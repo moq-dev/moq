@@ -182,6 +182,15 @@ impl Release {
 		self.jitter.out_of_tolerance()
 	}
 
+	/// Snapshot how the release clock is keeping up with the source.
+	pub fn stats(&self) -> super::stats::Release {
+		let mut stats = super::stats::Release::of(&self.jitter);
+		if let Some((_, track)) = &self.track {
+			stats.gaps = track.skips() - track.markers();
+		}
+		stats
+	}
+
 	/// How many objects are waiting in the jitter buffer.
 	#[cfg(test)]
 	pub(super) fn buffered(&self) -> usize {
@@ -194,6 +203,7 @@ impl Release {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
+	/// Poll for the next original MPEG-TS frame at its release time, or `None` at end.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {

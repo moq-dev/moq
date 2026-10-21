@@ -1066,11 +1066,7 @@ impl MoqMediaTrackStreamProducer {
 		Ok(())
 	}
 
-	/// Finalize the track.
-	///
-	/// The importer emits each access unit when the *next* one's start code arrives, so a trailing
-	/// access unit with no following delimiter (e.g. the last frame at EOF) is not emitted. This
-	/// matches moq-cli's stdin path.
+	/// Finalize the track, publishing the last access unit still waiting for a following start code.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();

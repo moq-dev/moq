@@ -25,6 +25,7 @@ import {
  */
 export type Delay = "instant" | "auto" | Milli;
 
+/** Signals the sync reads. */
 export type SyncInput = {
 	/** How far playback trails the live edge. See {@link Delay}. */
 	delay: Getter<Delay>;
@@ -73,7 +74,9 @@ type SyncOutput = {
 	maxDelay: Signal<Milli>;
 };
 
+/** The playback clock: decides when each frame plays so audio and video stay together at the configured delay. */
 export class Sync {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<SyncInput>;
 
 	readonly #out: SyncOutput = {
@@ -85,6 +88,7 @@ export class Sync {
 		buffered: new Signal<boolean>(false),
 		maxDelay: new Signal<Milli>(Milli.zero),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// Per-label late-frame tracking: accumulate count and max lateness, flush on recovery.
@@ -212,9 +216,11 @@ export class Sync {
 		return sleep < 0;
 	}
 
-	// Re-anchor playback to the next frame received. Call this at an utterance boundary
-	// in buffered mode (typically alongside flushing the audio buffer) so the new content
-	// plays from its own first frame instead of inheriting the previous reference.
+	/**
+	 * Re-anchor playback to the next frame received. Call this at an utterance boundary
+	 * in buffered mode (typically alongside flushing the audio buffer) so the new content
+	 * plays from its own first frame instead of inheriting the previous reference.
+	 */
 	reset(): void {
 		this.#epoch++;
 		this.#floor = undefined;
@@ -239,8 +245,10 @@ export class Sync {
 		return this.#floor !== undefined && timestamp < this.#floor;
 	}
 
-	// The PTS in milliseconds that should be rendering right now, derived from the reference +
-	// buffer; negative before the first frame's turn. Undefined if no frames have been received yet.
+	/**
+	 * The PTS in milliseconds that should be rendering right now, derived from the reference +
+	 * buffer; negative before the first frame's turn. Undefined if no frames have been received yet.
+	 */
 	now(): number | undefined {
 		const reference = this.#out.reference.peek();
 		if (reference === undefined) return undefined;
@@ -329,6 +337,7 @@ export class Sync {
 		return `${Math.round(m * 10) / 10}m`;
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#closed.set(true);
 		this.#signals.close();

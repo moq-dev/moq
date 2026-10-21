@@ -87,8 +87,3 @@ already carries the full pattern grant.
   cross-language harness runs with tokens configured.
 
 Additive. Wire: a lite-07-wip SETUP parameter.
-
-## Required
-
-- [Bindings](/quest/m1/auth/bindings.md) - supplies the client surface the new
-  token setters sit beside

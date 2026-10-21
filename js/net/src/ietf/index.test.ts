@@ -18,5 +18,8 @@ test("the package entry loads the IETF session code on demand", async () => {
 
 	const eager = [...reached].map((file) => relative(src, file));
 	expect(eager).toContain("ietf/setup.ts");
-	for (const lazy of ["ietf/connection.ts", "ietf/request_stream.ts"]) expect(eager).not.toContain(lazy);
+	// SETUP shares no module with the message parameter codec, which only a session uses.
+	for (const lazy of ["ietf/connection.ts", "ietf/request_stream.ts", "ietf/parameters.ts"]) {
+		expect(eager).not.toContain(lazy);
+	}
 });

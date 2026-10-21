@@ -443,11 +443,12 @@ async def test_route_update_observes_restart():
     """A route metadata update arrives as an AnnounceEventUpdate.
 
     The publisher re-prices its announced route; the subscriber observes the new
-    hop chain in place (no retraction), and cancelling retracts it.
+    hop chain in place (no retraction), and unannouncing retracts it.
     """
     origin = moq.OriginProducer()
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], publish=origin) as server:
-        announce = origin.dynamic("routed", moq.Route(hops=[42]))
+        announce = origin.create_broadcast("routed")
+        announce.announce(moq.Route(hops=[42]))
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -464,14 +465,14 @@ async def test_route_update_observes_restart():
                 assert 77 not in first.announce.route.hops
 
                 # The publisher advertises a longer chain: an in-place update.
-                announce.update(moq.Route(hops=[42, 77]))
+                announce.announce(moq.Route(hops=[42, 77]))
                 updated = await next_route(announced)
                 assert isinstance(updated, moq.AnnounceEventUpdate)
                 assert updated.announce.prefix == "routed"
                 assert 77 in updated.announce.route.hops
 
-                # Cancelling retracts the route.
-                announce.cancel()
+                # Unannouncing retracts the route.
+                announce.unannounce()
                 ended = await next_route(announced)
                 assert isinstance(ended, moq.AnnounceEventEnd)
                 assert ended.announce.prefix == "routed"
@@ -549,3 +550,48 @@ async def test_client_context_keeps_the_body_error():
             await asyncio.gather(*reading, return_exceptions=True)
             if broadcast is not None:
                 broadcast.close()
+
+
+async def _await_grant(auth: moq.Auth, want: moq.Grant) -> None:
+    async def follow() -> None:
+        while auth.grant() != want:
+            await auth.grant_changed()
+
+    await asyncio.wait_for(follow(), timeout=5.0)
+
+
+async def test_session_auth_reads_the_grant():
+    """Both sides read the grant their peer gave them; a peer that verifies no tokens refuses one."""
+    version = ["moq-lite-07-wip"]
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], versions=version) as server:
+        sessions: list = []
+        accepted = asyncio.Event()
+
+        async def accept_loop() -> None:
+            async for request in server:
+                sessions.append(await request.accept())
+                accepted.set()
+
+        accept_task = asyncio.create_task(accept_loop())
+        try:
+            async with moq.Client(
+                f"https://{server.local_addr}", tls_verify=False, bind="127.0.0.1:0", versions=version
+            ) as client:
+                session = client.session
+                assert session is not None
+                everything = moq.Grant(publish=("**",), subscribe=("**",))
+                await _await_grant(session.auth(), everything)
+                await asyncio.wait_for(accepted.wait(), timeout=5.0)
+                await _await_grant(sessions[0].auth(), everything)
+
+                with pytest.raises(moq.Error.Unsupported):
+                    await asyncio.wait_for(session.auth().add("extra"), timeout=5.0)
+                assert session.auth().grant() == everything
+        finally:
+            accept_task.cancel()
+            try:
+                await accept_task
+            except asyncio.CancelledError:
+                pass
+            for session in sessions:
+                session.cancel(0)

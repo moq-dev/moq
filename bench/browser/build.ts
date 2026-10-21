@@ -54,7 +54,7 @@ function workspace(root: string): BunPlugin {
 			build.onResolve({ filter: /^@moq\// }, (args) => {
 				const [scope, name, ...rest] = args.path.split("/");
 				const found = packages.get(`${scope}/${name}`);
-				// Published dependencies such as @moq/qmux resolve normally.
+				// Published dependencies resolve normally.
 				if (!found) return undefined;
 				const key = rest.length ? `./${rest.join("/")}` : ".";
 				const target = found.exports[key];

@@ -5,10 +5,13 @@
  * @module
  */
 
+/** Re-export of {@link https://jsr.io/@moq/loc | @moq/loc}, the LOC container. */
 export * as Loc from "@moq/loc";
+/** The CMAF (fMP4) container. */
 export * as Cmaf from "./cmaf";
 export { Consumer, type ConsumerProps, type Read } from "./consumer";
 export type { Format } from "./format";
+/** The legacy varint container. */
 export * as Legacy from "./legacy";
 export { type TrackInfoOptions, trackInfo } from "./track";
 export * from "./types";

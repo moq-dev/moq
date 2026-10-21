@@ -277,12 +277,44 @@ impl Producer {
 	/// [`close`](Self::close), or the last producer dropping.
 	///
 	/// Fails with [`Error::Closed`] on a standalone broadcast (one not created
-	/// through an origin, so there is nothing to announce into), once the broadcast
+	/// through an origin, so there is nothing to announce into), on a claim answer
+	/// still being [prepared](super::origin::Request::prepare), once the broadcast
 	/// has closed, or once the origin's driver has been dropped.
 	pub fn announce(&self, route: Route) -> Result<(), Error> {
 		let mut announcer = self.alive.announcer.lock();
 		let announcer = announcer.as_mut().ok_or(Error::Closed)?;
 		announcer.announce(route)
+	}
+
+	/// Hand back an announcer withheld at creation and announce `route` once `admit`
+	/// agrees, decided under the origin's table lock. The announcer is installed only
+	/// when admitted; otherwise it drops, so this broadcast can never announce.
+	pub(super) fn announce_withheld(
+		&self,
+		mut announcer: Announcer,
+		route: Route,
+		admit: impl FnOnce() -> bool,
+	) -> Result<bool, Error> {
+		let refused = {
+			let mut slot = self.alive.announcer.lock();
+			debug_assert!(slot.is_none(), "an announcer was already installed");
+			// A close already retracted the slot, so an announcer installed now would
+			// outlive the broadcast.
+			if self.alive.state.lock().closing {
+				Err(Error::Closed)
+			} else {
+				match announcer.announce_if(route, admit) {
+					Ok(true) => {
+						*slot = Some(announcer);
+						return Ok(true);
+					}
+					refused => refused,
+				}
+			}
+		};
+		// Dropped outside the announcer lock, as in `Alive::retract`.
+		drop(announcer);
+		refused
 	}
 
 	/// Retract this broadcast's advertisement, if any, from local consumers and

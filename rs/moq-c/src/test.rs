@@ -2579,7 +2579,6 @@ fn dynamic_serves_a_request_under_a_prefix() {
 			origin,
 			prefix.as_ptr() as *const c_char,
 			prefix.len(),
-			std::ptr::null(),
 			Some(channel_callback),
 			cb.ptr,
 		)
@@ -2606,8 +2605,11 @@ fn dynamic_serves_a_request_under_a_prefix() {
 	let got = unsafe { std::str::from_utf8(std::slice::from_raw_parts(info.data.cast::<u8>(), info.len)).unwrap() };
 	assert_eq!(got, "live/cam");
 
-	let served = id(unsafe { moq_origin_create_broadcast(origin, b"unused".as_ptr() as *const c_char, 6) });
-	assert_eq!(moq_broadcast_request_accept(request, served), 0);
+	let epoch = moq_net::Epoch::mint().to_string();
+	let mut served = 0;
+	let prepared =
+		id(unsafe { moq_broadcast_request_prepare(request, epoch.as_ptr().cast(), epoch.len(), &mut served) });
+	assert_eq!(moq_broadcast_prepared_publish(prepared), 0);
 	assert!(req_cb.recv() > 0);
 	req_cb.recv_terminal();
 
@@ -2627,7 +2629,6 @@ fn dynamic_refuses_a_missing_callback() {
 			origin,
 			prefix.as_ptr() as *const c_char,
 			prefix.len(),
-			std::ptr::null(),
 			None,
 			std::ptr::null_mut(),
 		)
@@ -3577,7 +3578,7 @@ fn consume_announced_delivers_a_takeover_once(dynamic_at: &str) {
 			.origin
 			.get(origin)
 			.unwrap()
-			.dynamic(dynamic_at, route)
+			.dynamic_route(dynamic_at, route)
 			.unwrap()
 	};
 	let cb = Callback::new();
@@ -3626,7 +3627,7 @@ fn serve_dynamic(origin: u32, prefix: &str, route: moq_net::origin::Route) -> mo
 		.origin
 		.get(origin)
 		.unwrap()
-		.dynamic(prefix, route)
+		.dynamic_route(prefix, route)
 		.unwrap()
 }
 

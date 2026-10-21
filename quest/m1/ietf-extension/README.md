@@ -84,6 +84,7 @@ Work owned by this README, after the children land:
 ## Required
 
 - [Ingress-version provenance](/quest/m1/ietf-extension/lite.md) - a track crossing a lite-07 hop carries its moq-transport ingress version once, replacing per-block Encoding codes
+- [Timed tracks cross lite-07](/quest/m1/ietf-extension/serve-timed.md) - moq-transport timestamps reach `ietf` extension peers over lite-07, with `unchecked` derived from `Info::ietf()`
 
 ## Related
 
