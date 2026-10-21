@@ -46,12 +46,17 @@ which #6032 had already finished, so it reuses #6032's reserved-port fix as
 its own child. moq-uring's `host_tracks_moq_clock` was seen the same day
 but #6056 had already fixed it by measuring the calibration gap.
 
+Added 2026-10-21 (maintainer): three small flakes and a fresh-worktree
+interop failure from the m0/m1 merge run, kept in one child since each is
+small.
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
 - [Relay bench holder](/quest/m1/test-flakes-2/relay-bench-holder.md) - the foreign-listener bench test fails fast when its holder cannot bind, instead of hanging on a fifo
+- [Three flakes and fresh-worktree interop](/quest/m1/test-flakes-2/three-flakes.md) - OBS stop drain, the js/net RSS test, the audio harness RTT sample, and interop's bun install
 
 ## Related
 

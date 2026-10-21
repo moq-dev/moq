@@ -63,6 +63,9 @@ Decided 2026-10-20 by the maintainer: change in place with fresh names.
   If the program returns, it publishes a new epoch of its broadcast, never
   the retired instance's names for new content. A single-program import
   whose selected program leaves the PAT ends, as today.
+- Open: a PAT that names a program whose PMT never arrives. Decide whether
+  the import refuses it or waits, and which clock bounds the wait (found in
+  [moq-dev/moq#6122](https://github.com/moq-dev/moq/pull/6122)).
 
 Why: it matches the 2026-10-15 identity decision (changed content gets a new
 name; a new epoch stays reserved for a whole-broadcast restart). Rejected:
