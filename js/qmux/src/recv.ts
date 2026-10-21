@@ -120,10 +120,10 @@ export class RecvStream {
 		return discarded;
 	}
 
-	/** Abort the readable, discarding undelivered buffered data. */
+	/** Abort the readable, discarding undelivered buffered data. Also discards a
+	 *  reliable prefix a reset left queued; the first error is kept. */
 	error(err: Error): number {
-		if (this.#error) return 0;
-		this.#error = err;
+		this.#error ??= err;
 		const discarded = this.#discard();
 		this.#signal();
 		return discarded;

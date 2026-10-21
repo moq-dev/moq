@@ -1845,6 +1845,23 @@ describe("RESET_STREAM_AT (qmux-02)", () => {
 		session.close();
 	});
 
+	test("a refused stream's reliable prefix still returns connection credit", async () => {
+		const { session, peer } = accept({ protocol: "qmux-02", config: { maxData: 10n } });
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+
+		const id = Stream.Id.create(0n, Stream.Dir.Uni, false);
+		peer.send({ type: "stream", id, offset: 0n, data: new Uint8Array(10), fin: false });
+		await reset(peer, resetStreamAt(id, 0, 10n, 6n));
+		expect(peer.has("max_data")).toBe(false);
+
+		// Refusing the unaccepted stream frees the kept prefix too.
+		await session.incomingUnidirectionalStreams.cancel();
+		await waitFor(() => peer.has("max_data"));
+		expect((peer.received().find((f) => f.type === "max_data") as Frame.MaxData).max).toBe(20n);
+		session.close();
+	});
+
 	test("a reliable prefix beyond the bytes received is a protocol violation", async () => {
 		const { session, peer, id } = await open([[1, 2]]);
 		// The transport is ordered, so bytes 2..4 can never arrive after the reset.
