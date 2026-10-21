@@ -81,7 +81,7 @@ Future<_Resolved> _resolveLibrary(
   );
 }
 
-/// Build moq-ffi from this checkout.
+/// Build moq-ffi from this checkout in the dev profile.
 ///
 /// Always shells out to Cargo rather than reusing whatever is already in
 /// target/: an existing artifact may predate a Rust edit, or have been built by
@@ -91,7 +91,6 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
   final cargoArgs = [
     'build',
     '--locked',
-    '--release',
     '--package',
     'moq-ffi',
     // The software H.264 fallback is opt-in in Rust; the published library ships it.
@@ -122,7 +121,7 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
     );
   }
 
-  final built = workspace.resolve('target/$target/release/$library');
+  final built = workspace.resolve('target/$target/debug/$library');
   if (!await File.fromUri(built).exists()) {
     throw StateError('cargo did not produce ${built.toFilePath()}');
   }
