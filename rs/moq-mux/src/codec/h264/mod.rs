@@ -148,11 +148,14 @@ impl Sps {
 /// The reordering an SPS NAL unit declares in its VUI: `max_num_reorder_frames` from the
 /// bitstream restriction, and the frame period when `fixed_frame_rate_flag` is set.
 ///
-/// `None` when the SPS carries no VUI or no bitstream restriction, or fails to parse.
+/// `None` when the SPS carries no VUI or no bitstream restriction, declares more than
+/// [`Reorder::MAX_DEPTH`](crate::codec::video::Reorder::MAX_DEPTH), or fails to parse.
 pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
+	use crate::codec::video::Reorder;
+
 	let vui = sps_vui(nal)?;
-	Some(crate::codec::video::Reorder {
-		depth: vui.depth?,
+	Some(Reorder {
+		depth: vui.depth.filter(|depth| *depth <= Reorder::MAX_DEPTH)?,
 		period: vui.period,
 		fields: !vui.frame_only,
 	})
@@ -938,6 +941,70 @@ mod tests {
 	}
 
 	const SC4: &[u8] = &[0, 0, 0, 1];
+
+	/// An RBSP written bit by bit.
+	#[derive(Default)]
+	struct Bits(Vec<bool>);
+
+	impl Bits {
+		fn put(&mut self, value: u64, width: u32) {
+			self.0.extend((0..width).rev().map(|bit| value >> bit & 1 == 1));
+		}
+
+		fn ue(&mut self, value: u32) {
+			let code = u64::from(value) + 1;
+			let width = 64 - code.leading_zeros();
+			self.put(0, width - 1);
+			self.put(code, width);
+		}
+
+		/// The SPS NAL unit, stop bit and emulation prevention added.
+		fn sps(mut self) -> Vec<u8> {
+			self.0.push(true);
+			self.0.resize(self.0.len().next_multiple_of(8), false);
+			let mut nal = vec![0x67];
+			let mut zeros = 0;
+			for byte in self.0.chunks(8) {
+				let byte = byte.iter().fold(0u8, |byte, &bit| byte << 1 | u8::from(bit));
+				if zeros == 2 && byte <= 3 {
+					nal.push(3);
+					zeros = 0;
+				}
+				zeros = if byte == 0 { zeros + 1 } else { 0 };
+				nal.push(byte);
+			}
+			nal
+		}
+	}
+
+	/// A 64x48 baseline SPS whose VUI carries only a bitstream restriction declaring `depth`.
+	fn sps_declaring(depth: u32) -> Vec<u8> {
+		let mut bits = Bits::default();
+		bits.put(66, 8); // profile_idc
+		bits.put(30, 16); // constraint flags, reserved bits, level_idc
+		for value in [0, 0, 2, 1] {
+			bits.ue(value); // seq_parameter_set_id .. max_num_ref_frames
+		}
+		bits.put(0, 1); // gaps_in_frame_num_value_allowed_flag
+		bits.ue(3); // pic_width_in_mbs_minus1
+		bits.ue(2); // pic_height_in_map_units_minus1
+		bits.put(0b1101, 4); // frame_mbs_only, direct_8x8_inference, frame_cropping, vui_parameters_present
+		bits.put(0, 8); // the VUI's aspect ratio .. pic_struct flags
+		bits.put(0b11, 2); // bitstream_restriction_flag, motion_vectors_over_pic_boundaries_flag
+		for value in [0, 0, 16, 16, depth, depth] {
+			bits.ue(value); // max_bytes_per_pic_denom .. max_dec_frame_buffering
+		}
+		bits.sps()
+	}
+
+	/// No decoded picture buffer holds more than 16 frames (A.3.1), so a deeper declaration is no
+	/// declaration rather than a count to hold that many frames for.
+	#[test]
+	fn an_impossible_reorder_depth_is_undeclared() {
+		assert_eq!(sps_reorder(&sps_declaring(2)).map(|reorder| reorder.depth), Some(2));
+		assert_eq!(sps_reorder(&sps_declaring(16)).map(|reorder| reorder.depth), Some(16));
+		assert_eq!(sps_reorder(&sps_declaring(1 << 20)), None);
+	}
 
 	#[test]
 	fn sps_reorder_reads_the_vui() {

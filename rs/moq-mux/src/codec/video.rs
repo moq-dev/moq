@@ -88,6 +88,10 @@ pub(crate) struct Reorder {
 }
 
 impl Reorder {
+	/// The deepest reordering a conforming sequence header declares: no decoded picture buffer
+	/// holds more than 16 frames (H.264 A.3.1, HEVC A.4.2).
+	pub(crate) const MAX_DEPTH: u32 = 16;
+
 	/// The most frames, each one picture, that can precede one in decode order and follow it in
 	/// output order: the depth, or with fields both fields of each pair it counts and the other
 	/// field of the frame's own pair.
