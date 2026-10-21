@@ -2160,7 +2160,7 @@ export class Subscriber {
 			}
 			for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
 				const dropped = report(run.start, run.end);
-				if (!dropped || dropped.kind !== "drop") continue;
+				if (dropped?.kind !== "drop") continue;
 				if (dropped.end < run.end) this.#pending.unshift({ start: dropped.end, end: run.end });
 				return dropped;
 			}
