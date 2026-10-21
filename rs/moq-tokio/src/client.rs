@@ -50,6 +50,8 @@ pub struct Client {
 	versions: moq_net::Versions,
 	/// The URL from [`connect.url`](crate::connect::Config::url), dialed by [`Client::publish`] / [`Client::consume`].
 	connect: Option<Url>,
+	/// The credentials every dial presents, shared with each clone.
+	tokens: crate::connect::Tokens,
 	/// Deadline for one [`Client::connect`], from [`crate::connect::Config::timeout`]. Zero waits forever.
 	#[cfg(feature = "_transport")]
 	timeout: std::time::Duration,
@@ -140,6 +142,7 @@ impl Client {
 				.with_extensions(config.extensions),
 			versions,
 			connect: config.url,
+			tokens: crate::connect::Tokens::new(config.tokens),
 			timeout,
 			reconnect: !config.once.unwrap_or(false),
 			backoff: config.backoff,
@@ -228,6 +231,13 @@ impl Client {
 	pub fn with_peer_hop(mut self, hop: moq_net::Hop) -> Self {
 		self.moq = self.moq.with_peer_hop(hop);
 		self
+	}
+
+	/// The credentials every dial presents, seeded from
+	/// [`connect.tokens`](crate::connect::Config::tokens). Set new ones before the old
+	/// ones expire.
+	pub fn tokens(&self) -> crate::connect::Tokens {
+		self.tokens.clone()
 	}
 
 	/// Override whether this client redials after a session drop.
@@ -341,7 +351,11 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	)))]
-	pub(crate) async fn dial(&self, _addr: crate::connect::Addr) -> crate::Result<Dialed> {
+	pub(crate) async fn dial(
+		&self,
+		_addr: crate::connect::Addr,
+		_tokens: &crate::connect::Set,
+	) -> crate::Result<(Dialed, crate::connect::Credential)> {
 		Err(Error::NoBackend(
 			"no backend compiled; enable quic, iroh, websocket, tcp, or uds feature",
 		))
@@ -360,10 +374,28 @@ impl Client {
 		feature = "tcp",
 		feature = "uds"
 	))]
-	pub(crate) async fn dial(&self, addr: crate::connect::Addr) -> crate::Result<Dialed> {
+	pub(crate) async fn dial(
+		&self,
+		addr: crate::connect::Addr,
+		tokens: &crate::connect::Set,
+	) -> crate::Result<(Dialed, crate::connect::Credential)> {
+		let credential = crate::connect::Credential::new(addr.url(), &self.versions, tokens);
+		let addr = addr.with_url(credential.url.clone());
+		let client = match &credential.setup {
+			Some(token) => {
+				let mut client = self.clone();
+				client.moq = client.moq.with_token(moq_net::setup::Token {
+					kind: moq_net::setup::Token::OUT_OF_BAND,
+					value: token.as_str().as_bytes().to_vec(),
+				});
+				std::borrow::Cow::Owned(client)
+			}
+			None => std::borrow::Cow::Borrowed(self),
+		};
+
 		// Each compiled backend adds state to this dispatch future. Keep it off the
 		// caller's stack so all-feature builds remain safe on standard 2 MiB threads.
-		let attempt = Box::pin(self.connect_inner(addr));
+		let attempt = Box::pin(client.connect_inner(addr));
 
 		// The deadline covers the dial AND the handshake, for every transport: it is the
 		// only bound some of them have. Dropping `attempt` on expiry cancels whichever
@@ -377,7 +409,7 @@ impl Client {
 		};
 
 		tracing::info!(version = %dialed.session.version(), transport = %dialed.transport, "connected");
-		Ok(dialed)
+		Ok((dialed, credential))
 	}
 
 	/// The moq client builder, advertising `path` in the SETUP when there is one.
@@ -1134,6 +1166,18 @@ mod tests {
 		assert_eq!(config.resolve().race, std::time::Duration::from_millis(50));
 	}
 
+	/// Tokens repeat, keep their order, and are refused when empty.
+	#[test]
+	fn test_connect_tokens() {
+		let config = Cli::config_from(["test", "--connect-token", "first", "--connect-token", "second"]);
+		let tokens: Vec<&str> = config.tokens.iter().map(crate::connect::Token::as_str).collect();
+		assert_eq!(tokens, ["first", "second"]);
+
+		let config: crate::connect::Config = toml::from_str(r#"tokens = ["first"]"#).unwrap();
+		assert_eq!(config.tokens.len(), 1);
+		assert!(toml::from_str::<crate::connect::Config>(r#"tokens = [""]"#).is_err());
+	}
+
 	#[test]
 	fn test_toml_resolution_delay_survives_update_from() {
 		let toml = r#"
@@ -1773,7 +1817,8 @@ mod tests {
 
 		// `dial` rather than `connect`: this is about one attempt's deadline, and
 		// `connect` now hands back a reconnect loop that would redial past it.
-		let mut attempt = Box::pin(client.dial(url.into()));
+		let tokens = Default::default();
+		let mut attempt = Box::pin(client.dial(url.into(), &tokens));
 		let _silent = tokio::select! {
 			res = &mut attempt => match res {
 				Err(err) => panic!("connect failed before the silent peer accepted it: {err}"),

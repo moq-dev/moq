@@ -400,6 +400,133 @@ async fn present(
 	}
 }
 
+/// Present a dial's configured tokens on its session, other than the connection
+/// credential, and keep them in step with the client's [`crate::connect::Tokens`] until
+/// the session ends.
+///
+/// The first tokens register before this returns, so call it before the session is
+/// published: a request the session sends early waits on their answers rather than
+/// being refused outside the connection credential's grant.
+pub(super) fn hold(
+	session: &moq_net::Session,
+	credential: crate::connect::Credential,
+	tokens: kio::Consumer<crate::connect::Set>,
+) -> AbortOnDrop {
+	let set = (*tokens.read()).clone();
+	let mut held = Held::default();
+	held.update(&session.auth(), credential.extra(&set.tokens));
+	let session = session.clone();
+	AbortOnDrop::new(tokio::spawn(async move {
+		let mut generation = set.generation;
+		loop {
+			let changed = {
+				let changed = async {
+					let wait = tokens.wait(|set| match set.generation != generation {
+						true => Poll::Ready((set.tokens.clone(), set.generation)),
+						false => Poll::Pending,
+					});
+					// Every client handle dropped, so the tokens can no longer change.
+					match wait.await {
+						Ok(changed) => changed,
+						Err(_) => std::future::pending().await,
+					}
+				};
+				let answered = std::future::poll_fn(|cx| held.poll_answers(&session, cx));
+				tokio::select! {
+					biased;
+					_ = session.closed() => return,
+					changed = changed => Some(changed),
+					_ = answered => None,
+				}
+			};
+			if let Some((latest, next)) = changed {
+				generation = next;
+				held.update(&session.auth(), credential.extra(&latest));
+			}
+		}
+	}))
+}
+
+/// The configured tokens one session holds on their own AUTH streams.
+#[derive(Default)]
+struct Held {
+	tokens: Vec<(crate::connect::Token, Answer)>,
+	/// Tokens a change replaced, answered or not, kept presented until every
+	/// replacement has its answer so the grant never narrows in between.
+	retiring: Vec<Answer>,
+}
+
+enum Answer {
+	Waiting(Opening),
+	Granted(#[allow(dead_code, reason = "held to keep the token presented")] auth::Auth),
+	/// Refused or unsupported. Not presented again unless a change removes and re-adds it.
+	Refused,
+}
+
+impl Held {
+	fn update(&mut self, handle: &auth::Handle, tokens: Vec<crate::connect::Token>) {
+		let mut old = std::mem::take(&mut self.tokens);
+		for token in tokens {
+			let answer = match old.iter().position(|(held, _)| *held == token) {
+				Some(index) => old.swap_remove(index).1,
+				None => {
+					let handle = handle.clone();
+					let bytes = Bytes::from(token.as_str().to_string());
+					let mut opening = async move { handle.add(bytes).await }.boxed();
+					// The first poll registers the token synchronously, as `Replay::queue` does.
+					if let Some(result) = opening.as_mut().now_or_never() {
+						opening = futures::future::ready(result).boxed();
+					}
+					Answer::Waiting(opening)
+				}
+			};
+			self.tokens.push((token, answer));
+		}
+		// A waiting registration may already hold its grant, unread, so it retires too.
+		self.retiring.extend(
+			old.into_iter()
+				.map(|(_, answer)| answer)
+				.filter(|answer| !matches!(answer, Answer::Refused)),
+		);
+		self.settle();
+	}
+
+	/// Resolve when another token has its answer.
+	fn poll_answers(&mut self, session: &moq_net::Session, cx: &mut std::task::Context<'_>) -> Poll<()> {
+		let mut answered = false;
+		for (_, answer) in &mut self.tokens {
+			let Answer::Waiting(opening) = answer else { continue };
+			let Poll::Ready(result) = opening.as_mut().poll(cx) else { continue };
+			answered = true;
+			*answer = match result {
+				Ok(auth) => Answer::Granted(auth),
+				// The session ending is no verdict on the token.
+				Err(_) if session.closed().now_or_never().is_some() => Answer::Refused,
+				Err(moq_net::Error::Unsupported) => {
+					tracing::debug!("the peer takes no tokens in band; presenting only the connection credential");
+					Answer::Refused
+				}
+				Err(err) => {
+					tracing::warn!(%err, "a configured token was refused");
+					Answer::Refused
+				}
+			};
+		}
+		self.settle();
+		match answered {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}
+	}
+
+	/// Withdraw the replaced tokens once nothing is waiting on an answer.
+	fn settle(&mut self) {
+		if !self.tokens.iter().any(|(_, answer)| matches!(answer, Answer::Waiting(_))) {
+			self.retiring.clear();
+		}
+	}
+}
+
 #[cfg(all(test, feature = "tcp"))]
 mod tests {
 	use super::*;
@@ -729,5 +856,63 @@ mod tests {
 		assert!(token.closed().await.is_err());
 		assert!(token.grant().peek().is_none());
 		issued.closed().await;
+	}
+
+	/// The configured tokens on a lite-07 dial, whose SETUP carries the first.
+	fn configured(tokens: &[&str]) -> (crate::connect::Tokens, crate::connect::Credential) {
+		let tokens = crate::connect::Tokens::new(tokens.iter().map(|token| token.parse().unwrap()).collect());
+		let url: url::Url = "moqt://relay.example.com/".parse().unwrap();
+		let versions = moq_net::Versions::from("moq-lite-07-wip".parse::<moq_net::Version>().unwrap());
+		let credential = crate::connect::Credential::new(&url, &versions, &tokens.snapshot());
+		(tokens, credential)
+	}
+
+	async fn next_token(pair: &mut Pair) -> auth::Request {
+		tokio::time::timeout(std::time::Duration::from_secs(5), pair.requests.recv())
+			.await
+			.expect("no token presented")
+			.unwrap()
+	}
+
+	/// Every configured token but the connection credential rides its own AUTH stream.
+	#[tokio::test(start_paused = true)]
+	async fn configured_tokens_ride_auth_beside_the_connection_credential() {
+		let mut pair = pair().await;
+		let (tokens, credential) = configured(&["connection", "a", "b"]);
+		let _held = hold(&pair.client, credential, tokens.consume());
+		let mut presented = Vec::new();
+		let mut issued = Vec::new();
+		for _ in 0..2 {
+			let request = next_token(&mut pair).await;
+			presented.push(request.token().to_vec());
+			issued.push(request.accept(auth::Grant::all()));
+		}
+		presented.sort();
+		assert_eq!(presented, [b"a".to_vec(), b"b".to_vec()]);
+		let again = tokio::time::timeout(std::time::Duration::from_secs(1), pair.requests.recv()).await;
+		assert!(again.is_err(), "the connection credential was presented twice");
+	}
+
+	/// A replaced token is withdrawn only once its replacement has an answer, so the grant
+	/// never narrows in between.
+	#[tokio::test(start_paused = true)]
+	async fn a_replaced_token_is_withdrawn_after_its_replacement_is_answered() {
+		let mut pair = pair().await;
+		let (tokens, credential) = configured(&["connection", "old"]);
+		let _held = hold(&pair.client, credential, tokens.consume());
+		let old = next_token(&mut pair).await.accept(auth::Grant::all());
+
+		tokens.set(vec!["connection".parse().unwrap(), "new".parse().unwrap()]);
+		let request = next_token(&mut pair).await;
+		assert_eq!(request.token().as_ref(), b"new");
+		let early = tokio::time::timeout(std::time::Duration::from_secs(1), old.closed()).await;
+		assert!(early.is_err(), "withdrawn before its replacement was answered");
+
+		let new = request.accept(auth::Grant::all());
+		tokio::time::timeout(std::time::Duration::from_secs(5), old.closed())
+			.await
+			.expect("the replaced token was never withdrawn");
+		let kept = tokio::time::timeout(std::time::Duration::from_secs(1), new.closed()).await;
+		assert!(kept.is_err(), "the replacement was withdrawn");
 	}
 }

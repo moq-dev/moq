@@ -93,6 +93,16 @@ impl Version {
 		}
 	}
 
+	/// Whether the client's SETUP can carry its connection credential (see
+	/// [`Client::with_token`](crate::Client::with_token)). Every moq-transport draft can;
+	/// moq-lite gained it in lite-07, so older versions need the credential in the URL.
+	pub fn has_setup_token(self) -> bool {
+		match self {
+			Self::Lite(version) => version.has_auth(),
+			Self::Ietf(_) => true,
+		}
+	}
+
 	/// Iterate the names accepted by [`FromStr`].
 	pub fn names() -> impl Iterator<Item = &'static str> {
 		ALL.iter().map(Self::as_str)
