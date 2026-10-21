@@ -113,10 +113,8 @@ try {
 			console.error(`publishing ${broadcast} (fake camera, ${variant}) to ${url}`);
 			await scriptFailed; // otherwise stream until the orchestrator kills us
 		} else {
-			const start = Date.now();
-			const deadline = start + timeoutMs;
+			const deadline = Date.now() + timeoutMs;
 			let frames = 0;
-			let reloaded = false;
 			while (Date.now() < deadline) {
 				frames = await page.evaluate(() => {
 					const w = document.querySelector("moq-watch") as unknown as {
@@ -125,13 +123,6 @@ try {
 					return w?.video?.out?.stats?.peek()?.frameCount ?? 0;
 				});
 				if (frames > 0) break;
-				// The watch element gives up if it subscribes to the catalog before the
-				// publisher has announced it (RESET_STREAM). If nothing has decoded by the
-				// halfway mark, reload once to re-subscribe now that the publisher is up.
-				if (!reloaded && Date.now() - start > timeoutMs / 2) {
-					reloaded = true;
-					await page.reload({ waitUntil: "load" }).catch(() => {});
-				}
 				await new Promise((r) => setTimeout(r, 250));
 			}
 			console.error(`decoded ${frames} frames from ${broadcast} (${variant})`);

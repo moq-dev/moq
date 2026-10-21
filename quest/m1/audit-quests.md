@@ -44,6 +44,3 @@ Checkpoint, 2026-10-20, against `main` at `96d6b5bd4`:
   origin whose directory is gone from `main`; and plans built on a design
   another quest has since replaced (SUBSCRIBE_ALL, the e2ee bridge, the
   per-PR CI model before #6038).
-- Unverified, for next run: whether qmux 0.6.4 on crates.io already carries
-  the credit fix while web-transport #412 and #413 stay open, which would
-  clear the m0 qmux conditions.

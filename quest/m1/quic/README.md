@@ -11,9 +11,11 @@ reliable stream resets (#5690), hierarchical send groups (#5711, #5770), one
 `main`. What remains is bounded incomplete-message memory; per-broadcast
 fairness gives the crate-private send domains (#5872) their consumer in
 [Scope track priority](/quest/m1/track-priority-scope.md).
-Per-stream acknowledgment progress, per-stream deadlines, qmux on the shared
-stream state machine, and the experiments (the egress profile, ECN
-measurement, deadline keep-alive) live in [m2](/quest/m2/README.md); media
+qmux on the shared stream state machine is its own m1 quest,
+[quic-qmux](/quest/m1/quic-qmux.md), outside this epic.
+Per-stream acknowledgment progress, per-stream deadlines, and the experiments
+(the egress profile, ECN measurement, deadline keep-alive) live in
+[m2](/quest/m2/README.md); media
 probing is its own [m2 epic](/quest/m2/probe/README.md); receive timestamps
 and a delay-based uplink controller are the
 [m2 realtime epic](/quest/m2/quic-realtime/README.md); L4S and careful resume
@@ -54,6 +56,9 @@ Decided in the 2026-09-30 audit: deadlines, qmux, BBR loss parity, ECN
 measurement, ACK progress, and the ACK hook moved to m2, since no m1 quest
 consumes them. Decided 2026-10-08: L4S and careful resume moved on to m3,
 and GCC shrank to a receive-timestamps spike, since none has a consumer.
+Decided 2026-10-20 (maintainer): qmux moved back to m1 as a milestone
+child, because moq stops depending on the web-transport repo and its credit
+and close fixes now ship in-tree.
 
 Decided in the 2026-10-10 receive-memory plan: native message assembly holds
 connection credit until complete-unit handoff, while stream credit advances
@@ -69,6 +74,8 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 ## Related
 
+- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - the m1
+  qmux port onto `moq-quic`'s stream state
 - [Scope track priority](/quest/m1/track-priority-scope.md) - the
   per-broadcast fairness policy on cluster sessions
 - [Native probing](/quest/m2/probe/native.md) - moq-quic retransmits in-flight data during ProbeBW_UP to probe up to a session's target

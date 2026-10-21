@@ -37,9 +37,8 @@ another follow loop; m1's [sink restart follow](/quest/m1/sink-restart-follow.md
 reuses that helper.
 
 Release builds: the 2026-10-11 nixpkgs bump broke the Linux zigbuild release
-builds ([release link](/quest/m0/release-link.md)). Decided 2026-10-20
-(audit): it and the epoch line rank above the qmux 0.5 backport, because both
-gate the next cut while the backport only patches the shipping line.
+builds ([release link](/quest/m0/release-link.md)), which gates the next
+cut.
 
 Hygiene (decided 2026-10-19): the audits sit at the end of this list.
 Each recurs once per major release: its PR adds the next run to the following
@@ -51,11 +50,8 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [moq-net follows announced instances](/quest/m0/net-announced-follow.md) - the Rust equivalent of JS `request(path, { announced: true })`, replacing the follow loops in moq-ffi and moq-c; catalog references builds `Source::follow` on it
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
-- [qmux 0.5 upstream](/quest/m0/qmux-credit-backport-upstream.md) - old-release publication, independent of the main fix
-- [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut
+- [Namespace advert errors](/quest/m0/namespace-advert-error.md) - one PUBLISH_NAMESPACE stream failing withdraws only that namespace instead of closing the Rust session
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
-- [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on #412 to publish the patched 0.6.x that main adopts
-- [qmux credit](/quest/m0/qmux-credit.md) - main adopts qmux 0.6 credit and close fixes; the 0.5 backport is independent
 - [Benchmark regression table](/quest/m0/bench-site.md) - the nightly benchmark page is one light table where red and green flag regressions and improvements beyond each series' noise
 - [Performance audit](/quest/m0/audit-perf.md) - benchmarks that regressed since the last run are explained, fixed, or planned, and unbenched hot paths get coverage
 - [Compile time audit](/quest/m0/audit-compile-time.md) - build-time hotspots are measured against a baseline and the worst are fixed or planned
