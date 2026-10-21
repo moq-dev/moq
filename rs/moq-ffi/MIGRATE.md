@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### `MoqClientConfig` gains `tokens`
+
+It defaults to empty in every generated binding; a Rust struct literal adds `tokens: vec![]` or ends with `..Default::default()`.
+
 ### `MoqTrackInfo` gains `compress` (#5928)
 
 It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.
