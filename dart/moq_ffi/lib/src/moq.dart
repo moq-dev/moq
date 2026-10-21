@@ -11947,6 +11947,7 @@ class FfiConverterMoqServer {
 abstract class MoqClientInterface {
   void cancel();
   Future<MoqSession> connect({required String url});
+  MoqException? failure();
 }
 
 final _MoqClientFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -12007,6 +12008,17 @@ class MoqClient implements MoqClientInterface {
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) => FfiConverterMoqSession.lift(Pointer<Void>.fromAddress(ptr)),
       moqExceptionErrorHandler,
+    );
+  }
+
+  MoqException? failure() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqclient_failure(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterOptionalMoqException.lift,
+      null,
     );
   }
 }
@@ -17129,6 +17141,14 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqclient_connect(
   RustBuffer url,
 );
 
+@Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external RustBuffer uniffi_moq_ffi_fn_method_moqclient_failure(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -18300,6 +18320,9 @@ external int uniffi_moq_ffi_checksum_method_moqclient_cancel();
 external int uniffi_moq_ffi_checksum_method_moqclient_connect();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqclient_failure();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqsession_bandwidth();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -18964,7 +18987,10 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqclient_cancel() != 29949) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 18055) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 14263) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqclient_failure() != 29341) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_bandwidth() != 8006) {
