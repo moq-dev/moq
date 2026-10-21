@@ -5,6 +5,7 @@ import type { TransportParams, WireFormat } from "./frame.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_TRANSPORT_PARAMS, isQmux, usesRecords } from "./frame.ts";
 import { RecvStream } from "./recv.ts";
+import { RecvOpen } from "./recv-open.ts";
 import { DEFAULT_SEND_ORDER, SendScheduler, type SendSink, WritableStreamSink } from "./scheduler.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
@@ -497,31 +498,6 @@ interface StreamFlowState {
 	recvMax: bigint;
 	recvOffset: bigint;
 	recvConsumed: bigint;
-}
-
-/** Which peer-initiated stream indexes have had a frame, so a late STREAM frame
- *  cannot resurrect one whose receive half already reached FIN or RESET_STREAM.
- *
- * Opening stream N implicitly opens every lower one, but those stay unseen until
- * their own first frame. Only indexes seen out of order are stored, never the
- * gaps: a peer jumping straight to a high index costs one entry, not one per
- * skipped stream. */
-class RecvOpen {
-	// Every index below this has been seen.
-	#floor = 0n;
-	// Seen indexes above the floor.
-	#above = new Set<bigint>();
-
-	/** Whether the stream was seen, which means closed if it isn't live. */
-	isClosed(index: bigint): boolean {
-		return index < this.#floor || this.#above.has(index);
-	}
-
-	record(index: bigint) {
-		if (index < this.#floor) return;
-		this.#above.add(index);
-		while (this.#above.delete(this.#floor)) this.#floor++;
-	}
 }
 
 export default class Session implements WebTransport {
