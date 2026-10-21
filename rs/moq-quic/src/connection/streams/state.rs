@@ -91,6 +91,11 @@ pub(crate) struct StreamsState {
     pub(super) max_remote: [u64; 2],
     /// Value of `max_remote` most recently transmitted to the peer in a `MAX_STREAMS` frame
     sent_max_remote: [u64; 2],
+    /// Highest `max_remote` ever sent to the peer, in transport parameters or `MAX_STREAMS`
+    ///
+    /// Unlike `sent_max_remote`, a rejected 0-RTT never lowers it, so it stays the limit the
+    /// peer may rely on.
+    announced_max_remote: [u64; 2],
     /// Number of streams that we've given the peer permission to open and which aren't fully closed
     pub(super) allocated_remote_count: [u64; 2],
     /// Size of the desired stream flow control window. May be smaller than `allocated_remote_count`
@@ -182,6 +187,7 @@ impl StreamsState {
             max: [0, 0],
             max_remote: [max_remote_bi.into(), max_remote_uni.into()],
             sent_max_remote: [max_remote_bi.into(), max_remote_uni.into()],
+            announced_max_remote: [max_remote_bi.into(), max_remote_uni.into()],
             allocated_remote_count: [max_remote_bi.into(), max_remote_uni.into()],
             max_concurrent_remote_count: [max_remote_bi.into(), max_remote_uni.into()],
             flow_control_adjusted: false,
@@ -609,6 +615,7 @@ impl StreamsState {
             pending.max_stream_id[dir as usize] = false;
             retransmits.get_or_create().max_stream_id[dir as usize] = true;
             self.sent_max_remote[dir as usize] = self.max_remote[dir as usize];
+            self.announced_max_remote[dir as usize] = self.max_remote[dir as usize];
             trace!(
                 value = self.max_remote[dir as usize],
                 "MAX_STREAMS ({:?})", dir
@@ -993,7 +1000,8 @@ impl StreamsState {
                 ));
             }
         } else {
-            let limit = self.max_remote[id.dir() as usize];
+            // A raised `max_remote` may not be in a `MAX_STREAMS` frame yet
+            let limit = self.announced_max_remote[id.dir() as usize];
             if id.index() >= limit {
                 return Err(TransportError::STREAM_LIMIT_ERROR(""));
             }
@@ -3509,6 +3517,43 @@ mod tests {
             result.map_err(|e| e.code),
             Err(TransportErrorCode::STREAM_STATE_ERROR),
         );
+    }
+
+    #[test]
+    fn stream_limit_checked_against_announced_value() {
+        let mut client = make(Side::Client);
+        client.set_max_concurrent(Dir::Bi, 256u32.into());
+        let id = StreamId::new(Side::Server, Dir::Bi, 200);
+
+        // Raised locally, but no MAX_STREAMS has told the peer yet
+        assert_eq!(
+            client
+                .received_stop_sending(id, 0u32.into())
+                .map_err(|e| e.code),
+            Err(TransportErrorCode::STREAM_LIMIT_ERROR),
+        );
+        assert_eq!(
+            client.received_max_stream_data(id, 1).map_err(|e| e.code),
+            Err(TransportErrorCode::STREAM_LIMIT_ERROR),
+        );
+
+        let mut pending = Retransmits::default();
+        assert!(client.queue_max_stream_id(&mut pending));
+        let mut buf = Vec::new();
+        client.write_control_frames(
+            &mut buf,
+            &mut pending,
+            &mut ThinRetransmits::default(),
+            &mut FrameStats::default(),
+            1200,
+        );
+        assert!(!buf.is_empty());
+
+        // A rejected 0-RTT resets `sent_max_remote` to force a re-announcement, which must not
+        // shrink the limit frames are checked against
+        client.zero_rtt_rejected();
+        assert_eq!(client.received_max_stream_data(id, 1), Ok(()));
+        assert!(client.received_stop_sending(id, 0u32.into()).is_ok());
     }
 
     #[test]
