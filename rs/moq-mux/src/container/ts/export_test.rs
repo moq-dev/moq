@@ -6060,6 +6060,50 @@ impl SiCadenceRig {
 	}
 }
 
+/// Under `--sync` the PCR rides a PID of its own, picked when the tables are built: an SI
+/// entry the catalog adds after them must not land on it.
+#[tokio::test(start_paused = true)]
+async fn sync_refuses_a_later_si_entry_on_the_clock_pid() {
+	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(2)).await;
+	rig.exporter = rig.exporter.with_mux_rate(2_000_000).with_sync();
+	let mut frames = Vec::new();
+	for millis in (0..1_000).step_by(40) {
+		frames.extend(rig.media_frames(millis).await);
+	}
+	let clock = frames
+		.iter()
+		.flat_map(|frame| frame.payload.chunks(188))
+		.find(|packet| packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x10 != 0)
+		.map(|packet| u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]))
+		.expect("the tables and the clock went out");
+	rig.catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.si
+		.entry(clock)
+		.or_default()
+		.insert(
+			0x70,
+			tscat::SiEntry {
+				track: "late.si".to_string(),
+				interval: Some(Duration::from_secs(5)),
+				..Default::default()
+			},
+		);
+	let err = tokio::time::timeout(Duration::from_secs(5), async {
+		loop {
+			if let Err(err) = rig.exporter.next().await {
+				break err;
+			}
+		}
+	})
+	.await
+	.expect("the export reads the catalog update");
+	assert!(err.to_string().contains("mpegts.si PID"), "{err}");
+}
+
 /// #2934: a revised SI snapshot goes out on the revision floor instead of waiting
 /// out the repetition interval (here the floor has long elapsed, so it rides the
 /// very next frame). For a clock table (TDT/TOT) the old interval-grid hold

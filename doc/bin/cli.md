@@ -438,7 +438,8 @@ it, which this command does not write. Each PID gets a fixed lane of the constan
 for its codec's most, with video taking the rest; content one leg lacks leaves
 its packets as stuffing there. The PCR rides a PID of its own, and each PID's
 continuity counter restarts at every group with the break flagged. It needs a
-constant rate (`--mux-rate`, or the catalog's), costing headroom over the
+constant rate, the same on every leg since the lanes follow from it
+(`--mux-rate`, or the catalog's), costing headroom over the
 source's (a 10 Mb/s channel needs about 12), and takes neither `--stitch` nor
 `--passthrough`. A group that starts behind the one before it, on a lane too
 narrow to absorb that one, is logged and counted in `overruns`: the legs can

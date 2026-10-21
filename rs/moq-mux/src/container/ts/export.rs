@@ -1836,7 +1836,13 @@ where
 			if !self.stale.is_empty() {
 				self.resubscribe(&catalog, &mpegts)?;
 			}
-			let es_pids: Vec<u16> = self.tracks.values().map(|t| t.pid).collect();
+			// Under `--sync` the PCR rides a PID of its own, which SI must not take either.
+			let es_pids: Vec<u16> = self
+				.tracks
+				.values()
+				.map(|t| t.pid)
+				.chain(self.psi.as_ref().map(|psi| psi.pcr_pid))
+				.collect();
 			reject_colliding_si_pids(&mpegts, self.pmt_pid(), &es_pids)?;
 			// The layout is locked but the timing is not: a `jitter` or `framerate` published
 			// after the tables still sizes the decode clock.
