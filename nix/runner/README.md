@@ -104,5 +104,5 @@ startup without carrier, public egress for multiple guests, private-network and
 sibling-guest isolation including spoofed established replies, compatible host NAT
 settings, the runner's locked-memory budget, symlink-free home and work directories
 with state migrated from the former DynamicUser layout, free page reporting and
-idle cache drops, killing a job that fills memory while sshd still answers, and
+idle cache drops, killing a job that fills memory before it thrashes the disk, and
 Nix/mbx persistence across runner and guest restarts.
