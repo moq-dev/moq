@@ -2454,6 +2454,12 @@ impl Consumer {
 		self.cursor.state.read().wire().cloned()
 	}
 
+	/// Whether the group was relayed from moq-transport, whose Object IDs may not be its frame
+	/// ordinals.
+	pub(super) fn relayed(&self) -> bool {
+		self.cursor.state.read().wire().is_some()
+	}
+
 	/// Read a compressed group's stored DEFLATE slices instead of plain frames, with each
 	/// frame's inflated size beside it ([`frame::Object::inflated`],
 	/// [`frame::Consumer::inflated`]), for egress that carries compression. A no-op on a

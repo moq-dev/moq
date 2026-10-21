@@ -2711,7 +2711,7 @@ async fn announced_filters_patterns_and_reports_captures() {
 		})
 		.unwrap();
 
-	let _broad = origin.dynamic("room".into(), MoqRoute::default()).unwrap();
+	let _broad = origin.dynamic("room".into()).unwrap();
 	let overlap = next_announced(&announced).await;
 	assert_eq!(overlap.prefix, "room");
 	assert_eq!(overlap.captures, None, "an overlap does not pin the wildcard");
@@ -3585,7 +3585,7 @@ async fn announced_broadcast() {
 }
 
 fn serve(origin: &MoqOriginProducer, prefix: &str) -> Arc<MoqOriginDynamic> {
-	origin.dynamic(prefix.into(), MoqRoute::default()).unwrap()
+	origin.dynamic(prefix.into()).unwrap()
 }
 
 #[tokio::test]
@@ -3605,9 +3605,12 @@ async fn dynamic_broadcast_request() {
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "dynamic/broadcast");
 
-	let served = MoqBroadcastProducer::new().unwrap();
+	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
-	request.accept(&served).unwrap();
+	// Only publish announces the answer, under its epoch and after admission.
+	assert!(matches!(served.announce(MoqRoute::default()), Err(MoqError::Closed)));
+	prepared.publish().unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
 	let broadcast = tokio::time::timeout(TIMEOUT, request_broadcast)
@@ -3654,8 +3657,9 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 		.expect("timed out waiting for the prefix request")
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "live/cam");
-	let served = MoqBroadcastProducer::new().unwrap();
-	request.accept(&served).unwrap();
+	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let served = prepared.broadcast();
+	prepared.publish().unwrap();
 	tokio::time::timeout(TIMEOUT, request_broadcast)
 		.await
 		.expect("timed out waiting for the request to resolve")
@@ -3695,8 +3699,9 @@ async fn dynamic_keeps_the_origin_alive() {
 		.await
 		.expect("the handler must still receive requests")
 		.unwrap();
-	let served = MoqBroadcastProducer::new().unwrap();
-	request.accept(&served).unwrap();
+	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let served = prepared.broadcast();
+	prepared.publish().unwrap();
 	tokio::time::timeout(TIMEOUT, request_broadcast)
 		.await
 		.expect("timed out waiting for the request to resolve")
@@ -4760,8 +4765,7 @@ async fn announced_broadcast_retries_a_dropped_wait() {
 	assert!(matches!(dropped.await, Err(err) if err.is_cancelled()));
 
 	let retry = tokio::spawn(async move { followed.available().await });
-	let served = MoqBroadcastProducer::new().unwrap();
-	request.accept(&served).unwrap();
+	let served = request.prepare(moq_mint_epoch()).unwrap().publish().unwrap();
 	tokio::time::timeout(TIMEOUT, retry)
 		.await
 		.expect("the retry waited for another instance")
@@ -4829,15 +4833,20 @@ async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 		.expect("timed out waiting for the broadcast")
 		.unwrap();
 
-	let dynamic = origin.dynamic("".into(), route).unwrap();
+	// A peer's covering route under the same epoch, which the public claim cannot express.
+	let dynamic = origin
+		.inner()
+		.inner
+		.dynamic_route("", route.clone().try_into().unwrap())
+		.unwrap();
 	broadcast.unannounce().unwrap();
 	let again = tokio::spawn(async move { followed.available().await });
 	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the instance never asked the route above the path")
 		.unwrap();
-	let served = MoqBroadcastProducer::new().unwrap();
-	request.accept(&served).unwrap();
+	let served = moq_net::broadcast::Info::new().produce();
+	request.accept(served.consume());
 
 	let again = tokio::time::timeout(TIMEOUT, again)
 		.await
@@ -4848,7 +4857,7 @@ async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 		again.inner().is_clone(first.inner()),
 		"the route above did not carry the instance on"
 	);
-	served.close().unwrap();
+	drop((served, dynamic));
 	broadcast.close().unwrap();
 }
 

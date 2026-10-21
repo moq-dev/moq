@@ -55,14 +55,12 @@ lands before the cut.
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
-- [TS qmux in the monorepo](/quest/m1/ts-qmux.md) - `@moq/qmux` moves into `js/` and `js/net` stops depending on moq-dev/web-transport
 - [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - qmux runs in-tree over `moq-quic`'s stream state machine, returning credit for every byte and delivering its close frame
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
 - [Refresh](/quest/m1/refresh/README.md) - a join asks for a fresh group once the current group's deltas exceed a publisher-advertised byte ratio, at every hop; replaces `Demand::used`/`unused` and moq-json's `delta_ratio`
 - [Compressed tracks](/quest/m1/compress/README.md) - a track flagged `compress` is DEFLATEd per group by moq-net, forwarded compressed, and inflated once on the relay for peers that cannot signal it; `catalog.json.z` and moq-flate go away
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
-- [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - a claim answers each output by publishing it at its exact path under its own epoch, so a restarted output never reaches a returning reader as the old one's cache
 - [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - a dropped or cut group ends its reader with an error, never a clean end, across cache reclaim, cap changes, and recovery
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
@@ -85,7 +83,7 @@ lands before the cut.
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence, and the media fixture's cold-start audio-tone flake is fixed at its cause
-- [Drain cleanup](/quest/m1/drain-cleanup.md) - sessions force-closed at the drain deadline record their lease end and bytes before the relay or CLI exits, while unfinished handshakes stay bounded
+- [Relay signal install](/quest/m1/relay-signal-install.md) - a shutdown signal after the relay starts serving drains it, without leaking handlers into an embedder whose startup failed
 - [Rust redirect loops](/quest/m1/tokio-redirect-loop.md) - moq-tokio escalates its backoff when GOAWAY redirects bounce between peers, as JS does
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
@@ -108,9 +106,7 @@ lands before the cut.
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
 - [lite-06 max sequence](/quest/m1/lite06-max-sequence.md) - group sequence 2^62-1 reaches a lite-06 subscriber or is refused loudly, instead of vanishing
 - [Track live signal](/quest/m1/track-live.md) - a reader can wait for its track's feed to be live, so a player skips old cached groups while a fresh upstream subscription starts
-- [moq-mux docs](/quest/m1/docs-mux.md) - every public moq-mux item has rustdoc and the crate warns on missing docs
 - [Binding docs](/quest/m1/docs-bindings.md) - every public moq-ffi and moq-c item has rustdoc, carried into the generated bindings and `moq.h`
-- [JS export docs](/quest/m1/docs-js.md) - every public JS export and class member has TSDoc, and `just check` enforces it
 
 - [moq-net compiles once](/quest/m1/net-erase-transport.md) - the session drivers stop monomorphizing per transport and per crate, saving several MiB of the relay, FFI library, `libmoq` and CLI
 

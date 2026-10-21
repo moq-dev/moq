@@ -38,8 +38,9 @@ Decided by the maintainer on 2026-10-20, when the quest was first started
 
 - **Split.** This quest replaces `requested_group`; removing `fetch_group`
   is [fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md), so each
-  PR breaks one API once. That half needs head fills, which
-  [frame bounds](/quest/m1/subscribe-ranges/frame-bounds.md) provides.
+  PR breaks one API once. That half needs head fills for a range starting
+  mid-group, which build on frame bounds
+  ([moq-dev/moq#6129](https://github.com/moq-dev/moq/pull/6129)).
 - **Handler shape.** `Dynamic::requested_fill` yields a `track::Fill` naming
   one bounded run: `start: Position`, exclusive end group, priority, the most
   tolerant budget among its readers, and order. Each reader's cursor still

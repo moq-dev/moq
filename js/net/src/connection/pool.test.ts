@@ -257,7 +257,7 @@ test("a borrowed connection origin exposes live routes and dynamic serving", asy
 			announcement = event;
 		});
 		const prefix = Path.from("on-demand");
-		const route = table.dynamic(prefix);
+		const route = table.dynamicRoute(prefix);
 		await advance();
 		expect(announcement).toMatchObject({ kind: "start", prefix });
 		let withdrawal: unknown;

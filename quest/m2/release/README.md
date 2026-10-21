@@ -40,5 +40,6 @@ production stability proven merely because upstream artifacts published.
 - [Retire libmoq](/quest/m2/release/libmoq-retire.md) - cleanup only after that publication
 - [Final hand-written C notice](/quest/m2/release/c-final-release.md) - publish the migration notice before source retirement
 - [Retire hand-written C](/quest/m2/release/c-retire.md) - complete the final old-package notice and source retirement
+- [Retire the web-transport JS qmux](/quest/m2/release/qmux-js-retire.md) - once `@moq/qmux` publishes from `js/qmux`, deprecate `@moq/web-socket-stream` and stop the second publisher
 - [Hosted worklet adoption](/quest/m2/release/dogfood-assets.md) - downstream consumers exercise the published assets
 - [moq.sh deployment](/quest/m2/release/moq-sh-deploy.md) - verify its release-triggered publication
