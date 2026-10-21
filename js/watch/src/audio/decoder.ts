@@ -27,6 +27,7 @@ import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 import { Terminal } from "./terminal";
 
+/** Signals the decoder reads. */
 export type DecoderInput = {
 	// Whether to download the audio track. Defaults to true.
 	enabled: Getter<boolean>;
@@ -86,8 +87,11 @@ export interface Stats {
  * The user is responsible for hooking up audio to speakers, an analyzer, etc.
  */
 export class Decoder {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<DecoderInput>;
+	/** The source picking the rendition to decode. */
 	readonly source: Source;
+	/** The clock that schedules playback. */
 	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
@@ -101,6 +105,7 @@ export class Decoder {
 		underruns: new Signal<number>(0),
 		buffered: new Signal<Container.BufferedRanges>([]),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// Decode buffer: audio sent to worklet but not yet played
@@ -762,8 +767,10 @@ export class Decoder {
 		});
 	}
 
-	// Flush the audio buffer and re-stall, re-anchoring playback to the next frame.
-	// Use in buffered mode at an utterance boundary (see Sync.reset).
+	/**
+	 * Flush the audio buffer and re-stall, re-anchoring playback to the next frame.
+	 * Use in buffered mode at an utterance boundary (see Sync.reset).
+	 */
 	reset(): void {
 		this.#ring.peek()?.reset();
 	}
@@ -782,12 +789,13 @@ export class Decoder {
 		return this.#arrivals.consume();
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#arrivals.close();
 		this.#signals.close();
 	}
 
-	// Whether the WebCodecs audio decoder can play this config.
+	/** Whether the WebCodecs audio decoder can play this config. */
 	static supported = supported;
 }
 

@@ -6,14 +6,16 @@ import type * as Encoder from "./video";
 
 export type { Backend, RendererError } from "@moq/video";
 
-// What the canvas preview renders.
-// - `none`: nothing, an easy way to toggle the preview off without removing the element.
-// - `source`: the raw captured frames, drawn directly (cheap, no extra codec work).
-// - `encoded`: a decoded copy of the encoded video, so the preview shows the same codec
-//   artifacts a viewer would receive. This costs a full extra encode + decode pass.
+/**
+ * What the canvas preview renders.
+ * - `none`: nothing, an easy way to toggle the preview off without removing the element.
+ * - `source`: the raw captured frames, drawn directly (cheap, no extra codec work).
+ * - `encoded`: a decoded copy of the encoded video, so the preview shows the same codec
+ *   artifacts a viewer would receive. This costs a full extra encode + decode pass.
+ */
 export type Mode = "none" | "source" | "encoded";
 
-// Signals the preview reads.
+/** Signals the preview reads. */
 export type RendererInput = {
 	// The canvas to draw into. Undefined renders nothing.
 	canvas: Getter<HTMLCanvasElement | undefined>;
@@ -40,8 +42,10 @@ export type RendererProps = Inputs<RendererInput>;
 
 /** Renders a `<canvas>` preview of the locally published video. */
 export class Renderer {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<RendererInput>;
 
+	/** The derived outputs, read-only. */
 	readonly out: Readonlys<{
 		// Why drawing stopped, or undefined while healthy. See {@link Video.RendererError}.
 		error: Getter<Video.RendererError | undefined>;
@@ -175,12 +179,13 @@ export class Renderer {
 		});
 	}
 
+	/** Stop and release everything this holds. */
 	close(): void {
 		this.#signals.close();
 	}
 }
 
-// Signals the transcoder reads.
+/** Signals the transcoder reads. */
 export type TranscodeInput = {
 	// The captured frames to re-encode. We subscribe for our own copies and close them.
 	source: Getter<Fanout<VideoFrame> | undefined>;
@@ -203,11 +208,13 @@ type TranscodeOutput = {
  * output frame is what a viewer would actually see after transmission.
  */
 export class Transcode {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<TranscodeInput>;
 
 	readonly #out: TranscodeOutput = {
 		frame: new Signal<VideoFrame | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
