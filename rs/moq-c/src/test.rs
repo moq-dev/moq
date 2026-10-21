@@ -3169,6 +3169,29 @@ fn dynamic_track_request_publishes_media() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A raw track request already delivered stays acceptable after its broadcast handle is closed.
+#[test]
+fn track_request_accepts_after_the_broadcast_closes() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"dynamic-closed");
+	let request_cb = Callback::new();
+	let _dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+
+	let consume = consume_local(broadcast);
+	let frame_cb = Callback::new();
+	consume_track(consume, b"raw", &frame_cb);
+
+	let request = id(request_cb.recv());
+	assert_eq!(moq_publish_close(broadcast), 0);
+	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
+	assert_eq!(moq_publish_track_finish(track), 0);
+	// The subscription ends with the finished track, before its callback's channel is freed.
+	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// Fetch one group of a published track from Rust, since the C ABI has no fetch consumer yet,
 /// delivering the consumer's index at resolve and the first frame's payload, or the fetch error.
 fn fetch_group(

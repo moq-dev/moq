@@ -18,6 +18,8 @@ struct DemandEntry {
 /// broadcast it was made on so media can be published onto it under that broadcast's catalog.
 struct TrackRequest {
 	broadcast: Id,
+	// Carried, not looked up, so a raw accept still works after the broadcast handle is released.
+	finished: Finished,
 	request: moq_net::track::Request,
 }
 
@@ -31,7 +33,7 @@ enum Request {
 /// What a request handler serves.
 enum Dynamic {
 	/// Track requests on a broadcast, remembered so media can be published onto them.
-	Broadcast(moq_net::broadcast::Dynamic, Id),
+	Broadcast(moq_net::broadcast::Dynamic, Id, Finished),
 	/// Group requests (fetches of uncached groups) on a track.
 	Track(moq_net::track::Dynamic),
 }
@@ -663,8 +665,9 @@ impl Publish {
 	/// Without a live handler an unknown track name is refused, as before.
 	pub fn dynamic(&mut self, broadcast: Id, on_request: OnStatus) -> Result<Id, Error> {
 		let dynamic = self.producer(broadcast)?.dynamic();
-		let driver = self.broadcast(broadcast)?.driver.clone();
-		self.spawn_dynamic(Dynamic::Broadcast(dynamic, broadcast), on_request, driver)
+		let Broadcast { driver, finished, .. } = self.broadcast(broadcast)?;
+		let dynamic = Dynamic::Broadcast(dynamic, broadcast, finished.clone());
+		self.spawn_dynamic(dynamic, on_request, driver.clone())
 	}
 
 	/// Serve fetches of uncached groups on a raw track, delivering each as a group-request
@@ -713,9 +716,15 @@ impl Publish {
 				biased;
 				_ = &mut close => return Ok(()),
 				res = kio::wait(|waiter| match &mut dynamic {
-					Dynamic::Broadcast(dynamic, broadcast) => dynamic
-						.poll_requested_track(waiter)
-						.map_ok(|request| Request::Track(Box::new(TrackRequest { broadcast: *broadcast, request }))),
+					Dynamic::Broadcast(dynamic, broadcast, finished) => {
+						dynamic.poll_requested_track(waiter).map_ok(|request| {
+							Request::Track(Box::new(TrackRequest {
+								broadcast: *broadcast,
+								finished: finished.clone(),
+								request,
+							}))
+						})
+					}
 					Dynamic::Track(dynamic) => dynamic.poll_requested_group(waiter).map_ok(Request::Group),
 				}) => res,
 			};
@@ -756,8 +765,7 @@ impl Publish {
 
 	/// Accept a track request as a raw track, returning a track handle like [`Self::track`].
 	pub fn track_request_accept(&mut self, request: Id, info: moq_net::track::Info) -> Result<Id, Error> {
-		let TrackRequest { broadcast, request } = self.track_request.remove(request).ok_or(Error::NotFound)?;
-		let finished = self.finished(broadcast)?;
+		let TrackRequest { finished, request, .. } = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		self.tracks.insert(Kept {
 			inner: request.accept(info),
 			finished,
@@ -766,8 +774,11 @@ impl Publish {
 
 	/// Accept a track request as an audio track, returning a media handle like [`Self::audio`].
 	pub fn track_request_audio(&mut self, request: Id, init: import::AudioInit) -> Result<Id, Error> {
-		let TrackRequest { broadcast, request } = self.track_request.remove(request).ok_or(Error::NotFound)?;
-		let finished = self.finished(broadcast)?;
+		let TrackRequest {
+			broadcast,
+			finished,
+			request,
+		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		let catalog = self.catalog(broadcast)?;
 		let track = import::Track::audio(request, catalog.reserve(), init)?;
 		self.media.insert(Kept {
@@ -778,8 +789,11 @@ impl Publish {
 
 	/// Accept a track request as a video track, returning a media handle like [`Self::video`].
 	pub fn track_request_video(&mut self, request: Id, init: import::VideoInit) -> Result<Id, Error> {
-		let TrackRequest { broadcast, request } = self.track_request.remove(request).ok_or(Error::NotFound)?;
-		let finished = self.finished(broadcast)?;
+		let TrackRequest {
+			broadcast,
+			finished,
+			request,
+		} = self.track_request.remove(request).ok_or(Error::NotFound)?;
 		let catalog = self.catalog(broadcast)?;
 		let track = import::Track::video(request, catalog.reserve(), init)?;
 		self.media.insert(Kept {
