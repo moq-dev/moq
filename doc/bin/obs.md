@@ -23,7 +23,10 @@ The source plays Opus, AAC-LC (mono or stereo), and PCM audio. A channel count n
 
 Enter a relay URL explicitly. On the shared anonymous relay, use a unique path
 such as `https://cdn.moq.dev/anon/your-stream`. A URL with `?jwt=` fills the
-token field.
+token field. Editing the token while live presents the new one without
+reconnecting, on a session that carries in-band authorization. Only
+`moq-lite-07-wip` does, and it is not offered yet, so for now the OBS log
+reports the new token as unsupported and it applies on the next Go Live.
 
 By default the dock tunes the encoder for low latency on this stream only:
 no B-frames or lookahead on the encoders that support turning them off. This

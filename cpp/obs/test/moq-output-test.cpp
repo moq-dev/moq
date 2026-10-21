@@ -813,6 +813,24 @@ int main()
 	}
 	printf("OBS-driven restart: ok\n");
 
+	// A token edited mid-stream goes to the live session only, and presenting a
+	// newer one or stopping cancels whatever is still in flight.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(!o.PresentToken("early"));
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		CHECK(o.PresentToken("fresh"));
+		CHECK(o.PresentToken("fresher"));
+		CHECK(o.IsLiveSession());
+		CHECK(signalCount() == 0);
+		o.Stop();
+		CHECK(!o.PresentToken("late"));
+	}
+	printf("present a token mid-stream: ok\n");
+
 	// Restarts and teardown racing failures still in flight, repeatedly. Whatever
 	// the order, each Start() reports at most once, and nothing reports once the
 	// output is gone.

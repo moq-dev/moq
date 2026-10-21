@@ -570,6 +570,32 @@ void MoQOutput::CopyLastFailure(int *code, std::string *reason)
 		*reason = last_failure_reason;
 }
 
+bool MoQOutput::PresentToken(const std::string &token)
+{
+	std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
+	if (!attempt || !attempt->session)
+		return false;
+
+	// Replacing `presenting` cancels a presentation still in flight, which the
+	// newer token supersedes.
+	attempt->presenting = attempt->session->auth()->add(token).then(
+		worker.Executor(), Current<moq::expected<std::shared_ptr<moq::AuthToken>>>(
+					   attempt, [](const std::shared_ptr<Attempt> &current, auto result) {
+						   if (!result) {
+							   LOG_WARNING("MoQ relay refused the new publish token: %s",
+								       result.error().to_string().c_str());
+							   return;
+						   }
+						   // The old token's grant leaves the union only after the new one joined.
+						   if (current->token)
+							   current->token->cancel();
+						   current->token = *result;
+						   LOG_INFO("MoQ relay accepted the new publish token: %s",
+							    MoQRedactUrl(current->url).c_str());
+					   }));
+	return true;
+}
+
 bool MoQOutput::TryGetVideoRate(VideoRate *out)
 {
 	VideoRate rate;

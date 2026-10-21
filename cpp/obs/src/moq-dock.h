@@ -37,6 +37,7 @@ private slots:
 	void OnEncodingChanged(int mode);
 	void RefreshEncodingOptions(bool applyProfileDefaults = false);
 	void OnRelayUrlEdited();
+	void OnTokenEdited();
 
 private:
 	void StartStream();
@@ -96,6 +97,9 @@ private:
 	OBSEncoderAutoRelease audioEncoder;
 
 	bool running = false;
+	// The token the running stream last presented, so leaving the field unchanged
+	// does not present it again.
+	QString presentedToken;
 	// Filled when Go Live creates encoders; shown in Stats while publishing.
 	QString publishSummary;
 	QString latencySummary;

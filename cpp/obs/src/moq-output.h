@@ -76,6 +76,12 @@ public:
 	};
 	bool TryGetVideoRate(VideoRate *out);
 
+	// Present a fresh publish token on the connected session without reconnecting,
+	// replacing the one presented here before once the relay accepts it. False when
+	// there is no session yet. The outcome is logged; a relay without in-band AUTH
+	// refuses it.
+	bool PresentToken(const std::string &token);
+
 private:
 	friend struct MoQOutputStatsTest;
 	bool CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
@@ -97,6 +103,11 @@ private:
 		bool connected = false;
 		// False while the session is between reconnects.
 		bool live = false;
+		// The latest token PresentToken() got accepted, presented on every reconnect
+		// until it is replaced or the attempt is dropped, and the call presenting the
+		// next one.
+		std::shared_ptr<moq::AuthToken> token;
+		std::optional<moq::Continuation> presenting;
 	};
 
 	void OnConnect(const std::shared_ptr<Attempt> &attempt, moq::expected<std::shared_ptr<moq::Session>> result);

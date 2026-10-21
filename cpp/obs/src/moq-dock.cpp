@@ -414,7 +414,9 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	tokenEdit->setPlaceholderText("(optional) publish JWT");
 	tokenEdit->setEchoMode(QLineEdit::Password);
 	const QString tokenHelp = "Optional relay publish token. Leave empty for public relays such as /anon. "
-				  "Pasting a URL with ?jwt= into Relay URL fills this and strips it from the URL.";
+				  "Pasting a URL with ?jwt= into Relay URL fills this and strips it from the URL. "
+				  "Editing it while live presents the new token without reconnecting, on a session "
+				  "that carries in-band authorization.";
 	tokenEdit->setToolTip(tokenHelp);
 
 	pathEdit = new QLineEdit(streamPage);
@@ -609,7 +611,7 @@ MoQDock::MoQDock(QWidget *parent) : QWidget(parent)
 	connect(pollTimer, &QTimer::timeout, this, &MoQDock::UpdateStatus);
 
 	connect(urlEdit, &QLineEdit::editingFinished, this, &MoQDock::OnRelayUrlEdited);
-	connect(tokenEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
+	connect(tokenEdit, &QLineEdit::editingFinished, this, &MoQDock::OnTokenEdited);
 	connect(pathEdit, &QLineEdit::editingFinished, this, &MoQDock::SaveSettings);
 	connect(encodingMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MoQDock::OnEncodingChanged);
 	connect(latencyMode, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MoQDock::SaveSettings);
@@ -673,6 +675,31 @@ void MoQDock::OnRelayUrlEdited()
 {
 	PeelJwtFromRelayUrl();
 	SaveSettings();
+}
+
+void MoQDock::OnTokenEdited()
+{
+	SaveSettings();
+
+	const QString token = tokenEdit->text().trimmed();
+	if (!running || !output || token.isEmpty() || token == presentedToken)
+		return;
+
+	// The same refusal as Go Live: the URL is fixed while running, but the token
+	// may be new.
+	const QUrl dial(urlEdit->text().trimmed());
+	if (dial.isValid() && MoQDial::IsCleartext(dial.scheme().toStdString())) {
+		status->setText("Publish token requires an encrypted relay URL (not http://, ws://, or tcp://)");
+		return;
+	}
+
+	// Presented in band, so the stream keeps going while the relay checks it.
+	auto *moq = static_cast<MoQOutput *>(obs_obj_get_data(output));
+	if (!moq || !moq->PresentToken(token.toStdString())) {
+		status->setText("Not connected yet; edit the token again once live");
+		return;
+	}
+	presentedToken = token;
 }
 
 void MoQDock::PeelJwtFromRelayUrl()
@@ -1069,6 +1096,7 @@ void MoQDock::StartStream()
 
 	const std::string url = ConnectUrl().toStdString();
 	const std::string path = pathEdit->text().toStdString();
+	presentedToken = token;
 
 	SaveSettings();
 
@@ -1158,10 +1186,10 @@ void MoQDock::SetRunning(bool isRunning)
 				      .arg(isRunning ? "#e04434" : "#36a45e"));
 
 	urlEdit->setEnabled(!isRunning);
-	tokenEdit->setEnabled(!isRunning);
 	pathEdit->setEnabled(!isRunning);
 	// The settings are read once at connect, so editing them mid-stream would look
-	// like it applied when it hadn't.
+	// like it applied when it hadn't. The token stays editable: a new one is
+	// presented on the live session.
 	advancedButton->setEnabled(!isRunning);
 	encodingMode->setEnabled(!isRunning);
 	latencyMode->setEnabled(!isRunning);
