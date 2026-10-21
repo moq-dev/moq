@@ -35,6 +35,7 @@ fn timed_info() -> MoqTrackInfo {
 		max_age_us: None,
 		refresh: None,
 		timescale: Some(1_000_000),
+		compress: false,
 	}
 }
 
@@ -862,6 +863,7 @@ async fn raw_track_datagram_roundtrip() {
 				max_age_us: None,
 				refresh: None,
 				timescale: Some(1_000_000),
+				compress: false,
 			}),
 		)
 		.unwrap();
@@ -893,6 +895,7 @@ async fn raw_track_info_reports_publisher_properties() {
 		max_age_us: Some(2_500_000),
 		refresh: Some(2),
 		timescale: Some(90_000),
+		compress: true,
 	};
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
 	let consumer = track.consume(None).unwrap();
@@ -902,6 +905,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	assert_eq!(got.max_age_us, Some(2_500_000));
 	assert_eq!(got.refresh, Some(2));
 	assert_eq!(got.timescale, Some(90_000));
+	assert!(got.compress);
 }
 
 #[tokio::test]
@@ -968,6 +972,7 @@ async fn data_writes_preserve_optional_timestamps() {
 						max_age_us: None,
 						refresh: None,
 						timescale: timestamp_us.map(|_| 1_000_000),
+						compress: false,
 					}),
 				)
 				.unwrap();
@@ -1109,6 +1114,7 @@ async fn json_snapshot_roundtrip() {
 		max_age_us: None,
 		timescale: Some(1_000_000),
 		refresh: None,
+		compress: false,
 	};
 	let track = broadcast.publish_track("meta".into(), Some(info)).unwrap();
 	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();

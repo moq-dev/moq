@@ -11,6 +11,11 @@ Point `<url>` at the root you want recordings under, and drop `--catalog-format`
 `--retention` now works on untimed tracks.
 `import archive` does not read the new layout yet; it still replays recordings made by older `moq` versions.
 
+### `--cluster-lan-secret` is a file path only (#5910)
+
+`--cluster-lan-secret`, `MOQ_CLUSTER_LAN_SECRET`, and `[cluster.lan] secret` no longer accept 64 hex characters inline.
+Write the hex to a file (`openssl rand -hex 32 > cluster.key`) and pass its path.
+
 ### `--listen-timeout` bounds admission (#5765)
 
 `moq --listen` now finishes auth admission within the `--listen-timeout` handshake deadline (default `10s`, counted from the first packet) instead of a separate fixed ten seconds, so a short timeout now refuses a slow auth server sooner and `0s` waits on it forever.
