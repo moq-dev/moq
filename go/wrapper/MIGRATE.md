@@ -10,6 +10,10 @@ How to update your code for each breaking change, newest first.
 Replace `request.Accept(broadcast)` with `request.Prepare(epoch)`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under that epoch and returns its producer.
 Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
 
+### `TrackInfo` gains `Compress` (#5928)
+
+A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals need no change.
+
 ### Anchors can name a time (#6074)
 
 `AnchorTime` names the group containing a presentation time, and type switches over `Anchor` need a case for it.

@@ -200,6 +200,7 @@ function requestStream(version: IetfVersion) {
 		stream,
 		written,
 		wire: () => new Reader(undefined, Uint8Array.from(written), version),
+		send: (bytes: Uint8Array) => input.enqueue(bytes),
 		cancel: () => input.error(new Error("request cancelled")),
 	};
 }
@@ -313,6 +314,42 @@ test("TRACK_STATUS outside the grant is refused on every draft", async () => {
 		grant.set(nothing());
 		await task;
 		expect(await refusalCode(narrowed.wire(), version)).toBe(unauthorized);
+
+		await requests.return?.();
+		origin.close();
+	}
+});
+
+// Nothing answers a SUBSCRIBE while its broadcast resolves, yet the request stream is still
+// read: a second GOAWAY then closes the session at once, not once an answer goes out.
+test("a second GOAWAY on an unanswered SUBSCRIBE closes the session", async () => {
+	for (const version of [Version.DRAFT_18, Version.DRAFT_21]) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const { pub, origin } = publisher(pair.server, { session });
+		const requests = origin.dynamic(Path.from("room")).requested();
+
+		const held = requestStream(version);
+		const task = pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("room"),
+				trackName: "video",
+				subscriberPriority: 0,
+			}),
+			held.stream,
+		);
+		expect((await requests.next()).value?.path).toBe(Path.from("room"));
+		// GOAWAY with no new session and no timeout, twice.
+		held.send(Uint8Array.of(0x10, 0, 2, 0, 0, 0x10, 0, 2, 0, 0));
+
+		const closed = await Promise.race([
+			pair.server.closed,
+			new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), 500)),
+		]);
+		expect(closed.closeCode).toBe(SessionCode.ProtocolViolation);
+		await task;
+		expect(held.written).toEqual([]);
 
 		await requests.return?.();
 		origin.close();

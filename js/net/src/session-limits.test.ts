@@ -57,6 +57,8 @@ function pendingPublisher(protocol: "lite" | "ietf", options: { track?: boolean 
 	const pending: Promise<void>[] = [];
 	let draining = false;
 	const writes: (() => void)[] = [];
+	// Shaped like the WebTransportError a requester's RESET_STREAM fails the read with.
+	const reset = Object.assign(new Error("cancelled"), { source: "stream", streamErrorCode: null });
 
 	// Subscribe once, returning a cancel that resets the requester's half.
 	const subscribe = (id: number): (() => void) => {
@@ -86,7 +88,7 @@ function pendingPublisher(protocol: "lite" | "ietf", options: { track?: boolean 
 						stream,
 					);
 		pending.push(request.catch(() => {}));
-		return () => requester.error(new Error("cancelled"));
+		return () => requester.error(reset);
 	};
 
 	// Each wire request has its own slot even when its track and group are identical.

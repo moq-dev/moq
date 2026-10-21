@@ -165,6 +165,8 @@ let
             mv "$STATE_DIRECTORY/root.qcow2.tmp" "$STATE_DIRECTORY/root.qcow2"
           fi
         '';
+        # Free page reporting returns pages the guest frees to the host, so QEMU holds
+        # what the guest uses rather than the peak since the VM started.
         script = ''
           exec ${qemu}/bin/qemu-system-x86_64 \
             -enable-kvm -cpu host -smp ${toString cfg.resources.cores} -m ${toString cfg.resources.memory} \
@@ -172,6 +174,7 @@ let
             -netdev tap,id=net,ifname=${tap},script=no,downscript=no \
             -device virtio-net-pci,netdev=net,mac=02:00:00:00:23:02 \
             -device virtio-rng-pci \
+            -device virtio-balloon-pci,free-page-reporting=on \
             -fw_cfg name=opt/io.systemd.credentials/runner-token,file="$CREDENTIALS_DIRECTORY/runner-token" \
             -qmp unix:"$RUNTIME_DIRECTORY/qmp",server=on,wait=off \
             -nographic

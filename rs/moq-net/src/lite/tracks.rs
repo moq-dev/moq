@@ -131,6 +131,7 @@ mod test {
 			priority: 3,
 			max_age: Some(Duration::from_secs(2)),
 			timescale: Some(Timescale::MICRO),
+			compress: true,
 		};
 		let TracksEvent::Added { name, info: got } = roundtrip(&TracksEvent::Added {
 			name: "video".into(),
@@ -143,6 +144,7 @@ mod test {
 		assert_eq!(got.priority, 3);
 		assert_eq!(got.max_age, Some(Duration::from_secs(2)));
 		assert_eq!(got.timescale, Some(Timescale::MICRO));
+		assert!(got.compress);
 
 		let TracksEvent::Removed { name } = roundtrip(&TracksEvent::Removed { name: "video".into() }) else {
 			panic!("expected a removal");

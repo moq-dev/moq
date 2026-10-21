@@ -2275,12 +2275,20 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test(start_paused = true)]
 	async fn a_refused_tcp_dial_keeps_retrying() {
-		// Refusal is what's under test, so this can't use [`dead`]. A port nothing is
-		// bound to refuses on every OS, unlike one that is bound but not listening.
-		let addr = std::net::TcpListener::bind("127.0.0.1:0")
-			.expect("bind")
+		// Refusal is what's under test, so this can't use [`dead`]. Only Linux
+		// refuses a SYN to a port that is bound but not listening, so only Linux
+		// holds it: a released port can become another process's listener mid-test.
+		// Elsewhere the port is released, since only a free port refuses there.
+		let reserve = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).expect("socket");
+		let loopback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+		reserve.bind(&loopback.into()).expect("bind");
+		let addr = reserve
 			.local_addr()
-			.expect("local addr");
+			.expect("local addr")
+			.as_socket()
+			.expect("an inet addr");
+		#[cfg(not(target_os = "linux"))]
+		drop(reserve);
 		// The OS's own wording, which differs on Windows.
 		let refused = std::net::TcpStream::connect(addr)
 			.expect_err("nothing listens")
