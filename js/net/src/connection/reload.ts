@@ -213,10 +213,10 @@ export class Reload {
 	// dials. Retired when it closes, at its handover cap, or when the sequence ends.
 	#draining: Draining | undefined;
 
-	// The endpoints that sent us away during the current run of migrations. A redirect back to
-	// one of them is a loop, however healthy each session looked. Cleared when a session ends
-	// without a GOAWAY, outlives the capped delay, or a new sequence starts.
-	#departed = new Set<string>();
+	// The current run of migrations. A redirect back to an endpoint that already sent us away is
+	// a loop, however healthy each session looked. Reset when a session ends without a GOAWAY,
+	// outlives the capped delay, or a new sequence starts.
+	#redirects = new Redirects();
 
 	// Whether a connect attempt is in flight, so a retiring predecessor reports the right status.
 	#dialing = false;
@@ -438,7 +438,7 @@ export class Reload {
 					if (ended === undefined) return;
 					if (ended === null || ended instanceof Error) {
 						console.warn("connection closed, reconnecting");
-						this.#departed.clear();
+						this.#redirects.reset();
 						if (this.established.peek() === connection) this.established.set(undefined);
 						this.#retry(effect, connected, ended ?? undefined);
 						return;
@@ -459,12 +459,10 @@ export class Reload {
 					// backoff would allow, so it starts a new run: rolling restarts days apart
 					// never add up to a loop.
 					const lived = Instant.durationSince(now(), connected);
-					if (lived >= Nano.fromMilli(this.delay?.max ?? DEFAULT_DELAY.max)) this.#departed.clear();
-					const next = (this.#redirect.peek() ?? url).href;
-					const moved = next !== dialing.href;
-					const loop = moved && this.#departed.has(next);
-					if (moved) this.#departed.add(dialing.href);
-					if (loop) {
+					if (lived >= Nano.fromMilli(this.delay?.max ?? DEFAULT_DELAY.max)) this.#redirects.reset();
+					const from = endpoint(dialing);
+					const to = endpoint(this.#redirect.peek() ?? url);
+					if (to !== from && this.#redirects.move(from, to)) {
 						this.#retry(effect, undefined, new Error("redirect loop"));
 						return;
 					}
@@ -618,7 +616,7 @@ export class Reload {
 		this.#delay = undefined;
 		this.#deadline = undefined;
 		this.#sequenceHref = undefined;
-		this.#departed.clear();
+		this.#redirects.reset();
 		this.#draining?.retire();
 	}
 
@@ -759,5 +757,48 @@ class Draining {
 		this.#timer.abort();
 		this.#connection.abort();
 		this.#onRetire();
+	}
+}
+
+/**
+ * Where `url` dials, without its query or fragment, where a peer may mint fresh credentials on
+ * every redirect. Two URLs that differ only there reach the same endpoint.
+ */
+function endpoint(url: URL): string {
+	const bare = new URL(url);
+	bare.search = "";
+	bare.hash = "";
+	return bare.href;
+}
+
+/**
+ * A run of GOAWAY redirects, and whether it has revisited an endpoint. The peer picks every
+ * hop, so remembering them all would grow without bound. Brent's cycle detection instead keeps
+ * one departed endpoint, replaced at doubling intervals, and catches a cycle of any length
+ * within a few laps of it. Once caught, the run stays a loop until reset.
+ */
+export class Redirects {
+	#mark: string | undefined;
+	#span = 1;
+	#hops = 0;
+	#loop = false;
+
+	/** Record leaving `from` for a different endpoint `to`, and return whether this run loops. */
+	move(from: string, to: string): boolean {
+		if (to === this.#mark) this.#loop = true;
+		if (++this.#hops === this.#span) {
+			this.#mark = from;
+			this.#span *= 2;
+			this.#hops = 0;
+		}
+		return this.#loop;
+	}
+
+	/** Start a new run. */
+	reset(): void {
+		this.#mark = undefined;
+		this.#span = 1;
+		this.#hops = 0;
+		this.#loop = false;
 	}
 }

@@ -287,21 +287,26 @@ async function elapse(clock: Manual, pred: () => boolean): Promise<Milli> {
 }
 
 /**
- * Let session `hop` live for `life`, then have its peer redirect it to the other address.
+ * Let session `hop` live for `life`, then have its peer redirect it to the other address,
+ * minting a fresh credential in the query when `rotate` is set.
  * Returns once the client has acted on the GOAWAY, so any backoff timer is already armed.
  */
-async function bounce(clock: Manual, reload: Reload, dials: Dial[], hop: number): Promise<string> {
+async function bounce(clock: Manual, reload: Reload, dials: Dial[], hop: number, rotate = false): Promise<string> {
 	await waitUntil(() => dials.length === hop + 1 && reload.status.peek() === "connected");
 	const dial = dials[hop];
 	if (!dial) throw new Error(`no dial ${hop}`);
-	const other = dial.url === url.href ? moved.href : url.href;
+	const peer = new URL(dial.url).port === moved.port ? url : moved;
+	const other = rotate ? `${peer.href}?jwt=${hop}` : peer.href;
 	await clock.advanceAsync(Nano.fromMilli(life));
 	await goaway(dial.server, other);
 	await waitUntil(() => reload.redirect.peek()?.href === other);
 	return other;
 }
 
-test("two peers redirecting to each other escalate the backoff instead of cycling", async () => {
+test.each([
+	["", false],
+	[" even with fresh credentials on every redirect", true],
+])("two peers redirecting to each other escalate the backoff instead of cycling%s", async (_, rotate) => {
 	const clock = new Manual();
 	const restore = clock.install();
 	const { dials } = fleet();
@@ -318,7 +323,7 @@ test("two peers redirecting to each other escalate the backoff instead of cyclin
 		// the jittered backoff, between half and all of a delay that escalates to the cap.
 		const delays = [0, 10, 40, 160, 640, 1000, 1000];
 		for (const [hop, delay] of delays.entries()) {
-			const other = await bounce(clock, reload, dials, hop);
+			const other = await bounce(clock, reload, dials, hop, rotate);
 			const waited = await elapse(clock, () => dials.length === hop + 2);
 			expect(waited, `hop ${hop}`).toBeGreaterThanOrEqual(delay / 2);
 			expect(waited, `hop ${hop}`).toBeLessThanOrEqual(delay);
