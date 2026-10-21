@@ -14,6 +14,7 @@ Cherry-picked since the fork point:
 - [`48854d48`](https://github.com/quinn-rs/quinn/commit/48854d48635875d259a95973cc0575db8c1792a4): accept non-minimally encoded integer transport parameters, as RFC 9000 section 16 allows.
 - [`83701a58`](https://github.com/quinn-rs/quinn/commit/83701a58d10f6cb089c48aeff45e137ebd2712ec): an ordered read refused after an unordered one leaves the stream readable instead of discarding it.
 - [`38b9f52f`](https://github.com/quinn-rs/quinn/commit/38b9f52fd7b545cc2d3fa81bc2fbaed072fae0f4): drop already-read duplicates when a stream switches from ordered to unordered reads.
+- [`ecc0dcfd`](https://github.com/quinn-rs/quinn/commit/ecc0dcfdeaec996d276da31d836f965753b66ea4): truncate an application `CONNECTION_CLOSE` reason by the error code's actual width, so a four- or eight-byte code no longer overruns the frame's budget.
 
 The fork never merges upstream.
 Upstream fixes are cherry-picked by hand, and the crate keeps quinn's formatting (rustfmt defaults) so the patches apply cleanly.

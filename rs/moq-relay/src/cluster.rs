@@ -1259,6 +1259,9 @@ impl Cluster {
 	}
 
 	/// Admit a gateway session and scope both origin directions from its grant.
+	///
+	/// Waits on the decider for as long as the caller does; the caller owns the
+	/// deadline, as for [`auth::Auth::admit`].
 	pub async fn admit(&self, auth: &auth::Auth, request: moq_auth::Request) -> Result<Admitted, auth::Error> {
 		let result = async {
 			if !matches!(request.event, moq_auth::Event::Connect) {

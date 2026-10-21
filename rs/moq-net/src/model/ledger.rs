@@ -114,6 +114,14 @@ impl Ledger {
 		self.runs.first().map(|run| run.groups.start)
 	}
 
+	/// The exclusive end of the accounted run holding `sequence`, `None` while it is not.
+	pub fn run_end(&self, sequence: u64) -> Option<u64> {
+		let run = self
+			.runs
+			.get(self.runs.partition_point(|run| run.groups.end <= sequence))?;
+		(run.groups.start <= sequence).then_some(run.groups.end)
+	}
+
 	/// Whether every group in `groups` is accounted for.
 	pub fn covers(&self, groups: Range<u64>) -> bool {
 		// Runs merge on insert, so one run covers the span or none does.

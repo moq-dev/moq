@@ -44,8 +44,10 @@ solicit = false                      # Decline MoQ Solicit, so peers may announc
 epoch = false                        # Decline MoQ Epoch, so routes over moq-transport carry no epoch (draft 17+).
 ```
 
-`timeout` bounds the whole handshake, transport through MoQ SETUP, so a peer
-that connects and never speaks is closed instead of held open by keep-alives.
+`timeout` bounds the whole handshake, transport through MoQ SETUP and auth
+admission, so a peer that connects and never speaks, or whose admission never
+gets an answer, is closed instead of held open by keep-alives. An HTTP read's
+admission is bounded by the same value from the request's arrival.
 
 `reset.secret` lets a relay restarted on the same address reset its
 predecessor's QUIC connections, so clients reconnect at once instead of

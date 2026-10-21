@@ -431,8 +431,19 @@ pub struct Discovery {
 	/// Events produced ahead of the caller asking, since one resolve can retire a
 	/// previous identity and report a new one.
 	pending: std::collections::VecDeque<Event>,
-	daemon: ServiceDaemon,
+	_daemon: Daemon,
 	events: mdns_sd::Receiver<ServiceEvent>,
+}
+
+// Own shutdown before any fallible setup or await, then move that responsibility
+// into Discovery. Dropping a raw ServiceDaemon only drops a command sender.
+struct Daemon(ServiceDaemon);
+
+impl Drop for Daemon {
+	fn drop(&mut self) {
+		// Best-effort goodbye; peers otherwise learn of the exit via TTL expiry.
+		self.0.shutdown().ok();
+	}
 }
 
 impl Discovery {
@@ -487,12 +498,12 @@ impl Discovery {
 			None => nonce,
 		};
 
-		let daemon = ServiceDaemon::new()?;
+		let daemon = Daemon(ServiceDaemon::new()?);
 		// Subscribe before registering. The daemon opens its multicast sockets
 		// lazily on its own thread, so `ServiceDaemon::new` succeeding proves
 		// nothing; the announcement (or the failure) arrives here. Subscribing
 		// after `register` would race the very event we are waiting for.
-		let monitor = daemon.monitor()?;
+		let monitor = daemon.0.monitor()?;
 
 		// Register and browse the application subtype so the daemon only resolves
 		// this application's records. The parent type stays `_moq._udp`, so a
@@ -507,8 +518,8 @@ impl Discovery {
 			txt,
 		)?
 		.enable_addr_auto();
-		daemon.register(service)?;
-		let events = daemon.browse(&ty_domain)?;
+		daemon.0.register(service)?;
+		let events = daemon.0.browse(&ty_domain)?;
 
 		announced(&monitor).await?;
 		tracing::info!(%id, app = %config.app, port = config.port, "advertising on the LAN");
@@ -520,7 +531,7 @@ impl Discovery {
 			credential,
 			peers: HashMap::new(),
 			pending: std::collections::VecDeque::new(),
-			daemon,
+			_daemon: daemon,
 			events,
 		})
 	}
@@ -652,13 +663,6 @@ impl Discovery {
 	/// higher accepts. Deterministic on both sides with no coordination.
 	pub fn should_dial(&self, remote: &str) -> bool {
 		should_dial(&self.id, remote)
-	}
-}
-
-impl Drop for Discovery {
-	fn drop(&mut self) {
-		// Best-effort goodbye; peers otherwise learn of the exit via TTL expiry.
-		self.daemon.shutdown().ok();
 	}
 }
 
@@ -1232,6 +1236,101 @@ mod tests {
 		let err = announced(&rx).await.expect_err("silence must not hang");
 		assert!(format!("{err}").contains("within"), "{err}");
 		drop(tx);
+	}
+
+	async fn daemon_probe() -> (Daemon, mdns_sd::Receiver<mdns_sd::DaemonEvent>) {
+		let daemon = Daemon(ServiceDaemon::new_with_port(0).expect("daemon"));
+		let monitor = daemon.0.monitor().expect("monitor");
+		assert_eq!(
+			daemon.0.status().expect("status").recv_async().await.expect("running"),
+			mdns_sd::DaemonStatus::Running,
+		);
+		(daemon, monitor)
+	}
+
+	async fn stopped(monitor: mdns_sd::Receiver<mdns_sd::DaemonEvent>) {
+		// Monitor senders belong to the worker, not the command handle. Their
+		// closure proves the worker released them rather than just accepting Exit.
+		tokio::time::timeout(std::time::Duration::from_secs(5), async {
+			while monitor.recv_async().await.is_ok() {}
+		})
+		.await
+		.expect("the construction owner must stop its daemon");
+	}
+
+	#[tokio::test]
+	#[ignore = "opens host network sockets; run by just rs multicast"]
+	async fn daemon_cancelled_gate_stops_worker() {
+		let (daemon, monitor) = daemon_probe().await;
+		let (_tx, rx) = flume::unbounded();
+		let mut opening = Box::pin(async move {
+			let _daemon = daemon;
+			announced(&rx).await
+		});
+		std::future::poll_fn(|cx| {
+			use std::future::Future;
+			assert!(opening.as_mut().poll(cx).is_pending());
+			std::task::Poll::Ready(())
+		})
+		.await;
+		drop(opening);
+		stopped(monitor).await;
+	}
+
+	#[tokio::test]
+	#[ignore = "opens host network sockets; run by just rs multicast"]
+	async fn daemon_failed_gate_stops_worker() {
+		let (daemon, monitor) = daemon_probe().await;
+		let (tx, rx) = flume::unbounded();
+		drop(tx);
+		let result = async move {
+			let _daemon = daemon;
+			announced(&rx).await
+		}
+		.await;
+		assert!(result.is_err(), "a closed monitor must fail startup");
+		stopped(monitor).await;
+	}
+
+	#[tokio::test]
+	#[ignore = "opens host network sockets; run by just rs multicast"]
+	async fn daemon_setup_error_stops_worker() {
+		let (daemon, monitor) = daemon_probe().await;
+		let result = (|| -> Result<()> {
+			let _daemon = daemon;
+			ServiceInfo::new(
+				"_moq._udp.local.",
+				"test",
+				"test.local.",
+				"",
+				4443,
+				&[("invalid=key", "value")][..],
+			)?;
+			Ok(())
+		})();
+		assert!(matches!(result, Err(Error(ErrorKind::Mdns(_)))));
+		stopped(monitor).await;
+	}
+
+	#[tokio::test]
+	#[ignore = "needs multicast on the host network; run by just rs multicast"]
+	async fn daemon_discovery_drop_stops_worker() {
+		let discovery = discovery(unique_app(), None, "cleanup").await.expect("advertise");
+		let monitor = discovery._daemon.0.monitor().expect("monitor");
+		assert_eq!(
+			discovery
+				._daemon
+				.0
+				.status()
+				.expect("status")
+				.recv_async()
+				.await
+				.expect("running"),
+			mdns_sd::DaemonStatus::Running,
+			"successful construction must retain the daemon",
+		);
+		drop(discovery);
+		stopped(monitor).await;
 	}
 
 	/// Two processes under the same app and secret find each other over real mDNS;

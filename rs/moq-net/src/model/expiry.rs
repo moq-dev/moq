@@ -34,6 +34,10 @@ pub(super) struct Wakes {
 	/// Relaxed: a read registers before resolving the edge, under the group locks a
 	/// write takes before it presents, so a write the read missed sees its deadline.
 	earliest: AtomicU64,
+	/// The lowest sequence a parked time end watches for a start, or `u64::MAX`, so a first
+	/// frame below every one skips the lock. Ordered by the starts index's lock, which a
+	/// read takes after registering and a first frame before checking this.
+	starts_from: AtomicU64,
 	parked: kio::Lock<Parked>,
 }
 
@@ -53,6 +57,9 @@ struct Parked {
 	/// Exact cache arrivals, independent of the live edge and neighbouring groups.
 	arrivals: BTreeMap<u64, kio::WaiterList>,
 	arrival_sweep: usize,
+	/// Reads parked on a time end, by the lowest sequence whose start could move it.
+	starts: BTreeMap<u64, kio::WaiterList>,
+	starts_sweep: usize,
 	/// Reads by wall-clock deadline, released by the pool's driver.
 	wall: BTreeMap<crate::time::Instant, kio::WaiterList>,
 	/// The earliest `wall` deadline the pool was asked to release, so arming a later one
@@ -67,6 +74,7 @@ impl Default for Wakes {
 	fn default() -> Self {
 		Self {
 			earliest: AtomicU64::new(u64::MAX),
+			starts_from: AtomicU64::new(u64::MAX),
 			parked: kio::Lock::default(),
 		}
 	}
@@ -179,6 +187,36 @@ impl Wakes {
 		parked.arrivals.entry(sequence).or_default().register(waiter);
 	}
 
+	/// Park `waiter` until a group at or above `from` starts.
+	pub(super) fn watch_start(&self, from: u64, waiter: &kio::Waiter) {
+		let mut parked = self.parked.lock();
+		if parked.starts.len() >= parked.starts_sweep {
+			parked.starts.retain(|_, list| !list.is_empty());
+			parked.starts_sweep = (parked.starts.len() * 2).max(HELD_SWEEP_MIN);
+		}
+		parked.starts.entry(from).or_default().register(waiter);
+		self.starts_from.fetch_min(from, Ordering::Relaxed);
+	}
+
+	/// Group `sequence` started: wake the time ends it could move.
+	pub(super) fn started(&self, sequence: u64) {
+		if sequence < self.starts_from.load(Ordering::Relaxed) {
+			return;
+		}
+		let mut woken = Vec::new();
+		{
+			let mut parked = self.parked.lock();
+			while let Some(entry) = parked.starts.first_entry()
+				&& *entry.key() <= sequence
+			{
+				woken.push(entry.remove());
+			}
+			let from = parked.starts.first_key_value().map_or(u64::MAX, |(from, _)| *from);
+			self.starts_from.store(from, Ordering::Relaxed);
+		}
+		woken.iter_mut().for_each(kio::WaiterList::wake);
+	}
+
 	/// Wake only cache arrivals whose outcome this insertion or boundary changes.
 	pub(super) fn arrived(&self, groups: impl std::ops::RangeBounds<u64>) {
 		let groups = (groups.start_bound().cloned(), groups.end_bound().cloned());
@@ -222,13 +260,15 @@ impl Wakes {
 		let parked = {
 			let mut parked = self.parked.lock();
 			self.earliest.store(u64::MAX, Ordering::Relaxed);
+			self.starts_from.store(u64::MAX, Ordering::Relaxed);
 			std::mem::take(&mut *parked)
 		};
 		let lists = parked.deadlines.into_values().chain(parked.landings.into_values());
 		let lists = lists
 			.chain(parked.held.into_values())
 			.chain(parked.wall.into_values())
-			.chain(parked.arrivals.into_values());
+			.chain(parked.arrivals.into_values())
+			.chain(parked.starts.into_values());
 		for mut list in lists {
 			list.wake();
 		}

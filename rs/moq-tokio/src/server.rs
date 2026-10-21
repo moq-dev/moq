@@ -1790,6 +1790,17 @@ impl Request {
 		self.quic.as_ref()
 	}
 
+	/// Finish `work` before what remains of the handshake deadline, or close the
+	/// session with the timeout code and return [`moq_net::Error::Timeout`].
+	///
+	/// Admitting the session is the caller's part of the handshake, so the same
+	/// `listen.timeout` that bounds the transport and SETUP bounds it too; a peer
+	/// cannot hold a connection open behind a decision that never comes. Without a
+	/// deadline, waits forever.
+	pub async fn within<T>(&self, work: impl Future<Output = T>) -> crate::Result<T> {
+		Deadline::bound(self.deadline.as_ref(), async { Ok(work.await) }).await
+	}
+
 	/// Accept the session and return its supervised driver task.
 	///
 	/// Await the driver before classifying the session close so a panic cannot look like cancellation.

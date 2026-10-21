@@ -9,6 +9,11 @@ How to update your invocation and config for each breaking change, newest first.
 `--cluster-lan-secret`, `MOQ_CLUSTER_LAN_SECRET`, and `[cluster.lan] secret` no longer accept 64 hex characters inline.
 Write the hex to a file (`openssl rand -hex 32 > cluster.key`) and pass its path.
 
+### `--listen-timeout` bounds admission (#5765)
+
+`moq --listen` now finishes auth admission within the `--listen-timeout` handshake deadline (default `10s`, counted from the first packet) instead of a separate fixed ten seconds, so a short timeout now refuses a slow auth server sooner and `0s` waits on it forever.
+If your auth server can take longer than the handshake timeout allows, raise `--listen-timeout`.
+
 ### `--epoch` is removed (#5967)
 
 Remove `--epoch` and `MOQ_EPOCH`: `--epoch` is now an unknown flag, and `MOQ_EPOCH` is ignored.

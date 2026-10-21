@@ -525,7 +525,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or(MoqError::Closed)?;
-		let subscription = subscription.map(moq_net::track::Subscription::from);
+		let subscription = subscription.map(moq_net::track::Subscription::try_from).transpose()?;
 		Ok(Arc::new(MoqTrackConsumer::new(
 			track.subscribe(subscription),
 			Background::default(),
