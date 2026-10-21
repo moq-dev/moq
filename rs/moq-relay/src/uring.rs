@@ -77,6 +77,9 @@ struct Serve {
 	/// `listen.timeout`, which each worker's endpoint starts at a connection's
 	/// first packet.
 	timeout: Option<std::time::Duration>,
+	/// `listen.reset.secret`, shared so any worker resets any worker's
+	/// connections, a restarted group's included.
+	reset_secret: Option<[u8; 32]>,
 }
 
 /// A bound group of io_uring QUIC workers sharing one port.
@@ -102,6 +105,7 @@ pub struct Workers {
 	alpns: Arc<Vec<String>>,
 	versions: moq_net::Versions,
 	timeout: Option<std::time::Duration>,
+	reset_secret: Option<[u8; 32]>,
 
 	threads: Vec<(u16, std::thread::JoinHandle<()>)>,
 	stops: Vec<Arc<Stop>>,
@@ -120,6 +124,8 @@ impl Workers {
 	///
 	/// Shares one served identity with every member; stream listeners are served separately.
 	pub fn bind(server: moq_tokio::server::Config, config: moq_tokio::worker::Config) -> anyhow::Result<Self> {
+		// Before any TLS loads or socket binds, so a bad `[quic]` has no side effects.
+		server.quic.validate()?;
 		let listen = &server.listen;
 		let quic = &server.quic;
 		let tls = match server.tls {
@@ -198,14 +204,28 @@ impl Workers {
 			.map(|alpn| alpn.as_bytes().to_vec())
 			.chain([b"h3".to_vec()])
 			.collect();
-		let mut server = moq_uring::quic::server::Config::new(tls.config(alpn)?);
 		let quic = quic.resolve();
+		let mut tls = tls.config(alpn)?;
+		if quic.keylog {
+			let tls = Arc::make_mut(&mut tls);
+			tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		}
+		let mut server = moq_uring::quic::server::Config::new(tls);
 		server.transport = transport(&quic)?;
 
 		// GSO is a property of the socket, not the connection, so it rides the
 		// worker's UDP config rather than the connection's.
 		let mut udp = moq_uring::udp::Config::default();
 		udp.gso = quic.gso.unwrap_or(true);
+
+		let reset_secret = listen
+			.reset
+			.secret
+			.as_deref()
+			.map(moq_tokio::secret::Secret::read)
+			.transpose()
+			.context("invalid --listen-reset-secret")?
+			.map(|secret| *secret.as_bytes());
 
 		let (failures_tx, failures) = tokio::sync::mpsc::unbounded_channel();
 		tracing::info!(workers = count, %addr, "bound io_uring QUIC workers");
@@ -221,6 +241,7 @@ impl Workers {
 			alpns: Arc::new(alpns),
 			versions,
 			timeout: listen.resolved_timeout(),
+			reset_secret,
 			threads: Vec::new(),
 			stops: Vec::new(),
 			failures,
@@ -273,6 +294,7 @@ impl Workers {
 			versions: self.versions.clone(),
 			local: self.addr,
 			timeout: self.timeout,
+			reset_secret: self.reset_secret,
 		};
 
 		let cores = match self.pin {
@@ -411,6 +433,7 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		// Unset means the backend's own default, and live media wants a steady
 		// send rate an encoder can track over CUBIC's sawtooth.
 		Some(moq_tokio::quic::CongestionControl::Delay) | None => moq_uring::quic::Congestion::Delay,
+		Some(moq_tokio::quic::CongestionControl::None) => moq_uring::quic::Congestion::None,
 		// A family added to the tokio stack later, rather than a silent
 		// substitution the operator would never learn about.
 		Some(other) => anyhow::bail!("io_uring workers cannot run the {other:?} congestion controller"),
@@ -500,7 +523,11 @@ fn serve_worker(spawn: Spawn) -> bool {
 	let setup = (|| -> anyhow::Result<(moq_uring::Worker, moq_uring::quic::Endpoint)> {
 		let mut config = moq_uring::Config::default();
 		config.metrics = metrics;
-		let worker = moq_uring::Worker::new(config).context("io_uring setup failed")?;
+		// Built inside the shared runtime, so the worker keeps that runtime's clock.
+		let worker = {
+			let _shared = serve.tokio.enter();
+			moq_uring::Worker::new(config).context("io_uring setup failed")?
+		};
 		// The member carries its slot in the steered group, so adopting it is
 		// what makes the endpoint issue connection ids that steer back here.
 		let socket = worker
@@ -510,6 +537,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 		let mut endpoint_config = moq_uring::quic::endpoint::Config::default().with_server(server);
 		endpoint_config.activity = serve.shutdown.activity.clone();
 		endpoint_config.handshake.timeout = serve.timeout;
+		endpoint_config.reset_secret = serve.reset_secret;
 		let endpoint =
 			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
@@ -741,27 +769,17 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 		url,
 	} = accepted;
 
-	// The path + `?jwt=` ride the URL for WebTransport and the SETUP for raw
-	// QUIC; either way the grant comes from the shared runtime, which owns the
-	// auth client.
-	let (path, query) = match &url {
-		Some(url) => (url.path().to_string(), url.query().map(str::to_owned)),
-		None => {
-			let setup = request.path();
-			match setup.split_once('?') {
-				Some((path, query)) => (path.to_string(), Some(query.to_string())),
-				None => (setup.to_string(), None),
-			}
-		}
-	};
-	let path = if path.is_empty() { "/".to_string() } else { path };
-	// Only a WebTransport session carries a URL.
+	// WebTransport addresses its path through the URL, but both transports can
+	// carry a credential in the MoQ SETUP.
 	let transport = match url {
 		Some(_) => moq_auth::Transport::WebTransport,
 		None => moq_auth::Transport::Quic,
 	};
-	let mut auth_request = serve.auth.request(transport, path.clone());
-	auth_request.query = query;
+	let mut auth_request = crate::auth::request_for_setup(&serve.auth, &request, transport);
+	if let Some(url) = &url {
+		auth_request.path = url.path().to_string();
+		auth_request.query = url.query().map(str::to_owned);
+	}
 	auth_request.remote = Some(remote);
 	auth_request.local = Some(serve.local);
 	// Like the tokio listener: the SNI, else the host a WebTransport client addressed.
@@ -772,13 +790,19 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 			.map(str::to_owned)
 	});
 	auth_request.alpn = alpn.clone();
-	auth_request.role = request.role().and_then(crate::auth::role);
 	auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 	let admission = lifecycle.clone();
-	let (admitted, registration) = match lifecycle
-		.shared(&serve.tokio, async move { admission.admit(auth_request).await })
-		.await?
-	{
+	// The handshake deadline covers admission too, so a peer cannot hold the connection
+	// open behind a decision that never comes. Dropping the shared task withdraws it.
+	let decided = deadline
+		.bound(lifecycle.shared(&serve.tokio, async move { admission.admit(auth_request).await }))
+		.await
+		.inspect_err(|err| {
+			if matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::Timeout)) {
+				serve.cluster.refusals.record(crate::refusals::Refusal::Unavailable);
+			}
+		})?;
+	let (admitted, registration) = match decided {
 		Ok(admitted) => admitted,
 		Err(err) => {
 			// The status is what separates "your credential is bad" from "the auth
@@ -891,8 +915,24 @@ mod tests {
 		}
 	}
 
-	/// An auth decision still pending at the drain deadline is abandoned then,
-	/// although worker teardown only detaches the task awaiting it.
+	/// A direct `bind` validates `[quic]` too, so a key log nobody can read back fails
+	/// instead of binding and logging nothing.
+	#[test]
+	#[allow(clippy::field_reassign_with_default)]
+	fn bind_refuses_a_keylog_without_sslkeylogfile() {
+		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
+		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		let mut server = moq_tokio::server::Config::default();
+		server.quic.keylog = Some(true);
+		let err = Workers::bind(server, moq_tokio::worker::Config::new(1))
+			.expect_err("a keylog without SSLKEYLOGFILE must be refused");
+		assert!(
+			matches!(err.downcast_ref(), Some(moq_tokio::Error::KeylogUnset)),
+			"{err:#}"
+		);
+	}
+
+	/// An auth decision still pending at the drain deadline is abandoned by then.
 	#[tokio::test]
 	async fn pending_admission_is_abandoned_at_the_deadline() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -944,6 +984,63 @@ mod tests {
 		tokio::time::timeout(window + std::time::Duration::from_secs(1), admission.abandoned())
 			.await
 			.expect("the admission outlived the drain deadline");
+		running.await.unwrap().unwrap();
+		connecting.abort();
+	}
+
+	/// `listen.timeout` bounds admission on the io_uring listener too: a decision
+	/// that never comes is abandoned at the handshake deadline.
+	#[tokio::test]
+	async fn pending_admission_is_abandoned_at_the_handshake_deadline() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
+			&& std::env::var_os("MOQ_STRICT").is_none()
+		{
+			eprintln!("skipping io_uring relay test: {reason}");
+			return;
+		}
+
+		let dir = tempfile::tempdir().unwrap();
+		let key = rcgen::KeyPair::generate().unwrap();
+		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.unwrap()
+			.self_signed(&key)
+			.unwrap();
+		let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+		std::fs::write(&cert_path, cert.pem()).unwrap();
+		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+
+		let timeout = std::time::Duration::from_secs(1);
+		let mut config = crate::Config::default();
+		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.listen.tls.cert = vec![cert_path];
+		config.listen.tls.key = vec![key_path];
+		config.listen.timeout = Some(timeout);
+		config.runtime.workers = Some(1);
+		config.runtime.pin = false;
+		config.runtime.io_uring = true;
+		config.drain_timeout = std::time::Duration::from_millis(100);
+		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let port = relay.addr().unwrap().port();
+		let mut admissions = relay.admissions().unwrap();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.insecure = Some(true);
+		client.once = Some(true);
+		client.bind = Some("127.0.0.1:0".parse().unwrap());
+		let url: url::Url = format!("moql://127.0.0.1:{port}/deadline").parse().unwrap();
+		let client = client.init(Default::default()).unwrap();
+		let connecting = tokio::spawn(async move { client.with_reconnect(false).connect(url).established().await });
+		let mut admission = admissions.next().await.unwrap();
+
+		// The handshake deadline is an io_uring timer, which a paused tokio clock cannot
+		// advance, so this waits out the real second with nobody answering.
+		tokio::time::timeout(timeout * 5, admission.abandoned())
+			.await
+			.expect("the admission outlived the handshake deadline");
+		trigger.start();
 		running.await.unwrap().unwrap();
 		connecting.abort();
 	}

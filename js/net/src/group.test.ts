@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
-import { FrameTooLarge, GroupTooLarge } from "./error.ts";
+import { Signal } from "@moq/signals";
+import { FrameTooLarge, GroupTooLarge, StreamCode, StreamError } from "./error.ts";
 import { MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
+import { hooks, type Replacement } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 
@@ -204,6 +206,86 @@ test("readable resolves once the group closes, even with nothing buffered", asyn
 	expect(consumer.tryReadFrame()).toBeUndefined();
 });
 
+test("readable waits past replayed frames after adopting an open replacement", async () => {
+	const producer = new Producer(0);
+	const consumer = producer.mirror();
+	const replacement = new Producer(0);
+	const route = new Signal(false);
+	const adopted = Promise.withResolvers<void>();
+	hooks.recoverGroup(consumer, {
+		changed: route,
+		wants: () => route.peek(),
+		replace: async (index) => {
+			expect(index).toBe(1);
+			return {
+				group: replacement.mirror(),
+				expiry: { expired: () => false, changed: [] },
+				adopt: () => {
+					route.set(false);
+					adopted.resolve();
+				},
+				discard: () => {},
+			};
+		},
+	});
+	producer.writeFrame(textFrame("zero"));
+	expect(await consumer.readString()).toBe("zero");
+	replacement.writeFrame(textFrame("zero"));
+	route.set(true);
+
+	let settled = false;
+	const readable = consumer.readable().then(() => {
+		settled = true;
+	});
+	await adopted.promise;
+	// Drain the adoption's microtasks without advancing wall-clock time.
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(settled).toBe(false);
+
+	replacement.writeFrame(textFrame("one"));
+	await readable;
+	expect(consumer.tryReadFrameSequence()).toMatchObject({ sequence: 1, payload: textFrame("one").payload });
+	consumer.close();
+	producer.close();
+	replacement.close();
+});
+
+test("done ignores replayed frames an adopted copy buffers", async () => {
+	const producer = new Producer(0);
+	const consumer = producer.mirror();
+	const replacement = new Producer(0);
+	const route = new Signal(false);
+	const adopted = Promise.withResolvers<void>();
+	hooks.recoverGroup(consumer, {
+		changed: route,
+		wants: () => route.peek(),
+		replace: async () => ({
+			group: replacement.mirror(),
+			expiry: { expired: () => false, changed: [] },
+			adopt: () => {
+				route.set(false);
+				adopted.resolve();
+			},
+			discard: () => {},
+		}),
+	});
+	producer.writeFrame(textFrame("zero"));
+	expect(await consumer.readString()).toBe("zero");
+	route.set(true);
+
+	const readable = consumer.readable();
+	await adopted.promise;
+	// Drain the adoption's microtasks without advancing wall-clock time.
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	// The adopted copy ends having repeated only the frame already read.
+	replacement.writeFrame(textFrame("zero"));
+	replacement.close();
+	expect(consumer.done).toBe(true);
+	await readable;
+	expect(consumer.tryReadFrame()).toBeUndefined();
+	producer.close();
+});
+
 test("buffered frames are still readable after the group closes", async () => {
 	const { producer, consumer } = pair(0);
 	producer.writeFrame(textFrame("a"));
@@ -226,4 +308,146 @@ test("a frame larger than the cache is rejected rather than silently dropped", (
 	const consumer = producer.consume();
 	producer.close();
 	expect(consumer.tryReadFrame()).toBeUndefined();
+});
+
+test("a group that ends on its own abandons the replacement it asked for", async () => {
+	const producer = new Producer(0);
+	const consumer = producer.mirror();
+	const route = new Signal(0);
+	let signal: AbortSignal | undefined;
+	hooks.recoverGroup(consumer, {
+		changed: route,
+		// A stall looks past the copy once the route moved.
+		wants: (failed) => failed !== undefined || route.peek() > 0,
+		replace: (_index, _failed, abort) => {
+			signal = abort;
+			return new Promise(() => {});
+		},
+	});
+	producer.writeFrame({ payload: new Uint8Array([0]) });
+	await consumer.readFrame();
+
+	route.set(1);
+	const read = consumer.readFrame();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	expect(signal?.aborted).toBe(false);
+
+	producer.close();
+	expect(await read).toBeUndefined();
+	expect(signal?.aborted).toBe(true);
+});
+
+test("a group that ends as its replacement arrives ends rather than adopting it", async () => {
+	const producer = new Producer(0);
+	const consumer = producer.mirror();
+	const route = new Signal(0);
+	const replacement = new Producer(0);
+	let resolve: ((value: Replacement) => void) | undefined;
+	let adopted = false;
+	let discarded = false;
+	hooks.recoverGroup(consumer, {
+		changed: route,
+		wants: (failed) => failed !== undefined || route.peek() > 0,
+		replace: () =>
+			new Promise((r) => {
+				resolve = r;
+			}),
+	});
+	producer.writeFrame({ payload: new Uint8Array([0]) });
+	await consumer.readFrame();
+
+	route.set(1);
+	const read = consumer.readFrame();
+	await new Promise((r) => setTimeout(r, 0));
+	// Both land before the read looks again.
+	resolve?.({
+		group: replacement.mirror(),
+		expiry: { expired: () => false, changed: [] },
+		adopt: () => {
+			adopted = true;
+		},
+		discard: () => {
+			discarded = true;
+		},
+	});
+	producer.close();
+	expect(await read).toBeUndefined();
+	expect(adopted).toBe(false);
+	expect(discarded).toBe(true);
+});
+
+test("a group recovered twice reads on and settles", async () => {
+	const producer = new Producer(0);
+	const consumer = producer.mirror();
+	const route = new Signal(0);
+	const replacements = [new Producer(0), new Producer(0)];
+	let next = 0;
+	hooks.recoverGroup(consumer, {
+		changed: route,
+		wants: (failed) => failed !== undefined,
+		replace: async () => ({
+			group: replacements[next++].mirror(),
+			expiry: { expired: () => false, changed: [] },
+			adopt: () => {},
+			discard: () => {},
+		}),
+	});
+	void consumer.closed;
+	producer.writeFrame({ payload: new Uint8Array([0]) });
+	await consumer.readFrame();
+
+	// Two failures in a row: each moves the group to the next copy.
+	producer.close(new Error("route failed"));
+	replacements[0].writeFrame({ payload: new Uint8Array([0]) });
+	replacements[0].writeFrame({ payload: new Uint8Array([1]) });
+	expect((await consumer.readFrame())?.payload[0]).toBe(1);
+	replacements[0].close(new Error("route failed"));
+	for (const payload of [0, 1, 2]) replacements[1].writeFrame({ payload: new Uint8Array([payload]) });
+	replacements[1].close();
+	expect((await consumer.readFrame())?.payload[0]).toBe(2);
+	expect(await consumer.readFrame()).toBeUndefined();
+	expect(await consumer.closed).toBeNull();
+});
+
+test("a stalled group whose copy then fails asks again with the failure", async () => {
+	const producer = new Producer(0);
+	const consumer = producer.mirror();
+	const route = new Signal(0);
+	const verdict = new Error("refused");
+	hooks.recoverGroup(consumer, {
+		changed: route,
+		wants: (failed) => failed !== undefined || route.peek() > 0,
+		// A stall waits for the route; a failure gets the route's verdict.
+		replace: (_index, failed) => (failed ? Promise.reject(verdict) : new Promise(() => {})),
+	});
+	producer.writeFrame({ payload: new Uint8Array([0]) });
+	await consumer.readFrame();
+
+	route.set(1);
+	const read = consumer.readFrame();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	producer.close(new Error("route failed"));
+	await expect(read).rejects.toBe(verdict);
+});
+
+test("a drained unfinished group fails with Old when its budget gives up", async () => {
+	const { producer, consumer } = pair(0);
+	producer.writeFrame(textFrame("a"));
+	const expired = new Signal(false);
+	hooks.expireGroup(consumer, { expired: () => expired.peek(), changed: [expired] });
+
+	expect(await consumer.readString()).toBe("a");
+	const pending = consumer.readFrame();
+	expired.set(true);
+
+	// The producer never finished the group, so a clean end would pass the prefix off as whole.
+	const err = await pending.then(
+		() => undefined,
+		(e: unknown) => e,
+	);
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.Old);
+	await expect(consumer.readFrame()).rejects.toBe(err);
+	expect(consumer.done).toBe(true);
+	expect(await consumer.closed).toBe(err as StreamError);
 });

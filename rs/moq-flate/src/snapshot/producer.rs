@@ -12,7 +12,8 @@ pub use super::Config;
 /// Publishes an opaque value over a track, one value per group.
 ///
 /// Each [`update`](Self::update) rolls a new group holding the whole value, so a consumer only ever
-/// needs the newest group and older ones are dropped. For a log where every payload survives, use
+/// needs the newest group to reconstruct the value. A reader can retain earlier states within its
+/// drift budget. For a log where every payload survives, use
 /// [`stream`](crate::stream) instead.
 ///
 /// Cheaply clonable: clones share one underlying track, like other MoQ producers.

@@ -83,8 +83,7 @@ Work owned by this README, after the children land:
 
 ## Required
 
-- [Track properties](/quest/m1/ietf-extension/track-properties.md) - unknown track properties are forwarded unchanged in SUBSCRIBE_OK, FETCH_OK, and TRACK_STATUS_OK
-- [Relay hops](/quest/m1/ietf-extension/lite.md) - the `ietf` SETUP extension carries every crate-private field across a lite-07 hop between relays
+- [Ingress-version provenance](/quest/m1/ietf-extension/lite.md) - a track crossing a lite-07 hop carries its moq-transport ingress version once, replacing per-block Encoding codes
 
 ## Related
 

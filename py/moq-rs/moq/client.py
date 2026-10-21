@@ -10,6 +10,7 @@ from moq_ffi import (
     MoqClientConfig,
     MoqClientTls,
     MoqCongestionControl,
+    MoqError,
     MoqQuicConfig,
     MoqWebSocketConfig,
     moq_qlog_supported,
@@ -73,6 +74,9 @@ class Client:
     certificate against another name (SNI). ``idle_timeout``, ``keep_alive`` (zero disables
     it), ``gso``, ``mtu_discovery``, ``congestion_control``, and ``qlog`` (a directory, when
     :func:`qlog_supported`) tune QUIC. ``None`` keeps the library default throughout.
+
+    ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
+    decrypting a capture; without ``SSLKEYLOGFILE`` the client refuses to build.
     """
 
     def __init__(
@@ -98,6 +102,7 @@ class Client:
         mtu_discovery: bool | None = None,
         congestion_control: CongestionControl | None = None,
         qlog: str | None = None,
+        keylog: bool = False,
         websocket_enabled: bool | None = None,
         websocket_delay: timedelta | None = None,
         reconnect: bool = True,
@@ -131,6 +136,7 @@ class Client:
                 mtu_discovery=mtu_discovery,
                 congestion_control=congestion_control,
                 qlog=qlog,
+                keylog=keylog,
             ),
             websocket=MoqWebSocketConfig(
                 enabled=websocket_enabled,
@@ -222,6 +228,16 @@ class Client:
         """The established session, or `None` before connecting / after exit."""
         return self._session
 
+    def failure(self) -> MoqError | None:
+        """Why entering the client is still dialing: the error that failed its latest
+        attempt, or ``None`` while nothing has failed or no connect is pending.
+
+        A first dial that keeps failing and retrying never finishes ``async with``, so
+        poll this from another task to show the reason. Giving up for good raises from
+        ``async with`` instead. Once connected, :meth:`Session.failure` reports the
+        reconnects."""
+        return None if self._inner is None else self._inner.failure()
+
 
 def connect(
     url: str,
@@ -245,6 +261,7 @@ def connect(
     mtu_discovery: bool | None = None,
     congestion_control: CongestionControl | None = None,
     qlog: str | None = None,
+    keylog: bool = False,
     websocket_enabled: bool | None = None,
     websocket_delay: timedelta | None = None,
     reconnect: bool = True,
@@ -280,6 +297,7 @@ def connect(
         mtu_discovery=mtu_discovery,
         congestion_control=congestion_control,
         qlog=qlog,
+        keylog=keylog,
         websocket_enabled=websocket_enabled,
         websocket_delay=websocket_delay,
         reconnect=reconnect,

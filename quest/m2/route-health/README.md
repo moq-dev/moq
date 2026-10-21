@@ -16,6 +16,11 @@ Decided with the maintainer, 2026-10-13:
 - Ranked in m2, after clustering stability, federation, and P2P. Health
   design must first reproduce a stall that transport failure and ordinary
   reconnect do not recover, or the line is abandoned.
+- A route that dies without a close counts as such a stall until the QUIC
+  idle timeout fires (decided 2026-10-20, from
+  [#6062](https://github.com/moq-dev/moq/issues/6062)): a killed relay
+  starves a same-epoch subscription for the whole timeout, and a subscriber
+  max age below it sheds that backlog even though resume asks for it.
 
 - Application-assigned connection priority remains ahead of additive cost.
   Deterministic hashing still chooses distinct equal routes; a new connection

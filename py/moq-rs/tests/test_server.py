@@ -161,6 +161,48 @@ async def test_client_reconnects_and_resumes_announcements():
                 pass
 
 
+async def test_client_failure_names_a_failing_first_dial():
+    """A first dial that keeps failing never finishes ``async with``, so
+    ``Client.failure`` is the only place its reason shows while it retries."""
+    import socket
+
+    # A socket that never answers holds the port, so each dial times out.
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as silent:
+        silent.bind(("127.0.0.1", 0))
+        host, port = silent.getsockname()
+        client = moq.Client(
+            f"https://{host}:{port}",
+            tls_verify=False,
+            bind="127.0.0.1:0",
+            timeout=timedelta(milliseconds=100),
+            websocket_enabled=False,
+            backoff=moq.Backoff(
+                initial=timedelta(milliseconds=50),
+                multiplier=2,
+                max=timedelta(milliseconds=200),
+                timeout=timedelta(0),
+            ),
+        )
+        assert client.failure() is None
+
+        enter = asyncio.create_task(client.__aenter__())
+        try:
+
+            async def failure() -> moq.Error:
+                while (err := client.failure()) is None:
+                    await asyncio.sleep(0.01)
+                return err
+
+            err = await asyncio.wait_for(failure(), timeout=10)
+            assert isinstance(err, moq.Error.Connect)  # type: ignore[attr-defined]
+            assert not enter.done()
+        finally:
+            enter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await enter
+        assert client.failure() is None
+
+
 async def test_server_close_releases_port():
     """Exiting the context manager releases the listening socket before it
     returns, so the same address binds again with no retry."""
@@ -266,6 +308,7 @@ async def test_client_connection_knobs():
                 gso=False,
                 mtu_discovery=True,
                 congestion_control=moq.CongestionControl.LOSS,
+                keylog=False,
                 websocket_enabled=False,
             ) as client:
                 assert client.session is not None
@@ -287,6 +330,16 @@ async def test_invalid_config_fails_on_enter():
             pass
     with pytest.raises(moq.Error.Config):  # type: ignore[attr-defined]
         async with moq.Server("not-an-address", tls_generate=["localhost"]):
+            pass
+
+
+async def test_server_keylog_requires_sslkeylogfile(monkeypatch):
+    """keylog reaches the native server, which refuses it without SSLKEYLOGFILE."""
+    monkeypatch.delenv("SSLKEYLOGFILE", raising=False)
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], keylog=False):
+        pass
+    with pytest.raises(moq.Error.Config, match="SSLKEYLOGFILE"):  # type: ignore[attr-defined]
+        async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], keylog=True):
             pass
 
 
@@ -473,7 +526,9 @@ async def test_client_context_keeps_the_body_error():
                     consumer = await asyncio.wait_for(consume.request_broadcast("live"), timeout=5.0)
                     reader = await asyncio.wait_for(consumer.subscribe_track("data"), timeout=5.0)
                     reading.append(asyncio.create_task(drain(reader)))
-                    await asyncio.wait_for(track.demand().used(), timeout=5.0)
+                    demand = track.demand()
+                    while await asyncio.wait_for(demand.wanted_changed(), timeout=5.0) is None:
+                        pass
                     raise ZeroDivisionError("boom")
             # The error exits the context without draining, but the session is over.
             assert session is not None

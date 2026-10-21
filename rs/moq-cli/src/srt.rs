@@ -14,7 +14,7 @@ use crate::args::TsProgram;
 use crate::moq::{ImportTarget, notify_ready};
 
 /// SRT endpoint args: exactly one of `--connect` (dial) / `--listen` (bind).
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(group("srt-mode", required))]
 pub struct Args {
@@ -33,7 +33,7 @@ pub struct Args {
 }
 
 /// SRT import args: the endpoint, plus which programs of a multiplex to publish.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
 	#[usage(flatten)]
@@ -47,7 +47,7 @@ pub struct ImportArgs {
 }
 
 /// SRT export args: the endpoint, plus how a broadcast ending or being replaced is followed.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
 	#[usage(flatten)]

@@ -145,7 +145,7 @@ fn default_bind() -> net::SocketAddr {
 ///
 /// Still parsed, and still carrying their original env vars, so a process can name
 /// the replacement and stop. Nothing reads the values: see [`Config::deprecated`].
-#[derive(Clone, Debug, Default, usage::Args)]
+#[derive(Clone, Debug, Default, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
 	#[usage(
@@ -479,16 +479,16 @@ failover_delay = "1s"
 	}
 }
 
-/// Whether `extensions` offers every extension, the default a config leaves out.
+/// Whether `extensions` is the default a config leaves out.
 pub(crate) fn all_extensions(extensions: &moq_net::setup::Extensions) -> bool {
 	*extensions == moq_net::setup::Extensions::default()
 }
 
 /// The dial side of an endpoint: where to connect and how to get there.
 ///
-/// Derives [`usage::Args`], so flatten it into a binary's own parser with
+/// Derives [`usage_rs::Args`], so flatten it into a binary's own parser with
 /// `#[usage(flatten)]`. The accept side is [`crate::listen::Config`].
-#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -641,7 +641,7 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// The moq-transport extensions to offer in SETUP, all by default.
+	/// The extensions to offer in SETUP, every moq-transport one by default.
 	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,

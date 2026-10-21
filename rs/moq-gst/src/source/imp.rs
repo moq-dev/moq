@@ -41,6 +41,7 @@ struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
 	tls_disable_verify: bool,
+	quic_keylog: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +49,7 @@ struct ResolvedSettings {
 	url: url::Url,
 	broadcast: String,
 	tls_disable_verify: bool,
+	quic_keylog: bool,
 }
 
 impl TryFrom<Settings> for ResolvedSettings {
@@ -62,6 +64,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 				.context("broadcast property is required")?
 				.clone(),
 			tls_disable_verify: value.tls_disable_verify,
+			quic_keylog: value.quic_keylog,
 		})
 	}
 }
@@ -214,7 +217,9 @@ fn connect(
 	let _rt = RUNTIME.enter();
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	let client = config.init(Default::default())?.with_subscriber(origin);
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.keylog = Some(settings.quic_keylog);
+	let client = config.init(quic)?.with_subscriber(origin);
 	let connection = client.connect(settings.url.clone());
 	Ok((client, connection, consumer))
 }
@@ -256,6 +261,14 @@ impl ObjectImpl for MoqSrc {
 					.default_value(false)
 					.mutable_ready()
 					.build(),
+				glib::ParamSpecBoolean::builder("quic-keylog")
+					.nick("QUIC TLS key log")
+					.blurb(
+						"Danger: write TLS session secrets to the file SSLKEYLOGFILE names; without it the start fails",
+					)
+					.default_value(false)
+					.mutable_ready()
+					.build(),
 			]
 		});
 		PROPS.as_ref()
@@ -285,6 +298,7 @@ impl ObjectImpl for MoqSrc {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
 			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
+			"quic-keylog" => settings.quic_keylog = value.get().unwrap(),
 			_ => unreachable!(),
 		}
 	}
@@ -295,6 +309,7 @@ impl ObjectImpl for MoqSrc {
 			"url" => settings.url.to_value(),
 			"broadcast" => settings.broadcast.to_value(),
 			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
+			"quic-keylog" => settings.quic_keylog.to_value(),
 			_ => unreachable!(),
 		}
 	}
@@ -706,7 +721,7 @@ fn source_lost(err: &moq_net::Error) -> bool {
 /// [`source_lost`] for a catalog read, where anything but a transport failure is malformed.
 fn catalog_lost(err: &moq_mux::Error) -> bool {
 	match err {
-		moq_mux::Error::Moq(err) | moq_mux::Error::Json(moq_json::Error::Net(err)) => source_lost(err),
+		moq_mux::Error::Moq(err) => source_lost(err),
 		_ => false,
 	}
 }
@@ -1954,14 +1969,13 @@ mod session_tests {
 		// has: that edge says the session reconciled the removal, which a fixed beat can only
 		// guess at. Answering before it lands is a pump that legitimately goes live, so the
 		// wait is what the assertion below is about.
+		let mut demand = request.demand();
+		let unwanted = async {
+			while demand.wanted_changed().await?.is_some() {}
+			moq_net::Result::Ok(())
+		};
 		super::RUNTIME
-			.block_on(async {
-				tokio::time::timeout(
-					Duration::from_secs(10),
-					moq_net::kio::wait(|waiter| request.demand().poll_unused(waiter)),
-				)
-				.await
-			})
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), unwanted).await })
 			.expect("the cancelled pump never dropped its subscription")
 			.expect("the pending request is still open");
 
@@ -2485,7 +2499,24 @@ mod session_tests {
 			url: "https://127.0.0.1:1".parse().unwrap(),
 			broadcast: "test".into(),
 			tls_disable_verify: false,
+			quic_keylog: false,
 		}
+	}
+
+	/// `quic-keylog` reaches the client's QUIC config, which refuses it without `SSLKEYLOGFILE`.
+	#[test]
+	fn keylog_reaches_the_client() {
+		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
+		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		let keylog = ResolvedSettings {
+			quic_keylog: true,
+			..unreachable()
+		};
+		let err = super::connect(&keylog)
+			.err()
+			.expect("a keylog without SSLKEYLOGFILE must be refused");
+		assert!(err.to_string().contains("SSLKEYLOGFILE"), "{err}");
+		assert!(super::connect(&unreachable()).is_ok());
 	}
 
 	fn is_closed(connection: &moq_tokio::Connection) -> bool {

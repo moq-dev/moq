@@ -18,7 +18,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use tokio::time::Instant;
+use moq_clock::Instant;
 
 use crate::{Event, Grant, Key, KeyId, KeySet, Permissions, Request, Token};
 
@@ -100,81 +100,146 @@ pub struct Policy {
 	pub limits: Limits,
 }
 
-/// Why a session was refused; the body of the 403.
+/// The policy failure mapped to the typed refusal in the 403 body.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum Refusal {
+	/// No keys are configured, so no token can be verified.
 	#[error("no keys are configured, so a token cannot be verified")]
 	NoKeys,
-	#[error("the token names no key and the key directory needs one")]
+	/// The token has no `kid`, and the configured keys need one to choose a key.
+	#[error("the token names no key and the configured keys need one")]
 	MissingKeyId,
+	/// The token's key could not be found or loaded: its `kid` is malformed or matches no key, or the key source is unreadable.
 	#[error("the token's key is unknown")]
 	UnknownKey,
+	/// The token failed to decode, verify, or authorize.
 	#[error("the token is invalid: {0}")]
 	InvalidToken(String),
+	/// The token's root does not overlap the dialed path.
 	#[error("the token root `{root}` does not overlap the dialed path `{path}`")]
-	RootMismatch { root: String, path: String },
+	RootMismatch {
+		/// The token's root.
+		root: String,
+		/// The dialed path.
+		path: String,
+	},
+	/// Nothing is granted at the dialed path.
 	#[error("nothing is granted at `{path}`")]
-	NoAccess { path: String },
+	NoAccess {
+		/// The dialed path.
+		path: String,
+		/// The verified token's root, absent without a token.
+		root: Option<String>,
+	},
+	/// A client certificate was presented, but the policy grants nothing to certificates.
 	#[error("a certificate was presented but nothing is granted to certificates")]
 	NoMtlsGrant,
+	/// Neither a token nor a certificate was presented, and anonymous access is not granted.
 	#[error("anonymous access is not granted")]
 	NoPublicGrant,
+	/// The token already holds its limit of live sessions.
 	#[error("too many live sessions for this token")]
-	TokenLimit,
+	TokenLimit {
+		/// The verified token's root, absent without a token.
+		root: Option<String>,
+	},
+	/// The remote address already holds its limit of live sessions.
 	#[error("too many live sessions from this address")]
-	RemoteLimit,
+	RemoteLimit {
+		/// The verified token's root, absent without a token.
+		root: Option<String>,
+	},
+	/// A SETUP token and a different `jwt` query were both presented.
 	#[error("a SETUP token and a different `jwt` query were presented; present one")]
 	TwoTokens,
+	/// The SETUP token type is not 0, a JWT.
 	#[error("SETUP token type {0:#x} is not supported; only type 0 (a JWT) is")]
 	UnsupportedToken(u64),
+	/// Both a JWT and a client certificate were presented.
 	#[error("both a JWT and a client certificate were presented; present one")]
 	TokenAndCertificate,
+	/// The policy's grant bound is beyond what the system clock can represent.
 	#[error("the policy's grant bound reaches past the system clock's range")]
 	ExpiresOutOfRange,
+	/// The token's expiry has passed.
+	#[error("the token has expired")]
+	Expired {
+		/// The token's root.
+		root: String,
+	},
+}
+
+impl Refusal {
+	/// The shared refusal contract, with attribution only from a verified token.
+	fn body(&self, tier: Option<String>) -> crate::Refusal {
+		use crate::refusal::Reason;
+		let reason = match self {
+			Self::Expired { .. } => Reason::Expired,
+			Self::RootMismatch { .. } | Self::NoAccess { .. } => Reason::Forbidden,
+			_ => Reason::Refused,
+		};
+		let root = match self {
+			Self::Expired { root } | Self::RootMismatch { root, .. } => Some(root.clone()),
+			Self::NoAccess { root, .. } | Self::TokenLimit { root } | Self::RemoteLimit { root } => root.clone(),
+			_ => None,
+		};
+		crate::Refusal { reason, root, tier }
+	}
 }
 
 impl Policy {
 	/// Decide `request` by the policy alone, ignoring session limits.
 	pub async fn decide(&self, request: &Request) -> Result<Grant, Refusal> {
+		Ok(self.decide_root(request).await?.0)
+	}
+
+	async fn decide_root(&self, request: &Request) -> Result<(Grant, Option<String>), Refusal> {
 		let jwt = jwt(request)?;
 		if jwt.is_some() && request.tls.is_some() {
 			return Err(Refusal::TokenAndCertificate);
 		}
-		let (permissions, expires, certificate) = if let Some(jwt) = jwt {
+		let (permissions, expires, certificate, root) = if let Some(jwt) = jwt {
 			let claims = self.verify(jwt).await?;
 			let permissions = claims.authorize(&request.path).map_err(|err| match err {
 				crate::Error::RootMismatch(path) => Refusal::RootMismatch {
 					root: claims.root.clone(),
 					path,
 				},
-				crate::Error::NoAccess(path) => Refusal::NoAccess { path },
+				crate::Error::NoAccess(path) => Refusal::NoAccess {
+					path,
+					root: Some(claims.root.clone()),
+				},
 				other => Refusal::InvalidToken(other.to_string()),
 			})?;
-			(permissions, claims.expires, false)
+			(permissions, claims.expires, false, Some(claims.root))
 		} else if let Some(peer) = &request.tls {
 			if self.mtls.is_empty() {
 				return Err(Refusal::NoMtlsGrant);
 			}
-			(authorize(&self.mtls, &request.path)?, peer.expires, true)
+			(authorize(&self.mtls, &request.path)?, peer.expires, true, None)
 		} else {
 			if self.public.is_empty() {
 				return Err(Refusal::NoPublicGrant);
 			}
-			(authorize(&self.public, &request.path)?, None, false)
+			(authorize(&self.public, &request.path)?, None, false, None)
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
 		grant.expires = match (expires, self.expires) {
 			(Some(expires), _) => Some(expires),
-			(None, Some(bound)) => Some(SystemTime::now().checked_add(bound).ok_or(Refusal::ExpiresOutOfRange)?),
+			(None, Some(bound)) => Some(
+				SystemTime::from(moq_clock::wall())
+					.checked_add(bound)
+					.ok_or(Refusal::ExpiresOutOfRange)?,
+			),
 			(None, None) => None,
 		};
 		grant.revalidate = self.revalidate;
 		grant.tier = self.tier.clone();
 		grant.peer = certificate && self.mtls_peer;
 		grant.upstream = certificate && self.mtls_upstream;
-		Ok(grant)
+		Ok((grant, root))
 	}
 
 	async fn verify(&self, jwt: &str) -> Result<crate::Claims, Refusal> {
@@ -183,7 +248,7 @@ impl Policy {
 			Keys::File(path) => Key::from_file_async(path)
 				.await
 				.map_err(|_| Refusal::UnknownKey)?
-				.verify(jwt),
+				.verify_claims(jwt),
 			Keys::Dir(dir) => {
 				let header = jsonwebtoken::decode_header(jwt).map_err(|err| Refusal::InvalidToken(err.to_string()))?;
 				let kid = header.kid.ok_or(Refusal::MissingKeyId)?;
@@ -191,20 +256,28 @@ impl Policy {
 				Key::from_file_async(dir.join(format!("{kid}.jwk")))
 					.await
 					.map_err(|_| Refusal::UnknownKey)?
-					.verify(jwt)
+					.verify_claims(jwt)
 			}
 			Keys::Set(path) => {
 				let json = tokio::fs::read_to_string(path).await.map_err(|_| Refusal::UnknownKey)?;
 				KeySet::from_str(&json)
 					.map_err(|err| Refusal::InvalidToken(err.to_string()))?
-					.verify(jwt)
+					.key(jwt)
+					.and_then(|key| key.verify_claims(jwt))
 			}
 		};
-		claims.map_err(|err| match err {
+		let claims = claims.map_err(|err| match err {
 			crate::Error::Key(crate::KeyError::MissingKid) => Refusal::MissingKeyId,
 			crate::Error::Key(crate::KeyError::KeyNotFound(_)) => Refusal::UnknownKey,
 			other => Refusal::InvalidToken(other.to_string()),
-		})
+		})?;
+		crate::key::validate_times(&claims, SystemTime::from(moq_clock::wall())).map_err(|err| match err {
+			crate::Error::TokenExpired => Refusal::Expired {
+				root: claims.root.clone(),
+			},
+			other => Refusal::InvalidToken(other.to_string()),
+		})?;
+		Ok(claims)
 	}
 }
 
@@ -219,6 +292,7 @@ fn authorize(rules: &Permissions, path: &str) -> Result<Permissions, Refusal> {
 	// An empty root overlaps every path, so the only refusal is reaching nothing.
 	claims.authorize(path).map_err(|_| Refusal::NoAccess {
 		path: crate::path::normalize(path),
+		root: None,
 	})
 }
 
@@ -279,7 +353,7 @@ impl Sessions {
 	/// Admit a `connect`, refusing over the cap. A known id is the same session
 	/// attaching another credential: it holds no new remote slot, but a JWT new to
 	/// it counts against that JWT's cap until the session ends.
-	fn connect(&mut self, request: &Request, limits: Limits) -> Result<(), Refusal> {
+	fn connect(&mut self, request: &Request, limits: Limits, root: Option<String>) -> Result<(), Refusal> {
 		// Decided before counting, so the credential is already known to be one JWT.
 		let token = jwt(request).ok().flatten().map(hash);
 		let known = self.slots.get(&request.id);
@@ -287,7 +361,7 @@ impl Sessions {
 		if let (Some(cap), Some(token)) = (limits.token, new_token)
 			&& self.slots.values().filter(|slot| slot.tokens.contains(&token)).count() >= cap
 		{
-			return Err(Refusal::TokenLimit);
+			return Err(Refusal::TokenLimit { root });
 		}
 		if let Some(slot) = self.slots.get_mut(&request.id) {
 			slot.tokens.extend(new_token);
@@ -298,7 +372,7 @@ impl Sessions {
 		if let (Some(cap), Some(remote)) = (limits.remote, remote)
 			&& self.slots.values().filter(|slot| slot.remote == Some(remote)).count() >= cap
 		{
-			return Err(Refusal::RemoteLimit);
+			return Err(Refusal::RemoteLimit { root });
 		}
 		self.slots.insert(
 			request.id.clone(),
@@ -362,7 +436,7 @@ impl Server {
 		}
 		if policy
 			.expires
-			.is_some_and(|bound| SystemTime::now().checked_add(bound).is_none())
+			.is_some_and(|bound| SystemTime::from(moq_clock::wall()).checked_add(bound).is_none())
 		{
 			return Err(crate::Error::ExpiresOutOfRange);
 		}
@@ -388,11 +462,11 @@ impl Server {
 	pub async fn answer(&self, request: &Request) -> Result<Option<Grant>, Refusal> {
 		match request.event {
 			Event::Connect => {
-				let grant = self.policy.decide(request).await?;
+				let (grant, root) = self.policy.decide_root(request).await?;
 				if let Some(cadence) = self.cadence() {
 					let mut sessions = self.sessions.lock().unwrap();
 					sessions.sweep(cadence);
-					sessions.connect(request, self.policy.limits)?;
+					sessions.connect(request, self.policy.limits, root)?;
 				}
 				Ok(Some(grant))
 			}
@@ -437,12 +511,13 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 		// which rule refused without the server saying anything to the client.
 		Err(refusal) => {
 			tracing::debug!(id = %request.id, path = %request.path, %refusal, "refused");
-			(StatusCode::FORBIDDEN, refusal.to_string()).into_response()
+			(StatusCode::FORBIDDEN, Json(refusal.body(server.policy.tier.clone()))).into_response()
 		}
 	}
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use crate::{Algorithm, Bytes, Claims, Client, Error, Peer, Transport, lease::Reason};
@@ -460,6 +535,20 @@ mod tests {
 		let mut request = Request::new("relay-1", Transport::Quic, path);
 		request.remote = Some("203.0.113.9:4433".parse().unwrap());
 		request
+	}
+
+	#[moq_clock::test]
+	async fn default_expiry_uses_the_ambient_wall() {
+		let policy = Policy {
+			public: rules(&["**"], &[]),
+			expires: Some(Duration::from_secs(30)),
+			..Default::default()
+		};
+		let grant = policy.decide(&request("/demo")).await.unwrap();
+		assert_eq!(
+			grant.expires,
+			Some((moq_clock::wall() + Duration::from_secs(30)).into())
+		);
 	}
 
 	fn with_token(mut request: Request, jwt: &str) -> Request {
@@ -600,7 +689,7 @@ mod tests {
 			Some(SystemTime::now() - Duration::from_secs(1)),
 		);
 		let err = policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err();
-		assert!(matches!(err, Refusal::InvalidToken(_)), "{err}");
+		assert!(matches!(err, Refusal::Expired { .. }), "{err}");
 
 		// Signed by a stranger.
 		let stranger = Key::generate(Algorithm::HS256, Some(KeyId::decode("kid1").unwrap())).unwrap();
@@ -708,7 +797,10 @@ mod tests {
 			assert!(server.answer(&first).await.unwrap().is_some());
 			let mut second = request("/room");
 			second.transport = transport;
-			assert_eq!(server.answer(&second).await.unwrap_err(), Refusal::RemoteLimit);
+			assert_eq!(
+				server.answer(&second).await.unwrap_err(),
+				Refusal::RemoteLimit { root: None }
+			);
 			first.event = Event::End {
 				reason: Reason::Shutdown,
 				duration: Duration::ZERO,
@@ -957,7 +1049,8 @@ mod tests {
 			assert_eq!(
 				policy.decide(&request(path)).await.unwrap_err(),
 				Refusal::NoAccess {
-					path: path.trim_start_matches('/').into()
+					path: path.trim_start_matches('/').into(),
+					root: None
 				},
 			);
 		}
@@ -988,11 +1081,17 @@ mod tests {
 		let third = request("/");
 		server.answer(&first).await.unwrap();
 		server.answer(&second).await.unwrap();
-		assert_eq!(server.answer(&third).await.unwrap_err(), Refusal::RemoteLimit);
+		assert_eq!(
+			server.answer(&third).await.unwrap_err(),
+			Refusal::RemoteLimit { root: None }
+		);
 
 		// A repeated connect for a known id refreshes rather than double-counting.
 		server.answer(&first).await.unwrap();
-		assert_eq!(server.answer(&third).await.unwrap_err(), Refusal::RemoteLimit);
+		assert_eq!(
+			server.answer(&third).await.unwrap_err(),
+			Refusal::RemoteLimit { root: None }
+		);
 
 		// Another address is unaffected.
 		let mut elsewhere = request("/");
@@ -1018,7 +1117,10 @@ mod tests {
 		// `third` is 180s old and gone; `second` was seen 90s ago and holds its slot.
 		let fourth = request("/");
 		server.answer(&fourth).await.unwrap();
-		assert_eq!(server.answer(&request("/")).await.unwrap_err(), Refusal::RemoteLimit);
+		assert_eq!(
+			server.answer(&request("/")).await.unwrap_err(),
+			Refusal::RemoteLimit { root: None }
+		);
 	}
 
 	/// The re-check a session table ages out by, which every limit needs.
@@ -1081,7 +1183,10 @@ mod tests {
 		})
 		.unwrap();
 		server.answer(&request("/")).await.unwrap();
-		assert_eq!(server.answer(&request("/")).await.unwrap_err(), Refusal::RemoteLimit);
+		assert_eq!(
+			server.answer(&request("/")).await.unwrap_err(),
+			Refusal::RemoteLimit { root: None }
+		);
 	}
 
 	/// With no limit to count against, nothing is kept per session, so a relay that
@@ -1116,7 +1221,12 @@ mod tests {
 		server.answer(&with_token(request("/demo"), &jwt)).await.unwrap();
 		let mut mapped = with_token(request("/demo"), &jwt);
 		mapped.remote = Some("[::ffff:203.0.113.9]:9".parse().unwrap());
-		assert_eq!(server.answer(&mapped).await.unwrap_err(), Refusal::TokenLimit);
+		assert_eq!(
+			server.answer(&mapped).await.unwrap_err(),
+			Refusal::TokenLimit {
+				root: Some("demo".into())
+			}
+		);
 
 		let other = sign(
 			&key,
@@ -1127,7 +1237,12 @@ mod tests {
 		);
 		let mut same_host = with_token(request("/demo"), &other);
 		same_host.remote = Some("[::ffff:203.0.113.9]:9".parse().unwrap());
-		assert_eq!(server.answer(&same_host).await.unwrap_err(), Refusal::RemoteLimit);
+		assert_eq!(
+			server.answer(&same_host).await.unwrap_err(),
+			Refusal::RemoteLimit {
+				root: Some("demo".into())
+			}
+		);
 	}
 
 	/// An in-band credential arrives as a `connect` for a live session id. It takes
@@ -1170,7 +1285,12 @@ mod tests {
 		server.answer(&attach(&first)).await.unwrap();
 		// Re-presenting a JWT the session already holds is not another use of it.
 		server.answer(&attach(&first)).await.unwrap();
-		assert_eq!(server.answer(&attach(&second)).await.unwrap_err(), Refusal::TokenLimit);
+		assert_eq!(
+			server.answer(&attach(&second)).await.unwrap_err(),
+			Refusal::TokenLimit {
+				root: Some("demo".into())
+			}
+		);
 		assert_eq!(server.sessions.lock().unwrap().slots.len(), 2);
 	}
 
@@ -1190,12 +1310,98 @@ mod tests {
 		assert_eq!(consumer.grant().publish, patterns(&["**"]).into());
 
 		let err = client.connect(request("/demo")).await.unwrap_err();
-		assert!(matches!(err, Error::Refused), "{err}");
+		assert!(matches!(err, Error::Refused(_)), "{err}");
 
 		// The end frees the slot for the next session.
 		consumer.close("done", Bytes::default());
 		ended.notified().await;
 		client.connect(request("/demo")).await.unwrap();
+	}
+
+	#[tokio::test]
+	async fn serve_client_refusals_attribute_only_verified_roots() {
+		use crate::refusal::Reason;
+		let (dir, key) = key_dir();
+		let stranger = Key::generate(Algorithm::HS256, key.kid.clone()).unwrap();
+		let expired = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+		for tier in [None, Some("edge")] {
+			let (client, _) = serve(Policy {
+				keys: Some(Keys::Dir(dir.path().into())),
+				tier: tier.map(str::to_owned),
+				..Default::default()
+			})
+			.await;
+			let expired_jwt = sign(&key, "tenant", &["media/**"], &[], expired);
+			let valid_jwt = sign(&key, "tenant", &["media/**"], &[], None);
+			let forged_jwt = sign(&stranger, "forged", &["**"], &[], expired);
+			for (path, token, reason, root) in [
+				(
+					"/attacker/path",
+					Some(expired_jwt.as_str()),
+					Reason::Expired,
+					Some("tenant"),
+				),
+				(
+					"/attacker/path",
+					Some(valid_jwt.as_str()),
+					Reason::Forbidden,
+					Some("tenant"),
+				),
+				(
+					"/tenant/no-access",
+					Some(valid_jwt.as_str()),
+					Reason::Forbidden,
+					Some("tenant"),
+				),
+				("/attacker/path", Some(forged_jwt.as_str()), Reason::Refused, None),
+				("/attacker/path", None, Reason::Refused, None),
+			] {
+				let mut request = request(path);
+				if let Some(jwt) = token {
+					request = with_token(request, jwt);
+				}
+				let Error::Refused(refusal) = client.connect(request).await.unwrap_err() else {
+					panic!("expected refusal")
+				};
+				assert_eq!(refusal.reason, reason);
+				assert_eq!(refusal.root.as_deref(), root);
+				assert_eq!(refusal.tier.as_deref(), tier);
+			}
+		}
+	}
+
+	#[tokio::test]
+	async fn expired_out_of_scope_claims_are_never_attributed() {
+		let (dir, key) = key_dir();
+		let scoped = key
+			.clone()
+			.with_scope(crate::Scope {
+				root: "tenant".into(),
+				publish: patterns(&["allowed/**"]),
+				subscribe: Patterns::default(),
+			})
+			.unwrap();
+		scoped.to_file(dir.path().join("kid1.jwk")).unwrap();
+		let (client, _) = serve(Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			..Default::default()
+		})
+		.await;
+		let token = sign(
+			&key,
+			"attacker",
+			&["**"],
+			&[],
+			Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+		);
+		let Error::Refused(refusal) = client
+			.connect(with_token(request("/attacker"), &token))
+			.await
+			.unwrap_err()
+		else {
+			panic!("expected refusal")
+		};
+		assert_eq!(refusal, crate::Refusal::default());
 	}
 
 	#[cfg(unix)]

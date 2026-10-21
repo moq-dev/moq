@@ -21,6 +21,12 @@ namespace prefix is illegal before draft 16), so a link to a peer without the
 MoQ Solicit extension, such as moxygen, learns only what that peer announces
 unasked. moxygen announces nothing unasked on draft 14.
 
+A track from a moq-transport publisher keeps its Object IDs, object properties,
+and END\_OF\_GROUP status objects across a moq-lite-07 link, since relays
+always offer the [ietf extension](/draft/moq-ietf) that carries them. Over an
+older moq-lite link they are lost: a moq-transport subscriber behind it sees
+consecutive objects with no properties.
+
 When a moq-lite-04 or later peer withdraws a broadcast, the routes relayed
 through it go with it at once. A change of best route is announced after
 300 ms, so stale paths are retracted once instead of advertised in turn;
@@ -37,17 +43,21 @@ publishes under a new epoch, which replaces the old broadcast instead of
 resuming it; the RTMP, SRT, and WHIP ingests mint one per connection. Epochs
 order by creation time, so a reconnect to a different gateway assumes the two
 gateways' clocks roughly agree. Seamless failover needs a publisher that
-announces an epoch and moq-lite 07 on every link the route crosses. A route
-without an epoch, including every route on moq-lite 06 and older or
-moq-transport, keeps its subscriptions until it goes or a track fails
+announces an epoch and, on every link the route crosses, moq-lite 07 or
+moq-transport draft 17 or later with the [epoch extension](/draft/moq-epoch). A route
+without an epoch, including every route on moq-lite 06 and older or a
+moq-transport link without the extension, keeps its subscriptions until it goes or a track fails
 upstream, and any other route winning it is announced as a restart. Viewers
 re-request on a restart, and a relay drops its copy of the old instance,
 including every path beneath a prefix claim when one of them moves to another
 worker.
 
-Failover routes must carry copies of the same broadcast: a source whose track
-differs in timescale, retention, publisher priority, or group order is refused
-for that track.
+Failover routes must carry copies of one publisher's broadcast. Independent
+importers use distinct epochs and switch as a restart, even when fed one stream.
+See [Redundant ingest](/setup/redundancy) to choose between publisher switching,
+subscriber selection, and several routes to one publisher.
+A source whose track differs in timescale, retention, publisher priority, or
+group order is refused for that track.
 
 A route whose original publisher (its first hop) changes under the same epoch is
 updated in place on both wire protocols, so the broadcast never briefly vanishes
@@ -174,7 +184,7 @@ node = "us-west.local:4443"
 
 [cluster.lan]
 enabled = true
-# secret = "/etc/moq/cluster.key"     # Optional. 64 hex chars, or a file holding them.
+# secret = "/etc/moq/cluster.key"     # Optional. A file holding 64 hex chars (openssl rand -hex 32).
 # app = "default"                     # DNS-SD subtype; moq-cli shares this name.
 ```
 

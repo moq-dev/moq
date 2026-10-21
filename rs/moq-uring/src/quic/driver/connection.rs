@@ -1,10 +1,10 @@
 //! The connection: shared state, the driver task, and the session handle.
 
+use moq_clock::Instant;
 use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll};
-use std::time::Instant;
 
 use bytes::Bytes;
 use moq_quic::{ConnectionHandle, Dir, StreamId, VarInt};
@@ -241,7 +241,7 @@ impl Inner {
 	/// space, which needs the whole varint range.
 	pub(crate) fn close_code(&self, code: u64, reason: &str) {
 		self.conn.borrow_mut().close(
-			moq_clock::Instant::now(),
+			self.owner.now(),
 			VarInt::from_u64(code).unwrap_or(VarInt::MAX),
 			Bytes::copy_from_slice(reason.as_bytes()),
 		);
@@ -792,12 +792,11 @@ impl Driver {
 			// polling before the set would leave the firing to wake nobody
 			// (fatal on a dial nobody answers, where no ingress ever re-polls
 			// us).
-			self.deadline
-				.set(self.shared.conn.borrow_mut().poll_timeout().map(super::to_std));
+			self.deadline.set(self.shared.conn.borrow_mut().poll_timeout());
 			if self.deadline.poll(waiter).is_pending() {
 				return Poll::Pending;
 			}
-			self.shared.conn.borrow_mut().handle_timeout(moq_clock::Instant::now());
+			self.shared.conn.borrow_mut().handle_timeout(self.shared.owner.now());
 		}
 	}
 
@@ -902,7 +901,7 @@ impl Driver {
 			let mut conn = self.shared.conn.borrow_mut();
 			// moq-quic encrypts the train straight into the socket's buffer.
 			// Nothing to send, or paced; the buffer returns to the pool on drop.
-			let Some(transmit) = conn.poll_transmit(moq_clock::Instant::now(), segments, &mut tx) else {
+			let Some(transmit) = conn.poll_transmit(self.shared.owner.now(), segments, &mut tx) else {
 				return Poll::Pending;
 			};
 			self.shared.wire.set_sent_bytes(conn.stats().udp_tx.bytes);

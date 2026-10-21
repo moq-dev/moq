@@ -113,7 +113,7 @@ pub(crate) struct Memo {
 	/// Filled by the diff in progress, and swapped in once its frame is committed.
 	next: Entries,
 	/// Reused by the repeated-key check.
-	check: RefCell<crate::merge::CheckScratch>,
+	check: RefCell<crate::strict::Scratch>,
 }
 
 #[derive(Default)]
@@ -281,7 +281,7 @@ fn lockstep(
 	new: &[u8],
 	patch: &mut Vec<u8>,
 	forced: &mut bool,
-	check: &RefCell<crate::merge::CheckScratch>,
+	check: &RefCell<crate::strict::Scratch>,
 ) -> Option<()> {
 	if old.first() != Some(&b'{') || new.first() != Some(&b'{') {
 		return replace(new, patch, forced, check);
@@ -323,16 +323,11 @@ fn lockstep(
 /// object value. A top-level null is caught here, and a replacement object holding one anywhere is
 /// left to the value diff rather than parsed (inside an array, or a string, it would be data). So is
 /// a replacement that repeats a key, for the value diff to refuse.
-fn replace(
-	new: &[u8],
-	patch: &mut Vec<u8>,
-	forced: &mut bool,
-	check: &RefCell<crate::merge::CheckScratch>,
-) -> Option<()> {
+fn replace(new: &[u8], patch: &mut Vec<u8>, forced: &mut bool, check: &RefCell<crate::strict::Scratch>) -> Option<()> {
 	match new {
 		b"null" => *forced = true,
 		[b'{', ..] if new.windows(4).any(|window| window == b"null") => return None,
-		[b'{' | b'[', ..] if crate::merge::check(new, check).is_err() => return None,
+		[b'{' | b'[', ..] if crate::strict::check(new, check).is_err() => return None,
 		_ => {}
 	}
 	patch.extend_from_slice(new);
@@ -755,9 +750,8 @@ impl MapDiff<'_> {
 					let memo = scratch.memo.as_ref().expect("a miss implies a memo");
 					let (start, end) = *memo.next.ends.last().expect("a miss records its entry");
 					let bytes = &memo.next.bytes[start..end];
-					crate::merge::check(bytes, &memo.check)
-						.and_then(|()| serde_json::from_slice(bytes))
-						.map_err(|err| Error(err.to_string()))?
+					crate::strict::check(bytes, &memo.check).map_err(|err| Error(err.to_string()))?;
+					serde_json::from_slice(bytes).map_err(|err| Error(err.to_string()))?
 				};
 				let (child, existed) = self.differ.child(key);
 				(entry.serialize(child)?, existed)

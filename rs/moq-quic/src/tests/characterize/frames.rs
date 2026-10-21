@@ -247,8 +247,8 @@ fn retire_connection_id_in_use() {
 }
 
 /// A connection closed by its own transport error sends CONNECTION_CLOSE to a CID the server
-/// retired, and the server answers with a stateless reset. Today the reset replaces the unread
-/// close reason with `Reset`, or, once the reason was read, reports a second `ConnectionLost`.
+/// retired, and the server answers with a stateless reset, which must neither replace the unread
+/// close reason with `Reset` nor, once the reason was read, report a second `ConnectionLost`.
 fn stateless_reset_after_local_close(poll_early: bool) {
     let _guard = subscribe();
     let (mut pair, client_ch, server_ch) = connected();
@@ -277,13 +277,11 @@ fn stateless_reset_after_local_close(poll_early: bool) {
 }
 
 #[test]
-#[ignore = "bug: /quest/m1/quic/close-reason-after-reset.md"]
 fn stateless_reset_after_local_close_keeps_reason() {
     stateless_reset_after_local_close(false);
 }
 
 #[test]
-#[ignore = "bug: /quest/m1/quic/close-reason-after-reset.md"]
 fn stateless_reset_after_local_close_is_not_a_second_loss() {
     stateless_reset_after_local_close(true);
 }
@@ -367,10 +365,7 @@ fn stream_final_size_changed() {
     );
 }
 
-/// Today the reader gets all five bytes and then blocks forever: the shrunken final size never
-/// matches what was read, so the stream neither finishes nor errors.
 #[test]
-#[ignore = "bug: /quest/m1/quic/final-size-below-received.md"]
 fn stream_final_size_below_received() {
     let s = id(Side::Client, Dir::Uni, 0);
     let frames = Frames::default().stream(s, 0, b"abcde", false);
@@ -440,5 +435,20 @@ fn stream_above_stream_limit() {
     assert_eq!(
         server_answer(frames),
         Some(TransportErrorCode::STREAM_LIMIT_ERROR)
+    );
+}
+
+/// A Requested Max Ack Delay of 2^14 ms or more is invalid, as for the `max_ack_delay` transport
+/// parameter; just under it is accepted
+#[test]
+fn ack_frequency_max_ack_delay_upper_bound() {
+    const LIMIT_US: u64 = (1 << 14) * 1000;
+    // Sequence, Ack-Eliciting Threshold, Requested Max Ack Delay (us), Reordering Threshold
+    let frames = Frames::default().var(FrameType::ACK_FREQUENCY, &[0, 1, LIMIT_US - 1, 1]);
+    assert_eq!(server_answer(frames), None);
+    let frames = Frames::default().var(FrameType::ACK_FREQUENCY, &[0, 1, LIMIT_US, 1]);
+    assert_eq!(
+        server_answer(frames),
+        Some(TransportErrorCode::PROTOCOL_VIOLATION)
     );
 }

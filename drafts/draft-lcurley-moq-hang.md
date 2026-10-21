@@ -74,6 +74,9 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 # Conventions and Definitions
 {::boilerplate bcp14-tagged}
 
+Every JSON frame in this document is UTF-8 JSON {{!RFC8259}}.
+A reader MUST refuse a frame in which an object repeats a member name, rather than pick one of the values.
+
 
 # Terminology
 Hang is built on top of moq-lite [moql] and uses much of the same terminology.
@@ -248,6 +251,8 @@ type VideoDecoderConfigExtensions = {
   "displayAspectHeight": number | undefined,
   "preference": number | undefined,
   "color": Color | undefined,
+  "projection": Projection | undefined,
+  "stereo": string | undefined,
 }
 ~~~
 
@@ -292,6 +297,25 @@ type Chromaticity = { "x": number, "y": number }
 `contentLight` is the {{cta861}} MaxCLL and MaxFALL in candelas per square metre, where 0 means unknown.
 A publisher MUST omit a field its source leaves unspecified rather than write a default, and SHOULD prefer the value signalled in the elementary stream over a container's when they disagree.
 `color` is not part of the track's identity ({{identity}}).
+
+`projection` maps the decoded picture onto the viewer's field of view:
+
+~~~
+type Projection =
+  { "kind": "rectilinear" } |
+  { "kind": "equirectangular", "fov": number | undefined }
+~~~
+
+`rectilinear`, the default when absent, is a flat picture.
+`equirectangular` maps longitude linearly across the width and latitude linearly down the height, spanning all 180 degrees of latitude around a viewer at the centre.
+Its `fov` is the degrees of longitude the picture spans, centred straight ahead: greater than 0 and at most 360, defaulting to 360, so VR180 is 180.
+
+`stereo` says how each eye's view is packed into the frame.
+`mono`, the default when absent, shows the whole frame to both eyes.
+`left-right` carries the left eye's view in the left half and the right eye's in the right half, and `top-bottom` carries the left eye's view in the top half and the right eye's in the bottom half.
+
+A consumer MUST treat an unrecognized `projection` kind or `stereo` value as absent, and MUST reject a recognized `projection` kind with a malformed field, such as a `fov` out of range.
+Neither field is part of the track's identity.
 
 For example:
 
@@ -367,7 +391,18 @@ See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#audio-decoder
 Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 The `sampleRate` and `numberOfChannels` fields describe the decoded output: for HE-AAC, the SBR rate rather than the core's, and two channels under parametric stereo.
 
-In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}).
+In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}) plus:
+
+~~~
+type AudioDecoderConfigExtensions = {
+  "layout": string | undefined,
+}
+~~~
+
+`layout` says what the decoded channels carry; when absent, they follow the codec's own channel order.
+`ambisonic` is full-sphere ambisonics in the AmbiX convention: ACN channel order with SN3D normalization, of the order N for which `numberOfChannels` is (N+1)^2.
+A consumer MUST reject `ambisonic` with fewer than 4 channels or a count that is not a square, and MUST treat an unrecognized `layout` as absent.
+`layout` is not part of the track's identity.
 
 ### PCM {#audio-pcm}
 
@@ -1320,6 +1355,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- A reader refuses a JSON frame in which an object repeats a member name.
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Each archive timeline declares its own fixed nominal record duration, omitted for an untimed track; removed the broadcast-wide duration bound.
@@ -1354,6 +1390,7 @@ This document has no IANA actions.
 - Added an optional `track` field to video, audio, text, `json`, and `binary` entries naming the track in its broadcast; the entry's key is its ID and names the track when `track` is absent. A consumer MUST reject a catalog using one ID for both a video and an audio rendition.
 - Defined video `displayAspectWidth` and `displayAspectHeight` as the whole picture's display aspect, not the sample aspect.
 - Added the optional video `color` field: H.273 primaries, transfer, matrix, and range, plus the SMPTE ST 2086 mastering display and CTA-861.3 content light levels.
+- Added the optional video `projection` (rectilinear, or equirectangular with a longitude `fov`) and `stereo` (mono, left-right, or top-bottom) fields and the optional audio `layout` field (ambisonic).
 
 ## moq-hang-03
 {:numbered="false"}

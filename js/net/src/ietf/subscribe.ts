@@ -1,6 +1,8 @@
+import type * as Epoch from "../epoch.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Order } from "../track.ts";
+import { supported as epochSupported } from "./epoch.ts";
 import * as Filter from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
@@ -62,6 +64,8 @@ export class Subscribe {
 	trackNamespace: Path.Valid;
 	trackName: string;
 	subscriberPriority: number;
+	/** Subscriber max age in milliseconds (MoQ Timestamp), if negotiated. */
+	maxAge?: number;
 
 	/** The order the publisher is asked to deliver groups in (GROUP_ORDER). Defaults to descending. */
 	groupOrder: Order;
@@ -84,11 +88,18 @@ export class Subscribe {
 	/** Whether RENDEZVOUS_TIMEOUT requested a wait; never encoded. */
 	rendezvous: boolean;
 
+	/**
+	 * The publisher instance the subscriber expects (EPOCH, MoQ Epoch, draft-17+). Only a
+	 * session that negotiated the extension names one; the session refuses one otherwise.
+	 */
+	epoch?: Epoch.Valid;
+
 	constructor({
 		requestId,
 		trackNamespace,
 		trackName,
 		subscriberPriority,
+		maxAge,
 		groupOrder,
 		filter,
 		fill,
@@ -96,11 +107,13 @@ export class Subscribe {
 		forward,
 		rangeFilters,
 		rendezvous,
+		epoch,
 	}: {
 		requestId: bigint;
 		trackNamespace: Path.Valid;
 		trackName: string;
 		subscriberPriority: number;
+		maxAge?: number;
 		groupOrder?: Order;
 		filter?: Filter.Filter;
 		fill?: Filter.Fill;
@@ -108,11 +121,13 @@ export class Subscribe {
 		forward?: boolean;
 		rangeFilters?: boolean;
 		rendezvous?: boolean;
+		epoch?: Epoch.Valid;
 	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
 		this.trackName = trackName;
 		this.subscriberPriority = subscriberPriority;
+		this.maxAge = maxAge;
 		this.groupOrder = groupOrder ?? "descending";
 		this.filter = filter ?? { kind: "unfiltered" };
 		this.fill = fill;
@@ -120,6 +135,7 @@ export class Subscribe {
 		this.forward = forward ?? true;
 		this.rangeFilters = rangeFilters ?? false;
 		this.rendezvous = rendezvous ?? false;
+		this.epoch = epoch;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -135,11 +151,14 @@ export class Subscribe {
 			await w.u8(encodeGroupOrder(this.groupOrder));
 			await w.bool(this.forward);
 			await w.write(Filter.encode(this.filter, version));
-			await w.u53(0); // no parameters
+			const params = new Parameters();
+			params.maxAge = this.maxAge;
+			await params.encode(w, version);
 		} else {
 			// v15+: fields moved into parameters
 			const params = new Parameters();
 			params.subscriberPriority = this.subscriberPriority;
+			params.maxAge = this.maxAge;
 			params.groupOrder = encodeGroupOrder(this.groupOrder);
 			params.forward = this.forward;
 			params.subscriptionFilter = this.filter;
@@ -156,6 +175,8 @@ export class Subscribe {
 					params.includeProperties = false;
 				}
 			}
+			// The same for EPOCH, which exists from draft-17.
+			if (epochSupported(version)) params.epoch = this.epoch;
 
 			await params.encode(w, version);
 		}
@@ -184,10 +205,11 @@ export class Subscribe {
 			const forward = await r.bool();
 			const filter = await Filter.decodeInline(r);
 
-			await Parameters.decode(r, version); // ignore parameters
+			const params = await Parameters.decode(r, version, "subscribe");
 
 			return new Subscribe({
 				requestId,
+				maxAge: params.maxAge,
 				trackNamespace,
 				trackName,
 				subscriberPriority,
@@ -222,6 +244,7 @@ export class Subscribe {
 		const fill = rawFill !== undefined ? Filter.decodeFill(rawFill, version) : undefined;
 
 		return new Subscribe({
+			maxAge: params.maxAge,
 			requestId,
 			trackNamespace,
 			trackName,
@@ -234,6 +257,7 @@ export class Subscribe {
 			forward: params.forward ?? true,
 			rangeFilters: params.rangeFilters,
 			rendezvous: (params.vars.get(0x04n) ?? 0n) > 0n,
+			epoch: params.epoch,
 		});
 	}
 }
@@ -430,6 +454,8 @@ export class SubscribeUpdate {
 			await w.u62(this.ownRequestId);
 			await w.u62(this.requestId);
 			if (version === Version.DRAFT_14) {
+				// Every field is mandatory and the start must not move. Our subscriptions start at
+				// {0, 0} open ended (`joinFilter`), so zeroes repeat their bounds.
 				await w.u62(0n); // start_group
 				await w.u62(0n); // start_object
 				await w.u62(0n); // end_group

@@ -31,7 +31,7 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
   compress by default (maintainer, 2026-10-17: "always useful"): the default
   lives where a track is created: moq-mux's JSON helpers and the docs' JSON
   examples set `compress: true`. `Producer::new(track, config)` keeps
-  wrapping a caller-built track, per [FFI shape](/quest/m1/ffi-shape/README.md),
+  wrapping a caller-built track, per `rs/moq-ffi/AGENTS.md`'s layers,
   and its docs say to set `compress` on that `Info`. Delete `rs/moq-mux/src/binary.rs` and its
   users; opaque bytes are a plain track.
 - Delete `rs/moq-flate`, `js/flate`, `rs/hang/src/catalog/compression.rs`,
@@ -48,6 +48,4 @@ Public API: removals listed above. Wire: the hang catalog loses
 
 ## Required
 
-- [Core](/quest/m1/compress/core.md) - Rust compresses opted-in tracks
 - [JavaScript](/quest/m1/compress/js.md) - js/publish and js/watch need the JS side before they drop `.z`
-- [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - in review on the same flate and binary consumers this deletes; one owner at a time

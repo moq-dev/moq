@@ -118,25 +118,20 @@ async function acceptAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, early, solicit, hidden, activeCount, cluster, auth } = await exchangeSetup(
-		transport,
-		version,
-		"moq-lite-js",
-		wiring,
-	);
+	// Spread whole, so every negotiated flag reaches the connection.
+	// The IETF session code loads on demand, since most sessions negotiate lite; the ALPN already
+	// committed to IETF, so fetch it alongside SETUP.
+	const [setup, { Connection }] = await Promise.all([
+		exchangeSetup(transport, version, "moq-lite-js", wiring),
+		import("../ietf/connection.ts"),
+	]);
 
-	return new Ietf.Connection({
+	return new Connection({
 		...wiring,
 		client: false,
 		url,
 		quic: transport,
-		control,
-		early,
-		solicit,
-		hidden,
-		activeCount,
-		cluster,
-		auth,
+		...setup,
 		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.
 		maxRequestId: 0n,
 		version,
@@ -172,6 +167,7 @@ async function acceptSetup(
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Extensions.intoSetup(params, wiring.extensions, version);
 	Ietf.hiddenIntoSetup(params);
+	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params, version);
 
 	const server = new Ietf.ServerSetup({ version, parameters: params });
@@ -179,7 +175,9 @@ async function acceptSetup(
 
 	const maxRequestId = client.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
 
-	return new Ietf.Connection({
+	// The IETF session code loads on demand, since most sessions negotiate lite.
+	const { Connection } = await import("../ietf/connection.ts");
+	return new Connection({
 		...wiring,
 		client: false,
 		url,
@@ -189,6 +187,7 @@ async function acceptSetup(
 		version,
 		solicit: Ietf.solicitFromSetup(client.parameters),
 		hidden: Ietf.hiddenFromSetup(client.parameters),
+		maxAge: Ietf.maxAgeFromSetup(client.parameters),
 		activeCount: Ietf.activeCountFromSetup(client.parameters, version),
 	});
 }
@@ -234,6 +233,7 @@ async function acceptNegotiated(
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
+	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params, setupVersion);
 
 	const server = new Ietf.ServerSetup({ version: selectedVersion, parameters: params });
@@ -249,7 +249,9 @@ async function acceptNegotiated(
 		});
 	} else if (Object.values(Ietf.Version).includes(selectedVersion as Ietf.Version)) {
 		const maxRequestId = client.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
-		return new Ietf.Connection({
+		// The IETF session code loads on demand, since most sessions negotiate lite.
+		const { Connection } = await import("../ietf/connection.ts");
+		return new Connection({
 			...wiring,
 			client: false,
 			url,
@@ -259,6 +261,7 @@ async function acceptNegotiated(
 			version: selectedVersion as Ietf.IetfVersion,
 			solicit: Ietf.solicitFromSetup(client.parameters),
 			hidden: Ietf.hiddenFromSetup(client.parameters),
+			maxAge: Ietf.maxAgeFromSetup(client.parameters),
 			activeCount: Ietf.activeCountFromSetup(client.parameters, selectedVersion as Ietf.IetfVersion),
 		});
 	} else {

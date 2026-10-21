@@ -25,10 +25,10 @@ const SERVER_SETUP: u8 = 0x21;
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) const SETUP_V17: u64 = 0x2F00;
 
-/// The moq-transport Setup Options this side offers, each on by default.
+/// The SETUP extensions this side offers.
 ///
 /// Turning one off connects as a peer that does not speak that extension. moq-lite carries
-/// both in its core, so this only changes moq-transport sessions.
+/// auth, solicit, and epoch in its core, so those only change moq-transport sessions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -38,6 +38,12 @@ pub struct Extensions {
 	/// The MoQ Solicit extension: the peer answers our SUBSCRIBE_NAMESPACE rather than
 	/// announcing unasked.
 	pub solicit: bool,
+	/// The MoQ Epoch extension: announcements and requests carry the publisher's
+	/// [`Epoch`](crate::Epoch), as moq-lite 07 does (draft-17+).
+	pub epoch: bool,
+	/// The MoQ IETF extension, off by default: a moq-lite 07 hop between relays carries the
+	/// moq-transport object state a relay preserves, such as Object IDs and properties.
+	pub ietf: bool,
 }
 
 impl Default for Extensions {
@@ -45,6 +51,8 @@ impl Default for Extensions {
 		Self {
 			auth: true,
 			solicit: true,
+			epoch: true,
+			ietf: false,
 		}
 	}
 }

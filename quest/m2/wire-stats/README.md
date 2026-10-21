@@ -44,6 +44,18 @@ depends on the workload. Measured wire/payload in moq.pro's bench:
 A provider bills the wire, so a relay operator needs per-root wire bytes to
 see cost per tenant.
 
+The shared core landed in #5773 (`778263c50`): `Presence` carries both
+counters, `moq_net::stats::Handle::wire` registers embedder sources, and
+the stats producer samples and preserves their final values. Native tokio
+and io_uring QUIC sources and their relay integration tests are already on
+`main`. Reuse that registry and accounting; do not create another one.
+
+Remaining here: finish the qmux and SRT adapter children, then verify their
+wire counters appear in the existing per-root presence and per-tier totals
+alongside native sessions, with final counts retained when a source closes.
+Confirm the stats documentation describes the supported adapters and their
+receive-side limitations.
+
 - **`Presence`, not `Traffic`.** `Presence` is already per (tier, root) and
   per session. `Traffic.bytes` stays payload, and its docs say so.
 - **Named `wire_tx` / `wire_rx`.** Rejected: `bytes_sent`, which reads like

@@ -55,17 +55,23 @@ class SelectionTest(unittest.TestCase):
         changed.chmod(0o755)
         tools = self.root / "tools"
         tools.mkdir()
-        bun = tools / "bun"
-        bun.write_text("#!/bin/sh\nexit 0\n")
-        bun.chmod(0o755)
+        for command in ("bun", "quest", "nixfmt", "taplo"):
+            stub = tools / command
+            stub.write_text("#!/bin/sh\nexit 0\n")
+            stub.chmod(0o755)
         just = tools / "just"
-        just.write_text('#!/bin/sh\nprintf "%s\\n" "$1 $2" > "$SELECT_CALLS"\ncat "$3" >> "$SELECT_CALLS"\n')
         just.chmod(0o755)
         subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
         calls = self.root / "calls"
         env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", MOQ_ALLOW_HOST="1",
                    SELECT_CALLS=str(calls))
-        subprocess.run(["bash", "sh/dispatch.sh", "ci-test", "base"], cwd=self.root, env=env, check=True)
+        for script in ("markdown.sh", "shell.sh"):
+            path = sh / script
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
+        just.write_text('#!/bin/sh\nif [ "$1 $2" = "js test-changed" ]; then\n'
+                        'printf "%s\\n" "$1 $2" > "$SELECT_CALLS"\ncat "$3" >> "$SELECT_CALLS"\nfi\n')
+        subprocess.run(["bash", "sh/dispatch.sh", "ci", "base"], cwd=self.root, env=env, check=True)
         self.assertEqual(calls.read_text().splitlines(),
                          ["js test-changed", "js/auth/src/token.ts", "demo/pub/worker.ts"])
 
@@ -182,7 +188,7 @@ class SelectionTest(unittest.TestCase):
         scripts = [c for c in calls if c[:2] == ["bun", "run"]]
         self.assertEqual(scripts, [["bun", "run", "--filter=docs", "--elide-lines=0", action]
                                   for action in ("check", "build")])
-        self.assertNotIn(["just", "js", "wasm"], calls)
+        self.assertNotIn(["just", "js", "wasm", "dev"], calls)
         self.assertTrue(any(c[:2] == ["bunx", "tsc"] for c in calls))
         self.assertEqual(self.configurations, [{"extends": "./tsconfig.json", "exclude":
                           ["**/dist", str(self.root / "test/browser")]}])
@@ -191,24 +197,24 @@ class SelectionTest(unittest.TestCase):
     def test_biome_covers_unowned_js_files_in_fallback(self):
         def biome(paths):
             return next(c for c in self.calls(paths) if c[:3] == ["bun", "biome", "check"])
-        self.assertEqual(biome(["js/tsconfig.json"]), ["bun", "biome", "check", "js", "test", "doc", "demo"])
+        self.assertEqual(biome(["js/tsconfig.json"]), ["bun", "biome", "check", "js", "bench/browser", "test", "doc", "demo"])
         self.assertEqual(biome(["doc/index.md"]), ["bun", "biome", "check", "doc", "js/common"])
         self.assertEqual(biome(["demo/nested/src/index.ts"]),
                          ["bun", "biome", "check", "demo/nested", "js/common"])
         self.assertEqual(biome(["demo/pub/src/index.ts"]),
-                         ["bun", "biome", "check", "js", "test", "doc", "demo"])
+                         ["bun", "biome", "check", "js", "bench/browser", "test", "doc", "demo"])
         self.assertEqual(biome(["js/core/src/index.ts"]),
                          ["bun", "biome", "check", "js/core", "js/view", "doc", "js/common"])
         self.assertEqual(biome(["js/wasm/src/index.ts"]),
                          ["bun", "biome", "check", "js/wasm", "test/browser", "demo/nested", "js/common"])
 
     def test_build_never_generates_wasm(self):
-        self.assertNotIn(["just", "js", "wasm"], self.calls(None, "build"))
-        self.assertIn(["just", "js", "wasm"], self.calls(None, "check"))
+        self.assertNotIn(["just", "js", "wasm", "dev"], self.calls(None, "build"))
+        self.assertIn(["just", "js", "wasm", "dev"], self.calls(None, "check"))
 
     def test_executor_builds_wasm_before_consumer_check(self):
         calls = self.calls(["demo/nested/src/index.ts"])
-        self.assertLess(calls.index(["just", "js", "wasm"]),
+        self.assertLess(calls.index(["just", "js", "wasm", "dev"]),
                         next(i for i, c in enumerate(calls) if c[:2] == ["bun", "run"]))
 
     def test_tests_do_not_build_wasm_or_unselected_packages(self):

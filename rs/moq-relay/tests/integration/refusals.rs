@@ -370,3 +370,53 @@ async fn explicit_auth_server_refusal_counts_once() {
 	stop.send(()).unwrap();
 	server.await.unwrap();
 }
+
+#[tokio::test]
+async fn expired_verified_tokens_count_under_the_token_root_and_auth_tier() {
+	let keys = tempfile::tempdir().unwrap();
+	let key = moq_auth::Key::generate(moq_auth::Algorithm::HS256, None).unwrap();
+	let key_path = keys.path().join("key.jwk");
+	key.to_file(&key_path).unwrap();
+	let mut claims = moq_auth::Claims::default()
+		.with_root("verified/tenant")
+		.with_subscribe(moq_auth::Pattern::all());
+	claims.expires = Some(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+	let token = key.sign(&claims).unwrap();
+	for tier in [None, Some("edge")] {
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let mut policy = moq_auth::serve::Policy::default();
+		policy.keys = Some(moq_auth::serve::Keys::File(key_path.clone()));
+		policy.tier = tier.map(str::to_owned);
+		let server = moq_auth::serve::Server::new(policy).unwrap();
+		let auth_url = format!("http://{}/", listener.local_addr().unwrap());
+		let running = tokio::spawn(async move {
+			server.serve(listener).await.unwrap();
+		});
+		let dir = tempfile::tempdir().unwrap();
+		let mut config = config(dir.path(), false);
+		config.auth.url = Some(auth_url.parse().unwrap());
+		config.stats.enabled = true;
+		let relay = start(config).await;
+		assert_refused(
+			format!("https://{}/attacker/path?jwt={token}", relay.quic)
+				.parse()
+				.unwrap(),
+			false,
+		)
+		.await;
+		assert_eq!(relay.refused("expired").await, 1);
+		assert_eq!(relay.refused("refused").await, 0);
+		let mut report = moq_net::stats::Report::default();
+		relay.stats.report(&mut report);
+		assert_eq!(report.sessions.len(), 1);
+		let entry = &report.sessions[0];
+		assert_eq!(entry.tier.as_str(), tier.unwrap_or(""));
+		assert_eq!(entry.label.as_str(), "verified/tenant");
+		let presence = entry.presence;
+		assert_eq!(presence.sessions_started, 0);
+		assert_eq!(presence.sessions_refused.expired, 1);
+		relay.stop().await;
+		running.abort();
+		assert!(running.await.unwrap_err().is_cancelled());
+	}
+}

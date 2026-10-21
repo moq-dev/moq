@@ -6,8 +6,13 @@ import { Stream } from "../stream.ts";
 import { ControlStreamAdapter } from "./adapter.ts";
 import { toRequestCode } from "./error.ts";
 import { GoAway } from "./goaway.ts";
-import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceDone } from "./publish_namespace.ts";
-import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW, RequestError } from "./request.ts";
+import {
+	PublishNamespace,
+	PublishNamespaceCancel,
+	PublishNamespaceDone,
+	PublishNamespaceUpdate,
+} from "./publish_namespace.ts";
+import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW, RequestError, RequestOk } from "./request.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
@@ -706,6 +711,76 @@ test("a canceled request ID wait never spends a later grant", async () => {
 			expect(await adapter.nextRequestId()).toBe(0n);
 			await expect(adapter.nextRequestId(signal.signal)).rejects.toThrow("retired");
 			expect(await adapter.nextRequestId()).toBe(2n);
+		} finally {
+			peer.close();
+			adapter.close();
+			void running;
+		}
+	}
+});
+
+// Draft 16 answers our REQUEST_UPDATE by the update's own request ID. The answer reaches the
+// request it updated, and a refusal leaves that request open. Draft 15's reaches nothing.
+test("an answer to our update reaches the request it updated on draft 16 only", async () => {
+	for (const [version, alpn] of [
+		[Version.DRAFT_15, ALPN.DRAFT_15],
+		[Version.DRAFT_16, ALPN.DRAFT_16],
+	] as const) {
+		const { adapter, peer, running } = await windowed(version, alpn, 8n, true);
+		try {
+			const stream = adapter.openBi();
+			await stream.writer.u53(PublishNamespace.id);
+			await new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("ns") }).encode(
+				stream.writer,
+				version,
+			);
+			// The mock transport schedules nothing on timers, so settled promise chains are final.
+			const next = async () => {
+				let id: number | undefined;
+				const read = stream.reader.u53().then((value) => {
+					id = value;
+				});
+				for (let i = 0; i < 20 && id === undefined; i++) await new Promise((resolve) => setImmediate(resolve));
+				void read.catch(() => undefined);
+				return id;
+			};
+			const renew = async (own: bigint) => {
+				await stream.writer.u53(SubscribeUpdate.id);
+				const update =
+					version === Version.DRAFT_16
+						? new PublishNamespaceUpdate({ requestId: own, namespaceRequestId: 0n, update: {} })
+						: new SubscribeUpdate({ requestId: 0n, ownRequestId: own });
+				await update.encode(stream.writer, version);
+			};
+			const ok = async (requestId: bigint) => {
+				await peer.writer.u53(RequestOk.id);
+				await new RequestOk({ requestId }).encode(peer.writer, version);
+			};
+
+			await ok(0n);
+			expect(await next()).toBe(RequestOk.id);
+			await RequestOk.decode(stream.reader, version);
+
+			await renew(2n);
+			await ok(2n);
+			await renew(4n);
+			await peer.writer.u53(RequestError.id);
+			await new RequestError({ requestId: 4n, errorCode: 0, reasonPhrase: "refused" }).encode(
+				peer.writer,
+				version,
+			);
+			if (version === Version.DRAFT_15) {
+				expect(await next()).toBeUndefined();
+				continue;
+			}
+			expect(await next()).toBe(RequestOk.id);
+			await RequestOk.decode(stream.reader, version);
+			expect(await next()).toBe(RequestError.id);
+			await RequestError.decode(stream.reader, version);
+
+			// Still open: a later message for the request reaches it after the refusal.
+			await ok(0n);
+			expect(await next()).toBe(RequestOk.id);
 		} finally {
 			peer.close();
 			adapter.close();

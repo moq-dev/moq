@@ -21,7 +21,8 @@ import 'package:moq_ffi/moq_ffi.dart';
 /// Publishes lossy latest-value JSON snapshots on a track it takes over.
 typedef SnapshotProducer = MoqJsonSnapshotProducer;
 
-/// Consumes reconstructed latest-value JSON snapshots from a track it takes over.
+/// Consumes each JSON snapshot state from a track it takes over, or skips to
+/// the newest with `latest()`.
 typedef SnapshotConsumer = MoqJsonSnapshotConsumer;
 
 /// Configures a lossy latest-value JSON track.
@@ -35,3 +36,9 @@ typedef StreamConsumer = MoqJsonStreamConsumer;
 
 /// Configures a lossless JSON stream track.
 typedef StreamConfig = MoqJsonStreamConfig;
+
+/// A JSON string read from a track, with the timestamp of the frame that
+/// carried it in microseconds, or null when untimed. Rounded down to a whole
+/// microsecond, so a tick on a track like 90 kHz may not survive a read and
+/// republish exactly.
+typedef Value = MoqJsonValue;

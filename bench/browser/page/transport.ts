@@ -35,7 +35,7 @@ async function publish(config: Transport): Promise<void> {
 	const producer = origin.createBroadcast(Moq.Path.from(config.path));
 	// Retention covers the whole run, so a slow consumer cannot lose a group to eviction.
 	const track = producer.createTrack("data", { timescale: Moq.Time.Timescale.MILLI, maxAge: Milli(600_000) });
-	const demand = track.demand().used;
+	const demand = track.demand().wanted;
 	producer.announce();
 	const connection = await Moq.Connection.connect({
 		url: new URL(config.url),
@@ -50,7 +50,7 @@ async function publish(config: Transport): Promise<void> {
 		origin.close();
 	});
 	writer = (async () => {
-		while (!demand.peek() && track.closed.peek() === undefined)
+		while (demand.peek() === undefined && track.closed.peek() === undefined)
 			await Promise.race([demand.changed(), track.closed]);
 		if (track.closed.peek() !== undefined) return;
 		for (let start = 0; start < config.frames; start += config.group) {

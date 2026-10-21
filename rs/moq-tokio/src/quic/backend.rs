@@ -88,6 +88,7 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn driver::congestion::
 	match family {
 		CongestionControl::Loss => Arc::new(driver::congestion::CubicConfig::default()),
 		CongestionControl::Delay => Arc::new(driver::congestion::Bbr3Config::default()),
+		CongestionControl::None => Arc::new(driver::congestion::Unlimited),
 	}
 }
 
@@ -209,6 +210,10 @@ pub enum Error {
 	#[error("QUIC-LB connection IDs cannot be combined with per-core workers")]
 	ShardWithQuicLb,
 
+	/// The stateless reset secret file could not be read or does not hold 64 hexadecimal characters.
+	#[error("invalid stateless reset secret")]
+	ResetSecret(#[source] crate::secret::Error),
+
 	/// The mTLS client verifier could not be built from the configured roots.
 	#[error("failed to build client certificate verifier")]
 	ClientVerifier(#[source] rustls::server::VerifierBuilderError),
@@ -326,6 +331,8 @@ pub(crate) struct Client {
 	/// whether an IPv4 destination is reachable at all. Captured here because the
 	/// endpoint owns the socket from here on and `local_addr` can't tell us.
 	dual_stack: bool,
+	/// Whether to write session secrets to `SSLKEYLOGFILE` (see [`crate::quic::Config::keylog`]).
+	keylog: bool,
 }
 
 impl Client {
@@ -339,6 +346,7 @@ impl Client {
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "client")?;
 		let transport = Arc::new(transport);
+		let keylog = quic.keylog;
 
 		// There's a bit more boilerplate to make a generic endpoint.
 		// The driver spawns its tasks on the current tokio runtime.
@@ -356,6 +364,7 @@ impl Client {
 			failover_delay: resolved.race,
 			resolution_delay: resolved.resolution_delay,
 			dual_stack,
+			keylog,
 		})
 	}
 
@@ -411,6 +420,11 @@ impl Client {
 
 				tracing::warn!(url = %RedactedUrl::new(&fingerprint), "performing insecure HTTP request for certificate");
 
+				// Even a plaintext fetch builds reqwest's TLS stack, which panics without a
+				// process default when another crate (iroh) builds it as `rustls-no-provider`.
+				// An error only means one is already installed.
+				let _ = crate::crypto::install_default();
+
 				let resp = reqwest::get(fingerprint.as_str())
 					.await
 					.map_err(|err| Error::FetchFingerprint(crate::error::message(err)))?;
@@ -441,7 +455,9 @@ impl Client {
 		};
 
 		config.alpn_protocols = alpns;
-		config.key_log = Arc::new(rustls::KeyLogFile::new());
+		if self.keylog {
+			config.key_log = Arc::new(rustls::KeyLogFile::new());
+		}
 
 		let config: driver::crypto::rustls::QuicClientConfig = config.try_into()?;
 		let mut config = driver::ClientConfig::new(Arc::new(config));
@@ -744,6 +760,7 @@ impl Server {
 		let quic = quic.resolve();
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "server")?;
+		let keylog = quic.keylog;
 		let transport = Arc::new(transport);
 
 		// H3 is last because it requires WebTransport framing which not all H3 endpoints support.
@@ -756,7 +773,9 @@ impl Server {
 		alpns.push(web::ALPN.as_bytes().to_vec());
 
 		let mut tls = (*served.config(alpns)?).clone();
-		tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		if keylog {
+			tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		}
 
 		let tls: driver::crypto::rustls::QuicServerConfig = tls.try_into()?;
 		let mut tls = driver::ServerConfig::with_crypto(Arc::new(tls));
@@ -784,8 +803,15 @@ impl Server {
 			.unwrap_or(crate::server::DEFAULT_BIND);
 		let load_balancer = config.load_balancer();
 
-		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = driver::EndpointConfig::default();
+		// First, since it also keys the default connection ID generator. The ones
+		// below validate a predecessor's IDs without it.
+		if let Some(secret) = &config.reset.secret {
+			let secret = crate::secret::Secret::read(secret).map_err(Error::ResetSecret)?;
+			endpoint_config.reset_secret(secret.as_bytes());
+		}
+
+		// Configure connection ID generator with server ID if provided
 		if let Some(shard) = member.as_ref().map(listen::Socket::shard) {
 			if load_balancer.is_some() {
 				return Err(Error::ShardWithQuicLb);
@@ -1073,6 +1099,40 @@ mod tests {
 		assert_eq!(err.kind(), std::io::ErrorKind::NetworkUnreachable);
 	}
 
+	/// The certificate fetch goes out without a process-default crypto provider installed,
+	/// even when reqwest is built with rustls but no provider (as iroh builds it).
+	#[tokio::test]
+	async fn http_dial_needs_no_installed_provider() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let port = listener.local_addr().unwrap().port();
+		tokio::spawn(async move {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut buf = [0; 1024];
+			let _ = socket.read(&mut buf).await;
+			let _ = socket
+				.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+				.await;
+		});
+
+		let config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			..Default::default()
+		};
+		let tls = config.tls.build().expect("tls config");
+		let client = Client::new(&config, &crate::quic::Config::default()).expect("client init");
+		let url: Url = format!("http://127.0.0.1:{port}/").parse().unwrap();
+		let versions = moq_net::Versions::default();
+		let result = tokio::time::timeout(Duration::from_secs(5), client.connect(&tls, url.into(), &versions))
+			.await
+			.expect("dial timed out");
+		assert!(
+			matches!(result, Err(Error::FingerprintStatus(404))),
+			"the fetch should reach the server"
+		);
+	}
+
 	async fn pinned_connection(bind: &str, host_name: Option<&str>) {
 		let quic = crate::quic::Config::default();
 		let config = listen::Config {
@@ -1164,6 +1224,9 @@ mod tests {
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
 		assert!(delay.into_any().downcast::<driver::congestion::Bbr3>().is_ok());
+
+		let none = congestion_factory(CongestionControl::None).build(now, mtu);
+		assert!(none.into_any().downcast::<driver::congestion::Unlimited>().is_ok());
 	}
 
 	/// Loopback regression test: with the knob unset, live QUIC connections must run

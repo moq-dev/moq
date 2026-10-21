@@ -15,6 +15,8 @@ const PARAM_ROLE: u64 = 0x3;
 const PARAM_COST: u64 = 0x4;
 /// Setup Parameter id for the endpoint's Hop ID.
 const PARAM_HOP: u64 = 0x5;
+/// Setup Parameter id offering the `ietf` extension (draft-lcurley-moq-ietf): "IETF" in ASCII.
+const PARAM_IETF: u64 = 0x4945_5446;
 
 /// The cost of crossing a link that neither end priced.
 ///
@@ -182,6 +184,9 @@ pub struct Setup {
 	/// applies). `None` when the endpoint has no meaningful identity (a
 	/// leaf that never forwards); a wire value of 0 decodes as `None`.
 	pub hop: Option<crate::Hop>,
+	/// Whether this endpoint offers the `ietf` extension (lite-07+). Negotiated only when
+	/// both endpoints offer it.
+	pub ietf: bool,
 }
 
 impl Message for Setup {
@@ -214,6 +219,13 @@ impl Message for Setup {
 		}
 		if let Some(hop) = self.hop {
 			params.set_varint(PARAM_HOP, hop.id(), version)?;
+		}
+		if self.ietf {
+			// The framing it changes is unpublished, so a published version cannot offer it.
+			if !version.has_ietf() {
+				return Err(EncodeError::Version);
+			}
+			params.set_bytes(PARAM_IETF, Vec::new());
 		}
 
 		params.encode(w, version)
@@ -256,6 +268,14 @@ impl Message for ReceivedSetup {
 		let hop = params
 			.get_varint(PARAM_HOP, version)?
 			.and_then(|id| crate::Hop::new(id).ok());
+		// An older version does not know the parameter, so it ignores it like any other.
+		let ietf = match params.get_bytes(PARAM_IETF) {
+			Some(value) if version.has_ietf() => match value.is_empty() {
+				true => true,
+				false => return Err(DecodeError::InvalidValue),
+			},
+			_ => false,
+		};
 
 		Ok(Self {
 			role_present: role_code.is_some(),
@@ -265,6 +285,7 @@ impl Message for ReceivedSetup {
 				role,
 				cost,
 				hop,
+				ietf,
 			},
 		})
 	}
@@ -285,6 +306,8 @@ pub(crate) struct PeerSetup(kio::Shared<PeerSetupState>);
 struct PeerSetupState {
 	client: bool,
 	binding: crate::transport::Binding,
+	/// Whether our own SETUP offers the `ietf` extension.
+	ietf: bool,
 	seen: bool,
 	setup: Option<Setup>,
 }
@@ -294,6 +317,7 @@ impl PeerSetup {
 		Self(kio::Shared::new(PeerSetupState {
 			client,
 			binding,
+			ietf: false,
 			seen: false,
 			setup: None,
 		}))
@@ -309,6 +333,31 @@ impl PeerSetup {
 		state.seen = true;
 		state.setup = Some(received.setup);
 		Ok(())
+	}
+
+	/// Note whether our own SETUP offers the `ietf` extension, before any stream depends on it.
+	pub fn offer_ietf(self, ietf: bool) -> Self {
+		self.0.lock().ietf = ietf;
+		self
+	}
+
+	/// Poll whether the `ietf` extension is negotiated: both SETUPs offer it.
+	///
+	/// Resolves at once when we did not offer it, and otherwise once the peer's SETUP arrives.
+	pub fn poll_ietf(&self, waiter: &kio::Waiter) -> std::task::Poll<bool> {
+		if !self.0.lock().ietf {
+			return std::task::Poll::Ready(false);
+		}
+		self.poll_get(waiter, |setup| setup.ietf)
+	}
+
+	/// Whether the `ietf` extension is negotiated, or `None` before the peer's SETUP arrives.
+	pub fn ietf(&self) -> Option<bool> {
+		let state = self.0.lock();
+		match state.ietf {
+			false => Some(false),
+			true => state.setup.as_ref().map(|setup| setup.ietf),
+		}
 	}
 
 	/// Record the peer's SETUP.
@@ -453,6 +502,33 @@ mod tests {
 				"{version}"
 			);
 		}
+	}
+
+	/// The `ietf` offer is an empty parameter that only a version with the extension sends,
+	/// and an older one ignores like any unknown parameter.
+	#[test]
+	fn ietf_offer_is_lite07_only() {
+		let msg = Setup {
+			ietf: true,
+			..Default::default()
+		};
+		let buf = msg.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(Setup::decode_slice(&buf, Version::Lite07).unwrap().0, msg);
+		assert!(msg.encode_bytes(Version::Lite06).is_err());
+
+		// Length, one parameter, its 8-byte QUIC varint ID, and an empty value.
+		let older = [0x0a, 0x01, 0xc0, 0, 0, 0, 0x49, 0x45, 0x54, 0x46, 0x00];
+		assert_eq!(
+			Setup::decode_slice(&older, Version::Lite06).unwrap().0,
+			Setup::default()
+		);
+
+		// A value it does not define is refused.
+		let mut valued = buf.to_vec();
+		assert_eq!(valued.pop(), Some(0), "the offer ends in its empty value");
+		valued.extend([1, 7]);
+		valued[0] += 1;
+		assert!(Setup::decode_slice(&valued, Version::Lite07).is_err());
 	}
 
 	/// Never emit a SETUP our own receiver would refuse.

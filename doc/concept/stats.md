@@ -32,9 +32,12 @@ with unavailable transport measurements absent. Missing rendition counters
 mean zero, and JavaScript preserves omission. A known-zero gauge or transport
 measurement stays explicit, so it remains distinct from unavailable.
 
-These types do not enable automatic reporting in a publisher or player.
-See the [hang draft](/draft/moq-hang#media-stats) for track framing,
-field units, and the feedback convention.
+`moq import --stats` and `moq export --echo` report them from the
+[CLI](/bin/cli#stats-and-feedback). An import counts the frames and payload
+bytes it writes to each rendition, and video keyframes; an export counts what
+it reads and records its newest arrival. See the
+[hang draft](/draft/moq-hang#media-stats) for track framing, field units, and
+the feedback convention.
 
 ## Broadcasts
 
@@ -61,8 +64,9 @@ Each announcement carries a fresh [publisher epoch](/concept/moq-lite#publisher-
 on its route, so a restarted node or a group returning from idle is a new
 broadcast at the same path: it replaces the old one, and no relay serves it
 groups cached under the old epoch. A reader treats each epoch as its own set of
-counters. The epoch rides moq-lite 07 announcements; over older versions and
-moq-transport a reader sees the same change as an end and a start at the path.
+counters. The epoch rides moq-lite 07 announcements, and moq-transport draft 17
+and later with the [epoch extension](/draft/moq-epoch); over anything else a
+reader sees the same change as an end and a start at the path.
 An aggregating reader pins each node's subscription to its epoch, and when one
 publisher is reached through both kinds of link (with and without an epoch), it
 carries only that path's outgoing counters across the change.
@@ -211,6 +215,7 @@ stale.
     "subscriptions_started": 6, "subscriptions_ended": 2,
     "fetches": 0,
     "bytes": 1048576, "frames": 900, "groups": 30, "datagrams": 0,
+    "inflated": 0,
     "stale": { "bytes": 0, "frames": 0, "groups": 0, "datagrams": 0 },
     "announced": 1, "announced_closed": 0,
     "broadcasts": 3, "broadcasts_closed": 1,
@@ -228,6 +233,7 @@ stale.
 | `fetches` | One-shot group fetches requested, including ones that found nothing. Their payload counts in `bytes`, `frames`, and `groups`. |
 | `bytes` / `frames` / `groups` | Payload delivered. |
 | `datagrams` | Groups delivered as an unreliable datagram. A subset of `groups`. |
+| `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy, plus received compressed datagrams, which inflate on arrival. Not part of `bytes`, which counts payload as stored or sent. |
 | `stale` | Payload skipped because it aged past a subscriber's latency budget, with the same four fields. Disjoint from the top-level payload counters. |
 
 The last six fields are legacy spellings of the `*_started` and `*_ended`
@@ -242,7 +248,7 @@ should prefer the canonical name and fall back to the legacy one.
     "requests": 3, "sessions_started": 12, "sessions_ended": 10,
     "sessions": 12, "sessions_closed": 10,
     "sent_bytes": 1048576, "received_bytes": 524288,
-    "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "lan": 0 },
+    "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "lan": 0, "expired": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
     "wire_tx": 2048, "wire_rx": 1024
@@ -281,10 +287,13 @@ qmux counter source; unavailable counters are never estimated from payload.
 Readers default missing wire fields to zero for older relays.
 
 `sessions_refused` counts sessions turned away before admission, by reason.
-They never start a session. The relay's own refusals have no resolved label, so
-they count under the empty label on the default tier; an embedder can count one
-it refuses itself with `stats::Handle::refuse`, under the label and tier it
-resolved.
+They never start a session. `expired` counts a verified credential that expired
+before admission. An auth-server or embedded refusal can name a root from a
+verified credential and an optional tier; that root is the refusal's stats label,
+with an absent tier using the default. A refusal without a verified root counts
+under the empty label, never the dialed path. An embedder can also count a refusal
+with `stats::Handle::refuse`, under the label and tier it resolved. Older readers
+ignore `expired`; newer readers default a missing counter to zero.
 
 `sessions_failed` counts admitted sessions that ended abnormally, by kind: a
 subset of `sessions_ended`, so the live count is unchanged. A clean close by

@@ -38,9 +38,8 @@ pub struct MoqSubscription {
 	/// The spans of the track to deliver, or null for everything `max_delay_us` still
 	/// considers fresh. An empty list asks for nothing.
 	///
-	/// A request to the publisher, aggregated across every subscriber. The one place it
-	/// touches this subscription's reads is where they start: at the lowest group any
-	/// range starts at.
+	/// A request to the publisher, aggregated across every subscriber, and this
+	/// subscription's read filter: it reads only the groups its own ranges cover.
 	#[uniffi(default = None)]
 	pub ranges: Option<Vec<MoqRange>>,
 	/// Which pending group the publisher sends first, or null for newest first.
@@ -50,8 +49,8 @@ pub struct MoqSubscription {
 
 /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
 ///
-/// A relative start is the first frame of its group, and a relative end includes its whole
-/// group. An absolute end is exclusive.
+/// A relative or time start is the first frame of its group, and a relative or time end
+/// includes its whole group. An absolute end is exclusive.
 #[derive(Clone, Copy, uniffi::Record)]
 pub struct MoqRange {
 	/// Where delivery starts.
@@ -68,6 +67,9 @@ pub enum MoqAnchor {
 	Absolute { group: u64, frame: u64 },
 	/// The group this many before the latest, clamped to group 0: `0` is the latest group.
 	Relative { groups: u64 },
+	/// The group containing this presentation time, in microseconds. An untimed track
+	/// refuses it.
+	Time { timestamp_us: u64 },
 }
 
 /// Which of a subscription's pending groups the publisher sends first, mirroring
@@ -80,21 +82,28 @@ pub enum MoqOrder {
 	Descending,
 }
 
-impl From<MoqAnchor> for moq_net::track::Anchor {
-	fn from(anchor: MoqAnchor) -> Self {
-		match anchor {
+impl TryFrom<MoqAnchor> for moq_net::track::Anchor {
+	type Error = MoqError;
+
+	fn try_from(anchor: MoqAnchor) -> Result<Self, MoqError> {
+		Ok(match anchor {
 			MoqAnchor::Absolute { group, frame } => Self::Absolute(moq_net::track::Position { group, frame }),
 			MoqAnchor::Relative { groups } => Self::Relative(groups),
-		}
+			MoqAnchor::Time { timestamp_us } => {
+				Self::Time(moq_net::Timestamp::from_micros(timestamp_us).map_err(|_| MoqError::TimeOverflow)?)
+			}
+		})
 	}
 }
 
-impl From<MoqRange> for moq_net::track::Range {
-	fn from(range: MoqRange) -> Self {
-		Self {
-			start: range.start.into(),
-			end: range.end.map(Into::into),
-		}
+impl TryFrom<MoqRange> for moq_net::track::Range {
+	type Error = MoqError;
+
+	fn try_from(range: MoqRange) -> Result<Self, MoqError> {
+		Ok(Self {
+			start: range.start.try_into()?,
+			end: range.end.map(TryInto::try_into).transpose()?,
+		})
 	}
 }
 
@@ -128,18 +137,25 @@ impl From<MoqFetchGroupOptions> for moq_net::group::Fetch {
 	}
 }
 
-impl From<MoqSubscription> for moq_net::track::Subscription {
-	fn from(s: MoqSubscription) -> Self {
+impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
+	type Error = MoqError;
+
+	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
 		let mut subscription = moq_net::track::Subscription::default()
 			.with_priority(s.priority)
 			.with_max_delay(std::time::Duration::from_micros(s.max_delay_us));
 		if let Some(ranges) = s.ranges {
-			subscription = subscription.with_ranges(ranges.into_iter().map(Into::into));
+			subscription = subscription.with_ranges(
+				ranges
+					.into_iter()
+					.map(TryInto::try_into)
+					.collect::<Result<Vec<_>, _>>()?,
+			);
 		}
 		if let Some(order) = s.order {
 			subscription = subscription.with_order(order.into());
 		}
-		subscription
+		Ok(subscription)
 	}
 }
 
@@ -255,7 +271,7 @@ impl MoqBroadcastConsumer {
 	) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		self.driver
 			.watch(async {
-				let subscription = subscription.map(moq_net::track::Subscription::from);
+				let subscription = subscription.map(moq_net::track::Subscription::try_from).transpose()?;
 				let track = self.inner.track(&name)?.subscribe(subscription).await?;
 				Ok(Arc::new(MoqTrackConsumer::new(track, self.driver.clone())))
 			})
@@ -418,6 +434,8 @@ impl TrackInner {
 		ordered.pending = None;
 		match result {
 			Ok(frame) => Poll::Ready(Ok(frame)),
+			// The group expired, here or at a hop that reset it, so move on like an empty one.
+			Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => Poll::Ready(Ok(None)),
 			Err(err) => Poll::Ready(Err(err.into())),
 		}
 	}
@@ -663,9 +681,13 @@ impl MoqTrackConsumer {
 	/// Change this subscriber's delivery preferences.
 	///
 	/// Silently ignored if the track already ended; the update is meaningless at
-	/// that point.
-	pub fn update(&self, subscription: MoqSubscription) {
-		let _ = self.control.update(subscription.into());
+	/// that point. Errors on a time anchor the track can't serve, leaving the
+	/// preferences as they were.
+	pub fn update(&self, subscription: MoqSubscription) -> Result<(), MoqError> {
+		match self.control.update(subscription.try_into()?) {
+			Ok(()) | Err(moq_net::Error::Closed) => Ok(()),
+			Err(err) => Err(err.into()),
+		}
 	}
 
 	/// Cancel all current and future reads.

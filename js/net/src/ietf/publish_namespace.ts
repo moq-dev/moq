@@ -1,3 +1,4 @@
+import type * as Epoch from "../epoch.ts";
 import { ProtocolViolation, reason, SessionError, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
@@ -8,6 +9,69 @@ import { Parameters } from "./parameters.ts";
 import { MalformedAuthToken, tokenIntoRequest } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
+/**
+ * Which advertisement extensions a session negotiated: what its PUBLISH_NAMESPACE and
+ * NAMESPACE messages carry.
+ */
+export interface Negotiated {
+	/** MoQ Cluster: every advertisement carries HOP_PATH, and may carry ROUTE_COST. */
+	cluster: boolean;
+	/** MoQ Epoch: an advertisement may carry EPOCH. */
+	epoch: boolean;
+}
+
+/** A session that negotiated neither advertisement extension. */
+export const NEGOTIATED_NONE: Negotiated = { cluster: false, epoch: false };
+
+/** Whether NAMESPACE takes the extended form, with a Parameters field. */
+export function extended(negotiated: Negotiated): boolean {
+	return negotiated.cluster || negotiated.epoch;
+}
+
+/** The extension parameters one advertisement carries. */
+export interface AdvertParams {
+	/** The MoQ Cluster parameters (see {@link Cluster}), set exactly on a session that negotiated it. */
+	cluster?: Cluster.Advert;
+	/** The MoQ Epoch parameter: the publisher instance the route serves, if it names one. */
+	epoch?: Epoch.Valid;
+}
+
+/** Write an advertisement's extension parameters into a fresh block. */
+export function advertIntoParams(advert: AdvertParams): Parameters {
+	const params = advert.cluster ? Cluster.intoParams(advert.cluster) : new Parameters();
+	params.epoch = advert.epoch;
+	return params;
+}
+
+/**
+ * Read an advertisement's Parameters field, checked against the list of the message that
+ * carries it (PUBLISH_NAMESPACE also allows a token), expecting what the session negotiated.
+ *
+ * Every way this fails is one to close the session over: a block that does not parse, a
+ * negotiated cluster session that omits HOP_PATH, or an EPOCH on a session that did not
+ * negotiate MoQ Epoch. A request token's own refusal keeps its type.
+ */
+export async function decodeAdvert(
+	r: Reader,
+	version: IetfVersion,
+	message: "namespace" | "publish-namespace",
+	negotiated: Negotiated,
+): Promise<AdvertParams> {
+	let params: Parameters;
+	try {
+		params = await Parameters.decode(r, version, message);
+	} catch (err) {
+		// Keep a violation's own code, such as a request token's, and a refusal of the request alone.
+		if (err instanceof ProtocolViolation || err instanceof MalformedAuthToken) throw err;
+		throw new ProtocolViolation(reason(err), { cause: err });
+	}
+
+	const epoch = params.epoch;
+	// An unknown parameter to a session that never offered the extension.
+	if (epoch !== undefined && !negotiated.epoch) throw new ProtocolViolation("EPOCH without MoQ Epoch");
+	return { cluster: negotiated.cluster ? Cluster.fromParams(params) : undefined, epoch };
+}
+
 // In draft-14, ANNOUNCE is renamed to PUBLISH_NAMESPACE
 export class PublishNamespace {
 	static id = 0x06;
@@ -15,10 +79,8 @@ export class PublishNamespace {
 	requestId: bigint;
 	trackNamespace: Path.Valid;
 
-	/** The MoQ Cluster parameters (see {@link Cluster}). Set on a session that negotiated
-	 * the extension and `undefined` on one that did not, which is what decides whether they
-	 * appear on the wire at all. */
-	cluster?: Cluster.Advert;
+	/** The extension parameters, which a session that negotiated none leaves empty. */
+	params: AdvertParams;
 
 	/** The AUTHORIZATION TOKEN to send, a value agreed out of band. Decoding leaves it unset. */
 	token?: Uint8Array;
@@ -26,12 +88,12 @@ export class PublishNamespace {
 	constructor({
 		requestId,
 		trackNamespace,
-		cluster,
+		params = {},
 		token,
-	}: { requestId: bigint; trackNamespace: Path.Valid; cluster?: Cluster.Advert; token?: Uint8Array }) {
+	}: { requestId: bigint; trackNamespace: Path.Valid; params?: AdvertParams; token?: Uint8Array }) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
-		this.cluster = cluster;
+		this.params = params;
 		this.token = token;
 	}
 
@@ -41,7 +103,7 @@ export class PublishNamespace {
 			await w.u62(0n); // required_request_id_delta: only 0 supported until stream-per-request
 		}
 		await Namespace.encode(w, this.trackNamespace);
-		const params = this.cluster ? Cluster.intoParams(this.cluster) : new Parameters();
+		const params = advertIntoParams(this.params);
 		if (this.token) tokenIntoRequest(params, this.token, version);
 		await params.encode(w, version);
 	}
@@ -51,30 +113,27 @@ export class PublishNamespace {
 	}
 
 	/**
-	 * Decode the message, expecting the cluster parameters when the session negotiated the
-	 * extension.
+	 * Decode the message, expecting the parameters of the extensions the session negotiated.
 	 *
 	 * The negotiation is session state rather than anything in the message, so the caller
-	 * supplies it. A negotiated session that omits HOP_PATH is a protocol violation, which
-	 * surfaces here as a throw.
+	 * supplies it. See {@link decodeAdvert} for what it refuses.
 	 */
-	static async decode(r: Reader, version: IetfVersion, negotiated = false): Promise<PublishNamespace> {
+	static async decode(
+		r: Reader,
+		version: IetfVersion,
+		negotiated: Negotiated = NEGOTIATED_NONE,
+	): Promise<PublishNamespace> {
 		return Message.decode(r, (rd) => PublishNamespace.#decode(rd, version, negotiated));
 	}
 
-	static async #decode(r: Reader, version: IetfVersion, negotiated: boolean): Promise<PublishNamespace> {
+	static async #decode(r: Reader, version: IetfVersion, negotiated: Negotiated): Promise<PublishNamespace> {
 		const requestId = await r.u62();
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta
 		}
 		const trackNamespace = await Namespace.decode(r);
-		if (negotiated) {
-			const cluster = await Cluster.decodeParams(r, version, "publish-namespace");
-			return new PublishNamespace({ requestId, trackNamespace, cluster });
-		}
-
-		await Parameters.decode(r, version, "publish-namespace");
-		return new PublishNamespace({ requestId, trackNamespace });
+		const params = await decodeAdvert(r, version, "publish-namespace", negotiated);
+		return new PublishNamespace({ requestId, trackNamespace, params });
 	}
 }
 
@@ -172,6 +231,8 @@ export class PublishNamespaceUpdate {
 			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
 		const params = await Parameters.decode(r, version, "publish-namespace");
+		// An epoch is fixed for the life of an advertisement, so no update carries one.
+		if (params.epoch !== undefined) throw new ProtocolViolation("EPOCH on a PUBLISH_NAMESPACE update");
 		return new PublishNamespaceUpdate({ requestId, namespaceRequestId, update: Cluster.updateFromParams(params) });
 	}
 }

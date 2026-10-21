@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class SelectTest(unittest.TestCase):
-    # CI's Check job runs `lint`; `check` is its local equivalent.
+    # CI runs target lints before its test build.
     def selected(self, *paths, action="lint"):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
@@ -25,7 +25,7 @@ class SelectTest(unittest.TestCase):
                        SELECT_CALLS=str(calls), BASH_ENV=os.devnull)
             subprocess.run(["bash", "sh/rs/select.sh", action, str(changed)],
                            cwd=ROOT, env=env, check=True, capture_output=True, text=True)
-            return calls.read_text().splitlines()
+            return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
         for action in ("check", "check-test", "lint", "test"):
@@ -33,35 +33,27 @@ class SelectTest(unittest.TestCase):
                 self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz",
                               self.selected("sh/rs/nextest.sh", action=action))
         selected = self.selected("sh/rs/nextest.sh")
-        for recipe in ("tokio-features --all", "net-features", "wasm", "uring-check", "media-features --all"):
+        for recipe in ("wasm", "uring-check"):
             self.assertIn(f"rs {recipe}", selected)
         self.assertNotIn("rs capture", selected)
 
-    def test_transitive_change_keeps_boundary_checks(self):
-        calls = self.selected("rs/kio/src/lib.rs")
-        self.assertIn("rs tokio-features", calls)
-        self.assertIn("rs media-features", calls)
-        self.assertNotIn("rs tokio-features --all", calls)
-        self.assertNotIn("rs media-features --all", calls)
+    def test_queue_leaves_permutations_to_feature_gate(self):
+        for path in ("rs/kio/src/lib.rs", "rs/moq-tokio/src/lib.rs",
+                     "rs/moq-video/src/lib.rs", "Cargo.lock", "sh/rs/nextest.sh"):
+            for action in ("check", "check-test", "lint"):
+                with self.subTest(path=path, action=action):
+                    calls = self.selected(path, action=action)
+                    self.assertFalse(any("-features" in call for call in calls), calls)
+        for owner in ("tokio", "media", "net"):
+            self.assertEqual(self.selected(f"sh/rs/{owner}-features.sh"), [])
 
-    def test_feature_owner_gets_isolated_permutations(self):
-        self.assertIn("rs tokio-features --all", self.selected("rs/moq-tokio/src/lib.rs"))
-        self.assertIn("rs media-features --all", self.selected("rs/moq-video/src/lib.rs"))
+    def test_demo_crate_follows_its_dependencies(self):
+        for path in ("demo/carla/bridge/src/lib.rs", "rs/moq-video/src/lib.rs"):
+            with self.subTest(path=path):
+                calls = self.selected(path, action="test")
+                self.assertTrue(any("/demo/carla/bridge#moq-carla-bridge" in call for call in calls), calls)
+        self.assertEqual(self.selected("demo/carla/web/src/main.ts"), [])
 
-    def test_feature_script_diff_checks_its_own_modes(self):
-        for action in ("check", "lint"):
-            for owner in ("tokio", "media"):
-                with self.subTest(action=action, owner=owner):
-                    self.assertEqual(self.selected(f"sh/rs/{owner}-features.sh", action=action),
-                                     [f"rs {owner}-features --all"])
-            with self.subTest(action=action, owner="net"):
-                self.assertEqual(self.selected("sh/rs/net-features.sh", action=action),
-                                 ["rs net-features"])
-
-    def test_shared_build_input_gets_all_permutations(self):
-        calls = self.selected("Cargo.lock")
-        self.assertIn("rs tokio-features --all", calls)
-        self.assertIn("rs media-features --all", calls)
 
 
 class RecipeTest(unittest.TestCase):
@@ -113,7 +105,7 @@ class FeatureTest(unittest.TestCase):
         boundary = self.trace("tokio")
         exhaustive = self.trace("tokio", "--all")
         self.assertEqual(sum(call.startswith("clippy ") for call in boundary), 2)
-        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 9)
+        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 10)
         self.assertEqual([call for call in boundary if not call.startswith("clippy ")],
                          [call for call in exhaustive if not call.startswith("clippy ")])
 
@@ -126,7 +118,7 @@ class FeatureTest(unittest.TestCase):
                          [call for call in exhaustive if not call.startswith("check ")])
 
 
-CARGO_STUB = r"""#!/bin/bash
+CARGO_STUB = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FEATURE_CALLS"
 if [[ "$*" == 'check --locked -p moq-tokio --no-default-features --features quic' ]]; then
  echo 'a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature' >&2

@@ -105,10 +105,10 @@ when its session does.
 `MediaTrackConsumer` reads in decode order. For arrival-order reads, decode each group
 from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
 frames carry container media time as they land.
-Share `moq::MediaTimebase::init(broadcast)` through container init records when several
-imports use one source timeline. `MediaContainerStreamProducer::init` takes
-`ContainerStreamInit`; omitting its timebase keeps an independent offset. A timebase
-belongs to its broadcast and does not keep it open.
+Share `moq::MediaTimebase::init(broadcast)` through `ContainerInit` when several imports
+use one source timeline; omitting it keeps an independent offset. A timebase belongs to
+its broadcast and does not keep it open. `MediaContainerProducer` takes chunks split
+anywhere, so a raw byte stream needs no other importer.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.
@@ -190,13 +190,19 @@ Audio and video convenience decoders reject a catalog configuration with `enable
 
 Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to receive bandwidth estimates. `peek()` reads the current estimate in bits per second and `changed()` waits for a new one. Releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 
+## Compressed tracks
+
+`moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
+
 ## Track demand
+
+`demand()->wanted()` is the group subscribers want, or `std::nullopt` while nobody subscribes, and `wanted_changed()` waits for it to move: start a new group once it passes your largest. Set `TrackInfo::refresh` to have a joining subscriber ask for a new group once the newest has grown past `refresh` times its first frame.
 
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 ## Stats
 
-`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. While a client session reconnects, `session->failure()` returns why as a `moq::Error`.
+`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. While a client session reconnects, `session->failure()` returns why as a `moq::Error`, and while its first `connect` is still retrying, `client->failure()` does.
 
 ## Shutdown
 

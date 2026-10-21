@@ -18,7 +18,7 @@ and fix the rest the same way:
 - `export hls`: `moq-hls`'s server resolves per request; check that a restart
   moves new requests to the new instance and how a playlist marks the break
   (`EXT-X-DISCONTINUITY`). Coordinate with
-  [HLS export failure signal](/quest/m1/hls-failure-signal.md).
+  [Failed HLS exports error](/quest/m1/hls-failure-signal.md).
 - `export rtmp`, `export srt`, `export rtc`, both `--listen` (per-viewer
   streams in `moq-rtmp`, `moq-srt`, `moq-rtc`) and `--connect` (one push).
   SRT already rides the TS follower (`--linger`, `--stitch`); confirm its
@@ -30,11 +30,8 @@ and fix the rest the same way:
 
 Share one helper (a `moq_mux` `Source::follow`-style API per
 [catalog references](/quest/m0/broadcast-epoch/catalog-references.md))
-rather than one rule per sink. Each fix lands with a test that replaces the
+rather than one rule per sink, built on
+`origin::Consumer::announced_broadcast` rather than another hand-rolled loop. Each fix lands with a test that replaces the
 publisher while the sink runs.
 
 Public API: possibly a shared follow helper in `moq-mux`. Wire: none.
-
-## Required
-
-- [moq-net follows announced instances](/quest/m1/net-announced-follow.md) - the shared follow helper builds on moq-net's announced request, not a third hand-rolled loop

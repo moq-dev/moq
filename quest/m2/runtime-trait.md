@@ -7,6 +7,10 @@ browser, io_uring, and sim implementations, and replaces web-async in every
 crate that uses it (moq-ffi, moq-mux, moq-net, moq-room, moq-stats, and
 moq-wasm if it still exists), so a crate runs on any of them unchanged.
 
+moq-relay spawns through it too, so its in-memory integration tests
+(`rs/moq-relay/tests/integration/connection.rs`) move from paused tokio onto
+the sim: today `Cluster::new` and the auth decider `tokio::spawn`.
+
 ## Plan
 
 Decided 2026-10-10: deferred until [controlled time](/quest/m1/time/README.md)

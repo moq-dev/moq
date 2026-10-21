@@ -3,8 +3,9 @@
 //! A replaced broadcast restarts announce consumers across relays, end to end over
 //! real sessions, while the subscriptions already on it stay.
 //!
-//! On moq-lite-07 the restart travels as ANNOUNCE_RESTART; older versions and
-//! moq-transport carry it as an end and a fresh start. Either way a downstream relay
+//! On moq-lite-07 the restart travels as ANNOUNCE_RESTART, and on moq-transport between
+//! two epochs as a new advertisement before the old one's withdrawal (MoQ Epoch); older
+//! versions and anything epochless carry it as an end and a fresh start. Either way a downstream relay
 //! retires its copy of the old source, so a new subscriber never sees the old
 //! instance's cached groups.
 
@@ -50,10 +51,21 @@ async fn next_event(announced: &mut announce::Consumer) -> announce::Event {
 		.expect("announce ended")
 }
 
-/// Expect the restart of `prefix` as `version` carries it: one restart on lite-07, an
-/// end then a start elsewhere.
+/// Expect the restart of `prefix` without any epoch, as `version` carries it: one restart
+/// on lite-07, an end then a start elsewhere.
 async fn expect_restart(version: Version, announced: &mut announce::Consumer, prefix: &str) {
-	let restarts = version == "moq-lite-07-wip".parse().unwrap();
+	expect_replaced(
+		version,
+		announced,
+		prefix,
+		version == "moq-lite-07-wip".parse().unwrap(),
+	)
+	.await
+}
+
+/// Expect the restart of `prefix` as one restart when the wire replaced the instance in
+/// place, so the path was never absent, or as an end then a start.
+async fn expect_replaced(version: Version, announced: &mut announce::Consumer, prefix: &str, restarts: bool) {
 	match next_event(announced).await {
 		announce::Event::Restart(announce) if restarts => assert_eq!(announce.prefix.as_str(), prefix),
 		announce::Event::End(announce) if !restarts => {
@@ -296,7 +308,7 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	let _upstream = link(version, &publisher, &relay).await;
 	let _downstream = link(version, &relay, &viewer).await;
 
-	let claim = Claim::new(&publisher, from);
+	let claim = Claim::new(&publisher, from.clone());
 	let mut announced = viewer.consume().announced();
 	match next_event(&mut announced).await {
 		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "live"),
@@ -321,9 +333,13 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	assert!(same.is_clone(&stale), "{version}: a re-price replaced the broadcast");
 	assert_eq!(claim.answered(), 1, "{version}: a re-price asked the handler again");
 
-	// Another epoch, or none, is another instance downstream.
+	// Another epoch, or none, is another instance downstream. lite-07 restarts it in place,
+	// and so does moq-transport (MoQ Epoch) between two epochs: the new instance is
+	// advertised before the old is withdrawn, so the path is never absent.
+	let lite = |name: &str| version == name.parse().unwrap();
+	let in_place = lite("moq-lite-07-wip") || !lite("moq-lite-06") && from.is_some() && to.is_some();
 	claim.update_epoch(to.clone());
-	expect_restart(version, &mut announced, "live").await;
+	expect_replaced(version, &mut announced, "live", in_place).await;
 
 	// The subscription already open stays on the old answer.
 	claim.write(0, "old:2");
@@ -333,7 +349,9 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	let (fresh, mut subscription) = subscribe(&viewer, "live/cam").await;
 	assert!(!fresh.is_clone(&stale), "{version}: joined the old instance's copy");
 	assert_eq!(claim.answered(), 2, "{version}: the old answer was served again");
-	if version == "moq-lite-07-wip".parse().unwrap() {
+	// Every wire here but lite-06 carries the epoch: lite-07, and moq-transport with the
+	// MoQ Epoch extension.
+	if version != "moq-lite-06".parse().unwrap() {
 		assert_eq!(fresh.info().epoch, to, "{version}: resolved under the old epoch");
 	}
 	claim.write(1, "new:0");

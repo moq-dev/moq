@@ -22,6 +22,9 @@ Rules every child keeps:
 - A paused clock auto-advances while the runtime idles, so it can fire a
   timer before a real socket delivers. Where real sockets fight the paused
   clock, make the timers mockable or move the test off real sockets.
+- A mocked clock still flakes when the code jitters its timers with `rand`
+  (the draft-16 cancel race was a retry sweep jittered past a fixed settle
+  budget). Wait out the jitter's whole window, not a count of small steps.
 
 Added 2026-10-15 (maintainer): three flakes seen while landing that day's
 merge batch, ranked by how likely each hides a product bug.
@@ -29,20 +32,26 @@ merge batch, ranked by how likely each hides a product bug.
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did. moq-tokio's
 `a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
-known exception, tracked by [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
+known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
+
+Added 2026-10-19 (maintainer): three more, the redial pair first since CI
+hit it. The same day's test cost audit added the macOS QUIC connects, and the
+redundant failover drift first: it may hide a TS export bug and failed two of
+three loaded `just check` runs.
+
+Added 2026-10-20 (maintainer): three more from that day's merge batch, the
+draft-16 cancel race first since it fails on a mocked clock and so may hide
+an ordering bug. The failed-listen test was meant to join the redial quest,
+which #6032 had already finished, so it reuses #6032's reserved-port fix as
+its own child. moq-uring's `host_tracks_moq_clock` was seen the same day
+but #6056 had already fixed it by measuring the calibration gap.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [TS MP2 join hole](/quest/m1/test-flakes-2/ts-mp2-join-hole.md) - the TS export skips no MPEG-1 audio group right after its live join, fixed at the cause
-- [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
-- [Relay burst drill](/quest/m1/test-flakes-2/relay-burst-impaired.md) - the impaired transport-peer burst drill never aborts its subscription while the link is up
-- [BBR marking seed](/quest/m1/test-flakes-2/bbr-marking-seed.md) - the BBR marking test seeds its probe schedule, replays a failing seed, and its rare drop is fixed at the cause
-- [gst redial port](/quest/m1/test-flakes-2/gst-redial-port.md) - the moq-gst redial tests never lose their relay's port to `AddrInUse`
-- [js/net local close](/quest/m1/test-flakes-2/js-local-close.md) - the draft-17 locally closed track test holds under load
-- [WASM refused track](/quest/m1/test-flakes-2/wasm-refused-track.md) - the refused-track case passes and fails on its refusal, not a timeout
-- [Drill shaper failure](/quest/m1/test-flakes-2/drill-shaper-failure.md) - a drill whose shaper stopped says so directly
+- [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
+- [Relay bench holder](/quest/m1/test-flakes-2/relay-bench-holder.md) - the foreign-listener bench test fails fast when its holder cannot bind, instead of hanging on a fifo
 
 ## Related
 

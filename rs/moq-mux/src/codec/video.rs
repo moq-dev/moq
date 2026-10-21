@@ -37,16 +37,37 @@ pub(super) fn display_aspect(width: u32, height: u32, sample: (u32, u32)) -> Opt
 	if width == 0 || height == 0 || sample_width == 0 || sample_height == 0 || sample_width == sample_height {
 		return None;
 	}
-	let shown_width = u64::from(width) * u64::from(sample_width);
-	let shown_height = u64::from(height) * u64::from(sample_height);
-	let (mut divisor, mut remainder) = (shown_width, shown_height);
+	reduce_aspect(
+		u128::from(width) * u128::from(sample_width),
+		u128::from(height) * u128::from(sample_height),
+	)
+}
+
+/// Reduce positive display dimensions to the catalog's integer ratio without truncating.
+pub(crate) fn reduce_aspect(width: u128, height: u128) -> Option<(u32, u32)> {
+	if width == 0 || height == 0 {
+		return None;
+	}
+	let (mut divisor, mut remainder) = (width, height);
 	while remainder != 0 {
 		(divisor, remainder) = (remainder, divisor % remainder);
 	}
 	Some((
-		u32::try_from(shown_width / divisor).ok()?,
-		u32::try_from(shown_height / divisor).ok()?,
+		u32::try_from(width / divisor).ok()?,
+		u32::try_from(height / divisor).ok()?,
 	))
+}
+
+/// Fill a missing display aspect from container metadata, retaining and diagnosing SPS conflicts.
+pub(crate) fn fill_display_aspect(config: &mut hang::catalog::VideoConfig, aspect: (u32, u32), source: &str) {
+	if let (Some(width), Some(height)) = (config.display_aspect_width, config.display_aspect_height) {
+		if u64::from(width) * u64::from(aspect.1) != u64::from(height) * u64::from(aspect.0) {
+			tracing::warn!(kept = ?(width, height), other = ?aspect, source, "display aspect disagrees with the stream; keeping the stream's");
+		}
+	} else {
+		config.display_aspect_width = Some(aspect.0);
+		config.display_aspect_height = Some(aspect.1);
+	}
 }
 
 type Track = crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>;
