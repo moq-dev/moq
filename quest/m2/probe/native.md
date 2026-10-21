@@ -64,5 +64,3 @@ to 17, so sessions on those drafts would keep `Report`.
 
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - decides when in-flight data has expired
 - [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - separate ProbeRTT policy experiment
-- [noq#811](https://github.com/n0-computer/noq/issues/811) - probing while app-limited, proposed to n0
-- [noq#476](https://github.com/n0-computer/noq/issues/476) - the earlier bitrate-probing ask
