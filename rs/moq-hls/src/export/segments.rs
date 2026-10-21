@@ -488,6 +488,8 @@ impl Consumer {
 	/// frames. A segment whose groups already left the relay cache (or that is a gap for this
 	/// rendition) is skipped, resuming at the next one, rather than surfaced as an error; a real
 	/// fetch/transmux failure is returned, leaving the cursor to retry it on the next call.
+	/// A bound instance's retained media drains after End or Restart; a replacement's media
+	/// is never read under the old rows.
 	pub async fn next(&mut self) -> Result<Option<Segment>> {
 		loop {
 			let Some((row, resets)) = kio::wait(|waiter| self.poll_next(waiter)).await else {

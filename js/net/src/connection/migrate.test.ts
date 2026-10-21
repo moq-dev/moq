@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Instant, Manual, Milli, Nano } from "@moq/clock";
 import { RefusedRedirect } from "../error.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -269,5 +269,168 @@ test("a redirect onto an already pooled key leaves both entries to their handles
 	} finally {
 		redirected.close();
 		resident.close();
+	}
+});
+
+// How long each session on the bouncing fleet lives before its peer redirects it away.
+const life = Milli(40);
+
+/** Fire `clock` timer by timer until `pred` holds, and return the time that took. */
+async function elapse(clock: Manual, pred: () => boolean): Promise<Milli> {
+	const start = clock.now();
+	for (;;) {
+		// Let the mock sessions run before deciding that time has to pass.
+		for (let i = 0; i < 10 && !pred(); i++) await settle();
+		if (pred()) return Nano.toMilli(Instant.durationSince(clock.now(), start));
+		await clock.fire();
+	}
+}
+
+/**
+ * Let session `hop` live for `life`, then have its peer redirect it to the other address,
+ * minting a fresh credential in the query when `rotate` is set.
+ * Returns once the client has acted on the GOAWAY, so any backoff timer is already armed.
+ */
+async function bounce(clock: Manual, reload: Reload, dials: Dial[], hop: number, rotate = false): Promise<string> {
+	await waitUntil(() => dials.length === hop + 1 && reload.status.peek() === "connected");
+	const dial = dials[hop];
+	if (!dial) throw new Error(`no dial ${hop}`);
+	const peer = new URL(dial.url).port === moved.port ? url : moved;
+	const other = rotate ? `${peer.href}?jwt=${hop}` : peer.href;
+	await clock.advanceAsync(Nano.fromMilli(life));
+	await goaway(dial.server, other);
+	await waitUntil(() => reload.redirect.peek()?.href === other);
+	return other;
+}
+
+test.each([
+	["", false],
+	[" even with fresh credentials on every redirect", true],
+])("two peers redirecting to each other escalate the backoff instead of cycling%s", async (_, rotate) => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const { dials } = fleet();
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		// Every session outlives the initial delay, so the immediate-redirect damping never applies.
+		delay: { initial: Milli(10), multiplier: 4, max: Milli(1000) },
+	});
+
+	try {
+		// The first move is a healthy migration. Every return after it is a loop that waits out
+		// the jittered backoff, between half and all of a delay that escalates to the cap.
+		const delays = [0, 10, 40, 160, 640, 1000, 1000];
+		for (const [hop, delay] of delays.entries()) {
+			const other = await bounce(clock, reload, dials, hop, rotate);
+			const waited = await elapse(clock, () => dials.length === hop + 2);
+			expect(waited, `hop ${hop}`).toBeGreaterThanOrEqual(delay / 2);
+			expect(waited, `hop ${hop}`).toBeLessThanOrEqual(delay);
+			// The ping-pong is a loop to slow down, not a failure: the redirects are honoured.
+			expect(dials[hop + 1]?.url).toBe(other);
+		}
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		restore();
+	}
+});
+
+test("a redirect loop stops at the retry window", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const { dials } = fleet();
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		delay: { initial: Milli(10), multiplier: 4, max: Milli(1000), timeout: Milli(150) },
+	});
+
+	try {
+		for (let hop = 0; reload.error.peek() === undefined; hop++) {
+			// Without the loop guard every hop is healthy and resets the window, so this never ends.
+			if (hop > 10) throw new Error("the loop never gave up");
+			await bounce(clock, reload, dials, hop);
+			await elapse(clock, () => dials.length === hop + 2 || reload.error.peek() !== undefined);
+		}
+		expect(reload.error.peek()?.message).toContain("redirect loop");
+	} finally {
+		reload.close();
+		restore();
+	}
+});
+
+test("a loop no faster than the capped delay migrates without backing off", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const { dials } = fleet();
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		// Each session lives exactly the cap, so it already redials no faster than the backoff would.
+		delay: { initial: Milli(10), max: life },
+	});
+
+	try {
+		for (let hop = 0; hop < 6; hop++) {
+			await bounce(clock, reload, dials, hop);
+			expect(await elapse(clock, () => dials.length === hop + 2), `hop ${hop}`).toBe(Milli(0));
+		}
+	} finally {
+		reload.close();
+		restore();
+	}
+});
+
+test("a one-way rolling restart migrates without backing off", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const { dials } = fleet();
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		// Long enough that any backoff would be visible.
+		delay: { initial: Milli(1000) },
+	});
+
+	try {
+		await waitUntil(() => reload.status.peek() === "connected");
+		// Outlive the initial delay so only loop detection could slow this down.
+		await clock.advanceAsync(Nano.fromMilli(Milli(1100)));
+		await goaway(dials[0]?.server as WebTransport, moved.href);
+		expect(await elapse(clock, () => dials.length === 2)).toBe(Milli(0));
+	} finally {
+		reload.close();
+		restore();
+	}
+});
+
+test("repeated GOAWAYs back to the same place are restarts, not a loop", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const { dials } = fleet();
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		// Long enough that any backoff would be visible.
+		delay: { initial: Milli(300) },
+	});
+
+	try {
+		for (let i = 1; i <= 3; i++) {
+			await waitUntil(() => dials.length === i && reload.status.peek() === "connected");
+			// Outlive the initial delay so only loop detection could slow this down.
+			await clock.advanceAsync(Nano.fromMilli(Milli(350)));
+			await goaway(dials[i - 1]?.server as WebTransport, "");
+			expect(await elapse(clock, () => dials.length === i + 1), `restart ${i}`).toBe(Milli(0));
+		}
+	} finally {
+		reload.close();
+		restore();
 	}
 });
