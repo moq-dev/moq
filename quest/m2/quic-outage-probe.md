@@ -35,4 +35,3 @@ Public API: none.
 
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the other outage-time knob
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - an early probe ahead of a deadline
-- [Restart reset](/quest/m1/stateless-reset-key.md) - the restart half of #5953's item 4

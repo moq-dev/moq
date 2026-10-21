@@ -197,6 +197,7 @@ pub struct Import<E: catalog::Catalog = ()> {
 }
 
 impl<E: catalog::Catalog> Import<E> {
+	/// Import a byte stream into the broadcast using its reserved catalog producer.
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		let container = hang::catalog::Container::default();
 		// A long-lived producer handle for catalog edits (mpegts sections, later PMTs); the passed

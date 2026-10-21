@@ -33,7 +33,7 @@ bench/ffi-gen's stale wasm-bindgen lock, moq-uring's fixed 1 ms calibration
 slack, the Nightly JS benchmark stall, the CI selection test's feature count,
 and the stats producer benchmark lint. It planned
 [redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md)
-and [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md).
+and [macOS QUIC connects](https://github.com/moq-dev/moq/pull/6110).
 
 Baselines from queue run
 [39371990135](https://github.com/moq-dev/moq/actions/runs/39371990135):

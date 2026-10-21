@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { maxAgeFromSetup, maxAgeIntoSetup } from "./max_age.ts";
-import { Parameters, SetupOptions } from "./parameters.ts";
+import { Parameters } from "./parameters.ts";
+import { SetupOptions } from "./setup_options.ts";
 import { Subscribe, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import { type IetfVersion, Version } from "./version.ts";
 

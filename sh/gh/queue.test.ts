@@ -29,8 +29,14 @@ for (const job of [check.jobs.check]) {
 	assert.equal(condition(job.if, "pull_request", "release"), true);
 	assert.equal(condition(job.if, "pull_request", "release", true, "edited"), true);
 	assert.equal(condition(job.if, "pull_request", "release", true, "closed"), false);
-	assert.equal(condition(job.if, "merge_group", ""), true);
+	assert.equal(condition(job.if, "merge_group", "", true, "checks_requested"), true);
+	// A destroyed group's run only cancels its stale build through the shared queue ref.
+	assert.equal(condition(job.if, "merge_group", "", true, "destroyed"), false);
 }
+assert.deepEqual(check.on.merge_group.types, ["checks_requested", "destroyed"]);
+// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
+assert.equal(check.concurrency.group, "check-${{ github.ref }}");
+assert.equal(check.concurrency["cancel-in-progress"], true);
 
 // Every other workflow stays out of main PRs and main's merge groups: optional
 // checks run nightly on main and on release PRs, retargeted ones included.

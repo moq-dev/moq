@@ -354,6 +354,7 @@ impl Mergeable for Traffic {
 			|| self.frames < prev.frames
 			|| self.groups < prev.groups
 			|| self.datagrams < prev.datagrams
+			|| self.inflated < prev.inflated
 			|| self.stale.bytes < prev.stale.bytes
 			|| self.stale.frames < prev.stale.frames
 			|| self.stale.groups < prev.stale.groups

@@ -334,7 +334,7 @@ async fn an_object_past_its_deadline_is_a_gap_in_that_release_only() {
 		stalled_release.dropped(),
 		"every late object is counted"
 	);
-	assert_eq!(stalled_release.gaps(), 0, "the late objects were delivered");
+	assert_eq!(stalled_release.stats().gaps, 0, "the late objects were delivered");
 	assert!(
 		loss.missing.windows(2).all(|pair| pair[1] == pair[0] + 1),
 		"one run is missing: {:?}",
@@ -378,7 +378,7 @@ async fn a_group_never_delivered_leaves_its_time_out() {
 		}
 	);
 	assert_eq!(release.dropped(), 0, "nothing arrived late");
-	assert_eq!(release.gaps(), 1, "the source skipped once");
+	assert_eq!(release.stats().gaps, 1, "the source skipped once");
 }
 
 /// A group cut short loses the objects after the cut alone.
@@ -398,7 +398,7 @@ async fn a_group_cut_short_loses_only_its_tail() {
 		}
 	);
 	assert_eq!(release.dropped(), 0, "nothing arrived late");
-	assert_eq!(release.gaps(), 1, "the source skipped once");
+	assert_eq!(release.stats().gaps, 1, "the source skipped once");
 }
 
 /// What the captures don't carry goes out at its exact position too: null packets, tables, a PID

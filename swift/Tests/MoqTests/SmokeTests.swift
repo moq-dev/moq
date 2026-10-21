@@ -199,9 +199,9 @@ final class SmokeTests: XCTestCase {
         }
         let request = try await dynamic.requestedBroadcast()
         XCTAssertEqual(try request.path, "live/cam")
-        let served = try BroadcastProducer()
-        try request.accept(broadcast: served)
+        let served = try request.prepare(epoch: mintEpoch()).publish()
         _ = try await pending.value
+        try served.close()
         dynamic.cancel()
     }
 
