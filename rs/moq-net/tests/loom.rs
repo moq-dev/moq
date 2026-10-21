@@ -511,6 +511,43 @@ fn a_request_never_joins_a_retiring_front() {
 	});
 }
 
+/// A claim answer published while its claim retracts on another thread. The answer
+/// either lands before the retraction, and stays announced, or is refused without
+/// ever being announced. Announcing it and withdrawing it again shows up here as a
+/// route seen mid-race on an answer that was refused.
+#[test]
+fn a_refused_answer_is_never_announced() {
+	model(|| {
+		let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+		let claim = producer.dynamic("room").unwrap();
+		let pending = producer.consume().request_broadcast("room/alice", None);
+		driver
+			.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
+			.unwrap();
+		let prepared = block_on(claim.requested_broadcast())
+			.expect("requested")
+			.prepare(moq_net::Epoch::mint())
+			.expect("prepare");
+		let answer = prepared.broadcast().clone();
+
+		let watch = answer.clone();
+		let releaser = thread::spawn(move || {
+			drop(claim);
+			watch.route().is_some()
+		});
+		let published = prepared.publish();
+		let seen = releaser.join().unwrap();
+
+		assert_eq!(
+			published.is_ok(),
+			answer.route().is_some(),
+			"the route outlived its answer"
+		);
+		assert!(!seen || published.is_ok(), "a refused answer was announced");
+		drop(pending);
+	});
+}
+
 /// Read a track whose source already aborted with `read`, racing the front ending it.
 /// A reader that saw no end, then found one set when it went to park, parked on nothing
 /// and never woke, which shows up here as a deadlock. `read` says whether the refusal

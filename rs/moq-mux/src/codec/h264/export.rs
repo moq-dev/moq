@@ -78,10 +78,12 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
+	/// Wait for the next Annex B access unit, or `None` once the export ends.
 	pub async fn next(&mut self) -> crate::Result<Option<Bytes>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
+	/// Poll for the next Annex B access unit, or `None` once the export ends.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Bytes>>> {
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {

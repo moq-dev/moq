@@ -15,15 +15,19 @@ pub use import::*;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The frame is shorter than its required header.
 	#[error("VP8 frame too short for tag")]
 	FrameTooShort,
 
+	/// The keyframe is shorter than its required header.
 	#[error("VP8 key frame too short for header")]
 	KeyframeHeaderTooShort,
 
+	/// The keyframe header has an invalid start code.
 	#[error("VP8 key frame start code mismatch")]
 	StartCodeMismatch,
 
+	/// The frame contains no bytes.
 	#[error("empty VP8 frame")]
 	EmptyFrame,
 }

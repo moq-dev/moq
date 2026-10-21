@@ -143,7 +143,7 @@ def run(action, plan):
     command("bun", "install", "--frozen-lockfile")
     if action == "test":
         command("bun", "test", "js/common/declarations.test.ts", "js/common/deps.test.ts",
-                "js/common/worklet.test.ts")
+                "js/common/docs.test.ts", "js/common/worklet.test.ts")
         scripts("test")
         return
     if action == "build":

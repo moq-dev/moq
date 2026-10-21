@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from moq_ffi import MoqBandwidth, MoqBandwidthConsumer, MoqError, MoqReservation, MoqSession
+from moq_ffi import MoqAuth, MoqAuthToken, MoqBandwidth, MoqBandwidthConsumer, MoqError, MoqReservation, MoqSession
 
 from .origin import OriginConsumer, OriginProducer
 from .publish import TrackDemand
-from .types import ConnectionStats, ConnectionStatus
+from .types import ConnectionStats, ConnectionStatus, Grant
 
 
 class Session:
@@ -107,6 +107,14 @@ class Session:
         Individual fields are ``None`` when the transport backend doesn't report them."""
         return ConnectionStats._from_ffi(self._inner.stats())
 
+    def auth(self) -> Auth:
+        """The session's authorization: the grant its peer gave it, and more tokens to present.
+
+        Each call returns an independent watcher of the grant. A client session's
+        handle survives reconnects, presenting each added token again on every new
+        connection."""
+        return Auth(self._inner.auth())
+
     def recv_bandwidth(self) -> Bandwidth.Consumer | None:
         """Hold an owned receive-estimate consumer; releasing the last one stops PROBE."""
         inner = self._inner.recv_bandwidth()
@@ -121,6 +129,61 @@ class Session:
         next connection.
         """
         return Bandwidth(self._inner.bandwidth())
+
+
+class Auth:
+    """A session's authorization, returned by :meth:`Session.auth`.
+
+    AUTH is only on ``moq-lite-07-wip`` and on moq-transport sessions that negotiate
+    the MoQ Auth extension; elsewhere the grant stays ``None``::
+
+        auth = session.auth()
+        print(auth.grant())
+        token = await auth.add(fresh_jwt)
+    """
+
+    def __init__(self, inner: MoqAuth) -> None:
+        self._inner = inner
+
+    def grant(self) -> Grant | None:
+        """The union of every token's grant, or ``None`` until the peer first answers one.
+
+        A client session reads ``None`` while it reconnects."""
+        return Grant._from_ffi(self._inner.grant())
+
+    async def grant_changed(self) -> Grant | None:
+        """Wait for the grant to differ from the one last reported, or held when this
+        handle was made, returning it.
+
+        Raises once nothing will change it again, because the session ended."""
+        return Grant._from_ffi(await self._inner.grant_changed())
+
+    async def add(self, token: str) -> AuthToken:
+        """Present another token, returning once the peer accepts it.
+
+        Its grant joins the union until :meth:`AuthToken.cancel`. The peer's refusal
+        raises ``moq.Error`` carrying its code; a session that cannot carry another
+        token raises ``moq.Error.Unsupported``."""
+        return AuthToken(await self._inner.add(token))
+
+
+class AuthToken:
+    """One token presented with :meth:`Auth.add`, withdrawn by :meth:`cancel`."""
+
+    def __init__(self, inner: MoqAuthToken) -> None:
+        self._inner = inner
+
+    def grant(self) -> Grant | None:
+        """This token's own grant, or ``None`` after it ended."""
+        return Grant._from_ffi(self._inner.grant())
+
+    async def closed(self) -> None:
+        """Wait for the token to end, raising the peer's revocation or the session's close."""
+        await self._inner.closed()
+
+    def cancel(self) -> None:
+        """Withdraw the token, removing its grant from the union."""
+        self._inner.cancel()
 
 
 class Bandwidth:
