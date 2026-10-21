@@ -82,18 +82,11 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 
 ## Required
 
-- [qmux 0.5 upstream](/quest/m0/qmux-credit-backport-upstream.md) - old-release publication, independent of the main fix
-
-- [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut
-
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
-- [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on #412 to publish the patched 0.6.x that main adopts
-- [qmux credit](/quest/m0/qmux-credit.md) - main adopts qmux 0.6 credit and close fixes; the 0.5 backport is independent
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
-- [Benchmark regression table](/quest/m0/bench-site.md) - the nightly benchmark page is one light table where red and green flag regressions and improvements beyond each series' noise
 - [Performance audit](/quest/m0/audit-perf.md) - benchmarks that regressed since the last run are explained, fixed, or planned, and unbenched hot paths get coverage
 - [Compile time audit](/quest/m0/audit-compile-time.md) - build-time hotspots are measured against a baseline and the worst are fixed or planned
-- [Artifact size audit](/quest/m0/audit-size.md) - binary, FFI, WASM, and bundle growth since the last run is explained, fixed, or planned
 - [Simplification audit](/quest/m0/audit-simplify.md) - overbuilt code and APIs are collapsed, merged, or narrowed into a net simpler whole
+- [Lint override and deprecation audit](/quest/m0/audit-lints.md) - every lint suppression is still needed and says why, nothing calls a deprecated API, and stale Rust overrides fail the build
 - [Quest tree audit](/quest/m0/audit-quests.md) - the tree agrees with itself and with main

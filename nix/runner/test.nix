@@ -101,16 +101,24 @@ pkgs.testers.runNixOSTest {
       networking.interfaces.eth0.ipv4.addresses = lib.mkForce [ ];
       virtualisation.qemu.options = [
         "-fw_cfg name=opt/io.systemd.credentials/runner-token,file=${pkgs.writeText "runner-token" "fixture"}"
+        "-device virtio-balloon-pci,free-page-reporting=on"
       ];
       systemd.services.cache-seed-fixture = {
         requiredBy = [ "github-runner-runner.service" ];
         before = [ "github-runner-runner.service" ];
         unitConfig.ConditionPathExists = "!/var/lib/cache-seeded";
         serviceConfig.Type = "oneshot";
+        # Lay out the cache and registration the way DynamicUser left them on
+        # deployed guests, owned by the nobody user they show as there.
         script = ''
-          install -d -m 0700 /var/cache/github-runner-home
-          echo seeded > /var/cache/github-runner-home/seeded
-          chmod 0600 /var/cache/github-runner-home/seeded
+          install -d -m 0700 /var/cache/private/github-runner-home /var/lib/private/github-runner/runner
+          ln -s private/github-runner-home /var/cache/github-runner-home
+          install -d /var/lib/github-runner
+          ln -s ../private/github-runner/runner /var/lib/github-runner/runner
+          echo seeded > /var/cache/private/github-runner-home/seeded
+          echo registered > /var/lib/private/github-runner/runner/.runner
+          chmod 0600 /var/cache/private/github-runner-home/seeded /var/lib/private/github-runner/runner/.runner
+          chown -R nobody:nogroup /var/cache/private/github-runner-home /var/lib/private/github-runner
           touch /var/lib/cache-seeded
         '';
       };
@@ -122,12 +130,18 @@ pkgs.testers.runNixOSTest {
           pkgs.writeShellScript "cache-probe" ''
             set -euo pipefail
             test "$(cat "$HOME/seeded")" = seeded
+            # Java ignores $HOME and reads the passwd entry.
+            test "$(${pkgs.getent}/bin/getent passwd "$(id -u)" | cut -d: -f6)" = "$HOME"
             mkdir -p "$MBX_CACHE_DIR"
             # Jobs execute checkout scripts and tools installed in their home.
             for directory in "$HOME" /var/cache/github-runner-work; do
               printf '#!${pkgs.runtimeShell}\necho executable\n' > "$directory/exec-probe"
               chmod +x "$directory/exec-probe"
               test "$("$directory/exec-probe")" = executable
+              # Builds such as askama's template includes join `..` to a
+              # canonical path lexically, which misses through a symlink.
+              lexical=$(realpath -s --relative-to="$directory" "$(realpath "$directory/exec-probe")")
+              test "$("$directory/$lexical")" = executable
             done
             # Jobs list processes and bind the IPv6 loopback.
             command -v pgrep
@@ -237,12 +251,27 @@ pkgs.testers.runNixOSTest {
         router.wait_for_file("/tmp/udp-result")
         router.succeed("test $(cat /tmp/udp-result) = finish")
 
+    with subtest("the runner adopts the registration DynamicUser left behind"):
+        guest.succeed("test ! -L /var/lib/github-runner/runner")
+        guest.succeed("test $(cat /var/lib/github-runner/runner/.runner) = registered")
+
     with subtest("the uplink stays IPv4-only"):
         guest.succeed("test $(cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6) = 1")
 
     with subtest("the runner inherits the hosted CI locked-memory budget"):
         guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/memlock")
         guest.succeed("test $(cat /var/cache/github-runner-home/.cache/mbx/memlock) = 65536")
+
+    with subtest("the guest reports freed pages and drops caches only between jobs"):
+        # Feature bit 5 is VIRTIO_BALLOON_F_REPORTING, negotiated only when the guest driver uses it.
+        guest.succeed("test $(cut -c6 /sys/bus/virtio/drivers/virtio_balloon/virtio*/features) = 1")
+        guest.succeed("systemd-run --unit=fake-job ${pkgs.python3}/bin/python3 -c 'import time; time.sleep(600)' Runner.Worker")
+        guest.wait_until_succeeds("pgrep -f 'Runner[.]Worker'")
+        guest.succeed("systemctl start runner-reclaim.service")
+        guest.succeed("journalctl -u runner-reclaim.service | grep -F 'keeping caches'")
+        guest.succeed("systemctl stop fake-job")
+        guest.succeed("systemctl start runner-reclaim.service")
+        guest.succeed("journalctl -u runner-reclaim.service | grep -F 'Dropped caches'")
 
     with subtest("local Nix and mbx storage survive runner and VM restarts"):
         guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/marker")

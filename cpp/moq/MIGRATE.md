@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Anchors can name a time (#6074)
+
+`Anchor` gains a `Time` case holding `timestamp_us`, the group containing that presentation time, so exhaustive visits need a case for it.
+`TrackConsumer::update` now returns a result, failing with `TimestampMismatch` on a time anchor an untimed track can't serve.
+
 ### JSON consumers return `JsonValue` (#5677)
 
 `JsonSnapshotConsumer::next()` and `JsonStreamConsumer::next()` return `JsonValue` (`value`, `timestamp_us`) instead of a string; `timestamp_us` is empty when untimed.

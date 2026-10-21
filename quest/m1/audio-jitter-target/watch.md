@@ -58,5 +58,4 @@ defer validation of the current player.
 ## Related
 
 - [A/V clock](/quest/m1/av-clock.md) - reshapes `SyncInput` around the per-track target this line produces
-- [AAC bursty budgets](/quest/m1/audio-jitter-target/aac-bursty-budgets.md) - confirms the AAC reorder fix on the nightlies, no gate on this proof
 - [Opus near-zero budgets](/quest/m1/audio-jitter-target/opus-near-zero-budgets.md) - confirms the build-flush fix on the nightlies, no gate on this proof

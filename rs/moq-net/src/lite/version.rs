@@ -124,6 +124,17 @@ impl Version {
 		}
 	}
 
+	/// Whether a subscriber may open a Tracks Stream (0x8) to list a broadcast's
+	/// tracks. Added in lite-07.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_tracks(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announcements carry implicit announce ids: each `active`
 	/// ANNOUNCE_BROADCAST assigns the next per-stream ordinal, and `ended`/`restart`
 	/// reference that id instead of repeating the path. Added in lite-06.
