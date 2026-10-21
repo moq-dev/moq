@@ -117,6 +117,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	streams: HashMap<Pid, Stream<E>>,
 	/// Counters from routes a later PMT replaced, keyed by PID.
 	retired_stats: BTreeMap<u16, stats::Stream>,
+	/// Routes ended or refused so far; see [`Self::MAX_ENDED_ROUTES`].
+	routes_ended: usize,
 	/// Damaged packets, PES, or access units refused, cumulative across PID remaps.
 	damaged: BTreeMap<u16, u64>,
 	damage_log: super::damage::Log,
@@ -229,6 +231,7 @@ impl<E: catalog::Catalog> Import<E> {
 			crc_errors: BTreeMap::new(),
 			streams: HashMap::new(),
 			retired_stats: BTreeMap::new(),
+			routes_ended: 0,
 			damaged: BTreeMap::new(),
 			damage_log: Default::default(),
 			liveness: Liveness::default(),
@@ -479,14 +482,15 @@ impl<E: catalog::Catalog> Import<E> {
 		tracing::warn!(pid = pid.as_u16(), "dropped a PSI section with a bad CRC");
 	}
 
-	fn handle_pmt(&mut self, mut pmt: Pmt) -> anyhow::Result<()> {
+	fn handle_pmt(&mut self, pmt: Pmt) -> anyhow::Result<()> {
 		// PMTs of several programs may share one PID; only the chosen one maps streams.
 		if self.program.is_some_and(|program| program != pmt.program_number) {
 			return Ok(());
 		}
-		// A PID listed twice is routed by its first entry, so the listing kept below says the same.
 		let mut seen = HashSet::new();
-		pmt.streams.retain(|es| seen.insert(es.pid));
+		if let Some(es) = pmt.streams.iter().find(|es| !seen.insert(es.pid)) {
+			anyhow::bail!("the PMT lists PID {} twice", es.pid.as_u16());
+		}
 		// Which PID speaks for the program clock, so a `discontinuity_indicator` there
 		// can be read as a timebase reset rather than a counter jump.
 		if self.pcr_pid != pmt.pcr_pid {
@@ -872,19 +876,43 @@ impl<E: catalog::Catalog> Import<E> {
 	fn retire_stream(&mut self, pid: Pid) -> Option<Stream<E>> {
 		self.unclocked.remove(&pid);
 		let stream = self.streams.remove(&pid)?;
-		if let Some(current) = stream.stats() {
+		self.keep_stats(pid, stream.stats());
+		Some(stream)
+	}
+
+	/// Keep a retired route's counters for this importer, naming it the PID's latest route.
+	fn keep_stats(&mut self, pid: Pid, current: Option<stats::Stream>) {
+		if let Some(current) = current {
 			self.retired_stats
 				.entry(pid.as_u16())
 				.and_modify(|retired| retired.merge(&current))
 				.or_insert(current);
 		}
-		Some(stream)
+	}
+
+	/// Routes one import may end or refuse. A route that reopens takes a fresh track name, and the
+	/// broadcast reserves every name written for its whole life, so a source that keeps revising
+	/// its PMT would otherwise grow the broadcast without bound. Under 10 MB of reserved names;
+	/// a feed revising its PMT 50 times a day would take years to reach it.
+	const MAX_ENDED_ROUTES: usize = 65_536;
+
+	/// Count a route ending, refusing the import once its source has churned through
+	/// [`Self::MAX_ENDED_ROUTES`].
+	fn count_ended_route(&mut self) -> anyhow::Result<()> {
+		self.routes_ended += 1;
+		anyhow::ensure!(
+			self.routes_ended <= Self::MAX_ENDED_ROUTES,
+			"the TS source ended {} elementary stream routes, more than an import keeps names for",
+			Self::MAX_ENDED_ROUTES
+		);
+		Ok(())
 	}
 
 	/// End the route on `pid` for a PMT that dropped or revised its stream, as the end of input
 	/// ends every route: the PES it began goes out, what waits on the clock is placed from the
 	/// PCRs so far, and its track finishes and leaves the catalog.
 	fn end_route(&mut self, pid: Pid) -> anyhow::Result<()> {
+		self.count_ended_route()?;
 		if self.headers.remove(&pid).is_some() {
 			self.damage(pid, &anyhow::anyhow!("PES header truncated by a PMT revision"))?;
 		}
@@ -892,16 +920,14 @@ impl<E: catalog::Catalog> Import<E> {
 		let generation = self.placement.generation;
 		let (mut units, mut unplaced) = (0, 0);
 		if let Some(mut section) = self.sections.remove(&pid.as_u16()) {
-			// Its row outlives the route, as a retired stream's does.
-			self.retired_stats
-				.entry(pid.as_u16())
-				.or_insert_with(|| stats::Stream::new(".ts", stats::Class::Data));
+			self.keep_stats(pid, Some(stats::Stream::new(".ts", stats::Class::Data)));
 			section.settle(&self.placement);
 			(units, unplaced) = section.release(&self.timebase, &self.pts, generation)?;
 			unplaced += section.held.len() as u64;
 			section.finish()?;
 		}
-		if let Some(mut stream) = self.retire_stream(pid) {
+		self.unclocked.remove(&pid);
+		if let Some(mut stream) = self.streams.remove(&pid) {
 			if let Stream::PesPacket(stream) = &mut stream {
 				stream.settle(&self.placement);
 				let (published, dropped) = stream.release(&self.timebase, &self.pts, generation)?;
@@ -916,6 +942,8 @@ impl<E: catalog::Catalog> Import<E> {
 				mpegts.tracks.remove(&name);
 			}
 			units += stream.finish()?;
+			// Finishing can publish a held frame, which its counters then include.
+			self.keep_stats(pid, stream.stats());
 		}
 		if unplaced > 0 {
 			*self.unplaced.entry(pid.as_u16()).or_default() += unplaced;
@@ -1197,6 +1225,8 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Refuse the undecoded stream on `pid` rather than carry it altered: its track ends with an
 	/// error and leaves the catalog, and the PID is dropped from here on.
 	fn refuse(&mut self, pid: Pid, why: &str) -> anyhow::Result<()> {
+		// A PMT that keeps losing and regaining its PCR reopens the stream each time.
+		self.count_ended_route()?;
 		self.pending.remove(&pid);
 		self.headers.remove(&pid);
 		if let Some(section) = self.sections.remove(&pid.as_u16()) {
@@ -9971,5 +10001,160 @@ pub(super) mod test {
 
 		let row = &import.stats().streams[&0x21];
 		assert_eq!((row.units, row.quiet), (1, None));
+	}
+
+	/// A PID decoded as audio, then revised to private sections, then dropped, reports the
+	/// section route it ended on.
+	#[test]
+	fn a_dropped_route_reports_the_route_it_ended_on() {
+		use crate::container::ts::psi::{Es, Pmt};
+		const AUDIO_PID: u16 = 0x0062;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pmt = |streams: &[u8]| Pmt {
+			program_number: 1,
+			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
+			program_info: Vec::new(),
+			streams: streams
+				.iter()
+				.map(|&stream_type| Es {
+					stream_type,
+					pid: Pid::new(AUDIO_PID).unwrap(),
+					descriptors: Vec::new(),
+				})
+				.collect(),
+		};
+
+		import.handle_pmt(pmt(&[MP2])).unwrap();
+		import.decode(&mp2_pes(AUDIO_PID, 0, 90_000, [0xAA, 0xBB])).unwrap();
+		import.decode(&mp2_pes(AUDIO_PID, 1, 180_000, [0xAA, 0xBB])).unwrap();
+		import.handle_pmt(pmt(&[0x05])).unwrap();
+		import.handle_pmt(pmt(&[])).unwrap();
+
+		let row = &import.stats().streams[&AUDIO_PID];
+		assert_eq!((row.track.as_str(), row.class), (".ts", super::stats::Class::Data));
+	}
+
+	/// Ending a self-describing audio route drains the frame it held for a successor, and its
+	/// counters include that frame.
+	#[test]
+	fn a_dropped_audio_route_counts_the_frame_its_end_drains() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pmt = |streams: Vec<Es>| Pmt {
+			program_number: 1,
+			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
+			program_info: Vec::new(),
+			streams,
+		};
+		let audio = Es {
+			stream_type: MP2,
+			pid: Pid::new(PCR_PID).unwrap(),
+			descriptors: Vec::new(),
+		};
+
+		// The second frame spans two PES, so it begins in a carried tail and is held for a
+		// successor header that never comes.
+		let (mut head, second) = (mp2_frame(0xAA), mp2_frame(0xBB));
+		head.extend_from_slice(&second[..36]);
+		import.handle_pmt(pmt(vec![audio])).unwrap();
+		import.decode(&audio_pes_packet(PCR_PID, 0, 90_000, &head)).unwrap();
+		import
+			.decode(&audio_pes_packet(PCR_PID, 1, 92_160, &second[36..]))
+			.unwrap();
+		assert_eq!(import.stats().streams[&PCR_PID].unconfirmed, 0);
+		import.handle_pmt(pmt(Vec::new())).unwrap();
+
+		assert_eq!(import.stats().streams[&PCR_PID].unconfirmed, 1);
+	}
+
+	/// A PMT listing one PID twice is malformed, so it refuses the import rather than pick an
+	/// entry to route by.
+	#[test]
+	fn a_pmt_listing_a_pid_twice_refuses_the_import() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let (_catalog, mut import) = psi_import();
+		let es = |stream_type| Es {
+			stream_type,
+			pid: Pid::new(0x0062).unwrap(),
+			descriptors: Vec::new(),
+		};
+		let pmt = Pmt {
+			program_number: 1,
+			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
+			program_info: Vec::new(),
+			streams: vec![es(0x06), es(0x15)],
+		};
+		let err = import.handle_pmt(pmt).expect_err("a PID listed twice is refused");
+		assert!(err.to_string().contains("twice"), "{err:#}");
+	}
+
+	/// Every ended route leaves its track name reserved, so a source that keeps revising its PMT
+	/// is refused once it has ended as many routes as an import keeps names for.
+	#[test]
+	fn pmt_churn_past_the_route_bound_refuses_the_import() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let (_catalog, mut import) = psi_import();
+		let pmt = |streams: &[u8]| Pmt {
+			program_number: 1,
+			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
+			program_info: Vec::new(),
+			streams: streams
+				.iter()
+				.map(|&stream_type| Es {
+					stream_type,
+					pid: Pid::new(0x0062).unwrap(),
+					descriptors: Vec::new(),
+				})
+				.collect(),
+		};
+		import.handle_pmt(pmt(&[0x06])).unwrap();
+		import.routes_ended = super::Import::<()>::MAX_ENDED_ROUTES - 1;
+
+		import
+			.handle_pmt(pmt(&[0x15]))
+			.expect("the last route within the bound");
+		let err = import.handle_pmt(pmt(&[])).expect_err("one route past the bound");
+		assert!(err.to_string().contains("routes"), "{err:#}");
+	}
+
+	/// A PMT that keeps dropping and restoring its PCR reopens the stream each time, so its
+	/// refusals count toward the same bound.
+	#[test]
+	fn pcr_churn_past_the_route_bound_refuses_the_import() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pmt = |pcr_pid: Option<u16>| Pmt {
+			program_number: 1,
+			pcr_pid: pcr_pid.map(|pid| Pid::new(pid).unwrap()),
+			program_info: Vec::new(),
+			streams: vec![Es {
+				stream_type: 0x06,
+				pid: Pid::new(0x0062).unwrap(),
+				descriptors: Vec::new(),
+			}],
+		};
+		import.handle_pmt(pmt(Some(PCR_PID))).unwrap();
+		import.routes_ended = super::Import::<Ext>::MAX_ENDED_ROUTES;
+
+		let err = import.handle_pmt(pmt(None)).expect_err("a refusal past the bound");
+		assert!(err.to_string().contains("routes"), "{err:#}");
 	}
 }

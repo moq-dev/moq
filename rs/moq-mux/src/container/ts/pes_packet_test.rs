@@ -919,35 +919,6 @@ async fn a_dropped_private_stream_finishes_and_its_reused_pid_opens_a_new_track(
 	assert_eq!(frames.len(), 1);
 	assert_eq!(&frames[0].payload[..], &feed.pes[2].1[..]);
 }
-
-/// A PMT listing the private PID twice is routed by its first entry, so a revision keeping only
-/// the second is a change: the first's track gives way to one for the second.
-#[tokio::test(start_paused = true)]
-async fn a_pid_listed_twice_is_routed_by_its_first_entry() {
-	let mut feed = Feed::new(0x06, KLVA);
-	let twice: &[(u8, u16, &[u8])] = &[
-		(0x02, VIDEO_PID, &[]),
-		(0x06, DATA_PID, KLVA),
-		(0x15, DATA_PID, METADATA),
-	];
-	feed.mux.pmt_with(PMT_PID, 1, CLOCK_PID, twice, 0);
-	let start = 1_000 * MS;
-	feed.pcr(start).picture(start).data(klv(1, 8)).pcr(start + 40 * MS);
-	let head = feed.bytes();
-	let second: &[(u8, u16, &[u8])] = &[(0x02, VIDEO_PID, &[]), (0x15, DATA_PID, METADATA)];
-	feed.mux.pmt_with(PMT_PID, 1, CLOCK_PID, second, 0);
-	feed.picture(start + 40 * MS).data(klv(2, 8)).pcr(start + 80 * MS);
-
-	let mut imported = start_import(&head);
-	let (old, entry) = imported.entry().unwrap();
-	assert_eq!(entry.pes_packet.as_ref().unwrap().stream_type, 0x06);
-	imported.import.decode(&feed.bytes()[head.len()..]).unwrap();
-	imported.import.finish().unwrap();
-	let (name, entry) = imported.entry().expect("the second entry's stream");
-	assert_ne!(name, old);
-	assert_eq!(entry.pes_packet.as_ref().unwrap().stream_type, 0x15);
-}
-
 /// Revisions apply by what they say, across the 5-bit `version_number` wrap: versions 30, 31,
 /// then 0 each relabel the stream and open their own track, while a repetition of any of them
 /// keeps the track it opened.
