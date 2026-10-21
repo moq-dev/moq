@@ -12,20 +12,6 @@ on:
   # workflow this way so a broken build surfaces before the tag is cut.
   workflow_call:
   workflow_dispatch:
-  # Packaging changes only, like the other FFI release workflows. A change to
-  # the moq-ffi sources is covered on every platform by cheaper gates: check.yml
-  # compiles it and regenerates the Dart bindings, platform.yml compiles it for
-  # macOS, Windows, and iOS, and nightly runs this full matrix. Main PRs skip
-  # it; `edited` catches a main PR retargeted to release.
-  pull_request:
-    branches: [release]
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - ".github/workflows/release-dart-ffi.yml"
-      - ".github/workflows/release-ffi.yml"
-      - "dart/moq_ffi/**"
-      - "sh/dart/**"
-      - "rs/moq-ffi/build.sh"
 
 permissions:
   contents: read
