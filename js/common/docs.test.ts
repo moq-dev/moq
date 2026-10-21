@@ -77,6 +77,22 @@ test("only the public surface needs docs", () => {
 	expect(found).toEqual([]);
 });
 
+test("a literal computed key is an ordinary member", () => {
+	const found = check({
+		"/dist/index.d.ts":
+			'/** Documented. */\nexport declare class Thing {\n    ["parse"](): void;\n    [42]: string;\n}\n',
+	});
+	expect(found).toEqual(["index.d.ts: Thing.parse", "index.d.ts: Thing.42"]);
+});
+
+test("a star re-export skips the default export", () => {
+	const found = check({
+		"/dist/inner.d.ts": "export default class Hidden {}\n/** Documented. */\nexport declare const shown: number;\n",
+		"/dist/index.d.ts": 'export * from "./inner";\n',
+	});
+	expect(found).toEqual([]);
+});
+
 test("custom element reactions are exempt only on an element", () => {
 	const found = check({
 		"/dist/index.d.ts": [

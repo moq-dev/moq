@@ -126,6 +126,7 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		const module = load(file);
 		const binding = module.exports.get(name);
 		if (binding) return { file, binding };
+		if (name === "default") return undefined;
 		for (const specifier of module.stars) {
 			const target = dtsPath(files, file, specifier);
 			if (!target) continue;
@@ -135,14 +136,17 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		return undefined;
 	};
 
-	const walk = (file: string, prefix: string, chain = new Set<string>()) => {
+	// `export *` never re-exports a default, so a file reached through one skips it.
+	const walk = (file: string, prefix: string, chain = new Set<string>(), star = false) => {
 		if (chain.has(file)) return;
 		chain.add(file);
 		const module = load(file);
-		for (const [name, binding] of module.exports) visit(file, prefix + name, binding);
+		for (const [name, binding] of module.exports) {
+			if (!(star && name === "default")) visit(file, prefix + name, binding);
+		}
 		for (const specifier of module.stars) {
 			const target = dtsPath(files, file, specifier);
-			if (target) walk(target, prefix, chain);
+			if (target) walk(target, prefix, chain, true);
 		}
 	};
 
@@ -237,7 +241,7 @@ function isElement(superClass: unknown): boolean {
 
 // The name of a class member a consumer can use, or undefined for one that needs no doc:
 // constructors, private and protected members, `#private`, an element's custom element
-// reactions, and symbol-keyed members such as brands.
+// reactions, and members keyed by an expression, such as symbol brands.
 function memberName(member: Node | { type: string; [key: string]: unknown }, element: boolean): string | undefined {
 	const m = member as {
 		type: string;
@@ -250,9 +254,9 @@ function memberName(member: Node | { type: string; [key: string]: unknown }, ele
 	if (m.type === "TSIndexSignature" || m.type === "StaticBlock") return undefined;
 	if (m.kind === "constructor") return undefined;
 	if (m.accessibility === "private" || m.accessibility === "protected") return undefined;
-	if (m.computed || !m.key) return undefined;
+	if (!m.key) return undefined;
 	let name: string | undefined;
-	if (m.key.type === "Identifier") name = m.key.name;
+	if (m.key.type === "Identifier" && !m.computed) name = m.key.name;
 	else if (m.key.type === "StringLiteral" || m.key.type === "NumericLiteral") name = String(m.key.value);
 	return name === undefined || (element && REACTIONS.has(name)) ? undefined : name;
 }
