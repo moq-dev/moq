@@ -751,6 +751,33 @@ int main()
 	}
 	printf("names the failure while reconnecting: ok\n");
 
+	// While the first dial keeps failing, the dock names why instead of a bare
+	// "Connecting…". The relay is gone before the start, so nothing answers.
+	{
+		std::string url;
+		{
+			TestRelay relay;
+			url = relay.Url();
+		}
+		reset(url);
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		std::string reason;
+		CHECK(WaitFor([&] {
+			int code = 0;
+			o.CopyLastFailure(&code, &reason);
+			return !reason.empty();
+		}));
+		// Still retrying rather than failed, so this is the first-dial path.
+		CHECK(!o.IsLiveSession());
+		CHECK(signalCount() == 0);
+		o.Stop();
+		int code = 0;
+		o.CopyLastFailure(&code, &reason);
+		CHECK(reason.empty());
+	}
+	printf("names the failure while the first dial retries: ok\n");
+
 	// Stopping while the connect is still pending cancels it: nothing but the stop
 	// reaches OBS, then or later.
 	{

@@ -64,7 +64,7 @@ public:
 	std::string GetEpoch();
 
 	// Most recent connect/reconnect failure for this Start(), or empty when none.
-	// Thread-safe; the dock polls this while reconnecting and on stop.
+	// Thread-safe; the dock polls this while connecting, while reconnecting, and on stop.
 	void CopyLastFailure(int *code, std::string *reason);
 
 	// The bitrate the video encoders follow the bandwidth grant at, summed over
@@ -90,6 +90,8 @@ private:
 				   ConnectionStats *out);
 	// Between reconnects: name why the session is down, for CopyLastFailure.
 	void RecordReconnectFailure(const std::shared_ptr<moq::Session> &current);
+	// Before the first connect: name why the dial is retrying, for CopyLastFailure.
+	void RecordDialFailure();
 
 	// One Start()'s connection: the client dialing, the session once it connects,
 	// and the pending call whose continuation reports on it. Replaced wholesale by
@@ -174,6 +176,8 @@ private:
 	// Guards the group below, which the dock reads from the UI thread.
 	std::mutex mutex;
 	std::shared_ptr<moq::Session> session;
+	// The client while its first connect is pending, so the dock can ask why it retries.
+	std::shared_ptr<moq::Client> dialing;
 	std::shared_ptr<moq::BandwidthConsumer> recv_bandwidth;
 	bool connected = false;
 	bool live = false;

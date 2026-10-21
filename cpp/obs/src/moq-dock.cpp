@@ -1235,8 +1235,9 @@ void MoQDock::UpdateStatus()
 	const bool everConnected = moq && (moq->IsLiveSession() || obs_output_get_connect_time_ms(output) > 0);
 	if (!everConnected) {
 		if (!failText.isEmpty()) {
-			status->setText(QString("● %1").arg(failText));
-			status->setStyleSheet("color: #c0392b;");
+			// The first dial is still retrying; one that gave up stops the output instead.
+			status->setText(QString("● Connecting… · %1").arg(failText));
+			status->setStyleSheet("color: #d08b1d;");
 			statsBox->setText(failText);
 		} else {
 			status->setText("● Connecting…");

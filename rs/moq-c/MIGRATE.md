@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq_track_info` gains `compress` (#5928)
+
+The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.
+
 ### Anchors can name a time (#6074)
 
 `moq_anchor` gains `timestamp_us`, read with the new `MOQ_ANCHOR_TIME` kind, which changes its ABI.

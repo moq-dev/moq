@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `mdns::Secret` is `secret::Secret`, read from a file (#5910)
+
+The 32-byte secret type moved out of `mdns` so `listen.reset.secret` shares it, and it no longer parses inline hex.
+Name it `moq_tokio::secret::Secret`.
+Replace `Secret::load(value)` with `Secret::read(path)`, which reads a file of 64 hexadecimal characters and returns `secret::Error`; replace `Secret::new(hex)` and `str::parse` with `Secret::from([u8; 32])`, decoding the hex yourself.
+
 ### Dropping an unfinished send stream resets it (#5909)
 
 `quic::driver::SendStream` and `quic::web::SendStream` send `RESET_STREAM` with code 0 when dropped before `finish()`, instead of finishing implicitly.

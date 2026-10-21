@@ -240,6 +240,7 @@ bool MoQOutput::Start()
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
 		epoch = *route.epoch;
+		dialing = client;
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
@@ -282,6 +283,7 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		session = current->session;
+		dialing.reset();
 		recv_bandwidth = session->recv_bandwidth();
 		connected = true;
 		live = true;
@@ -357,6 +359,7 @@ void MoQOutput::Fail(const std::shared_ptr<Attempt> &current, const moq::Error &
 		std::lock_guard<std::mutex> lock(mutex);
 		recv_bandwidth.reset();
 		session.reset();
+		dialing.reset();
 		connected = false;
 		live = false;
 		last_failure_code = FailureCode(error);
@@ -399,6 +402,7 @@ void MoQOutput::Reset()
 		std::lock_guard<std::mutex> lock(mutex);
 		recv_bandwidth.reset();
 		session.reset();
+		dialing.reset();
 		connected = false;
 		live = false;
 		url.clear();
@@ -531,6 +535,27 @@ void MoQOutput::RecordReconnectFailure(const std::shared_ptr<moq::Session> &curr
 	}
 }
 
+void MoQOutput::RecordDialFailure()
+{
+	std::shared_ptr<moq::Client> current;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if (!dialing)
+			return;
+		current = dialing;
+	}
+
+	// Read outside the lock: it calls into moq-ffi.
+	const auto failure = current->failure();
+
+	std::lock_guard<std::mutex> lock(mutex);
+	// A Stop(), restart, or connect while failure() ran made this one stale.
+	if (dialing != current || !failure)
+		return;
+	last_failure_code = FailureCode(*failure);
+	last_failure_reason = failure->to_string();
+}
+
 bool MoQOutput::CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
 				      ConnectionStats *out)
 {
@@ -564,6 +589,8 @@ bool MoQOutput::IsLiveSession()
 
 void MoQOutput::CopyLastFailure(int *code, std::string *reason)
 {
+	RecordDialFailure();
+
 	std::lock_guard<std::mutex> lock(mutex);
 	if (code)
 		*code = last_failure_code;

@@ -126,12 +126,15 @@ class TrackInfo:
     times its first frame a group's later bytes may grow before a joining subscriber
     asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
     ``None`` means the track is untimed, on both publish and receive.
+    ``compress`` DEFLATEs each group on the wire to peers that support it; readers
+    always see the original frames.
     """
 
     priority: int = 127
     max_age: timedelta | None = None
     refresh: int | None = None
     timescale: int | None = None
+    compress: bool = False
 
     def _ffi(self) -> MoqTrackInfo:
         return MoqTrackInfo(
@@ -139,6 +142,7 @@ class TrackInfo:
             max_age_us=_opt_us(self.max_age, "max_age"),
             refresh=self.refresh,
             timescale=self.timescale,
+            compress=self.compress,
         )
 
     @staticmethod
@@ -148,6 +152,7 @@ class TrackInfo:
             max_age=None if info.max_age_us is None else _from_us(info.max_age_us),
             refresh=info.refresh,
             timescale=info.timescale,
+            compress=info.compress,
         )
 
 
