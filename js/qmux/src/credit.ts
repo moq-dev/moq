@@ -34,9 +34,10 @@ export class Credit {
 		this.#max = max;
 	}
 
-	/** Try to claim up to `limit` units. Returns amount claimed (0n if none available). */
+	/** Try to claim up to `limit` units. Returns amount claimed (0n if none
+	 *  available or closed). */
 	tryClaim(limit: bigint): bigint {
-		if (limit === 0n) return 0n;
+		if (limit === 0n || this.#closed) return 0n;
 		const available = this.#max - this.#used;
 		if (available <= 0n) return 0n;
 		const claimed = limit < available ? limit : available;

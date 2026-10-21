@@ -861,6 +861,42 @@ describe("Session integration (scripted peer)", () => {
 		expect(FakePeer.last?.closeInfo).toBeDefined();
 	});
 
+	test("STOP_SENDING fails a bidi write parked on stream credit", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams({ initialMaxStreamDataBidiRemote: 0n }) });
+
+		const bidi = await session.createBidirectionalStream();
+		const write = settleTo(bidi.writable.getWriter().write(new Uint8Array(10)));
+		await settle();
+
+		peer.send({ type: "stop_sending", id: Stream.Id.create(0n, Stream.Dir.Bi, false), code: VarInt.from(5) });
+		const err = await Promise.race([write, new Promise((resolve) => setTimeout(() => resolve("pending"), 500))]);
+		expect(err).toBeInstanceOf(StreamError);
+		session.close();
+	});
+
+	test("no stream data follows STOP_SENDING once connection credit arrives", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams({ initialMaxData: 0n }) });
+
+		const uni = await session.createUnidirectionalStream();
+		const write = settleTo(uni.getWriter().write(new Uint8Array(10)));
+		await settle();
+
+		const id = Stream.Id.create(0n, Stream.Dir.Uni, false);
+		peer.send({ type: "stop_sending", id, code: VarInt.from(5) });
+		peer.send({ type: "max_data", max: 100n });
+		peer.send({ type: "ping_request", sequence: 1n });
+		await waitFor(() => peer.has("ping_response"));
+		await settle();
+
+		expect(await write).toBeInstanceOf(Error);
+		expect(peer.received().some((f) => f.type === "stream" && f.id.value.value === id.value.value)).toBe(false);
+		session.close();
+	});
+
 	test("close() sends APPLICATION_CLOSE, resolves closed, and is idempotent", async () => {
 		const { session, peer } = connect();
 		await session.ready;

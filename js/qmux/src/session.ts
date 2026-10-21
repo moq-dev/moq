@@ -1582,6 +1582,9 @@ export default class Session implements WebTransport {
 		stream.error(stopped);
 		this.#sendStreams.delete(streamId);
 		this.#scheduler?.dropStream(streamId, stopped);
+		// A write parked on stream credit isn't interrupted by error(); fail it here,
+		// even though a live receive half keeps the flow state around.
+		this.#streamFlow.get(streamId)?.sendCredit.close(stopped);
 
 		this.#sendPriorityFrame({
 			type: "reset_stream",
@@ -1780,6 +1783,8 @@ export default class Session implements WebTransport {
 
 		// Wait for stream count permit
 		await this.#bidiStreamCredit.claim(1n);
+		// close() may have torn down the session while the claim resumed.
+		if (this.#closed) throw this.#closed;
 
 		const streamId = Stream.Id.create(this.#nextBiStreamId++, Stream.Dir.Bi, this.#isServer);
 		const streamIdVal = streamId.value.value;
@@ -1857,6 +1862,7 @@ export default class Session implements WebTransport {
 
 		// Wait for stream count permit
 		await this.#uniStreamCredit.claim(1n);
+		if (this.#closed) throw this.#closed;
 
 		const streamId = Stream.Id.create(this.#nextUniStreamId++, Stream.Dir.Uni, this.#isServer);
 		const streamIdVal = streamId.value.value;
