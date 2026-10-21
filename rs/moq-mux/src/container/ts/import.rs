@@ -345,8 +345,10 @@ impl<E: catalog::Catalog> Import<E> {
 			if self.pcr_pid.is_some_and(|p| p.as_u16() == pid) && pkt[1] & 0x80 == 0 {
 				if discontinuity_indicator(&pkt) {
 					// A PES this packet starts ends the one before it on its PID whole, on the old
-					// clock; only the other PIDs' are cut short by the break.
+					// clock; only the other PIDs' are cut short by the break. An adaptation-only
+					// packet starts none whatever its PUSI says, as `pes_packet` treats it.
 					if pkt[1] & 0x40 != 0
+						&& matches!(payload(&pkt), Payload::Bytes(_))
 						&& let Ok(pid) = Pid::new(pid)
 					{
 						self.flush(pid)?;
@@ -8409,6 +8411,35 @@ pub(super) mod test {
 			import.stats().streams[&VIDEO].units,
 			1,
 			"the keyframe before the damage"
+		);
+	}
+
+	/// A flagged clock break that sets PUSI on an adaptation-only packet starts no PES, so it
+	/// proves nothing whole: the unbounded picture open across it is cut short and dropped.
+	#[test]
+	fn flagged_break_without_payload_drops_the_open_picture() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let unbounded = |cc, pts, keyframe| {
+			let mut packet = video_pes(VIDEO, cc, pts, None, &annexb_au(keyframe));
+			let start = 5 + usize::from(packet[4]);
+			packet[start + 4..start + 6].fill(0);
+			packet
+		};
+		let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		data.extend(unbounded(0, 90_000, true));
+		data.extend(unbounded(1, 90_000 + FRAME, false));
+		let mut flagged = clock_break_packet(VIDEO);
+		flagged[1] |= 0x40;
+		flagged[3] |= 1;
+		data.extend(flagged);
+		import.decode(&data).unwrap();
+		import.finish().unwrap();
+		assert_eq!(
+			import.stats().streams[&VIDEO].units,
+			1,
+			"only the keyframe the second start proved whole"
 		);
 	}
 
