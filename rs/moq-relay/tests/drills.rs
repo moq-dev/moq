@@ -1373,11 +1373,22 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	}
 }
 
-/// A finite deep queue, below the media bitrate, must shed superseded groups while
-/// preserving the newest catalog snapshot. Random loss is disabled in this acceptance test.
 #[tokio::test]
 async fn ietf_subscriber_max_age_skips_bufferbloat() {
-	let version: moq_net::Version = "moq-transport-22".parse().unwrap();
+	subscriber_max_age_skips_bufferbloat("moq-transport-22").await
+}
+
+#[tokio::test]
+async fn lite_subscriber_max_age_skips_bufferbloat() {
+	subscriber_max_age_skips_bufferbloat("moq-lite-06").await
+}
+
+/// A finite deep queue, below the media bitrate, must shed superseded groups while
+/// preserving the newest catalog snapshot. Random loss is disabled in this acceptance test.
+/// On both protocols: this is the benign twin of a subscriber that stalls on purpose, so
+/// bounding what a stalled one makes the relay hold must not cost it the live edge.
+async fn subscriber_max_age_skips_bufferbloat(version: &str) {
+	let version: moq_net::Version = version.parse().unwrap();
 	let mut config = relay_config();
 	config.listen.version = vec![version];
 	let relay = RelayHost::start(config).await;

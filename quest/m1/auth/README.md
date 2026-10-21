@@ -145,8 +145,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 ## Required
 
 - [Auth outlives its session](/quest/m1/auth/issuer.md) - one `auth::Handle` spans a connection's sessions, so a route's auth survives a reconnect
-- [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
-  binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - extra credentials ride
   AUTH streams: a session starts on the token its SETUP or URL carried and its
   AUTH streams add the rest

@@ -76,6 +76,14 @@ public:
 	};
 	bool TryGetVideoRate(VideoRate *out);
 
+	// Present a fresh publish token on the connected session without reconnecting,
+	// replacing the one presented here before once the relay accepts it. False when
+	// there is no session yet. The outcome is logged, and a refusal is kept for
+	// TokenRefusal(); a session without in-band AUTH refuses it.
+	bool PresentToken(const std::string &token);
+	// Why the relay refused the token PresentToken() last presented, or empty.
+	std::string TokenRefusal();
+
 private:
 	friend struct MoQOutputStatsTest;
 	bool CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
@@ -99,6 +107,11 @@ private:
 		bool connected = false;
 		// False while the session is between reconnects.
 		bool live = false;
+		// The latest token PresentToken() got accepted, presented on every reconnect
+		// until it is replaced or the attempt is dropped, and the call presenting the
+		// next one.
+		std::shared_ptr<moq::AuthToken> token;
+		std::optional<moq::Continuation> presenting;
 	};
 
 	void OnConnect(const std::shared_ptr<Attempt> &attempt, moq::expected<std::shared_ptr<moq::Session>> result);
@@ -172,6 +185,7 @@ private:
 	std::string epoch;
 	int last_failure_code = 0;
 	std::string last_failure_reason;
+	std::string token_refusal;
 
 	// Written on the worker, read by GetConnectTime().
 	std::atomic<int> connect_time_ms{0};

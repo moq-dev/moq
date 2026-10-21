@@ -10,11 +10,16 @@
 //
 //	ffmpeg ... -f h264 - | go-interop publish --url http://localhost:4443 --broadcast b.hang
 //	go-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
+//
+// --auth-version offers only that version, one that carries AUTH: the client waits
+// for the grant the relay sends and prints it as an `auth granted` line before it
+// starts.
 package main
 
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -74,8 +79,43 @@ func publishTone(ctx context.Context, audio *moqaudio.Producer) {
 	}
 }
 
-func publish(ctx context.Context, url, broadcast string) error {
-	client, err := moq.Dial(ctx, url, moq.WithTLSVerify(false))
+// dial connects to url. With an authVersion, it offers only that version and waits
+// for the relay's grant, printing it in the Rust client's `auth granted` shape.
+func dial(ctx context.Context, url, authVersion string, timeout time.Duration) (*moq.Client, error) {
+	opts := []moq.ClientOption{moq.WithTLSVerify(false)}
+	if authVersion != "" {
+		opts = append(opts, moq.WithVersions(authVersion))
+	}
+	client, err := moq.Dial(ctx, url, opts...)
+	if err != nil || authVersion == "" {
+		return client, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	auth := client.Session().Auth()
+	grant := auth.Grant()
+	for grant == nil {
+		if grant, err = auth.GrantChanged(ctx); err != nil {
+			client.Close()
+			return nil, fmt.Errorf("grant: %w", err)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "auth granted publish=%s subscribe=%s\n", patterns(grant.Publish), patterns(grant.Subscribe))
+	return client, nil
+}
+
+// patterns renders a grant's patterns as a JSON list, the shape the Rust client logs.
+func patterns(list []string) string {
+	if list == nil {
+		list = []string{}
+	}
+	out, _ := json.Marshal(list)
+	return string(out)
+}
+
+func publish(ctx context.Context, url, broadcast, authVersion string, timeout time.Duration) error {
+	client, err := dial(ctx, url, authVersion, timeout)
 	if err != nil {
 		return err
 	}
@@ -176,11 +216,11 @@ func catalogWithVideo(ctx context.Context, consumer *moq.BroadcastConsumer) (*mo
 	}
 }
 
-func subscribe(ctx context.Context, url, broadcast string, timeout time.Duration) error {
+func subscribe(ctx context.Context, url, broadcast, authVersion string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	client, err := moq.Dial(ctx, url, moq.WithTLSVerify(false))
+	client, err := dial(ctx, url, authVersion, timeout)
 	if err != nil {
 		return err
 	}
@@ -234,7 +274,7 @@ func subscribe(ctx context.Context, url, broadcast string, timeout time.Duration
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: go-interop publish|subscribe --url URL --broadcast PATH [--timeout SECONDS]")
+		return errors.New("usage: go-interop publish|subscribe --url URL --broadcast PATH [--timeout SECONDS] [--auth-version V]")
 	}
 	role := os.Args[1]
 
@@ -242,6 +282,7 @@ func run() error {
 	url := flags.String("url", "", "relay URL")
 	broadcast := flags.String("broadcast", "", "broadcast path")
 	timeout := flags.Float64("timeout", 20, "seconds to wait for data")
+	authVersion := flags.String("auth-version", "", "offer only this version, which carries AUTH, and print the grant")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		return err
 	}
@@ -249,12 +290,17 @@ func run() error {
 		return errors.New("--url and --broadcast are required")
 	}
 
+	// Warnings and errors from the Rust layer, such as a publication outside the grant.
+	if err := moq.LogLevel("warn"); err != nil {
+		return err
+	}
+	wait := time.Duration(*timeout * float64(time.Second))
 	ctx := context.Background()
 	switch role {
 	case "publish":
-		return publish(ctx, *url, *broadcast)
+		return publish(ctx, *url, *broadcast, *authVersion, wait)
 	case "subscribe":
-		return subscribe(ctx, *url, *broadcast, time.Duration(*timeout*float64(time.Second)))
+		return subscribe(ctx, *url, *broadcast, *authVersion, wait)
 	default:
 		return fmt.Errorf("unknown role %q", role)
 	}
