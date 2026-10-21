@@ -959,7 +959,7 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const epoch = Epoch.mint();
 	const local = origin.createBroadcast(path);
 	local.announce({ epoch, cost: 5n });
-	const dynamic = origin.dynamic(path, { epoch, cost: 1n });
+	const dynamic = origin.dynamicRoute(path, { epoch, cost: 1n });
 
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),
@@ -2732,7 +2732,7 @@ test("create then announce is discoverable on the wire", async () => {
 test("a handle serves a request under live/** over the wire", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
-	const handle = origin.dynamic(Path.from("live"));
+	const handle = origin.dynamicRoute(Path.from("live"));
 
 	const serving = (async () => {
 		for await (const request of handle.requested()) {

@@ -4154,7 +4154,9 @@ struct Terminal {
 	sent: AtomicBool,
 }
 
-/// Serves a track's groups, one machine per group, with unlimited concurrency.
+/// Serves a track's groups, one machine per group. One at a time waits for stream credit;
+/// the rest wait in the cache, so what a peer withholding credit makes this hold is bounded
+/// by the credit it grants, not by how long it withholds it.
 struct TrackServe<S: crate::transport::poll::Session> {
 	session: S,
 	track: track::Subscriber,
@@ -4162,6 +4164,11 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	version: Version,
 	range: ServeRange,
 	timescale: Option<Timescale>,
+	/// The one group waiting for stream credit. The cursor hands out no other meanwhile, so
+	/// the backlog stays in the cache, which bills, ages, and evicts it, and the cursor's
+	/// budget skips whatever went stale.
+	opening: Option<GroupServe<S>>,
+	/// The groups with a stream, serving or awaiting the acknowledgement of their FIN.
 	children: kio::Tasks<GroupServe<S>>,
 	/// The subscriber priority, which every group stream follows while it is open.
 	priority: kio::Producer<u8>,
@@ -4223,6 +4230,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			version,
 			range,
 			timescale,
+			opening: None,
 			children: kio::Tasks::new(),
 			priority,
 			ranking,
@@ -4275,7 +4283,14 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// Close every group stream still in flight. Dropping a group machine resets its
 	/// stream, as a cancelled subscription's would; a drained track has none left.
 	fn close_groups(&mut self) {
+		self.opening = None;
 		self.children = kio::Tasks::new();
+	}
+
+	/// Group machines held: the one waiting for stream credit, and those with a stream.
+	#[cfg(test)]
+	fn machines(&self) -> usize {
+		self.children.len() + usize::from(self.opening.is_some())
 	}
 
 	/// Where the track ends, when the subscription ran to that end rather than stopping at
@@ -4340,6 +4355,16 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			if self.budget.poll_yield(waiter).is_pending() {
 				break;
 			}
+			if let Some(opening) = &mut self.opening {
+				let Poll::Ready(res) = opening.poll_open(waiter) else {
+					break;
+				};
+				let opening = self.opening.take().expect("polled above");
+				// A group that failed without a stream has nothing to reset.
+				if res.is_ok() {
+					self.children.push(opening);
+				}
+			}
 			match self.track.poll_recv_group(waiter) {
 				Poll::Ready(Ok(Some(group))) => {
 					let sequence = group.sequence;
@@ -4388,7 +4413,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						group: sequence,
 						object: slice.skip,
 					});
-					self.children.push(
+					self.opening = Some(
 						GroupServe::new(
 							self.session.clone(),
 							msg,
@@ -4854,6 +4879,43 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		self
 	}
 
+	/// Wait for stream credit, then write the group header, leaving the machine serving.
+	/// Gives up once the group can no longer be sent, so a parked group never spends the
+	/// credit it was waiting for on a reset.
+	fn poll_open(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if !matches!(self.state, GroupState::Open) {
+			return Poll::Ready(Ok(()));
+		}
+		if let Some(err) = self.group.poll_abandoned(waiter, false) {
+			self.state = GroupState::Done;
+			return Poll::Ready(Err(err));
+		}
+		// The current rank, so a move while parked applies to the stream as it opens.
+		let _ = self.rank.poll_moved(waiter);
+		let stream = match ready!(self.session.poll_open_uni(&mut waiter.context(), self.rank.options())) {
+			Ok(stream) => stream,
+			Err(err) => {
+				self.state = GroupState::Done;
+				return Poll::Ready(Err(Error::from_transport(err)));
+			}
+		};
+		self.opened.fetch_add(1, Ordering::Relaxed);
+
+		let mut writer = Writer::new(stream, self.version);
+		if let Err(err) = writer.buffer(&self.msg) {
+			self.state = GroupState::Done;
+			return Poll::Ready(Err(err));
+		}
+		self.state = GroupState::Serve {
+			writer,
+			frame: None,
+			chunk: None,
+			batch: Box::new(arrayvec::ArrayVec::new()),
+			batch_pos: 0,
+		};
+		Poll::Ready(Ok(()))
+	}
+
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = waiter.context();
 		// A REQUEST_UPDATE can move the subscriber priority while this stream is open, and
@@ -4864,33 +4926,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		loop {
 			match &mut self.state {
 				GroupState::Open => {
-					if self.group.poll_expired(waiter) {
-						self.state = GroupState::Done;
-						return Poll::Ready(Err(Error::Old));
-					}
+					ready!(self.poll_open(waiter))?;
 					// The current rank, which already includes anything `moved` saw.
-					let stream = match ready!(self.session.poll_open_uni(&mut cx, self.rank.options())) {
-						Ok(stream) => stream,
-						Err(err) => {
-							self.state = GroupState::Done;
-							return Poll::Ready(Err(Error::from_transport(err)));
-						}
-					};
-					self.opened.fetch_add(1, Ordering::Relaxed);
 					moved = None;
-
-					let mut writer = Writer::new(stream, self.version);
-					if let Err(err) = writer.buffer(&self.msg) {
-						self.state = GroupState::Done;
-						return Poll::Ready(Err(err));
-					}
-					self.state = GroupState::Serve {
-						writer,
-						frame: None,
-						chunk: None,
-						batch: Box::new(arrayvec::ArrayVec::new()),
-						batch_pos: 0,
-					};
 				}
 				GroupState::Serve {
 					writer,
@@ -4915,11 +4953,12 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								Poll::Ready(Err(err)) => break 'serve Err(err),
 								// Parking on the transport is the one stall the group cursor cannot
 								// see, and the only place a served group applies the drift budget:
-								// flow control must not pin a stream that has gone stale. `true`
-								// because the transport still owns bytes the cursor has released.
+								// flow control must not pin a stream that has gone stale, or one
+								// whose unread rest the cache evicted. `true` because the transport
+								// still owns bytes the cursor has released.
 								Poll::Pending => {
-									if self.group.poll_expired_while_pending(waiter, true) {
-										break 'serve Err(Error::Old);
+									if let Some(err) = self.group.poll_abandoned(waiter, true) {
+										break 'serve Err(err);
 									}
 									return Poll::Pending;
 								}
@@ -4934,11 +4973,12 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									Poll::Ready(Err(err)) => break 'serve Err(err),
 									// Parking on the transport is the one stall the group cursor cannot
 									// see, and the only place a served group applies the drift budget:
-									// flow control must not pin a stream that has gone stale. `true`
-									// because the transport still owns bytes the cursor has released.
+									// flow control must not pin a stream that has gone stale, or one
+									// whose unread rest the cache evicted. `true` because the transport
+									// still owns bytes the cursor has released.
 									Poll::Pending => {
-										if self.group.poll_expired_while_pending(waiter, true) {
-											break 'serve Err(Error::Old);
+										if let Some(err) = self.group.poll_abandoned(waiter, true) {
+											break 'serve Err(err);
 										}
 										return Poll::Pending;
 									}
@@ -5911,6 +5951,108 @@ mod group_priority_test {
 
 	fn hang_video_priority() -> u8 {
 		60
+	}
+
+	/// Poll `serve` a few times, yielding between them, so its per-poll budget lets every
+	/// group that is ready move on.
+	async fn settle_serve(serve: &mut TrackServe<SinkSession>) {
+		for _ in 0..8 {
+			let _ = serve.poll(&kio::Waiter::noop());
+			moq_clock::sim::yield_now().await;
+		}
+	}
+
+	/// A peer withholding stream credit makes each subscription hold one group machine,
+	/// however many tracks it subscribes to and groups they publish: the backlog waits in the
+	/// cache. Granting credit then serves every group still worth sending.
+	#[moq_clock::test]
+	async fn withheld_credit_holds_one_group_machine_per_subscription() {
+		for (tracks, groups) in [(1, 1), (1, 64), (16, 1), (16, 64)] {
+			let gate = kio::Producer::new(false);
+			let session = SinkSession::gated_open_uni(gate.consume());
+			let mut serves: Vec<_> = (0..tracks)
+				.map(|id| {
+					let track = track::Producer::new(
+						std::sync::Arc::new(crate::broadcast::Info::default()),
+						"test",
+						crate::track::Info::timed(),
+					);
+					// Nothing goes stale, so only the credit bounds what is held.
+					let subscriber =
+						track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+					let serve = TrackServe::new(
+						session.clone(),
+						subscriber,
+						RequestId(id),
+						Version::Draft22,
+						ServeRange::default(),
+						Some(Timescale::MILLI),
+					);
+					(track, serve)
+				})
+				.collect();
+
+			for sequence in 0..groups {
+				for (track, serve) in &mut serves {
+					let mut group = track.append_group().unwrap();
+					group
+						.write_frame(crate::Timestamp::from_millis(sequence).unwrap(), b"x".as_slice())
+						.unwrap();
+					group.finish().unwrap();
+					settle_serve(serve).await;
+				}
+				let held = serves.iter().map(|(_, serve)| serve.machines() as u64).sum::<u64>();
+				assert_eq!(held, tracks, "{tracks} tracks after {} groups each", sequence + 1);
+			}
+
+			*gate.write().ok().unwrap() = true;
+			for (_, serve) in &mut serves {
+				settle_serve(serve).await;
+				assert_eq!(serve.opened(), groups);
+				assert_eq!(serve.machines(), 0, "every group was served");
+			}
+		}
+	}
+
+	/// A group waiting for stream credit that the cache evicts leaves at once, rather than
+	/// spending the credit on a reset once it arrives. The next group takes its place.
+	#[moq_clock::test]
+	async fn an_evicted_group_waiting_for_credit_leaves_at_once() {
+		let gate = kio::Producer::new(false);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let mut serve = TrackServe::new(
+			SinkSession::gated_open_uni(gate.consume()),
+			subscriber,
+			RequestId(0),
+			Version::Draft22,
+			ServeRange::default(),
+			Some(Timescale::MILLI),
+		);
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		settle_serve(&mut serve).await;
+		assert_eq!(serve.machines(), 1, "group 0 waits for credit");
+
+		group.abort(Error::Evicted).unwrap();
+		settle_serve(&mut serve).await;
+		assert_eq!(serve.machines(), 0, "the evicted group leaves without credit");
+
+		let mut next = track.append_group().unwrap();
+		next.write_frame(crate::Timestamp::from_millis(1).unwrap(), b"x".as_slice())
+			.unwrap();
+		next.finish().unwrap();
+		settle_serve(&mut serve).await;
+		assert_eq!(serve.machines(), 1, "group 1 takes its place");
+
+		*gate.write().ok().unwrap() = true;
+		settle_serve(&mut serve).await;
+		assert_eq!(serve.opened(), 1, "the credit goes to group 1 alone");
 	}
 
 	/// A subgroup waiting for stream credit keeps its subscription expiry armed.
@@ -8109,7 +8251,10 @@ mod serve_tests {
 
 		for version in ALL_VERSIONS {
 			let mut h = serve(version);
-			let claim = h._origin.dynamic("live", crate::origin::Route::default()).unwrap();
+			let claim = h
+				._origin
+				.dynamic_route("live", crate::origin::Route::default())
+				.unwrap();
 			let auth = crate::auth::Handle::new(false);
 			auth.authorize(&nothing());
 			h.publisher = h.publisher.clone().with_auth(auth);
@@ -8129,7 +8274,10 @@ mod serve_tests {
 
 		for version in ALL_VERSIONS {
 			let mut h = serve(version);
-			let claim = h._origin.dynamic("live", crate::origin::Route::default()).unwrap();
+			let claim = h
+				._origin
+				.dynamic_route("live", crate::origin::Route::default())
+				.unwrap();
 			let auth = crate::auth::Handle::new(false);
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
 
@@ -8453,7 +8601,7 @@ mod serve_tests {
 		for version in [Version::Draft21, Version::Draft22] {
 			for path in [".", "./child", ".session", ".session/extension"] {
 				let h = serve(version);
-				let claim = h._origin.dynamic("", crate::origin::Route::default()).unwrap();
+				let claim = h._origin.dynamic_route("", crate::origin::Route::default()).unwrap();
 				settle().await;
 				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
 				let mark = h.log.writes.lock().unwrap().len();
@@ -10720,7 +10868,7 @@ mod serve_tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let (claim, published) = match parked {
 			Parked::Resolving => (
-				Some(origin.dynamic("room", crate::origin::Route::default()).unwrap()),
+				Some(origin.dynamic_route("room", crate::origin::Route::default()).unwrap()),
 				None,
 			),
 			Parked::Acking | Parked::Ending => {

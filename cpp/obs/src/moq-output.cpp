@@ -409,6 +409,7 @@ void MoQOutput::Reset()
 		epoch.clear();
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
+		token_refusal.clear();
 	}
 	connect_time_ms = 0;
 
@@ -595,6 +596,45 @@ void MoQOutput::CopyLastFailure(int *code, std::string *reason)
 		*code = last_failure_code;
 	if (reason)
 		*reason = last_failure_reason;
+}
+
+std::string MoQOutput::TokenRefusal()
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	return token_refusal;
+}
+
+bool MoQOutput::PresentToken(const std::string &token)
+{
+	std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
+	if (!attempt || !attempt->session)
+		return false;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		token_refusal.clear();
+	}
+
+	// Replacing `presenting` cancels a presentation still in flight, which the
+	// newer token supersedes.
+	attempt->presenting = attempt->session->auth()->add(token).then(
+		worker.Executor(), Current<moq::expected<std::shared_ptr<moq::AuthToken>>>(
+					   attempt, [this](const std::shared_ptr<Attempt> &current, auto result) {
+						   if (!result) {
+							   const std::string reason = result.error().to_string();
+							   LOG_WARNING("MoQ relay refused the new publish token: %s",
+								       reason.c_str());
+							   std::lock_guard<std::mutex> lock(mutex);
+							   token_refusal = reason;
+							   return;
+						   }
+						   // The old token's grant leaves the union only after the new one joined.
+						   if (current->token)
+							   current->token->cancel();
+						   current->token = *result;
+						   LOG_INFO("MoQ relay accepted the new publish token: %s",
+							    MoQRedactUrl(current->url).c_str());
+					   }));
+	return true;
 }
 
 bool MoQOutput::TryGetVideoRate(VideoRate *out)

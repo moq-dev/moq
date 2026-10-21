@@ -16,6 +16,7 @@ from moq_ffi import (
     MoqConnectionStats,
     MoqDatagram,
     MoqFrame,
+    MoqGrant,
     MoqOrder,
     MoqRange,
     MoqSubscription,
@@ -210,4 +211,29 @@ class ConnectionStats:
             packets_received=stats.packets_received,
             packets_lost=stats.packets_lost,
             version=stats.version,
+        )
+
+
+@dataclass(frozen=True)
+class Grant:
+    """What the peer lets this side do, in this side's own paths.
+
+    An empty pattern list grants nothing in that direction; ``**`` grants everything.
+    """
+
+    publish: tuple[str, ...]
+    """The broadcast patterns this side may publish to the peer."""
+    subscribe: tuple[str, ...]
+    """The broadcast patterns this side may subscribe to from the peer."""
+    expires: timedelta | None = None
+    """How long until the grant lapses, measured when it was read, or ``None`` for never."""
+
+    @staticmethod
+    def _from_ffi(grant: MoqGrant | None) -> Grant | None:
+        if grant is None:
+            return None
+        return Grant(
+            publish=tuple(grant.publish),
+            subscribe=tuple(grant.subscribe),
+            expires=_opt_from_us(grant.expires_us),
         )
