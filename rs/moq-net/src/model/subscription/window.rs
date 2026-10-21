@@ -41,6 +41,17 @@ struct Span {
 	floored: bool,
 }
 
+impl Span {
+	/// Whether group `sequence` is in this span.
+	fn covers(&self, sequence: u64) -> bool {
+		sequence >= self.start
+			&& match self.end {
+				End::Before(end) => sequence < end,
+				End::Open => true,
+			}
+	}
+}
+
 #[derive(Clone, Copy, Debug)]
 enum End {
 	/// Before this group.
@@ -136,6 +147,36 @@ impl Window {
 				.map(move |run| (*run.start()).max(from)..=*run.end())
 		});
 		all.into_iter().chain(runs.into_iter().flatten())
+	}
+
+	/// The frames of group `sequence` in range: from a start frame up to an exclusive end,
+	/// `None` through the group's end.
+	///
+	/// Only an absolute anchor names a frame, so a group a range starts or ends inside reads
+	/// part of itself and every other group reads whole. Ranges that cover a group
+	/// differently read the hull of their frames. Everything while a relative anchor waits.
+	pub fn frames(&self, sequence: u64) -> (u64, Option<u64>) {
+		if self.pending {
+			return (0, None);
+		}
+		let mut hull = None;
+		for span in self.spans.iter().filter(|span| span.covers(sequence)) {
+			let range = &self.ranges[span.index];
+			let start = match range.start {
+				Anchor::Absolute(start) if start.group == sequence => start.frame,
+				_ => 0,
+			};
+			// A head-of-group end covers nothing of its group, so it never gets here.
+			let end = match range.end {
+				Some(Anchor::Absolute(end)) if end.group == sequence => Some(end.frame),
+				_ => None,
+			};
+			hull = Some(match hull {
+				None => (start, end),
+				Some((low, high)) => (start.min(low), end.zip(high).map(|(end, high)| end.max(high))),
+			});
+		}
+		hull.unwrap_or((0, None))
 	}
 
 	/// The first run of `range` that is in range.
@@ -251,6 +292,33 @@ mod tests {
 		let window = Window::new(&[], None);
 		assert_eq!(covered(&window, 4), Vec::<u64>::new());
 		assert_eq!((window.floor(), window.end()), (Some(0), Some(0)));
+	}
+
+	/// Only a group an absolute anchor falls inside reads part of itself, and overlapping
+	/// ranges read the hull of their frames there.
+	#[test]
+	fn frames_bound_only_the_groups_an_anchor_falls_inside() {
+		let at = |group, frame| Anchor::Absolute(Position { group, frame });
+		let window = Window::new(&[range(at(4, 5), at(6, 3))], None);
+		assert_eq!(window.frames(4), (5, None));
+		assert_eq!(window.frames(5), (0, None));
+		assert_eq!(window.frames(6), (0, Some(3)));
+
+		// Within one group, both ends bound it.
+		let window = Window::new(&[range(at(4, 2), at(4, 7))], None);
+		assert_eq!(window.frames(4), (2, Some(7)));
+
+		// A second range reaching further either way widens the group to cover both.
+		let window = Window::new(&[range(at(4, 5), at(4, 7)), range(at(4, 2), at(4, 6))], None);
+		assert_eq!(window.frames(4), (2, Some(7)));
+		let window = Window::new(&[range(at(4, 5), None), range(at(2, 0), at(4, 3))], None);
+		assert_eq!(window.frames(4), (0, None));
+
+		// Relative anchors cover whole groups, and a pending one bounds nothing yet.
+		let window = Window::new(&[range(Anchor::Relative(1), at(9, 2))], Some(9));
+		assert_eq!((window.frames(8), window.frames(9)), ((0, None), (0, Some(2))));
+		let window = Window::new(&[range(at(4, 5), None), Range::live()], None);
+		assert_eq!(window.frames(4), (0, None));
 	}
 
 	/// Relative anchors count back from the latest group, both ends whole groups, and wait

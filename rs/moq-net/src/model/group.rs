@@ -2017,6 +2017,12 @@ impl Consumer {
 		self.cursor.state.read().wire().cloned()
 	}
 
+	/// Whether the group was relayed from moq-transport, whose Object IDs may not be its frame
+	/// ordinals.
+	pub(super) fn relayed(&self) -> bool {
+		self.cursor.state.read().wire().is_some()
+	}
+
 	/// The index of the first frame the group holds (see [`Producer::start_at`]).
 	// private: passthrough
 	pub(crate) fn first_frame(&self) -> u64 {

@@ -5417,7 +5417,21 @@ impl Cursor {
 		}
 	}
 
-	fn with_expiry(&self, group: group::Consumer) -> group::Consumer {
+	/// Hand `group` out: bounded to the frames this cursor's ranges cover in it, and expiring
+	/// against its budget.
+	///
+	/// Positioned without clamping, so a group missing the head asked for reads it as
+	/// [`Error::Lagged`], which a route copy recovers from another. A group relayed from
+	/// moq-transport is handed out whole, since its ranges may name Object IDs rather than
+	/// frame ordinals, so its reader filters by ID.
+	fn deliver(&self, mut group: group::Consumer) -> group::Consumer {
+		if !group.relayed() {
+			let (start, end) = self.filter.window.frames(group.sequence);
+			group.skip_to(start);
+			if let Some(end) = end {
+				group.end_at(Bound::Excluded(end));
+			}
+		}
 		let sequence = group.sequence;
 		group.with_expiry(Arc::new(GroupExpiry {
 			state: self.state.weak(),
@@ -5431,7 +5445,7 @@ impl Cursor {
 		if let Some(peeked) = self.peeked.take().filter(|peeked| take && !peeked.ordered) {
 			self.advance_arrival(peeked.group.sequence, peeked.index);
 			peeked.group.cache_refresh();
-			return Poll::Ready(Ok(Some(self.with_expiry(peeked.group))));
+			return Poll::Ready(Ok(Some(self.deliver(peeked.group))));
 		}
 		self.sync();
 		self.admit();
@@ -5521,7 +5535,7 @@ impl Cursor {
 				continue;
 			}
 			return Poll::Ready(Ok(Some(if take {
-				self.with_expiry(consumer)
+				self.deliver(consumer)
 			} else {
 				self.peeked = Some(Box::new(Peeked {
 					group: consumer.clone(),
@@ -5544,7 +5558,8 @@ impl Cursor {
 
 	/// The next datagram inside this subscriber's range, dropping the ones outside it.
 	///
-	/// The range is the one groups get: the floor, the cap, and the start Object ID.
+	/// The range is the one groups get: the floor, the cap, and the frames its group's
+	/// ranges cover, matched by Object ID.
 	/// Plain datagrams have Object ID 0. A datagram is judged when the cursor reaches
 	/// it, against the range in force then, and one outside it is gone for good: unlike a
 	/// group past the cap, nothing holds it for a later raise.
@@ -5559,11 +5574,10 @@ impl Cursor {
 			self.sync();
 
 			let sequence = datagram.sequence;
-			let mid_group = self.subscription.read().start().is_some_and(|start| {
-				start.group == sequence
-					&& start.frame > datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0)
-			});
-			if sequence >= self.floor() && self.admits(sequence) && !mid_group {
+			let (start, end) = self.filter.window.frames(sequence);
+			let object = datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0);
+			let framed = object >= start && end.is_none_or(|end| object < end);
+			if sequence >= self.floor() && self.admits(sequence) && framed {
 				return Poll::Ready(Ok(Some(datagram)));
 			}
 		}
@@ -5655,7 +5669,7 @@ impl Cursor {
 		// The delivery commits everything the seek stepped over to reach this group.
 		self.commit_seek_stale(self.next_sequence.unwrap_or(u64::MAX));
 		group.cache_refresh();
-		self.with_expiry(group)
+		self.deliver(group)
 	}
 
 	/// Count the sequence path's convictions below `committed` into [`Self::stale`],
@@ -5824,6 +5838,10 @@ impl Subscriber {
 	/// here. Raising the cap, or widening the ranges, offers the groups it newly covers
 	/// that the cache still holds, lowest sequence first. Once the track finishes, a
 	/// reader with nothing left in range ends.
+	///
+	/// A group one of [`Subscription::ranges`] starts or ends inside reads only the frames
+	/// they cover there. One missing the frames asked for reads [`Error::Lagged`] rather
+	/// than starting short.
 	///
 	/// Returns `Poll::Ready(Ok(Some(group)))` when a group is available,
 	/// `Poll::Ready(Ok(None))` when the track is finished,
@@ -7119,6 +7137,90 @@ mod test {
 		group
 	}
 
+	/// Every group a reader hands out with the frame indices it reads, until one would block.
+	fn read_groups(
+		mut next: impl FnMut(&kio::Waiter) -> Poll<Result<Option<group::Consumer>>>,
+	) -> Vec<(u64, Vec<u64>)> {
+		let noop = kio::Waiter::noop();
+		let mut groups = Vec::new();
+		while let Poll::Ready(group) = next(&noop) {
+			let Some(mut group) = group.unwrap() else { break };
+			let mut frames = Vec::new();
+			loop {
+				let index = group.index();
+				match group.poll_read_frame(&noop) {
+					Poll::Ready(Ok(Some(_))) => frames.push(index),
+					Poll::Ready(Ok(None)) => break,
+					res => panic!("group {} read {res:?}", group.sequence),
+				}
+			}
+			groups.push((group.sequence, frames));
+		}
+		groups
+	}
+
+	/// A range starting and ending inside cached groups reads only the frames it covers,
+	/// in arrival and sequence order alike, however wide another subscriber made the
+	/// aggregate.
+	#[test]
+	fn a_range_reads_only_its_frames() {
+		let producer = track_producer("test", Info::default());
+		let _groups: Vec<_> = (3..8)
+			.map(|sequence| {
+				let mut group = framed(&producer, sequence, 8);
+				group.finish().unwrap();
+				group
+			})
+			.collect();
+		let _wide = producer.subscribe(replay());
+		let range = Range {
+			start: Anchor::Absolute(Position { group: 4, frame: 5 }),
+			end: Some(Anchor::Absolute(Position { group: 6, frame: 3 })),
+		};
+		let bounded = || producer.subscribe(replay().with_ranges([range]));
+
+		let want = vec![(4, vec![5, 6, 7]), (5, (0..8).collect()), (6, vec![0, 1, 2])];
+		let mut arrival = bounded();
+		assert_eq!(read_groups(|waiter| arrival.poll_recv_group(waiter)), want);
+		let mut ordered = bounded().ordered();
+		assert_eq!(read_groups(|waiter| ordered.poll_next_group(waiter)), want);
+	}
+
+	/// A group missing the frames a range asks for is never served short: reading them is
+	/// [`Error::Lagged`], which a route copy recovers. One holding them from where the range
+	/// starts is served from there.
+	#[test]
+	fn a_group_missing_its_asked_head_lags() {
+		let producer = track_producer("test", Info::default());
+		let mut headless = producer.create_group(group::Info { sequence: 4 }).unwrap();
+		headless.start_at(2).unwrap();
+		for _ in 0..3 {
+			headless.write_frame(None, &b"x"[..]).unwrap();
+		}
+		headless.finish().unwrap();
+
+		let noop = kio::Waiter::noop();
+		for frame in [0, 1] {
+			let start = Anchor::Absolute(Position { group: 4, frame });
+			let mut sub = producer.subscribe(replay().with_ranges([Range { start, end: None }]));
+			let Poll::Ready(Ok(Some(mut group))) = sub.poll_recv_group(&noop) else {
+				panic!("from frame {frame}: no group");
+			};
+			assert_eq!(group.index(), frame);
+			assert!(
+				matches!(group.poll_read_frame(&noop), Poll::Ready(Err(Error::Lagged))),
+				"from frame {frame}"
+			);
+		}
+
+		let start = Anchor::Absolute(Position { group: 4, frame: 2 });
+		let mut sub = producer.subscribe(replay().with_ranges([Range { start, end: None }]));
+		assert_eq!(
+			read_groups(|waiter| sub.poll_recv_group(waiter)),
+			vec![(4, vec![2, 3, 4])]
+		);
+	}
+
 	/// The largest reports only while it is within the bounds: a cap below it or a floor
 	/// above it reports nothing, rather than a cached group standing in for it.
 	#[test]
@@ -7801,12 +7903,19 @@ mod test {
 	}
 
 	/// A start past the start group's first frame excludes that group's datagram, its only
-	/// frame; a start at frame 0 keeps it.
+	/// frame, even behind an earlier range; a start at frame 0 keeps it.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_mid_group_start_drops_the_start_groups_datagram() {
 		let mut producer = track_producer("test", Info::timed());
 		let mut mid = producer.subscribe(Subscription::default().with_start(Position { group: 5, frame: 1 }));
+		let mut split = producer.subscribe(Subscription::default().with_ranges([
+			Range::groups(2..4),
+			Range {
+				start: Anchor::Absolute(Position { group: 5, frame: 1 }),
+				end: None,
+			},
+		]));
 		let mut whole = producer.subscribe(Subscription::default().with_start(Position::group(5)));
 		for sequence in [5, 6] {
 			producer
@@ -7815,6 +7924,7 @@ mod test {
 		}
 
 		assert_eq!(recv_datagram(&mut mid).sequence, 6);
+		assert_eq!(recv_datagram(&mut split).sequence, 6);
 		assert_eq!(recv_datagram(&mut whole).sequence, 5);
 		assert_eq!(recv_datagram(&mut whole).sequence, 6);
 	}
