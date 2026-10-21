@@ -61,6 +61,8 @@ export interface ConnectionProps {
 	 * Defaults to true.
 	 */
 	client?: boolean;
+	/** The connection credential the client's SETUP presents, on versions that carry one (lite-07+). */
+	token?: Uint8Array;
 }
 
 /**
@@ -119,6 +121,8 @@ export class Connection implements Established {
 
 	// Whether we dialed; see {@link ConnectionProps.client}.
 	#client: boolean;
+	// See {@link ConnectionProps.token}.
+	#token?: Uint8Array;
 	// The peer's GOAWAY. Lite carries no deadline, so only the URI is set.
 	#goaway = new Once<Drain>();
 
@@ -140,8 +144,10 @@ export class Connection implements Established {
 	 *
 	 * @internal
 	 */
-	constructor({ url, quic, version, session, publish, client = true }: ConnectionProps) {
+	constructor({ url, quic, version, session, publish, client = true, token }: ConnectionProps) {
 		this.url = url;
+		// Older versions carry the credential in the URL instead.
+		this.#token = client && hasAuth(version) ? token : undefined;
 		this.#quic = quic;
 		this.#session = session;
 		// The session stream was opened at the SETUP exchange's version; the rest of it speaks this one.
@@ -302,7 +308,7 @@ export class Connection implements Established {
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			await new Setup({ probe, hop: this.hop }).encode(writer, this.#version);
+			await new Setup({ probe, hop: this.hop, token: this.#token }).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);
@@ -416,7 +422,7 @@ export class Connection implements Established {
 				throw new ProtocolViolation("invalid SETUP", { cause: err });
 			});
 			if (this.#client && hasClientParameters(setup))
-				throw new ProtocolViolation("server SETUP contains Path or Role");
+				throw new ProtocolViolation("server SETUP contains Path, Role, or Token");
 			if (!this.#client && setup.path !== undefined)
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);

@@ -15,12 +15,15 @@ the types do not spell out.
 ```ts
 import * as Moq from "@moq/net";
 
-const url = new URL("https://cdn.moq.dev/anon?jwt=...");
+const url = new URL("https://cdn.moq.dev/room");
 
 // The origin is the routing table. The broadcast survives a reconnect.
 const origin = new Moq.Origin.Producer();
 const connection = await Moq.Connection.connect({
     url,
+    // The first token rides SETUP (and `?jwt=` for older versions); others widen the grant.
+    // A reloading `new Moq.Connection({ tokens })` also takes a Signal, set to replace them.
+    tokens: [token],
     publish: origin.consume(),
     consume: origin,
 });

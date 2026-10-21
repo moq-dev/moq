@@ -12,6 +12,7 @@ import type { Established } from "./established.ts";
 import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { exchangeSetup } from "./handshake.ts";
+import { type Credential, credential, hold, withJwt } from "./tokens.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
 const DEFAULT_WEBSOCKET_DELAY_MS = Milli(500);
@@ -109,6 +110,13 @@ interface Offer {
 	setup: SetupVersion[];
 	/** Whether the caller named the versions, so the peer must pick one of them. */
 	explicit: boolean;
+	/** Whether every offered version carries the connection credential in SETUP. */
+	setupToken: boolean;
+}
+
+// moq-lite gained the SETUP token in lite-07; every moq-transport draft has one.
+function hasSetupToken(name: string): boolean {
+	return !name.startsWith("moq-lite-") || name === "moq-lite-07-wip";
 }
 
 function offer(versions?: readonly string[]): Offer {
@@ -121,7 +129,7 @@ function offer(versions?: readonly string[]): Offer {
 		alpns.add(version.alpn);
 		if (version.setup !== undefined) setup.push(version.setup);
 	}
-	return { alpns: [...alpns], setup, explicit: versions !== undefined };
+	return { alpns: [...alpns], setup, explicit: versions !== undefined, setupToken: names.every(hasSetupToken) };
 }
 
 /** Validate and snapshot an ordered version list before acquiring a connection. @internal */
@@ -203,6 +211,16 @@ export interface ConnectProps {
 	extensions?: Extensions.Extensions;
 
 	/**
+	 * Credentials to present, kept apart from the URL.
+	 *
+	 * The first is the connection credential: it rides SETUP, and the URL's `jwt` query too
+	 * while an offered version can't carry it in SETUP (moq-lite before 07). Each other token
+	 * rides its own AUTH stream, widening the session's grant. A URL that already has a `jwt`
+	 * keeps it as the connection credential, and then every token rides AUTH.
+	 */
+	tokens?: readonly string[];
+
+	/**
 	 * Aborts the connection attempt with the signal's reason. An already-aborted
 	 * signal rejects before anything opens, and aborting after the connection is
 	 * established has no effect. Use `AbortSignal.timeout(ms)` for a deadline.
@@ -217,6 +235,8 @@ type SessionProps = {
 	client: boolean;
 	/** The moq-transport extensions this side offers. */
 	extensions: Extensions.Offered;
+	/** The connection credential SETUP presents, on versions that carry one. */
+	token?: Uint8Array;
 };
 
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
@@ -244,12 +264,16 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 	const onAbort = () => resolve();
 	signal.addEventListener("abort", onAbort, { once: true });
 
-	const pending = connectInner(url, props, abort);
+	const tokens = props.tokens ?? [];
+	const dial = credential(url, tokens, offer(props.versions).setupToken);
+	const pending = connectInner(dial, props, abort);
 	try {
 		// A `pending` rejection propagates unless the abort beat it to the finish line.
 		const connection = await Promise.race([pending, abort.then(() => undefined)]);
 		if (connection && !signal.aborted) {
 			if (props.consume) forwardAnnounced(connection, props.consume);
+			// Before the caller sees the session, so its first requests wait on these answers.
+			hold(connection, dial, tokens);
 			return connection;
 		}
 
@@ -261,12 +285,23 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 	}
 }
 
-async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: Promise<void>): Promise<Established> {
+async function connectInner(
+	dial: Credential,
+	props: Omit<ConnectProps, "url">,
+	abort: Promise<void>,
+): Promise<Established> {
+	const url = dial.url;
 	const wiring: SessionProps = {
 		publish: props.publish,
 		client: true,
 		extensions: Extensions.offered(props.extensions),
+		token: dial.setup === undefined ? undefined : new TextEncoder().encode(dial.setup),
 	};
+	// A fallback URL needs the credential wherever the primary one does.
+	const fallback =
+		props.websocket?.url && url.searchParams.get("jwt") && !props.websocket.url.searchParams.get("jwt")
+			? withJwt(props.websocket.url, url.searchParams.get("jwt") as string)
+			: props.websocket?.url;
 
 	const offered = offer(props.versions);
 
@@ -290,7 +325,7 @@ async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: P
 		!webtransport || websocketWon.has(url.toString()) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
 	const websocket =
 		props.websocket?.enabled !== false
-			? connectWebSocket(props.websocket?.url ?? url, headstart, cancel, offered.alpns)
+			? connectWebSocket(fallback ?? url, headstart, cancel, offered.alpns)
 			: undefined;
 
 	if (!websocket && !webtransport) {
@@ -433,6 +468,7 @@ async function negotiate(
 	Ietf.hiddenIntoSetup(params);
 	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params, setupVersion);
+	if (wiring.token) Ietf.tokenIntoSetup(params, { kind: Ietf.TOKEN_OUT_OF_BAND, value: wiring.token }, setupVersion);
 
 	const client = new Ietf.ClientSetup({
 		versions:

@@ -77,6 +77,12 @@ export interface ConnectionProps {
 	delay?: ReloadDelay;
 
 	/**
+	 * Credentials to present, kept apart from the URL; see {@link ConnectProps.tokens}. Pass a
+	 * `Signal` to replace them before they expire. Implies a private loop.
+	 */
+	tokens?: readonly string[] | Signal<readonly string[]>;
+
+	/**
 	 * How to react to the relay's GOAWAY; an unset field uses its default. Every connection
 	 * migrates on GOAWAY, dialing the replacement while the old session finishes its groups.
 	 * This only tunes where it may go and for how long the old session serves.
@@ -111,7 +117,7 @@ export interface ConnectionProps {
  * session finishes its groups, and the handle and its origin carry across. A redirect the
  * {@link ConnectionProps.goaway} policy refuses stops the loop like an auth rejection does.
  *
- * Options the pool cannot honor (transport options, delay, goaway, a pinned
+ * Options the pool cannot honor (transport options, delay, goaway, tokens, a pinned
  * certificate, caller-owned origins) use a private loop. An explicit `share: true`
  * refuses them. A supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
  * instead.
@@ -264,6 +270,7 @@ export class Connection {
 			websocket: props.websocket,
 			delay: props.delay,
 			goaway: props.goaway,
+			tokens: props.tokens,
 		});
 		this.#signals.cleanup(() => loop.close());
 
@@ -387,6 +394,9 @@ function refuse(props?: ConnectionProps): void {
 	if (props.delay !== undefined) {
 		throw new Error("delay cannot be shared; pass share: false");
 	}
+	if (props.tokens !== undefined) {
+		throw new Error("tokens cannot be shared; pass share: false");
+	}
 	if (props.goaway !== undefined) {
 		throw new Error("goaway cannot be shared; pass share: false");
 	}
@@ -398,6 +408,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 		props.webtransport !== undefined ||
 		props.websocket !== undefined ||
 		props.delay !== undefined ||
+		props.tokens !== undefined ||
 		props.goaway !== undefined ||
 		props.publish !== undefined ||
 		props.consume !== undefined
