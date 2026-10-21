@@ -29,7 +29,9 @@ Decided with the maintainer on 2026-10-20:
   `await import("@moq/hang/cmaf")` only in their CMAF paths: `#runCmaf`,
   `#runCmafDecoder` and the `supported()` probes, which are already async.
   Downstream bundlers split the chunk. Async wrappers inside hang were
-  rejected because every caller turns async anyway.
+  rejected because every caller turns async anyway. The audio-quality
+  client (`test/audio-quality/clients/js/src/capture.ts`) also builds
+  `Container.Cmaf.Format`, so it moves to `@moq/hang/cmaf` too.
 - Delete the public encoder (`createVideoInitSegment`,
   `createAudioInitSegment`, `encodeDataSegment`, `encode.ts`). Only tests
   and the nightly browser benchmark call it, and publish never writes CMAF.
