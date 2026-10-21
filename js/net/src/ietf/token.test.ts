@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { ProtocolViolation, SessionCode } from "../error.ts";
 import { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
-import { Parameters, SetupOption, SetupOptions } from "./parameters.ts";
+import { Parameters } from "./parameters.ts";
+import { SetupOption, SetupOptions } from "./setup_options.ts";
 import {
 	AUTHORIZATION_TOKEN,
 	TOKEN_OUT_OF_BAND,

@@ -38,7 +38,8 @@ export interface AdvertParams {
 
 /** Write an advertisement's extension parameters into a fresh block. */
 export function advertIntoParams(advert: AdvertParams): Parameters {
-	const params = advert.cluster ? Cluster.intoParams(advert.cluster) : new Parameters();
+	const params = new Parameters();
+	if (advert.cluster) Cluster.intoParams(advert.cluster, params);
 	params.epoch = advert.epoch;
 	return params;
 }
@@ -184,7 +185,8 @@ export class PublishNamespaceUpdate {
 		if (version === Version.DRAFT_17) {
 			await w.u62(0n); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
-		const params = Cluster.updateIntoParams(this.update);
+		const params = new Parameters();
+		Cluster.updateIntoParams(this.update, params);
 		if (this.token) tokenIntoRequest(params, this.token, version);
 		await params.encode(w, version);
 	}

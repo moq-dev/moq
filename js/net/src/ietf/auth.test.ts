@@ -5,7 +5,7 @@ import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { AuthError, AuthMessage, AuthOk } from "./auth.ts";
 import { fromSetup, intoSetup } from "./auth_setup.ts";
-import { SetupOption, SetupOptions } from "./parameters.ts";
+import { SetupOption, SetupOptions } from "./setup_options.ts";
 import { Version } from "./version.ts";
 
 function patterns(...prefixes: string[]): Path.Patterns {
