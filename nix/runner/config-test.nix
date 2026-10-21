@@ -62,6 +62,11 @@ assert !valid.config.systemd.network.wait-online.enable;
 assert pkgs.lib.all (
   name: valid.config.systemd.services.${name}.serviceConfig.Restart == "always"
 ) (builtins.attrNames ids);
+assert pkgs.lib.all (
+  name:
+  pkgs.lib.hasInfix "virtio-balloon-pci,free-page-reporting=on"
+    valid.config.systemd.services.${name}.script
+) (builtins.attrNames ids);
 assert pkgs.lib.any (item: !item.assertion) duplicate.config.assertions;
 assert pkgs.lib.any (item: !item.assertion) wrongUplink.config.assertions;
 assert pkgs.lib.any (item: !item.assertion) fixedAddress.config.assertions;
