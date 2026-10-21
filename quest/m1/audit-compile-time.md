@@ -91,21 +91,68 @@ known [failover flake](/quest/m1/test-flakes-2/redundant-failover-drift.md).
 Cargo rebuilds every dependent when an upstream crate's source changes at all,
 even a comment, so the test build is the bulk of the compile cost.
 
+### Thin-LTO experiment (2026-10-20)
+
+The root `[profile.release]` (`lto = "fat"`, one codegen unit) builds every
+shipped native artifact; `bench/ffi-gen` mirrors it but ships nothing, and
+Cargo refuses `lto` in per-package overrides, so the choice is workspace-wide.
+The Go mirror commits `libmoq_ffi.a` for four targets and fails its push at
+100 MiB per file. Thin ran as `CARGO_PROFILE_RELEASE_LTO=thin` on `d55407256`,
+x86_64 Linux host build, `nproc` 24, two jobs.
+
+Sizes (deterministic):
+
+| Artifact | Fat | Thin | Change |
+| --- | ---: | ---: | ---: |
+| `libmoq_ffi.a` (Go mirror, `--features openh264`) | 71.23 MiB | 81.07 MiB | +13.8% |
+| `libmoq_ffi.so` | 33.88 MiB | 37.16 MiB | +9.7% |
+| `moq` CLI | 48.62 MiB | 52.93 MiB | +9.0% |
+
+Both archives fit, but thin cuts the headroom under 100 MiB from 28.8 to
+18.9 MiB. The mirror's v0.4.17 archives (fat, cross-built) are 62.3 MiB
+(linux_amd64), 61.5 (linux_arm64), 54.4 (windows_amd64) and 40.5
+(darwin_arm64); the other targets were not built here.
+
+Build time, load 20 to 51 (load-sensitive; compare ratios):
+
+| Build | Fat wall | Thin wall | Thin/fat wall | Thin/fat CPU |
+| --- | ---: | ---: | ---: | ---: |
+| Clean `-p moq-ffi`, both modes at once | 544 s | 469 s | 0.86 | 1.00 |
+| Then `-p moq-cli --bin moq`, both modes at once | 643 s | 545 s | 0.85 | 1.02 |
+| `moq_ffi` final unit, interleaved, two rounds | 226, 256 s | 199, 158 s | 0.74 | 1.11 |
+| `moq` final unit, interleaved, two rounds | 416, 404 s | 246, 240 s | 0.59 | 0.97 |
+
+Two jobs cap thin LTO's parallel backend at two threads, so a runner with
+more cores would save more wall time than this; CPU time stays about even.
+
+Runtime (deterministic instruction counts, valgrind cachegrind on criterion
+`--test`, which runs each case once; `perf stat` is blocked by
+`perf_event_paranoid` 4): moq-net `session_delivery_viewers` (lite-06,
+lite-07, moq-transport-22) 2,621M fat against 2,677M thin (+2.1%), and
+`track_fanout` 414M against 421M (+1.6%). Repeats varied by 0.4% at most.
+
+Decision pending with the maintainer; the recommendation is to keep fat.
+Thin saves about 40% of the final unit's wall time on two jobs, but release
+builds run only nightly and on release PRs, off the merge-queue gate. It costs
+10 MiB of the Go archive's headroom under a hard publish limit while that
+archive is growing, and 2% more instructions. Revisit if release builds join
+the PR gate, or once [moq-net compiles once](/quest/m1/net-erase-transport.md)
+lands and the archive shrinks.
+
 ### Results of the m0 run
 
 - Planned: [moq-net compiles once](/quest/m1/net-erase-transport.md) removes
   the per-transport copies, the largest attributable dev IR (43% of moq-tokio)
   and a share of the release fat-LTO module.
 - Explained, no action: the release `moq` unit is all LLVM backend work on one
-  fat-LTO module; linking is 1 s. The profile keeps shipping artifacts compact
-  for the Go mirror's 100 MB limit, and release builds are off the merge-queue
-  gate. aws-lc-sys's build script is the longest dev unit; the crypto provider
+  fat-LTO module; linking is 1 s. Thin LTO would cut that unit by about 40%
+  at a size and instruction cost (above); the profile stays fat pending the
+  maintainer's decision. aws-lc-sys's build script is the longest dev unit; the crypto provider
   stays. usage-rs derive output is external code. serde visitors per
   deserializer are inherent to TOML config.
 - Candidates for next run: mp4-atom's `Any::decode_atom` instantiated per
   reader type (38k lines in moq-mux, an upstream change to decode from one
-  slice type); a thin-LTO experiment only if release builds join a PR gate,
-  comparing shipping sizes and runtime on the same source.
+  slice type); rerun the thin-LTO comparison if release builds join a PR gate.
 
 ### Method
 
