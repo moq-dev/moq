@@ -1003,17 +1003,17 @@ fn grade(ledgers: &[Ledger], stats: &stats::Export) -> Result<(), String> {
 
 	// The source skips frames that came older than its age budget, each run one more gap, and
 	// they are neither trimmed nor dropped.
-	let skips = stats
-		.gaps
-		.checked_sub(gaps)
-		.ok_or(format!("{} gaps reported for the {gaps} the schedule made", stats.gaps))?;
-	let counted = stats.dropped + stats.trimmed;
+	let skips = stats.release.gaps.checked_sub(gaps).ok_or(format!(
+		"{} gaps reported for the {gaps} the schedule made",
+		stats.release.gaps
+	))?;
+	let counted = stats.release.dropped + stats.release.trimmed;
 	let skipped = (before + after).checked_sub(counted).ok_or(format!(
 		"{counted} frames counted dropped or trimmed, but only {} are missing",
 		before + after
 	))?;
-	let exact = (stats.dropped, stats.trimmed) == (after, before);
-	if !(exact || (skipped > 0 && stats.dropped <= after && stats.trimmed <= before))
+	let exact = (stats.release.dropped, stats.release.trimmed) == (after, before);
+	if !(exact || (skipped > 0 && stats.release.dropped <= after && stats.release.trimmed <= before))
 		|| (skips > 0) != (skipped > 0)
 		|| skips > skipped
 		|| skipped > late
@@ -1021,7 +1021,7 @@ fn grade(ledgers: &[Ledger], stats: &stats::Export) -> Result<(), String> {
 		return Err(format!(
 			"(dropped, trimmed, gaps) reported {:?}; {before} missing before each track started, \
 			 {after} after, {late} of them late, and {gaps} gaps scheduled",
-			(stats.dropped, stats.trimmed, stats.gaps)
+			(stats.release.dropped, stats.release.trimmed, stats.release.gaps)
 		));
 	}
 	Ok(())
@@ -1343,7 +1343,7 @@ async fn a_clean_path_loses_nothing() {
 	let run = recover(arm(Profile::Closed, clean)).await;
 	let video = run.ledger(true);
 	assert_eq!(out(video), video.units.len(), "every picture goes out");
-	assert_eq!((run.stats.dropped, run.stats.gaps), (0, 0));
+	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 0));
 }
 
 /// A group the path never delivers is skipped whole: the group before keeps its tail, though
@@ -1356,7 +1356,7 @@ async fn a_skipped_group_resumes_at_the_next() {
 		false => clean(slot),
 	}))
 	.await;
-	assert_eq!((run.stats.dropped, run.stats.gaps), (0, 1));
+	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
 }
 
 /// A group cut short keeps the pictures it delivered, though they are fewer than it takes to
@@ -1373,7 +1373,7 @@ async fn a_cut_group_keeps_what_it_delivered() {
 	let video = run.ledger(true);
 	let kept = video.units.iter().filter(|unit| unit.group == 5 && unit.output).count();
 	assert_eq!(kept, 4, "the cut group's delivered pictures go out");
-	assert_eq!((run.stats.dropped, run.stats.gaps), (0, 1));
+	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
 }
 
 /// The video stalls for 2.5 s while the audio runs on, then delivers what it held at once: the
@@ -1387,7 +1387,7 @@ async fn a_stall_drops_what_it_made_late() {
 		video.units.iter().any(|unit| unit.on_time == Some(false)),
 		"the schedule made pictures late"
 	);
-	assert_eq!((run.stats.dropped, run.stats.gaps), (0, 1));
+	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
 	let first = audio.units.iter().position(|unit| unit.output).unwrap();
 	assert!(
 		audio.units[first..].iter().all(|unit| unit.output),
@@ -1421,7 +1421,7 @@ async fn a_stalled_track_leaves_the_others_running() {
 	let run = recover(arm(Profile::Closed, stall_audio)).await;
 	let video = run.ledger(true);
 	assert_eq!(out(video), video.units.len(), "every picture goes out");
-	assert_eq!((run.stats.dropped, run.stats.gaps), (0, 1));
+	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
 
 	let (audio, pictures) = (run.pid(Class::Audio), run.pid(Class::Video));
 	// The longest stretch of output the audio row sat still through.
@@ -1466,7 +1466,7 @@ async fn skewed_audio_survives_a_video_skip() {
 		(false, _) => Delivery::At(slot.nominal + Duration::from_millis(200)),
 	}))
 	.await;
-	assert_eq!((run.stats.dropped, run.stats.gaps), (0, 1));
+	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
 }
 
 /// A skipped group around the 33-bit wrap keeps the clock, and the pictures either side decode.
@@ -1484,7 +1484,7 @@ async fn a_skip_across_the_wrap_keeps_the_clock() {
 		pts.windows(2).any(|pair| pair[1] < pair[0] / 2),
 		"the output crosses the wrap"
 	);
-	assert_eq!((run.stats.dropped, run.stats.gaps), (0, 1));
+	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
 }
 
 fn skip_group_5(slot: Slot) -> Delivery {
@@ -1528,7 +1528,7 @@ async fn open_gop_trims_only_the_orphans() {
 		leading_out(video, 7) > 0 && leading_out(video, 10) > 0,
 		"a continuous group keeps them"
 	);
-	assert_eq!(run.stats.gaps, 2);
+	assert_eq!(run.stats.release.gaps, 2);
 }
 
 /// HEVC open GOP: the RASL pictures a skip or a cut orphans are trimmed, a continuous CRA keeps
@@ -1546,7 +1546,7 @@ async fn hevc_trims_only_orphaned_rasl() {
 		leading_out(video, 7) > 0 && leading_out(video, 10) > 0,
 		"a continuous group keeps them"
 	);
-	assert_eq!(run.stats.gaps, 2);
+	assert_eq!(run.stats.release.gaps, 2);
 }
 
 /// HEVC RADL pictures reference only their own IDR, so after a skip or a cut they go out with it.
@@ -1559,7 +1559,7 @@ async fn hevc_keeps_radl_after_a_hole() {
 		(2, 2),
 		"RADL survives a hole"
 	);
-	assert_eq!(run.stats.gaps, 2);
+	assert_eq!(run.stats.release.gaps, 2);
 }
 
 /// A subscriber joining 2.3 s in starts on a whole group and loses nothing after it.
@@ -1573,7 +1573,7 @@ async fn a_join_starts_on_a_whole_group() {
 	let video = run.ledger(true);
 	let first = video.units.iter().find(|unit| unit.output).unwrap().group;
 	assert!(first >= 4, "the export starts at the live edge, group {first}");
-	assert_eq!((run.stats.dropped, run.stats.gaps), (0, 0));
+	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 0));
 }
 
 /// The catalog names the tracks only 2.3 s in, while the group in flight is cut short: the export
@@ -1594,7 +1594,7 @@ async fn a_late_catalog_starts_on_a_whole_group() {
 	let video = run.ledger(true);
 	let first = video.units.iter().find(|unit| unit.output).unwrap().group;
 	assert_eq!(first, 5, "the export starts on the first whole group after the catalog");
-	assert_eq!(run.stats.dropped, 0);
+	assert_eq!(run.stats.release.dropped, 0);
 }
 
 /// The picture size changes at a keyframe the path never delivers: the export resumes at the next
@@ -1609,7 +1609,7 @@ async fn a_skip_across_a_resolution_change_takes_the_new_parameters() {
 		}
 	}))
 	.await;
-	assert_eq!((run.stats.dropped, run.stats.gaps), (0, 1));
+	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
 }
 
 /// The clock jumps 20 s at a declared discontinuity, and the path loses the group before the
@@ -1624,7 +1624,7 @@ async fn a_declared_discontinuity_survives_loss_either_side() {
 		}
 	}))
 	.await;
-	assert_eq!(run.stats.dropped, 0);
+	assert_eq!(run.stats.release.dropped, 0);
 }
 
 /// The path loses the marker that declares the break, and every frame on either side arrives:
@@ -1636,7 +1636,7 @@ async fn a_lost_discontinuity_marker_still_breaks_the_clock() {
 		false => clean(slot),
 	}))
 	.await;
-	assert_eq!(run.stats.dropped, 0);
+	assert_eq!(run.stats.release.dropped, 0);
 }
 
 /// A path narrower than the media, behind a queue twice the delay deep, for two seconds: frames
@@ -1708,7 +1708,7 @@ async fn long_faults_hold_their_latency() {
 		..arm(Profile::Long, faults)
 	})
 	.await;
-	assert!(run.stats.gaps >= 20, "every fault skipped: {:?}", run.stats);
+	assert!(run.stats.release.gaps >= 20, "every fault skipped: {:?}", run.stats);
 	let lags = lags(&run);
 	let (least, most) = (lags.iter().min().unwrap(), lags.iter().max().unwrap());
 	assert!(
@@ -1749,19 +1749,19 @@ async fn the_graders_fail_what_they_should() {
 	assert!(err.contains("went out, though"), "{err}");
 	let err = edited(&|ledgers, stats| {
 		ledgers[video].units[unit(6, 3)].output = false;
-		stats.dropped += 1;
+		stats.release.dropped += 1;
 	});
 	assert!(err.contains("chain broke"), "{err}");
 	let err = edited(&|ledgers, stats| {
 		for frame in 0..12 {
 			ledgers[video].units[unit(7, frame)].output = false;
 		}
-		stats.dropped += 12;
+		stats.release.dropped += 12;
 	});
 	assert!(err.contains("did not go out"), "{err}");
-	let err = edited(&|_, stats| stats.dropped += 1);
+	let err = edited(&|_, stats| stats.release.dropped += 1);
 	assert!(err.contains("dropped"), "{err}");
-	let err = edited(&|_, stats| stats.gaps = 0);
+	let err = edited(&|_, stats| stats.release.gaps = 0);
 	assert!(err.contains("gaps reported"), "{err}");
 
 	// The output less the tables ahead of the keyframe it resumes at.
