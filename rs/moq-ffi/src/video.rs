@@ -267,9 +267,14 @@ impl MoqVideoEncoder {
 fn finalize(
 	mut producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
 	drained: Result<(), moq_video::Error>,
+	finished: &crate::producer::Finished,
 ) -> Result<(), MoqError> {
 	match drained {
-		Ok(()) => Ok(producer.finish()?),
+		Ok(()) => {
+			producer.finish()?;
+			finished.keep(producer);
+			Ok(())
+		}
 		Err(err) => {
 			producer.abort(moq_net::Error::Transport(err.to_string()));
 			Err(err.into())
@@ -362,14 +367,14 @@ impl VideoProducer {
 		Ok(())
 	}
 
-	fn finish(self) -> Result<(), MoqError> {
+	fn finish(self, finished: &crate::producer::Finished) -> Result<(), MoqError> {
 		let Self {
 			encoder, mut producer, ..
 		} = self;
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
 		let drained = block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded));
-		finalize(producer, drained)
+		finalize(producer, drained, finished)
 	}
 }
 
@@ -387,6 +392,7 @@ pub struct MoqVideoProducer {
 	applied: Arc<AtomicU64>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqBandwidth>>,
+	finished: crate::producer::Finished,
 }
 
 impl MoqVideoProducer {
@@ -522,7 +528,7 @@ impl MoqVideoProducer {
 		self.reservation.lock().unwrap().take();
 		// A follower panic only stops rate adaptation, so the encoded frames still
 		// end the track cleanly before the panic is reported.
-		producer.finish()?;
+		producer.finish(&self.finished)?;
 		followed
 	}
 }
@@ -569,6 +575,7 @@ impl MoqVideoProducer {
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 		let gop = config.gop.duration(config.framerate);
 		let ceiling = video_ceiling(&config, &rendition);
+		let finished = broadcast.with_state(|state| Ok(state.finished.clone()))?;
 		let producer = broadcast.with_state(|state| match output.track {
 			Some(name) => {
 				let track = state
@@ -614,6 +621,7 @@ impl MoqVideoProducer {
 			follow: std::sync::Mutex::new(follow),
 			applied,
 			_bandwidth: bandwidth,
+			finished,
 		}))
 	}
 }
