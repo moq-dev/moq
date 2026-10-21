@@ -52,6 +52,10 @@ let
           message = "services.github-runner-vms supports x86_64-linux KVM hosts.";
         }
         {
+          assertion = cfg.resources.disk >= 8;
+          message = "Runner VM ${name} needs at least 8 GiB for its base image.";
+        }
+        {
           assertion =
             config.networking.nat.externalInterface == null
             || config.networking.nat.externalInterface == cfg.network.uplink;
@@ -275,7 +279,7 @@ in
               disk = lib.mkOption {
                 type = lib.types.ints.positive;
                 default = 128;
-                description = "Initial persistent disk capacity in GiB.";
+                description = "Initial persistent disk capacity in GiB, at least 8.";
               };
             };
             tokenFile = lib.mkOption {

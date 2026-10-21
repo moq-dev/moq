@@ -17,6 +17,13 @@
     ./image.nix
   ];
 
+  assertions = [
+    {
+      assertion = resources.disk >= 8;
+      message = "Runner guests and migrations need at least 8 GiB for the base image.";
+    }
+  ];
+
   networking = {
     hostName = "github-runner";
     useDHCP = false;
