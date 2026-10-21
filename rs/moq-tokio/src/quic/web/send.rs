@@ -11,6 +11,9 @@ use crate::quic::web::{CloseReason, ClosedStream, SessionError, WriteError};
 
 /// A stream that can be used to send bytes. See [`crate::quic::driver::SendStream`].
 ///
+/// Dropping it before [`finish`](Self::finish) resets it with code 0, still delivering the
+/// WebTransport header.
+///
 /// This wrapper is mainly needed for error codes, which is unfortunate.
 /// WebTransport uses u32 error codes and they're mapped in a reserved HTTP/3 error space.
 #[derive(Debug)]
@@ -22,7 +25,12 @@ pub struct SendStream {
 }
 
 impl SendStream {
-	pub(crate) fn new(stream: crate::quic::driver::SendStream, close: Arc<CloseReason>, header: Option<u64>) -> Self {
+	pub(crate) fn new(
+		mut stream: crate::quic::driver::SendStream,
+		close: Arc<CloseReason>,
+		header: Option<u64>,
+	) -> Self {
+		stream.set_drop_reset(header.unwrap_or(0), close.encode_stream_code(0));
 		Self { stream, close, header }
 	}
 
@@ -93,9 +101,6 @@ impl SendStream {
 
 	/// Mark the stream as finished, such that no more data can be written. See
 	/// [`crate::quic::driver::SendStream::finish`].
-	///
-	/// WARNING: This is implicitly called on Drop, but it's a common footgun in QUIC libraries.
-	/// If you cancel futures by dropping them you'll get incomplete writes.
 	pub fn finish(&mut self) -> Result<(), ClosedStream> {
 		self.stream.finish().map_err(Into::into)
 	}

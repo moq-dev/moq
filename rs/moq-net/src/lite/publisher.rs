@@ -82,6 +82,8 @@ struct Shared<S: crate::transport::poll::Session> {
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
 	interests: Interests,
+	/// Holds this session's listings: one per broadcast, the newest replacing the rest.
+	lister: crate::broadcast::Owner,
 	fetches: crate::session::Slots,
 	// The send time an untimed track's frames carry on Lite05/06, which can't mark them
 	// untimed (see `wire_timestamp`).
@@ -204,6 +206,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				peer_grant: config.peer_grant,
 				owed: AtomicUsize::new(0),
 				interests: Interests::new(config.subscriptions),
+				lister: crate::broadcast::Owner::new(),
 				fetches: config.fetches,
 				runtime: config.runtime.clone(),
 				estimate: config.estimate,
@@ -299,6 +302,7 @@ enum ControlState<S: crate::transport::poll::Session> {
 	Subscribe(RequestServe<S, SubscribeServe<S>>),
 	Fetch(RequestServe<S, FetchServe>),
 	TrackInfo(RequestServe<S, TrackInfoServe>),
+	Tracks(RequestServe<S, TracksServe>),
 	Probe(ProbeServe<S>),
 	Auth(AuthServe<S>),
 	/// Decoding the peer's GOAWAY, surfaced through [`crate::Session::draining`].
@@ -334,12 +338,13 @@ impl<S: crate::transport::poll::Session> Control<S> {
 					};
 					let version = self.shared.version;
 					// PROBE is lite-03+, GOAWAY lite-04+, the Track Stream and FETCH lite-05+, and the
-					// Auth Stream lite-07+.
+					// Auth and Tracks Streams lite-07+.
 					let kind = kind.filter(|kind| match kind {
 						lite::ControlType::Probe => !matches!(version, Version::Lite01 | Version::Lite02),
 						lite::ControlType::Goaway => version.has_goaway(),
 						lite::ControlType::Fetch | lite::ControlType::Track => version.has_track_stream(),
 						lite::ControlType::Auth => version.has_auth(),
+						lite::ControlType::Tracks => version.has_tracks(),
 						_ => true,
 					});
 
@@ -363,6 +368,9 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						lite::ControlType::Track => {
 							ControlState::TrackInfo(RequestServe::new(self.shared.clone(), stream))
 						}
+						lite::ControlType::Tracks => {
+							ControlState::Tracks(RequestServe::new(self.shared.clone(), stream))
+						}
 						lite::ControlType::Probe => {
 							ControlState::Probe(ProbeServe::new(self.shared.clone(), self.runtime.clone(), stream))
 						}
@@ -375,6 +383,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 				ControlState::Subscribe(serve) => return serve.poll(waiter),
 				ControlState::Fetch(serve) => return serve.poll(waiter),
 				ControlState::TrackInfo(serve) => return serve.poll(waiter),
+				ControlState::Tracks(serve) => return serve.poll(waiter),
 				ControlState::Probe(serve) => return serve.poll(waiter),
 				ControlState::Auth(serve) => return serve.poll(waiter),
 				ControlState::Goaway { stream } => {
@@ -1809,6 +1818,11 @@ enum Charge {
 	Track,
 	/// A subscription.
 	Subscribe,
+	/// A TRACKS stream listing the broadcast, charged under the empty track name on top
+	/// of any interest in a track of that name. Each listing is charged until it is gone,
+	/// replaced or not: which listing a newer one replaces is known only once both
+	/// resolve, so like a repeated SUBSCRIBE, a replacement must fit under the cap.
+	Tracks,
 }
 
 /// A session's subscription cap, charged per track.
@@ -1826,6 +1840,7 @@ struct Interests {
 struct Interest {
 	tracks: usize,
 	subscribes: usize,
+	listings: usize,
 	slots: Vec<crate::session::Slot>,
 }
 
@@ -1834,11 +1849,12 @@ impl Interest {
 		match charge {
 			Charge::Track => &mut self.tracks,
 			Charge::Subscribe => &mut self.subscribes,
+			Charge::Tracks => &mut self.listings,
 		}
 	}
 
 	fn cost(&self) -> usize {
-		self.tracks.max(self.subscribes)
+		self.tracks.max(self.subscribes) + self.listings
 	}
 }
 
@@ -1946,11 +1962,82 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 			priority: info.priority,
 			max_age: info.max_age,
 			timescale: info.timescale,
+			// An older peer is served the frames inflated.
+			compress: info.compress && shared.version.has_compression(),
 		})?;
 		if ietf {
 			writer.buffer(&lite::ietf::TrackProperties(info.properties.clone()))?;
 		}
 		Poll::Ready(Ok(ControlFlow::Break(())))
+	}
+}
+
+/// Answers a TRACKS stream: the broadcast's listed tracks, SYNCED, then each change,
+/// until the broadcast ends or a newer listing of it on the session replaces this one.
+///
+/// Each listing queues the broadcast's whole listed set, so the session lists each
+/// broadcast once: duplicates would multiply that memory and every change's fanout. A
+/// newer listing replaces the older rather than being refused, since a subscriber that
+/// stops listing and lists again can open the new stream before we see the old one close.
+struct TracksServe {
+	tracks: crate::broadcast::Tracks,
+}
+
+impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
+	const KIND: &'static str = "tracks";
+	const GRACEFUL: bool = false;
+	const CHARGE: Option<Charge> = Some(Charge::Tracks);
+	const HOLDS: bool = false;
+	type Message = lite::Tracks<'static>;
+	type Update = NoUpdate;
+
+	fn target(msg: &Self::Message) -> (&crate::Path<'static>, &str) {
+		(&msg.broadcast, "")
+	}
+
+	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch> {
+		msg.epoch.as_ref()
+	}
+
+	fn start(shared: &Shared<S>, _: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
+		Ok(Self {
+			tracks: broadcast.tracks_as(shared.lister)?,
+		})
+	}
+
+	fn update(&mut self, update: NoUpdate) {
+		match update {}
+	}
+
+	fn poll(
+		&mut self,
+		shared: &Shared<S>,
+		writer: &mut Writer<S::SendStream, Version>,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<ControlFlow<()>, Error>> {
+		// Pull an event only once the last is out, so a stalled requester's changes collapse
+		// in the listing's queue rather than pile up here.
+		ready!(writer.poll_flush(&mut waiter.context()))?;
+		let event = match ready!(self.tracks.poll_next(waiter))? {
+			Some(crate::broadcast::TracksEvent::Added { name, info }) => lite::TracksEvent::Added {
+				name: name.to_string().into(),
+				info: lite::TrackInfo {
+					refresh: info.refresh,
+					priority: info.priority,
+					max_age: info.max_age,
+					timescale: info.timescale,
+					// An older peer is served the frames inflated.
+					compress: info.compress && shared.version.has_compression(),
+				},
+			},
+			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
+				name: name.to_string().into(),
+			},
+			Some(crate::broadcast::TracksEvent::Synced) => lite::TracksEvent::Synced,
+			None => return Poll::Ready(Ok(ControlFlow::Break(()))),
+		};
+		writer.buffer(&event)?;
+		Poll::Ready(Ok(ControlFlow::Continue(())))
 	}
 }
 
@@ -2162,7 +2249,7 @@ enum FetchServe {
 	},
 }
 
-/// A batch of frames with their relay metadata, which the `ietf` extension forwards.
+/// A batch of frames read for egress, each with what the wire needs beside it.
 type Objects = arrayvec::ArrayVec<frame::Object, 8>;
 
 impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
@@ -2229,6 +2316,10 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 
 					// Matches the timescale TRACK_INFO declared for the track.
 					let timescale = shared.version.wire_timescale(group.timescale());
+					// And its compression, which a lite-07 peer receives as stored.
+					if shared.version.has_compression() {
+						group = group.compressed();
+					}
 					let capped = msg.end_frame.is_some();
 					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale, shared.version)?;
 
@@ -2274,8 +2365,9 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 							}
 							buffer_frame_info(
 								writer,
-								batched.timestamp,
-								batched.payload.len() as u64,
+								batched.frame.timestamp,
+								batched.inflated,
+								batched.frame.payload.len() as u64,
 								*timescale,
 								prev_ts,
 								&shared.runtime,
@@ -2309,6 +2401,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 									buffer_frame_info(
 										writer,
 										next.timestamp,
+										next.inflated,
 										next.size,
 										*timescale,
 										prev_ts,
@@ -3266,6 +3359,7 @@ mod announce_test {
 fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	timestamp: Option<crate::Timestamp>,
+	inflated: Option<u64>,
 	size: u64,
 	timescale: Option<crate::Timescale>,
 	prev_ts: &mut u64,
@@ -3273,6 +3367,10 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 ) -> Result<(), Error> {
 	if let Some(timescale) = timescale {
 		buffer_zigzag_delta(writer, wire_timestamp(timestamp, timescale, runtime)?, prev_ts)?;
+	}
+	// Only a compressed group read in its stored form has one, and only on lite-07.
+	if let Some(inflated) = inflated {
+		writer.buffer_varint(inflated)?;
 	}
 	writer.buffer_varint(size)?;
 	Ok(())
@@ -3360,7 +3458,7 @@ fn poll_recv_next(
 			Poll::Pending => {}
 		}
 		if datagrams {
-			match track.poll_recv_wire_datagram(waiter)? {
+			match track.poll_recv_stored_datagram(waiter)? {
 				Poll::Ready(Some(datagram)) => return Poll::Ready(Ok(Recv::Datagram(datagram))),
 				// Datagram side finished but groups are still paused/pending: keep waiting on groups.
 				Poll::Ready(None) => {}
@@ -3569,11 +3667,14 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 			(true, Some(wire)) => Some(Some(wire.as_ref().clone())),
 		};
 		let sequence = datagram.sequence;
+		// A lite-07 peer takes a compressed track's datagram as stored, others inflated.
+		let (payload, inflated) = datagram.sent(self.version.has_compression());
 		let body = lite::Datagram {
 			subscribe: self.id,
 			sequence,
 			timestamp,
-			payload: datagram.datagram.payload,
+			inflated,
+			payload: payload.clone(),
 			ietf,
 		};
 		// has_datagrams is checked before this runs, and the timescale is set wherever the
@@ -3837,7 +3938,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				Poll::Pending => {
 					self.first = Some(group);
 					if self.datagrams
-						&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_wire_datagram(waiter)?
+						&& let Poll::Ready(Some(datagram)) = self.track.poll_recv_stored_datagram(waiter)?
 					{
 						self.serve_datagram(datagram);
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
@@ -3958,6 +4059,9 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 	/// Send a datagram, recording its sequence once it went out.
 	fn serve_datagram(&mut self, datagram: crate::model::datagram::Stored) {
 		let sequence = datagram.sequence;
+		// Metered in the form the wire carries.
+		let (payload, _) = datagram.sent(self.ctx.version.has_compression());
+		self.track.meter_datagram(payload.len() as u64);
 		if self.ctx.serve_datagram(datagram) {
 			self.mark_served(sequence);
 		}
@@ -4164,6 +4268,11 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		rank: Rank<GroupOf<S>>,
 		group: group::Consumer,
 	) -> Self {
+		// A lite-07 peer receives a compressed group as stored, others inflated.
+		let group = match ctx.version.has_compression() {
+			true => group.compressed(),
+			false => group,
+		};
 		Self {
 			ctx,
 			rank,
@@ -4360,8 +4469,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									.and_then(|()| {
 										buffer_frame_info(
 											writer,
-											batched.timestamp,
-											batched.payload.len() as u64,
+											batched.frame.timestamp,
+											batched.inflated,
+											batched.frame.payload.len() as u64,
 											self.ctx.timescale,
 											&mut self.prev_ts,
 											&self.ctx.runtime,
@@ -4406,6 +4516,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 												buffer_frame_info(
 													writer,
 													next.timestamp,
+													next.inflated,
 													next.size,
 													self.ctx.timescale,
 													&mut self.prev_ts,
@@ -6482,7 +6593,7 @@ mod tests {
 		let mut echoed_hops = Hops::new();
 		echoed_hops.push(crate::Hop::UNKNOWN).unwrap();
 		let _echoed = origin
-			.dynamic(
+			.dynamic_route(
 				"echoed",
 				crate::origin::Route::default()
 					.with_hops(echoed_hops)
@@ -6493,7 +6604,7 @@ mod tests {
 		let mut local_hops = Hops::new();
 		local_hops.push(upstream).unwrap();
 		let _local = origin
-			.dynamic("local", crate::origin::Route::default().with_hops(local_hops))
+			.dynamic_route("local", crate::origin::Route::default().with_hops(local_hops))
 			.unwrap();
 
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
@@ -6719,15 +6830,16 @@ mod tests {
 	async fn unknown_control_types_reset_only_their_stream() {
 		use kio::Task;
 		// An unassigned type everywhere, then types a version predates: PROBE before lite-03,
-		// GOAWAY before lite-04, FETCH and TRACK before lite-05, AUTH before lite-07.
+		// GOAWAY before lite-04, FETCH and TRACK before lite-05, AUTH and TRACKS before lite-07.
 		let cases = [
-			(Version::Lite06, 8),
-			(Version::Lite07, 8),
+			(Version::Lite06, 9),
+			(Version::Lite07, 9),
 			(Version::Lite02, lite::ControlType::Probe as u8),
 			(Version::Lite03, lite::ControlType::Goaway as u8),
 			(Version::Lite04, lite::ControlType::Fetch as u8),
 			(Version::Lite04, lite::ControlType::Track as u8),
 			(Version::Lite06, lite::ControlType::Auth as u8),
+			(Version::Lite06, lite::ControlType::Tracks as u8),
 		];
 		for (version, kind) in cases {
 			let mut session = ScriptedSession::new(vec![kind]);
@@ -6959,7 +7071,7 @@ mod tests {
 		let mut _route = None;
 		let mut held = None;
 		match wait {
-			Wait::Broadcast => _route = Some(origin.dynamic("room", crate::origin::Route::default()).unwrap()),
+			Wait::Broadcast => _route = Some(origin.dynamic_route("room", crate::origin::Route::default()).unwrap()),
 			Wait::Track => {
 				let broadcast = origin.create_broadcast("room").unwrap();
 				let dynamic = broadcast.dynamic();
@@ -7681,6 +7793,14 @@ mod tests {
 			drop(slots.acquire().expect("the slot was not returned"));
 		}
 
+		// Each listing is its own interest, even one that will replace another.
+		let listing = interests.charge(&room, "", Charge::Tracks).expect("the listing fits");
+		assert!(matches!(
+			interests.charge(&room, "", Charge::Tracks),
+			Err(Error::TooManyRequests)
+		));
+		drop(listing);
+
 		// Two of a kind are two interests.
 		let _a = interests.charge(&room, "video", Charge::Subscribe).unwrap();
 		assert!(matches!(
@@ -7802,6 +7922,52 @@ mod tests {
 				"{version}: late decode error was swallowed"
 			);
 		}
+	}
+
+	/// A second listing of a broadcast on one session replaces the first, so a peer cannot
+	/// multiply the listed set's memory and fanout by listing it again.
+	#[moq_clock::test]
+	async fn a_newer_listing_of_a_broadcast_replaces_the_older() {
+		use kio::Task;
+		let version = Version::Lite07;
+		let origin = crate::origin::Config::new(Hop::random()).produce();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let request = lite::Tracks {
+			broadcast: crate::Path::new("room"),
+			epoch: None,
+		};
+		let request = request.encode_bytes(version).unwrap().to_vec();
+		let mut session = ScriptedSession::per_stream(vec![request.clone(), request]);
+		let log = session.log.clone();
+		let older = Stream::open(&mut session, version).await.unwrap();
+		let newer = Stream::open(&mut session, version).await.unwrap();
+		let estimate = kio::Producer::default();
+		let probe = probe_server(session.clone(), older, version, &estimate);
+		probe.shared.peer_setup.set(lite::Setup::default());
+		let mut shared = probe.shared;
+		Arc::get_mut(&mut shared).expect("one owner").origin = origin.consume();
+		let control = |stream| Control {
+			shared: shared.clone(),
+			runtime: crate::time::sim(),
+			state: ControlState::Tracks(RequestServe::new(shared.clone(), stream)),
+		};
+
+		// Whether the control is still serving after the runtime settles.
+		async fn serving(control: &mut Control<ScriptedSession>) -> bool {
+			moq_clock::timeout(Duration::from_millis(1), kio::wait(|waiter| control.poll(waiter)))
+				.await
+				.is_err()
+		}
+
+		let mut older = control(probe.stream.unwrap());
+		assert!(serving(&mut older).await, "the listing ended early");
+		let mut newer = control(newer);
+		assert!(serving(&mut newer).await, "the newer listing ended early");
+		assert!(!serving(&mut older).await, "the older listing outlived its replacement");
+		assert_eq!(log.resets(), vec![crate::StreamError::Cancel.to_code()]);
+		assert!(log.closes().is_empty(), "a repeated listing closed the session");
+		assert!(serving(&mut newer).await, "the newer listing ended");
 	}
 
 	#[moq_clock::test]

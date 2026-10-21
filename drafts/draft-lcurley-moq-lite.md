@@ -36,6 +36,14 @@ normative:
 
 informative:
   I-D.lcurley-moq-cluster:
+  moqflate:
+    title: "DEFLATE Compressed Tracks for MoQ"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-flate/
+    author:
+      -
+        ins: L. Curley
+        name: Luke Curley
+    date: false
 
 --- abstract
 
@@ -396,6 +404,8 @@ There's a 1-byte STREAM_TYPE at the beginning of each stream.
 | ------- | ------------- | ----------- |
 |    0x7  | Auth         | Either      |
 | ------- | ------------- | ----------- |
+|    0x8  | Tracks       | Subscriber  |
+| ------- | ------------- | ----------- |
 
 ### Announce
 A subscriber can open an Announce Stream to discover routes matching a prefix.
@@ -551,6 +561,39 @@ Anything cached against a path, on either side, is therefore scoped to the annou
 If FRAME messages cannot be decoded against the cached TRACK_INFO, the subscriber MUST reset the affected stream with a protocol violation and re-request it.
 
 Because a subscriber cannot parse buffered group frames until TRACK_INFO arrives, the publisher SHOULD prioritize TRACK_INFO ahead of group data on the connection.
+
+### Tracks {#tracks-stream}
+A subscriber opens a Tracks Stream (0x8) to list the Tracks of one Broadcast.
+A listing is discovery, not delivery: the subscriber SUBSCRIBEs to each Track it wants as usual, and a Track's groups reach a late SUBSCRIBE from the publisher's cache while they are retained.
+
+The subscriber sends a [TRACKS](#tracks) message naming the broadcast path and Epoch.
+The publisher replies with listing events, then FINs the stream once the Broadcast ends, or resets it on error:
+
+- [TRACKS_ADD](#tracks-add): a Track is listed, with its TRACK_INFO.
+- [TRACKS_REMOVE](#tracks-remove): a listed Track no longer is.
+- [SYNCED](#synced): every Track this hop listed when the stream opened, and still lists, has been sent.
+
+A Broadcast lists the Tracks its publisher produces.
+A Track the publisher serves only on request, such as any name a transcoder answers for, is never listed, and listing never creates one.
+A removal promises only that the Track is no longer listed; a SUBSCRIBE for its name MAY still succeed.
+A Track listed again under a removed name is the same Track: within one Broadcast a name always means the same content.
+
+The listing is relative to this hop: a relay answers with the Tracks it currently holds and never waits on its upstream, so a relay without a listing of its own sends SYNCED at once and its upstream's Tracks follow as live TRACKS_ADD.
+A relay SHOULD answer every listing of a Broadcast from one upstream Tracks Stream.
+A subscriber SHOULD hold at most one Tracks Stream per Broadcast, since each costs the publisher the whole listed set.
+A publisher keeps only the newest Tracks Stream per Broadcast on a session and resets any older one with CANCELLED, rather than refusing the newer: a subscriber that stops listing and lists again can open the new stream before the publisher sees the old one close.
+
+The publisher keeps a pending queue per stream, keyed by Track name in the order the changes happened.
+A removal of a Track the subscriber has not been sent cancels its add, and a removal followed by an add of a name it was sent collapses in place into that removal then that add, so a stalled subscriber costs the names it was sent plus the listed set.
+The publisher MUST send SYNCED exactly once: the first time that queue drains, or after it has sent N events, whichever comes first, where N is the queue's length when the stream opened.
+A removal of a Track already sent MAY precede SYNCED.
+
+The subscriber MUST close the session with a PROTOCOL_VIOLATION on a TRACKS_ADD for a name already listed on the stream, a TRACKS_REMOVE for a name not listed, a second SYNCED, or an unknown event type.
+A FIN before SYNCED means the Broadcast ended.
+On a FIN, a relay ends the listings it answers from that stream, even before the Broadcast's retraction arrives.
+A publisher MUST reset a Tracks Stream with NOT_FOUND when the route it would serve the path from covers it by a shorter prefix: a route claims capability, not inventory, so it names no Broadcast to list.
+A subscriber MAY skip the Track Stream for a Track it learned from TRACKS_ADD, since the properties are the same immutable ones.
+Each listed Track a subscriber holds counts against its bound on announcements (see [Resource Exhaustion](#resource-exhaustion)); past it, the subscriber resets the stream rather than hold more.
 
 ### Probe
 A subscriber opens a Probe Stream (0x4) to measure, and optionally increase, the available bitrate of the connection.
@@ -758,6 +801,7 @@ DATAGRAM Body {
   Subscribe ID (i)
   Group Sequence (i)
   [Timestamp (i)]
+  [Inflated Size (i)]
   Payload (b)
 }
 ~~~
@@ -772,6 +816,10 @@ The absolute sequence number of the group carried by this datagram.
 **Timestamp**:
 The absolute timestamp of the single frame in the group, expressed in the Track's `Timescale`.
 Present only on a timed Track, which the receiver learns from the subscription named by `Subscribe ID`.
+
+**Inflated Size**:
+The size of the payload once inflated.
+Present only when the Track's Compression is not none; the datagram payload is then compressed alone, as a stream of its own.
 
 **Payload**:
 The frame payload, extending to the end of the datagram.
@@ -977,7 +1025,8 @@ SYNCED Message {
 ~~~
 
 SYNCED has no body and assigns no Announce ID.
-A second SYNCED on the same stream, or a stream ending before SYNCED, is a PROTOCOL_VIOLATION.
+A second SYNCED on the same stream is a PROTOCOL_VIOLATION.
+An Announce Stream ending before SYNCED is a PROTOCOL_VIOLATION; a Tracks Stream FIN before SYNCED means the Broadcast ended (see [Tracks](#tracks-stream)).
 
 
 ## ANNOUNCE_START {#announce-start}
@@ -1270,6 +1319,7 @@ TRACK_INFO Message {
   Publisher Max Age (i)
   Timescale (i)
   Refresh (i)
+  [Compression (i)]
 }
 ~~~
 
@@ -1308,6 +1358,64 @@ On a live-edge join, a publisher asks for a group beyond every sequence already 
 Joins coalesce until the requested group arrives.
 A relay preserves the ratio and evaluates joins against its own cache, forwarding demand in SUBSCRIBE_UPDATE.
 Versions before lite-07 omit Refresh and Wanted Group; a Track received on those versions never refreshes.
+
+**Compression**:
+Present from lite-07.
+How each Group of this Track is compressed: none (0x0), or DEFLATE (0x1), each Group one DEFLATE stream as specified by {{moqflate}}.
+Any other value is a PROTOCOL_VIOLATION.
+When Compression is not none, FRAME messages and datagrams carry an `Inflated Size`.
+A publisher that cannot send this field, on lite-06 and earlier, MUST send the Track's frames inflated instead.
+
+## TRACKS {#tracks}
+TRACKS is sent by a subscriber to list a Broadcast's Tracks.
+It is the first message on a Tracks Stream (0x8).
+
+~~~
+TRACKS Message {
+  Message Length (i)
+  Broadcast Path (s)
+  Epoch (b)
+}
+~~~
+
+**Broadcast Path**:
+The path of the Broadcast to list.
+
+**Epoch**:
+The publisher instance the subscriber expects, as in [TRACK](#track).
+The listing is pinned to the instance that answers it and ends with that instance.
+
+## TRACKS_ADD {#tracks-add}
+A publisher sends TRACKS_ADD on a Tracks Stream when a Track is listed.
+
+~~~
+TRACKS_ADD Message {
+  Type (i) = 0x0
+  Message Length (i)
+  Track Name (s)
+  Track Info (..)
+}
+~~~
+
+**Track Name**:
+The name of the Track, unique among the Tracks listed on the stream.
+
+**Track Info**:
+A [TRACK_INFO](#track-info) message, with its own Message Length, as a Track Stream would answer for the Track.
+
+## TRACKS_REMOVE {#tracks-remove}
+A publisher sends TRACKS_REMOVE on a Tracks Stream when a listed Track is no longer listed.
+
+~~~
+TRACKS_REMOVE Message {
+  Type (i) = 0x1
+  Message Length (i)
+  Track Name (s)
+}
+~~~
+
+**Track Name**:
+The name a TRACKS_ADD on the stream listed.
 
 ## SUBSCRIBE_OK {#subscribe-ok}
 A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start position.
@@ -1614,6 +1722,7 @@ The FRAME message is a payload within a group.
 ~~~
 FRAME Message {
   [Timestamp Delta (i)]
+  [Inflated Size (i)]
   Message Length (i)
   Payload (b)
 }
@@ -1630,6 +1739,11 @@ Encoded as a zigzag-mapped variable-length integer:
 Zigzag interleaves non-negative and negative values so small magnitudes of either sign fit in a 1-byte varint.
 The first frame of a group is delta-encoded from `0`, so its `Timestamp Delta` is the zigzag encoding of the absolute timestamp.
 
+**Inflated Size**:
+The size of the payload once inflated.
+Present only when the Track's Compression is not none; the payload is then the next slice of the Group's compressed stream.
+A receiver MUST check it against its limits before inflating, and MUST treat a payload that inflates to any other size as malformed.
+
 **Payload**:
 An application-specific payload.
 The `Message Length` describes the payload size on the wire.
@@ -1639,7 +1753,10 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Added the Tracks Stream (0x8) with TRACKS, TRACKS_ADD, TRACKS_REMOVE, and SYNCED: a subscriber lists one Broadcast's Tracks, each with its TRACK_INFO, then SUBSCRIBEs to those it wants. A relay answers at once with what it holds. Older versions reset the stream type.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
+
+- Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none. Earlier versions receive the Track inflated.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 

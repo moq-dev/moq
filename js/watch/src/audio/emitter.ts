@@ -4,6 +4,7 @@ import type { Decoder } from "./decoder";
 
 const FADE = Milli(200);
 
+/** Signals the emitter reads. */
 export type EmitterInput = {
 	volume: Getter<number>;
 
@@ -29,10 +30,12 @@ type EmitterOutput = {
 	enabled: Signal<boolean>;
 };
 
-// A helper that emits audio directly to the speakers.
+/** A helper that emits audio directly to the speakers. */
 export class Emitter {
+	/** The decoder supplying samples. */
 	readonly source: Decoder;
 
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<EmitterInput>;
 
 	/** How long a volume change ramps for. 0 steps at once; a negative or non-finite fade throws and leaves the volume as it was. */
@@ -41,6 +44,7 @@ export class Emitter {
 	readonly #out: EmitterOutput = {
 		enabled: new Signal<boolean>(false),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
@@ -110,6 +114,7 @@ export class Emitter {
 		});
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#signals.close();
 	}

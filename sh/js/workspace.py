@@ -139,7 +139,7 @@ def run(action, plan):
     command("bun", "install", "--frozen-lockfile")
     if action == "test":
         command("bun", "test", "js/common/declarations.test.ts", "js/common/deps.test.ts",
-                "js/common/worklet.test.ts")
+                "js/common/docs.test.ts", "js/common/worklet.test.ts")
         scripts("test")
         return
     if action == "build":
@@ -161,7 +161,7 @@ def run(action, plan):
         raise RuntimeError("import.meta.env scan found a reference or failed")
     command("bun", "js/common/deps.ts")
     if plan["wasm"]:
-        command("just", "js", "wasm")
+        command("just", "js", "wasm", "dev")
     scripts("check")
     if plan["all"]:
         command("bunx", "tsc", "--noEmit", "--project", "test/tsconfig.json")

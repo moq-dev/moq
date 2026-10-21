@@ -22,6 +22,16 @@ impl Delivered {
 			.is_some_and(|(_, last)| sequence <= *last)
 	}
 
+	/// Whether every sequence in `groups` was handed out, or is below the floor.
+	pub fn covers(&self, groups: std::ops::Range<u64>) -> bool {
+		groups.is_empty()
+			|| self
+				.runs
+				.range(..=groups.start)
+				.next_back()
+				.is_some_and(|(_, last)| groups.end - 1 <= *last)
+	}
+
 	/// Record `sequence` as handed out; `false` when it already was.
 	pub fn insert(&mut self, sequence: u64) -> bool {
 		if self.contains(sequence) {
@@ -94,6 +104,8 @@ mod test {
 		assert_eq!(runs(&delivered), [(4, 8)]);
 		assert!(delivered.contains(4) && delivered.contains(8));
 		assert!(!delivered.contains(3) && !delivered.contains(9));
+		assert!(delivered.covers(4..9) && delivered.covers(9..9));
+		assert!(!delivered.covers(3..5) && !delivered.covers(8..10));
 	}
 
 	#[test]

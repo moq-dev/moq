@@ -161,6 +161,48 @@ async def test_client_reconnects_and_resumes_announcements():
                 pass
 
 
+async def test_client_failure_names_a_failing_first_dial():
+    """A first dial that keeps failing never finishes ``async with``, so
+    ``Client.failure`` is the only place its reason shows while it retries."""
+    import socket
+
+    # A socket that never answers holds the port, so each dial times out.
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as silent:
+        silent.bind(("127.0.0.1", 0))
+        host, port = silent.getsockname()
+        client = moq.Client(
+            f"https://{host}:{port}",
+            tls_verify=False,
+            bind="127.0.0.1:0",
+            timeout=timedelta(milliseconds=100),
+            websocket_enabled=False,
+            backoff=moq.Backoff(
+                initial=timedelta(milliseconds=50),
+                multiplier=2,
+                max=timedelta(milliseconds=200),
+                timeout=timedelta(0),
+            ),
+        )
+        assert client.failure() is None
+
+        enter = asyncio.create_task(client.__aenter__())
+        try:
+
+            async def failure() -> moq.Error:
+                while (err := client.failure()) is None:
+                    await asyncio.sleep(0.01)
+                return err
+
+            err = await asyncio.wait_for(failure(), timeout=10)
+            assert isinstance(err, moq.Error.Connect)  # type: ignore[attr-defined]
+            assert not enter.done()
+        finally:
+            enter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await enter
+        assert client.failure() is None
+
+
 async def test_server_close_releases_port():
     """Exiting the context manager releases the listening socket before it
     returns, so the same address binds again with no retry."""
@@ -401,11 +443,12 @@ async def test_route_update_observes_restart():
     """A route metadata update arrives as an AnnounceEventUpdate.
 
     The publisher re-prices its announced route; the subscriber observes the new
-    hop chain in place (no retraction), and cancelling retracts it.
+    hop chain in place (no retraction), and unannouncing retracts it.
     """
     origin = moq.OriginProducer()
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], publish=origin) as server:
-        announce = origin.dynamic("routed", moq.Route(hops=[42]))
+        announce = origin.create_broadcast("routed")
+        announce.announce(moq.Route(hops=[42]))
 
         serve_task = asyncio.create_task(server.serve())
         try:
@@ -422,14 +465,14 @@ async def test_route_update_observes_restart():
                 assert 77 not in first.announce.route.hops
 
                 # The publisher advertises a longer chain: an in-place update.
-                announce.update(moq.Route(hops=[42, 77]))
+                announce.announce(moq.Route(hops=[42, 77]))
                 updated = await next_route(announced)
                 assert isinstance(updated, moq.AnnounceEventUpdate)
                 assert updated.announce.prefix == "routed"
                 assert 77 in updated.announce.route.hops
 
-                # Cancelling retracts the route.
-                announce.cancel()
+                # Unannouncing retracts the route.
+                announce.unannounce()
                 ended = await next_route(announced)
                 assert isinstance(ended, moq.AnnounceEventEnd)
                 assert ended.announce.prefix == "routed"

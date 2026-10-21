@@ -1,4 +1,4 @@
-import { SetupOption, type SetupOptions } from "./parameters.ts";
+import { SetupOption, type SetupOptions } from "./setup_options.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /**

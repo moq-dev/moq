@@ -876,8 +876,8 @@ pub struct LanConfig {
 	)]
 	pub enabled: bool,
 
-	/// The shared key admitting a peer to the LAN mesh, as 64 hexadecimal
-	/// characters or a path to a file containing them.
+	/// A file holding the shared key admitting a peer to the LAN mesh, as 64
+	/// hexadecimal characters (`openssl rand -hex 32`).
 	///
 	/// Optional. Without it, anyone who can reach the listener joins, so leave
 	/// it unset only on networks you trust. With it, only peers that prove they
@@ -886,10 +886,10 @@ pub struct LanConfig {
 		name = "cluster-lan-secret",
 		long = "cluster-lan-secret",
 		env = "MOQ_CLUSTER_LAN_SECRET",
-		value_name = "HEX_OR_PATH",
 		setting = "cluster.lan.secret"
 	)]
-	pub secret: Option<String>,
+	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
+	pub secret: Option<std::path::PathBuf>,
 
 	/// DNS-SD application this relay advertises under. Peers using a different
 	/// name never discover this one. Defaults to `default`, which moq-cli
@@ -1259,6 +1259,9 @@ impl Cluster {
 	}
 
 	/// Admit a gateway session and scope both origin directions from its grant.
+	///
+	/// Waits on the decider for as long as the caller does; the caller owns the
+	/// deadline, as for [`auth::Auth::admit`].
 	pub async fn admit(&self, auth: &auth::Auth, request: moq_auth::Request) -> Result<Admitted, auth::Error> {
 		let result = async {
 			if !matches!(request.event, moq_auth::Event::Connect) {
@@ -2126,7 +2129,7 @@ impl Cluster {
 async fn lan_discovery(
 	advertise: &LanAdvertise,
 	node: Option<&str>,
-	secret: Option<&str>,
+	secret: Option<&std::path::Path>,
 	app: moq_tokio::mdns::App,
 ) -> anyhow::Result<moq_tokio::mdns::Discovery> {
 	let mut config = moq_tokio::mdns::Config::new(app, advertise.port);
@@ -2157,7 +2160,7 @@ async fn lan_discovery(
 		config = config.with_node(url);
 	}
 	if let Some(secret) = secret {
-		let secret = moq_tokio::mdns::Secret::load(secret).context("invalid --cluster-lan-secret")?;
+		let secret = moq_tokio::secret::Secret::read(secret).context("invalid --cluster-lan-secret")?;
 		config = config.with_secret(secret);
 	}
 	Ok(config.advertise().await?)
@@ -3264,7 +3267,10 @@ mod tests {
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = RelayConfig::parse_and_merge(args).expect("config load");
 		assert!(config.cluster.lan.enabled);
-		assert_eq!(config.cluster.lan.secret.as_deref(), Some("cluster.key"));
+		assert_eq!(
+			config.cluster.lan.secret.as_deref(),
+			Some(std::path::Path::new("cluster.key"))
+		);
 		assert_eq!(
 			config.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
 			Some("custom")
@@ -3295,7 +3301,10 @@ mod tests {
 			std::ffi::OsString::from("from-cli"),
 		];
 		let config = RelayConfig::parse_and_merge(args).expect("config load");
-		assert_eq!(config.cluster.lan.secret.as_deref(), Some("from-cli.key"));
+		assert_eq!(
+			config.cluster.lan.secret.as_deref(),
+			Some(std::path::Path::new("from-cli.key"))
+		);
 		assert_eq!(
 			config.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
 			Some("from-cli")

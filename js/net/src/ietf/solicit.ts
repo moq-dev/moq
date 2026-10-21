@@ -1,4 +1,4 @@
-import { SetupOption, type SetupOptions } from "./parameters.ts";
+import { SetupOption, type SetupOptions } from "./setup_options.ts";
 
 /**
  * The MoQ Solicit extension (draft-lcurley-moq-solicit-00).

@@ -1121,6 +1121,14 @@ impl Charge {
 		self.access.clone()
 	}
 
+	/// An [`Extra`] against this charge's account, detached when the charge is.
+	pub(super) fn extra(&self) -> Extra {
+		Extra {
+			track: self.track.clone(),
+			bytes: AtomicU64::new(0),
+		}
+	}
+
 	/// Tick of the group's last cache access.
 	pub(super) fn accessed(&self) -> u64 {
 		self.access.get()
@@ -1194,6 +1202,67 @@ impl Charge {
 }
 
 impl Drop for Charge {
+	fn drop(&mut self) {
+		self.clear();
+	}
+}
+
+/// Bytes a group keeps beside its cached frames, billed to the same pool and account as
+/// its [`Charge`] but reachable outside the group's write lock: a compressed group's
+/// inflated copy, which its readers build, and its codec state. Released on [`Self::clear`] or drop.
+///
+/// Its owner serializes the changes; the count is atomic so the eviction walk can size
+/// the group without that owner's lock.
+#[derive(Default)]
+pub(super) struct Extra {
+	track: Option<Arc<Track>>,
+	bytes: AtomicU64,
+}
+
+impl Extra {
+	/// Bill `n` more bytes.
+	pub(super) fn add(&self, n: u64) {
+		if let Some(track) = &self.track {
+			track.pool.add(n);
+			track.written.fetch_add(n, Ordering::Relaxed);
+			self.bytes.fetch_add(n, Ordering::Relaxed);
+		}
+	}
+
+	/// Settle the track's eviction debt, taking its lock: call with no group lock held.
+	pub(super) fn settle(&self) {
+		if let Some(track) = &self.track {
+			track.settle(None);
+		}
+	}
+
+	/// Bytes currently billed.
+	pub(super) fn size(&self) -> u64 {
+		self.bytes.load(Ordering::Relaxed)
+	}
+
+	/// Release `n` billed bytes.
+	pub(super) fn sub(&self, n: u64) {
+		if let Some(track) = &self.track {
+			let prior = self
+				.bytes
+				.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bytes| {
+					Some(bytes.saturating_sub(n))
+				})
+				.expect("always updates");
+			track.pool.sub(prior.min(n));
+		}
+	}
+
+	/// Release every billed byte.
+	pub(super) fn clear(&self) {
+		if let Some(track) = &self.track {
+			track.pool.sub(self.bytes.swap(0, Ordering::Relaxed));
+		}
+	}
+}
+
+impl Drop for Extra {
 	fn drop(&mut self) {
 		self.clear();
 	}

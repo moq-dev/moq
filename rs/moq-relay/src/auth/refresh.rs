@@ -242,7 +242,7 @@ impl Refresh {
 		self.waiting.push_back(Waiting {
 			request,
 			facts,
-			deadline: moq_clock::now() + super::ADMIT_TIMEOUT,
+			deadline: moq_clock::now() + super::ATTACH_TIMEOUT,
 		});
 		self.dispatch();
 	}

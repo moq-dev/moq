@@ -16,8 +16,10 @@ Public API: breaking in every binding.
 
 Today every binding speaks microseconds: moq-ffi `timestamp_us: Option<u64>`
 (about 160 sites in 9 files: `MoqFrame`, `MoqDatagram`, `MoqMediaFrame`, audio
-frames, json/flate producer `update`/`append`, media `flush`), moq-c
-`timestamp_us` plus `timestamp_present` pairs (about 140 sites in 6 files), and
+frames, json/flate producer `update`/`append`, media `flush`, the
+subscription start `MoqAnchor::Time`), moq-c `timestamp_us` plus
+`timestamp_present` pairs (about 140 sites in 6 files, plus
+`moq_anchor.timestamp_us` read as `MOQ_ANCHOR_TIME`), and
 each wrapper's native type (Python `timedelta`, Go `*time.Duration`, Swift
 `UInt64`, Kotlin `Duration`, Dart `int`, C++ `std::optional<uint64_t>`, OBS
 microseconds). Reads floor through `as_micros()`, so any scale that does not

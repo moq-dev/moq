@@ -22,6 +22,9 @@ Rules every child keeps:
 - A paused clock auto-advances while the runtime idles, so it can fire a
   timer before a real socket delivers. Where real sockets fight the paused
   clock, make the timers mockable or move the test off real sockets.
+- A mocked clock still flakes when the code jitters its timers with `rand`
+  (the draft-16 cancel race was a retry sweep jittered past a fixed settle
+  budget). Wait out the jitter's whole window, not a count of small steps.
 
 Added 2026-10-15 (maintainer): three flakes seen while landing that day's
 merge batch, ranked by how likely each hides a product bug.
@@ -36,12 +39,19 @@ hit it. The same day's test cost audit added the macOS QUIC connects, and the
 redundant failover drift first: it may hide a TS export bug and failed two of
 three loaded `just check` runs.
 
+Added 2026-10-20 (maintainer): three more from that day's merge batch, the
+draft-16 cancel race first since it fails on a mocked clock and so may hide
+an ordering bug. The failed-listen test was meant to join the redial quest,
+which #6032 had already finished, so it reuses #6032's reserved-port fix as
+its own child. moq-uring's `host_tracks_moq_clock` was seen the same day
+but #6056 had already fixed it by measuring the calibration gap.
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
-- [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md) - moq-tokio's loopback QUIC tests stop timing out on the macOS Platform job
+- [Relay bench holder](/quest/m1/test-flakes-2/relay-bench-holder.md) - the foreign-listener bench test fails fast when its holder cannot bind, instead of hanging on a fifo
 
 ## Related
 

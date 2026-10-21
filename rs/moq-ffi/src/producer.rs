@@ -31,6 +31,10 @@ pub struct MoqTrackInfo {
 	/// Per-frame timescale in ticks per second, or null for an untimed track.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
+	/// Whether each group is DEFLATE-compressed on the wire to peers that support it.
+	/// Readers always see the original frames.
+	#[uniffi(default = false)]
+	pub compress: bool,
 }
 
 impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
@@ -49,7 +53,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			})?;
 			out = out.with_timescale(scale);
 		}
-		Ok(out)
+		Ok(out.with_compress(info.compress))
 	}
 }
 
@@ -75,6 +79,7 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 			max_age_us,
 			refresh: info.refresh,
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
+			compress: info.compress,
 		})
 	}
 }
@@ -160,6 +165,7 @@ impl MoqBroadcastProducer {
 		})
 	}
 
+	#[cfg(test)]
 	pub(crate) fn consume_inner(&self) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		self.with_state(|state| Ok(state.broadcast.consume()))
 	}
@@ -212,8 +218,7 @@ impl MoqBroadcastProducer {
 
 	/// Create a standalone broadcast, not attached to any origin.
 	///
-	/// Use it to serve a dynamic broadcast request ([`MoqBroadcastRequest::accept`](crate::origin::MoqBroadcastRequest::accept))
-	/// or for local pub/sub via [`consume`](Self::consume). To publish at a path, use
+	/// Use it for local pub/sub via [`consume`](Self::consume). To publish at a path, use
 	/// [`MoqOriginProducer::create_broadcast`](crate::origin::MoqOriginProducer::create_broadcast) instead.
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
@@ -525,7 +530,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let guard = self.inner.lock().unwrap();
 		let track = guard.as_ref().ok_or(MoqError::Closed)?;
-		let subscription = subscription.map(moq_net::track::Subscription::from);
+		let subscription = subscription.map(moq_net::track::Subscription::try_from).transpose()?;
 		Ok(Arc::new(MoqTrackConsumer::new(
 			track.subscribe(subscription),
 			Background::default(),
@@ -725,6 +730,7 @@ mod metadata_tests {
 				max_age_us,
 				refresh: None,
 				timescale: None,
+				compress: false,
 			};
 			let model = moq_net::track::Info::try_from(info).unwrap();
 			assert_eq!(model.max_age, max_age_us.map(std::time::Duration::from_micros));

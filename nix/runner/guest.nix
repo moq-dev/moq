@@ -95,8 +95,23 @@
     '';
   };
 
+  # A static user, unlike DynamicUser, gets real cache directories instead of
+  # symlinks into /var/cache/private. Builds resolve `..` lexically against
+  # canonical paths (askama's template includes), which misses through a
+  # symlinked HOME. On the switch, systemd moves the private directories back
+  # and chowns them, so caches and the registration survive.
+  users.users.github-runner = {
+    isSystemUser = true;
+    group = "github-runner";
+    # Java reads its home from passwd, not $HOME, so Gradle needs this too.
+    home = "/var/cache/github-runner-home";
+  };
+  users.groups.github-runner = { };
+
   services.github-runners.runner = {
     enable = true;
+    user = "github-runner";
+    group = "github-runner";
     url = runner.url;
     name = runner.name;
     extraLabels = runner.labels;
@@ -114,7 +129,7 @@
       which
     ];
     extraEnvironment = {
-      HOME = "/var/cache/github-runner-home";
+      HOME = config.users.users.github-runner.home;
       MBX_CACHE_DIR = "/var/cache/github-runner-home/.cache/mbx";
       CARGO_BUILD_JOBS = toString resources.cores;
     };
@@ -124,7 +139,7 @@
         "github-runner-work"
       ];
       CacheDirectoryMode = "0700";
-      # DynamicUser cache mounts default to noexec, but jobs execute checkout
+      # The sandbox mounts cache directories noexec, but jobs execute checkout
       # scripts, build outputs, and tools installed in their persistent home.
       ExecPaths = [
         "/var/cache/github-runner-home"
@@ -143,6 +158,36 @@
   systemd.services.github-runner-runner = {
     requires = [ "runner-token.service" ];
     after = [ "runner-token.service" ];
+  };
+
+  # Free page reporting hands back only free pages. The disk bypasses the host's
+  # cache, so the guest's page cache keeps every file a job touched resident on the
+  # host until it is dropped between jobs.
+  systemd.services.runner-reclaim = {
+    serviceConfig.Type = "oneshot";
+    path = [ pkgs.procps ];
+    # A write-heavy build can leave sync running long enough for a job to start,
+    # so check again right before dropping.
+    script = ''
+      idle() {
+        if pgrep -f Runner.Worker >/dev/null; then
+          echo "A job is running; keeping caches."
+          return 1
+        fi
+      }
+      idle || exit 0
+      sync
+      idle || exit 0
+      echo 3 > /proc/sys/vm/drop_caches
+      echo "Dropped caches."
+    '';
+  };
+  systemd.timers.runner-reclaim = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "5min";
+      OnUnitInactiveSec = "5min";
+    };
   };
 
   environment.systemPackages = with pkgs; [

@@ -23,6 +23,8 @@ mod clock;
 pub(crate) mod datagram;
 mod delivered;
 mod expiry;
+// The DEFLATE codec behind compressed tracks.
+mod flate;
 // pending: /quest/m1/public-model/ingest.md
 pub(crate) mod ledger;
 // private: passthrough
@@ -51,9 +53,10 @@ pub use timed::Timed;
 
 /// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {
+	pub use super::follow::AnnouncedBroadcast;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, Preference, Producer, Request, Requesting, Route,
-		Routing, Source,
+		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, Preference, Prepared, Producer, Request,
+		Requesting, Route, Routing, Source,
 	};
 }
 

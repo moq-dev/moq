@@ -208,6 +208,8 @@ A receiver refuses such a track as {{moqt}} ingress does, with an unsupported ex
 The receiver parses the keys inside the Immutable Properties from its value, which a relay MUST NOT restate as mutable.
 It SHOULD read them from the value when needed rather than hold them beside it, as a list of IDs can cost several times the value.
 
+A TRACKS_ADD ({{moql}} Tracks Stream) embeds TRACK_INFO without TRACK_PROPERTIES, so when the extension is negotiated a subscriber MUST NOT skip the Track Stream for a track it learned from a listing.
+
 
 # Datagrams {#datagrams}
 When the extension is negotiated, a DATAGRAM carries a Datagram State after its Group Sequence.
@@ -222,6 +224,7 @@ DATAGRAM Body {
   [Status (i)]
   [Properties Length (i), Properties (..)]
   [Timestamp (i)]
+  [Inflated Size (i)]
   Payload (b)
 }
 ~~~
@@ -238,6 +241,7 @@ A bit field, or 0 for a plain datagram, which has none of the optional fields be
 A receiver MUST drop a datagram with any other bit, or a bit without RELAYED.
 
 A datagram with a Status MUST have an empty Payload, as {{moqt}} sends no payload beside one; a Normal (0) Status is an empty object.
+It has no Inflated Size ({{moql}} DATAGRAM), even on a compressed track, as there is no payload to inflate.
 A non-zero Status carries no object: it has no Timestamp, even on a timed track.
 A receiver MUST drop a datagram whose Status no {{moqt}} draft defines: only 0 (Normal), 1 (DOES_NOT_EXIST, drafts 14 and 15), 3 (END_OF_GROUP), and 4 (END_OF_TRACK) are relayed.
 It MUST also drop one whose fields no {{moqt}} OBJECT_DATAGRAM Type can carry, such as STATUS with END_OF_GROUP.

@@ -124,6 +124,17 @@ impl Version {
 		}
 	}
 
+	/// Whether a subscriber may open a Tracks Stream (0x8) to list a broadcast's
+	/// tracks. Added in lite-07.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_tracks(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announcements carry implicit announce ids: each `active`
 	/// ANNOUNCE_BROADCAST assigns the next per-stream ordinal, and `ended`/`restart`
 	/// reference that id instead of repeating the path. Added in lite-06.
@@ -242,6 +253,18 @@ impl Version {
 	/// from a live announcement on the same stream. Added in lite-07.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_announce_compression(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether TRACK_INFO carries the compression flag, and a compressed Track's FRAME
+	/// and datagram its inflated size. Added in lite-07; an earlier peer receives the
+	/// frames inflated.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_compression(self) -> bool {
 		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
