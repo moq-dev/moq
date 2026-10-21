@@ -3832,6 +3832,170 @@ fn handshake_anti_deadlock_probe() {
     );
 }
 
+/// The ack-eliciting frames the client has sent, which its probes carry
+fn client_probes(pair: &mut Pair, ch: ConnectionHandle) -> u64 {
+    let stats = pair.client_conn_mut(ch).stats();
+    stats.frame_tx.stream + stats.frame_tx.ping + stats.frame_tx.immediate_ack
+}
+
+/// Drive the pair for `outage` with the client's packets lost, and the server's too unless
+/// `one_way`, the server pinging every `ping` if set. Returns when, from the outage's start, the
+/// client sent ack-eliciting frames.
+fn probe_through_outage(
+    pair: &mut Pair,
+    (client_ch, server_ch): (ConnectionHandle, ConnectionHandle),
+    outage: Duration,
+    one_way: bool,
+    ping: Option<Duration>,
+) -> Vec<Duration> {
+    pair.to_server.loss = 1.0;
+    pair.to_client.loss = if one_way { 0.0 } else { 1.0 };
+    let start = pair.time;
+    let end = start + outage;
+    let mut next_ping = ping.map(|_| start);
+    let mut sent = client_probes(pair, client_ch);
+    let mut probes = Vec::new();
+    loop {
+        if let (Some(at), Some(every)) = (next_ping, ping)
+            && at <= pair.time
+        {
+            pair.server_conn_mut(server_ch).ping();
+            next_ping = Some(at + every);
+        }
+        pair.drive_client();
+        pair.drive_server();
+        let now = client_probes(pair, client_ch);
+        if now > sent {
+            probes.push(pair.time - start);
+            sent = now;
+        }
+        let next = [
+            pair.client.next_wakeup(),
+            pair.server.next_wakeup(),
+            next_ping,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        match next {
+            Some(t) if t < end => pair.time = pair.time.max(t),
+            _ => break,
+        }
+    }
+    pair.time = end;
+    pair.to_server.loss = 0.0;
+    pair.to_client.loss = 0.0;
+    probes
+}
+
+/// Connect over a 20 ms RTT, the client's last packet a PING whose ACK it has, so no packet the
+/// server sends after it acknowledges anything new
+fn settled_pair() -> (Pair, ConnectionHandle, ConnectionHandle) {
+    let mut pair = Pair::default();
+    pair.latency = Duration::from_millis(10);
+    let (client_ch, server_ch) = pair.connect();
+    pair.time += Duration::from_millis(100);
+    pair.drive();
+    pair.client_conn_mut(client_ch).ping();
+    pair.drive();
+    (pair, client_ch, server_ch)
+}
+
+/// Drive the pair until `done` holds, returning when it first did
+fn drive_until(pair: &mut Pair, mut done: impl FnMut(&mut Pair) -> bool) -> Instant {
+    loop {
+        pair.drive_client();
+        pair.drive_server();
+        if done(pair) {
+            return pair.time;
+        }
+        let next = [pair.client.next_wakeup(), pair.server.next_wakeup()]
+            .into_iter()
+            .flatten()
+            .min()
+            .expect("the connection went idle");
+        pair.time = pair.time.max(next);
+    }
+}
+
+/// Assert that each gap between `probes` is about twice the one before
+fn assert_backs_off(probes: &[Duration]) {
+    assert!(probes.len() >= 5, "{probes:?}");
+    for sends in probes.windows(3) {
+        let (gap, next) = (sends[1] - sends[0], sends[2] - sends[1]);
+        assert!(next >= gap.mul_f32(1.9), "the client backs off: {probes:?}");
+    }
+}
+
+/// A path that drops everything for 5 s with the client's data in flight: the client's probes
+/// back off while it hears nothing, and once the server is heard again the next one goes out
+/// then, not at the backed-off timer.
+#[test]
+fn a_peer_heard_after_an_outage_brings_the_probe_forward() {
+    let _guard = subscribe();
+    let (mut pair, client_ch, server_ch) = settled_pair();
+    let rtt = pair.latency * 2;
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+    pair.client_send(client_ch, s).write(b"hello").unwrap();
+
+    let probes = probe_through_outage(
+        &mut pair,
+        (client_ch, server_ch),
+        Duration::from_secs(5),
+        false,
+        None,
+    );
+    assert_backs_off(&probes);
+
+    let end = pair.time;
+    let due = pair.client.next_wakeup().unwrap() - end;
+    assert!(
+        due > 3 * rtt,
+        "the backed-off probe is due {due:?} after the outage"
+    );
+    pair.server_conn_mut(server_ch).ping();
+    let sent = client_probes(&mut pair, client_ch);
+    let probed = drive_until(&mut pair, |pair| client_probes(pair, client_ch) > sent) - end;
+    assert!(
+        probed <= rtt,
+        "the client probed {probed:?} after the outage, not {due:?}"
+    );
+    // The probe is an IMMEDIATE_ACK, whose ACK declares the data lost.
+    let received = pair.server_conn_mut(server_ch).stats().frame_rx.stream;
+    let delivered = drive_until(&mut pair, |pair| {
+        pair.server_conn_mut(server_ch).stats().frame_rx.stream > received
+    }) - end;
+    assert!(
+        delivered <= 2 * rtt,
+        "the client's data arrived {delivered:?} after the outage"
+    );
+}
+
+/// While only the client's packets are lost, a server heard every 50 ms says nothing of the
+/// path the client's probes take, so they back off as if it were silent.
+#[test]
+fn a_peer_heard_through_a_one_way_outage_leaves_the_backoff() {
+    let _guard = subscribe();
+    let (mut pair, client_ch, server_ch) = settled_pair();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+    pair.client_send(client_ch, s).write(b"hello").unwrap();
+
+    let probes = probe_through_outage(
+        &mut pair,
+        (client_ch, server_ch),
+        Duration::from_secs(5),
+        true,
+        Some(Duration::from_millis(50)),
+    );
+    assert_backs_off(&probes);
+}
+
 /// A client's lost Finished is probed at the Handshake space's own PTO, not one
 /// still backed off from Initials lost before it (RFC 9002 A.11).
 #[test]
