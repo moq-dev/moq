@@ -51,4 +51,4 @@ Decided with the maintainer on 2026-10-20:
 ## Related
 
 - [fMP4 import unwraps to Legacy](/quest/m1/fmp4-import-unwrap.md) - makes CMAF renditions rare, which is why loading on demand pays
-- [Artifact size audit](/quest/m0/audit-size.md) - tracks the watch first-load baseline this cuts
+- [Artifact size audit](/quest/m1/audit-size.md) - tracks the watch first-load baseline this cuts
