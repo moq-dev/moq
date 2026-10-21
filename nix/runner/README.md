@@ -117,7 +117,7 @@ inside libguestfs appliances rather than being mounted in the host kernel.
 Activate the built host configuration and start the VM:
 
 ```bash
-sudo ./result/bin/switch-to-configuration switch
+nixos-rebuild switch --sudo --flake .#build-host
 sudo systemctl start queue-ci
 ```
 
