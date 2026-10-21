@@ -64,6 +64,11 @@ own program's PIDs and leaves multiplex-wide accounting to `--program all`.
 When the PAT lists only the selected program, it counts as above. Chosen
 over passively acquiring every PMT, which adds a reassembler per program to
 an import that serves one.
+Classifying a PID looks it up in one map of every claimed PID, kept as
+PMTs arrive, never by searching each program's PMT. A benchmark in
+`rs/moq-mux/benches` feeds `Programs` a generated MPTS and sweeps program
+count and PID count independently, against a baseline without the
+accounting, so any slope it adds beyond the existing per-program feed shows.
 
 Prefer the existing `stats::Stream` row and its `refused` count over a new
 field; if a dropped PID needs a new `Class` or member, report the public API
