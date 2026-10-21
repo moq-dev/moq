@@ -5,6 +5,7 @@
  *
  * @module
  */
+
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import { type Codec, type Full, isSupported, type Level } from "./";
@@ -15,13 +16,16 @@ const isFirefox = navigator.userAgent.toLowerCase().includes("firefox");
 const OBSERVED = ["show", "details"] as const;
 type Observed = (typeof OBSERVED)[number];
 
-// Whether to display the support banner.
-// - "always": Always display the banner.
-// - "warning": Display the banner if a required feature needs a polyfill/fallback.
-// - "error": Display the banner if a required feature is unsupported.
-// - "never": Never display the banner.
+/**
+ * Whether to display the support banner.
+ * - "always": Always display the banner.
+ * - "warning": Display the banner if a required feature needs a polyfill/fallback.
+ * - "error": Display the banner if a required feature is unsupported.
+ * - "never": Never display the banner.
+ */
 export type Show = "always" | "warning" | "error" | "never";
 
+/** The `<moq-watch-support>` element: a banner reporting what this browser can play. */
 export default class MoqWatchSupport extends HTMLElement {
 	#show = new Signal<Show>("warning");
 	#details = new Signal<boolean>(false);
@@ -66,6 +70,7 @@ export default class MoqWatchSupport extends HTMLElement {
 		}
 	}
 
+	/** When to display the banner, mirrored by the `show` attribute. */
 	get show(): Show {
 		return this.#show.peek();
 	}
@@ -74,6 +79,7 @@ export default class MoqWatchSupport extends HTMLElement {
 		this.#show.set(show);
 	}
 
+	/** Whether to list each feature, mirrored by the `details` attribute. */
 	get details(): boolean {
 		return this.#details.peek();
 	}

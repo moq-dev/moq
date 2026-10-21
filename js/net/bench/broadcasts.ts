@@ -54,7 +54,7 @@ for (const scope of ["unscoped", "distinct-scopes", "producer-scopes", "rooted-p
 
 			const start = performance.now();
 			for (let index = 0; index < updates; index++) {
-				handles[0].update({ cost: BigInt(index + 1) });
+				handles[0].updateRoute({ cost: BigInt(index + 1) });
 				await new Promise<void>((resolve) => setImmediate(resolve));
 			}
 			const elapsed = performance.now() - start;
@@ -216,7 +216,7 @@ const nextEpoch = Epoch.parse("01900000-0000-7000-8000-000000000002");
 for (const pathCount of routeCounts) {
 	for (const readerCount of observerCounts) {
 		const origin = new Producer();
-		const dynamic = origin.dynamic(Path.from("room"), { epoch });
+		const dynamic = origin.dynamicRoute(Path.from("room"), { epoch });
 		const pending = dynamic.requested();
 		const requests = Array.from({ length: pathCount }, (_, index) =>
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),
@@ -226,7 +226,7 @@ for (const pathCount of routeCounts) {
 		await Promise.resolve();
 		const before = requests.map((request) => request.active.peek());
 		const start = performance.now();
-		dynamic.update({ epoch: nextEpoch });
+		dynamic.updateRoute({ epoch: nextEpoch });
 		await Promise.resolve();
 		const elapsed = performance.now() - start;
 		for (const [index, request] of requests.entries()) {

@@ -1,6 +1,6 @@
 import type { Reader, Writer } from "../stream.ts";
 import * as Message from "./message.ts";
-import { SetupOptions } from "./parameters.ts";
+import { SetupOptions } from "./setup_options.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // Draft-17 unified SETUP message (0x2F00)

@@ -27,7 +27,9 @@
 import { ProtocolViolation, reason } from "../error.ts";
 import { type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
 import * as Varint from "../varint.ts";
-import { Parameters, SetupOption, type SetupOptions } from "./parameters.ts";
+// Type-only: SETUP loads eagerly and must not pull in the message parameter codec.
+import type { Parameters } from "./parameters.ts";
+import { SetupOption, type SetupOptions } from "./setup_options.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /**
@@ -160,31 +162,26 @@ export function loops(advert: Advert, self: Hop): boolean {
 }
 
 /**
- * Write an advertisement's parameters, ready to encode onto the wire.
+ * Write an advertisement's parameters into `params`, ready to encode onto the wire.
  *
  * @internal
  */
-export function intoParams(advert: Advert): Parameters {
-	const params = new Parameters();
+export function intoParams(advert: Advert, params: Parameters) {
 	params.hopPath = encodeHops(advert.hops);
 
 	// Absent means 0, so a free path sends nothing.
 	if (advert.cost !== 0n) params.routeCost = advert.cost;
-
-	return params;
 }
 
 /**
- * Write a REQUEST_UPDATE's parameters: only what changed, and a cost of 0 explicitly,
- * since an omitted parameter keeps its value.
+ * Write a REQUEST_UPDATE's parameters into `params`: only what changed, and a cost of 0
+ * explicitly, since an omitted parameter keeps its value.
  *
  * @internal
  */
-export function updateIntoParams(update: Update): Parameters {
-	const params = new Parameters();
+export function updateIntoParams(update: Update, params: Parameters) {
 	if (update.hops !== undefined) params.hopPath = encodeHops(update.hops);
 	if (update.cost !== undefined) params.routeCost = update.cost;
-	return params;
 }
 
 /** Write a HOP_PATH value: the entries fill it with no count of their own, framed by the

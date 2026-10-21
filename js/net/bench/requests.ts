@@ -71,7 +71,7 @@ console.log("unrelated,waiters,cancel_us");
 for (const unrelated of [8, 128, 2048])
 	for (const waiters of [1, 8, 32]) {
 		const origin = new Producer();
-		origin.dynamic(Path.from("pending"));
+		origin.dynamicRoute(Path.from("pending"));
 		const held = Array.from({ length: unrelated }, (_, i) => origin.request(Path.from(`pending/${i}`)));
 		const wire = wireOf(origin.consume());
 		const samples: number[] = [];
@@ -105,9 +105,9 @@ for (const failovers of [0, 1, 16, 128])
 			const sources: Broadcast[] = [];
 			for (let i = 0; i < failovers; i++) {
 				const epoch = Epoch.mint();
-				const primary = origin.dynamic(prefix, { epoch, cost: 0n });
+				const primary = origin.dynamicRoute(prefix, { epoch, cost: 0n });
 				const ar = primary.requested();
-				const br = origin.dynamic(prefix, { epoch, cost: 1n }).requested();
+				const br = origin.dynamicRoute(prefix, { epoch, cost: 1n }).requested();
 				const held = origin.request(path);
 				const source = new Broadcast();
 				sources.push(source);
@@ -116,8 +116,8 @@ for (const failovers of [0, 1, 16, 128])
 				entries.push({ primary, ar, br, held });
 			}
 			const epoch = Epoch.mint();
-			origin.dynamic(prefix, { epoch });
-			for (let i = 0; i < extraRoutes; i++) origin.dynamic(prefix, { epoch, cost: BigInt(i + 1) });
+			origin.dynamicRoute(prefix, { epoch });
+			for (let i = 0; i < extraRoutes; i++) origin.dynamicRoute(prefix, { epoch, cost: BigInt(i + 1) });
 			const pending = [];
 			for (const entry of entries) {
 				entry.primary.close();
@@ -179,7 +179,7 @@ for (const operation of ["cancel-forward", "cancel-reverse", "drain-local"])
 			const settled: number[] = [];
 			for (let round = 0; round < 4; round++) {
 				const origin = new Producer();
-				const dynamic = origin.dynamic(Path.from("pending"));
+				const dynamic = origin.dynamicRoute(Path.from("pending"));
 				const requests = dynamic.requested();
 				const wire = wireOf(origin.consume());
 				const names = Array.from({ length: paths }, (_, i) => Path.from(`pending/${i}`));
@@ -237,7 +237,7 @@ for (const survivor of [false, true])
 				const origin = new Producer();
 				const prefix = Path.from("competing");
 				const path = Path.from("competing/touched");
-				for (let i = 0; i < routes; i++) origin.dynamic(prefix, { cost: BigInt(i) });
+				for (let i = 0; i < routes; i++) origin.dynamicRoute(prefix, { cost: BigInt(i) });
 				const wire = wireOf(origin.consume());
 				const kept = survivor ? new AbortController() : undefined;
 				const remaining = kept ? wire.demand(path, undefined, kept.signal).catch(() => {}) : undefined;
