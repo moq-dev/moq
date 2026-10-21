@@ -1325,6 +1325,44 @@ mod tests {
 		assert!(matches!(bi, crate::quic::web::ReadError::Reset(8)), "{bi:?}");
 	}
 
+	/// A stream dropped before `finish` is reset with WebTransport code 0, still after its
+	/// header, so the peer neither reads the truncated data as complete nor loses the reset.
+	#[tokio::test]
+	async fn drop_resets_after_header() {
+		let (client_conn, server_conn, _endpoints) = pair().await;
+		let (client, server) = tokio::join!(
+			Session::connect(client_conn, url::Url::parse("https://localhost/").unwrap()),
+			async { crate::quic::web::Request::accept(server_conn).await.unwrap().ok().await },
+		);
+		let (client, server) = (client.unwrap(), server.unwrap());
+
+		let mut uni = client.open_uni(Default::default()).await.unwrap();
+		uni.write_all(b"truncated").await.unwrap();
+		drop(uni);
+		let (mut send, mut client_bi) = client.open_bi(Default::default()).await.unwrap();
+		send.write_all(b"request").await.unwrap();
+		send.finish().unwrap();
+
+		let read = async {
+			let mut uni = server.accept_uni().await.unwrap();
+			// The accepted half carries no header of its own, but still needs the code mapped.
+			let (send, mut bi) = server.accept_bi().await.unwrap();
+			assert_eq!(bi.read_to_end(usize::MAX).await.unwrap(), b"request");
+			drop(send);
+			let uni = loop {
+				match uni.read_chunk(usize::MAX).await {
+					Ok(Some(_)) => {}
+					res => break res,
+				}
+			};
+			(uni, client_bi.read_chunk(usize::MAX).await)
+		};
+		// Without the header the server never surfaces the stream, so bound the wait.
+		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), read).await.unwrap();
+		assert!(matches!(uni, Err(crate::quic::web::ReadError::Reset(0))), "{uni:?}");
+		assert!(matches!(bi, Err(crate::quic::web::ReadError::Reset(0))), "{bi:?}");
+	}
+
 	/// A stream that names another session is still reported as `UnknownSession`.
 	#[tokio::test]
 	async fn uni_other_session() {
