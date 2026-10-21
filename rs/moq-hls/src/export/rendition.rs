@@ -448,6 +448,7 @@ impl Rendition {
 			self.section.clone(),
 			self.track_name().to_string(),
 			self.spans.clone(),
+			self.live.clone(),
 			history,
 		));
 		*self.watcher.lock().expect("watcher lock poisoned") = Some(watcher);
@@ -702,9 +703,10 @@ impl Rendition {
 		if let Some(err) = &window.failed {
 			return Some(err.clone());
 		}
-		let err = self.spans.failure()?;
-		// A timeline failing once the reference ended loses nothing if its records cover every row.
-		(!window.ended || window.segments.iter().any(|row| self.is_failed(row))).then_some(err)
+		let failure = self.spans.failure()?;
+		// A timeline failing once the reference finished loses nothing if its records cover every
+		// row. One that failed earlier stays failed, however the reference ends.
+		(!failure.late || window.segments.iter().any(|row| self.is_failed(row))).then_some(failure.err)
 	}
 
 	/// Fail if a timeline this rendition lists failed (see [`failure`](Self::failure)).
@@ -1234,6 +1236,11 @@ fn listed_tag(rows: &[segments::Row]) -> String {
 
 #[cfg(test)]
 impl Rendition {
+	/// Whether this rendition's own timeline failed, whether or not that fails its listings.
+	pub(crate) fn own_failure(&self) -> bool {
+		self.spans.failure().is_some()
+	}
+
 	/// Fetch the listed segment numbered `segment`, under the tag its rows carry.
 	pub(crate) async fn listed_segment(&self, segment: u64) -> Result<Option<Bytes>> {
 		let tag = listed_tag(&self.live.window().segments);
@@ -1267,6 +1274,7 @@ async fn watch_spans(
 	section: Archive,
 	track: String,
 	spans: Arc<Spans>,
+	live: Arc<segments::Producer>,
 	history: bool,
 ) {
 	let result: Result<()> = async {
@@ -1295,10 +1303,11 @@ async fn watch_spans(
 		// papered over with gaps: the rendition's playlist answers the error.
 		Err(err) => {
 			tracing::error!(%track, %err, "rendition timeline failed; failing its playlist");
-			spans.fail(crate::Error::TimelineFailed {
+			let err = crate::Error::TimelineFailed {
 				track,
 				source: Box::new(err),
-			});
+			};
+			spans.fail(err, live.is_ended());
 		}
 	}
 }

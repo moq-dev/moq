@@ -49,7 +49,15 @@ struct State {
 	ended: bool,
 	/// The timeline failed: no more records will arrive, and a segment past the last one fails
 	/// rather than resolving as a gap.
-	failed: Option<crate::Error>,
+	failed: Option<Failure>,
+}
+
+/// Why a rendition's own timeline failed, and when.
+#[derive(Clone)]
+pub(crate) struct Failure {
+	pub err: crate::Error,
+	/// The reference had already finished, so only the rows these records do not cover are lost.
+	pub late: bool,
 }
 
 impl State {
@@ -132,16 +140,16 @@ impl Spans {
 		}
 	}
 
-	/// The timeline failed with `err`: segments its records cover still resolve, and later ones
-	/// are [`Content::Failed`].
-	pub fn fail(&self, err: crate::Error) {
+	/// The timeline failed with `err`, `late` once the reference had already finished: segments
+	/// its records cover still resolve, and later ones are [`Content::Failed`].
+	pub fn fail(&self, err: crate::Error, late: bool) {
 		if let Ok(mut state) = self.state.write() {
-			state.failed = Some(err);
+			state.failed = Some(Failure { err, late });
 		}
 	}
 
 	/// Why the timeline failed, if it did.
-	pub fn failure(&self) -> Option<crate::Error> {
+	pub fn failure(&self) -> Option<Failure> {
 		self.state.read().failed.clone()
 	}
 
@@ -411,7 +419,7 @@ mod tests {
 		// Waiting on a keyframe that could still land near the boundary.
 		assert_eq!(spans.resolve(true, secs(4.0)..secs(6.0)), Content::Pending);
 
-		spans.fail(crate::Error::NoVariants);
+		spans.fail(crate::Error::NoVariants, false);
 		assert_eq!(
 			spans.resolve(true, secs(4.0)..secs(6.0)),
 			frames(&[(Position::group(2), Position::group(3))], None)

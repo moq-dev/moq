@@ -330,6 +330,11 @@ impl Producer {
 		}
 	}
 
+	/// Whether the timeline finished.
+	pub fn is_ended(&self) -> bool {
+		self.state.read().ended
+	}
+
 	/// Why the reference timeline failed, if it did.
 	pub fn failure(&self) -> Option<crate::Error> {
 		self.state.read().failed.clone()

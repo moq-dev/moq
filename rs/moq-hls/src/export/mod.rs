@@ -4326,6 +4326,50 @@ mod tests {
 		assert!(test.rendition("video0").representations().is_ok());
 	}
 
+	// A rendition that failed while the reference was live stays failed once the reference
+	// finishes, even when its records cover every listed row. One failing only after the
+	// reference finished loses nothing it covers, so its playlist still ends as complete.
+	#[tokio::test(start_paused = true)]
+	async fn a_rendition_failure_counts_only_before_the_reference_finishes() {
+		for early in [true, false] {
+			let test = Timelines::new();
+			let (_reference, mut video0) = test.publish("video0");
+			let (track, mut video1) = test.publish("video1");
+			for sequence in 0..4 {
+				video0.push(&gop(sequence)).unwrap();
+			}
+			// video1 runs past the last listed row, so its records cover every one.
+			for sequence in 0..6 {
+				video1.push(&gop(sequence)).unwrap();
+			}
+			test.listed("video1", 3).await;
+
+			let mut publisher = Some((track, video1));
+			if early {
+				let (track, video1) = publisher.take().unwrap();
+				cut(track, video1);
+				test.failed("video1").await;
+			}
+			video0.finish().unwrap();
+			test.finished("video0").await;
+			let rendition = test.rendition("video1");
+			if let Some((track, video1)) = publisher {
+				test.finished("video1").await;
+				cut(track, video1);
+				while !rendition.own_failure() {
+					tokio::time::sleep(Duration::from_millis(10)).await;
+				}
+				let snapshot = rendition.snapshot();
+				assert!(snapshot.finished, "a covered late failure loses nothing");
+				assert_eq!(numbers(&snapshot), [0, 1, 2, 3]);
+			} else {
+				settle().await;
+				assert!(rendition.try_snapshot().is_err(), "the failure is sticky");
+				assert!(rendition.failed_alone());
+			}
+		}
+	}
+
 	// A failed reference timeline is not retried. Every playlist answers the error instead of
 	// ending as if complete or freezing live, and recording cursors end.
 	#[tokio::test(start_paused = true)]
