@@ -40,8 +40,10 @@ Decided 2026-10-20 with the maintainer:
   `playwright ^1.64`, and the Chromium it downloads cannot load
   `libglib-2.0.so.0` on NixOS (found while landing the browser rename check).
   The root devShell exports `PLAYWRIGHT_BROWSERS_PATH` from
-  `playwright-driver.browsers` and `PLAYWRIGHT_VERSION` from
-  `playwright-driver.version`, as `test/smoke/flake.nix` already does. Every
+  `playwright-driver.browsers`, `PLAYWRIGHT_VERSION` from
+  `playwright-driver.version`, and `PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS`,
+  as `test/smoke/flake.nix` already does; without the last, Playwright's host
+  check rejects the Nix browser on NixOS. Every
   package pins npm `playwright` to exactly that version, even when this
   downgrades it (1.64 to nixpkgs' 1.63 today). The alternatives were rejected:
   supplying host libraries to a downloaded Chromium (nix-ld or an FHS env)

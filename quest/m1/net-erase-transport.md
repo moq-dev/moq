@@ -40,5 +40,7 @@ Compile time (2026-10-20 compile-time audit,
 [#6106](https://github.com/moq-dev/moq/pull/6106)): moq-tokio's dev build is
 1,661,503 lines of LLVM IR, 43.2% of it moq-net session code instantiated per
 transport and again under `ControlStreamAdapter`. The PR reports
-`cargo llvm-lines` for moq-tokio and moq-relay before and after; line counts are
-deterministic, so they stand in for build time on a shared host.
+`cargo llvm-lines` for moq-tokio and moq-relay before and after, which is
+deterministic, and a clean build of both crates before and after, run back to
+back and reported as a ratio with the load average. Fewer IR lines alone do not
+prove a faster build if the work moves to another compiler phase.
