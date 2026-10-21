@@ -6,7 +6,7 @@ Every merge queue and nightly job is timed, and every expensive step either
 earns its minutes or is cut, moved or planned. The Rust cache reuses
 unchanged crates, and CI compiles nothing it doesn't need. Fixes land in this
 quest's PR, one commit each. Ranking individual tests stays with the
-recurring [test cost audit](/quest/m1/audit-test-cost.md).
+recurring [test cost audit](/quest/m2/audit-test-cost.md).
 
 ## Plan
 
