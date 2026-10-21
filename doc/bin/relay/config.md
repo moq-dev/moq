@@ -41,8 +41,10 @@ solicit = false                      # Decline MoQ Solicit, so peers may announc
 epoch = false                        # Decline MoQ Epoch, so routes over moq-transport carry no epoch (draft 17+).
 ```
 
-`timeout` bounds the whole handshake, transport through MoQ SETUP, so a peer
-that connects and never speaks is closed instead of held open by keep-alives.
+`timeout` bounds the whole handshake, transport through MoQ SETUP and auth
+admission, so a peer that connects and never speaks, or whose admission never
+gets an answer, is closed instead of held open by keep-alives. An HTTP read's
+admission is bounded by the same value from the request's arrival.
 
 A setting no configured listener reads stops startup rather than being ignored.
 A stream-only relay refuses `preferred_v4`, `preferred_v6`, and `lb_id` (or `load_balancer`), which

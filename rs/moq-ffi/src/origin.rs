@@ -1,4 +1,4 @@
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
@@ -212,85 +212,19 @@ impl Announced {
 
 /// Follows one exact path, resolving each publisher instance that serves it.
 struct AnnouncedBroadcast {
+	inner: moq_net::origin::AnnouncedBroadcast,
 	origin: moq_net::origin::Consumer,
-	path: moq_net::PathOwned,
-	follow: moq_net::announce::Follow,
-	/// An instance serves the path that was not handed out yet.
-	unseen: bool,
-	/// The handle handed out last, until the caller drops it or the path goes offline. Weak, so
-	/// it never keeps an instance the caller let go of from retiring.
-	last: Weak<MoqBroadcastConsumer>,
 	driver: Background,
 }
 
 impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		let driver = self.driver.clone();
-		driver
-			.watch(async {
-				loop {
-					// Apply every change on hand before resolving, so a burst of them hands out
-					// only the instance serving the path now.
-					self.settle()?;
-					if !self.unseen {
-						let event = self.follow.next().await;
-						self.apply(event)?;
-						continue;
-					}
-
-					// `routed_broadcast` rides out the churn between something covering the path
-					// and the path actually resolving (failover, an advertise-only announce
-					// racing its handler). The instance stays unseen until it resolves: a foreign
-					// cancel only drops this future, and the caller may call again.
-					let broadcast = self.origin.routed_broadcast(&self.path).await?;
-
-					// A change that came through while resolving may predate the answer, such as
-					// an end and a start for the instance it resolved. Resolve afresh once caught up.
-					if self.settle()? {
-						continue;
-					}
-					self.unseen = false;
-
-					// Resolving can run ahead of the follower: a takeover resolves at once while
-					// its restart is held, and that restart then names the instance handed out.
-					if self.last.upgrade().is_some_and(|last| last.inner.is_clone(&broadcast)) {
-						continue;
-					}
-					let broadcast = Arc::new(MoqBroadcastConsumer::routed(
-						broadcast,
-						self.origin.clone(),
-						self.driver.clone(),
-					));
-					self.last = Arc::downgrade(&broadcast);
-					return Ok(broadcast);
-				}
-			})
-			.await
-	}
-
-	/// Apply every change on hand, returning whether any came through.
-	fn settle(&mut self) -> Result<bool, MoqError> {
-		let mut changed = false;
-		while let std::task::Poll::Ready(event) = self.follow.poll_next(&kio::Waiter::noop()) {
-			changed |= self.apply(event)?;
-		}
-		Ok(changed)
-	}
-
-	/// Apply one change to the path, returning whether it is one.
-	fn apply(&mut self, event: Option<moq_net::announce::Event>) -> Result<bool, MoqError> {
-		match event.ok_or(MoqError::Closed)? {
-			moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => self.unseen = true,
-			// An end is a gap that ended every request on the old route, so whatever serves the
-			// path next is handed out, even the same instance coming back.
-			moq_net::announce::Event::End(_) => {
-				self.unseen = false;
-				self.last = Weak::new();
-			}
-			// The same instance over another route, which its subscriptions ride out.
-			moq_net::announce::Event::Update(_) => return Ok(false),
-		}
-		Ok(true)
+		let broadcast = self.driver.watch(async { Ok(self.inner.available().await?) }).await?;
+		Ok(Arc::new(MoqBroadcastConsumer::routed(
+			broadcast,
+			self.origin.clone(),
+			self.driver.clone(),
+		)))
 	}
 }
 
@@ -523,23 +457,14 @@ impl MoqOriginConsumer {
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
-		let path = moq_net::Path::new(&path).to_owned();
-
 		// Following checks the permission eagerly, so an unreachable path fails here rather
 		// than surfacing later as a `Closed` the caller can't tell from the origin ending.
-		let follow = self.inner.follow(&path)?;
+		let inner = self.inner.announced_broadcast(path.as_str(), None)?;
 
 		Ok(Arc::new(MoqAnnouncedBroadcast {
 			task: Task::new(AnnouncedBroadcast {
-				// The wait runs on the *unrooted* cursor, so the broadcast is handed out named
-				// by its full path. Rooting the cursor at `path` would name it "" instead,
-				// making it its own root, and a catalog's `../sibling` reference would read as
-				// escaping.
+				inner,
 				origin: self.inner.clone(),
-				path,
-				follow,
-				unseen: false,
-				last: Weak::new(),
 				driver: self.driver.clone(),
 			}),
 		}))

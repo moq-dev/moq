@@ -150,15 +150,14 @@ func (t *TrackConsumer) Info() (TrackInfo, error) {
 	return trackInfoFromFFI(info), nil
 }
 
-// Update changes this subscriber's delivery preferences. It fails only on a
-// negative MaxDelay.
+// Update changes this subscriber's delivery preferences. It fails on a
+// negative MaxDelay, or a time anchor the track can't serve.
 func (t *TrackConsumer) Update(subscription Subscription) error {
 	sub, err := subscription.ffi()
 	if err != nil {
 		return err
 	}
-	t.inner.Update(sub)
-	return nil
+	return t.inner.Update(sub)
 }
 
 // Groups ranges over groups in sequence order.

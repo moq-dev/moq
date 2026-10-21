@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Replace `request.Accept(broadcast)` with `request.Prepare(epoch)`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under that epoch and returns its producer.
 Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
 
+### Anchors can name a time (#6074)
+
+`AnchorTime` names the group containing a presentation time, and type switches over `Anchor` need a case for it.
+`TrackConsumer.Update` also fails on a time anchor an untimed track can't serve.
+
 ### JSON consumers return `*json.Timed` (#5677)
 
 `SnapshotConsumer.Next`, `StreamConsumer.Next`, and `All` return `*Timed{Value, Timestamp}` instead of the raw message; `Timestamp` is a `*time.Duration`, nil when untimed.

@@ -9,6 +9,11 @@ How to update your code for each breaking change, newest first.
 `OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
 Replace `request.accept(broadcast)` with `prepared = request.prepare(moq.mint_epoch())`, fill `prepared.broadcast`, then `prepared.publish()`, which announces it at the exact path under that epoch and returns its producer.
 
+### Anchors can name a time (#6074)
+
+`Anchor` gains a `TIME` variant, the group containing a presentation time.
+`TrackConsumer.update` now raises on a time anchor an untimed track can't serve.
+
 ### JSON consumers yield `json.Timed` (#5677)
 
 `json.SnapshotConsumer` and `json.StreamConsumer` yield `Timed(value, timestamp)` instead of the bare value; `timestamp` is a `timedelta`, or `None` when untimed.

@@ -22,6 +22,15 @@ use crate::origin::Route;
 use super::origin_impl::Announcer;
 use super::{Requests, WeakCache};
 
+#[path = "listing.rs"]
+mod listing;
+// private: capability gap
+// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
+#[cfg(feature = "async")]
+pub(crate) use listing::Owner;
+pub(super) use listing::{ListOnAccept, Unlist};
+pub use listing::{Lister, Tracks, TracksEvent};
+
 /// A collection of media tracks that can be published and subscribed to.
 ///
 /// Create via [`Info::produce`] to obtain both [`Producer`] and [`Consumer`] pair.
@@ -106,6 +115,9 @@ struct BroadcastState {
 	// append a sequence an earlier one wrote is refused. Entries nothing holds or wrote are
 	// swept as the map grows, so requests for names never served stay bounded.
 	sequences: HashMap<Arc<str>, track::Sequence>,
+
+	// The tracks the broadcast lists, and the readers listing them; see [`Tracks`].
+	listing: listing::ListingState,
 
 	// Set once the broadcast ends: `Producer::close()` or the last producer-side
 	// handle dropping. Every lookup after it answers `Unroutable`.
@@ -346,20 +358,22 @@ impl Producer {
 		// this they would be stranded, since the name is taken the moment the
 		// track exists, so no handler could ever serve their queue entry.
 		if let Some(request) = state.requests.take(name.as_ref()) {
-			let track = request.with_stats(self.stats.clone()).accept(info);
+			let track = request.with_stats(self.stats.clone()).accept(info.clone());
 			// Cache it like a served request so concurrent lookups coalesce; a
 			// live same-name entry cannot exist (its presence would have kept
 			// the request from queuing).
-			let _ = state.tracks.insert(name, track.weak());
-			return Ok(track);
+			let _ = state.tracks.insert(name.clone(), track.weak());
+			let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
+			return Ok(track.listed(unlist));
 		}
 
 		let sequence = state.sequence(&name);
-		let track = track::Producer::new(self.info.clone(), name, info)
+		let track = track::Producer::new(self.info.clone(), name.clone(), info.clone())
 			.with_stats(self.stats.clone())
 			.with_sequence(sequence);
 		state.insert_track(track.weak())?;
-		Ok(track)
+		let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
+		Ok(track.listed(unlist))
 	}
 
 	/// Reserve a track by name without finalizing its [`track::Info`].
@@ -380,7 +394,10 @@ impl Producer {
 			.with_stats(self.stats.clone())
 			.with_sequence(state.sequence(&name));
 		state.insert_track(request.weak())?;
-		Ok(request)
+		Ok(request.listed(ListOnAccept {
+			state: self.state.clone(),
+			name,
+		}))
 	}
 
 	/// Create a track with a unique name using the given suffix.
@@ -467,13 +484,10 @@ impl Producer {
 	/// the broadcast; `Finish::wait` does both on a runtime. Dropping it early is how an
 	/// interrupt ends the linger.
 	pub fn finish(self) -> Finish {
-		let held: Vec<track::Hold> = self
-			.state
-			.lock()
-			.tracks
-			.values()
-			.filter_map(track::TrackWeak::hold_finished)
-			.collect();
+		let tracks: Vec<track::TrackWeak> = self.state.read().tracks.values().cloned().collect();
+		// Held outside the lock: a track whose last producer drops meanwhile unlists itself
+		// under it.
+		let held: Vec<track::Hold> = tracks.iter().filter_map(track::TrackWeak::hold_finished).collect();
 		let linger = held.iter().filter_map(|hold| hold.max_age).max().unwrap_or_default();
 		Finish {
 			producer: self,
@@ -618,6 +632,7 @@ impl Alive {
 			// and `Consumer::track` answers `Unroutable` for one asked about after this
 			// point. Say the same to whoever asked earlier.
 			state.reject_unserved(Error::Unroutable);
+			state.listing.close();
 		}
 		let _ = self.token.close();
 		self.retract();
@@ -643,6 +658,7 @@ impl Alive {
 			};
 			state.closing = true;
 			state.reject_unserved(Error::Unroutable);
+			state.listing.close();
 			token
 		};
 		token.close();
@@ -890,6 +906,15 @@ impl Dynamic {
 			state: self.state.clone(),
 			stats: stats::Scope::default(),
 		}
+	}
+
+	/// Answer the broadcast's track listings, for a handler that knows the tracks it
+	/// would serve, such as a relay listing its upstream's. See [`Lister`].
+	///
+	/// A handler that serves any name on request takes none, so it lists nothing. One
+	/// answer per broadcast: fails with [`Error::Duplicate`] while another lister exists.
+	pub fn lister(&self) -> Result<Lister, Error> {
+		Lister::new(self.state.clone())
 	}
 
 	/// Block until the broadcast ends, by [`Producer::close`] or every producer dropping.

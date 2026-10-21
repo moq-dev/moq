@@ -12,8 +12,8 @@ kept beside it.
 
 A subscriber already reads only its own ranges, re-resolved when they are
 replaced. What remains is the miss: one below the cache becomes a range request
-on `Dynamic` rather than a group request. Time anchors land separately; see
-[time anchors](/quest/m1/subscribe-ranges/time-anchors.md).
+on `Dynamic` rather than a group request. A time anchor the cache can't
+resolve passes to the handler unresolved in its range request.
 
 - Replace `requested_group` and `fetch_group` rather than keep both. Update
   every caller (relay, moq-archive, hls, the ladder) in the same PR,

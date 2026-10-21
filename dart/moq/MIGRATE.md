@@ -9,6 +9,11 @@ How to update your code for each breaking change, newest first.
 `origin.dynamic_(prefix:)` takes no route, and `update` is gone.
 Replace `request.accept(broadcast:)` with `request.prepare(epoch: mintEpoch())`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
 
+### Anchors can name a time (#6074)
+
+`Anchor` gains a time variant, so exhaustive switches need a case for it.
+`TrackConsumer.update` now throws on a time anchor an untimed track can't serve.
+
 ### JSON consumers return `Value` (#5677)
 
 `SnapshotConsumer.next()` and `StreamConsumer.next()` return `Value` (`value`, `timestampUs`) instead of a string; `timestampUs` is null when untimed.
