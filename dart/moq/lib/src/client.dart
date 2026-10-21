@@ -254,6 +254,13 @@ final class Moq {
   /// the room back.
   Bandwidth bandwidth() => session.bandwidth();
 
+  /// The session's authorization: the grant its peer gave it, and more tokens to present.
+  ///
+  /// Listen to [AuthGrants.grants] to follow the grant, and [Auth.add] a fresh
+  /// token before the current one expires; each added token is presented again
+  /// on every reconnect.
+  Auth auth() => session.auth();
+
   /// Drain within one second, then stop the client.
   ///
   /// Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
@@ -264,6 +271,26 @@ final class Moq {
       await session.shutdown();
     } finally {
       _client.cancel();
+    }
+  }
+}
+
+/// A [Stream] view over a session's grant.
+extension AuthGrants on Auth {
+  /// The current grant, then each change, null while there is none.
+  ///
+  /// Ends when the session shuts down, and errors with its close reason otherwise.
+  Stream<Grant?> grants() async* {
+    yield grant();
+    while (true) {
+      final Grant? next;
+      try {
+        next = await grantChanged();
+      } on MoqException catch (e) {
+        if (e is CancelledMoqException || e is ClosedMoqException) return;
+        rethrow;
+      }
+      yield next;
     }
   }
 }
