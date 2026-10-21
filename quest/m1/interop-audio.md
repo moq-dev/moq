@@ -18,7 +18,8 @@ Decided in planning (2026-10-20):
 
 - Depth: decode and verify the tone, not just count frames. A Goertzel filter
   at 440 Hz and timestamp continuity per subscriber; bytes arriving is the bar
-  that already lets a broken decode pass.
+  that already lets a broken decode pass. A multichannel publisher sends a
+  distinct frequency per channel, so a channel swap fails too.
 - The Rust CLI publisher adds an AAC track in fMP4 (ffmpeg `sine` at 440 Hz).
   The Python, Go, and C++ publishers already send Opus, so AAC runs the other
   native decode backend (symphonia) through every subscriber.

@@ -13,15 +13,18 @@ shaper, and the audio-quality profiles leave rate limits off.
 Decided in planning (2026-10-20):
 
 - Behavior asserted is today's design: continuity plus sync. Audio is sent
-  first (subscriber priority 80 vs 60) and its ring plays through a video
-  stall. In `"auto"` delay the shared target is the deepest track's, so late
-  video raises audio latency too; that is expected, not a failure. Making
+  first (players subscribe to audio at a higher priority than video) and its
+  ring plays through a video stall. In `"auto"` delay the shared target is
+  the deepest track's, so late video raises audio latency too; that is expected, not a failure. Making
   audio latency independent of video would be a player change, not this
   quest.
 - Extend `test/audio-quality` rather than routing media QA through the
   shaper: add rows whose publisher sends the media QA pattern (frame counter
   plus stepped tone), and reuse the tap worklet, budgets, captures, and
-  replays. Add media QA's sync probe to grade rendered frames.
+  replays. Add media QA's sync probe to grade rendered frames against the
+  same sync bound `just test media` holds the browser to. Video freezes and
+  skips are reported, not gated: the point is that audio does not pay for
+  them.
 - Folded in: the native `pulse` rows become enforced. They report only
   because an intermittent two-second device stall voids about one AAC native
   row in seven (see `test/audio-quality/README.md`). Reproduce and fix that
@@ -36,7 +39,8 @@ Recommendations:
   cases](/quest/m2/media-qa-audio.md) if it has landed; the browser fixture
   publisher works otherwise.
 - Budgets come from nightly runs by the rule in `budgets.json`'s note, not a
-  developer machine.
+  developer machine. The native `pulse` ceilings there are provisional
+  developer-host numbers; re-measure them from nightlies before enforcing.
 - [Track priority scope](/quest/m1/track-priority-scope.md) renumbers
   priorities; assert on behavior, not on the 80 and 60 constants.
 - Update the harness README's "Not covered" list, which names video.

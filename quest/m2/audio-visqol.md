@@ -21,7 +21,9 @@ Decided in planning (2026-10-20):
   considered were `visqol-python`, which claims C++ parity, and the Bazel C++
   build).
 - Per-row floors live in `budgets.json` and are enforced like the existing
-  ceilings, measured from nightlies by the same rule.
+  ceilings, measured from nightlies by the same rule. Native `pulse` floors
+  stay report-only until [Audio outlives
+  video](/quest/m2/audio-bufferbloat-av.md) makes those rows enforceable.
 
 Recommendations:
 
@@ -30,8 +32,10 @@ Recommendations:
   silence classifier (below -60 dBFS): a clip with quiet passages may need
   its own rows.
 - Score both browser rings and the native `pulse` rows. Resample AAC's
-  44.1 kHz output to 48 kHz, and trim startup and re-anchor gaps before
-  scoring; ViSQOL aligns, but not across a skip.
+  44.1 kHz output to 48 kHz. ViSQOL aligns, but not across a skip, so score
+  the contiguous segments between skips; time lost to a skip stays graded by
+  the existing skip-ahead and discarded-duration budgets, not hidden in the
+  score.
 - Speech-only metrics (PESQ, DNSMOS, SQUIM) work at 16 kHz and would hide
   full-band codec damage; POLQA is commercial. Do not substitute them.
 

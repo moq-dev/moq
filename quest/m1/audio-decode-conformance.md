@@ -21,14 +21,18 @@ Decided in planning (2026-10-20): both synthesized tones and real clips.
 - Tones test our wrapping logic: a distinct frequency per channel (catches
   channel order and remix), a stepped sweep (catches dropped or duplicated
   frames), and timestamp continuity across pre-skip, resampling (48 kHz and
-  44.1 kHz), and surround layouts. libopus has its own test vectors; this
-  suite tests what moq-audio does around it.
+  44.1 kHz), and surround layouts. Backends return samples only; the
+  consumer assigns timestamps, so continuity is checked at the consumer.
+  libopus has its own test vectors; this suite tests what moq-audio does
+  around it.
 - Real clips catch what tones miss: the AAC in `rs/moq-mux`'s `bbb.mp4`
   fixture, plus a new small Opus fMP4/CMAF fixture (the repo has none; Opus
   fMP4 tests synthesize their input today). Opus and AAC decoders are not
   bit-exact across implementations, so compare against a reference decode
-  with a tolerance derived from measured backend differences, and say how it
-  was measured.
+  from a decoder independent of every backend under test (so a shared bug
+  cannot make them agree), with a tolerance derived from measured backend
+  differences, and say how it was measured. Commit each encoded fixture
+  with the command that produced it.
 - Folded in from the same gap analysis:
   - moq-ffi gains audio counterparts of the video raw-publish tests (publish
     from many threads, reject bad frames), and its decode-delay test feeds a
