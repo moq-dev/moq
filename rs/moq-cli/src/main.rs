@@ -880,12 +880,7 @@ fn spawn_export(
 				}
 			}
 			ExportSink::Archive(args) => {
-				let format = export
-					.catalog_format
-					.map(Into::into)
-					.or_else(|| moq_mux::catalog::CatalogFormat::detect(&name))
-					.unwrap_or_default();
-				tasks.spawn(archive::export(origin.consume(), name, format, args));
+				tasks.spawn(archive::export(origin.consume(), name, args));
 			}
 			ExportSink::Stats => {
 				tasks.spawn(report::print_stats(origin.consume(), name));

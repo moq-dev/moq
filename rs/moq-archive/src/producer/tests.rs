@@ -677,3 +677,75 @@ async fn a_track_that_ended_unseen_leaves_the_broadcast_open() {
 	assert_eq!(end(&store, "audio").await, None);
 	assert!(!complete(&store).await);
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_put_fails_the_recording() {
+	let store = store();
+	store.inner().fail_puts("video/0");
+	let broadcast = broadcast::Info::new().produce();
+	let video = broadcast.create_track("video", timed()).unwrap();
+	group(&video, 0, &[(0, "a")]);
+	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
+	let err = task.await.unwrap().unwrap_err();
+	assert!(matches!(err, Error::Store(_)), "{err}");
+	assert_eq!(keys(&store).await, ["video/.info"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_resume_listing_writes_nothing() {
+	let store = store();
+	store.put_info("video", &Info::new(0, Some(1000)).unwrap()).await.unwrap();
+	store.inner().fail_lists();
+	let broadcast = broadcast::Info::new().produce();
+	let _video = broadcast.create_track("video", timed()).unwrap();
+	store.inner().take();
+	let err = spawn(&store, &broadcast, config()).await.unwrap().unwrap_err();
+	assert!(matches!(err, Error::Store(_)), "{err}");
+	let ops = store.inner().take();
+	assert!(!ops.iter().any(|op| matches!(op, crate::mock::Op::Put(_))), "{ops:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_prune_fails_the_dvr() {
+	let store = store();
+	store.inner().fail_deletes("video/");
+	let broadcast = broadcast::Info::new().produce();
+	let video = broadcast.create_track("video", timed()).unwrap();
+	let dvr = Dvr::new(SECOND, Duration::ZERO);
+	let task = spawn(&store, &broadcast, config().with_duration(SECOND).with_dvr(dvr));
+	subscribed(&video).await;
+	for sequence in 0..3 {
+		group(&video, sequence, &[(sequence * 1000, "x")]);
+	}
+	settle().await;
+	sleep(2 * SECOND).await;
+	let err = task.await.unwrap().unwrap_err();
+	assert!(matches!(err, Error::Store(_)), "{err}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_put_holds_only_its_track() {
+	let store = store();
+	store.inner().hold_puts("video/0");
+	let broadcast = broadcast::Info::new().produce();
+	let video = broadcast.create_track("video", timed()).unwrap();
+	let audio = broadcast.create_track("audio", timed()).unwrap();
+	let task = spawn(&store, &broadcast, config().with_flush(SECOND));
+	subscribed(&video).await;
+	subscribed(&audio).await;
+	group(&video, 0, &[(0, "v")]);
+	group(&audio, 0, &[(0, "a")]);
+	settle().await;
+	sleep(SECOND).await;
+	settle().await;
+	assert_eq!(objects(&store, "audio", true).await.len(), 1);
+	assert!(objects(&store, "video", true).await.is_empty());
+
+	store.inner().release();
+	video.finish().unwrap();
+	audio.finish().unwrap();
+	broadcast.close();
+	finished(task).await;
+	assert_eq!(objects(&store, "video", true).await.len(), 1);
+	assert!(complete(&store).await);
+}

@@ -5,8 +5,8 @@
 `archive::Consumer` serves one broadcast's stored key prefix as an ordinary
 broadcast: every stored track, the archived catalog included, with its
 original groups, frames, timescale, and priority. A host publishes it at a path of its choosing;
-moq-relay never uses it. `moq export archive` records through
-`archive::Producer` and `moq import archive` serves through
+moq-relay never uses it. `moq export archive` already records through
+`archive::Producer`; `moq import archive` serves through
 `archive::Consumer`. It replaces `moq_archive::Reader`.
 
 ## Plan
@@ -81,7 +81,3 @@ and re-added under its name replaying both runs in sequence, a growing archive
 with no markers staying open, and an empty or unrecognized prefix refused loudly.
 
 Public API: `archive::Consumer` replaces `Reader`. Wire: none.
-
-## Required
-
-- [Archive producer](/quest/m1/archive/producer.md) - the layout this serves

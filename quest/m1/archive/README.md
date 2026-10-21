@@ -55,7 +55,7 @@ archive (per-track `.timeline.z` records named by the catalog's root
   stored keys and another epoch is another prefix. An optional DVR mode prunes
   old objects. Rejected: an object per whole-broadcast window (every read pulls
   every rendition) and size-based cuts. The
-  [producer](/quest/m1/archive/producer.md) records the rest.
+  `archive::Producer` records the rest.
 - **Hosts serve archives, relays do not.** `archive::Consumer` serves a stored
   prefix through `broadcast::Dynamic` and `track::Dynamic`, the archived
   catalog included as an ordinary track, and a host publishes it at a path of
@@ -85,7 +85,6 @@ from a host. Each child fixes the stale docs it touches.
 ## Required
 
 - [TRACKS in js/net](/quest/m1/archive/tracks-js.md) - `@moq/net` lists a broadcast's tracks over lite-07's Tracks Stream and answers listings of its own broadcasts, mirroring Rust
-- [Archive producer](/quest/m1/archive/producer.md) - `archive::Producer` stores every matching broadcast as duration-cut per-track objects keyed by group and pts, recording gaps instead of stalling, with an optional DVR mode
 - [Archive consumer](/quest/m1/archive/consumer.md) - `archive::Consumer` serves a stored prefix as a broadcast from its key listing, and `moq export/import archive` use the new pair
 - [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - the root `archive` section is gone; an opt-in per-rendition `hls` field marks each aligned HLS segment's first group and pts and declares its nominal duration
 - [SUBSCRIBE_TRACKS](/quest/m1/archive/subscribe-tracks.md) - moq-transport SUBSCRIBE_TRACKS is answered through the TRACKS hook, and an IETF peer's tracks are learned with FORWARD=0, instead of NOT_SUPPORTED

@@ -1,6 +1,6 @@
 [package]
 name = "moq-archive"
-description = "Versioned hang recording objects on any object_store::ObjectStore"
+description = "MoQ broadcast archives on any object_store::ObjectStore"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"

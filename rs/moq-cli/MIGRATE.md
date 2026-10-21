@@ -4,6 +4,13 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### `export archive` records a prefix
+
+`moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/<epoch>`, until the connection ends, instead of one broadcast at `<url>`.
+Point `<url>` at the root you want recordings under, and drop `--catalog-format`, which it now refuses.
+`--retention` now works on untimed tracks.
+`import archive` does not read the new layout yet; it still replays recordings made by older `moq` versions.
+
 ### `--listen-timeout` bounds admission (#5765)
 
 `moq --listen` now finishes auth admission within the `--listen-timeout` handshake deadline (default `10s`, counted from the first packet) instead of a separate fixed ten seconds, so a short timeout now refuses a slow auth server sooner and `0s` waits on it forever.
