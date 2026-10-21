@@ -20,6 +20,7 @@ use crate::catalog::hang::Container as HangContainer;
 use crate::container::ts::Export;
 use crate::container::ts::export::PCR_INTERVAL;
 use crate::container::ts::stats::Export as Stats;
+use crate::container::ts::stats::SignedDuration;
 use crate::container::{Container as _, Frame, Producer};
 
 const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
@@ -717,7 +718,11 @@ async fn a_slow_source_clock_keeps_the_delay() {
 	let drift = stats.release.drift.expect("a measurement");
 	assert!((drift + 30.0).abs() < 0.5, "measured {drift} ppm");
 	let margin = stats.release.margin.expect("a margin");
-	assert!(margin > 0, "a clean path keeps time to spare: {margin} ms");
+	assert!(
+		margin > SignedDuration::default(),
+		"a clean path keeps time to spare: {} ms",
+		margin.as_millis()
+	);
 	assert!(stats.release.offset.is_some(), "the offset is measured with the rate");
 }
 

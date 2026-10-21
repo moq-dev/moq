@@ -29,9 +29,11 @@ const COMPRESSED: &str = ".z";
 /// Lines `export echo` queues for stdout before its readers wait for it to catch up.
 const LINES: usize = 64;
 
-/// The most reconstructed state a sink holds for one report. A report is a few KiB, so this
-/// only stops a publisher whose patches keep adding keys.
-const MAX_REPORT: usize = 1024 * 1024;
+/// The most reconstructed state a sink holds for one report. A report is a few KiB, but a TS
+/// import keeps a row for each PID it has carried, and the largest it can publish (a row for
+/// each of the 8,192 PIDs, every counter at its limit) is under half this. So this only stops
+/// a publisher whose patches keep adding keys.
+const MAX_REPORT: usize = 8 * 1024 * 1024;
 
 /// How long `export echo` lets a reader drain after its broadcast ends. The final snapshot can
 /// still be in flight, but the track can also outlive its route.
@@ -611,6 +613,85 @@ mod tests {
 			.update(&serde_json::json!({ "pad": "x".repeat(MAX_REPORT) }))
 			.unwrap();
 		assert!(matches!(read.next().await, Err(moq_json::Error::TooLarge(MAX_REPORT))));
+	}
+
+	/// The largest report a TS import can publish reads whole: a row for each of the 8,192
+	/// PIDs, every counter at its limit, beside the 1,024 renditions a registry holds.
+	#[tokio::test]
+	async fn the_largest_ts_report_reads_whole() {
+		const SAFE: u64 = hang::catalog::MAX_SAFE_INTEGER;
+		let mut mpegts = ts::stats::Snapshot::default();
+		for counter in [
+			&mut mpegts.crc_error,
+			&mut mpegts.ts_sync_loss,
+			&mut mpegts.sync_byte_error,
+			&mut mpegts.pat_error,
+			&mut mpegts.continuity_count_error,
+			&mut mpegts.pmt_error,
+			&mut mpegts.transport_error,
+			&mut mpegts.pcr_repetition_error,
+			&mut mpegts.pcr_discontinuity_indicator_error,
+			&mut mpegts.pts_error,
+		] {
+			*counter = u64::MAX;
+		}
+		for pid in 0..8192 {
+			let mut row = ts::stats::Stream::default();
+			row.track = ".avc3".to_string();
+			row.class = ts::stats::Class::Video;
+			row.quiet = Some(Duration::from_millis(u64::MAX));
+			for counter in [
+				&mut row.units,
+				&mut row.resyncs,
+				&mut row.discarded,
+				&mut row.unconfirmed,
+				&mut row.damaged,
+				&mut row.unplaced,
+				&mut row.refused,
+				&mut row.continuity_count_error,
+				&mut row.transport_error,
+				&mut row.pts_error,
+			] {
+				*counter = u64::MAX;
+			}
+			mpegts.streams.insert(pid, row);
+		}
+		let mut report = hang::stats::Snapshot::<ts::stats::Report>::default();
+		report.ext.mpegts = Some(mpegts);
+		report.transport.rtt = Some(Duration::from_millis(SAFE));
+		report.transport.age = Some(Duration::from_millis(SAFE));
+		(
+			report.transport.rate,
+			report.transport.lost_bytes,
+			report.transport.lost_packets,
+		) = (Some(SAFE), Some(SAFE), Some(SAFE));
+		for n in 0..1024 {
+			let mut rendition = hang::stats::Rendition::default();
+			(
+				rendition.frames,
+				rendition.bytes,
+				rendition.keyframes,
+				rendition.skipped,
+			) = (SAFE, SAFE, SAFE, SAFE);
+			rendition.bitrate = Some(SAFE);
+			report.renditions.insert(format!("0x{n:04x}-0x1b.avc3"), rendition);
+		}
+		let value = serde_json::to_value(&report).unwrap();
+
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track(STATS_TRACK, None)
+			.unwrap();
+		let mut read = reader(track.subscribe(None));
+		let mut producer = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
+		producer.update(&value).unwrap();
+		assert_eq!(read.latest().await.unwrap().unwrap().value, value);
+
+		let size = serde_json::to_vec(&value).unwrap().len();
+		assert!(
+			size <= MAX_REPORT / 2,
+			"a {size}-byte report leaves the cap too little room"
+		);
 	}
 
 	/// A feedback track can outlive its route, so a reader left to drain stops after `DRAIN`.

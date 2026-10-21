@@ -251,6 +251,7 @@ pub struct Export {
 /// How an export keeps up with the source: the frames it drops, trims, and never receives,
 /// and how its release clock tracks the source's. What [`Export::stats`](super::Export::stats)
 /// reports beside its rows, and [`Release::stats`](super::Release::stats) on its own.
+#[serde_with::serde_as]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 #[non_exhaustive]
@@ -273,16 +274,18 @@ pub struct Release {
 	/// skipped.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub gaps: u64,
-	/// The least time any frame arrived before its deadline over the last whole second, in
-	/// milliseconds: how much more latency the path could take before frames drop. Negative
-	/// when a frame missed its deadline. `None` until a second has passed, and without a delay.
+	/// The least time any frame arrived before its deadline over the last whole second: how
+	/// much more latency the path could take before frames drop. Negative when a frame missed
+	/// its deadline. `None` until a second has passed, and without a delay.
+	#[serde_as(as = "Option<SignedMillis>")]
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub margin: Option<i64>,
-	/// How far the output clock sits from the source's plus the delay, in milliseconds, as last
-	/// measured: positive holds frames longer than the delay, negative shorter. The clock pulls
-	/// it shut over ten minutes. `None` until there is a measurement.
+	pub margin: Option<SignedDuration>,
+	/// How far the output clock sits from the source's plus the delay, as last measured:
+	/// positive holds frames longer than the delay, negative shorter. The clock pulls it shut
+	/// over ten minutes. `None` until there is a measurement.
+	#[serde_as(as = "Option<SignedMillis>")]
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub offset: Option<i64>,
+	pub offset: Option<SignedDuration>,
 	/// How fast the source's clock runs against ours, in parts per million (positive runs
 	/// fast), as last measured. `None` until there is a measurement.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -295,16 +298,69 @@ pub struct Release {
 
 impl Release {
 	pub(crate) fn of<K: Ord + Clone, T>(jitter: &crate::jitter::Buffer<K, T>) -> Self {
-		let millis = |seconds: f64| (seconds * 1e3).round() as i64;
 		Self {
 			dropped: jitter.dropped(),
 			trimmed: jitter.trimmed(),
 			gaps: 0,
-			margin: jitter.margin().map(millis),
-			offset: jitter.offset().map(millis),
+			margin: jitter.margin().map(SignedDuration::from_secs_f64),
+			offset: jitter.offset().map(SignedDuration::from_secs_f64),
 			drift: jitter.drift().map(|drift| drift * 1e6),
 			out_of_tolerance: jitter.out_of_tolerance(),
 		}
+	}
+}
+
+/// A span of time that can fall below zero, which [`Duration`](std::time::Duration) cannot: a
+/// [`Release`]'s margin and offset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SignedDuration {
+	nanos: i64,
+}
+
+impl SignedDuration {
+	/// `millis` milliseconds, below zero when negative.
+	pub const fn from_millis(millis: i64) -> Self {
+		Self {
+			nanos: millis.saturating_mul(1_000_000),
+		}
+	}
+
+	/// `seconds`, below zero when negative, saturating at about 292 years either way.
+	pub(crate) fn from_secs_f64(seconds: f64) -> Self {
+		Self {
+			nanos: (seconds * 1e9).round() as i64,
+		}
+	}
+
+	/// Whether the span falls below zero.
+	pub const fn is_negative(self) -> bool {
+		self.nanos < 0
+	}
+
+	/// How long the span is, whichever side of zero it falls.
+	pub const fn unsigned_abs(self) -> std::time::Duration {
+		std::time::Duration::from_nanos(self.nanos.unsigned_abs())
+	}
+
+	/// Whole milliseconds, rounded away from zero, so a span short of one keeps its sign: what
+	/// a report carries.
+	pub const fn as_millis(self) -> i64 {
+		self.nanos / 1_000_000 + (self.nanos % 1_000_000).signum()
+	}
+}
+
+/// A [`SignedDuration`] in a report: [`SignedDuration::as_millis`].
+struct SignedMillis;
+
+impl serde_with::SerializeAs<SignedDuration> for SignedMillis {
+	fn serialize_as<S: serde::Serializer>(value: &SignedDuration, serializer: S) -> Result<S::Ok, S::Error> {
+		value.as_millis().serialize(serializer)
+	}
+}
+
+impl<'de> serde_with::DeserializeAs<'de, SignedDuration> for SignedMillis {
+	fn deserialize_as<D: serde::Deserializer<'de>>(deserializer: D) -> Result<SignedDuration, D::Error> {
+		i64::deserialize(deserializer).map(SignedDuration::from_millis)
 	}
 }
 
@@ -657,8 +713,8 @@ mod test {
 			},
 		);
 		let release = Release {
-			margin: Some(-12),
-			offset: Some(3),
+			margin: Some(SignedDuration::from_millis(-12)),
+			offset: Some(SignedDuration::from_millis(3)),
 			drift: Some(1.5),
 			..Default::default()
 		};
@@ -687,6 +743,28 @@ mod test {
 
 		let row: Stream = serde_json::from_value(serde_json::json!({ "class": "subtitle", "later": 1 })).unwrap();
 		assert_eq!(row.class, Class::Data);
+	}
+
+	/// A span short of a millisecond keeps its sign in a report, so a frame that missed its
+	/// deadline by less still reads as a miss.
+	#[test]
+	fn a_release_span_under_a_millisecond_keeps_its_sign() {
+		let release = Release {
+			margin: Some(SignedDuration::from_secs_f64(-0.000_3)),
+			offset: Some(SignedDuration::from_secs_f64(0.000_2)),
+			..Default::default()
+		};
+		assert!(release.margin.unwrap().is_negative());
+		assert_eq!(
+			release.margin.unwrap().unsigned_abs(),
+			std::time::Duration::from_micros(300)
+		);
+		assert_eq!(
+			serde_json::to_value(&release).unwrap(),
+			serde_json::json!({ "margin": -1, "offset": 1 })
+		);
+		assert_eq!(SignedDuration::from_secs_f64(-0.012).as_millis(), -12);
+		assert_eq!(SignedDuration::default().as_millis(), 0);
 	}
 
 	/// Damage is reported per PID when its cumulative count moves, including the final sample.

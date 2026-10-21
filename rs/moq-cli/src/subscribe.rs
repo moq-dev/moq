@@ -259,12 +259,13 @@ pub struct Subscribe {
 
 /// Log how a TS export's release clock keeps up with the source.
 fn log_release(release: &moq_mux::container::ts::stats::Release, message: &'static str) {
+	use moq_mux::container::ts::stats::SignedDuration;
 	tracing::info!(
 		dropped = release.dropped,
 		trimmed = release.trimmed,
 		gaps = release.gaps,
-		margin_ms = ?release.margin,
-		offset_ms = ?release.offset,
+		margin_ms = ?release.margin.map(SignedDuration::as_millis),
+		offset_ms = ?release.offset.map(SignedDuration::as_millis),
 		drift_ppm = ?release.drift,
 		out_of_tolerance = release.out_of_tolerance,
 		"{message}"

@@ -92,8 +92,8 @@ source's. `export ts --passthrough` reports it without `mpegts`.
 | `dropped` | Frames lost from the output after their stream began: missed their release deadline, or a video track dropped them waiting for its next keyframe. |
 | `trimmed` | Frames dropped before their stream's first went out, so the output starts on a whole group led by a keyframe. Nothing is missing for these. |
 | `gaps` | Times the source skipped media it will never deliver: a group lost or expired upstream, or a resubscription. A declared break is not one. |
-| `margin` | Gauge, milliseconds: the least time any frame arrived before its deadline over the last second. Negative when one missed. |
-| `offset` | Gauge, milliseconds: how far the output clock sits from the source's plus the delay. Positive holds frames longer than the delay. The clock pulls it shut over ten minutes. |
+| `margin` | Gauge, milliseconds rounded away from zero: the least time any frame arrived before its deadline over the last second. Negative when one missed, however narrowly. |
+| `offset` | Gauge, milliseconds rounded away from zero: how far the output clock sits from the source's plus the delay. Positive holds frames longer than the delay. The clock pulls it shut over ten minutes. |
 | `drift` | Gauge, parts per million: the source clock's rate against ours, positive running fast. |
 | `outOfTolerance` | Measurements that found the source clock past the 30 ppm ISO/IEC 13818-1 allows, which the output cannot follow. |
 

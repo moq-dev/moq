@@ -463,7 +463,8 @@ The `stats` and `echo` sinks print reports as JSON lines. `export stats`
 follows one broadcast's stats track until the broadcast ends; `export echo`
 prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
 `--broadcast` as they come and go, reading one that ends for 5 s more for its
-final report. Either sink stops reading a report that grows past 1 MiB.
+final report. Either sink stops reading a report that grows past 8 MiB, twice
+the largest a TS import publishes.
 
 ```bash
 moq ... --broadcast event import --stats ts < feed.ts
