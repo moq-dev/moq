@@ -63,6 +63,8 @@ Decided with the maintainer on 2026-10-20:
   native rung recovery needs, and viewer handles, viewer grants, the peer's
   PROBE target, and `Increase` came back here as
   [viewer targets](/quest/m2/probe/viewer-target.md), beside their consumers.
+  The `js/net` send target moved to [padding](/quest/m2/probe/padding.md), its
+  only sender.
 
 This README's own work, once the children land:
 

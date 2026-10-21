@@ -95,6 +95,12 @@ once, when its header decodes:
 - With fairness on, rank received groups within their broadcast's domain
   first, as sends are, so one broadcast's priorities never evict another's
   partial groups.
+- Ranking inside domains still leaves the session-wide window to share, so
+  a broadcast that fills it would block every other one. Add a fair domain
+  tier ahead of the ranks, mirroring the byte-fair send tier: a stuck window
+  evicts from the domain holding the most beyond an even share of the window
+  across the domains with partial groups, then by rank within that domain.
+  A broadcast that fills the window alone may keep it until another arrives.
 - Re-rank a receive stream when its subscription's priority or group order
   changes, instead of keeping the rank from its header.
 
@@ -130,7 +136,9 @@ broadcasts on one session with fairness on: neither starves, a downstream 255
 does not change the upstream order, and with fairness off the strict order is
 unchanged. On the receive side, with fairness on, a high priority in one
 broadcast never makes a stuck window evict another broadcast's partial groups
-first, and a priority or order update moves an already-ranked stream. The io_uring workers apply the same setting. Move
+first, a broadcast that filled the window before another began receiving
+yields down to its even share instead of blocking the newcomer, and a priority
+or order update moves an already-ranked stream. The io_uring workers apply the same setting. Move
 `doc/concept/moq-lite.md` (the 0..255 knob) and `doc/concept/standard.md`
 (IETF 128 maps to 127) to the new range and mapping.
 

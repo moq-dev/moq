@@ -12,8 +12,7 @@ rendition, and a browser without WebXR layers, play as today.
 ## Plan
 
 Decided with the maintainer on 2026-10-20, from the follow-ups of
-[#5543](https://github.com/moq-dev/moq/pull/5543), which adds the fields.
-Start once #5543 lands.
+[#5543](https://github.com/moq-dev/moq/pull/5543), which landed the fields.
 
 - `XRMediaBinding` layers take an `HTMLVideoElement`, which `<moq-watch>`
   does not use (it decodes with WebCodecs), so an `XRWebGLBinding` layer fed

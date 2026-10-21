@@ -2,14 +2,15 @@
 
 ## Goal
 
-A moq-net session and a `js/net` connection each keep one send target: the
-sum of its publisher reservations, so several broadcasts on one connection add
-up without the application coordinating them. The session hands it to
+A moq-net session keeps one send target: the sum of its publisher
+reservations, so several broadcasts on one connection add up without the
+application coordinating them. The session hands it to
 whichever sender its transport has, which probes up to it. Without a sender,
 behavior is today's: nothing probes. This is what the native
 [rung disable](/quest/m1/simulcast-rung-disable.md) needs to resume a stopped
 rendition; targets a peer asks for are the m2
-[viewer targets](/quest/m2/probe/viewer-target.md) quest.
+[viewer targets](/quest/m2/probe/viewer-target.md) quest. The `js/net`
+mirror lands with its only sender, [padding](/quest/m2/probe/padding.md).
 
 ## Plan
 
@@ -20,7 +21,10 @@ Later that day the maintainer split it: m1 keeps only the send target native
 rung recovery needs, and viewer handles, viewer grants, the peer's PROBE
 target, and advertising `Increase` moved back to m2 as
 [viewer targets](/quest/m2/probe/viewer-target.md), whose consumers (players
-and the viewer up-switch) are there.
+and the viewer up-switch) are there. Review of
+[#6102](https://github.com/moq-dev/moq/pull/6102) then moved the `js/net`
+send target to padding, since without a sender it would be API with no
+behavior until m2.
 
 Decided with the maintainer on 2026-10-17 (see the
 [epic](/quest/m2/probe/README.md)):
@@ -44,16 +48,15 @@ Decided with the maintainer on 2026-10-17 (see the
 
 Notes for the implementer:
 
-- `js/net` already owns its connection's `Allocator`
-  (`js/net/src/connection/reload.ts`), but Rust callers build one from
-  `send_bandwidth()` themselves (`rs/moq-cli`, `rs/moq-c`, `rs/moq-ffi`), so
-  the session can't see their reservations. Settle who owns the Rust
-  allocator, and keep it across reconnects the way the estimate is.
-- Wire: none. Report the public API in the PR, mirrored across Rust and JS,
-  and carry it through moq-ffi and the bindings per the cross-package sync
-  table.
+- Rust callers build their `Allocator` from `send_bandwidth()` themselves
+  (`rs/moq-cli`, `rs/moq-c`, `rs/moq-ffi`), so the session can't see their
+  reservations. Settle who owns it, and keep it across reconnects the way the
+  estimate is.
+- Wire: none. Report the public API in the PR, shaped so the `js/net` mirror
+  can match it, and carry it through moq-ffi and the bindings per the
+  cross-package sync table.
 
-Tests with mocked time, Rust and JS: the send target follows reservations
+Tests with mocked time, in Rust: the send target follows reservations
 being added, updated, and dropped, demanded or not; the session hands it to
 its sender; opting out probes nothing; SETUP still advertises `Report`.
 

@@ -5,7 +5,8 @@
 A moq-net session and a `js/net` connection each keep a receive target: the
 sum of their viewer handles, sent to the peer as the PROBE target. A sending
 session probes to the larger of its own [send target](/quest/m1/probe-target.md)
-and the peer's PROBE target, and advertises PROBE `Increase` where it has a
+(in `js/net`, the one [padding](/quest/m2/probe/padding.md) adds) and the
+peer's PROBE target, and advertises PROBE `Increase` where it has a
 sender. The two directions never mix: a session that publishes and watches
 doesn't probe its uplink for what it watches.
 

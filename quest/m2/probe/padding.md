@@ -24,6 +24,13 @@ Decided with the maintainer on 2026-10-17 (see the
   implements the [target](/quest/m1/probe-target.md) quest's sender hook in
   `js/net`. Decided 2026-10-20: browser-only. moq-quic is the only Rust
   transport, so no native session needs it.
+- **The browser's send target.** The `js/net` mirror of the
+  [send target](/quest/m1/probe-target.md) lands here, beside the sender that
+  uses it: the same reservation sum, opt-out, and sender seam, matching the
+  Rust API. `js/net` already owns its connection's `Allocator`
+  (`js/net/src/connection/reload.ts`). Moved here in review of
+  [#6102](https://github.com/moq-dev/moq/pull/6102), so m1 ships no browser
+  target without a sender.
 - **WebRTC's schedule.** Model it on GoogCC's `ProbeController` ALR probing.
   Rejected: [#5863](https://github.com/moq-dev/moq/pull/5863)'s exponential
   backoff to 60 s, which leaves a rendition waiting up to a minute after the
@@ -45,6 +52,9 @@ Decided with the maintainer on 2026-10-17 (see the
 
 Tests, on `@moq/clock`'s `Manual`:
 
+- The send target: it follows reservations being added, updated, and
+  dropped, demanded or not, reaches the padding sender, and opting out pads
+  nothing, as in the Rust tests.
 - The schedule: nothing while media meets the target or the sender isn't
   app-limited; a cluster about every five seconds at twice the estimate,
   capped at the target; a follow-up after one that validates; an early end

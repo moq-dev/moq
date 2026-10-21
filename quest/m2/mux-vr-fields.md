@@ -11,13 +11,18 @@ boxes or elements imports as today.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-20, from #5543's follow-ups. Start once
-#5543 lands.
+Decided with the maintainer on 2026-10-20, from #5543's follow-ups. #5543 has
+landed the fields.
 
 - The fields are live state like `color` (#5543), so fill them the way the
   importers fill color (`rs/moq-mux/src/codec/color.rs`) and update them when
   the source's config changes.
-- Derive `fov` from the equirectangular bounds.
+- Derive `fov` from the equirectangular bounds. The catalog's `fov` is a
+  longitude span centred straight ahead over the full 180 degrees of latitude
+  (`rs/hang/src/catalog/video/projection.rs`), so refuse asymmetric left and
+  right bounds, any top or bottom crop, and a nonzero pose (`sv3d`'s `prhd`,
+  Matroska `ProjectionPoseYaw`/`Pitch`/`Roll`): importing them would silently
+  recenter or rotate the video.
 - Refuse what the catalog cannot describe, since an absent field claims flat
   video or plain channels: a cubemap or mesh projection, so Google's
   mesh-based VR180 is refused until the catalog has a mesh kind. For Opus
@@ -35,8 +40,9 @@ Decided with the maintainer on 2026-10-20, from #5543's follow-ups. Start once
 
 Tests: a fixture per source (MP4 360, a 180-degree equirectangular MP4 with
 `equi` bounds, Matroska stereo, Opus first-order ambisonics) imports with the
-expected fields, and a cubemap, a mesh VR180, an ambisonic stream with
-non-diegetic stereo, and a malformed one are refused.
+expected fields, and a cubemap, a mesh VR180, an equirectangular source with
+asymmetric bounds, a vertical crop, or a nonzero pose, an ambisonic stream
+with non-diegetic stereo, and a malformed one are refused.
 
 Public API: none beyond the catalog fields #5543 adds. Wire: none.
 
