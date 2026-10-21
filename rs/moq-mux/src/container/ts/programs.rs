@@ -246,7 +246,7 @@ mod test {
 				}
 			};
 			assert!(
-				matches!(err, crate::Error::Json(moq_json::Error::Net(moq_net::Error::Transport(ref reason))) if reason == "decode failed")
+				matches!(err, crate::Error::Moq(moq_net::Error::Transport(ref reason)) if reason == "decode failed")
 			);
 		}
 	}

@@ -23,11 +23,10 @@ Facts (2026-10-10, `origin/main` e5446b036):
   (`rs/moq-net/src/lite/subscriber.rs:601`); the IETF subscriber has the
   equivalent.
 - `OriginConsumer::follow` exists (`rs/moq-net/src/model/origin.rs:4473`);
-  Rust has no announced-gated request like JS's, so the fold's shape is open.
-- Added 2026-10-17: [moq-net follows announced instances](/quest/m1/net-announced-follow.md)
-  lands first and gives Rust its announced request. This quest then makes
-  that request register discovery interest for its path, since the session
-  stops asking for its whole scope.
+  `origin::Consumer::announced_broadcast` is Rust's announced request.
+- `origin::Consumer::announced_broadcast` registers no discovery interest
+  yet. This quest makes it register interest for its path, as JS does, since
+  the session stops asking for its whole scope.
 - moq-relay reads `origin.consume().announced()` for the root in its web,
   internal, and cluster paths, so a relay's watch set is the root.
 
@@ -54,7 +53,3 @@ fallout (see the Cross-Package Sync table in `AGENTS.md`).
 Tests must pin the relay side: an origin in relay mode (cluster and upstream
 sessions on the client subscriber path) still sends a root request, so
 lazy discovery never narrows what a relay discovers.
-
-## Required
-
-- [moq-net follows announced instances](/quest/m1/net-announced-follow.md) - the Rust announced request this quest registers discovery interest for
