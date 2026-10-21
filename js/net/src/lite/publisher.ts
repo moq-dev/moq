@@ -1647,7 +1647,10 @@ export class Publisher {
 			stream.close();
 			group.close();
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
-			return await stream.closed.then(() => undefined, error);
+			// Its bytes still hold the connection until acknowledged, so a group gone stale
+			// meanwhile is reset like one still serving, as the Rust `GroupServe` does.
+			await hooks.guardGroup(group, () => stream.closed);
+			return undefined;
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);

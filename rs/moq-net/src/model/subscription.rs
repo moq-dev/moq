@@ -75,8 +75,8 @@ pub struct Subscription {
 	/// for nothing.
 	///
 	/// A request to the publisher, aggregated across every live subscriber as the union of
-	/// their ranges, and this subscriber's read filter: it reads only the groups its own
-	/// ranges cover, whatever another subscriber widens the union to.
+	/// their ranges, and this subscriber's read filter: it reads only the groups and frames
+	/// its own ranges cover, whatever another subscriber widens the union to.
 	/// [`crate::track::Subscriber::set_groups`] narrows the reads further. See [Local cursor
 	/// vs wire preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
 	pub ranges: Vec<Range>,
@@ -305,6 +305,7 @@ impl Subscription {
 	/// from the latest group (or none is asked for).
 	///
 	/// The form a wire without ranges carries: a floor below which nothing is requested.
+	#[cfg(any(feature = "async", test))]
 	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn start(&self) -> Option<Position> {
 		let mut floor: Option<Position> = None;

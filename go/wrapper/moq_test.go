@@ -44,7 +44,7 @@ func opusHead() []byte {
 func TestOriginLifecycle(t *testing.T) {
 	origin := newOrigin(t)
 	_ = origin.Consume()
-	dynamic, err := origin.Dynamic("", moq.Route{})
+	dynamic, err := origin.Dynamic("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.Dynamic("", moq.Route{})
+	dynamic, err := origin.Dynamic("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,15 +84,16 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 		t.Fatalf("path = %q, want %q", path, "dynamic/broadcast")
 	}
 
-	served, err := moq.NewBroadcastProducer()
+	prepared, err := request.Prepare(moq.MintEpoch())
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := served.PublishTrack("status", timedInfo())
+	track, err := prepared.Broadcast().PublishTrack("status", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := request.Accept(served); err != nil {
+	served, err := prepared.Publish()
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -1105,7 +1106,7 @@ func TestConsumerCancelConcurrent(t *testing.T) {
 // that one request rather than the consumer it was made on.
 func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 	origin := newOrigin(t)
-	dynamic, err := origin.Dynamic("", moq.Route{})
+	dynamic, err := origin.Dynamic("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1142,12 +1143,6 @@ func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 
 	// The same consumer resolves the next path, which it could not do if the
 	// cancel had torn the origin down.
-	served, err := moq.NewBroadcastProducer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer served.Close()
-
 	resolved := make(chan error, 1)
 	go func() {
 		_, err := consumer.RequestBroadcast(waitCtx, "later/served")
@@ -1158,9 +1153,15 @@ func TestRequestBroadcastCancelKeepsTheOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := next.Accept(served); err != nil {
+	prepared, err := next.Prepare(moq.MintEpoch())
+	if err != nil {
 		t.Fatal(err)
 	}
+	served, err := prepared.Publish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer served.Close()
 	select {
 	case err := <-resolved:
 		if err != nil {
@@ -1553,7 +1554,7 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	defer cancel()
 
 	origin := newOrigin(t)
-	dynamic, err := origin.Dynamic("live", moq.Route{})
+	dynamic, err := origin.Dynamic("live")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1574,15 +1575,58 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 	if err != nil || path != "live/cam" {
 		t.Fatalf("path = %q err=%v", path, err)
 	}
-	served, err := moq.NewBroadcastProducer()
+	prepared, err := request.Prepare(moq.MintEpoch())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := request.Accept(served); err != nil {
+	served, err := prepared.Publish()
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer served.Close()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClosingAPreparedAnswerRefusesTheRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := newOrigin(t)
+	dynamic, err := origin.Dynamic("live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dynamic.Cancel()
+
+	consumer := origin.Consume()
+	done := make(chan error, 1)
+	go func() {
+		_, err := consumer.RequestBroadcast(ctx, "live/cam")
+		done <- err
+	}()
+
+	request, err := dynamic.RequestedBroadcast(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := request.Prepare(moq.MintEpoch())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared.Close()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("RequestBroadcast succeeded, want the abandoned answer refused")
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("RequestBroadcast err = %v, want a refusal before the deadline", err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
 	}
 }
 

@@ -2,7 +2,6 @@ package moq
 
 import (
 	"context"
-	"errors"
 	"iter"
 
 	ffi "moq.dev/moq-ffi/moq"
@@ -42,8 +41,8 @@ func (o *OriginProducer) Consume() *OriginConsumer {
 // service that only serves some of them rejects the rest as they are requested.
 // Create, Dynamic if tracks are served on demand, populate, then
 // [BroadcastProducer.Announce].
-func (o *OriginProducer) Dynamic(prefix string, route Route) (*OriginDynamic, error) {
-	inner, err := o.inner.Dynamic(prefix, route)
+func (o *OriginProducer) Dynamic(prefix string) (*OriginDynamic, error) {
+	inner, err := o.inner.Dynamic(prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -86,11 +85,6 @@ func (d *OriginDynamic) All(ctx context.Context) iter.Seq2[*BroadcastRequest, er
 	return bridge.Seq(ctx, d.RequestedBroadcast)
 }
 
-// Update re-prices the route in place: replaces its hops and costs.
-func (d *OriginDynamic) Update(route Route) error {
-	return d.inner.Update(route)
-}
-
 // Cancel stops serving requested broadcasts and retracts the route.
 func (d *OriginDynamic) Cancel() {
 	d.inner.Cancel()
@@ -106,17 +100,42 @@ func (r *BroadcastRequest) Path() (string, error) {
 	return r.inner.Path()
 }
 
-// Accept serves the request with an unannounced broadcast.
-func (r *BroadcastRequest) Accept(broadcast *BroadcastProducer) error {
-	if broadcast == nil {
-		return errors.New("moq: nil broadcast producer")
+// Prepare starts an answer under a new epoch, hidden until published.
+func (r *BroadcastRequest) Prepare(epoch string) (*BroadcastPrepared, error) {
+	inner, err := r.inner.Prepare(epoch)
+	if err != nil {
+		return nil, err
 	}
-	return r.inner.Accept(broadcast.inner)
+	return &BroadcastPrepared{inner: inner}, nil
 }
 
 // Reject fails the request with an application error code.
 func (r *BroadcastRequest) Reject(errorCode uint16) error {
 	return r.inner.Reject(errorCode)
+}
+
+// BroadcastPrepared is a claim answer being filled before announcement.
+type BroadcastPrepared struct {
+	inner *ffi.MoqBroadcastPrepared
+}
+
+// Broadcast returns the unannounced broadcast to fill before publishing; only Publish announces it.
+func (p *BroadcastPrepared) Broadcast() *BroadcastProducer {
+	return &BroadcastProducer{inner: p.inner.Broadcast()}
+}
+
+// Publish announces the answer and resolves every waiting requester.
+func (p *BroadcastPrepared) Publish() (*BroadcastProducer, error) {
+	inner, err := p.inner.Publish()
+	if err != nil {
+		return nil, err
+	}
+	return &BroadcastProducer{inner: inner}, nil
+}
+
+// Close abandons the answer if it was not published, refusing every waiting requester.
+func (p *BroadcastPrepared) Close() {
+	p.inner.Destroy()
 }
 
 // OriginConsumer discovers and requests broadcasts published to an origin.

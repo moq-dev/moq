@@ -63,6 +63,5 @@ Decided with the maintainer, 2026-10-20:
 
 ## Related
 
-- [Resumed in-flight groups](/quest/m1/resume-in-flight.md) - which replaced copies stay while groups below them are in flight
 - [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - the same max-age bound on a warm relay
 - [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - the same idle-timeout outage hitting the TS jitter clock

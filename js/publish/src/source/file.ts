@@ -5,7 +5,7 @@ import type { InputAudioTrack, InputVideoTrack, VideoSample } from "mediabunny";
 import { Timeline } from "./timeline";
 import type { Media } from "./types";
 
-// Signals the file source reads.
+/** Signals the file source reads. */
 export type FileInput = {
 	// Whether to decode the file. Defaults to true. When false the decode stops and `out.source` clears.
 	enabled: Getter<boolean>;
@@ -40,6 +40,7 @@ const FRAME_RATE_SAMPLES = 100;
  * the window isn't composited.
  */
 export class File {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<FileInput>;
 
 	/** The file to decode. Written by {@link prompt}, or set it directly. */
@@ -48,6 +49,7 @@ export class File {
 	readonly #out: FileOutput = {
 		source: new Signal<Media | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();

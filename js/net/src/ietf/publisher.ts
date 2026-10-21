@@ -992,15 +992,17 @@ export class Publisher {
 				}
 
 				stream.close();
+				// Its bytes still hold the connection until acknowledged, so a group gone stale
+				// meanwhile is reset like one still serving, as the Rust `GroupServe` does. Awaited
+				// even without a marker: PUBLISH_DONE waits on this group, so the track, whose
+				// timeline judges the budget, stays open until the stream settles.
+				const delivered = await race([
+					hooks.guardGroup(group, () => stream.closed).then(() => true),
+					unsubscribed.then(() => false),
+				]);
 				// Only a stream that closed cleanly delivered the marker: one reset after its FIN
 				// may not have, which leaves the standalone fallback in place, as in Rust.
-				if (marked) {
-					const delivered = stream.closed.then(
-						() => true,
-						() => false,
-					);
-					streams.terminalSent = (await race([delivered, unsubscribed.then(() => false)])) === true;
-				}
+				if (marked) streams.terminalSent = delivered === true;
 			} catch (err: unknown) {
 				stream.reset(error(err));
 			} finally {
@@ -1754,16 +1756,22 @@ export class Publisher {
 			const deadline = new Deadline();
 			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
-					const opened = new RequestStream(
-						await deadline.open(this.#session.openBi(requestOptions)),
-						this.#session,
-						this.#quic,
-					);
+					const stream = await deadline.open(this.#session.openBi(requestOptions));
+					const opened = new RequestStream(stream, this.#session, this.#quic);
 					request = opened;
-					await opened.writer.u53(PublishNamespace.id);
+					const version = this.#session.version;
 					const token = this.#auth?.carried(auth);
 					const msg = new PublishNamespace({ requestId, trackNamespace: path, params, token });
-					await msg.encode(opened.writer, this.#session.version);
+					const legacy =
+						version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+					await deadline.send(
+						stream,
+						async () => {
+							await opened.writer.u53(PublishNamespace.id);
+							await msg.encode(opened.writer, version);
+						},
+						legacy ? () => this.#done(opened, path, requestId) : undefined,
+					);
 
 					// Read response (RequestOk and PublishNamespaceOk share 0x07)
 					const response = await opened.next();
@@ -1946,10 +1954,6 @@ export class Publisher {
 	}
 
 	/**
-	 * End a namespace's PUBLISH_NAMESPACE request: PUBLISH_NAMESPACE_DONE then FIN before
-	 * draft-17, a cancel in both directions after.
-	 */
-	/**
 	 * Replace the PUBLISH_NAMESPACE request for `path` with one for another instance. The two
 	 * streams are unordered, so the old one is withdrawn only once the peer answered the new
 	 * one, refused or not: it serves another instance either way.
@@ -1969,7 +1973,10 @@ export class Publisher {
 		await this.#end(request);
 	}
 
-	/** Withdraw one PUBLISH_NAMESPACE request, already out of its map. */
+	/**
+	 * Withdraw one PUBLISH_NAMESPACE request, already out of its map: PUBLISH_NAMESPACE_DONE
+	 * then FIN before draft-17, a cancel in both directions after.
+	 */
 	async #end(request: NamespaceRequest) {
 		// Draft-17+ withdraws by cancelling the request in both directions; a FIN is only
 		// allowed to end SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS.
@@ -1979,15 +1986,20 @@ export class Publisher {
 			return;
 		}
 
+		await this.#done(request.stream, request.path, request.requestId);
+		request.stream.close();
+		await request.stream.writer.closed;
+	}
+
+	/** Write the PUBLISH_NAMESPACE_DONE that withdraws a draft-14-16 request. */
+	async #done(request: RequestStream, path: Path.Valid, requestId: bigint) {
 		try {
-			await request.stream.writer.u53(PublishNamespaceDone.id);
-			const done = new PublishNamespaceDone({ trackNamespace: request.path, requestId: request.requestId });
-			await done.encode(request.stream.writer, version);
+			await request.writer.u53(PublishNamespaceDone.id);
+			const done = new PublishNamespaceDone({ trackNamespace: path, requestId });
+			await done.encode(request.writer, this.#session.version);
 		} catch {
 			// Stream might already be closed
 		}
-		request.stream.close();
-		await request.stream.writer.closed;
 	}
 
 	/**

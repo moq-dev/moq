@@ -20,7 +20,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
-		"@moq/qmux": "^0.3.3"
+		"@moq/qmux": "workspace:^"
 	},
 	"devDependencies": {
 		"@types/bun": "^1.4.3",

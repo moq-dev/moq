@@ -121,7 +121,14 @@ export function launch(args: string[] = [], engine: Engine = "chromium"): Promis
 			handleSIGTERM: false,
 			firefoxUserPrefs: { "media.autoplay.default": 1, "media.autoplay.block-webaudio": true },
 		});
-	return webkit.launch({ headless: true, handleSIGTERM: false });
+	// WebKit's WebCodecs decode through the system GStreamer. The Nix dev shell points GStreamer at
+	// its own newer plugins, which the system core refuses, leaving WebKit with no decoders at all.
+	const env = Object.fromEntries(
+		Object.entries(process.env).filter(
+			(entry): entry is [string, string] => entry[1] !== undefined && !entry[0].startsWith("GST_PLUGIN"),
+		),
+	);
+	return webkit.launch({ headless: true, handleSIGTERM: false, env });
 }
 
 // The latest sample each player page logged. Cleared on navigation so a reload cannot read the
@@ -187,6 +194,12 @@ export async function open(
 	page.on("pageerror", (error) => {
 		console.error(`[${label} error] ${error.message}`);
 		errors.page.push(error.message);
+	});
+	// A crashed WebKit page never settles a pending call, so close it: that rejects them.
+	page.on("crash", () => {
+		console.error(`[${label} error] page crashed`);
+		errors.page.push("page crashed");
+		void page.close().catch(() => {});
 	});
 	if (trace) await startTrace(page, label);
 	await page.goto(url, { waitUntil: "load" });
