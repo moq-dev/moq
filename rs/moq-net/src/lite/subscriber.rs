@@ -3233,7 +3233,7 @@ mod tests {
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
 			let request = broadcast.reserve_track("video").unwrap();
-			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed(), Some(Timescale::MILLI));
+			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed());
 			let mut arriving = serving.serving.create_group(group::Info { sequence: 2 }).unwrap();
 			arriving.write_frame(crate::Timestamp::ZERO, b"2".as_slice()).unwrap();
 			let mut reader = broadcast
