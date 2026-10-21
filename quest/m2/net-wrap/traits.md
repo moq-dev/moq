@@ -14,20 +14,24 @@ with moq-net's types as the default, no `Send` bounds wasm can't meet, and
 the methods exactly as moq-net has them today.
 
 - Cover each role writers and readers hold: `broadcast::Producer`,
-  `broadcast::Consumer`, `track::Producer`, `track::Request`,
-  `track::Dynamic`, `track::Consumer`, `track::Subscriber`,
-  `track::Ordered`, `group::Producer`, `group::Consumer`, `frame::Producer`,
-  and `frame::Consumer`. Associated types link the levels, so a broadcast
-  producer's `create_track` returns its own track producer, whose
-  `create_group` returns its own group producer, whose `create_frame`
-  returns its own frame producer, and a subscriber's `ordered` returns its
-  own ordered reader with the same group, datagram, and control surface.
-  moq-json's snapshot and window consumers, moq-mux, and moq-stats read
-  through `ordered()`, so without it they stay concrete. moq-mux's fMP4 and
-  LOC importers stream chunks through `create_frame` and `write`, and
-  readers use `next_frame` and `read_chunk`, so without the frame level they
-  stay concrete or buffer whole frames. `frame::Producer<'_>` borrows its group, so its associated
-  type is generic over that lifetime.
+  `broadcast::Dynamic`, `broadcast::Consumer`, `track::Producer`,
+  `track::Request`, `track::Dynamic`, `track::Consumer`,
+  `track::Subscriber`, `track::Ordered`, `group::Producer`,
+  `group::Consumer`, `frame::Producer`, and `frame::Consumer`. Associated
+  types link the levels, so a broadcast producer's `create_track` returns
+  its own track producer, whose `create_group` returns its own group
+  producer, whose `create_frame` returns its own frame producer. A broadcast
+  producer's `dynamic` returns its own dynamic handle, whose
+  `requested_track` yields its own track request, so generic code serves
+  undeclared names (as [E2EE dynamic names](/quest/m2/e2ee/dynamic-names.md)
+  needs). A subscriber's `ordered` returns its own ordered reader with the
+  same group, datagram, and control surface. moq-json's snapshot and window
+  consumers, moq-mux, and moq-stats read through `ordered()`, so without it
+  they stay concrete. moq-mux's fMP4 and LOC importers stream chunks through
+  `create_frame` and `write`, and readers use `next_frame` and `read_chunk`,
+  so without the frame level they stay concrete or buffer whole frames.
+  `frame::Producer<'_>` borrows its group, so its associated type is generic
+  over that lifetime.
 - `poll_*` methods are the required ones; the async forms are provided
   methods over them, so no `async fn` in a trait forces a `Send` bound.
 - Demand (`demand`, `subscription_changed`, `Request::accept` and `reject`)

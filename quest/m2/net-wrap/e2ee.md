@@ -34,7 +34,13 @@ the reverse (decided 2026-10-20, maintainer):
   physical track uncompressed, and inflates after decryption. Sessions drop
   a sealed datagram past the transport's datagram size as they drop an
   oversized plaintext one, so document that the AEAD tag and any compression
-  growth count against the caller's payload budget. This keeps
+  growth count against the caller's payload budget. The physical size
+  describes ciphertext, so each sealed frame and datagram carries its
+  inflated size inside the authenticated payload: `frame::Info.size` stays
+  the logical size, the subscriber reserves only that declared size against
+  the same group and pool limits as a plain frame, and an inflate that
+  differs from it is an error, as moq-net's compression contract requires.
+  This keeps
   [rust-publish](/quest/m2/e2ee/rust-publish.md)'s rule that protected
   catalogs compress before encryption, and needs moq-net to expose its group
   codec to the wrapper. `@moq/e2ee` does the same in
@@ -65,7 +71,8 @@ the reverse (decided 2026-10-20, maintainer):
   [moq-json to take the traits](/quest/m2/net-wrap/json.md).
 
 Public API: the moq-e2ee wrapper signatures change to moq-net's. Wire:
-`draft-lcurley-moq-e2ee.md` gains the authenticated logical `compress` flag.
+`draft-lcurley-moq-e2ee.md` gains the authenticated logical `compress` flag
+and each compressed object's authenticated inflated size.
 
 ## Required
 
