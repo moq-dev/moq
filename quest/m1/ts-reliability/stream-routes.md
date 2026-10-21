@@ -53,7 +53,10 @@ delivered its PMT: packets on a PID before then are acquisition, as
 mid-stream join never shows as refused, including one program's media
 arriving before its PMT while another program's PMT is already known. A PAT
 that adds a program suspends the count for PIDs no PMT claims until that
-program's PMT arrives.
+program's PMT arrives. A listed PMT that does not arrive within the 0.5 s of
+program clock TR 101 290 allows (`PMT_error_2`, already counted) stops
+holding the gate, so a stale or corrupt program never disables the count.
+
 Under `--program all`, every per-program `Import` reads the whole multiplex
 and `Programs::stats` merges their rows by PID, so a per-program drop row
 would shadow the program that carries the PID. `Programs` owns the
@@ -75,7 +78,10 @@ A dropped PID reuses `stats::Stream`, with no new field: a row keyed by its
 PID in `Snapshot::streams`, an empty `track`, `Class::Data`, and `refused`
 counting the PID's dropped packets, with one warning on the first. Widen the
 `Snapshot::streams` and `refused` docs to say so, and report that as a
-public API change in meaning. Coordinate the serialized shape with
+public API change in meaning. When a later PMT claims a PID that has a
+dropped row, the carried stream takes over that row and keeps its
+accumulated `refused`, since counters never go backward; the drop and the
+carried row never coexist under one key. Coordinate the serialized shape with
 [TS health counters](/quest/m2/ts-health-stats.md).
 
 Rust: `rs/moq-mux` TS import (and export for MPEG-2 video `pesPacket`
@@ -87,7 +93,8 @@ Tests: generated `fixture::Mux` inputs with MPEG-2 video, each DSM-CC type,
 0x86 without CUEI, LATM, a PAT network entry with a NIT, a CAT plus
 scrambled ES, a PSIP base PID, an unlisted PID, media before its first PMT,
 a two-program MPTS under `--program all` whose second program's media
-precedes its PMT, and the same MPTS under `--program 1` with no rows for
+precedes its PMT, a PAT listing a program whose PMT never arrives, an
+unlisted PID that a later PMT revision adds, and the same MPTS under `--program 1` with no rows for
 program 2's PIDs, asserting the catalog, the
 stats rows (the unlisted PID's row asserted field by field), and an export
 round trip of the carried streams. The MPEG-2 video arm also runs the TSDuck
