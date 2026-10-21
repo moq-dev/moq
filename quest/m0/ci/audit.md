@@ -17,7 +17,11 @@ measures it.
 
 Measured 2026-10-19 (ubuntu-24.04-arm; sample of 20 PR and 20 queue runs of
 check.yml, plus 35 wider runs). Start from these levers and re-measure each
-before and after:
+before and after. Before one-pass, queue run
+[39471110155](https://github.com/moq-dev/moq/actions/runs/39471110155)
+(2026-10-20) took 21m08s overall: Check 20m57s and Test 19m36s. Record
+per-entry wall time after the one-pass workflow first runs in the queue; draft
+PRs cannot supply that measurement.
 
 - **Test's extra builds:** `play` (`-p moq-cli --features play,openh264`)
   compiles for 104 s on a hit and 170 s on a miss to run 2 s of tests; the
@@ -44,7 +48,7 @@ before and after:
   the crate as fresh and the queue would pass on the old build. A cache hit
   currently saves only about 2.5 minutes net of its 2.5-minute restore.
 - **Release-profile builds in the gate:** dart's moq-ffi release build (fat
-  LTO) and the `wasm-release` build. [One CI pass](/quest/m0/ci/one-pass.md)
+  LTO) and the `wasm-release` build. The one-pass workflow
   moves the permutations; confirm nothing release-profile stays in the
   queue.
 - **Dev shell:** `nix develop` downloads for 52 s (p90 90 s) in every job,
@@ -70,10 +74,6 @@ before and after:
 Scratch data from the 2026-10-19 measurement (job logs and scripts) was
 local only; re-measure on the one-pass pipeline rather than trusting those
 numbers.
-
-## Required
-
-- [One CI pass](/quest/m0/ci/one-pass.md) - the pipeline this audit measures; it replaces the two jobs whose costs dominate the baseline
 
 ## Related
 

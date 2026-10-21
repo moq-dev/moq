@@ -4,15 +4,15 @@ import { ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError }
 import * as Path from "../path.ts";
 import type { Reader, Stream, Writer } from "../stream.ts";
 import type { Session } from "./adapter.ts";
+import { supported } from "./auth_setup.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { SetupOption, type SetupOptions } from "./parameters.ts";
 import { nextMessage } from "./request_stream.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import type { IetfVersion } from "./version.ts";
 
 /**
  * The MoQ Auth extension (draft-lcurley-moq-auth-00): the moq-lite Auth Stream as
- * moq-transport request streams, negotiated with the AUTH Setup Option on draft-17+.
+ * moq-transport request streams, negotiated in `auth_setup.ts`.
  *
  * The wire carries namespace prefixes, so a grant is told only when it is a union of
  * subtrees; anything narrower is refused with NOT_SUPPORTED rather than widened.
@@ -20,28 +20,6 @@ import { type IetfVersion, Version } from "./version.ts";
  * @module
  * @internal
  */
-
-/** Whether a version negotiates the extension. @internal */
-export function supported(version: IetfVersion): boolean {
-	return version >= Version.DRAFT_17;
-}
-
-/**
- * What the peer declared: undefined for no option, otherwise whether it offered the
- * extension. Only an explicit 1 negotiates it.
- *
- * @internal
- */
-export function fromSetup(params: SetupOptions, version: IetfVersion): boolean | undefined {
-	if (!supported(version)) return undefined;
-	const value = params.getVarint(SetupOption.Auth);
-	return value === undefined ? undefined : value === 1n;
-}
-
-/** Offer the extension, on the versions that negotiate it. @internal */
-export function intoSetup(params: SetupOptions, version: IetfVersion) {
-	if (supported(version)) params.setVarint(SetupOption.Auth, 1n);
-}
 
 /** The REQUEST_ERROR codes AUTH_ERROR carries. */
 const UNAUTHORIZED = 0x1;
