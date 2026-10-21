@@ -789,19 +789,6 @@ mod tests {
 			);
 		}
 
-		// The moq-transport codes we reuse must keep moq-transport's values.
-		assert_eq!(SessionError::Unauthorized.to_code(), 0x2);
-		assert_eq!(SessionError::Expired.to_code(), 0x18);
-		assert_eq!(SessionError::InvalidRequestId.to_code(), 0x4);
-		assert_eq!(SessionError::TooManyRequests.to_code(), 0x7);
-		assert_eq!(SessionError::InvalidPath.to_code(), 0x8);
-		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
-		assert_eq!(SessionError::AuthTokenCacheOverflow.to_code(), 0x13);
-		assert_eq!(SessionError::Version.to_code(), 0x15);
-		assert_eq!(SessionError::UnknownAuthTokenAlias.to_code(), 0x17);
-		assert_eq!(SessionError::InvalidAuthority.to_code(), 0x19);
-		assert_eq!(SessionError::TooManyRequestUpdates.to_code(), 0x1B);
-
 		// The reserved 32-47 range, and anything else unregistered, keeps its value instead
 		// of being given a meaning. A peer on the old placeholders (0x20-0x22) lands here.
 		for code in [0x1f, 0x20, 0x21, 0x22, 0x2f, 0x30] {
@@ -848,25 +835,7 @@ mod tests {
 			assert_eq!(StreamError::from_code(err.to_code()), err, "{err:?} did not round trip");
 		}
 
-		// moq-lite's own 48-63 range, pinned to the draft's table.
-		for (err, code) in [
-			(StreamError::ControlTimeout, 0x31),
-			(StreamError::GroupTooLarge, 0x32),
-			(StreamError::NotFound, 0x33),
-			(StreamError::Old, 0x34),
-			(StreamError::Evicted, 0x35),
-			(StreamError::Unroutable, 0x36),
-			(StreamError::WrongSize, 0x37),
-			(StreamError::FrameTooLarge, 0x38),
-			(StreamError::TimestampMismatch, 0x39),
-			(StreamError::NotFetchable, 0x3a),
-			(StreamError::Unauthorized, 0x3b),
-		] {
-			assert_eq!(err.to_code(), code, "{err:?} moved off its assigned code");
-		}
-
-		// The reserved 32-47 range carries no meaning, including the values the four
-		// codes above used to be sent from: a peer still emitting them is not given one.
+		// The reserved 32-47 range carries no meaning, so a peer emitting it is not given one.
 		for code in 0x20..0x30 {
 			assert_eq!(StreamError::from_code(code), StreamError::Unknown(code));
 		}

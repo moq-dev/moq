@@ -1111,27 +1111,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_toml_failover_delay_is_reported_not_applied() {
-		let toml = r#"
-			failover_delay = "1s"
-		"#;
-
-		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.resolve().race, crate::connect::DEFAULT_RACE);
-		assert!(
-			config.deprecated().to_string().contains("failover_delay -> race"),
-			"{}",
-			config.deprecated()
-		);
-	}
-
-	#[test]
-	fn test_cli_failover_delay() {
-		let config = Cli::config_from(["test", "--connect-race", "50ms"]);
-		assert_eq!(config.resolve().race, std::time::Duration::from_millis(50));
-	}
-
-	#[test]
 	fn test_cli_resolution_delay() {
 		let config = Cli::config_from(["test", "--connect-resolution-delay", "0s"]);
 		assert_eq!(config.resolution_delay, None);

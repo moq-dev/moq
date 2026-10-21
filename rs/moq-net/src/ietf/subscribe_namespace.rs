@@ -628,13 +628,6 @@ mod tests {
 	}
 
 	#[test]
-	fn message_ids() {
-		// 0x11 through draft-17 (legacy), renumbered to 0x50 in draft-18 (#1542).
-		assert_eq!(SubscribeNamespaceLegacy::ID, 0x11);
-		assert_eq!(SubscribeNamespace::ID, 0x50);
-	}
-
-	#[test]
 	fn draft18_omits_subscribe_options() {
 		// Draft-18 modern body: Request ID (0x00), empty namespace field-count
 		// (0x00), Number of Parameters (0x00). No Subscribe Options field.

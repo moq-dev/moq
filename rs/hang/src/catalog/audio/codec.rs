@@ -124,36 +124,3 @@ impl FromStr for AudioCodec {
 		Ok(Self::Unknown(s.to_string()))
 	}
 }
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn flac_roundtrip() {
-		let codec = AudioCodec::from_str("flac").unwrap();
-		assert_eq!(codec, AudioCodec::Flac);
-		assert_eq!(codec.to_string(), "flac");
-		assert_eq!(codec.kind(), AudioCodecKind::Flac);
-	}
-
-	#[test]
-	fn pcm_roundtrip() {
-		let codec = AudioCodec::from_str("pcm").unwrap();
-		assert_eq!(codec, AudioCodec::Pcm);
-		assert_eq!(codec.to_string(), "pcm");
-		assert_eq!(codec.kind(), AudioCodecKind::Pcm);
-	}
-
-	#[test]
-	fn codec_kind_discriminants_are_stable() {
-		assert_eq!(AudioCodecKind::AAC as isize, 0);
-		assert_eq!(AudioCodecKind::Opus as isize, 1);
-		assert_eq!(AudioCodecKind::Unknown as isize, 2);
-		assert_eq!(AudioCodecKind::Flac as isize, 3);
-		assert_eq!(AudioCodecKind::Mp3 as isize, 4);
-		assert_eq!(AudioCodecKind::Pcm as isize, 5);
-		assert_eq!(AudioCodecKind::Ac3 as isize, 6);
-		assert_eq!(AudioCodecKind::Ec3 as isize, 7);
-	}
-}

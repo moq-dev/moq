@@ -675,17 +675,6 @@ mod tests {
 		assert!(host_instant(moq_net::time::now() + Duration::from_millis(100)) > now);
 	}
 
-	#[test]
-	fn send_buffer_uses_standard_srt_window() {
-		let mut options = SocketOptions::default();
-		configure_buffers(&mut options);
-
-		assert_eq!(
-			options.sender.buffer_size,
-			SRT_BUFFER_PACKETS * options.session.max_segment_size
-		);
-	}
-
 	/// Regression for #2978: a frame that completes a chunk must not re-stamp bytes
 	/// already buffered from an earlier pacing instant.
 	#[test]

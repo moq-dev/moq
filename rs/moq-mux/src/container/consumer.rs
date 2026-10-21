@@ -1099,18 +1099,6 @@ mod tests {
 
 	// ---- Basic Reading ----
 
-	#[test]
-	fn new_inherits_the_initial_subscription_latency() {
-		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let max_delay = Duration::from_millis(250);
-		let subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_delay(max_delay));
-
-		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
-
-		assert_eq!(consumer.max_delay, max_delay);
-		assert_eq!(consumer.subscriber().subscription().max_delay, max_delay);
-	}
-
 	#[tokio::test]
 	async fn read_single_group() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));

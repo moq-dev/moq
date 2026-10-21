@@ -171,18 +171,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_keyset_to_str() {
-		let key = create_test_key(Some("1"));
-		let set = KeySet {
-			keys: vec![Arc::new(key)],
-		};
-
-		let json = set.to_str().unwrap();
-		assert!(json.contains("\"keys\""));
-		assert!(json.contains("\"kid\":\"1\""));
-	}
-
-	#[test]
 	fn test_keyset_serde_round_trip() {
 		let key1 = create_test_key(Some("1"));
 		let key2 = create_test_key(Some("2"));

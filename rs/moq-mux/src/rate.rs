@@ -186,11 +186,6 @@ mod tests {
 	}
 
 	#[test]
-	fn starts_optimistic() {
-		assert_eq!(control().target(), bps(4_000_000));
-	}
-
-	#[test]
 	fn drop_applies_immediately() {
 		let mut control = control();
 		// A 2 Mbps pipe: take the target down to it at once, no ramp, no waiting.

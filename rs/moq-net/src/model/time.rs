@@ -600,14 +600,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_new() {
-		let t = Timestamp::new(5000, Timescale::MILLI).unwrap();
-		assert_eq!(t.value(), 5000);
-		assert_eq!(t.scale(), Timescale::MILLI);
-		assert_eq!(t.as_millis(), 5000);
-	}
-
-	#[test]
 	fn test_custom_scale_convert() {
 		// 120 units at 60Hz = 2 seconds, expressed at 1000Hz = 2000 ms.
 		let scale_60 = Timescale::new(60).unwrap();

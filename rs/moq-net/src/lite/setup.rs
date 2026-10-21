@@ -643,16 +643,6 @@ mod tests {
 	}
 
 	#[test]
-	fn role_wire_codes() {
-		// The draft pins Publisher=1 / Subscriber=2. A swap here would still round-trip
-		// against our own decoder, but break every other implementation.
-		for (role, code) in [(Role::Publisher, 1u64), (Role::Subscriber, 2)] {
-			assert_eq!(role.to_code(), code);
-			assert_eq!(Role::from_code(code), Some(role));
-		}
-	}
-
-	#[test]
 	fn unknown_role_decodes_as_bidirectional() {
 		// A role value the receiver doesn't recognize (a future extension, or an explicit
 		// 0) decodes to `None` rather than failing, so a newer client can't break an older

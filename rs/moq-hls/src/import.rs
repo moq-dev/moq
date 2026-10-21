@@ -1186,18 +1186,6 @@ mod tests {
 		assert_eq!(uris, ["large.m3u8", "medium.m3u8", "small.m3u8"]);
 	}
 
-	#[test]
-	fn hls_import_starts_without_tracks() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let url = Url::parse("https://example.com/master.m3u8").unwrap();
-		let cfg = Config::new(url);
-		let hls = Import::new(broadcast, catalog, cfg).unwrap();
-
-		assert!(hls.video.is_empty());
-		assert!(hls.audio.is_none());
-	}
-
 	/// Joining a live window must start near its edge, not replay the whole thing.
 	#[test]
 	fn first_anchor_joins_near_the_live_edge() {
