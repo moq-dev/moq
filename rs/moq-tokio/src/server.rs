@@ -1786,6 +1786,17 @@ impl Request {
 		self.quic.as_ref()
 	}
 
+	/// Finish `work` before what remains of the handshake deadline, or close the
+	/// session with the timeout code and return [`moq_net::Error::Timeout`].
+	///
+	/// Admitting the session is the caller's part of the handshake, so the same
+	/// `listen.timeout` that bounds the transport and SETUP bounds it too; a peer
+	/// cannot hold a connection open behind a decision that never comes. Without a
+	/// deadline, waits forever.
+	pub async fn within<T>(&self, work: impl Future<Output = T>) -> crate::Result<T> {
+		Deadline::bound(self.deadline.as_ref(), async { Ok(work.await) }).await
+	}
+
 	/// Accept the session and return its supervised driver task.
 	///
 	/// Await the driver before classifying the session close so a panic cannot look like cancellation.
@@ -2624,10 +2635,25 @@ mod tests {
 		let occupied = dir.path().join("not-a-socket");
 		std::fs::write(&occupied, b"in the way").unwrap();
 
-		// A concrete port, so the release is observable.
-		let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe");
-		let port = probe.local_addr().expect("probe addr").port();
-		drop(probe);
+		// A concrete port, so the release is observable, reserved for the whole
+		// test so no other process can take it in between. The reservation is a
+		// wildcard bind that never listens, with `SO_REUSEADDR`, which Linux and
+		// macOS let a loopback listener that also sets it share, as the server's
+		// and the final check's both do. Two loopback listeners still collide, so
+		// the final check fails while the server holds the port.
+		let reserve = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).expect("reserve");
+		reserve.set_reuse_address(true).expect("reuse address");
+		let wildcard = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0));
+		reserve.bind(&wildcard.into()).expect("reserve port");
+		let port = reserve
+			.local_addr()
+			.expect("reserved addr")
+			.as_socket()
+			.expect("an inet addr")
+			.port();
+		let live = std::net::TcpListener::bind(("127.0.0.1", port)).expect("the reservation admits a listener");
+		std::net::TcpListener::bind(("127.0.0.1", port)).expect_err("a held port fails the final check");
+		drop(live);
 
 		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));

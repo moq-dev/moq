@@ -62,4 +62,3 @@ Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it.
 - [ACK hook](/quest/m2/quic-ack-hook.md) - the same pattern for a moq-net method backed by `moq-quic`
 - [Native probing](/quest/m2/probe/native.md) - retransmits in-flight data
   to probe, and must not resend what a deadline has expired
-- [noq#813](https://github.com/n0-computer/noq/issues/813) - the per-stream deadline proposal to n0
