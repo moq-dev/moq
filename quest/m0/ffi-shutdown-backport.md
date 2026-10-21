@@ -39,8 +39,9 @@ adapts 7bbac3272's session close to the `release` line's moq-net and keeps
 its tests, renamed to `drain()`. Follow the Cross-Package Sync row for
 `rs/moq-ffi`: every binding and its docs gain `drain()`, or the PR says why
 one has none. Wrapper workflows skip versions already published, so bump
-each changed wrapper's human-owned version (CONTRIBUTING's Versions). Run
-each binding's tests and `just test interop --all`. The
+each changed wrapper's human-owned version (CONTRIBUTING's Versions). Leave
+`go/wrapper/VERSION` alone: CI derives Go's patch, and `drain()` is
+additive. Run each binding's tests and `just test interop --all`. The
 qmux credit fix is out of scope: it arrives with
 [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md).
 
