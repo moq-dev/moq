@@ -9,8 +9,8 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 use super::*;
-use crate::layout::{At, Entry, Object};
 use crate::Info;
+use crate::layout::{At, Entry, Object};
 use crate::mock::Mock;
 
 const SECOND: Duration = Duration::from_secs(1);
@@ -201,12 +201,18 @@ async fn a_lost_group_is_a_gap_that_never_stalls_later_groups() {
 	settle().await;
 	// Group 0 is flushed alone; 2 and 3 wait on the missing 1.
 	sleep(SECOND + SECOND / 2).await;
-	assert_eq!(objects(&store, "video", true).await.keys().cloned().collect::<Vec<_>>(), [key(0, 0, 0)]);
+	assert_eq!(
+		objects(&store, "video", true).await.keys().cloned().collect::<Vec<_>>(),
+		[key(0, 0, 0)]
+	);
 
 	// Once the max delay passes, the gap is given up and the rest follow within the flush.
 	sleep(2 * SECOND).await;
 	let stored = objects(&store, "video", true).await;
-	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0, 0), key(2, 0, 2000)]);
+	assert_eq!(
+		stored.keys().cloned().collect::<Vec<_>>(),
+		[key(0, 0, 0), key(2, 0, 2000)]
+	);
 	assert_eq!(
 		contents(&stored)[1],
 		[
@@ -231,7 +237,15 @@ async fn an_oversized_timed_group_splits_into_ordered_unique_keys() {
 	let broadcast = broadcast::Info::new().produce();
 	let video = broadcast.create_track("video", timed()).unwrap();
 	// Timestamps repeat and go backward, as decode order allows.
-	let frames = [(0, "0"), (1000, "1"), (2000, "2"), (2000, "3"), (1500, "4"), (4000, "5"), (4000, "6")];
+	let frames = [
+		(0, "0"),
+		(1000, "1"),
+		(2000, "2"),
+		(2000, "3"),
+		(1500, "4"),
+		(4000, "5"),
+		(4000, "6"),
+	];
 	group(&video, 0, &frames);
 	let task = spawn(&store, &broadcast, config());
 	subscribed(&video).await;
@@ -267,14 +281,20 @@ async fn an_open_untimed_group_is_rewritten_in_place_and_cut_by_wall_clock() {
 	open.write_frame(None, "a").unwrap();
 	settle().await;
 	sleep(SECOND).await;
-	assert_eq!(contents(&objects(&store, "data", false).await), [[(0, "group", vec!["a".to_string()])]]);
+	assert_eq!(
+		contents(&objects(&store, "data", false).await),
+		[[(0, "group", vec!["a".to_string()])]]
+	);
 
 	open.write_frame(None, "b").unwrap();
 	settle().await;
 	sleep(SECOND).await;
 	let stored = objects(&store, "data", false).await;
 	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), ["0000000000000000000"]);
-	assert_eq!(contents(&stored), [[(0, "group", vec!["a".to_string(), "b".to_string()])]]);
+	assert_eq!(
+		contents(&stored),
+		[[(0, "group", vec!["a".to_string(), "b".to_string()])]]
+	);
 	open.finish().unwrap();
 
 	// Past the duration, the next group starts the next object.
@@ -309,7 +329,10 @@ async fn an_idle_track_is_flushed_within_the_bound() {
 	sleep(SECOND / 2).await;
 	assert!(objects(&store, "video", true).await.is_empty());
 	sleep(SECOND / 2).await;
-	assert_eq!(objects(&store, "video", true).await.keys().cloned().collect::<Vec<_>>(), [key(0, 0, 0)]);
+	assert_eq!(
+		objects(&store, "video", true).await.keys().cloned().collect::<Vec<_>>(),
+		[key(0, 0, 0)]
+	);
 
 	// The open group continues in the next object.
 	open.write_frame(ms(100), "b").unwrap();
@@ -362,7 +385,10 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	finished(task).await;
 
 	let stored = objects(&store, "video", true).await;
-	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(0, 0, 0), key(0, 2, 200)]);
+	assert_eq!(
+		stored.keys().cloned().collect::<Vec<_>>(),
+		[key(0, 0, 0), key(0, 2, 200)]
+	);
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
@@ -374,7 +400,11 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	let stored = objects(&store, "data", false).await;
 	assert_eq!(
 		contents(&stored),
-		[[(0, "group", vec!["a", "b", "c", "d"].into_iter().map(String::from).collect())]]
+		[[(
+			0,
+			"group",
+			vec!["a", "b", "c", "d"].into_iter().map(String::from).collect()
+		)]]
 	);
 	assert!(complete(&store).await);
 }
@@ -473,7 +503,8 @@ async fn a_dvr_prunes_superseded_objects_after_its_window_and_grace() {
 		sleep(SECOND).await;
 	}
 	// Object 0 was superseded when object 1 was stored, at 2s: it stays through 5s.
-	let names = |objects: BTreeMap<String, Object>| objects.values().map(|o| o.start().unwrap().group).collect::<Vec<_>>();
+	let names =
+		|objects: BTreeMap<String, Object>| objects.values().map(|o| o.start().unwrap().group).collect::<Vec<_>>();
 	assert_eq!(names(objects(&store, "video", true).await), [0, 1, 2]);
 	sleep(SECOND).await;
 	settle().await;
@@ -694,7 +725,10 @@ async fn a_failed_put_fails_the_recording() {
 #[tokio::test(start_paused = true)]
 async fn a_failed_resume_listing_writes_nothing() {
 	let store = store();
-	store.put_info("video", &Info::new(0, Some(1000)).unwrap()).await.unwrap();
+	store
+		.put_info("video", &Info::new(0, Some(1000)).unwrap())
+		.await
+		.unwrap();
 	store.inner().fail_lists();
 	let broadcast = broadcast::Info::new().produce();
 	let _video = broadcast.create_track("video", timed()).unwrap();

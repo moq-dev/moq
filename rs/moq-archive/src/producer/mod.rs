@@ -25,9 +25,9 @@ mod resume;
 mod track;
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod backends;
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashMap;
 use std::sync::Arc;

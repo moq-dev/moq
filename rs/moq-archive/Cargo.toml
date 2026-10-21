@@ -19,7 +19,6 @@ hang = { workspace = true }
 kio = { workspace = true }
 moq-clock = { workspace = true }
 moq-json = { workspace = true }
-moq-mux = { workspace = true }
 moq-net = { workspace = true }
 object_store = { workspace = true }
 percent-encoding = { workspace = true }

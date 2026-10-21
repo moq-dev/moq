@@ -13,8 +13,8 @@ use moq_net::{Datagram, StreamError, Timescale, group};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
 
-use super::resume::Stored;
 use super::Shared;
+use super::resume::Stored;
 use crate::layout::{self, End, Entry, Object};
 use crate::segment::Frame;
 use crate::{Error, Info, Result};

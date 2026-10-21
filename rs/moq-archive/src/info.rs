@@ -57,7 +57,6 @@ impl Info {
 	}
 }
 
-
 #[cfg(test)]
 mod tests {
 	use super::*;

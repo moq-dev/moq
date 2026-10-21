@@ -4538,7 +4538,6 @@ dependencies = [
  "kio 0.6.2",
  "moq-clock",
  "moq-json",
- "moq-mux",
  "moq-net",
  "object_store",
  "percent-encoding",

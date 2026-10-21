@@ -101,7 +101,12 @@ fn parse_id(field: &str) -> Option<Result<u64>> {
 	if field.len() != ID_WIDTH || !field.bytes().all(|b| b.is_ascii_digit()) {
 		return None;
 	}
-	Some(field.parse().map_err(|_| Error::Path(field.to_string())).and_then(check_id))
+	Some(
+		field
+			.parse()
+			.map_err(|_| Error::Path(field.to_string()))
+			.and_then(check_id),
+	)
 }
 
 /// How a track's last run ended, stored in its `end` once the broadcast ended.
@@ -420,7 +425,11 @@ mod tests {
 		sorted.sort();
 		assert_eq!(names, sorted);
 		assert_eq!(names[1], "0000000000000000000-0000000000000000003-0000000000000000002");
-		assert!(names.iter().all(|name| name.as_str() < TRACK_END && name.as_str() > TRACK_INFO));
+		assert!(
+			names
+				.iter()
+				.all(|name| name.as_str() < TRACK_END && name.as_str() > TRACK_INFO)
+		);
 	}
 
 	#[test]
@@ -464,7 +473,10 @@ mod tests {
 	#[test]
 	fn end_markers_are_json() {
 		let finish = End::Finish(At { group: 5, frame: 3 });
-		assert_eq!(finish.encode().unwrap().as_ref(), br#"{"finish":{"group":5,"frame":3}}"#);
+		assert_eq!(
+			finish.encode().unwrap().as_ref(),
+			br#"{"finish":{"group":5,"frame":3}}"#
+		);
 		assert_eq!(End::decode(&finish.encode().unwrap()).unwrap(), finish);
 		let error = End::Error(0x34);
 		assert_eq!(error.encode().unwrap().as_ref(), br#"{"error":52}"#);
