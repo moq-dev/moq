@@ -7328,7 +7328,8 @@ mod tests {
 		// The one real bidi everything is multiplexed onto.
 		let control_stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let running = adapter.clone();
-		let (_goaway_handle, goaway) = crate::goaway::Handle::new(true);
+		let (_goaway_handle, goaway) =
+			crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
 		moq_clock::sim::spawn(async move {
 			let _ = running.run(control_stream.reader, control_stream.writer, goaway).await;
 		});
