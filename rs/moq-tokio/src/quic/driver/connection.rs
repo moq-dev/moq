@@ -193,8 +193,8 @@ impl Connecting {
     /// the endpoint is bound to a wildcard address like `0.0.0.0` or `::`.
     ///
     /// This will return `None` for clients, or when the platform does not expose this
-    /// information. See [`quinn_udp::RecvMeta::dst_ip`](moq_sock::udp::RecvMeta::dst_ip) for a list of
-    /// supported platforms when using [`quinn_udp`](udp) for I/O, which is the default.
+    /// information. See [`moq_sock::udp::RecvMeta::dst_ip`] for a list of
+    /// supported platforms when using [`moq_sock::udp`] for I/O, which is the default.
     ///
     /// Will panic if called after `poll` has returned `Ready`.
     pub fn local_ip(&self) -> Option<IpAddr> {
@@ -284,9 +284,12 @@ impl Future for ConnectionDriver {
         conn.forward_app_events(&self.conn.shared);
 
         // Every datagram sent or received passes through this poll.
-        let stats = conn.inner.stats();
-        self.conn.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
-        self.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
+        #[cfg(feature = "moq-net")]
+        {
+            let stats = conn.inner.stats();
+            self.conn.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
+            self.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
+        }
 
         if !conn.inner.is_drained() {
             if keep_going {
@@ -618,8 +621,8 @@ impl Connection {
     /// the endpoint is bound to a wildcard address like `0.0.0.0` or `::`.
     ///
     /// This will return `None` for clients, or when the platform does not expose this
-    /// information. See [`quinn_udp::RecvMeta::dst_ip`](moq_sock::udp::RecvMeta::dst_ip) for a list of
-    /// supported platforms when using [`quinn_udp`](udp) for I/O, which is the default.
+    /// information. See [`moq_sock::udp::RecvMeta::dst_ip`] for a list of
+    /// supported platforms when using [`moq_sock::udp`] for I/O, which is the default.
     pub fn local_ip(&self) -> Option<IpAddr> {
         self.0.state.lock("local_ip").inner.local_ip()
     }
@@ -640,6 +643,7 @@ impl Connection {
     }
 
     /// The wire counters the driver updates as it sends and receives.
+    #[cfg(feature = "moq-net")]
     pub(crate) fn wire(&self) -> moq_net::transport::Wire {
         self.0.shared.wire.clone()
     }
@@ -1069,6 +1073,9 @@ pub(crate) struct Shared {
     /// Number of live handles that can used to initiate or handle I/O; excludes the driver
     ref_count: AtomicUsize,
     /// Refreshed by every driver poll, so readers never wake the driver to sample.
+    ///
+    /// Only moq-net reads them, so a driver-only build skips the per-poll stats.
+    #[cfg(feature = "moq-net")]
     wire: moq_net::transport::Wire,
 }
 
