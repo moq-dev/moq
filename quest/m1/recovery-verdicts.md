@@ -33,7 +33,3 @@ still recovers the group on the next route, and both languages classify every
 listed error alike.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Resumed in-flight groups](/quest/m1/resume-in-flight.md) - how long a replaced copy stays to back a handed-out group

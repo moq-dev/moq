@@ -87,7 +87,8 @@ dropped-PID owner (`Programs` under `--program all`) with every cumulative
 counter intact, since counters never go backward. `track` and `class` follow
 the current owner, empty and `Data` while dropped, and two rows never
 coexist under one key. Coordinate the serialized shape with
-[TS health counters](/quest/m2/ts-health-stats.md).
+the TS health counters [#5849](https://github.com/moq-dev/moq/pull/5849)
+landed.
 
 Rust: `rs/moq-mux` TS import (and export for MPEG-2 video `pesPacket`
 packetization). JS: none. Draft
