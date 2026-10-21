@@ -5777,12 +5777,10 @@ impl Cursor {
 
 			let sequence = datagram.sequence;
 			// A datagram is a whole group, so its own timestamp places it against a time end.
-			let admits = super::subscription::before_end(sequence, self.end_sequence)
-				&& self.filter.window.admits_datagram(sequence, datagram.timestamp);
-			let (start, end) = self.filter.window.frames(sequence);
 			let object = datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0);
-			let framed = object >= start && end.is_none_or(|end| object < end);
-			if sequence >= self.floor() && admits && framed {
+			let admits = super::subscription::before_end(sequence, self.end_sequence)
+				&& self.filter.window.admits_datagram(sequence, datagram.timestamp, object);
+			if sequence >= self.floor() && admits {
 				return Poll::Ready(Ok(Some(datagram)));
 			}
 		}
