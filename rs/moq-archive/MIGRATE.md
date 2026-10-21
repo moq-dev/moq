@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `Producer` replaces `Writer`
+### `Producer` replaces `Writer` (#6160)
 
 `Writer`, its `Control`, and `writer::{Config, Retention}` are removed; record with `Producer::new(store, broadcast, producer::Config::default()).run().await` instead.
 A producer records every track of one broadcast, found with TRACKS rather than a catalog, and needs no timeline: the layout is per-track objects keyed by group, frame, and timestamp, documented in the crate docs.

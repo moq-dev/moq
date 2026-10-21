@@ -4,7 +4,7 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
-### `export archive` records a prefix
+### `export archive` records a prefix (#6160)
 
 `moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/<epoch>`, until the connection ends, instead of one broadcast at `<url>`.
 Point `<url>` at the root you want recordings under, and drop `--catalog-format`, which it now refuses.
