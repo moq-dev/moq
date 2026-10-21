@@ -125,9 +125,8 @@ pub struct Backoff {
 	/// slower than this still lands. Giving up can therefore take up to one whole walk longer.
 	///
 	/// Resets after a stable connection (one that outlives the initial backoff) outside a redirect
-	/// loop, so a flapping
-	/// session that reconnects then immediately drops still counts toward the timeout. Set to
-	/// `Some(Duration::ZERO)` for unlimited retries. `None` takes the default. When this config was
+	/// loop, so a flapping session that reconnects then immediately drops still counts toward the
+	/// timeout. Set to `Some(Duration::ZERO)` for unlimited retries. `None` takes the default. When this config was
 	/// parsed from the command line, a `--backoff-timeout` given there wins over this field.
 	///
 	/// An `Option` because zero is a real setting: a command-line parse leaves this field at its
