@@ -101,6 +101,7 @@ remain with their current quests.
 
 - [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
+- [Arrival stamps](/quest/m1/ts-reliability/arrival-stamps.md) - frames carry their local arrival time, so a stalled path never lets late frames out
 
 ## Related
 
