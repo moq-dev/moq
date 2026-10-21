@@ -51,8 +51,7 @@ pub struct ImportArgs {
 type Instance = (moq_net::PathOwned, Option<moq_net::Epoch>);
 
 /// Record every broadcast announced at or under `prefix` into `args.store`, each publisher
-/// instance under `<path>/<epoch>`, until the announcements end. A route covering `prefix`
-/// lists nothing beneath it, so `prefix` itself is recorded as its broadcast.
+/// instance under `<path>/<epoch>`, until the announcements end.
 ///
 /// A route without an epoch names no instance, so each one it announces records under an epoch
 /// minted here: a restarted export never resumes it, and never stitches two instances together.
@@ -88,16 +87,10 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 					moq_net::announce::Event::Restart(announce) => (announce, true),
 					_ => continue,
 				};
-				// A route covering the selected path serves it without listing what is beneath, so
-				// the selected path is requested itself.
-				let path = if announce.prefix.has_prefix(&prefix) {
-					announce.prefix
-				} else if prefix.has_prefix(&announce.prefix) {
-					prefix.clone()
-				} else {
+				if !announce.prefix.has_prefix(&prefix) {
 					continue;
-				};
-				let instance: Instance = (path, announce.route.epoch);
+				}
+				let instance: Instance = (announce.prefix, announce.route.epoch);
 				let count = running.entry(instance.clone()).or_default();
 				if *count > 0 && !(restart && instance.1.is_none()) {
 					continue;
@@ -321,53 +314,6 @@ mod tests {
 			);
 		}
 		assert!(!files.iter().any(|file| file.starts_with("other")), "{files:?}");
-	}
-
-	/// A route covering the selected path, which serves it on request without announcing it, is
-	/// still asked for that path.
-	#[tokio::test]
-	async fn a_covering_route_is_asked_for_the_selected_path() {
-		let _env = crate::test_env::EnvGuard::clear(&[]);
-		let dir = tempfile::tempdir().unwrap();
-		let url = Url::from_directory_path(dir.path()).unwrap();
-
-		let origin = moq_tokio::origin::spawn();
-		let server = origin.dynamic("live").unwrap();
-		let args = ExportArgs {
-			store: url,
-			retention: None,
-			retention_grace: None,
-		};
-		let recording = tokio::spawn(export(origin.consume(), "live/a".into(), args));
-
-		let request = tokio::time::timeout(Duration::from_secs(10), server.requested_broadcast())
-			.await
-			.expect("the export requests the selected path")
-			.unwrap();
-		assert_eq!(request.path().as_str(), "live/a");
-		let prepared = request.prepare(moq_net::Epoch::mint()).unwrap();
-		let mut track = prepared
-			.broadcast()
-			.create_track("video", track::Info::default().with_max_age(Duration::from_secs(3600)))
-			.unwrap();
-		let broadcast = prepared.publish().unwrap();
-		tokio::time::timeout(Duration::from_secs(10), track.subscription_changed())
-			.await
-			.expect("the export subscribes")
-			.unwrap();
-		track.finish().unwrap();
-		broadcast.close();
-
-		tokio::time::timeout(Duration::from_secs(10), async {
-			while !files(dir.path()).iter().any(|file| file.ends_with("/.end")) {
-				tokio::time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await
-		.expect("the recording completes");
-		recording.abort();
-		let files = files(dir.path());
-		assert!(files.iter().all(|file| file.starts_with("live/a/")), "{files:?}");
 	}
 
 	/// A route without an epoch records under one minted per instance, so two instances never
