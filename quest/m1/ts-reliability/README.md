@@ -100,7 +100,7 @@ refused means an error or a counted drop.
 | Mechanism | Contract | Owner |
 |:--|:--|:--|
 | H.264 (0x1B), H.265 (0x24) | Preserved: video rendition, PID and ES descriptors in `mpegts.tracks` | landed |
-| AAC ADTS (0x0F), MP2, AC-3, E-AC-3, Opus (0x06 + `Opus`) | Preserved: audio rendition; Opus export labels mono and stereo only | landed |
+| AAC ADTS (0x0F), MP2, AC-3, E-AC-3, Opus (0x06 + `Opus`) | Preserved: audio rendition; Opus export labels mono and stereo, and 3 to 8 channels with an OpusHead in the Vorbis layout. Other mapping families (such as 255) refuse | landed |
 | Private and unknown PES types, LATM (0x11), metadata (0x15) | Preserved: `pesPacket`, PTS and DTS rebased | landed |
 | PES clock fields (ESCR, pack header, TREF), PES scrambling | Refused, counted in `refused` | landed |
 | Private sections (0x05), SCTE-35 (0x86 + `CUEI`) | Preserved: `verbatim` section, `pts_adjustment` rebased | landed |

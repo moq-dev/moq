@@ -28,7 +28,11 @@ Found 2026-10-20 in the fidelity audit (`Export::build_psi`, `Import::finish`):
 Import: when the PMT lists no media stream, anchor the timebase at the first
 PCR, so placement alone puts the data on the catalog clock. A media stream a
 later PMT adds shares that anchor, since PCR and PTS run on one program
-clock.
+clock. The era must come from the PCR too: `placement()` reduces its
+unwrapped ticks `% PCR_WRAP`, and `PtsUnwrap::pcr` picks the era from the
+last media PTS, so without one a data-only program restarts near zero at the
+26.5-hour PCR wrap. Keep the PCR era across the wrap without a PTS, and let a
+media stream added later unwrap its PTS against that era.
 
 Find why the video requirement exists before removing it: sections may lean
 on the video tune-in point (`video_start`) or the video decode clock. Then
@@ -45,7 +49,9 @@ for lacking video.
 Tests: replace `scte35_without_video_export_is_rejected` with round trips for
 audio plus SCTE-35, audio plus `pesPacket`, sections only, and `pesPacket`
 only, each through import and export with byte-exact section and PES
-payloads and placements. Add a generated audio-plus-SCTE-35 arm to the
+payloads and placements. A data-only import crosses the PCR wrap with
+continuous timestamps, from a generated PCR that starts just before the
+wrap. Add a generated audio-plus-SCTE-35 arm to the
 TSDuck round trip in `test/ts`, so `compliance.py` grades PCR repetition and
 the PMT on a program whose clock rides audio or its own PID.
 
