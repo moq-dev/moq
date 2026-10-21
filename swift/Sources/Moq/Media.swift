@@ -335,8 +335,8 @@ public enum Media {
             try ffi.write(payload: payload)
         }
 
-        /// Finalize the track. A trailing access unit with no following delimiter is
-        /// not emitted (matches the moq-cli stdin path).
+        /// Finalize the track, publishing the last access unit still waiting for a
+        /// following start code.
         public func finish() throws {
             try ffi.finish()
         }

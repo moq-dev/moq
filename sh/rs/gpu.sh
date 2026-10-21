@@ -27,9 +27,23 @@ done
 }
 
 for vendor in "${!vendors[@]}"; do
-    MOQ_GPU_VENDOR="$vendor" just rs test -p moq-video --run-ignored only -E 'test(vulkan_gpu_device)'
     case "$vendor" in
-        0x10de) sh/rs/vulkan-cuda.sh ;;
-        0x1002 | 0x8086) echo "GPU $vendor: Vulkan driver verified; encoder hardware tests arrive with its backend" ;;
+        0x10de)
+            MOQ_GPU_VENDOR="$vendor" just rs test -p moq-video --run-ignored only -E 'test(vulkan_gpu_device)'
+            sh/rs/vulkan-cuda.sh
+            ;;
+        0x1002 | 0x8086)
+            # The Nix shell has no Vulkan loader, and the host's Mesa links the host's
+            # libc, so drive the GPU through the flake's own Mesa, as `just rs render-sw` does.
+            mesa=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#mesa)
+            loader=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#vulkan-loader)
+            case "$vendor" in
+                0x1002) icd=("$mesa"/share/vulkan/icd.d/radeon_icd.*.json) ;;
+                0x8086) icd=("$mesa"/share/vulkan/icd.d/intel_icd.*.json) ;;
+            esac
+            LD_LIBRARY_PATH="$loader/lib" VK_DRIVER_FILES="${icd[0]}" MOQ_GPU_VENDOR="$vendor" \
+                just rs test -p moq-video --run-ignored only -E 'test(vulkan_gpu_device)'
+            echo "GPU $vendor: Vulkan driver verified; encoder hardware tests arrive with its backend"
+            ;;
     esac
 done

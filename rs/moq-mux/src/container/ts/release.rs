@@ -182,6 +182,15 @@ impl Release {
 		self.jitter.out_of_tolerance()
 	}
 
+	/// Snapshot how the release clock is keeping up with the source.
+	pub fn stats(&self) -> super::stats::Release {
+		let mut stats = super::stats::Release::of(&self.jitter);
+		if let Some((_, track)) = &self.track {
+			stats.gaps = track.skips() - track.markers();
+		}
+		stats
+	}
+
 	/// How many objects are waiting in the jitter buffer.
 	#[cfg(test)]
 	pub(super) fn buffered(&self) -> usize {
