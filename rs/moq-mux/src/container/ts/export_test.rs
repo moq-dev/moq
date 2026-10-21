@@ -9777,6 +9777,8 @@ struct Placed {
 	sync: bool,
 	/// Also carry an SDT from a snapshot track, re-emitted at this interval.
 	sdt: Option<Duration>,
+	/// Finish the catalog once everything is written, so the export must end rather than stall.
+	ends: bool,
 }
 
 impl Placed {
@@ -9791,6 +9793,7 @@ impl Placed {
 			mux_rate: None,
 			sync: false,
 			sdt: None,
+			ends: false,
 		}
 	}
 }
@@ -9938,6 +9941,9 @@ async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
 	}
 	audio.finish().unwrap();
 	data.finish().unwrap();
+	if placed.ends {
+		catalog.finish().unwrap();
+	}
 
 	let mut exporter = open_ts(
 		crate::source::announced(&consumer).await,
@@ -9953,13 +9959,16 @@ async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
 		exporter = exporter.with_sync();
 	}
 	let mut out = Vec::new();
-	while let Ok(next) = tokio::time::timeout(DRAIN, exporter.next()).await {
+	loop {
+		let Ok(next) = tokio::time::timeout(DRAIN, exporter.next()).await else {
+			assert!(!placed.ends, "the export stalled instead of ending");
+			return Ok(out);
+		};
 		match next? {
 			Some(frame) => out.push(frame),
-			None => break,
+			None => return Ok(out),
 		}
 	}
-	Ok(out)
 }
 
 /// Where a PES went out: the slice it began in, its first byte's offset into the slice, and
@@ -10175,11 +10184,12 @@ async fn placed_pes_goes_out_whole_at_its_placement_under_sync() {
 }
 
 /// Under `--sync`, an SI entry due in every slot goes out while the media does and stops with
-/// it, so the flush at the end returns.
+/// it, so the export ends.
 #[test]
 fn si_due_every_slot_ends_with_the_media_under_sync() {
 	let (sent, received) = std::sync::mpsc::channel();
 	// A thread of its own: a flush that never returns blocks the runtime that would time it out.
+	// A stall panics the thread instead, which drops `sent`.
 	std::thread::spawn(move || {
 		let runtime = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
@@ -10190,12 +10200,13 @@ fn si_due_every_slot_ends_with_the_media_under_sync() {
 			mux_rate: Some(2_000_000),
 			sync: true,
 			sdt: Some(Duration::ZERO),
+			ends: true,
 			..Placed::new(vec![(1_000, pes_bare(0xbf, b"private_stream_2"))])
 		})));
 	});
 	let slices = received
 		.recv_timeout(Duration::from_secs(5))
-		.expect("the flush at the end never returned")
+		.expect("the export never ended")
 		.unwrap();
 	let sdt = slices
 		.iter()
