@@ -71,6 +71,10 @@ Regression tests:
 
 - A group-only reader of a finite resumed track sees `closed` settle and the
   route release its copy.
+- The same for a fork: a group-only fork of a finite resumed track sees its
+  `closed` settle and the route release the fork's copy. Forks became logical
+  readers on the route in [#6024](https://github.com/moq-dev/moq/pull/6024),
+  so they share the `Reader.#finish` path this quest fixes.
 - A swap after copy A declared the end keeps `end()` at that end, and
   `finished()` resolves with it before B learns it.
 - `largest()` on a finite resumed track resolves `undefined` once its serving

@@ -100,6 +100,6 @@ passes; release pull requests use hosted runners and main pull requests skip clo
 `just gh runner-vm` builds a guest image and runs NixOS integration tests for
 startup without carrier, public egress for multiple guests, private-network and
 sibling-guest isolation including spoofed established replies, compatible host NAT
-settings, the runner's locked-memory budget, free page reporting and idle cache
-drops, and Nix/mbx persistence across runner
-and guest restarts.
+settings, the runner's locked-memory budget, symlink-free home and work directories
+with state migrated from the former DynamicUser layout, free page reporting and
+idle cache drops, and Nix/mbx persistence across runner and guest restarts.

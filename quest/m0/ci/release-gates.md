@@ -15,7 +15,7 @@ require `Platform scope`, `macOS` and `Windows` in main's merge queue, which
 never got activated.
 
 - Main ruleset 2420853 requires `Check` and `Test` from the GitHub Actions
-  integration (15368) and nothing else. [One CI pass](/quest/m0/ci/one-pass.md)
+  integration (15368) and nothing else. The one-pass workflow
   folds them into one job that keeps the name `Check`. Remove `Test` from the
   ruleset just before that PR is enqueued. Removing a context only loosens
   the gate, and groups built earlier still report both, so nothing waits on a
@@ -35,7 +35,3 @@ never got activated.
 - Measured 2026-10-14 to 10-16, for sizing the release PR wait: of 100 queue
   macOS jobs, runner wait was p50 0.2, p90 33 and max 83 minutes. Nightly
   and releases share the five-job macOS cap.
-
-## Required
-
-- [One CI pass](/quest/m0/ci/one-pass.md) - settles main's required job name
