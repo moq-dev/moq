@@ -642,6 +642,16 @@ mod tests {
 		assert_eq!(got.probe, ProbeLevel::Increase);
 	}
 
+	/// Roles, pinned to the draft. A swap still round trips against our own decoder but
+	/// breaks every other implementation.
+	#[test]
+	fn role_code_points() {
+		for (role, spec) in [(Role::Publisher, 1u64), (Role::Subscriber, 2)] {
+			assert_eq!(role.to_code(), spec, "{role:?}");
+			assert_eq!(Role::from_code(spec), Some(role));
+		}
+	}
+
 	#[test]
 	fn unknown_role_decodes_as_bidirectional() {
 		// A role value the receiver doesn't recognize (a future extension, or an explicit

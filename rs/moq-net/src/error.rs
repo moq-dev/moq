@@ -760,33 +760,30 @@ mod tests {
 
 	#[test]
 	fn session_codes_round_trip() {
-		// Only the registered codes are a wire contract, so only they round trip.
-		let registered = [
-			SessionError::Cancel,
-			SessionError::Internal,
-			SessionError::Unauthorized,
-			SessionError::Expired,
-			SessionError::ProtocolViolation,
-			SessionError::InvalidRequestId,
-			SessionError::KeyValueFormatting,
-			SessionError::TooManyRequests,
-			SessionError::InvalidPath,
-			SessionError::GoawayTimeout,
-			SessionError::Timeout,
-			SessionError::AuthTokenCacheOverflow,
-			SessionError::Version,
-			SessionError::UnknownAuthTokenAlias,
-			SessionError::InvalidAuthority,
-			SessionError::TooManyRequestUpdates,
-			SessionError::App(0),
-			SessionError::App(404),
-		];
-		for err in registered {
-			assert_eq!(
-				SessionError::from_code(err.to_code()),
-				err,
-				"{err:?} did not round trip"
-			);
+		// Only the registered codes are a wire contract, so only they round trip, each on
+		// the value the drafts assign (moq-transport's, where we reuse its code).
+		for (err, spec) in [
+			(SessionError::Cancel, 0x0),
+			(SessionError::Internal, 0x1),
+			(SessionError::Unauthorized, 0x2),
+			(SessionError::ProtocolViolation, 0x3),
+			(SessionError::InvalidRequestId, 0x4),
+			(SessionError::KeyValueFormatting, 0x6),
+			(SessionError::TooManyRequests, 0x7),
+			(SessionError::InvalidPath, 0x8),
+			(SessionError::GoawayTimeout, 0x10),
+			(SessionError::Timeout, 0x11),
+			(SessionError::AuthTokenCacheOverflow, 0x13),
+			(SessionError::Version, 0x15),
+			(SessionError::UnknownAuthTokenAlias, 0x17),
+			(SessionError::Expired, 0x18),
+			(SessionError::InvalidAuthority, 0x19),
+			(SessionError::TooManyRequestUpdates, 0x1B),
+			(SessionError::App(0), 0x40),
+			(SessionError::App(404), 0x40 + 404),
+		] {
+			assert_eq!(err.to_code(), spec, "{err:?} moved off its assigned code");
+			assert_eq!(SessionError::from_code(spec), err, "{err:?} did not round trip");
 		}
 
 		// The reserved 32-47 range, and anything else unregistered, keeps its value instead
@@ -810,29 +807,30 @@ mod tests {
 
 	#[test]
 	fn stream_codes_round_trip() {
-		// Only the registered codes are a wire contract, so only they round trip.
-		let registered = [
-			StreamError::Internal,
-			StreamError::Cancel,
-			StreamError::DeliveryTimeout,
-			StreamError::ControlTimeout,
-			StreamError::GoingAway,
-			StreamError::TooFarBehind,
-			StreamError::MalformedTrack,
-			StreamError::GroupTooLarge,
-			StreamError::NotFound,
-			StreamError::Old,
-			StreamError::Evicted,
-			StreamError::Unroutable,
-			StreamError::WrongSize,
-			StreamError::FrameTooLarge,
-			StreamError::TimestampMismatch,
-			StreamError::NotFetchable,
-			StreamError::Unauthorized,
-			StreamError::App(7),
-		];
-		for err in registered {
-			assert_eq!(StreamError::from_code(err.to_code()), err, "{err:?} did not round trip");
+		// Only the registered codes are a wire contract, so only they round trip, each on
+		// the value the draft assigns.
+		for (err, spec) in [
+			(StreamError::Internal, 0x0),
+			(StreamError::Cancel, 0x1),
+			(StreamError::DeliveryTimeout, 0x2),
+			(StreamError::GoingAway, 0x4),
+			(StreamError::TooFarBehind, 0x5),
+			(StreamError::MalformedTrack, 0x12),
+			(StreamError::ControlTimeout, 0x31),
+			(StreamError::GroupTooLarge, 0x32),
+			(StreamError::NotFound, 0x33),
+			(StreamError::Old, 0x34),
+			(StreamError::Evicted, 0x35),
+			(StreamError::Unroutable, 0x36),
+			(StreamError::WrongSize, 0x37),
+			(StreamError::FrameTooLarge, 0x38),
+			(StreamError::TimestampMismatch, 0x39),
+			(StreamError::NotFetchable, 0x3a),
+			(StreamError::Unauthorized, 0x3b),
+			(StreamError::App(7), 0x40 + 7),
+		] {
+			assert_eq!(err.to_code(), spec, "{err:?} moved off its assigned code");
+			assert_eq!(StreamError::from_code(spec), err, "{err:?} did not round trip");
 		}
 
 		// The reserved 32-47 range carries no meaning, so a peer emitting it is not given one.
