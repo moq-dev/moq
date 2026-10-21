@@ -3080,9 +3080,9 @@ where
 	///
 	/// A request stream that fails on its own, reset or ended before its answer, ends only
 	/// this advertisement, which comes back on `watch`'s growing backoff. Only the control
-	/// stream failing or the peer breaking the protocol ends the loop, and a violation
-	/// closes the session here, since the solicited path runs this inside a request task
-	/// whose errors end only that stream.
+	/// stream failing, the peer breaking the protocol, or a draft-14/15 header that failed
+	/// to send ends the loop. Those last two close the session here, since the solicited
+	/// path runs this inside a request task whose errors end only that stream.
 	///
 	/// Returns what the refusal, if any, said about coming back.
 	async fn advertise_namespace(
@@ -3106,7 +3106,7 @@ where
 		};
 
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
-		let answer = async {
+		let sent = async {
 			request.writer.varint(ietf::PublishNamespace::ID).await?;
 			request
 				.writer
@@ -3116,10 +3116,22 @@ where
 					params,
 					authorization_token: auth.as_ref().and_then(|auth| self.request_token(auth)),
 				})
-				.await?;
-			self.read_response(&mut request, &mut messages).await
+				.await
 		}
 		.await;
+		let answer = match sent {
+			Ok(()) => self.read_response(&mut request, &mut messages).await,
+			// A sequential-ID peer cannot accept any later request when this header failed
+			// before it learned the allocated ID.
+			Err(err) if matches!(self.version, Version::Draft14 | Version::Draft15) => {
+				self.session.clone().close(
+					super::error::to_session_code(&crate::SessionError::Internal),
+					"failed to send PUBLISH_NAMESPACE",
+				);
+				return Err(err);
+			}
+			Err(err) => Err(err),
+		};
 
 		let absolute = self.origin.absolute(path);
 		let super::request_stream::Framed(type_id, body) = match answer {
@@ -14880,6 +14892,67 @@ mod tests {
 			),
 		}
 		assert!(!run.is_finished(), "{version} fin={fin}: the loop ended");
+	}
+
+	/// A draft-14/15 PUBLISH_NAMESPACE whose header fails to send closes the session: its
+	/// request ID is spent, and a peer that requires the next ID would refuse every later
+	/// request. Later drafts back off that namespace instead.
+	#[moq_clock::test]
+	async fn a_failed_legacy_header_closes_the_session() {
+		use crate::transport::{memory, poll::Session as _};
+
+		for version in [Version::Draft14, Version::Draft15, Version::Draft19] {
+			let origin = unheld_origin();
+			let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+			settle().await;
+
+			// One message at a time, so the header's body waits behind its type.
+			let (session, mut peer) = memory::pair(memory::Config {
+				stream_buffer: 0,
+				..Default::default()
+			});
+			let publisher = Publisher::new(
+				crate::time::sim(),
+				session,
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				declared(Some(false)),
+				version,
+			);
+			let run = moq_clock::sim::spawn(publisher.run_publish_namespaces());
+
+			let mut stream = moq_clock::timeout(Duration::from_secs(10), Stream::accept(&mut peer, version))
+				.await
+				.expect("no advertisement")
+				.unwrap();
+			stream.reader.abort(&Error::Cancel);
+
+			match version {
+				Version::Draft14 | Version::Draft15 => {
+					let closed = moq_clock::timeout(Duration::from_secs(10), peer.closed())
+						.await
+						.unwrap_or_else(|_| panic!("{version}: the session stayed open"));
+					let code = super::super::error::to_session_code(&crate::SessionError::Internal);
+					assert!(
+						matches!(closed, memory::Error::Session { code: c, .. } if c == code),
+						"{version}: {closed:?}"
+					);
+					let res = moq_clock::timeout(Duration::from_secs(10), run)
+						.await
+						.unwrap_or_else(|_| panic!("{version}: the loop kept running"));
+					assert!(res.unwrap().is_err(), "{version}: the loop ended cleanly");
+				}
+				_ => {
+					// Offered again after the backoff, on a session that stays open.
+					moq_clock::timeout(Duration::from_secs(10), Stream::accept(&mut peer, version))
+						.await
+						.unwrap_or_else(|_| panic!("{version}: not offered again"))
+						.unwrap();
+					assert!(!run.is_finished(), "{version}: the loop ended");
+				}
+			}
+		}
 	}
 
 	/// A peer that resets a request's stream while its renewal is in flight ends only that
