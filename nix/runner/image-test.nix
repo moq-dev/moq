@@ -4,6 +4,7 @@ pkgs.testers.runNixOSTest {
   name = "github-runner-vm-image";
   nodes.machine = { lib, ... }: {
     imports = [ guestModule ];
+    environment.systemPackages = [ pkgs.python3 ];
     system.switch.enable = true;
     services.github-runners.runner.enable = lib.mkForce false;
     systemd.services.runner-token.enable = false;
@@ -37,6 +38,8 @@ pkgs.testers.runNixOSTest {
     mkdir-p /var/lib/github-runner/runner
     write /var/lib/github-runner/runner/.runner registered
     chmod 0600 /var/lib/github-runner/runner/.runner
+    write /var/lib/runner-owner-marker owned
+    chown 12345 12346 /var/lib/runner-owner-marker
     write /nix-path-registration stale
     """, text=True, check=True)
     subprocess.run([
@@ -75,6 +78,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test ! -e /boot/EFI/Linux/${nodes.machine.system.boot.loader.ukiFile}")
         machine.succeed("test $(cat /var/lib/github-runner/runner/.runner) = registered")
         machine.succeed("test $(stat -c %a /var/lib/github-runner/runner/.runner) = 600")
+        machine.succeed("test $(stat -c %u:%g /var/lib/runner-owner-marker) = 12345:12346")
         machine.succeed("test $(cat /var/cache/github-runner-home/.cache/mbx/fixture) = cached")
         machine.succeed("test /var/cache/github-runner-home/.cache/mbx/fixture -ef /var/cache/github-runner-home/.cache/mbx/linked")
 
