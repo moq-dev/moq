@@ -224,13 +224,6 @@ impl Consume {
 		self.broadcast.insert(ConsumeBroadcast { broadcast, origin })
 	}
 
-	/// Whether the caller still holds `id` as a handle to `broadcast`.
-	pub fn holds(&self, id: Id, broadcast: &moq_net::broadcast::Consumer) -> bool {
-		self.broadcast
-			.get(id)
-			.is_some_and(|held| held.broadcast.is_clone(broadcast))
-	}
-
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let ConsumeBroadcast { broadcast, origin } =
 			self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
