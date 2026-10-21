@@ -45,8 +45,8 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
   peer that cannot signal compression) reads one inflated copy per group,
   built on first demand, shared across readers, billed to the cache pool, and
   dropped with its group. A thousand old-lite viewers cost one inflate.
-- **Signaling:** lite-07 TrackInfo carries the flag and the frame header the
-  size ([Core](/quest/m1/compress/core.md)); IETF draft-16+ carries them only
+- **Signaling:** lite-07 TrackInfo carries the codec id and the frame header the
+  size; IETF draft-16+ carries them only
   after both peers advertise a setup parameter
   ([IETF](/quest/m1/compress/ietf.md)), because unknown track properties are
   discarded. Lite-01..06, IETF draft-14/15, and IETF peers without the
@@ -80,7 +80,6 @@ This README owns the end-to-end proof and the guide once every child lands:
 
 ## Required
 
-- [Core](/quest/m1/compress/core.md) - Rust moq-net compresses opted-in tracks, carries them on lite-07, and serves a shared inflated copy to everything else
 - [IETF extension](/quest/m1/compress/ietf.md) - moq-transport draft-16+ peers that negotiate the extension exchange compressed tracks
 - [JavaScript](/quest/m1/compress/js.md) - js/net publishes and consumes compressed tracks on lite-07
 - [Migrate](/quest/m1/compress/migrate.md) - catalogs, stats, and timelines publish one compressed track; moq-flate, @moq/flate, and every `.z` name are gone

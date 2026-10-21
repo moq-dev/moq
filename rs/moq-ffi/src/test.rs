@@ -35,6 +35,7 @@ fn timed_info() -> MoqTrackInfo {
 		max_age_us: None,
 		refresh: None,
 		timescale: Some(1_000_000),
+		compress: false,
 	}
 }
 
@@ -862,6 +863,7 @@ async fn raw_track_datagram_roundtrip() {
 				max_age_us: None,
 				refresh: None,
 				timescale: Some(1_000_000),
+				compress: false,
 			}),
 		)
 		.unwrap();
@@ -893,6 +895,7 @@ async fn raw_track_info_reports_publisher_properties() {
 		max_age_us: Some(2_500_000),
 		refresh: Some(2),
 		timescale: Some(90_000),
+		compress: true,
 	};
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
 	let consumer = track.consume(None).unwrap();
@@ -902,6 +905,7 @@ async fn raw_track_info_reports_publisher_properties() {
 	assert_eq!(got.max_age_us, Some(2_500_000));
 	assert_eq!(got.refresh, Some(2));
 	assert_eq!(got.timescale, Some(90_000));
+	assert!(got.compress);
 }
 
 #[tokio::test]
@@ -968,6 +972,7 @@ async fn data_writes_preserve_optional_timestamps() {
 						max_age_us: None,
 						refresh: None,
 						timescale: timestamp_us.map(|_| 1_000_000),
+						compress: false,
 					}),
 				)
 				.unwrap();
@@ -1109,6 +1114,7 @@ async fn json_snapshot_roundtrip() {
 		max_age_us: None,
 		timescale: Some(1_000_000),
 		refresh: None,
+		compress: false,
 	};
 	let track = broadcast.publish_track("meta".into(), Some(info)).unwrap();
 	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
@@ -2200,6 +2206,39 @@ async fn video_publish_named_track() {
 		.unwrap()
 		.expect("expected a catalog");
 	assert!(catalog.video.contains_key("hd"), "catalog: {:?}", catalog.video.keys());
+}
+
+/// The raw-stream producer frames Annex-B written in arbitrary chunks, and
+/// `finish` publishes the last access unit even with no start code after it.
+#[tokio::test]
+async fn track_stream_producer_publishes_its_last_access_unit() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let stream = MoqMediaTrackStreamProducer::video(
+		&broadcast,
+		MoqMediaTarget::Named {
+			name: Some("video".into()),
+		},
+		video_init(MoqVideoFormat::Avc3, Vec::new()),
+	)
+	.unwrap();
+	let track = consumer.subscribe_track("video".into(), None).await.unwrap();
+
+	let idr = [0x65, 0x88, 0x84, 0x21];
+	let mut bytes = h264_init();
+	bytes.extend_from_slice(&[0, 0, 0, 1]);
+	bytes.extend_from_slice(&idr);
+	for chunk in bytes.chunks(5) {
+		stream.write(chunk.to_vec()).unwrap();
+	}
+	stream.finish().unwrap();
+
+	let frame = tokio::time::timeout(TIMEOUT, track.read_frame())
+		.await
+		.expect("timed out waiting for the access unit")
+		.unwrap()
+		.expect("finish dropped the last access unit");
+	assert!(frame.payload.ends_with(&idr), "{:02x?}", frame.payload);
 }
 
 #[tokio::test]

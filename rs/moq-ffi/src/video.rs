@@ -1027,6 +1027,50 @@ mod decode_tests {
 mod finish_tests {
 	use super::*;
 
+	/// The codec-only encoder every wrapper exposes (`moq.video.Encoder` and
+	/// friends): a keyframe opens the stream, `cut` forces the next one, and
+	/// `finish` closes it. No test in any language had driven it.
+	#[test]
+	fn encoder_emits_keyframes_where_asked() {
+		let (width, height) = (64u32, 48u32);
+		let encoder = MoqVideoEncoder::new(
+			MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::I420,
+				width,
+				height,
+				framerate: 30,
+			},
+			MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				track: None,
+				bitrate: Some(500_000),
+				gop: None,
+				kind: MoqVideoEncoderKind::Software,
+			},
+		)
+		.unwrap();
+		let picture = |i: u64| MoqVideoFrame {
+			timestamp_us: i * 33_333,
+			data: vec![(i * 40) as u8; (width * height * 3 / 2) as usize],
+		};
+
+		let mut packets = Vec::new();
+		for i in 0..3 {
+			packets.extend(encoder.encode(picture(i)).unwrap());
+		}
+		packets.extend(encoder.flush().unwrap());
+		encoder.set_bitrate(250_000).unwrap();
+		encoder.cut().unwrap();
+		packets.extend(encoder.encode(picture(3)).unwrap());
+		packets.extend(encoder.finish().unwrap());
+
+		let keyframes: Vec<u64> = packets.iter().filter(|p| p.keyframe).map(|p| p.timestamp_us).collect();
+		assert_eq!(packets.len(), 4, "one access unit per picture");
+		assert_eq!(keyframes, [0, 3 * 33_333], "keyframes at the start and the cut");
+		assert!(packets.iter().all(|p| !p.data.is_empty()), "an empty access unit");
+		assert!(matches!(encoder.encode(picture(4)), Err(MoqError::Closed)));
+	}
+
 	#[tokio::test]
 	async fn finish_ends_the_track_after_a_rate_follower_panic() {
 		let estimate = moq_net::bandwidth::Producer::new();

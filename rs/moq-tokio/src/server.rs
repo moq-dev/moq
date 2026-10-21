@@ -317,6 +317,10 @@ impl Server {
 		if config.bind.is_some() && parts.quic() {
 			return Err(Error::NoBackend("--listen requires the quic feature"));
 		}
+		#[cfg(not(feature = "quic"))]
+		if config.reset.secret.is_some() && parts.quic() {
+			return Err(Error::NoBackend("--listen-reset-secret requires the quic feature"));
+		}
 
 		// Only the QUIC backend verifies client certificates; the qmux listeners
 		// (tcp/unix/websocket) never ask for one, even over `tls://`, so a
@@ -2889,6 +2893,24 @@ mod tests {
 			}
 			.init(),
 			Err(Error::NoBackend(_))
+		));
+	}
+
+	/// A reset secret on the default QUIC listener would never be read without a
+	/// QUIC backend.
+	#[cfg(not(feature = "quic"))]
+	#[test]
+	fn reset_secret_without_a_quic_backend_is_rejected() {
+		let mut config = crate::listen::Config::default();
+		config.reset.secret = Some("reset.key".into());
+
+		assert!(matches!(
+			Config {
+				listen: config,
+				..Default::default()
+			}
+			.init(),
+			Err(Error::NoBackend(reason)) if reason.starts_with("--listen-reset-secret")
 		));
 	}
 

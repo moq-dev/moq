@@ -34,6 +34,13 @@ export class Delivered {
 		return index >= 0 && sequence <= this.#runs[index][1];
 	}
 
+	/** Whether every sequence in `[start, end)` was handed out, or is below the floor. */
+	covers(start: number, end: number): boolean {
+		if (start >= end) return true;
+		const index = this.#below(start);
+		return index >= 0 && end - 1 <= this.#runs[index][1];
+	}
+
 	/** Record `sequence` as handed out; `false` when it already was. */
 	add(sequence: number): boolean {
 		const index = this.#below(sequence);

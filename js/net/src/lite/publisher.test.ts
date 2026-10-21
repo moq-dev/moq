@@ -1,9 +1,9 @@
 import { expect, jest, mock, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import { SessionCode, StreamCode, toStreamCode } from "../error.ts";
+import { fromTransport, SessionCode, StreamCode, toStreamCode } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks } from "../internal.ts";
@@ -648,6 +648,38 @@ async function servedSubscription(
 			group.close();
 			track.writeGroup(group);
 		},
+		// Makes the next group stream withhold its FIN from the client, the way a stream the
+		// browser never finishes sending looks; resolves with the reason the publisher resets it.
+		stall(): Promise<unknown> {
+			const open = pair.server.createUnidirectionalStream.bind(pair.server);
+			return new Promise((resolve) => {
+				pair.server.createUnidirectionalStream = async (options) => {
+					pair.server.createUnidirectionalStream = open;
+					const writer = (await open(options)).getWriter();
+					return new WritableStream<Uint8Array>({
+						start(controller) {
+							// A WebTransport send stream resets on the controller's signal; the
+							// sink's abort would wait for the close that never settles.
+							controller.signal.addEventListener("abort", () => {
+								resolve(controller.signal.reason);
+								void writer.abort(controller.signal.reason);
+							});
+						},
+						write: (chunk) => writer.write(chunk),
+						close: () => new Promise(() => undefined),
+					});
+				};
+			});
+		},
+		// The sequence of the next group stream the publisher opened, from its header alone,
+		// for a stream whose end never comes.
+		async servedHeader(): Promise<number | undefined> {
+			const next = await opened.read();
+			if (next.done) return undefined;
+			const reader = new Reader(next.value, undefined, version);
+			await reader.u53(); // stream type
+			return (await GroupMessage.decode(reader, version)).sequence;
+		},
 		// The next group stream the publisher opened, drained, or undefined once it has gone
 		// idle. A group the publisher dropped then fails an assertion instead of hanging the
 		// test on a stream that will never arrive.
@@ -778,6 +810,47 @@ test("lite draft-06: a cut dropped then re-created is not served", async () => {
 		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
 	} finally {
 		await sub.close();
+	}
+});
+
+// A group stream that never completes after its FIN still holds the connection. Like the
+// Rust `GroupServe`, the publisher waits on it only while the age budget keeps the group:
+// the newest group is never stale, and once its successor arrived a full budget ago the
+// stream is reset with `Old` and the group dropped.
+test("lite draft-06: a group stream that never completes is reset once the group goes stale", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const budget = Milli(1_000);
+	// The track's max age caps the subscription's budget.
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, maxAge: budget });
+	try {
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06))).toBe(true);
+
+		let reason: unknown;
+		const reset = sub.stall().then((value) => {
+			reason = value;
+		});
+		sub.serve(1);
+		expect(await sub.servedHeader()).toBe(1);
+		await flush();
+		await clock.advanceAsync(Nano.fromMilli(Milli(budget * 10)));
+		expect(reason).toBeUndefined();
+
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+		await clock.advanceAsync(Nano.fromMilli(Milli(budget - 1)));
+		expect(reason).toBeUndefined();
+		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await reset;
+		expect(toStreamCode(fromTransport(reason))).toBe(StreamCode.Old);
+		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
+	} finally {
+		await sub.close();
+		restore();
 	}
 });
 

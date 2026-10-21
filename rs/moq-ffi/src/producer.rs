@@ -33,6 +33,10 @@ pub struct MoqTrackInfo {
 	/// Per-frame timescale in ticks per second, or null for an untimed track.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
+	/// Whether each group is DEFLATE-compressed on the wire to peers that support it.
+	/// Readers always see the original frames.
+	#[uniffi(default = false)]
+	pub compress: bool,
 }
 
 impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
@@ -51,7 +55,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			})?;
 			out = out.with_timescale(scale);
 		}
-		Ok(out)
+		Ok(out.with_compress(info.compress))
 	}
 }
 
@@ -77,6 +81,7 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 			max_age_us,
 			refresh: info.refresh,
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
+			compress: info.compress,
 		})
 	}
 }
@@ -731,6 +736,7 @@ mod metadata_tests {
 				max_age_us,
 				refresh: None,
 				timescale: None,
+				compress: false,
 			};
 			let model = moq_net::track::Info::try_from(info).unwrap();
 			assert_eq!(model.max_age, max_age_us.map(std::time::Duration::from_micros));

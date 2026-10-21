@@ -544,6 +544,10 @@ pub struct moq_track_info {
 	pub refresh: u32,
 	/// Whether `refresh` is set. When false, a joining subscriber never asks for a new group.
 	pub refresh_present: bool,
+
+	/// Whether each group is DEFLATE-compressed on the wire to peers that support it.
+	/// Readers always see the original frames.
+	pub compress: bool,
 }
 
 impl TryFrom<&moq_track_info> for moq_net::track::Info {
@@ -564,7 +568,7 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		if info.refresh_present {
 			out = out.with_refresh(info.refresh);
 		}
-		Ok(out)
+		Ok(out.with_compress(info.compress))
 	}
 }
 

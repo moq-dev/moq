@@ -280,6 +280,14 @@ untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
 
+A publisher may compress a track, which pays off for repetitive data such as
+JSON and not for media. Each group's frames become one DEFLATE stream
+([moq-flate](/draft/moq-flate)), and a datagram
+compresses alone. Only the work-in-progress moq-lite 07 carries the compressed
+bytes. A relay forwards them as received and inflates each group once for every
+other subscriber, moq-transport included, so readers always see the original
+frames. Rust publishes and relays compressed tracks; js/net refuses them for now.
+
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning
 reader or the next fetch finds it. That copy is not live meanwhile: readers get

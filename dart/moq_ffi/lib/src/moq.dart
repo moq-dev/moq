@@ -2638,11 +2638,13 @@ class MoqTrackInfo {
   final int? maxAgeUs;
   final int? refresh;
   final int? timescale;
+  final bool compress;
   MoqTrackInfo({
     this.priority = 127,
     this.maxAgeUs = null,
     this.refresh = null,
     this.timescale = null,
+    this.compress = false,
   });
 }
 
@@ -2673,12 +2675,18 @@ class FfiConverterMoqTrackInfo {
     );
     final timescale = timescale_lifted.value;
     new_offset += timescale_lifted.bytesRead;
+    final compress_lifted = FfiConverterBool.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final compress = compress_lifted.value;
+    new_offset += compress_lifted.bytesRead;
     return LiftRetVal(
       MoqTrackInfo(
         priority: priority,
         maxAgeUs: maxAgeUs,
         refresh: refresh,
         timescale: timescale,
+        compress: compress,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -2690,6 +2698,7 @@ class FfiConverterMoqTrackInfo {
         FfiConverterOptionalUInt64.allocationSize(value.maxAgeUs) +
         FfiConverterOptionalUInt32.allocationSize(value.refresh) +
         FfiConverterOptionalUInt64.allocationSize(value.timescale) +
+        FfiConverterBool.allocationSize(value.compress) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -2714,6 +2723,10 @@ class FfiConverterMoqTrackInfo {
       value.timescale,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterBool.write(
+      value.compress,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -2722,6 +2735,7 @@ class FfiConverterMoqTrackInfo {
         FfiConverterOptionalUInt64.allocationSize(value.maxAgeUs) +
         FfiConverterOptionalUInt32.allocationSize(value.refresh) +
         FfiConverterOptionalUInt64.allocationSize(value.timescale) +
+        FfiConverterBool.allocationSize(value.compress) +
         0;
   }
 }
@@ -18779,7 +18793,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediatrackstreamproducer_finish() !=
-      57446) {
+      6627) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqmediatrackstreamproducer_write() !=

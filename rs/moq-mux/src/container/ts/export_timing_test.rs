@@ -714,8 +714,11 @@ async fn a_slow_source_clock_keeps_the_delay() {
 	let (spread, dropped, stats) = on_a_scaled_clock(1.0 - 30e-6, DRIFT_TICKS).await;
 	assert_eq!(dropped, 0, "frames went late as the source fell behind the anchor");
 	assert!(spread <= DRIFT_SLACK, "the delay walked by {spread:?}");
-	let drift = stats.drift.expect("a measurement");
+	let drift = stats.release.drift.expect("a measurement");
 	assert!((drift + 30.0).abs() < 0.5, "measured {drift} ppm");
+	let margin = stats.release.margin.expect("a margin");
+	assert!(margin > 0, "a clean path keeps time to spare: {margin} ms");
+	assert!(stats.release.offset.is_some(), "the offset is measured with the rate");
 }
 
 #[tokio::test(start_paused = true)]
@@ -723,7 +726,7 @@ async fn a_fast_source_clock_keeps_the_delay() {
 	let (spread, dropped, stats) = on_a_scaled_clock(1.0 + 30e-6, DRIFT_TICKS).await;
 	assert_eq!(dropped, 0);
 	assert!(spread <= DRIFT_SLACK, "the delay walked by {spread:?}");
-	let drift = stats.drift.expect("a measurement");
+	let drift = stats.release.drift.expect("a measurement");
 	assert!((drift - 30.0).abs() < 0.5, "measured {drift} ppm");
 }
 
@@ -731,9 +734,9 @@ async fn a_fast_source_clock_keeps_the_delay() {
 #[tokio::test(start_paused = true)]
 async fn a_source_past_the_limit_is_counted() {
 	let (_, _, stats) = on_a_scaled_clock(1.0004, 300_000_000 / VIDEO_US).await;
-	let drift = stats.drift.expect("a measurement");
+	let drift = stats.release.drift.expect("a measurement");
 	assert!((drift - 400.0).abs() < 1.0, "measured {drift} ppm");
-	assert!(stats.out_of_tolerance > 0, "not counted");
+	assert!(stats.release.out_of_tolerance > 0, "not counted");
 }
 
 /// The same source fails the export once it has used half the delay, about ten minutes in,
