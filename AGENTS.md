@@ -42,7 +42,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Do not bump package versions unless asked. Releases are cut separately.
 - Comments should explain the non-obvious why, and never the history.
 - Inline simple helpers.
-- Question whether functionality is needed at all before adding it.
+- Every change needs a consumer that uses it now and is worth its cost; name it in the PR.
 - Deleting code is better than adding code.
 - Suggest follow up sessions and quests when finished, interactively prompting the user.
 - Prefer the net simpler result: reuse what exists, or narrow the scope, when that makes the implementation or API simpler overall. Say what was dropped.

@@ -46,9 +46,8 @@ each gets its own impl:
   adapters. A native impl can pass them to the open, as moq-tokio's driver
   `open_uni`/`open_bi` already accept.
 - moq-tokio's `quic::web` module is public but `#[doc(hidden)]`. Decide
-  whether it is API or should be private. `quic::driver` stays public:
-  [An async QUIC driver without moq-net](/quest/m1/quic-driver.md) makes it
-  supported API.
+  whether it is API or should be private. `quic::driver` is supported API
+  and stays public.
 
 Notes from related quests:
 - [qmux on moq-quic](/quest/m1/quic-qmux.md) planned to port qmux's
