@@ -9,6 +9,11 @@ How to update your code for each breaking change, newest first.
 Every rendition and data track config gains an optional `epoch` beside `broadcast`, and `Archive` gains `replay_epoch` beside `replay`.
 `Reference` has a new required `epoch()`: an implementor outside this crate returns the entry's epoch, or `None` when it names none.
 
+### A lost catalog track is `Error::Moq` (#6114)
+
+`catalog::Consumer::next` and `poll_next` return `Error::Moq` when the catalog track fails, instead of flattening it into `Error::Json`.
+Match `Error::Moq` to tell a lost source from a malformed catalog.
+
 ### `M2ts::random_access` covers the whole track (#5967)
 
 `random_access` no longer describes the latest two-second window: it is true only while every group the track has published started at a random access point.

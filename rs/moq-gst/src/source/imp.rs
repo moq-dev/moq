@@ -722,7 +722,7 @@ fn source_lost(err: &moq_net::Error) -> bool {
 /// [`source_lost`] for a catalog read, where anything but a transport failure is malformed.
 fn catalog_lost(err: &moq_mux::Error) -> bool {
 	match err {
-		moq_mux::Error::Moq(err) | moq_mux::Error::Json(moq_json::Error::Net(err)) => source_lost(err),
+		moq_mux::Error::Moq(err) => source_lost(err),
 		_ => false,
 	}
 }

@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Pass `config.epoch.as_ref()` (or `Reference::epoch`), or `None` to accept the first instance resolved as before.
 A broadcast proven to serve another epoch fails with the new `Error::EpochMismatch`; over a route without an epoch the check is best effort.
 
+### Catalog read errors use `hang`'s variants (#6114)
+
+`catalog::hang::Consumer` reports a lost catalog track as `Error::Moq` instead of `Error::Json(moq_json::Error::Net(_))`, and any other catalog decode failure (such as a bad DEFLATE stream) as `Error::Hang(hang::Error::Json(_))` instead of `Error::Json(_)`.
+Match `Error::Moq` to detect a lost source.
+
 ### JSON and binary consumers return `Timed<T>` (#5677)
 
 The `json` and `binary` consumers' `next` / `poll_next` return `moq_net::Timed<T>`; read `.value` and the optional `.at`.
