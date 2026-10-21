@@ -441,11 +441,14 @@ impl Copy {
 		// group is waited for: a failure of the copy that group is read from continues here.
 		let lands = self.since.is_some() && !self.expired(grace, reader.waiter);
 		let backs = |sequence: u64| {
+			// A group at or past where it was asked to start may land even before its first
+			// arrival; without a floor, only what follows its first arrival can.
+			let asked = self.floor.is_some_and(|floor| floor.group <= sequence);
 			self.track.peek_group(sequence).is_some()
 				|| (lands
 					&& self
 						.track
-						.may_land(sequence..sequence.saturating_add(1), false, grace, None))
+						.may_land(sequence..sequence.saturating_add(1), asked, grace, None))
 		};
 		match Arc::strong_count(&self.lease) > 1 || reader.out.iter().any(|(sequence, _)| backs(*sequence)) {
 			true => Retains::Keep,
@@ -2396,6 +2399,48 @@ mod test {
 
 			// The old route finishes group 1 only now, and the new route's copy of it fails.
 			let mut whole = a.create_group(group::Info { sequence: 1 }).unwrap();
+			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
+			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
+			whole.finish().unwrap();
+			failing.abort(Error::SessionClosed).unwrap();
+			assert_eq!(read(&mut reading), Some(b"b".to_vec()), "ordered={ordered}");
+			assert_eq!(read(&mut reading), None);
+		}
+	}
+
+	/// A replaced copy that got no group yet still backs one at or past where it was asked to
+	/// start: its first group may still land within the grace.
+	#[test]
+	fn a_replaced_copy_backs_a_group_before_its_first_arrival() {
+		for ordered in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, HOUR);
+			write(&a, 0);
+			assert_eq!(drain(&mut sub, ordered), [0]);
+			a.finish().unwrap();
+			let b = copy();
+			routes.serve(b.consume());
+			let c = copy();
+			routes.serve(c.consume());
+
+			let mut failing = c.create_group(group::Info { sequence: 1 }).unwrap();
+			failing.write_frame(ts(1), b"a".as_ref()).unwrap();
+			let noop = kio::Waiter::noop();
+			let res = match ordered {
+				true => sub.poll_next_group(&noop),
+				false => sub.poll_recv_group(&noop),
+			};
+			let Poll::Ready(Ok(Some(mut reading))) = res else {
+				panic!("expected group 1");
+			};
+			assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+			assert_eq!(drain(&mut sub, ordered), Vec::<u64>::new());
+
+			// b's first group lands only now, and c's copy of it fails.
+			let mut whole = b.create_group(group::Info { sequence: 1 }).unwrap();
 			whole.write_frame(ts(1), b"a".as_ref()).unwrap();
 			whole.write_frame(ts(2), b"b".as_ref()).unwrap();
 			whole.finish().unwrap();

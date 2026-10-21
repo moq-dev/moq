@@ -629,7 +629,10 @@ class Reader implements ResumeSource {
 		for (const recover of this.out) {
 			const sequence = recover.sequence;
 			if (hooks.holdsGroup(copy.sub, sequence)) return "keep";
-			const land = { start: sequence, end: sequence + 1, floor: false, grace: wait };
+			// A group at or past where it was asked to start may land even before its first
+			// arrival; without a floor, only what follows its first arrival can.
+			const asked = copy.floor !== undefined && copy.floor <= sequence;
+			const land = { start: sequence, end: sequence + 1, floor: asked, grace: wait };
 			if (lands && hooks.mayLand(copy.sub, land)) return "keep";
 		}
 		return undefined;

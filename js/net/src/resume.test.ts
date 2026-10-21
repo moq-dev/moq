@@ -1479,6 +1479,50 @@ test.each([true, false])(
 	},
 );
 
+test.each([true, false])("a replaced copy backs a group before its first arrival (ordered: %p)", async (ordered) => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const c = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const tc = copy(c);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+	const view = ordered ? sub.ordered() : undefined;
+	const next = () => (view ? view.nextGroup() : sub.recvGroup());
+	ta.write(0);
+	(await next())?.close();
+	ta.producer.close();
+	front.serve(b.consume());
+	await settle();
+	front.serve(c.consume());
+	await settle();
+
+	const failing = tc.write(1, 1, false);
+	const group = await next();
+	if (group?.sequence !== 1) throw new Error("expected group 1");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("1.0");
+	const later = next();
+	await settle();
+
+	// b's first group lands only now, and c's copy of it fails.
+	tb.write(1, 2);
+	failing.close(new StreamError(StreamCode.SessionClosed));
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("1.1");
+	expect(await group.readFrame()).toBeUndefined();
+
+	group.close();
+	tc.write(2);
+	expect((await later)?.sequence).toBe(2);
+	view?.close();
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+	c.close();
+});
+
 test("a clean end waits for a group the replaced copy still carries", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
