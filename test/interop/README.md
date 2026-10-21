@@ -245,8 +245,8 @@ cannot publish it. Capabilities are measured on every run rather than assumed
 from an engine name. Playwright WebKit is not Safari; Safari device/transport
 bugs and real Firefox transport negotiation still require manual evidence.
 
-Firefox only resumes Web Audio on an output device, so each run gets a private
-null sink from `test/lib/pulse.py`. Chromium plays to its fake output instead,
+Firefox only resumes Web Audio on an output device, so each Linux run gets a
+private null sink from `test/lib/pulse.py`. Chromium plays to its fake output instead,
 with or without a host sound server.
 
 Nightly runs the Firefox player only. Playwright's Linux WebKit 27.2 fails two
