@@ -328,6 +328,11 @@ quic-sim:
 send-depth:
     bash sh/rs/send-depth.sh
 
+# Run moq-cli's `moq export` process tests, which feed a real relay and wait out lingers in real time.
+[positional-arguments]
+cli-export *args:
+    just rs test -p moq-cli --test integration --run-ignored only -E 'test(/^export::/)' "$@"
+
 # Exercise small connection and stream receive windows over real QUIC sockets.
 quic-stress:
     just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
