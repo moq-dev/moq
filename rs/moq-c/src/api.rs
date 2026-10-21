@@ -594,8 +594,8 @@ pub struct moq_subscription {
 	/// The spans of the track to deliver, or NULL for everything `max_delay_us` still
 	/// considers fresh. A non-NULL pointer with `ranges_len` 0 asks for nothing.
 	///
-	/// A request to the publisher, aggregated across every subscriber. Reads start at the
-	/// lowest group a range starts at, and stop past the last absolute end.
+	/// A request to the publisher, aggregated across every subscriber, and this
+	/// subscription's read filter: it reads only the groups its own ranges cover.
 	pub ranges: *const moq_range,
 	pub ranges_len: usize,
 
