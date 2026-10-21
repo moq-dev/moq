@@ -7,18 +7,25 @@ against the Chromium build that Nix provides. No check needs a hand-set
 `LD_LIBRARY_PATH` or a `playwright install`, and no contributor doc tells
 anyone to run one.
 
-Inventory on `main` (2026-10-21); recheck with
-`git grep -n "playwright install"` and every `package.json` that depends on
-`playwright`:
+Inventory on `main` (2026-10-21). Recheck with `git grep -n -i chromium`
+outside `quest/` and `test/smoke/`, keeping the hits that install, download, or
+say where Chromium comes from (comments included), and with every
+`package.json` that depends on `playwright`:
 
 - Packages: `test/interop/clients/js`, `test/video`, `test/p2p`, `test/wasm`,
   `test/audio-quality/clients/js`, `bench/browser`.
 - Scripts: `test/interop/interop.sh`, `test/portrait/run.sh` (run in CI as
-  `just test portrait`), `test/audio-quality/{run,record}.sh`,
-  `bench/browser/run.sh`, and the `test/justfile` recipes.
-- Workflows: `interop.yml`, `video.yml`, `wasm.yml`, `nightly.yml`.
-- Docs: `test/interop/README.md` (says the devShell lacks Chromium) and
-  `test/wasm/README.md` (says to run `bunx playwright install chromium`).
+  `just test portrait`), `test/wasm/run.sh`,
+  `test/audio-quality/{run,record}.sh`, `bench/browser/run.sh`, and the
+  `test/justfile` recipes.
+- Workflows: `interop.yml`, `video.yml`, `wasm.yml`, `nightly.yml`, including
+  their comments that the devShell lacks Chromium.
+- Docs and comments: `test/interop/README.md` (says the devShell lacks
+  Chromium), `test/wasm/README.md` (says to run
+  `bunx playwright install chromium`), `rs/justfile`'s browser clock recipe
+  (says `wasm.yml` installs it), `js/justfile`'s fairness sweep ("requires
+  installed Chromium"), and `test/video/renderer.browser.ts` (says
+  `just test video` installs it).
 
 Out of scope: the Firefox and WebKit rows, which
 [Nightly media players](/quest/m1/media-engines-nightly.md) owns (its
@@ -45,5 +52,5 @@ Decided 2026-10-20 with the maintainer:
 - **The pin is enforced.** A check in `just check` fails when any package's
   npm `playwright` differs from `PLAYWRIGHT_VERSION`, like
   `test/smoke/freshness.sh`, so a nixpkgs bump cannot silently drift.
-- The READMEs in the inventory say the devShell provides Chromium. No new
-  user-facing docs: this changes only contributor tooling.
+- The docs and comments in the inventory say the devShell provides Chromium.
+  No new user-facing docs: this changes only contributor tooling.
