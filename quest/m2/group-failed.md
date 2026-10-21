@@ -22,11 +22,18 @@ the lite publisher.
   and the group's sequence (the track belongs to one broadcast instance), so
   N subscribers or retries failing one group cost one event, and benchmark
   the path swept over subscribers and groups.
+- Coalescing per group still leaves one notification per distinct sequence,
+  so a subscriber that fails every live group while the consumer is slow or
+  absent would grow an event queue. Keep what a track retains bounded
+  whatever the notification carries: coalesced latest state (such as the
+  newest failed sequence and a count since the last read), not a queue.
 - Carry it through moq-ffi and the bindings only once a binding consumer
   asks.
 
 Tests on mock time, Rust and JS: a group reset as `Old`, an evicted group, and
-a failed stream each surface once, on lite and IETF.
+a failed stream each surface once, on lite and IETF, and a long run of
+distinct failed groups with no consumer reading keeps the track's retained
+state constant.
 
 Public API: new, mirrored across Rust and JS. Wire: none.
 

@@ -57,7 +57,9 @@ Decided with the maintainer on 2026-10-17 (see the
   ([rate grant](/quest/m2/rate-grant.md)) rather than adding a constant.
 - **`Increase` only with a sender.** SETUP advertises `Increase` only when
   the session has a sender behind the seam the send target defines: native
-  probing on moq-quic, padding in the browser.
+  probing on moq-quic, padding in the browser. A browser session on a version
+  [padding](/quest/m2/probe/padding.md) refuses (lite-05, lite-06, IETF
+  drafts 14 to 17) has none, so it keeps `Report`.
 - **Automatic, opt-out.** Targets are on by default; an application can
   override them or disable probing.
 
@@ -75,7 +77,8 @@ Tests with mocked time, Rust and JS: viewer handles sum into the PROBE target
 sent to the peer; the session probes to the larger of its reservations and
 the peer's target; a session that publishes and watches keeps the two
 directions apart; viewer grants split the receive estimate max-min fair by
-`max` and never sum above it; `Increase` is advertised only with a sender;
+`max` and never sum above it; `Increase` is advertised only with a sender, and never by a browser session
+on a version padding refuses;
 opting out sends no target.
 
 The sum fans out over viewer handles, so add a benchmark sweeping their count,

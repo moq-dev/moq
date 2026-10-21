@@ -35,6 +35,13 @@ mechanism wins first" step:
   replace capacity with the encoder rate because the source plateaus. Keep
   current goodput, historical capacity and its age, and the desired rate
   distinct; preserving an old estimate does not discover capacity.
+- **Expired means reset.** Both moq-net publishers reset a stale group's
+  stream as `Old`, even after its FIN while bytes await acknowledgment
+  (`poll_expired_while_pending`), and moq-quic never resends a reset stream's
+  bytes, so probing never sends past a group's expiry. Rejected: requiring
+  [per-stream deadlines](/quest/m2/quic-deadline.md) first. They predict
+  whether bytes can still arrive before the deadline, which tightens loss
+  recovery too, but expiry itself already reaches moq-quic as a reset.
 - Evaluate the IMMEDIATE_ACK extension so ACK delay doesn't obscure a short
   sample.
 - Implement the [target](/quest/m1/probe-target.md) quest's sender hook in
@@ -50,7 +57,8 @@ extending `Bottleneck` to step its rate) and wired into CI at least nightly:
 an illustrative 2 Mbit/s source seeking 4 Mbit/s while the path steps 3 to 12
 to 3 Mbit/s, on identical media traces and wire budgets. Cover keyframes, idle
 restart, stale high estimates, receiver credit limits, compressed ACKs,
-competing CUBIC and BBR flows, and a peer target far above the path, whose
+competing CUBIC and BBR flows, a group that expires mid-probe (no probe
+bytes for its stream after the reset), and a peer target far above the path, whose
 redundant bytes stay within the overhead budget. Add a congested arm below the media bitrate
 behind a deep but finite queue for impairment acceptance and performance.
 Verify actual overflow drops, adding competing loss-based traffic if BBR
