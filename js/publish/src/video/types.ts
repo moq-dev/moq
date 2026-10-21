@@ -38,13 +38,14 @@ export function isStreamTrack(source: Source): source is StreamTrack {
 	return !("frames" in source) && !("track" in source);
 }
 
-// Stronger typing for the MediaStreamTrack interface.
+/** Stronger typing for the MediaStreamTrack interface. */
 export interface StreamTrack extends MediaStreamTrack {
 	kind: "video";
 	clone(): StreamTrack;
 	getSettings(): TrackSettings;
 }
 
+/** The settings a video track reports, with the fields video always has made required. */
 export interface TrackSettings {
 	deviceId: string;
 	groupId: string;
@@ -58,6 +59,7 @@ export interface TrackSettings {
 	width: number;
 }
 
+/** The `getUserMedia` constraints that apply to video. */
 export type Constraints = Omit<
 	MediaTrackConstraints,
 	"autoGainControl" | "channelCount" | "echoCancellation" | "noiseSuppression" | "sampleRate" | "sampleSize"

@@ -1,5 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Auth, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -693,6 +693,89 @@ test("a blocked group header is reset when the group expires", async () => {
 		client.close();
 		broadcast.close();
 		origin.close();
+	}
+});
+
+// A finished group's stream still holds the connection until its FIN is acknowledged. One
+// whose FIN never completes is waited on only while the group is within the budget, then
+// reset like a stream still serving, as the Rust `GroupServe` does. The track ending first
+// does not end the wait: PUBLISH_DONE waits on the stream, so the budget still judges it.
+test("a group stream whose FIN never completes is reset when the group expires", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+
+	let closing!: () => void;
+	const closeStarted = new Promise<void>((resolve) => {
+		closing = resolve;
+	});
+	let reset = false;
+	let resetting!: () => void;
+	const streamReset = new Promise<void>((resolve) => {
+		resetting = resolve;
+	});
+	const stalled = new WritableStream<Uint8Array>({
+		start(controller) {
+			// An abort while the close is in flight reaches the sink only through its signal.
+			controller.signal.addEventListener("abort", () => {
+				reset = true;
+				resetting();
+			});
+		},
+		close() {
+			closing();
+			return new Promise<void>(() => {});
+		},
+	});
+	spyOn(pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
+
+	const budget = Milli(5000);
+	const { pub, origin } = publisher(pair.server);
+	const broadcast = publish(origin, Path.from("test"));
+	// No subscriber max age, so the track's caps the budget.
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: budget });
+	const client = await Stream.open(pair.client, { version: VERSION });
+	const server = await Stream.accept(pair.server, VERSION);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	try {
+		void pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+			}),
+			server,
+		);
+
+		const write = (sequence: number) => {
+			const group = new GroupProducer(sequence);
+			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
+			group.close();
+			track.writeGroup(group);
+		};
+
+		write(0);
+		await closeStarted;
+		// The newest group is never stale, however long its FIN takes. Kept inside the cache's
+		// idle window: a group evicted once superseded is no longer judged.
+		await clock.advanceAsync(Nano.fromMilli(Milli(budget * 2)));
+		expect(reset).toBe(false);
+
+		// Its successor presents no further, so only the wall clock since it arrived convicts
+		// group 0, after the track has ended.
+		write(1);
+		track.close();
+		await clock.advanceAsync(Nano.fromMilli(Milli(budget - 1)));
+		expect(reset).toBe(false);
+		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await streamReset;
+	} finally {
+		client.close();
+		broadcast.close();
+		origin.close();
+		restore();
 	}
 });
 
@@ -1826,6 +1909,52 @@ test("an unanswered draft 16 update withdraws its request before offering it aga
 		const fresh = watch(peer.reader.u53());
 		await advanceUntil(() => fresh.state !== "pending", 30_000);
 		expect(fresh.value).toBe(PublishNamespace.id);
+	} finally {
+		warn.mockRestore();
+		origin.close();
+		adapter.close();
+		jest.useRealTimers();
+	}
+});
+
+/**
+ * A draft-14-16 request rides the control stream, where the deadline's reset tells the peer
+ * nothing, so an advertisement the peer never answers is withdrawn with PUBLISH_NAMESPACE_DONE.
+ * It stays terminal: nothing is offered again.
+ */
+test.each([
+	["14", Version.DRAFT_14],
+	["15", Version.DRAFT_15],
+	["16", Version.DRAFT_16],
+] as const)("an unanswered draft %s advertisement is withdrawn at its deadline", async (_, version) => {
+	jest.useFakeTimers();
+	const pair = createMockTransportPair(ALPNS[version]);
+	const control = await Stream.open(pair.server, { version });
+	const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, false);
+	void adapter.run().catch(() => undefined);
+	const peer = await Stream.accept(pair.client, version);
+	if (!peer) throw new Error("no control stream");
+	const { pub, origin } = publisher(pair.server, { session: adapter });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	try {
+		origin.createBroadcast(Path.from("mine")).announce();
+		void pub.runPublishNamespaces();
+
+		expect(await peer.reader.u53()).toBe(PublishNamespace.id);
+		const advertised = await PublishNamespace.decode(peer.reader, version);
+
+		const next = watch(peer.reader.u53());
+		await advance(9_950);
+		expect(next.state).toBe("pending");
+		await advanceUntil(() => next.state !== "pending", 100);
+		expect(next.value).toBe(PublishNamespaceDone.id);
+		const done = await PublishNamespaceDone.decode(peer.reader, version);
+		if (version === Version.DRAFT_16) expect(done.requestId).toBe(advertised.requestId);
+		else expect(done.trackNamespace).toBe(advertised.trackNamespace);
+
+		const more = watch(peer.reader.u53());
+		await advance(30_000);
+		expect(more.state).toBe("pending");
 	} finally {
 		warn.mockRestore();
 		origin.close();

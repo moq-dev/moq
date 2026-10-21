@@ -156,7 +156,7 @@ client = moq.Client(
   - `.cancel(code)`, `await session.shutdown()`. Cancel immediately, or drain within one second, raising on failure. Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older Lite versions, including default lite-06, wait only for transport ACKs. IETF also waits for transport ACKs.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
-  - `await .status() → ConnectionStatus`, `.connects()`, `.failure()`. Watch reconnects; `connects()` counts connections, 1 on the first, and `failure()` says why a reconnect is under way.
+  - `await .status() → ConnectionStatus`, `.connects()`, `.failure()`. Watch reconnects; `connects()` counts connections, 1 on the first, and `failure()` says why a reconnect is under way. Before the first connect, `Client.failure()` says why the dial is retrying.
   - `.bandwidth() → Bandwidth`. Divide the send estimate between encoders and app-owned tracks.
 
 ### Publishing

@@ -577,6 +577,77 @@ fn client_stateless_reset() {
     assert_matches!(conn.poll(), None);
 }
 
+/// Restart the server from a fresh config built from `restart`, and report whether the client's
+/// next packet for the old connection drew a stateless reset
+fn restarted_server_resets(restart: &[u8; 32]) -> bool {
+    let _guard = subscribe();
+    let config = |secret: &[u8; 32]| {
+        let mut config = EndpointConfig::default();
+        config.reset_secret(secret);
+        Arc::new(config)
+    };
+
+    let mut pair = Pair::new(config(&[1; 32]), server_config());
+    let (client_ch, _) = pair.connect();
+    pair.drive(); // Flush any post-handshake frames
+    pair.server.endpoint = Endpoint::new(config(restart), Some(Arc::new(server_config())), true);
+    pair.client.connections.get_mut(&client_ch).unwrap().ping();
+    pair.drive();
+    matches!(
+        pair.client_conn_mut(client_ch).poll(),
+        Some(Event::ConnectionLost {
+            reason: ConnectionError::Reset
+        })
+    )
+}
+
+#[test]
+fn reset_secret_survives_a_restart() {
+    assert!(restarted_server_resets(&[1; 32]));
+}
+
+#[test]
+fn reset_secret_must_match() {
+    assert!(!restarted_server_resets(&[2; 32]));
+}
+
+/// After a restart every peer's next packet draws a reset at once, so a reset secret answers
+/// 1000 connections a second, still dropping a packet that arrives within 1ms of the last reset
+#[test]
+fn reset_secret_resets_connections_each_millisecond() {
+    let _guard = subscribe();
+    let mut config = EndpointConfig::default();
+    config.reset_secret(&[1; 32]);
+    let mut cids = (config.connection_id_generator_factory)();
+    let mut endpoint = Endpoint::new(Arc::new(config), Some(Arc::new(server_config())), true);
+
+    let interval = Duration::from_millis(1);
+    let start = Instant::now();
+    let mut buf = Vec::new();
+    for i in 0..2_000u16 {
+        let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1024 + i);
+        let mut packet = vec![0x40];
+        packet.extend_from_slice(&cids.generate_cid());
+        packet.resize(100, 0);
+
+        let now = start + interval * u32::from(i);
+        let event = endpoint.handle(now, remote, None, None, packet[..].into(), &mut buf);
+        assert!(
+            matches!(event, Some(DatagramEvent::Response(_))),
+            "connection {i} was not reset"
+        );
+        let event = endpoint.handle(
+            now + interval / 2,
+            remote,
+            None,
+            None,
+            packet[..].into(),
+            &mut buf,
+        );
+        assert!(event.is_none(), "connection {i} was reset twice within 1ms");
+    }
+}
+
 /// The client reads CONNECTION_CLOSE after the server forgets the connection.
 /// The client's reply triggers a reset before the application polls.
 #[test]
@@ -3438,6 +3509,48 @@ fn datagram_recv_buffer_overflow() {
     pair.drive();
     assert_eq!(pair.server_datagrams(server_ch).recv().unwrap(), DATA1);
     assert_matches!(pair.server_datagrams(server_ch).recv(), None);
+}
+
+/// A datagram of the advertised maximum size is a valid frame, so its queue metadata
+/// overflowing the receive buffer drops it rather than closing the connection.
+#[test]
+fn datagram_of_max_size_keeps_connection() {
+    let _guard = subscribe();
+    const WINDOW: usize = 1000;
+    let server = ServerConfig {
+        transport: Arc::new(TransportConfig {
+            datagram_receive_buffer_size: Some(WINDOW),
+            ..TransportConfig::default()
+        }),
+        ..server_config()
+    };
+    let mut pair = Pair::new(Default::default(), server);
+    let (client_ch, server_ch) = pair.connect();
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+    let max_size = pair
+        .client_conn_mut(client_ch)
+        .datagrams()
+        .max_size()
+        .unwrap();
+    assert_eq!(max_size, WINDOW - Datagram::SIZE_BOUND);
+
+    pair.client_datagrams(client_ch)
+        .send(vec![0xAB; max_size].into(), Default::default())
+        .unwrap();
+    pair.drive();
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+    assert!(!pair.server_conn_mut(server_ch).is_closed());
+
+    const DATA: &[u8] = &[0xCD; 100];
+    pair.client_datagrams(client_ch)
+        .send(DATA.into(), Default::default())
+        .unwrap();
+    pair.drive();
+    assert_matches!(
+        pair.server_conn_mut(server_ch).poll(),
+        Some(Event::DatagramReceived)
+    );
+    assert_eq!(pair.server_datagrams(server_ch).recv().unwrap(), DATA);
 }
 
 #[test]

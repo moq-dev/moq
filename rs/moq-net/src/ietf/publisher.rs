@@ -90,6 +90,8 @@ fn rendezvous_error(error: Error, requested: bool, resolved: bool) -> Error {
 	if requested && missing { Error::Timeout } else { error }
 }
 
+// Returned from one poll and matched at once, so its size never sits in a task.
+#[allow(clippy::large_enum_variant)]
 enum FillStep {
 	Batch,
 	Partial(frame::Consumer),
@@ -2992,7 +2994,7 @@ where
 							.advertise_namespace(requests, watch, path, suffix.clone(), advert.params(), auth)
 							.await?;
 						if let Some(old) = old {
-							self.end_request(old).await;
+							self.end_request(old.stream, &old.path, old.request_id).await;
 						}
 					}
 					(true, Some(_)) => {
@@ -3138,6 +3140,9 @@ where
 			Ok(Answer::Message(framed)) => framed,
 			Ok(Answer::Late) => {
 				tracing::debug!(broadcast = %absolute, "no answer to the advertisement");
+				// The peer may hold the request it never answered. Dropping one riding the
+				// draft-14-16 control stream tells it nothing, so it is withdrawn instead.
+				self.end_request(request, path, request_id).await;
 				return Ok(Refused::No);
 			}
 			Ok(Answer::Ended) => {
@@ -3576,7 +3581,8 @@ where
 		match target {
 			Target::Requests(_) => {
 				if let Some(request) = requests.remove(&suffix) {
-					self.end_request(request).await;
+					self.end_request(request.stream, &request.path, request.request_id)
+						.await;
 				}
 			}
 			Target::Inline(stream) => {
@@ -3593,27 +3599,26 @@ where
 	}
 
 	/// Withdraw one PUBLISH_NAMESPACE request, best effort: the peer may already be gone.
-	async fn end_request(&self, mut request: NamespaceRequest<S>) {
+	async fn end_request(&self, mut stream: Stream<S, Version>, path: &crate::PathOwned, request_id: RequestId) {
 		// Draft-17+ withdraws by cancelling the request in both directions; a FIN is only
 		// allowed to end SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS.
 		if !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
-			request.stream.reader.abort(&Error::Cancel);
-			request.stream.writer.abort(&Error::Cancel);
+			stream.reader.abort(&Error::Cancel);
+			stream.writer.abort(&Error::Cancel);
 			return;
 		}
 
-		let _ = request
-			.stream
+		let _ = stream
 			.writer
 			.encode_message(&ietf::PublishNamespaceDone {
-				track_namespace: request.path.as_path(),
-				request_id: request.request_id,
+				track_namespace: path.as_path(),
+				request_id,
 			})
 			.await;
 
 		// The withdrawal rides this request's own stream, which drops with it, so it needs
 		// the acknowledgement before the drop-time reset can discard it.
-		let _ = request.stream.writer.close().await;
+		let _ = stream.writer.close().await;
 	}
 
 	/// Close out every open PUBLISH_NAMESPACE request. A no-op for a loop whose entries
@@ -14534,7 +14539,8 @@ mod tests {
 	}
 
 	/// A draft-16 peer's PUBLISH_NAMESPACE_CANCEL can beat its answer to our update. It
-	/// withdraws only that namespace, which is offered again, and the loop carries on.
+	/// withdraws only that namespace, which the jittered retry sweep offers again, and the
+	/// loop carries on.
 	#[moq_clock::test]
 	async fn a_draft_16_cancel_ahead_of_the_answer_ends_only_its_request() {
 		const VERSION: Version = Version::Draft16;
@@ -14556,8 +14562,15 @@ mod tests {
 		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
 		poll_until(&mut run, &log, b"first-secret", 1).await;
 
+		// The re-offer waits out a randomly jittered sweep, which 1ms settles can overrun.
 		cam.update(crate::origin::Route::default().with_auth(second)).unwrap();
-		poll_until(&mut run, &log, b"cam", 2).await;
+		for _ in 0..100 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			if occurrences(&log, b"cam") >= 2 {
+				break;
+			}
+			tick().await;
+		}
 
 		assert_eq!(occurrences(&log, b"cam"), 2, "the namespace was not offered again");
 		assert_eq!(log.bi_opens(), 2, "a fresh request after the cancel");
@@ -14872,7 +14885,7 @@ mod tests {
 		let mut ok = bytes::Bytes::from(publish_namespace_ok(version).await);
 		held.writer.write_all(&mut ok).await.unwrap();
 
-		let (_again, name) = offered().await;
+		let (mut again, name) = offered().await;
 		assert_eq!(
 			name, first,
 			"{version} fin={fin}: the failed namespace was not offered again"
@@ -14882,6 +14895,9 @@ mod tests {
 			"{version} fin={fin}: re-offered after {:?}",
 			ended.elapsed()
 		);
+		// Answered, so the loop moves on now rather than withdrawing it at its deadline.
+		let mut ok = bytes::Bytes::from(publish_namespace_ok(version).await);
+		again.writer.write_all(&mut ok).await.unwrap();
 
 		cams.remove(second);
 		match version {
@@ -15269,6 +15285,52 @@ mod tests {
 			occurrences(&log, b"second-cam") > 0,
 			"the silent answer wedged the loop: the second namespace never went out"
 		);
+	}
+
+	/// An advertisement the peer never answers is given up at its deadline. On drafts 14-16
+	/// it rides the control stream, where dropping it tells the peer nothing, so it is
+	/// withdrawn with PUBLISH_NAMESPACE_DONE; from draft 17 its own stream's reset ends it.
+	#[moq_clock::test]
+	async fn an_unanswered_advertisement_is_withdrawn() {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16, Version::Draft17] {
+			let origin = unheld_origin();
+			let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+			settle().await;
+
+			// The peer takes the request and answers nothing.
+			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]);
+			let log = session.log.clone();
+			let publisher = Publisher::new(
+				crate::time::sim(),
+				session,
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				declared(Some(false)),
+				version,
+			);
+			let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+			poll_until(&mut run, &log, b"cam", 1).await;
+
+			let done = match version {
+				Version::Draft17 => None,
+				_ => Some(publish_namespace_done(version).await),
+			};
+			let withdrawn = || match &done {
+				Some(done) => occurrences(&log, done) > 0,
+				None => !log.resets().is_empty(),
+			};
+			moq_clock::sleep(ADVERTISE_TIMEOUT - Duration::from_millis(10)).await;
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			assert!(!withdrawn(), "{version}: withdrawn before its deadline");
+
+			moq_clock::sleep(Duration::from_millis(20)).await;
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			assert!(
+				withdrawn(),
+				"{version}: the unanswered advertisement was never withdrawn"
+			);
+		}
 	}
 
 	/// Credit returning raises no signal of its own: no announce, no route change, nothing

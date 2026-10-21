@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### `MoqTrackInfo` gains `compress` (#5928)
+
+It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.
+
 ### Anchors can name a time (#6074)
 
 `MoqAnchor` gains `Time { timestamp_us }`, the group containing that presentation time, so exhaustive matches need an arm for it.
