@@ -1,3 +1,11 @@
+/**
+ * The `<moq-boy>` custom element: discovers Game Boy sessions on a relay and renders them.
+ *
+ * Side-effectful: importing this registers the element.
+ *
+ * @module
+ */
+
 import * as Moq from "@moq/net";
 import { render } from "solid-js/web";
 import type { GameConfig } from "./game.ts";

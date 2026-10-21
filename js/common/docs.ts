@@ -26,6 +26,8 @@ type Module = {
 	imports: Map<string, Binding>;
 	exports: Map<string, Binding>;
 	stars: string[];
+	// Whether the file carries a `@module` block, which an entrypoint needs.
+	described: boolean;
 };
 
 /** Every exported symbol, or public member of an exported class, reachable from `entrypoints` without a doc comment. */
@@ -74,13 +76,11 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		for (const { declaration } of declarations) {
 			if (declaration.type === "ClassDeclaration") {
 				const superClass = declaration.superClass;
-				if (superClass?.type === "Identifier") {
-					const base = resolveBinding(file, { kind: "local", name: superClass.name });
-					const inherited = base?.kind === "local" ? load(base.file).locals.get(base.name) : undefined;
-					if (base?.kind === "local" && inherited && !seen.has(`${base.file}#${base.name}`)) {
-						seen.add(`${base.file}#${base.name}`);
-						check(base.file, base.name, inherited);
-					}
+				const base = resolveClass(file, superClass);
+				const inherited = base ? load(base.file).locals.get(base.name) : undefined;
+				if (base && inherited && !seen.has(`${base.file}#${base.name}`)) {
+					seen.add(`${base.file}#${base.name}`);
+					check(base.file, base.name, inherited);
 				}
 				const element = isElement(superClass);
 				for (const member of declaration.body.body) {
@@ -103,6 +103,26 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 			if (!ok) found.push(`${where}: ${path}.${name}`);
 		}
 		for (const [name, list] of nested) check(file, `${path}.${name}`, list);
+	};
+
+	// The package class a superclass expression names, plain (`Base`) or through a namespace
+	// import (`base.Parent`); undefined for a global or another package's class.
+	const resolveClass = (file: string, superClass: unknown): { file: string; name: string } | undefined => {
+		const node = superClass as { type: string; name?: string; object?: unknown; property?: unknown } | null;
+		if (node?.type === "Identifier" && node.name) {
+			const base = resolveBinding(file, { kind: "local", name: node.name });
+			return base?.kind === "local" ? base : undefined;
+		}
+		const object = node?.object as { type: string; name: string } | undefined;
+		const property = node?.property as { type: string; name: string } | undefined;
+		if (node?.type !== "MemberExpression" || object?.type !== "Identifier" || property?.type !== "Identifier") {
+			return undefined;
+		}
+		const namespace = resolveBinding(file, { kind: "local", name: object.name });
+		if (namespace?.kind !== "namespace") return undefined;
+		const next = findExport(namespace.file, property.name, new Set());
+		const base = next ? resolveBinding(next.file, next.binding) : undefined;
+		return base?.kind === "local" ? base : undefined;
 	};
 
 	// Follow a binding to the file and local name that declares it; undefined for another package.
@@ -160,12 +180,15 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		}
 	};
 
-	for (const entrypoint of entrypoints) walk(entrypoint, "");
+	for (const entrypoint of entrypoints) {
+		if (!load(entrypoint).described) found.push(`${relative(root, entrypoint)}: no @module block`);
+		walk(entrypoint, "");
+	}
 	return found;
 }
 
 function parseModule(source: string): Module {
-	const module: Module = { locals: new Map(), imports: new Map(), exports: new Map(), stars: [] };
+	const module: Module = { locals: new Map(), imports: new Map(), exports: new Map(), stars: [], described: false };
 	const declare = (name: string, statement: Node, declaration: Node) => {
 		const list = module.locals.get(name) ?? [];
 		list.push({ statement, declaration });
@@ -173,6 +196,9 @@ function parseModule(source: string): Module {
 	};
 
 	const ast = parse(source, { sourceType: "module", plugins: [["typescript", { dts: true }], "jsx"] });
+	module.described = (ast.comments ?? []).some(
+		(c) => c.type === "CommentBlock" && /^\*[\s\S]*@module\b/.test(c.value),
+	);
 	for (const statement of ast.program.body) {
 		switch (statement.type) {
 			case "ImportDeclaration":

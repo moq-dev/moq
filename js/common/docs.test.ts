@@ -3,9 +3,31 @@ import { undocumented } from "./docs";
 
 const root = "/dist";
 
+// Each entrypoint gets the `@module` block it needs, so a test covers only what it names.
 function check(files: Record<string, string>, entrypoints = ["/dist/index.d.ts"]): string[] {
-	return undocumented(root, new Map(Object.entries(files)), entrypoints);
+	const described = Object.entries(files).map(([file, source]): [string, string] =>
+		entrypoints.includes(file) ? [file, `/** Test. @module */\n\n${source}`] : [file, source],
+	);
+	return undocumented(root, new Map(described), entrypoints);
 }
+
+test("an entrypoint without a module block is reported", () => {
+	const found = undocumented(
+		root,
+		new Map([["/dist/index.d.ts", "/** Documented. */\nexport declare const a: number;\n"]]),
+		["/dist/index.d.ts"],
+	);
+	expect(found).toEqual(["index.d.ts: no @module block"]);
+});
+
+test("members inherited through a namespace import are checked", () => {
+	const found = check({
+		"/dist/base.d.ts": "/** Documented. */\nexport declare class Parent {\n    run(): void;\n}\n",
+		"/dist/index.d.ts":
+			'import * as base from "./base";\n/** Documented. */\nexport declare class Derived extends base.Parent {}\n',
+	});
+	expect(found).toEqual(["base.d.ts: Parent.run"]);
+});
 
 test("an undocumented export and class member are reported", () => {
 	const found = check({

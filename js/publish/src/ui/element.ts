@@ -1,4 +1,3 @@
-import { Milli, Nano } from "@moq/clock";
 /**
  * The `<moq-publish-ui>` custom element: capture controls wrapped around a `<moq-publish>`.
  *
@@ -6,6 +5,8 @@ import { Milli, Nano } from "@moq/clock";
  *
  * @module
  */
+
+import { Milli, Nano } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqPublish from "../element";

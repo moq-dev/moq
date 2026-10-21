@@ -3,6 +3,7 @@
  *
  * @module
  */
+
 import { Connection } from "@moq/net";
 
 // https://bugzilla.mozilla.org/show_bug.cgi?id=1967793
