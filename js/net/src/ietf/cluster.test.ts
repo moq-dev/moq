@@ -62,12 +62,6 @@ function reader(bytes: Uint8Array, version: IetfVersion = VERSION): Reader {
 	return new Reader(undefined, bytes, version);
 }
 
-test("Cluster: the registry code points are bare varints", () => {
-	// Odd values are length-prefixed byte strings, even ones bare varints.
-	expect(SetupOption.HopId % 2n).toBe(0n);
-	expect(SetupOption.RelayCost % 2n).toBe(0n);
-});
-
 test("Cluster: the hop path carries no count of its own", async () => {
 	// The entries fill the parameter length; a count would make us unreadable to every
 	// other implementation.

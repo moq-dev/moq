@@ -20,6 +20,10 @@ const FIXTURE = {
 	archive: { timelines: { video: { track: "video.timeline.z", duration: 2000 } }, timescale: 1000 },
 };
 
+test("an omitted timescale means microseconds on the wire", () => {
+	expect(Number(ClockSchema.parse({ wall: 1000 }).timescale)).toBe(1_000_000);
+});
+
 test("a zero timescale is refused", () => {
 	expect(() => ClockSchema.parse({ wall: 0, timescale: 0 })).toThrow();
 });

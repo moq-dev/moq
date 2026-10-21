@@ -11,6 +11,16 @@ async function flush() {
 	for (let i = 0; i < 30; i++) await Promise.resolve();
 }
 
+// Track names are wire identifiers shared with every other publisher and subscriber.
+test("track names match the hang catalog section", () => {
+	expect({ ...TRACK }).toEqual({
+		user: "hang/user.json",
+		preview: "hang/preview.json",
+		chat: "hang/chat.json",
+		location: "hang/location.json",
+	});
+});
+
 test("metadata updates keep the same track and reach an existing subscriber", async () => {
 	const net = new Net.Broadcast.Producer();
 	const catalog = new Signal<ExtendedCatalog>({});

@@ -206,7 +206,51 @@ test("fromClose: a clean close is null, a coded close keeps its code", () => {
 	expect(fromClose({ closeCode: SessionCode.GoawayTimeout })?.message).toBe("remote error: 16");
 });
 
-// The two registries are wire contracts (draft-lcurley-moq-lite, Error Codes).
+// The two registries are wire contracts (draft-lcurley-moq-lite, Error Codes). Encoder and
+// decoder share these constants, so only a spec table catches a renumbering.
+test("session codes match the draft's Session Error Codes table", () => {
+	expect({ ...SessionCode } as Record<string, number>).toEqual({
+		Cancel: 0x0,
+		Internal: 0x1,
+		Unauthorized: 0x2,
+		ProtocolViolation: 0x3,
+		InvalidRequestId: 0x4,
+		KeyValueFormatting: 0x6,
+		TooManyRequests: 0x7,
+		InvalidPath: 0x8,
+		GoawayTimeout: 0x10,
+		Timeout: 0x11,
+		AuthTokenCacheOverflow: 0x13,
+		Version: 0x15,
+		UnknownAuthTokenAlias: 0x17,
+		Expired: 0x18,
+		InvalidAuthority: 0x19,
+		TooManyRequestUpdates: 0x1b,
+		Unsupported: 0x30,
+	});
+});
+
+test("stream codes match the draft's Stream Error Codes table", () => {
+	expect({ ...StreamCode } as Record<string, number>).toEqual({
+		Internal: 0x0,
+		Cancel: 0x1,
+		DeliveryTimeout: 0x2,
+		SessionClosed: 0x3,
+		GoingAway: 0x4,
+		TooFarBehind: 0x5,
+		MalformedTrack: 0x12,
+		ControlTimeout: 0x31,
+		GroupTooLarge: 0x32,
+		NotFound: 0x33,
+		Old: 0x34,
+		Evicted: 0x35,
+		Unroutable: 0x36,
+		FrameTooLarge: 0x38,
+		TimestampMismatch: 0x39,
+		Unauthorized: 0x3b,
+	});
+});
+
 test("the code tables keep their registry ranges", () => {
 	// Session codes retain moq-transport assignments below 32; Lite owns 48-63.
 	for (const code of Object.values(SessionCode)) {
