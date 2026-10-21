@@ -5916,6 +5916,108 @@ mod group_priority_test {
 		60
 	}
 
+	/// Poll `serve` a few times, yielding between them, so its per-poll budget lets every
+	/// group that is ready move on.
+	async fn settle_serve(serve: &mut TrackServe<SinkSession>) {
+		for _ in 0..8 {
+			let _ = serve.poll(&kio::Waiter::noop());
+			moq_clock::sim::yield_now().await;
+		}
+	}
+
+	/// A peer withholding stream credit makes each subscription hold one group machine,
+	/// however many tracks it subscribes to and groups they publish: the backlog waits in the
+	/// cache. Granting credit then serves every group still worth sending.
+	#[moq_clock::test]
+	async fn withheld_credit_holds_one_group_machine_per_subscription() {
+		for (tracks, groups) in [(1, 1), (1, 64), (16, 1), (16, 64)] {
+			let gate = kio::Producer::new(false);
+			let session = SinkSession::gated_open_uni(gate.consume());
+			let mut serves: Vec<_> = (0..tracks)
+				.map(|id| {
+					let track = track::Producer::new(
+						std::sync::Arc::new(crate::broadcast::Info::default()),
+						"test",
+						crate::track::Info::timed(),
+					);
+					// Nothing goes stale, so only the credit bounds what is held.
+					let subscriber =
+						track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+					let serve = TrackServe::new(
+						session.clone(),
+						subscriber,
+						RequestId(id),
+						Version::Draft22,
+						ServeRange::default(),
+						Some(Timescale::MILLI),
+					);
+					(track, serve)
+				})
+				.collect();
+
+			for sequence in 0..groups {
+				for (track, serve) in &mut serves {
+					let mut group = track.append_group().unwrap();
+					group
+						.write_frame(crate::Timestamp::from_millis(sequence).unwrap(), b"x".as_slice())
+						.unwrap();
+					group.finish().unwrap();
+					settle_serve(serve).await;
+				}
+				let held = serves.iter().map(|(_, serve)| serve.machines() as u64).sum::<u64>();
+				assert_eq!(held, tracks, "{tracks} tracks after {} groups each", sequence + 1);
+			}
+
+			*gate.write().ok().unwrap() = true;
+			for (_, serve) in &mut serves {
+				settle_serve(serve).await;
+				assert_eq!(serve.opened(), groups);
+				assert_eq!(serve.machines(), 0, "every group was served");
+			}
+		}
+	}
+
+	/// A group waiting for stream credit that the cache evicts leaves at once, rather than
+	/// spending the credit on a reset once it arrives. The next group takes its place.
+	#[moq_clock::test]
+	async fn an_evicted_group_waiting_for_credit_leaves_at_once() {
+		let gate = kio::Producer::new(false);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let mut serve = TrackServe::new(
+			SinkSession::gated_open_uni(gate.consume()),
+			subscriber,
+			RequestId(0),
+			Version::Draft22,
+			ServeRange::default(),
+			Some(Timescale::MILLI),
+		);
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		settle_serve(&mut serve).await;
+		assert_eq!(serve.machines(), 1, "group 0 waits for credit");
+
+		group.abort(Error::Evicted).unwrap();
+		settle_serve(&mut serve).await;
+		assert_eq!(serve.machines(), 0, "the evicted group leaves without credit");
+
+		let mut next = track.append_group().unwrap();
+		next.write_frame(crate::Timestamp::from_millis(1).unwrap(), b"x".as_slice())
+			.unwrap();
+		next.finish().unwrap();
+		settle_serve(&mut serve).await;
+		assert_eq!(serve.machines(), 1, "group 1 takes its place");
+
+		*gate.write().ok().unwrap() = true;
+		settle_serve(&mut serve).await;
+		assert_eq!(serve.opened(), 1, "the credit goes to group 1 alone");
+	}
+
 	/// A subgroup waiting for stream credit keeps its subscription expiry armed.
 	#[moq_clock::test]
 	async fn group_waiting_for_stream_credit_expires() {

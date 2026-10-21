@@ -3655,7 +3655,8 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 }
 
 /// A subscription's run loop: one subscriber cursor serving groups, datagrams,
-/// and SUBSCRIBE_UPDATE messages, with an in-flight group machine per group.
+/// and SUBSCRIBE_UPDATE messages, with a machine per group it serves, one at a time
+/// waiting for stream credit.
 struct TrackRun<S: crate::transport::poll::Session> {
 	ctx: Subscription<S>,
 	track: track::Subscriber,

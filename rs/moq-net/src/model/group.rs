@@ -2212,20 +2212,20 @@ impl Consumer {
 		if self.poll_expired_while_pending(waiter, pending) {
 			return Some(Error::Old);
 		}
-		let unread = |state: &GroupState, cursor: &Cursor| !cursor.capped() && state.fin.is_none_or(|fin| cursor.index < fin);
-		let cursor = &self.cursor;
-		let aborted = match cursor.state.poll(waiter, |state| match &state.abort {
-			Some(err) if unread(state, cursor) => Poll::Ready(Some(err.clone())),
-			Some(_) => Poll::Ready(None),
-			None => Poll::Pending,
-		}) {
-			Poll::Ready(Ok(aborted)) => aborted?,
-			// Closed without an abort: only an unfinished group is lost with its producer.
-			Poll::Ready(Err(state)) => match unread(&*state, cursor) {
-				true => Error::Dropped,
-				false => return None,
-			},
-			Poll::Pending => return None,
+		// Registered on the close alone: an abort closes the channel, and waking on every
+		// frame written to a parked group would cost a stalled subscriber per frame.
+		if self.cursor.state.poll_closed(waiter).is_pending() {
+			return None;
+		}
+		let aborted = {
+			let state = self.cursor.state.read();
+			let unread = !self.cursor.capped() && state.fin.is_none_or(|fin| self.cursor.index < fin);
+			match &state.abort {
+				// The rest of the group is gone; what was read already is not.
+				Some(err) if unread => err.clone(),
+				// Read to its end, or finished and closed with its last producer: still servable.
+				_ => return None,
+			}
 		};
 		// A front's reader may continue the group from another route's copy when it reads.
 		if self
