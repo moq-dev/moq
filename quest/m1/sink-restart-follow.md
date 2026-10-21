@@ -26,7 +26,7 @@ and fix the rest the same way:
   on the new instance.
 
 Share one helper (a `moq_mux` `Source::follow`-style API per
-[catalog references](/quest/m0/broadcast-epoch/catalog-references.md))
+[reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md))
 rather than one rule per sink, built on
 `origin::Consumer::announced_broadcast` rather than another hand-rolled loop. Each fix lands with a test that replaces the
 publisher while the sink runs.

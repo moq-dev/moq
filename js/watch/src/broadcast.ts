@@ -423,8 +423,23 @@ export class Broadcast {
 	 * The consumer is scoped to the caller's `effect` (closed on its next run), so a
 	 * reference resolves lazily and reacts to `enabled` / connection / announcement
 	 * changes exactly like the catalog broadcast.
+	 *
+	 * `epoch` is the rendition's `epoch` field, the publisher instance the reference names.
+	 * Returns `undefined` while the followed broadcast is proven to be another instance, rather
+	 * than reading it. A route without an epoch cannot prove one, so there it is best effort.
 	 */
-	relativeBroadcast(effect: Effect, rel: Path.Relative | undefined): Moq.Broadcast.Consumer | undefined {
+	relativeBroadcast(
+		effect: Effect,
+		rel: Path.Relative | undefined,
+		epoch?: Moq.Epoch.Valid,
+	): Moq.Broadcast.Consumer | undefined {
+		const active = this.#relativeActive(effect, rel);
+		if (!active || epoch === undefined || active.epoch === undefined || active.epoch === epoch) return active;
+		console.warn("ignoring rendition: its broadcast serves another epoch", active.path, active.epoch, epoch);
+		return undefined;
+	}
+
+	#relativeActive(effect: Effect, rel: Path.Relative | undefined): Moq.Broadcast.Consumer | undefined {
 		const target = this.#relativeTarget(effect, rel);
 		if (!target) return undefined;
 		if (target.local) return effect.get(this.out.active);
