@@ -16,9 +16,8 @@ type Comment = { type: string; value: string; end?: number };
 type Binding =
 	| { kind: "local"; name: string }
 	| { kind: "import"; specifier: string; name: string }
-	// `documented` is set for an `export * as Name`, whose own statement carries the doc, and
-	// `types` for `export type * as Name`, which re-exports only types.
-	| { kind: "namespace"; specifier: string; documented?: boolean; types?: boolean };
+	// `documented` is set for an `export * as Name`, whose own statement carries the doc.
+	| { kind: "namespace"; specifier: string; documented?: boolean };
 
 // A name's declarations, each with the statement that carries its comments.
 type Declarations = Array<{ statement: Node; declaration: Node }>;
@@ -28,8 +27,8 @@ type Module = {
 	locals: Map<string, Declarations>;
 	imports: Map<string, Binding>;
 	exports: Map<string, Binding>;
-	// `export *` targets; `types` marks `export type *`, which re-exports only types.
-	stars: Array<{ specifier: string; types: boolean }>;
+	// `export *` targets. A type-only one counts too: `typeof` reaches its values.
+	stars: string[];
 	// Where the first statement starts; a `@module` block above it documents the module.
 	header: number;
 	// Whether the file carries a `@module` block, which an entrypoint needs.
@@ -55,8 +54,7 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 	const aliases = new Set<Binding>();
 
 	// Report each declaration once, under the first public name that reaches it.
-	// Under `types`, a name reached only through `export type *` that is purely a value is skipped.
-	const visit = (file: string, path: string, binding: Binding, types: boolean) => {
+	const visit = (file: string, path: string, binding: Binding) => {
 		// The `export * as Name` statement is what a consumer sees, whichever package it names.
 		if (binding.kind === "namespace" && binding.documented === false && !aliases.has(binding)) {
 			aliases.add(binding);
@@ -65,18 +63,15 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		const resolved = resolveBinding(file, binding);
 		if (!resolved) return;
 		if (resolved.kind === "namespace") {
-			// A namespace walked for its types alone is walked again where its values are public.
-			const typesOnly = types || (binding.kind === "namespace" && binding.types === true);
-			const key = `${resolved.file}#*${typesOnly ? ":types" : ""}`;
+			const key = `${resolved.file}#*`;
 			if (seen.has(key)) return;
 			seen.add(key);
-			walk(resolved.file, `${path}.`, typesOnly);
+			walk(resolved.file, `${path}.`);
 			return;
 		}
 
 		const declarations = load(resolved.file).locals.get(resolved.name);
 		if (!declarations) throw new Error(`${relative(root, resolved.file)}: cannot find ${resolved.name}`);
-		if (types && declarations.every(({ declaration }) => VALUES.has(declaration.type))) return;
 		const key = `${resolved.file}#${resolved.name}`;
 		if (seen.has(key)) return;
 		seen.add(key);
@@ -91,8 +86,22 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		const header = load(file).header;
 		if (!declarations.some(({ statement }) => documented(statement, header))) found.push(`${where}: ${path}`);
 
-		const members = new Map<string, boolean>();
+		// Keyed apart for static and instance members of the same name; overloads and accessor
+		// pairs share a key, and one documented declaration covers them all.
+		const members = new Map<string, { name: string; ok: boolean }>();
+		const member = (node: unknown, element: boolean) => {
+			const name = memberName(node, element);
+			if (name === undefined) return;
+			const id = `${(node as { static?: boolean }).static ? "static " : ""}${name}`;
+			const ok = members.get(id)?.ok || documented(node as { leadingComments?: Comment[] | null }, header);
+			members.set(id, { name, ok });
+		};
+		const isClass = declarations.some(({ declaration }) => declaration.type === "ClassDeclaration");
 		for (const { declaration } of declarations) {
+			// An interface merged into a class adds members to its instances.
+			if (isClass && declaration.type === "TSInterfaceDeclaration") {
+				for (const node of declaration.body.body) member(node, false);
+			}
 			if (declaration.type === "ClassDeclaration") {
 				const superClass = declaration.superClass;
 				const base = resolveClass(file, superClass);
@@ -101,14 +110,10 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 					check(base.file, base.name, base.key, base.declarations);
 				}
 				const element = isElement(superClass);
-				for (const member of declaration.body.body) {
-					const name = memberName(member, element);
-					if (name === undefined) continue;
-					members.set(name, (members.get(name) ?? false) || documented(member, header));
-				}
+				for (const node of declaration.body.body) member(node, element);
 			}
 		}
-		for (const [name, ok] of members) {
+		for (const { name, ok } of members.values()) {
 			if (!ok) found.push(`${where}: ${path}.${name}`);
 		}
 		for (const [name, list] of namespaceMembers(declarations)) {
@@ -180,7 +185,7 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		const binding = module.exports.get(name);
 		if (binding) return { file, binding };
 		if (name === "default") return undefined;
-		for (const { specifier } of module.stars) {
+		for (const specifier of module.stars) {
 			const target = dtsPath(files, file, specifier);
 			if (!target) continue;
 			const found = findExport(target, name, chain);
@@ -190,19 +195,19 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 	};
 
 	// `export *` never re-exports a default, nor a name the re-exporting module exports itself.
-	// `chain` holds only the active path, so a module reached again in another context (a value
-	// star after a type star, or under different shadowing) is walked again; `seen` stops repeats.
-	const walk = (file: string, prefix: string, types = false, chain = new Set<string>(), hidden?: Set<string>) => {
+	// `chain` holds only the active path, so a module reached again under different shadowing is
+	// walked again; `seen` stops repeats.
+	const walk = (file: string, prefix: string, chain = new Set<string>(), hidden?: Set<string>) => {
 		if (chain.has(file)) return;
 		chain.add(file);
 		const module = load(file);
 		for (const [name, binding] of module.exports) {
-			if (!hidden?.has(name)) visit(file, prefix + name, binding, types);
+			if (!hidden?.has(name)) visit(file, prefix + name, binding);
 		}
 		const shadowed = new Set([...(hidden ?? ["default"]), ...module.exports.keys()]);
-		for (const star of module.stars) {
-			const target = dtsPath(files, file, star.specifier);
-			if (target) walk(target, prefix, types || star.types, chain, shadowed);
+		for (const specifier of module.stars) {
+			const target = dtsPath(files, file, specifier);
+			if (target) walk(target, prefix, chain, shadowed);
 		}
 		chain.delete(file);
 	};
@@ -254,7 +259,6 @@ function parseModule(source: string): Module {
 								kind: "namespace",
 								specifier: statement.source.value,
 								documented: documented(statement, module.header),
-								types: statement.exportKind === "type",
 							});
 					} else if (s.type === "ExportSpecifier") {
 						const name = moduleName(s.local);
@@ -272,7 +276,7 @@ function parseModule(source: string): Module {
 				}
 				break;
 			case "ExportAllDeclaration":
-				module.stars.push({ specifier: statement.source.value, types: statement.exportKind === "type" });
+				module.stars.push(statement.source.value);
 				break;
 			case "ExportDefaultDeclaration": {
 				const declaration = statement.declaration;
@@ -309,7 +313,14 @@ function namespaceMembers(declarations: Declarations): Map<string, Declarations>
 			members.set(names[1], list);
 			continue;
 		}
-		for (const statement of declaration.body.body) {
+		// Every member of an ambient namespace is exported, unless an `export {}` marker says only
+		// the `export`ed ones are, as declaration emit writes when it keeps a private helper.
+		const body = declaration.body.body;
+		const explicit = body.some(
+			(s) => s.type === "ExportNamedDeclaration" && !s.declaration && !s.source && s.specifiers.length === 0,
+		);
+		for (const statement of body) {
+			if (explicit && statement.type !== "ExportNamedDeclaration") continue;
 			const inner = statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
 			for (const name of declared(inner)) {
 				const list = members.get(name) ?? [];
@@ -332,9 +343,6 @@ function documented(node: { leadingComments?: Comment[] | null }, header: number
 		(c) => c.type === "CommentBlock" && /^\*[\s*]*[^\s*/]/.test(c.value) && !isModuleBlock(c, header),
 	);
 }
-
-// Declarations that are only values, which `export type *` does not re-export.
-const VALUES = new Set(["VariableDeclaration", "TSDeclareFunction", "FunctionDeclaration"]);
 
 // Custom element reactions: on an element, the browser calls them and the HTML spec documents them.
 const REACTIONS = new Set([

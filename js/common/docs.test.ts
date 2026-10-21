@@ -162,12 +162,12 @@ test("only a block above the first statement is the module block", () => {
 	expect(found).toEqual(["index.d.ts: no @module block"]);
 });
 
-test("a type-only star skips values", () => {
+test("a type-only star is checked like a value star", () => {
 	const found = check({
 		"/dist/inner.d.ts": "export declare const value: number;\nexport type Shape = number;\n",
 		"/dist/index.d.ts": 'export type * from "./inner";\n',
 	});
-	expect(found).toEqual(["inner.d.ts: Shape"]);
+	expect(found).toEqual(["inner.d.ts: value", "inner.d.ts: Shape"]);
 });
 
 test("an extensionless specifier prefers the file over a directory index", () => {
@@ -195,21 +195,12 @@ test("a well-known symbol member needs a doc, unlike a brand", () => {
 	expect(found).toEqual(["index.d.ts: Handle.[Symbol.dispose]"]);
 });
 
-test("a module reached by a type-only star is walked again as values", () => {
-	const found = check({
-		"/dist/foo.d.ts": "export declare function run(): void;\n",
-		"/dist/bar.d.ts": 'export * from "./foo";\n',
-		"/dist/index.d.ts": 'export type * from "./foo";\nexport * from "./bar";\n',
-	});
-	expect(found).toEqual(["foo.d.ts: run"]);
-});
-
-test("a type-only namespace re-export skips values", () => {
+test("a type-only namespace re-export is checked like a value one", () => {
 	const found = check({
 		"/dist/inner.d.ts": "export declare const value: number;\nexport type Shape = number;\n",
 		"/dist/index.d.ts": '/** Documented. */\nexport type * as Types from "./inner";\n',
 	});
-	expect(found).toEqual(["inner.d.ts: Types.Shape"]);
+	expect(found).toEqual(["inner.d.ts: Types.value", "inner.d.ts: Types.Shape"]);
 });
 
 test("an explicit export shadows the same name from a star", () => {
@@ -305,4 +296,49 @@ test("a re-export of a missing name fails loudly", () => {
 	expect(() => check({ "/dist/a.d.ts": "", "/dist/index.d.ts": 'export { gone } from "./a";\n' })).toThrow(
 		"index.d.ts: ./a does not export gone",
 	);
+});
+
+test("an export marker in a namespace hides its unexported members", () => {
+	const found = check({
+		"/dist/index.d.ts": [
+			"/** Documented. */",
+			"export declare namespace Ns {",
+			"    function helper(): void;",
+			"    /** Documented. */",
+			"    export function run(): void;",
+			"    export function bare(): void;",
+			"    export {};",
+			"}",
+		].join("\n"),
+	});
+	expect(found).toEqual(["index.d.ts: Ns.bare"]);
+});
+
+test("an interface merged into a class has its members checked", () => {
+	const found = check({
+		"/dist/index.d.ts": [
+			"/** Documented. */",
+			"export declare class Thing {}",
+			"export interface Thing {",
+			"    /** Documented. */",
+			"    name: string;",
+			"    run(): void;",
+			"}",
+		].join("\n"),
+	});
+	expect(found).toEqual(["index.d.ts: Thing.run"]);
+});
+
+test("a static member does not document the instance member of the same name", () => {
+	const found = check({
+		"/dist/index.d.ts": [
+			"/** Documented. */",
+			"export declare class Thing {",
+			"    /** Documented. */",
+			"    static create(): Thing;",
+			"    create(): void;",
+			"}",
+		].join("\n"),
+	});
+	expect(found).toEqual(["index.d.ts: Thing.create"]);
 });
