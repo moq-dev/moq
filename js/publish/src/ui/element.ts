@@ -1,4 +1,3 @@
-import { Milli, Nano } from "@moq/clock";
 /**
  * The `<moq-publish-ui>` custom element: capture controls wrapped around a `<moq-publish>`.
  *
@@ -6,6 +5,8 @@ import { Milli, Nano } from "@moq/clock";
  *
  * @module
  */
+
+import { Milli, Nano } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqPublish from "../element";
@@ -18,6 +19,7 @@ import styles from "./styles/index.css?inline";
 // How long the chrome lingers after the pointer stops moving while previewing.
 const HIDE = Nano.fromMilli(Milli(2800));
 
+/** The `<moq-publish-ui>` element: capture controls around the `<moq-publish>` it wraps. */
 export default class MoqPublishUi extends HTMLElement {
 	#signals?: Effect;
 	#root: ShadowRoot;

@@ -8,6 +8,7 @@
 
 pub mod aac;
 pub(crate) mod ac3;
+/// Annex B NAL unit framing and conversion.
 pub mod annexb;
 pub mod av1;
 pub(crate) mod color;

@@ -43,6 +43,9 @@ typedef OriginDynamic = MoqOriginDynamic;
 /// A requested broadcast not yet accepted: fulfill it with a producer or reject it.
 typedef BroadcastRequest = MoqBroadcastRequest;
 
+/// A claim answer being filled before its exact route is announced.
+typedef BroadcastPrepared = MoqBroadcastPrepared;
+
 /// A stream of announce events under a prefix.
 typedef AnnounceConsumer = MoqAnnounceConsumer;
 
@@ -143,6 +146,15 @@ typedef Reservation = MoqReservation;
 
 /// A snapshot of transport connection statistics.
 typedef ConnectionStats = MoqConnectionStats;
+
+/// A session's authorization: the grant its peer gave it, and more tokens to present.
+typedef Auth = MoqAuth;
+
+/// One token presented with [Auth.add]; cancel it to withdraw the token.
+typedef AuthToken = MoqAuthToken;
+
+/// What the peer lets this side do: publish and subscribe patterns, and an expiry.
+typedef Grant = MoqGrant;
 
 /// A connection lifecycle transition reported by [Session.status].
 typedef ConnectionStatus = MoqConnectionStatus;

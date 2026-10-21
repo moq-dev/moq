@@ -28,6 +28,7 @@
 		"doc",
 		"js/net",
 		"js/p2p",
+		"js/qmux",
 		"js/clock",
 		"js/pattern",
 		"js/auth",
@@ -53,6 +54,7 @@
 		"test/drain",
 		"test/video",
 		"test/p2p",
+		"test/qmux",
 		"test/wasm"
 	]
 }

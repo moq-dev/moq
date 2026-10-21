@@ -279,6 +279,24 @@ export type RecvDatagram =
 	| { kind: "error"; error: Error };
 
 /**
+ * Which groups of a track's live feed to ask whether one may still land: one the feed has not
+ * accounted for, the publisher did not drop, and the feed reaches, in a gap a later arrival
+ * opened less than `grace` ago or that nothing later opened, while a producer is left.
+ */
+export interface Land {
+	/** The first group asked about. */
+	start: number;
+	/** The first group past those asked about. */
+	end: number;
+	/** Whether the feed was asked to start at `start`: otherwise only from its first arrival. */
+	floor: boolean;
+	/** How long a gap a later arrival opened is waited for. */
+	grace: Milli;
+	/** When given, only a group it lacks counts. */
+	delivered?: Delivered;
+}
+
+/**
  * The reads a resumed {@link Subscriber} delegates: it reads its routes' copies rather than a
  * buffer of its own. Implemented by `resume.ts`, the counterpart of the Rust `Inner::Resume`.
  */
@@ -288,10 +306,10 @@ export interface ResumeSource {
 	/** The next group not in `delivered`, in arrival or sequence order, without waiting. */
 	tryGroup(ordered: boolean, delivered: Delivered): Recv;
 	/**
-	 * The next datagram in arrival order, without waiting. `delivered` is the group record once
-	 * groups are read too, so a copy that still holds one for them is kept.
+	 * The next datagram in arrival order, without waiting. `delivered` is the group record, so a
+	 * copy that still holds a group for a later group read is kept.
 	 */
-	tryDatagram(delivered: Delivered | undefined): RecvDatagram;
+	tryDatagram(delivered: Delivered): RecvDatagram;
 	/** Wake once a read may go differently; fires at most once. */
 	changed(fn: () => void): Dispose;
 	/** Forget the gaps in `delivered` below each group past the budget, judged on the newest copy. */
@@ -423,6 +441,8 @@ export const hooks: {
 	cachedGroup: (subscriber: Subscriber, sequence: number) => GroupConsumer | undefined;
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
 	holdsGroup: (subscriber: Subscriber, sequence: number) => boolean;
+	/** Whether a group may still land on the live feed of the subscriber's track; see {@link Land}. */
+	mayLand: (subscriber: Subscriber, land: Land) => boolean;
 	// private: capability gap
 	/** A subscriber's largest location now, and whether it can still advance. */
 	peekLargest: (subscriber: Subscriber) => { largest?: Location; ended: boolean };
@@ -492,6 +512,10 @@ export const hooks: {
 		producer: BroadcastProducer,
 		announcer: { announce(route: Route): void; unannounce(): void; route(): Route | undefined },
 	) => void;
+	/** Take a created broadcast's advertisement away, so it cannot announce until attached again. */
+	withholdAnnouncer: (
+		producer: BroadcastProducer,
+	) => { announce(route: Route): void; unannounce(): void; route(): Route | undefined } | undefined;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
@@ -575,6 +599,9 @@ export const hooks: {
 	holdsGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
+	mayLand: () => {
+		throw new Error("track.ts not loaded");
+	},
 	peekLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -639,6 +666,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	attachAnnouncer: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	withholdAnnouncer: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 	stampPath: () => {

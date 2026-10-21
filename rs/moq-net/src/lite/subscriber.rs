@@ -5471,7 +5471,7 @@ impl Announced {
 			return false;
 		}
 		// An error means the prefix is outside our origin's scope, so don't serve it.
-		match subscriber.origin.dynamic(&path, route.clone()) {
+		match subscriber.origin.dynamic_route(&path, route.clone()) {
 			Ok(dynamic) => {
 				self.attach(path, route, dynamic);
 				true
@@ -5667,7 +5667,7 @@ impl AnnouncedRoute {
 	fn update(&mut self, route: crate::origin::Route) {
 		self.route = route.clone();
 		self.drained = false;
-		let _ = self.dynamic.update(route);
+		let _ = self.dynamic.update_route(route);
 	}
 
 	/// Re-price the route to [`crate::origin::Cost::DRAIN`] (the peer sent a
@@ -5680,7 +5680,7 @@ impl AnnouncedRoute {
 		self.drained = true;
 		let mut route = self.route.clone();
 		route.cost = crate::origin::Cost::DRAIN;
-		let _ = self.dynamic.update(route);
+		let _ = self.dynamic.update_route(route);
 	}
 }
 

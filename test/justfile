@@ -13,6 +13,9 @@
 set fallback
 set working-directory := '.'
 
+# Where `just test qmux` installs the Rust qmux release it interoperates with.
+qmux_root := env("CARGO_TARGET_DIR", justfile_directory() / "target") / "qmux-0.6.3"
+
 # List the cross-language suites.
 default:
     @just --justfile {{ quote(justfile()) }} --list test
@@ -211,6 +214,16 @@ bare-fin:
 # Explore JSON snapshot codec sequences with a fresh replayable seed.
 json-properties:
     bash json-properties.sh
+
+# The TypeScript qmux peer as client and server against qmux 0.6.3's Rust
+# interop examples, per draft. `cargo install` keeps that release out of the
+# workspace's dependency graph and skips the build once installed.
+
+# TypeScript-to-Rust qmux interop.
+qmux:
+    cargo install --locked --quiet qmux@0.6.3 --features ws --example interop-server --example interop-client --root {{ quote(qmux_root) }}
+    cd .. && bun install --frozen-lockfile
+    cd .. && QMUX_INTEROP_BIN={{ quote(qmux_root / "bin") }} bun test test/qmux/interop.test.ts
 
 # Complete MoQ SETUP and transfer a frame over a real browser data-channel pair.
 p2p:

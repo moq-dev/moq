@@ -50,6 +50,10 @@ struct Script {
 	/// fetch without touching the sessions serving it.
 	revalidate_http: Arc<Mutex<Option<Answer>>>,
 	seen: Arc<Mutex<Vec<Request>>>,
+	/// Answers each `end` only once a permit is added, when [`Self::hold_ends`] set it.
+	end_gate: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
+	/// Notified as each `end` arrives.
+	end_arrived: Arc<tokio::sync::Notify>,
 }
 
 impl Script {
@@ -59,7 +63,16 @@ impl Script {
 			revalidate: Arc::new(Mutex::new(Answer::Grant(grant))),
 			revalidate_http: Arc::new(Mutex::new(None)),
 			seen: Arc::new(Mutex::new(Vec::new())),
+			end_gate: Arc::default(),
+			end_arrived: Arc::default(),
 		}
+	}
+
+	/// Hold every `end` reply until the returned gate gets a permit.
+	fn hold_ends(&self) -> Arc<tokio::sync::Semaphore> {
+		let gate = Arc::new(tokio::sync::Semaphore::new(0));
+		*self.end_gate.lock().unwrap() = Some(gate.clone());
+		gate
 	}
 
 	fn on_connect(&self, answer: Answer) {
@@ -95,7 +108,14 @@ impl Script {
 				.clone()
 				.unwrap_or_else(|| script.revalidate.lock().unwrap().clone()),
 			Event::Revalidate => script.revalidate.lock().unwrap().clone(),
-			Event::End { .. } => return StatusCode::NO_CONTENT.into_response(),
+			Event::End { .. } => {
+				script.end_arrived.notify_one();
+				let gate = script.end_gate.lock().unwrap().clone();
+				if let Some(gate) = gate {
+					drop(gate.acquire().await);
+				}
+				return StatusCode::NO_CONTENT.into_response();
+			}
 		};
 		match answer {
 			Answer::Grant(grant) => Json(grant).into_response(),
@@ -1007,6 +1027,81 @@ async fn the_end_carries_duration_and_bytes() {
 	relay.abort();
 }
 
+/// A session the drain deadline force-closes reports its `end` to the auth server,
+/// and the drain waits for that report rather than exiting under it.
+#[tokio::test]
+async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
+	let script = Script::new(grant(Duration::from_secs(3600)));
+	let gate = script.hold_ends();
+	let auth = build_auth(script.spawn().await);
+	let (trigger, observer) = moq_relay::shutdown::Observer::new(Duration::from_millis(100));
+
+	let version = crate::memory::newest();
+	let mut config = moq_net::transport::memory::Config::default();
+	config.protocol = Some(version.alpn().to_string());
+	let (client_link, relay_link) = moq_net::transport::memory::pair(config);
+	tokio::spawn({
+		let observer = observer.clone();
+		async move {
+			let server = moq_net::Server::new().with_versions(version.into());
+			let handshake = server
+				.accept_request(moq_net::time::now(), relay_link)
+				.await
+				.expect("relay handshake");
+			let request = moq_relay::Accepted::new(handshake, moq_auth::Transport::Quic);
+			Connection::new(request, crate::memory::cluster(), auth)
+				.with_shutdown(observer)
+				.run()
+				.await;
+		}
+	});
+	let (client, driver) = moq_net::Client::new()
+		.with_versions(version.into())
+		.connect(moq_net::time::now(), client_link)
+		.await
+		.expect("client handshake");
+	tokio::spawn(moq_net::time::run(driver));
+
+	// The client hears the GOAWAY and ignores it, so the deadline closes it.
+	trigger.start();
+	tokio::time::timeout(TIMEOUT, client.draining().recv())
+		.await
+		.expect("GOAWAY timeout")
+		.expect("a GOAWAY");
+	let drained = tokio::spawn({
+		let observer = observer.clone();
+		async move { observer.drained().await }
+	});
+	tokio::time::timeout(TIMEOUT, script.end_arrived.notified())
+		.await
+		.expect("the end never reached the server");
+	tokio::task::yield_now().await;
+	assert!(
+		!drained.is_finished(),
+		"the drain ended before the server answered the end"
+	);
+
+	gate.add_permits(1);
+	tokio::time::timeout(TIMEOUT, drained)
+		.await
+		.expect("the drain outlived the end")
+		.unwrap();
+	let ends = script.ends();
+	let [end] = ends.as_slice() else {
+		panic!("one end per session: {ends:?}")
+	};
+	assert!(
+		matches!(
+			&end.event,
+			Event::End {
+				reason: moq_auth::lease::Reason::Shutdown,
+				..
+			}
+		),
+		"{end:?}"
+	);
+}
+
 /// A certificate is a fact: with no server grant for it, a verified peer is
 /// refused; with a narrow one, it is scoped to that and nothing more. Over QUIC
 /// with a client certificate, and over WebSocket where none can be presented.
@@ -1330,7 +1425,7 @@ async fn closes_at_expires(clock: &moq_clock::Installed, consumer: moq_auth::lea
 	let supervised = tokio::spawn(moq_relay::supervise(
 		server,
 		lease.expect("admitted"),
-		moq_relay::shutdown::Observer::disabled(),
+		moq_relay::shutdown::Observer::disabled().serve(),
 		None,
 	));
 

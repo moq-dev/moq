@@ -20,21 +20,27 @@ use hang::catalog::AV1;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The OBU or codec configuration has an incomplete or invalid header.
 	#[error("OBU is too short")]
 	ObuTooShort,
 
+	/// The OBU size exceeds the supported length.
 	#[error("OBU size too large")]
 	ObuSizeTooLarge,
 
+	/// The stream has not supplied its decoder configuration.
 	#[error("not initialized")]
 	NotInitialized,
 
+	/// A frame arrived before the sequence header.
 	#[error("expected sequence header before any frames")]
 	MissingSequenceHeader,
 
+	/// The frame has no timestamp.
 	#[error("missing timestamp")]
 	MissingTimestamp,
 
+	/// The OBU header could not be parsed.
 	#[error("OBU header parse: {0}")]
 	ObuHeaderParse(std::sync::Arc<std::io::Error>),
 }
@@ -45,6 +51,7 @@ impl From<std::io::Error> for Error {
 	}
 }
 
+/// A result using this module's error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Build a catalog [`VideoConfig`](hang::catalog::VideoConfig) for the `av01`

@@ -2454,6 +2454,12 @@ impl Consumer {
 		self.cursor.state.read().wire().cloned()
 	}
 
+	/// Whether the group was relayed from moq-transport, whose Object IDs may not be its frame
+	/// ordinals.
+	pub(super) fn relayed(&self) -> bool {
+		self.cursor.state.read().wire().is_some()
+	}
+
 	/// Read a compressed group's stored DEFLATE slices instead of plain frames, with each
 	/// frame's inflated size beside it ([`frame::Object::inflated`],
 	/// [`frame::Consumer::inflated`]), for egress that carries compression. A no-op on a
@@ -2657,6 +2663,44 @@ impl Consumer {
 			}
 		}
 		self.expired
+	}
+
+	/// Why a wire publisher waiting on the transport, for stream credit or to drain, should
+	/// give up on this group: the drift budget convicted it ([`Error::Old`]), or its copy
+	/// was aborted (evicted, cut, or failed upstream) before this cursor read it all and no
+	/// route will continue it. `pending` as in [`Self::poll_expired_while_pending`].
+	///
+	/// A machine parked on stream credit reads nothing, so without this an aborted group,
+	/// which never expires, would wait for credit it could only spend on a reset.
+	// pending: /quest/m1/public-model/serve.md
+	pub(crate) fn poll_abandoned(&mut self, waiter: &kio::Waiter, pending: bool) -> Option<Error> {
+		if self.poll_expired_while_pending(waiter, pending) {
+			return Some(Error::Old);
+		}
+		// Registered on the close alone: an abort closes the channel, and waking on every
+		// frame written to a parked group would cost a stalled subscriber per frame.
+		if self.cursor.state.poll_closed(waiter).is_pending() {
+			return None;
+		}
+		let aborted = {
+			let state = self.cursor.state.read();
+			let unread = !self.cursor.capped() && state.fin.is_none_or(|fin| self.cursor.index < fin);
+			match &state.abort {
+				// The rest of the group is gone; what was read already is not.
+				Some(err) if unread => err.clone(),
+				// Read to its end, or finished and closed with its last producer: still servable.
+				_ => return None,
+			}
+		};
+		// A front's reader may continue the group from another route's copy when it reads.
+		if self
+			.recover
+			.as_ref()
+			.is_some_and(|recover| recover.wants(Some(&aborted), waiter))
+		{
+			return None;
+		}
+		Some(aborted)
 	}
 
 	/// Whether expiry can still discard content or unblock a group that may grow.
