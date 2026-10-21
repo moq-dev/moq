@@ -874,7 +874,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
+	const subscriber = new Subscriber({ session, quic: pair.server, cluster: { self: SELF, peer: PEER } });
 
 	const announced = subscriber.announced();
 	await acceptSubscribeNamespace(pair.client);
@@ -906,7 +906,9 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 		channel.port2.postMessage(null);
 	});
 	await expect(handler).rejects.toThrow(ProtocolViolation);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
+	// The request closes the session itself, which takes the namespace subscription down too.
+	await violationClosed(pair);
+	await expect(announced.next()).rejects.toThrow();
 });
 
 /**
@@ -2246,6 +2248,22 @@ test("an ACTIVE_COUNT that does not match the negotiation closes the session", a
 		await answerCounted(pair.client, count);
 		await violationClosed(pair);
 	}
+});
+
+/** A violation on a namespace subscription closes the session through its request, once. */
+test("a namespace subscription closes the session once over a violation", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, quic: pair.server, activeCount: true });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	onTestFinished(() => warn.mockRestore());
+	const close = spyOn(pair.server, "close");
+
+	subscriber.announced();
+	await answerCounted(pair.client, undefined);
+	await violationClosed(pair);
+	await yieldTask();
+	expect(close.mock.calls.filter(([info]) => info?.closeCode !== undefined)).toHaveLength(1);
 });
 
 /** A counted set cut short, by a NAMESPACE_DONE or the stream ending, is the peer's fault. */
