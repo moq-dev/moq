@@ -189,9 +189,12 @@ impl Serving {
 		let origin = &self.cluster.origin;
 		let directions = self.directions;
 		let auth_request = moq_relay::auth::request_for(&self.auth, &request);
-		let lease = match self.auth.admit(auth_request).await {
-			Ok(lease) => lease,
-			Err(err) => {
+		// The listener's handshake deadline covers admission; `within` closes a session
+		// it gives up on with the timeout code.
+		let lease = match request.within(self.auth.admit(auth_request)).await {
+			Err(err) => return Err(anyhow::Error::new(err).context("admission timed out")),
+			Ok(Ok(lease)) => lease,
+			Ok(Err(err)) => {
 				let status = axum::http::StatusCode::from(&err);
 				let reject = match status {
 					axum::http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,

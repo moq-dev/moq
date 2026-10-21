@@ -1,0 +1,43 @@
+name: Features
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+  pull_request:
+    branches: [release]
+    types: [opened, synchronize, reopened, edited, closed]
+
+concurrency:
+  group: features-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  features:
+    name: Features (${{ matrix.recipe }})
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-24.04-arm
+    environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # These feature sets and optimized artifacts cannot share the queue's
+        # default-feature test build. Release binding workflows cover their
+        # optimized libraries separately, nightly and on release PRs.
+        recipe: ["rs features", "js wasm"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/rust-cache
+        with:
+          access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      - name: Check feature and profile variants
+        run: nix develop --command just ${{ matrix.recipe }}
+        env:
+          NEXTEST_PROFILE: ci
+          MOQ_STRICT: 1

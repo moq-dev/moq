@@ -13,6 +13,7 @@ Cherry-picked since the fork point:
 
 - [`48854d48`](https://github.com/quinn-rs/quinn/commit/48854d48635875d259a95973cc0575db8c1792a4): accept non-minimally encoded integer transport parameters, as RFC 9000 section 16 allows.
 - [`83701a58`](https://github.com/quinn-rs/quinn/commit/83701a58d10f6cb089c48aeff45e137ebd2712ec): an ordered read refused after an unordered one leaves the stream readable instead of discarding it.
+- [`38b9f52f`](https://github.com/quinn-rs/quinn/commit/38b9f52fd7b545cc2d3fa81bc2fbaed072fae0f4): drop already-read duplicates when a stream switches from ordered to unordered reads.
 
 The fork never merges upstream.
 Upstream fixes are cherry-picked by hand, and the crate keeps quinn's formatting (rustfmt defaults) so the patches apply cleanly.
@@ -43,10 +44,11 @@ quinn itself, the async layer from the same commit, is the `quic::driver` module
 
 ```sh
 git -C ../quinn format-patch -1 --stdout <sha> -- quinn/src \
-  | sed -E 's#([ab])/quinn/src/lib\.rs#\1/rs/moq-tokio/src/quic/driver/mod.rs#g; s#([ab])/quinn/src/#\1/rs/moq-tokio/src/quic/driver/#g; s/\bcrate::/crate::quic::driver::/g; s/\bproto::/moq_quic::/g; s/\budp::/moq_sock::udp::/g' \
+  | sed -E 's#([ab])/quinn/src/lib\.rs#\1/rs/moq-tokio/src/quic/driver/mod.rs#g; s#([ab])/quinn/src/#\1/rs/moq-tokio/src/quic/driver/#g; s/(^|[^[:alnum:]_])crate::/\1crate::quic::driver::/g; s/(^|[^[:alnum:]_])proto::/\1moq_quic::/g; s/(^|[^[:alnum:]_])udp::/\1moq_sock::udp::/g' \
   | git am -3
 ```
 
+The word boundaries are spelled `(^|[^[:alnum:]_])` because BSD sed, as on macOS, has no `\b` and would silently leave the paths unrewritten.
 The driver is tokio-only: the `Runtime` trait, smol, the `futures-io` impls, and the lock-tracking mutex are dropped, so hunks touching them are skipped.
 moq-tokio's `quic::web` module is `web-transport-moq` from moq-dev/noq at [`e27c0ce0`](https://github.com/moq-dev/noq/commit/e27c0ce00741d81c8620b98e345d4f2c88e0768c), which has no upstream left to track.
 
@@ -60,6 +62,7 @@ Changes on top of the upstream commit, besides the renames:
 - **Classic ECN for BBR3**, ported from [moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12): CE exits Startup, stops a bandwidth probe, or lowers the short-term model, once per recovery episode, instead of counting as a loss.
 - **Pacer rounding**: a wait shorter than a nanosecond rounds up instead of re-arming the pacing timer at the current instant.
 - **Malformed control input**: `RETIRE_CONNECTION_ID` for a sequence that was never issued (`issued` is a count, so `sequence >= issued`) and a repeated `grease_quic_bit` or `min_ack_delay` transport parameter close the connection. RFC 9000 section 7.4 only says SHOULD for a duplicate parameter; this fork refuses it, as it does every other known parameter. A STREAM frame whose FIN sets a final size below data already received closes with `FINAL_SIZE_ERROR`, as RFC 9000 section 4.5 requires, where quinn accepts it and leaves the reader blocked forever. Not offered upstream yet.
+- **`ACK_FREQUENCY` upper bound**: a Requested Max Ack Delay of 2^14 ms or more closes the connection with `PROTOCOL_VIOLATION`, as [draft-ietf-quic-ack-frequency-14](https://www.ietf.org/archive/id/draft-ietf-quic-ack-frequency-14.html#section-4) section 4 requires, mirroring RFC 9000's bound on the `max_ack_delay` transport parameter, and a configured `AckFrequencyConfig::max_ack_delay` is requested just below it. quinn checks only the lower bound; not offered upstream yet.
 - **qlog pacing rate** in bits per second, as qlog defines it.
 - moq-dev/noq's congestion-callback regressions, reworked onto quinn's test harness.
 - [quinn#2724](https://github.com/quinn-rs/quinn/pull/2724) (`moq_sock::udp`): when the kernel rejects a GSO batch with `EIO` or `EINVAL`, the socket halts GSO and resends the batch as individual datagrams instead of dropping it.
@@ -81,6 +84,7 @@ Changes on top of the upstream commit, besides the renames:
 - **Draining endpoint event**: `EndpointEvent::is_draining` fires once per connection when it stops being active, before the drained event, so the driver's `Endpoint::wait_all_draining` can end a shutdown without sitting out every closing period.
 - **Late stream limits**: peer transport parameters that raise a stream limit after an open was refused emit `StreamEvent::Available`, as `MAX_STREAMS` does. A server accepted before the rest of a multi-packet ClientHello (a post-quantum key share is enough) otherwise leaves a 0.5-RTT `open_uni` parked until the idle timeout. Not offered upstream yet.
 - **Stream credit on stop**: `RecvStream::stop` on a stream whose final size is already known (finished or reset) frees it and queues `MAX_STREAMS` at once, as reading the reset does, instead of leaving the credit until the next packet arrives. Not offered upstream yet; quinn `main` has the same gap.
+- **Drop resets** (`quic::driver::SendStream`): a send stream dropped before `finish` is reset with code 0, or with the peer's `STOP_SENDING` code, instead of quinn's implicit `finish`, so a cancelled writer never ends a truncated stream with a FIN. This matches moq-uring's driver and moq-net's transport contract. `quic::web` resets after the WebTransport header with the mapped code. quinn's `stream_stopped_2` finishes its stream before dropping it. Not offered upstream: it reverses a documented quinn behaviour.
 - **Connection limits** (`Limits`, `Connection::set_limits`, and the drivers' `set_limits`): one validated call changes a live connection's stream limit and windows, refusing values a peer would reject and changing nothing then. moq-tokio and moq-uring re-export the type, so both runtimes check limits the same way. Not offered upstream: it only bundles quinn's existing setters.
 
 Recheck the BBR3 changes when cherry-picking quinn#2481 updates, or if it merges.

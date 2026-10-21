@@ -53,7 +53,9 @@ sessions a reconnect-to-me GOAWAY and waits up to `--drain-timeout` (default
 such as `moq-lite-03`, get none and are closed when the window ends. A second
 signal exits immediately; `--drain-timeout 0s` closes sessions immediately.
 Pending handshakes and admission requests share the same drain window, and an
-open stdin pipe does not keep the process alive afterward.
+open stdin pipe does not keep the process alive afterward. Admission is part of
+the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission without
+a deadline.
 
 Add `--stats-enabled` before the first stage to publish accepted-session and
 traffic counters with the relay's `--stats-*` settings. An export-only listener
@@ -347,13 +349,9 @@ Other versions carry no epoch, so a restart from another session is the newest
 route at an equal cost, or a better one.
 
 Each independent importer publishes its own epoch, even when two importers read
-one stream and publish one path. On a version that carries epochs, the newest
-importer wins new requests. If it leaves, a still-live older importer wins again
-as a restart. Players following announcements and `moq export ts --stitch`
-follow those restarts; other consumers end. `--stitch` also switches as soon as a newer
-importer starts, even while the current importer remains healthy. Each switch
-marks a program discontinuity, so redundant ingest does not promise hitless
-output.
+one stream and publish one path. See [Redundant ingest](/setup/redundancy) for
+same-path switching, subscriber-controlled selection on separate paths, and
+several routes to one publisher.
 
 An importer announces once its catalog names a servable track. Input that ends
 before then, such as an empty input or a header that configures no track,
