@@ -20,9 +20,11 @@ Decided in planning (2026-10-20):
   at 440 Hz and timestamp continuity per subscriber; bytes arriving is the bar
   that already lets a broken decode pass. A multichannel publisher sends a
   distinct frequency per channel, so a channel swap fails too.
-- The Rust CLI publisher adds an AAC track in fMP4 (ffmpeg `sine` at 440 Hz).
-  The Python, Go, and C++ publishers already send Opus, so AAC runs the other
-  native decode backend (symphonia) through every subscriber.
+- The Rust CLI publisher adds an Opus track in fMP4 (ffmpeg `sine` at
+  440 Hz), which also covers moq-mux's Opus import. AAC was the first choice,
+  but the Node and Bun subscribers fall back to an Opus-only libav build, so
+  an AAC track waits on [AAC in the native JS
+  fallback](/quest/m1/libav-aac.md), which adds it once that lands.
 - Folded in from the same gap analysis: the `just test wire-compat` media lanes
   gain an audio check (released vs current, decoded), and moq-transcode gains
   a test that an audio rendition passes through untouched.
@@ -45,6 +47,8 @@ Recommendations:
 Public API: none. Wire: none.
 
 ## Related
+
+- [AAC in the native JS fallback](/quest/m1/libav-aac.md) - lets the Rust publisher add an AAC track every subscriber can decode
 
 - [Bindings in the interop matrix](/quest/m2/interop-bindings.md) - Kotlin, Swift, and Dart clients; whichever lands second carries the audio check to them
 - [Native audio decode conformance](/quest/m1/audio-decode-conformance.md) - the same decode paths, checked in unit tests
