@@ -650,7 +650,7 @@ impl MoqBroadcastRequest {
 
 #[uniffi::export]
 impl MoqBroadcastPrepared {
-	/// The unannounced broadcast to fill before publishing.
+	/// The unannounced broadcast to fill before publishing; only `publish` announces it.
 	pub fn broadcast(&self) -> Arc<MoqBroadcastProducer> {
 		self.broadcast.clone()
 	}

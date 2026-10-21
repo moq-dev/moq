@@ -73,7 +73,7 @@ public final class BroadcastPrepared: Sendable {
         self.ffi = ffi
     }
 
-    /// The unannounced broadcast to fill before publishing.
+    /// The unannounced broadcast to fill before publishing; only `publish` announces it.
     public var broadcast: BroadcastProducer {
         BroadcastProducer(ffi.broadcast())
     }

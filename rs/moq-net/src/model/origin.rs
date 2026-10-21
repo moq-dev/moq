@@ -1944,10 +1944,13 @@ impl Producer {
 	/// [`Driver`] has been dropped.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<broadcast::Producer, Error> {
 		let full = self.root.join(path.as_path()).to_owned();
-		self.create_broadcast_full(full)
+		let (broadcast, announcer) = self.create_withheld(full)?;
+		Ok(broadcast.with_announcer(announcer))
 	}
 
-	fn create_broadcast_full(&self, full: PathOwned) -> Result<broadcast::Producer, Error> {
+	/// A new broadcast at `full` with its announcer withheld, so it cannot announce
+	/// until the announcer is handed back.
+	fn create_withheld(&self, full: PathOwned) -> Result<(broadcast::Producer, Announcer), Error> {
 		if !self.scope.permits(&full) || !self.scope.publishes(&full) {
 			return Err(Error::Unauthorized);
 		}
@@ -1994,11 +1997,12 @@ impl Producer {
 				advertised: false,
 			},
 		)?;
-		Ok(source.with_announcer(Announcer {
+		let announcer = Announcer {
 			entry,
 			ingress,
 			_keepalive: self.tasks.keepalive(),
-		}))
+		};
+		Ok((source, announcer))
 	}
 
 	/// Create and advertise a broadcast in one call.
@@ -4942,10 +4946,11 @@ impl Request {
 	/// Start an answer under a new publisher `epoch`, hidden until it is published.
 	pub fn prepare(self, epoch: Epoch) -> Result<Prepared, Error> {
 		let publisher = self.publisher.clone().ok_or(Error::Unroutable)?;
-		let broadcast = publisher.create_broadcast_full(self.path.clone())?;
+		let (broadcast, announcer) = publisher.create_withheld(self.path.clone())?;
 		Ok(Prepared {
 			request: self,
 			broadcast,
+			announcer,
 			epoch,
 		})
 	}
@@ -4978,11 +4983,16 @@ impl Request {
 pub struct Prepared {
 	request: Request,
 	broadcast: broadcast::Producer,
+	// Withheld from the broadcast until `publish`, so the answer cannot announce
+	// itself under another epoch or skip the request's admission.
+	announcer: Announcer,
 	epoch: Epoch,
 }
 
 impl Prepared {
-	/// The unannounced broadcast to fill before publishing.
+	/// The unannounced broadcast to fill before publishing. Its own
+	/// [`announce`](broadcast::Producer::announce) fails with [`Error::Closed`]: only
+	/// [`Self::publish`] announces it.
 	pub fn broadcast(&self) -> &broadcast::Producer {
 		&self.broadcast
 	}
@@ -4990,15 +5000,21 @@ impl Prepared {
 	/// Announce the filled broadcast and resolve every requester waiting for it.
 	///
 	/// Fails with [`Error::Unroutable`], announcing nothing, once the request was
-	/// released or its claim retracted.
+	/// released or its claim retracted, or with [`Error::Closed`] once the broadcast
+	/// closed. A failed answer can never announce.
 	pub fn publish(self) -> Result<broadcast::Producer, Error> {
-		let route = Route::default().with_epoch(self.epoch);
-		let request = &self.request;
-		let answer = self.broadcast.consume();
+		let Self {
+			request,
+			broadcast,
+			announcer,
+			epoch,
+		} = self;
+		let route = Route::default().with_epoch(epoch);
+		let answer = broadcast.consume();
 		let mut resolved = None;
 		// Answered under the table lock that every release takes first, so the route
 		// lands only for a request still pending and no release can slip in between.
-		let admitted = self.broadcast.announce_if(route, || {
+		let admitted = broadcast.announce_withheld(announcer, route, || {
 			resolved = request.home.lock().answer(&request.path, &request.producer, Ok(answer));
 			resolved.is_some()
 		})?;
@@ -5009,7 +5025,7 @@ impl Prepared {
 		if let Ok(mut pending) = request.producer.write() {
 			pending.resolved.get_or_insert(resolved);
 		}
-		Ok(self.broadcast)
+		Ok(broadcast)
 	}
 }
 
@@ -9615,6 +9631,44 @@ mod tests {
 		let resolved = pending.await.unwrap();
 		assert_eq!(resolved.info().epoch.as_ref(), Some(&epoch));
 		assert!(resolved.track("video").is_ok());
+	}
+
+	/// Only `publish` announces a prepared answer, under its epoch and after admission.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_prepared_answer_cannot_announce_itself() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+		let claim = producer.dynamic("room").unwrap();
+		announced.assert_next_active("room");
+		let pending = producer.consume().request_broadcast("room/alice", None);
+		let epoch = crate::Epoch::mint();
+		let prepared = queued(&claim).await.prepare(epoch.clone()).unwrap();
+		let answer = prepared.broadcast().clone();
+
+		let other = Route::default().with_epoch(crate::Epoch::mint());
+		assert!(matches!(answer.announce(other), Err(Error::Closed)));
+		assert!(answer.route().is_none());
+		announced.assert_next_wait();
+
+		let published = prepared.publish().unwrap();
+		assert_eq!(published.route().and_then(|route| route.epoch), Some(epoch.clone()));
+		assert_eq!(pending.await.unwrap().info().epoch.as_ref(), Some(&epoch));
+	}
+
+	/// A refused answer keeps its announcer withheld, so a clone cannot announce it later.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_refused_prepared_answer_cannot_announce_later() {
+		let producer = origin(1).produce();
+		let claim = producer.dynamic("room").unwrap();
+		let _pending = producer.consume().request_broadcast("room/alice", None);
+		let prepared = queued(&claim).await.prepare(crate::Epoch::mint()).unwrap();
+		let answer = prepared.broadcast().clone();
+
+		drop(claim);
+		assert!(matches!(prepared.publish(), Err(Error::Unroutable)));
+		assert!(matches!(answer.announce(Route::default()), Err(Error::Closed)));
 	}
 
 	#[moq_clock::test]

@@ -3567,6 +3567,8 @@ async fn dynamic_broadcast_request() {
 	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
 	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
+	// Only publish announces the answer, under its epoch and after admission.
+	assert!(matches!(served.announce(MoqRoute::default()), Err(MoqError::Closed)));
 	prepared.publish().unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 

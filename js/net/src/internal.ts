@@ -492,6 +492,10 @@ export const hooks: {
 		producer: BroadcastProducer,
 		announcer: { announce(route: Route): void; unannounce(): void; route(): Route | undefined },
 	) => void;
+	/** Take a created broadcast's advertisement away, so it cannot announce until attached again. */
+	withholdAnnouncer: (
+		producer: BroadcastProducer,
+	) => { announce(route: Route): void; unannounce(): void; route(): Route | undefined } | undefined;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
@@ -639,6 +643,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	attachAnnouncer: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	withholdAnnouncer: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 	stampPath: () => {

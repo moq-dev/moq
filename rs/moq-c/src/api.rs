@@ -1781,7 +1781,8 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 
 /// Start a broadcast request answer under `epoch`, hidden until published.
 ///
-/// Consumes the request handle, writes the new broadcast handle to `broadcast`,
+/// Consumes the request handle, writes the new broadcast handle to `broadcast`
+/// (which cannot announce itself; only [moq_broadcast_prepared_publish] does),
 /// and returns a positive prepared-answer handle or a negative error.
 ///
 /// # Safety

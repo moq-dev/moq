@@ -317,6 +317,30 @@ test("a claim answer is hidden until published under its own epoch", async () =>
 	origin.close();
 });
 
+test("a prepared answer cannot announce itself before publish", async () => {
+	const origin = new Producer();
+	const path = Path.from("room/alice");
+	const claim = origin.dynamic(Path.from("room"));
+	const requests = claim.requested();
+	const request = origin.request(path);
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected a request");
+	const epoch = Epoch.mint();
+	const prepared = pending.prepare(epoch);
+	expect(() => prepared.broadcast.announce({ epoch: Epoch.mint() })).toThrow("not attached to an origin");
+	expect(prepared.broadcast.route).toBeUndefined();
+	await settle();
+	expect(request.active.peek()).toBeUndefined();
+	const published = prepared.publish();
+	expect(published.route?.epoch).toBe(epoch);
+	await settle();
+	expect(request.active.peek()?.epoch).toBe(epoch);
+	request.close();
+	published.close();
+	claim.close();
+	origin.close();
+});
+
 test("an application claim refuses an arbitrary broadcast", async () => {
 	const origin = new Producer();
 	const claim = origin.dynamic(Path.from("room"));

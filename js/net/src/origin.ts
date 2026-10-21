@@ -2386,12 +2386,19 @@ export class Request {
 		if (this.#done) throw new Error("request is closed");
 		if (!this.publisher) throw new Error("forwarded requests cannot be prepared");
 		this.#done = true;
-		return new Prepared(this, this.publisher.createBroadcast(this.path), epoch);
+		const answer = this.publisher.createBroadcast(this.path);
+		// Withheld until publish, so the answer cannot announce itself under another
+		// epoch or skip the request's admission.
+		const announcer = hooks.withholdAnnouncer(answer);
+		if (!announcer) throw new Error("origin is closed");
+		return new Prepared(this, answer, announcer, epoch);
 	}
 
 	/** @internal Publish a prepared answer after its tracks have been filled. */
-	publishPrepared(answer: broadcast.Producer, epoch: Epoch.Valid): broadcast.Producer {
+	publishPrepared(answer: broadcast.Producer, announcer: broadcast.Announcer, epoch: Epoch.Valid): broadcast.Producer {
 		if (!this.#server.has(this)) throw new Error("request is closed");
+		if (answer.closed.peek() !== undefined) throw new Error("broadcast is closed");
+		hooks.attachAnnouncer(answer, announcer);
 		// The exact route usually settles the request on its own, resolving its waiters
 		// through the new epoch; answer it directly if it is still pending.
 		answer.announce({ epoch });
@@ -2444,15 +2451,18 @@ export class Request {
 
 /** A claim answer being filled before its exact route is announced. */
 export class Prepared {
+	/** The unannounced broadcast to fill before publishing; only {@link publish} announces it. */
 	readonly broadcast: broadcast.Producer;
 	readonly #request: Request;
+	readonly #announcer: broadcast.Announcer;
 	readonly #epoch: Epoch.Valid;
 	#done = false;
 
 	/** @internal */
-	constructor(request: Request, answer: broadcast.Producer, epoch: Epoch.Valid) {
+	constructor(request: Request, answer: broadcast.Producer, announcer: broadcast.Announcer, epoch: Epoch.Valid) {
 		this.#request = request;
 		this.broadcast = answer;
+		this.#announcer = announcer;
 		this.#epoch = epoch;
 	}
 
@@ -2461,7 +2471,7 @@ export class Prepared {
 		if (this.#done) throw new Error("prepared answer is closed");
 		this.#done = true;
 		try {
-			return this.#request.publishPrepared(this.broadcast, this.#epoch);
+			return this.#request.publishPrepared(this.broadcast, this.#announcer, this.#epoch);
 		} catch (err) {
 			this.broadcast.close();
 			this.#request.rejectPrepared(err instanceof Error ? err : new Error(String(err)));

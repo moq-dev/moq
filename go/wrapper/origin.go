@@ -119,7 +119,7 @@ type BroadcastPrepared struct {
 	inner *ffi.MoqBroadcastPrepared
 }
 
-// Broadcast returns the unannounced broadcast to fill before publishing.
+// Broadcast returns the unannounced broadcast to fill before publishing; only Publish announces it.
 func (p *BroadcastPrepared) Broadcast() *BroadcastProducer {
 	return &BroadcastProducer{inner: p.inner.Broadcast()}
 }

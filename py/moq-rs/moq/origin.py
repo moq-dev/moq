@@ -130,7 +130,7 @@ class BroadcastPrepared:
 
     @property
     def broadcast(self) -> BroadcastProducer:
-        """The unannounced broadcast to fill before publishing."""
+        """The unannounced broadcast to fill before publishing; only `publish` announces it."""
         return BroadcastProducer._from_inner(self._inner.broadcast())
 
     def publish(self) -> BroadcastProducer:
