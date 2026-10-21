@@ -829,6 +829,9 @@ export default class Session implements WebTransport {
 			this.#uniStreamCredit = new Credit(0n);
 			this.#recvDataMax = this.#ourParams.initialMaxData;
 			this.#sendTransportParameters();
+			// Our own deadline applies until the peer's parameters arrive, so a peer
+			// that never sends them can't hold the session open.
+			this.#startIdleTimerIfEnabled();
 		}
 
 		this.#readyResolve();
@@ -1004,6 +1007,7 @@ export default class Session implements WebTransport {
 			flow.sendCredit.increaseMax(sendLimit);
 		}
 
+		// The peer's limit may be shorter than ours.
 		this.#startIdleTimerIfEnabled();
 	}
 
@@ -1023,6 +1027,8 @@ export default class Session implements WebTransport {
 	}
 
 	#startIdleTimerIfEnabled() {
+		this.#idleTimer?.close();
+		this.#idleTimer = undefined;
 		const timeoutMs = this.#effectiveIdleTimeoutMs();
 		if (timeoutMs === 0n) return;
 		// Poll at a fraction of the timeout — frequent enough to trigger pings on time
@@ -1091,7 +1097,8 @@ export default class Session implements WebTransport {
 		}
 		// Keep-alive: nudge the peer when our outbound side has been silent for a third
 		// of the timeout. Any frame counts as activity, so this only fires when truly idle.
-		if (Instant.durationSince(at, this.#lastSendAt) > timeout / 3) {
+		// Nothing to keep alive before the peer has spoken at all.
+		if (this.#paramsReceived && Instant.durationSince(at, this.#lastSendAt) > timeout / 3) {
 			const seq = this.#nextPingSeq;
 			// Monotonic (never wraps within a session's life): the draft-02
 			// strictly-increasing rule requires it, and it must not wrap earlier

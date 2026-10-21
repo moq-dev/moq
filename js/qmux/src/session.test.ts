@@ -1020,6 +1020,23 @@ describe("Session integration (scripted peer)", () => {
 			}
 		});
 
+		test("a peer that never sends its parameters still idles out", async () => {
+			const clock = new Manual();
+			const uninstall = clock.install();
+			try {
+				const { session, peer } = connect({ maxIdleTimeout: 150n });
+				await session.ready;
+				await waitFor(() => peer.has("transport_parameters"));
+
+				await clock.advanceAsync(Nano.fromMilli(Milli(200)));
+				const err = await expectSessionFailure(session);
+				expect(err.message).toContain("idle timeout");
+				expect(peer.has("ping_request")).toBe(false);
+			} finally {
+				uninstall();
+			}
+		});
+
 		test("outbound frame activity resets the idle timeout", async () => {
 			const clock = new Manual();
 			const uninstall = clock.install();
