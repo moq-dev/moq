@@ -550,8 +550,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			Some(size) => entry.producer.insert_deflated_datagram(datagram, size)?,
 			None => entry.producer.insert_wire_datagram(datagram)?,
 		}
+		// A datagram-only feed may never answer with SUBSCRIBE_START, which waits for a group.
 		if !live {
-			entry.producer.set_live(Some(Position::group(dg.sequence)));
+			entry.producer.set_live(Some(Position::group(dg.sequence)), None);
 		}
 		Ok(())
 	}
@@ -905,14 +906,19 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						// cache holds the group, so a fetch held for the feed that sees it
 						// accounted also finds it.
 						let reading = Reading::open(&entry.tail, Some(hdr.sequence), self.subscriber.runtime.now());
-						// A route's first group says where its live feed is, when its answer did
+						// A route's first group says where its live feed is, when its answer does
 						// not: even one the cache already holds, as an idle copy asked from its
 						// head gets back. The copy goes live once the cache shows that group.
-						if !entry.producer.is_live() {
-							entry.producer.set_live(Some(Position {
-								group: hdr.sequence,
-								frame: hdr.frame_start,
-							}));
+						// Lite-07's answer does, and a group can overtake it: on a descending
+						// track the first to land is the newest, not where the feed starts.
+						if !entry.producer.is_live() && !self.subscriber.version.has_largest() {
+							entry.producer.set_live(
+								Some(Position {
+									group: hdr.sequence,
+									frame: hdr.frame_start,
+								}),
+								None,
+							);
 						}
 						let mut group = match received {
 							Ok(group) => group,
@@ -2322,12 +2328,16 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		fetches.poll(&sub, start, &waiter);
 		let polled = fetches.polled;
-		track.drop_groups(1..2);
+		track.drop_groups(1..2, crate::StreamError::Old);
 		fetches.poll(&sub, start, &waiter);
 		assert_eq!(fetches.polled - polled, 1);
 		assert!(!fetches.held.contains_key(&1));
 		assert_eq!(fetches.held.len(), 2);
-		assert!(matches!(callers.remove(0).now_or_never(), Some(Err(Error::NotFound))));
+		// The held fetch ends with the drop's own error.
+		assert!(matches!(
+			callers.remove(0).now_or_never(),
+			Some(Err(Error::Stream(crate::StreamError::Old)))
+		));
 	}
 
 	#[moq_clock::test]
@@ -2429,8 +2439,9 @@ mod tests {
 					// newer-group check is inert. Keep the scanner on the model's global
 					// wake channel rather than giving it the new per-group index.
 					match feed.poll_group(sequence, waiter) {
-						Poll::Ready(Some(_)) => drop(req),
-						Poll::Ready(None) => req.reject(Error::NotFound),
+						Poll::Ready(Ok(Some(_))) => drop(req),
+						Poll::Ready(Ok(None)) => req.reject(Error::NotFound),
+						Poll::Ready(Err(err)) => req.reject(err),
 						Poll::Pending if !missing || folds.is_some_and(|at| at <= now) => req.reject(Error::NotFound),
 						Poll::Pending => {
 							fold = fold.into_iter().chain(folds).min();
@@ -3128,6 +3139,88 @@ mod tests {
 		assert_eq!(reader.largest().await, Some(largest));
 		assert_eq!(reader.largest().await, None, "the stream ends with the aborted track");
 		assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
+	}
+
+	/// A SUBSCRIBE_DROP ends a group still arriving now, with its Error Code on lite-07.
+	/// Earlier versions carry an application code there, so the same bytes read as
+	/// NOT_FOUND.
+	#[moq_clock::test]
+	async fn a_subscribe_drop_ends_an_arriving_group_with_its_code() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut responses = Vec::new();
+			let code = crate::coding::StreamCodes::encode_stream_code(&Version::Lite07, &crate::StreamError::App(5));
+			for resp in [
+				lite::SubscribeResponse::Start(lite::SubscribeStart {
+					group: 0,
+					largest: None,
+				}),
+				lite::SubscribeResponse::Drop(lite::SubscribeDrop {
+					start: 2,
+					end: 2,
+					error: code.into(),
+				}),
+			] {
+				resp.encode(
+					&mut crate::coding::Encoder::new(&mut responses, version.into()),
+					version,
+				)
+				.unwrap();
+			}
+			// No FIN: the subscription stays open, so only the DROP ends the group.
+			let session = crate::lite::test_transport::ScriptedSession::new(responses);
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session,
+				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Handle::new(false),
+			});
+			let serve = TrackServe {
+				validity: Default::default(),
+				route: None,
+				subscriber,
+				path: Path::new("room").to_owned(),
+				epoch: None,
+				name: "video".to_string(),
+			};
+			let broadcast = crate::broadcast::Info::new().produce();
+			let request = broadcast.reserve_track("video").unwrap();
+			let serving = ServeLoop::new(&serve, request, crate::track::Info::timed(), Some(Timescale::MILLI));
+			let mut arriving = serving.serving.create_group(group::Info { sequence: 2 }).unwrap();
+			arriving.write_frame(crate::Timestamp::ZERO, b"2".as_slice()).unwrap();
+			let mut reader = broadcast
+				.consume()
+				.track("video")
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap();
+			let mut group = reader.recv_group().await.unwrap().unwrap();
+			assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"2");
+
+			let gate = serve.gate();
+			let mut running = TrackServeRun {
+				serve,
+				state: TrackRunState::Serve(serving),
+				gate,
+			};
+			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
+
+			let expected = match version {
+				Version::Lite07 => crate::StreamError::App(5),
+				_ => crate::StreamError::NotFound,
+			};
+			let res = group.read_frame().now_or_never();
+			assert!(
+				matches!(&res, Some(Err(Error::Stream(err))) if *err == expected),
+				"{version:?}: {res:?}"
+			);
+		}
 	}
 
 	/// Drive the subscriber with a peer's response bytes followed by FIN.
@@ -6668,8 +6761,9 @@ impl FeedFetches {
 				continue;
 			}
 			match arrivals.poll_group(sequence, now, &held.waiter) {
-				Poll::Ready(Some(_)) => settled.push((held.req, None)),
-				Poll::Ready(None) => settled.push((held.req, Some(Error::NotFound))),
+				Poll::Ready(Ok(Some(_))) => settled.push((held.req, None)),
+				Poll::Ready(Ok(None)) => settled.push((held.req, Some(Error::NotFound))),
+				Poll::Ready(Err(err)) => settled.push((held.req, Some(err))),
 				Poll::Pending => {
 					self.held.insert(sequence, held);
 				}
@@ -6929,7 +7023,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									lite::SubscribeResponse::Start(start) => {
 										// Where the live feed is, on versions whose answer says.
 										if serve.subscriber.version.has_largest() {
-											self.serving.set_live(start.largest);
+											self.serving.set_live(start.largest, Some(start.group));
 											if let Some(largest) = start.largest {
 												self.serving.report_largest(largest);
 											}
@@ -6954,7 +7048,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 										}
 									}
 									// The publisher will never send these groups, so they
-									// are accounted for without a stream.
+									// are accounted for without a stream, and a reader of
+									// one still arriving ends with the drop's error now.
 									lite::SubscribeResponse::Drop(dropped) => {
 										if let Ok(mut tail) = active.tail.write() {
 											tail.account(
@@ -6962,7 +7057,10 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 												serve.subscriber.runtime.now(),
 											);
 										}
-										self.serving.drop_groups(dropped.start..dropped.end.saturating_add(1));
+										self.serving.drop_groups(
+											dropped.start..dropped.end.saturating_add(1),
+											dropped.error(serve.subscriber.version),
+										);
 									}
 									// OK just resolves the range (the producer already orders
 									// groups).

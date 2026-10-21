@@ -22,4 +22,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [JS answers SUBSCRIBE_START like Rust](/quest/m1/js-start-parity.md) - the lite-07 publisher half
-- [Resume through an outage](/quest/m1/resume-outage.md) - the lite-07 fix
+- [Resume through an outage](https://github.com/moq-dev/moq/pull/6183) - the lite-07 fix

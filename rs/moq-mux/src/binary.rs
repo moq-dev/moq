@@ -396,7 +396,11 @@ impl crate::catalog::Entry<'_, BinaryConfig> {
 	/// Errors if the entry declares a mode or compression this build doesn't implement.
 	pub async fn subscribe(&self, source: &crate::Source) -> crate::Result<Consumer> {
 		let track = source
-			.subscribe_track(self.config().broadcast.as_ref(), self.config().track(self.name()))
+			.subscribe_track(
+				self.config().broadcast.as_ref(),
+				self.config().epoch.as_ref(),
+				self.config().track(self.name()),
+			)
 			.await?;
 		Consumer::from_track(track, self.config())
 	}

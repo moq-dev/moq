@@ -3,7 +3,7 @@ import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import { fromTransport, SessionCode, StreamCode, toStreamCode } from "../error.ts";
+import { fromTransport, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks } from "../internal.ts";
@@ -771,6 +771,52 @@ test("lite draft-06: a cut group is dropped early, once", async () => {
 		await sub.close();
 	}
 });
+
+// Lite-07 names why with a stream error code: the cut's own, and NOT_FOUND for what the end
+// sweep finds never served. Earlier versions carry an application code there, so 0.
+for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+	test(`lite ${version}: a SUBSCRIBE_DROP carries ${version === Version.DRAFT_07 ? "the stream error code" : "no code"}`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 0 });
+		try {
+			sub.serve(0);
+			expect(await sub.servedSequence()).toBe(0);
+			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+			const cut = new GroupProducer(1);
+			sub.track.writeGroup(cut);
+			cut.close(new StreamError(StreamCode(70), { message: "cut" }));
+			const resp = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
+				1,
+				1,
+				version === Version.DRAFT_07 ? 70 : 0,
+			]);
+		} finally {
+			await sub.close();
+		}
+	});
+
+	test(`lite ${version}: the end sweep's SUBSCRIBE_DROP carries ${version === Version.DRAFT_07 ? "NOT_FOUND" : "no code"}`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 5 });
+		try {
+			sub.serve(5);
+			expect(await sub.servedSequence()).toBe(5);
+			await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, version);
+			await flush();
+			sub.track.close();
+			const codes: number[] = [];
+			for (;;) {
+				const resp = await decodeSubscribeResponseMaybe(sub.client.reader, version);
+				if (!resp) break;
+				if ("drop" in resp) codes.push(resp.drop.error);
+			}
+			expect(codes).toEqual([version === Version.DRAFT_07 ? StreamCode.NotFound : 0]);
+		} finally {
+			await sub.close();
+		}
+	});
+}
 
 // A sent datagram is accounted for, so the end sweep does not drop it, as the Rust publisher does.
 test("lite draft-06: the end sweep does not drop a sent datagram", async () => {

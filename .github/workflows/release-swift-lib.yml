@@ -26,20 +26,6 @@ on:
       - "sh/swift/verify.sh"
       - ".github/workflows/release-swift-lib.yml"
       - "sh/gh/release.sh"
-  pull_request:
-    branches: [release]
-    # `edited` catches a main PR retargeted to release.
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - "swift/VERSION"
-      - "swift/Package.swift.template"
-      - "swift/Sources/Moq/**"
-      - "swift/Tests/**"
-      - "sh/swift/package.sh"
-      - "sh/swift/publish.sh"
-      - "sh/swift/verify.sh"
-      - ".github/workflows/release-swift-lib.yml"
-      - "sh/gh/release.sh"
   workflow_call:
   workflow_dispatch:
   workflow_run:

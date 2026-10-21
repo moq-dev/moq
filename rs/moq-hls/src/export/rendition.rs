@@ -113,9 +113,9 @@ enum Config {
 struct Media {
 	handle: Mutex<Handle>,
 	track: String,
-	/// The source and reference a sibling is bound through, to re-issue a bind that failed
-	/// before it ever resolved.
-	sibling: Option<(moq_mux::Source, moq_net::path::RelativeOwned)>,
+	/// The source, reference, and epoch a sibling is bound through, to re-issue a bind that
+	/// failed before it ever resolved.
+	sibling: Option<(moq_mux::Source, moq_net::path::RelativeOwned, Option<moq_net::Epoch>)>,
 }
 
 struct Handle {
@@ -139,13 +139,10 @@ impl Handle {
 }
 
 impl Media {
-	fn bind(
-		source: &moq_mux::Source,
-		rel: Option<&moq_net::path::RelativeOwned>,
-		track: &str,
-	) -> moq_mux::Result<Self> {
+	fn bind(source: &moq_mux::Source, reference: &impl hang::catalog::Reference, track: &str) -> moq_mux::Result<Self> {
+		let rel = reference.broadcast();
 		let mut handle = Handle {
-			binding: Arc::new(source.bind(rel)?),
+			binding: Arc::new(source.bind(rel, reference.epoch())?),
 			track: None,
 			ended: false,
 		};
@@ -155,7 +152,7 @@ impl Media {
 		Ok(Self {
 			handle: Mutex::new(handle),
 			track: track.to_string(),
-			sibling: sibling(source, rel),
+			sibling: sibling(source, rel).map(|rel| (source.clone(), rel, reference.epoch().cloned())),
 		})
 	}
 
@@ -189,8 +186,8 @@ impl Media {
 				// successful result, so a replacement can never answer these old rows.
 				Poll::Ready(Err(_)) if !reissued => {
 					reissued = true;
-					if let Some((source, rel)) = &self.sibling
-						&& let Ok(next) = source.bind(Some(rel))
+					if let Some((source, rel, epoch)) = &self.sibling
+						&& let Ok(next) = source.bind(Some(rel), epoch.as_ref())
 					{
 						handle.binding = Arc::new(next);
 						continue;
@@ -220,15 +217,12 @@ impl Media {
 fn sibling(
 	source: &moq_mux::Source,
 	rel: Option<&moq_net::path::RelativeOwned>,
-) -> Option<(moq_mux::Source, moq_net::path::RelativeOwned)> {
+) -> Option<moq_net::path::RelativeOwned> {
 	let target = source.resolve_reference(rel)?;
 	if source.resolve_reference(None).as_ref() == Some(&target) {
 		return None;
 	}
-	Some((
-		source.clone(),
-		rel.cloned().unwrap_or_else(moq_net::path::Relative::empty),
-	))
+	Some(rel.cloned().unwrap_or_else(moq_net::path::Relative::empty))
 }
 
 /// Clear the video fields that don't change how the rendition decodes or is muxed, so a config
@@ -382,7 +376,7 @@ impl Rendition {
 		section: Archive,
 		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
-		let media = Media::bind(source, config.broadcast.as_ref(), config.track(&name))?;
+		let media = Media::bind(source, config, config.track(&name))?;
 		Ok(Self {
 			name,
 			kind: Kind::Video,
@@ -415,7 +409,7 @@ impl Rendition {
 		section: Archive,
 		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
-		let media = Media::bind(source, config.broadcast.as_ref(), config.track(&name))?;
+		let media = Media::bind(source, config, config.track(&name))?;
 		Ok(Self {
 			name,
 			kind: Kind::Audio,
