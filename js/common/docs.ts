@@ -5,8 +5,9 @@
 // already dropped the `@internal` symbols. TypeScript 7 has no stable compiler API and TypeDoc
 // does not support it, so this parses declarations the same way `declarations.ts` does.
 
-import { dirname, extname, join, relative, resolve } from "node:path";
+import { relative } from "node:path";
 import { parse } from "@babel/parser";
+import { dtsPath, moduleName } from "./declarations.ts";
 
 type Program = ReturnType<typeof parse>["program"];
 type Node = Program["body"][number];
@@ -25,7 +26,8 @@ type Module = {
 	locals: Map<string, Declarations>;
 	imports: Map<string, Binding>;
 	exports: Map<string, Binding>;
-	stars: string[];
+	// `export *` targets; `types` marks `export type *`, which re-exports only types.
+	stars: Array<{ specifier: string; types: boolean }>;
 	// Where the first statement starts; a `@module` block above it documents the module.
 	header: number;
 	// Whether the file carries a `@module` block, which an entrypoint needs.
@@ -50,20 +52,24 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 	const seen = new Set<string>();
 
 	// Report each declaration once, under the first public name that reaches it.
-	const visit = (file: string, path: string, binding: Binding) => {
+	// Under `types`, a name reached only through `export type *` that is purely a value is skipped.
+	const visit = (file: string, path: string, binding: Binding, types: boolean) => {
 		const resolved = resolveBinding(file, binding);
 		if (!resolved) return;
-		const key = `${resolved.file}#${resolved.kind === "namespace" ? "*" : resolved.name}`;
-		if (seen.has(key)) return;
-		seen.add(key);
-
 		if (resolved.kind === "namespace") {
-			walk(resolved.file, `${path}.`);
+			const key = `${resolved.file}#*`;
+			if (seen.has(key)) return;
+			seen.add(key);
+			walk(resolved.file, `${path}.`, types);
 			return;
 		}
 
 		const declarations = load(resolved.file).locals.get(resolved.name);
 		if (!declarations) throw new Error(`${relative(root, resolved.file)}: cannot find ${resolved.name}`);
+		if (types && declarations.every(({ declaration }) => VALUES.has(declaration.type))) return;
+		const key = `${resolved.file}#${resolved.name}`;
+		if (seen.has(key)) return;
+		seen.add(key);
 		check(resolved.file, path, key, declarations);
 	};
 
@@ -164,7 +170,7 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		const binding = module.exports.get(name);
 		if (binding) return { file, binding };
 		if (name === "default") return undefined;
-		for (const specifier of module.stars) {
+		for (const { specifier } of module.stars) {
 			const target = dtsPath(files, file, specifier);
 			if (!target) continue;
 			const found = findExport(target, name, chain);
@@ -174,17 +180,17 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 	};
 
 	// `export *` never re-exports a default, nor a name the re-exporting module exports itself.
-	const walk = (file: string, prefix: string, chain = new Set<string>(), hidden?: Set<string>) => {
+	const walk = (file: string, prefix: string, types = false, chain = new Set<string>(), hidden?: Set<string>) => {
 		if (chain.has(file)) return;
 		chain.add(file);
 		const module = load(file);
 		for (const [name, binding] of module.exports) {
-			if (!hidden?.has(name)) visit(file, prefix + name, binding);
+			if (!hidden?.has(name)) visit(file, prefix + name, binding, types);
 		}
 		const shadowed = new Set([...(hidden ?? ["default"]), ...module.exports.keys()]);
-		for (const specifier of module.stars) {
-			const target = dtsPath(files, file, specifier);
-			if (target) walk(target, prefix, chain, shadowed);
+		for (const star of module.stars) {
+			const target = dtsPath(files, file, star.specifier);
+			if (target) walk(target, prefix, types || star.types, chain, shadowed);
 		}
 	};
 
@@ -248,7 +254,7 @@ function parseModule(source: string): Module {
 				}
 				break;
 			case "ExportAllDeclaration":
-				module.stars.push(statement.source.value);
+				module.stars.push({ specifier: statement.source.value, types: statement.exportKind === "type" });
 				break;
 			case "ExportDefaultDeclaration": {
 				const declaration = statement.declaration;
@@ -309,6 +315,9 @@ function documented(node: { leadingComments?: Comment[] | null }, header: number
 	);
 }
 
+// Declarations that are only values, which `export type *` does not re-export.
+const VALUES = new Set(["VariableDeclaration", "TSDeclareFunction", "FunctionDeclaration"]);
+
 // Custom element reactions: on an element, the browser calls them and the HTML spec documents them.
 const REACTIONS = new Set([
 	"observedAttributes",
@@ -346,21 +355,6 @@ function memberName(member: unknown, element: boolean): string | undefined {
 	if (m.key.type === "Identifier" && !m.computed) name = m.key.name;
 	else if (m.key.type === "StringLiteral" || m.key.type === "NumericLiteral") name = String(m.key.value);
 	return name === undefined || (element && REACTIONS.has(name)) ? undefined : name;
-}
-
-// The declaration file a relative specifier resolves to, as a file or a directory index. A package
-// specifier resolves to another package, which checks its own surface, so it is not followed.
-function dtsPath(files: Map<string, unknown>, from: string, specifier: string): string | undefined {
-	if (!specifier.startsWith(".")) return undefined;
-	const ext = extname(specifier);
-	if (ext && !/^\.(js|jsx|ts|tsx)$/.test(ext)) return undefined;
-	const base = resolve(dirname(from), specifier).replace(/\.(js|jsx|ts|tsx)$/, "");
-	const index = join(base, "index.d.ts");
-	return files.has(index) ? index : `${base}.d.ts`;
-}
-
-function moduleName(node: { type: "Identifier"; name: string } | { type: "StringLiteral"; value: string }): string {
-	return node.type === "Identifier" ? node.name : node.value;
 }
 
 // The names a declaration statement introduces.

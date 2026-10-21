@@ -48,3 +48,12 @@ test("type-only star re-exports, const enums, and let declarations resolve", () 
 	]);
 	expect(problems(root, files)).toEqual([]);
 });
+
+test("an extensionless import resolves to the file before a directory index", () => {
+	const files = new Map([
+		["/dist/foo.d.ts", "export declare const value: number;\n"],
+		["/dist/foo/index.d.ts", "export declare const other: number;\n"],
+		["/dist/index.d.ts", 'import { value } from "./foo";\n'],
+	]);
+	expect(problems(root, files)).toEqual([]);
+});

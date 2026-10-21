@@ -45,16 +45,20 @@ export function problems(root: string, files: Map<string, string>): string[] {
 	return found;
 }
 
-// The declaration file a relative specifier resolves to, as a file or a directory index. A package
-// specifier resolves outside the package, and an asset (`./icon.svg?raw`) is typed by the bundler,
-// so neither is checked.
-function dtsPath(files: Map<string, unknown>, from: string, specifier: string): string | undefined {
+/**
+ * The declaration file a relative specifier resolves to: the file itself, else a directory index.
+ *
+ * Undefined for a package specifier, which resolves outside the package, and for an asset
+ * (`./icon.svg?raw`), which the bundler types.
+ */
+export function dtsPath(files: Map<string, unknown>, from: string, specifier: string): string | undefined {
 	if (!specifier.startsWith(".")) return undefined;
 	const ext = extname(specifier);
 	if (ext && !/^\.(js|jsx|ts|tsx)$/.test(ext)) return undefined;
 	const base = resolve(dirname(from), specifier).replace(/\.(js|jsx|ts|tsx)$/, "");
+	const file = `${base}.d.ts`;
 	const index = join(base, "index.d.ts");
-	return files.has(index) ? index : `${base}.d.ts`;
+	return files.has(file) || !files.has(index) ? file : index;
 }
 
 function exported(files: Map<string, FileExports>, file: string, name: string, seen = new Set<string>()): boolean {
@@ -113,7 +117,10 @@ function fileExports(source: string): FileExports {
 	return { names, stars, imports };
 }
 
-function moduleName(node: { type: "Identifier"; name: string } | { type: "StringLiteral"; value: string }): string {
+/** The name an import or export specifier spells, as an identifier or a string. */
+export function moduleName(
+	node: { type: "Identifier"; name: string } | { type: "StringLiteral"; value: string },
+): string {
 	return node.type === "Identifier" ? node.name : node.value;
 }
 

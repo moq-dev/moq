@@ -160,6 +160,23 @@ test("only a block above the first statement is the module block", () => {
 	expect(found).toEqual(["index.d.ts: no @module block"]);
 });
 
+test("a type-only star skips values", () => {
+	const found = check({
+		"/dist/inner.d.ts": "export declare const value: number;\nexport type Shape = number;\n",
+		"/dist/index.d.ts": 'export type * from "./inner";\n',
+	});
+	expect(found).toEqual(["inner.d.ts: Shape"]);
+});
+
+test("an extensionless specifier prefers the file over a directory index", () => {
+	const found = check({
+		"/dist/foo.d.ts": "export declare const file: number;\n",
+		"/dist/foo/index.d.ts": "export declare const index: number;\n",
+		"/dist/index.d.ts": 'export * from "./foo";\n',
+	});
+	expect(found).toEqual(["foo.d.ts: file"]);
+});
+
 test("an explicit export shadows the same name from a star", () => {
 	const found = check({
 		"/dist/inner.d.ts": "export declare const name: number;\n",
