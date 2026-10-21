@@ -441,6 +441,23 @@ async def test_finish_lingers_until_closed():
     finish.close()
 
 
+async def test_finish_wait_cancelled_before_it_starts_closes():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    announced = consumer.announced()
+    broadcast = create_announced(origin, "finish")
+    assert isinstance(await next_route(announced), moq.AnnounceEventStart)
+
+    broadcast.publish_track("status", moq.TrackInfo(max_age=timedelta(hours=1))).finish()
+    finish = broadcast.finish()
+    # Cancelled before the loop first steps it, so the wait's body never runs.
+    wait = asyncio.create_task(finish.wait())
+    wait.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wait
+    assert isinstance(await next_route(announced), moq.AnnounceEventEnd)
+
+
 async def test_finish_without_a_max_age_closes_on_wait():
     broadcast = moq.BroadcastProducer()
     broadcast.publish_track("status").finish()

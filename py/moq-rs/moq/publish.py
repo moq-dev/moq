@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Coroutine, Generator
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from moq_ffi import (
     MoqBroadcastDynamic,
@@ -373,14 +374,47 @@ class BroadcastFinish:
         """How long to keep the broadcast: the longest max age of the held tracks."""
         return _from_us(self._inner.linger_us())
 
-    async def wait(self) -> None:
+    def wait(self) -> Coroutine[Any, Any, None]:
         """Keep the broadcast up for its linger, or until :meth:`close`, then close it."""
-        try:
-            await self._inner.wait()
-        except asyncio.CancelledError:
-            self._inner.close()
-            raise
+        return _FinishWait(self._inner)
 
     def close(self) -> None:
         """Close the broadcast now, ending the linger and any wait. Closing again is a no-op."""
         self._inner.close()
+
+
+class _FinishWait(Coroutine[Any, Any, None]):
+    """A finish's wait that closes the broadcast when cancelled.
+
+    A coroutine body never runs when its task is cancelled before the first step, so the
+    close hooks the cancellation thrown in rather than an ``except`` inside the body.
+    """
+
+    def __init__(self, inner: MoqBroadcastFinish) -> None:
+        self._inner = inner
+        self._wait = inner.wait()
+
+    def __await__(self) -> Generator[Any, None, None]:
+        return self
+
+    def __iter__(self) -> Generator[Any, None, None]:
+        return self
+
+    def __next__(self) -> Any:
+        return self.send(None)
+
+    def send(self, value: Any) -> Any:
+        return self._wait.send(value)
+
+    def throw(self, typ: Any, val: Any = None, tb: Any = None) -> Any:
+        error = typ if val is None else val
+        if isinstance(error, asyncio.CancelledError) or (
+            isinstance(error, type) and issubclass(error, asyncio.CancelledError)
+        ):
+            self._inner.close()
+        if val is None and tb is None:
+            return self._wait.throw(typ)
+        return self._wait.throw(typ, val, tb)
+
+    def close(self) -> None:
+        self._wait.close()
