@@ -2538,7 +2538,7 @@ mod test {
 
 			match outcome {
 				"lands" => {}
-				"dropped" => a.drop_groups(1..2),
+				"dropped" => a.drop_groups(1..2, StreamError::NotFound),
 				_ => moq_clock::sleep(Duration::from_secs(1)).await,
 			}
 			if outcome != "lands" {

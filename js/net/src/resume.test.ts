@@ -1418,7 +1418,7 @@ test.each(["lands", "dropped", "expired"])(
 			expect(drain(sub)).toEqual([]);
 			expect(ta.producer.demand().wanted.peek()).toBeDefined();
 
-			if (outcome === "dropped") hooks.dropTrackGroups(ta.producer, 1, 2);
+			if (outcome === "dropped") hooks.dropTrackGroups(ta.producer, 1, 2, new NotFound("group"));
 			if (outcome === "expired") await clock.advanceAsync(Nano.fromMilli(SECOND));
 			if (outcome !== "lands") {
 				// The groups drained above are released once their close settles.
