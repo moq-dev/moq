@@ -69,6 +69,8 @@ interface Waiter {
 export interface SchedulerOptions {
 	/** Called after each frame is actually written (to track send activity). */
 	onActivity?: () => void;
+	/** Called once if the sink fails, after which nothing more is sent. */
+	onFail?: (err: Error) => void;
 }
 
 /** Default `sendOrder` for streams that don't set one. */
@@ -82,6 +84,7 @@ const DATAGRAM_QUEUE_LIMIT = 1024;
 export class SendScheduler {
 	#sink: SendSink;
 	#onActivity: () => void;
+	#onFail: (err: Error) => void;
 	#closed?: Error;
 
 	// Control frames preempt all stream data, FIFO among themselves. Lossless and
@@ -115,6 +118,7 @@ export class SendScheduler {
 	constructor(sink: SendSink, options?: SchedulerOptions) {
 		this.#sink = sink;
 		this.#onActivity = options?.onActivity ?? (() => {});
+		this.#onFail = options?.onFail ?? (() => {});
 		// Start the writer loop. It never rejects — failures are captured by #fail.
 		void this.#run();
 	}
@@ -302,5 +306,6 @@ export class SendScheduler {
 		this.#control.length = 0;
 		this.#latest.clear();
 		this.#datagrams.length = 0;
+		this.#onFail(err);
 	}
 }

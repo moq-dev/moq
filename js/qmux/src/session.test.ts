@@ -29,6 +29,7 @@ class FakePeer {
 	#closedReject: (err: Error) => void;
 	#recv!: ReadableStreamDefaultController<Uint8Array | ArrayBuffer | string>;
 	#writeBlocked: Promise<void> | undefined;
+	#writeError: Error | undefined;
 	#unblockWrites: (() => void) | undefined;
 
 	/** Raw chunks the Session has written. */
@@ -51,6 +52,7 @@ class FakePeer {
 		const writable = new WritableStream<Uint8Array>({
 			write: async (chunk) => {
 				await this.#writeBlocked;
+				if (this.#writeError) throw this.#writeError;
 				this.sent.push(chunk);
 			},
 		});
@@ -73,6 +75,10 @@ class FakePeer {
 		this.#closedReject(err);
 	}
 	setHighWaterMark() {}
+	/** Reject every later write, without the socket reporting that it closed. */
+	failWrites(err = new Error("write failed")) {
+		this.#writeError = err;
+	}
 	blockWrites() {
 		const blocked = Promise.withResolvers<void>();
 		this.#writeBlocked = blocked.promise;
@@ -694,6 +700,114 @@ describe("Session integration (scripted peer)", () => {
 		} finally {
 			uninstall();
 		}
+	});
+
+	test("config values that don't fit a varint are refused up front", () => {
+		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
+		expect(() => new Session("https://example/test", { config: { maxData: -1n } })).toThrow("VarInt");
+		expect(() => new Session("https://example/test", { config: { maxStreamsBidi: VarInt.MAX + 1n } })).toThrow(
+			"VarInt",
+		);
+	});
+
+	test("a failed write closes the session even if the socket never reports closing", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await waitFor(() => peer.has("transport_parameters"));
+
+		peer.failWrites(new Error("broken pipe"));
+		peer.send({ type: "ping_request", sequence: 1n });
+
+		const err = await expectSessionFailure(session);
+		expect(err.message).toBe("broken pipe");
+	});
+
+	test("a STREAM frame on a bidi stream we never opened closes the session", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+
+		// Client-initiated bidi index 0: our role, but we never opened it.
+		peer.send({
+			type: "stream",
+			id: Stream.Id.create(0n, Stream.Dir.Bi, false),
+			data: new Uint8Array(8),
+			fin: false,
+		});
+
+		const err = await expectSessionFailure(session);
+		expect((err.cause as Error).message).toContain("never opened");
+		await waitFor(() => sentCloseCode(peer) === 1002);
+	});
+
+	test("a RESET_STREAM on a stream we never opened closes the session", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+
+		peer.send({
+			type: "reset_stream",
+			id: Stream.Id.create(3n, Stream.Dir.Bi, false),
+			code: VarInt.from(0),
+			finalSize: 0n,
+		});
+
+		const err = await expectSessionFailure(session);
+		expect((err.cause as Error).message).toContain("never opened");
+	});
+
+	test("a late STREAM frame on a bidi stream we opened and stopped reading is dropped", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+
+		const bidi = await session.createBidirectionalStream();
+		await bidi.readable.cancel();
+		await waitFor(() => peer.has("stop_sending"));
+
+		peer.send({
+			type: "stream",
+			id: Stream.Id.create(0n, Stream.Dir.Bi, false),
+			data: new Uint8Array(4),
+			fin: false,
+		});
+		peer.send({ type: "ping_request", sequence: 1n });
+		await waitFor(() => peer.has("ping_response"));
+		expect(peer.has("connection_close")).toBe(false);
+		session.close();
+	});
+
+	test("a peer bidi stream opened before params gets the peer's bidi_local credit", async () => {
+		// qmux-01 doesn't require TRANSPORT_PARAMETERS first, so a peer may open a
+		// stream before them. Its own bidi stream is limited by its bidi_local.
+		const { session, peer } = connect();
+		await session.ready;
+
+		const id = Stream.Id.create(0n, Stream.Dir.Bi, true);
+		peer.send({ type: "stream", id, offset: 0n, data: new Uint8Array([1]), fin: false });
+		peer.send({
+			type: "transport_parameters",
+			params: peerParams({ initialMaxStreamDataBidiLocal: 10n, initialMaxStreamDataBidiRemote: 1000n }),
+		});
+
+		const acceptor = session.incomingBidirectionalStreams.getReader();
+		const incoming = await acceptor.read();
+		if (incoming.done || !incoming.value) throw new Error("expected an incoming stream");
+		void incoming.value.writable
+			.getWriter()
+			.write(new Uint8Array(100))
+			.catch(() => {});
+
+		const sent = () =>
+			peer
+				.received()
+				.filter((f): f is Frame.Data => f.type === "stream" && f.id.value.value === id.value.value)
+				.reduce((n, f) => n + f.data.byteLength, 0);
+		await waitFor(() => sent() > 0);
+		await settle();
+		expect(sent()).toBe(10);
+		session.close();
 	});
 
 	test("close() sends APPLICATION_CLOSE, resolves closed, and is idempotent", async () => {

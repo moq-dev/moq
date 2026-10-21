@@ -658,6 +658,9 @@ export default class Session implements WebTransport {
 
 		// Merge user config with defaults
 		this.#config = { ...DEFAULT_CONFIG, ...options?.config };
+		// Every value goes on the wire as a varint; refuse one that can't, here
+		// rather than as a handshake that never completes.
+		for (const value of Object.values(this.#config)) VarInt.from(value);
 		this.#ourParams = configToTransportParams(this.#config);
 		this.#sendBufferSize = options?.sendBufferSize ?? DEFAULT_SEND_BUFFER_SIZE;
 
@@ -811,6 +814,13 @@ export default class Session implements WebTransport {
 		this.#scheduler = new SendScheduler(sink, {
 			onActivity: () => {
 				this.#lastSendAt = now();
+			},
+			// A failed write leaves the session unable to send anything, even if the
+			// socket hasn't reported closing yet.
+			onFail: (err) => {
+				this.#closeReason ??= err;
+				this.#abort(1006, "WebSocketStream write error");
+				this.#transportClose();
 			},
 		});
 
@@ -985,16 +995,18 @@ export default class Session implements WebTransport {
 			this.datagrams.setMaxDatagramSize(Number(payload));
 		}
 
-		// Update per-stream send credits for streams created before params arrived.
-		// The direction-only limit below is correct for locally-opened streams; we
-		// rely on a conforming peer sending TRANSPORT_PARAMETERS as its first frame,
-		// so no peer-opened stream exists here yet. This is NOT enforced — a peer
-		// that interleaved a STREAM frame ahead of its params would be mis-credited
-		// (a peer-opened bidi stream's send limit is bidi_local, cf. #handleStreamFrame).
+		// Credit streams created before params arrived. Only qmux-02 requires the
+		// params first, so an earlier draft's peer may already have opened streams:
+		// the peer's bidi_local limits its own bidi streams, bidi_remote ours.
 		for (const [streamIdVal, flow] of this.#streamFlow) {
 			const id = new Stream.Id(VarInt.from(streamIdVal));
-			const sendLimit =
-				id.dir === Stream.Dir.Bi ? params.initialMaxStreamDataBidiRemote : params.initialMaxStreamDataUni;
+			let sendLimit = params.initialMaxStreamDataUni;
+			if (id.dir === Stream.Dir.Bi) {
+				sendLimit =
+					id.serverInitiated === this.#isServer
+						? params.initialMaxStreamDataBidiRemote
+						: params.initialMaxStreamDataBidiLocal;
+			}
 			flow.sendCredit.increaseMax(sendLimit);
 		}
 
@@ -1309,8 +1321,12 @@ export default class Session implements WebTransport {
 		}
 
 		if (!recv) {
-			// We created the stream, we can skip it.
 			if (frame.id.serverInitiated === this.#isServer) {
+				// One of ours whose receive half already closed: a late frame, dropped.
+				// One we never opened is malformed (canRecv leaves only bidi here).
+				if (frame.id.index >= this.#nextBiStreamId) {
+					throw new Error("STREAM frame for a stream we never opened");
+				}
 				return;
 			}
 			if (!frame.id.canRecv(this.#isServer)) {
@@ -1486,8 +1502,13 @@ export default class Session implements WebTransport {
 			if (isQmux(this.#version) && peerInitiated && this.#recvOpen(frame.id.dir).isClosed(frame.id.index)) {
 				return;
 			}
-			// A locally-created receive half that is no longer live is already closed.
-			if (!peerInitiated) return;
+			// A locally-created receive half that is no longer live is already closed,
+			// unless we never opened it at all.
+			if (!peerInitiated) {
+				const opened = frame.id.dir === Stream.Dir.Bi ? this.#nextBiStreamId : this.#nextUniStreamId;
+				if (frame.id.index >= opened) throw new Error("RESET_STREAM for a stream we never opened");
+				return;
+			}
 
 			if (isQmux(this.#version)) {
 				const credit = frame.id.dir === Stream.Dir.Bi ? this.#recvBiCredit : this.#recvUniCredit;
