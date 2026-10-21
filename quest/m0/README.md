@@ -92,3 +92,4 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [Simplification audit](/quest/m0/audit-simplify.md) - overbuilt code and APIs are collapsed, merged, or narrowed into a net simpler whole
 - [Lint override and deprecation audit](/quest/m0/audit-lints.md) - every lint suppression is still needed and says why, nothing calls a deprecated API, and stale Rust overrides fail the build
 - [Quest tree audit](/quest/m0/audit-quests.md) - the tree agrees with itself and with main
+- [Interop audit](/quest/m0/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down
