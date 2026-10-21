@@ -751,6 +751,33 @@ int main()
 	}
 	printf("names the failure while reconnecting: ok\n");
 
+	// While the first dial keeps failing, the dock names why instead of a bare
+	// "Connecting…". The relay is gone before the start, so nothing answers.
+	{
+		std::string url;
+		{
+			TestRelay relay;
+			url = relay.Url();
+		}
+		reset(url);
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		std::string reason;
+		CHECK(WaitFor([&] {
+			int code = 0;
+			o.CopyLastFailure(&code, &reason);
+			return !reason.empty();
+		}));
+		// Still retrying rather than failed, so this is the first-dial path.
+		CHECK(!o.IsLiveSession());
+		CHECK(signalCount() == 0);
+		o.Stop();
+		int code = 0;
+		o.CopyLastFailure(&code, &reason);
+		CHECK(reason.empty());
+	}
+	printf("names the failure while the first dial retries: ok\n");
+
 	// Stopping while the connect is still pending cancels it: nothing but the stop
 	// reaches OBS, then or later.
 	{
@@ -812,6 +839,27 @@ int main()
 		CHECK(signalCount() == 2);
 	}
 	printf("OBS-driven restart: ok\n");
+
+	// A token edited mid-stream goes to the live session only, and presenting a
+	// newer one or stopping cancels whatever is still in flight.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(!o.PresentToken("early"));
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		CHECK(o.PresentToken("fresh"));
+		CHECK(o.PresentToken("fresher"));
+		// The default protocol carries no in-band AUTH, so the relay's refusal is
+		// kept for the dock while the stream stays up.
+		CHECK(WaitFor([&] { return !o.TokenRefusal().empty(); }));
+		CHECK(o.IsLiveSession());
+		CHECK(signalCount() == 0);
+		o.Stop();
+		CHECK(!o.PresentToken("late"));
+	}
+	printf("present a token mid-stream: ok\n");
 
 	// Restarts and teardown racing failures still in flight, repeatedly. Whatever
 	// the order, each Start() reports at most once, and nothing reports once the

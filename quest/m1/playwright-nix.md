@@ -27,10 +27,9 @@ say where Chromium comes from (comments included), and with every
   installed Chromium"), and `test/video/renderer.browser.ts` (says
   `just test video` installs it).
 
-Out of scope: the Firefox and WebKit rows, which
-[Nightly media players](/quest/m1/media-engines-nightly.md) owns (its
-`nightly.yml` step keeps installing those engines), and `test/smoke`, which
-keeps its own flake on purpose.
+Out of scope: the Firefox player row, whose `media-firefox` job in
+`nightly.yml` keeps installing its engines with `--with-deps`, and
+`test/smoke`, which keeps its own flake on purpose.
 
 ## Plan
 

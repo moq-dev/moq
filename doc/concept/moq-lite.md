@@ -87,21 +87,19 @@ A path and an epoch name one broadcast. The path never changes, so
 authorization and hidden names work exactly as without one.
 
 - **One instance, one epoch.** A publisher mints an epoch per run. Replicas of
-  the same content announce that same epoch. A prefix claim, and any route
-  without an epoch, names no instance, so a relay cannot tell that a claim's
-  worker closed a path and serves it again. Such a worker keeps the path's group
-  sequence going, even when its own input starts over at 0. Otherwise a viewer
-  returning within a relay's cache window gets the old output's latest group,
-  then nothing until the new sequence passes it.
+  the same content announce that same epoch. A prefix claim names no instance:
+  its worker answers each requested path by announcing that exact path under
+  the output's own epoch. Restarting one output is then a new epoch every hop
+  sees, so a viewer returning within a relay's cache window never gets the old
+  output's groups.
 - **Newest wins.** Among routes at the same prefix, the newest epoch ranks
   first, ahead of cost, and a route without an epoch ranks last. Newest means
   the latest UUIDv7 timestamp, so hosts with skewed clocks can lose a restart
   until the old instance retracts.
 - **Same epoch resumes.** A subscription moves between routes with the same
   epoch without a seam, continuing from the first frame it lacks. A route
-  without an epoch keeps its subscriptions until that route goes, which is how
-  a transcoder claim stays on the worker that first served it, and a track that
-  fails ends instead of resuming, so request the path again.
+  without an epoch keeps its subscriptions until that route goes, and a track
+  that fails ends instead of resuming, so request the path again.
 - **Another instance restarts.** A newer epoch, or, without one, another route
   winning the path, is announced as a restart. Subscriptions already open stay
   on the old instance until dropped or none of its routes remain, which ends
@@ -279,6 +277,14 @@ moq-transport without a `TIMESCALE` (every track on drafts 14-16), arrive
 untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
+
+A publisher may compress a track, which pays off for repetitive data such as
+JSON and not for media. Each group's frames become one DEFLATE stream
+([moq-flate](/draft/moq-flate)), and a datagram
+compresses alone. Only the work-in-progress moq-lite 07 carries the compressed
+bytes. A relay forwards them as received and inflates each group once for every
+other subscriber, moq-transport included, so readers always see the original
+frames. Rust publishes and relays compressed tracks; js/net refuses them for now.
 
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning

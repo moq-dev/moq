@@ -29,6 +29,8 @@ impl Handle {
 	}
 
 	/// Present a token now and on later sessions until its handle is dropped or refused.
+	///
+	/// A session that cannot send it, without AUTH, refuses it as unsupported.
 	pub async fn add(&self, token: impl Into<Bytes>) -> crate::Result<Auth> {
 		let producer = kio::Producer::<Granted>::default();
 		let state = producer.consume();
@@ -158,7 +160,8 @@ impl Auth {
 		}
 	}
 
-	/// Wait until the token is refused or its connection ends.
+	/// Wait until the token ends: `Ok` when the peer closed it without an error, otherwise its
+	/// refusal or revocation, or the connection's end.
 	pub async fn closed(&self) -> crate::Result<()> {
 		kio::wait(|waiter| self.state.poll_closed(waiter)).await;
 		match &self.state.read().error {
@@ -352,12 +355,19 @@ async fn present(
 				Err(err) => return Err(err.into()),
 			}
 		};
-		if let Some(answered) = answered.take() {
-			let _ = answered.send(Ok(()));
-		}
 		let mut watch = token.grant();
+		// Without AUTH, moq-transport accepts a token at once for the requests that name it,
+		// but a connection's token rides no request, so nothing would send it. One the peer
+		// already ended has a grant no longer and is left to the watch below.
+		if watch.peek().is_none() && token.closed().now_or_never().is_none() {
+			return Err(moq_net::Error::Unsupported.into());
+		}
 		if let Ok(mut state) = producer.write() {
 			state.grant = watch.peek();
+		}
+		// After the grant, so `add` never returns a token that still reads none.
+		if let Some(answered) = answered.take() {
+			let _ = answered.send(Ok(()));
 		}
 		loop {
 			tokio::select! {
@@ -378,6 +388,8 @@ async fn present(
 						snapshot = next(&connection, Some((connects, true))).await?;
 						break;
 					}
+					// The peer closed it without an error: the token is over, not refused.
+					Err(moq_net::Error::Cancel) => return Ok(()),
 					Err(err) => return Err(err.into()),
 				}
 			}

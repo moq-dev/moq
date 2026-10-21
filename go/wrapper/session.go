@@ -73,6 +73,70 @@ func (s *Session) Bandwidth() *Bandwidth {
 	return &Bandwidth{inner: s.inner.Bandwidth()}
 }
 
+// Auth is the session's authorization: the grant its peer gave it, and more
+// tokens to present. Each call returns an independent watcher of the grant. A
+// client session's handle survives reconnects, presenting each added token again
+// on every new connection.
+func (s *Session) Auth() *Auth {
+	return &Auth{inner: s.inner.Auth()}
+}
+
+// Auth reads a session's grant and presents more tokens.
+//
+// AUTH is only on moq-lite-07-wip and on moq-transport sessions that negotiate
+// the MoQ Auth extension; elsewhere the grant stays nil.
+type Auth struct {
+	inner *ffi.MoqAuth
+}
+
+// Grant returns the union of every token's grant, or nil until the peer first
+// answers one. A client session reads nil while it reconnects.
+func (a *Auth) Grant() *Grant {
+	return grantFromFFI(a.inner.Grant())
+}
+
+// GrantChanged blocks until the grant differs from the one this handle last
+// reported, or held when it was made, and returns it. It errors once the session
+// ends.
+func (a *Auth) GrantChanged(ctx context.Context) (*Grant, error) {
+	grant, err := bridge.Call(ctx, nil, a.inner.GrantChanged)
+	return grantFromFFI(grant), err
+}
+
+// Add presents another token, returning once the peer accepts it. Its grant
+// joins the union until the token is closed. The peer's refusal is a
+// ProtocolError carrying its code; a session that cannot carry another token
+// returns an error for which errors.Is(err, ErrUnsupported) holds. Cancelling ctx
+// withdraws the token.
+func (a *Auth) Add(ctx context.Context, token string) (*AuthToken, error) {
+	inner, err := bridge.CallHandle(ctx, nil, func(ctx context.Context) (*ffi.MoqAuthToken, error) {
+		return a.inner.Add(ctx, token)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &AuthToken{inner: inner}, nil
+}
+
+// AuthToken is one token presented with Auth.Add.
+type AuthToken struct {
+	inner *ffi.MoqAuthToken
+}
+
+// Grant returns this token's own grant, or nil after it ended.
+func (t *AuthToken) Grant() *Grant {
+	return grantFromFFI(t.inner.Grant())
+}
+
+// Closed blocks until the token ends, returning the peer's revocation or the
+// session's close, or nil when the peer closed it without an error.
+func (t *AuthToken) Closed(ctx context.Context) error {
+	return bridge.CallErr(ctx, nil, t.inner.Closed)
+}
+
+// Close withdraws the token, removing its grant from the union.
+func (t *AuthToken) Close() { t.inner.Cancel() }
+
 // Bandwidth divides one connection's send estimate among the tracks sharing it.
 type Bandwidth struct {
 	inner *ffi.MoqBandwidth

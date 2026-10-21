@@ -1618,7 +1618,7 @@ mod tests {
 		let mut served = moq_net::broadcast::Info::new().produce();
 		let served_catalog = catalog::Producer::new(&mut served, Default::default()).unwrap();
 		let mut new = rendition(&served, &served_catalog, "audio");
-		let pool = origin.dynamic("", route).unwrap();
+		let pool = origin.dynamic_route("", route).unwrap();
 		drop(exact);
 		let consumer = served.consume();
 		tokio::spawn(async move {
@@ -1664,7 +1664,7 @@ mod tests {
 		}
 
 		exact.unannounce();
-		let pool = origin.dynamic("", route).unwrap();
+		let pool = origin.dynamic_route("", route).unwrap();
 		let consumer = mirror.consume();
 		tokio::spawn(async move {
 			while let Ok(request) = pool.requested_broadcast().await {

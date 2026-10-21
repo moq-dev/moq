@@ -121,7 +121,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 			existing.handle = handle;
 			void drive(handle, conn);
 		} else if (!routesEqual(existing.handle.route, route)) {
-			existing.handle.update(route);
+			existing.handle.updateRoute(route);
 		}
 	};
 

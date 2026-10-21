@@ -55,6 +55,9 @@ pub struct Frame {
 pub(crate) struct Object {
 	pub frame: Frame,
 	pub fields: Option<Arc<super::object::Fields>>,
+	/// The inflated size of a compressed frame read in its stored form (see
+	/// [`group::Consumer::compressed`]), whose `payload` is then the DEFLATE slice.
+	pub inflated: Option<u64>,
 }
 
 #[cfg(feature = "async")]
@@ -70,11 +73,18 @@ impl std::ops::Deref for Object {
 pub(crate) struct Header {
 	pub info: Info,
 	pub fields: Option<Arc<super::object::Fields>>,
+	/// A received compressed frame's inflated size: `info.size` is then its DEFLATE
+	/// slice's. `None` for a plain frame, or one a local producer compresses itself.
+	pub inflated: Option<u64>,
 }
 
 impl From<Info> for Header {
 	fn from(info: Info) -> Self {
-		Self { info, fields: None }
+		Self {
+			info,
+			fields: None,
+			inflated: None,
+		}
 	}
 }
 
@@ -750,6 +760,11 @@ pub struct Consumer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
 	pub(crate) fields: Option<Arc<super::object::Fields>>,
+	/// The inflated size of a compressed frame read in its stored form (see
+	/// [`group::Consumer::compressed`]), whose payload is then the DEFLATE slice.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) inflated: Option<u64>,
 	source: Source,
 	// Byte offset consumed so far.
 	read_idx: usize,
@@ -779,6 +794,7 @@ impl Consumer {
 			state,
 			info: header.info,
 			fields: header.fields,
+			inflated: header.inflated,
 			source,
 			read_idx: 0,
 			stats: stats::Meter::default(),
@@ -836,6 +852,11 @@ impl Consumer {
 			if let Some(expiry) = &mut self.expiry {
 				expiry.policy = expiry.policy.for_track(&replacement.copy);
 			}
+			// A stored compressed frame continues from the replacement's stored form, where
+			// the byte offset means the same thing.
+			if self.inflated.is_some() {
+				replacement.group = replacement.group.compressed();
+			}
 			let frame = match replacement.group.poll_next_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => frame,
 				Poll::Ready(Ok(None)) => return Poll::Ready(Err(Error::WrongSize)),
@@ -853,7 +874,7 @@ impl Consumer {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
 			// Same name, same content: a different size is the routes disagreeing.
-			if frame.info.size != self.info.size {
+			if frame.info.size != self.info.size || frame.inflated != self.inflated {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
 			recover.adopt(&replacement);
