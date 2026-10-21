@@ -4,6 +4,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.onCompletion
 import uniffi.moq.MoqException
@@ -54,6 +55,25 @@ fun GroupConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
  * Collect it once: the handle is cancelled when collection ends, however it ends.
  */
 fun AnnounceConsumer.updates(): Flow<AnnounceEvent> = pull { next() }.onCompletion { cancel() }
+
+/**
+ * The session's grant: the current one, then each change, null while there is none.
+ *
+ * Completes when the session shuts down, and throws its close reason otherwise.
+ */
+fun Auth.grants(): Flow<Grant?> = flow {
+    emit(grant())
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        val grant = try {
+            grantChanged()
+        } catch (e: MoqException) {
+            if (e.isShutdown) break
+            throw e
+        }
+        emit(grant)
+    }
+}.distinctUntilChanged()
 
 /** Emits [next] until it returns null, checking for cancellation before each pull. */
 private fun <T : Any> pull(next: suspend () -> T?): Flow<T> = flow {

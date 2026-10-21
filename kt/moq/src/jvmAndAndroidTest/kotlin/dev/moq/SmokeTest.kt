@@ -620,6 +620,36 @@ class SmokeTest {
     }
 
     /**
+     * Both sides read the grant their peer gave them, and a peer that verifies no tokens
+     * of its own refuses another one as unsupported.
+     */
+    @Test
+    fun `session auth reads the grant`() = runTest {
+        val version = listOf("moq-lite-07-wip")
+        Server.listen(
+            ServerConfig(bind = "127.0.0.1:0", versions = version, tls = ServerTls(generate = listOf("localhost"))),
+        ).use { server ->
+            // Not requests().first(): ending that collection cancels the server.
+            val accepted = async { server.server.accept()!!.accept() }
+            val moq = Moq.connect(
+                "https://${server.localAddr}",
+                ClientConfig(bind = "127.0.0.1:0", versions = version, tls = ClientTls(insecure = true), once = true),
+            )
+            moq.use {
+                val everything = Grant(publish = listOf("**"), subscribe = listOf("**"), expiresUs = null)
+                assertEquals(everything, moq.auth().grants().first { it != null })
+                val session = accepted.await()
+                assertEquals(everything, session.auth().grants().first { it != null })
+                assertNull(everything.expires)
+
+                assertFailsWith<MoqException.Unsupported> { moq.auth().add("extra") }
+                assertEquals(everything, moq.auth().grant())
+                session.cancel(0u)
+            }
+        }
+    }
+
+    /**
      * Cancelling the client aborts a connect parked on a server that never
      * accepts, and the connect reports it as [MoqException.Cancelled].
      */
