@@ -60,6 +60,8 @@ pub struct RecvStream {
     is_0rtt: bool,
     all_data_read: bool,
     reset: Option<VarInt>,
+    /// The code a drop before the end stops with
+    drop_stop: VarInt,
 }
 
 impl RecvStream {
@@ -70,6 +72,7 @@ impl RecvStream {
             is_0rtt,
             all_data_read: false,
             reset: None,
+            drop_stop: VarInt::from_u32(0),
         }
     }
 
@@ -333,6 +336,12 @@ impl RecvStream {
     /// Get the identity of this stream
     pub fn id(&self) -> StreamId {
         self.stream
+    }
+
+    /// Stop with `code`, instead of code 0, if dropped before the end
+    #[cfg(feature = "quic")]
+    pub(crate) fn set_drop_stop(&mut self, code: VarInt) {
+        self.drop_stop = code;
     }
 
     /// Completes when the stream has been reset by the peer or otherwise closed
@@ -670,7 +679,7 @@ impl Drop for RecvStream {
         }
 
         // Ignore ClosedStream errors
-        let _ = conn.inner.recv_stream(self.stream).stop(0u32.into());
+        let _ = conn.inner.recv_stream(self.stream).stop(self.drop_stop);
         conn.wake();
     }
 }

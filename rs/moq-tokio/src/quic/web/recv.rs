@@ -10,6 +10,8 @@ use bytes::Bytes;
 use crate::quic::web::{CloseReason, ReadError, ReadExactError, ReadToEndError, SessionError};
 
 /// A stream that can be used to receive bytes. See [`crate::quic::driver::RecvStream`].
+///
+/// Dropping it before the end stops it with code 0.
 #[derive(Debug)]
 pub struct RecvStream {
 	inner: crate::quic::driver::RecvStream,
@@ -17,7 +19,9 @@ pub struct RecvStream {
 }
 
 impl RecvStream {
-	pub(crate) fn new(stream: crate::quic::driver::RecvStream, close: Arc<CloseReason>) -> Self {
+	pub(crate) fn new(mut stream: crate::quic::driver::RecvStream, close: Arc<CloseReason>) -> Self {
+		// The driver's raw 0 is outside the HTTP/3 range, so a WebTransport peer can't decode it.
+		stream.set_drop_stop(close.encode_stream_code(0));
 		Self { inner: stream, close }
 	}
 
