@@ -152,6 +152,39 @@ func TestPublishAudioLifecycle(t *testing.T) {
 	}
 }
 
+func TestBroadcastFinishLingersUntilCancelled(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxAge := time.Hour
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Priority: 127, MaxAge: &maxAge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := track.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	finish, err := broadcast.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := finish.Linger(); got != time.Hour {
+		t.Fatalf("Linger = %v, want 1h", got)
+	}
+	if _, err := broadcast.Consume(); err == nil {
+		t.Fatal("Consume after Finish succeeded")
+	}
+
+	// A cancelled wait is the interrupt: it returns at once instead of lingering.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := finish.Wait(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Wait = %v, want the deadline", err)
+	}
+	finish.Close()
+}
+
 func TestBroadcastCloseTwiceIsNoop(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {

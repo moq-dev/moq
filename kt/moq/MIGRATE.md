@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Finished tracks stay until the broadcast ends (#PRNUM)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast ends or the new `BroadcastProducer.finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
 ### Anchors can name a time (#6074)
 
 `Anchor` gains `AnchorTime`, so exhaustive `when` expressions need a branch for it.

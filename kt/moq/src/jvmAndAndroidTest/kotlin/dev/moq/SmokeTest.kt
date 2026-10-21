@@ -29,6 +29,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration
@@ -226,6 +227,23 @@ class SmokeTest {
                 assertFailsWith<MoqException> { consumer.subscribeTrack("events", null) }
                 assertFailsWith<MoqException> { broadcast.publishTrack("events", null) }
             }
+        }
+    }
+
+    @Test
+    fun `finishing a broadcast lingers until the wait is cancelled`() = runTest {
+        val broadcast = BroadcastProducer()
+        val track = broadcast.publishTrack("status", TrackInfo(maxAgeUs = 3_600_000_000uL))
+        track.finish()
+        broadcast.finish().use { finish ->
+            assertEquals(1.hours, finish.linger)
+            assertFailsWith<MoqException> { broadcast.consume() }
+            // Cancelling the wait is the interrupt: it ends instead of lingering for an hour.
+            val wait = async { finish.wait() }
+            yield()
+            wait.cancel()
+            wait.join()
+            finish.end()
         }
     }
 
