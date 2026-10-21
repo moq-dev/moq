@@ -3238,7 +3238,7 @@ fn count_pid(frames: &[Frame], pid: u16) -> usize {
 }
 
 /// Count the TS packets whose adaptation field sets `discontinuity_indicator`.
-fn count_discontinuity(frames: &[Frame]) -> usize {
+pub(super) fn count_discontinuity(frames: &[Frame]) -> usize {
 	frames
 		.iter()
 		.flat_map(|f| f.payload.as_chunks::<188>().0.iter())
@@ -5265,7 +5265,7 @@ fn in_decode_order(decode: &[u64]) -> bool {
 
 /// Every PES unit, each PID in its own decode order, finishes arriving before it decodes, on
 /// the clock a receiver recovers from the PCRs. Returns how many units were judged.
-fn assert_on_time(frames: &[Frame]) -> usize {
+pub(super) fn assert_on_time(frames: &[Frame]) -> usize {
 	const WRAP: i128 = 1 << 33;
 	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 	// PCRs unwrapped from the first, which a start a window before the timeline may wrap.

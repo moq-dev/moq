@@ -182,6 +182,14 @@ impl Release {
 		self.jitter.out_of_tolerance()
 	}
 
+	/// Times the source skipped objects it will never deliver, as the TS export's `gaps`.
+	#[cfg(test)]
+	pub(super) fn gaps(&self) -> u64 {
+		self.track
+			.as_ref()
+			.map_or(0, |(_, source)| source.skips() - source.markers())
+	}
+
 	/// How many objects are waiting in the jitter buffer.
 	#[cfg(test)]
 	pub(super) fn buffered(&self) -> usize {

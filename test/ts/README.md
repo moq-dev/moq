@@ -666,7 +666,12 @@ generated clip keeps one frame step, so it reads the capture's timestamps agains
 the source's, independently of what the exporter reports. Either way a stream may
 start up to 3 s late: the subscriber joins at the relay's latest group once the
 catalog is out, which skips the first 1-2 s on a clean path. Omitting MoQ content
-on purpose belongs to the [recovery tests](/quest/m1/ts-reliability/recovery.md).
+on purpose is graded on a paused clock in
+`rs/moq-mux/src/container/ts/recovery_test.rs`: each arm republishes a generated
+clip under a fault schedule (a group skipped or cut, a track or the video held
+past its deadline, a join, A/V skew, the PTS wrap, open GOP), grades the output
+against the ledger of what was delivered and when, and decodes it with FFmpeg
+from each point a receiver acquires at, against the continuous source decode.
 
 ### Lossy path (`--loss`)
 
@@ -850,8 +855,9 @@ PCR against a wrong rate or an empty measurement. Process controls also require
 nonzero/timeout exit codes to fail despite nonempty output. A missing tool or
 an unexpected failure category is a failing test, not a successful negative.
 
-Other codecs, open-GOP acquisition, loss/recovery, raw carriage, and arbitrary
-source captures do not yet have decoded-content comparisons. Their existing
+Other codecs, raw carriage, and arbitrary source captures do not yet have
+decoded-content comparisons; H.264 loss, recovery and open-GOP acquisition have
+them in `recovery_test.rs`. Their existing
 specific checks remain active and the harness explicitly reports the narrower
 coverage. VBR and independent-clock MPTS need applicable timing models before
 claiming the CBR PCR-accuracy profile.

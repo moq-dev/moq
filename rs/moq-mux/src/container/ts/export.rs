@@ -46,6 +46,7 @@ use crate::catalog::hang::Catalog;
 use crate::codec::annexb::InBandCodec;
 use crate::codec::video::{Hrd, Reorder};
 use crate::codec::{aac, annexb, opus};
+use crate::container::consumer::Event;
 use crate::container::decode::{DecodeClock, MAX_REORDER};
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
@@ -274,6 +275,12 @@ struct Track {
 	/// The source's cut count at the last frame queued. A cut since clears what a track that
 	/// has not started holds.
 	held: Option<u64>,
+	/// The source ended a group, cleanly or cut. The next group presents after every picture
+	/// of this one, its leading pictures included, so the end settles each DTS the clock holds:
+	/// waiting on the next group instead would make what this one delivered late behind a hole
+	/// upstream. Settled once the source has nothing more right now, so a track's end, read
+	/// with its last group's, still takes the end of the stream's settlement.
+	settle: bool,
 	/// The PTS of the last keyframe queued, which leading pictures present before.
 	keyframe: Option<Timestamp>,
 	/// What the catalog and the SPS declare about the video's reordering.
@@ -313,6 +320,7 @@ impl Track {
 			recovery_gap: None,
 			leading_floor: None,
 			held: None,
+			settle: false,
 			keyframe: None,
 			timing: Timing::default(),
 			buffer: None,
@@ -370,8 +378,11 @@ impl Track {
 			if !input.waiting_for_header && input.jitter.full(&self.pid) {
 				break;
 			}
-			match self.source.poll_read(waiter)? {
-				Poll::Ready(Some(frame)) => {
+			match self.source.poll_event(waiter)? {
+				Poll::Ready(Some(Event::Frame(frame))) => {
+					if std::mem::take(&mut self.settle) && !input.waiting_for_header {
+						self.release(name, input.jitter, true)?;
+					}
 					if input.waiting_for_header && !self.source.header_ready() {
 						*input.trimmed += 1;
 						continue;
@@ -398,11 +409,16 @@ impl Track {
 					}
 					self.queue(name, pending, input.jitter)?;
 				}
+				Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => self.settle = true,
+				Poll::Ready(Some(Event::FrameEnd { .. })) => {}
 				Poll::Ready(None) => {
 					self.finished = true;
 					break;
 				}
 				Poll::Pending => {
+					if std::mem::take(&mut self.settle) && !input.waiting_for_header {
+						self.release(name, input.jitter, true)?;
+					}
 					self.empty = moq_clock::now();
 					break;
 				}
