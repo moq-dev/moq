@@ -72,7 +72,8 @@ duplicates are ecosystem transitions owned upstream:
   webpki-roots 0.26). winit 0.30 holds rustix 0.38, x11rb 0.13, and objc2 0.5
   until 0.31 leaves beta.
 - Our own crates: web-transport-iroh 0.8.3 holds kio 0.5 (main already takes
-  0.6, waiting on a moq-dev/web-transport release), moq-vaapi holds bindgen
+  0.6; iroh is an accepted exception to moq taking no new work in
+  moq-dev/web-transport, so this lasts until that crate is released on its own), moq-vaapi holds bindgen
   0.70, libloading 0.8, and thiserror 1, and mp4-atom holds thiserror 1.
 - Bun has no dedupe, so same-major duplicates (`@babel/types`,
   `@vue/shared`, `minimatch`, `picomatch`, `yaml`) persist until a parent

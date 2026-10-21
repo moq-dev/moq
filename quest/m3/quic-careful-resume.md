@@ -35,7 +35,3 @@ loss-based traffic when BBR alone does not fill the queue. Random loss may
 prove fallback correctness, but never grades the jump's performance.
 Ship it on by default
 only when the jump never makes the first second worse than slow start.
-
-## Related
-
-- [noq#815](https://github.com/n0-computer/noq/issues/815) - the careful-resume proposal to n0
