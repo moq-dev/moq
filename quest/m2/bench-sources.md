@@ -3,7 +3,7 @@
 ## Goal
 
 Every nightly benchmark job that measures something feeds the
-[benchmark regression table](/quest/m0/bench-site.md), and no series on it
+[benchmark regression table](https://git.moq.dev/bench/), and no series on it
 is a smoke run that measures nothing.
 
 ## Plan
@@ -29,7 +29,3 @@ don't already emit one.
   Criterion history on the same `gh-pages` branch instead of creating its own.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Benchmark regression table](/quest/m0/bench-site.md) - the table these sources feed

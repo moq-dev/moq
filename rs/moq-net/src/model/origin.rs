@@ -15,6 +15,7 @@ use rand::RngExt;
 
 use super::{
 	Requests, WeakCache, WeakEntry,
+	follow::AnnouncedBroadcast,
 	front::{Action, Candidate, Event, Front, Refusal},
 };
 use crate::{
@@ -2801,6 +2802,21 @@ impl TrackIo {
 	}
 }
 
+/// The front's answer to listings of its broadcast: the serving source's listing,
+/// forwarded through the front's [`broadcast::Lister`].
+#[derive(Default)]
+struct FrontListing {
+	/// The source being read.
+	source: Option<u64>,
+	reader: Option<broadcast::Tracks>,
+	/// Every name the front lists.
+	listed: HashSet<Arc<str>>,
+	/// Names an earlier source listed that the current one has yet to list. A source of the
+	/// same instance lists the same tracks, so its readers see no churn: what it still lacks
+	/// at its SYNCED is gone.
+	stale: HashSet<Arc<str>>,
+}
+
 /// A track the ended front left in flight, held until its last reader leaves. It
 /// keeps none of the driver's wake state, which would queue its name for a driver
 /// that is gone.
@@ -2901,11 +2917,20 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 		Closed,
 		Deadline,
 		Table,
+		/// Someone lists the broadcast, or the serving source changed: read its listing.
+		Listing,
+		/// Nobody lists the broadcast any more.
+		Unlisted,
+		Listed(Result<Option<broadcast::TracksEvent>, Error>),
 	}
 
 	// The front serves its broadcast on demand: every track a reader names is
 	// handed here, and its readers read it from whichever source serves the path.
 	let mut dynamic = broadcast.dynamic();
+	let lister = dynamic
+		.lister()
+		.expect("only the front answers its broadcast's listings");
+	let mut listing: Option<FrontListing> = None;
 	let mut front = Front::new(track::IDLE_LINGER);
 	let mut sources: HashMap<u64, broadcast::Consumer> = HashMap::new();
 	// The instance each source's route served when it was asked: what its content is from.
@@ -3349,6 +3374,26 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			{
 				return Poll::Ready(Step::SourceClosed(id));
 			}
+			match &mut listing {
+				None => {
+					if front.serving().is_some() && matches!(lister.poll_used(waiter), Poll::Ready(Ok(()))) {
+						return Poll::Ready(Step::Listing);
+					}
+				}
+				Some(state) => {
+					if lister.poll_unused(waiter).is_ready() {
+						return Poll::Ready(Step::Unlisted);
+					}
+					if state.source != front.serving() {
+						return Poll::Ready(Step::Listing);
+					}
+					if let Some(reader) = &mut state.reader
+						&& let Poll::Ready(result) = reader.poll_next(waiter)
+					{
+						return Poll::Ready(Step::Listed(result));
+					}
+				}
+			}
 			while let Poll::Ready(Ok(name)) = ready.poll_pop(waiter) {
 				let Some(io) = tracks.get_mut(&name) else { continue };
 				io.ready.queued.store(false, Ordering::Release);
@@ -3596,6 +3641,82 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 				Event::Deadline { now: timers.now() }
 			}
 			Step::Table => select(&mut front, &sources, &mut seen, &mut resolved),
+			Step::Listing => {
+				// A route claiming a prefix names no broadcast, so a path it serves on request
+				// has no inventory to list.
+				let covering = front.serving_route().is_some_and(|route| {
+					shared
+						.read()
+						.routes
+						.covering(&path.as_path())
+						.find(|entry| entry.id == route)
+						.is_some_and(|entry| entry.prefix != path)
+				});
+				if covering {
+					listing = None;
+					lister.abort(Error::NotFound);
+					continue;
+				}
+				let state = listing.get_or_insert_default();
+				state.source = front.serving();
+				state.stale = state.listed.clone();
+				// A closing source lists nothing more; the front moves off it soon.
+				state.reader = state
+					.source
+					.and_then(|id| sources.get(&id))
+					.and_then(|source| source.tracks().ok());
+				continue;
+			}
+			Step::Unlisted => {
+				listing = None;
+				lister.clear();
+				continue;
+			}
+			Step::Listed(result) => {
+				let Some(state) = &mut listing else { continue };
+				// The lister refuses only once the broadcast ended, which ends the front too.
+				match result {
+					Ok(Some(broadcast::TracksEvent::Added { name, info })) => {
+						if !state.stale.remove(&name) && state.listed.insert(name.clone()) {
+							let _ = lister.add(name, info);
+						}
+					}
+					Ok(Some(broadcast::TracksEvent::Removed { name })) => {
+						state.stale.remove(&name);
+						if state.listed.remove(&name) {
+							let _ = lister.remove(&name);
+						}
+					}
+					Ok(Some(broadcast::TracksEvent::Synced)) => {
+						for name in state.stale.drain() {
+							state.listed.remove(&name);
+							let _ = lister.remove(&name);
+						}
+						lister.synced();
+					}
+					// The source ended: the front moves to another source, or ends with it.
+					Ok(None)
+						if state
+							.source
+							.and_then(|id| sources.get(&id))
+							.is_none_or(|source| source.is_closing()) =>
+					{
+						state.reader = None
+					}
+					// The source's handler ended the listing on a live source, as a peer does
+					// once its broadcast ended: so does the front's, and a later reader asks again.
+					Ok(None) => {
+						listing = None;
+						lister.finish();
+					}
+					Err(err) => {
+						// Its readers fail, and a later reader asks again.
+						listing = None;
+						lister.abort(err);
+					}
+				}
+				continue;
+			}
 		};
 		events.push_back(event);
 	}
@@ -5035,6 +5156,8 @@ pub struct Routing {
 	watch: Option<(Watch, u64)>,
 	// The ask in flight, dropped once it fails `Unroutable` until the routes move.
 	request: Option<Requesting>,
+	// The publisher instance every ask is pinned to, if any.
+	epoch: Option<crate::Epoch>,
 }
 
 impl kio::Task for Routing {
@@ -5073,7 +5196,11 @@ impl kio::Task for Routing {
 					let seen = watch.seen();
 					drop(table);
 					self.watch = Some((watch, seen));
-					self.request = Some(self.consumer.request(self.path.as_path(), None).into_inner());
+					self.request = Some(
+						self.consumer
+							.request(self.path.as_path(), self.epoch.as_ref())
+							.into_inner(),
+					);
 				}
 			}
 		}
@@ -5472,7 +5599,7 @@ impl Consumer {
 
 	/// Follow the announcements of the routes covering `path`, reduced to the one serving it.
 	///
-	/// This is how a player follows a broadcast across publisher restarts: play on a
+	/// [`Self::announced_broadcast`] resolves each instance this reports. Following by hand: play on a
 	/// [`Start`](AnnounceEvent::Start), drop everything and request the path afresh on a
 	/// [`Restart`](AnnounceEvent::Restart), and stop on an [`End`](AnnounceEvent::End). An
 	/// [`Update`](AnnounceEvent::Update) is the same publisher instance re-priced or failed
@@ -5515,17 +5642,50 @@ impl Consumer {
 	/// [`Error::Closed`] once the origin closes, and any other resolution
 	/// failure as-is. Await it, or poll it through [`kio::Task`].
 	pub fn routed_broadcast(&self, path: impl AsPath) -> kio::Pending<Routing> {
-		let path = path.as_path().to_owned();
+		kio::Pending::new(self.routing(path.as_path().to_owned(), None))
+	}
 
+	/// [`Self::routed_broadcast`], refusing any instance but `epoch` when one is pinned.
+	pub(super) fn routing(&self, path: PathOwned, epoch: Option<crate::Epoch>) -> Routing {
 		// `allowed` keeps narrower permissions intact: if the whole path is not
 		// reachable, no route can ever cover it, so bail rather than loop forever.
 		let request = (!self.allowed().matches(path.as_str())).then(|| Requesting::failed(Error::Unauthorized));
-		kio::Pending::new(Routing {
+		Routing {
 			consumer: self.clone(),
 			path,
 			watch: None,
 			request,
-		})
+			epoch,
+		}
+	}
+
+	/// Follow the broadcast at `path`, resolving each publisher instance that serves it.
+	///
+	/// The Rust form of JS `request(path, { announced: true })`. The first
+	/// [`available`](AnnouncedBroadcast::poll_available) resolves the instance serving the path
+	/// once one is announced, riding out churn as [`Self::routed_broadcast`] does. Each
+	/// later call waits for another instance to take over (an
+	/// [`AnnounceEvent::Restart`]), or for the path to be served again after an
+	/// [`AnnounceEvent::End`], even by the same instance. Drop what was read from the
+	/// previous instance then: its tracks end with an error once its routes go.
+	///
+	/// Pass an owned [`crate::Epoch`] to follow only that instance: another one taking
+	/// over is never handed out, and the instance is handed out again if it returns after
+	/// an end. Fails with [`Error::Unauthorized`] when this consumer's scope can never
+	/// cover the path, and with [`Error::InvalidPath`] when no pattern can spell it.
+	pub fn announced_broadcast(
+		&self,
+		path: impl AsPath,
+		epoch: impl Into<Option<crate::Epoch>>,
+	) -> Result<AnnouncedBroadcast, Error> {
+		let path = path.as_path();
+		let follow = self.follow(&path)?;
+		Ok(AnnouncedBroadcast::new(
+			self.clone(),
+			path.to_owned(),
+			epoch.into(),
+			follow,
+		))
 	}
 
 	/// Returns a consumer rooted at `root` and restricted to matching `patterns`.
@@ -7837,6 +7997,114 @@ mod tests {
 
 		let second = consumer.request_broadcast("room/alice", None).await.expect("resolves");
 		assert!(first.is_clone(&second), "the newcomer joins the front");
+	}
+
+	#[cfg(feature = "async")]
+	async fn listed(tracks: &mut broadcast::Tracks) -> String {
+		match tracks.next().await {
+			Ok(Some(broadcast::TracksEvent::Added { name, .. })) => format!("+{name}"),
+			Ok(Some(broadcast::TracksEvent::Removed { name })) => format!("-{name}"),
+			Ok(Some(broadcast::TracksEvent::Synced)) => "synced".into(),
+			Ok(None) => "end".into(),
+			Err(err) => format!("error: {err}"),
+		}
+	}
+
+	/// A front lists what its serving source lists, as it changes.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_front_lists_its_source() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let source = producer.publish("room/alice", Route::default()).unwrap();
+		let video = source.create_track("video", None).unwrap();
+
+		let front = consumer.request_broadcast("room/alice", None).await.unwrap();
+		let mut tracks = front.tracks().unwrap();
+		assert_eq!(listed(&mut tracks).await, "+video");
+		assert_eq!(listed(&mut tracks).await, "synced");
+
+		let _audio = source.create_track("audio", None).unwrap();
+		assert_eq!(listed(&mut tracks).await, "+audio");
+		drop(video);
+		assert_eq!(listed(&mut tracks).await, "-video");
+
+		drop(source);
+		assert_eq!(listed(&mut tracks).await, "end");
+	}
+
+	/// A source's handler ending its listing while the source stays, as a session does on
+	/// its peer's FIN before any retraction, ends the front's listing too.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_front_ends_its_listing_with_its_sources() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let source = producer.publish("room/alice", Route::default()).unwrap();
+		let lister = source.dynamic().lister().unwrap();
+		lister.add("video", crate::track::Info::default()).unwrap();
+		lister.synced();
+
+		let front = consumer.request_broadcast("room/alice", None).await.unwrap();
+		let mut tracks = front.tracks().unwrap();
+		assert_eq!(listed(&mut tracks).await, "+video");
+		assert_eq!(listed(&mut tracks).await, "synced");
+
+		lister.finish();
+		assert_eq!(listed(&mut tracks).await, "end");
+		assert!(!front.is_closed(), "the listing's end is not the broadcast's");
+	}
+
+	/// A same-instance route taking the front over lists the same tracks: readers see
+	/// only what differs, once the new source's listing synced.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_front_reconciles_a_takeover() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let local = producer
+			.publish("room/alice", Route::default().with_epoch(epoch()).with_cost(5))
+			.unwrap();
+		let _a = local.create_track("a", None).unwrap();
+		let _b = local.create_track("b", None).unwrap();
+
+		let front = consumer.request_broadcast("room/alice", None).await.unwrap();
+		let mut tracks = front.tracks().unwrap();
+		assert_eq!(listed(&mut tracks).await, "+a");
+		assert_eq!(listed(&mut tracks).await, "+b");
+		assert_eq!(listed(&mut tracks).await, "synced");
+
+		let server = producer
+			.dynamic(
+				"room/alice",
+				Route::default().with_epoch(epoch()).with_hops(hops(&[10])).with_cost(1),
+			)
+			.unwrap();
+		let upstream = broadcast::Info::new().produce();
+		let _b = upstream.create_track("b", None).unwrap();
+		let _c = upstream.create_track("c", None).unwrap();
+		queued(&server).await.accept(&upstream);
+
+		assert_eq!(listed(&mut tracks).await, "+c");
+		assert_eq!(listed(&mut tracks).await, "-a");
+	}
+
+	/// A path served on request through a covering prefix is not a broadcast anyone
+	/// announced, so it has nothing to list.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_front_through_a_covering_prefix_lists_nothing() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let server = producer.dynamic("room", Route::default()).unwrap();
+		let pending = consumer.request_broadcast("room/alice", None);
+		let upstream = broadcast::Info::new().produce();
+		let _video = upstream.create_track("video", None).unwrap();
+		queued(&server).await.accept(&upstream);
+		let front = pending.await.unwrap();
+
+		let mut tracks = front.tracks().unwrap();
+		assert_eq!(listed(&mut tracks).await, format!("error: {}", Error::NotFound));
 	}
 
 	/// At equal cost the local broadcast wins even over a route with no hops of its

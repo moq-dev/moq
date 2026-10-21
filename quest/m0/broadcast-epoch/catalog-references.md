@@ -58,7 +58,7 @@ following does not authorize substituting a different requested epoch.
   it. Restart behavior belongs to
   [sink restart follow](/quest/m1/sink-restart-follow.md).
 - Share this in `moq_mux` as `Source::follow`, built on moq-net's
-  [announced request](/quest/m0/net-announced-follow.md), rather than per
+  announced request (`origin::Consumer::announced_broadcast`), rather than per
   reader. `Source::bind` binds once today, as
   `failed_binding_does_not_retry_a_later_publisher` asserts; that changes.
   Decided 2026-10-20 (maintainer): this quest owns `Source::follow` and
@@ -88,10 +88,6 @@ framing change. Update the Hang draft, existing catalog/identity docs, and
 upgrade notes inline. The [identity guide](/quest/m1/identity-guide.md)
 consolidates the behavior separately. Explain both the strong epoch-aware
 guarantee and the selected legacy best-effort behavior.
-
-## Required
-
-- [moq-net follows announced instances](/quest/m0/net-announced-follow.md) - the announced request `Source::follow` builds on
 
 ## Related
 

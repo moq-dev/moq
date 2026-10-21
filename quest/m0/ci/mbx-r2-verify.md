@@ -13,7 +13,7 @@ closes this:
 - Each merge queue and `main` job's `Check the cache` step reports
   `effective read-write`, and a release pull request's reports
   `effective read-only`.
-- The merge queue's Check and Test show mbx remote hits for code the queued
+- The merge queue's Check show mbx remote hits for code the queued
   pull request did not touch, and Nightly's macOS and Windows jobs hit what
   the previous Nightly wrote.
 - Restore plus build time against the 150-210s Actions restore of the ~6 GB

@@ -19,7 +19,7 @@ Decided by the maintainer on 2026-10-17 (see the
   maintainer, because moq.pro's archive line records one broadcast per
   recorder). The host runs the ANNOUNCE loop and starts a producer per
   broadcast announced at its own path; `moq export archive` is such a host.
-  [TRACKS](/quest/m1/archive/tracks.md) lists the broadcast's tracks, and
+  TRACKS (`broadcast::Consumer::tracks`) lists the broadcast's tracks, and
   each track records through its own SUBSCRIBE. A covering-prefix route is capability,
   not inventory, so broadcasts served under one on request without their own
   announcement are not recorded, and a TRACKS refused with NOT_FOUND on an
@@ -156,10 +156,6 @@ mid-recording writing no marker.
 
 Public API: `archive::Producer` and its config replace `Writer`, `Control`,
 and the timeline-driven types. Wire: none.
-
-## Required
-
-- [TRACKS](/quest/m1/archive/tracks.md) - how it learns each broadcast's tracks
 
 ## Related
 

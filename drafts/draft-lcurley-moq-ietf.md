@@ -208,6 +208,8 @@ A receiver refuses such a track as {{moqt}} ingress does, with an unsupported ex
 The receiver parses the keys inside the Immutable Properties from its value, which a relay MUST NOT restate as mutable.
 It SHOULD read them from the value when needed rather than hold them beside it, as a list of IDs can cost several times the value.
 
+A TRACKS_ADD ({{moql}} Tracks Stream) embeds TRACK_INFO without TRACK_PROPERTIES, so when the extension is negotiated a subscriber MUST NOT skip the Track Stream for a track it learned from a listing.
+
 
 # Datagrams {#datagrams}
 When the extension is negotiated, a DATAGRAM carries a Datagram State after its Group Sequence.

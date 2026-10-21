@@ -5,7 +5,7 @@
 Each Nightly run on `main` compares every measured Rust Criterion benchmark
 against the previous nightly's commit, built and run on the same runner, and
 publishes the comparison to the git.moq.dev nightly report beside the
-[regression table](/quest/m0/bench-site.md). A regression past a loose threshold
+[regression table](https://git.moq.dev/bench/). A regression past a loose threshold
 fails the job, so the existing Alert workflow posts it to Discord.
 
 Benchmarks never run in the merge queue or on PRs. Rust Criterion targets
@@ -48,4 +48,3 @@ VMs, so its thresholds fire on runner noise.
 ## Related
 
 - [Benchmark reporting](/bench/README.md) - the existing `bench/run.sh` retains repeated paired rounds
-- [Benchmark regression table](/quest/m0/bench-site.md) - where the nightly history is shown
