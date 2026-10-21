@@ -10,6 +10,11 @@ moq-net is optional, behind the default `moq-net` feature that every transport f
 A build with `default-features = false` and no transport feature loses `client`, `connect`, `connection`, `listen`, `origin`, `transport`, their root re-exports (`Client`, `Connection`, `ConnectError`, `Transport`, ...), `Error::MoqNet`, `Error::Connect`, `Error::connect_error`, `Error::is_auth`, and the `moq_net` re-export.
 Enable `moq-net`, or a transport feature, to keep them.
 
+### Dropping an unfinished send stream resets it (#5909)
+
+`quic::driver::SendStream` and `quic::web::SendStream` send `RESET_STREAM` with code 0 when dropped before `finish()`, instead of finishing implicitly.
+Call `finish()` before dropping a stream whose data should arrive whole.
+
 ### `jemalloc::tikv_jemallocator` is 0.7 (#6053)
 
 The re-exported allocator crate moved from tikv-jemallocator 0.6 to 0.7.

@@ -260,8 +260,8 @@ let
     '';
   };
 
-  # CI checks run via `just ci check` (clippy / doc) and `just ci test` (nextest), not
-  # through crane/`nix flake check`. Both reach mbx through the Cargo shim the
+  # CI checks run via `just ci` (lints, docs, and nextest), not
+  # through crane/`nix flake check`. It reaches mbx through the Cargo shim the
   # dev shell puts on PATH, so nothing spells a wrapper out. Which compiler
   # cache backs those runs is a workflow concern
   # (`.github/actions/rust-cache`), not configured here.

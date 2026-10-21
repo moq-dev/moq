@@ -17,6 +17,7 @@ mod hls;
 mod moq;
 mod play;
 mod publish;
+mod report;
 mod rtc;
 mod rtmp;
 mod rtsp;
@@ -188,9 +189,12 @@ impl Serving {
 		let origin = &self.cluster.origin;
 		let directions = self.directions;
 		let auth_request = moq_relay::auth::request_for(&self.auth, &request);
-		let lease = match self.auth.admit(auth_request).await {
-			Ok(lease) => lease,
-			Err(err) => {
+		// The listener's handshake deadline covers admission; `within` closes a session
+		// it gives up on with the timeout code.
+		let lease = match request.within(self.auth.admit(auth_request)).await {
+			Err(err) => return Err(anyhow::Error::new(err).context("admission timed out")),
+			Ok(Ok(lease)) => lease,
+			Ok(Err(err)) => {
 				let status = axum::http::StatusCode::from(&err);
 				let reject = match status {
 					axum::http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
@@ -388,7 +392,7 @@ async fn run() -> anyhow::Result<()> {
 /// Which directions the stages need on the shared MoQ attachment.
 #[derive(Clone, Copy, Default)]
 pub struct Directions {
-	/// Any `import`: the Origin is published outward.
+	/// Any `import`, or an `export --echo`: the Origin is published outward.
 	pub publish: bool,
 	/// Any `export` or `play`: the Origin is filled from the network.
 	pub consume: bool,
@@ -397,8 +401,13 @@ pub struct Directions {
 impl Directions {
 	/// The union of what the stages need, so one attachment serves them all.
 	fn of(stages: &[Command]) -> Self {
+		let publishes = |stage: &Command| match stage {
+			Command::Import(_) => true,
+			Command::Export(export) => export.echo.is_some(),
+			_ => false,
+		};
 		Self {
-			publish: stages.iter().any(|stage| matches!(stage, Command::Import(_))),
+			publish: stages.iter().any(publishes),
 			consume: stages.iter().any(|stage| matches!(stage, Command::Export(_))),
 		}
 	}
@@ -588,9 +597,14 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					if import.source.stdin_format().is_some() {
 						claim("stdin", &mut stdin, &name)?;
 					}
-					if let Some(publish) =
+					let stats = import.stats;
+					if let Some(mut publish) =
 						spawn_import(&origin, import, name, epoch.clone(), bandwidth.clone(), &mut tasks)?
 					{
+						// Before `run` declares a track, so the stats section rides the first catalog.
+						if stats {
+							publish = publish.with_stats(connection.as_ref().map(moq_tokio::Connection::monitor))?;
+						}
 						locals.push(publish);
 					}
 				}
@@ -598,7 +612,8 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					if export.sink.is_stdout() {
 						claim("stdout", &mut stdout, &name)?;
 					}
-					spawn_export(&origin, export, name, &mut tasks)?;
+					let monitor = connection.as_ref().map(moq_tokio::Connection::monitor);
+					spawn_export(&origin, export, name, monitor, &mut tasks)?;
 				}
 				other => unreachable!("`{}` is not a stage", other.name()),
 			}
@@ -791,10 +806,12 @@ fn spawn_import(
 }
 
 /// Route the shared Origin OUT to one stage's sink, filling it from the MoQ network.
+/// `connection` supplies an `--echo` report's transport measurements.
 fn spawn_export(
 	origin: &moq_net::origin::Producer,
 	export: Export,
 	name: String,
+	connection: Option<moq_tokio::connection::Monitor>,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
 	if let ExportSink::Rtc(rtc) = &export.sink
@@ -816,7 +833,12 @@ fn spawn_export(
 			select: export.select,
 		};
 		let consumer = origin.consume();
-		tasks.spawn(async move { run_stdout(consumer, name, args).await });
+		let echo = export.echo.map(|name| report::EchoTarget {
+			origin: origin.clone(),
+			name,
+			connection,
+		});
+		tasks.spawn(async move { run_stdout(consumer, name, args, echo).await });
 	} else {
 		match export.sink {
 			ExportSink::Hls(args) => {
@@ -865,6 +887,12 @@ fn spawn_export(
 					.unwrap_or_default();
 				tasks.spawn(archive::export(origin.consume(), name, format, args));
 			}
+			ExportSink::Stats => {
+				tasks.spawn(report::print_stats(origin.consume(), name));
+			}
+			ExportSink::Echo => {
+				tasks.spawn(report::print_echo(origin.consume(), name));
+			}
 			_ => unreachable!("container formats are handled by stdout_format above"),
 		}
 	}
@@ -872,8 +900,14 @@ fn spawn_export(
 	Ok(())
 }
 
-/// Subscribe to `name` from the Origin and write it to stdout.
-async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: SubscribeArgs) -> anyhow::Result<()> {
+/// Subscribe to `name` from the Origin and write it to stdout, publishing feedback beside it
+/// where the catalog solicits it when `echo` is set.
+async fn run_stdout(
+	consumer: moq_net::origin::Consumer,
+	name: String,
+	args: SubscribeArgs,
+	echo: Option<report::EchoTarget>,
+) -> anyhow::Result<()> {
 	let catalog = args.catalog_format(&name);
 
 	// Confirm the broadcast is reachable and wait for it to be announced; `Subscribe` then
@@ -884,7 +918,17 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
 
-	Subscribe::new(consumer, &name, catalog, args).await?.run().await
+	let subscribe = Subscribe::new(consumer, &name, catalog, args).await?;
+	let Some(echo) = echo else {
+		return subscribe.run().await;
+	};
+	let mut echo = report::Echo::new(echo, subscribe.source().clone(), catalog);
+	let result = tokio::select! {
+		result = subscribe.run() => result,
+		never = echo.run() => match never {},
+	};
+	echo.finish();
+	result
 }
 
 /// Run until an endpoint ends, keeping all tasks alive while a signalled listener drains.
@@ -1338,5 +1382,20 @@ mod tests {
 		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
 		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
 		assert!(is_public_transport(moq_tokio::Transport::Quic, true));
+	}
+
+	/// A `--connect` URL can name the broadcast itself, leaving the stage's broadcast empty: the
+	/// connection root, which `export stats` reads like the other point exports.
+	#[tokio::test]
+	async fn export_stats_reads_the_connection_root() {
+		let invocation =
+			Invocation::try_parse_from(["moq", "--connect", "http://relay/event", "export", "stats"]).unwrap();
+		let Some(Command::Export(export)) = invocation.stages.into_iter().next() else {
+			panic!("parsed as something other than an export");
+		};
+		let origin = moq_tokio::origin::spawn();
+		let mut tasks = JoinSet::new();
+		spawn_export(&origin, export, String::new(), None, &mut tasks).expect("the root is a broadcast");
+		tasks.abort_all();
 	}
 }

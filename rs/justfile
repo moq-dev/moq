@@ -345,7 +345,7 @@ render-sw:
 
 # Run the ignored mDNS tests, which multicast on the host's network interfaces.
 multicast:
-    just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::apps_partition_discovery)'
+    just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::apps_partition_discovery) | test(/^mdns::tests::daemon_/)'
     just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
 
 # Run moq-audio's ignored output-device tests against a private PulseAudio null sink.
