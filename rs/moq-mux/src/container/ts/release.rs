@@ -203,6 +203,7 @@ impl Release {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
+	/// Poll for the next original MPEG-TS frame at its release time, or `None` at end.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		while let Some(catalog) = self.catalog.as_mut() {
 			match catalog.poll_next(waiter)? {

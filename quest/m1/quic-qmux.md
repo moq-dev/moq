@@ -99,7 +99,9 @@ the fork plan the same day kept it there.
 Decided 2026-10-20 (maintainer): moved to m1. moq stops depending on the
 web-transport repo, so the qmux credit and close fixes ship here instead of
 as upstream releases and pin bumps; the bug stays on main until this lands.
-The release line keeps its current qmux and gets no backport.
+The release line gets no backport of the credit and close fixes; the
+stream-limit port in the [release shutdown backport](/quest/m0/ffi-shutdown-backport.md)
+is the exception.
 
 ## Required
 

@@ -11,6 +11,7 @@ export function renderable(config: Catalog.TextConfig): boolean {
 	return RENDERABLE.has(config.format);
 }
 
+/** Signals the source reads. */
 export type SourceInput = {
 	broadcast: Getter<Broadcast | undefined>;
 
@@ -37,6 +38,7 @@ type SourceOutput = {
  * nothing is chosen until `target` names a track. The {@link Renderer} consumes whatever it picks.
  */
 export class Source {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<SourceInput>;
 
 	readonly #out: SourceOutput = {
@@ -45,6 +47,7 @@ export class Source {
 		track: new Signal<string | undefined>(undefined),
 		config: new Signal<Catalog.TextConfig | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
@@ -86,6 +89,7 @@ export class Source {
 		effect.set(this.#out.config, config);
 	}
 
+	/** Stop and release everything this holds. */
 	close(): void {
 		this.#signals.close();
 	}

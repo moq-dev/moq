@@ -56,7 +56,7 @@ impl Worker {
 		let origin = produce_origin(hop);
 		let claim = Rc::new(
 			origin
-				.dynamic("pool", origin::Route::default().with_cost(cost))
+				.dynamic_route("pool", origin::Route::default().with_cost(cost))
 				.unwrap(),
 		);
 		let outputs = Rc::new(RefCell::new(Vec::new()));
@@ -103,7 +103,9 @@ async fn drained_claim(version: &str) {
 
 	// A closes its output and drains its claim, so B wins the path from here on.
 	a.outputs.borrow().iter().for_each(|(output, _)| output.close());
-	a.claim.update(a.claim.route().with_cost(origin::Cost::DRAIN)).unwrap();
+	a.claim
+		.update_route(a.claim.route().with_cost(origin::Cost::DRAIN))
+		.unwrap();
 	// Past the linger, which is as long as the cache window, nothing reads the relay's
 	// front for the path.
 	moq_clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2).await;

@@ -14,8 +14,10 @@ import { type Kind, Rendition } from "./rendition";
 // outweigh twice its keyframe. Matches moq-video's capture `REFRESH`; see it for the measurements.
 const VIDEO_REFRESH = 2;
 
-// Signals the broadcast reads. Whoever owns the backing Signal (the element, or another component
-// whose output is wired in, e.g. a Video.Capture's `display`) does the writing.
+/**
+ * Signals the broadcast reads. Whoever owns the backing Signal (the element, or another component
+ * whose output is wired in, e.g. a Video.Capture's `display`) does the writing.
+ */
 export type BroadcastInput = {
 	// The origin to publish into. Independent of any connection: whichever sessions serve the
 	// origin announce the broadcast, and it survives their reconnects.
@@ -71,19 +73,24 @@ export class Broadcast {
 	/** The DEFLATE-compressed catalog track, served alongside {@link CATALOG_TRACK} with identical content. */
 	static readonly CATALOG_TRACK_COMPRESSED = Catalog.TRACK_COMPRESSED;
 
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<BroadcastInput>;
 
-	// The catalog, editable at any time regardless of whether anyone is subscribed. The base
-	// `video`/`audio` sections are folded from the registered renditions; an application adds its own
-	// root sections (e.g. `scte35`) by locking it too.
+	/**
+	 * The catalog, editable at any time regardless of whether anyone is subscribed. The base
+	 * `video`/`audio` sections are folded from the registered renditions; an application adds its own
+	 * root sections (e.g. `scte35`) by locking it too.
+	 */
 	readonly catalog = new CatalogProducer();
 
-	// The underlying network broadcast, recreated when the name, enabled state, or maxAge changes,
-	// and is `undefined` in between. It lives in the origin rather than any session, so it spans
-	// reconnects. Exposed so an application can serve its own tracks alongside the built-in
-	// catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
-	// Names under a rendition's ID (`video/1`) are reserved for that rendition's replacement tracks.
-	// Reacquire it via an effect, since a rename swaps in a fresh producer.
+	/**
+	 * The underlying network broadcast, recreated when the name, enabled state, or maxAge changes,
+	 * and is `undefined` in between. It lives in the origin rather than any session, so it spans
+	 * reconnects. Exposed so an application can serve its own tracks alongside the built-in
+	 * catalog/audio/video, e.g. `net.createTrack("meta.json")` plus a matching `catalog` section.
+	 * Names under a rendition's ID (`video/1`) are reserved for that rendition's replacement tracks.
+	 * Reacquire it via an effect, since a rename swaps in a fresh producer.
+	 */
 	readonly net = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
 
 	/**
@@ -448,6 +455,7 @@ export class Broadcast {
 		});
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#signals.close();
 	}

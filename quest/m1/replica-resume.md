@@ -30,5 +30,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - rechecks this contract after changing how a claim answers
+- [Claim answer epochs](https://github.com/moq-dev/moq/pull/5678) - changed how a claim answers, so this contract is rechecked after it
 - [Resume through an outage](/quest/m1/resume-outage.md) - the same-epoch resume after an unclosed route dies
