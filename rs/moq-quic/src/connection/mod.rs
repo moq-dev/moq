@@ -237,8 +237,10 @@ pub struct Connection {
     //
     /// The number of times a PTO has been sent without receiving an ack.
     pto_count: u32,
-    /// When a packet from the peer last authenticated
-    last_heard: Option<Instant>,
+    /// Whether a packet from the peer has authenticated since the last ack-eliciting 1-RTT packet
+    /// went out. Kept in event order: a packet handled and one sent in the same poll share an
+    /// instant.
+    heard_since_sent: bool,
     /// A probe timed out with the peer unheard since the packet it probed for went out, so the
     /// path may have been down: the next packet heard brings the next probe forward.
     probe_when_heard: bool,
@@ -365,7 +367,7 @@ impl Connection {
             next_bundled_ack_time: None,
 
             pto_count: 0,
-            last_heard: None,
+            heard_since_sent: false,
             probe_when_heard: false,
 
             app_limited: false,
@@ -1923,14 +1925,16 @@ impl Connection {
         self.probe_when_heard = space == SpaceId::Data
             && self.spaces[space]
                 .time_of_last_ack_eliciting_packet
-                .is_some_and(|sent| self.last_heard.is_none_or(|heard| heard < sent));
+                .is_some()
+            && !self.heard_since_sent;
         self.pto_count = self.pto_count.saturating_add(1);
         self.set_loss_detection_timer(now);
     }
 
     /// Send the next probe now if the peer, silent through the last probe timeout, is heard
-    /// again ([`Self::probe_when_heard`]). The timeout doubles without a cap (RFC 9002 §6.2.1),
-    /// so after an outage the backed-off timer can leave a path that is back idle for seconds.
+    /// again ([`Self::probe_when_heard`]). The timeout doubles with each probe (RFC 9002 §6.2.1),
+    /// up to 2^[`MAX_BACKOFF_EXPONENT`] times its base, so after an outage the backed-off timer
+    /// can leave a path that is back idle for seconds.
     /// A packet that acknowledged anything new has already reset the backoff.
     fn probe_on_heard(&mut self, now: Instant) {
         if mem::take(&mut self.probe_when_heard) && self.pto_count > 0 && !self.state.is_closed() {
@@ -2205,7 +2209,7 @@ impl Connection {
         spin: bool,
         is_1rtt: bool,
     ) {
-        self.last_heard = Some(now);
+        self.heard_since_sent = true;
         self.reset_keep_alive(now);
         self.reset_idle_timeout(now, space_id);
         self.permit_idle_reset = true;

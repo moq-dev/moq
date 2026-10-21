@@ -3996,6 +3996,48 @@ fn a_peer_heard_through_a_one_way_outage_leaves_the_backoff() {
     assert_backs_off(&probes);
 }
 
+/// A packet the client handles in the instant its data goes out came before the data, so a probe
+/// timeout with nothing heard after it still brings the next probe forward.
+#[test]
+fn a_peer_heard_as_the_data_left_still_brings_the_probe_forward() {
+    let _guard = subscribe();
+    let (mut pair, client_ch, server_ch) = settled_pair();
+    let rtt = pair.latency * 2;
+    pair.server_conn_mut(server_ch).ping();
+    pair.drive_server();
+    pair.time += pair.latency;
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+    pair.client_send(client_ch, s).write(b"hello").unwrap();
+
+    // The PING arrives now and the data leaves in the same drive, into an outage that lasts until
+    // the client's first probe.
+    pair.to_server.loss = 1.0;
+    pair.to_client.loss = 1.0;
+    for _ in 0..2 {
+        let sent = client_probes(&mut pair, client_ch);
+        drive_until(&mut pair, |pair| client_probes(pair, client_ch) > sent);
+    }
+    pair.to_server.loss = 0.0;
+    pair.to_client.loss = 0.0;
+
+    let end = pair.time;
+    let due = pair.client.next_wakeup().unwrap() - end;
+    assert!(
+        due > 3 * rtt,
+        "the backed-off probe is due {due:?} after the outage"
+    );
+    pair.server_conn_mut(server_ch).ping();
+    let sent = client_probes(&mut pair, client_ch);
+    let probed = drive_until(&mut pair, |pair| client_probes(pair, client_ch) > sent) - end;
+    assert!(
+        probed <= rtt,
+        "the client probed {probed:?} after the outage, not {due:?}"
+    );
+}
+
 /// A client's lost Finished is probed at the Handshake space's own PTO, not one
 /// still backed off from Initials lost before it (RFC 9002 A.11).
 #[test]
