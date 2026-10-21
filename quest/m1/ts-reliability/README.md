@@ -104,12 +104,12 @@ refused means an error or a counted drop.
 | Private and unknown PES types, LATM (0x11), metadata (0x15) | Preserved: `pesPacket`, PTS and DTS rebased | landed |
 | PES clock fields (ESCR, pack header, TREF), PES scrambling | Refused, counted in `refused` | landed |
 | Private sections (0x05), SCTE-35 (0x86 + `CUEI`) | Preserved: `verbatim` section, `pts_adjustment` rebased | landed |
-| MPEG-1/2 video (0x01/0x02) | Today clock only, payload discarded | [routes](/quest/m1/ts-reliability/stream-routes.md) |
+| MPEG-1/2 video (0x01/0x02) | Preserved: `pesPacket`, keeping its clock role; today clock only, payload discarded | [routes](/quest/m1/ts-reliability/stream-routes.md) |
 | DSM-CC types (0x0A to 0x0D), 0x86 without `CUEI` | Today PES-parsed into damage, or dropped uncounted | [routes](/quest/m1/ts-reliability/stream-routes.md) |
 | CAT, EMM/ECM, ATSC PSIP, other SI PIDs, unlisted PIDs, TS scrambling | Outside the profile, raw lane; today dropped uncounted | [routes](/quest/m1/ts-reliability/stream-routes.md) |
 | DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
 | Program identity, program and ES descriptors | Preserved, but captured once | [PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) |
-| PMT add, remove, retype; PID reuse; PAT changes | Today stale tracks on import, refusal or stale PMT on export | [PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) |
+| PMT add, remove, retype; PID reuse; PAT changes | Normalized: in place under fresh track names, PMT rebuilt at the next `version_number`; program identity changes refused. Today stale tracks on import, refusal or stale PMT on export | [PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) |
 | Programs without video | Today audio plus `pesPacket` only; sections or no media refused | [clockless export](/quest/m1/ts-reliability/clockless-export.md) |
 | PCR | Normalized: rebased, carried on the first video (else audio) PID | landed |
 | Mux rate, null stuffing | Normalized: re-padded to `muxRate` while the source is CBR | landed |

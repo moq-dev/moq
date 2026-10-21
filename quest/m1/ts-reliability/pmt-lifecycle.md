@@ -36,34 +36,32 @@ What the code does today:
   leaves the catalog keeps its PID in the PMT forever. A switch to another
   instance already rebuilds the tables at the next `version_number`.
 
-Open decision for the maintainer, from the fidelity planning PR. Recommended:
+Decided 2026-10-20 by the maintainer: change in place with fresh names.
 
-1. **In place, fresh names (recommended).** A changed `stream_type` or ES
-   descriptor loop finishes the old track, drops its catalog entry, and opens
-   a new uniquely named track, as for a new PID; a removed stream finishes its
-   track and leaves the catalog; `programDescriptors` updates in place, and a
-   CUEI change re-routes the affected PIDs. Export rebuilds the PMT at the
-   next `version_number` when the track set or an entry changes, drops a
-   retired track's PID once its track ends, and keeps the PCR PID unless its
-   track retires. A TS receiver sees an ordinary PMT revision and a Hang
-   player sees a rendition switch; nothing else blips. It matches the
-   2026-10-15 identity decision: changed content gets a new name, and a new
-   epoch stays reserved for a whole-broadcast restart.
-2. **Replace the broadcast.** Any ES layout change ends the import's
-   broadcast and publishes a new epoch. Export already follows that. Every
-   subscriber reacquires every track, so an audio-language add interrupts
-   video too.
-3. **Refuse transitions.** Any ES layout change after the first catalog ends
-   the import with an error. Simplest and honest, but common live
-   transitions (a regional opt-out adding audio, a subtitle PID coming and
-   going) stop the ingest.
+- A changed `stream_type` or ES descriptor loop finishes the old track,
+  drops its catalog entry, and opens a new uniquely named track, as for a
+  new PID. A removed stream finishes its track and leaves the catalog.
+  `programDescriptors` updates in place, and a CUEI change re-routes the
+  affected PIDs.
+- Export rebuilds the PMT at the next `version_number` when the track set
+  or an entry changes, drops a retired track's PID once its track ends, and
+  keeps the PCR PID unless its track retires. A TS receiver sees an
+  ordinary PMT revision and a Hang player sees a rendition switch; nothing
+  else blips.
+- A change of program identity (`transport_stream_id`, `program_number`)
+  refuses with an error: the carried SI describes the old service.
+- A new PMT PID for the same program moves the reassembler and updates
+  `program.pmtPid`, which the export follows with a new PAT. `Programs`
+  publishes a program a later PAT adds as its own broadcast, as it does for
+  the first PAT, rather than ignoring it.
 
-Under every option, a change of program identity (`transport_stream_id`,
-`program_number`) refuses with an error: the carried SI describes the old
-service. A new PMT PID for the same program moves the reassembler and
-updates `program.pmtPid`, which the export follows with a new PAT.
-`Programs` publishes a program a later PAT adds as its own broadcast, as it
-does for the first PAT, or refuses loudly; recommend publishing.
+Why: it matches the 2026-10-15 identity decision (changed content gets a new
+name; a new epoch stays reserved for a whole-broadcast restart). Rejected:
+replacing the broadcast with a new epoch on any ES layout change, which makes
+every subscriber reacquire every track so an audio-language add interrupts
+video too; and refusing every layout change, which stops the ingest on common
+live transitions such as a regional opt-out adding audio or a subtitle PID
+coming and going.
 
 Rust: `rs/moq-mux` TS import and export. JS: none; `js/msf` passes the
 `mpegts` section through untyped and nothing in `js/` muxes TS. Draft

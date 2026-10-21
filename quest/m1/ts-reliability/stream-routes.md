@@ -16,12 +16,12 @@ Found 2026-10-20 in the fidelity audit (`Import::ensure_stream`,
 - **MPEG-1/2 video (0x01/0x02)** is `Stream::Clock`: its PTS anchors the
   timebase and its payload is discarded, so TS to Hang to TS loses the
   program's video without an error, while an unknown `stream_type` survives
-  as `pesPacket`. Recommended: carry it as `pesPacket` and keep its clock
-  role, so the round trip keeps the video and a Hang player still sees no
-  rendition it cannot decode. The draft already lets a video PES leave
-  `PES_packet_length` unbounded. Alternative: refuse it loudly in `refused`
-  and leave the video to the raw lane. Confirm with the maintainer when this
-  quest starts.
+  as `pesPacket`. Decided 2026-10-20 by the maintainer: carry it as an
+  opaque `pesPacket` and keep its clock role, so the round trip keeps the
+  video and a Hang player still sees no rendition it cannot decode. The
+  draft already lets a video PES leave `PES_packet_length` unbounded.
+  Rejected: refusing it loudly and leaving the video to the raw lane, which
+  drops a stream the semantic lane can carry unchanged.
 - **Section-framed types outside 0x05 and CUEI-marked 0x86** are PES-parsed.
   The ISO 13818-6 DSM-CC types (0x0A to 0x0D) ride sections, so every unit
   fails the start code and counts as `damaged`. Route them through
