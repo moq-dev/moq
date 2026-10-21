@@ -156,6 +156,14 @@ public final class Session: Sendable {
         ffi.stats()
     }
 
+    /// The session's authorization: the grant its peer gave it, and more tokens to present.
+    ///
+    /// A client session's handle survives reconnects, presenting each added token
+    /// again on every new connection.
+    public func auth() -> Auth {
+        Auth(ffi.auth())
+    }
+
     /// Hold receive-estimate demand until the returned consumer is released.
     public func recvBandwidth() -> Bandwidth.Consumer? {
         ffi.recvBandwidth().map(Bandwidth.Consumer.init)
