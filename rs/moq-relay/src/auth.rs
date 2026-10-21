@@ -899,8 +899,8 @@ impl Auth {
 	///
 	/// Waits on the decider for as long as the caller does. The caller owns the
 	/// deadline: a listener bounds it with the connection's handshake deadline
-	/// ([`moq_tokio::server::Request::within`]), and dropping the future withdraws
-	/// the admission from the decider.
+	/// ([`moq_tokio::server::Request::within`]). Dropping the future drops a server
+	/// decider's in-flight request; an embedder's [`Admission`] is not told.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
 		// Build the token from the grant the admission checked: re-reading it could
 		// pick up an update that skipped the check.
