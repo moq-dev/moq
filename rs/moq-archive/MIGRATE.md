@@ -18,6 +18,6 @@ The new layout is not readable by `Reader`, which still replays timeline recordi
 `Info::new` and `Info::timescale` take and return `Option<u64>`, and `Error::TimescaleMismatch` carries `Option<u64>` fields.
 `segment::Frame::timestamp` is `Option<u64>`.
 `Object::decode(buf, timed)` and `Store::get_segments(track, segment, timed)` take whether the track is timed.
-`Error::Untimed` now means a DVR cannot record an untimed track; mismatched timing is `Error::Timing`.
+Mismatched timing is `Error::Timing`.
 Untimed recordings use the version 2 format, which an older version 2 reader refuses.
 Pass `Some(timescale)` to `Info::new`, and `info.timescale.is_some()` as `timed`.

@@ -73,6 +73,7 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 	let mut announced = origin.clone().with_hidden(hidden).announced();
 	let mut recordings = tokio::task::JoinSet::new();
 	let mut running = Running::default();
+	let claims = Claims::default();
 
 	tracing::info!(%prefix, store = %args.store, "recording");
 	notify_ready();
@@ -105,7 +106,51 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 		};
 		let key = key(&root, &instance)?;
 		let store = moq_archive::Store::new(store.clone(), key);
-		recordings.spawn(record(origin.clone(), instance, store, config.clone()));
+		// Requested now, so an announcement resolves the instance serving it when read, not
+		// whichever one serves by the time its task runs.
+		let request = origin.request_broadcast(&instance.0, instance.1.clone());
+		recordings.spawn(record(request, instance, store, config.clone(), claims.clone()));
+	}
+}
+
+/// The broadcasts being recorded. Announcements read after another instance took over all
+/// resolve that one, so it is recorded once.
+#[derive(Clone, Default)]
+struct Claims(Arc<std::sync::Mutex<HashMap<moq_net::PathOwned, Vec<moq_net::broadcast::Consumer>>>>);
+
+impl Claims {
+	/// Claim `broadcast` for recording, or `None` when it is recorded already.
+	fn claim(&self, path: &moq_net::PathOwned, broadcast: &moq_net::broadcast::Consumer) -> Option<Claim> {
+		let mut claims = self.0.lock().unwrap();
+		let claimed = claims.entry(path.clone()).or_default();
+		if claimed.iter().any(|other| other.is_clone(broadcast)) {
+			return None;
+		}
+		claimed.push(broadcast.clone());
+		Some(Claim {
+			claims: self.clone(),
+			path: path.clone(),
+			broadcast: broadcast.clone(),
+		})
+	}
+}
+
+/// A broadcast being recorded, released on drop.
+struct Claim {
+	claims: Claims,
+	path: moq_net::PathOwned,
+	broadcast: moq_net::broadcast::Consumer,
+}
+
+impl Drop for Claim {
+	fn drop(&mut self) {
+		let mut claims = self.claims.0.lock().unwrap();
+		if let Some(claimed) = claims.get_mut(&self.path) {
+			claimed.retain(|other| !other.is_clone(&self.broadcast));
+			if claimed.is_empty() {
+				claims.remove(&self.path);
+			}
+		}
 	}
 }
 
@@ -148,19 +193,22 @@ impl Running {
 	}
 }
 
-/// Record one publisher instance until its broadcast ends.
+/// Record one publisher instance until its broadcast ends, unless another recording has it.
 async fn record(
-	origin: moq_net::origin::Consumer,
+	request: impl Future<Output = Result<moq_net::broadcast::Consumer, moq_net::Error>>,
 	instance: Instance,
 	store: moq_archive::Store<Arc<dyn ObjectStore>>,
 	config: moq_archive::producer::Config,
+	claims: Claims,
 ) -> (Instance, anyhow::Result<()>) {
 	let result = async {
-		let (path, epoch) = &instance;
-		let broadcast = origin
-			.request_broadcast(path, epoch.clone())
+		let path = &instance.0;
+		let broadcast = request
 			.await
 			.with_context(|| format!("broadcast `{path}` is unavailable"))?;
+		let Some(_claim) = claims.claim(path, &broadcast) else {
+			return Ok(());
+		};
 		tracing::info!(%path, key = %store.prefix(), "recording broadcast");
 		moq_archive::Producer::new(store, broadcast, config)
 			.run()
@@ -374,6 +422,26 @@ mod tests {
 		assert!(running.done(&pinned));
 		assert!(!running.done(&pinned));
 		assert!(running.start(&pinned));
+	}
+
+	/// Announcements that resolve the same broadcast record it once at a time, while another
+	/// instance at the path records beside it.
+	#[tokio::test]
+	async fn a_resolved_broadcast_is_recorded_once() {
+		let origin = moq_tokio::origin::spawn();
+		let path = moq_net::Path::new("live/a").to_owned();
+		let newest = origin.create_broadcast(&path).unwrap();
+		let older = origin.create_broadcast(&path).unwrap();
+
+		let claims = Claims::default();
+		let claim = claims.claim(&path, &newest.consume()).expect("first claim");
+		assert!(claims.claim(&path, &newest.consume()).is_none());
+		let beside = claims.claim(&path, &older.consume()).expect("another instance");
+
+		drop(claim);
+		assert!(claims.claim(&path, &newest.consume()).is_some());
+		drop(beside);
+		assert!(claims.0.lock().unwrap().is_empty());
 	}
 
 	/// A route without an epoch records under one minted per instance, so two instances never

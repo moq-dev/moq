@@ -8,7 +8,7 @@ How to update your invocation and config for each breaking change, newest first.
 
 `moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/@<epoch>`, until the connection ends, instead of one broadcast at `<url>`.
 Point `<url>` at the root you want recordings under, and drop `--catalog-format`, which it now refuses.
-`--retention` now works on untimed tracks.
+Untimed tracks record, and `--retention` works on them.
 `import archive` does not read the new layout yet; it still replays recordings made by older `moq` versions.
 
 ### `--cluster-lan-secret` is a file path only (#5910)
@@ -68,10 +68,6 @@ A restarted publisher exits 1 unless `--stitch` follows it as a program switch.
 ```bash
 moq export ts --linger 10s --stitch ...
 ```
-
-### `moq export archive` refuses untimed tracks
-
-Recording a track with no timestamps fails with `Untimed`, so an archive over moq-lite before 05 or moq-transport drafts 14 to 16 fails instead of recording arrival times.
 
 ### `moq export fmp4` fixes its track set at the init segment
 
