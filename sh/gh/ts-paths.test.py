@@ -42,5 +42,25 @@ class BuiltDirsTest(unittest.TestCase):
         self.check("/repo (copy)", "/")
 
 
+class TsFilterTest(unittest.TestCase):
+    def test_only_the_ts_entry(self):
+        workflow = "".join(f"{line}\n" for line in (
+            "          filters: |",
+            "            obs:",
+            '              - "rs/moq-c/**"',
+            "            ts:",
+            '              - "test/ts/**"',
+            "              # A comment.",
+            '              - "rs/moq-net/**"',
+            "            uring:",
+            '              - "rs/**"',
+        ))
+        self.assertEqual(module.ts_filter(workflow), '              - "test/ts/**"\n              # A comment.\n              - "rs/moq-net/**"\n')
+
+    def test_missing(self):
+        with self.assertRaises(SystemExit):
+            module.ts_filter("            obs:\n              - \"rs/moq-c/**\"\n")
+
+
 if __name__ == "__main__":
     unittest.main()

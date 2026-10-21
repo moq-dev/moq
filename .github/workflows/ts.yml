@@ -6,48 +6,7 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 8 * * *"
-  pull_request:
-    # Main PRs skip it; the schedule above runs it on main. `edited` catches a
-    # main PR retargeted to release.
-    branches: [release]
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - "test/ts/**"
-      - "test/lib/**"
-      - "test/justfile"
-      # Exactly the workspace crates run.sh builds; sh/gh/ts-paths.py fails Check on drift.
-      - "rs/hang/**"
-      - "rs/kio/**"
-      - "rs/moq-archive/**"
-      - "rs/moq-auth/**"
-      - "rs/moq-cli/**"
-      - "rs/moq-clock/**"
-      - "rs/moq-flate/**"
-      - "rs/moq-hls/**"
-      - "rs/moq-ice/**"
-      - "rs/moq-json/**"
-      - "rs/moq-loc/**"
-      - "rs/moq-msf/**"
-      - "rs/moq-mux/**"
-      - "rs/moq-net/**"
-      - "rs/moq-pattern/**"
-      - "rs/moq-quic/**"
-      - "rs/moq-relay/**"
-      - "rs/moq-rtc/**"
-      - "rs/moq-rtmp/**"
-      - "rs/moq-rtsp/**"
-      - "rs/moq-shaper/**"
-      - "rs/moq-sock/**"
-      - "rs/moq-srt/**"
-      - "rs/moq-stats/**"
-      - "rs/moq-tokio/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/actions/rust-cache/**"
-      - ".github/workflows/ts.yml"
+  workflow_call:
 
 concurrency:
   group: ts-${{ github.ref }}

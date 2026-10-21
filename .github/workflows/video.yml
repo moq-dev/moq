@@ -16,24 +16,7 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 8 * * *"
-  pull_request:
-    # Main PRs skip it; the schedule above runs it on main. `edited` catches a
-    # main PR retargeted to release. `closed` is here only so merging/closing a
-    # PR cancels its in-flight run via the concurrency group below; the job
-    # itself is skipped on close.
-    branches: [release]
-    types: [opened, synchronize, reopened, edited, closed]
-    paths:
-      - "js/video/**"
-      - "js/publish/src/preview.ts"
-      - "js/publish/src/element.ts"
-      - "test/video/**"
-      - "test/justfile"
-      - "package.json"
-      - "bun.lock"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/workflows/video.yml"
+  workflow_call:
 
 concurrency:
   group: video-${{ github.ref }}
@@ -42,7 +25,6 @@ concurrency:
 jobs:
   video:
     name: Video
-    if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 

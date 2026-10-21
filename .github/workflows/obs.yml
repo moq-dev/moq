@@ -38,7 +38,7 @@ name: OBS
 # A list of paths still can't be complete here -- a vendored C source or a
 # .cargo/config.toml could do it too -- and `rs/**` would run this on nearly
 # every PR, which is the cost that removed the Windows and macOS gates (#2600).
-# So this filter covers the likely inputs at PR time, and pushes to `release`
+# So release-gate.yml's filter covers the likely inputs at PR time, and pushes to `release`
 # rebuild on any Rust or plugin change to cover the rest. Main PRs skip it:
 # nightly.yml runs the same Linux recipes on main diff-independently.
 
@@ -61,32 +61,12 @@ on:
       - "flake.nix"
       - "flake.lock"
       - ".github/workflows/obs.yml"
-  pull_request:
-    # `edited` catches a main PR retargeted to release. `closed` is here only so
-    # merging/closing a PR cancels its in-flight run via the concurrency group
-    # below; the job itself is skipped on close.
-    branches: [release]
-    types: [opened, synchronize, reopened, edited, closed]
-    paths:
-      - "cpp/obs/**"
-      - "cpp/moq/**"
-      - "sh/obs/**"
-      - "rs/moq-ffi/**"
-      - "rs/moq-c/**"
-      - "doc/lib/c/**"
-      - "doc/lib/samples.sh"
-      - "rs/**/Cargo.toml"
-      - "rs/**/build.rs"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/workflows/obs.yml"
+  # Release PRs, through release-gate.yml.
+  workflow_call:
 
-# Keyed and cancelled like platform.yml: a merged PR's `closed` run must not
-# cancel the push run it triggers, and `release` can merge faster than a push
-# run finishes, so pushes queue rather than cancel.
+# Keyed and cancelled like platform.yml: a release PR's run must not cancel a
+# push run, and `release` can merge faster than a push run finishes, so pushes
+# queue rather than cancel.
 concurrency:
   group: obs-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -94,7 +74,6 @@ concurrency:
 jobs:
   build:
     name: OBS
-    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
 
