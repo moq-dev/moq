@@ -1835,6 +1835,52 @@ test("an unanswered draft 16 update withdraws its request before offering it aga
 });
 
 /**
+ * A draft-14-16 request rides the control stream, where the deadline's reset tells the peer
+ * nothing, so an advertisement the peer never answers is withdrawn with PUBLISH_NAMESPACE_DONE.
+ * It stays terminal: nothing is offered again.
+ */
+test.each([
+	["14", Version.DRAFT_14],
+	["15", Version.DRAFT_15],
+	["16", Version.DRAFT_16],
+] as const)("an unanswered draft %s advertisement is withdrawn at its deadline", async (_, version) => {
+	jest.useFakeTimers();
+	const pair = createMockTransportPair(ALPNS[version]);
+	const control = await Stream.open(pair.server, { version });
+	const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, false);
+	void adapter.run().catch(() => undefined);
+	const peer = await Stream.accept(pair.client, version);
+	if (!peer) throw new Error("no control stream");
+	const { pub, origin } = publisher(pair.server, { session: adapter });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	try {
+		origin.createBroadcast(Path.from("mine")).announce();
+		void pub.runPublishNamespaces();
+
+		expect(await peer.reader.u53()).toBe(PublishNamespace.id);
+		const advertised = await PublishNamespace.decode(peer.reader, version);
+
+		const next = watch(peer.reader.u53());
+		await advance(9_950);
+		expect(next.state).toBe("pending");
+		await advanceUntil(() => next.state !== "pending", 100);
+		expect(next.value).toBe(PublishNamespaceDone.id);
+		const done = await PublishNamespaceDone.decode(peer.reader, version);
+		if (version === Version.DRAFT_16) expect(done.requestId).toBe(advertised.requestId);
+		else expect(done.trackNamespace).toBe(advertised.trackNamespace);
+
+		const more = watch(peer.reader.u53());
+		await advance(30_000);
+		expect(more.state).toBe("pending");
+	} finally {
+		warn.mockRestore();
+		origin.close();
+		adapter.close();
+		jest.useRealTimers();
+	}
+});
+
+/**
  * A draft-16 PUBLISH_NAMESPACE_CANCEL can beat the answer to our update. The peer already let
  * the namespace go, and draft 16 sends no PUBLISH_NAMESPACE_DONE after a cancel, so the next
  * message is the namespace offered again.
