@@ -30,7 +30,7 @@ name: Nightly
 # Main PRs run no cloud CI beyond the merge queue's Check, so every
 # path-filtered gate (Android, C++, WASM, X11, the audio replays, the OSS
 # Scanner image, platform.yml and the release dry-runs) runs here on main too,
-# and on release PRs.
+# and release-gate.yml runs them on release PRs.
 #
 # A failure here lands on main rather than being caught in review, which is the
 # accepted trade. Anything that must block a merge belongs in check.yml.
@@ -173,7 +173,7 @@ jobs:
             artifact-path: target/coverage/js
           # OBS (over moq-ffi) and moq-c's C fixtures link a Rust staticlib from
           # outside cargo, so a stale `rs/moq-c/native-libs/*.txt` breaks them and
-          # no cargo build. obs.yml's path filter can't list every such input;
+          # no cargo build. release-gate.yml's OBS filter can't list every such input;
           # this diff-independent run catches what it misses, a day late.
           - name: OBS
             recipe: obs ci
