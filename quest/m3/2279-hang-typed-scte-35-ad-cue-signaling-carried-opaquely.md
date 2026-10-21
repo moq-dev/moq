@@ -30,8 +30,9 @@ independent of media GOPs.
   cue event from it. Applications that want the rest parse the bytes.
 - **The TS lanes stay.** The importer keeps the verbatim `mpegts` track for
   contribution fidelity and additionally emits the sidecar; the exporter must
-  not double-emit. Audio-only section export is owned by
-  [clockless export](/quest/m1/ts-reliability/clockless-export.md), so the
+  not double-emit: an import-to-export test with the sidecar present asserts
+  each source section is emitted exactly once. Audio-only section export is
+  owned by [clockless export](/quest/m1/ts-reliability/clockless-export.md), so the
   audio-only mapping above is a promise export can keep.
 
 Wire and catalog schema: a new optional section, additive, so it lands on

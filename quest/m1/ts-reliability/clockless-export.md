@@ -37,9 +37,14 @@ media stream added later unwrap its PTS against that era.
 
 Find why the video requirement exists before removing it: sections may lean
 on the video tune-in point (`video_start`) or the video decode clock. Then
-take the PCR from the first audio track when there is no video, and from a
-PCR-only PID when there is no media at all. The schedule already writes a PCR
-in an adaptation-only packet when no clock-PID packet can open the slot. A
+take the PCR from the first audio track when there is no video. With no
+media at all, export allocates a dedicated PCR-only PID that no track uses:
+the PMT names it as `PCR_PID` with no elementary stream entry, and every
+packet on it is adaptation-only and carries a PCR at the existing repetition
+interval, so `PCR_PID` never names a PID without PCRs. Reusing a sparse data
+PID is rejected: its packets cannot meet the repetition interval. The
+schedule already writes a PCR in an adaptation-only packet when no clock-PID
+packet can open the slot. A
 data-only program has no tune-in point, so its first frame starts the output.
 
 Rust: `rs/moq-mux` TS import and export. JS: none. Draft
@@ -54,8 +59,8 @@ payloads and placements. A data-only import crosses the PCR wrap with
 continuous timestamps, from a generated PCR that starts just before the
 wrap. Keep a refusal test for a data-only program whose PMT has no PCR
 (`PCR_PID` 0x1FFF): its section and whole-PES streams count in `refused`
-and nothing publishes. Add generated audio-plus-SCTE-35 and sections-only arms to the
-TSDuck round trip in `test/ts`, so `compliance.py` grades `PCR_PID`, PCR
+and nothing publishes. Add generated audio-plus-SCTE-35, sections-only and
+`pesPacket`-only arms to the TSDuck round trip in `test/ts`, so `compliance.py` grades `PCR_PID`, PCR
 repetition and the PMT both when the clock rides audio and when it rides
 its own PID.
 

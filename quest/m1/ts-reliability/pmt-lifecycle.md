@@ -35,7 +35,7 @@ What the code does today:
   per-program `Import`; the removed program's `handle_pat` errors,
   `Programs::feed` propagates it, and the whole multiplex ingest stops,
   including unrelated programs.
-- `Export` builds the PAT/PMT once. A track added afterwards fails the export
+- `Export` builds the PAT/PMT once. A track added afterward fails the export
   ("TS track layout changed after PAT/PMT was emitted"), and a track that
   leaves the catalog keeps its PID in the PMT forever. A switch to another
   instance already rebuilds the tables at the next `version_number`.
