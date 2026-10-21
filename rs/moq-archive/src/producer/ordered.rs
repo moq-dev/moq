@@ -3,7 +3,7 @@
 //! `moq_net::track::Ordered` seeks past a missing group at once and orders groups alone, so it
 //! fits a player, not an archive that must keep every group and datagram it can in key order.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
@@ -20,19 +20,20 @@ pub(super) enum Item {
 }
 
 /// Hands out each sequence once every lower one was handed out or given up: at once when it is
-/// the next, otherwise after `max_delay` from its arrival, or from the first arrival while no
-/// start is known. Once both channels end, everything received is handed out without waiting.
+/// the next, otherwise once `max_delay` passes from the oldest arrival still waiting, which is
+/// when the gap below it was first seen. While no start is known, anything but 0 waits the same
+/// way, since arrival is not sequence order. Once both channels end, everything received is
+/// handed out without waiting.
 pub(super) struct Ordered {
 	subscriber: Subscriber,
 	max_delay: Duration,
 	/// The next sequence to hand out; `None` until a start is known or the first wait ends.
 	next: Option<u64>,
-	/// Received sequences waiting on a lower one, with when they arrived.
-	pending: BTreeMap<u64, (Item, Instant)>,
-	/// When the first sequence arrived while `next` was unknown, since arrival is not sequence
-	/// order and a lower one may still be on its way. Fixed, so ever lower arrivals can't extend
-	/// the wait.
-	first: Option<Instant>,
+	/// Received sequences waiting on a lower one.
+	pending: BTreeMap<u64, Item>,
+	/// Each pending sequence with when it arrived, oldest first; ones handed out are dropped
+	/// lazily. The oldest dates the gap, so a later, lower arrival never extends the wait.
+	arrivals: VecDeque<(u64, Instant)>,
 	timer: Option<Pin<Box<moq_clock::Sleep>>>,
 	groups_done: bool,
 	datagrams_done: bool,
@@ -48,7 +49,7 @@ impl Ordered {
 			max_delay,
 			next,
 			pending: BTreeMap::new(),
-			first: None,
+			arrivals: VecDeque::new(),
 			timer: None,
 			groups_done: false,
 			datagrams_done: false,
@@ -77,8 +78,11 @@ impl Ordered {
 
 	fn arrive(&mut self, sequence: u64, item: Item, now: Instant) {
 		// A sequence names one group, so a copy of one already here or handed out is dropped.
-		if self.next.is_none_or(|next| sequence >= next) {
-			self.pending.entry(sequence).or_insert((item, now));
+		if self.next.is_none_or(|next| sequence >= next)
+			&& let std::collections::btree_map::Entry::Vacant(entry) = self.pending.entry(sequence)
+		{
+			entry.insert(item);
+			self.arrivals.push_back((sequence, now));
 		}
 	}
 
@@ -94,20 +98,26 @@ impl Ordered {
 				};
 			};
 			let sequence = *entry.key();
-			let arrived = entry.get().1;
-			let waiting = match self.next {
+			let gap = match self.next {
 				Some(next) if sequence < next => {
 					entry.remove();
 					continue;
 				}
-				Some(next) => (sequence > next).then_some(arrived),
+				Some(next) => sequence > next,
 				// Nothing is below 0.
-				None => (sequence > 0).then(|| *self.first.get_or_insert(arrived)),
+				None => sequence > 0,
 			};
-			if let Some(waiting) = waiting
-				&& !draining
-			{
-				let deadline = waiting + self.max_delay;
+			if gap && !draining {
+				// The oldest arrival still pending is when this gap was first seen.
+				while self
+					.arrivals
+					.front()
+					.is_some_and(|(sequence, _)| !self.pending.contains_key(sequence))
+				{
+					self.arrivals.pop_front();
+				}
+				let (_, since) = self.arrivals.front().expect("a pending sequence arrived");
+				let deadline = *since + self.max_delay;
 				if moq_clock::now() < deadline {
 					let timer = self
 						.timer
@@ -118,7 +128,7 @@ impl Ordered {
 					}
 				}
 			}
-			let (item, _) = entry.remove();
+			let item = self.pending.remove(&sequence).expect("the lowest pending sequence");
 			self.next = Some(sequence.saturating_add(1));
 			return Poll::Ready(Some((sequence, item)));
 		}
@@ -152,12 +162,7 @@ mod tests {
 		}
 	}
 
-	/// The next sequence is handed out at once, a datagram in turn with the groups, and one past a
-	/// missing sequence only once the max delay from its arrival passes.
-	#[tokio::test(start_paused = true)]
-	async fn only_a_missing_sequence_waits_the_max_delay() {
-		let broadcast = broadcast::Info::new().produce();
-		let mut track = broadcast.create_track("t", track::Info::default()).unwrap();
+	async fn ordered(broadcast: &broadcast::Producer, next: Option<u64>) -> Ordered {
 		let subscription = Subscription::default()
 			.with_order(Order::Ascending)
 			.with_max_delay(MAX_DELAY)
@@ -169,7 +174,16 @@ mod tests {
 			.subscribe(subscription)
 			.await
 			.unwrap();
-		let mut ordered = Ordered::new(subscriber, MAX_DELAY, None);
+		Ordered::new(subscriber, MAX_DELAY, next)
+	}
+
+	/// The next sequence is handed out at once, a datagram in turn with the groups, and one past a
+	/// missing sequence only once the max delay from its arrival passes.
+	#[tokio::test(start_paused = true)]
+	async fn only_a_missing_sequence_waits_the_max_delay() {
+		let broadcast = broadcast::Info::new().produce();
+		let mut track = broadcast.create_track("t", track::Info::default()).unwrap();
+		let mut ordered = ordered(&broadcast, None).await;
 
 		group(&track, 0);
 		assert_eq!(next(&mut ordered), Some(0));
@@ -191,5 +205,22 @@ mod tests {
 		group(&track, 3);
 		track.finish().unwrap();
 		assert!(matches!(ordered.poll_next(&kio::Waiter::noop()), Poll::Ready(None)));
+	}
+
+	/// A gap's wait runs from when it was first seen, so ever lower arrivals above it can't extend it.
+	#[tokio::test(start_paused = true)]
+	async fn lower_arrivals_never_extend_a_gap() {
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track("t", track::Info::default()).unwrap();
+		let mut ordered = ordered(&broadcast, Some(0)).await;
+
+		group(&track, 10);
+		assert_eq!(next(&mut ordered), None);
+		moq_clock::sleep(MAX_DELAY - Duration::from_millis(1)).await;
+		group(&track, 9);
+		assert_eq!(next(&mut ordered), None);
+		moq_clock::sleep(Duration::from_millis(1)).await;
+		assert_eq!(next(&mut ordered), Some(9));
+		assert_eq!(next(&mut ordered), Some(10));
 	}
 }

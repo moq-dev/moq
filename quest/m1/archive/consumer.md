@@ -7,7 +7,8 @@ broadcast: every stored track, the archived catalog included, with its
 original groups, frames, timescale, and priority. A host publishes it at a path of its choosing;
 moq-relay never uses it. `moq export archive` already records through
 `archive::Producer`; `moq import archive` serves through
-`archive::Consumer`. It replaces `moq_archive::Reader`.
+`archive::Consumer`. It replaces `moq_archive::Reader`, and with it goes
+`.info`'s tolerance of the `epoch` an older `Writer` stored.
 
 ## Plan
 
