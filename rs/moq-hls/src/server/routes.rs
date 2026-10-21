@@ -873,8 +873,8 @@ mod tests {
 	}
 
 	/// Only the URLs the renderers emit are served: the init under its hash, segments under the
-	/// current generation.
-	#[tokio::test]
+	/// current generation. Paused, since a refused lookup waits out [`READY_TIMEOUT`].
+	#[tokio::test(start_paused = true)]
 	async fn serves_only_versioned_media_urls() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
