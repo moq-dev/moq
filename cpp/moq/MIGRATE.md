@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Anchors can name a time (#6074)
+
+`Anchor` gains a `Time` case holding `timestamp_us`, the group containing that presentation time, so exhaustive visits need a case for it.
+`TrackConsumer::update` now returns a result, failing with `TimestampMismatch` on a time anchor an untimed track can't serve.
+
 ### Rebuild the matching raw bindings
 
 The documentation update changes UniFFI's audio-producer method metadata checksums.

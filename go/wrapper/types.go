@@ -58,12 +58,14 @@ type (
 	// A relative start is the first frame of its group, a relative end includes its whole
 	// group, and an absolute end is exclusive.
 	Range = ffi.MoqRange
-	// Anchor is where one end of a Range falls: AnchorAbsolute or AnchorRelative.
+	// Anchor is where one end of a Range falls: AnchorAbsolute, AnchorRelative, or AnchorTime.
 	Anchor = ffi.MoqAnchor
 	// AnchorAbsolute is an exact group and frame.
 	AnchorAbsolute = ffi.MoqAnchorAbsolute
 	// AnchorRelative is the group Groups before the latest one, clamped to group 0: 0 is the latest.
 	AnchorRelative = ffi.MoqAnchorRelative
+	// AnchorTime is the group containing TimestampUs, a presentation time in microseconds.
+	AnchorTime = ffi.MoqAnchorTime
 	// Order is which of a subscription's pending groups the publisher sends first.
 	Order = ffi.MoqOrder
 	// VideoDecoderOutput configures what a video.Consumer delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).

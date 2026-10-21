@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Anchors can name a time (#6074)
+
+`Subscription.Anchor` gains `.time(timestampUs:)`, so exhaustive switches need a case for it.
+`TrackConsumer.update(subscription:)` now `throws`, on a time anchor an untimed track can't serve; call it with `try`.
+
 ### Rebuild the matching raw bindings
 
 The documentation update changes UniFFI's audio-producer method metadata checksums.

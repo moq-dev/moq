@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Convert measured nightly results to github-action-benchmark's JSON format."""
+"""Convert measured nightly results to github-action-benchmark's JSON format and render its history."""
 
 import argparse
 import csv
+from datetime import datetime, timezone
 import html
 import json
 import math
 import os
 from pathlib import Path
 import re
+import statistics
+import time
 from urllib.parse import quote
 
 
@@ -139,7 +142,8 @@ def prepare(directory, output):
             target.append({**entry, 'name': f'{source.name}/{entry["name"]}'})
         print(f'{source.name}: {len(entries)} measured entries')
     if not costs and not rates:
-        raise ValueError('no completed benchmark reports to publish')
+        # The table still rebuilds from stored history and marks every source stale.
+        print('no completed benchmark reports; no history point')
     output.mkdir(parents=True, exist_ok=True)
     for name, entries in [('costs', costs), ('rates', rates)]:
         (output / f'{name}.json').write_text(json.dumps(entries, indent=2) + '\n')
@@ -150,26 +154,170 @@ def prepare(directory, output):
                 stream.write(f'{name}={str(bool(entries)).lower()}\n')
 
 
-def index(directory):
-    destination = directory / 'bench'
-    links = []
-    for name, label in [('costs', 'Time, CPU, size and Rust ratios'), ('rates', 'Delivered throughput')]:
-        if (destination / name / 'index.html').exists():
-            links.append(f'<li><a href="{name}/">{html.escape(label)}</a></li>')
-    if not links:
-        raise ValueError('no generated benchmark charts to deploy')
-    (destination / 'index.html').write_text('''<!doctype html>
+HISTORY_PREFIX = 'window.BENCHMARK_DATA = '
+BASELINE = 7
+TREND = 30
+
+
+def history(directory):
+    """Read github-action-benchmark's stored runs into one point per series and commit."""
+    series = {}
+    for kind in ('costs', 'rates'):
+        path = directory / 'bench' / kind / 'data.js'
+        if not path.exists():
+            continue
+        text = path.read_text()
+        if not text.startswith(HISTORY_PREFIX):
+            raise ValueError(f'unrecognized benchmark history: {path}')
+        for runs in json.loads(text[len(HISTORY_PREFIX):])['entries'].values():
+            for run in runs:
+                commit = run['commit']
+                when = datetime.fromisoformat(commit['timestamp'].replace('Z', '+00:00'))
+                for bench in run['benches']:
+                    point = {'commit': commit['id'], 'order': (when, run['date']), 'date': run['date'],
+                             'unit': bench['unit'], 'value': value(bench['value'])}
+                    points = series.setdefault(bench['name'], {})
+                    # Re-running the site job records the same commit again; the latest run wins.
+                    if commit['id'] not in points or points[commit['id']]['date'] < run['date']:
+                        points[commit['id']] = point
+    return {name: sorted(points.values(), key=lambda point: point['order']) for name, points in series.items()}
+
+
+def assess(points):
+    """Compare the newest point with the median of the previous BASELINE, scaled by their own spread."""
+    unit = points[-1]['unit']
+    # A series that changed its unit starts its history over.
+    values = [point['value'] for point in points if point['unit'] == unit]
+    row = {'unit': unit, 'latest': values[-1], 'values': values[-TREND:], 'count': len(values)}
+    previous = values[-BASELINE - 1:-1]
+    if len(previous) < BASELINE:
+        return row
+    baseline = statistics.median(previous)
+    spread = statistics.median(abs(number - baseline) for number in previous)
+    delta = values[-1] - baseline
+    row.update(baseline=baseline, delta=delta,
+               relative=abs(delta) / baseline if baseline else math.inf if delta else 0.0)
+    if abs(delta) > max(0.1 * baseline, 3 * spread):
+        row['flag'] = 'better' if (delta > 0) == (unit in BIGGER) else 'worse'
+    return row
+
+
+def sparkline(values):
+    low, high = min(values), max(values)
+    points = ' '.join(f'{index * 3},{15 - round(14 * (number - low) / (high - low)) if high > low else 8}'
+                      for index, number in enumerate(values))
+    return f'<svg width="87" height="16"><polyline points="{points}"/></svg>'
+
+
+def number(amount, unit):
+    text = f'{amount:,.0f}' if abs(amount) >= 1000 else f'{amount:.4g}'
+    return f'{text} {html.escape(unit)}'
+
+
+def table(rows):
+    if not rows:
+        return ''
+    body = []
+    for row in rows:
+        unit = row['unit']
+        if 'baseline' not in row:
+            change, baseline = f'{row["count"]} of {BASELINE + 1} points', ''
+        else:
+            baseline = number(row['baseline'], unit)
+            change = (f'{100 * row["delta"] / row["baseline"]:+.1f}%' if row['baseline']
+                      else ('+' if row['delta'] > 0 else '') + number(row['delta'], unit))
+        status = row.get('flag', 'muted' if row['stale'] or 'baseline' not in row else '')
+        body.append(f'<tr><td>{html.escape(row["name"])}<td>{number(row["latest"], unit)}<td>{baseline}'
+                    f'<td class="{status}">{change}<td>{sparkline(row["values"])}')
+    return ('<table><thead><tr><th>Series<th>Latest<th>Baseline<th>Change<th>Trend</thead><tbody>'
+            + '\n'.join(body) + '</tbody></table>')
+
+
+def regressions(directory, commit=None, now=None):
+    """Render every series' newest point against its own baseline as one static table."""
+    series = history(directory)
+    if not series:
+        raise ValueError('no benchmark history to publish')
+    now = time.time() if now is None else now
+    if commit is None:
+        commit = max((points[-1] for points in series.values()), key=lambda point: point['order'])['commit']
+    # A source records every series or none, so a series missing from its source's newest run was retired.
+    sources = {}
+    for name, points in series.items():
+        source = name.split('/', 1)[0]
+        if source not in sources or sources[source]['order'] < points[-1]['order']:
+            sources[source] = points[-1]
+    flagged, sections = [], {source: [] for source in sorted(sources)}
+    for name, points in sorted(series.items()):
+        source = name.split('/', 1)[0]
+        if points[-1]['commit'] != sources[source]['commit']:
+            continue
+        row = {**assess(points), 'name': name, 'stale': sources[source]['commit'] != commit}
+        if row['stale']:
+            row.pop('flag', None)
+        (flagged if 'flag' in row else sections[source]).append(row)
+    flagged.sort(key=lambda row: -row['relative'])
+    parts = []
+    for flag, label in [('worse', 'Regressions'), ('better', 'Improvements')]:
+        rows = [row for row in flagged if row['flag'] == flag]
+        parts.append(f'<details open class="flagged"><summary>{label} ({len(rows)})</summary>{table(rows)}</details>')
+    for source, rows in sections.items():
+        newest = sources[source]
+        label = f'{html.escape(source)} ({len(rows)})'
+        if newest['commit'] != commit:
+            measured = datetime.fromtimestamp(newest['date'] / 1000, timezone.utc)
+            days = math.floor((now - newest['date'] / 1000) / 86400)
+            label += (f' <span class="muted">stale: last measured {measured:%Y-%m-%d} at '
+                      f'{newest["commit"][:9]}, {days} days ago</span>')
+        parts.append(f'<details><summary>{label}</summary>{table(rows)}</details>')
+    return f'''<!doctype html>
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>MoQ benchmarks</title>
-<style>body{font:18px system-ui;max-width:48rem;margin:4rem auto;padding:0 1rem;line-height:1.6}a{color:#066fbb}</style>
+<style>
+body{{font:15px system-ui;max-width:72rem;margin:2rem auto;padding:0 1rem;line-height:1.4}}a{{color:#066fbb}}
+summary{{font-weight:600;margin:1rem 0 .3rem;cursor:pointer}}table{{border-collapse:collapse;width:100%;
+table-layout:fixed}}th,td{{padding:.1rem .5rem;text-align:right;white-space:nowrap}}th{{width:9rem}}
+th:first-child{{width:auto}}th:last-child{{width:6rem}}th:first-child,td:first-child{{text-align:left}}
+td:first-child{{word-break:break-all;white-space:normal;font:13px ui-monospace,monospace}}
+tr:nth-child(even){{background:#f6f6f6}}
+td{{font-variant-numeric:tabular-nums}}polyline{{fill:none;stroke:#555}}.worse{{background:#fcc}}
+.better{{background:#cec}}.muted{{color:#888;font-weight:400}}input{{font:inherit;width:100%;padding:.3rem}}
+</style>
 <h1>MoQ nightly benchmarks</h1>
-<p>Hosted runners vary. These charts are informational. Binding ratios compare each wrapper
-with Rust on the same host: above 1x means slower or more CPU per delivered byte.</p>
-<ul>''' + ''.join(links) + '''</ul>
-<p>Each series keeps its source and payload shape. A failed suite contributes no point.
-<a href="https://github.com/moq-dev/moq/blob/main/bench/README.md">Metrics and local reproduction</a></p>
+<p>Nightly <a href="https://github.com/moq-dev/moq/commit/{commit}">{commit[:9]}</a>, {len(flagged)} flagged
+of {sum(map(len, sections.values())) + len(flagged)} series. Each series compares its newest point with the median
+of its previous {BASELINE}. Red is worse and green is better by more than 10% and 3 times that window's median
+absolute deviation. Grey rows lack history or come from a source that did not finish tonight.
+<a href="https://github.com/moq-dev/moq/blob/main/bench/README.md#nightly-trends">Metrics and local
+reproduction</a></p>
+<input id="filter" type="search" placeholder="Filter series">
+{''.join(parts)}
+<script>
+const filter = document.getElementById('filter');
+filter.oninput = () => {{
+  const query = filter.value.toLowerCase();
+  for (const row of document.querySelectorAll('tbody tr')) {{
+    row.hidden = !row.cells[0].textContent.toLowerCase().includes(query);
+  }}
+  for (const section of document.querySelectorAll('details')) {{
+    section.open = query !== '' || section.classList.contains('flagged');
+  }}
+}};
+</script>
 </html>
-''')
+'''
+
+
+def index(directory, commit=None):
+    destination = directory / 'bench'
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / 'index.html').write_text(regressions(directory, commit))
+    # The table replaces the action's chart pages, which it only writes when missing.
+    for kind in ('costs', 'rates'):
+        if (destination / kind).is_dir():
+            (destination / kind / 'index.html').write_text(
+                '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=../">'
+                '<title>MoQ benchmarks</title><a href="../">MoQ benchmarks</a>\n')
     # gh-pages hosts every nightly report, each in its own directory with its own writer.
     reports = []
     for page in sorted(directory.glob('*/index.html')):
@@ -198,7 +346,9 @@ def main():
     sub = commands.add_parser('status')
     sub.add_argument('status', choices=('success', 'failure', 'cancelled', 'skipped'))
     sub.add_argument('directory', type=Path)
-    commands.add_parser('index').add_argument('directory', type=Path)
+    sub = commands.add_parser('index')
+    sub.add_argument('directory', type=Path)
+    sub.add_argument('--commit', help='the nightly commit; sources without a point for it are stale')
     args = parser.parse_args()
     if args.command == 'rust':
         write(args.output, rust(args.directory))
@@ -210,7 +360,7 @@ def main():
         args.directory.mkdir(parents=True, exist_ok=True)
         (args.directory / 'outcome.json').write_text(json.dumps({'status': args.status}) + '\n')
     else:
-        index(args.directory)
+        index(args.directory, args.commit)
 
 
 if __name__ == '__main__':

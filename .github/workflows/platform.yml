@@ -75,7 +75,7 @@ jobs:
         id: scope
         env:
           CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
-        run: just ci-select platform "$CI_BASE" >> "$GITHUB_OUTPUT"
+        run: just ci-select-platform "$CI_BASE" >> "$GITHUB_OUTPUT"
 
   windows:
     name: Windows
