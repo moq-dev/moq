@@ -24,9 +24,11 @@ const cleanup = new FinalizationRegistry<Moq.Signals.Effect>((signals) => signal
 export default class MoqBoy extends HTMLElement {
 	static observedAttributes = OBSERVED;
 
+	/** The relay connection, shared by every game. */
 	readonly connection: Moq.Connection;
 	/** The origin viewer broadcasts are published into, served across reconnects. */
 	readonly origin = new Moq.Origin.Producer();
+	/** The session currently expanded, or undefined for the grid. */
 	readonly expanded = new Moq.Signals.Signal<string | undefined>(undefined);
 
 	/** Reactive map of active game sessions. Emits on add/remove. */
@@ -90,6 +92,7 @@ export default class MoqBoy extends HTMLElement {
 		}
 	}
 
+	/** The relay URL, mirrored by the `url` attribute. */
 	get url(): URL | undefined {
 		return this.connection.url.peek();
 	}
@@ -98,6 +101,7 @@ export default class MoqBoy extends HTMLElement {
 		this.connection.url.set(value ? new URL(value) : undefined);
 	}
 
+	/** The base path prefix, mirrored by the `prefix` attribute. */
 	get prefixPath(): string {
 		return this.#prefix.peek();
 	}
@@ -106,6 +110,7 @@ export default class MoqBoy extends HTMLElement {
 		this.#prefix.set(value);
 	}
 
+	/** The path prefix for game broadcasts, mirrored by the `prefix-game` attribute. */
 	get prefixGame(): string {
 		return this.#gamePrefixOverride.peek() ?? `${this.#prefix.peek()}/game`;
 	}
@@ -114,6 +119,7 @@ export default class MoqBoy extends HTMLElement {
 		this.#gamePrefixOverride.set(value);
 	}
 
+	/** The path prefix for viewer broadcasts, mirrored by the `prefix-viewer` attribute. */
 	get prefixViewer(): string {
 		return this.#viewerPrefixOverride.peek() ?? `${this.#prefix.peek()}/viewer`;
 	}

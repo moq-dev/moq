@@ -38,11 +38,10 @@ comparing against these baselines:
   is a fork of the `v4l` crate with 222 undocumented hand-written items beside
   its generated `sys` bindings; decide whether a fork earns docs before
   writing them. `libmoq` and the `moq-native` tombstone export nothing.
-- JS: no tool checks doc comments; the [follow-up](/quest/m1/docs-js.md) adds
-  one. Until it lands, walk each published package's `exports` with the
-  TypeScript compiler API. The m0 baseline was 608 exports with 84
-  undocumented and 676 public class members with 159 undocumented, nearly all
-  in `@moq/publish`, `@moq/watch`, and `@moq/boy`.
+- JS: every published package's build runs `js/common/docs.ts`, which fails
+  on an undocumented export or public class member, so check only that its
+  exemptions (private, protected, symbol-keyed, and custom element reactions)
+  still hold up and that docs say something.
 - Links: GET (not HEAD) every external URL in `doc/` with a browser user
   agent; 262 answered except npmjs.com package pages, which refuse
   non-browser clients (check `registry.npmjs.org/<package>` instead), and

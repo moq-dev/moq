@@ -3,6 +3,7 @@ import type * as Catalog from "@moq/hang/catalog";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 
+/** What the viewer wants from the audio rendition. */
 export type Target = {
 	// Optional manual override for the selected rendition name.
 	name?: string;
@@ -15,6 +16,7 @@ export type Target = {
  */
 export type Supported = (config: Catalog.AudioConfig) => Promise<boolean>;
 
+/** Signals the source reads. */
 export type SourceInput = {
 	broadcast: Getter<Broadcast | undefined>;
 
@@ -41,6 +43,7 @@ type SourceOutput = {
  * for audio playback. The Decoder consumes whichever rendition it picks.
  */
 export class Source {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<SourceInput>;
 
 	readonly #out: SourceOutput = {
@@ -50,6 +53,7 @@ export class Source {
 		config: new Signal<Catalog.AudioConfig | undefined>(undefined),
 		jitter: new Signal<Milli | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();
@@ -160,6 +164,7 @@ export class Source {
 		return undefined;
 	}
 
+	/** Stop and release everything this holds. */
 	close(): void {
 		this.#signals.close();
 	}
