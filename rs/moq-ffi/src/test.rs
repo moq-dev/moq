@@ -6882,6 +6882,8 @@ async fn auth_tokens_join_and_leave_the_union() {
 				b"revoked" => request
 					.accept(publish("revoked/**"))
 					.revoke(moq_net::SessionError::Expired, "revoked"),
+				// Dropping the issued grant closes the token without an error.
+				b"closed" => drop(request.accept(publish("closed/**"))),
 				_ => request.reject(moq_net::SessionError::Unauthorized, "unknown token"),
 			}
 		}
@@ -6942,6 +6944,16 @@ async fn auth_tokens_join_and_leave_the_union() {
 		.unwrap_err();
 	assert_protocol(&closed, crate::error::MoqErrorScope::Session, MoqProtocolKind::Expired);
 	assert_eq!(revoked.grant(), None, "an ended token grants nothing");
+	assert_eq!(auth.grant(), Some(grant(&["setup/**"], &[])));
+
+	let closed = tokio::time::timeout(TIMEOUT, auth.add("closed".into()))
+		.await
+		.expect("add timed out")
+		.unwrap();
+	tokio::time::timeout(TIMEOUT, closed.closed())
+		.await
+		.expect("closed timed out")
+		.expect("a clean close is not an error");
 	assert_eq!(auth.grant(), Some(grant(&["setup/**"], &[])));
 
 	session.cancel(0);

@@ -158,7 +158,8 @@ impl Auth {
 		}
 	}
 
-	/// Wait until the token is refused or its connection ends.
+	/// Wait until the token ends: `Ok` when the peer closed it without an error, otherwise its
+	/// refusal or revocation, or the connection's end.
 	pub async fn closed(&self) -> crate::Result<()> {
 		kio::wait(|waiter| self.state.poll_closed(waiter)).await;
 		match &self.state.read().error {
@@ -379,6 +380,8 @@ async fn present(
 						snapshot = next(&connection, Some((connects, true))).await?;
 						break;
 					}
+					// The peer closed it without an error: the token is over, not refused.
+					Err(moq_net::Error::Cancel) => return Ok(()),
 					Err(err) => return Err(err.into()),
 				}
 			}
