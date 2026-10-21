@@ -437,3 +437,18 @@ fn stream_above_stream_limit() {
         Some(TransportErrorCode::STREAM_LIMIT_ERROR)
     );
 }
+
+/// A Requested Max Ack Delay of 2^14 ms or more is invalid, as for the `max_ack_delay` transport
+/// parameter; just under it is accepted
+#[test]
+fn ack_frequency_max_ack_delay_upper_bound() {
+    const LIMIT_US: u64 = (1 << 14) * 1000;
+    // Sequence, Ack-Eliciting Threshold, Requested Max Ack Delay (us), Reordering Threshold
+    let frames = Frames::default().var(FrameType::ACK_FREQUENCY, &[0, 1, LIMIT_US - 1, 1]);
+    assert_eq!(server_answer(frames), None);
+    let frames = Frames::default().var(FrameType::ACK_FREQUENCY, &[0, 1, LIMIT_US, 1]);
+    assert_eq!(
+        server_answer(frames),
+        Some(TransportErrorCode::PROTOCOL_VIOLATION)
+    );
+}

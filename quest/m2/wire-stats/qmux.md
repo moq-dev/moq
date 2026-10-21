@@ -13,17 +13,21 @@ beside the field.
 
 ## Plan
 
-- moq-dev/web-transport: qmux's `TcpStats` already reads `TCP_INFO` for rtt
-  and delivery rate. Add `tcpi_bytes_sent` and `tcpi_bytes_received` from
-  the same read. A platform without them (non-Linux, or Linux before 4.19)
-  reports `None`, which moq-net maps to 0. Upstream source work:
-  moq-dev/web-transport#435 and #436.
+- The in-tree qmux's `TcpStats` (ported from moq-dev/web-transport, which
+  already reads `TCP_INFO` for rtt and delivery rate): add `tcpi_bytes_sent`
+  and `tcpi_bytes_received` from the same read. A platform without them
+  (non-Linux, or Linux before 4.19) reports `None`, which moq-net maps to 0.
+  Decided 2026-10-20 (maintainer): moq-dev/web-transport#435 and #436 are not
+  pursued; this lands in-tree after qmux moves.
 - The transport pushes its counters: the stats tick never polls a session,
   and there is no per-connection timer. `TCP_INFO` is read on demand, so
   decide how qmux's I/O path refreshes the `Wire` (for example, after each
   socket write batch) without a syscall per write, then return it from
   moq-tokio's `Grouped::wire` for `qmux::Session`, including the relay's
   `SocketStats` wiring (`rs/moq-relay/src/websocket.rs`).
-- Release qmux on every line moq builds against, then bump it here.
 - Test: a loopback WebSocket session's `sent_bytes` covers at least the
   payload it wrote.
+
+## Required
+
+- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - qmux lives in-tree, where its `TcpStats` can grow the byte counters

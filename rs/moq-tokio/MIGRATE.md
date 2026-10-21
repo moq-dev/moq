@@ -10,6 +10,11 @@ The 32-byte secret type moved out of `mdns` so `listen.reset.secret` shares it, 
 Name it `moq_tokio::secret::Secret`.
 Replace `Secret::load(value)` with `Secret::read(path)`, which reads a file of 64 hexadecimal characters and returns `secret::Error`; replace `Secret::new(hex)` and `str::parse` with `Secret::from([u8; 32])`, decoding the hex yourself.
 
+### Dropping an unfinished send stream resets it (#5909)
+
+`quic::driver::SendStream` and `quic::web::SendStream` send `RESET_STREAM` with code 0 when dropped before `finish()`, instead of finishing implicitly.
+Call `finish()` before dropping a stream whose data should arrive whole.
+
 ### `jemalloc::tikv_jemallocator` is 0.7 (#6053)
 
 The re-exported allocator crate moved from tikv-jemallocator 0.6 to 0.7.
