@@ -28,7 +28,8 @@ publisher-local padding handle:
 - **One session target.** The session probes to the larger of its local
   target and the peer's PROBE target. PROBE `Increase` is the wire signal;
   retransmission or padding is the mechanism. The
-  [target](/quest/m1/probe-target.md) quest owns it.
+  [send target](/quest/m1/probe-target.md) owns the local half and
+  [viewer targets](/quest/m2/probe/viewer-target.md) the peer's.
 - **Viewers are in scope.** The viewer up-switch joined the epic, since a
   viewer's target is the same session target sent the other way.
 - **moq-net stays catalog-agnostic, and each hop is independent.** A relay
@@ -58,6 +59,10 @@ Decided with the maintainer on 2026-10-20:
   the sender stays here.
 - The JS publisher's rung disable split into its own quest here, since it
   probes with padding.
+- The target then split: m1 keeps the [send target](/quest/m1/probe-target.md)
+  native rung recovery needs, and viewer handles, viewer grants, the peer's
+  PROBE target, and `Increase` came back here as
+  [viewer targets](/quest/m2/probe/viewer-target.md), beside their consumers.
 
 This README's own work, once the children land:
 
@@ -73,11 +78,12 @@ This README's own work, once the children land:
 
 ## Required
 
-- [Session probe target](/quest/m1/probe-target.md) - a session probes up to its reservations or the peer's PROBE target, sends its viewer handles as its own PROBE target, and advertises `Increase` where a sender exists
+- [Session send target](/quest/m1/probe-target.md) - a session probes up to the sum of its publisher reservations through whichever sender its transport has
 - [Native probing](/quest/m1/probe-native.md) - moq-quic retransmits in-flight data during BBR3's ProbeBW_UP so an app-limited sender still validates headroom up to the target
 - [Native rung disable](/quest/m1/simulcast-rung-disable.md) - Rust/FFI and OBS publishers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and re-enable with hysteresis
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
+- [Viewer targets](/quest/m2/probe/viewer-target.md) - a session sends its viewer handles as its PROBE target, probes to the peer's, splits the receive estimate into viewer grants, and advertises `Increase` where a sender exists
 - [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
 

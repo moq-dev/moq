@@ -7,8 +7,9 @@ retransmits in-flight STREAM data (sent, unacknowledged, and not yet expired)
 to fill BBR3's ProbeBW_UP phase, so that phase's sample isn't app-limited and
 the estimate rises when the path has room. Media frames keep their deadlines,
 redundant bytes stay within budget, and unique goodput is counted once.
-Sessions on moq-tokio and moq-uring then advertise PROBE `Increase`. A
-measured no-go is a valid outcome.
+Sessions on moq-tokio and moq-uring then have a sender, so
+[viewer targets](/quest/m2/probe/viewer-target.md) can advertise PROBE
+`Increase` for them. A measured no-go is a valid outcome.
 
 ## Plan
 
@@ -68,7 +69,7 @@ maintainer instead of falling back to it.
 
 ## Required
 
-- [Session probe target](/quest/m1/probe-target.md) - the target this probes to and the sender hook it implements
+- [Session send target](/quest/m1/probe-target.md) - the target this probes to and the sender hook it implements
 
 ## Related
 

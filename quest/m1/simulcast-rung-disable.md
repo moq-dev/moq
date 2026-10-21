@@ -68,7 +68,7 @@ publishers expose for it. Wire: none; `enabled` already exists.
 
 ## Required
 
-- [Session probe target](/quest/m1/probe-target.md) - a disabled rung's reservation keeps the session probing for it, since the estimators stop learning while app-limited
+- [Session send target](/quest/m1/probe-target.md) - a disabled rung's reservation keeps the session probing for it, since the estimators stop learning while app-limited
 - [Native probing](/quest/m1/probe-native.md) - the sender that raises the estimate so a disabled rung can resume
 
 ## Related

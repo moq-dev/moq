@@ -8,8 +8,9 @@ send priority. On an ALR schedule, while app-limited below the target, it
 sends a short probe cluster at about twice the estimate, capped at the target,
 about every five seconds, with a follow-up probe when one validates. When the
 path has room the estimate rises; when it doesn't, padding stays within its
-overhead and media frame-delay budgets. Such sessions then advertise PROBE
-`Increase`.
+overhead and media frame-delay budgets. Such sessions then have a sender, so
+[viewer targets](/quest/m2/probe/viewer-target.md) can advertise PROBE
+`Increase` for them.
 
 ## Plan
 
@@ -61,5 +62,5 @@ Tests, on `@moq/clock`'s `Manual`:
 
 ## Required
 
-- [Session probe target](/quest/m1/probe-target.md) - the target this probes to and the sender hook it implements
+- [Session send target](/quest/m1/probe-target.md) - the target this probes to and the sender hook it implements
 - [lite-07 padding](/quest/m1/lite07-padding.md) - the stream type the padding is sent on
