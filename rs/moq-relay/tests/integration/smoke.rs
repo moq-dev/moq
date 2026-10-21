@@ -295,11 +295,11 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 	let hidden = pub_origin.create_broadcast(".x/y").expect("create hidden");
 	hidden.announce(Default::default()).expect("announce hidden");
 	let track = hidden.create_track("video", timed()).expect("create track");
-	track
-		.append_group()
-		.expect("append group")
+	let mut group = track.append_group().expect("append group");
+	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hidden".as_ref())
 		.expect("write frame");
+	group.finish().expect("finish group");
 	// The relay's announce request carries the opt-in only on lite-07, so the publisher
 	// must speak it too for the hidden route to reach the relay.
 	let (_pub_client, pub_connection) = tokio::time::timeout(

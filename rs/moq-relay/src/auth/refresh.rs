@@ -242,7 +242,7 @@ impl Refresh {
 		self.waiting.push_back(Waiting {
 			request,
 			facts,
-			deadline: moq_clock::now() + super::ADMIT_TIMEOUT,
+			deadline: moq_clock::now() + super::ATTACH_TIMEOUT,
 		});
 		self.dispatch();
 	}
@@ -944,7 +944,7 @@ mod tests {
 					other.publish = Default::default();
 					admission.grant(lease::Consumer::fixed(other));
 				} else {
-					admission.refuse(super::super::Error::Refused);
+					admission.refuse(super::super::Error::Refused(Default::default()));
 				}
 			});
 			assert!(result.is_err());

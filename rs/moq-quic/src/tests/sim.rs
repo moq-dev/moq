@@ -8,6 +8,8 @@ use proptest::test_runner::{Config, RngSeed, TestCaseError, TestCaseResult, Test
 
 use super::*;
 
+mod workloads;
+
 /// One generated run
 #[derive(Debug, Clone)]
 struct Case {
@@ -21,6 +23,7 @@ struct Case {
     /// How long the receivers leave data unread between reads
     read_interval: Duration,
     streams: Vec<Spec>,
+    extra: Option<workloads::Spec>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +62,7 @@ fn priority_on_a_clean_path() {
     // Reads stamp arrival times, so a read every step catches an inversion within one interval
     let cases = case(link(false), limits).prop_map(|case| Case {
         read_interval: Duration::ZERO,
+        extra: None,
         ..case
     });
     check(cases, |outcome| {
@@ -105,6 +109,7 @@ fn replays_from_seed() {
             max_streams: 4,
         },
         read_interval: Duration::ZERO,
+        extra: None,
         streams: vec![
             Spec {
                 from_client: true,
@@ -136,9 +141,10 @@ fn case(
         limits,
         0u64..=20_000,
         proptest::collection::vec(spec(), 1..=12),
+        workloads::spec(),
     )
         .prop_map(
-            |(seed, latency, to_server, to_client, limits, read_interval, streams)| Case {
+            |(seed, latency, to_server, to_client, limits, read_interval, streams, extra)| Case {
                 seed,
                 latency: Duration::from_micros(latency),
                 to_server,
@@ -146,6 +152,7 @@ fn case(
                 limits,
                 read_interval: Duration::from_micros(read_interval),
                 streams,
+                extra: Some(extra),
             },
         )
 }
@@ -395,7 +402,11 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
     transport
         .stream_receive_window(case.limits.stream_window.into())
         .receive_window(case.limits.window.into())
-        .max_concurrent_uni_streams(case.limits.max_streams.into());
+        .max_concurrent_uni_streams(case.limits.max_streams.into())
+        .max_concurrent_bidi_streams(case.limits.max_streams.into())
+        .datagram_receive_buffer_size(Some(65_536))
+        .datagram_send_buffer_size(65_536)
+        .reset_stream_at(true);
     let transport = Arc::new(transport);
 
     let mut server_config = server_config();
@@ -435,23 +446,38 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
         recvs: Vec::new(),
     };
 
+    let mut extra = case
+        .extra
+        .as_ref()
+        .map(|spec| workloads::Run::new(spec, client_ch, server_ch));
+
     client.send(&mut pair);
     server.send(&mut pair);
     // Priority alone orders the data only if it was all waiting to be sent at once
-    let written = [&client, &server].map(|peer| peer.sends.iter().all(|s| s.finished));
+    let written = [&client, &server]
+        .map(|peer| case.extra.is_none() && peer.sends.iter().all(|s| s.finished));
 
     let mut next_read = pair.time;
     loop {
         client.send(&mut pair);
         server.send(&mut pair);
+        if let Some(extra) = &mut extra {
+            extra.send(&mut pair)?;
+        }
         if pair.time >= next_read {
             client.receive(&mut pair, &server.sends, case.limits)?;
             server.receive(&mut pair, &client.sends, case.limits)?;
+            if let Some(extra) = &mut extra {
+                extra.receive(&mut pair)?;
+            }
             next_read = pair.time + case.read_interval;
         }
         client.poll(&mut pair)?;
         server.poll(&mut pair)?;
-        if client.done(&server.sends) && server.done(&client.sends) {
+        if client.done(&server.sends)
+            && server.done(&client.sends)
+            && extra.as_ref().is_none_or(|extra| extra.done())
+        {
             break;
         }
 
@@ -471,6 +497,10 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
             };
             pair.time = next;
         }
+    }
+
+    if let Some(extra) = &mut extra {
+        extra.finish(&mut pair)?;
     }
 
     // ...and the path delivered every datagram in order

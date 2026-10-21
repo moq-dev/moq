@@ -35,7 +35,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [#3129](/quest/m3/3129-moq-uring-write-the-webtransport-stream-header-at-open.md) - moq-uring writes the WebTransport stream header at open and settles the open contract, once a caller hits it
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement, if the ECN measurement says marks survive
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a Rust redial starts at the previous connection's rate
-- [Cut-through](/quest/m3/cut-through/README.md) - a lossy-hop bench decides whether a relay should forward bytes behind a QUIC stream hole; the build is re-planned if it says go
+- [Cut-through](/quest/m3/cut-through/README.md) - a bufferbloat bench decides whether a relay should forward bytes behind a QUIC stream hole; the build is re-planned if it says go
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [vcpkg registry](/quest/m3/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests, once a consumer asks
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
@@ -66,6 +66,6 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Paced replay](/quest/m3/archive-paced-replay.md) - an archive consumer pushes stored groups to live subscribers on one shared clock, so any live player plays it
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   reads its viewers' feedback and adapts its bitrate
-- [Interop runner withdraws before disconnecting](/quest/m3/interop-runner-approval.md) - condition: the maintainer approves posting and a released moq-tokio and @moq/net carry close() withdrawals
+- [Interop runner withdraws before disconnecting](/quest/m3/interop-runner-approval.md) - condition: a released moq-tokio and @moq/net carry close() withdrawals; then the runner's moq.dev clients switch to close()
 - [Safari ships the WebKit 319818 fix](/quest/m3/webkit-319818.md) - the Safari release the gate admits
 - [Safari WebTransport](/quest/m3/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed

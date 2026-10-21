@@ -54,7 +54,7 @@ func (c *clientConfig) ffi() (ffi.MoqClientConfig, error) {
 			return nil
 		}
 		var out *uint64
-		out, err = optMicros(name, d)
+		out, err = bridge.OptionalDuration(d, name)
 		return out
 	}
 	cfg := ffi.MoqClientConfig{
@@ -150,7 +150,7 @@ func backoffMicros(name string, d time.Duration) (*uint64, error) {
 	if d == 0 {
 		return nil, nil
 	}
-	us, err := micros(name, d)
+	us, err := bridge.Duration(d, name)
 	if err != nil {
 		return nil, err
 	}

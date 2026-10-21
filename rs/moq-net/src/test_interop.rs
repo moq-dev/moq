@@ -143,6 +143,7 @@ fn lite_varint_interop() {
 			sequence: 300,
 			timestamp: Some((1 << 50) + 5),
 			payload: bytes::Bytes::from_static(b"x"),
+			ietf: None,
 		}
 		.encode_bytes(version)
 		.unwrap();
@@ -156,6 +157,7 @@ fn lite_varint_interop() {
 			sequence: 1 << 30,
 			timestamp: None,
 			payload: bytes::Bytes::from_static(b"untimed"),
+			ietf: None,
 		}
 		.encode_bytes(version);
 		let untimed_datagram = match untimed {
@@ -168,6 +170,7 @@ fn lite_varint_interop() {
 
 		// An untimed track: zero on lite-07, milliseconds before it.
 		let track_info = lite::TrackInfo {
+			refresh: None,
 			priority: 1,
 			max_age: None,
 			timescale: None,

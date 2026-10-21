@@ -16,15 +16,15 @@ use serde_with::{OneOrMany, serde_as};
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
-/// The longest a decider may take to answer an admission, the bound
-/// `moq_auth::Client` puts on a server, so a stalled decider refuses rather
-/// than parks the session behind it.
-const ADMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The longest a decider may take to verify a token presented in band. A
+/// connection's admission has no bound of its own: it runs under the listener's
+/// handshake deadline, which a token arriving after the handshake does not.
+const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Where every session's grant comes from. Exactly one of `url` and the public
 /// patterns is set; [`validate`](Self::validate) refuses anything else.
 #[serde_as]
-#[derive(usage::Args, Clone, Debug, Serialize, Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Serialize, Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default)]
 #[non_exhaustive]
@@ -135,7 +135,7 @@ const VERIFICATIONS: usize = 128;
 
 /// The `--auth-*` flags 0.14 had and #3688 removed, with their env vars: a relay
 /// deployed through the environment would otherwise ignore them without a word.
-#[derive(Clone, Debug, Default, usage::Args)]
+#[derive(Clone, Debug, Default, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
 	#[usage(name = "auth-key", long = "auth-key", env = "MOQ_AUTH_KEY", hide = true)]
@@ -353,8 +353,8 @@ impl Config {
 #[non_exhaustive]
 pub enum Error {
 	/// The auth server answered and the answer was no.
-	#[error("the auth server refused the session")]
-	Refused,
+	#[error(transparent)]
+	Refused(moq_auth::Refusal),
 
 	/// The auth server could not be asked, or answered nonsense; nothing is
 	/// admitted because the server was down.
@@ -373,7 +373,8 @@ pub enum Error {
 impl From<moq_auth::Error> for Error {
 	fn from(err: moq_auth::Error) -> Self {
 		match err {
-			moq_auth::Error::Refused | moq_auth::Error::UselessGrant => Self::Refused,
+			moq_auth::Error::Refused(refusal) => Self::Refused(refusal),
+			moq_auth::Error::UselessGrant => Self::Refused(Default::default()),
 			other => Self::Unavailable(other.to_string()),
 		}
 	}
@@ -386,6 +387,9 @@ impl From<&Error> for http::StatusCode {
 			Error::Unavailable(_) => http::StatusCode::BAD_GATEWAY,
 			Error::Request(_) => http::StatusCode::BAD_REQUEST,
 			Error::Forbidden(_) => http::StatusCode::FORBIDDEN,
+			Error::Refused(refusal) if refusal.reason == moq_auth::refusal::Reason::Forbidden => {
+				http::StatusCode::FORBIDDEN
+			}
 			_ => http::StatusCode::UNAUTHORIZED,
 		}
 	}
@@ -776,15 +780,24 @@ enum Decider {
 impl Decider {
 	fn spawn(self, mut admissions: Admissions) {
 		tokio::spawn(async move {
-			while let Some(admission) = admissions.next().await {
+			while let Some(mut admission) = admissions.next().await {
 				match &self {
 					Self::Server(client) => {
 						let client = client.clone();
 						// A panic drops the admission, which answers it as unavailable.
 						tokio::spawn(moq_tokio::panic::isolate(async move {
-							let lease = match &admission.connection {
-								Some(connection) => client.attach(connection, admission.request.clone()).await,
-								None => client.connect(admission.request.clone()).await,
+							let ask = async {
+								match &admission.connection {
+									Some(connection) => client.attach(connection, admission.request.clone()).await,
+									None => client.connect(admission.request.clone()).await,
+								}
+							};
+							// The relay stopped waiting (its handshake deadline passed): drop the
+							// request to the server, so an expired admission leaves nothing in flight.
+							let lease = tokio::select! {
+								biased;
+								() = admission.reply.closed() => return,
+								lease = ask => lease,
 							};
 							match lease {
 								Ok(lease) => admission.grant(lease),
@@ -796,7 +809,7 @@ impl Decider {
 					// its holder expects it to count, and the public grant is not what it says.
 					Self::Public(_) if presents_token(&admission.request) => {
 						tracing::debug!(path = %admission.request.path, "a token was presented to public rules");
-						admission.refuse(Error::Refused);
+						admission.refuse(Error::Refused(Default::default()));
 					}
 					Self::Public(rules) => match rules.authorize(&admission.request.path) {
 						Ok(access) => {
@@ -807,10 +820,10 @@ impl Decider {
 						// client would retry.
 						Err(err) => {
 							tracing::debug!(path = %admission.request.path, %err, "public rules refused");
-							admission.refuse(Error::Refused);
+							admission.refuse(Error::Refused(Default::default()));
 						}
 					},
-					Self::Refuse => admission.refuse(Error::Refused),
+					Self::Refuse => admission.refuse(Error::Refused(Default::default())),
 				}
 			}
 		});
@@ -883,6 +896,11 @@ impl Auth {
 	}
 
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
+	///
+	/// Waits on the decider for as long as the caller does. The caller owns the
+	/// deadline: a listener bounds it with the connection's handshake deadline
+	/// ([`moq_tokio::server::Request::within`]), and dropping the future withdraws
+	/// the admission from the decider.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
 		// Build the token from the grant the admission checked: re-reading it could
 		// pick up an update that skipped the check.
@@ -898,10 +916,7 @@ impl Auth {
 
 	async fn decide(&self, request: Request) -> Result<(lease::Consumer, Grant), Error> {
 		let answer = self.submit(request, None)?;
-		let answered = moq_clock::timeout(ADMIT_TIMEOUT, answer)
-			.await
-			.map_err(|_| timed_out())?;
-		answered_with(answered)
+		answered_with(answer.await)
 	}
 
 	/// Queue one admission for the decider, returning its pending answer.
@@ -965,11 +980,13 @@ fn check_rates(publish: &moq_auth::Access, subscribe: &moq_auth::Access) -> Resu
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
 ///
 /// The transport has already accepted each one; it waits for its answer, so a
-/// slow decider holds connects the way a slow auth server would, and one that
-/// takes longer than a server may (ten seconds) is refused as unavailable. An
-/// [attached](Admission::attached) token holds one of its session's verification
-/// slots until the decider answers or drops it, even past that, and the session's
-/// later tokens wait for a slot before they reach the decider.
+/// slow decider holds connects the way a slow auth server would. A connection's
+/// admission has no bound of its own: whoever awaits [`Auth::admit`] owns the
+/// deadline, which the relay's listeners set to their handshake deadline. An
+/// [attached](Admission::attached) token is refused as unavailable after ten
+/// seconds, but holds one of its session's verification slots until the decider
+/// answers or drops it, even past that, and the session's later tokens wait for a
+/// slot before they reach the decider.
 /// Answer in place or hand each [`Admission`] to its own task; nothing here
 /// serializes them.
 pub struct Admissions(mpsc::UnboundedReceiver<Admission>);
@@ -1045,6 +1062,26 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 	out.role = request.role().and_then(role);
 	out.tls = request.peer_identity().as_ref().and_then(peer);
 	out
+}
+
+/// Build an auth request from the path, credential, and role carried in SETUP.
+pub(crate) fn request_for_setup<S: moq_net::transport::poll::Session>(
+	auth: &Auth,
+	setup: &moq_net::server::Handshake<S>,
+	transport: moq_auth::Transport,
+) -> Request {
+	let (path, query) = match setup.path().split_once('?') {
+		Some((path, query)) => (path, Some(query.to_string())),
+		None => (setup.path(), None),
+	};
+	let mut request = auth.request(transport, if path.is_empty() { "/" } else { path });
+	request.query = query;
+	request.token = setup.token().map(|token| moq_auth::Token {
+		kind: token.kind,
+		value: token.value.clone(),
+	});
+	request.role = setup.role().and_then(role);
+	request
 }
 
 /// The auth transport for a session's transport.
@@ -1164,6 +1201,20 @@ mod tests {
 	}
 
 	#[test]
+	fn typed_refusal_preserves_transport_status() {
+		for (reason, status) in [
+			(moq_auth::refusal::Reason::Refused, http::StatusCode::UNAUTHORIZED),
+			(moq_auth::refusal::Reason::Expired, http::StatusCode::UNAUTHORIZED),
+			(moq_auth::refusal::Reason::Forbidden, http::StatusCode::FORBIDDEN),
+		] {
+			let mut refusal = moq_auth::Refusal::default();
+			refusal.reason = reason;
+			let error = Error::from(moq_auth::Error::Refused(refusal));
+			assert_eq!(http::StatusCode::from(&error), status);
+		}
+	}
+
+	#[test]
 	fn every_transport_has_an_auth_name() {
 		use moq_tokio::Transport as T;
 		for transport in [
@@ -1255,7 +1306,7 @@ mod tests {
 			let Err(err) = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await else {
 				panic!("{path} was admitted");
 			};
-			assert!(matches!(err, Error::Refused), "{path}: {err}");
+			assert!(matches!(err, Error::Refused(_)), "{path}: {err}");
 			assert_eq!(http::StatusCode::from(&err), http::StatusCode::UNAUTHORIZED);
 		}
 	}
@@ -1280,7 +1331,7 @@ mod tests {
 			let Err(err) = auth.admit(request).await else {
 				panic!("a token was admitted on the public grant");
 			};
-			assert!(matches!(err, Error::Refused), "{err}");
+			assert!(matches!(err, Error::Refused(_)), "{err}");
 		}
 
 		// An empty `jwt=` is no token.
@@ -1360,7 +1411,7 @@ mod tests {
 			assert_eq!(admission.request.path, "/anon/room");
 			admission.grant(lease::Consumer::fixed(Grant::new(patterns(&["**"]), patterns(&["**"]))));
 			let admission = admissions.next().await.expect("an admission");
-			admission.refuse(Error::Refused);
+			admission.refuse(Error::Refused(Default::default()));
 			// A grant that admits nothing is the decider's mistake, refused like a server's.
 			let admission = admissions.next().await.expect("an admission");
 			admission.grant(lease::Consumer::fixed(Grant::new(Patterns::new(), Patterns::new())));
@@ -1371,8 +1422,8 @@ mod tests {
 		let admit = async {
 			let lease = auth.admit(request()).await.expect("granted");
 			assert_eq!(lease.token().root, Path::new("anon/room").to_owned());
-			assert!(matches!(auth.admit(request()).await, Err(Error::Refused)));
-			assert!(matches!(auth.admit(request()).await, Err(Error::Refused)));
+			assert!(matches!(auth.admit(request()).await, Err(Error::Refused(_))));
+			assert!(matches!(auth.admit(request()).await, Err(Error::Refused(_))));
 			assert!(matches!(auth.admit(request()).await, Err(Error::Unavailable(_))));
 		};
 		let (admissions, ()) = tokio::join!(decide, admit);
@@ -1399,7 +1450,7 @@ mod tests {
 	async fn refuse_answers_the_admission_queue() {
 		let auth = Auth::refuse("relay-1");
 		let request = auth.request(moq_auth::Transport::Quic, "/anon/room");
-		assert!(matches!(auth.admit(request).await, Err(Error::Refused)));
+		assert!(matches!(auth.admit(request).await, Err(Error::Refused(_))));
 	}
 
 	/// The session supervisor re-polls `ended` on every nudge; that must not

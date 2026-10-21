@@ -53,7 +53,9 @@ sessions a reconnect-to-me GOAWAY and waits up to `--drain-timeout` (default
 such as `moq-lite-03`, get none and are closed when the window ends. A second
 signal exits immediately; `--drain-timeout 0s` closes sessions immediately.
 Pending handshakes and admission requests share the same drain window, and an
-open stdin pipe does not keep the process alive afterward.
+open stdin pipe does not keep the process alive afterward. Admission is part of
+the handshake, so `--listen-timeout` bounds it too; `0s` leaves admission without
+a deadline.
 
 Add `--stats-enabled` before the first stage to publish accepted-session and
 traffic counters with the relay's `--stats-*` settings. An export-only listener
@@ -85,14 +87,18 @@ to the wall time the first frame arrived. A timeline that rewinds, such as a
 restarted encoder or a looping file wrapping to the top, ends the import with
 an error; run it again to publish anew. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
-MPEG-TS timestamps run on across their 33-bit wrap (every 26.5 hours), each
-taking the wrap that lands it nearest the clock, so media that gets more than
-13.25 hours ahead of it (a jump that far, or a long file read faster than real
-time) reads as a rewind.
+MPEG-TS timestamps follow their source history across the 33-bit wrap
+(every 26.5 hours), including files imported faster than real time and flagged
+jumps, so a jump of more than half a wrap (13.25 hours) can read as a rewind.
 
-MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, and passes SCTE-35
-and every other stream it does not decode (KLV, subtitles, DVB AC-3) through as
-tracks. Each such PES goes through whole, at its place on the program clock
+For a source already in MPEG-TS, `ffmpeg -c copy -f mpegts` re-muxes and drops PIDs
+(NIT, TDT/TOT, extra audio, teletext, SCTE-35), so pipe its bytes instead, for example
+`tsp -I ip 239.1.2.3:1234 -O file - | moq --connect https://relay.example.com/anon --broadcast my-stream.hang import ts`,
+or use [`import srt`](/bin/srt).
+
+MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3/Opus, and passes
+SCTE-35 and every other stream it does not decode (KLV, subtitles, DVB AC-3)
+through as tracks. Each such PES goes through whole, at its place on the program clock
 (PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
 is refused with a warning: any in a program with no PCR, and one whose PES carry
 an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
@@ -111,7 +117,8 @@ logs feed health (stalled streams, TR 101 290 errors) without changing what it
 publishes. `--passthrough` publishes the multiplex whole instead, every packet
 in order on one [`m2ts`](/concept/hang#transport-streams) track with every
 program aboard, for what demultiplexing cannot carry, such as a scrambled
-service; `export ts --passthrough` writes it back out. FLV covers H.264 + AAC.
+service; `export ts --passthrough` writes it back out. FLV accepts the same
+legacy and enhanced-RTMP codecs as the [RTMP gateway](/bin/rtmp).
 
 `import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
 re-encoding. RTP rides the RTSP connection, so run it on the camera's network
@@ -123,7 +130,7 @@ including when the camera sends no media for 10 seconds or no keyframe for 30,
 until a fatal error (refused access, or no stream it can publish), and
 each RTSP session is a new broadcast with its own catalog, since the session's
 RTP time restarts; a camera whose clock jumps mid-session is restarted the same
-way. Embed [`moq-rtsp`](https://docs.rs/moq-rtsp) for your own supervision,
+way. Embed [`moq-rtsp`](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp) for your own supervision,
 such as two of a camera's URLs as renditions of one broadcast.
 
 ```bash
@@ -341,31 +348,14 @@ there, so a host whose clock runs behind the old run's waits for it to close.
 Other versions carry no epoch, so a restart from another session is the newest
 route at an equal cost, or a better one.
 
-On a version that carries epochs, two processes that pass the same `--epoch` (a UUIDv7, such as
-`uuidgen -7` prints) are one publisher: relays fail over between them
-mid-group, so they must produce identical tracks with aligned groups. Each
-derives its catalog clock from the epoch's wall time, so fed one stream they
-publish the same clock and timestamps wherever each started, without reading
-anything from the other; group numbering is not aligned yet. PTS zero is the
-epoch's time, and for `ts` one 33-bit wrap before it. The wall mapping is
-therefore off by the source clock's reading at the epoch's time: for a TS
-program clock, anywhere within 13.25 hours. Each process picks a TS timestamp's
-wrap from its own clock, so near either end of that range, processes whose host
-clocks or delivery differ by more than the distance left can put one timestamp
-in adjacent wraps, 26.5 hours apart, and one later reads its media as a rewind.
-FLV's millisecond timestamps are not unwrapped, so redundant `flv` imports stop
-matching at its 49.7-day wrap: the incumbent rewinds and exits, and one started
-after it publishes timestamps near zero. A host whose clock reads before the
-epoch's time cannot place an `fmp4`, `flv`, or `hls` import on it, and exits 1.
-Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
-accept it. The RTMP, SRT, RTSP, and WHIP ingests
-and `import ts --program all` refuse it because they mint their own, and `import
-avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
-timestamps or bytes come from the instance rather than the input. Each that
-accepts it announces once its catalog names a servable track, so a standby
-started ahead of its feed is never asked for tracks it cannot serve yet. Input
-that ends before then, such as an empty input or a PMT or header that
-configures no track, exits 1 without announcing.
+Each independent importer publishes its own epoch, even when two importers read
+one stream and publish one path. See [Redundant ingest](/setup/redundancy) for
+same-path switching, subscriber-controlled selection on separate paths, and
+several routes to one publisher.
+
+An importer announces once its catalog names a servable track. Input that ends
+before then, such as an empty input or a header that configures no track,
+exits 1 without announcing.
 
 ## Cluster
 
@@ -455,6 +445,38 @@ up. Only lite-07 and moq-transport draft 17+ sessions carry epochs, so on the
 default version every return is a replacement. An export that fails while the broadcast stays up, such as on
 a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
 so the other formats refuse `--linger`.
+
+## Stats and feedback
+
+`import --stats` names a stats track in the catalog and reports what each
+rendition has written, about once a second while someone subscribes, with the
+connection's RTT, estimated send rate, and loss. It covers the stdin imports;
+capture, the gateways, `archive`, and `ts --program all` refuse it.
+
+`export --echo <name>` answers a publisher that solicits feedback: under the
+catalog's `echo` path it publishes `<name>.echo`, reporting what each rendition
+the export reads has received and its newest arrival, until the export ends.
+It covers the stdout container exports and needs a hang catalog, so MSF
+refuses it.
+
+The `stats` and `echo` sinks print reports as JSON lines. `export stats`
+follows one broadcast's stats track until the broadcast ends; `export echo`
+prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
+`--broadcast` as they come and go, reading one that ends for 5 s more for its
+final report. Either sink stops reading a report that grows past 1 MiB.
+
+```bash
+moq ... --broadcast event import --stats ts < feed.ts
+moq ... --broadcast event export stats
+moq ... --broadcast event export --echo alice ts > out.ts
+moq ... --broadcast viewers export echo
+```
+
+Counters are cumulative for the life of the process: a rendition that ends
+keeps its final counts, and one that returns under the same ID continues them.
+A report holds 1,024 rendition IDs at most: past that, each new ID replaces
+one that has ended.
+[Stats](/concept/stats#media-reports) has the schema.
 
 ## Debugging
 

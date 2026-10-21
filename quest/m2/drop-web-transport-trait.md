@@ -45,22 +45,29 @@ each gets its own impl:
   `SendOptions` reach a new stream through its setters in both runtimes'
   adapters. A native impl can pass them to the open, as moq-tokio's driver
   `open_uni`/`open_bi` already accept.
-- moq-tokio's `quic::driver` and `quic::web` modules are public but
-  `#[doc(hidden)]`. Decide whether they are API or should be private.
+- moq-tokio's `quic::web` module is public but `#[doc(hidden)]`. Decide
+  whether it is API or should be private. `quic::driver` stays public:
+  [An async QUIC driver without moq-net](/quest/m1/quic-driver.md) makes it
+  supported API.
 
 Notes from related quests:
-- [qmux on moq-quic](/quest/m2/quic-qmux.md) planned to port qmux's
+- [qmux on moq-quic](/quest/m1/quic-qmux.md) planned to port qmux's
   `web-transport-trait` impl. If it lands first, its impl targets moq-net's
   `transport::poll` instead.
 - [poll_acked](/quest/m2/quic-ack-hook.md) already puts its hook on moq-net's
   trait because moq-net has no `web-transport-trait` dependency. That holds
   here.
-- [Rust request credit](/quest/m1/rs-request-credit.md) prefers adding a
-  credit query to qmux and iroh upstream in moq-dev/web-transport. Once this
-  lands, that query belongs on each backend's own moq-net impl.
+- [Rust request credit](/quest/m1/rs-request-credit.md) gets qmux's credit
+  query from the in-tree qmux; iroh keeps waiting. Once this lands, that
+  query belongs on each backend's own moq-net impl.
+
+Decided 2026-10-20 (maintainer): moq takes no new dependency on, or work in,
+moq-dev/web-transport; `moq-quic` powers qmux and WebTransport. The iroh
+(`web-transport-iroh`) and wasm (`web-transport-wasm`) backends stay crates
+from that repo as accepted exceptions, and web-transport-proto may stay.
 
 ## Related
 
-- [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - the in-tree qmux implements the moq-net traits directly
+- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - the in-tree qmux implements the moq-net traits directly
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - another hook that lives only on moq-net's traits
 - [Rust requests fail fast without stream credit](/quest/m1/rs-request-credit.md) - its credit query moves to each backend's moq-net impl

@@ -3,6 +3,8 @@ mod codec;
 mod color;
 mod h264;
 mod h265;
+mod projection;
+mod stereo;
 mod vp9;
 
 pub use av1::*;
@@ -10,6 +12,8 @@ pub use codec::*;
 pub use color::*;
 pub use h264::*;
 pub use h265::*;
+pub use projection::*;
+pub use stereo::*;
 pub use vp9::*;
 
 use std::collections::{BTreeMap, btree_map};
@@ -150,7 +154,9 @@ impl Video {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Display {
+	/// Width in pixels.
 	pub width: u32,
+	/// Height in pixels.
 	pub height: u32,
 }
 
@@ -216,6 +222,7 @@ pub struct VideoConfig {
 	/// The picture resizes in band at a keyframe below these ceilings, unless the
 	/// `description` pins it. Absent means unknown; a publisher may fill it once.
 	pub coded_width: Option<u32>,
+	/// The height counterpart of `coded_width`.
 	pub coded_height: Option<u32>,
 
 	/// The aspect ratio the whole picture is displayed at, as WebCodecs'
@@ -228,6 +235,7 @@ pub struct VideoConfig {
 	/// rename to `displayAspect*`; the current name is what we emit.
 	#[serde(alias = "displayRatioWidth")]
 	pub display_aspect_width: Option<u32>,
+	/// The height counterpart of `display_aspect_width`.
 	#[serde(alias = "displayRatioHeight")]
 	pub display_aspect_height: Option<u32>,
 
@@ -236,6 +244,19 @@ pub struct VideoConfig {
 	/// Live state, not identity: a publisher may fill it in once the bitstream reveals it.
 	#[serde(default)]
 	pub color: Option<Color>,
+
+	/// How the picture maps onto the viewer's field of view. Absent means rectilinear.
+	///
+	/// Live state, like [`color`](Self::color).
+	#[serde(default)]
+	pub projection: Option<Projection>,
+
+	/// How each eye's view is packed into the frame. Absent means mono.
+	///
+	/// Live state, like [`color`](Self::color).
+	#[serde(default)]
+	#[serde_as(as = "Option<DisplayFromStr>")]
+	pub stereo: Option<Stereo>,
 
 	/// The maximum bitrate of the video track, if known.
 	#[serde(default)]
@@ -326,6 +347,8 @@ impl VideoConfig {
 			display_aspect_width: None,
 			display_aspect_height: None,
 			color: None,
+			projection: None,
+			stereo: None,
 			bitrate: None,
 			enabled: true,
 			preference: 0,

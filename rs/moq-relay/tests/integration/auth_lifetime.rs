@@ -1236,7 +1236,7 @@ async fn an_embedded_decider_admits_and_revokes() {
 	let (refusing, mut refusals) = moq_relay::auth::Auth::embedded("test-relay");
 	tokio::spawn(async move {
 		while let Some(admission) = refusals.next().await {
-			admission.refuse(moq_relay::auth::Error::Refused);
+			admission.refuse(moq_relay::auth::Error::Refused(Default::default()));
 		}
 	});
 	let (refused_port, refusing_relay) = spawn_relay(refusing).await;
@@ -1390,6 +1390,104 @@ async fn a_relay_without_an_auth_source_is_decided_by_the_embedder() {
 		.expect("run returned after the trigger")
 		.expect("relay task panicked")
 		.expect("relay exited with an error");
+}
+
+/// A relay deciding admissions in process, listening on TCP with `timeout` as its
+/// handshake deadline, and a client connecting to it.
+async fn connect_through_embedded_admission(
+	timeout: Duration,
+) -> (
+	Relay,
+	auth::Admissions,
+	tokio::task::JoinHandle<moq_tokio::Result<moq_tokio::Connection>>,
+) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let mut config = Config::default();
+	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
+	config.listen.timeout = Some(timeout);
+	config.drain_timeout = Duration::from_millis(100);
+	let mut relay = Relay::load(config).await.expect("load relay");
+	let port = relay.tcp_addr().expect("TCP listener bound").port();
+	let admissions = relay.admissions().expect("an empty [auth] hands over the admissions");
+	let url = room_url("tcp", port);
+	let connecting = tokio::spawn(async move { client().with_reconnect(false).connect(url).established().await });
+	(relay, admissions, connecting)
+}
+
+/// `listen.timeout` bounds admission as part of the handshake: a decision that never
+/// comes closes the connection at the deadline, not after a fixed cap of its own.
+#[tokio::test]
+async fn an_unanswered_admission_closes_at_the_handshake_deadline() {
+	let (relay, mut admissions, connecting) = connect_through_embedded_admission(Duration::from_secs(1)).await;
+	let trigger = relay.shutdown_trigger().clone();
+	let running = tokio::spawn(relay.run());
+	let admission = admissions.next().await.expect("the admission is asked");
+
+	// Only timers decide what follows: the deadline passes with nobody answering.
+	tokio::time::pause();
+	tokio::time::advance(Duration::from_secs(2)).await;
+	tokio::time::resume();
+	// The close reaches the client over loopback within moments; the old fixed cap
+	// would have held the connection for another eight seconds.
+	let connecting = tokio::time::timeout(TIMEOUT, connecting)
+		.await
+		.expect("the client never settled")
+		.expect("client task");
+	if let Ok(connection) = connecting {
+		tokio::time::timeout(Duration::from_secs(3), connection.closed())
+			.await
+			.expect("the connection outlived the handshake deadline")
+			.expect_err("closed as refused, not cleanly");
+	}
+	// A decision now has nobody to tell.
+	drop(admission);
+
+	trigger.start();
+	tokio::time::timeout(TIMEOUT, running)
+		.await
+		.expect("run returned after the trigger")
+		.expect("relay task panicked")
+		.expect("relay exited with an error");
+}
+
+/// Admission has no bound but the handshake deadline: a decision past the old
+/// ten-second cap still admits the session, under a deadline or with `"0"`, which
+/// sets none. The wait stays under the transport's keep-alive, which a longer jump
+/// of the paused clock would trip on its own.
+#[tokio::test]
+async fn a_late_decision_within_the_deadline_admits() {
+	let wait = Duration::from_secs(11);
+	for timeout in [Duration::from_secs(30), Duration::ZERO] {
+		let (relay, mut admissions, connecting) = connect_through_embedded_admission(timeout).await;
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+		let admission = admissions.next().await.expect("the admission is asked");
+
+		tokio::time::pause();
+		tokio::time::advance(wait).await;
+		tokio::time::resume();
+		admission.grant(moq_auth::lease::Consumer::fixed(grant(Duration::from_secs(3600))));
+		let connection = tokio::time::timeout(TIMEOUT, connecting)
+			.await
+			.expect("the late decision never reached the client")
+			.expect("client task")
+			.unwrap_or_else(|err| panic!("{timeout:?}: refused after {wait:?}: {err}"));
+		// Admitted, so the session stays up; a refusal would have closed it by now.
+		assert!(
+			tokio::time::timeout(Duration::from_secs(1), connection.closed())
+				.await
+				.is_err(),
+			"{timeout:?}: closed after the decision {wait:?} in"
+		);
+		drop(connection);
+
+		trigger.start();
+		tokio::time::timeout(TIMEOUT, running)
+			.await
+			.expect("run returned after the trigger")
+			.expect("relay task panicked")
+			.expect("relay exited with an error");
+	}
 }
 
 /// The next route and whether it is active.

@@ -5,6 +5,25 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Admission runs under the handshake deadline (#5765)
+
+`listen.timeout` now bounds auth admission as part of the handshake, replacing the fixed ten-second admission timeout, so `"0"` also lets admission wait forever.
+HTTP reads bound admission by the web listener's timeout.
+`Auth::admit` and `Cluster::admit` no longer time out on their own, so a slow embedded decider no longer refuses after ten seconds: the caller owns the deadline.
+Bound them with `moq_tokio::server::Request::within` on an accepted session, or wrap them in `tokio::time::timeout`; dropping the future withdraws the admission from the decider.
+Tokens attached in band keep their ten-second bound and are refused as `auth::Error::Unavailable` past it.
+
+### Usage types come from usage-rs 7 (#6060)
+
+The relay's `Args` and `Config` derives now implement usage-rs 7 traits.
+A CLI that flattens them depends on `usage-rs = "7"` under its own name: the derives emit `::usage_rs` paths and no longer read `Cargo.toml`.
+
+### Typed admission refusals (#5996)
+
+`auth::Error::Refused` now carries the shared `moq_auth::Refusal`.
+Pass `auth::Error::Refused(moq_auth::Refusal::default())` to `Admission::refuse` for an unattributed refusal, or set its `reason`, optional verified `root`, and `tier`.
+Match `auth::Error::Refused(refusal)` to inspect it; never use the dialed path as refusal attribution.
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

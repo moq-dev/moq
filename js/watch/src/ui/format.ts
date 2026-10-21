@@ -7,14 +7,6 @@ export function formatBitrate(bps: number): string {
 	return `${Math.round(bps)} bps`;
 }
 
-/** Format a bandwidth estimate with a direction arrow, or null if unavailable. */
-export function formatBandwidth(bps: number | undefined, dir: "up" | "down"): string | null {
-	if (bps === undefined || bps <= 0) return null;
-	const arrow = dir === "down" ? "↓" : "↑";
-	if (bps >= 1_000_000_000) return `${arrow} ${(bps / 1_000_000_000).toFixed(1)} Gbps`;
-	return `${arrow} ${formatBitrate(bps)}`;
-}
-
 /** Format a duration in milliseconds, switching to seconds past 1s. */
 export function formatMillis(ms: number): string {
 	if (ms < 1000) return `${Math.round(ms)} ms`;

@@ -10,11 +10,7 @@ const TrackSchema = z.object({
 	name: z.string(),
 });
 
-/**
- * Schema for a single audio rendition's decoder config.
- * Mirrors WebCodecs AudioDecoderConfig (https://w3c.github.io/webcodecs/#audio-decoder-config).
- */
-export const AudioConfigSchema = z.object({
+const AudioConfigFields = z.object({
 	// Optional reference to another broadcast that publishes this track, expressed
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
@@ -43,6 +39,12 @@ export const AudioConfigSchema = z.object({
 
 	// The number of channels in the audio
 	numberOfChannels: u53Schema,
+
+	// What the decoded channels carry. Absent means the codec's own channel order. "ambisonic" is
+	// full-sphere AmbiX (ACN order, SN3D normalization) whose order follows from numberOfChannels,
+	// a square of at least 4. Typed as a plain string so an unrecognized layout survives a
+	// republish; a consumer treats one as absent.
+	layout: z.optional(z.string()),
 
 	// The maximum bitrate of the audio in bits per second.
 	// TODO: Support up to Number.MAX_SAFE_INTEGER
@@ -83,6 +85,22 @@ export const AudioConfigSchema = z.object({
 		),
 	),
 });
+
+/**
+ * Schema for a single audio rendition's decoder config.
+ * Mirrors WebCodecs AudioDecoderConfig (https://w3c.github.io/webcodecs/#audio-decoder-config).
+ */
+export const AudioConfigSchema = AudioConfigFields.check(
+	z.refine((c) => c.layout !== "ambisonic" || isAmbisonic(c.numberOfChannels), {
+		message: "ambisonic audio needs a square channel count of at least 4",
+	}),
+);
+
+// (order + 1)² channels for an order of at least 1.
+function isAmbisonic(channels: number): boolean {
+	const order = Math.round(Math.sqrt(channels));
+	return order >= 2 && order * order === channels;
+}
 
 /** Schema for the catalog audio section: a map of track name to rendition config. */
 export const AudioSchema = z.union([

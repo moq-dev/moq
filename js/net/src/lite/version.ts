@@ -51,6 +51,25 @@ export function hasSetupStream(version: Version): boolean {
 	}
 }
 
+/**
+ * Whether the version has lite-05's dedicated TRACK stream and related stream layout changes.
+ *
+ * This is the common feature boundary for TRACK_INFO, FETCH streams, SUBSCRIBE_START/END, and
+ * per-frame timestamp prefixes.
+ */
+export function hasTrackStream(version: Version): boolean {
+	// Explicitly list older versions so future versions default to having the stream.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
 /// A datagram carries one single-frame group's `subscribe | sequence | timestamp | payload` and is
 /// routed over the existing subscription. Added in lite-05; older versions never send/accept them.
@@ -61,6 +80,19 @@ export function hasDatagrams(version: Version): boolean {
 		case Version.DRAFT_02:
 		case Version.DRAFT_03:
 		case Version.DRAFT_04:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether the session supports the GOAWAY control stream (0x5) for graceful shutdown and migration. Added in lite-04. */
+export function hasGoaway(version: Version): boolean {
+	// Explicitly list older versions so future versions default to having GOAWAY.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
 			return false;
 		default:
 			return true;
@@ -285,25 +317,6 @@ export function hasHidden(version: Version): boolean {
 }
 
 /**
- * Whether SUBSCRIBE_END carries the subscription's group stream count, sent once every
- * counted stream is open, in place of SUBSCRIBE_DROP. Added in lite-07.
- */
-export function hasStreamCount(version: Version): boolean {
-	// Explicitly list older versions so future versions keep the lite-07+ behavior.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
-
-/**
  * Whether a served SUBSCRIBE completes only once the subscriber FINs or resets its half of the
  * Subscribe Stream. Added in lite-07, where a subscriber FINs once its tail accounting settles,
  * since a transport ACK does not say the application read the tail.
@@ -360,6 +373,23 @@ export function hasEpoch(version: Version): boolean {
 
 /** Whether ANNOUNCE_START and ANNOUNCE_UPDATE may copy a path head or hop-chain tail from a live announcement. Added in lite-07. */
 export function hasAnnounceCompression(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE a wanted group. Added in lite-07.
+ * Older peers see a track that never refreshes. */
+export function hasRefresh(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:
@@ -445,5 +475,20 @@ export function wireTimescale(version: Version, timescale: Timescale | null | un
 			return timescale ?? Timescale.MILLI;
 		default:
 			return timescale ?? undefined;
+	}
+}
+
+/** Whether discovery streams mark their initial set with SYNCED rather than a count. */
+export function hasSynced(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
 	}
 }

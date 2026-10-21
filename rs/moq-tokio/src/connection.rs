@@ -58,7 +58,7 @@ fn settles_walk(err: &Error) -> bool {
 /// A GOAWAY naming no new URI is no failure: a restarting peer sends one to each session until
 /// it goes, and each of those
 /// serves, so it restarts the timeout instead.
-#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -189,7 +189,7 @@ pub enum Status {
 ///
 /// The URI is dialed exactly as given, so it must carry whatever credentials the
 /// new endpoint needs. Nothing from the current session is copied onto it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, usage::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, usage_rs::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum Redirect {
@@ -312,13 +312,7 @@ fn is_local_ip(ip: std::net::IpAddr) -> bool {
 		// it by that rather than by the v6 rules.
 		std::net::IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
 			Some(v4) => is_local_v4(v4),
-			// Loopback (::1), unspecified (::), unique local (fc00::/7), link local (fe80::/10).
-			None => {
-				ip.is_loopback()
-					|| ip.is_unspecified()
-					|| (ip.segments()[0] & 0xfe00) == 0xfc00
-					|| (ip.segments()[0] & 0xffc0) == 0xfe80
-			}
+			None => ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() || ip.is_unicast_link_local(),
 		},
 	}
 }
@@ -328,7 +322,7 @@ fn is_local_v4(ip: std::net::Ipv4Addr) -> bool {
 }
 
 /// How a reconnect loop reacts to a peer's GOAWAY.
-#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -468,6 +462,8 @@ impl Resolved {
 /// distinguishes a permanent give-up from a graceful close.
 #[derive(Default)]
 struct State {
+	/// Tokens to queue before publishing a replacement session to its consumers.
+	tokens: std::sync::Mutex<Vec<std::sync::Weak<auth::Replay>>>,
 	/// Current connection status, or `None` before the first connect.
 	status: Option<Status>,
 	/// How many sessions have been live on this handle, counting the current one.
@@ -519,6 +515,7 @@ impl Shared {
 			return;
 		}
 		if let Ok(mut state) = self.state.write() {
+			auth::replay(&state, session, state.connects + 1);
 			// A migration replaces a live session without a disconnect in between, so
 			// its end is counted here, keeping `started - ended` at 1 while connected.
 			if state.session.is_some() {
@@ -1563,7 +1560,7 @@ mod tests {
 	/// Updating with an empty CLI preserves a standing TOML value over typed defaults.
 	#[test]
 	fn cli_does_not_clobber_toml_backoff() {
-		#[derive(usage::Cli)]
+		#[derive(usage_rs::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(settings)]
 		struct Wrapper {
@@ -1601,7 +1598,7 @@ mod tests {
 	/// GOAWAY typed defaults remain overrideable by a standing TOML layer.
 	#[test]
 	fn cli_does_not_clobber_toml_goaway() {
-		#[derive(usage::Cli)]
+		#[derive(usage_rs::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(settings)]
 		struct Wrapper {
@@ -2315,21 +2312,18 @@ mod tests {
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn a_failing_redial_reports_why_until_it_connects() {
-		const WAIT: Duration = Duration::from_secs(10);
-
-		// Nothing listens here, so every dial is refused until the name moves.
-		let refused = std::net::TcpListener::bind("127.0.0.1:0")
-			.expect("bind")
-			.local_addr()
-			.expect("local addr");
-		let reason = std::net::TcpStream::connect(refused)
-			.expect_err("nothing listens")
-			.to_string();
+		// Hold the failing listener until the runtime ends: a released port can
+		// become another process's listener while the connection keeps retrying.
+		let failing = dead().await.socket_addrs(|| None).unwrap();
+		assert!(
+			std::net::TcpListener::bind(failing[0]).is_err(),
+			"the failing port stays reserved"
+		);
 		let (live, mut accepted, _task) = serve(crate::origin::spawn()).await;
 
 		// Unique to this test: the table is process-wide.
 		const HOST: &str = "failing-redial.test";
-		crate::resolve::hosts::point(HOST, [refused]);
+		crate::resolve::hosts::point(HOST, failing);
 
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some(MIN_BACKOFF);
@@ -2339,62 +2333,60 @@ mod tests {
 		let mut connection = client.connect(url(&format!("tcp://{HOST}:1/")));
 		let monitor = connection.monitor();
 
-		let failure = tokio::time::timeout(WAIT, async {
-			loop {
-				if let Some(err) = monitor.failure() {
-					break err;
-				}
-				tokio::time::sleep(MIN_BACKOFF).await;
-			}
+		let failure = kio::wait(|waiter| {
+			monitor.state.poll(waiter, |state| match &state.failure {
+				Some(err) => Poll::Ready(err.clone()),
+				None => Poll::Pending,
+			})
 		})
 		.await
-		.expect("the refused redial never reported a failure");
-		assert!(failure.to_string().contains(&reason), "{failure}");
+		.unwrap_or_else(|_| panic!("the connection ended before reporting its retry reason"));
+		assert_eq!(
+			monitor
+				.failure()
+				.expect("the monitor reports the retry reason")
+				.to_string(),
+			failure.to_string()
+		);
+		assert!(
+			matches!(&failure, Error::Tcp(err) if matches!(err.as_ref(), crate::tcp::Error::Connect(reason) if !reason.is_empty())),
+			"{failure}"
+		);
 		let transition = futures::FutureExt::now_or_never(connection.status());
 		assert!(transition.is_none(), "a failed redial is no status transition");
 
 		crate::resolve::hosts::point(HOST, [live]);
-		let status = tokio::time::timeout(WAIT, connection.status())
-			.await
-			.expect("never connected once the name moved")
-			.unwrap();
-		assert_eq!(status, Status::Connected);
+		assert_eq!(connection.status().await.unwrap(), Status::Connected);
 		assert!(monitor.failure().is_none(), "the connect must clear the failure");
-		let _session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		let _session = accepted.recv().await.unwrap();
 	}
 
 	/// Closing a connection between retries ends the retry, so its reason goes with it.
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn closing_between_retries_clears_the_failure() {
-		const WAIT: Duration = Duration::from_secs(10);
-
-		// Nothing listens here, so every dial is refused.
-		let refused = std::net::TcpListener::bind("127.0.0.1:0")
-			.expect("bind")
-			.local_addr()
-			.expect("local addr");
+		// A held port, not a released one: another test's server could claim a
+		// released port, and the dial would connect instead of failing.
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some(MIN_BACKOFF);
 		config.backoff.max = Some(MIN_BACKOFF);
 		config.backoff.timeout = Some(Duration::ZERO);
 		let client = config.init(Default::default()).unwrap();
-		let connection = client.connect(url(&format!("tcp://{refused}/")));
+		let connection = client.connect(dead().await);
 		let mut monitor = connection.monitor();
 
-		tokio::time::timeout(WAIT, async {
-			while monitor.failure().is_none() {
-				tokio::time::sleep(MIN_BACKOFF).await;
-			}
+		kio::wait(|waiter| {
+			monitor.state.poll(waiter, |state| match state.failure {
+				Some(_) => Poll::Ready(()),
+				None => Poll::Pending,
+			})
 		})
 		.await
-		.expect("the refused dial never reported a failure");
+		.unwrap_or_else(|_| panic!("the connection ended before reporting its retry reason"));
 
 		connection.close().await.expect("close");
 		// Resolves with an error once the loop's state is final.
-		let ended = tokio::time::timeout(WAIT, monitor.presence_changed())
-			.await
-			.expect("the loop never ended");
+		let ended = monitor.presence_changed().await;
 		assert!(ended.is_err(), "nothing connected, so only the end moves presence");
 		assert!(monitor.failure().is_none(), "nothing is retrying");
 	}

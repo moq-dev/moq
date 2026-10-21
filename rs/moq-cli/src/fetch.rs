@@ -16,7 +16,7 @@ use crate::args::MoqSide;
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Read one group of a track and write it to stdout.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Args {
 	/// The track name, taken literally: a `/` in it is part of the name.
@@ -339,7 +339,7 @@ mod tests {
 		}
 	}
 
-	const ENV: &[&str] = &["MOQ_CONNECT", "MOQ_EPOCH"];
+	const ENV: &[&str] = &["MOQ_CONNECT"];
 
 	/// A known sequence prints its frames back to back, the same bytes as `/fetch`.
 	#[tokio::test(start_paused = true)]

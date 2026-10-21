@@ -4,6 +4,34 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Anchors can name a time (#6074)
+
+`Subscription.Anchor` gains `.time(timestampUs:)`, so exhaustive switches need a case for it.
+`TrackConsumer.update(subscription:)` now `throws`, on a time anchor an untimed track can't serve; call it with `try`.
+
+### JSON consumers yield `Json.Timed` (#5677)
+
+`Json.SnapshotConsumer` and `Json.StreamConsumer` yield `Json.Timed<Value>` (`value`, `timestampUs`) instead of the bare value; `timestampUs` is `nil` when untimed.
+A snapshot consumer's `next()` now yields every state in order; call `latest()` for the newest.
+Timestamps are rounded down to a whole microsecond.
+
+### Ranges filter reads (#5929)
+
+A subscription now reads only the groups its own `ranges` cover.
+
+### Track demand reports the wanted group (#5930)
+
+`TrackDemand.isUsed`, `used()`, and `unused()` are gone.
+`wanted` is nil while nobody subscribes, otherwise the group subscribers want next, and `wantedChanged()` waits for it to change (the first call returns at once).
+Loop on `wantedChanged()` until it returns non-nil where you awaited `used()`, and nil where you awaited `unused()`.
+`TrackInfo` gains `refresh`. `GroupDemand` is unchanged.
+
+### `CongestionControl` gained `none` (#5926)
+
+`CongestionControl.none` runs no congestion control and no pacing, for tests and controlled links.
+An exhaustive `switch` needs one more case.
+Spell it out as `CongestionControl.none` when assigning to `QuicConfig.congestionControl`: a bare `.none` there is `nil`, the backend's default.
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

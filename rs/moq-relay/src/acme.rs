@@ -47,7 +47,7 @@ const FAILURE_WINDOW: Duration = Duration::from_secs(60 * 60);
 
 /// Automatic certificates from an ACME directory, enabled by `acme.domains`.
 #[serde_with::serde_as]
-#[derive(usage::Args, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -81,7 +81,7 @@ pub struct Config {
 
 	/// Directory that keeps the account key and certificate across restarts, made owner-only.
 	#[usage(long = "acme-dir", name = "acme-dir", env = "MOQ_ACME_DIR", setting = "acme.dir")]
-	#[usage(value_hint = usage::ValueHint::DirPath)]
+	#[usage(value_hint = usage_rs::ValueHint::DirPath)]
 	pub dir: Option<PathBuf>,
 
 	/// The ACME directory URL, Let's Encrypt production when unset.
