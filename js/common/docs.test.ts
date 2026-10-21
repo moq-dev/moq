@@ -342,3 +342,20 @@ test("a static member does not document the instance member of the same name", (
 	});
 	expect(found).toEqual(["index.d.ts: Thing.create"]);
 });
+
+test("members inherited from an unexported sibling in a namespace are checked", () => {
+	const found = check({
+		"/dist/index.d.ts": [
+			"/** Documented. */",
+			"export declare namespace Ns {",
+			"    class Base {",
+			"        run(): void;",
+			"    }",
+			"    /** Documented. */",
+			"    export class Public extends Base {}",
+			"    export {};",
+			"}",
+		].join("\n"),
+	});
+	expect(found).toEqual(["index.d.ts: Ns.Base", "index.d.ts: Ns.Base.run"]);
+});

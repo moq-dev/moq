@@ -54,6 +54,9 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 	const aliases = new Set<Binding>();
 
 	// Report each declaration once, under the first public name that reaches it.
+	// A declaration reached by local path, with the namespaces enclosing it.
+	type Named = { key: string; file: string; name: string; declarations: Declarations; scopes: Named[] };
+
 	const visit = (file: string, path: string, binding: Binding) => {
 		// The `export * as Name` statement is what a consumer sees, whichever package it names.
 		if (binding.kind === "namespace" && binding.documented === false && !aliases.has(binding)) {
@@ -80,8 +83,9 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 
 	// Check one name's declarations, the public members of a class and of the package's classes it
 	// extends, and everything a namespace declares, since an ambient namespace exports all of it.
-	// `key` names the declaration by file and local path, so each is reported once.
-	const check = (file: string, path: string, key: string, declarations: Declarations) => {
+	// `key` names the declaration by file and local path, so each is reported once; `scopes` are
+	// the namespaces enclosing it, innermost last.
+	const check = (file: string, path: string, key: string, declarations: Declarations, scopes: Named[] = []) => {
 		const where = relative(root, file);
 		const header = load(file).header;
 		if (!declarations.some(({ statement }) => documented(statement, header))) found.push(`${where}: ${path}`);
@@ -104,10 +108,10 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 			}
 			if (declaration.type === "ClassDeclaration") {
 				const superClass = declaration.superClass;
-				const base = resolveClass(file, superClass);
+				const base = resolveClass(file, superClass, scopes);
 				if (base && "key" in base && !seen.has(base.key)) {
 					seen.add(base.key);
-					check(base.file, base.name, base.key, base.declarations);
+					check(base.file, base.name, base.key, base.declarations, base.scopes);
 				}
 				const element = isElement(superClass);
 				for (const node of declaration.body.body) member(node, element);
@@ -116,41 +120,55 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		for (const { name, ok } of members.values()) {
 			if (!ok) found.push(`${where}: ${path}.${name}`);
 		}
+		const scope = { key, file, name: key.slice(key.indexOf("#") + 1), declarations, scopes };
 		for (const [name, list] of namespaceMembers(declarations)) {
 			const nested = `${key}.${name}`;
 			if (seen.has(nested)) continue;
 			seen.add(nested);
-			check(file, `${path}.${name}`, nested, list);
+			check(file, `${path}.${name}`, nested, list, [...scopes, scope]);
 		}
 	};
 
 	// What a superclass expression names: a module through a namespace import, or a package
 	// declaration reached by name or through any depth of namespaces (`ns.Inner.Parent`).
-	// Undefined for a global or another package's class.
-	type Named = { key: string; file: string; name: string; declarations: Declarations };
-	const resolveClass = (file: string, expression: unknown): Named | { module: string } | undefined => {
+	// Undefined for a global or another package's class. A bare name resolves in the enclosing
+	// namespaces first, which see their unexported members too.
+	const resolveClass = (
+		file: string,
+		expression: unknown,
+		scopes: Named[],
+	): Named | { module: string } | undefined => {
 		const local = (base: ReturnType<typeof resolveBinding>): Named | { module: string } | undefined => {
 			if (base?.kind === "namespace") return { module: base.file };
 			const declarations = base ? load(base.file).locals.get(base.name) : undefined;
 			if (!base || !declarations) return undefined;
-			return { key: `${base.file}#${base.name}`, file: base.file, name: base.name, declarations };
+			return { key: `${base.file}#${base.name}`, file: base.file, name: base.name, declarations, scopes: [] };
+		};
+		const member = (owner: Named, name: string, all: boolean): Named | undefined => {
+			const declarations = namespaceMembers(owner.declarations, all).get(name);
+			if (!declarations) return undefined;
+			const local = `${owner.name}.${name}`;
+			const scopes = [...owner.scopes, owner];
+			return { key: `${owner.file}#${local}`, file: owner.file, name: local, declarations, scopes };
 		};
 		const node = expression as { type: string; name?: string; object?: unknown; property?: unknown } | null;
-		if (node?.type === "Identifier" && node.name)
+		if (node?.type === "Identifier" && node.name) {
+			for (const scope of scopes.toReversed()) {
+				const found = member(scope, node.name, true);
+				if (found) return found;
+			}
 			return local(resolveBinding(file, { kind: "local", name: node.name }));
+		}
 
 		const property = node?.property as { type: string; name: string } | undefined;
 		if (node?.type !== "MemberExpression" || property?.type !== "Identifier") return undefined;
-		const owner = resolveClass(file, node.object);
+		const owner = resolveClass(file, node.object, scopes);
 		if (!owner) return undefined;
 		if ("module" in owner) {
 			const next = findExport(owner.module, property.name, new Set());
 			return next ? local(resolveBinding(next.file, next.binding)) : undefined;
 		}
-		const declarations = namespaceMembers(owner.declarations).get(property.name);
-		if (!declarations) return undefined;
-		const name = `${owner.name}.${property.name}`;
-		return { key: `${owner.file}#${name}`, file: owner.file, name, declarations };
+		return member(owner, property.name, false);
 	};
 
 	// Follow a binding to the file and local name that declares it; undefined for another package.
@@ -299,8 +317,9 @@ function parseModule(source: string): Module {
 	return module;
 }
 
-// Everything an ambient namespace among `declarations` declares, by name; all of it is exported.
-function namespaceMembers(declarations: Declarations): Map<string, Declarations> {
+// What an ambient namespace among `declarations` exports, by name, or with `all` everything it
+// declares, as seen from inside it.
+function namespaceMembers(declarations: Declarations, all = false): Map<string, Declarations> {
 	const members = new Map<string, Declarations>();
 	for (const { statement: outer, declaration } of declarations) {
 		if (declaration.type !== "TSModuleDeclaration" || declaration.body.type !== "TSModuleBlock") continue;
@@ -320,7 +339,7 @@ function namespaceMembers(declarations: Declarations): Map<string, Declarations>
 			(s) => s.type === "ExportNamedDeclaration" && !s.declaration && !s.source && s.specifiers.length === 0,
 		);
 		for (const statement of body) {
-			if (explicit && statement.type !== "ExportNamedDeclaration") continue;
+			if (explicit && !all && statement.type !== "ExportNamedDeclaration") continue;
 			const inner = statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
 			for (const name of declared(inner)) {
 				const list = members.get(name) ?? [];
