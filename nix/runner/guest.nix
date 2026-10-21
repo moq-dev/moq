@@ -103,6 +103,8 @@
   users.users.github-runner = {
     isSystemUser = true;
     group = "github-runner";
+    # Java reads its home from passwd, not $HOME, so Gradle needs this too.
+    home = "/var/cache/github-runner-home";
   };
   users.groups.github-runner = { };
 
@@ -127,7 +129,7 @@
       which
     ];
     extraEnvironment = {
-      HOME = "/var/cache/github-runner-home";
+      HOME = config.users.users.github-runner.home;
       MBX_CACHE_DIR = "/var/cache/github-runner-home/.cache/mbx";
       CARGO_BUILD_JOBS = toString resources.cores;
     };

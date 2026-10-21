@@ -129,6 +129,8 @@ pkgs.testers.runNixOSTest {
           pkgs.writeShellScript "cache-probe" ''
             set -euo pipefail
             test "$(cat "$HOME/seeded")" = seeded
+            # Java ignores $HOME and reads the passwd entry.
+            test "$(${pkgs.getent}/bin/getent passwd "$(id -u)" | cut -d: -f6)" = "$HOME"
             mkdir -p "$MBX_CACHE_DIR"
             # Jobs execute checkout scripts and tools installed in their home.
             for directory in "$HOME" /var/cache/github-runner-work; do
