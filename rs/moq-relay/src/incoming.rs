@@ -47,6 +47,9 @@ pub trait Sealed: Sized {
 	/// What the auth decider is asked about this session.
 	fn admission(&self, auth: &auth::Auth) -> moq_auth::Request;
 
+	/// Finish `work` before the handshake deadline, closing the session if it passes.
+	async fn within<T>(&self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T>;
+
 	/// Refuse the session with the admission's HTTP-style status.
 	async fn reject(self, status: http::StatusCode);
 
@@ -85,6 +88,10 @@ impl Sealed for moq_tokio::server::Request {
 
 	fn admission(&self, auth: &auth::Auth) -> moq_auth::Request {
 		auth::request_for(auth, self)
+	}
+
+	async fn within<T>(&self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
+		Ok(moq_tokio::server::Request::within(self, work).await?)
 	}
 
 	async fn reject(self, status: http::StatusCode) {
@@ -152,6 +159,11 @@ impl<S: poll::Boxable> Sealed for Accepted<S> {
 
 	fn admission(&self, auth: &auth::Auth) -> moq_auth::Request {
 		auth::request_for_setup(auth, &self.handshake, self.transport)
+	}
+
+	/// No listener deadline: whoever owns the transport bounds the handshake.
+	async fn within<T>(&self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T> {
+		Ok(work.await)
 	}
 
 	async fn reject(self, status: http::StatusCode) {
