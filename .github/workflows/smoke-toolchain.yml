@@ -25,7 +25,9 @@ jobs:
       - uses: ./.github/actions/just
       - name: Update the coupled pins
         run: just --justfile test/smoke/justfile update-toolchain
-      # An app token lets the proposed update trigger Smoke's pull_request checks.
+      - name: Check the updated browser toolchain
+        run: just --justfile test/smoke/justfile check-toolchain
+      # Use the existing app identity to publish the validated draft proposal.
       # Mint it after evaluating nixpkgs so the update itself holds no write token.
       - name: Generate moq-bot token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
@@ -43,7 +45,7 @@ jobs:
           token: ${{ steps.token.outputs.token }}
           branch: codex/smoke-toolchain
           base: main
-          draft: true
+          draft: always-true
           add-paths: |
             test/smoke/flake.lock
             test/smoke/clients/js/package.json
@@ -71,6 +73,6 @@ jobs:
 
             ## Follow-ups
 
-            Review the Smoke checks before marking ready. This workflow does not enqueue or merge updates.
+            The updater validated freshness and launched the updated browser. Dispatch Smoke on this branch to run the full published-package matrix before marking ready. This workflow does not enqueue or merge updates.
 
             (Written by GPT-6)

@@ -127,3 +127,9 @@ cloudflare-check:
 # Refresh the toolchain lock and the exact npm Playwright pin in the same change.
 update-toolchain:
     python3 update.py
+
+# Verify a proposed toolchain with its own version and a real browser launch.
+check-toolchain:
+    nix develop --command just freshness
+    cd clients/js && nix develop --command bun install
+    cd clients/js && nix develop --command bun -e 'import {chromium} from "playwright"; const browser = await chromium.launch({channel: "chromium", headless: true}); await browser.close();'
