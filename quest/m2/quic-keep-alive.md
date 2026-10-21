@@ -32,7 +32,3 @@ mechanism and stays as is.
 Tests: the derived interval follows a changed idle timeout, including a peer
 that advertises a shorter one; an idle connection survives with the
 default; an explicit value wins; `0s` disables.
-
-## Related
-
-- [noq#810](https://github.com/n0-computer/noq/issues/810) - the deadline-driven proposal to n0; flub and matheus23 asked to keep a cap for NAT bindings, which the override covers
