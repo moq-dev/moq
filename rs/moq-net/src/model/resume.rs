@@ -14,7 +14,8 @@
 //! grace a passed group is waited for), and while a group still read is read from it or may
 //! continue from it (it holds that group, or may yet get it). Nothing under the bound is
 //! waited for past the reader's budget. The serving copy draining cleanly ends the track
-//! only once nothing it replaced may still deliver below that end.
+//! only once nothing it replaced may still deliver below that end. Datagrams are ephemeral,
+//! so no copy is kept for them: a reader that never asked for a group keeps none.
 //!
 //! A group carries on across the switch through its [`Recover`]: once its copy stalls while
 //! a newer route serves, it continues from the serving route's copy of the same group at the
@@ -388,15 +389,14 @@ impl Copy {
 
 	/// How a reader still needs this copy, once replaced.
 	fn retains(&mut self, reader: &Retain<'_>) -> Retains {
+		// Datagrams are ephemeral, so only groups keep a copy: a reader that only reads
+		// datagrams keeps none, whatever its budget.
+		if !reader.groups_read {
+			return Retains::No;
+		}
+		// Not yet bounded, it may still feed a group the new copy never has.
 		if self.until.is_none() && self.done.is_none() {
-			// Not yet bounded, it may still feed a group the new copy never has.
-			if reader.groups_read {
-				return Retains::Wait;
-			}
-			// Nobody read groups yet, so no new copy's group will bound it: it finishes the
-			// groups it has, and nothing newer.
-			self.until = Some(reader.newest.max(self.track.latest_sequence()));
-			self.update(reader.mirrored);
+			return Retains::Wait;
 		}
 		// Superseded once the serving copy has a group past the bound.
 		if self.since.is_none()
@@ -458,7 +458,6 @@ impl Copy {
 struct Retain<'a> {
 	groups: (u64, Cap),
 	groups_read: bool,
-	newest: Option<u64>,
 	/// The newest group the serving copy has.
 	edge: Option<u64>,
 	mirrored: &'a Subscription,
@@ -529,7 +528,7 @@ impl Subscriber {
 	}
 
 	/// Poll for the next datagram in arrival order. `delivered` decides which replaced
-	/// copies still have a group to hand out.
+	/// copies still have a group to hand out, once groups were asked for.
 	pub(super) fn poll_recv_datagram(
 		&mut self,
 		delivered: &Delivered,
@@ -694,7 +693,7 @@ struct Reader {
 	datagram: Option<(u64, u64)>,
 	/// The local group filter; see [`track::Subscriber::set_groups`].
 	groups: (u64, Cap),
-	/// Whether groups were read, so a datagram read keeps the copies they still need.
+	/// Whether groups were ever asked for; until then the reader keeps no replaced copy.
 	groups_read: bool,
 	/// The groups handed out while copies overlap, by sequence, held while each is read.
 	out: Vec<(u64, Weak<()>)>,
@@ -853,7 +852,6 @@ impl Reader {
 		let reader = Retain {
 			groups: self.groups,
 			groups_read: self.groups_read,
-			newest: self.newest,
 			edge: self.copies.last().and_then(|copy| copy.track.latest_sequence()),
 			mirrored: &self.mirrored,
 			delivered,
@@ -2433,29 +2431,28 @@ mod test {
 		assert!(matches!(sub.poll_recv_group(&noop), Poll::Ready(Ok(None))));
 	}
 
-	/// A reader that never reads groups keeps a replaced copy's unread groups only within its
-	/// budget, so a route that keeps moving leaves no copy per swap behind.
-	#[moq_clock::test]
-	async fn datagram_readers_keep_replaced_copies_within_their_budget() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let mut sub = subscribe(&logical, Duration::from_millis(100));
-		let mut tracks = Vec::new();
-		for sequence in 0..20 {
-			let track = copy();
-			routes.serve(track.consume());
-			write(&track, sequence);
-			assert!(sub.recv_datagram().now_or_never().is_none());
-			assert!(
-				copies(&routes) <= 3,
-				"{} copies after {sequence} swaps",
-				copies(&routes)
-			);
-			tracks.push(track);
-			moq_clock::sleep(Duration::from_millis(50)).await;
+	/// Datagrams are ephemeral: a reader that only reads them keeps no replaced copy, whatever
+	/// its budget and whatever unread groups the copy holds, so a route that keeps moving
+	/// leaves no copy per swap behind.
+	#[test]
+	#[cfg(feature = "async")]
+	fn datagram_readers_keep_no_replaced_copy() {
+		for budget in [Duration::from_millis(100), Duration::MAX] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let mut sub = subscribe(&logical, budget);
+			let mut tracks = Vec::new();
+			for sequence in 0..20 {
+				let track = copy();
+				routes.serve(track.consume());
+				write(&track, sequence);
+				assert!(sub.recv_datagram().now_or_never().is_none());
+				assert_eq!(copies(&routes), 1, "after {sequence} swaps, budget {budget:?}");
+				tracks.push(track);
+			}
+			// Only the serving copy's group is left.
+			assert_eq!(drain(&mut sub, false), [19], "budget {budget:?}");
 		}
-		// The unread groups still within the budget are read.
-		assert_eq!(drain(&mut sub, false), [18, 19]);
 	}
 
 	/// A copy whose route failed still continues a failed group it finished: a failed track
@@ -3902,8 +3899,8 @@ mod test {
 		);
 	}
 
-	/// Datagrams and groups are independent channels: reading datagrams first must not
-	/// release a replaced copy whose buffered groups the reader has yet to read.
+	/// Datagrams and groups are independent channels: once a reader asked for groups, reading
+	/// datagrams first must not release a replaced copy whose buffered groups it has yet to read.
 	#[test]
 	#[cfg(feature = "async")]
 	fn datagram_reads_keep_unread_groups_on_a_replaced_copy() {
@@ -3913,6 +3910,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(10));
+			assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
 			assert!(sub.recv_datagram().now_or_never().is_none());
 			let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
 			group.write_frame(ts(0), b"a0".as_ref()).unwrap();
@@ -3936,6 +3934,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let mut sub = subscribe(&logical, Duration::from_secs(10));
+			assert!(sub.poll_next_group(&kio::Waiter::noop()).is_pending());
 			assert!(sub.recv_datagram().now_or_never().is_none());
 			let _zero = ordered_first.then(|| a.create_group(group::Info { sequence: 0 }).unwrap());
 			if ordered_first {
@@ -3978,6 +3977,7 @@ mod test {
 				let a = copy();
 				routes.serve(a.consume());
 				let mut sub = subscribe(&logical, Duration::from_secs(10));
+				assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
 				assert!(sub.recv_datagram().now_or_never().is_none());
 				let _zero = a.create_group(group::Info { sequence: 0 }).unwrap();
 				let b = copy();
@@ -4148,32 +4148,6 @@ mod test {
 		let readers = routes.readers.lock().unwrap();
 		let reader = readers[0].upgrade().unwrap();
 		assert_eq!(reader.lock().unwrap().copies.len(), 1);
-	}
-
-	/// A reader that read no groups bounds a replaced copy at what it has, so the copy stops
-	/// taking new groups: no new copy's group handed out will ever bound it.
-	#[test]
-	#[cfg(feature = "async")]
-	fn datagram_readers_bound_replaced_copies() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let a = copy();
-		routes.serve(a.consume());
-		let mut sub = subscribe(&logical, Duration::from_secs(10));
-		write(&a, 0);
-		let b = copy();
-		routes.serve(b.consume());
-		assert!(sub.recv_datagram().now_or_never().is_none());
-		write(&a, 1);
-		{
-			let readers = routes.readers.lock().unwrap();
-			let reader = readers[0].upgrade().unwrap();
-			let reader = reader.lock().unwrap();
-			assert_eq!(reader.copies.len(), 2, "its buffered group may still be read");
-			assert_eq!(reader.copies[0].until, Some(Some(0)));
-		}
-		// A group read later still gets what it had, and nothing it took after.
-		assert_eq!(drain(&mut sub, false), [0]);
 	}
 
 	#[test]

@@ -1512,7 +1512,7 @@ test("a clean end waits for a group the replaced copy still carries", async () =
 });
 
 test.each([false, true])(
-	"a datagram read keeps a replaced copy's unread group for the first group read (datagrams first: %p)",
+	"a reader that asked for groups keeps a replaced copy's unread group across a datagram read (datagrams first: %p)",
 	async (datagramsFirst) => {
 		const front = new Front();
 		const a = new BroadcastProducer();
@@ -1521,6 +1521,7 @@ test.each([false, true])(
 		copy(b);
 		front.serve(a.consume());
 		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(10_000) });
+		expect(sub.tryRecvGroup()).toBeUndefined();
 		expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
 		ta.write(0);
 		front.serve(b.consume());
@@ -1535,33 +1536,33 @@ test.each([false, true])(
 	},
 );
 
-test("a datagram reader keeps replaced copies only within its budget", async () => {
-	const { clock, restore } = manual();
-	const front = new Front();
-	const sources: BroadcastProducer[] = [];
-	const copies: ReturnType<typeof copy>[] = [];
-	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(100) });
-	try {
-		for (let sequence = 0; sequence < 20; sequence++) {
-			const source = new BroadcastProducer();
-			const held = copy(source);
-			sources.push(source);
-			copies.push(held);
-			front.serve(source.consume());
-			await settle();
-			held.write(sequence);
-			expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
-			await settle();
-			const subscribed = copies.filter((held) => held.producer.demand().wanted.peek() !== undefined);
-			expect(subscribed.length).toBeLessThanOrEqual(3);
-			await clock.advanceAsync(Nano.fromMilli(Milli(50)));
+test.each([Milli(100), Milli(3_600_000)])(
+	"a datagram reader keeps no replaced copy, whatever its budget (%p ms)",
+	async (maxDelay) => {
+		const front = new Front();
+		const sources: BroadcastProducer[] = [];
+		const copies: ReturnType<typeof copy>[] = [];
+		const sub = front.consumer.track("seq").subscribe({ maxDelay });
+		try {
+			for (let sequence = 0; sequence < 20; sequence++) {
+				const source = new BroadcastProducer();
+				const held = copy(source);
+				sources.push(source);
+				copies.push(held);
+				front.serve(source.consume());
+				await settle();
+				held.write(sequence);
+				expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
+				await settle();
+				const subscribed = copies.filter((held) => held.producer.demand().wanted.peek() !== undefined);
+				expect(subscribed).toEqual([held]);
+			}
+			// Only the serving copy's group is left.
+			expect(drain(sub)).toEqual([19]);
+		} finally {
+			sub.close();
+			front.consumer.close();
+			for (const source of sources) source.close();
 		}
-		// The unread groups still within the budget are read.
-		expect(drain(sub)).toEqual([18, 19]);
-	} finally {
-		sub.close();
-		front.consumer.close();
-		for (const source of sources) source.close();
-		restore();
-	}
-});
+	},
+);

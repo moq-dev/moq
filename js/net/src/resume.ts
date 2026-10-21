@@ -16,6 +16,8 @@
  * and while a group still read is read from it or may continue from it (it holds that group, or may
  * yet get it). Nothing under the bound is waited for past the reader's budget. The serving copy
  * draining cleanly ends the track only once nothing it replaced may still deliver below that end.
+ * Datagrams are ephemeral, so no copy is kept for them: a reader that never asked for a group keeps
+ * none.
  *
  * A group carries on across the switch through its {@link Recover}: once its copy stalls while a
  * newer route serves, it continues from the serving route's copy of the same group at the same
@@ -272,7 +274,7 @@ class Reader implements ResumeSource {
 	#closed = false;
 	/** The channels that ran out cleanly. */
 	#drained = new Set<"groups" | "datagrams">();
-	/** Whether groups were read, so a datagram read keeps the copies they still need. */
+	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
 	#groupsRead = false;
 	/** The groups handed out while copies overlap and still read; see {@link #retains}. */
 	readonly out = new Set<Recover>();
@@ -598,16 +600,11 @@ class Reader implements ResumeSource {
 	 * copy has.
 	 */
 	#retains(copy: Copy, delivered: Delivered, edge: number | undefined): "wait" | "keep" | undefined {
-		if (copy.until === undefined && copy.done === undefined) {
-			// Not yet bounded, it may still feed a group the new copy never has.
-			if (this.#groupsRead) return "wait";
-			// Nobody read groups yet, so no new copy's group will bound it: it finishes the groups
-			// it has, and nothing newer.
-			const until = Math.max(this.#newest ?? -1, hooks.latestSequence(copy.sub) ?? -1);
-			copy.until = until < 0 ? null : until;
-			this.#update(copy);
-			this.#bound(copy);
-		}
+		// Datagrams are ephemeral, so only groups keep a copy: a reader that only reads datagrams
+		// keeps none, whatever its budget.
+		if (!this.#groupsRead) return undefined;
+		// Not yet bounded, it may still feed a group the new copy never has.
+		if (copy.until === undefined && copy.done === undefined) return "wait";
 		const end = copyEnd(copy);
 		// Superseded once the serving copy has a group past the bound.
 		if (copy.since === undefined && end !== undefined && edge !== undefined && edge >= end) copy.since = now();
