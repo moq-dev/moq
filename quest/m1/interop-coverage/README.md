@@ -2,12 +2,12 @@
 
 ## Goal
 
-Every moq-transport feature that moq-net exposes has a cross-implementation
-test: Rust, JS, and the bindings exchange hang media and exercise subgroup
-data, namespace discovery, late joins, FETCH, GOAWAY, TRACK_STATUS,
-datagrams, and request limits over the even drafts 14 through 22, and our
-upstream runner clients implement the runner's existing cases for those
-features.
+The moq-transport features moq-net exposes with the most interop bug
+history have cross-implementation tests: Rust, JS, and the bindings exchange
+hang media and exercise subgroup data, namespace discovery, late joins,
+FETCH, GOAWAY, TRACK_STATUS, datagrams, and request limits over the even
+drafts 14 through 22, and our upstream runner clients implement the
+runner's existing cases for those features.
 
 Boundaries:
 
@@ -17,6 +17,10 @@ Boundaries:
   stay red by design.
 - Media stays hang. No MSF catalog in our runner clients.
 - New cases live in-tree (`test/interop`), not in the runner's spec.
+- Not covered: mid-subscription updates (`Subscription::update` in Rust and
+  JS, sent as SUBSCRIBE_UPDATE or REQUEST_UPDATE) for priority, max age,
+  NEW_GROUP_REQUEST, and group order. The maintainer did not pick them on
+  2026-10-21; plan them separately if their bug history grows.
 
 ## Plan
 
@@ -32,8 +36,7 @@ coverage on `main` at `3ab6cbf81d`.
 - Even drafts only (14, 16, 18, 20, 22), nightly.
 - Case ranking follows interop bug history: subgroup data and namespace
   discovery, then late join and FETCH, then GOAWAY, TRACK_STATUS,
-  datagrams, and limits. Mid-subscription updates (priority, max age,
-  NEW_GROUP_REQUEST, descending order) were not picked.
+  datagrams, and limits.
 
 ## Required
 

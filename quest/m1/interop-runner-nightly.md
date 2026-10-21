@@ -3,8 +3,8 @@
 ## Goal
 
 A nightly job runs [englishm/moq-interop-runner](https://github.com/englishm/moq-interop-runner)
-in its docker mode at a pinned commit, with a moq-relay image built from
-`main` standing in for the `moq-dev-rs` relay. Every client and docker-only
+in its docker mode at its default branch's HEAD, with a moq-relay image
+built from `main` standing in for the `moq-dev-rs` relay. Every client and docker-only
 relay registered upstream is exercised against our relay and our clients,
 so an implementation added to the registry is tested here without a change
 on our side. The runner's own HTML report publishes to
@@ -16,8 +16,13 @@ Decided with the maintainer on 2026-10-21.
 
 - Reuse the runner's tooling rather than teaching `test/smoke/relays.sh` to
   start docker relays and clients. That keeps one implementation of the
-  registry's client contract, and the [interop audit](/quest/m0/audit-interop.md)
-  only bumps the pin.
+  registry's client contract.
+- Track the runner's HEAD, not a pinned commit. The registry lives in the
+  runner's checkout, so a pin would freeze it and hide every implementation
+  registered after it until the next [interop audit](/quest/m0/audit-interop.md).
+  This matches the Cloudflare and Moxygen smoke lanes, which also build
+  third-party code from unpinned HEAD, and is safe because the job never
+  gates.
 - Publish the runner's generated report as is, under its own Pages
   directory, with the per-directory publisher
   (`test/smoke/report/publish.sh`). It is another `gh-pages` writer: join the
@@ -35,5 +40,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Interop audit](/quest/m0/audit-interop.md) - bumps this job's runner pin and audits its moq.dev cells each run
+- [Interop audit](/quest/m0/audit-interop.md) - audits this job's moq.dev cells each run
 - [Interop report](/quest/m1/interop-report.md) - the in-tree interop matrix's own Pages report
