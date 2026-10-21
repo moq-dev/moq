@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { type Micro, Milli } from "@moq/clock";
+import { Manual, type Micro, Milli, Nano } from "@moq/clock";
 import { Format as LocFormat, Producer as LocProducer } from "@moq/loc";
 import { Group, Error as NetError, SessionCode, StreamCode, Time, Track, Varint } from "@moq/net";
 import { AudioConfigSchema } from "../catalog/audio.ts";
@@ -845,6 +845,8 @@ test("Consumer skips groups via PTS-span when over the max delay", async () => {
 });
 
 test("Consumer measures arrivals as they land", async () => {
+	const clock = new Manual();
+	using _clock = { [Symbol.dispose]: clock.install() };
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("audio"),
@@ -858,7 +860,8 @@ test("Consumer measures arrivals as they land", async () => {
 	// late, so the evidence pulls the estimate down from the cold start.
 	for (let i = 0; i < 3; i++) {
 		writeGroupWithLegacyFrames(track, i, [(i * 520_000) as Micro]);
-		await settle(520);
+		await clock.advanceAsync(Nano.zero);
+		await clock.advanceAsync(Nano.fromMilli(Milli(520)));
 	}
 	expect(consumer.spread.peek()).toBeLessThan(100 as Milli);
 
