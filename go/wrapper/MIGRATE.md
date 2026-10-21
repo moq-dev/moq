@@ -24,6 +24,13 @@ A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals ne
 `AnchorTime` names the group containing a presentation time, and type switches over `Anchor` need a case for it.
 `TrackConsumer.Update` also fails on a time anchor an untimed track can't serve.
 
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Update generated `moq.dev/moq-ffi` sources and its bundled static libraries together,
+then rebuild the application; older generated guards reject the rebuilt library.
+Application calls are unchanged.
+
 ### JSON consumers return `*json.Timed` (#5677)
 
 `SnapshotConsumer.Next`, `StreamConsumer.Next`, and `All` return `*Timed{Value, Timestamp}` instead of the raw message; `Timestamp` is a `*time.Duration`, nil when untimed.

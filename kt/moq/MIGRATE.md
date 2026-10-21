@@ -19,6 +19,13 @@ Replace `request.accept(broadcast)` with `request.prepare(mintEpoch())`, which r
 `Anchor` gains `AnchorTime`, so exhaustive `when` expressions need a branch for it.
 `TrackConsumer.update` now throws `MoqException` on a time anchor an untimed track can't serve.
 
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Regenerate the Kotlin sources and update the native libraries in `moq-ffi` together,
+then rebuild the application; older generated guards reject the rebuilt library.
+Application calls are unchanged.
+
 ### JSON consumers emit timestamps (#5677)
 
 `values()` emits `json.Value` (`value`, plus `timestamp` as a `Duration?`) instead of a string, and `valuesAs<T>()` emits `Timed<T>(value, timestamp)`.

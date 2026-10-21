@@ -70,7 +70,10 @@ pub enum MoqVideoEncoderKind {
 	/// `"openh264"` (software, everywhere).
 	/// Naming one this build lacks fails with a no-encoder error, so reach for
 	/// this only when [`Auto`](Self::Auto) picks the wrong one.
-	Named { name: String },
+	Named {
+		/// The encoder backend name to open.
+		name: String,
+	},
 }
 
 impl From<MoqVideoEncoderKind> for moq_video::encode::Kind {
@@ -89,6 +92,7 @@ impl From<MoqVideoEncoderKind> for moq_video::encode::Kind {
 /// match `width` x `height`; scale before writing if your source moves.
 #[derive(uniffi::Record)]
 pub struct MoqVideoEncoderInput {
+	/// The raw pixel layout.
 	pub format: MoqVideoPixelFormat,
 	/// Encoded width in pixels. Must be even (I420 chroma is subsampled 2x2).
 	pub width: u32,
@@ -102,6 +106,7 @@ pub struct MoqVideoEncoderInput {
 /// Codec-side configuration.
 #[derive(uniffi::Record)]
 pub struct MoqVideoEncoderOutput {
+	/// The codec used to encode this rendition.
 	pub codec: MoqVideoCodec,
 	/// Track name for a broadcast-bound producer. `None` derives one from the codec.
 	#[uniffi(default = None)]
@@ -122,7 +127,10 @@ pub struct MoqVideoEncoderOutput {
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqVideoGop {
 	/// Start a group with a keyframe every `interval` frames.
-	Keyframe { interval: u32 },
+	Keyframe {
+		/// The number of frames between keyframes.
+		interval: u32,
+	},
 }
 
 impl From<MoqVideoGop> for moq_video::encode::Gop {
@@ -771,7 +779,10 @@ pub struct MoqVideoDecoderOutput {
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqVideoSurface {
 	/// An Apple `CVPixelBufferRef` from VideoToolbox, IOSurface-backed NV12.
-	PixelBuffer { pointer: u64 },
+	PixelBuffer {
+		/// The borrowed CVPixelBuffer address, valid while the frame is held.
+		pointer: u64,
+	},
 }
 
 /// One decoded video frame, owning the surface it was decoded into.

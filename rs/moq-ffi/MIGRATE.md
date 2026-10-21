@@ -25,6 +25,13 @@ It defaults to `false` in every generated binding; a Rust struct literal adds `c
 `MoqAnchor` gains `Time { timestamp_us }`, the group containing that presentation time, so exhaustive matches need an arm for it.
 `MoqTrackConsumer::update` now returns `Result<(), MoqError>`, failing with `TimestampMismatch` on a time anchor an untimed track can't serve.
 
+### Regenerate bindings after the API documentation update
+
+The new documentation on `MoqAudioProducer::write` and `finish` changes their
+UniFFI metadata checksums, even though their signatures and behavior are unchanged.
+Regenerate each language's bindings from the rebuilt library and update them together.
+Older generated bindings with active checksum guards reject this library during initialization.
+
 ### JSON consumers return `MoqJsonValue` (#5677)
 
 `MoqJsonSnapshotConsumer::next` and `MoqJsonStreamConsumer::next` return `MoqJsonValue { value, timestamp_us }` instead of a string; `timestamp_us` is null when untimed.
