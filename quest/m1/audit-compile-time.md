@@ -26,7 +26,8 @@ deduplicating and upgrading dependencies.
 
 What to check first: whether [moq-net compiles once](/quest/m1/net-erase-transport.md)
 landed. If so, rerun `cargo llvm-lines` on the moq-tokio lib and compare the
-transport share below. Then whether `cargo-llvm-lines` joined the pinned shell.
+transport share below, then rerun the thin-LTO size comparison against the
+smaller archive. Then whether `cargo-llvm-lines` joined the pinned shell.
 
 ### Baselines (m0 run, 2026-10-19 and 2026-10-20)
 
@@ -134,13 +135,13 @@ lite-07, moq-transport-22) 2,621M fat against 2,677M thin (+2.1%), and
 Not measured: thin sizes for linux_arm64, darwin_arm64 and windows_amd64;
 build time above two jobs; wall-clock runtime.
 
-Decision pending with the maintainer; the recommendation is to keep fat.
+Decision (maintainer, 2026-10-20): keep fat LTO, and revisit once
+[moq-net compiles once](/quest/m1/net-erase-transport.md) shrinks the archive.
 Thin saves about 40% of the final unit's wall time on two jobs, but release
 builds run only nightly and on release PRs, off the merge-queue gate. It costs
 10 MiB of the Go archive's headroom under a hard publish limit while that
-archive is growing, and 2% more instructions. Revisit if release builds join
-the PR gate, or once [moq-net compiles once](/quest/m1/net-erase-transport.md)
-lands and the archive shrinks.
+archive is growing, and 2% more instructions. Revisit sooner if release
+builds join the PR gate.
 
 ### Results of the m0 run
 
@@ -149,8 +150,8 @@ lands and the archive shrinks.
   and a share of the release fat-LTO module.
 - Explained, no action: the release `moq` unit is all LLVM backend work on one
   fat-LTO module; linking is 1 s. Thin LTO would cut that unit by about 40%
-  at a size and instruction cost (above); the profile stays fat pending the
-  maintainer's decision. aws-lc-sys's build script is the longest dev unit; the crypto provider
+  at a size and instruction cost (above); the maintainer kept fat LTO.
+  aws-lc-sys's build script is the longest dev unit; the crypto provider
   stays. usage-rs derive output is external code. serde visitors per
   deserializer are inherent to TOML config.
 - Candidates for next run: mp4-atom's `Any::decode_atom` instantiated per
