@@ -989,16 +989,17 @@ mod tests {
 				let answer = answer.clone();
 				move |request| match request.event {
 					Event::Connect => ResponseTemplate::new(200)
-						.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1)))),
+						.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(60)))),
 					_ => answer.clone(),
 				}
 			})
 			.await;
 
 			let consumer = client(&server).connect(request()).await.unwrap();
+			consumer.revalidate();
 			let reason = tokio::time::timeout(Duration::from_secs(3), consumer.closed())
 				.await
-				.expect("revoked within the cadence");
+				.expect("revoked by the nudged re-check");
 			assert_eq!(reason, Reason::Refused);
 		}
 	}
@@ -1008,15 +1009,16 @@ mod tests {
 		let unbounded = grant(None, Some(Duration::from_secs(1)));
 		let server = server(Log::default(), move |request| match request.event {
 			Event::Connect => ResponseTemplate::new(200)
-				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1)))),
+				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(60)))),
 			_ => ResponseTemplate::new(200).set_body_json(unbounded.clone()),
 		})
 		.await;
 
 		let consumer = client(&server).connect(request()).await.unwrap();
+		consumer.revalidate();
 		let reason = tokio::time::timeout(Duration::from_secs(3), consumer.closed())
 			.await
-			.expect("revoked within the cadence");
+			.expect("revoked by the nudged re-check");
 		assert_eq!(reason, Reason::Invalid);
 	}
 
@@ -1120,20 +1122,15 @@ mod tests {
 		assert_eq!(reason, Reason::Expired);
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_close_is_reported_while_a_recheck_is_stalled() {
 		let log = Log::default();
-		let server = server(log.clone(), |request| match request.event {
-			Event::Connect => ResponseTemplate::new(200)
-				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1)))),
-			Event::Revalidate => ResponseTemplate::new(200)
-				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(60))))
-				.set_delay(Duration::from_secs(30)),
-			Event::End { .. } => ResponseTemplate::new(200),
-		})
-		.await;
+		let script = Script::new(log.clone(), |request| match request.event {
+			Event::Connect => Some(Ok(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1))))),
+			_ => None,
+		});
 
-		let consumer = client(&server).connect(request()).await.unwrap();
+		let consumer = script.connect().await.unwrap();
 		tokio::time::sleep(Duration::from_millis(1500)).await;
 		assert!(log.events().contains(&Event::Revalidate), "the re-check is in flight");
 		consumer.close("disconnected", Bytes::default());
