@@ -690,16 +690,19 @@ void MoQDock::OnTokenEdited()
 	// may be new.
 	const QUrl dial(urlEdit->text().trimmed());
 	if (dial.isValid() && MoQDial::IsCleartext(dial.scheme().toStdString())) {
-		status->setText("Publish token requires an encrypted relay URL (not http://, ws://, or tcp://)");
+		tokenNotice = "Publish token requires an encrypted relay URL (not http://, ws://, or tcp://)";
+		status->setText(tokenNotice);
 		return;
 	}
 
 	// Presented in band, so the stream keeps going while the relay checks it.
 	auto *moq = static_cast<MoQOutput *>(obs_obj_get_data(output));
 	if (!moq || !moq->PresentToken(token.toStdString())) {
-		status->setText("Not connected yet; edit the token again once live");
+		tokenNotice = "Not connected yet; edit the token again once live";
+		status->setText(tokenNotice);
 		return;
 	}
+	tokenNotice.clear();
 	tokenEdited = false;
 }
 
@@ -1098,6 +1101,7 @@ void MoQDock::StartStream()
 	const std::string url = ConnectUrl().toStdString();
 	const std::string path = pathEdit->text().toStdString();
 	tokenEdited = false;
+	tokenNotice.clear();
 
 	SaveSettings();
 
@@ -1288,20 +1292,24 @@ void MoQDock::UpdateStatus()
 		return;
 	}
 
+	// Why the last token edit did not take, so the next refresh does not hide it.
+	QString tokenProblem = tokenNotice;
 	const QString tokenRefusal = QString::fromStdString(moq->TokenRefusal());
+	if (tokenProblem.isEmpty() && !tokenRefusal.isEmpty())
+		tokenProblem = QString("New publish token refused: %1").arg(tokenRefusal);
 	QString connectedText = stats.reconnects > 0 ? QString("● Connected · reconnects %1").arg(stats.reconnects)
 						     : QString("● Connected");
-	if (!tokenRefusal.isEmpty())
-		connectedText += QStringLiteral(" · new token refused");
+	if (!tokenProblem.isEmpty())
+		connectedText += QStringLiteral(" · new token not in use");
 	status->setText(connectedText);
-	status->setStyleSheet(tokenRefusal.isEmpty() ? "color: #36a45e;" : "color: #d08b1d;");
+	status->setStyleSheet(tokenProblem.isEmpty() ? "color: #36a45e;" : "color: #d08b1d;");
 
 	{
 		QStringList lines;
 		if (!publishSummary.isEmpty())
 			lines << publishSummary;
-		if (!tokenRefusal.isEmpty())
-			lines << QString("New publish token refused: %1").arg(tokenRefusal);
+		if (!tokenProblem.isEmpty())
+			lines << tokenProblem;
 		if (!stats.protocol.empty())
 			lines << QString("Protocol %1").arg(QString::fromStdString(stats.protocol));
 		if (!stats.dial.empty())

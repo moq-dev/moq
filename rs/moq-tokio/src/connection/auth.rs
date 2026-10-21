@@ -29,6 +29,8 @@ impl Handle {
 	}
 
 	/// Present a token now and on later sessions until its handle is dropped or refused.
+	///
+	/// A session that cannot send it, without AUTH, refuses it as unsupported.
 	pub async fn add(&self, token: impl Into<Bytes>) -> crate::Result<Auth> {
 		let producer = kio::Producer::<Granted>::default();
 		let state = producer.consume();
@@ -354,6 +356,12 @@ async fn present(
 			}
 		};
 		let mut watch = token.grant();
+		// Without AUTH, moq-transport accepts a token at once for the requests that name it,
+		// but a connection's token rides no request, so nothing would send it. One the peer
+		// already ended has a grant no longer and is left to the watch below.
+		if watch.peek().is_none() && token.closed().now_or_never().is_none() {
+			return Err(moq_net::Error::Unsupported.into());
+		}
 		if let Ok(mut state) = producer.write() {
 			state.grant = watch.peek();
 		}

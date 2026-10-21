@@ -100,6 +100,8 @@ private:
 	// Whether the token field was typed in since its token was last presented, so
 	// leaving it unchanged does not present it again while a retyped one does.
 	bool tokenEdited = false;
+	// Why the last token edit was not presented, kept until the next one is.
+	QString tokenNotice;
 	// Filled when Go Live creates encoders; shown in Stats while publishing.
 	QString publishSummary;
 	QString latencySummary;

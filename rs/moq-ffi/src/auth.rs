@@ -51,18 +51,23 @@ impl Handle {
 	}
 
 	async fn add(self, token: String) -> Result<Token, MoqError> {
-		let token = match self {
-			Self::Session(handle) => Token::Session(handle.add(token).await?),
+		match self {
+			Self::Session(handle) => {
+				let auth = handle.add(token).await?;
+				// A token the peer accepted carries a grant until it ends. Without AUTH,
+				// moq-transport accepts one at once for the requests that name it, but nothing
+				// here can name one, so it would never be sent. One already revoked is left for
+				// `closed` to report. moq-tokio refuses the same for a client's connection.
+				if auth.grant().peek().is_none() && poll_now(auth.closed()).is_pending() {
+					return Err(MoqError::Unsupported);
+				}
+				Ok(Token::Session(auth))
+			}
 			#[cfg(not(target_arch = "wasm32"))]
-			Self::Connection(handle) => Token::Connection(handle.add(token).await.map_err(crate::session::map_closed_error)?),
-		};
-		// A token the peer accepted carries a grant until it ends. Without AUTH, moq-transport
-		// accepts one at once for the requests that name it, but nothing here can name one, so
-		// it would never be sent. One already revoked is left for `closed` to report.
-		if token.grant().peek().is_none() && poll_now(token.closed()).is_pending() {
-			return Err(MoqError::Unsupported);
+			Self::Connection(handle) => Ok(Token::Connection(
+				handle.add(token).await.map_err(crate::session::map_closed_error)?,
+			)),
 		}
-		Ok(token)
 	}
 }
 
