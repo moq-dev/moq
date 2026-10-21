@@ -93,6 +93,13 @@ Check first (from the m0 CI pipeline audit, 2026-10-21):
   compiling the test build and 2 to 2.5 running it, plus separate builds for
   `cargo doc` (25 to 60 s), the io_uring clippy (20 to 50 s), the wasm32
   clippy (12 s), and the capture (30 to 36 s) and play (40 to 48 s) tests.
+- Deferred to the maintainer (coverage trade-off): fold the capture and play
+  test builds into the main test build, as the platform build already does
+  (about 75 s per core Rust entry; the non-feature arms of moq-video,
+  moq-audio and moq-cli would compile only in Nightly's Features job, and
+  openh264 in `dev` tests needs measuring first), or move both to Nightly
+  (the same saving, but the gate stops testing the device features). The
+  m0 audit recommended folding; the queue keeps both builds until decided.
 - Cold builds (release PRs, Nightly) still compile both rustls backends and
   aws-lc-sys once per environment; the queue VM keeps those built.
 - Nightly on 2026-10-20 took about 1,450 runner-minutes (320 macOS) and was
