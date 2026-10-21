@@ -854,9 +854,9 @@ test("Consumer measures arrivals as they land", async () => {
 	// Nothing observed yet: the cold-start estimate.
 	expect(consumer.spread.peek()).toBe(100 as Milli);
 
-	// Groups arriving exactly as fast as their media, across two resample intervals. Nothing is
+	// Groups arriving exactly as fast as their media, across four resample intervals. Nothing is
 	// late, so the evidence pulls the estimate down from the cold start.
-	for (let i = 0; i < 3; i++) {
+	for (let i = 0; i < 5; i++) {
 		writeGroupWithLegacyFrames(track, i, [(i * 520_000) as Micro]);
 		await settle(520);
 	}

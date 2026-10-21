@@ -42,6 +42,7 @@ describe("audio jitter conformance", () => {
 			"paced",
 			"reorder",
 			"spike",
+			"straggler",
 			"tunein",
 		]);
 	});
