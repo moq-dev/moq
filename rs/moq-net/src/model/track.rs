@@ -2351,6 +2351,12 @@ impl Producer {
 		self
 	}
 
+	/// Keep the broadcast's listing of this track until it leaves the table.
+	pub(super) fn listed(self, unlist: broadcast::Unlist) -> Self {
+		self.alive.list(unlist);
+		self
+	}
+
 	/// The track's name, unique within its broadcast.
 	pub fn name(&self) -> &str {
 		&self.name
@@ -2807,6 +2813,8 @@ impl Producer {
 	/// [`finish`](Self::finish) is deliberately not terminal: it declares the final
 	/// sequence, and lower-numbered groups may still be written afterwards.
 	pub fn abort(self, err: Error) -> Result<()> {
+		// Unlisted first, so the track leaves the listing before its name is free again.
+		self.alive.unlist();
 		TrackState::abort(&self.state, err)
 	}
 
@@ -2822,15 +2830,21 @@ impl Producer {
 		reason = "return the owned producer without allocating on an idle check"
 	)]
 	pub fn abort_unused(self, err: Error) -> std::result::Result<(), Self> {
-		match self.state.write_unused() {
+		let used = match self.state.write_unused() {
 			kio::Unused::Idle(guard) => {
 				commit_abort(guard, err);
-				return Ok(());
+				false
 			}
-			kio::Unused::Closed => return Ok(()),
-			kio::Unused::Used => {}
+			kio::Unused::Closed => false,
+			kio::Unused::Used => true,
+		};
+		if used {
+			return Err(self);
 		}
-		Err(self)
+		// After the track's own lock is released; a later track of the name, listed in
+		// between, keeps its listing.
+		self.alive.unlist();
+		Ok(())
 	}
 
 	/// Block until the track is closed or aborted, returning the cause.
@@ -3188,6 +3202,10 @@ struct Alive {
 	// Ingress subscription for this track, opened by the tagged producer that claimed
 	// it and closed when this guard drops.
 	stats: OnceLock<stats::Subscription>,
+
+	// The broadcast's listing of a track its producer created, withdrawn once the track
+	// leaves the table: on abort, or when this guard drops.
+	listed: kio::Lock<Option<broadcast::Unlist>>,
 }
 
 impl Alive {
@@ -3197,7 +3215,18 @@ impl Alive {
 			state,
 			published: Default::default(),
 			stats: Default::default(),
+			listed: kio::Lock::new(None),
 		})
+	}
+
+	fn list(&self, unlist: broadcast::Unlist) {
+		*self.listed.lock() = Some(unlist);
+	}
+
+	/// Withdraw the track from its broadcast's listing. Never under the broadcast's lock.
+	fn unlist(&self) {
+		let unlist = self.listed.lock().take();
+		drop(unlist);
 	}
 
 	/// Note that a [`Producer`] was minted from this track, optionally under a tagged
@@ -3215,6 +3244,9 @@ impl Alive {
 
 impl Drop for Alive {
 	fn drop(&mut self) {
+		// Withdrawn before the state closes, so the track leaves the listing before a
+		// later one can take its name.
+		self.unlist();
 		// A request nobody accepted was never publishing; there's nothing to tear down.
 		if !self.published.load(Ordering::Relaxed) {
 			return;
@@ -6557,6 +6589,9 @@ pub struct Request {
 
 	// Served from a front's routes; see [`Self::routes`].
 	routes: Option<super::resume::Consumer>,
+
+	// A track the producer reserved, listed by its broadcast once accepted.
+	list: Option<broadcast::ListOnAccept>,
 }
 
 impl Request {
@@ -6575,7 +6610,14 @@ impl Request {
 			stats: stats::Scope::default(),
 			resolving_start: false,
 			routes: None,
+			list: None,
 		}
+	}
+
+	/// List the track in its broadcast once accepted: the producer reserved it.
+	pub(super) fn listed(mut self, list: broadcast::ListOnAccept) -> Self {
+		self.list = Some(list);
+		self
 	}
 
 	/// Serve the track from a front's routes, read straight from their copies; see
@@ -6678,14 +6720,22 @@ impl Request {
 		let info = info.into().unwrap_or_default();
 		// A closed state means the track was aborted under us. Mirror `reject` and
 		// tolerate it: the Producer we hand back simply can't write.
-		if let Ok(mut state) = self.state.write() {
-			state.accept(info.clone());
-			state.start_pending = self.resolving_start;
-			state.routes = self.routes;
-		}
+		let open = match self.state.write() {
+			Ok(mut state) => {
+				state.accept(info.clone());
+				state.start_pending = self.resolving_start;
+				state.routes = self.routes;
+				true
+			}
+			Err(_) => false,
+		};
 		// Accepting the request creates the track producer: count it as one ingress
 		// subscription (closed when the last handle drops). No-op when untagged.
 		self.alive.publish(Some(&self.stats));
+		// An aborted track already left the table, so it is never listed.
+		if let Some(list) = self.list.filter(|_| open) {
+			self.alive.list(list.list(&info));
+		}
 		Producer {
 			name: self.name,
 			info,

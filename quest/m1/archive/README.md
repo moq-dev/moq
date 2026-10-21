@@ -28,7 +28,8 @@ archive (per-track `.timeline.z` records named by the catalog's root
 - **Discovery is pull**, decided 2026-10-19 in place of SUBSCRIBE_ALL's push:
   ANNOUNCE finds the broadcasts under a prefix, a moq-lite TRACKS request
   lists each broadcast's tracks as they appear, and the archive SUBSCRIBEs per
-  track, gating the lite-07 cut ([TRACKS](/quest/m1/archive/tracks.md)).
+  track, gating the lite-07 cut (`broadcast::Consumer::tracks` in Rust;
+  [TRACKS in js/net](/quest/m1/archive/tracks-js.md)).
   moq-transport answers SUBSCRIBE_TRACKS through the same hook and learns an
   IETF peer's tracks with a FORWARD=0 SUBSCRIBE_TRACKS
   ([SUBSCRIBE_TRACKS](/quest/m1/archive/subscribe-tracks.md)). Rejected:
@@ -83,7 +84,7 @@ from a host. Each child fixes the stale docs it touches.
 
 ## Required
 
-- [TRACKS](/quest/m1/archive/tracks.md) - a moq-lite-07 request lists a broadcast's tracks with their TRACK_INFO, marks when it is synced, and names removed tracks, for the subscriber to SUBSCRIBE per track, and relays fan it out from one upstream request
+- [TRACKS in js/net](/quest/m1/archive/tracks-js.md) - `@moq/net` lists a broadcast's tracks over lite-07's Tracks Stream and answers listings of its own broadcasts, mirroring Rust
 - [Archive producer](/quest/m1/archive/producer.md) - `archive::Producer` stores every matching broadcast as duration-cut per-track objects keyed by group and pts, recording gaps instead of stalling, with an optional DVR mode
 - [Archive consumer](/quest/m1/archive/consumer.md) - `archive::Consumer` serves a stored prefix as a broadcast from its key listing, and `moq export/import archive` use the new pair
 - [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - the root `archive` section is gone; an opt-in per-rendition `hls` field marks each aligned HLS segment's first group and pts and declares its nominal duration
