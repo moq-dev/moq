@@ -87,7 +87,8 @@ Decided by the maintainer on 2026-10-20, when the quest was first started
   `poll_requested_group` leaves the hand-written ABI with a `MIGRATE.md` entry
   and the fill reaches C through the generated API. Otherwise the frozen crate
   splits each fill into its per-group requests internally, keeping its ABI
-  unchanged. Not a blocker.
+  unchanged, and maps `moq_subscription.max_delay_us` to `Some`: a frozen C
+  subscriber cannot ask for max-age alone, as today. Not a blocker.
 
 ## Related
 
