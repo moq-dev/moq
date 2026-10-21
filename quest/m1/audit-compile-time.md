@@ -131,6 +131,9 @@ Runtime (deterministic instruction counts, valgrind cachegrind on criterion
 lite-07, moq-transport-22) 2,621M fat against 2,677M thin (+2.1%), and
 `track_fanout` 414M against 421M (+1.6%). Repeats varied by 0.4% at most.
 
+Not measured: thin sizes for linux_arm64, darwin_arm64 and windows_amd64;
+build time above two jobs; wall-clock runtime.
+
 Decision pending with the maintainer; the recommendation is to keep fat.
 Thin saves about 40% of the final unit's wall time on two jobs, but release
 builds run only nightly and on release PRs, off the merge-queue gate. It costs
