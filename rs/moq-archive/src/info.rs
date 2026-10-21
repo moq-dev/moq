@@ -16,9 +16,6 @@ pub struct Info {
 	/// is untimed and its frames store no timestamps.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timescale: Option<u64>,
-	/// The source's publisher epoch, when its route had one. A resume from another refuses.
-	#[serde(default, skip_serializing_if = "Option::is_none", with = "epoch")]
-	pub epoch: Option<moq_net::Epoch>,
 }
 
 impl Info {
@@ -28,16 +25,9 @@ impl Info {
 			version: VERSION,
 			priority,
 			timescale,
-			epoch: None,
 		};
 		info.validate()?;
 		Ok(info)
-	}
-
-	/// Record `epoch` as the source's publisher epoch.
-	pub fn with_epoch(mut self, epoch: Option<moq_net::Epoch>) -> Self {
-		self.epoch = epoch;
-		self
 	}
 
 	/// Encode as compact JSON.
@@ -67,24 +57,6 @@ impl Info {
 	}
 }
 
-/// The epoch as its UUID text.
-mod epoch {
-	use serde::{Deserialize, Deserializer, Serializer, de::Error};
-
-	pub fn serialize<S: Serializer>(epoch: &Option<moq_net::Epoch>, serializer: S) -> Result<S::Ok, S::Error> {
-		match epoch {
-			Some(epoch) => serializer.serialize_str(epoch.as_str()),
-			None => serializer.serialize_none(),
-		}
-	}
-
-	pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<moq_net::Epoch>, D::Error> {
-		let Some(text) = Option::<String>::deserialize(deserializer)? else {
-			return Ok(None);
-		};
-		text.parse().map(Some).map_err(D::Error::custom)
-	}
-}
 
 #[cfg(test)]
 mod tests {
@@ -124,22 +96,6 @@ mod tests {
 			let json = format!(r#"{{"version":{version},"priority":0,"timescale":1000}}"#);
 			assert!(matches!(Info::decode(json.as_bytes()), Err(Error::Version(v)) if v == version));
 		}
-	}
-
-	#[test]
-	fn epoch_roundtrip() {
-		let epoch: moq_net::Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
-		let info = Info::new(0, Some(1000)).unwrap().with_epoch(Some(epoch));
-		let bytes = info.encode().unwrap();
-		assert_eq!(
-			bytes.as_ref(),
-			br#"{"version":2,"priority":0,"timescale":1000,"epoch":"01900000-0000-7000-8000-000000000001"}"#
-		);
-		assert_eq!(Info::decode(&bytes).unwrap(), info);
-		assert!(matches!(
-			Info::decode(br#"{"version":2,"priority":0,"timescale":1000,"epoch":"not-a-uuid"}"#),
-			Err(Error::Json(_))
-		));
 	}
 
 	#[test]

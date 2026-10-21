@@ -41,5 +41,5 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "test-util"] }
 
 [[bench]]
-name = "writer"
+name = "producer"
 harness = false
