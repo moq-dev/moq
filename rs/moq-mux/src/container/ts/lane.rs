@@ -32,9 +32,10 @@ pub(super) const PSI_SLOTS: u128 = PSI_INTERVAL.as_nanos() / PCR_INTERVAL.as_nan
 /// How fast a system PID's transport buffer drains (Rxsys, ISO 13818-1 2.4.2.3).
 const RX_SYSTEM: u64 = 1_000_000;
 /// How far a restarted grid's first packet may sit behind the last slot laid, or ahead of it,
-/// and still be on the same timeline, so the grid runs on rather than jumps: two seconds back,
-/// a minute on.
-const BEHIND: u128 = 2 * SLOTS as u128;
+/// and still be on the same timeline, so the grid runs on rather than jumps: a minute either
+/// way. A leg that stalled has laid the slots it owed, and its subscription may resume as far
+/// behind them as the relay kept its groups.
+const BEHIND: u128 = 60 * SLOTS as u128;
 const AHEAD: u128 = 60 * SLOTS as u128;
 
 /// What a position of a slot carries.
@@ -649,6 +650,29 @@ mod test {
 			sent,
 			[(21, 0x0000, 1), (21, 0x1000, 1), (40, 0x0000, 2), (40, 0x1000, 2)]
 		);
+	}
+
+	/// A leg that stalled has laid the slots it owed, and its subscription may resume as far
+	/// behind them as the relay kept its groups. Its grid runs on from the last slot, leaving what
+	/// it missed as stuffing, rather than lay those slots again under a PCR that steps back. A
+	/// timeline further off starts afresh.
+	#[test]
+	fn a_grid_restarted_behind_its_last_slot_runs_on() {
+		let layout = Arc::new(layout());
+		let mut packet = [0xaau8; TsPacket::SIZE];
+		packet[..4].copy_from_slice(&[0x47, 0x41, 0x00, 0x10]);
+		let last = 10_000u128;
+		for (behind, next) in [(3 * u128::from(SLOTS), last + 1), (BEHIND + 1, last - BEHIND - 2)] {
+			let mut grid = Grid::new(layout.clone(), tables());
+			grid.lay(last);
+			grid.restart();
+			grid.place(&packet, &[layout.first(last - behind)], false);
+			assert_eq!(grid.index(), Some(next), "{behind} slots behind");
+			if next == last + 1 {
+				assert!(!grid.lay(next).jump);
+				assert!(grid.is_empty(), "what it missed never goes out");
+			}
+		}
 	}
 
 	#[test]
