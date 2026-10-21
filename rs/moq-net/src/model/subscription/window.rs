@@ -791,12 +791,13 @@ mod tests {
 		assert_eq!(window.frames(4), (0, None));
 
 		// A time end covers whole groups, through its cap while it waits to settle.
-		let groups = Groups::new([
-			Groups::started(4, 4000),
-			Groups::started(5, 5000),
-			(6, Held::Pending),
-		]);
-		let window = Window::new(&[range(at(6, 2), None), range(time(4500), time(5000))], Some(6), &groups).unwrap();
+		let groups = Groups::new([Groups::started(4, 4000), Groups::started(5, 5000), (6, Held::Pending)]);
+		let window = Window::new(
+			&[range(at(6, 2), None), range(time(4500), time(5000))],
+			Some(6),
+			&groups,
+		)
+		.unwrap();
 		assert!(!window.is_settled());
 		assert_eq!(window.frames(6), (0, None));
 	}
