@@ -416,6 +416,39 @@ async def test_announced_epoch_restarts():
     broadcast.close()
 
 
+async def test_finish_lingers_until_closed():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    announced = consumer.announced()
+    broadcast = create_announced(origin, "finish")
+    assert isinstance(await next_route(announced), moq.AnnounceEventStart)
+
+    track = broadcast.publish_track("status", moq.TrackInfo(max_age=timedelta(hours=1)))
+    track.write_frame(b"tail")
+    track.finish()
+    finish = broadcast.finish()
+    assert finish.linger == timedelta(hours=1)
+    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+        broadcast.consume()
+
+    # Cancelling the wait is the interrupt: the broadcast closes at once.
+    wait = asyncio.ensure_future(finish.wait())
+    await asyncio.sleep(0)
+    wait.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wait
+    assert isinstance(await next_route(announced), moq.AnnounceEventEnd)
+    finish.close()
+
+
+async def test_finish_without_a_max_age_closes_on_wait():
+    broadcast = moq.BroadcastProducer()
+    broadcast.publish_track("status").finish()
+    finish = broadcast.finish()
+    assert finish.linger == timedelta(0)
+    await asyncio.wait_for(finish.wait(), timeout=5.0)
+
+
 def test_publish_lifecycle():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status")

@@ -31,6 +31,7 @@ from .origin import (
 )
 from .publish import (
     BroadcastDynamic,
+    BroadcastFinish,
     BroadcastProducer,
     GroupDemand,
     GroupProducer,
@@ -91,6 +92,7 @@ __all__ = [
     "Bandwidth",
     "BroadcastConsumer",
     "BroadcastDynamic",
+    "BroadcastFinish",
     "BroadcastProducer",
     "BroadcastRequest",
     "Client",

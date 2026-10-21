@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from moq_ffi import (
     MoqBroadcastDynamic,
+    MoqBroadcastFinish,
     MoqBroadcastProducer,
     MoqGroupDemand,
     MoqGroupProducer,
@@ -17,7 +19,7 @@ from moq_ffi import (
     MoqTrackRequest,
 )
 
-from ._records import _subscription, _track_info
+from ._records import _from_us, _subscription, _track_info
 from ._stream import _Stream
 from .types import (
     Frame,
@@ -343,4 +345,42 @@ class BroadcastProducer:
 
         Tracks already subscribed carry on to their own end. Closing again is a no-op.
         """
+        self._inner.close()
+
+    def finish(self) -> BroadcastFinish:
+        """End the broadcast cleanly, keeping it servable until its media goes stale.
+
+        Finish every track first: the returned handle holds the tracks finished by now and
+        keeps the broadcast announced, so a subscriber still catching up can drain them. A
+        track still live is not held. Every later call on this producer fails, as after
+        :meth:`close`.
+        """
+        return BroadcastFinish(self._inner.finish())
+
+
+class BroadcastFinish:
+    """A cleanly ended broadcast, still announced and serving its finished tracks.
+
+    Await :meth:`wait` to keep it up for its :attr:`linger`. Cancelling the wait, or
+    :meth:`close`, closes the broadcast at once.
+    """
+
+    def __init__(self, inner: MoqBroadcastFinish) -> None:
+        self._inner = inner
+
+    @property
+    def linger(self) -> timedelta:
+        """How long to keep the broadcast: the longest max age of the held tracks."""
+        return _from_us(self._inner.linger_us())
+
+    async def wait(self) -> None:
+        """Keep the broadcast up for its linger, or until :meth:`close`, then close it."""
+        try:
+            await self._inner.wait()
+        except asyncio.CancelledError:
+            self._inner.close()
+            raise
+
+    def close(self) -> None:
+        """Close the broadcast now, ending the linger and any wait. Closing again is a no-op."""
         self._inner.close()

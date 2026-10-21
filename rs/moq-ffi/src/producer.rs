@@ -352,6 +352,7 @@ impl MoqBroadcastProducer {
 		drop(finished);
 		Ok(Arc::new(MoqBroadcastFinish {
 			linger: finish.linger(),
+			until: moq_clock::now().checked_add(finish.linger()),
 			broadcast,
 			finish: std::sync::Mutex::new(Some(finish)),
 		}))
@@ -365,6 +366,9 @@ impl MoqBroadcastProducer {
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastFinish {
 	linger: std::time::Duration,
+	// The linger counts from the finish, as a C caller's own clock would, not from the first
+	// poll of a wait; `None` when it overflows the clock.
+	until: Option<moq_clock::Instant>,
 	// Closes the broadcast from any thread, ending a wait that took `finish`.
 	broadcast: moq_net::broadcast::Producer,
 	// Taken by `wait` or `close`.
@@ -386,8 +390,20 @@ impl MoqBroadcastFinish {
 	/// or a close took the handle.
 	pub async fn wait(&self) -> Result<(), MoqError> {
 		let finish = self.finish.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let until = self.until;
 		crate::ffi::detached(async move {
-			finish.wait().await;
+			let closed = kio::wait(|waiter| finish.poll_closed(waiter));
+			match until {
+				Some(until) => {
+					tokio::select! {
+						_ = moq_clock::sleep_until(until) => {}
+						_ = closed => {}
+					}
+				}
+				None => closed.await,
+			}
+			// Dropping the finish is what closes the broadcast.
+			drop(finish);
 			Ok::<_, MoqError>(())
 		})
 		.await
