@@ -66,6 +66,8 @@ struct State {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
+	/// Whether the finished broadcast stopped serving its tail, so the EOS it owes may go out.
+	drained: bool,
 	/// Whether this publication's single EOS message already went out. One per publication, not per
 	/// entry to PLAYING: a finished publication is terminal here, so there is nothing to announce twice.
 	eos_delivered: bool,
@@ -92,8 +94,8 @@ struct Control {
 
 /// Claim this publication's EOS, if it is owed and may go out now.
 ///
-/// One claim per publication, so whichever arrives first (the transition into PLAYING, or the pad that
-/// ended it) is the only one that posts. Called under `control`, which is what serializes the two.
+/// One claim per publication, so whichever arrives first (the transition into PLAYING, or the end of
+/// the linger) is the only one that posts. Called under `control`, which is what serializes the two.
 fn claim_eos(control: &mut Control) -> Posted {
 	if !control.playing {
 		return Posted::Nothing;
@@ -101,7 +103,8 @@ fn claim_eos(control: &mut Control) -> Posted {
 	let Some(state) = control.live.as_mut() else {
 		return Posted::Nothing;
 	};
-	if state.eos_delivered || state.session.completion().get() != Completion::Eos {
+	// Only a clean finish drains, so a drained publication ended with EOS.
+	if state.eos_delivered || !state.drained {
 		return Posted::Nothing;
 	}
 	state.eos_delivered = true;
@@ -132,7 +135,7 @@ enum Posted {
 
 /// The element-wide outcome a publishing session earned.
 enum MessageKind {
-	/// Every pad ended and the producers closed.
+	/// Every pad ended and the finished broadcast closed.
 	Eos,
 	/// A producer failed to close, already formatted for the bus.
 	FinalizeError(String),
@@ -603,6 +606,7 @@ impl MoqSink {
 				broadcast,
 				catalog: Some(catalog),
 				wall,
+				drained: false,
 				eos_delivered: false,
 			});
 			let pads = self.pads_locked(&control);
@@ -683,7 +687,7 @@ impl MoqSink {
 		if let Some(err) = failure {
 			gst::warning!(CAT, "finalize on stop: {err:?}");
 		}
-		// Close the broadcast before reaping the session task.
+		// Close the broadcast before reaping the session task. This also ends a linger early.
 		state.broadcast.close();
 		drop(closed);
 		state.session.stop();
@@ -1044,13 +1048,13 @@ impl MoqSink {
 			}
 		}
 		state.wall.finish();
-		if let Some(mut catalog) = state.catalog.take()
+		let mut catalog = state.catalog.take();
+		if let Some(catalog) = &mut catalog
 			&& let Err(err) = catalog.finish().context("finalize catalog")
 			&& failure.is_none()
 		{
 			failure = Some(err);
 		}
-		drop(closed);
 		// Claimed after the work, not before: the outcome decides which terminal state this pass takes.
 		// Losing the claim means the session task already ended the publication and posted its own
 		// error, so this pass owes the bus nothing.
@@ -1058,17 +1062,55 @@ impl MoqSink {
 		let message = match failure {
 			Some(err) => match completion.fail() {
 				true => Posted::Message {
-					session: state.session.completion(),
+					session: completion,
 					kind: MessageKind::FinalizeError(format!("{err:?}")),
 				},
 				false => Posted::Nothing,
 			},
-			None => {
-				completion.finish();
-				claim_eos(control)
+			None if completion.finish() => {
+				// Taken while the producers are alive, so it holds the tracks they finished.
+				let finish = state.broadcast.clone().finish();
+				drop((closed, catalog));
+				self.linger_locked(control, finish)
 			}
+			None => Posted::Nothing,
 		};
 		Finished { updates, message }
+	}
+
+	/// Serve the finished broadcast, so subscribers still catching up drain its tail until the media
+	/// is stale, and owe the EOS once it closes. A broadcast with nothing to drain owes it now.
+	///
+	/// The EOS waits for the linger because `gst-launch` exits on it, and NULL closes the broadcast.
+	/// Stopping the pipeline is the interrupt: it closes the broadcast, which ends the wait.
+	fn linger_locked(&self, control: &mut Control, finish: moq_net::broadcast::Finish) -> Posted {
+		let state = control.live.as_mut().expect("a finished publication is live");
+		let linger = finish.linger();
+		if linger.is_zero() {
+			drop(finish);
+			state.drained = true;
+			return claim_eos(control);
+		}
+		gst::info!(
+			CAT,
+			obj = self.obj(),
+			"all pads ended, serving the broadcast for {linger:?}"
+		);
+		RUNTIME.spawn(linger_task(finish, self.obj().downgrade(), state.session.completion()));
+		Posted::Nothing
+	}
+
+	/// Owe the EOS now that the finished broadcast closed, unless a newer run replaced `session`.
+	fn drained(&self, session: &CompletionHandle) {
+		let message = {
+			let mut control = self.control.lock().unwrap();
+			match control.live.as_mut() {
+				Some(state) if std::sync::Arc::ptr_eq(&state.session.completion(), session) => state.drained = true,
+				_ => return,
+			}
+			claim_eos(&mut control)
+		};
+		self.post_current(message);
 	}
 
 	fn notify_updates(&self, updates: Vec<PadUpdate>) {
@@ -1077,7 +1119,7 @@ impl MoqSink {
 		}
 	}
 
-	/// Open the EOS gate for this run and post the message if the publication already ended.
+	/// Open the EOS gate for this run and post the message if the finished broadcast already closed.
 	fn enter_playing(&self) {
 		let message = {
 			let mut control = self.control.lock().unwrap();
@@ -1143,7 +1185,7 @@ impl MoqSink {
 
 		match kind {
 			MessageKind::Eos => {
-				gst::info!(CAT, "all pads ended, posting EOS");
+				gst::info!(CAT, "the broadcast ended, posting EOS");
 				let obj = self.obj();
 				let _ = obj.post_message(gst::message::Eos::builder().src(&*obj).build());
 			}
@@ -1154,6 +1196,18 @@ impl MoqSink {
 				gst::element_error!(self.obj(), gst::CoreError::Failed, ("session error"), ["{err}"]);
 			}
 		}
+	}
+}
+
+/// Serve a finished broadcast for its linger, then release the EOS its publication owes.
+async fn linger_task(
+	finish: moq_net::broadcast::Finish,
+	element: glib::WeakRef<super::MoqSink>,
+	session: CompletionHandle,
+) {
+	finish.wait().await;
+	if let Some(element) = element.upgrade() {
+		element.imp().drained(&session);
 	}
 }
 
@@ -2039,6 +2093,59 @@ mod tests {
 		assert!(
 			error.debug().is_some_and(|debug| debug.contains("closed")),
 			"the reason travels with the message"
+		);
+		let _ = element.set_state(gst::State::Null);
+	}
+
+	// A clean end keeps the broadcast up for subscribers still catching up, and the EOS waits for it:
+	// `gst-launch` exits on that message, which would close the broadcast under them. The real sink
+	// lingers on its own runtime, so this drives the same task on a paused clock over a stand-in track.
+	#[tokio::test(start_paused = true)]
+	async fn the_eos_waits_for_the_finished_broadcast_to_go_stale() {
+		gst::init().unwrap();
+		let sink = sink();
+		sink.set_property("url", "https://127.0.0.1:1");
+		sink.set_property("broadcast", "linger-test");
+		let element = sink.clone().upcast::<gst::Element>();
+		let bus = gst::Bus::new();
+		element.set_bus(Some(&bus));
+		element.set_state(gst::State::Playing).expect("start playing");
+		let (broadcast, session) = {
+			let control = sink.imp().control.lock().unwrap();
+			let state = control.live.as_ref().expect("live session");
+			(state.broadcast.clone(), state.session.completion())
+		};
+		let consumer = broadcast.consume();
+		let max_age = Duration::from_secs(30);
+		let track = broadcast
+			.clone()
+			.create_track("video", moq_net::track::Info::default().with_max_age(max_age))
+			.unwrap();
+		track.append_group().unwrap().finish().unwrap();
+		track.finish().unwrap();
+		assert!(session.finish());
+		while bus.pop().is_some() {}
+
+		let finish = broadcast.finish();
+		assert_eq!(finish.linger(), max_age);
+		let start = tokio::time::Instant::now();
+		let linger = tokio::spawn(linger_task(finish, sink.downgrade(), session));
+		drop(track);
+
+		tokio::time::sleep(max_age - Duration::from_secs(1)).await;
+		let mut late = consumer.track("video").unwrap().subscribe(None).await.unwrap();
+		assert!(
+			late.recv_group().await.unwrap().is_some(),
+			"a late subscriber drains the tail"
+		);
+		assert!(bus.pop_filtered(&[gst::MessageType::Eos]).is_none(), "the EOS waits");
+
+		linger.await.unwrap();
+		assert_eq!(start.elapsed(), max_age);
+		assert!(consumer.is_closed());
+		assert!(
+			bus.pop_filtered(&[gst::MessageType::Eos]).is_some(),
+			"the EOS follows the linger"
 		);
 		let _ = element.set_state(gst::State::Null);
 	}

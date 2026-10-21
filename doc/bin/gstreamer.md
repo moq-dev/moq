@@ -77,6 +77,12 @@ it is released, reaches EOS, or fails; a flush or new stream after that EOS
 holds it back again. Opaque data pads are not listed. Later
 catalog updates do not wait for newly requested pads.
 
+Once every pad reaches EOS, the sink finishes the broadcast and keeps serving
+it until its media is stale (30 seconds for audio and video), so a viewer
+still catching up gets the tail. Only then does it post EOS, which is when
+`gst-launch-1.0 -e` exits. Stopping the pipeline, such as a second Ctrl-C under
+`-e`, closes the broadcast at once.
+
 All pads share one media timeline on one wall clock. The first timed buffer places
 it using UNIX or NTP reference timestamp metadata; other clock domains use the
 pipeline running time and local wall clock. Delayed buffers keep their media
