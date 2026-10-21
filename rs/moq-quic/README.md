@@ -15,6 +15,7 @@ Cherry-picked since the fork point:
 - [`83701a58`](https://github.com/quinn-rs/quinn/commit/83701a58d10f6cb089c48aeff45e137ebd2712ec): an ordered read refused after an unordered one leaves the stream readable instead of discarding it.
 - [`38b9f52f`](https://github.com/quinn-rs/quinn/commit/38b9f52fd7b545cc2d3fa81bc2fbaed072fae0f4): drop already-read duplicates when a stream switches from ordered to unordered reads.
 - [`ecc0dcfd`](https://github.com/quinn-rs/quinn/commit/ecc0dcfdeaec996d276da31d836f965753b66ea4): truncate an application `CONNECTION_CLOSE` reason by the error code's actual width, so a four- or eight-byte code no longer overruns the frame's budget.
+- [`0365181f`](https://github.com/quinn-rs/quinn/commit/0365181f2d1ee63606d43b6e858c4f70c5802c08) (moq-tokio's `quic::driver`): an ignored `ECONNRESET` or `EMSGSIZE` receive error counts toward the receive work budget, so a flood of them cannot hold the endpoint task.
 
 The fork never merges upstream.
 Upstream fixes are cherry-picked by hand, and the crate keeps quinn's formatting (rustfmt defaults) so the patches apply cleanly.

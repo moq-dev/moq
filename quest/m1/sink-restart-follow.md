@@ -3,10 +3,10 @@
 ## Goal
 
 Every moq-cli and moq-gst reader that resolves a broadcast and keeps reading
-it follows publisher instances through moq-net's announced request
-([moq-net follows announced instances](/quest/m1/net-announced-follow.md)),
-the Rust counterpart of moq-ffi's `announced_broadcast`, instead of a
-hand-rolled `origin.follow` loop. Each handles an epochless
+it follows publisher instances through moq-net's
+`origin::Consumer::announced_broadcast`
+([#5925](https://github.com/moq-dev/moq/pull/5925)) instead of a hand-rolled
+`origin.follow` loop. Each handles an epochless
 `Restart` on purpose: it follows the new instance where its output can mark
 the break. A route change alone is never fatal: a reader that cannot follow
 stays on the old instance while its publisher serves it, and fails once that
@@ -19,7 +19,7 @@ sinks to every moq-cli and moq-gst reader. Following a catalog's references
 to other broadcasts stays with
 [catalog references](/quest/m0/broadcast-epoch/catalog-references.md).
 
-Readers with their own follow loop today move onto the announced request:
+Readers with their own follow loop today move onto `announced_broadcast`:
 
 - moqsrc: `follow_path` in `rs/moq-gst/src/source/imp.rs` drains
   `origin.follow` and re-requests on each start, holding its pads across
@@ -27,7 +27,7 @@ Readers with their own follow loop today move onto the announced request:
 - `moq play`: `play` in `rs/moq-cli/src/play/media.rs` does the same and
   resets its presentation per instance.
 - The TS stitching follower (`rs/moq-mux/src/container/ts/follower.rs`), if
-  the announced request fits how it marks a break.
+  `announced_broadcast` fits how it marks a break.
 
 `subscribe` reads until its track ends, so it follows like the rest. Only a
 finite read such as `fetch` stays on the one instance it resolved.
@@ -51,11 +51,7 @@ and fix the rest the same way:
 
 Share one helper (a `moq_mux` `Source::follow`-style API per
 [catalog references](/quest/m0/broadcast-epoch/catalog-references.md))
-rather than one rule per reader. Each fix lands with a test that replaces the
-publisher while the reader runs.
+rather than one rule per reader, built on `announced_broadcast`. Each fix
+lands with a test that replaces the publisher while the reader runs.
 
 Public API: possibly a shared follow helper in `moq-mux`. Wire: none.
-
-## Required
-
-- [moq-net follows announced instances](/quest/m1/net-announced-follow.md) - the shared follow helper builds on moq-net's announced request, not a third hand-rolled loop
