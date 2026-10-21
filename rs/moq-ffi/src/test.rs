@@ -5512,6 +5512,80 @@ async fn request_per_session_publish_override() {
 	server.cancel();
 }
 
+/// A first dial that keeps failing never resolves `connect`, so `MoqClient::failure` is the
+/// only place its reason shows until a session connects, and the connect clears it.
+#[tokio::test]
+async fn client_failure_names_a_failing_first_dial() {
+	// Hold the port with a socket that never answers, so each dial times out.
+	let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+	let addr = silent.local_addr().expect("local addr");
+
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		timeout_us: Some(100_000),
+		websocket: MoqWebSocketConfig {
+			enabled: Some(false),
+			..Default::default()
+		},
+		backoff: fast_backoff(),
+		..Default::default()
+	})
+	.unwrap();
+	assert!(client.failure().is_none(), "nothing is dialing yet");
+
+	let dialer = client.clone();
+	let url = format!("https://{addr}");
+	let connect = tokio::spawn(async move { dialer.connect(url).await });
+
+	let failure = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			if let Some(failure) = client.failure() {
+				return failure;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("the failing dial never reported why");
+	assert!(matches!(failure, MoqError::Connect { .. }), "{failure:?}");
+	assert!(
+		!connect.is_finished(),
+		"connect resolved while the dial was still failing"
+	);
+
+	// Serve the port; the next retry lands, which resolves the connect and clears the report.
+	drop(silent);
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some(addr.to_string()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
+	tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let request = tokio::time::timeout(TIMEOUT, server.accept())
+		.await
+		.expect("accept timed out")
+		.expect("accept errored")
+		.expect("accept returned None");
+	let server_session = request.accept(None, None).await.expect("handshake failed");
+	let cs = tokio::time::timeout(TIMEOUT, connect)
+		.await
+		.expect("connect timed out")
+		.expect("connect task panicked")
+		.expect("connect failed");
+	assert!(client.failure().is_none(), "the connect must clear the failure");
+	assert!(cs.failure().is_none(), "the session has not dropped");
+
+	cs.cancel(0);
+	server_session.cancel(0);
+	client.cancel();
+	server.cancel();
+}
+
 /// The #2609 regression: a client session must ride out a transport drop on its
 /// own. The server kills the first session; after the automatic redial, a
 /// broadcast published on the server still reaches the client's consume origin.
