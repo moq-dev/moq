@@ -520,12 +520,14 @@ impl Bottleneck {
 				deliveries[i] = Delivery::At(free);
 				continue;
 			}
-			if free.saturating_sub(at) > self.queue {
+			// The frame is admitted only if all of it fits: the backlog ahead plus its own bytes.
+			let leaves = free.max(at) + Duration::from_nanos(slot.size as u64 * 8 * 1_000_000_000 / self.rate);
+			if leaves - at > self.queue {
 				cut.insert((track, slot.group));
 				deliveries[i] = Delivery::Omitted;
 				continue;
 			}
-			free = free.max(at) + Duration::from_nanos(slot.size as u64 * 8 * 1_000_000_000 / self.rate);
+			free = leaves;
 			deliveries[i] = Delivery::At(free);
 		}
 	}
@@ -1665,6 +1667,33 @@ async fn a_congested_path_sheds_what_it_made_late() {
 		"the latency recovers: {:?} at first, {:?} at last",
 		lags[0],
 		lags.last().unwrap()
+	);
+}
+
+/// The bottleneck tail-drops a frame whose own bytes don't fit behind the backlog.
+#[test]
+fn the_bottleneck_admits_only_what_fits() {
+	// At 8 kbit/s, 1000 bytes take the whole one-second queue.
+	let link = Bottleneck {
+		rate: 8_000,
+		queue: Duration::from_secs(1),
+		congested: |_| true,
+	};
+	let slot = |group, size| Slot {
+		video: true,
+		group,
+		frame: 0,
+		nominal: Duration::ZERO,
+		marker: false,
+		size,
+	};
+	let slots = [(0, slot(0, 1000)), (0, slot(1, 1))];
+	let mut deliveries = [Delivery::At(Duration::ZERO); 2];
+	link.carry(&slots, &mut deliveries);
+	assert_eq!(
+		deliveries,
+		[Delivery::At(Duration::from_secs(1)), Delivery::Omitted],
+		"a full queue has no room for one more byte"
 	);
 }
 
