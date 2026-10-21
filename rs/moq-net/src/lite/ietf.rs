@@ -1043,6 +1043,7 @@ mod hop_tests {
 						timestamp: Some(ts(millis)),
 					},
 					fields: fields.map(Arc::new),
+					inflated: None,
 				},
 				&frame::Budget::default(),
 			)
@@ -1413,6 +1414,51 @@ mod hop_tests {
 		assert_eq!((datagram.sequence, datagram.timestamp), (7, Some(ts(9))));
 		assert_eq!(&datagram.payload[..], b"datagram");
 		assert!(datagram.wire.is_none());
+		drop(sessions);
+	}
+
+	/// A compressed track crosses a negotiated hop as stored: each frame's Inflated Size
+	/// follows its Object Record, and a datagram's follows its Datagram State.
+	#[moq_clock::test]
+	async fn compressed_media_crosses_a_negotiated_hop() {
+		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
+		let info = track::Info::timed()
+			.with_timescale(Timescale::MILLI)
+			.with_compress(true);
+		let mut track = broadcast.create_track("video", info).unwrap();
+		let (downstream, sessions) = test_hop(&upstream, "room", [true, true]).await;
+		let (_copy, mut subscriber) = subscribe(&downstream).await;
+		assert!(subscriber.info().compress);
+
+		let payload = |n: u8| vec![n; 300];
+		let mut group = track.append_group().unwrap();
+		group.write_frame(ts(5), payload(1)).unwrap();
+		group.write_frame(ts(6), payload(2)).unwrap();
+		group.finish().unwrap();
+		let mut received = recv(&mut subscriber).await;
+		for (millis, n) in [(5, 1), (6, 2)] {
+			let frame = next(&mut received).await.unwrap();
+			assert_eq!(
+				(frame.timestamp, &frame.payload[..]),
+				(Some(ts(millis)), &payload(n)[..])
+			);
+			assert!(frame.fields.is_none());
+		}
+		assert!(next(&mut received).await.is_none());
+
+		track.insert_datagram(7, ts(9), payload(3)).unwrap();
+		let datagram = moq_clock::timeout(
+			TIMEOUT,
+			kio::wait(|waiter| subscriber.poll_recv_stored_datagram(waiter)),
+		)
+		.await
+		.expect("no datagram")
+		.unwrap()
+		.unwrap();
+		assert_eq!((datagram.sequence, datagram.timestamp), (7, Some(ts(9))));
+		assert_eq!(&datagram.payload[..], &payload(3)[..]);
+		assert!(datagram.deflated.is_some() && datagram.wire.is_none());
 		drop(sessions);
 	}
 }

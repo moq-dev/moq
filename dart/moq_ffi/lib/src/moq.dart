@@ -2638,11 +2638,13 @@ class MoqTrackInfo {
   final int? maxAgeUs;
   final int? refresh;
   final int? timescale;
+  final bool compress;
   MoqTrackInfo({
     this.priority = 127,
     this.maxAgeUs = null,
     this.refresh = null,
     this.timescale = null,
+    this.compress = false,
   });
 }
 
@@ -2673,12 +2675,18 @@ class FfiConverterMoqTrackInfo {
     );
     final timescale = timescale_lifted.value;
     new_offset += timescale_lifted.bytesRead;
+    final compress_lifted = FfiConverterBool.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final compress = compress_lifted.value;
+    new_offset += compress_lifted.bytesRead;
     return LiftRetVal(
       MoqTrackInfo(
         priority: priority,
         maxAgeUs: maxAgeUs,
         refresh: refresh,
         timescale: timescale,
+        compress: compress,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -2690,6 +2698,7 @@ class FfiConverterMoqTrackInfo {
         FfiConverterOptionalUInt64.allocationSize(value.maxAgeUs) +
         FfiConverterOptionalUInt32.allocationSize(value.refresh) +
         FfiConverterOptionalUInt64.allocationSize(value.timescale) +
+        FfiConverterBool.allocationSize(value.compress) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -2714,6 +2723,10 @@ class FfiConverterMoqTrackInfo {
       value.timescale,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterBool.write(
+      value.compress,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -2722,6 +2735,7 @@ class FfiConverterMoqTrackInfo {
         FfiConverterOptionalUInt64.allocationSize(value.maxAgeUs) +
         FfiConverterOptionalUInt32.allocationSize(value.refresh) +
         FfiConverterOptionalUInt64.allocationSize(value.timescale) +
+        FfiConverterBool.allocationSize(value.compress) +
         0;
   }
 }
@@ -12056,6 +12070,7 @@ class FfiConverterMoqServer {
 abstract class MoqClientInterface {
   void cancel();
   Future<MoqSession> connect({required String url});
+  MoqException? failure();
 }
 
 final _MoqClientFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -12116,6 +12131,17 @@ class MoqClient implements MoqClientInterface {
       ffi_moq_ffi_rust_future_free_u64,
       (ptr) => FfiConverterMoqSession.lift(Pointer<Void>.fromAddress(ptr)),
       moqExceptionErrorHandler,
+    );
+  }
+
+  MoqException? failure() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqclient_failure(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterOptionalMoqException.lift,
+      null,
     );
   }
 }
@@ -17283,6 +17309,14 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqclient_connect(
   RustBuffer url,
 );
 
+@Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external RustBuffer uniffi_moq_ffi_fn_method_moqclient_failure(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -18466,6 +18500,9 @@ external int uniffi_moq_ffi_checksum_method_moqclient_cancel();
 external int uniffi_moq_ffi_checksum_method_moqclient_connect();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqclient_failure();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqsession_bandwidth();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -19142,7 +19179,10 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqclient_cancel() != 29949) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 18055) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 14263) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqclient_failure() != 29341) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_bandwidth() != 8006) {

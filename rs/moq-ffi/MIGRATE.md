@@ -10,6 +10,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer::finish` lets go, instead of unlisting when its producer finishes or is released.
 Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
 
+### `MoqTrackInfo` gains `compress` (#5928)
+
+It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.
+
 ### Anchors can name a time (#6074)
 
 `MoqAnchor` gains `Time { timestamp_us }`, the group containing that presentation time, so exhaustive matches need an arm for it.

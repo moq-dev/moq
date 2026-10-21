@@ -9,6 +9,10 @@ How to update your code for each breaking change, newest first.
 A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.Finish()` lets go.
 Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
 
+### `TrackInfo` gains `Compress` (#5928)
+
+A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals need no change.
+
 ### Anchors can name a time (#6074)
 
 `AnchorTime` names the group containing a presentation time, and type switches over `Anchor` need a case for it.
