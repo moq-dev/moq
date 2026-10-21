@@ -245,6 +245,15 @@ cannot publish it. Capabilities are measured on every run rather than assumed
 from an engine name. Playwright WebKit is not Safari; Safari device/transport
 bugs and real Firefox transport negotiation still require manual evidence.
 
+Firefox only resumes Web Audio on an output device, so each run gets a private
+null sink from `test/lib/pulse.py`. Chromium plays to its fake output instead,
+with or without a host sound server.
+
+Nightly runs the Firefox player only. Playwright's Linux WebKit 27.2 fails two
+cases: its VP8 decoder keeps reporting the first coded size after an in-band
+resize, failing coded-size growth, and detaching logs a WebSocket "Connection
+reset by peer" console error that is not yet root-caused.
+
 The publisher is a fixture, not a fake camera: a canvas painting a frame counter
 as black/white blocks, and a tone stepping through a fixed frequency table. Both
 are indexed off one `AudioContext` clock, so the subscriber can read the frame it
