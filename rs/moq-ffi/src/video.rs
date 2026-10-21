@@ -70,7 +70,10 @@ pub enum MoqVideoEncoderKind {
 	/// `"openh264"` (software, everywhere).
 	/// Naming one this build lacks fails with a no-encoder error, so reach for
 	/// this only when [`Auto`](Self::Auto) picks the wrong one.
-	Named { name: String },
+	Named {
+		/// The encoder backend name to open.
+		name: String,
+	},
 }
 
 impl From<MoqVideoEncoderKind> for moq_video::encode::Kind {
@@ -89,6 +92,7 @@ impl From<MoqVideoEncoderKind> for moq_video::encode::Kind {
 /// match `width` x `height`; scale before writing if your source moves.
 #[derive(uniffi::Record)]
 pub struct MoqVideoEncoderInput {
+	/// The raw pixel layout.
 	pub format: MoqVideoPixelFormat,
 	/// Encoded width in pixels. Must be even (I420 chroma is subsampled 2x2).
 	pub width: u32,
@@ -102,6 +106,7 @@ pub struct MoqVideoEncoderInput {
 /// Codec-side configuration.
 #[derive(uniffi::Record)]
 pub struct MoqVideoEncoderOutput {
+	/// The codec used to encode this rendition.
 	pub codec: MoqVideoCodec,
 	/// Track name for a broadcast-bound producer. `None` derives one from the codec.
 	#[uniffi(default = None)]
@@ -122,7 +127,10 @@ pub struct MoqVideoEncoderOutput {
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqVideoGop {
 	/// Start a group with a keyframe every `interval` frames.
-	Keyframe { interval: u32 },
+	Keyframe {
+		/// The number of frames between keyframes.
+		interval: u32,
+	},
 }
 
 impl From<MoqVideoGop> for moq_video::encode::Gop {
@@ -761,7 +769,10 @@ pub struct MoqVideoDecoderOutput {
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqVideoSurface {
 	/// An Apple `CVPixelBufferRef` from VideoToolbox, IOSurface-backed NV12.
-	PixelBuffer { pointer: u64 },
+	PixelBuffer {
+		/// The borrowed CVPixelBuffer address, valid while the frame is held.
+		pointer: u64,
+	},
 }
 
 /// One decoded video frame, owning the surface it was decoded into.
@@ -1015,6 +1026,50 @@ mod decode_tests {
 #[cfg(test)]
 mod finish_tests {
 	use super::*;
+
+	/// The codec-only encoder every wrapper exposes (`moq.video.Encoder` and
+	/// friends): a keyframe opens the stream, `cut` forces the next one, and
+	/// `finish` closes it. No test in any language had driven it.
+	#[test]
+	fn encoder_emits_keyframes_where_asked() {
+		let (width, height) = (64u32, 48u32);
+		let encoder = MoqVideoEncoder::new(
+			MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::I420,
+				width,
+				height,
+				framerate: 30,
+			},
+			MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				track: None,
+				bitrate: Some(500_000),
+				gop: None,
+				kind: MoqVideoEncoderKind::Software,
+			},
+		)
+		.unwrap();
+		let picture = |i: u64| MoqVideoFrame {
+			timestamp_us: i * 33_333,
+			data: vec![(i * 40) as u8; (width * height * 3 / 2) as usize],
+		};
+
+		let mut packets = Vec::new();
+		for i in 0..3 {
+			packets.extend(encoder.encode(picture(i)).unwrap());
+		}
+		packets.extend(encoder.flush().unwrap());
+		encoder.set_bitrate(250_000).unwrap();
+		encoder.cut().unwrap();
+		packets.extend(encoder.encode(picture(3)).unwrap());
+		packets.extend(encoder.finish().unwrap());
+
+		let keyframes: Vec<u64> = packets.iter().filter(|p| p.keyframe).map(|p| p.timestamp_us).collect();
+		assert_eq!(packets.len(), 4, "one access unit per picture");
+		assert_eq!(keyframes, [0, 3 * 33_333], "keyframes at the start and the cut");
+		assert!(packets.iter().all(|p| !p.data.is_empty()), "an empty access unit");
+		assert!(matches!(encoder.encode(picture(4)), Err(MoqError::Closed)));
+	}
 
 	#[tokio::test]
 	async fn finish_ends_the_track_after_a_rate_follower_panic() {

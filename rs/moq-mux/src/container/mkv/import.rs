@@ -162,6 +162,7 @@ impl Media {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
+	/// Import a byte stream into the broadcast using its reserved catalog producer.
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		let container = hang::catalog::Container::default();
 		Self {

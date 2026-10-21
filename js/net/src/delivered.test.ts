@@ -14,6 +14,8 @@ test("add joins neighbouring runs", () => {
 	expect(delivered.runs).toBe(1);
 	expect(delivered.has(4) && delivered.has(8)).toBe(true);
 	expect(delivered.has(3) || delivered.has(9)).toBe(false);
+	expect(delivered.covers(4, 9) && delivered.covers(9, 9)).toBe(true);
+	expect(delivered.covers(3, 5) || delivered.covers(8, 10)).toBe(false);
 });
 
 test("the extremes are sequences too", () => {

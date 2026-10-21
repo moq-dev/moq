@@ -49,5 +49,7 @@ export {
 	type EncoderOptions,
 } from "./codec.ts";
 export type { Compression } from "./compression.ts";
+/** Lossy latest-value opaque publishing. */
 export * as Snapshot from "./snapshot/index.ts";
+/** Lossless append-log opaque publishing. */
 export * as Stream from "./stream/index.ts";

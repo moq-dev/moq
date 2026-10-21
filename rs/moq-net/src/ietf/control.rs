@@ -123,6 +123,9 @@ impl Drop for RequestSend {
 }
 
 impl Control {
+	/// How long a request waits for MAX_REQUEST_ID credit before giving up.
+	pub const REQUEST_ID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 	pub fn new(request_id_max: Option<RequestId>, client: bool) -> Self {
 		Self {
 			state: kio::Shared::new(ControlState {
@@ -286,26 +289,32 @@ impl Control {
 		Poll::Ready(state.request_id_next.increment())
 	}
 
+	/// Allocate the next request_id once credit and the committed header allow it, or give
+	/// up with [`Error::Cancel`] once `timeout` passes.
+	///
+	/// Arm `timeout` with [`Self::REQUEST_ID_TIMEOUT`] on the caller's clock.
+	pub fn poll_credit(
+		&self,
+		waiter: &kio::Waiter,
+		timeout: &mut crate::time::Deadline,
+	) -> Poll<Result<RequestId, Error>> {
+		if let Poll::Ready(id) = self.poll_next_request_id(waiter) {
+			return Poll::Ready(Ok(id));
+		}
+		if timeout.poll(waiter).is_ready() {
+			tracing::warn!("timed out waiting for MAX_REQUEST_ID");
+			return Poll::Ready(Err(Error::Cancel));
+		}
+		Poll::Pending
+	}
+
 	/// Allocate the next request_id once credit and the committed header allow it.
 	///
 	/// `runtime` arms the give-up timer, so the wait cannot outlive the caller's
 	/// clock.
 	pub async fn next_request_id(&self, runtime: &crate::time::Deadlines) -> Result<RequestId, Error> {
-		let mut timeout = crate::time::Deadline::after(runtime, std::time::Duration::from_secs(10));
-
-		kio::wait(|waiter| {
-			if let Poll::Ready(id) = self.poll_next_request_id(waiter) {
-				return Poll::Ready(Ok(id));
-			}
-
-			if timeout.poll(waiter).is_ready() {
-				tracing::warn!("timed out waiting for MAX_REQUEST_ID");
-				return Poll::Ready(Err(Error::Cancel));
-			}
-
-			Poll::Pending
-		})
-		.await
+		let mut timeout = crate::time::Deadline::after(runtime, Self::REQUEST_ID_TIMEOUT);
+		kio::wait(|waiter| self.poll_credit(waiter, &mut timeout)).await
 	}
 }
 

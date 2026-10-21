@@ -404,6 +404,7 @@ struct Shape {
 	container: hang::catalog::Container,
 	track: String,
 	broadcast: Option<moq_net::path::RelativeOwned>,
+	epoch: Option<moq_net::Epoch>,
 }
 
 /// A pump's progress, shared with its [`ActiveTrack`] so teardown and pad creation can't both
@@ -880,6 +881,7 @@ fn reconcile(
 				container: container.clone(),
 				track: reference.track(name).to_string(),
 				broadcast: reference.broadcast().cloned(),
+				epoch: reference.epoch().cloned(),
 			};
 			desired.insert(name.clone(), Desired { kind, shape });
 		}
@@ -982,7 +984,7 @@ fn reconcile(
 
 		// Bind without waiting: an unavailable sibling or track must not park the catalog loop
 		// and hold up every other rendition. The pump resolves both under its cancellation scope.
-		let binding = match source.bind(d.shape.broadcast.as_ref()) {
+		let binding = match source.bind(d.shape.broadcast.as_ref(), d.shape.epoch.as_ref()) {
 			Ok(binding) => binding,
 			Err(err) => {
 				gst::warning!(CAT, "ignoring rendition {name}: {err:?}");
@@ -2956,7 +2958,7 @@ mod session_tests {
 
 		let mut old = Publisher::standalone(video_rendition());
 		let serving = std::sync::Arc::new(Mutex::new(old.broadcast.consume()));
-		let pool = std::sync::Arc::new(origin.dynamic("", epoch()).unwrap());
+		let pool = std::sync::Arc::new(origin.dynamic_route("", epoch()).unwrap());
 		let (handler, answer) = (pool.clone(), serving.clone());
 		let handler = super::RUNTIME.spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
@@ -2969,7 +2971,7 @@ mod session_tests {
 
 		let mut new = Publisher::standalone(video_rendition());
 		*serving.lock().unwrap() = new.broadcast.consume();
-		pool.update(epoch()).unwrap();
+		pool.update_route(epoch()).unwrap();
 		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
 
 		stop(session);

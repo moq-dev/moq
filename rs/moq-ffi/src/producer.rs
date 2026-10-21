@@ -1,3 +1,5 @@
+//! Publish broadcasts, tracks, and groups.
+
 use std::sync::Arc;
 
 use moq_mux::catalog::hang::Extra;
@@ -31,6 +33,10 @@ pub struct MoqTrackInfo {
 	/// Per-frame timescale in ticks per second, or null for an untimed track.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
+	/// Whether each group is DEFLATE-compressed on the wire to peers that support it.
+	/// Readers always see the original frames.
+	#[uniffi(default = false)]
+	pub compress: bool,
 }
 
 impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
@@ -49,7 +55,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			})?;
 			out = out.with_timescale(scale);
 		}
-		Ok(out)
+		Ok(out.with_compress(info.compress))
 	}
 }
 
@@ -75,6 +81,7 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 			max_age_us,
 			refresh: info.refresh,
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
+			compress: info.compress,
 		})
 	}
 }
@@ -91,11 +98,13 @@ pub(crate) struct BroadcastProducer {
 	pub(crate) driver: Background,
 }
 
+/// A broadcast in which tracks can be published.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastProducer {
 	pub(crate) state: std::sync::Mutex<Option<BroadcastProducer>>,
 }
 
+/// A handler for requests for tracks in a broadcast.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastDynamic {
 	task: Task<DynamicProducer>,
@@ -160,6 +169,7 @@ impl MoqBroadcastProducer {
 		})
 	}
 
+	#[cfg(test)]
 	pub(crate) fn consume_inner(&self) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		self.with_state(|state| Ok(state.broadcast.consume()))
 	}
@@ -212,8 +222,7 @@ impl MoqBroadcastProducer {
 
 	/// Create a standalone broadcast, not attached to any origin.
 	///
-	/// Use it to serve a dynamic broadcast request ([`MoqBroadcastRequest::accept`](crate::origin::MoqBroadcastRequest::accept))
-	/// or for local pub/sub via [`consume`](Self::consume). To publish at a path, use
+	/// Use it for local pub/sub via [`consume`](Self::consume). To publish at a path, use
 	/// [`MoqOriginProducer::create_broadcast`](crate::origin::MoqOriginProducer::create_broadcast) instead.
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
@@ -473,6 +482,7 @@ impl MoqTrackRequest {
 
 // ---- Track Producer ----
 
+/// A track to which groups, frames, or datagrams can be published.
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
 	inner: std::sync::Mutex<Option<moq_net::track::Producer>>,
@@ -623,6 +633,7 @@ impl MoqTrackProducer {
 	}
 }
 
+/// A group to which frames can be published.
 #[derive(uniffi::Object)]
 pub struct MoqGroupProducer {
 	sequence: u64,
@@ -725,6 +736,7 @@ mod metadata_tests {
 				max_age_us,
 				refresh: None,
 				timescale: None,
+				compress: false,
 			};
 			let model = moq_net::track::Info::try_from(info).unwrap();
 			assert_eq!(model.max_age, max_age_us.map(std::time::Duration::from_micros));

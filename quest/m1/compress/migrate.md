@@ -21,6 +21,11 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
   `rs/hang/src/timeline.rs` set `compress` on their one track.
 - Consumers: `rs/moq-mux/src/catalog/consumer.rs`, `rs/moq-cli`
   (`subscribe.rs`, `archive.rs`), and `js/watch` lose their hangz paths.
+  moq-mux's hang catalog adapter over `hang::catalog::Consumer`
+  ([#6114](https://github.com/moq-dev/moq/pull/6114)) drops its `format`
+  field and `CatalogFormat::HangZ` goes away; check whether
+  `catalog::msf::Consumer` can reuse hang's escaping-path check instead of
+  its own (decided 2026-10-20 instead of a separate quest).
 - moq-stats deltas: the `.z` side uses merge-patch deltas and the plain side
   does not. Keep deltas on the single track unless measuring stats bytes with
   and without them on a compressed track shows the saving is small; then
@@ -48,5 +53,4 @@ Public API: removals listed above. Wire: the hang catalog loses
 
 ## Required
 
-- [Core](/quest/m1/compress/core.md) - Rust compresses opted-in tracks
 - [JavaScript](/quest/m1/compress/js.md) - js/publish and js/watch need the JS side before they drop `.z`

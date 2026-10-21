@@ -4,7 +4,7 @@ import { Device, type DeviceProps } from "./device";
 import { Retry } from "./retry";
 import type { Media } from "./types";
 
-// Signals the camera reads.
+/** Signals the camera reads. */
 export type CameraInput = {
 	// Whether to hold the camera open. Defaults to true. When false the track is stopped and `out.source` clears.
 	enabled: Getter<boolean>;
@@ -30,13 +30,16 @@ type CameraOutput = {
 
 /** Captures video from a camera, tracking the available devices. */
 export class Camera {
-	// The browser picks a low default resolution (often 640x480), so request 720p.
-	// Caller-supplied constraints take precedence per field.
+	/**
+	 * The browser picks a low default resolution (often 640x480), so request 720p.
+	 * Caller-supplied constraints take precedence per field.
+	 */
 	static readonly DEFAULT_CONSTRAINTS: Video.Constraints = {
 		width: { ideal: 1280 },
 		height: { ideal: 720 },
 	};
 
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<CameraInput>;
 
 	/** The available cameras and which one to use. */
@@ -55,6 +58,7 @@ export class Camera {
 		orientation: new Signal(0),
 		error: new Signal<Error | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();

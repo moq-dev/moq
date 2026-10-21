@@ -92,7 +92,7 @@ declare -A scope=(
     [flake]='(^rs/|^Cargo\.(toml|lock)$|^flake\.lock$|\.nix$)'
     # ts.yml's crate filters against the closure test/ts/run.sh builds, which
     # moves only with a manifest, the lockfile, or the harness's packages.
-    [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/ts\.yml$|sh/gh/ts-paths\.py$)'
+    [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'
     [markdown]=''
     [shell]=''
     [toml]=''

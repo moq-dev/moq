@@ -36,6 +36,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use subtle::ConstantTimeEq;
 use url::Url;
 
+use crate::secret::Secret;
+
 /// The DNS-SD service MoQ processes advertise under.
 const SERVICE_TYPE: &str = "_moq._udp.local.";
 
@@ -73,14 +75,6 @@ pub struct Error(ErrorKind);
 enum ErrorKind {
 	#[error(transparent)]
 	Mdns(#[from] mdns_sd::Error),
-
-	#[error(
-		"secret must be exactly 32 bytes encoded as 64 hexadecimal characters, or a path to a file containing them"
-	)]
-	InvalidSecret,
-
-	#[error("secret must be 64 hexadecimal characters or a path to a file containing them, and {0} is neither")]
-	SecretFile(String, #[source] std::io::Error),
 
 	#[error("app must be 1 to 62 lowercase ASCII letters, digits, or hyphens")]
 	InvalidApp,
@@ -176,58 +170,6 @@ impl<'de> Deserialize<'de> for App {
 	}
 }
 
-/// A 32-byte pre-shared key proving membership of a discovery group.
-///
-/// Peers holding different secrets (or none) never see each other. The proofs
-/// are HMACs over a public nonce, so the secret never travels the network but a
-/// weak one can be brute-forced offline by anyone watching it; generate a random
-/// 32 bytes rather than choosing one.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Secret([u8; 32]);
-
-impl Secret {
-	/// Decode a key from exactly 64 hexadecimal characters.
-	pub fn new(secret: impl AsRef<str>) -> Result<Self> {
-		let secret = secret.as_ref();
-		let mut key = [0; 32];
-		if secret.len() != key.len() * 2 || hex::decode_to_slice(secret, &mut key).is_err() {
-			return Err(Error(ErrorKind::InvalidSecret));
-		}
-		Ok(Self(key))
-	}
-
-	/// Decode a key given inline, or read it from the file `value` names.
-	///
-	/// What a `--*-secret <HEX_OR_PATH>` flag accepts. A path that exists but
-	/// holds something other than a key is an error rather than a silent fallback,
-	/// and a path that doesn't exist is never created.
-	pub fn load(value: impl AsRef<str>) -> Result<Self> {
-		let value = value.as_ref();
-		if let Ok(secret) = Self::new(value) {
-			return Ok(secret);
-		}
-		// Not a key, so it can only have been meant as a path. A read failure here
-		// is the useful error: it names the file the operator actually typed.
-		let contents =
-			std::fs::read_to_string(value).map_err(|err| Error(ErrorKind::SecretFile(value.to_string(), err)))?;
-		Self::new(contents.trim())
-	}
-}
-
-impl FromStr for Secret {
-	type Err = Error;
-
-	fn from_str(secret: &str) -> Result<Self> {
-		Self::new(secret)
-	}
-}
-
-impl fmt::Debug for Secret {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		formatter.write_str("Secret([redacted])")
-	}
-}
-
 /// Everything a proof is bound to, so one captured off the network
 /// authenticates nowhere else.
 ///
@@ -249,7 +191,7 @@ struct Identity<'a> {
 /// An HMAC-SHA256 proof of knowing `secret`, bound to one listener's
 /// [`Identity`], plus a `context` separating the advertise and dial roles.
 fn proof(secret: &Secret, context: &str, id: &Identity<'_>) -> String {
-	let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&secret.0).expect("HMAC accepts any key length");
+	let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
 	let port = id.port.to_string();
 	for field in [
 		context,
@@ -832,8 +774,8 @@ fn instance_id(fullname: &str) -> Option<&str> {
 mod tests {
 	use super::*;
 
-	const KEY_A: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-	const KEY_B: &str = "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+	const KEY_A: [u8; 32] = [0xa; 32];
+	const KEY_B: [u8; 32] = [0xb; 32];
 
 	/// Exactly one side of every pair dials: the lower id. Symmetric ids never
 	/// dial themselves.
@@ -852,17 +794,6 @@ mod tests {
 		);
 		assert_eq!(instance_id("weird name._moq._udp.local."), Some("weird name"));
 		assert_eq!(instance_id("not-a-moq-service._http._tcp.local."), None);
-	}
-
-	#[test]
-	fn secret_requires_exactly_32_hex_bytes_and_redacts_debug() {
-		for invalid in ["", "00", &"x".repeat(64), &"00".repeat(33)] {
-			assert!(Secret::new(invalid).is_err(), "{invalid:?} must not parse");
-		}
-		assert_eq!(
-			format!("{:?}", Secret::new(KEY_A).expect("valid")),
-			"Secret([redacted])"
-		);
 	}
 
 	/// 62, not 63: the subtype label is `_<app>`, and a DNS label holds 63 octets.
@@ -895,8 +826,8 @@ mod tests {
 	/// the listener, so one captured anywhere stands in nowhere else.
 	#[test]
 	fn proofs_are_bound_to_one_listener() {
-		let a = Secret::new(KEY_A).expect("valid secret");
-		let b = Secret::new(KEY_B).expect("valid secret");
+		let a = Secret::from(KEY_A);
+		let b = Secret::from(KEY_B);
 		let base = proof(
 			&a,
 			CONTEXT_DIAL,
@@ -1083,8 +1014,8 @@ mod tests {
 	/// never receives a credential.
 	#[test]
 	fn verify_admits_only_the_secret_holder() {
-		let ours = Secret::new(KEY_A).expect("valid secret");
-		let theirs = Secret::new(KEY_B).expect("valid secret");
+		let ours = Secret::from(KEY_A);
+		let theirs = Secret::from(KEY_B);
 
 		// The holder is admitted, and gets the proof that peer will check.
 		let app = App::default();
@@ -1136,7 +1067,7 @@ mod tests {
 	/// service instance and port are what make the proof non-transferable.
 	#[test]
 	fn a_stolen_proof_does_not_transfer() {
-		let ours = Secret::new(KEY_A).expect("valid secret");
+		let ours = Secret::from(KEY_A);
 		let app = App::default();
 		let other: App = "other".parse().expect("valid app");
 
@@ -1225,10 +1156,10 @@ mod tests {
 	}
 
 	/// Advertise on a port nothing listens on, purely to exercise the record.
-	async fn discovery(app: App, secret: Option<&str>, fingerprint: &str) -> Result<Discovery> {
+	async fn discovery(app: App, secret: Option<[u8; 32]>, fingerprint: &str) -> Result<Discovery> {
 		let mut config = Config::new(app, 4443).with_fingerprint(fingerprint);
 		if let Some(secret) = secret {
-			config = config.with_secret(Secret::new(secret).expect("valid secret"));
+			config = config.with_secret(Secret::from(secret));
 		}
 		config.advertise().await
 	}

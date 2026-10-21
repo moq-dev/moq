@@ -1,12 +1,16 @@
-//! QUIC transport protocol implementation
+//! An async QUIC driver: [`moq_quic`]'s state machine on tokio sockets and timers.
+//!
+//! Its API mirrors quinn's, plus what moq-quic adds:
+//! [`SendGroup`]s that schedule streams and datagrams together, [`SendStream::reset_at`] to
+//! keep a prefix reliable, [`RecvStream::read_held`] to hold receive credit until a message is
+//! complete, and [`Connection::set_limits`] to change flow control on a live connection.
+//!
+//! It needs no MoQ session: enable the `driver` feature (with `aws-lc-rs` or `ring`) and
+//! `default-features = false` to build it without moq-net. The entry point is the [`Endpoint`].
 //!
 //! [QUIC](https://en.wikipedia.org/wiki/QUIC) is a modern transport protocol addressing
 //! shortcomings of TCP, such as head-of-line blocking, poor security, slow handshakes, and
-//! inefficient congestion control. This crate provides a portable userspace implementation. It
-//! builds on top of quinn-proto, which implements protocol logic independent of any particular
-//! runtime.
-//!
-//! The entry point of this crate is the [`Endpoint`].
+//! inefficient congestion control.
 //!
 //! # About QUIC
 //!
@@ -29,7 +33,7 @@
 //! multiple TCP connections between the same two hosts, while providing more useful behavior than
 //! raw UDP sockets.
 //!
-//! Quinn also exposes unreliable datagrams, which are a low-level primitive preferred when
+//! The driver also exposes unreliable datagrams, which are a low-level primitive preferred when
 //! automatic fragmentation and retransmission of certain data is not desired.
 //!
 //! QUIC uses encryption and identity verification built directly on TLS 1.3. Just as with a TLS
@@ -76,8 +80,9 @@ pub use crate::quic::driver::incoming::{Incoming, IncomingFuture, RetryError};
 pub use crate::quic::driver::recv_stream::{
     Credit, ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError,
 };
+#[cfg(feature = "quic")]
 pub(crate) use crate::quic::driver::runtime::send_failed;
-#[cfg(test)]
+#[cfg(all(test, feature = "quic"))]
 pub(crate) use crate::quic::driver::runtime::wrap_udp_socket;
 pub use crate::quic::driver::runtime::{AsyncUdpSocket, UdpSender};
 pub use crate::quic::driver::send_group::{SendGroup, SendOptions};

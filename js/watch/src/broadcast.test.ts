@@ -270,6 +270,91 @@ describe("relativeBroadcast", () => {
 		}
 	});
 
+	it("reads a reference only from the epoch it names, best effort without one", async () => {
+		const owner = new Origin.Producer();
+		const [catalogEpoch, siblingEpoch, other] = [Moq.Epoch.mint(), Moq.Epoch.mint(), Moq.Epoch.mint()];
+		const catalog = owner.createBroadcast(Path.from("a/b"));
+		catalog.announce({ epoch: catalogEpoch });
+		const sibling = owner.createBroadcast(Path.from("a/source"));
+		sibling.announce({ epoch: siblingEpoch });
+		const plain = publish(owner, Path.from("a/plain"));
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("a/b"),
+			enabled: true,
+			announced: false,
+			catalogFormat: "manual",
+		});
+		const effect = new Effect();
+		try {
+			await settle();
+			const rel = Path.normalizeRelative("./source");
+			expect(source.relativeBroadcast(effect, rel)?.epoch).toBe(siblingEpoch);
+			expect(source.relativeBroadcast(effect, rel, siblingEpoch)?.epoch).toBe(siblingEpoch);
+			const own = source.out.active.peek();
+			expect(own?.epoch).toBe(catalogEpoch);
+			expect(source.relativeBroadcast(effect, undefined, catalogEpoch)).toBe(own);
+			withoutWarnings(() => {
+				expect(source.relativeBroadcast(effect, rel, other)).toBeUndefined();
+				expect(source.relativeBroadcast(effect, undefined, other)).toBeUndefined();
+				expect(source.relativeBroadcast(effect, Path.normalizeRelative("./b"), other)).toBeUndefined();
+			});
+			// An epochless route cannot prove its instance, so the epoch cannot refuse it.
+			expect(source.relativeBroadcast(effect, Path.normalizeRelative("./plain"), other)).toBeDefined();
+		} finally {
+			effect.close();
+			source.close();
+			plain.close();
+			sibling.close();
+			catalog.close();
+			owner.close();
+		}
+	});
+
+	it("follows a replaced sibling only for a reference that names no epoch", async () => {
+		const owner = new Origin.Producer();
+		const main = publish(owner, Path.from("a/b"));
+		const [oldEpoch, newEpoch] = [Moq.Epoch.mint(), Moq.Epoch.mint()];
+		const old = owner.createBroadcast(Path.from("a/source"));
+		old.announce({ epoch: oldEpoch });
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("a/b"),
+			enabled: true,
+			catalogFormat: "manual",
+		});
+		const effect = new Effect();
+		const rel = Path.normalizeRelative("./source");
+		let following: Moq.Broadcast.Consumer | undefined;
+		let pinned: Moq.Broadcast.Consumer | undefined;
+		effect.run((nested) => {
+			following = source.relativeBroadcast(nested, rel);
+		});
+		effect.run((nested) => {
+			pinned = withoutWarnings(() => source.relativeBroadcast(nested, rel, oldEpoch));
+		});
+		try {
+			await settle();
+			expect(following?.epoch).toBe(oldEpoch);
+			expect(pinned?.epoch).toBe(oldEpoch);
+
+			// The announcement is the online signal: the plain reference follows the restart,
+			// while one naming the old instance never reads the new one.
+			const replacement = owner.createBroadcast(Path.from("a/source"));
+			replacement.announce({ epoch: newEpoch });
+			await settle();
+			expect(following?.epoch).toBe(newEpoch);
+			expect(pinned).toBeUndefined();
+			replacement.close();
+		} finally {
+			effect.close();
+			source.close();
+			old.close();
+			main.close();
+			owner.close();
+		}
+	});
+
 	it("uses the catalog's own broadcast when the reference is absent, empty, or self", async () => {
 		const { source, owner } = broadcast("a/b");
 		const effect = new Effect();
@@ -307,7 +392,7 @@ describe("blind resolution", () => {
 
 		// Stand in for a dynamic route answering the request.
 		const upstream = new Moq.Broadcast.Producer();
-		const route = owner.dynamic(Path.from("blind.hang"));
+		const route = owner.dynamicRoute(Path.from("blind.hang"));
 		const requests = route.requested();
 		const next = await requests.next();
 		expect(next.done).toBe(false);
@@ -419,7 +504,7 @@ describe("restart", () => {
 	it("moves to a more specific announcement of another instance", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
-		const pool = owner.dynamic(Path.from("pool"), { epoch: Moq.Epoch.mint() });
+		const pool = owner.dynamicRoute(Path.from("pool"), { epoch: Moq.Epoch.mint() });
 		const requests = pool.requested();
 		const upstream = new Moq.Broadcast.Producer();
 		void (async () => {
@@ -465,7 +550,7 @@ describe("restart", () => {
 		// The exact route goes, which ends the request on it, and the prefix arrives under the same
 		// epoch before the table is read again. The player still has to ask again.
 		exact.close();
-		const pool = owner.dynamic(Path.from("pool"), { epoch });
+		const pool = owner.dynamicRoute(Path.from("pool"), { epoch });
 		const requests = pool.requested();
 		const upstream = new Moq.Broadcast.Producer();
 		void (async () => {
@@ -487,7 +572,7 @@ describe("restart", () => {
 	it("falls back to a covering prefix when the exact route ends", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
-		const pool = owner.dynamic(Path.from("pool"));
+		const pool = owner.dynamicRoute(Path.from("pool"));
 		const requests = pool.requested();
 		const upstream = new Moq.Broadcast.Producer();
 		void (async () => {
@@ -525,7 +610,7 @@ describe("refusal", () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("room/live.hang");
 		const upstream = new Moq.Broadcast.Producer();
-		const first = owner.dynamic(Path.from("room"), { epoch: Moq.Epoch.mint() });
+		const first = owner.dynamicRoute(Path.from("room"), { epoch: Moq.Epoch.mint() });
 		const firstRequests = first.requested();
 		void (async () => {
 			for await (const request of firstRequests) request.accept(upstream);
@@ -535,7 +620,7 @@ describe("refusal", () => {
 		expect(source.out.active.peek()).toBeDefined();
 
 		// The restarted publisher refuses with the same code an ended instance reports.
-		const second = owner.dynamic(Path.from("room"), { epoch: Moq.Epoch.mint() });
+		const second = owner.dynamicRoute(Path.from("room"), { epoch: Moq.Epoch.mint() });
 		const refused = await second.requested().next();
 		refused.value?.reject(new Moq.Error.Stream(Moq.StreamCode.Unroutable, { message: "refused" }));
 		await settle();
@@ -573,7 +658,7 @@ describe("refusal", () => {
 	for (const announced of [true, false]) {
 		it(`reports a refusal until a fresh request (announced: ${announced})`, async () => {
 			const owner = new Origin.Producer();
-			const route = owner.dynamic(Path.from("room"));
+			const route = owner.dynamicRoute(Path.from("room"));
 			const requests = route.requested();
 			const name = new Signal(Path.from("room/refused.hang"));
 			const enabled = new Signal(true);
@@ -855,7 +940,7 @@ describe("wildcard renditions", () => {
 			await settle();
 			expect(videoRenditions(source)).toEqual(["source"]);
 
-			const worker = owner.dynamic(Path.from(".pro/transcode"));
+			const worker = owner.dynamicRoute(Path.from(".pro/transcode"));
 			const requests = worker.requested();
 			await settle();
 			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
@@ -904,8 +989,8 @@ describe("wildcard renditions", () => {
 
 		try {
 			// A catch-all (an archive) and a narrower pool both cover the derived path.
-			const archive = owner.dynamic(Path.empty());
-			const worker = owner.dynamic(Path.from(".pro/transcode"));
+			const archive = owner.dynamicRoute(Path.empty());
+			const worker = owner.dynamicRoute(Path.from(".pro/transcode"));
 			await settle();
 			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
 
