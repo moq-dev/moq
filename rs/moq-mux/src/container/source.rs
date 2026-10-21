@@ -95,6 +95,8 @@ pub(crate) struct ExportSource {
 	cuts: u64,
 	// A stopped encoder may still emit final packets in this group on the old timeline.
 	ends: Option<(u64, u64)>,
+	/// The counters the export source reports for this rendition, as received, before any transform.
+	received: std::sync::Arc<crate::stats::Received>,
 }
 
 impl ExportSource {
@@ -181,6 +183,7 @@ impl ExportSource {
 			open: false,
 			cuts: 0,
 			ends: None,
+			received: source.received(name),
 		};
 		source.resolve_video_dimensions(&[])?;
 		Ok(Some(source))
@@ -218,6 +221,7 @@ impl ExportSource {
 			open: false,
 			cuts: 0,
 			ends: None,
+			received: source.received(name),
 		}))
 	}
 
@@ -248,6 +252,7 @@ impl ExportSource {
 			open: false,
 			cuts: 0,
 			ends: None,
+			received: source.received(name),
 		})
 	}
 
@@ -408,6 +413,7 @@ impl ExportSource {
 							self.finish_ends();
 						}
 						self.open = true;
+						self.received.frame(frame.timestamp, frame.payload.len());
 						frame
 					}
 					Some(Item::Read(Read::Gap { timestamp, duration })) => {

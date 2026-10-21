@@ -198,3 +198,46 @@ test("color refuses out-of-range code points and light levels", () => {
 	expect(parse({ range: "full" })).toBe(true);
 	expect(parse({ range: true })).toBe(false);
 });
+
+const vr = (fields: object) => VideoConfigSchema.parse({ codec: "vp8", container: { kind: "legacy" }, ...fields });
+
+test("projection parses the known kinds and is optional", () => {
+	expect(vr({}).projection).toBeUndefined();
+	for (const projection of [
+		{ kind: "rectilinear" },
+		{ kind: "equirectangular" },
+		{ kind: "equirectangular", fov: 180 },
+	] as const) {
+		expect(vr({ projection }).projection).toEqual(projection);
+	}
+	expect(Catalog.ProjectionSchema.parse({ kind: "rectilinear" })).toEqual({ kind: "rectilinear" });
+});
+
+test("projection keeps an unknown kind verbatim and ignores unknown fields", () => {
+	const raw = { face: "front", kind: "cubemap" };
+	expect(vr({ projection: raw }).projection).toEqual({ kind: "unknown", raw });
+	// A newer publisher may add a parameter to a known kind; this reader must not refuse it.
+	expect(vr({ projection: { kind: "rectilinear", fov: 90 } }).projection).toEqual({ kind: "rectilinear" });
+});
+
+test("projection refuses a malformed known kind", () => {
+	expect(() => vr({ projection: { fov: 180 } })).toThrow();
+	expect(() => vr({ projection: { kind: 5 } })).toThrow();
+	for (const fov of ["wide", 0, -90, 360.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+		expect(() => vr({ projection: { kind: "equirectangular", fov } })).toThrow();
+	}
+	for (const fov of [0.5, 180, 360]) {
+		expect(vr({ projection: { kind: "equirectangular", fov } }).projection).toEqual({
+			kind: "equirectangular",
+			fov,
+		});
+	}
+});
+
+test("stereo is optional and keeps unknown packings verbatim", () => {
+	expect(vr({}).stereo).toBeUndefined();
+	for (const stereo of ["mono", "left-right", "top-bottom", "multiview"]) {
+		expect(vr({ stereo }).stereo).toBe(stereo);
+	}
+	expect(() => vr({ stereo: 2 })).toThrow();
+});
