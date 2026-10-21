@@ -55,7 +55,7 @@ for (const name of ["check"]) {
 }
 
 test("scope queries support both merge groups and release PRs without path filters", () => {
-	expect(workflow.on.merge_group).toEqual({ types: ["checks_requested"] });
+	expect(workflow.on.merge_group).toEqual({ types: ["checks_requested", "destroyed"] });
 	expect(workflow.on.pull_request).toBeDefined();
 	expect(workflow.on.pull_request).not.toHaveProperty("paths");
 	expect(workflow.on.pull_request).not.toHaveProperty("branches");
@@ -67,7 +67,7 @@ test("main PRs skip Check while the queue and release PRs run it", () => {
 	expect(workflow.on.pull_request).toEqual({ types: ["opened", "synchronize", "reopened", "edited", "closed"] });
 	for (const name of ["check"]) {
 		expect(workflow.jobs[name].if).toBe(
-			"github.event.action != 'closed' && (github.event_name != 'pull_request' || github.base_ref == 'release')",
+			"github.event.action != 'closed' && github.event.action != 'destroyed' && (github.event_name != 'pull_request' || github.base_ref == 'release')",
 		);
 	}
 });
