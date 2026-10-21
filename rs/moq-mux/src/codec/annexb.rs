@@ -1,30 +1,38 @@
 use bytes::{Buf, Bytes, BytesMut};
 
+/// The four-byte Annex B start code preceding a NAL unit.
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
 
 /// Annex B parsing errors.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The buffer does not begin with an Annex B start code.
 	#[error("missing Annex B start code")]
 	MissingStartCode,
 
+	/// The start code has an invalid byte sequence.
 	#[error("invalid Annex B start code")]
 	InvalidStartCode,
 
+	/// The NAL length prefix size is outside one through four bytes.
 	#[error("invalid avc1/hvc1 length size {0}")]
 	InvalidLengthSize(usize),
 
+	/// A NAL length prefix or payload extends past the buffer.
 	#[error("truncated length-prefixed NAL unit")]
 	Truncated,
 
+	/// The NAL payload length does not fit a four-byte prefix.
 	#[error("NAL too large for a 4-byte length prefix")]
 	NalTooLarge,
 
+	/// A keyframe has neither an inline nor a retained parameter set of the named type.
 	#[error("keyframe has no {0}, in the access unit or earlier in the track")]
 	MissingParameterSet(&'static str),
 }
 
+/// A result using this module's error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// True when the buffer is an out-of-band config record (avcC / hvcC) rather than an
@@ -312,12 +320,14 @@ pub(crate) fn reconcile_keyframe_params(chunks: &mut BytesMut, retained: &mut Ve
 	}
 }
 
+/// Iterates complete Annex B NAL units, leaving an unterminated final unit for `flush`.
 pub struct NalIterator<'a, T: Buf + AsRef<[u8]> + 'a> {
 	buf: &'a mut T,
 	start: Option<usize>,
 }
 
 impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
+	/// Read NAL units from a buffer that begins with an Annex B start code.
 	pub fn new(buf: &'a mut T) -> Self {
 		Self { buf, start: None }
 	}
@@ -375,7 +385,7 @@ pub fn length_prefixed_to_annexb(data: &[u8], length_size: usize, out: &mut Vec<
 	Ok(())
 }
 
-// Return the size of the start code at the start of the buffer.
+/// Return the leading start code size, or `None` if more bytes are needed.
 pub fn after_start_code(b: &[u8]) -> Result<Option<usize>> {
 	if b.len() < 3 {
 		return Ok(None);
@@ -395,7 +405,7 @@ pub fn after_start_code(b: &[u8]) -> Result<Option<usize>> {
 	}
 }
 
-// Return the number of bytes until the next start code, and the size of that start code.
+/// Return the byte offset and size of the first start code in the buffer.
 //
 // Both forms share the `0 0 1` suffix (3-byte is `0 0 1`, 4-byte is `0 0 0 1`), so a single
 // SIMD-accelerated substring search for `0 0 1` finds the core. We then peek one byte back to

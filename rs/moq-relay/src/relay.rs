@@ -736,8 +736,7 @@ impl Relay {
 /// Two-stage shutdown: the first signal, or an embedder firing
 /// [`shutdown::Trigger::start`], starts the drain broadcast (every session sends
 /// GOAWAY and waits for its peer to leave). Returns from [`Relay::run`] once
-/// every session has left, which the drain deadline forces, or on a second
-/// signal, logging which ended it.
+/// [`shutdown::Observer::drained`] does, or on a second signal.
 /// Without `signals` only the trigger and the sessions count.
 async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, signals: bool) -> anyhow::Result<()> {
 	let window = shutdown.drain_timeout;
@@ -759,37 +758,12 @@ async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, sig
 		_ = shutdown.started() => tracing::info!(?window, "shutdown requested; draining sessions"),
 	}
 
-	// The deadline fixed when the trigger fired, which may be earlier than this
-	// future was polled (the embedder can start the drain during startup).
-	// Handshakes may never finish, so the same absolute deadline bounds them
-	// without waiting for an established session to force-close.
-	let deadline = shutdown.deadline().context("drain started without a deadline")?;
 	tokio::select! {
 		res = signal() => {
 			res?;
 			tracing::warn!(open = shutdown.tally().live, "second shutdown signal; exiting immediately");
-			return Ok(());
 		}
-		_ = shutdown.drained() => {}
-		_ = tokio::time::sleep_until(deadline) => {}
-	}
-
-	let elapsed = tokio::time::Instant::now().saturating_duration_since(deadline - window);
-	match shutdown.tally() {
-		shutdown::Tally { live: 0, forced: 0, .. } => {
-			tracing::info!(?elapsed, "drain ended with no established sessions; exiting")
-		}
-		shutdown::Tally { live: 0, forced, .. } => {
-			tracing::warn!(?elapsed, forced, "drain deadline force-closed sessions; exiting")
-		}
-		shutdown::Tally { live, forced, .. } => {
-			tracing::warn!(
-				?elapsed,
-				forced,
-				open = live,
-				"drain deadline passed with sessions still open; exiting"
-			)
-		}
+		() = shutdown.drained() => {}
 	}
 	Ok(())
 }

@@ -165,6 +165,7 @@ impl MoqBroadcastProducer {
 		})
 	}
 
+	#[cfg(test)]
 	pub(crate) fn consume_inner(&self) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		self.with_state(|state| Ok(state.broadcast.consume()))
 	}
@@ -217,8 +218,7 @@ impl MoqBroadcastProducer {
 
 	/// Create a standalone broadcast, not attached to any origin.
 	///
-	/// Use it to serve a dynamic broadcast request ([`MoqBroadcastRequest::accept`](crate::origin::MoqBroadcastRequest::accept))
-	/// or for local pub/sub via [`consume`](Self::consume). To publish at a path, use
+	/// Use it for local pub/sub via [`consume`](Self::consume). To publish at a path, use
 	/// [`MoqOriginProducer::create_broadcast`](crate::origin::MoqOriginProducer::create_broadcast) instead.
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {

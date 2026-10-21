@@ -62,6 +62,18 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   - Keep them private.
 - `origin::Dynamic::withdrawn` (lite subscriber): public, as the explicit
   peer withdrawal that differs from a session simply dropping its handle.
+- **Peer-route escape hatches** (`origin::Producer::dynamic_route`,
+  `origin::Dynamic::update_route`, `origin::Request::accept`; JS
+  `Origin.Producer.dynamicRoute`, `Dynamic.updateRoute`, `Request.accept`).
+  Settled as the interim in [#5678](https://github.com/moq-dev/moq/pull/5678):
+  an application claim (`dynamic(prefix)`) carries no route and answers
+  through `Request::prepare` then `Prepared::publish`, and these stay
+  `#[doc(hidden)] pub` / `@internal` for the sessions, tests, and benches that
+  model a peer's route (a covering claim with hops, cost, or an epoch,
+  answered with a broadcast the session already routes). Make them private
+  (`pub(crate)`, and private in JS) once the identity handle above and the
+  answer source give a peer's route a public shape, and move the
+  out-of-crate tests and benches onto it.
 - `origin::interest_prefixes` (both subscribers): remove the need through
   [Rust lazy discovery](/quest/m1/lazy-discovery/rust.md), which gives Rust
   the origin's watched interests the way JS has them; make that public in

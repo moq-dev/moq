@@ -19,64 +19,90 @@ Only a change that needs a maintainer decision (public API, scope) or is
 independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
 
+Checkpointed 2026-10-21, a day after the m0 run, with nothing to plan but
+the quests below. The run finishes after
+[moq-net compiles once](/quest/m1/net-erase-transport.md) lands, so the audit
+before the breaking cut sees its result and the rest of m1.
+
 What to check first: whether the nightly `sizes` job (`sh/size/`) has run.
-It needs the Linux release builds, skipped since the 2026-10-11 nixpkgs
-bump broke their link. If it has, its history replaces the local method below.
-Then whether [moq-net compiles once](/quest/m1/net-erase-transport.md) and
-[the catalog publish path compiles once](/quest/m2/catalog-publish-once.md)
-landed, and re-attribute the native rows if so.
+It needs the Linux release builds, which still fail to link
+([moq-dev/moq#6090](https://github.com/moq-dev/moq/pull/6090) was open on
+2026-10-21). If it has, its history replaces the local method below. Then
+re-attribute the native rows for the erasure quest, and measure `@moq/net`
+once [compressed tracks in js/net](/quest/m1/compress/js.md) moves `pako` in.
 
-### Baselines (m0 run, 2026-10-19 and 2026-10-20)
+### Baselines
 
-Release assets are x86_64 Linux, stripped as shipped. main is a local build
-with the host linker, not `cargo zigbuild`, so compare main to main. JS rows
-are `sh/size/bundles.ts` first-load gzip; main is the workspace build.
+Release assets are x86_64 Linux, stripped as shipped. main is a local
+`cargo build --release` (rust-lld, not `cargo zigbuild`), so compare main to
+main. WASM is `just js wasm` output, `gzip -9`. JS rows are
+`sh/size/bundles.ts` first-load gzip on the workspace build.
 
-| Artifact | Earlier release | Release (2026-10-17) | main (2026-10-20) |
-|---|---|---|---|
-| `moq-relay` | 30.69 MiB (0.14.5) | 37.70 MiB (0.17.7) | 31.29 MiB |
-| `moq` CLI | 36.38 MiB (0.8.2) | 49.70 MiB (0.14.7) | 48.14 MiB |
-| `libmoq_ffi.so` | 16.80 MiB (0.3.16) | 25.22 MiB (0.4.17) | 31.86 MiB |
-| `libmoq` tarball | 10.49 MiB (0.5.15) | 14.29 MiB (0.6.17) | not built |
-| `moq_bg.wasm` gzip | ~471 KB (06-09) | not published | 771 KB |
-| `net` | 65.3 KB (09-09) | 93.0 KB | 100.9 KB |
-| `watch` | 120.3 KB | 160.5 KB | 161.3 KB |
-| `watch-ui` | 131.8 KB | 172.6 KB | 173.8 KB |
-| `publish` | 94.9 KB | 230.6 KB | 151.2 KB |
+| Artifact | Release (2026-10-17) | main 2b28f5eac (10-19) | main 7d2a91fe66 (10-20) | checkpoint |
+|---|---|---|---|---|
+| `moq-relay` | 37.70 MiB (0.17.7) | 31.31 MiB | 31.81 MiB | same |
+| `moq` CLI | 49.70 MiB (0.14.7) | 47.54 MiB | 48.45 MiB | same |
+| `libmoq_ffi.so` | 25.22 MiB (0.4.17) | 34.16 MiB | 34.80 MiB | same |
+| `libmoq` tarball | 14.29 MiB (0.6.17) | not built | not built | not built |
+| `moq_bg.wasm` gzip | not published | 771.0 KB | 861.9 KB | same |
+| `net` | 93.0 KB | 100.9 KB | 101.2 KB | 95.7 KB |
+| `watch` | 160.5 KB | 161.3 KB | 161.8 KB | 156.7 KB |
+| `watch-ui` | 172.6 KB | 173.8 KB | 174.3 KB | 169.2 KB |
+| `publish` | 230.6 KB | 151.2 KB | 151.7 KB | 146.5 KB |
 
-Native and WASM main numbers are from 2026-10-19 (2b28f5eac); JS from
-2026-10-20, after the fix below.
+Earlier releases: relay 30.69 MiB (0.14.5), CLI 36.38 MiB (0.8.2), FFI
+16.80 MiB (0.3.16), `libmoq` 10.49 MiB (0.5.15), WASM ~471 KB (06-09),
+`net` 65.3 KB, `watch` 120.3 KB, `watch-ui` 131.8 KB and `publish` 94.9 KB
+(09-09). The 2b28f5eac column was rebuilt here from the same commit; the m0
+run's FFI (31.86 MiB) and CLI (48.14 MiB) figures for it do not reproduce.
 
-### Results of the m0 run
+### Results so far
 
-- Fixed: `@moq/net` loads the IETF session code on demand, since lite is
-  preferred. First load fell 126.8 to 100.9 KB (net), 187.3 to 161.3 KB
-  (watch), 199.8 to 173.8 KB (watch-ui) and 176.8 to 151.2 KB (publish).
-  `js/net/src/ietf/index.test.ts` fails if the entry statically reaches it
-  again.
-- Planned: [moq-net compiles once](/quest/m1/net-erase-transport.md), most of
-  the native growth since July (the drivers are monomorphized per transport and
-  per instantiating crate), and
-  [the catalog publish path compiles once](/quest/m2/catalog-publish-once.md),
-  about 1 MiB of the CLI.
-- Explained, no action: `moq-quic` replacing quinn, `kio`, `unsafe-libopus`,
-  `moq-video`/`moq-vaapi` in the FFI library and `fast_image_resize` in
-  `libmoq`. The CLI embeds the relay (+5.4 MiB since 0.12.0) and defaults to
-  WebRTC (about 1.2 MiB) and the `s3`, `gcs` and `azure` stores; main drops
-  the `iroh` default from both. The FFI library keeps its symbol table on
-  purpose for UniFFI (about 3.5 MiB). WASM growth is `moq-net`'s.
-- `@moq/publish` 0.5.x bundles `mediabunny` eagerly; main fixed it in
-  [moq-dev/moq#5267](https://github.com/moq-dev/moq/pull/5267), not yet
-  released when measured.
+- Fixed (m0): `@moq/net` loads the IETF session code on demand.
+  `js/net/src/ietf/index.test.ts` fails if the entry statically reaches it.
+- Fixed (checkpoint): SETUP options live in `ietf/setup_options.ts`, apart
+  from the message parameter codec (`parameters.ts`, `filter.ts`), so a lite
+  session never loads them. First load fell 5.1 to 5.5 KB gzip in every
+  bundle; the same test fails if SETUP reaches `parameters.ts` again.
+- Planned: [moq-net compiles once](/quest/m1/net-erase-transport.md). On
+  7d2a91fe66, `moq-net` is 9.5 MiB of the relay's text and 7.7 MiB of the FFI
+  library's; one copy of each function would be about 2.5 MiB in both, so the
+  ceiling is about 7.0 and 5.2 MiB. In the relay, the binary crate (a 16-line
+  `main.rs`) instantiates 3.1 MiB of it, `moq-tokio` 3.2 MiB and the library
+  1.9 MiB; identical instantiations repeated across crates are 5.0 MiB. They
+  are not byte-identical after LTO: `-Wl,--icf=all` saves only 0.23 MiB.
+- Planned: [the catalog publish path compiles once](/quest/m2/catalog-publish-once.md)
+  (`moq-json`'s diff serializer, +0.14 MiB of the CLI this run).
+- Explained, no action: native growth since 2b28f5eac is `moq-net` features
+  (ranges and time anchors, TRACKS, followed instances, compressed tracks):
+  +0.41 to 0.53 MiB of text per binary. The CLI adds import stats (+0.08 MiB)
+  and `moq-mux` (+0.06 MiB); `usage-rs` 7 saves 0.07 MiB. WASM code grew
+  187 KB raw: `zlib-rs` 55 KB (compressed tracks; `miniz_oxide` is refused for
+  its sync flush bug), `moq-net` 88 KB, `hashbrown`/`hashlink`/`foldhash`
+  23 KB. JS grew 0.3 to 0.5 KB gzip.
+- Explained in m0, unchanged: `moq-quic` replacing quinn, `kio`,
+  `unsafe-libopus`, `moq-video`/`moq-vaapi` in the FFI library,
+  `fast_image_resize` in `libmoq`, the relay and WebRTC embedded in the CLI,
+  the object-store defaults, and the FFI symbol table kept for UniFFI.
 
-Candidates for next run: the eager IETF SETUP code in `@moq/net` is still
-29.9 KiB raw, mostly `parameters.ts`, whose SETUP options share a module with
-the request parameters (and `filter.ts`); splitting them needs `cluster.ts`,
-`token.ts` and `request.ts` reshuffled, for about 4 KB gzip.
+Leads:
 
-Method: `nm` symbol attribution by crate path and by instantiating crate on
-unstripped release `.so`/`.a` files and local `profiling` builds, and esbuild
-metafiles from `sh/size/bundles.ts` for JS.
+- `pako` costs `watch` and `publish` 12.8 KB gzip through `@moq/json`. A player
+  only inflates: `Inflate` alone is 9.9 KB, and the browser's
+  `DecompressionStream("deflate-raw")` would be free if it yields each
+  sync-flushed frame. Carried into [compressed tracks in js/net](/quest/m1/compress/js.md).
+- `zod/mini` is 9 KB raw of `@moq/net`'s first load for one branded bigint
+  (`HopSchema`), and `@moq/hang` imports it as both `zod/mini` and
+  `@zod/mini`. Not worth a quest alone.
+
+Method: `nm` symbol attribution by crate path and by instantiating crate (the
+v0 mangling suffix) on local `profiling` builds of both revisions, the wasm
+name section from a `wasm-release` build with `CARGO_PROFILE_WASM_RELEASE_STRIP=none`,
+and esbuild metafiles from `sh/size/bundles.ts` for JS.
+
+## Required
+
+- [moq-net compiles once](/quest/m1/net-erase-transport.md) - re-measure the native rows once the drivers compile once
 
 ## Related
 
