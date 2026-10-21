@@ -35,6 +35,7 @@ struct Settings {
 	quic_idle_timeout: Option<Duration>,
 	quic_keep_alive: Option<Duration>,
 	quic_keylog: bool,
+	linger: bool,
 }
 
 fn duration_millis(duration: Duration) -> u64 {
@@ -66,6 +67,8 @@ struct State {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
+	/// Whether a clean end keeps serving the finished broadcast until its media is stale.
+	linger: bool,
 	/// Whether the finished broadcast stopped serving its tail, so the EOS it owes may go out.
 	drained: bool,
 	/// Whether this publication's single EOS message already went out. One per publication, not per
@@ -212,6 +215,12 @@ impl ObjectImpl for MoqSink {
 					.default_value(false)
 					.mutable_ready()
 					.build(),
+				glib::ParamSpecBoolean::builder("linger")
+					.nick("Linger")
+					.blurb("At end of stream, serve the finished broadcast until its media is stale, then post EOS")
+					.default_value(false)
+					.mutable_ready()
+					.build(),
 				// Read-only, served from the live session's status. Each notifies on change.
 				glib::ParamSpecEnum::builder::<ConnectionStatus>("status")
 					.nick("Connection status")
@@ -280,6 +289,7 @@ impl ObjectImpl for MoqSink {
 			"quic-idle-timeout" => settings.quic_idle_timeout = Some(Duration::from_millis(value.get().unwrap())),
 			"quic-keep-alive" => settings.quic_keep_alive = Some(Duration::from_millis(value.get().unwrap())),
 			"quic-keylog" => settings.quic_keylog = value.get().unwrap(),
+			"linger" => settings.linger = value.get().unwrap(),
 			_ => unreachable!(),
 		}
 	}
@@ -325,6 +335,7 @@ impl ObjectImpl for MoqSink {
 						.unwrap_or(0)
 						.to_value(),
 					"quic-keylog" => settings.quic_keylog.to_value(),
+					"linger" => settings.linger.to_value(),
 					_ => unreachable!(),
 				}
 			}
@@ -588,7 +599,9 @@ impl MoqSink {
 
 	/// Create the session and producers before any buffer flows.
 	fn start_session(&self) -> Result<SessionRegistration, gst::StateChangeError> {
-		let settings = ResolvedSettings::try_from(self.settings.lock().unwrap().clone()).map_err(|err| {
+		let settings = self.settings.lock().unwrap().clone();
+		let linger = settings.linger;
+		let settings = ResolvedSettings::try_from(settings).map_err(|err| {
 			gst::error!(CAT, obj = self.obj(), "invalid settings: {err:#}");
 			gst::StateChangeError
 		})?;
@@ -606,6 +619,7 @@ impl MoqSink {
 				broadcast,
 				catalog: Some(catalog),
 				wall,
+				linger,
 				drained: false,
 				eos_delivered: false,
 			});
@@ -1078,15 +1092,16 @@ impl MoqSink {
 		Finished { updates, message }
 	}
 
-	/// Serve the finished broadcast, so subscribers still catching up drain its tail until the media
-	/// is stale, and owe the EOS once it closes. A broadcast with nothing to drain owes it now.
+	/// With `linger` set, serve the finished broadcast so subscribers still catching up drain its tail
+	/// until the media is stale, and owe the EOS once it closes. Otherwise, or with nothing to drain,
+	/// close it and owe the EOS now.
 	///
 	/// The EOS waits for the linger because `gst-launch` exits on it, and NULL closes the broadcast.
 	/// Stopping the pipeline is the interrupt: it closes the broadcast, which ends the wait.
 	fn linger_locked(&self, control: &mut Control, finish: moq_net::broadcast::Finish) -> Posted {
 		let state = control.live.as_mut().expect("a finished publication is live");
 		let linger = finish.linger();
-		if linger.is_zero() {
+		if !state.linger || linger.is_zero() {
 			drop(finish);
 			state.drained = true;
 			return claim_eos(control);
@@ -2224,6 +2239,7 @@ mod tests {
 			"quic-idle-timeout",
 			"quic-keep-alive",
 			"quic-keylog",
+			"linger",
 		] {
 			assert!(
 				spec(&sink, name).flags().contains(gst::PARAM_FLAG_MUTABLE_READY),

@@ -210,13 +210,8 @@ fn the_eos_is_posted_once_per_publication() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
-// Published media lingers until it is stale, so the EOS that ends `gst-launch` waits for it. Stopping
-// the pipeline is the interrupt: it closes the broadcast at once, and the run it ended owes no EOS.
-#[test]
-fn published_media_holds_the_eos_until_the_pipeline_stops() {
-	init();
-	let sink = publisher();
-	let seen = recording_bus(&sink);
+/// Start `sink` playing and publish one frame on `sink_0`, so its track has media to drain.
+fn play_one_frame(sink: &gst::Element) -> gst::Pad {
 	let pad = sink.request_pad_simple("sink_0").expect("request sink_0");
 	// A running time places the wall clock, which the first published frame needs.
 	let clock = gst::SystemClock::obtain();
@@ -228,6 +223,34 @@ fn published_media_holds_the_eos_until_the_pipeline_stops() {
 	segment.set_start(gst::ClockTime::ZERO);
 	assert!(pad.send_event(gst::event::Segment::new(&segment)));
 	assert_eq!(pad.chain(h264_keyframe()), Ok(gst::FlowSuccess::Ok));
+	pad
+}
+
+// Lingering is opt-in: by default the end of stream closes the broadcast and posts EOS at once, even
+// with media a late subscriber could still have drained.
+#[test]
+fn published_media_posts_the_eos_at_once_by_default() {
+	init();
+	let sink = publisher();
+	assert!(!sink.property::<bool>("linger"));
+	let seen = recording_bus(&sink);
+	let pad = play_one_frame(&sink);
+
+	assert!(pad.send_event(gst::event::Eos::new()));
+	assert_eq!(posted_eos(&seen), 1);
+	let _ = sink.set_state(gst::State::Null);
+}
+
+// With `linger`, published media is served until it is stale, so the EOS that ends `gst-launch` waits
+// for it. Stopping the pipeline is the interrupt: it closes the broadcast at once, and the run it ended
+// owes no EOS.
+#[test]
+fn a_lingering_sink_holds_the_eos_until_the_pipeline_stops() {
+	init();
+	let sink = publisher();
+	sink.set_property("linger", true);
+	let seen = recording_bus(&sink);
+	let pad = play_one_frame(&sink);
 
 	assert!(pad.send_event(gst::event::Eos::new()));
 	assert_eq!(status_of(&sink, "sink_0"), "ended");
