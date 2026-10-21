@@ -128,6 +128,15 @@ test("members inherited from a class in a declared namespace are checked", () =>
 	expect(found).toEqual(["index.d.ts: Hidden.Parent", "index.d.ts: Hidden.Parent.run"]);
 });
 
+test("members inherited through nested namespaces are checked", () => {
+	const found = check({
+		"/dist/base.d.ts": "export declare namespace Inner {\n    class Parent {\n        run(): void;\n    }\n}\n",
+		"/dist/index.d.ts":
+			'import * as ns from "./base";\n/** Documented. */\nexport declare class Derived extends ns.Inner.Parent {}\n',
+	});
+	expect(found).toEqual(["base.d.ts: Inner.Parent", "base.d.ts: Inner.Parent.run"]);
+});
+
 test("an explicit export shadows the same name from a star", () => {
 	const found = check({
 		"/dist/inner.d.ts": "export declare const name: number;\n",

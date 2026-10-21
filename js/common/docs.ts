@@ -76,7 +76,7 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 			if (declaration.type === "ClassDeclaration") {
 				const superClass = declaration.superClass;
 				const base = resolveClass(file, superClass);
-				if (base && !seen.has(base.key)) {
+				if (base && "key" in base && !seen.has(base.key)) {
 					seen.add(base.key);
 					check(base.file, base.name, base.declarations);
 				}
@@ -94,36 +94,33 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		for (const [name, list] of namespaceMembers(declarations)) check(file, `${path}.${name}`, list);
 	};
 
-	// The package class a superclass expression names: plain (`Base`), or a member (`ns.Parent`) of
-	// a namespace import or a declared namespace. Undefined for a global or another package's class.
-	const resolveClass = (
-		file: string,
-		superClass: unknown,
-	): { key: string; file: string; name: string; declarations: Declarations } | undefined => {
-		const local = (base: ReturnType<typeof resolveBinding>) => {
-			const declarations = base?.kind === "local" ? load(base.file).locals.get(base.name) : undefined;
-			if (base?.kind !== "local" || !declarations) return undefined;
+	// What a superclass expression names: a module through a namespace import, or a package
+	// declaration reached by name or through any depth of namespaces (`ns.Inner.Parent`).
+	// Undefined for a global or another package's class.
+	type Named = { key: string; file: string; name: string; declarations: Declarations };
+	const resolveClass = (file: string, expression: unknown): Named | { module: string } | undefined => {
+		const local = (base: ReturnType<typeof resolveBinding>): Named | { module: string } | undefined => {
+			if (base?.kind === "namespace") return { module: base.file };
+			const declarations = base ? load(base.file).locals.get(base.name) : undefined;
+			if (!base || !declarations) return undefined;
 			return { key: `${base.file}#${base.name}`, file: base.file, name: base.name, declarations };
 		};
-		const node = superClass as { type: string; name?: string; object?: unknown; property?: unknown } | null;
+		const node = expression as { type: string; name?: string; object?: unknown; property?: unknown } | null;
 		if (node?.type === "Identifier" && node.name)
 			return local(resolveBinding(file, { kind: "local", name: node.name }));
 
-		const object = node?.object as { type: string; name: string } | undefined;
 		const property = node?.property as { type: string; name: string } | undefined;
-		if (node?.type !== "MemberExpression" || object?.type !== "Identifier" || property?.type !== "Identifier") {
-			return undefined;
-		}
-		const owner = resolveBinding(file, { kind: "local", name: object.name });
-		if (owner?.kind === "namespace") {
-			const next = findExport(owner.file, property.name, new Set());
+		if (node?.type !== "MemberExpression" || property?.type !== "Identifier") return undefined;
+		const owner = resolveClass(file, node.object);
+		if (!owner) return undefined;
+		if ("module" in owner) {
+			const next = findExport(owner.module, property.name, new Set());
 			return next ? local(resolveBinding(next.file, next.binding)) : undefined;
 		}
-		const namespace = local(owner);
-		const declarations = namespace && namespaceMembers(namespace.declarations).get(property.name);
-		if (!namespace || !declarations) return undefined;
-		const name = `${namespace.name}.${property.name}`;
-		return { key: `${namespace.file}#${name}`, file: namespace.file, name, declarations };
+		const declarations = namespaceMembers(owner.declarations).get(property.name);
+		if (!declarations) return undefined;
+		const name = `${owner.name}.${property.name}`;
+		return { key: `${owner.file}#${name}`, file: owner.file, name, declarations };
 	};
 
 	// Follow a binding to the file and local name that declares it; undefined for another package.
