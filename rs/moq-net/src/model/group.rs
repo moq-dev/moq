@@ -946,9 +946,9 @@ impl Producer {
 		self.handle.alive.checked.store(true, Ordering::Relaxed);
 		self.advance_largest(&state);
 		drop(state);
-		// The group's lock is released first: sharing reads it back through its slot.
-		if let (Some(track), Some(start)) = (&track, bound) {
-			track.share_bound(self.handle.info.sequence, start);
+		// The group's lock is released first: indexing reads it back through its slot.
+		if let Some(track) = &track {
+			track.first_frame(self.handle.info.sequence, bound);
 		}
 		drop(track);
 
@@ -1033,9 +1033,9 @@ impl Producer {
 			self.advance_largest(&state);
 		}
 		drop(state);
-		// The group's lock is released first: sharing reads it back through its slot.
-		if let (Some(track), Some(start)) = (&track, bound) {
-			track.share_bound(self.handle.info.sequence, start);
+		// The group's lock is released first: indexing reads it back through its slot.
+		if let Some(track) = &track {
+			track.first_frame(self.handle.info.sequence, bound);
 		}
 		drop(track);
 
@@ -1155,9 +1155,9 @@ impl Producer {
 		let bound = state.settle(origin);
 		self.handle.alive.checked.store(true, Ordering::Relaxed);
 		drop(state);
-		// The group's lock is released first: sharing reads it back through its slot.
-		if let (Some(track), Some(start)) = (&track, bound) {
-			track.share_bound(self.handle.info.sequence, start);
+		// The group's lock is released first: indexing reads it back through its slot.
+		if let Some(track) = &track {
+			track.first_frame(self.handle.info.sequence, bound);
 		}
 		drop(track);
 
@@ -1570,6 +1570,13 @@ impl Handle {
 	// pending: /quest/m1/public-model/ingest.md
 	pub(crate) fn is_started(&self) -> bool {
 		self.state.read().started()
+	}
+
+	/// Whether this copy may yet present the group's frame 0: it holds it, and nothing
+	/// opened or ended it.
+	pub(super) fn may_start(&self) -> bool {
+		let state = self.state.read();
+		state.offset == 0 && !state.started()
 	}
 
 	/// Where the group starts in presentation time: its first frame's timestamp, or
