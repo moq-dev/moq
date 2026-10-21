@@ -43,9 +43,8 @@ with three verdicts:
   stop producing it. Each report on the Pages site owns one `gh-pages`
   directory: its workflow commits only that directory, deploys the whole
   branch, and joins the `benchmark-pages` concurrency group with
-  `queue: max`, so no deploy drops another report (decided 2026-10-20 with the
-  [interop report](/quest/m1/interop-report.md); Nightly's `benchmark-site`
-  comment still claims a single writer until the first second writer lands).
+  `queue: max`, so no deploy drops another report (decided 2026-10-20; the
+  benchmark, relay, and interop reports do, through `sh/gh/pages-publish.sh`).
 - **Cost:** runner-minutes per month by runner type, from the org billing API
   and job timings, against that signal. macOS is the scarce one (a 5-job
   concurrency cap).

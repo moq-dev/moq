@@ -4,6 +4,8 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 };
+#[cfg(feature = "async")]
+use crate::{StreamError, coding::StreamCodes};
 
 use super::{Message, Version};
 use crate::track::Order;
@@ -499,9 +501,36 @@ pub struct SubscribeDrop {
 	/// The last absolute group sequence in the dropped range (inclusive).
 	pub end: u64,
 
-	/// An application-specific error code. A value of 0 indicates no error;
-	/// the groups are simply unavailable.
+	/// Why the groups were given up: a stream error code on lite-07 and later, or an
+	/// application-specific code before, where 0 means simply unavailable.
 	pub error: u64,
+}
+
+#[cfg(feature = "async")]
+impl SubscribeDrop {
+	/// Name `groups` given up with `err`, as `version` carries it.
+	pub fn new(groups: std::ops::RangeInclusive<u64>, err: &StreamError, version: Version) -> Self {
+		Self {
+			start: *groups.start(),
+			end: *groups.end(),
+			// Before lite-07 the code is the application's, so it says nothing of why.
+			error: match version.has_drop_code() {
+				true => version.encode_stream_code(err).into(),
+				false => 0,
+			},
+		}
+	}
+
+	/// The error the dropped groups' readers end with, as `version` reads the code.
+	///
+	/// Before lite-07 the code is the application's, so every drop reads as
+	/// [`StreamError::NotFound`]: the groups are not there to deliver.
+	pub fn error(&self, version: Version) -> StreamError {
+		match version.has_drop_code() {
+			true => u32::try_from(self.error).map_or(StreamError::Internal, |code| version.decode_stream_code(code)),
+			false => StreamError::NotFound,
+		}
+	}
 }
 
 impl Message for SubscribeDrop {

@@ -30,19 +30,6 @@ on:
       - "kt/settings.gradle.kts"
       - ".github/workflows/release-kt-lib.yml"
       - "sh/gh/release.sh"
-  # Main PRs skip it; nightly.yml calls it as a dry-run on main. `edited`
-  # catches a main PR retargeted to release.
-  pull_request:
-    branches: [release]
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - "kt/moq/**"
-      - "kt/gradle.properties"
-      - "kt/build.gradle.kts"
-      - "kt/settings.gradle.kts"
-      - ".github/workflows/release-kt-lib.yml"
-      - "sh/gh/release.sh"
-      - "rs/moq-ffi/build.sh"
   # Manual trigger so a wrapper bump can be published once the bindings it
   # depends on land on Maven Central (the guard below skips otherwise). Only a
   # dispatch on `release` publishes.

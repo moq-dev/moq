@@ -42,6 +42,10 @@ rest of the workspace and public `SystemTime` fields still need migration. In pa
 SRT and WebRTC hand instants to third-party APIs on std's clock, and audio/video
 device threads block outside an async runtime; those boundaries still need
 clock support rather than a second host-clock read at each call site.
+moq-srt's `a_late_payload_keeps_its_past_host_instant` compares a direct
+`StdInstant::now()` with `host_instant(moq_net::time::now())`, so it can flake
+under load; the SRT boundary migration rewrites it on controlled time
+(decided 2026-10-20 instead of a separate flake quest).
 
 Public API: breaking wherever a crate exposes an instant or a time source.
 Wire: none.

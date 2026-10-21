@@ -97,7 +97,10 @@ authorization and hidden names work exactly as without one.
   the latest UUIDv7 timestamp, so hosts with skewed clocks can lose a restart
   until the old instance retracts.
 - **Same epoch resumes.** A subscription moves between routes with the same
-  epoch without a seam, continuing from the first frame it lacks. A route
+  epoch without a seam, continuing from the first frame it lacks. That is a
+  floor, not a promise: groups the outage held back still arrive only while
+  the subscriber's max age covers them, so a route that dies silently, noticed
+  only at the idle timeout, costs whatever aged out meanwhile. A route
   without an epoch keeps its subscriptions until that route goes, and a track
   that fails ends instead of resuming, so request the path again.
 - **Another instance restarts.** A newer epoch, or, without one, another route
@@ -240,6 +243,8 @@ Each subscription carries the knobs that decide behavior under congestion:
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
 This lets a finished subscription settle without waiting for missing groups.
+A reader of a reported group, including one still arriving, ends with the publisher's error, such as `OLD` or `NOT_FOUND`.
+On moq-lite 05 and 06 that code is application-specific, so every reported group ends with `NOT_FOUND` there.
 Datagram delivery stays best effort.
 
 Ranges are both a request and a filter. A subscriber reads only the groups its

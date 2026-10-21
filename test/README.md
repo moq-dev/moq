@@ -94,3 +94,7 @@ with the `rm -rf` the run prints; nothing expires it for you.
 
 In CI the harness writes under `MOQ_TEST_RUNS`, and `interop.yml` and `wasm.yml`
 upload that directory as a short-lived artifact when the job fails.
+
+`MOQ_TEST_RESULTS` names a JSON Lines file a harness appends one record per case to,
+through `harness_result`; `interop.yml` builds its report from it. See
+[interop/README.md](interop/README.md#ci).
