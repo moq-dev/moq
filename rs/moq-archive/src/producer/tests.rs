@@ -409,6 +409,49 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	assert!(complete(&store).await);
 }
 
+/// A later group that starts past frame 0, its head held elsewhere, opens its own object: an
+/// entry after the first has no frame start, so a resume would otherwise rewind into it.
+#[tokio::test(start_paused = true)]
+async fn a_partial_group_resumes_after_its_last_stored_frame() {
+	let store = store();
+	let broadcast = broadcast::Info::new().produce();
+	let video = broadcast.create_track("video", timed()).unwrap();
+	let config = config().with_flush(SECOND);
+	let task = spawn(&store, &broadcast, config.clone());
+	subscribed(&video).await;
+
+	group(&video, 0, &[(0, "a")]);
+	let mut partial = video.create_group(group::Info { sequence: 1 }).unwrap();
+	partial.start_at(2).unwrap();
+	partial.write_frame(ms(500), "c").unwrap();
+	settle().await;
+	sleep(SECOND).await;
+	task.abort();
+	assert!(task.await.unwrap_err().is_cancelled());
+
+	let task = spawn(&store, &broadcast, config);
+	settle().await;
+	partial.write_frame(ms(600), "d").unwrap();
+	partial.finish().unwrap();
+	settle().await;
+	video.finish().unwrap();
+	broadcast.close();
+	finished(task).await;
+
+	let stored = objects(&store, "video", true).await;
+	assert_eq!(
+		stored.keys().cloned().collect::<Vec<_>>(),
+		[key(0, 0, 0), key(1, 2, 500), key(1, 3, 600)]
+	);
+	let frames: Vec<String> = contents(&stored)
+		.into_iter()
+		.flatten()
+		.flat_map(|(_, _, frames)| frames)
+		.collect();
+	assert_eq!(frames, ["0/a", "500/c", "600/d"]);
+	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 2, frame: 0 })));
+}
+
 #[tokio::test(start_paused = true)]
 async fn changed_properties_fail_the_resume() {
 	let store = store();

@@ -348,13 +348,13 @@ impl<S: ObjectStore> Track<S> {
 					self.next = Some(Position::group(sequence + 1));
 				}
 				Pending::Group(mut group, _) => {
-					// A resumed group continues after its stored frames.
-					if let Some(next) = self.next
-						&& next.group == sequence
-						&& group.index() < next.frame
-					{
-						group.set_frames(next.frame..);
-					}
+					// A resumed group continues after its stored frames. The clamp also starts a group
+					// whose head is held elsewhere at its first frame, rather than lagging behind it.
+					let stored = self
+						.next
+						.filter(|next| next.group == sequence)
+						.map_or(0, |next| next.frame);
+					group.set_frames(stored..);
 					self.next = Some(Position {
 						group: sequence,
 						frame: group.index(),
@@ -416,18 +416,21 @@ impl<S: ObjectStore> Track<S> {
 		if let Some(building) = &self.object {
 			let last = building.object.entries.last().map(Entry::sequence);
 			let boundary = last != Some(sequence);
-			let cut = match (self.timescale, frame.timestamp) {
-				(Some(timescale), Some(pts)) => {
-					let duration = units(config.duration, timescale);
-					let first = building.object.start()?.pts.expect("a timed object starts timed");
-					match boundary {
-						true => pts.saturating_sub(first) >= duration,
-						// An oversized group splits once its own run here reaches the duration.
-						false => pts.saturating_sub(building.run_pts) >= duration,
+			// Only an object's first entry carries a frame start, so a group starting past frame 0
+			// opens its own object.
+			let cut = (boundary && index != 0)
+				|| match (self.timescale, frame.timestamp) {
+					(Some(timescale), Some(pts)) => {
+						let duration = units(config.duration, timescale);
+						let first = building.object.start()?.pts.expect("a timed object starts timed");
+						match boundary {
+							true => pts.saturating_sub(first) >= duration,
+							// An oversized group splits once its own run here reaches the duration.
+							false => pts.saturating_sub(building.run_pts) >= duration,
+						}
 					}
-				}
-				_ => boundary && now.saturating_duration_since(building.opened) >= config.duration,
-			};
+					_ => boundary && now.saturating_duration_since(building.opened) >= config.duration,
+				};
 			if cut {
 				self.close()?;
 			}
