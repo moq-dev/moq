@@ -42,13 +42,13 @@ mod stats;
 mod status;
 mod video;
 
-#[derive(usage::Cli, Clone)]
+#[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq-boy")]
 #[usage(completion, settings)]
 pub struct Config {
 	/// Path to the Game Boy ROM file.
-	#[usage(long, value_hint = usage::ValueHint::FilePath, extensions("gb", "gbc"))]
+	#[usage(long, value_hint = usage_rs::ValueHint::FilePath, extensions("gb", "gbc"))]
 	pub rom: PathBuf,
 
 	/// Session name (used in broadcast path). Defaults to ROM filename.
@@ -121,12 +121,19 @@ struct Session {
 	location: Option<String>,
 }
 
+/// Wait until some viewer wants the track, or none does.
+async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> moq_net::Result<()> {
+	let mut demand = demand.clone();
+	while demand.wanted_changed().await?.is_some() != wanted {}
+	Ok(())
+}
+
 impl Session {
 	/// Monitor a single track's subscription state.
 	/// Sets the flag when a viewer subscribes, clears it when all unsubscribe.
 	async fn run_track_monitor(&self, name: &str, track: &moq_net::track::Demand, flag: &AtomicBool) {
 		loop {
-			if track.used().await.is_err() {
+			if until_wanted(track, true).await.is_err() {
 				break;
 			}
 			tracing::info!("resuming {name}: viewer subscribed");
@@ -134,7 +141,7 @@ impl Session {
 			self.paused.store(false, Ordering::Release);
 			self.resume.1.notify_all();
 
-			if track.unused().await.is_err() {
+			if until_wanted(track, false).await.is_err() {
 				break;
 			}
 			tracing::info!("pausing {name}: no viewers");
@@ -147,7 +154,10 @@ impl Session {
 	async fn run_pause_monitor(&self) {
 		loop {
 			// Wait for BOTH tracks to become unused.
-			let (v, a) = tokio::join!(self.video_track.unused(), self.audio_track.unused());
+			let (v, a) = tokio::join!(
+				until_wanted(&self.video_track, false),
+				until_wanted(&self.audio_track, false)
+			);
 			if v.is_err() || a.is_err() {
 				break;
 			}
@@ -156,8 +166,8 @@ impl Session {
 
 			// Wait for EITHER track to become used.
 			tokio::select! {
-				Err(_) = self.video_track.used() => break,
-				Err(_) = self.audio_track.used() => break,
+				Err(_) = until_wanted(&self.video_track, true) => break,
+				Err(_) = until_wanted(&self.audio_track, true) => break,
 				else => {},
 			}
 			tracing::info!("resuming emulation: viewer connected");

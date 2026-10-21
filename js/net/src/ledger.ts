@@ -102,6 +102,23 @@ export class Ledger {
 		return this.#runs.some((run) => run.start <= start && end <= run.end);
 	}
 
+	/**
+	 * The gaps within `[start, end)`, each with when a later arrival opened it: none for the one
+	 * past the last run, which nothing has opened yet.
+	 */
+	gaps(start: number, end: number): { start: number; end: number; since?: Instant }[] {
+		const gaps: { start: number; end: number; since?: Instant }[] = [];
+		let below = start;
+		for (const run of this.#runs) {
+			if (below >= end) return gaps;
+			if (run.end <= below) continue;
+			if (below < run.start) gaps.push({ start: below, end: Math.min(run.start, end), since: run.since });
+			below = run.end;
+		}
+		if (below < end) gaps.push({ start: below, end });
+		return gaps;
+	}
+
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */
 	demand(start: number, end: number, at: Instant): void {
 		if (start >= end) return;

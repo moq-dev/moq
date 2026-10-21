@@ -79,9 +79,9 @@ pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 
 /// The accept side of an endpoint: what to listen on and how to be trusted.
 ///
-/// Derives [`usage::Args`], so flatten it into a binary's own parser with
+/// Derives [`usage_rs::Args`], so flatten it into a binary's own parser with
 /// `#[usage(flatten)]`. The dial side is [`crate::connect::Config`].
-#[derive(usage::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
@@ -146,13 +146,14 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// The moq-transport extensions to offer in SETUP, all by default.
+	/// The extensions to offer in SETUP, every moq-transport one by default.
 	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,
 
 	/// Maximum time for one accepted connection to finish its handshake: the
-	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, through
+	/// QUIC, WebTransport, WebSocket, or qmux one, then the MoQ SETUP, whatever the
+	/// server runs under [`crate::server::Request::within`] (admission, say), through
 	/// [`crate::server::Request::ok`]. Defaults to 10 seconds; set to 0 to wait forever.
 	///
 	/// A peer that connects and then never speaks would otherwise hold its
@@ -249,6 +250,11 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub load_balancer: Option<crate::quic::LoadBalancer>,
 
+	/// QUIC stateless resets (`--listen-reset-*`).
+	#[usage(flatten)]
+	#[serde(default)]
+	pub reset: Reset,
+
 	/// The released `--server-*` spellings and their env vars, kept parsing but
 	/// hidden. Never read as settings: [`Config::deprecated`] names what replaced
 	/// each one so a process can say so and stop.
@@ -286,10 +292,36 @@ impl Default for Config {
 			lb_id: None,
 			lb_nonce: None,
 			load_balancer: None,
+			reset: Default::default(),
 			legacy: Default::default(),
 			quic: None,
 		}
 	}
+}
+
+/// QUIC stateless reset settings (`[listen.reset]`, `--listen-reset-*`).
+#[derive(usage_rs::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Reset {
+	/// A file holding the secret the stateless reset key is derived from, as 64
+	/// hexadecimal characters (`openssl rand -hex 32`).
+	///
+	/// A server restarted with the same secret resets its predecessor's connections,
+	/// so peers reconnect at once instead of waiting out their idle timeout. Every
+	/// holder can reset every other holder's connections, so share it between live
+	/// servers only behind one address that routes by connection ID (QUIC-LB).
+	/// Unset draws a random key per process.
+	#[usage(
+		name = "listen-reset-secret",
+		long = "listen-reset-secret",
+		env = "MOQ_LISTEN_RESET_SECRET",
+		setting = "listen.reset.secret"
+	)]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub secret: Option<std::path::PathBuf>,
 }
 
 /// One server's socket in a complete `SO_REUSEPORT` group.
@@ -304,7 +336,7 @@ pub(crate) use moq_sock::shard::Socket;
 /// They carry their original env vars, which is why these are separate args rather
 /// than Usage aliases: an alias renames the flag but not the variable, and a relay
 /// deployed through the environment is the common case.
-#[derive(Clone, Debug, Default, usage::Args)]
+#[derive(Clone, Debug, Default, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
 	#[usage(name = "server-bind", long = "server-bind", env = "MOQ_SERVER_BIND", hide = true)]
@@ -507,6 +539,10 @@ impl Config {
 				self.lb_id.is_some() || self.load_balancer.is_some(),
 				"--listen-quic-lb-id (load_balancer) needs a QUIC listener (--listen)",
 			),
+			(
+				self.reset.secret.is_some(),
+				"--listen-reset-secret needs a QUIC listener (--listen)",
+			),
 		];
 		match refused.into_iter().find(|(set, _)| *set) {
 			Some((_, reason)) => Err(crate::Error::NoBackend(reason)),
@@ -558,7 +594,7 @@ mod tests {
 	}
 	/// A parser wrapping the config, since it derives `Args` (see the note in
 	/// [`crate::connect`]).
-	#[derive(usage::Cli)]
+	#[derive(usage_rs::Cli)]
 	#[usage(unknown_flags = "error", args_override_self = false)]
 	#[usage(settings)]
 	struct Cli {
@@ -770,7 +806,7 @@ load_balancer = { id = "ab", nonce = 8 }
 			..Default::default()
 		};
 		type Set = fn(&mut Config);
-		let cases: [(&str, Set); 7] = [
+		let cases: [(&str, Set); 8] = [
 			("--listen-tls-cert", |c| c.tls.cert = vec!["cert.pem".into()]),
 			("--listen-tls-key", |c| c.tls.key = vec!["key.pem".into()]),
 			("--listen-tls-generate", |c| c.tls.generate = vec!["localhost".into()]),
@@ -787,6 +823,7 @@ load_balancer = { id = "ab", nonce = 8 }
 					nonce: 8,
 				})
 			}),
+			("--listen-reset-secret", |c| c.reset.secret = Some("reset.key".into())),
 		];
 		for (name, set) in cases {
 			let mut config = stream_only();

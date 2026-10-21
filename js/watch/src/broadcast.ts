@@ -66,18 +66,24 @@ function filterCatalog(catalog: Catalog.Root, usable: (rel: Path.Relative | unde
 	};
 }
 
-// Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
-// DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
-// catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
-// and is never auto-detected, so set it explicitly via `catalogFormat`.
+/**
+ * Watch supports the on-the-wire catalog formats from @moq/hang, plus "hangz" (the
+ * DEFLATE-compressed `catalog.json.z` track) and a "manual" mode where the user supplies the
+ * catalog directly without fetching. "hangz" is opt-in only: it shares the `.hang` broadcast suffix
+ * and is never auto-detected, so set it explicitly via `catalogFormat`.
+ */
 export const CATALOG_FORMATS = [...Catalog.FORMATS, "hangz", "manual"] as const;
+/** A catalog format the watcher can read; see {@link CATALOG_FORMATS}. */
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
 // "error" means the origin refused the broadcast; `out.error` says why.
-type Status = "offline" | "loading" | "live" | "error";
+// "unsupported" means its catalog requires a newer player.
+type Status = "offline" | "loading" | "live" | "error" | "unsupported";
 
-// Signals the component reads. Whoever owns the backing Signal (the caller, or
-// another component whose output is wired in) does the writing.
+/**
+ * Signals the component reads. Whoever owns the backing Signal (the caller, or
+ * another component whose output is wired in) does the writing.
+ */
 export type BroadcastInput = {
 	// The origin to consume from. Independent of any connection: whichever sessions feed
 	// the origin resolve the broadcast, and the handle spans their reconnects.
@@ -119,8 +125,9 @@ type BroadcastOutput = {
 	catalog: Signal<Catalog.Root | undefined>;
 };
 
-// A catalog source that can wait for announcement before subscribing.
+/** A catalog source that can wait for announcement before subscribing. */
 export class Broadcast {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<BroadcastInput>;
 
 	readonly #out: BroadcastOutput = {
@@ -129,6 +136,7 @@ export class Broadcast {
 		error: new Signal<Error | undefined>(undefined),
 		catalog: new Signal<Catalog.Root | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// One announcement watch per referenced broadcast, shared by callers, so the origin only asks
@@ -285,6 +293,7 @@ export class Broadcast {
 			effect.set(this.#out.status, "error", "offline");
 			return;
 		}
+		effect.cleanup(() => this.#out.status.set("offline"));
 
 		const catalogFormat = effect.get(this.in.catalogFormat);
 		const name = effect.get(this.in.name);
@@ -299,16 +308,19 @@ export class Broadcast {
 			// exception would surface as an unhandled error.
 			const catalog = effect.get(this.in.catalog);
 			let accepted: Catalog.Root | undefined;
+			let status: Status = "loading";
 			try {
 				accepted =
 					catalog &&
 					Catalog.checkResolvable(Catalog.checkRenditions(Catalog.RootSchema.parse(catalog)), name);
+				if (accepted) status = "live";
 			} catch (err) {
+				if (err instanceof Catalog.UnsupportedVersion) status = "unsupported";
 				console.error("rejecting catalog", name, err);
 			}
 			this.#raw.set(accepted, true);
 			effect.cleanup(() => this.#raw.set(undefined, true));
-			this.#out.status.set(accepted ? "live" : "loading");
+			this.#out.status.set(status);
 			return;
 		}
 
@@ -341,6 +353,7 @@ export class Broadcast {
 		}
 
 		effect.spawn(async () => {
+			let status: Status = "offline";
 			try {
 				for (;;) {
 					const update = await effect.race(fetchNext());
@@ -352,12 +365,13 @@ export class Broadcast {
 					this.#out.status.set("live");
 				}
 			} catch (err) {
+				if (err instanceof Catalog.UnsupportedVersion) status = "unsupported";
 				if (err instanceof NetError.Stream)
 					console.debug("catalog subscription ended", this.in.name.peek(), err);
 				else console.error("error fetching catalog", this.in.name.peek(), err);
 			} finally {
 				this.#raw.set(undefined);
-				this.#out.status.set("offline");
+				this.#out.status.set(status);
 			}
 		});
 	}
@@ -423,6 +437,7 @@ export class Broadcast {
 		return this.#requestBroadcast(effect, origin, target.path);
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#signals.close();
 		for (const entry of this.#references.values()) entry.request.close();

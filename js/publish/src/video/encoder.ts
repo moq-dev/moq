@@ -48,7 +48,8 @@ export interface Config {
 	// When combined with maxPixels, the smaller resulting cap wins.
 	maxScale?: number;
 
-	// The interval at which to insert keyframes. (default: 2000 milliseconds)
+	// The longest interval between keyframes. A joining subscriber forces one sooner once the
+	// group's deltas outweigh the track's refresh ratio. (default: 2000 milliseconds)
 	keyframeInterval?: Milli;
 
 	// If not provided, the encoder will use the best bitrate for the given width, height, and framerate.
@@ -63,7 +64,7 @@ export interface Config {
 	frameRate?: number;
 }
 
-// Signals the encoder reads.
+/** Signals the encoder reads. */
 export type EncoderInput = {
 	// Whether to encode this rendition. Defaults to true. When false it stops encoding but stays in the
 	// catalog with `enabled: false` and its last config, and stays registered so a subscriber still gets
@@ -118,6 +119,7 @@ export class Encoder {
 	/** The full track name of this rendition, e.g. `"video/hd"`. */
 	readonly name: string;
 
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<EncoderInput>;
 
 	/** The live-editable encoder tuning knobs (codec, dimensions, bitrate, frame rate). */
@@ -140,6 +142,7 @@ export class Encoder {
 		active: new Signal<boolean>(false),
 		stats: new Signal<Stats>({ frames: 0, bytes: 0, keyframes: 0 }),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// The output dimensions of the video in pixels.
@@ -368,9 +371,17 @@ export class Encoder {
 		if (!capture) return;
 
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
+		const demand = track.demand();
 
 		let lastKeyframe: Micro | undefined;
 		let lastEncoded: Micro | undefined;
+		// The largest group demand asked for that a keyframe already answers. A join over the refresh
+		// ratio asks for one past the largest, which the next frame opens.
+		let answered: number | undefined;
+		const answer = () => {
+			const wanted = demand.wanted.peek();
+			if (wanted !== undefined) answered = Math.max(answered ?? 0, wanted);
+		};
 		let tearingDown = false;
 
 		effect.spawn(async () => {
@@ -388,6 +399,8 @@ export class Encoder {
 					}));
 
 					producer.encode(frame, frame.timestamp as Micro, key);
+					// Including a keyframe the encoder placed on its own, which opened a group too.
+					if (key) answer();
 					if (this.#estimator.flush(frame.timestamp, baseline)) {
 						this.#estimate.set({ ...this.#estimator.estimate });
 					}
@@ -458,19 +471,23 @@ export class Encoder {
 
 							const interval = config?.keyframeInterval ?? Milli.fromSecond(2 as Second);
 
-							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, or
-							// the caller asked for one and the last is old enough.
+							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, the
+							// caller asked for one, or a join wants a group past the largest. No spacing: the
+							// refresh ratio already rate-limits joins by the bytes a group holds.
 							const since = lastKeyframe === undefined ? undefined : frame.timestamp - lastKeyframe;
+							const wanted = demand.wanted.peek();
 							const keyFrame =
 								resized ||
 								since === undefined ||
 								since >= Micro.fromMilli(interval) ||
-								(this.#cut && since >= Micro.fromMilli(MIN_CUT_INTERVAL));
+								this.#cut ||
+								(wanted !== undefined && (answered === undefined || wanted > answered));
 							if (keyFrame) {
 								lastKeyframe = frame.timestamp as Micro;
 								resized = false;
-								// Any keyframe serves an outstanding request.
+								// Any keyframe serves an outstanding request and every join before it.
 								this.#cut = false;
+								answer();
 							}
 
 							encoder.encode(frame, { keyFrame });
@@ -804,22 +821,20 @@ export class Encoder {
 	 * Request a keyframe, opening a new group at a frame no earlier than this call.
 	 *
 	 * For a resume, a recording cut, or a known tune-in moment; {@link Config.keyframeInterval} is the
-	 * cadence. Requests coalesce into the next keyframe, and forced keyframes land at least 500ms
-	 * apart so a caller in a loop cannot pin the encoder at all-keyframe. A request while not encoding
-	 * is served by the keyframe every encode starts with.
+	 * longest a group runs, and a joining subscriber already opens one through the track's refresh
+	 * ratio. Requests between two frames coalesce into one keyframe on the next, with no spacing: a
+	 * caller in a loop pins the encoder at all-keyframe. A request while not encoding is served by the
+	 * keyframe every encode starts with.
 	 */
 	cut(): void {
 		this.#cut = true;
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#signals.close();
 	}
 }
-
-// The closest two requested keyframes may land. A keyframe costs several times a predicted frame,
-// and this stays well under the default two-second GOP so a request still beats the cadence.
-const MIN_CUT_INTERVAL = 500 as Milli;
 
 // The source's nominal frame rate: what the capture device settled on, or what a frame stream
 // declared. Undefined when nothing reports one.

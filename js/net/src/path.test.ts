@@ -321,6 +321,16 @@ test("decode enforces the max part count", () => {
 	expect(() => Path.decode(`${atLimit}/extra`)).toThrow();
 });
 
+test("decode never allocates per slash of a hostile path", () => {
+	// A peer can send a path as large as a control message; splitting it would hold one entry per slash.
+	const slashes = "/".repeat(64 * 1024 * 1024);
+	const parts = "a/".repeat(32 * 1024 * 1024);
+	const before = process.memoryUsage().rss;
+	expect(Path.decode(slashes)).toBe(Path.empty());
+	expect(() => Path.decode(parts)).toThrow();
+	expect(process.memoryUsage().rss - before).toBeLessThan(256 * 1024 * 1024);
+});
+
 test("encode enforces the max part count", () => {
 	const atLimit = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}`).join("/") as Path.Valid;
 	expect(Path.encode(atLimit)).toBe(atLimit);

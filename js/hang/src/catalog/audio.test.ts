@@ -85,3 +85,21 @@ test("audio warmup round trips as optional integer milliseconds", () => {
 		expect(() => AudioConfigSchema.parse({ ...base, warmup })).toThrow();
 	}
 });
+
+test("ambisonic layout needs a square channel count of at least 4", () => {
+	const base = { codec: "opus", container: { kind: "legacy" }, sampleRate: 48_000, layout: "ambisonic" };
+	for (const numberOfChannels of [4, 9, 16, 225]) {
+		expect(AudioConfigSchema.parse({ ...base, numberOfChannels }).layout).toBe("ambisonic");
+	}
+	for (const numberOfChannels of [0, 1, 2, 6, 8]) {
+		expect(() => AudioConfigSchema.parse({ ...base, numberOfChannels })).toThrow();
+	}
+});
+
+test("audio layout is optional and keeps unknown values verbatim", () => {
+	const base = { codec: "opus", container: { kind: "legacy" }, sampleRate: 48_000, numberOfChannels: 6 };
+	expect(AudioConfigSchema.parse(base).layout).toBeUndefined();
+	// An unknown layout puts no constraint on the channel count.
+	expect(AudioConfigSchema.parse({ ...base, layout: "surround" }).layout).toBe("surround");
+	expect(() => AudioConfigSchema.parse({ ...base, layout: 1 })).toThrow();
+});

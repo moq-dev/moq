@@ -19,40 +19,75 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - `track::Subscriber::poll_start` (lite publisher): public. A publisher
   reports the resolved start to its peer (SUBSCRIBE_START, SUBSCRIBE_OK).
 - `track::Subscriber::poll_live` (both publishers): remove the need through
-  the public `poll_largest` (#5725). It does not wait out an idle copy the
-  way `poll_live` does: it follows the source's reported largest, which can
-  name a frame the cache does not hold yet, so the publishers still answer
-  with the buffered edge. Decide here whether wire answers move to it, and
+  the public `poll_largest` (#5725). It now waits out an idle copy too
+  (#5924), but it follows the source's reported largest, which can name a
+  frame the cache does not hold yet, so the publishers still answer with the
+  buffered edge. A public live signal is
+  [its own quest](/quest/m1/track-live.md). Decide here whether wire answers move to it, and
   with them `latest_sequence` on `track::{Producer,Consumer,Subscriber}`,
   the private snapshot that replaced the public `latest()` (#5725).
 - **Cursor** (`track::Subscriber::start_at`, `raise_start_to`, `end_at`,
   `subscription::Cap`; both publishers). **Decision**:
-  - ✅ One public method assigns the floor and the cap in either direction,
-    renamed from `set_groups` to `set_bounds` (JS `setBounds`) on
-    `track::Subscriber` and `track::Ordered`, since it sets the reader's
-    bounds. Each reader already hands a sequence out once (#5446), so a
-    SUBSCRIBE_UPDATE that widens the start re-offers only unread groups.
+  - ✅ One public consuming builder assigns the floor and the cap in either
+    direction: `with_range(self, range) -> Self` on `track::Subscriber` and
+    `track::Ordered` (JS `withRange`), replacing `set_groups` and the
+    chaining `withGroups`. The maintainer decided "range" on 2026-10-19,
+    replacing the 2026-10-18 `limit` and the earlier `set_bounds`. Each
+    reader already hands a sequence out once (#5446), so a SUBSCRIBE_UPDATE
+    that widens the start re-offers only unread groups.
     `start_at`, `raise_start_to`, `end_at`, and `Cap` go. Precondition:
     lowering the floor re-offers unread cached groups in every mode. Today
     only the resume cursor does; the arrival-order (Plain) cursor walks a
     monotonic arrival index, so it must rescan below its old floor for
     groups it never handed out. Rewrite the doc ("without rewinding read
-    progress") to say what lowering does. JS's chaining form,
-    `withGroups` on `Track.Subscriber` and `Track.Ordered`, becomes
-    `withBounds`.
+    progress") to say what lowering does.
+  - Rebinding: a consuming builder fits readers bounded once at creation,
+    but these callers move a live reader's bounds through `&mut` today, so
+    the rename needs a way to rebind (take and replace the reader, or a
+    crate-private setter the builder wraps):
+    - `rs/moq-c/src/consume.rs` `RawReader::apply` re-applies the range on
+      every subscription update, counting a relative start from the track
+      `Consumer`'s unbounded largest. `set_groups` only raises the floor, so an
+      update cannot lower a floor an earlier one put above the live edge
+      (Codex on #5924). Making the floor assign fixes it; land that with a
+      moq-c test where a later relative update delivers the next group.
+    - The lite and IETF publishers move the cursor on SUBSCRIBE_UPDATE
+      (`start_at`, `end_at`; JS `hooks.replaceGroups` and the IETF
+      publisher's `setGroups({ start })`).
+    - `js/json` snapshot and `js/flate` `latest()` raise the floor of the same
+      reader on each read; `js/room` chat sets it after `largest()` resolves.
+      The snapshot consumers (`js/json/src/snapshot/consumer.ts` `#read`,
+      `js/flate/src/snapshot/consumer.ts` `latest()`) call
+      `setGroups({ start: { included: latest.group } })`, whose omitted end
+      removes the caller's cap. The rebinding must keep that cap; land it with
+      a regression test where a capped snapshot reader stays below its cap.
+      A datagram also advances `largest()` past every group, stranding the
+      read. The Rust consumers instead drain the groups the reader already
+      has and keep the newest (#5677), which needs no floor at all.
+    - `rs/moq-hls` export narrows a fetched group with `set_frames(..end)`.
+    - Readers that set a floor once right after `poll_largest` (moq-audio,
+      moq-video, moq-cli play, moq-json window, moq-mux) fit the builder.
+  - ✅ The range floor counts as a local bound (maintainer, 2026-10-19):
+    `largest()` reports within both the floor and the cap, so a reader whose
+    floor sits above the live edge reports nothing until a group reaches it
+    (#5924).
+  - ✅ `largest()` reports only upstream-confirmed state (maintainer,
+    2026-10-19): the source's reported largest and what its live feed
+    delivered since, never a cache-derived stand-in. It waits while the copy
+    is idle, though cached groups are still served, and past the cap it
+    reports nothing rather than the newest cached group below it (#5924).
   - A second public `replace_groups`.
-- **Bounds naming** (decided 2026-10-16 in #5717): ✅ the siblings follow the
-  rename, so every range setter says bounds. `group::Consumer::set_frames`
-  becomes `set_bounds`, and `Subscription::with_groups` becomes
-  `with_bounds`, with the JS mirrors (the `Subscription.groups` field
-  becomes `bounds`, and any group-level frame bounds setter matches).
+- **Bounds naming** (decided 2026-10-16 in #5717, changed to "range" by the
+  maintainer on 2026-10-19): ✅ the siblings follow:
+  `Subscription::with_range` replaces `with_groups` as the single-range form
+  of `with_ranges`, and `group::Consumer::set_frames` becomes the consuming
+  `with_range`, with the JS mirrors.
 - `group::Consumer::start_at`, `end_at` (both publishers): remove the need;
-  the public `set_bounds` (today `set_frames`) and `skip_to` cover them.
+  the public `with_range` (today `set_frames`) and `skip_to` cover them.
 - `Subscription::{start, end, set_bounds, with_start, with_end}` (both
   publishers, IETF subscriber, from #5732): the covering span a wire without
   ranges carries. Derive it from the public `ranges` instead, or make it
-  public. Either way, rename the crate `set_bounds` so it doesn't clash with
-  the public `with_bounds`.
+  public.
 - `subscription::Position::final_sequence` (lite publisher): public, the
   one-line wire translation of an exclusive end that both languages
   already duplicate. `track::Consumer::final_sequence` (IETF publisher) goes;
@@ -76,7 +111,7 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 JS items (`js/net/src/`):
 
 - `hooks.replaceGroups` (lite publisher): mirror the cursor decision, so
-  `Track.Subscriber.setBounds` assigns the floor and the hook goes.
+  `Track.Subscriber.withRange` assigns the floor and the hook goes.
 - `hooks.tryRecvGroup` with its `Recv` union, and `hooks.groupChanged`
   (lite publisher). The public `Subscriber.tryRecvGroup()` returns
   `undefined` for both a held boundary and a drained end, so a synchronous

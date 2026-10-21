@@ -187,7 +187,8 @@ void main() {
 
     // Routed subscriptions pull their source lazily when the consumer is first read.
     final nextGroup = consumer.nextGroup();
-    await track.demand().used().timeout(timeout);
+    final demand = track.demand();
+    while (await demand.wantedChanged().timeout(timeout) == null) {}
 
     final producer = track.appendGroup();
     producer.writeFrame(
@@ -427,12 +428,11 @@ void main() {
 
   test('dynamic serves a request under a prefix', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final dynamic = origin.dynamic_(prefix: 'live', route: MoqRoute());
+    final dynamic = origin.dynamic_(prefix: 'live');
     final pending = origin.consume().requestBroadcast(path: 'live/cam');
     final request = await dynamic.requestedBroadcast().timeout(timeout);
     expect(request.path(), 'live/cam');
-    final served = MoqBroadcastProducer();
-    request.accept(broadcast: served);
+    final served = request.prepare(epoch: mintEpoch()).publish();
     await pending.timeout(timeout);
     dynamic.cancel();
     dynamic.dispose();
@@ -443,7 +443,10 @@ void main() {
     final broadcast = MoqBroadcastProducer();
     final producer = moq_json.SnapshotProducer(
       broadcast: broadcast,
-      track: broadcast.publishTrack(name: 'status', info: null),
+      track: broadcast.publishTrack(
+        name: 'status',
+        info: MoqTrackInfo(timescale: 1000000),
+      ),
       config: moq_json.SnapshotConfig(),
     );
     final track = await broadcast
@@ -455,9 +458,19 @@ void main() {
       config: moq_json.SnapshotConfig(),
     );
 
-    producer.update(value: jsonEncode({'state': 'live'}));
-    final value = await consumer.next().timeout(timeout);
-    expect(jsonDecode(value!), {'state': 'live'});
+    for (var n = 1; n <= 4; n++) {
+      producer.update(value: jsonEncode({'n': n}), timestampUs: n * 1000);
+    }
+
+    // next() yields every state in order; latest() skips the buffered third.
+    moq_json.Value? value = await consumer.next().timeout(timeout);
+    expect(jsonDecode(value!.value), {'n': 1});
+    expect(value.timestampUs, 1000);
+    value = await consumer.next().timeout(timeout);
+    expect(jsonDecode(value!.value), {'n': 2});
+    value = await consumer.latest().timeout(timeout);
+    expect(jsonDecode(value!.value), {'n': 4});
+    expect(value.timestampUs, 4000);
 
     consumer.cancel();
     producer.finish();

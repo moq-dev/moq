@@ -34,6 +34,9 @@ pub struct Source {
 	origin: moq_net::origin::Consumer,
 	path: moq_net::PathOwned,
 	pins: Pins,
+	/// What each rendition an export reads through this source has received. See
+	/// [`stats`](Self::stats).
+	received: Arc<crate::stats::Registry<crate::stats::Received>>,
 }
 
 impl Source {
@@ -52,18 +55,38 @@ impl Source {
 			origin,
 			path,
 			pins: Arc::new(Mutex::new(pins)),
+			received: Default::default(),
 		}
 	}
 
 	/// This source holding nothing but `broadcast` at its own path: an export switching to
-	/// another instance starts over from the broadcast it switched to.
+	/// another instance starts over from the broadcast it switched to. Its counters carry on.
 	pub(crate) fn switched(&self, broadcast: &moq_net::broadcast::Consumer) -> Self {
 		let pins = HashMap::from([(self.path.clone(), broadcast.clone())]);
 		Self {
 			origin: self.origin.clone(),
 			path: self.path.clone(),
 			pins: Arc::new(Mutex::new(pins)),
+			received: self.received.clone(),
 		}
+	}
+
+	/// The counters an export reading rendition `name` bumps.
+	pub(crate) fn received(&self, name: &str) -> Arc<crate::stats::Received> {
+		self.received.track(name)
+	}
+
+	/// What each rendition exported through this source (and its clones) has received, keyed by
+	/// rendition ID in the catalog that listed it, including renditions referenced from another
+	/// broadcast.
+	///
+	/// Counters are cumulative for the life of the source, across resubscriptions and a
+	/// [`Follower`](crate::container::ts::Follower) switching instances, so a rendition no export
+	/// reads any more keeps its final counts, until 1,024 renditions are held: then those no export
+	/// reads make way for new ones. Fold this into an
+	/// [`echo::Snapshot`](hang::echo::Snapshot) on the feedback interval.
+	pub fn stats(&self) -> std::collections::BTreeMap<String, hang::echo::Rendition> {
+		self.received.received()
 	}
 
 	/// Serve this source's own path from `broadcast` from now on, as when the same instance
@@ -325,7 +348,7 @@ pub(crate) async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> 
 #[cfg(test)]
 pub(crate) async fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
 	let origin = produce_origin();
-	let dynamic = origin.dynamic("", Default::default()).unwrap();
+	let dynamic = origin.dynamic_route("", Default::default()).unwrap();
 	let served = broadcast.clone();
 	tokio::spawn(async move {
 		while let Ok(request) = dynamic.requested_broadcast().await {
@@ -357,7 +380,7 @@ mod tests {
 		let _catalog = origin.publish("pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "pub").await;
-		let dynamic = origin.dynamic("media", Default::default()).unwrap();
+		let dynamic = origin.dynamic_route("media", Default::default()).unwrap();
 		let binding = source.bind(Some(&Relative::new("media"))).unwrap();
 		let request = dynamic.requested_broadcast().await.unwrap();
 

@@ -79,7 +79,7 @@ async fn setup(version: Version) -> Setup {
 		}
 	});
 
-	moq_clock::timeout(TIMEOUT, track.demand().used())
+	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();

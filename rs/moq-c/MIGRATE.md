@@ -4,6 +4,46 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A claim answers by publishing (#5678)
+
+`moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
+`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer under the epoch you pass: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under that epoch.
+`moq_broadcast_prepared_free` refuses an answer you will not publish.
+
+### `moq_track_info` gains `compress` (#5928)
+
+The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.
+
+### Anchors can name a time (#6074)
+
+`moq_anchor` gains `timestamp_us`, read with the new `MOQ_ANCHOR_TIME` kind, which changes its ABI.
+`moq_consume_track_update` fails with a negative code when the track refuses an update, such as a time anchor on an untimed track, leaving the subscription as it was.
+An update made before the subscription is established applies once it is, so a refusal then ends the consumer through its callback.
+
+### JSON values carry their timestamp (#5677)
+
+`moq_json_value` gains `timestamp_us` and `timestamp_present`, which changes its ABI.
+A snapshot consumer's callback now fires for each state in order instead of only the newest.
+Timestamps are rounded down to a whole microsecond.
+
+### Ranges filter reads (#5929)
+
+A raw track consumer now reads only the groups its `ranges` cover, rather than every group from the lowest start to the last absolute end.
+
+### Demand reports the wanted group (#5930)
+
+`moq_track_info` gains `refresh` and `refresh_present`, which changes its ABI; a zeroed field leaves refresh off.
+A demand watcher's `on_demand` now repeats `MOQ_DEMAND_USED` whenever the wanted group moves, so treat it as "read the wanted group" rather than an edge.
+Read it with `moq_publish_demand_wanted`, and start a new group (a keyframe) once it passes the largest group written.
+Before any group is written, the first subscriber wants group 0, so start one whenever it is present.
+
+```c
+// `written` is false until a group is written; `largest` is the largest group written.
+uint64_t group;
+bool present;
+if (moq_publish_demand_wanted(watcher, &group, &present) == 0 && present && (!written || group > largest)) start_group();
+```
+
 ### Key logging is opt-in (#5907)
 
 `SSLKEYLOGFILE` alone no longer writes TLS session secrets.

@@ -260,7 +260,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 					&mut run.announced,
 				)?;
 			}
-			lite::AnnounceBroadcast::Skipped => {}
+			lite::AnnounceBroadcast::Skipped | lite::AnnounceBroadcast::Synced => {}
 		}
 		Ok(())
 	}
@@ -504,10 +504,19 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// is a handful of atomic bumps on every datagram, and a producer held past its
 		// removal would keep the track (its cached groups, its stats subscription) alive.
 		// The group path already writes to a producer under this lock.
+		// Its framing is unknown until the peer's SETUP says whether the `ietf` extension is
+		// negotiated, and a best-effort datagram is not worth waiting for.
+		let Some(ietf) = self.peer_setup.ietf() else {
+			return Ok(());
+		};
 		let mut subscribes = self.subscribes.lock();
 		// An unknown subscription's datagram is dropped below, however it parses.
-		let dg = lite::Datagram::decode(payload, self.version, |id| {
-			subscribes.get(&id).is_some_and(|entry| entry.timescale.is_some())
+		let dg = lite::Datagram::decode(payload, self.version, ietf, |id| match subscribes.get(&id) {
+			Some(entry) => lite::Format {
+				timescale: entry.timescale,
+				compressed: entry.producer.info().compress,
+			},
+			None => lite::Format::default(),
 		})?;
 		let Some(entry) = subscribes.get_mut(&dg.subscribe) else {
 			// Unknown or already-closed subscription: drop the datagram.
@@ -528,7 +537,19 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// A datagram says where the live feed is as well as a group does. Inserted first, so
 		// the copy goes live with it already showing.
 		let live = entry.producer.is_live();
-		entry.producer.insert_datagram(dg.sequence, timestamp, dg.payload)?;
+		let datagram = crate::model::datagram::Stored {
+			datagram: crate::Datagram {
+				sequence: dg.sequence,
+				timestamp,
+				payload: dg.payload,
+			},
+			wire: dg.ietf.flatten().map(Arc::new),
+			deflated: None,
+		};
+		match dg.inflated {
+			Some(size) => entry.producer.insert_deflated_datagram(datagram, size)?,
+			None => entry.producer.insert_wire_datagram(datagram)?,
+		}
 		if !live {
 			entry.producer.set_live(Some(Position::group(dg.sequence)));
 		}
@@ -864,6 +885,8 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 		loop {
 			match &mut self.state {
 				GroupRecvState::Header => {
+					// Before the header, which a wait after it would lose.
+					let ietf = ready!(self.subscriber.peer_setup.poll_ietf(waiter));
 					let mut cx = waiter.context();
 					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
 
@@ -924,7 +947,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					self.state = GroupRecvState::Serve {
 						group: crate::recv::Group::new(group),
 						track,
-						ingest: FrameIngest::new(&self.subscriber, timescale),
+						ingest: FrameIngest::new(&self.subscriber, timescale, ietf, hdr.frame_start),
 						shown: false,
 						_reading: reading,
 					};
@@ -942,13 +965,13 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						if let Poll::Ready(err) = track.poll_closed(waiter) {
 							break 'serve Err(err);
 						}
-						if let Poll::Ready(err) = group.poll_closed(waiter) {
+						if let Poll::Ready(err) = group.handle().poll_closed(waiter) {
 							break 'serve Err(err);
 						}
 						let res = ingest.poll(&mut self.reader, group, waiter);
 						// Shown once its first frame opens, even mid-payload.
-						if !*shown && group.is_started() {
-							track.reveal_group(group);
+						if !*shown && group.handle().is_started() {
+							track.reveal_group(group.handle());
 							*shown = true;
 						}
 						match res {
@@ -970,7 +993,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						unreachable!()
 					};
 					// A group that ended without a frame shows once it settles.
-					let handle = (!shown).then(|| (*group).clone());
+					let handle = (!shown).then(|| group.handle().clone());
 					let res = match res {
 						Ok(()) => {
 							let _ = group.finish();
@@ -1008,26 +1031,94 @@ struct FrameIngest {
 	prev_ts: u64,
 	phase: IngestPhase,
 	budget: frame::Budget,
+	version: Version,
+	/// Where the stream's frames start, the first Object ID until a record names it.
+	frame_start: u64,
+	/// `Some` once the Group State of the `ietf` extension arrived: every frame follows an
+	/// object record.
+	records: Option<RecordIngest>,
+}
+
+/// A group's object records on ingest, under the `ietf` extension.
+struct RecordIngest {
+	/// The Group State carried relay state. Otherwise every record is plain: its Object ID
+	/// is the frame's index, with no properties and no END_OF_GROUP.
+	relayed: bool,
+	/// The Group State set EXTENSIONS, without which no record has properties.
+	extensions: bool,
+	/// The previous record's Object ID, `None` before the first.
+	prior: Option<u64>,
+	/// The record of the frame being read: its Object ID and properties block.
+	///
+	/// It is checked when the frame is created, which charges it to the cache, so a stalled
+	/// stream holds only the bytes it read.
+	pending: Option<(u64, bytes::Bytes)>,
 }
 
 enum IngestPhase {
+	/// Reading the `ietf` extension's Group State.
+	State,
+	/// Reading the next object record. Stream end here means the group has no more objects.
+	Object,
+	/// Reading the record's properties block, whose size comes first.
+	Properties { id: u64, end: bool, size: Option<usize> },
+	/// The END_OF_GROUP record arrived, so only the stream end may follow.
+	Ended,
 	/// Reading the timestamp delta (skipped without a timescale). Stream end here
 	/// means the group has no more frames.
 	Timing,
+	/// Reading a compressed Track's inflated size (lite-07), or skipped. Stream end here
+	/// also ends the group on an untimed Track, where nothing precedes it.
+	Inflated { timestamp: Option<Timestamp> },
 	/// Reading the frame size. Stream end here also ends the group (pre-lite-05,
 	/// where there is no timing prefix to act as the sentinel).
-	Size { timestamp: Option<Timestamp> },
+	Size {
+		timestamp: Option<Timestamp>,
+		inflated: Option<u64>,
+	},
 	/// Streaming the frame payload.
 	Payload { frame: frame::ProducerOwned },
 }
 
 impl FrameIngest {
-	fn new<S: crate::transport::poll::Session>(subscriber: &Subscriber<S>, timescale: Option<Timescale>) -> Self {
+	/// `ietf` when the session negotiated the extension, so the stream starts with a Group State.
+	fn new<S: crate::transport::poll::Session>(
+		subscriber: &Subscriber<S>,
+		timescale: Option<Timescale>,
+		ietf: bool,
+		frame_start: u64,
+	) -> Self {
 		Self {
 			timescale,
 			prev_ts: 0,
-			phase: IngestPhase::Timing,
+			phase: match ietf {
+				true => IngestPhase::State,
+				false => IngestPhase::Timing,
+			},
 			budget: subscriber.frames.clone(),
+			version: subscriber.version,
+			frame_start,
+			records: None,
+		}
+	}
+
+	/// The phase that starts the next frame.
+	fn next_frame(&self) -> IngestPhase {
+		match self.records {
+			Some(_) => IngestPhase::Object,
+			None => IngestPhase::Timing,
+		}
+	}
+
+	/// Read a frame header varint. Only a plain group may end in its place.
+	fn poll_header_varint<R: crate::transport::poll::RecvStream>(
+		&self,
+		reader: &mut Reader<R, Version>,
+		cx: &mut std::task::Context<'_>,
+	) -> Poll<Result<Option<u64>, Error>> {
+		match self.records {
+			Some(_) => reader.poll_varint(cx).map_ok(Some),
+			None => reader.poll_varint_maybe(cx),
 		}
 	}
 
@@ -1037,19 +1128,86 @@ impl FrameIngest {
 	fn poll<R: crate::transport::poll::RecvStream>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
-		group: &mut group::Producer,
+		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(), Error>> {
 		let mut cx = waiter.context();
 		loop {
 			match &mut self.phase {
+				IngestPhase::State => {
+					let state = ready!(reader.poll_varint(&mut cx))?;
+					let wire = lite::ietf::decode_state(state, self.frame_start)?;
+					let relayed = wire.is_some();
+					let extensions = wire.as_ref().is_some_and(|wire| wire.extensions);
+					if let Some(wire) = wire {
+						group.set_wire(wire)?;
+					}
+					self.records = Some(RecordIngest {
+						relayed,
+						extensions,
+						prior: None,
+						pending: None,
+					});
+					self.phase = IngestPhase::Object;
+				}
+				IngestPhase::Object => {
+					let Some(code) = ready!(reader.poll_varint_maybe(&mut cx))? else {
+						return Poll::Ready(Ok(()));
+					};
+					let records = self.records.as_mut().expect("the Group State came first");
+					let (id, end) = lite::ietf::decode_object(records.prior, code)?;
+					if records.prior.is_none()
+						&& let Some(mut wire) = group.wire()
+					{
+						wire.first_id = id;
+						group.set_wire(wire)?;
+					}
+					records.prior = Some(id);
+					self.phase = IngestPhase::Properties { id, end, size: None };
+				}
+				IngestPhase::Properties { id, end, size } => {
+					let len = match size {
+						Some(len) => *len,
+						None => {
+							let len = ready!(reader.poll_varint(&mut cx))?;
+							if len > lite::ietf::MAX_PROPERTIES as u64 {
+								return Poll::Ready(Err(Error::BoundsExceeded(crate::coding::BoundsExceeded)));
+							}
+							*size.insert(len as usize)
+						}
+					};
+					let block = ready!(reader.poll_read_exact(&mut cx, len))?;
+					let (id, end) = (*id, *end);
+					let records = self.records.as_mut().expect("the Group State came first");
+					if (end && !records.relayed) || (!block.is_empty() && !records.extensions) {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					if end {
+						let decoded = lite::ietf::decode_end(&block, self.timescale, self.version)?;
+						group.mark_gap(id, decoded.gap)?;
+						group.set_end_object(crate::model::object::Fields {
+							id,
+							properties: decoded.properties,
+						})?;
+						self.phase = IngestPhase::Ended;
+					} else {
+						records.pending = Some((id, block));
+						self.phase = IngestPhase::Timing;
+					}
+				}
+				IngestPhase::Ended => {
+					if ready!(reader.poll_has_more(&mut cx))? {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					return Poll::Ready(Ok(()));
+				}
 				IngestPhase::Timing => {
 					let Some(scale) = self.timescale else {
-						self.phase = IngestPhase::Size { timestamp: None };
+						self.phase = IngestPhase::Inflated { timestamp: None };
 						continue;
 					};
 					// The timestamp delta doubles as the per-frame sentinel.
-					let Some(zz) = ready!(reader.poll_varint_maybe(&mut cx))? else {
+					let Some(zz) = ready!(self.poll_header_varint(reader, &mut cx))? else {
 						return Poll::Ready(Ok(()));
 					};
 					let next: u64 = (self.prev_ts as i128 + crate::coding::varint::unzigzag(zz) as i128)
@@ -1058,22 +1216,59 @@ impl FrameIngest {
 					self.prev_ts = next;
 					let timestamp = Timestamp::new(next, scale)
 						.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
-					self.phase = IngestPhase::Size {
+					self.phase = IngestPhase::Inflated {
 						timestamp: Some(timestamp),
 					};
 				}
-				IngestPhase::Size { timestamp } => {
-					let Some(size) = ready!(reader.poll_varint_maybe(&mut cx))? else {
+				IngestPhase::Inflated { timestamp } => {
+					let timestamp = *timestamp;
+					// Only a compressed Track carries it, and only lite-07 can mark one.
+					if !group.compressed() {
+						self.phase = IngestPhase::Size {
+							timestamp,
+							inflated: None,
+						};
+						continue;
+					}
+					let Some(inflated) = ready!(self.poll_header_varint(reader, &mut cx))? else {
 						return Poll::Ready(Ok(()));
+					};
+					self.phase = IngestPhase::Size {
+						timestamp,
+						inflated: Some(inflated),
+					};
+				}
+				IngestPhase::Size { timestamp, inflated } => {
+					let (timestamp, inflated) = (*timestamp, *inflated);
+					let Some(size) = ready!(self.poll_header_varint(reader, &mut cx))? else {
+						return Poll::Ready(Ok(()));
+					};
+					// A frame that says nothing a plain frame would not keeps no fields.
+					let fields = match &mut self.records {
+						Some(records) => {
+							let (id, block) = records.pending.take().expect("a record precedes each frame");
+							let lite::ietf::Decoded { properties, gap } =
+								lite::ietf::decode_properties(&block, self.timescale, true, self.version)?;
+							group.mark_gap(id, gap)?;
+							let plain = id == group.frame_count() as u64 && properties.is_empty();
+							if !plain && !records.relayed {
+								return Poll::Ready(Err(Error::ProtocolViolation));
+							}
+							(!plain).then(|| Arc::new(crate::model::object::Fields { id, properties }))
+						}
+						None => None,
 					};
 					// `create_frame_owned` is the allocation chokepoint: it rejects an
 					// oversized `size` and allocates up front only within the budget, so
 					// no pre-check is needed. No wire timestamp (pre-lite-05) means an
 					// untimed frame.
+					// A compressed frame stores the slice as it arrives, its inflated size
+					// checked against the same limits before anything inflates.
 					let frame = group.create_frame_owned(
-						frame::Info {
-							size,
-							timestamp: *timestamp,
+						frame::Header {
+							info: frame::Info { size, timestamp },
+							fields,
+							inflated,
 						},
 						&self.budget,
 					)?;
@@ -1082,11 +1277,12 @@ impl FrameIngest {
 				IngestPhase::Payload { frame } => {
 					let failed = ready!(reader.poll_read_frame(&mut cx, frame)).err();
 
-					let IngestPhase::Payload { frame } = std::mem::replace(&mut self.phase, IngestPhase::Timing) else {
+					let next = self.next_frame();
+					let IngestPhase::Payload { frame } = std::mem::replace(&mut self.phase, next) else {
 						unreachable!()
 					};
 					match failed {
-						None => frame.finish()?,
+						None => group.restore(frame.finish()?),
 						Some(err) => {
 							// Fail the group with the reason, not the Drop fallback's
 							// generic `Dropped`.
@@ -1386,7 +1582,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					};
 					let version = self.subscriber.version;
 					// Lite03/04 mark no initial set, so the request going out is the best
-					// boundary. Lite01/02 mark it with ANNOUNCE_INIT, newer ones with a count.
+					// boundary. Lite01/02 use ANNOUNCE_INIT, lite05/06 a count, lite07 SYNCED.
 					if !version.has_announce_ok() && !matches!(version, Version::Lite01 | Version::Lite02) {
 						self.snapshot = None;
 					}
@@ -1402,9 +1598,9 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 				PrefixState::ReadOk { stream } => {
 					// Lite05+: the publisher reports its own origin id, which we stamp onto
 					// every received Announce's hop chain since it no longer does so itself.
-					// Its `active` count marks where the initial set ends.
+					// Lite05/06 mark the initial set by count; lite07 waits for SYNCED.
 					let ok = ready!(stream.reader.poll_decode::<lite::AnnounceOk>(&mut cx))?;
-					if ok.active == 0 {
+					if ok.active == 0 && !self.subscriber.version.has_synced() {
 						self.snapshot = None;
 					}
 					// A peer may legally report id 0 (no identity). Keep it: the assigned
@@ -1492,6 +1688,12 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					loop {
 						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx) {
 							Poll::Ready(Ok(Some(announce))) => {
+								if matches!(announce, lite::AnnounceBroadcast::Synced) {
+									if self.snapshot.take().is_none() {
+										return Poll::Ready(Err(Error::ProtocolViolation));
+									}
+									continue;
+								}
 								if run.initial > 0 {
 									match announce {
 										lite::AnnounceBroadcast::Active { .. } => run.initial -= 1,
@@ -1502,11 +1704,11 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 								}
 								self.subscriber.handle_announce(&self.prefix, announce, run)?;
 								// Released only once the last counted route is in the origin.
-								if run.initial == 0 {
+								if run.initial == 0 && !self.subscriber.version.has_synced() {
 									self.snapshot = None;
 								}
 							}
-							Poll::Ready(Ok(None)) if run.initial > 0 => {
+							Poll::Ready(Ok(None)) if run.initial > 0 || self.snapshot.is_some() => {
 								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
 							Poll::Ready(Ok(None)) => {
@@ -1564,12 +1766,90 @@ struct SourceServe<S: crate::transport::poll::Session> {
 	tracks: kio::Tasks<TrackServeRun<S>>,
 	// The source ended: no more track requests will arrive.
 	ended: bool,
+	/// Answers listings of the source with the peer's TRACKS.
+	lister: crate::broadcast::Lister,
+	/// The peer's listing, while anyone lists the source.
+	listing: Option<TracksRecv<S>>,
+}
+
+/// Forwards the peer's TRACKS listing of a source into the source's lister.
+struct TracksRecv<S: crate::transport::poll::Session> {
+	session: S,
+	stream: Option<Stream<S, Version>>,
+	/// What the peer lists, each holding an `announces` slot: discovery state the peer
+	/// makes us hold.
+	listed: HashMap<Arc<str>, crate::session::Slot>,
+	synced: bool,
+	/// Each event fans out to every reader, so a peer streaming add/remove churn must not
+	/// hold the thread for as long as its bytes keep arriving.
+	budget: kio::coop::Budget,
+}
+
+impl<S: crate::transport::poll::Session> TracksRecv<S> {
+	/// Apply the peer's events until it ends the listing, or the error that ends it.
+	fn poll(&mut self, source: &SourceServe<S>, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let mut cx = waiter.context();
+		let version = source.subscriber.version;
+		let stream = match &mut self.stream {
+			Some(stream) => stream,
+			None => {
+				let mut stream = ready!(Stream::poll_open(&mut self.session, version, &mut cx))?;
+				stream.writer.buffer(&lite::ControlType::Tracks)?;
+				stream.writer.buffer(&lite::Tracks {
+					broadcast: source.path.as_path(),
+					epoch: source.epoch.clone(),
+				})?;
+				self.stream.insert(stream)
+			}
+		};
+		ready!(stream.writer.poll_flush(&mut cx))?;
+		loop {
+			ready!(self.budget.poll_yield(waiter));
+			let Some(event) = ready!(stream.reader.poll_decode_maybe::<lite::TracksEvent>(&mut cx))? else {
+				return Poll::Ready(Ok(()));
+			};
+			match event {
+				lite::TracksEvent::Added { name, info } => {
+					let name: Arc<str> = name.as_ref().into();
+					if self.listed.contains_key(&name) {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					let slot = source.subscriber.announces.acquire()?;
+					let info = track::Info::default()
+						.with_timescale(info.timescale)
+						.with_max_age(info.max_age)
+						.with_priority(info.priority)
+						.with_refresh(info.refresh)
+						.with_compress(info.compress);
+					source.lister.add(name.clone(), info)?;
+					self.listed.insert(name, slot);
+				}
+				lite::TracksEvent::Removed { name } => {
+					if self.listed.remove(name.as_ref()).is_none() {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+					source.lister.remove(&name)?;
+				}
+				lite::TracksEvent::Synced => {
+					// This hop synced its readers when the listing began; only the order matters here.
+					if std::mem::replace(&mut self.synced, true) {
+						return Poll::Ready(Err(Error::ProtocolViolation));
+					}
+				}
+			}
+		}
+	}
 }
 
 impl<S: crate::transport::poll::Session> SourceServe<S> {
 	fn new(subscriber: Subscriber<S>, minted: MintedSource) -> Self {
 		let closed = subscriber.session.clone();
 		Self {
+			lister: minted
+				.dynamic
+				.lister()
+				.expect("only the source answers its broadcast's listings"),
+			listing: None,
 			subscriber,
 			validity: minted.validity,
 			path: minted.path,
@@ -1581,6 +1861,60 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 			tracks: kio::Tasks::new(),
 			ended: false,
 		}
+	}
+
+	/// Answer the source's listings while anyone lists it, from the peer's TRACKS.
+	fn poll_listing(&mut self, waiter: &kio::Waiter) {
+		// Taken out while it runs, since it reads the rest of the source.
+		let mut listing = self.listing.take();
+		loop {
+			match &mut listing {
+				None => {
+					if !matches!(self.lister.poll_used(waiter), Poll::Ready(Ok(()))) {
+						break;
+					}
+					if !self.subscriber.version.has_tracks() {
+						// An empty answer would claim the peer lists nothing.
+						self.lister.abort(Error::Unsupported);
+						continue;
+					}
+					// Synced with this hop, which holds nothing yet: a relay never waits on its
+					// upstream, so the peer's tracks follow as live adds.
+					self.lister.synced();
+					listing = Some(TracksRecv {
+						session: self.subscriber.session.clone(),
+						stream: None,
+						listed: HashMap::new(),
+						synced: false,
+						budget: kio::coop::Budget::new(32),
+					});
+				}
+				Some(_) if self.lister.poll_unused(waiter).is_ready() => {
+					// Dropping the stream resets it.
+					listing = None;
+					self.lister.clear();
+				}
+				Some(recv) => match recv.poll(self, waiter) {
+					Poll::Pending => break,
+					// The peer's broadcast ended, whether or not its retraction has arrived:
+					// end the listing and let go of what it listed.
+					Poll::Ready(Ok(())) => {
+						listing = None;
+						self.lister.finish();
+					}
+					Poll::Ready(Err(err)) => {
+						let err = lite::error::control(&mut self.subscriber.session.clone(), err);
+						tracing::debug!(broadcast = %self.path, %err, "tracks failed");
+						if let Some(stream) = recv.stream.take() {
+							stream.writer.abort(&err);
+						}
+						listing = None;
+						self.lister.abort(err);
+					}
+				},
+			}
+		}
+		self.listing = listing;
 	}
 }
 
@@ -1596,6 +1930,7 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 				// Session gone.
 				return Poll::Ready(());
 			}
+			self.poll_listing(waiter);
 			if self.ended {
 				// Done once the tracks in flight are.
 				return self.tracks.poll(waiter);
@@ -1677,6 +2012,7 @@ mod tests {
 			tail: tail.clone(),
 			served: None,
 			end: None,
+			wanted: None,
 		})
 	}
 
@@ -1756,6 +2092,72 @@ mod tests {
 		fetches.poll(&sub, start + crate::tail::GRACE, &kio::Waiter::noop());
 		assert!(fetches.held.is_empty());
 		assert!(matches!(fetching.now_or_never(), Some(Err(Error::NotFound))));
+	}
+
+	/// A floor lowered by an update, or a fresh SUBSCRIBE starting below earlier arrivals,
+	/// asks for groups only now, so a fetch held for one waits out a fresh grace rather than
+	/// the age of the gap below those arrivals.
+	#[moq_clock::test]
+	async fn a_lowered_floor_restarts_a_held_fetch_gap() {
+		for update in [true, false] {
+			let h = Harness::new(Version::Lite04);
+			let (mut track, fetching, req) = feed_fetch(3);
+			for sequence in [5, 6] {
+				let mut group = track.receive_group(group::Info { sequence }).unwrap();
+				group.write_frame(None, &b"x"[..]).unwrap();
+				group.finish().unwrap();
+			}
+			moq_clock::sleep(crate::tail::GRACE * 2).await;
+
+			let lowered = Some(Subscription::default().with_groups(2..));
+			// The SUBSCRIBE in force, already answered.
+			let floor = Position::group(if update { 5 } else { 2 });
+			let mut sub = Sub::Active(SubStream {
+				order: crate::track::Order::Descending,
+				stream: Stream::open(&mut h.session.clone(), Version::Lite04).await.unwrap(),
+				id: 0,
+				max_delay: Duration::ZERO,
+				start: Some(floor),
+				priority: 0,
+				requested: Some(floor),
+				tail: Default::default(),
+				served: None,
+				end: None,
+				wanted: None,
+			});
+			if update {
+				h.serve
+					.handle_subscription(&mut track, &mut sub, lowered, true, None)
+					.await
+					.unwrap();
+			} else {
+				let begin = h
+					.serve
+					.begin_subscription(&mut track, &mut Sub::None, lowered, true, None);
+				assert!(matches!(begin, Ok(Begin::Establish(_))));
+			}
+
+			let now = crate::time::Instant::now();
+			let clock = crate::time::Deadlines::new(now);
+			let mut fetches = FeedFetches::new(&clock);
+			fetches.push(req, track.consume());
+			fetches.poll(&sub, now, &kio::Waiter::noop());
+			assert_eq!(
+				fetches.held.len(),
+				1,
+				"group 3 was asked for just now (update: {update})"
+			);
+
+			let mut group = track.receive_group(group::Info { sequence: 3 }).unwrap();
+			group.write_frame(None, &b"x"[..]).unwrap();
+			group.finish().unwrap();
+			fetches.poll(&sub, now, &kio::Waiter::noop());
+			let group = fetching
+				.now_or_never()
+				.expect("answered")
+				.expect("served from the feed");
+			assert_eq!(group.sequence, 3);
+		}
 	}
 
 	/// Many group fetches on one track share model state, but never share readiness.
@@ -1862,6 +2264,7 @@ mod tests {
 		}
 		arrive(&track, &tail, 0, start);
 		arrive(&track, &tail, 2, start);
+		moq_clock::sleep(crate::tail::GRACE / 2).await;
 		arrive(&track, &tail, 4, start + crate::tail::GRACE / 2);
 		let waiter = kio::Waiter::noop();
 		fetches.poll(&sub, start, &waiter);
@@ -1903,6 +2306,28 @@ mod tests {
 		track.abort(Error::Cancel).unwrap();
 		fetches.poll(&sub, start, &waiter);
 		assert!(fetches.held.is_empty(), "closure releases all remaining held groups");
+	}
+
+	#[moq_clock::test]
+	async fn a_feed_drop_polls_only_the_groups_it_excludes() {
+		let start = crate::time::Instant::now();
+		let clock = crate::time::Deadlines::new(start);
+		let tail = kio::Producer::new(Tail::default());
+		let sub = feed_sub(&tail).await;
+		let (track, mut callers, requests) = feed_batch([1, 3, 5]);
+		let mut fetches = FeedFetches::new(&clock);
+		for req in requests {
+			fetches.push(req, track.consume());
+		}
+		let waiter = kio::Waiter::noop();
+		fetches.poll(&sub, start, &waiter);
+		let polled = fetches.polled;
+		track.drop_groups(1..2);
+		fetches.poll(&sub, start, &waiter);
+		assert_eq!(fetches.polled - polled, 1);
+		assert!(!fetches.held.contains_key(&1));
+		assert_eq!(fetches.held.len(), 2);
+		assert!(matches!(callers.remove(0).now_or_never(), Some(Err(Error::NotFound))));
 	}
 
 	#[moq_clock::test]
@@ -1952,7 +2377,7 @@ mod tests {
 		assert!(next.now_or_never().unwrap().is_ok());
 	}
 
-	/// A live arrival on one track must not scale with unrelated held groups or tracks.
+	/// Sweep held fetches, unrelated tracks, and live arrival runs independently.
 	#[moq_clock::test]
 	#[ignore = "release benchmark, run by nightly"]
 	async fn benchmark_feed_fetch_wakes() {
@@ -2020,9 +2445,9 @@ mod tests {
 		}
 
 		const EVENTS: u64 = 128;
-		println!("held,tracks,scan_ns,indexed_ns");
+		println!("held,tracks,runs,scan_ns,indexed_ns");
 		for held in [1, 64, 1024] {
-			for tracks in [1, 8, 32] {
+			for (tracks, runs) in [(1, 1), (8, 1), (32, 1), (1, 64), (1, 1024)] {
 				let mut medians = Vec::new();
 				for indexed in [false, true] {
 					let mut samples = Vec::new();
@@ -2035,6 +2460,9 @@ mod tests {
 							let (track, callers, requests) = feed_batch(1_000_000..1_000_000 + held);
 							let tail = kio::Producer::new(Tail::default());
 							let sub = feed_sub(&tail).await;
+							for sequence in 0..runs {
+								arrive(&track, &tail, sequence * 2, start);
+							}
 							let mut scan = ScanFetches::new(&clock);
 							let mut fetches = FeedFetches::new(&clock);
 							for req in requests {
@@ -2054,7 +2482,7 @@ mod tests {
 						let (track, _callers, tail, sub, scan, fetches) = &mut fixtures[0];
 						#[allow(clippy::disallowed_methods)]
 						let began = std::time::Instant::now();
-						for sequence in 0..EVENTS {
+						for sequence in runs * 2..runs * 2 + EVENTS {
 							arrive(track, tail, sequence, start);
 							if indexed {
 								fetches.poll(sub, start, &waiter);
@@ -2067,7 +2495,7 @@ mod tests {
 					samples.sort_unstable();
 					medians.push(samples[2]);
 				}
-				println!("{held},{tracks},{},{}", medians[0], medians[1]);
+				println!("{held},{tracks},{runs},{},{}", medians[0], medians[1]);
 			}
 		}
 	}
@@ -2088,7 +2516,8 @@ mod tests {
 			requested: Some(Position::group(2)),
 			tail: Default::default(),
 			served: None,
-			end: Some(lite::SubscribeEnd { group: 10, streams: 0 }),
+			end: Some(lite::SubscribeEnd { group: 10 }),
+			wanted: None,
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -2265,6 +2694,175 @@ mod tests {
 		}
 	}
 
+	/// Receive group 0 of a track in `timescale` over a lite-07 session that negotiated the
+	/// `ietf` extension, its stream holding `body` after the GROUP header. Also returns the
+	/// cache pool the track charges.
+	async fn receive_ietf(
+		timescale: Option<Timescale>,
+		body: &[u64],
+	) -> (Result<(), Error>, track::Producer, crate::cache::Pool) {
+		use crate::transport::poll::Session as _;
+
+		let version = Version::Lite07;
+		let mut script = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+		lite::Group {
+			subscribe: 7,
+			sequence: 0,
+			frame_start: 0,
+		}
+		.encode(&mut encoder, version)
+		.unwrap();
+		for value in body {
+			encoder.varint(*value).unwrap();
+		}
+		let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand).offer_ietf(true);
+		peer_setup.set(lite::Setup {
+			ietf: true,
+			..Default::default()
+		});
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: session.clone(),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup,
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
+		});
+		let pool = crate::cache::Pool::unbounded();
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info {
+				pool: pool.clone(),
+				..Default::default()
+			}),
+			"video",
+			crate::track::Info::default().with_timescale(timescale),
+		);
+		subscriber.subscribes.lock().insert(
+			7,
+			TrackEntry {
+				producer: track.clone(),
+				timescale,
+				tail: Default::default(),
+			},
+		);
+
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
+		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
+		(res, track, pool)
+	}
+
+	/// Object records: `(Skip << 1) | END`, the properties block's length, then the frame.
+	#[moq_clock::test]
+	async fn ietf_records_frame_a_group() {
+		// A plain group: Group State 0, then frame 0 with an empty record.
+		let (res, track, _) = receive_ietf(None, &[0, 0, 0, 1, u64::from(b'x')]).await;
+		res.unwrap();
+		let mut group = track.consume().peek_group(0).unwrap();
+		assert_eq!(
+			group.read_frame().now_or_never().unwrap().unwrap().unwrap().payload,
+			b"x"[..]
+		);
+
+		// A relayed group starting at Object 4, then END_OF_GROUP at Object 6.
+		let (res, track, _) = receive_ietf(None, &[0x1, 4 << 1, 0, 1, u64::from(b'x'), (1 << 1) | 1, 0]).await;
+		res.unwrap();
+		let group = track.consume().peek_group(0).unwrap();
+		assert_eq!(group.end_object().map(|end| end.id), Some(6));
+		assert_eq!(group.wire().map(|wire| wire.first_id), Some(4));
+	}
+
+	/// A record the Group State does not allow, or bytes past END_OF_GROUP, are refused.
+	#[moq_clock::test]
+	async fn ietf_records_refuse_what_their_group_cannot_hold() {
+		for (body, reason) in [
+			(&[0x20][..], "an unknown Group State bit"),
+			(&[0x2][..], "relay state without RELAYED"),
+			(&[0, 1 << 1, 0, 1, 0], "a plain group skipping an Object ID"),
+			(&[0, 1, 0], "a plain group with END_OF_GROUP"),
+			(&[0, 0, 2, 0x10, 0], "a plain group with properties"),
+			(&[0x1, 1, 0, 0], "a byte after END_OF_GROUP"),
+			(&[0x1, 0, 0], "a stream ending inside a frame"),
+		] {
+			let (res, ..) = receive_ietf(None, body).await;
+			assert!(res.is_err(), "accepted {reason}");
+		}
+	}
+
+	/// A relayed group's records carry properties only when its Group State sets EXTENSIONS,
+	/// as the moq-transport subgroup it mirrors could hold none otherwise.
+	#[moq_clock::test]
+	async fn ietf_records_need_extensions_for_properties() {
+		// Object 0 with a draft-18 block holding 0x20 = 1, or an untimed Timestamp.
+		for record in [&[3, 4, 0x20, 1][..], &[3, 4, 0x10, 7]] {
+			for (state, ok) in [(0x1 | 0x4, true), (0x1, false)] {
+				let mut body = vec![state, 0];
+				body.extend(record);
+				body.push(0);
+				let (res, ..) = receive_ietf(None, &body).await;
+				assert_eq!(res.is_ok(), ok, "Group State {state:#x}, record {record:?}");
+			}
+		}
+	}
+
+	/// On a timed track, the frame holds an object's time, so a record cannot carry a second,
+	/// mutable Timestamp that could disagree with it. Records that say nothing of time, or
+	/// seal a Timestamp moq-transport egress cannot rewrite, cross beside the frame's.
+	#[moq_clock::test]
+	async fn ietf_records_leave_time_to_their_frame() {
+		let frame = crate::coding::varint::zigzag(500);
+		// Each record after its Object code: Object 0 unless it says otherwise.
+		for (record, ok, reason) in [
+			(&[0, 0][..], true, "nothing at all"),
+			(&[0, 4, 4, 0x10, 500], false, "a mutable Timestamp"),
+			(&[0, 3, 4, 0x20, 1], true, "properties without a Timestamp"),
+			(&[0, 6, 4, 0x0b, 3, 0x10, 499], true, "a sealed Timestamp"),
+			(&[1 << 1, 0], true, "Object 1 without properties"),
+		] {
+			let mut body = vec![0x1 | 0x4];
+			body.extend(record);
+			body.extend([frame, 0]);
+			let (res, track, _) = receive_ietf(Some(Timescale::MILLI), &body).await;
+			assert_eq!(res.is_ok(), ok, "{reason}: {res:?}");
+			if ok {
+				let mut group = track.consume().peek_group(0).unwrap();
+				let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+				assert_eq!(frame.timestamp, Some(Timestamp::from_millis(500).unwrap()), "{reason}");
+			}
+		}
+	}
+
+	/// A record's properties stay the bytes they arrived as, which the cache charges, rather
+	/// than a decoded list costing many times as much.
+	#[moq_clock::test]
+	async fn ietf_records_hold_properties_at_their_wire_size() {
+		const COUNT: u64 = 1000;
+		// A relayed group's Object 0, whose draft-18 block holds COUNT two-byte properties
+		// (0x20 = 1, then zero deltas), then an empty frame.
+		let mut body = vec![0x1 | 0x4, 0, 1 + 2 * COUNT, 4, 0x20, 1];
+		for _ in 1..COUNT {
+			body.extend([0, 1]);
+		}
+		body.push(0);
+		let (res, track, pool) = receive_ietf(None, &body).await;
+		res.unwrap();
+		let group = track.consume().peek_group(0).unwrap();
+		assert_eq!(group.frame_count(), 1);
+		let decoded = COUNT * size_of::<crate::model::object::Property>() as u64;
+		assert!(
+			(2 * COUNT..decoded / 2).contains(&pool.used()),
+			"{} cached for a {}-byte block",
+			pool.used(),
+			2 * COUNT
+		);
+	}
+
 	/// Receive group 5 starting at 500ms over `version`, on a received timed track whose
 	/// group 4 starts at 1000ms, returning the stream's result and the track.
 	async fn receive_rewind(version: Version) -> (Result<(), Error>, track::Producer) {
@@ -2410,7 +3008,7 @@ mod tests {
 				version,
 			)
 			.unwrap();
-			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 2, streams: 1 })
+			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 2 })
 				.encode(
 					&mut crate::coding::Encoder::new(&mut responses, version.into()),
 					version,
@@ -2597,7 +3195,7 @@ mod tests {
 			.unwrap();
 		}
 		if clean {
-			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, streams: 0 })
+			lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0 })
 				.encode(
 					&mut crate::coding::Encoder::new(&mut responses, version.into()),
 					version,
@@ -2670,6 +3268,8 @@ mod tests {
 				sequence,
 				timestamp: Some(sequence),
 				payload: bytes::Bytes::from_static(b"x"),
+				inflated: None,
+				ietf: None,
 			}
 			.encode_bytes(VERSION)
 			.unwrap()
@@ -2807,6 +3407,56 @@ mod tests {
 				"{stage}: an unused track kept waiting on TRACK_INFO"
 			);
 		}
+	}
+
+	/// A track waiting on an unanswered token ends once nobody wants it, rather than
+	/// holding its task and track until a token that may never be answered.
+	#[moq_clock::test]
+	async fn an_unused_track_stops_waiting_for_auth() {
+		let auth = crate::auth::Handle::new(true);
+		let _token = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: SinkSession::default(),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth,
+		});
+
+		let broadcast = crate::broadcast::Info::new().produce();
+		let mut dynamic = broadcast.dynamic();
+		let consumer = broadcast.consume();
+		let mut waiting = Box::pin(consumer.track("video").unwrap().subscribe(None));
+		assert!(futures::poll!(waiting.as_mut()).is_pending());
+		let request = dynamic.requested_track().now_or_never().unwrap().expect("request");
+
+		let mut run = TrackServeRun::new(
+			TrackServe {
+				validity: Default::default(),
+				route: None,
+				subscriber,
+				path: Path::new("room").to_owned(),
+				epoch: None,
+				name: "video".to_string(),
+			},
+			request,
+		);
+		let waiter = kio::Waiter::noop();
+		assert!(
+			kio::Task::poll(&mut run, &waiter).is_pending(),
+			"waits on the token while the track is wanted"
+		);
+
+		drop(waiting);
+		assert!(
+			kio::Task::poll(&mut run, &waiter).is_ready(),
+			"an unused track kept waiting on its token"
+		);
 	}
 
 	/// `establish` puts exactly one SUBSCRIBE on the wire, and the id is registered
@@ -3056,7 +3706,6 @@ mod tests {
 		serving.mode = ServeMode::Tail {
 			settle: Settle::new(&serve.subscriber.runtime, tail.consume()),
 			owed: Some(0..1),
-			streams: None,
 		};
 		assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
 		peer.close(crate::SessionError::Unauthorized.to_code(), "revoked");
@@ -3113,7 +3762,7 @@ mod tests {
 				send.reset(crate::StreamError::NotFound.to_code());
 			} else {
 				let mut end = Vec::new();
-				lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, streams: 0 })
+				lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0 })
 					.encode(&mut crate::coding::Encoder::new(&mut end, version.into()), version)
 					.unwrap();
 				std::future::poll_fn(|cx| send.poll_write(cx, &end)).await.unwrap();
@@ -3423,6 +4072,57 @@ mod tests {
 		let msg = crate::coding::decode_buf(&mut wire, Version::Lite05, lite::SubscribeUpdate::decode).unwrap();
 		assert_eq!((msg.start_group, msg.start_frame), (Some(5), 0));
 		assert_eq!((msg.end_group, msg.end_frame), (Some(5), None));
+	}
+
+	/// Concurrent joins over the refresh ratio send one SUBSCRIBE_UPDATE upstream, a new
+	/// group past the largest sends the next, and every update restates the latest.
+	#[moq_clock::test]
+	async fn refresh_joins_coalesce_upstream() {
+		let h = Harness::new(Version::Lite07);
+		let request = h._broadcast.reserve_track("refresh").unwrap();
+		let mut serving = ServeLoop::new(&h.serve, request, track::Info::default().with_refresh(1), None);
+		let track = h._broadcast.consume().track("refresh").unwrap();
+		let _baseline = track.subscribe(None).await.unwrap();
+		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		assert!(matches!(serving.sub, Sub::Active(_)), "the reader opens the upstream");
+		let established = h.wire().len();
+
+		let arrive = |serving: &ServeLoop<SinkSession>, sequence| {
+			let mut group = serving.serving.receive_group(group::Info { sequence }).unwrap();
+			for frame in [&b"key"[..], b"abc", b"d"] {
+				group.write_frame(None, frame).unwrap();
+			}
+			group.finish().unwrap();
+		};
+		let wanted = |h: &Harness| {
+			let wire = h.wire();
+			let mut wire = &wire[established..];
+			let mut wanted = Vec::new();
+			while !wire.is_empty() {
+				let msg = crate::coding::decode_buf(&mut wire, Version::Lite07, lite::SubscribeUpdate::decode).unwrap();
+				wanted.extend(msg.wanted_group);
+			}
+			wanted
+		};
+
+		// The deltas outweigh the first frame, so every join asks for group 1.
+		arrive(&serving, 0);
+		let mut joins = Vec::new();
+		for _ in 0..8 {
+			joins.push(track.subscribe(None).await.unwrap());
+			assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		}
+		assert_eq!(wanted(&h), [1], "joins coalesce into one request");
+
+		arrive(&serving, 1);
+		joins.push(track.subscribe(None).await.unwrap());
+		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		assert_eq!(wanted(&h), [1, 2], "the requested group re-arms the next request");
+
+		// A parameter change restates the pending wanted group rather than clearing it.
+		let _urgent = track.subscribe(Subscription::default().with_priority(9)).await.unwrap();
+		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
+		assert_eq!(wanted(&h), [1, 2, 2], "every update restates the wanted group");
 	}
 
 	/// A buffered SUBSCRIBE_START describes the demand its SUBSCRIBE carried, so
@@ -4462,16 +5162,27 @@ mod tests {
 		assert!(!cursor.is_synced());
 	}
 
-	/// A count of zero is synced on the ANNOUNCE_OK.
+	/// An empty lite-07 set waits for the ordered SYNCED event.
 	#[moq_clock::test]
 	async fn an_empty_initial_set_catches_up_at_once() {
 		const VERSION: Version = Version::Lite07;
-		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0)]);
+		let synced = |w: &mut crate::coding::Encoder<'_>| lite::AnnounceBroadcast::Synced.encode(w, VERSION).unwrap();
+		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &synced]);
 		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
 		let cursor = consumer.announced();
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 		assert!(cursor.is_synced());
+	}
+
+	#[moq_clock::test]
+	async fn a_duplicate_synced_is_refused() {
+		const VERSION: Version = Version::Lite07;
+		let synced = |w: &mut crate::coding::Encoder<'_>| lite::AnnounceBroadcast::Synced.encode(w, VERSION).unwrap();
+		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &synced, &synced]);
+		let (mut prefix, _consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
+		let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+		assert!(matches!(err, Error::ProtocolViolation));
 	}
 
 	/// Anything but a start inside the counted set cuts it short: a protocol violation.
@@ -4653,8 +5364,10 @@ struct SubStream<S: crate::transport::poll::Session> {
 	tail: kio::Producer<Tail>,
 	/// The first group the publisher serves (SUBSCRIBE_START), once declared.
 	served: Option<u64>,
-	/// The track's exclusive end and stream count (SUBSCRIBE_END), once declared.
+	/// The track's exclusive end (SUBSCRIBE_END), once declared.
 	end: Option<lite::SubscribeEnd>,
+	/// The refresh join's wanted group, restated in every SUBSCRIBE_UPDATE.
+	wanted: Option<u64>,
 }
 
 impl<S: crate::transport::poll::Session> SubStream<S> {
@@ -4676,6 +5389,9 @@ impl<S: crate::transport::poll::Session> SubStream<S> {
 	}
 }
 
+// One per track copy, which holds a live stream while anyone reads it, so boxing it
+// would add an allocation per upstream subscription without saving memory.
+#[allow(clippy::large_enum_variant)]
 enum Sub<S: crate::transport::poll::Session> {
 	None,
 	Active(SubStream<S>),
@@ -4762,7 +5478,7 @@ impl Announced {
 			return false;
 		}
 		// An error means the prefix is outside our origin's scope, so don't serve it.
-		match subscriber.origin.dynamic(&path, route.clone()) {
+		match subscriber.origin.dynamic_route(&path, route.clone()) {
 			Ok(dynamic) => {
 				self.attach(path, route, dynamic);
 				true
@@ -4958,7 +5674,7 @@ impl AnnouncedRoute {
 	fn update(&mut self, route: crate::origin::Route) {
 		self.route = route.clone();
 		self.drained = false;
-		let _ = self.dynamic.update(route);
+		let _ = self.dynamic.update_route(route);
 	}
 
 	/// Re-price the route to [`crate::origin::Cost::DRAIN`] (the peer sent a
@@ -4971,7 +5687,7 @@ impl AnnouncedRoute {
 		self.drained = true;
 		let mut route = self.route.clone();
 		route.cost = crate::origin::Cost::DRAIN;
-		let _ = self.dynamic.update(route);
+		let _ = self.dynamic.update_route(route);
 	}
 }
 
@@ -5103,6 +5819,11 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						if subscription.start().is_none() {
 							subscription.set_bounds(producer.idle_newest().map(Position::group), subscription.end());
 						}
+						// The track's arrivals outlive a subscription, and this one asks for
+						// its groups only now.
+						if let Some(start) = subscription.start() {
+							producer.demand_arrivals(start.group..u64::MAX);
+						}
 						// Open an upstream SUBSCRIBE for the first subscriber.
 						Ok(Begin::Establish(self.prepare_establish(
 							producer,
@@ -5117,12 +5838,19 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						active.priority = subscription.priority;
 						active.order = subscription.order;
 						active.max_delay = subscription.max_delay;
+						// A lowered floor owes groups nobody asked for until now, in the track's
+						// arrivals that held fetches read as well as in the session's tail.
+						let lowered = subscription.start().map(|start| {
+							let floor = active.start.map(|start| start.group).or(active.served);
+							start.group..floor.unwrap_or(u64::MAX)
+						});
+						if let Some(groups) = &lowered {
+							producer.demand_arrivals(groups.clone());
+						}
 						if let Ok(mut tail) = active.tail.write() {
 							tail.set_grace(tail::grace(subscription.max_delay));
-							// A lowered floor owes groups nobody asked for until now.
-							if let Some(start) = subscription.start() {
-								let floor = active.start.map(|start| start.group).or(active.served);
-								tail.demand(start.group..floor.unwrap_or(u64::MAX), self.subscriber.runtime.now());
+							if let Some(groups) = lowered {
+								tail.demand(groups, self.subscriber.runtime.now());
 							}
 						}
 						active.start = subscription.start();
@@ -5286,14 +6014,14 @@ enum Begin<S: crate::transport::poll::Session> {
 	Establish(Establish<S>),
 }
 
-/// Buffer a SUBSCRIBE_UPDATE echoing the current params, varying only the end
-/// bound. The caller flushes.
+/// Buffer the current SUBSCRIBE parameters with an updated end. The caller flushes.
 fn buffer_update<S: crate::transport::poll::Session>(
 	active: &mut SubStream<S>,
 	end: Option<Position>,
 ) -> Result<(), Error> {
 	let bounds = WireBounds::new(active.start, end);
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
+		wanted_group: active.wanted,
 		priority: active.priority,
 		max_delay: active.max_delay,
 		start_group: bounds.start_group,
@@ -5413,6 +6141,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 			tail: self.tail.clone(),
 			served: None,
 			end: None,
+			wanted: None,
 		}
 	}
 }
@@ -5488,10 +6217,37 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 	}
 }
 
+impl<S: crate::transport::poll::Session> TrackServeRun<S> {
+	/// Nobody wants the track anymore (the origin failed over, the reader left): stop
+	/// waiting on a token or a peer that may never answer, which would otherwise hold
+	/// this task, its TRACK stream, and the track for good. Dropping the fetch resets the
+	/// stream. Ready once the request is released.
+	fn poll_unused(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			let TrackRunState::Info { request, .. } = &self.state else {
+				return Poll::Pending;
+			};
+			let pending = request.as_ref().expect("request pending");
+			ready!(crate::util::poll_unwanted(&mut pending.demand(), waiter));
+			if pending.reject_unused(Error::Cancel) {
+				self.state = TrackRunState::Done;
+				return Poll::Ready(());
+			}
+			// Demand returned in the gap and won inside `reject_unused`: poll again so the
+			// unused wait is armed for when it leaves.
+		}
+	}
+}
+
 impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 	type Output = ();
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		// Checked before the auth wait too, so an abandoned request never parks on a token.
+		if self.poll_unused(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		ready!(self.gate.poll_ready(waiter));
 		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
 		if !matches!(self.state, TrackRunState::Finish(_)) && self.gate.poll_denied(waiter).is_ready() {
 			self.revoke();
@@ -5500,20 +6256,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 		loop {
 			match &mut self.state {
 				TrackRunState::Info { request, info } => {
-					// Nobody wants the track anymore (the origin failed over, the reader
-					// left): stop waiting on a peer that may never answer, which would
-					// otherwise hold this task, its TRACK stream, and the track for good.
-					// Dropping the fetch resets the stream.
-					let pending = request.as_ref().expect("request pending");
-					if pending.demand().poll_unused(waiter).is_ready() {
-						if pending.reject_unused(Error::Cancel) {
-							self.state = TrackRunState::Done;
-							return Poll::Ready(());
-						}
-						// Demand returned in the gap and won inside `reject_unused`: poll
-						// again so the unused wait is armed for when it leaves.
-						continue;
-					}
+					// Abandonment was checked at the top of this poll, arming its wait.
 					let res = ready!(info.poll_fetch(&self.serve, waiter));
 					let request = request.take().expect("request pending");
 					match res {
@@ -5616,8 +6359,17 @@ struct TrackInfoFetch<S: crate::transport::poll::Session> {
 
 enum TrackInfoState<S: crate::transport::poll::Session> {
 	Open,
-	Send { stream: Stream<S, Version> },
-	Read { stream: Stream<S, Version> },
+	Send {
+		stream: Stream<S, Version>,
+	},
+	Read {
+		stream: Stream<S, Version>,
+	},
+	/// Reading the TRACK_PROPERTIES the `ietf` extension sends after TRACK_INFO.
+	Properties {
+		stream: Stream<S, Version>,
+		info: track::Info,
+	},
 }
 
 impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
@@ -5669,6 +6421,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
 						return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 					}
+					let ietf = ready!(serve.subscriber.peer_setup.poll_ietf(waiter));
 					let info = ready!(stream.reader.poll_decode::<lite::TrackInfo>(&mut cx))?;
 					let TrackInfoState::Read { stream } = std::mem::replace(&mut self.state, TrackInfoState::Open)
 					else {
@@ -5682,8 +6435,30 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					let model = track::Info::default()
 						.with_timescale(info.timescale)
 						.with_max_age(info.max_age)
-						.with_priority(info.priority);
-					return Poll::Ready(Ok((model, HeldTrack(stream))));
+						.with_priority(info.priority)
+						.with_refresh(info.refresh)
+						.with_compress(info.compress);
+					if !ietf {
+						return Poll::Ready(Ok((model, HeldTrack(stream))));
+					}
+					self.state = TrackInfoState::Properties { stream, info: model };
+				}
+				TrackInfoState::Properties { stream, info } => {
+					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+						return Poll::Ready(Err(crate::lite::error::from_transport(err)));
+					}
+					let properties = ready!(stream.reader.poll_decode::<lite::ietf::TrackProperties>(&mut cx))?;
+					// Refused as moq-transport ingress refuses it.
+					if let Some(err) = properties.0.as_ref().and_then(|properties| properties.refused(info)) {
+						return Poll::Ready(Err(err));
+					}
+					let TrackInfoState::Properties { stream, mut info } =
+						std::mem::replace(&mut self.state, TrackInfoState::Open)
+					else {
+						unreachable!()
+					};
+					info.properties = properties.0;
+					return Poll::Ready(Ok((info, HeldTrack(stream))));
 				}
 			}
 		}
@@ -5712,6 +6487,7 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	/// through the producer's aggregate (including the resume floor after a source
 	/// change).
 	serving: track::Producer,
+	largest: Option<u64>,
 	/// Watches `serving`'s subscribers, to release the copy once nobody reads it.
 	demand: track::Demand,
 	/// Serve on-demand fetches of uncached groups from this session.
@@ -5746,13 +6522,11 @@ enum ServeMode<S: crate::transport::poll::Session> {
 	/// exactly like the old inline await.
 	Establish(Establish<S>),
 	/// The upstream FIN'd, so the track is over, but QUIC does not order streams: keep
-	/// the subscription routable until the counted headers arrive (lite-07), or every
-	/// owed group is accounted for (older drafts). The grace bounds a stream reset
-	/// before its header arrived.
+	/// the subscription routable until every owed group is accounted for. The grace bounds
+	/// an unaccounted sequence, such as a lost datagram.
 	Tail {
 		settle: Settle,
 		owed: Option<std::ops::Range<u64>>,
-		streams: Option<u64>,
 	},
 }
 
@@ -5762,7 +6536,7 @@ enum ServeMode<S: crate::transport::poll::Session> {
 struct FeedFetches {
 	held: BTreeMap<u64, HeldFetch>,
 	ready: kio::Shared<BTreeSet<u64>>,
-	tail: Option<kio::Consumer<Tail>>,
+	arrivals: Option<track::Arrivals>,
 	/// Only gaps containing a held group arm the earliest fold.
 	fold: crate::time::Deadline,
 	/// An additional track backstop, above one peer's default FETCH allowance.
@@ -5773,7 +6547,6 @@ struct FeedFetches {
 
 struct HeldFetch {
 	req: group::Request,
-	feed: track::Consumer,
 	waiter: kio::Waiter,
 }
 
@@ -5796,7 +6569,7 @@ impl FeedFetches {
 		Self {
 			held: Default::default(),
 			ready: Default::default(),
-			tail: None,
+			arrivals: None,
 			fold: crate::time::Deadline::new(clock),
 			max: crate::session::Limits::default().announces,
 			#[cfg(test)]
@@ -5805,6 +6578,15 @@ impl FeedFetches {
 	}
 
 	fn push(&mut self, req: group::Request, feed: track::Consumer) {
+		let Some(arrivals) = feed.arrivals() else {
+			req.reject(Error::NotFound);
+			return;
+		};
+		if let Some(previous) = &self.arrivals {
+			assert!(previous.same_channel(&arrivals), "held fetches belong to one track");
+		} else {
+			self.arrivals = Some(arrivals);
+		}
 		let sequence = req.sequence();
 		// The last caller may leave and a replacement attempt arrive before the
 		// queued cancellation gets polled. The old attempt owns no callers now.
@@ -5819,7 +6601,7 @@ impl FeedFetches {
 			sequence,
 			ready: self.ready.clone(),
 		})));
-		self.held.insert(sequence, HeldFetch { req, feed, waiter });
+		self.held.insert(sequence, HeldFetch { req, waiter });
 		self.ready.lock().insert(sequence);
 	}
 
@@ -5829,7 +6611,7 @@ impl FeedFetches {
 		now: crate::time::Instant,
 		waiter: &kio::Waiter,
 	) {
-		let Sub::Active(active) = sub else {
+		let Sub::Active(_) = sub else {
 			for (_, held) in std::mem::take(&mut self.held) {
 				held.req.reject(Error::NotFound);
 			}
@@ -5838,23 +6620,20 @@ impl FeedFetches {
 				ready.clear();
 			}
 			drop(ready);
-			self.tail = None;
+			self.arrivals = None;
 			self.fold.set(None);
 			return;
 		};
-		let tail = active.tail.consume();
-		if self.tail.as_ref().is_none_or(|previous| !previous.same_channel(&tail)) {
-			// A replacement upstream has a new ledger. Rebind the held groups once,
-			// instead of leaving their registrations in the old subscription.
+		let Some(arrivals) = &self.arrivals else {
+			return;
+		};
+		// One shared read arms the batch for new gaps, without copying the ledger or
+		// re-polling held groups whose verdict did not change.
+		let arrivals = arrivals.poll(waiter);
+		if arrivals.is_closed() {
 			self.ready.lock().extend(self.held.keys().copied());
-			self.tail = Some(tail.clone());
 		}
-		// Ledger changes can open or move a gap's deadline, but only its accounted
-		// groups register child waiters. A new highest group therefore arms one fold
-		// without re-polling every lower held fetch.
-		let _ = tail.poll(waiter, |_| Poll::<()>::Pending);
-		let tail = tail.read();
-		for (gap, at) in tail.folds() {
+		for (gap, at) in arrivals.folds() {
 			if at <= now {
 				let mut groups = self.held.range(gap).map(|(sequence, _)| *sequence);
 				if let Some(first) = groups.next() {
@@ -5875,6 +6654,7 @@ impl FeedFetches {
 			Poll::Pending => BTreeSet::new(),
 		};
 		let _ = self.ready.poll(waiter, |_| Poll::<()>::Pending);
+		let mut settled = Vec::new();
 		for sequence in ready {
 			let Some(held) = self.held.remove(&sequence) else {
 				continue;
@@ -5884,24 +6664,28 @@ impl FeedFetches {
 				self.polled += 1;
 			}
 			if held.req.demand().poll_unused(&held.waiter).is_ready() {
+				settled.push((held.req, None));
 				continue;
 			}
-			let missing = !tail.covers(sequence..sequence.saturating_add(1));
-			let folds = tail.folds_at(sequence);
-			match held.feed.poll_landed(sequence, &held.waiter) {
-				Poll::Ready(Some(_)) => drop(held.req),
-				Poll::Ready(None) => held.req.reject(Error::NotFound),
-				Poll::Pending if !missing || folds.is_some_and(|at| at <= now) => held.req.reject(Error::NotFound),
+			match arrivals.poll_group(sequence, now, &held.waiter) {
+				Poll::Ready(Some(_)) => settled.push((held.req, None)),
+				Poll::Ready(None) => settled.push((held.req, Some(Error::NotFound))),
 				Poll::Pending => {
-					tail.watch_group(sequence, &held.waiter);
 					self.held.insert(sequence, held);
 				}
 			}
 		}
-		let fold = tail
+		let fold = arrivals
 			.folds()
 			.filter_map(|(gap, at)| self.held.range(gap).next().map(|_| at))
 			.min();
+		// Requests own track producers: releasing one takes the track lock too.
+		drop(arrivals);
+		for (req, err) in settled {
+			if let Some(err) = err {
+				req.reject(err);
+			}
+		}
 		self.fold.set(fold);
 		let _ = self.fold.poll(waiter);
 	}
@@ -5922,6 +6706,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 		let serving = request.accept(info);
 		serving.received();
 		Self {
+			largest: None,
 			demand: serving.demand(),
 			serving,
 			dynamic,
@@ -5965,20 +6750,19 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						}
 					}
 				}
-				ServeMode::Tail { settle, owed, streams } => {
+				ServeMode::Tail { settle, owed } => {
 					let _ = self.fetches.poll(waiter);
 					self.feed_fetches
 						.poll(&self.sub, serve.subscriber.runtime.now(), waiter);
 					if settle
-						.poll(waiter, |tail| match streams {
-							Some(streams) => tail.streams() >= *streams,
-							None => owed.clone().is_some_and(|owed| tail.covers(owed)),
+						.poll(waiter, |tail| {
+							owed.as_ref().is_some_and(|owed| tail.covers(owed.clone()))
 						})
 						.is_ready()
 					{
 						return Poll::Ready(ServeEnd::Finished);
 					}
-					if self.fetches.is_empty() && self.demand.poll_unused(waiter).is_ready() {
+					if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready() {
 						return Poll::Ready(ServeEnd::Idle);
 					}
 					let mut cx = std::task::Context::from_waker(waiter.waker());
@@ -6048,6 +6832,29 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						Poll::Pending => {}
 					}
 
+					// The wanted group is subscription state: an update announces each new one
+					// past our largest, and every later update restates it. Joins asking for
+					// the same group coalesce into that one update.
+					if serve.subscriber.version.has_refresh() {
+						if let Poll::Ready(Some(largest)) = self.serving.poll_largest(waiter) {
+							self.largest = Some(largest.group);
+						}
+						let _ = self.demand.poll_wanted_changed(waiter);
+						if let Sub::Active(active) = &mut self.sub
+							&& let Some(largest) = self.largest
+							&& let Some(wanted) = self.demand.wanted().filter(|wanted| *wanted > largest)
+							&& active.wanted != Some(wanted)
+						{
+							active.wanted = Some(wanted);
+							if let Err(err) =
+								buffer_update(active, self.serving.subscription().and_then(|sub| sub.end()))
+							{
+								return Poll::Ready(ServeEnd::GiveBack(err));
+							}
+							continue;
+						}
+					}
+
 					// (2) In-flight fetches; completions just retire. The demand is settled,
 					// so a held fetch with no feed open is a miss.
 					let _ = self.fetches.poll(waiter);
@@ -6058,17 +6865,16 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// went with the last subscriber, so it lingers, cache and all, for a
 					// reader or fetch that asks again soon, then is dropped. In-flight
 					// fetches keep it alive: work already accepted still gets finished.
-					if self.fetches.is_empty() && self.demand.poll_unused(waiter).is_ready() {
+					if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready() {
 						self.held = None;
 						if self.linger.deadline().is_none() {
 							let now = serve.subscriber.runtime.now();
 							self.linger.set(now.checked_add(track::IDLE_LINGER));
 						}
+						// A reader returning restarts the countdown when it next leaves.
 						if self.linger.poll(waiter).is_ready() {
 							return Poll::Ready(ServeEnd::Idle);
 						}
-						// A reader returning restarts the countdown when it next leaves.
-						let _ = self.demand.poll_used(waiter);
 					} else {
 						self.linger.set(None);
 					}
@@ -6198,11 +7004,6 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								self.mode = ServeMode::Tail {
 									settle: Settle::new(&serve.subscriber.runtime, active.tail.consume()),
 									owed: active.owed(requested_end),
-									streams: active
-										.end
-										.as_ref()
-										.filter(|_| serve.subscriber.version.has_stream_count())
-										.map(|end| end.streams),
 								};
 								continue;
 							}
@@ -6232,6 +7033,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 /// is implicit from the request.
 struct FetchServeRun<S: crate::transport::poll::Session> {
 	validity: crate::model::broadcast::RequestValidity,
+	gate: crate::auth::Gate,
 	serve: TrackServe<S>,
 	session: S,
 	timescale: Option<Timescale>,
@@ -6256,7 +7058,7 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 	},
 	Ingest {
 		stream: Stream<S, Version>,
-		producer: group::Producer,
+		producer: crate::recv::Group,
 		// The accepted request's demand: fetches that joined it but have not yet
 		// picked the group up from the cache.
 		joined: kio::Producer<track::FetchOutcome>,
@@ -6282,6 +7084,7 @@ impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 		let group = request.sequence();
 		Self {
 			validity: serve.validity.start(),
+			gate: serve.gate(),
 			serve,
 			session,
 			timescale,
@@ -6319,7 +7122,10 @@ impl<S: crate::transport::poll::Session> Drop for FetchServeRun<S> {
 				}
 			}
 			FetchRunState::Ingest {
-				mut stream, producer, ..
+				mut stream,
+				producer,
+				ingest: _ingest,
+				..
 			} => {
 				stream.reader.abort(&err);
 				stream.writer.abort(&err);
@@ -6365,6 +7171,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 
 			match &mut self.state {
 				FetchRunState::Open { request } => {
+					ready!(self.gate.poll_ready(waiter));
 					let mut stream = match ready!(Stream::poll_open(
 						&mut self.session,
 						self.serve.subscriber.version,
@@ -6454,6 +7261,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					};
 				}
 				FetchRunState::Answer { stream, .. } => {
+					let ietf = ready!(self.serve.subscriber.peer_setup.poll_ietf(waiter));
 					// Lite has no FETCH_OK: a publisher without the group resets the
 					// stream instead. Accepting before the first byte (or a FIN, for an
 					// empty group) would resolve every joined `fetch_group` to a group
@@ -6503,9 +7311,14 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 
 					self.state = FetchRunState::Ingest {
 						stream,
-						producer,
+						producer: crate::recv::Group::new(producer),
 						joined,
-						ingest: Box::new(FrameIngest::new(&self.serve.subscriber, self.timescale)),
+						ingest: Box::new(FrameIngest::new(
+							&self.serve.subscriber,
+							self.timescale,
+							ietf,
+							frame_start,
+						)),
 					};
 				}
 				FetchRunState::Ingest {
@@ -6519,10 +7332,11 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						// wants the rest (no joined fetch left to pick it up, no reader),
 						// cancel upstream and abort the truncated group, never caching it
 						// as complete. The abort is atomic with a new reader arriving.
-						if joined.poll_unused(waiter).is_pending() || producer.poll_unused(waiter).is_pending() {
+						if joined.poll_unused(waiter).is_pending() || producer.handle().poll_unused(waiter).is_pending()
+						{
 							return Poll::Pending;
 						}
-						if !producer.abort_unused(Error::Cancel) {
+						if !producer.handle().abort_unused(Error::Cancel) {
 							continue;
 						}
 						tracing::debug!(track = %self.serve.name, group = self.group, "fetch abandoned");

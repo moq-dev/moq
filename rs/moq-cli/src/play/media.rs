@@ -258,12 +258,11 @@ impl<O: Output> Media<O> {
 									.with_max_delay(max_delay),
 							)
 							.await?;
-						// Start at the local live edge without asking the shared publisher
-						// subscription to rewind to a cached sequence. Only what is known now: a
-						// track with nothing yet starts wherever its first group lands.
-						if let std::task::Poll::Ready(Some(largest)) =
-							subscriber.poll_largest(&moq_net::kio::Waiter::noop())
-						{
+						// Start at the live edge without asking the shared publisher
+						// subscription to rewind to a cached sequence. The edge is known only
+						// once the feed is live, so wait for it rather than read the backlog of
+						// a warm copy still waiting on its source; the wait ends with the track.
+						if let Some(largest) = subscriber.largest().await {
 							subscriber.set_groups(largest.group..);
 						}
 						let format = catalog::hang::Container::try_from(config)?;
@@ -1619,7 +1618,7 @@ mod tests {
 		let mut served = moq_net::broadcast::Info::new().produce();
 		let served_catalog = catalog::Producer::new(&mut served, Default::default()).unwrap();
 		let mut new = rendition(&served, &served_catalog, "audio");
-		let pool = origin.dynamic("", route).unwrap();
+		let pool = origin.dynamic_route("", route).unwrap();
 		drop(exact);
 		let consumer = served.consume();
 		tokio::spawn(async move {
@@ -1665,7 +1664,7 @@ mod tests {
 		}
 
 		exact.unannounce();
-		let pool = origin.dynamic("", route).unwrap();
+		let pool = origin.dynamic_route("", route).unwrap();
 		let consumer = mirror.consume();
 		tokio::spawn(async move {
 			while let Ok(request) = pool.requested_broadcast().await {

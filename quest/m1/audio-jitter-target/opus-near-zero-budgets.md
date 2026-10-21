@@ -26,7 +26,3 @@ the note's sentence that budgets the isolated row's one-second drops as
 measured. If the first row still shows long-task clusters, compare
 `<tag>.longtasks.json` against the runner's disk activity before changing the
 player.
-
-## Related
-
-- [AAC bursty budgets](/quest/m1/audio-jitter-target/aac-bursty-budgets.md) - the same re-measure for the AAC rows, on its own fix's nightlies

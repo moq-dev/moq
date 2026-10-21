@@ -130,7 +130,7 @@ export interface AudioBuffer {
 }
 
 /** Returns true when SharedArrayBuffer is available and usable in the current context. */
-export function supportsSharedArrayBuffer(): boolean {
+function supportsSharedArrayBuffer(): boolean {
 	if (typeof SharedArrayBuffer === "undefined") return false;
 	// In browsers, SharedArrayBuffer requires cross-origin isolation (COOP/COEP).
 	// crossOriginIsolated is a browser global; in Node/Bun it's undefined.

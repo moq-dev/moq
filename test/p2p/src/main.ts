@@ -77,8 +77,8 @@ window.checkTransport = async () => {
 			if (!active) throw new Error("broadcast disappeared");
 			const subscriber = active.track("data").subscribe().ordered();
 			try {
-				const demand = track.demand().used;
-				while (!demand.peek()) await demand.changed();
+				const demand = track.demand().wanted;
+				while (demand.peek() === undefined) await demand.changed();
 				const payload = Uint8Array.from({ length: 256 * 1024 }, (_, i) => i % 251);
 				track.writeFrame({ payload, timestamp: Moq.Time.Timestamp.now() });
 				const frame = await subscriber.readFrame();

@@ -269,7 +269,7 @@ where
 	// reads the peer's Setup stream; capability-gated streams (PROBE) wait on it.
 	// When the caller already read it (a gated server accept), seed the slot so the
 	// Setup stream isn't expected on the wire again.
-	let peer_setup_slot = PeerSetup::new(client, session.binding());
+	let peer_setup_slot = PeerSetup::new(client, session.binding()).offer_ietf(our_setup.ietf);
 	let early = if let Some(accepted) = peer_setup {
 		peer_setup_slot.set(accepted.setup);
 		accepted.early

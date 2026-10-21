@@ -29,6 +29,7 @@ mod drafts
 mod gh '.github'
 # Shortcuts to avoid `demo::` prefix.
 mod boy 'demo/boy'
+mod carla 'demo/carla'
 mod pub 'demo/pub'
 mod relay 'demo/relay'
 mod sub 'demo/sub'
@@ -96,20 +97,34 @@ install:
 check $BASE="":
     sh/dispatch.sh check "$BASE"
 
-# CI runs `check` as two parallel jobs, since one runner doing both takes about
-# the sum of their times. Same dispatch, with MOQ_STRICT=1.
+# The merge queue runs this gate in one job. The test build also enforces
+# default-feature clippy; distinct feature permutations and optimized binding
+# builds run nightly and on release PRs. Missing tools fail under MOQ_STRICT.
 
-# Run half of `check` for CI: JOB `check` lints and compiles, `test` runs the tests.
-ci $JOB $BASE="":
-    sh/dispatch.sh "ci-$JOB" "$BASE"
+# Run the merge queue's Linux gate over the branch diff against BASE.
+ci $BASE="":
+    MOQ_STRICT=1 NEXTEST_PROFILE=ci sh/dispatch.sh ci "$BASE"
 
-# Report what a CI job (`check`, `test`, `platform`) selects, before installing the dev shell or build caches.
-ci-select $JOB $BASE="":
-    sh/dispatch.sh "ci-$JOB" "$BASE" --query
+# Run the queue's Linux gate over every package.
+gate:
+    just ci --all
+
+# Report what CI selects before installing the dev shell or build caches.
+ci-select $BASE="":
+    sh/dispatch.sh ci "$BASE" --query
+
+# Report the native platform suites before installing their toolchains.
+ci-select-platform $BASE="":
+    sh/dispatch.sh ci-platform "$BASE" --query
 
 # Auto-fix lint and formatting for what the branch changed since BASE.
 fix $BASE="":
     sh/dispatch.sh fix "$BASE"
+
+# Build .oss-scanner/ with Anthropic's OSS Scanner tools/check: `just oss-scanner [REF] [REPO]`. REF must be pushed.
+[positional-arguments]
+oss-scanner *args:
+    sh/oss-scanner.sh "$@"
 
 # Build the packages.
 build:

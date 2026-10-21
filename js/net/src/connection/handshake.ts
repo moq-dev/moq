@@ -29,6 +29,7 @@ export async function exchangeSetup(
 	early: Reader[];
 	solicit: boolean | undefined;
 	hidden: boolean;
+	maxAge: boolean;
 	activeCount: boolean;
 	cluster: Ietf.Cluster.Hops;
 	auth: boolean;
@@ -39,6 +40,7 @@ export async function exchangeSetup(
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
 	Extensions.intoSetup(params, extensions, version);
 	Ietf.hiddenIntoSetup(params);
+	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params, version);
 
 	// One id per session, like the moq-lite connection: nothing in this process forwards
@@ -67,6 +69,7 @@ export async function exchangeSetup(
 		early: received.early,
 		solicit: received.solicit,
 		hidden: received.hidden,
+		maxAge: received.maxAge,
 		activeCount: received.activeCount,
 		cluster: { self, peer: received.cluster },
 		// Negotiated only when both sides offer it.
@@ -99,6 +102,7 @@ async function receiveSetup(
 	early: Reader[];
 	solicit: boolean | undefined;
 	hidden: boolean;
+	maxAge: boolean;
 	activeCount: boolean;
 	cluster: Hop | undefined;
 	auth: boolean;
@@ -154,6 +158,7 @@ async function receiveSetup(
 		early,
 		solicit: Ietf.solicitFromSetup(setup.parameters),
 		hidden: Ietf.hiddenFromSetup(setup.parameters),
+		maxAge: Ietf.maxAgeFromSetup(setup.parameters),
 		activeCount: Ietf.activeCountFromSetup(setup.parameters, version),
 		cluster: Ietf.Cluster.fromSetup(setup.parameters, version),
 		auth: Ietf.Auth.fromSetup(setup.parameters, version) === true,

@@ -1,5 +1,6 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
+import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import * as Moq from "@moq/net";
 import { Origin, Path } from "@moq/net";
@@ -55,6 +56,84 @@ const video = (codec: string, broadcast?: string): Catalog.VideoConfig =>
 
 it("refuses the released reload input", () => {
 	expect(() => new Broadcast({ reload: true } as never)).toThrow("renamed to `announced`");
+});
+
+describe("unsupported catalog", () => {
+	it("reports an inline catalog needing a newer player and clears on replacement or disable", async () => {
+		const logged = spyOn(console, "error").mockImplementation(() => {});
+		const catalog = new Signal<Catalog.Root | undefined>({ version: Catalog.VERSION + 1 });
+		const enabled = new Signal(true);
+		const source = new Broadcast({ catalogFormat: "manual", catalog, enabled });
+		try {
+			await Promise.resolve();
+			expect(source.out.status.peek()).toBe("unsupported");
+			expect(source.out.catalog.peek()).toBeUndefined();
+			expect(source.out.error.peek()).toBeUndefined();
+
+			let changed = source.out.status.changed();
+			catalog.set({});
+			await changed;
+			expect(source.out.status.peek()).toBe("live");
+
+			changed = source.out.status.changed();
+			const cleared = source.out.catalog.changed();
+			catalog.set({ version: Catalog.VERSION + 1 });
+			await changed;
+			await cleared;
+			expect(source.out.status.peek()).toBe("unsupported");
+			expect(source.out.catalog.peek()).toBeUndefined();
+
+			changed = source.out.status.changed();
+			enabled.set(false);
+			await changed;
+			expect(source.out.status.peek()).toBe("offline");
+		} finally {
+			source.close();
+			logged.mockRestore();
+		}
+	});
+
+	for (const format of ["hang", "hangz"] as const) {
+		it(`reports a fetched ${format} catalog needing a newer player and clears stale media`, async () => {
+			const logged = spyOn(console, "error").mockImplementation(() => {});
+			const owner = new Origin.Producer();
+			const name = Path.from("room/live.hang");
+			const published = publish(owner, name);
+			const track = published.createTrack(format === "hang" ? Catalog.TRACK : Catalog.TRACK_COMPRESSED);
+			const producer = new Json.Snapshot.Producer<Catalog.Root>({
+				track,
+				deltaRatio: 0,
+				compression: format === "hangz" ? "deflate" : "none",
+			});
+			const enabled = new Signal(true);
+			const source = new Broadcast({ origin: owner, name, catalogFormat: format, enabled });
+			try {
+				const ready = source.out.catalog.changed();
+				producer.update({ value: {} });
+				await ready;
+				expect(source.out.status.peek()).toBe("live");
+
+				const rejected = source.out.status.changed();
+				const cleared = source.out.catalog.changed();
+				producer.update({ value: { version: Catalog.VERSION + 1 } });
+				await rejected;
+				await cleared;
+				expect(source.out.status.peek()).toBe("unsupported");
+				expect(source.out.catalog.peek()).toBeUndefined();
+				expect(source.out.error.peek()).toBeUndefined();
+
+				const disabled = source.out.status.changed();
+				enabled.set(false);
+				await disabled;
+				expect(source.out.status.peek()).toBe("offline");
+			} finally {
+				source.close();
+				producer.finish();
+				owner.close();
+				logged.mockRestore();
+			}
+		});
+	}
 });
 
 describe("relativeBroadcast", () => {
@@ -123,6 +202,9 @@ describe("relativeBroadcast", () => {
 			// The catalog is validated by an effect, which settles a microtask later.
 			await Promise.resolve();
 			expect(source.out.catalog.peek()).toBeUndefined();
+			expect(source.out.status.peek()).toBe(
+				logged instanceof Catalog.UnsupportedVersion ? "unsupported" : "loading",
+			);
 			return logged;
 		} finally {
 			console.error = error;
@@ -225,7 +307,7 @@ describe("blind resolution", () => {
 
 		// Stand in for a dynamic route answering the request.
 		const upstream = new Moq.Broadcast.Producer();
-		const route = owner.dynamic(Path.from("blind.hang"));
+		const route = owner.dynamicRoute(Path.from("blind.hang"));
 		const requests = route.requested();
 		const next = await requests.next();
 		expect(next.done).toBe(false);
@@ -337,7 +419,7 @@ describe("restart", () => {
 	it("moves to a more specific announcement of another instance", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
-		const pool = owner.dynamic(Path.from("pool"), { epoch: Moq.Epoch.mint() });
+		const pool = owner.dynamicRoute(Path.from("pool"), { epoch: Moq.Epoch.mint() });
 		const requests = pool.requested();
 		const upstream = new Moq.Broadcast.Producer();
 		void (async () => {
@@ -383,7 +465,7 @@ describe("restart", () => {
 		// The exact route goes, which ends the request on it, and the prefix arrives under the same
 		// epoch before the table is read again. The player still has to ask again.
 		exact.close();
-		const pool = owner.dynamic(Path.from("pool"), { epoch });
+		const pool = owner.dynamicRoute(Path.from("pool"), { epoch });
 		const requests = pool.requested();
 		const upstream = new Moq.Broadcast.Producer();
 		void (async () => {
@@ -405,7 +487,7 @@ describe("restart", () => {
 	it("falls back to a covering prefix when the exact route ends", async () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("pool/job.hang");
-		const pool = owner.dynamic(Path.from("pool"));
+		const pool = owner.dynamicRoute(Path.from("pool"));
 		const requests = pool.requested();
 		const upstream = new Moq.Broadcast.Producer();
 		void (async () => {
@@ -443,7 +525,7 @@ describe("refusal", () => {
 		const owner = new Origin.Producer();
 		const name = Path.from("room/live.hang");
 		const upstream = new Moq.Broadcast.Producer();
-		const first = owner.dynamic(Path.from("room"), { epoch: Moq.Epoch.mint() });
+		const first = owner.dynamicRoute(Path.from("room"), { epoch: Moq.Epoch.mint() });
 		const firstRequests = first.requested();
 		void (async () => {
 			for await (const request of firstRequests) request.accept(upstream);
@@ -453,7 +535,7 @@ describe("refusal", () => {
 		expect(source.out.active.peek()).toBeDefined();
 
 		// The restarted publisher refuses with the same code an ended instance reports.
-		const second = owner.dynamic(Path.from("room"), { epoch: Moq.Epoch.mint() });
+		const second = owner.dynamicRoute(Path.from("room"), { epoch: Moq.Epoch.mint() });
 		const refused = await second.requested().next();
 		refused.value?.reject(new Moq.Error.Stream(Moq.StreamCode.Unroutable, { message: "refused" }));
 		await settle();
@@ -491,7 +573,7 @@ describe("refusal", () => {
 	for (const announced of [true, false]) {
 		it(`reports a refusal until a fresh request (announced: ${announced})`, async () => {
 			const owner = new Origin.Producer();
-			const route = owner.dynamic(Path.from("room"));
+			const route = owner.dynamicRoute(Path.from("room"));
 			const requests = route.requested();
 			const name = new Signal(Path.from("room/refused.hang"));
 			const enabled = new Signal(true);
@@ -773,7 +855,7 @@ describe("wildcard renditions", () => {
 			await settle();
 			expect(videoRenditions(source)).toEqual(["source"]);
 
-			const worker = owner.dynamic(Path.from(".pro/transcode"));
+			const worker = owner.dynamicRoute(Path.from(".pro/transcode"));
 			const requests = worker.requested();
 			await settle();
 			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
@@ -822,8 +904,8 @@ describe("wildcard renditions", () => {
 
 		try {
 			// A catch-all (an archive) and a narrower pool both cover the derived path.
-			const archive = owner.dynamic(Path.empty());
-			const worker = owner.dynamic(Path.from(".pro/transcode"));
+			const archive = owner.dynamicRoute(Path.empty());
+			const worker = owner.dynamicRoute(Path.from(".pro/transcode"));
 			await settle();
 			expect(videoRenditions(source)).toEqual(["source", "transcode"]);
 

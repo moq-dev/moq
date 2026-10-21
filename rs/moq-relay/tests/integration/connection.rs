@@ -10,6 +10,63 @@ use crate::memory::{self, connect, newest};
 /// Long enough that only a hang reaches it; paused time skips straight there.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The relay preserves every legal QUIC-varint sequence, including values beyond
+/// JavaScript's exact number range, on each flavour used by the browser bindings.
+#[tokio::test(start_paused = true)]
+async fn largest_quic_sequence_reaches_the_subscriber() {
+	for alpn in ["moq-lite-02", "moq-lite-06", "moq-transport-19"] {
+		let version = alpn.parse().unwrap();
+		let auth = memory::public(&["**"], &[], &[]);
+		let cluster = memory::cluster();
+		let publisher = moq_tokio::origin::spawn();
+		let broadcast = publisher.create_broadcast("ladder").unwrap();
+		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
+		let track = broadcast.create_track("data", info).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let _publisher = connect(
+			moq_net::Client::new().with_publisher(publisher.consume()),
+			version,
+			&cluster,
+			&auth,
+		)
+		.await
+		.unwrap();
+		let subscriber = moq_tokio::origin::spawn();
+		let _subscriber = connect(
+			moq_net::Client::new().with_subscriber(subscriber.clone()),
+			version,
+			&cluster,
+			&auth,
+		)
+		.await
+		.unwrap();
+		tokio::time::timeout(TIMEOUT, subscriber.consume().routed("ladder"))
+			.await
+			.unwrap()
+			.unwrap();
+		let remote = subscriber.consume().request_broadcast("ladder", None).await.unwrap();
+		let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
+		for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
+			// Lite05/06 zigzag the first timestamp from zero, halving its positive range.
+			let timestamp = moq_net::Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap();
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
+			group.finish().unwrap();
+			let mut got = tokio::time::timeout(TIMEOUT, sub.recv_group())
+				.await
+				.unwrap_or_else(|_| panic!("{alpn} sequence={sequence} hung"))
+				.unwrap()
+				.unwrap();
+			assert_eq!(got.sequence, sequence, "{alpn}");
+			let frame = got.read_frame().await.unwrap().unwrap();
+			assert_eq!(frame.payload, b"ladder".as_ref());
+			if alpn != "moq-lite-02" {
+				assert_eq!(frame.timestamp, Some(timestamp));
+			}
+		}
+	}
+}
+
 /// A publisher of one broadcast holding one frame, kept alive by the returned handles.
 fn publish(
 	name: &str,
@@ -23,11 +80,11 @@ fn publish(
 	broadcast.announce(Default::default()).expect("announce");
 	let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
 	let track = broadcast.create_track("video", info).expect("create track");
-	track
-		.append_group()
-		.expect("append group")
+	let mut group = track.append_group().expect("append group");
+	group
 		.write_frame(moq_net::Timestamp::ZERO, name.as_bytes())
 		.expect("write frame");
+	group.finish().expect("finish group");
 	(origin, broadcast, track)
 }
 

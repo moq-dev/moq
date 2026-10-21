@@ -80,13 +80,13 @@ function watchDemand(state: BroadcastState, producer: track.Producer, lookups?: 
 		const used =
 			state.closed.peek() === undefined &&
 			demand.closed.peek() === undefined &&
-			((lookups?.pending ?? 0) > 0 || demand.used.peek());
+			((lookups?.pending ?? 0) > 0 || demand.wanted.peek() !== undefined);
 		if (active === used) return;
 		state.active += used ? 1 : -1;
 		active = used;
 		state.used.set(state.active > 0);
 	};
-	const disposeUsed = demand.used.subscribe(update);
+	const disposeUsed = demand.wanted.subscribe(update);
 	if (lookups) lookups.changed = update;
 	const disposeClosed = demand.closed.subscribe(() => {
 		if (demand.closed.peek() === undefined) return;
@@ -221,7 +221,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	let answered = false;
 	let ended = false;
 	const release = () => {
-		if (lookups.opened && lookups.pending === 0 && !producer.demand().used.peek()) producer.close();
+		if (lookups.opened && lookups.pending === 0 && producer.demand().wanted.peek() === undefined) producer.close();
 	};
 	info.then(
 		() => {
@@ -367,6 +367,11 @@ export class Producer {
 			producer.#announcer = announcer;
 		};
 		hooks.attachAnnouncer = attachAnnouncer;
+		hooks.withholdAnnouncer = (producer) => {
+			const announcer = producer.#announcer;
+			producer.#announcer = undefined;
+			return announcer;
+		};
 		stampProducer = (producer, path) => {
 			producer.#path = path;
 		};
@@ -456,7 +461,7 @@ export class Producer {
 	 * Call it once the tracks a subscriber needs first (a catalog) exist. Until then the
 	 * broadcast exists for nobody, on its own origin or at a peer. Retracts on
 	 * {@link unannounce} or {@link close}. Throws if this producer was not created through an
-	 * origin, or if the broadcast is already closed.
+	 * origin, is a claim answer still being prepared, or if the broadcast is already closed.
 	 */
 	announce(
 		route:

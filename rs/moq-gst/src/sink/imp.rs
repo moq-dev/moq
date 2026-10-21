@@ -2086,15 +2086,14 @@ mod tests {
 		sink.imp().post_session_error(&first, "old session failed".to_string());
 
 		assert!(
-			bus.timed_pop_filtered(gst::ClockTime::ZERO, &[gst::MessageType::Error])
-				.is_none(),
+			bus.pop_filtered(&[gst::MessageType::Error]).is_none(),
 			"the stopped session posted an error into its replacement"
 		);
 
 		sink.imp()
 			.post_session_error(&replacement, "current session failed".to_string());
 		let message = bus
-			.timed_pop_filtered(gst::ClockTime::ZERO, &[gst::MessageType::Error])
+			.pop_filtered(&[gst::MessageType::Error])
 			.expect("the current session posted its error");
 		let gst::MessageView::Error(error) = message.view() else {
 			unreachable!();

@@ -88,6 +88,7 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn driver::congestion::
 	match family {
 		CongestionControl::Loss => Arc::new(driver::congestion::CubicConfig::default()),
 		CongestionControl::Delay => Arc::new(driver::congestion::Bbr3Config::default()),
+		CongestionControl::None => Arc::new(driver::congestion::Unlimited),
 	}
 }
 
@@ -208,6 +209,10 @@ pub enum Error {
 	/// each reads back only its own encoding.
 	#[error("QUIC-LB connection IDs cannot be combined with per-core workers")]
 	ShardWithQuicLb,
+
+	/// The stateless reset secret file could not be read or does not hold 64 hexadecimal characters.
+	#[error("invalid stateless reset secret")]
+	ResetSecret(#[source] crate::secret::Error),
 
 	/// The mTLS client verifier could not be built from the configured roots.
 	#[error("failed to build client certificate verifier")]
@@ -798,8 +803,15 @@ impl Server {
 			.unwrap_or(crate::server::DEFAULT_BIND);
 		let load_balancer = config.load_balancer();
 
-		// Configure connection ID generator with server ID if provided
 		let mut endpoint_config = driver::EndpointConfig::default();
+		// First, since it also keys the default connection ID generator. The ones
+		// below validate a predecessor's IDs without it.
+		if let Some(secret) = &config.reset.secret {
+			let secret = crate::secret::Secret::read(secret).map_err(Error::ResetSecret)?;
+			endpoint_config.reset_secret(secret.as_bytes());
+		}
+
+		// Configure connection ID generator with server ID if provided
 		if let Some(shard) = member.as_ref().map(listen::Socket::shard) {
 			if load_balancer.is_some() {
 				return Err(Error::ShardWithQuicLb);
@@ -1212,6 +1224,9 @@ mod tests {
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
 		assert!(delay.into_any().downcast::<driver::congestion::Bbr3>().is_ok());
+
+		let none = congestion_factory(CongestionControl::None).build(now, mtu);
+		assert!(none.into_any().downcast::<driver::congestion::Unlimited>().is_ok());
 	}
 
 	/// Loopback regression test: with the knob unset, live QUIC connections must run

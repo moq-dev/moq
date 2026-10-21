@@ -344,21 +344,37 @@ The shared Rust benchmark nightly invocation measures both targets in quick mode
 
 ## Nightly trends
 
-The trend site will be at <https://moq-dev.github.io/moq/bench/> once the
-maintainer enables GitHub Pages with **Source: GitHub Actions**. The Nightly
-workflow keeps history on one `gh-pages` branch and deploys the generated
-`github-action-benchmark` charts explicitly. The publisher runs only on `main`,
-serializes history writes, and leaves regression alerts and comments disabled.
-Enabling Pages is a separate repository setting; merging the workflow does not
-change it. Until it is enabled, the Nightly's Benchmark site job still records
-history on `gh-pages`, then fails at deployment.
+<https://git.moq.dev/bench/> is one static table of every nightly series,
+linked from the [nightly reports](https://git.moq.dev/) root with every other
+report. Each row shows the newest value, its baseline, the change, and a
+sparkline of the last 30 nightly points. The baseline is the median of the
+previous 7 points. A change beyond both 10% of the baseline and 3 times those
+points' median absolute deviation is flagged, so each series' own noise sets its
+bar: red is worse and green is better, by the series' direction (time, CPU,
+size, and ratios lower; throughput higher). Flagged rows open at the top, worst
+first; everything else sits in a collapsed section per source, behind a text
+filter. A series with fewer than 8 points is grey.
 
-The charts include these measurements:
+A failed or cancelled source records no point, so its section is grey and
+marked stale with the date and commit of its last measurement; it is never
+flagged as tonight's result. A series missing from its source's newest run was
+retired and leaves the table. Re-runs of the same commit collapse to the latest
+point.
+
+The Nightly workflow keeps history on one `gh-pages` branch, where
+`github-action-benchmark` appends each night's points to `bench/{costs,rates}/data.js`
+with its alerts, comments, and charts unused. The publisher runs only on `main`,
+serializes history writes, renders the table from that history even when every
+source failed, and deploys the branch explicitly. Re-running its job in place
+fails, because the earlier attempt's `github-pages` artifact remains; delete
+that artifact first or wait for the next Nightly.
+
+The table includes these measurements:
 
 - Binding delivery in MB/s, process CPU in ms/MB, sync calls in ns, and each
   wrapper's ratio to `rust-ffi`. Ratios above 1 mean more cost than Rust on the
   same host, including for throughput, where the ratio is Rust/wrapper.
-- Rust Criterion mean ns per iteration, with the measured confidence interval.
+- Rust Criterion mean ns per iteration; the history also keeps the confidence interval.
   The `net-cpu` source and the moq-quic targets time thread CPU; the others
   time elapsed time. The Rust bench targets job measures them with a short warmup
   and Criterion's quick mode. Per-group benchmark settings can override the default warmup. Quick estimates
@@ -366,14 +382,23 @@ The charts include these measurements:
 - JS benchmark CSV time columns (`ns`, `us`, `ms`, and their per-operation
   variants), retaining every workload dimension in each series name.
 
-Hosted runners vary across nights. Raw trends are informational, and binding
-ratios compare languages within one run. A failed suite contributes no point;
-malformed, empty, nonfinite, or duplicate measurements fail validation. The
+Hosted runners vary across nights, so a flag prompts a paired local run rather
+than proving a regression. Binding ratios compare languages within one run.
+Malformed, empty, nonfinite, or duplicate measurements fail validation. The
 nightly artifacts retain the reports, raw JS output, and each Criterion run's
 metadata and estimates for 45 days. Relay load, audio quality, and the Rust
-benchmark tests job's nextest output do not enter these charts.
+benchmark tests job's nextest output do not enter the table.
 
-Reproduce the chart inputs locally:
+Render the table from the published history:
+
+```bash
+git fetch origin gh-pages
+git worktree add .scratch/pages origin/gh-pages
+nix develop --command just gh benchmark-report index .scratch/pages
+```
+
+Then open `.scratch/pages/bench/index.html`. Without `--commit`, the newest
+recorded commit counts as tonight's. Reproduce the measurements locally:
 
 ```bash
 nix develop --command just bench-ffi
@@ -395,6 +420,6 @@ and `outcome.json` containing `{ "status": "success" }`. Names must be unique
 within a source; dimensions belong in the name. Supported units are `ns`, `us`,
 `µs`, `ms`, `s`, `ms/MB`, `x`, `bytes`, `B`, `MiB`, `MB/s`, `MiB/s`, `B/s`,
 `ops/s`, and `frames/s`. Optional `range` and `extra` fields retain uncertainty
-and context. Validate and split sources into cost and throughput charts with
+and context. Validate and split sources into cost and throughput histories with
 `just gh benchmark-report prepare INPUT_DIRECTORY OUTPUT_DIRECTORY`; extending
-the site requires no new chart renderer or data branch.
+the table requires no new renderer or data branch.

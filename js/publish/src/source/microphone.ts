@@ -4,7 +4,7 @@ import { Device, type DeviceProps } from "./device";
 import { Retry } from "./retry";
 import type { Media } from "./types";
 
-// Signals the microphone reads.
+/** Signals the microphone reads. */
 export type MicrophoneInput = {
 	// Whether to hold the microphone open. Defaults to true. When false the track is stopped and `out.source` clears.
 	enabled: Getter<boolean>;
@@ -27,6 +27,7 @@ type MicrophoneOutput = {
 
 /** Captures audio from a microphone, tracking the available devices. */
 export class Microphone {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<MicrophoneInput>;
 
 	/** The available microphones and which one to use. */
@@ -39,6 +40,7 @@ export class Microphone {
 		source: new Signal<Media | undefined>(undefined),
 		error: new Signal<Error | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();

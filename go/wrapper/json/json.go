@@ -152,7 +152,29 @@ func (p *StreamProducer) Finish() error {
 	return p.inner.Finish()
 }
 
-// SnapshotConsumer receives the latest reconstructed JSON value.
+// Timed is a JSON value and the timestamp of the frame that carried it.
+type Timed struct {
+	// Value is the JSON document.
+	Value stdjson.RawMessage
+	// Timestamp is on the broadcast clock, or nil on an untimed track. It is rounded down
+	// to a whole microsecond, so a tick on a track like 90 kHz may not survive a read and
+	// republish exactly.
+	Timestamp *time.Duration
+}
+
+func timed(value *ffi.MoqJsonValue) *Timed {
+	if value == nil {
+		return nil
+	}
+	out := &Timed{Value: stdjson.RawMessage(value.Value)}
+	if value.TimestampUs != nil {
+		at := time.Duration(*value.TimestampUs) * time.Microsecond
+		out.Timestamp = &at
+	}
+	return out
+}
+
+// SnapshotConsumer receives each reconstructed JSON state.
 type SnapshotConsumer struct {
 	inner *ffi.MoqJsonSnapshotConsumer
 }
@@ -171,18 +193,23 @@ func NewSnapshotConsumer(track *moq.TrackConsumer, options ConsumerOptions) (*Sn
 	return &SnapshotConsumer{inner: inner}, nil
 }
 
-// Next returns the next JSON value, or nil when the track ends.
-func (c *SnapshotConsumer) Next(ctx context.Context) (*stdjson.RawMessage, error) {
+// Next returns the next state in order, or nil when the track ends. Groups older
+// than the subscription's MaxDelay are skipped, so a playhead reader sets that
+// budget to its distance behind live.
+func (c *SnapshotConsumer) Next(ctx context.Context) (*Timed, error) {
 	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
-	if err != nil || value == nil {
-		return nil, err
-	}
-	decoded := stdjson.RawMessage(*value)
-	return &decoded, nil
+	return timed(value), err
 }
 
-// All ranges over reconstructed JSON values until the track ends.
-func (c *SnapshotConsumer) All(ctx context.Context) iter.Seq2[*stdjson.RawMessage, error] {
+// Latest skips to the newest state, or waits for one; nil when the track ends.
+// Skipped states are gone, and Next continues after this one.
+func (c *SnapshotConsumer) Latest(ctx context.Context) (*Timed, error) {
+	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Latest)
+	return timed(value), err
+}
+
+// All ranges over each JSON state until the track ends.
+func (c *SnapshotConsumer) All(ctx context.Context) iter.Seq2[*Timed, error] {
 	return bridge.Seq(ctx, c.Next)
 }
 
@@ -210,17 +237,13 @@ func NewStreamConsumer(track *moq.TrackConsumer, options ConsumerOptions) (*Stre
 }
 
 // Next returns the next JSON record, or nil when the track ends.
-func (c *StreamConsumer) Next(ctx context.Context) (*stdjson.RawMessage, error) {
+func (c *StreamConsumer) Next(ctx context.Context) (*Timed, error) {
 	value, err := bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
-	if err != nil || value == nil {
-		return nil, err
-	}
-	decoded := stdjson.RawMessage(*value)
-	return &decoded, nil
+	return timed(value), err
 }
 
 // All ranges over every JSON record until the track ends.
-func (c *StreamConsumer) All(ctx context.Context) iter.Seq2[*stdjson.RawMessage, error] {
+func (c *StreamConsumer) All(ctx context.Context) iter.Seq2[*Timed, error] {
 	return bridge.Seq(ctx, c.Next)
 }
 

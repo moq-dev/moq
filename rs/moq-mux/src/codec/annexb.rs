@@ -1,30 +1,38 @@
 use bytes::{Buf, Bytes, BytesMut};
 
+/// The four-byte Annex B start code preceding a NAL unit.
 pub const START_CODE: Bytes = Bytes::from_static(&[0, 0, 0, 1]);
 
 /// Annex B parsing errors.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The buffer does not begin with an Annex B start code.
 	#[error("missing Annex B start code")]
 	MissingStartCode,
 
+	/// The start code has an invalid byte sequence.
 	#[error("invalid Annex B start code")]
 	InvalidStartCode,
 
+	/// The NAL length prefix size is outside one through four bytes.
 	#[error("invalid avc1/hvc1 length size {0}")]
 	InvalidLengthSize(usize),
 
+	/// A NAL length prefix or payload extends past the buffer.
 	#[error("truncated length-prefixed NAL unit")]
 	Truncated,
 
+	/// The NAL payload length does not fit a four-byte prefix.
 	#[error("NAL too large for a 4-byte length prefix")]
 	NalTooLarge,
 
+	/// A keyframe has neither an inline nor a retained parameter set of the named type.
 	#[error("keyframe has no {0}, in the access unit or earlier in the track")]
 	MissingParameterSet(&'static str),
 }
 
+/// A result using this module's error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// True when the buffer is an out-of-band config record (avcC / hvcC) rather than an
@@ -50,9 +58,23 @@ pub(crate) fn length_prefixed_nals(data: &[u8], length_size: usize) -> Result<Le
 }
 
 /// The iterator [`length_prefixed_nals`] returns.
+#[derive(Clone)]
 pub(crate) struct LengthPrefixedNals<'a> {
 	data: &'a [u8],
 	length_size: usize,
+}
+
+impl<'a> LengthPrefixedNals<'a> {
+	/// Take a leading access unit delimiter, which must stay ahead of injected parameter sets.
+	pub(crate) fn take_delimiter(&mut self, codec: InBandCodec) -> Result<Option<&'a [u8]>> {
+		if let Some(nal) = self.clone().next().transpose()?
+			&& !nal.is_empty()
+			&& codec.nal_type(nal) == codec.delimiter()
+		{
+			return self.next().transpose();
+		}
+		Ok(None)
+	}
 }
 
 impl<'a> Iterator for LengthPrefixedNals<'a> {
@@ -79,19 +101,29 @@ impl<'a> Iterator for LengthPrefixedNals<'a> {
 }
 
 /// Convert a length-prefixed NALU payload (avc1 / hvc1 wire shape) to Annex-B,
-/// optionally prepending `prefix` bytes (typically VPS/SPS/PPS NAL units already
-/// in Annex-B form, for keyframe parameter-set injection).
+/// injecting `prefix` bytes (typically VPS/SPS/PPS NAL units already in Annex-B
+/// form) after a leading access unit delimiter, or before the other NAL units.
 pub fn from_length_prefixed(payload: &[u8], length_size: usize, prefix: Option<&[u8]>) -> Result<Bytes> {
 	let mut out = BytesMut::with_capacity(payload.len() + prefix.map(|p| p.len()).unwrap_or(0) + 16);
-	if let Some(p) = prefix {
-		out.extend_from_slice(p);
+	let mut nals = length_prefixed_nals(payload, length_size)?;
+	if let Some(prefix) = prefix {
+		let codec = after_start_code(prefix)
+			.ok()
+			.flatten()
+			.and_then(|start| prefix.get(start))
+			.and_then(|&header| InBandCodec::of_parameter_set(header));
+		if let Some(codec) = codec
+			&& let Some(aud) = nals.take_delimiter(codec)?
+		{
+			out.extend_from_slice(&START_CODE);
+			out.extend_from_slice(aud);
+		}
+		out.extend_from_slice(prefix);
 	}
-
-	for nal in length_prefixed_nals(payload, length_size)? {
+	for nal in nals {
 		out.extend_from_slice(&START_CODE);
 		out.extend_from_slice(nal?);
 	}
-
 	Ok(out.freeze())
 }
 
@@ -136,6 +168,18 @@ impl InBandCodec {
 		match self {
 			Self::H264 => &[(7, "SPS"), (8, "PPS")],
 			Self::H265 => &[(32, "VPS"), (33, "SPS"), (34, "PPS")],
+		}
+	}
+
+	/// The codec whose parameter-set NAL begins with `header`.
+	///
+	/// NAL headers overlap between codecs (an H.265 slice can look like an H.264 AUD), so
+	/// only a parameter set identifies one.
+	fn of_parameter_set(header: u8) -> Option<Self> {
+		match (header & 0x1f, (header >> 1) & 0x3f) {
+			(7 | 8, _) => Some(Self::H264),
+			(_, 32..=34) => Some(Self::H265),
+			_ => None,
 		}
 	}
 
@@ -276,12 +320,14 @@ pub(crate) fn reconcile_keyframe_params(chunks: &mut BytesMut, retained: &mut Ve
 	}
 }
 
+/// Iterates complete Annex B NAL units, leaving an unterminated final unit for `flush`.
 pub struct NalIterator<'a, T: Buf + AsRef<[u8]> + 'a> {
 	buf: &'a mut T,
 	start: Option<usize>,
 }
 
 impl<'a, T: Buf + AsRef<[u8]> + 'a> NalIterator<'a, T> {
+	/// Read NAL units from a buffer that begins with an Annex B start code.
 	pub fn new(buf: &'a mut T) -> Self {
 		Self { buf, start: None }
 	}
@@ -339,7 +385,7 @@ pub fn length_prefixed_to_annexb(data: &[u8], length_size: usize, out: &mut Vec<
 	Ok(())
 }
 
-// Return the size of the start code at the start of the buffer.
+/// Return the leading start code size, or `None` if more bytes are needed.
 pub fn after_start_code(b: &[u8]) -> Result<Option<usize>> {
 	if b.len() < 3 {
 		return Ok(None);
@@ -359,7 +405,7 @@ pub fn after_start_code(b: &[u8]) -> Result<Option<usize>> {
 	}
 }
 
-// Return the number of bytes until the next start code, and the size of that start code.
+/// Return the byte offset and size of the first start code in the buffer.
 //
 // Both forms share the `0 0 1` suffix (3-byte is `0 0 1`, 4-byte is `0 0 0 1`), so a single
 // SIMD-accelerated substring search for `0 0 1` finds the core. We then peek one byte back to
@@ -412,21 +458,60 @@ mod tests {
 	}
 
 	#[test]
-	fn from_length_prefixed_multiple_nals_with_prefix() {
-		// Two NALs in one frame: AUD then IDR slice. Prefix gets prepended once.
-		let prefix = build_prefix([&Bytes::from_static(&[0x67, 0x42])]);
-		let payload = &[
-			0, 0, 0, 2, 0x09, 0x10, // AUD
-			0, 0, 0, 2, 0x65, 0x88, // IDR slice
-		];
-		let out = from_length_prefixed(payload, 4, Some(&prefix)).unwrap();
+	fn from_length_prefixed_keeps_aud_first() {
+		for (params, aud, slice) in [
+			(
+				vec![vec![0x67, 0x42], vec![0x68, 0xce]],
+				vec![0x09, 0x10],
+				vec![0x65, 0x88],
+			),
+			(
+				vec![vec![0x40, 1], vec![0x42, 1], vec![0x44, 1]],
+				vec![0x46, 1, 0x10],
+				vec![0x26, 1, 0x88],
+			),
+		] {
+			let params: Vec<Bytes> = params.into_iter().map(Bytes::from).collect();
+			let prefix = build_prefix(&params);
+			for length_size in 1..=4 {
+				for leading in [None, Some(aud.as_slice())] {
+					let mut payload = Vec::new();
+					for nal in leading.into_iter().chain([slice.as_slice()]) {
+						payload.extend_from_slice(&(nal.len() as u32).to_be_bytes()[4 - length_size..]);
+						payload.extend_from_slice(nal);
+					}
+					let mut expected = Vec::new();
+					if let Some(aud) = leading {
+						expected.extend_from_slice(&START_CODE);
+						expected.extend_from_slice(aud);
+					}
+					expected.extend_from_slice(&prefix);
+					expected.extend_from_slice(&START_CODE);
+					expected.extend_from_slice(&slice);
+					let out = from_length_prefixed(&payload, length_size, Some(&prefix)).unwrap();
+					assert_eq!(out.as_ref(), expected.as_slice());
+					let mut without_prefix = Vec::new();
+					for nal in leading.into_iter().chain([slice.as_slice()]) {
+						without_prefix.extend_from_slice(&START_CODE);
+						without_prefix.extend_from_slice(nal);
+					}
+					assert_eq!(
+						from_length_prefixed(&payload, length_size, None).unwrap(),
+						without_prefix
+					);
+				}
+			}
+		}
+	}
 
-		// Single prefix followed by both NALs in Annex-B order.
-		let mut expected = Vec::new();
-		expected.extend_from_slice(&prefix);
-		expected.extend_from_slice(&[0, 0, 0, 1, 0x09, 0x10]); // AUD
-		expected.extend_from_slice(&[0, 0, 0, 1, 0x65, 0x88]); // IDR
-		assert_eq!(out.as_ref(), expected.as_slice());
+	#[test]
+	fn from_length_prefixed_distinguishes_codec_headers() {
+		// H.265 TSA_N with nuh_layer_id 32 has the same first byte as an H.264 AUD.
+		let prefix = build_prefix([&Bytes::from_static(&[0x40, 1])]);
+		let payload = &[0, 0, 0, 3, 0x09, 1, 0x80];
+		let mut expected = prefix.to_vec();
+		expected.extend_from_slice(&[0, 0, 0, 1, 0x09, 1, 0x80]);
+		assert_eq!(from_length_prefixed(payload, 4, Some(&prefix)).unwrap(), expected);
 	}
 
 	#[test]

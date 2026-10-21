@@ -55,15 +55,6 @@ fn ecn_from_quic(ecn: moq_quic::EcnCodepoint) -> udp::Ecn {
 	}
 }
 
-/// Map a moq-quic deadline onto the worker's timers.
-///
-/// moq-quic counts on moq-clock's instants while the worker's timers still take
-/// std's, until the worker becomes a moq-clock backend. A deadline already past
-/// maps to now, which fires at once either way.
-fn to_std(at: moq_clock::Instant) -> std::time::Instant {
-	std::time::Instant::now() + at.saturating_duration_since(moq_clock::Instant::now())
-}
-
 impl From<moq_quic::ConnectionError> for Error {
 	fn from(err: moq_quic::ConnectionError) -> Self {
 		use moq_quic::ConnectionError;
@@ -100,10 +91,17 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 		.clone()
 }
 
-/// The endpoint-wide configuration: how connection ids are minted, and the
-/// largest datagram we tell peers we can receive.
-pub(crate) fn endpoint_config(shard: Option<moq_sock::shard::Shard>) -> Result<Arc<moq_quic::EndpointConfig>, Error> {
+/// The endpoint-wide configuration: how connection ids are minted, the reset
+/// key, and the largest datagram we tell peers we can receive.
+pub(crate) fn endpoint_config(
+	shard: Option<moq_sock::shard::Shard>,
+	reset_secret: Option<&[u8; 32]>,
+) -> Result<Arc<moq_quic::EndpointConfig>, Error> {
 	let mut config = moq_quic::EndpointConfig::default();
+	// The random ids below validate a predecessor's too, so the reset reaches them.
+	if let Some(secret) = reset_secret {
+		config.reset_secret(secret);
+	}
 	// The steering filter recognizes short headers by their fixed bit.
 	config.grease_quic_bit(shard.is_none());
 	// moq-quic asks its generator for every id it issues, dials and rotations
@@ -288,6 +286,7 @@ fn transport_config(config: &Transport) -> Result<moq_quic::TransportConfig, Err
 		Congestion::Loss => Arc::new(moq_quic::congestion::CubicConfig::default())
 			as Arc<dyn moq_quic::congestion::ControllerFactory + Send + Sync>,
 		Congestion::Delay => Arc::new(moq_quic::congestion::Bbr3Config::default()),
+		Congestion::None => Arc::new(moq_quic::congestion::Unlimited),
 	});
 	Ok(transport)
 }

@@ -55,6 +55,9 @@ pub struct Frame {
 pub(crate) struct Object {
 	pub frame: Frame,
 	pub fields: Option<Arc<super::object::Fields>>,
+	/// The inflated size of a compressed frame read in its stored form (see
+	/// [`group::Consumer::compressed`]), whose `payload` is then the DEFLATE slice.
+	pub inflated: Option<u64>,
 }
 
 #[cfg(feature = "async")]
@@ -70,11 +73,18 @@ impl std::ops::Deref for Object {
 pub(crate) struct Header {
 	pub info: Info,
 	pub fields: Option<Arc<super::object::Fields>>,
+	/// A received compressed frame's inflated size: `info.size` is then its DEFLATE
+	/// slice's. `None` for a plain frame, or one a local producer compresses itself.
+	pub inflated: Option<u64>,
 }
 
 impl From<Info> for Header {
 	fn from(info: Info) -> Self {
-		Self { info, fields: None }
+		Self {
+			info,
+			fields: None,
+			inflated: None,
+		}
 	}
 }
 
@@ -431,11 +441,13 @@ impl FrameBuf {
 /// The writer behind [`Producer`] and [`ProducerOwned`], generic over how it
 /// reaches the parent group (an exclusive borrow, or an owned clone).
 struct Raw<G: std::borrow::BorrowMut<group::Producer>> {
-	group: G,
+	group: Option<G>,
 	buf: FrameBuf,
 	info: Info,
 	// Set once the frame is committed (finished) or aborted, so Drop is a no-op.
 	done: bool,
+	// An owned receive frame carries its handler's cancellation cleanup across polls.
+	cancel_on_drop: bool,
 	// Ingress payload meter, inherited from the parent group. Counts each written
 	// chunk's bytes. Empty (no-op) for an untagged group.
 	stats: stats::Meter,
@@ -475,16 +487,24 @@ impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
 			return Err(Error::WrongSize);
 		}
 		let payload = self.buf.freeze();
-		self.group.borrow_mut().frame_commit(Frame {
-			timestamp: self.info.timestamp,
-			payload,
-		})?;
+		self.group
+			.as_mut()
+			.expect("frame owns its group")
+			.borrow_mut()
+			.frame_commit(Frame {
+				timestamp: self.info.timestamp,
+				payload,
+			})?;
 		self.done = true;
 		Ok(())
 	}
 
 	fn abort(&mut self, err: Error) -> Result<()> {
-		self.group.borrow_mut().frame_abort(err);
+		self.group
+			.as_mut()
+			.expect("frame owns its group")
+			.borrow_mut()
+			.frame_abort(err);
 		self.done = true;
 		Ok(())
 	}
@@ -497,14 +517,21 @@ impl<G: std::borrow::BorrowMut<group::Producer>> Drop for Raw<G> {
 			// consumers surface an error instead of hanging on the partial forever.
 			// A group already aborted (superseded, evicted, cancelled) carries its own
 			// reason, so cutting its in-flight frame short is expected.
-			let group = self.group.borrow_mut();
-			if !group.is_aborted() {
+			let Some(group) = self.group.as_mut() else {
+				return;
+			};
+			let group = group.borrow_mut();
+			if !group.is_aborted() && !self.cancel_on_drop {
 				tracing::warn!(
 					group = group.info().sequence,
 					"frame::Producer dropped before writing all bytes"
 				);
 			}
-			group.frame_abort(Error::Dropped);
+			group.frame_abort(if self.cancel_on_drop {
+				Error::Cancel
+			} else {
+				Error::Dropped
+			});
 		}
 	}
 }
@@ -532,10 +559,11 @@ impl std::ops::Deref for Producer<'_> {
 impl<'a> Producer<'a> {
 	pub(super) fn new(group: &'a mut group::Producer, buf: FrameBuf, info: Info) -> Self {
 		Self(Raw {
-			group,
+			group: Some(group),
 			buf,
 			info,
 			done: false,
+			cancel_on_drop: false,
 			stats: stats::Meter::default(),
 		})
 	}
@@ -548,7 +576,7 @@ impl<'a> Producer<'a> {
 
 	/// The parent group this frame belongs to.
 	pub fn group(&self) -> group::Info {
-		self.0.group.info()
+		self.0.group.as_ref().expect("frame owns its group").info()
 	}
 
 	/// Bytes still needed to complete the frame.
@@ -561,7 +589,7 @@ impl<'a> Producer<'a> {
 	/// Returns [`Error::WrongSize`] if the chunk would exceed the remaining bytes.
 	pub fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
 		self.0.write(chunk)?;
-		self.0.group.frame_notify();
+		self.0.group.as_mut().expect("frame owns its group").frame_notify();
 		Ok(())
 	}
 
@@ -581,9 +609,8 @@ impl<'a> Producer<'a> {
 /// The owned counterpart of [`Producer`], for the wire drivers that stream a
 /// frame across polls and cannot hold the group borrowed inside their state.
 ///
-/// Crate-private on purpose: the exclusivity the public borrow enforces (one
-/// live frame per group) becomes the holder's promise here. Do not open another
-/// frame on the group until this one is finished or aborted.
+/// Owns the only group writer until the frame finishes and returns it, so another
+/// frame or a group finish cannot race this frame.
 ///
 /// Holds the frame's share of the session's [`Budget`], if it got one, until then.
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
@@ -602,14 +629,24 @@ impl std::ops::Deref for ProducerOwned {
 }
 
 impl ProducerOwned {
+	/// Transfer a receive handler's cancellation cleanup into its in-flight frame.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: capability gap
+	// Public drivers still borrow frames; the owned public writer belongs to ingest.
+	pub(crate) fn cancel_on_drop(mut self) -> Self {
+		self.raw.cancel_on_drop = true;
+		self
+	}
+
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(super) fn new(group: group::Producer, buf: FrameBuf, info: Info, reserved: Option<Reservation>) -> Self {
 		Self {
 			raw: Raw {
-				group,
+				group: Some(group),
 				buf,
 				info,
 				done: false,
+				cancel_on_drop: false,
 				stats: stats::Meter::default(),
 			},
 			_reserved: reserved,
@@ -647,13 +684,14 @@ impl ProducerOwned {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: tuning
 	pub(crate) fn notify(&self) {
-		self.raw.group.frame_notify();
+		self.raw.group.as_ref().expect("frame owns its group").frame_notify();
 	}
 
 	/// Commit the frame, verifying that all bytes were written.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn finish(mut self) -> Result<()> {
-		self.raw.finish()
+	pub fn finish(mut self) -> Result<group::Producer> {
+		self.raw.finish()?;
+		Ok(self.raw.group.take().expect("frame owns its group"))
 	}
 
 	/// Abort the frame (and its group) with the given error.
@@ -722,6 +760,11 @@ pub struct Consumer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
 	pub(crate) fields: Option<Arc<super::object::Fields>>,
+	/// The inflated size of a compressed frame read in its stored form (see
+	/// [`group::Consumer::compressed`]), whose payload is then the DEFLATE slice.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) inflated: Option<u64>,
 	source: Source,
 	// Byte offset consumed so far.
 	read_idx: usize,
@@ -751,6 +794,7 @@ impl Consumer {
 			state,
 			info: header.info,
 			fields: header.fields,
+			inflated: header.inflated,
 			source,
 			read_idx: 0,
 			stats: stats::Meter::default(),
@@ -808,6 +852,11 @@ impl Consumer {
 			if let Some(expiry) = &mut self.expiry {
 				expiry.policy = expiry.policy.for_track(&replacement.copy);
 			}
+			// A stored compressed frame continues from the replacement's stored form, where
+			// the byte offset means the same thing.
+			if self.inflated.is_some() {
+				replacement.group = replacement.group.compressed();
+			}
 			let frame = match replacement.group.poll_next_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => frame,
 				Poll::Ready(Ok(None)) => return Poll::Ready(Err(Error::WrongSize)),
@@ -825,7 +874,7 @@ impl Consumer {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
 			// Same name, same content: a different size is the routes disagreeing.
-			if frame.info.size != self.info.size {
+			if frame.info.size != self.info.size || frame.inflated != self.inflated {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
 			recover.adopt(&replacement);

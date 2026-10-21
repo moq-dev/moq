@@ -3,8 +3,8 @@
 Cross-language interop test that builds every client from **this checkout**
 and runs them against each other.
 
-This is the in-tree companion to [moq-dev/smoke](https://github.com/moq-dev/smoke).
-That repo installs each client from its public package registry (crates.io, PyPI,
+This is the in-tree companion to [`test/smoke`](../smoke).
+That suite installs each client from its public package registry (crates.io, PyPI,
 npm, ...) to catch *packaging* breakage in a release. This one builds each client
 from the workspace source (`cargo`, `bun`, `uv`, `cc`) to catch *interop*
 regressions before anything is published. No apt/brew/npm/PyPI, and no
@@ -111,7 +111,7 @@ until moq-ffi exposes one, and the browser's shared connection keeps its session
 private, so their cells check media alone. AUTH is only on the work-in-progress
 moq-lite-07, so the printing clients dial `moq-lite-07-wip` alone and a printing
 client that reports nothing never got its grant. The native JS subscribers dial
-WebTransport alone, since the WebSocket fallback cannot offer it. The rest keep
+WebTransport alone and offer it there. The rest keep
 their defaults, so the matrix also crosses versions through the relay, which
 accepts both.
 
@@ -245,6 +245,15 @@ cannot publish it. Capabilities are measured on every run rather than assumed
 from an engine name. Playwright WebKit is not Safari; Safari device/transport
 bugs and real Firefox transport negotiation still require manual evidence.
 
+Firefox only resumes Web Audio on an output device, so each Linux run gets a
+private null sink from `test/lib/pulse.py`. Chromium plays to its fake output instead,
+with or without a host sound server.
+
+Nightly runs the Firefox player only. Playwright's Linux WebKit 27.2 fails two
+cases: its VP8 decoder keeps reporting the first coded size after an in-band
+resize, failing coded-size growth, and detaching logs a WebSocket "Connection
+reset by peer" console error that is not yet root-caused.
+
 The publisher is a fixture, not a fake camera: a canvas painting a frame counter
 as black/white blocks, and a tone stepping through a fixed frequency table. Both
 are indexed off one `AudioContext` clock, so the subscriber can read the frame it
@@ -359,7 +368,7 @@ clients/
 ## CI
 
 `.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
-PRs that touch `test/interop/`). A red cell means a real interop break in the
+release PRs that touch `test/interop/`). A red cell means a real interop break in the
 current tree.
 
 ## Subscription termination
