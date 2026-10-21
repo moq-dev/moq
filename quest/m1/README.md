@@ -58,7 +58,6 @@ lands before the cut.
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [TS qmux in the monorepo](/quest/m1/ts-qmux.md) - `@moq/qmux` moves into `js/` and `js/net` stops depending on moq-dev/web-transport
 - [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - qmux runs in-tree over `moq-quic`'s stream state machine, returning credit for every byte and delivering its close frame
-- [Drop moq-native's noq feature](/quest/m1/native-noq-feature.md) - the empty default `noq` feature is removed
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
 - [Refresh](/quest/m1/refresh/README.md) - a join asks for a fresh group once the current group's deltas exceed a publisher-advertised byte ratio, at every hop; replaces `Demand::used`/`unused` and moq-json's `delta_ratio`
