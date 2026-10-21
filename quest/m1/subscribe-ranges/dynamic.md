@@ -38,8 +38,9 @@ Decided by the maintainer on 2026-10-20, when the quest was first started
 
 - **Split.** This quest replaces `requested_group`; removing `fetch_group`
   is [fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md), so each
-  PR breaks one API once. That half needs head fills, which
-  [frame bounds](/quest/m1/subscribe-ranges/frame-bounds.md) provides.
+  PR breaks one API once. That half needs head fills for a range starting
+  mid-group, which build on frame bounds
+  ([moq-dev/moq#6129](https://github.com/moq-dev/moq/pull/6129)).
 - **Handler shape.** `Dynamic::requested_fill` yields a `track::Fill` naming
   one bounded run: `start: Position`, exclusive end group, priority, the most
   tolerant budget among its readers, and order. Each reader's cursor still
@@ -89,6 +90,9 @@ Decided by the maintainer on 2026-10-20, when the quest was first started
   splits each fill into its per-group requests internally, keeping its ABI
   unchanged, and maps `moq_subscription.max_delay_us` to `Some`: a frozen C
   subscriber cannot ask for max-age alone, as today. Not a blocker.
+- **Bench.** Fills fan out, so add a fill bench swept over both axes,
+  subscribers x misses, so a cost that grows with either shows up as a slope
+  (decided 2026-10-21).
 
 ## Related
 

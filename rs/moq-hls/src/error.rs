@@ -135,6 +135,15 @@ pub enum Error {
 	/// I/O error while reading a local playlist or segment.
 	#[error("io: {0}")]
 	Io(std::sync::Arc<std::io::Error>),
+
+	/// An export timeline failed, so its listings refuse rather than read as a finished recording.
+	#[error("timeline {track} failed: {source}")]
+	TimelineFailed {
+		/// The timeline's track name.
+		track: String,
+		/// Why the timeline failed.
+		source: Box<Error>,
+	},
 }
 
 impl Error {

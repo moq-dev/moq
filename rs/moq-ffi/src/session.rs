@@ -1,7 +1,10 @@
+//! Connect to peers and manage MoQ sessions.
+
 use std::sync::Arc;
 
 use url::Url;
 
+use crate::auth::MoqAuth;
 use crate::bandwidth::MoqBandwidth;
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -927,6 +930,7 @@ impl Accepted {
 	}
 }
 
+/// A connection that exchanges broadcasts with a peer.
 #[derive(uniffi::Object)]
 pub struct MoqSession {
 	inner: Inner,
@@ -1147,6 +1151,20 @@ impl MoqSession {
 	/// an unlimited allocator, which reports `None` for every reservation.
 	pub fn bandwidth(&self) -> Arc<MoqBandwidth> {
 		self.bandwidth.clone()
+	}
+
+	/// The session's authorization: the grant its peer gave it, and more tokens to present.
+	///
+	/// Every call returns a new handle sharing the session's tokens, which tracks its own
+	/// [`grant_changed`](MoqAuth::grant_changed), so concurrent watchers each take one. A client
+	/// session's handle survives reconnects, presenting each added token again on every new
+	/// connection.
+	pub fn auth(&self) -> Arc<MoqAuth> {
+		Arc::new(MoqAuth::new(match &self.inner {
+			#[cfg(not(target_arch = "wasm32"))]
+			Inner::Connection(connection) => crate::auth::Handle::Connection(connection.auth()),
+			Inner::Session(session) => crate::auth::Handle::Session(session.auth()),
+		}))
 	}
 
 	/// Hold receive-estimate demand until the returned consumer is released.
