@@ -550,8 +550,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			Some(size) => entry.producer.insert_deflated_datagram(datagram, size)?,
 			None => entry.producer.insert_wire_datagram(datagram)?,
 		}
-		// Lite-07's SUBSCRIBE_START says where the feed is; see `GroupRecv`.
-		if !live && !self.version.has_largest() {
+		// A datagram-only feed may never answer with SUBSCRIBE_START, which waits for a group.
+		if !live {
 			entry.producer.set_live(Some(Position::group(dg.sequence)), None);
 		}
 		Ok(())
