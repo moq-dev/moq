@@ -418,6 +418,7 @@ pub struct Descriptor {
 #[non_exhaustive]
 pub struct Ext {
 	#[serde(default, skip_serializing_if = "Mpegts::is_empty")]
+	/// MPEG-TS program, stream, and descriptor metadata.
 	pub mpegts: Mpegts,
 }
 

@@ -21,6 +21,12 @@ namespace prefix is illegal before draft 16), so a link to a peer without the
 MoQ Solicit extension, such as moxygen, learns only what that peer announces
 unasked. moxygen announces nothing unasked on draft 14.
 
+A track from a moq-transport publisher keeps its Object IDs, object properties,
+and END\_OF\_GROUP status objects across a moq-lite-07 link, since relays
+always offer the [ietf extension](/draft/moq-ietf) that carries them. Over an
+older moq-lite link they are lost: a moq-transport subscriber behind it sees
+consecutive objects with no properties.
+
 When a moq-lite-04 or later peer withdraws a broadcast, the routes relayed
 through it go with it at once. A change of best route is announced after
 300 ms, so stale paths are retracted once instead of advertised in turn;
@@ -48,6 +54,8 @@ worker.
 
 Failover routes must carry copies of one publisher's broadcast. Independent
 importers use distinct epochs and switch as a restart, even when fed one stream.
+See [Redundant ingest](/setup/redundancy) to choose between publisher switching,
+subscriber selection, and several routes to one publisher.
 A source whose track differs in timescale, retention, publisher priority, or
 group order is refused for that track.
 
@@ -176,7 +184,7 @@ node = "us-west.local:4443"
 
 [cluster.lan]
 enabled = true
-# secret = "/etc/moq/cluster.key"     # Optional. 64 hex chars, or a file holding them.
+# secret = "/etc/moq/cluster.key"     # Optional. A file holding 64 hex chars (openssl rand -hex 32).
 # app = "default"                     # DNS-SD subtype; moq-cli shares this name.
 ```
 

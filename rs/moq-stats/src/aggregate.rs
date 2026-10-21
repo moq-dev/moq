@@ -354,6 +354,7 @@ impl Mergeable for Traffic {
 			|| self.frames < prev.frames
 			|| self.groups < prev.groups
 			|| self.datagrams < prev.datagrams
+			|| self.inflated < prev.inflated
 			|| self.stale.bytes < prev.stale.bytes
 			|| self.stale.frames < prev.stale.frames
 			|| self.stale.groups < prev.stale.groups
@@ -925,9 +926,9 @@ fn advance<V: Mergeable>(
 				}
 				Poll::Pending => return changed,
 			},
-			Reader::Active(reader) => match reader.poll_next(waiter) {
+			Reader::Active(reader) => match reader.poll_latest(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
-					node.observe(frame);
+					node.observe(frame.value);
 					changed = true;
 				}
 				// The subscription ended: the serving session died (a failover to
@@ -1457,11 +1458,11 @@ mod tests {
 				let mut warm = moq_json::snapshot::Consumer::<TrafficFrame>::new(subscriber, Default::default());
 				let frame = futures::executor::block_on(kio::wait(|waiter| {
 					driver.poll(now, waiter).unwrap();
-					warm.poll_next(waiter)
+					warm.poll_latest(waiter)
 				}))
 				.unwrap()
 				.unwrap();
-				assert_eq!(frame["acme/room"].bytes, 30);
+				assert_eq!(frame.value["acme/room"].bytes, 30);
 				ready.wait();
 				release.wait();
 				(new, front, warm, driver)

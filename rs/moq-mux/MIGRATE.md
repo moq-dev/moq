@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `ts::stats::Export`'s release counters move into `release` (#5849)
+
+`dropped`, `trimmed`, `gaps`, `drift`, and `out_of_tolerance` are now fields of `Export::release`, a `ts::stats::Release`, which `ts::Release::stats` also returns on its own.
+Read `export.release.dropped` where you read `export.dropped`, and likewise for the rest.
+
+### Catalog read errors use `hang`'s variants (#6114)
+
+`catalog::hang::Consumer` reports a lost catalog track as `Error::Moq` instead of `Error::Json(moq_json::Error::Net(_))`, and any other catalog decode failure (such as a bad DEFLATE stream) as `Error::Hang(hang::Error::Json(_))` instead of `Error::Json(_)`.
+Match `Error::Moq` to detect a lost source.
+
+### JSON and binary consumers return `Timed<T>` (#5677)
+
+The `json` and `binary` consumers' `next` / `poll_next` return `moq_net::Timed<T>`; read `.value` and the optional `.at`.
+On a snapshot track `next` yields every state; call `latest` / `poll_latest` for the newest. `latest` on a stream track fails with `UnsupportedMode`.
+
 ### `ts::Passthrough` describes the whole track in its `m2ts` section (#5967)
 
 The section's `randomAccess` turns false at the first group that does not start at a random access point and stays false, instead of recovering with the next two-second window; its `muxRate` follows the source's measured rate.

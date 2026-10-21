@@ -118,6 +118,8 @@ moq-auth = { workspace = true, features = ["serve"] }
 moq-clock = { workspace = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
+# Writes and reads the stats and feedback snapshots.
+moq-json = { workspace = true }
 # Names the MSF catalog track `export archive` records.
 moq-msf = { workspace = true }
 moq-mux = { workspace = true }
@@ -143,15 +145,13 @@ tokio = { workspace = true, features = ["full"] }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-usage = { workspace = true, features = ["completions", "config"] }
+usage-rs = { workspace = true, features = ["completions", "config"] }
 winit = { version = "0.30.13", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 sd-notify = { workspace = true }
 
 [dev-dependencies]
-# Decodes the timeline the archive round-trip test checks.
-moq-json = { path = "../moq-json" }
 # `test_relay` stands up a real relay for the `fetch` and `announced` tests to read through.
 moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
 # The scripted RTSP server `import rtsp` pulls from.

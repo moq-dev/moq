@@ -721,7 +721,7 @@ fn source_lost(err: &moq_net::Error) -> bool {
 /// [`source_lost`] for a catalog read, where anything but a transport failure is malformed.
 fn catalog_lost(err: &moq_mux::Error) -> bool {
 	match err {
-		moq_mux::Error::Moq(err) | moq_mux::Error::Json(moq_json::Error::Net(err)) => source_lost(err),
+		moq_mux::Error::Moq(err) => source_lost(err),
 		_ => false,
 	}
 }
@@ -2956,7 +2956,7 @@ mod session_tests {
 
 		let mut old = Publisher::standalone(video_rendition());
 		let serving = std::sync::Arc::new(Mutex::new(old.broadcast.consume()));
-		let pool = std::sync::Arc::new(origin.dynamic("", epoch()).unwrap());
+		let pool = std::sync::Arc::new(origin.dynamic_route("", epoch()).unwrap());
 		let (handler, answer) = (pool.clone(), serving.clone());
 		let handler = super::RUNTIME.spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
@@ -2969,7 +2969,7 @@ mod session_tests {
 
 		let mut new = Publisher::standalone(video_rendition());
 		*serving.lock().unwrap() = new.broadcast.consume();
-		pool.update(epoch()).unwrap();
+		pool.update_route(epoch()).unwrap();
 		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
 
 		stop(session);

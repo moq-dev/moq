@@ -17,7 +17,11 @@ measures it.
 
 Measured 2026-10-19 (ubuntu-24.04-arm; sample of 20 PR and 20 queue runs of
 check.yml, plus 35 wider runs). Start from these levers and re-measure each
-before and after:
+before and after. Before one-pass, queue run
+[39471110155](https://github.com/moq-dev/moq/actions/runs/39471110155)
+(2026-10-20) took 21m08s overall: Check 20m57s and Test 19m36s. Record
+per-entry wall time after the one-pass workflow first runs in the queue; draft
+PRs cannot supply that measurement.
 
 - **Test's extra builds:** `play` (`-p moq-cli --features play,openh264`)
   compiles for 104 s on a hit and 170 s on a miss to run 2 s of tests; the
@@ -44,13 +48,13 @@ before and after:
   the crate as fresh and the queue would pass on the old build. A cache hit
   currently saves only about 2.5 minutes net of its 2.5-minute restore.
 - **Release-profile builds in the gate:** dart's moq-ffi release build (fat
-  LTO) and the `wasm-release` build. [One CI pass](/quest/m0/ci/one-pass.md)
+  LTO) and the `wasm-release` build. The one-pass workflow
   moves the permutations; confirm nothing release-profile stays in the
   queue.
 - **Dev shell:** `nix develop` downloads for 52 s (p90 90 s) in every job,
   even ones that compile no Rust. That overlaps with
-  [the Nix cache](/quest/m0/ci/nix-cache.md); measure what is still slow
-  once it lands.
+  [the Nix cache](/quest/m0/ci/nix-cache-verify.md); measure what is still
+  slow once it lands.
 - **Waste in the dependency graph:** both rustls backends (ring from moq-quic's
   default `rustls-ring`, aws-lc-rs from rustls, str0m, jsonwebtoken, rcgen and
   object_store), and aws-lc-sys recompiling 3 to 5 times per cold job because
@@ -59,7 +63,7 @@ before and after:
   52 crate names are duplicated on aarch64-linux (syn 1, 2 and 3; rand 0.8,
   0.9 and 0.10; three toml versions; sha2 and digest 0.10 and 0.11). Cut what
   the gate doesn't need. Dependency upgrades belong to
-  [the dependency audit](/quest/m0/audit-deps.md).
+  [the dependency audit](/quest/m1/audit-deps.md).
 - **Nightly:** about 1250 runner-minutes and 2 hours of wall time, and the
   last 5 runs failed (the Features job, plus JS benchmarks cancelled at 60
   minutes). With main's optional checks moved to nightly, a red nightly hides
@@ -71,10 +75,7 @@ Scratch data from the 2026-10-19 measurement (job logs and scripts) was
 local only; re-measure on the one-pass pipeline rather than trusting those
 numbers.
 
-## Required
-
-- [One CI pass](/quest/m0/ci/one-pass.md) - the pipeline this audit measures; it replaces the two jobs whose costs dominate the baseline
-
 ## Related
 
 - [Faster runners](/quest/m0/ci/runners.md) - waits on this audit's result
+- [CI workflow audit](/quest/m1/audit-ci.md) - the recurring per-workflow audit that starts from this one's result

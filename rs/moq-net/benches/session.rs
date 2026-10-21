@@ -16,6 +16,10 @@
 //! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
 //! `session_delivery_group_cost` sweeps publishers and viewers independently for SUBSCRIBE
 //! and FETCH; its constrained cases release held streams only after a real blocked write.
+//! `session_delivery_credit` grants a viewer one uni stream at a time, swept over its
+//! subscriptions and the backlog each holds, so every group waits for a stream grant. A
+//! publisher that parks state per backlogged group pays for it on each grant, which shows
+//! as a slope over the backlog.
 //! `SESSION_EXPIRY_ONLY=1` uses the standalone 30s-expiry pool and reports groups
 //! written plus charged cache bytes every 10s during long profiling runs. Each round
 //! advances the cache clock by a second, so the expiry window spans 30 rounds.
@@ -107,8 +111,12 @@ struct Shape {
 	/// Whole groups each watched broadcast writes per round, so a serve loop finds a
 	/// backlog ready: the group rate a round stands in for.
 	burst: usize,
+	/// Cached groups per track before a join, whose older groups the live budget skips.
+	history: usize,
 	/// Bytes queued before a mock stream applies backpressure.
 	window: usize,
+	/// Group streams a viewer's relay may have open toward it at once.
+	credit: Option<usize>,
 	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
 }
@@ -126,7 +134,9 @@ impl Shape {
 		group_frames: FRAMES,
 		paced: false,
 		burst: 1,
+		history: 1,
 		window: 1024 * 1024,
+		credit: None,
 		fetch: false,
 	};
 
@@ -151,8 +161,13 @@ impl Shape {
 	}
 
 	fn id(&self, version: &str) -> String {
+		// The credit sweep names only what it varies: the full form passes Criterion's
+		// 100-character title limit, which truncates and renumbers it.
+		if let Some(credit) = self.credit {
+			return format!("{version}/watch={}/burst={}/credit={credit}", self.watch, self.burst);
+		}
 		format!(
-			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}{}",
+			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}{}{}",
 			self.relays,
 			self.publishers,
 			self.broadcasts,
@@ -180,6 +195,11 @@ impl Shape {
 				String::new()
 			},
 			if self.fetch { "/fetch" } else { "" },
+			if self.history > 1 {
+				format!("/history={}", self.history)
+			} else {
+				String::new()
+			},
 		)
 	}
 }
@@ -297,6 +317,7 @@ fn path(broadcast: usize) -> String {
 struct Cluster {
 	version: Version,
 	window: usize,
+	credit: Option<usize>,
 	relays: Vec<origin::Producer>,
 	/// One track per broadcast, indexed like [`path`].
 	tracks: Vec<track::Producer>,
@@ -313,6 +334,7 @@ impl Cluster {
 		let mut this = Self {
 			version: version.parse().unwrap(),
 			window: shape.window,
+			credit: shape.credit,
 			relays: Vec::new(),
 			tracks: Vec::new(),
 			_broadcasts: Vec::new(),
@@ -385,6 +407,9 @@ impl Cluster {
 		let (origin, pool) = self.origin(CLIENT_CACHE);
 		let mut options = MockConnectOptions::new(self.version);
 		options.transport.stream_buffer = self.window;
+		// Draft 22, the one IETF version here, keeps its SETUP stream open beside the groups.
+		options.transport.max_concurrent_uni_streams =
+			self.credit.map(|credit| credit + usize::from(self.version.is_ietf()));
 		// Hidden included, as the dash's `.stats/` scope sees its subtree.
 		options.server_publish = Some(self.relays[relay].consume().with_hidden(true));
 		options.client_subscribe = Some(origin.clone());
@@ -753,7 +778,15 @@ fn join(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) 
 						let cluster = Cluster::new(version, *shape).await;
 						let payload = Bytes::from(vec![0; shape.frame]);
 						for track in &cluster.tracks {
-							write_group(track, &payload, shape.group_frames);
+							for sequence in 0..shape.history {
+								let mut group = track.append_group().unwrap();
+								for _ in 0..shape.group_frames {
+									group
+										.write_frame(Timestamp::from_millis(sequence as u64).unwrap(), payload.clone())
+										.unwrap();
+								}
+								group.finish().unwrap();
+							}
 						}
 						cluster
 					})
@@ -1233,6 +1266,22 @@ fn session(c: &mut Criterion) {
 			..base
 		}),
 	);
+	// The same backlog behind one uni stream grant at a time.
+	delivery(
+		c,
+		"credit",
+		[1, 16, 64].into_iter().flat_map(|watch| {
+			[1, 16, 64].map(move |burst| Shape {
+				publishers: 1,
+				broadcasts: 64,
+				viewers: 1,
+				watch,
+				burst,
+				credit: Some(1),
+				..base
+			})
+		}),
+	);
 	delivery(
 		c,
 		"relays",
@@ -1255,6 +1304,20 @@ fn session(c: &mut Criterion) {
 			})
 		}),
 	);
+	// A live join skips a cached prefix. Sweep publishers against that prefix so
+	// resolving one start cannot hide a scan of unrelated publishers or group IDs.
+	join(
+		c,
+		"stale",
+		[1, 8, 32].into_iter().flat_map(|publishers| {
+			[1, 64, 1024].map(move |history| Shape {
+				publishers,
+				history,
+				..base
+			})
+		}),
+	);
+
 	join(c, "relays", [1, 2, 8].map(|relays| Shape { relays, ..base }));
 
 	churn(c, "sessions", [1, 16, 128].map(|sessions| Churn { sessions, held: 16 }));

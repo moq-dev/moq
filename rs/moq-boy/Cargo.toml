@@ -32,14 +32,14 @@ moq-audio = { workspace = true }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
-moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "net"] }
 # Select the Linux NVIDIA and VAAPI codecs explicitly; software H.264 is the
 # `openh264` feature.
 moq-video = { workspace = true, features = ["nvidia", "vaapi"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
-usage = { workspace = true, features = ["completions", "config"] }
+usage-rs = { workspace = true, features = ["completions", "config"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

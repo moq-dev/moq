@@ -16,9 +16,10 @@ use crate::quic::driver::{
 
 /// A stream that can only be used to send data
 ///
-/// If dropped, streams that haven't been explicitly [`reset()`] will be implicitly [`finish()`]ed,
-/// continuing to (re)transmit previously written data until it has been fully acknowledged or the
-/// connection is closed.
+/// If dropped, streams that haven't been explicitly [`finish()`]ed are [`reset()`], with code 0
+/// unless the peer stopped them, so the peer can't mistake a truncated stream for a complete one.
+/// A finished stream keeps (re)transmitting previously written data until it has been fully
+/// acknowledged or the connection is closed.
 ///
 /// # Cancellation
 ///
@@ -35,6 +36,9 @@ pub struct SendStream {
     conn: ConnectionRef,
     stream: StreamId,
     is_0rtt: bool,
+    finished: bool,
+    /// The offset and code a drop before `finish` resets at
+    drop_reset: (u64, VarInt),
 }
 
 impl SendStream {
@@ -43,6 +47,8 @@ impl SendStream {
             conn,
             stream,
             is_0rtt,
+            finished: false,
+            drop_reset: (0, VarInt::from_u32(0)),
         }
     }
 
@@ -185,6 +191,7 @@ impl SendStream {
         let mut conn = self.conn.state.lock("finish");
         match conn.inner.send_stream(self.stream).finish() {
             Ok(()) => {
+                self.finished = true;
                 conn.wake();
                 Ok(())
             }
@@ -312,6 +319,12 @@ impl SendStream {
         self.stream
     }
 
+    /// Reset at `offset` with `code`, instead of at 0 with code 0, if dropped before `finish`
+    #[cfg(feature = "quic")]
+    pub(crate) fn set_drop_reset(&mut self, offset: u64, code: VarInt) {
+        self.drop_reset = (offset, code);
+    }
+
     /// Attempt to write bytes from buf into the stream.
     ///
     /// On success, returns Poll::Ready(Ok(num_bytes_written)).
@@ -375,15 +388,21 @@ impl Drop for SendStream {
         if conn.error.is_some() || (self.is_0rtt && conn.check_0rtt().is_err()) {
             return;
         }
-        match conn.inner.send_stream(self.stream).finish() {
-            Ok(()) => conn.wake(),
-            Err(FinishError::Stopped(reason)) => {
-                if conn.inner.send_stream(self.stream).reset(reason).is_ok() {
-                    conn.wake();
-                }
+        // Fails harmlessly when already reset.
+        let mut stream = conn.inner.send_stream(self.stream);
+        let reset = match stream.stopped() {
+            // Echo the code, as RFC 9000 section 3.5 asks, even after `finish`: the peer reads
+            // nothing more, so retransmitting the rest is wasted.
+            Ok(Some(code)) => stream.reset(code),
+            _ if self.finished => return,
+            _ => {
+                let (offset, code) = self.drop_reset;
+                let offset = offset.min(stream.offset());
+                stream.reset_at(offset, code)
             }
-            // Already finished or reset, which is fine.
-            Err(FinishError::ClosedStream) => {}
+        };
+        if reset.is_ok() {
+            conn.wake();
         }
     }
 }

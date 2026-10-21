@@ -5,7 +5,7 @@ use std::{
 	pin::Pin,
 	task::{Poll, ready},
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use crate::ffi::OnStatus;
 use crate::task::Task;
@@ -133,7 +133,15 @@ async fn resolve(
 /// A raw track task also accepts subscription updates while it is running.
 struct RawTaskEntry {
 	task: Task,
-	update: mpsc::UnboundedSender<Option<moq_net::track::Subscription>>,
+	control: RawControl,
+}
+
+/// Where a raw track's subscription updates go.
+enum RawControl {
+	/// Waiting on SUBSCRIBE_OK, holding the latest update to apply once it arrives.
+	Pending(Option<moq_net::track::Subscription>),
+	/// Subscribed: updates apply at once, so a refusal reaches the caller.
+	Live(moq_net::track::Control),
 }
 
 /// Outcome of polling a raw track source alongside its control channels.
@@ -146,12 +154,27 @@ enum RawStep<T> {
 	Stop,
 }
 
-/// A raw frame or datagram timestamp in microseconds, `None` when untimed.
+/// A raw frame, datagram, or JSON value timestamp in microseconds, `None` when untimed.
 fn timestamp_us(timestamp: Option<moq_net::Timestamp>) -> Result<Option<u64>, Error> {
 	timestamp
 		.map(|timestamp| timestamp.as_micros().try_into())
 		.transpose()
 		.map_err(|_| Error::TimestampOverflow(moq_net::TimeOverflow))
+}
+
+/// A JSON value pre-serialized to a string, with its frame timestamp.
+struct JsonValue {
+	json: String,
+	timestamp_us: Option<u64>,
+}
+
+impl JsonValue {
+	fn new(value: moq_net::Timed<serde_json::Value>) -> Result<Self, Error> {
+		Ok(Self {
+			json: serde_json::to_string(&value.value)?,
+			timestamp_us: timestamp_us(value.at)?,
+		})
+	}
 }
 
 #[derive(Default)]
@@ -186,8 +209,8 @@ pub struct Consume {
 	/// JSON consumer tasks (snapshot and stream share this slab).
 	json_task: NonZeroSlab<Task>,
 
-	/// Buffered JSON values ready for consumption, pre-serialized to a string.
-	json_value: NonZeroSlab<String>,
+	/// Buffered JSON values ready for consumption.
+	json_value: NonZeroSlab<JsonValue>,
 }
 
 impl Consume {
@@ -199,13 +222,6 @@ impl Consume {
 		origin: Option<crate::origin::Consumer>,
 	) -> Result<Id, Error> {
 		self.broadcast.insert(ConsumeBroadcast { broadcast, origin })
-	}
-
-	/// Whether the caller still holds `id` as a handle to `broadcast`.
-	pub fn holds(&self, id: Id, broadcast: &moq_net::broadcast::Consumer) -> bool {
-		self.broadcast
-			.get(id)
-			.is_some_and(|held| held.broadcast.is_clone(broadcast))
 	}
 
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
@@ -577,15 +593,28 @@ impl Consume {
 		let name = name.to_string();
 
 		let (task, close) = Task::new(on_frame);
-		let (update, updates) = mpsc::unbounded_channel();
-		let id = self.raw_task.insert(Some(RawTaskEntry { task, update }))?;
+		let control = RawControl::Pending(None);
+		let id = self.raw_task.insert(Some(RawTaskEntry { task, control }))?;
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
 			let res = crate::ffi::run(driver.watch(async move {
-				let mut track = broadcast.track(&name)?.subscribe(subscription.clone()).await?.ordered();
-				Self::apply_raw_subscription(&mut track, subscription);
-				Self::run_raw(on_frame, track, close, updates).await
+				let track = broadcast.track(&name)?.subscribe(subscription.clone()).await?.ordered();
+				let control = track.control();
+				Self::update_raw(&control, Self::raw_subscription(subscription))?;
+				// Go live under the lock, so no later update lands before the pending one.
+				if let Some(entry) = State::lock()
+					.consume
+					.raw_task
+					.get_mut(id)
+					.and_then(|entry| entry.as_mut())
+				{
+					let pending = std::mem::replace(&mut entry.control, RawControl::Live(control.clone()));
+					if let RawControl::Pending(Some(subscription)) = pending {
+						Self::update_raw(&control, subscription)?;
+					}
+				}
+				Self::run_raw(on_frame, track, close).await
 			}))
 			.await;
 
@@ -600,24 +629,30 @@ impl Consume {
 		Ok(id)
 	}
 
-	/// Apply a raw reader's preferences, which join at the latest group unless a range
-	/// names a floor of its own.
-	fn apply_raw_subscription(track: &mut moq_net::track::Ordered, subscription: Option<moq_net::track::Subscription>) {
+	/// A raw reader's preferences, which join at the latest group unless a range names
+	/// a floor of its own.
+	fn raw_subscription(subscription: Option<moq_net::track::Subscription>) -> moq_net::track::Subscription {
 		let mut subscription = subscription.unwrap_or_default();
 		for range in &mut subscription.ranges {
 			if range.start == moq_net::track::Range::oldest().start {
 				range.start = moq_net::track::Range::live().start;
 			}
 		}
-		// A closed track makes the update meaningless; the reader already sees the close.
-		let _ = track.update(subscription);
+		subscription
+	}
+
+	fn update_raw(control: &moq_net::track::Control, subscription: moq_net::track::Subscription) -> Result<(), Error> {
+		match control.update(subscription) {
+			// A closed track makes the update meaningless; the reader already sees the close.
+			Ok(()) | Err(moq_net::Error::Closed) => Ok(()),
+			Err(err) => Err(err.into()),
+		}
 	}
 
 	async fn run_raw(
 		callback: OnStatus,
 		mut track: moq_net::track::Ordered,
 		mut close: oneshot::Receiver<()>,
-		mut updates: mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
 	) -> Result<(), Error> {
 		// Deliver every frame in sequence order, reading all frames within each
 		// group rather than the one-frame-per-group convenience. This is the
@@ -629,7 +664,7 @@ impl Consume {
 		loop {
 			let mut group =
 				match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::group::Consumer>, Error>> {
-					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
+					if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
 					match ready!(track.poll_next_group(waiter))? {
@@ -646,7 +681,7 @@ impl Consume {
 
 			loop {
 				let frame = match moq_net::kio::wait(|waiter| -> Poll<Result<RawStep<moq_net::frame::Frame>, Error>> {
-					if Self::poll_raw_control(&mut close, &mut updates, &mut track, waiter) {
+					if Pin::new(&mut close).poll(&mut waiter.context()).is_ready() {
 						return Poll::Ready(Ok(RawStep::Stop));
 					}
 					match ready!(group.poll_read_frame(waiter))? {
@@ -670,33 +705,6 @@ impl Consume {
 		}
 	}
 
-	/// Poll the close and update channels, applying any subscription updates inline.
-	///
-	/// Returns `true` when the task must stop: either the consumer was closed
-	/// (`close` fired) or the update channel was dropped. The caller must then
-	/// unwind rather than poll `close` again, since a completed oneshot panics if
-	/// re-polled. Borrows `track` only for the duration of the call so the caller
-	/// can poll a track/group source afterwards.
-	fn poll_raw_control(
-		close: &mut oneshot::Receiver<()>,
-		updates: &mut mpsc::UnboundedReceiver<Option<moq_net::track::Subscription>>,
-		track: &mut moq_net::track::Ordered,
-		waiter: &moq_net::kio::Waiter,
-	) -> bool {
-		let mut cx = waiter.context();
-		if Pin::new(close).poll(&mut cx).is_ready() {
-			return true;
-		}
-
-		loop {
-			match updates.poll_recv(&mut cx) {
-				Poll::Ready(Some(subscription)) => Self::apply_raw_subscription(track, subscription),
-				Poll::Ready(None) => return true,
-				Poll::Pending => return false,
-			}
-		}
-	}
-
 	pub fn raw_track_update(
 		&mut self,
 		track: Id,
@@ -707,7 +715,11 @@ impl Consume {
 			.get_mut(track)
 			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::TrackNotFound)?;
-		entry.update.send(subscription).map_err(|_| Error::TrackNotFound)?;
+		let subscription = Self::raw_subscription(subscription);
+		match &mut entry.control {
+			RawControl::Pending(pending) => *pending = Some(subscription),
+			RawControl::Live(control) => Self::update_raw(control, subscription)?,
+		}
 		Ok(())
 	}
 
@@ -823,8 +835,8 @@ impl Consume {
 
 	/// Subscribe to a JSON snapshot track (lossy latest-value) by name.
 	///
-	/// `on_value` is called with a value ID for each new latest value; a consumer that falls
-	/// behind collapses the backlog and only sees the newest. Values must be released with
+	/// `on_value` is called with a value ID for each state, in order; a group superseded by a
+	/// newer one before it is read is skipped. Values must be released with
 	/// [`Self::json_value_close`]. Pass the same compression the producer used.
 	pub fn json_snapshot(
 		&mut self,
@@ -874,9 +886,10 @@ impl Consume {
 				},
 			};
 
-			let json = serde_json::to_string(&value)?;
-			// Hold the lock only to buffer the value; release it before the callback.
-			let value_id = State::lock().consume.json_value.insert(json)?;
+			// Serialize before locking, hold the lock only to buffer the value, and release it
+			// before the callback.
+			let value = JsonValue::new(value)?;
+			let value_id = State::lock().consume.json_value.insert(value)?;
 			callback.call(Ok(value_id));
 		}
 	}
@@ -933,8 +946,8 @@ impl Consume {
 				},
 			};
 
-			let json = serde_json::to_string(&value)?;
-			let value_id = State::lock().consume.json_value.insert(json)?;
+			let value = JsonValue::new(value)?;
+			let value_id = State::lock().consume.json_value.insert(value)?;
 			callback.call(Ok(value_id));
 		}
 	}
@@ -948,11 +961,13 @@ impl Consume {
 	/// Fill `dst` with a JSON value delivered via a consumer callback. The pointer is valid
 	/// until the value is released with [`Self::json_value_close`].
 	pub fn json_value(&self, value: Id, dst: &mut moq_json_value) -> Result<(), Error> {
-		let json = self.json_value.get(value).ok_or(Error::FrameNotFound)?;
+		let value = self.json_value.get(value).ok_or(Error::FrameNotFound)?;
 
 		*dst = moq_json_value {
-			json: json.as_str().as_ptr() as *const c_char,
-			json_len: json.len(),
+			json: value.json.as_ptr() as *const c_char,
+			json_len: value.json.len(),
+			timestamp_us: value.timestamp_us.unwrap_or_default(),
+			timestamp_present: value.timestamp_us.is_some(),
 		};
 
 		Ok(())

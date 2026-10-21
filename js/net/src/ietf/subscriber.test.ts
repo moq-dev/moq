@@ -874,7 +874,7 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
+	const subscriber = new Subscriber({ session, quic: pair.server, cluster: { self: SELF, peer: PEER } });
 
 	const announced = subscriber.announced();
 	await acceptSubscribeNamespace(pair.client);
@@ -906,7 +906,9 @@ test("a repeated PUBLISH_NAMESPACE is a protocol violation", async () => {
 		channel.port2.postMessage(null);
 	});
 	await expect(handler).rejects.toThrow(ProtocolViolation);
-	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
+	// The request closes the session itself, which takes the namespace subscription down too.
+	await violationClosed(pair);
+	await expect(announced.next()).rejects.toThrow();
 });
 
 /**
@@ -956,6 +958,44 @@ test("a legacy cancel reaches the control stream", async () => {
 	}
 
 	expect(seen).toContain(BigInt(Unsubscribe.id));
+});
+
+/**
+ * A draft-14-16 SUBSCRIBE rides the control stream, where a reset tells the peer nothing, so
+ * one the peer never answers is cancelled with UNSUBSCRIBE at its deadline.
+ */
+test.each([
+	["14", Version.DRAFT_14, ALPN.DRAFT_14],
+	["15", Version.DRAFT_15, ALPN.DRAFT_15],
+	["16", Version.DRAFT_16, ALPN.DRAFT_16],
+] as const)("an unanswered draft %s subscribe is unsubscribed at its deadline", async (_, version, alpn) => {
+	jest.useFakeTimers();
+	const pair = createMockTransportPair(alpn);
+	const control = await Stream.open(pair.server, { version });
+	const session = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+	void session.run().catch(() => undefined);
+	const peer = await Stream.accept(pair.client, version);
+	if (!peer) throw new Error("no control stream");
+	const subscriber = new Subscriber({ session });
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	try {
+		expect(await peer.reader.u53()).toBe(Subscribe.id);
+		const request = await Subscribe.decode(peer.reader, version);
+
+		const next = peer.reader.u53();
+		jest.advanceTimersByTime(10_000);
+		expect(await next).toBe(Unsubscribe.id);
+		expect((await Unsubscribe.decode(peer.reader, version)).requestId).toBe(request.requestId);
+		expect(((await track.closed) as Error).message).toContain("request timed out after 10000ms");
+	} finally {
+		warn.mockRestore();
+		track.close();
+		broadcast.close();
+		session.close();
+		jest.useRealTimers();
+	}
 });
 
 /**
@@ -2246,6 +2286,22 @@ test("an ACTIVE_COUNT that does not match the negotiation closes the session", a
 		await answerCounted(pair.client, count);
 		await violationClosed(pair);
 	}
+});
+
+/** A violation on a namespace subscription closes the session through its request, once. */
+test("a namespace subscription closes the session once over a violation", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, quic: pair.server, activeCount: true });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	onTestFinished(() => warn.mockRestore());
+	const close = spyOn(pair.server, "close");
+
+	subscriber.announced();
+	await answerCounted(pair.client, undefined);
+	await violationClosed(pair);
+	await yieldTask();
+	expect(close.mock.calls.filter(([info]) => info?.closeCode !== undefined)).toHaveLength(1);
 });
 
 /** A counted set cut short, by a NAMESPACE_DONE or the stream ending, is the peer's fault. */

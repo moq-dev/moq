@@ -1,5 +1,9 @@
 set working-directory := '..'
 
+# Build and test the persistent NixOS runner VM on x86_64 Linux.
+runner-vm:
+    nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
+
 # Lint GitHub Actions workflows, their alert coverage, and that every step runs a recipe.
 check:
     actionlint
@@ -29,6 +33,7 @@ test:
     python3 sh/gh/ffi.test.py
     bun test sh/gh/ffi.test.ts sh/gh/cpp.test.ts
     python3 sh/rs/package-rename.test.py
+    python3 sh/dart/build.test.py
     python3 sh/rs/select.test.py
     python3 sh/js/workspace.test.py
     python3 sh/js/audit.test.py
@@ -103,7 +108,7 @@ benchmark-report *args:
 ffi *args:
     python3 sh/gh/ffi.py "$@"
 
-# Prepare the shared history branch or publish its generated charts.
+# Prepare the shared history branch or publish its regression table.
 [positional-arguments]
 benchmark-publish *args:
     sh/gh/bench-publish.sh "$@"

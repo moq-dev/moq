@@ -17,6 +17,7 @@ mod hls;
 mod moq;
 mod play;
 mod publish;
+mod report;
 mod rtc;
 mod rtmp;
 mod rtsp;
@@ -188,9 +189,12 @@ impl Serving {
 		let origin = &self.cluster.origin;
 		let directions = self.directions;
 		let auth_request = moq_relay::auth::request_for(&self.auth, &request);
-		let lease = match self.auth.admit(auth_request).await {
-			Ok(lease) => lease,
-			Err(err) => {
+		// The listener's handshake deadline covers admission; `within` closes a session
+		// it gives up on with the timeout code.
+		let lease = match request.within(self.auth.admit(auth_request)).await {
+			Err(err) => return Err(anyhow::Error::new(err).context("admission timed out")),
+			Ok(Ok(lease)) => lease,
+			Ok(Err(err)) => {
 				let status = axum::http::StatusCode::from(&err);
 				let reject = match status {
 					axum::http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
@@ -226,8 +230,13 @@ impl Serving {
 		if let Some(subscribe) = subscribe {
 			request = request.with_subscriber(subscribe);
 		}
-		let (session, driver) = request.ok().await?;
-		let result = moq_relay::supervise(session, lease, self.shutdown.clone(), None).await;
+		let serving = self.shutdown.serve();
+		let (session, driver) = self
+			.shutdown
+			.until_deadline(request.ok())
+			.await
+			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
+		let result = moq_relay::supervise(session, lease, serving, None).await;
 		driver.await??;
 		result
 	}
@@ -285,15 +294,14 @@ struct Shutdown {
 	observer: moq_relay::shutdown::Observer,
 }
 
-/// Keep all stages and listener tasks alive while admitted sessions drain.
+/// Keep all stages and listener tasks alive while admitted sessions drain, the way
+/// the relay does, or until a second signal.
 async fn drain(shutdown: Shutdown, signals: &mut Signals) {
-	let deadline = tokio::time::Instant::now() + shutdown.observer.drain_timeout;
 	shutdown.trigger.start();
 	tracing::info!(window = ?shutdown.observer.drain_timeout, "shutdown requested; draining sessions (signal again to exit immediately)");
 	tokio::select! {
-		() = signals.recv() => {},
-		() = shutdown.observer.activity().close() => {},
-		() = tokio::time::sleep_until(deadline) => {},
+		() = signals.recv() => tracing::warn!("second shutdown signal; exiting immediately"),
+		() = shutdown.observer.drained() => {},
 	}
 }
 
@@ -388,7 +396,7 @@ async fn run() -> anyhow::Result<()> {
 /// Which directions the stages need on the shared MoQ attachment.
 #[derive(Clone, Copy, Default)]
 pub struct Directions {
-	/// Any `import`: the Origin is published outward.
+	/// Any `import`, or an `export --echo`: the Origin is published outward.
 	pub publish: bool,
 	/// Any `export` or `play`: the Origin is filled from the network.
 	pub consume: bool,
@@ -397,8 +405,13 @@ pub struct Directions {
 impl Directions {
 	/// The union of what the stages need, so one attachment serves them all.
 	fn of(stages: &[Command]) -> Self {
+		let publishes = |stage: &Command| match stage {
+			Command::Import(_) => true,
+			Command::Export(export) => export.echo.is_some(),
+			_ => false,
+		};
 		Self {
-			publish: stages.iter().any(|stage| matches!(stage, Command::Import(_))),
+			publish: stages.iter().any(publishes),
 			consume: stages.iter().any(|stage| matches!(stage, Command::Export(_))),
 		}
 	}
@@ -588,9 +601,14 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					if import.source.stdin_format().is_some() {
 						claim("stdin", &mut stdin, &name)?;
 					}
-					if let Some(publish) =
+					let stats = import.stats;
+					if let Some(mut publish) =
 						spawn_import(&origin, import, name, epoch.clone(), bandwidth.clone(), &mut tasks)?
 					{
+						// Before `run` declares a track, so the stats section rides the first catalog.
+						if stats {
+							publish = publish.with_stats(connection.as_ref().map(moq_tokio::Connection::monitor))?;
+						}
 						locals.push(publish);
 					}
 				}
@@ -598,7 +616,8 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					if export.sink.is_stdout() {
 						claim("stdout", &mut stdout, &name)?;
 					}
-					spawn_export(&origin, export, name, &mut tasks)?;
+					let monitor = connection.as_ref().map(moq_tokio::Connection::monitor);
+					spawn_export(&origin, export, name, monitor, &mut tasks)?;
 				}
 				other => unreachable!("`{}` is not a stage", other.name()),
 			}
@@ -791,10 +810,12 @@ fn spawn_import(
 }
 
 /// Route the shared Origin OUT to one stage's sink, filling it from the MoQ network.
+/// `connection` supplies an `--echo` report's transport measurements.
 fn spawn_export(
 	origin: &moq_net::origin::Producer,
 	export: Export,
 	name: String,
+	connection: Option<moq_tokio::connection::Monitor>,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
 	if let ExportSink::Rtc(rtc) = &export.sink
@@ -816,7 +837,12 @@ fn spawn_export(
 			select: export.select,
 		};
 		let consumer = origin.consume();
-		tasks.spawn(async move { run_stdout(consumer, name, args).await });
+		let echo = export.echo.map(|name| report::EchoTarget {
+			origin: origin.clone(),
+			name,
+			connection,
+		});
+		tasks.spawn(async move { run_stdout(consumer, name, args, echo).await });
 	} else {
 		match export.sink {
 			ExportSink::Hls(args) => {
@@ -865,6 +891,12 @@ fn spawn_export(
 					.unwrap_or_default();
 				tasks.spawn(archive::export(origin.consume(), name, format, args));
 			}
+			ExportSink::Stats => {
+				tasks.spawn(report::print_stats(origin.consume(), name));
+			}
+			ExportSink::Echo => {
+				tasks.spawn(report::print_echo(origin.consume(), name));
+			}
 			_ => unreachable!("container formats are handled by stdout_format above"),
 		}
 	}
@@ -872,8 +904,14 @@ fn spawn_export(
 	Ok(())
 }
 
-/// Subscribe to `name` from the Origin and write it to stdout.
-async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: SubscribeArgs) -> anyhow::Result<()> {
+/// Subscribe to `name` from the Origin and write it to stdout, publishing feedback beside it
+/// where the catalog solicits it when `echo` is set.
+async fn run_stdout(
+	consumer: moq_net::origin::Consumer,
+	name: String,
+	args: SubscribeArgs,
+	echo: Option<report::EchoTarget>,
+) -> anyhow::Result<()> {
 	let catalog = args.catalog_format(&name);
 
 	// Confirm the broadcast is reachable and wait for it to be announced; `Subscribe` then
@@ -884,7 +922,18 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
 
-	Subscribe::new(consumer, &name, catalog, args).await?.run().await
+	let subscribe = Subscribe::new(consumer, &name, catalog, args).await?;
+	let Some(echo) = echo else {
+		return subscribe.run().await;
+	};
+	let mut echo = report::Echo::new(echo, subscribe.source().clone(), catalog);
+	let subscribe = subscribe.with_sections(echo.sections());
+	let result = tokio::select! {
+		result = subscribe.run() => result,
+		never = echo.run() => match never {},
+	};
+	echo.finish();
+	result
 }
 
 /// Run until an endpoint ends, keeping all tasks alive while a signalled listener drains.
@@ -1055,6 +1104,69 @@ mod tests {
 		assert!(!draining.is_finished());
 		tokio::time::advance(window / 2).await;
 		draining.await.unwrap();
+	}
+
+	/// A session that stops reading never takes its GOAWAY, yet the deadline still
+	/// closes it, and the drain returns only once its lease recorded the shutdown.
+	#[tokio::test(start_paused = true)]
+	async fn drain_closes_a_stalled_session_at_the_deadline() {
+		use futures::FutureExt;
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		let _signals = SIGNALS.lock().await;
+		let window = std::time::Duration::from_secs(10);
+		let (trigger, observer) = moq_relay::shutdown::Observer::new(window);
+
+		let (auth, mut admissions) = moq_relay::auth::Auth::embedded("test");
+		let all = moq_auth::Pattern::all;
+		let (producer, consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
+		let (lease, ()) = tokio::join!(auth.admit(auth.request(moq_auth::Transport::Tcp, "/room")), async {
+			admissions.next().await.unwrap().grant(consumer);
+		});
+
+		let mut config = moq_net::transport::memory::Config::default();
+		config.protocol = Some("moq-lite-06".into());
+		let (client, server) = moq_net::transport::memory::pair(config);
+		let accepting = tokio::spawn(async move {
+			let (session, driver) = moq_net::Server::new()
+				.accept(moq_net::time::now(), server)
+				.await
+				.unwrap();
+			tokio::spawn(moq_net::time::run(driver));
+			session
+		});
+		let (_client, client_driver) = moq_net::Client::new()
+			.connect(moq_net::time::now(), client)
+			.await
+			.unwrap();
+		// Never dropped, which would close the transport: polled only until the session is served.
+		let reading = std::sync::Arc::new(AtomicBool::new(true));
+		tokio::spawn({
+			let reading = reading.clone();
+			async move {
+				let mut driver = std::pin::pin!(moq_net::time::run(client_driver));
+				std::future::poll_fn(|cx| match reading.load(Ordering::Relaxed) {
+					true => driver.as_mut().poll(cx),
+					false => std::task::Poll::Pending,
+				})
+				.await
+			}
+		});
+		let server = accepting.await.unwrap();
+		tokio::spawn(moq_relay::supervise(server, lease.unwrap(), observer.serve(), None));
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		reading.store(false, Ordering::Relaxed);
+
+		let mut signals = Signals::new().unwrap();
+		let shutdown = Shutdown { trigger, observer };
+		tokio::time::timeout(window * 2, drain(shutdown, &mut signals))
+			.await
+			.expect("a stalled session held the drain past its deadline");
+		let (reason, _) = producer
+			.closed()
+			.now_or_never()
+			.expect("the drain returned before the lease recorded its end");
+		assert_eq!(reason, moq_auth::lease::Reason::Shutdown);
 	}
 
 	/// A local pipeline that dies takes the process with it, even while another one is
@@ -1338,5 +1450,20 @@ mod tests {
 		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
 		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
 		assert!(is_public_transport(moq_tokio::Transport::Quic, true));
+	}
+
+	/// A `--connect` URL can name the broadcast itself, leaving the stage's broadcast empty: the
+	/// connection root, which `export stats` reads like the other point exports.
+	#[tokio::test]
+	async fn export_stats_reads_the_connection_root() {
+		let invocation =
+			Invocation::try_parse_from(["moq", "--connect", "http://relay/event", "export", "stats"]).unwrap();
+		let Some(Command::Export(export)) = invocation.stages.into_iter().next() else {
+			panic!("parsed as something other than an export");
+		};
+		let origin = moq_tokio::origin::spawn();
+		let mut tasks = JoinSet::new();
+		spawn_export(&origin, export, String::new(), None, &mut tasks).expect("the root is a broadcast");
+		tasks.abort_all();
 	}
 }

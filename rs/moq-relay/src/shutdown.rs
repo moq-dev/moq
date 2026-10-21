@@ -6,9 +6,11 @@
 //! that (a cached DNS resolve, a pool alias) is sent a GOAWAY at once, carrying
 //! only the time left, so no session outlives the window the relay promised.
 //!
-//! The drain ends as soon as every session has left, or at that deadline.
-//! Accepted transports hold the drain through handshake and authentication,
-//! then through the established session, or until the shared deadline.
+//! The drain ends as soon as every session has left. Accepted transports hold it
+//! through handshake and authentication, then through the established session,
+//! or until the shared deadline. The deadline cuts what is still pending and
+//! closes every established session left, then waits for those to finish their
+//! cleanup: the lease's `end`, reported to the decider.
 
 use std::{sync::Arc, time::Duration};
 
@@ -41,7 +43,7 @@ impl Trigger {
 /// The sessions a drain is waiting on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Tally {
-	/// Established sessions still open, drained or not.
+	/// Established sessions still open or still reporting their end, drained or not.
 	pub live: usize,
 	/// Sessions sent a GOAWAY that have not left yet.
 	pub draining: usize,
@@ -100,7 +102,7 @@ impl Observer {
 
 	/// Run `work` until the drain deadline, or `None` if the deadline passes first.
 	/// The deadline wins a tie: work that finishes late, polled late, is still late.
-	pub(crate) async fn until_deadline<T>(&self, work: impl Future<Output = T>) -> Option<T> {
+	pub async fn until_deadline<T>(&self, work: impl Future<Output = T>) -> Option<T> {
 		tokio::select! {
 			biased;
 			() = self.expired() => None,
@@ -121,7 +123,7 @@ impl Observer {
 
 	/// Resolve at the drain deadline, once the drain has started. Never resolves
 	/// for [`disabled`](Self::disabled) handles.
-	async fn expired(&self) {
+	pub(crate) async fn expired(&self) {
 		let mut rx = self.rx.clone();
 		let deadline = match rx.wait_for(Option::is_some).await {
 			Ok(deadline) => *deadline,
@@ -143,13 +145,26 @@ impl Observer {
 		*self.rx.borrow()
 	}
 
-	/// Count an established session until the returned guard drops, so the drain
-	/// waits for it to leave.
-	pub(crate) fn serve(&self) -> Serving {
-		self.tally.send_modify(|tally| tally.live += 1);
+	/// Count a session until the returned guard drops, so the drain waits for it to
+	/// leave and report its end. Hand the guard to [`supervise`](crate::supervise).
+	///
+	/// Take it before the session's SETUP reply, while the connection's admission
+	/// still holds the drain open: the transport driver may release that admission
+	/// once the reply is out, and a drain that empties in between would not wait for
+	/// the session. Bound the reply with [`until_deadline`](Self::until_deadline)
+	/// too, or a peer stalling it holds the drain past its deadline.
+	///
+	/// One served after the deadline is closed at once and not counted: arrivals
+	/// a listener still lets through must not hold a drain that is past it.
+	pub fn serve(&self) -> Serving {
+		let counted = self.deadline().is_none_or(|deadline| Instant::now() < deadline);
+		if counted {
+			self.tally.send_modify(|tally| tally.live += 1);
+		}
 		Serving {
 			_active: self.activity.enter(),
-			tally: self.tally.clone(),
+			counted,
+			shutdown: self.clone(),
 		}
 	}
 
@@ -158,10 +173,34 @@ impl Observer {
 		*self.tally.borrow()
 	}
 
-	/// Resolve once every admitted transport and serving guard has left, refusing
-	/// any connection that arrives after that.
-	pub(crate) async fn drained(&self) {
-		self.activity.close().await;
+	/// Resolve once the drain is over, logging how it ended: every admitted
+	/// connection has left, refusing any that arrives after that, or the deadline
+	/// passed and every established session it closed has reported its end.
+	///
+	/// Pending handshakes and admissions are cut at the deadline rather than waited
+	/// for, so they never hold this past it. Waits for [`Trigger::start`] first, and
+	/// never resolves for a [`disabled`](Self::disabled) handle.
+	pub async fn drained(&self) {
+		self.clone().started().await;
+		tokio::select! {
+			biased;
+			() = self.activity.close() => {}
+			() = self.expired() => {}
+		}
+		// Either way, wait for the counted sessions: past the deadline they are still
+		// reporting their end, and before it one served without an admission still
+		// holds the drain. Sessions served after the deadline are not counted, so
+		// this only falls.
+		let mut tally = self.tally.subscribe();
+		// The sender lives in `self`, so this cannot close.
+		let _ = tally.wait_for(|tally| tally.live == 0).await;
+
+		let deadline = self.deadline().expect("started");
+		let elapsed = Instant::now().saturating_duration_since(deadline - self.drain_timeout);
+		match self.tally().forced {
+			0 => tracing::info!(?elapsed, "drain ended with every session gone; exiting"),
+			forced => tracing::warn!(?elapsed, forced, "drain deadline force-closed sessions; exiting"),
+		}
 	}
 
 	/// Count a session as draining until the returned guard drops, and as forced
@@ -177,12 +216,14 @@ impl Observer {
 	/// Drain `session` with an empty-URI GOAWAY ("reconnect to me"), waiting for
 	/// the peer to leave.
 	///
-	/// The driver force-closes with [`moq_net::Error::GoawayTimeout`] at the
-	/// drain's deadline: [`drain_timeout`](Self::drain_timeout) after the trigger
-	/// fired, or after this call if it has not. So this resolves either way, on
-	/// every version. A peer too old for GOAWAY (moq-lite-03 and earlier) keeps
-	/// being served until then and is closed the same way; it simply never learns
-	/// why, which beats cutting it off with no warning and no grace.
+	/// This force-closes with [`moq_net::Error::GoawayTimeout`] at the drain's
+	/// deadline: [`drain_timeout`](Self::drain_timeout) after the trigger fired, or
+	/// after this call if it has not. It does not rely on the driver's own GOAWAY
+	/// timer, which starts only once the message is on the wire, so a peer that
+	/// stalls that write is still closed on time. A peer too old for GOAWAY
+	/// (moq-lite-03 and earlier) keeps being served until then and is closed the same
+	/// way; it simply never learns why, which beats cutting it off with no warning
+	/// and no grace.
 	///
 	/// With no time left (a zero [`drain_timeout`](Self::drain_timeout), or a
 	/// session accepted after the deadline) the session is closed at once.
@@ -212,21 +253,33 @@ impl Observer {
 			tracing::warn!(%err, "failed to drain session");
 		}
 
+		tokio::select! {
+			biased;
+			_ = session.closed() => return,
+			() = tokio::time::sleep_until(deadline) => {}
+		}
+		tracing::debug!("peer did not leave before the drain deadline; closing");
+		session.abort(moq_net::Error::GoawayTimeout);
 		session.closed().await;
 	}
 }
 
-/// An established session the drain waits on; see [`Observer::serve`].
-pub(crate) struct Serving {
-	// `None` only after the drain closed admission, which an admitted
-	// connection's own guard prevents until it leaves.
+/// A session the drain waits on, from [`Observer::serve`].
+#[must_use = "the drain stops waiting for the session once this drops"]
+pub struct Serving {
+	// `None` only once the drain closed admission, which the connection's own
+	// admission prevents while it is held before the SETUP reply.
 	_active: Option<moq_net::server::Active>,
-	tally: Arc<watch::Sender<Tally>>,
+	/// False for a session served after the deadline, which is not counted.
+	counted: bool,
+	pub(crate) shutdown: Observer,
 }
 
 impl Drop for Serving {
 	fn drop(&mut self) {
-		self.tally.send_modify(|tally| tally.live -= 1);
+		if self.counted {
+			self.shutdown.tally.send_modify(|tally| tally.live -= 1);
+		}
 	}
 }
 
@@ -238,9 +291,8 @@ struct Draining {
 
 impl Drop for Draining {
 	fn drop(&mut self) {
-		// The driver arms its force-close after sending the GOAWAY, so it never
-		// fires before `deadline` and every session it closes is counted. A peer
-		// leaving in that sliver was still there at the deadline too.
+		// The force-close fires at `deadline`, so every session it closes is
+		// counted. A peer leaving in that sliver was still there at the deadline too.
 		let forced = Instant::now() >= self.deadline;
 		self.tally.send_modify(|tally| {
 			tally.draining -= 1;
@@ -441,6 +493,52 @@ mod tests {
 		drop(second);
 		drained.await.expect("drained task");
 		assert_eq!(shutdown.tally(), Tally::default());
+	}
+
+	/// A drain whose admissions emptied before the deadline still waits for a session
+	/// counted without one, rather than racing its cleanup.
+	#[tokio::test(start_paused = true)]
+	async fn an_emptied_drain_still_waits_for_counted_sessions() {
+		let (trigger, shutdown) = Observer::new(Duration::from_secs(10));
+		trigger.start();
+		shutdown.activity.close().await;
+		let serving = shutdown.serve();
+		let drained = tokio::spawn({
+			let shutdown = shutdown.clone();
+			async move { shutdown.drained().await }
+		});
+		tokio::task::yield_now().await;
+		assert!(!drained.is_finished(), "drained under a counted session");
+
+		drop(serving);
+		drained.await.expect("drained task");
+	}
+
+	/// Past the deadline the drain waits for each established session to finish its
+	/// cleanup, but not for one served after it, so arrivals cannot keep it open.
+	#[tokio::test(start_paused = true)]
+	async fn the_deadline_waits_only_for_sessions_served_before_it() {
+		let window = Duration::from_secs(10);
+		let (trigger, shutdown) = Observer::new(window);
+		let established = shutdown.serve();
+		trigger.start();
+		let drained = tokio::spawn({
+			let shutdown = shutdown.clone();
+			async move { shutdown.drained().await }
+		});
+
+		tokio::time::sleep(window).await;
+		let late = shutdown.serve();
+		tokio::task::yield_now().await;
+		assert!(!drained.is_finished(), "drained under a session still cleaning up");
+
+		drop(established);
+		tokio::time::timeout(Duration::from_secs(1), drained)
+			.await
+			.expect("a session served after the deadline held the drain")
+			.unwrap();
+		drop(late);
+		assert_eq!(shutdown.tally().live, 0);
 	}
 
 	#[tokio::test(start_paused = true)]

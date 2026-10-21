@@ -3,8 +3,8 @@
 Cross-language interop test that builds every client from **this checkout**
 and runs them against each other.
 
-This is the in-tree companion to [moq-dev/smoke](https://github.com/moq-dev/smoke).
-That repo installs each client from its public package registry (crates.io, PyPI,
+This is the in-tree companion to [`test/smoke`](../smoke).
+That suite installs each client from its public package registry (crates.io, PyPI,
 npm, ...) to catch *packaging* breakage in a release. This one builds each client
 from the workspace source (`cargo`, `bun`, `uv`, `cc`) to catch *interop*
 regressions before anything is published. No apt/brew/npm/PyPI, and no
@@ -104,19 +104,20 @@ subtree and each subscriber with one to read it, so every cell also covers the
 
 Clients that print the grant the relay sent back over AUTH, as an
 `auth granted publish=[...] subscribe=[...]` line, must report exactly what
-their token implies: the Rust CLI (a `moq_net::auth` debug log) and the native
+their token implies: the Rust CLI (a `moq_net::auth` debug log), the Python,
+Go, and C++ clients (read through moq-ffi before they start), and the native
 JS subscribers. A cell whose grant is missing or wrong fails even when media
-flowed. The binding clients (Python, Go, C, GStreamer) have no grant to print
-until moq-ffi exposes one, and the browser's shared connection keeps its session
-private, so their cells check media alone. AUTH is only on the work-in-progress
+flowed. moq-c's frozen ABI and GStreamer expose no grant, and the browser's
+shared connection keeps its session private, so their cells check media alone. AUTH is only on the work-in-progress
 moq-lite-07, so the printing clients dial `moq-lite-07-wip` alone and a printing
 client that reports nothing never got its grant. The native JS subscribers dial
 WebTransport alone and offer it there. The rest keep
 their defaults, so the matrix also crosses versions through the relay, which
 accepts both.
 
-After the matrix, each publisher whose refusal the harness can read (Rust) runs
-once more with a token that excludes its broadcast. It must fail loud, logging
+After the matrix, each publisher whose refusal the harness can read (Rust,
+Python, Go, and C++, which log moq-net's error) runs once more with a token that
+excludes its broadcast. It must fail loud, logging
 Unauthorized and naming the path, and every subscriber must time out. The
 browser publisher enforces its grant too, but its elements cannot offer
 `moq-lite-07-wip` yet.
@@ -244,6 +245,15 @@ WebCodecs but lacks `MediaStreamTrackProcessor`, so it can play this fixture but
 cannot publish it. Capabilities are measured on every run rather than assumed
 from an engine name. Playwright WebKit is not Safari; Safari device/transport
 bugs and real Firefox transport negotiation still require manual evidence.
+
+Firefox only resumes Web Audio on an output device, so each Linux run gets a
+private null sink from `test/lib/pulse.py`. Chromium plays to its fake output instead,
+with or without a host sound server.
+
+Nightly runs the Firefox player only. Playwright's Linux WebKit 27.2 fails two
+cases: its VP8 decoder keeps reporting the first coded size after an in-band
+resize, failing coded-size growth, and detaching logs a WebSocket "Connection
+reset by peer" console error that is not yet root-caused.
 
 The publisher is a fixture, not a fake camera: a canvas painting a frame counter
 as black/white blocks, and a tone stepping through a fixed frequency table. Both

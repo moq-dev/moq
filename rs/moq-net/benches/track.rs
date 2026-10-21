@@ -65,6 +65,11 @@
 //! for the groups outside its ranges, so a widening scans only the span it newly covers,
 //! and a scan of the cache or the audience shows up as a slope.
 //!
+//! `track_time_end` lands groups one at a time behind a sequence that never arrives, each
+//! drained by readers whose range ends at a time no group reaches, swept over the groups and
+//! the readers: an unsettled time end walks on from where it stopped, so a rescan of the
+//! groups behind the gap on every read shows up as a slope over them.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 // Custom timings measure the real time the work took, not the ambient clock.
@@ -79,7 +84,7 @@ use moq_net::time::Instant;
 
 use bytes::Bytes;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Error, Timestamp, broadcast, cache, track};
+use moq_net::{Error, Timestamp, broadcast, cache, group, track};
 
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> track::Info {
@@ -539,7 +544,7 @@ fn bench_fanout_frame(c: &mut Criterion) {
 					let mut elapsed = Duration::ZERO;
 					for _ in 0..iterations {
 						if written == FRAMES_PER_GROUP {
-							if let Some(open) = open.take() {
+							if let Some(mut open) = open.take() {
 								open.finish().unwrap();
 							}
 							open = Some(fanout.track.append_group().unwrap());
@@ -1261,6 +1266,83 @@ fn bench_range_widening(c: &mut Criterion) {
 	bench.finish();
 }
 
+/// Readers whose range ends at a time no group reaches yet, as groups land behind a missing
+/// sequence; see [`bench_time_end`].
+struct TimeEnd {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	readers: Vec<track::Subscriber>,
+	groups: u64,
+}
+
+impl TimeEnd {
+	fn new(readers: usize, groups: u64) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		let mut zero = track.create_group(group::Info { sequence: 0 }).unwrap();
+		zero.write_frame(Timestamp::from_millis(0).unwrap(), Bytes::from_static(b"x"))
+			.unwrap();
+		zero.finish().unwrap();
+		// Group 1 never arrives, and the budget outlasts the run, so the end never settles.
+		let subscription = track::Subscription::default()
+			.with_max_delay(AGED_BUDGET)
+			.with_ranges([track::Range {
+				start: track::Anchor::Absolute(track::Position::group(0)),
+				end: Some(track::Anchor::Time(Timestamp::from_secs(u32::MAX.into()).unwrap())),
+			}]);
+		let waiter = kio::Waiter::noop();
+		let readers = (0..readers)
+			.map(|_| {
+				let mut reader = track.subscribe(subscription.clone());
+				while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+				reader
+			})
+			.collect();
+		Self {
+			_broadcast: broadcast,
+			track,
+			readers,
+			groups,
+		}
+	}
+
+	fn run(&mut self) {
+		let waiter = kio::Waiter::noop();
+		for sequence in 2..self.groups + 2 {
+			let mut group = self.track.create_group(group::Info { sequence }).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(sequence).unwrap(), Bytes::from_static(b"x"))
+				.unwrap();
+			group.finish().unwrap();
+			for reader in &mut self.readers {
+				let mut handed = 0;
+				while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
+					black_box(group);
+					handed += 1;
+				}
+				assert_eq!(handed, 1);
+			}
+		}
+	}
+}
+
+/// Groups landing one at a time behind a missing sequence, each drained by readers whose
+/// time end it cannot settle, swept over the groups and the readers. Each group must cost
+/// each reader the same, so a rescan behind the gap shows up as a slope over the groups.
+fn bench_time_end(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_time_end");
+	group.sample_size(10);
+	for readers in [1usize, 8, 64] {
+		for groups in [64u64, 512, 4096] {
+			group.throughput(Throughput::Elements(groups * readers as u64));
+			group.bench_function(BenchmarkId::new(format!("{readers}r"), groups), |b| {
+				b.iter_batched_ref(|| TimeEnd::new(readers, groups), TimeEnd::run, BatchSize::PerIteration);
+			});
+		}
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_range_widening,
@@ -1282,6 +1364,7 @@ criterion_group!(
 	bench_sparse_read,
 	bench_gap_flush,
 	bench_wall,
-	bench_empty_run
+	bench_empty_run,
+	bench_time_end
 );
 criterion_main!(benches);

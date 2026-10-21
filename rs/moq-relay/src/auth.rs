@@ -16,15 +16,15 @@ use serde_with::{OneOrMany, serde_as};
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
-/// The longest a decider may take to answer an admission, the bound
-/// `moq_auth::Client` puts on a server, so a stalled decider refuses rather
-/// than parks the session behind it.
-const ADMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// The longest a decider may take to verify a token presented in band. A
+/// connection's admission has no bound of its own: it runs under the listener's
+/// handshake deadline, which a token arriving after the handshake does not.
+const ATTACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Where every session's grant comes from. Exactly one of `url` and the public
 /// patterns is set; [`validate`](Self::validate) refuses anything else.
 #[serde_as]
-#[derive(usage::Args, Clone, Debug, Serialize, Deserialize)]
+#[derive(usage_rs::Args, Clone, Debug, Serialize, Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default)]
 #[non_exhaustive]
@@ -135,7 +135,7 @@ const VERIFICATIONS: usize = 128;
 
 /// The `--auth-*` flags 0.14 had and #3688 removed, with their env vars: a relay
 /// deployed through the environment would otherwise ignore them without a word.
-#[derive(Clone, Debug, Default, usage::Args)]
+#[derive(Clone, Debug, Default, usage_rs::Args)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub(crate) struct Legacy {
 	#[usage(name = "auth-key", long = "auth-key", env = "MOQ_AUTH_KEY", hide = true)]
@@ -680,6 +680,12 @@ impl Lease {
 		}
 	}
 
+	/// Resolve once the lease has ended and the decider heard; see
+	/// [`moq_auth::lease::Consumer::reported`]. Take it before [`close`](Self::close).
+	pub(crate) fn reported(&self) -> impl Future<Output = ()> + Send + 'static {
+		self.consumer.reported()
+	}
+
 	/// End the lease with the session's close classification and the totals it
 	/// moved, and learn what ended the session: that, or for a gateway the
 	/// decider's reason if it revoked first. Dropping the consumer reports zero bytes.
@@ -699,7 +705,11 @@ impl Lease {
 				self.consumer.close(reason, bytes)
 			}
 			Some(refresh) => {
-				if let Some(ended) = refresh.ended().now_or_never() {
+				// The session has closed by now, withdrawing every grant it was issued.
+				// That is the effect of `reason`, not a verdict that overrides it.
+				if let Some(ended) = refresh.ended().now_or_never()
+					&& ended != lease::Reason::Dropped
+				{
 					if let Some(kind) = uncovered(&ended) {
 						self.stats.fail(kind);
 					}
@@ -780,15 +790,24 @@ enum Decider {
 impl Decider {
 	fn spawn(self, mut admissions: Admissions) {
 		tokio::spawn(async move {
-			while let Some(admission) = admissions.next().await {
+			while let Some(mut admission) = admissions.next().await {
 				match &self {
 					Self::Server(client) => {
 						let client = client.clone();
 						// A panic drops the admission, which answers it as unavailable.
 						tokio::spawn(moq_tokio::panic::isolate(async move {
-							let lease = match &admission.connection {
-								Some(connection) => client.attach(connection, admission.request.clone()).await,
-								None => client.connect(admission.request.clone()).await,
+							let ask = async {
+								match &admission.connection {
+									Some(connection) => client.attach(connection, admission.request.clone()).await,
+									None => client.connect(admission.request.clone()).await,
+								}
+							};
+							// The relay stopped waiting (its handshake deadline passed): drop the
+							// request to the server, so an expired admission leaves nothing in flight.
+							let lease = tokio::select! {
+								biased;
+								() = admission.reply.closed() => return,
+								lease = ask => lease,
 							};
 							match lease {
 								Ok(lease) => admission.grant(lease),
@@ -887,6 +906,11 @@ impl Auth {
 	}
 
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
+	///
+	/// Waits on the decider for as long as the caller does. The caller owns the
+	/// deadline: a listener bounds it with the connection's handshake deadline
+	/// ([`moq_tokio::server::Request::within`]), and dropping the future withdraws
+	/// the admission from the decider.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
 		// Build the token from the grant the admission checked: re-reading it could
 		// pick up an update that skipped the check.
@@ -902,10 +926,7 @@ impl Auth {
 
 	async fn decide(&self, request: Request) -> Result<(lease::Consumer, Grant), Error> {
 		let answer = self.submit(request, None)?;
-		let answered = moq_clock::timeout(ADMIT_TIMEOUT, answer)
-			.await
-			.map_err(|_| timed_out())?;
-		answered_with(answered)
+		answered_with(answer.await)
 	}
 
 	/// Queue one admission for the decider, returning its pending answer.
@@ -969,11 +990,13 @@ fn check_rates(publish: &moq_auth::Access, subscribe: &moq_auth::Access) -> Resu
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
 ///
 /// The transport has already accepted each one; it waits for its answer, so a
-/// slow decider holds connects the way a slow auth server would, and one that
-/// takes longer than a server may (ten seconds) is refused as unavailable. An
-/// [attached](Admission::attached) token holds one of its session's verification
-/// slots until the decider answers or drops it, even past that, and the session's
-/// later tokens wait for a slot before they reach the decider.
+/// slow decider holds connects the way a slow auth server would. A connection's
+/// admission has no bound of its own: whoever awaits [`Auth::admit`] owns the
+/// deadline, which the relay's listeners set to their handshake deadline. An
+/// [attached](Admission::attached) token is refused as unavailable after ten
+/// seconds, but holds one of its session's verification slots until the decider
+/// answers or drops it, even past that, and the session's later tokens wait for a
+/// slot before they reach the decider.
 /// Answer in place or hand each [`Admission`] to its own task; nothing here
 /// serializes them.
 pub struct Admissions(mpsc::UnboundedReceiver<Admission>);

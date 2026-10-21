@@ -162,6 +162,7 @@ impl Media {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
+	/// Import a byte stream into the broadcast using its reserved catalog producer.
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		let container = hang::catalog::Container::default();
 		Self {
@@ -637,7 +638,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
-			if let Some(g) = track.group.take() {
+			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
 			track.track.finish()?;

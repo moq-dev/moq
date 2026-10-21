@@ -16,6 +16,8 @@ import dev.moq.json.SnapshotConfig
 import dev.moq.json.SnapshotConsumer
 import dev.moq.json.SnapshotProducer
 import dev.moq.json.StreamConfig
+import dev.moq.json.Timed
+import dev.moq.json.decode
 import dev.moq.json.update
 import dev.moq.json.valuesAs
 import kotlinx.serialization.Serializable
@@ -163,7 +165,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
-            origin.dynamic("", Route()).use { /* dynamic origin smoke */ }
+            origin.dynamic("").use { /* dynamic origin smoke */ }
         }
     }
 
@@ -409,12 +411,16 @@ class SmokeTest {
     @Test
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
-            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
-            producer.update(Status(state = "live"))
-
+            val config = SnapshotConfig(deltaRatio = 8u, compression = false)
+            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
+            val producer = SnapshotProducer(broadcast, track, config)
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
-            assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first())
+            for (n in 1..4) producer.update(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
+
+            // `next` yields every state in order; `latest` skips the buffered third.
+            assertEquals(Timed(Status(state = "live1"), 1.milliseconds), consumer.next()?.decode<Status>())
+            assertEquals(Timed(Status(state = "live2"), 2.milliseconds), consumer.next()?.decode<Status>())
+            assertEquals(Timed(Status(state = "live4"), 4.milliseconds), consumer.latest()?.decode<Status>())
         }
     }
 
@@ -445,7 +451,7 @@ class SmokeTest {
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
             while (demand.wantedChanged() == null) {}
             // `first` cancels the collection, which must release the subscription without an explicit cancel.
-            assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first())
+            assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first().value)
             while (demand.wantedChanged() != null) {}
         }
     }
@@ -463,7 +469,7 @@ class SmokeTest {
             producer.update("""{"state":"raw"}""")
 
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
-            assertEquals(Status(state = "raw"), consumer.valuesAs<Status>().first())
+            assertEquals(Timed(Status(state = "raw"), null), consumer.valuesAs<Status>().first())
         }
     }
 
@@ -557,15 +563,14 @@ class SmokeTest {
     @Test
     fun `dynamic serves a request under a prefix`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.dynamic("live", Route()).use { dynamic ->
+            origin.dynamic("live").use { dynamic ->
                 val pending = async {
                     origin.consume().requestBroadcast("live/cam")
                 }
                 val request = dynamic.requestedBroadcast()
                 assertEquals("live/cam", request.path())
-                BroadcastProducer().use { served ->
-                    request.accept(served)
-                    pending.await()
+                request.prepare(mintEpoch()).use { prepared ->
+                    prepared.publish().use { pending.await() }
                 }
             }
         }
@@ -609,6 +614,36 @@ class SmokeTest {
                     input,
                     AudioEncoderOutput(codec = AudioCodec.opus(), track = "coarse", frameDurationUs = 2_000u),
                 )
+            }
+        }
+    }
+
+    /**
+     * Both sides read the grant their peer gave them, and a peer that verifies no tokens
+     * of its own refuses another one as unsupported.
+     */
+    @Test
+    fun `session auth reads the grant`() = runTest {
+        val version = listOf("moq-lite-07-wip")
+        Server.listen(
+            ServerConfig(bind = "127.0.0.1:0", versions = version, tls = ServerTls(generate = listOf("localhost"))),
+        ).use { server ->
+            // Not requests().first(): ending that collection cancels the server.
+            val accepted = async { server.server.accept()!!.accept() }
+            val moq = Moq.connect(
+                "https://${server.localAddr}",
+                ClientConfig(bind = "127.0.0.1:0", versions = version, tls = ClientTls(insecure = true), once = true),
+            )
+            moq.use {
+                val everything = Grant(publish = listOf("**"), subscribe = listOf("**"), expiresUs = null)
+                assertEquals(everything, moq.auth().grants().first { it != null })
+                val session = accepted.await()
+                assertEquals(everything, session.auth().grants().first { it != null })
+                assertNull(everything.expires)
+
+                assertFailsWith<MoqException.Unsupported> { moq.auth().add("extra") }
+                assertEquals(everything, moq.auth().grant())
+                session.cancel(0u)
             }
         }
     }

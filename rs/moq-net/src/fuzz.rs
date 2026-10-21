@@ -35,10 +35,14 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 			std::sync::Arc::new(crate::model::object::Fields {
 				id: id as u64,
 				properties: crate::model::object::Properties {
-					values: vec![crate::model::object::Property {
-						id: 0x80,
-						value: crate::model::object::Value::Int(96_000),
-					}],
+					block: crate::ietf::object::block(
+						&[crate::model::object::Property {
+							id: 0x80,
+							value: crate::model::object::Value::Int(96_000),
+						}],
+						crate::model::object::Encoding::Draft19,
+					)
+					.unwrap(),
 					..Default::default()
 				},
 			})
@@ -49,10 +53,11 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 				timestamp: None,
 			},
 			fields,
+			inflated: None,
 		};
 		let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
 		frame.write(payload.clone()).unwrap();
-		frame.finish().unwrap();
+		group = frame.finish().unwrap();
 	}
 	group.finish().unwrap();
 	(broadcast, track, group)
@@ -99,7 +104,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 ];
 
 /// How many types [`lite_wire`] dispatches over.
-const LITE_KINDS: u8 = 21;
+const LITE_KINDS: u8 = 22;
 
 /// How many types [`ietf_wire`] dispatches over.
 const IETF_KINDS: u8 = 40;
@@ -146,20 +151,32 @@ where
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	// The body doesn't say whether it carries a timestamp, so try both readings.
+	// The body doesn't say whether it carries a timestamp or an inflated size, or whether
+	// the session negotiated the `ietf` extension, so try every reading.
+	let ietf: &[bool] = match version.has_ietf() {
+		true => &[false, true],
+		false => &[false],
+	};
 	let mut any = false;
-	for timed in [true, false] {
-		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| timed) else {
-			continue;
-		};
-		any = true;
+	for &ietf in ietf {
+		for timescale in [Some(crate::Timescale::MILLI), None] {
+			for compressed in [false, true] {
+				let format = lite::Format { timescale, compressed };
+				let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, ietf, |_| format)
+				else {
+					continue;
+				};
+				any = true;
 
-		let Ok(first) = decoded.encode_bytes(version) else {
-			continue;
-		};
+				let Ok(first) = decoded.encode_bytes(version) else {
+					continue;
+				};
 
-		let echo = lite::Datagram::decode(first, version, |_| timed).expect("could not decode our own encoding");
-		assert_eq!(echo, decoded, "datagram did not survive a round trip");
+				let echo = lite::Datagram::decode(first, version, ietf, |_| format)
+					.expect("could not decode our own encoding");
+				assert_eq!(echo, decoded, "datagram did not survive a round trip");
+			}
+		}
 	}
 	any
 }
@@ -197,6 +214,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		18 => roundtrip::<lite::Probe, _>(rest, version),
 		19 => datagram(rest, version),
 		20 => roundtrip::<lite::Parameters, _>(rest, version),
+		21 => roundtrip::<lite::ietf::TrackProperties, _>(rest, version),
 		_ => unreachable!("kind is taken modulo LITE_KINDS"),
 	}
 }
@@ -431,7 +449,9 @@ impl LiteSample {
 				subscribe: 3,
 				sequence: 1_234,
 				timestamp: Some(1_234_567_890),
+				inflated: None,
 				payload: bytes::Bytes::new(),
+				ietf: None,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -463,9 +483,14 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
+			Self::Datagram => {
+				lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| lite::Format {
+					timescale: Some(crate::Timescale::MILLI),
+					compressed: false,
+				})
 				.map(|_| 1)
-				.unwrap(),
+				.unwrap()
+			}
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
 		}
 	}
@@ -611,6 +636,7 @@ impl Default for Messages {
 				end_frame: None,
 			},
 			lite_update: lite::SubscribeUpdate {
+				wanted_group: None,
 				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Duration::from_millis(500),
@@ -624,9 +650,11 @@ impl Default for Messages {
 				largest: None,
 			}),
 			lite_info: lite::TrackInfo {
+				refresh: None,
 				priority: 1,
 				max_age: Some(Duration::from_secs(10)),
 				timescale: Some(crate::Timescale::MICRO),
+				compress: false,
 			},
 			lite_group: lite::Group {
 				subscribe: 7,
@@ -1122,7 +1150,6 @@ pub fn seeds() -> Vec<Seed> {
 /// the bytes received.
 pub struct FrameRecv {
 	streams: Vec<Option<(coding::Reader<Chunks, lite::Version>, frame::ProducerOwned)>>,
-	groups: Vec<group::Producer>,
 	// Keeps the groups' track alive.
 	_track: track::Producer,
 	_broadcast: broadcast::Producer,
@@ -1145,16 +1172,14 @@ impl FrameRecv {
 		let budget = budget.map(frame::Budget::new).unwrap_or_default();
 		let payload = bytes::Bytes::from(vec![0u8; size]);
 
-		let mut groups = Vec::with_capacity(streams);
 		let streams = (0..streams)
 			.map(|_| {
-				let mut group = track.append_group().unwrap();
+				let group = track.append_group().unwrap();
 				let info = frame::Info {
 					size: size as u64,
 					timestamp: Some(crate::Timestamp::ZERO),
 				};
 				let frame = group.create_frame_owned(info, &budget).unwrap();
-				groups.push(group);
 				let stream = Chunks {
 					payload: payload.clone(),
 					chunk,
@@ -1166,7 +1191,6 @@ impl FrameRecv {
 
 		Self {
 			streams,
-			groups,
 			_track: track,
 			_broadcast: broadcast,
 		}
@@ -1182,13 +1206,11 @@ impl FrameRecv {
 				if let std::task::Poll::Ready(res) = reader.poll_read_frame(&mut cx, frame) {
 					res.unwrap();
 					let (_, frame) = slot.take().unwrap();
-					frame.finish().unwrap();
+					let mut group = frame.finish().unwrap();
+					group.finish().unwrap();
 					open -= 1;
 				}
 			}
-		}
-		for group in &self.groups {
-			group.finish().unwrap();
 		}
 	}
 }

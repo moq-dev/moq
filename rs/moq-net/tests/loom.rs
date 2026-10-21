@@ -100,7 +100,7 @@ fn back_to_back_groups_arrive_in_order() {
 
 		let publisher = thread::spawn(move || {
 			for _ in 0..2 {
-				let group = track.append_group().expect("append group");
+				let mut group = track.append_group().expect("append group");
 				group.finish().expect("finish group");
 			}
 			track.finish().expect("finish track");
@@ -511,6 +511,43 @@ fn a_request_never_joins_a_retiring_front() {
 	});
 }
 
+/// A claim answer published while its claim retracts on another thread. The answer
+/// either lands before the retraction, and stays announced, or is refused without
+/// ever being announced. Announcing it and withdrawing it again shows up here as a
+/// route seen mid-race on an answer that was refused.
+#[test]
+fn a_refused_answer_is_never_announced() {
+	model(|| {
+		let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+		let claim = producer.dynamic("room").unwrap();
+		let pending = producer.consume().request_broadcast("room/alice", None);
+		driver
+			.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
+			.unwrap();
+		let prepared = block_on(claim.requested_broadcast())
+			.expect("requested")
+			.prepare(moq_net::Epoch::mint())
+			.expect("prepare");
+		let answer = prepared.broadcast().clone();
+
+		let watch = answer.clone();
+		let releaser = thread::spawn(move || {
+			drop(claim);
+			watch.route().is_some()
+		});
+		let published = prepared.publish();
+		let seen = releaser.join().unwrap();
+
+		assert_eq!(
+			published.is_ok(),
+			answer.route().is_some(),
+			"the route outlived its answer"
+		);
+		assert!(!seen || published.is_ok(), "a refused answer was announced");
+		drop(pending);
+	});
+}
+
 /// Read a track whose source already aborted with `read`, racing the front ending it.
 /// A reader that saw no end, then found one set when it went to park, parked on nothing
 /// and never woke, which shows up here as a deadlock. `read` says whether the refusal
@@ -555,46 +592,13 @@ fn an_aborted_parked_group_releases_a_finished_track() {
 	model(|| {
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("parked", timed()).unwrap();
-		let group = track.append_group().unwrap();
-		group.clone().finish().unwrap();
+		let mut group = track.append_group().unwrap();
+		group.finish().unwrap();
 		let mut subscriber = track.subscribe(moq_net::track::Subscription::default().with_groups(0..));
 		subscriber.set_groups(..0);
 		track.finish().unwrap();
 		let aborting = thread::spawn(move || group.abort(Error::Old).unwrap());
 		assert!(block_on(subscriber.recv_group()).unwrap().is_none());
 		aborting.join().unwrap();
-	});
-}
-
-/// A frame written on one group handle racing `finish` on another must never reopen
-/// the finished largest group, or a reader at the declared end waits forever.
-#[test]
-fn a_frame_racing_finish_never_reopens_the_largest() {
-	model(|| {
-		let broadcast = broadcast::Info::new().produce();
-		let mut track = broadcast
-			.create_track("largest", moq_net::track::Info::default())
-			.unwrap();
-		let mut group = track.append_group().unwrap();
-		group.write_frame(None, Bytes::from_static(b"a")).unwrap();
-		track.finish().unwrap();
-
-		let finishing = group.clone();
-		let writer = thread::spawn(move || {
-			// Refused once the finish wins; either order must end the stream.
-			let _ = group.write_frame(None, Bytes::from_static(b"b"));
-			group
-		});
-		finishing.finish().unwrap();
-		let _group = writer.join().unwrap();
-
-		let noop = kio::Waiter::noop();
-		loop {
-			match track.poll_largest(&noop) {
-				std::task::Poll::Ready(Some(_)) => continue,
-				std::task::Poll::Ready(None) => break,
-				std::task::Poll::Pending => panic!("a stale frame write reopened the finished largest group"),
-			}
-		}
 	});
 }

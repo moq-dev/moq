@@ -3,7 +3,7 @@
 ## Goal
 
 The latest published Go and JavaScript clients read live media from the
-current Rust publisher in moq-dev/smoke's Nix channel. Incompatible optional
+current Rust publisher in test/smoke's Nix channel. Incompatible optional
 archive metadata does not make an otherwise playable catalog unreadable.
 
 ## Plan
@@ -35,4 +35,3 @@ in the existing release-execution act rather than as a prerequisite of m1.
 ## Related
 
 - [Release execution](/quest/m2/release/README.md) - owns publication and installed-artifact verification
-- [Draft-22 release notices](/quest/m0/release-22/README.md) - tells testers and reporters about the published fixes

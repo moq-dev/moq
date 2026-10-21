@@ -64,7 +64,7 @@ public:
 	std::string GetEpoch();
 
 	// Most recent connect/reconnect failure for this Start(), or empty when none.
-	// Thread-safe; the dock polls this while reconnecting and on stop.
+	// Thread-safe; the dock polls this while connecting, while reconnecting, and on stop.
 	void CopyLastFailure(int *code, std::string *reason);
 
 	// The bitrate the video encoders follow the bandwidth grant at, summed over
@@ -76,12 +76,22 @@ public:
 	};
 	bool TryGetVideoRate(VideoRate *out);
 
+	// Present a fresh publish token on the connected session without reconnecting,
+	// replacing the one presented here before once the relay accepts it. False when
+	// there is no session yet. The outcome is logged, and a refusal is kept for
+	// TokenRefusal(); a session without in-band AUTH refuses it.
+	bool PresentToken(const std::string &token);
+	// Why the relay refused the token PresentToken() last presented, or empty.
+	std::string TokenRefusal();
+
 private:
 	friend struct MoQOutputStatsTest;
 	bool CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
 				   ConnectionStats *out);
 	// Between reconnects: name why the session is down, for CopyLastFailure.
 	void RecordReconnectFailure(const std::shared_ptr<moq::Session> &current);
+	// Before the first connect: name why the dial is retrying, for CopyLastFailure.
+	void RecordDialFailure();
 
 	// One Start()'s connection: the client dialing, the session once it connects,
 	// and the pending call whose continuation reports on it. Replaced wholesale by
@@ -97,6 +107,11 @@ private:
 		bool connected = false;
 		// False while the session is between reconnects.
 		bool live = false;
+		// The latest token PresentToken() got accepted, presented on every reconnect
+		// until it is replaced or the attempt is dropped, and the call presenting the
+		// next one.
+		std::shared_ptr<moq::AuthToken> token;
+		std::optional<moq::Continuation> presenting;
 	};
 
 	void OnConnect(const std::shared_ptr<Attempt> &attempt, moq::expected<std::shared_ptr<moq::Session>> result);
@@ -161,6 +176,8 @@ private:
 	// Guards the group below, which the dock reads from the UI thread.
 	std::mutex mutex;
 	std::shared_ptr<moq::Session> session;
+	// The client while its first connect is pending, so the dock can ask why it retries.
+	std::shared_ptr<moq::Client> dialing;
 	std::shared_ptr<moq::BandwidthConsumer> recv_bandwidth;
 	bool connected = false;
 	bool live = false;
@@ -168,6 +185,7 @@ private:
 	std::string epoch;
 	int last_failure_code = 0;
 	std::string last_failure_reason;
+	std::string token_refusal;
 
 	// Written on the worker, read by GetConnectTime().
 	std::atomic<int> connect_time_ms{0};

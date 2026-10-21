@@ -139,6 +139,69 @@ void main() {
     },
   );
 
+  test('both sides read the grant their peer gave them', () async {
+    const version = ['moq-lite-07-wip'];
+    final server = MoqServer(
+      config: MoqServerConfig(
+        bind: '127.0.0.1:0',
+        versions: version,
+        tls: MoqServerTls(generate: ['localhost']),
+        quic: MoqQuicConfig(),
+      ),
+    );
+    final address = await server.listen().timeout(timeout);
+    final accepted = () async {
+      final request = await server.accept().timeout(timeout);
+      if (request == null) throw StateError('server closed before accept');
+      return request.accept().timeout(timeout);
+    }();
+
+    final client = await Moq.connect(
+      'https://$address',
+      options: const ConnectOptions(
+        tlsVerify: false,
+        bind: '127.0.0.1:0',
+        versions: version,
+        reconnect: false,
+      ),
+    ).timeout(timeout);
+    final serverSession = await accepted;
+
+    // Generated records compare by identity, so compare the fields.
+    void expectEverything(Grant? grant) {
+      expect(grant?.publish, ['**']);
+      expect(grant?.subscribe, ['**']);
+      expect(grant?.expires, isNull);
+    }
+
+    expectEverything(
+      await client
+          .auth()
+          .grants()
+          .firstWhere((g) => g != null)
+          .timeout(timeout),
+    );
+    expectEverything(
+      await serverSession
+          .auth()
+          .grants()
+          .firstWhere((g) => g != null)
+          .timeout(timeout),
+    );
+
+    // A peer that verifies no tokens of its own refuses another one.
+    await expectLater(
+      client.auth().add(token: 'extra').timeout(timeout),
+      throwsA(isA<UnsupportedMoqException>()),
+    );
+    expectEverything(client.auth().grant());
+
+    // The client drains first: cancelling the server session would fail its shutdown.
+    await client.close();
+    serverSession.cancel(code: 0);
+    server.cancel();
+  });
+
   test('connects, announces, subscribes, and delivers a frame', () async {
     final relay = MoqOriginProducer(config: MoqOriginConfig());
     final server = MoqServer(
@@ -428,12 +491,11 @@ void main() {
 
   test('dynamic serves a request under a prefix', () async {
     final origin = MoqOriginProducer(config: MoqOriginConfig());
-    final dynamic = origin.dynamic_(prefix: 'live', route: MoqRoute());
+    final dynamic = origin.dynamic_(prefix: 'live');
     final pending = origin.consume().requestBroadcast(path: 'live/cam');
     final request = await dynamic.requestedBroadcast().timeout(timeout);
     expect(request.path(), 'live/cam');
-    final served = MoqBroadcastProducer();
-    request.accept(broadcast: served);
+    final served = request.prepare(epoch: mintEpoch()).publish();
     await pending.timeout(timeout);
     dynamic.cancel();
     dynamic.dispose();
@@ -444,7 +506,10 @@ void main() {
     final broadcast = MoqBroadcastProducer();
     final producer = moq_json.SnapshotProducer(
       broadcast: broadcast,
-      track: broadcast.publishTrack(name: 'status', info: null),
+      track: broadcast.publishTrack(
+        name: 'status',
+        info: MoqTrackInfo(timescale: 1000000),
+      ),
       config: moq_json.SnapshotConfig(),
     );
     final track = await broadcast
@@ -456,9 +521,19 @@ void main() {
       config: moq_json.SnapshotConfig(),
     );
 
-    producer.update(value: jsonEncode({'state': 'live'}));
-    final value = await consumer.next().timeout(timeout);
-    expect(jsonDecode(value!), {'state': 'live'});
+    for (var n = 1; n <= 4; n++) {
+      producer.update(value: jsonEncode({'n': n}), timestampUs: n * 1000);
+    }
+
+    // next() yields every state in order; latest() skips the buffered third.
+    moq_json.Value? value = await consumer.next().timeout(timeout);
+    expect(jsonDecode(value!.value), {'n': 1});
+    expect(value.timestampUs, 1000);
+    value = await consumer.next().timeout(timeout);
+    expect(jsonDecode(value!.value), {'n': 2});
+    value = await consumer.latest().timeout(timeout);
+    expect(jsonDecode(value!.value), {'n': 4});
+    expect(value.timestampUs, 4000);
 
     consumer.cancel();
     producer.finish();

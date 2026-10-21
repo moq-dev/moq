@@ -1615,6 +1615,40 @@ mod tests {
         assert!(!client.recv.contains_key(&id));
     }
 
+    /// An ordered read refused after an unordered one leaves the stream readable.
+    #[test]
+    fn illegal_ordered_read_keeps_stream() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        receive(&mut client, id, 0..4);
+
+        let mut pending = Retransmits::default();
+        let mut recv = RecvStream {
+            id,
+            state: &mut client,
+            pending: &mut pending,
+        };
+        let mut chunks = recv.read(false).unwrap();
+        assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes.len(), 4);
+        let _ = chunks.finalize();
+
+        receive(&mut client, id, 4..8);
+        let mut recv = RecvStream {
+            id,
+            state: &mut client,
+            pending: &mut pending,
+        };
+        assert_eq!(
+            recv.read(true).err(),
+            Some(ReadableError::IllegalOrderedRead)
+        );
+
+        let mut chunks = recv.read(false).unwrap();
+        let chunk = chunks.next(usize::MAX).unwrap().unwrap();
+        assert_eq!((chunk.offset, chunk.bytes.len()), (4, 4));
+        let _ = chunks.finalize();
+    }
+
     #[test]
     fn stopped_reset() {
         for final_offset in [32u32, 48] {

@@ -16,13 +16,13 @@
 		"@moq/json": "workspace:^",
 		"@moq/net": "workspace:^",
 		"@moq/watch": "workspace:^",
-		"zod": "^4.6.5"
+		"zod": "^4.6.7"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.2",
+		"@types/bun": "^1.4.3",
 		"rolldown": "^1.2.12",
 		"typescript": "7.0.2",
 		"vite": "^8.3.2",
-		"wrangler": "^4.147.0"
+		"wrangler": "^4.150.0"
 	}
 }

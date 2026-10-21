@@ -40,6 +40,9 @@ asyncio.run(main())
    Session
    Request
    Transport
+   Auth
+   AuthToken
+   Grant
 ```
 
 ## Publishing
@@ -146,6 +149,7 @@ broadcast, and producers advertise it in the catalog.
    StreamProducer
    SnapshotConsumer
    StreamConsumer
+   Timed
 ```
 
 ## Opaque data

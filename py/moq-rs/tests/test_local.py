@@ -488,18 +488,23 @@ async def test_fetch_group_and_serve_dynamic_miss():
 
 async def test_json_snapshot_roundtrip():
     broadcast = moq.BroadcastProducer()
-    producer = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
+    track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
+    producer = moq.json.SnapshotProducer(broadcast, track, compression=True)
     consumer = moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("status"), compression=True)
 
-    producer.update({"state": "live", "viewers": 1})
-    value = await asyncio.wait_for(anext(consumer), timeout=5.0)
-    assert value == {"state": "live", "viewers": 1}
+    for viewers in range(1, 5):
+        producer.update({"viewers": viewers}, timestamp=timedelta(milliseconds=viewers))
 
-    producer.update({"state": "live", "viewers": 2})
+    # Iteration yields every state in order; latest() skips the buffered third.
     value = await asyncio.wait_for(anext(consumer), timeout=5.0)
-    assert value == {"state": "live", "viewers": 2}
+    assert value == moq.json.Timed({"viewers": 1}, timedelta(milliseconds=1))
+    value = await asyncio.wait_for(anext(consumer), timeout=5.0)
+    assert value == moq.json.Timed({"viewers": 2}, timedelta(milliseconds=2))
+    value = await asyncio.wait_for(consumer.latest(), timeout=5.0)
+    assert value == moq.json.Timed({"viewers": 4}, timedelta(milliseconds=4))
 
     producer.finish()
+    assert await asyncio.wait_for(consumer.latest(), timeout=5.0) is None
 
 
 async def test_json_stream_roundtrip():
@@ -510,7 +515,7 @@ async def test_json_stream_roundtrip():
     for n in range(3):
         producer.append({"n": n})
         record = await asyncio.wait_for(anext(consumer), timeout=5.0)
-        assert record == {"n": n}
+        assert record == moq.json.Timed({"n": n}, None)
 
     producer.finish()
 
@@ -644,9 +649,9 @@ async def test_dynamic_broadcast_request():
     request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
     assert request.path == "dynamic/broadcast"
 
-    served = moq.BroadcastProducer()
-    track = served.publish_track("status", moq.TrackInfo(timescale=1_000_000))
-    request.accept(served)
+    prepared = request.prepare(moq.mint_epoch())
+    track = prepared.broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
+    served = prepared.publish()
     with pytest.raises(Exception):
         _ = request.path
 
@@ -1522,8 +1527,7 @@ async def test_dynamic_serves_a_request_under_a_prefix():
     pending = asyncio.create_task(consumer.request_broadcast("live/cam"))
     request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
     assert request.path == "live/cam"
-    served = moq.BroadcastProducer()
-    request.accept(served)
+    served = request.prepare(moq.mint_epoch()).publish()
     await asyncio.wait_for(pending, timeout=5.0)
     dynamic.cancel()
     served.close()

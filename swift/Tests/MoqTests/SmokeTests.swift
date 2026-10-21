@@ -101,6 +101,48 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    /// Both sides read the grant their peer gave them, and a peer that verifies no
+    /// tokens of its own refuses another one as unsupported.
+    func testSessionAuthReadsTheGrant() async throws {
+        let version = ["moq-lite-07-wip"]
+        let server = try Server(bind: "127.0.0.1:0", versions: version, tls: ServerTls(generate: ["localhost"]))
+        defer { server.cancel() }
+        let addr = try await server.listen()
+        async let accepted = server.accept()
+
+        let client = try Client(bind: "127.0.0.1:0", versions: version, tls: ClientTls(insecure: true), once: true)
+        defer { client.cancel() }
+        let session = try await client.connect(to: "https://\(addr)")
+        guard let request = try await accepted else { return XCTFail("server closed before accept") }
+        let peer = try await request.accept()
+
+        // Ending both sessions ends any wait below, so a grant that never arrives fails
+        // rather than hangs.
+        let watchdog = Task {
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+            peer.cancel(code: 0)
+            session.cancel(code: 0)
+        }
+        defer { watchdog.cancel() }
+
+        let everything = Grant(publish: ["**"], subscribe: ["**"], expiresUs: nil)
+        for auth in [session.auth(), peer.auth()] {
+            var grant = auth.grant()
+            while grant != everything {
+                grant = try await auth.grantChanged()
+            }
+        }
+
+        do {
+            _ = try await session.auth().add(token: "extra")
+            XCTFail("the default acceptor refuses a token")
+        } catch MoqError.Unsupported {}
+        XCTAssertEqual(session.auth().grant(), everything)
+
+        peer.cancel(code: 0)
+        session.cancel(code: 0)
+    }
+
     /// `cancel()` releases the listening socket before it returns, so the same
     /// address binds again with no retry.
     func testServerCloseReleasesPort() async throws {
@@ -199,9 +241,9 @@ final class SmokeTests: XCTestCase {
         }
         let request = try await dynamic.requestedBroadcast()
         XCTAssertEqual(try request.path, "live/cam")
-        let served = try BroadcastProducer()
-        try request.accept(broadcast: served)
+        let served = try request.prepare(epoch: mintEpoch()).publish()
         _ = try await pending.value
+        try served.close()
         dynamic.cancel()
     }
 
@@ -278,18 +320,23 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.SnapshotProducer<Status>(
-            broadcast: broadcast, track: try broadcast.publishTrack(name: "status"), compression: true)
+            broadcast: broadcast,
+            track: try broadcast.publishTrack(name: "status", info: TrackInfo(timescale: 1_000_000)),
+            compression: true)
         let consumer = try Json.SnapshotConsumer<Status>(
             track: try await broadcast.consume().subscribeTrack(name: "status"), compression: true)
 
-        try producer.update(Status(state: "live", viewers: 42))
-        let first = try await consumer.next()
-        XCTAssertEqual(first, Status(state: "live", viewers: 42))
+        for viewers in 1...4 {
+            try producer.update(Status(state: "live", viewers: viewers), timestampUs: UInt64(viewers) * 1000)
+        }
 
-        // A second update supersedes the first; a late reader collapses to the latest.
-        try producer.update(Status(state: "live", viewers: 43))
+        // `next` yields every state in order; `latest` skips the buffered third.
+        let first = try await consumer.next()
+        XCTAssertEqual(first, Json.Timed(value: Status(state: "live", viewers: 1), timestampUs: 1000))
         let second = try await consumer.next()
-        XCTAssertEqual(second, Status(state: "live", viewers: 43))
+        XCTAssertEqual(second, Json.Timed(value: Status(state: "live", viewers: 2), timestampUs: 2000))
+        let latest = try await consumer.latest()
+        XCTAssertEqual(latest, Json.Timed(value: Status(state: "live", viewers: 4), timestampUs: 4000))
 
         consumer.cancel()
         try producer.finish()
@@ -310,7 +357,7 @@ final class SmokeTests: XCTestCase {
         for n in 0..<3 {
             try producer.append(Event(n: n))
             let record = try await consumer.next()
-            XCTAssertEqual(record, Event(n: n))
+            XCTAssertEqual(record, Json.Timed(value: Event(n: n), timestampUs: nil))
         }
 
         consumer.cancel()

@@ -1,5 +1,5 @@
 import { Nano, Second } from "@moq/clock";
-import { type Getter, Once, Signal } from "@moq/signals";
+import { type Getter, Once, race, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
@@ -7,14 +7,15 @@ import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
+import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, RequestWindowError, type Session } from "./adapter.ts";
-import { AuthMessage, supported as authSupported, IetfAuthWire } from "./auth.ts";
+import { AuthMessage, IetfAuthWire } from "./auth.ts";
+import { supported as authSupported } from "./auth_setup.ts";
 import * as Cluster from "./cluster.ts";
 import type { RequestKind } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
@@ -40,6 +41,12 @@ import { type IetfVersion, Version, versionName } from "./version.ts";
 
 // The PADDING stream type (draft-18+): bytes a peer sends to probe for bandwidth.
 const PADDING = 0x132b3e28n;
+
+// A handler owns its request stream, and ending the request (closing the session over a
+// violation) is its job: closing again here could only send a competing code.
+function handed(task: Promise<void>): Promise<void> {
+	return task.catch((err: unknown) => console.error("error processing bidi stream", err));
+}
 
 /**
  * Represents a connection to a MoQ server using moq-transport protocol.
@@ -192,8 +199,15 @@ export class Connection implements Established {
 					this.#close({ closeCode: err.code, reason: err.message });
 					return;
 				}
-				console.error("adapter error", err);
-				this.#close();
+				if (sessionClosed(err)) {
+					this.#close();
+					return;
+				}
+				this.#violated(
+					err instanceof ProtocolViolation
+						? err
+						: new ProtocolViolation("control stream failed", { cause: err }),
+				);
 			});
 		}
 
@@ -365,7 +379,7 @@ export class Connection implements Established {
 			case BigInt(SubscribeNamespace.id): {
 				const decoded = SubscribeNamespace.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "subscribe_namespace", decoded);
-				if (msg) await this.#publisher.runSubscribeNamespace(msg, stream);
+				if (msg) await handed(this.#publisher.runSubscribeNamespace(msg, stream));
 				break;
 			}
 			case BigInt(SubscribeNamespaceLegacy.id): {
@@ -395,14 +409,14 @@ export class Connection implements Established {
 				this.#spend(legacy.requestId);
 				try {
 					if (legacy.subscribeOptions === SubscribeOptions.PUBLISH) {
-						await this.#publisher.refuseSubscribeNamespace(legacy.requestId, stream);
+						await handed(this.#publisher.refuseSubscribeNamespace(legacy.requestId, stream));
 					} else {
 						const msg = new SubscribeNamespace({
 							requestId: legacy.requestId,
 							namespace: legacy.namespace,
 							hidden: legacy.hidden,
 						});
-						await this.#publisher.runSubscribeNamespace(msg, stream);
+						await handed(this.#publisher.runSubscribeNamespace(msg, stream));
 					}
 				} finally {
 					adapter?.releaseRequest(legacy.requestId);
@@ -418,7 +432,7 @@ export class Connection implements Established {
 			case BigInt(Subscribe.id): {
 				const decoded = Subscribe.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "subscribe", decoded);
-				if (msg) await this.#publisher.runSubscribe(msg, stream);
+				if (msg) await handed(this.#publisher.runSubscribe(msg, stream));
 				break;
 			}
 			case BigInt(SUBSCRIBE_TRACKS_ID): {
@@ -435,19 +449,19 @@ export class Connection implements Established {
 					throw malformed(err, "subscribe_tracks");
 				});
 				this.#session.spendRequest(request.requestId);
-				await this.#publisher.runSubscribeTracks(stream, request.namespace);
+				await handed(this.#publisher.runSubscribeTracks(stream, request.namespace));
 				break;
 			}
 			case BigInt(TrackStatusRequest.id): {
 				const decoded = TrackStatusRequest.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "track_status", decoded);
-				if (msg) await this.#publisher.runTrackStatusRequest(msg, stream);
+				if (msg) await handed(this.#publisher.runTrackStatusRequest(msg, stream));
 				break;
 			}
 			case BigInt(Fetch.id): {
 				const decoded = Fetch.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "fetch", decoded);
-				if (msg) await this.#publisher.runFetch(msg, stream);
+				if (msg) await handed(this.#publisher.runFetch(msg, stream));
 				break;
 			}
 
@@ -480,7 +494,7 @@ export class Connection implements Established {
 					break;
 				}
 
-				await this.#subscriber.runPublishNamespace(msg, stream);
+				await handed(this.#subscriber.runPublishNamespace(msg, stream));
 				break;
 			}
 			case BigInt(AuthMessage.id): {
@@ -492,7 +506,7 @@ export class Connection implements Established {
 			case BigInt(Publish.id): {
 				const decoded = Publish.decode(stream.reader, this.#session.version);
 				const msg = await this.#request(stream, "publish", decoded);
-				if (msg) await this.#subscriber.runPublish(msg, stream);
+				if (msg) await handed(this.#subscriber.runPublish(msg, stream));
 				break;
 			}
 
@@ -613,33 +627,46 @@ export class Connection implements Established {
 	 */
 	async #runGoAway(controlStream: Stream, version: IetfVersion) {
 		try {
-			for (;;) {
-				const done = await controlStream.reader.done();
-				if (done) return;
+			const read = async () => {
+				for (;;) {
+					const done = await controlStream.reader.done();
+					if (done) throw new ProtocolViolation("control stream closed");
 
-				const msg = await this.#readGoAway(controlStream, version).catch((err: unknown) => {
-					throw malformed(err, "setup stream message");
-				});
-				if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
-				// A client may leave, but only the server may name where to go.
-				if (!this.#client && msg.newSessionUri !== "") {
-					throw new ProtocolViolation("client GOAWAY must not name a redirect");
-				}
-				// Draft-18's Request ID names our IDs: even when we are the client, odd for a server.
-				// It is required here, on the control stream.
-				if (version === Version.DRAFT_18 && msg.requestId === undefined) {
-					throw new ProtocolViolation("draft-18 GOAWAY on the control stream lacks a Request ID");
-				}
-				if (msg.requestId !== undefined && msg.requestId % 2n !== (this.#client ? 0n : 1n)) {
-					throw new ProtocolViolation("GOAWAY Request ID has the wrong parity", {
-						code: SessionCode.InvalidRequestId,
+					const msg = await this.#readGoAway(controlStream, version).catch((err: unknown) => {
+						throw malformed(err, "setup stream message");
 					});
+					if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
+					// A client may leave, but only the server may name where to go.
+					if (!this.#client && msg.newSessionUri !== "") {
+						throw new ProtocolViolation("client GOAWAY must not name a redirect");
+					}
+					// Draft-18's Request ID names our IDs: even when we are the client, odd for a server.
+					// It is required here, on the control stream.
+					if (version === Version.DRAFT_18 && msg.requestId === undefined) {
+						throw new ProtocolViolation("draft-18 GOAWAY on the control stream lacks a Request ID");
+					}
+					if (msg.requestId !== undefined && msg.requestId % 2n !== (this.#client ? 0n : 1n)) {
+						throw new ProtocolViolation("GOAWAY Request ID has the wrong parity", {
+							code: SessionCode.InvalidRequestId,
+						});
+					}
+					// Reject bytes already behind GOAWAY before a caller can close on the drain.
+					if (controlStream.reader.tryDecode((c) => c.u8()) !== undefined)
+						throw new ProtocolViolation("message after control stream GOAWAY");
+					this.#goaway.set(msg.drain());
 				}
-				this.#goaway.set(msg.drain());
-			}
+			};
+			const stopped = controlStream.writer.closed.then(() => {
+				throw new ProtocolViolation("control stream stopped");
+			});
+			await race([read(), stopped]);
 		} catch (err) {
-			if (err instanceof ProtocolViolation) this.#violated(err);
-			else if (!this.#closed) console.error("error reading setup stream", err);
+			if (!this.#closed && !sessionClosed(err))
+				this.#violated(
+					err instanceof ProtocolViolation
+						? err
+						: new ProtocolViolation("control stream failed", { cause: err }),
+				);
 		} finally {
 			this.#close();
 		}

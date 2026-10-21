@@ -40,7 +40,7 @@ use crate::subscribe::{CatalogFormatArg, SubscribeFormat};
 // the doc comment to one line: Usage renders the rest as `--help` body text, where
 // rustdoc links read as noise.
 /// moq-cli: a media router that wires endpoints onto a shared MoQ Origin.
-#[derive(usage::Cli, Clone)]
+#[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq", version = env!("CARGO_PKG_VERSION"))]
 #[usage(completion, settings)]
@@ -66,7 +66,7 @@ pub struct Cli {
 // read like it scopes that stage, when there is only ever one connection. As with
 // [`Cli`], the doc comment stays one line because Usage shows it in `--help`.
 /// A stage after the first: the verb and endpoint, without the globals.
-#[derive(usage::Cli, Clone)]
+#[derive(usage_rs::Cli, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[usage(name = "moq")]
 #[usage(completion, settings)]
@@ -92,7 +92,7 @@ pub struct Invocation {
 	/// otherwise make `moq auth` and `moq completion` fail for everyone who has one.
 	/// Read from the parse itself rather than from the built fields, so a flag added
 	/// to any flattened config is refused without anyone listing it here.
-	given: Vec<&'static usage::Flag<'static>>,
+	given: Vec<&'static usage_rs::Flag<'static>>,
 
 	/// The stages, in the order given. Never empty.
 	pub stages: Vec<Command>,
@@ -155,7 +155,7 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 /// Whether `flag` is one of the flags `T` declares.
-fn owns<T: usage::spec::CommandArgs>(flag: &usage::Flag<'_>) -> bool {
+fn owns<T: usage_rs::spec::CommandArgs>(flag: &usage_rs::Flag<'_>) -> bool {
 	T::COMMAND.flags.iter().any(|own| own.key == flag.key)
 }
 
@@ -199,7 +199,7 @@ impl Invocation {
 	/// `--iroh-*` settings it dials with. Answered from the command line, like
 	/// [`Self::reject`].
 	pub fn dial_only(&self, command: &str, allow: &[&str]) -> anyhow::Result<()> {
-		let dials = |flag: &&&usage::Flag<'_>| {
+		let dials = |flag: &&&usage_rs::Flag<'_>| {
 			#[cfg(feature = "iroh")]
 			if owns::<moq_tokio::iroh::Config>(flag) {
 				return true;
@@ -224,7 +224,7 @@ impl Invocation {
 		if self.moq.serves() {
 			return Ok(());
 		}
-		let listens = |flag: &&&usage::Flag<'_>| {
+		let listens = |flag: &&&usage_rs::Flag<'_>| {
 			owns::<moq_tokio::listen::Config>(flag)
 				|| owns::<moq_relay::auth::Config>(flag)
 				|| owns::<moq_relay::stats::Config>(flag)
@@ -239,7 +239,7 @@ impl Invocation {
 	}
 
 	/// `--a, --b` for the flags given, or `None` when there are none.
-	fn names<'a>(flags: impl Iterator<Item = &'a &'static usage::Flag<'static>>) -> Option<String> {
+	fn names<'a>(flags: impl Iterator<Item = &'a &'static usage_rs::Flag<'static>>) -> Option<String> {
 		let names: Vec<String> = flags.map(|flag| format!("--{}", flag.longs[0])).collect();
 		(!names.is_empty()).then(|| names.join(", "))
 	}
@@ -316,9 +316,45 @@ impl Invocation {
 		}
 
 		for command in &self.stages {
+			if let Command::Import(import) = command
+				&& import.stats
+				&& let Some(reason) = import.source.stats_refusal()
+			{
+				anyhow::bail!("--stats names a track in the catalog the import builds, but {reason}");
+			}
 			let Command::Export(export) = command else {
 				continue;
 			};
+			if let Some(sink) = export.sink.report() {
+				anyhow::ensure!(
+					export.catalog_format.is_none(),
+					"`export {sink}` reads no media, so it takes no --catalog-format"
+				);
+				anyhow::ensure!(
+					export.echo.is_none(),
+					"`export {sink}` reads no media to report on; remove --echo"
+				);
+			}
+			if export.echo.is_some() {
+				if export.sink.stdout().is_none()
+					&& let Some(sink) = export.sink.ignores_selection()
+				{
+					anyhow::bail!(
+						"--echo reports what a stdout container export reads, and `export {sink}` is not one"
+					);
+				}
+				let msf = match export.catalog_format {
+					Some(format) => matches!(format, CatalogFormatArg::Msf),
+					None => matches!(
+						moq_mux::catalog::CatalogFormat::detect(&command.broadcast(&self.moq)),
+						Some(moq_mux::catalog::CatalogFormat::Msf)
+					),
+				};
+				anyhow::ensure!(
+					!msf,
+					"--echo follows the hang catalog's `echo` section, which the MSF catalog does not carry"
+				);
+			}
 			if let Some(stdout) = export.sink.stdout() {
 				anyhow::ensure!(
 					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
@@ -366,17 +402,19 @@ impl Invocation {
 /// moq-bench, which parse more than once for their own reasons. This adds the
 /// failure category, which only this crate's callers ask about.
 fn parse_error(
-	spec: &usage::argv::spec::Spec<'_>,
-	root: &usage::Command<'_>,
+	spec: &usage_rs::argv::spec::Spec<'_>,
+	root: &usage_rs::Command<'_>,
 	argv: &[&OsStr],
-	err: usage::Error<'_, '_>,
+	err: usage_rs::Error<'_, '_>,
 ) -> ParseError {
 	let kind = match &err {
-		usage::Error::Help { .. } | usage::Error::HelpAll { .. } => ParseErrorKind::DisplayHelp,
-		usage::Error::Version { .. } => ParseErrorKind::DisplayVersion,
-		usage::Error::UnknownFlag { .. } | usage::Error::UnexpectedArg { .. } => ParseErrorKind::UnknownArgument,
-		usage::Error::MissingSubcommand | usage::Error::MissingArgsHelp { .. } => ParseErrorKind::MissingSubcommand,
-		usage::Error::InvalidValue(_) | usage::Error::InvalidChoice { .. } => ParseErrorKind::ValueValidation,
+		usage_rs::Error::Help { .. } | usage_rs::Error::HelpAll { .. } => ParseErrorKind::DisplayHelp,
+		usage_rs::Error::Version { .. } => ParseErrorKind::DisplayVersion,
+		usage_rs::Error::UnknownFlag { .. } | usage_rs::Error::UnexpectedArg { .. } => ParseErrorKind::UnknownArgument,
+		usage_rs::Error::MissingSubcommand | usage_rs::Error::MissingArgsHelp { .. } => {
+			ParseErrorKind::MissingSubcommand
+		}
+		usage_rs::Error::InvalidValue(_) | usage_rs::Error::InvalidChoice { .. } => ParseErrorKind::ValueValidation,
 		_ => ParseErrorKind::Other,
 	};
 	ParseError::new(kind, moq_tokio::cli::answer(spec, root, argv, err).message())
@@ -392,7 +430,7 @@ fn parse_error(
 /// The three transport sections are read as plain fields. [`Invocation`] refuses a
 /// released spelling while parsing, so a field left unset here means the command
 /// line really did leave it unset.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct MoqSide {
 	/// The default broadcast name for every stage that doesn't name its own.
@@ -554,13 +592,13 @@ impl MoqSide {
 	/// A flattened config's flags sit in this struct's table under the keys that
 	/// config minted, so the table is the complete list. The chunk already parsed,
 	/// so nothing stops the walk early.
-	fn given(argv: &[&OsStr]) -> Vec<&'static usage::Flag<'static>> {
-		use usage::spec::CommandArgs;
+	fn given(argv: &[&OsStr]) -> Vec<&'static usage_rs::Flag<'static>> {
+		use usage_rs::spec::CommandArgs;
 
-		let mut given: Vec<&'static usage::Flag<'static>> = Vec::new();
-		let mut parser = usage::Parser::new(Cli::command(), argv);
+		let mut given: Vec<&'static usage_rs::Flag<'static>> = Vec::new();
+		let mut parser = usage_rs::Parser::new(Cli::command(), argv);
 		while let Some(Ok(event)) = parser.next_event() {
-			if let usage::Event::Flag { flag, .. } = event
+			if let usage_rs::Event::Flag { flag, .. } = event
 				&& <Self as CommandArgs>::COMMAND
 					.flags
 					.iter()
@@ -576,7 +614,7 @@ impl MoqSide {
 
 /// The verb: for `import`/`export` it is also the data direction, the pivot
 /// between the MoQ side and the endpoint.
-#[derive(usage::Subcommands, Clone)]
+#[derive(usage_rs::Subcommands, Clone)]
 pub enum Command {
 	/// Route media INTO MoQ from one source.
 	Import(Import),
@@ -689,7 +727,7 @@ impl Command {
 // ------------------------------------------------------------------ import
 
 /// import = one source -> MoQ.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Import {
 	/// The broadcast this stage publishes, overriding the process-wide `--broadcast`.
@@ -720,6 +758,11 @@ pub struct Import {
 	#[usage(long = "latency-max", hide = true)]
 	latency_max: Option<crate::duration::Duration>,
 
+	/// Name a stats track in the catalog and fill it with what each track has written, about
+	/// once a second while subscribed. The stdin imports only.
+	#[usage(long)]
+	pub stats: bool,
+
 	/// The single source feeding the Origin.
 	#[usage(subcommand)]
 	pub source: ImportSource,
@@ -740,7 +783,7 @@ impl Import {
 
 /// The single source feeding the Origin on an import. The container formats read
 /// from stdin; the gateways bridge another protocol.
-#[derive(usage::Subcommands, Clone)]
+#[derive(usage_rs::Subcommands, Clone)]
 pub enum ImportSource {
 	/// Raw H.264 Annex-B from stdin.
 	Avc3,
@@ -784,10 +827,26 @@ impl ImportSource {
 			_ => return None,
 		})
 	}
+
+	/// Why `--stats` can't report this source, or `None` when it can: the CLI builds the one
+	/// catalog of a stdin import, whose tracks `moq-mux` counts.
+	fn stats_refusal(&self) -> Option<&'static str> {
+		match self {
+			Self::Ts(args) if args.program == Some(TsProgram::All) => {
+				Some("`import ts --program all` builds a catalog per program")
+			}
+			Self::Hls(_) | Self::Rtmp(_) | Self::Srt(_) | Self::Rtsp(_) | Self::Rtc(_) | Self::Archive(_) => {
+				Some("the gateway and archive imports build their own catalogs")
+			}
+			#[cfg(feature = "capture")]
+			Self::Capture(_) => Some("`import capture` encodes, and its encoders do not count yet"),
+			Self::Avc3 | Self::Fmp4 | Self::Ts(_) | Self::Flv => None,
+		}
+	}
 }
 
 /// The MPEG-TS stdin container: which programs of a multiplex to publish.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct TsImport {
 	/// Import one program of a multi-program stream, by its PAT program number, or `all` to
@@ -865,7 +924,7 @@ impl std::str::FromStr for TsProgram {
 // ------------------------------------------------------------------ export
 
 /// export = MoQ -> one sink.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Export {
 	/// The broadcast this stage subscribes to, overriding the process-wide `--broadcast`.
@@ -886,6 +945,12 @@ pub struct Export {
 	/// Rendition selection (`--video-name`, `--no-audio`, ...), refused by sinks that don't apply it.
 	#[usage(flatten)]
 	pub select: crate::subscribe::SelectArgs,
+
+	/// Publish feedback where the broadcast's catalog solicits it: a `<NAME>.echo` broadcast
+	/// under the catalog's `echo` path, reporting what each rendition this export reads has
+	/// received. One path segment, not starting with `.`. The stdout container exports only.
+	#[usage(long, value_name = "NAME")]
+	pub echo: Option<crate::report::EchoName>,
 
 	/// The single sink draining the Origin.
 	#[usage(subcommand)]
@@ -914,7 +979,7 @@ impl Export {
 
 /// The single sink draining the Origin on an export. The container formats write
 /// to stdout; the gateways bridge another protocol.
-#[derive(usage::Subcommands, Clone)]
+#[derive(usage_rs::Subcommands, Clone)]
 pub enum ExportSink {
 	/// Fragmented MP4 / CMAF to stdout.
 	Fmp4(Fragmented),
@@ -938,6 +1003,10 @@ pub enum ExportSink {
 	Rtc(crate::rtc::Args),
 	/// Record the broadcast into an object store until it ends.
 	Archive(crate::archive::ExportArgs),
+	/// Write the broadcast's stats snapshots to stdout as JSON lines.
+	Stats,
+	/// Write the feedback of every `.echo` broadcast under `--broadcast` to stdout as JSON lines.
+	Echo,
 }
 
 impl ExportSink {
@@ -951,12 +1020,23 @@ impl ExportSink {
 			Self::Srt(_) => "srt",
 			Self::Rtc(_) => "rtc",
 			Self::Archive(_) => "archive",
+			Self::Stats => "stats",
+			Self::Echo => "echo",
 		})
 	}
 
-	/// Whether this sink writes to stdout (the container formats).
+	/// The report sink's name: these read no media, so they skip catalog discovery.
+	fn report(&self) -> Option<&'static str> {
+		match self {
+			Self::Stats => Some("stats"),
+			Self::Echo => Some("echo"),
+			_ => None,
+		}
+	}
+
+	/// Whether this sink writes to stdout (the container formats and the report sinks).
 	pub fn is_stdout(&self) -> bool {
-		self.stdout().is_some()
+		self.stdout().is_some() || self.report().is_some()
 	}
 
 	/// The stdout container format and its options, when this sink writes to
@@ -1022,7 +1102,7 @@ pub struct Stdout {
 }
 
 /// Staleness options for stdout sinks without a fixed release delay.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Container {
 	/// How far a group may fall behind the live edge before it is skipped (e.g. `500ms`, `1s`).
@@ -1057,7 +1137,7 @@ impl Container {
 }
 
 /// A stdout container with a fixed release delay.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Buffered {
 	/// How long after its decode time each frame is written (e.g. `500ms`); late frames are dropped.
@@ -1096,7 +1176,7 @@ impl Buffered {
 }
 
 /// A buffered Matroska output with an optional cluster cap.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct BufferedFragmented {
 	#[usage(flatten)]
@@ -1107,7 +1187,7 @@ pub struct BufferedFragmented {
 }
 
 /// The MPEG-TS stdout container.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Transport {
 	/// How far behind the source the output runs (e.g. `2s`), like an SRT receiver's latency,
@@ -1165,7 +1245,7 @@ impl Transport {
 }
 
 /// The fMP4 stdout container with a fragment cap.
-#[derive(usage::Args, Clone)]
+#[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Fragmented {
 	#[usage(flatten)]
@@ -1349,6 +1429,86 @@ mod tests {
 				let err = export(&[flag, sink].concat()).unwrap().validate().unwrap_err();
 				assert!(err.to_string().contains(flag[0]), "{sink:?} {flag:?}: {err}");
 			}
+		}
+	}
+
+	/// `--stats` goes where the CLI builds the one catalog it names a track in.
+	#[test]
+	fn stats_needs_a_catalog_the_cli_builds() {
+		let import = |source: &[&str]| {
+			let argv = [
+				"moq",
+				"--connect",
+				"http://relay",
+				"--broadcast",
+				"room",
+				"import",
+				"--stats",
+			];
+			Invocation::try_parse_from(argv.iter().chain(source).copied()).unwrap()
+		};
+		for source in [
+			["ts"].as_slice(),
+			&["fmp4"],
+			&["flv"],
+			&["avc3"],
+			&["ts", "--program", "1"],
+		] {
+			import(source).validate().unwrap();
+		}
+		for source in [
+			["ts", "--program", "all"].as_slice(),
+			&["hls", "http://origin/master.m3u8"],
+			&["rtmp", "--listen", "127.0.0.1:1935"],
+			&["rtsp", "--connect", "rtsp://camera/stream"],
+		] {
+			let err = import(source).validate().unwrap_err().to_string();
+			assert!(err.contains("--stats"), "{source:?}: {err}");
+		}
+	}
+
+	/// `--echo` reports what a stdout container export reads from a hang catalog, under one
+	/// path segment, and the report sinks read no media to report on.
+	#[test]
+	fn echo_needs_a_container_export_and_a_hang_catalog() {
+		for sink in ["ts", "fmp4", "mkv", "flv", "h264", "h265"] {
+			export(&["--echo", "alice", sink]).unwrap().validate().unwrap();
+		}
+		for sink in [["hls", "--listen", "127.0.0.1:8080"].as_slice(), &["stats"], &["echo"]] {
+			let err = export(&[["--echo", "alice"].as_slice(), sink].concat())
+				.unwrap()
+				.validate()
+				.unwrap_err();
+			assert!(err.to_string().contains("--echo"), "{sink:?}: {err}");
+		}
+		for flags in [
+			["--echo", "alice", "--catalog-format", "msf", "fmp4"].as_slice(),
+			&["--broadcast", "live.msf", "--echo", "alice", "fmp4"],
+		] {
+			let err = export(flags).unwrap().validate().unwrap_err();
+			assert!(err.to_string().contains("MSF"), "{flags:?}: {err}");
+		}
+		export(&[
+			"--broadcast",
+			"live.msf",
+			"--catalog-format",
+			"hang",
+			"--echo",
+			"alice",
+			"fmp4",
+		])
+		.unwrap()
+		.validate()
+		.unwrap();
+		for name in ["", "a/b", ".", "..", "*", ".alice"] {
+			assert!(export(&["--echo", name, "fmp4"]).is_err(), "`{name}` must be refused");
+		}
+		for sink in ["stats", "echo"] {
+			let err = export(&["--catalog-format", "hang", sink])
+				.unwrap()
+				.validate()
+				.unwrap_err();
+			assert!(err.to_string().contains("--catalog-format"), "{sink}: {err}");
 		}
 	}
 
@@ -2382,7 +2542,10 @@ mod tests {
 		])
 		.expect("parse");
 		assert!(cli.moq.validate().is_ok());
-		assert_eq!(cli.moq.cluster.lan.secret.as_deref(), Some("cluster.key"));
+		assert_eq!(
+			cli.moq.cluster.lan.secret.as_deref(),
+			Some(std::path::Path::new("cluster.key"))
+		);
 	}
 
 	/// The app is only read by the mesh, so configuring one without it is an
@@ -2597,7 +2760,7 @@ mod tests {
 	/// add the draft, and this fails until every list has it.
 	#[test]
 	fn version_choices_match_the_parser() {
-		fn walk<'a>(cmd: &'a usage::argv::spec::CommandMeta<'a>, found: &mut Vec<(&'a str, Vec<&'a str>)>) {
+		fn walk<'a>(cmd: &'a usage_rs::argv::spec::CommandMeta<'a>, found: &mut Vec<(&'a str, Vec<&'a str>)>) {
 			for flag in cmd.flags {
 				let Some(long) = flag.flag.longs.first() else {
 					continue;

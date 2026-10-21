@@ -22,6 +22,15 @@ use crate::origin::Route;
 use super::origin_impl::Announcer;
 use super::{Requests, WeakCache};
 
+#[path = "listing.rs"]
+mod listing;
+// private: capability gap
+// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
+#[cfg(feature = "async")]
+pub(crate) use listing::Owner;
+pub(super) use listing::{ListOnAccept, Unlist};
+pub use listing::{Lister, Tracks, TracksEvent};
+
 /// A collection of media tracks that can be published and subscribed to.
 ///
 /// Create via [`Info::produce`] to obtain both [`Producer`] and [`Consumer`] pair.
@@ -106,6 +115,9 @@ struct BroadcastState {
 	// append a sequence an earlier one wrote is refused. Entries nothing holds or wrote are
 	// swept as the map grows, so requests for names never served stay bounded.
 	sequences: HashMap<Arc<str>, track::Sequence>,
+
+	// The tracks the broadcast lists, and the readers listing them; see [`Tracks`].
+	listing: listing::ListingState,
 
 	// Set once the broadcast ends: `Producer::close()` or the last producer-side
 	// handle dropping. Every lookup after it answers `Unroutable`.
@@ -265,12 +277,44 @@ impl Producer {
 	/// [`close`](Self::close), or the last producer dropping.
 	///
 	/// Fails with [`Error::Closed`] on a standalone broadcast (one not created
-	/// through an origin, so there is nothing to announce into), once the broadcast
+	/// through an origin, so there is nothing to announce into), on a claim answer
+	/// still being [prepared](super::origin::Request::prepare), once the broadcast
 	/// has closed, or once the origin's driver has been dropped.
 	pub fn announce(&self, route: Route) -> Result<(), Error> {
 		let mut announcer = self.alive.announcer.lock();
 		let announcer = announcer.as_mut().ok_or(Error::Closed)?;
 		announcer.announce(route)
+	}
+
+	/// Hand back an announcer withheld at creation and announce `route` once `admit`
+	/// agrees, decided under the origin's table lock. The announcer is installed only
+	/// when admitted; otherwise it drops, so this broadcast can never announce.
+	pub(super) fn announce_withheld(
+		&self,
+		mut announcer: Announcer,
+		route: Route,
+		admit: impl FnOnce() -> bool,
+	) -> Result<bool, Error> {
+		let refused = {
+			let mut slot = self.alive.announcer.lock();
+			debug_assert!(slot.is_none(), "an announcer was already installed");
+			// A close already retracted the slot, so an announcer installed now would
+			// outlive the broadcast.
+			if self.alive.state.lock().closing {
+				Err(Error::Closed)
+			} else {
+				match announcer.announce_if(route, admit) {
+					Ok(true) => {
+						*slot = Some(announcer);
+						return Ok(true);
+					}
+					refused => refused,
+				}
+			}
+		};
+		// Dropped outside the announcer lock, as in `Alive::retract`.
+		drop(announcer);
+		refused
 	}
 
 	/// Retract this broadcast's advertisement, if any, from local consumers and
@@ -314,20 +358,22 @@ impl Producer {
 		// this they would be stranded, since the name is taken the moment the
 		// track exists, so no handler could ever serve their queue entry.
 		if let Some(request) = state.requests.take(name.as_ref()) {
-			let track = request.with_stats(self.stats.clone()).accept(info);
+			let track = request.with_stats(self.stats.clone()).accept(info.clone());
 			// Cache it like a served request so concurrent lookups coalesce; a
 			// live same-name entry cannot exist (its presence would have kept
 			// the request from queuing).
-			let _ = state.tracks.insert(name, track.weak());
-			return Ok(track);
+			let _ = state.tracks.insert(name.clone(), track.weak());
+			let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
+			return Ok(track.listed(unlist));
 		}
 
 		let sequence = state.sequence(&name);
-		let track = track::Producer::new(self.info.clone(), name, info)
+		let track = track::Producer::new(self.info.clone(), name.clone(), info.clone())
 			.with_stats(self.stats.clone())
 			.with_sequence(sequence);
 		state.insert_track(track.weak())?;
-		Ok(track)
+		let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
+		Ok(track.listed(unlist))
 	}
 
 	/// Reserve a track by name without finalizing its [`track::Info`].
@@ -348,7 +394,10 @@ impl Producer {
 			.with_stats(self.stats.clone())
 			.with_sequence(state.sequence(&name));
 		state.insert_track(request.weak())?;
-		Ok(request)
+		Ok(request.listed(ListOnAccept {
+			state: self.state.clone(),
+			name,
+		}))
 	}
 
 	/// Create a track with a unique name using the given suffix.
@@ -435,13 +484,10 @@ impl Producer {
 	/// the broadcast; `Finish::wait` does both on a runtime. Dropping it early is how an
 	/// interrupt ends the linger.
 	pub fn finish(self) -> Finish {
-		let held: Vec<track::Hold> = self
-			.state
-			.lock()
-			.tracks
-			.values()
-			.filter_map(track::TrackWeak::hold_finished)
-			.collect();
+		let tracks: Vec<track::TrackWeak> = self.state.read().tracks.values().cloned().collect();
+		// Held outside the lock: a track whose last producer drops meanwhile unlists itself
+		// under it.
+		let held: Vec<track::Hold> = tracks.iter().filter_map(track::TrackWeak::hold_finished).collect();
 		let linger = held.iter().filter_map(|hold| hold.max_age).max().unwrap_or_default();
 		Finish {
 			producer: self,
@@ -586,6 +632,7 @@ impl Alive {
 			// and `Consumer::track` answers `Unroutable` for one asked about after this
 			// point. Say the same to whoever asked earlier.
 			state.reject_unserved(Error::Unroutable);
+			state.listing.close();
 		}
 		let _ = self.token.close();
 		self.retract();
@@ -611,6 +658,7 @@ impl Alive {
 			};
 			state.closing = true;
 			state.reject_unserved(Error::Unroutable);
+			state.listing.close();
 			token
 		};
 		token.close();
@@ -858,6 +906,15 @@ impl Dynamic {
 			state: self.state.clone(),
 			stats: stats::Scope::default(),
 		}
+	}
+
+	/// Answer the broadcast's track listings, for a handler that knows the tracks it
+	/// would serve, such as a relay listing its upstream's. See [`Lister`].
+	///
+	/// A handler that serves any name on request takes none, so it lists nothing. One
+	/// answer per broadcast: fails with [`Error::Duplicate`] while another lister exists.
+	pub fn lister(&self) -> Result<Lister, Error> {
+		Lister::new(self.state.clone())
 	}
 
 	/// Block until the broadcast ends, by [`Producer::close`] or every producer dropping.
@@ -1386,7 +1443,7 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
-		track.append_group().unwrap();
+		let _open = track.append_group().unwrap();
 		let handle = consumer.track("a").unwrap();
 		assert_eq!(handle.latest_sequence(), Some(0));
 		drop(track);
@@ -1420,7 +1477,7 @@ mod test {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
-		track.append_group().unwrap();
+		let _open = track.append_group().unwrap();
 		let handle = consumer.track("a").unwrap();
 		producer.close();
 		drop(track);
@@ -1565,7 +1622,7 @@ mod test {
 
 		// Create the track before any consumer exists.
 		let track1 = producer.assert_create_track("track1", crate::track::Info::timed());
-		track1.append_group().unwrap();
+		track1.append_group().unwrap().finish().unwrap();
 
 		let consumer = producer.consume();
 
@@ -1579,7 +1636,7 @@ mod test {
 		let mut track2_consumer = consumer2.track("track2").unwrap().subscribe(None).await.unwrap();
 		track2_consumer.assert_no_group();
 
-		track2.append_group().unwrap();
+		track2.append_group().unwrap().finish().unwrap();
 
 		track2_consumer.assert_group();
 	}
@@ -1667,7 +1724,7 @@ mod test {
 		track3.subscribe(None).assert_is_clone(&track1);
 
 		// Append a group and make sure they all get it.
-		track3.append_group().unwrap();
+		track3.append_group().unwrap().finish().unwrap();
 		track1.assert_group();
 		track2.assert_group();
 
@@ -1693,7 +1750,7 @@ mod test {
 		let mut track1 = track1_fut.await.unwrap();
 
 		// Close the producer (simulating publisher disconnect).
-		producer1.append_group().unwrap();
+		producer1.append_group().unwrap().finish().unwrap();
 		producer1.finish().unwrap();
 		drop(producer1);
 
@@ -1708,7 +1765,11 @@ mod test {
 		track2.assert_not_clone(&track1);
 
 		// The new consumer should receive the new group, which continues past the first's.
-		producer2.create_group(crate::group::Info { sequence: 1 }).unwrap();
+		producer2
+			.create_group(crate::group::Info { sequence: 1 })
+			.unwrap()
+			.finish()
+			.unwrap();
 		track2.assert_group();
 	}
 
@@ -1725,7 +1786,7 @@ mod test {
 		let mut first = dynamic.assert_request().accept(crate::track::Info::timed());
 		assert_eq!(first.append_group().unwrap().sequence, 0);
 		assert_eq!(first.append_datagram(crate::Timestamp::ZERO, b"x").unwrap(), 1);
-		first.create_group(crate::group::Info { sequence: 8 }).unwrap();
+		let _open = first.create_group(crate::group::Info { sequence: 8 }).unwrap();
 		first.insert_datagram(12, crate::Timestamp::ZERO, b"x").unwrap();
 		first.finish().unwrap();
 		drop((first, track));
@@ -1739,7 +1800,7 @@ mod test {
 		));
 
 		// An explicit first write picks the start, and appends continue from there.
-		second.create_group(crate::group::Info { sequence: 13 }).unwrap();
+		let _open = second.create_group(crate::group::Info { sequence: 13 }).unwrap();
 		assert_eq!(second.append_datagram(crate::Timestamp::ZERO, b"x").unwrap(), 14);
 		second.finish().unwrap();
 		drop((second, track));
@@ -1880,7 +1941,7 @@ mod test {
 		let mut sub = subscribing.await.expect("fulfilled by create_track");
 
 		// The fulfilled subscription is live against this very producer.
-		track.append_group().unwrap();
+		track.append_group().unwrap().finish().unwrap();
 		sub.recv_group().await.expect("recv").expect("group");
 
 		// The handler never sees the request; a fresh subscribe reuses the track.
@@ -2045,7 +2106,7 @@ mod test {
 		let track = consumer.track("track1").unwrap();
 		let pending_fetch = track.fetch_group(0, None);
 		let fetch = dynamic.requested_group().await.unwrap();
-		let group = fetch.accept(crate::track::Info::timed()).unwrap();
+		let mut group = fetch.accept(crate::track::Info::timed()).unwrap();
 		group.finish().unwrap();
 		pending_fetch.await.unwrap();
 
@@ -2071,7 +2132,7 @@ mod test {
 		producer.close();
 		assert!(matches!(consumer.track("track1"), Err(Error::Unroutable)));
 
-		track.append_group().unwrap();
+		track.append_group().unwrap().finish().unwrap();
 		subscriber.assert_group();
 		track.finish().unwrap();
 	}
@@ -2156,7 +2217,7 @@ mod test {
 		assert!(!track.is_closed());
 		let mut subscriber = viewer.await.unwrap();
 		subscriber.assert_no_group();
-		track.append_group().unwrap();
+		track.append_group().unwrap().finish().unwrap();
 		assert!(subscriber.recv_group().await.unwrap().is_some());
 
 		// Once the viewer really leaves, the same teardown commits, and the lookup

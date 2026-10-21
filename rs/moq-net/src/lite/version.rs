@@ -124,6 +124,17 @@ impl Version {
 		}
 	}
 
+	/// Whether a subscriber may open a Tracks Stream (0x8) to list a broadcast's
+	/// tracks. Added in lite-07.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_tracks(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announcements carry implicit announce ids: each `active`
 	/// ANNOUNCE_BROADCAST assigns the next per-stream ordinal, and `ended`/`restart`
 	/// reference that id instead of repeating the path. Added in lite-06.
@@ -249,6 +260,18 @@ impl Version {
 		}
 	}
 
+	/// Whether TRACK_INFO carries the compression flag, and a compressed Track's FRAME
+	/// and datagram its inflated size. Added in lite-07; an earlier peer receives the
+	/// frames inflated.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_compression(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether the stream error table has NOT_FETCHABLE, for a FETCH that reached a
 	/// datagram. Added in lite-07; earlier versions say NOT_FOUND instead.
 	#[allow(clippy::match_like_matches_macro)]
@@ -273,12 +296,45 @@ impl Version {
 		}
 	}
 
+	/// Whether a session may negotiate the `ietf` extension (draft-lcurley-moq-ietf), which
+	/// carries moq-transport object state between relays. Added on lite-07; published
+	/// versions get no framing changes.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_ietf(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether the announce stream has ANNOUNCE_RESTART: another publisher instance
 	/// replacing an advertisement in place. Added in lite-07. Older versions send an
 	/// ANNOUNCE_END then an ANNOUNCE_START.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_announce_restart(self) -> bool {
 		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE a wanted group,
+	/// so a join at any hop reaches the publisher. Added in lite-07; older peers see a
+	/// track that never refreshes.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_refresh(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether discovery streams end their initial set with SYNCED rather than a count.
+	#[allow(clippy::match_like_matches_macro)]
+	pub fn has_synced(self) -> bool {
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
 			_ => true,

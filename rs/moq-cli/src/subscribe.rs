@@ -26,7 +26,7 @@ pub enum SubscribeFormat {
 
 /// `Usage` adapter for [`CatalogFormat`] (which is `#[non_exhaustive]` and so
 /// can't derive `ValueEnum` itself).
-#[derive(usage::ValueEnum, Clone, Copy)]
+#[derive(usage_rs::ValueEnum, Clone, Copy)]
 pub enum CatalogFormatArg {
 	Hang,
 	#[usage(name = "hangz")]
@@ -45,7 +45,7 @@ impl From<CatalogFormatArg> for CatalogFormat {
 }
 
 /// `Usage` adapter for [`VideoCodecKind`].
-#[derive(usage::ValueEnum, Clone, Copy)]
+#[derive(usage_rs::ValueEnum, Clone, Copy)]
 pub enum VideoCodecArg {
 	H264,
 	H265,
@@ -67,7 +67,7 @@ impl From<VideoCodecArg> for VideoCodecKind {
 }
 
 /// `Usage` adapter for [`AudioCodecKind`].
-#[derive(usage::ValueEnum, Clone, Copy)]
+#[derive(usage_rs::ValueEnum, Clone, Copy)]
 pub enum AudioCodecArg {
 	Aac,
 	Opus,
@@ -86,7 +86,7 @@ impl From<AudioCodecArg> for AudioCodecKind {
 
 /// Rendition selection flags for the stdout container sinks that honor them and
 /// native playback. With no flags set, every rendition is kept.
-#[derive(usage::Args, Clone, Default)]
+#[derive(usage_rs::Args, Clone, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct SelectArgs {
 	/// Pick the video rendition with this exact name.
@@ -253,6 +253,22 @@ pub struct Subscribe {
 	source: moq_mux::Source,
 	catalog: CatalogFormat,
 	args: SubscribeArgs,
+	/// Where a TS export sets its MPEG-TS sections, when it reports them.
+	sections: Option<crate::report::Sections>,
+}
+
+/// Log how a TS export's release clock keeps up with the source.
+fn log_release(release: &moq_mux::container::ts::stats::Release, message: &'static str) {
+	tracing::info!(
+		dropped = release.dropped,
+		trimmed = release.trimmed,
+		gaps = release.gaps,
+		margin_ms = ?release.margin,
+		offset_ms = ?release.offset,
+		drift_ppm = ?release.drift,
+		out_of_tolerance = release.out_of_tolerance,
+		"{message}"
+	);
 }
 
 impl Subscribe {
@@ -276,7 +292,19 @@ impl Subscribe {
 			source,
 			catalog,
 			args,
+			sections: None,
 		})
+	}
+
+	/// The resolved broadcast, whose [`stats`](moq_mux::Source::stats) count what the export reads.
+	pub fn source(&self) -> &moq_mux::Source {
+		&self.source
+	}
+
+	/// Set a TS export's per-PID rows and release clock in `sections` as it samples them.
+	pub fn with_sections(mut self, sections: crate::report::Sections) -> Self {
+		self.sections = Some(sections);
+		self
 	}
 
 	/// Build the catalog stream, narrowed by the rendition selection flags. The
@@ -401,15 +429,14 @@ impl Subscribe {
 		let mut sampled = tokio::time::Instant::now();
 		// The export's drop, gap and out-of-tolerance counts, as last logged.
 		let mut reported = (0, 0, 0, 0);
-		let release = |stats: &moq_mux::container::ts::stats::Export| {
-			tracing::info!(
-				dropped = stats.dropped,
-				trimmed = stats.trimmed,
-				gaps = stats.gaps,
-				drift_ppm = ?stats.drift,
-				out_of_tolerance = stats.out_of_tolerance,
-				"TS export release clock"
-			);
+		let sections = self.sections;
+		let report = |stats: &moq_mux::container::ts::stats::Export| {
+			if let Some(sections) = &sections {
+				sections.set(|report| {
+					report.mpegts = Some(stats.clone().into());
+					report.release = Some(stats.release.clone());
+				});
+			}
 		};
 		let end = loop {
 			let frame = match ts.next().await {
@@ -423,15 +450,19 @@ impl Subscribe {
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
 				sampled = tokio::time::Instant::now();
 				let stats = ts.export().stats();
-				let counts = (stats.dropped, stats.trimmed, stats.gaps, stats.out_of_tolerance);
+				report(&stats);
+				let release = &stats.release;
+				let counts = (release.dropped, release.trimmed, release.gaps, release.out_of_tolerance);
 				if counts != reported {
 					reported = counts;
-					release(&stats);
+					log_release(release, "TS export release clock");
 				}
 				log.sample(stats.into());
 			}
 		};
-		release(&ts.export().stats());
+		let stats = ts.export().stats();
+		report(&stats);
+		log_release(&stats.release, "TS export release clock");
 		match end {
 			Err(err @ moq_mux::Error::Replaced(_)) => {
 				Err(anyhow::Error::from(err).context("pass --stitch to follow a replacement as a program switch"))
@@ -447,30 +478,31 @@ impl Subscribe {
 		let mut release = moq_mux::container::ts::Release::new(self.source, self.catalog)
 			.await?
 			.with_delay(self.args.max_delay);
-		let log = |release: &moq_mux::container::ts::Release| {
-			tracing::info!(
-				dropped = release.dropped(),
-				drift_ppm = ?release.drift().map(|drift| drift * 1e6),
-				out_of_tolerance = release.out_of_tolerance(),
-				"TS passthrough release clock"
-			);
+		let report = |stats: &moq_mux::container::ts::stats::Release| {
+			if let Some(sections) = &self.sections {
+				sections.set(|report| report.release = Some(stats.clone()));
+			}
 		};
 		let mut sampled = tokio::time::Instant::now();
-		let mut reported = (0, 0);
+		let mut reported = (0, 0, 0, 0);
 		while let Some(object) = release.next().await? {
 			stdout.write_all(&object.payload).await?;
 			stdout.flush().await?;
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
 				sampled = tokio::time::Instant::now();
-				let counts = (release.dropped(), release.out_of_tolerance());
+				let stats = release.stats();
+				report(&stats);
+				let counts = (stats.dropped, stats.trimmed, stats.gaps, stats.out_of_tolerance);
 				if counts != reported {
 					reported = counts;
-					log(&release);
+					log_release(&stats, "TS passthrough release clock");
 				}
 			}
 		}
-		log(&release);
+		let stats = release.stats();
+		report(&stats);
+		log_release(&stats, "TS passthrough release clock");
 		Ok(())
 	}
 

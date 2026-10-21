@@ -2341,7 +2341,7 @@ mod tests {
 		let origin = crate::source::produce_origin();
 		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
 		let first_route = origin
-			.dynamic(
+			.dynamic_route(
 				"live",
 				moq_net::origin::Route::default()
 					.with_epoch(epoch.clone())
@@ -2385,7 +2385,7 @@ mod tests {
 		let mut sources = Vec::new();
 		for sequence in 1..=4 {
 			let route = origin
-				.dynamic(
+				.dynamic_route(
 					"live",
 					moq_net::origin::Route::default()
 						.with_epoch(epoch.clone())
@@ -3710,7 +3710,7 @@ mod tests {
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500)));
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
-		let group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		let mut group0 = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		group0.finish().unwrap();
 
 		write_group(&mut track, 1, &[ts(30_000)]);

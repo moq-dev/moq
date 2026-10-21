@@ -63,6 +63,16 @@ public final class Client: Sendable {
     public func cancel() {
         ffi.cancel()
     }
+
+    /// Why the pending `connect(to:)` is still dialing: the error that failed its
+    /// latest attempt, or `nil` while nothing has failed or no connect is pending.
+    ///
+    /// A first dial that keeps failing and retrying never returns from `connect(to:)`,
+    /// so poll this to show the reason. Giving up for good throws from `connect(to:)`
+    /// instead. Once connected, `Session.failure()` reports the reconnects.
+    public func failure() -> MoqError? {
+        ffi.failure()
+    }
 }
 
 /// The protocol versions offered by default, most preferred first, spelled the way
@@ -154,6 +164,15 @@ public final class Session: Sendable {
     /// Individual fields are `nil` when the transport backend doesn't report them.
     public func stats() -> ConnectionStats {
         ffi.stats()
+    }
+
+    /// The session's authorization: the grant its peer gave it, and more tokens to present.
+    ///
+    /// Each call returns an independent watcher of the grant. A client session's
+    /// handle survives reconnects, presenting each added token again on every new
+    /// connection.
+    public func auth() -> Auth {
+        Auth(ffi.auth())
     }
 
     /// Hold receive-estimate demand until the returned consumer is released.

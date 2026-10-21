@@ -14,7 +14,7 @@ use stun_types::prelude::*;
 use tokio::time::Instant;
 
 /// Configuration for the optional public STUN Binding listener.
-#[derive(usage::Args, Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(usage_rs::Args, Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, default)]
 #[non_exhaustive]
 pub struct Config {

@@ -29,7 +29,10 @@ pub struct Origin {
 	dynamic: NonZeroSlab<Option<DynamicEntry>>,
 
 	/// Broadcast requests delivered to a dynamic handler, freed after accept/reject.
-	broadcast_request: NonZeroSlab<Option<moq_net::origin::Request>>,
+	broadcast_request: NonZeroSlab<Option<(moq_net::origin::Request, crate::ffi::Background)>>,
+
+	/// Claim answers being filled before their exact route is announced.
+	prepared: NonZeroSlab<Option<(moq_net::origin::Prepared, crate::ffi::Background)>>,
 }
 
 #[derive(Clone)]
@@ -238,76 +241,30 @@ impl Origin {
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		// An unreachable path and a closed origin both mean no broadcast can ever arrive here.
-		let mut follow = match consumer.follow(path.as_str()) {
-			Ok(follow) => follow,
+		let mut announced = match consumer.announced_broadcast(path.as_str(), None) {
+			Ok(announced) => announced,
 			Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
 			Err(err) => return Err(err.into()),
 		};
-		let mut unseen = false;
 		let mut delivered = false;
-		// The handle delivered last, until the caller frees it or the path goes offline. An id
-		// rather than the broadcast, so it never keeps an instance the caller freed from retiring.
-		let mut last: Option<Id> = None;
-		// The origin closing ends the wait, cleanly once a handle was delivered.
-		let closed = |delivered: bool| match delivered {
-			true => Ok(()),
-			false => Err(Error::BroadcastNotFound),
-		};
 
 		// Deliver each publisher instance serving the path: the first, then each one that takes
 		// over or returns. `biased` so a pending close always wins.
 		loop {
-			// Apply every change on hand before resolving, so a burst of them delivers only the
-			// instance serving the path now.
-			if settle(&mut follow, &mut unseen, &mut last).is_none() {
-				return closed(delivered);
-			}
-			if !unseen {
-				let event = tokio::select! {
-					biased;
-					_ = &mut close => return Ok(()),
-					event = follow.next() => event,
-				};
-				let Some(event) = event else {
-					return closed(delivered);
-				};
-				apply(&mut unseen, &mut last, event);
-				continue;
-			}
-
-			// `routed_broadcast` rides out the churn between something covering the path
-			// and the path actually resolving (failover, an advertise-only announce
-			// racing its handler).
 			let broadcast = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				resolved = consumer.routed_broadcast(path.as_str()) => match resolved {
+				available = announced.available() => match available {
 					Ok(broadcast) => broadcast,
-					Err(moq_net::Error::Closed) => return closed(delivered),
-					Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
+					// The origin closing ends the wait, cleanly once a handle was delivered.
+					Err(moq_net::Error::Closed) if delivered => return Ok(()),
+					Err(moq_net::Error::Closed) => return Err(Error::BroadcastNotFound),
 					Err(err) => return Err(err.into()),
 				},
 			};
 
-			// A change that came through while resolving may predate the answer, such as an end
-			// and a start for the instance it resolved. Resolve afresh once caught up.
-			match settle(&mut follow, &mut unseen, &mut last) {
-				None => return closed(delivered),
-				Some(true) => continue,
-				Some(false) => unseen = false,
-			}
-
 			// Hold the lock only to buffer the broadcast; release it before the callback.
-			let broadcast_id = {
-				let mut state = State::lock();
-				// Resolving can run ahead of the follower: a takeover resolves at once while its
-				// restart is held, and that restart then names the instance already delivered.
-				if last.is_some_and(|last| state.consume.holds(last, &broadcast)) {
-					continue;
-				}
-				state.consume.start(broadcast, Some(consumer.clone()))?
-			};
-			last = Some(broadcast_id);
+			let broadcast_id = State::lock().consume.start(broadcast, Some(consumer.clone()))?;
 			delivered = true;
 			callback.call(broadcast_id);
 		}
@@ -378,17 +335,11 @@ impl Origin {
 
 	/// Advertise `prefix` and serve requests beneath it, delivering each as a
 	/// broadcast-request handle via `on_request`.
-	pub fn dynamic(
-		&mut self,
-		origin: Id,
-		prefix: &str,
-		route: moq_net::origin::Route,
-		on_request: OnStatus,
-	) -> Result<Id, Error> {
+	pub fn dynamic(&mut self, origin: Id, prefix: &str, on_request: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
 		let driver = origin.driver.clone();
-		let result = origin.producer.dynamic(prefix, route);
+		let result = origin.producer.dynamic(prefix);
 		origin.driver.check()?;
 		let inner = result?;
 		let channel = oneshot::channel();
@@ -398,8 +349,9 @@ impl Origin {
 			callback: on_request,
 		}))?;
 
+		let request_driver = driver.clone();
 		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(Self::run_dynamic(id, channel.1))).await;
+			let res = crate::ffi::run(driver.watch(Self::run_dynamic(id, channel.1, request_driver))).await;
 			let entry = State::lock().origin.dynamic.remove(id).flatten();
 			if let Some(entry) = entry {
 				entry.callback.call(res);
@@ -409,7 +361,11 @@ impl Origin {
 		Ok(id)
 	}
 
-	async fn run_dynamic(id: Id, mut close: oneshot::Receiver<()>) -> Result<(), Error> {
+	async fn run_dynamic(
+		id: Id,
+		mut close: oneshot::Receiver<()>,
+		driver: crate::ffi::Background,
+	) -> Result<(), Error> {
 		loop {
 			let request = tokio::select! {
 				biased;
@@ -427,7 +383,10 @@ impl Origin {
 				},
 			};
 
-			let request_id = State::lock().origin.broadcast_request.insert(Some(request))?;
+			let request_id = State::lock()
+				.origin
+				.broadcast_request
+				.insert(Some((request, driver.clone())))?;
 			let callback = State::lock()
 				.origin
 				.dynamic
@@ -439,16 +398,6 @@ impl Origin {
 			};
 			callback.call(request_id);
 		}
-	}
-
-	pub fn dynamic_update(&self, dynamic: Id, route: moq_net::origin::Route) -> Result<(), Error> {
-		let dynamic = self
-			.dynamic
-			.get(dynamic)
-			.and_then(|entry| entry.as_ref())
-			.and_then(|entry| entry.inner.as_ref())
-			.ok_or(Error::NotFound)?;
-		Ok(dynamic.update(route)?)
 	}
 
 	pub fn dynamic_close(&mut self, dynamic: Id) -> Result<(), Error> {
@@ -469,7 +418,7 @@ impl Origin {
 			.get(request)
 			.and_then(|slot| slot.as_ref())
 			.ok_or(Error::NotFound)?;
-		let path = request.path();
+		let path = request.0.path();
 		*dst = crate::moq_string {
 			data: path.as_str().as_ptr().cast::<std::ffi::c_char>(),
 			len: path.as_str().len(),
@@ -477,40 +426,32 @@ impl Origin {
 		Ok(())
 	}
 
-	pub fn broadcast_request_take(&mut self, request: Id) -> Result<moq_net::origin::Request, Error> {
+	pub fn broadcast_request_take(
+		&mut self,
+		request: Id,
+	) -> Result<(moq_net::origin::Request, crate::ffi::Background), Error> {
 		self.broadcast_request.remove(request).flatten().ok_or(Error::NotFound)
+	}
+
+	pub fn prepared_insert(
+		&mut self,
+		prepared: moq_net::origin::Prepared,
+		driver: crate::ffi::Background,
+	) -> Result<Id, Error> {
+		self.prepared.insert(Some((prepared, driver)))
+	}
+
+	pub fn prepared_take(
+		&mut self,
+		prepared: Id,
+	) -> Result<(moq_net::origin::Prepared, crate::ffi::Background), Error> {
+		self.prepared.remove(prepared).flatten().ok_or(Error::NotFound)
 	}
 
 	pub fn close(&mut self, origin: Id) -> Result<(), Error> {
 		self.active.remove(origin).ok_or(Error::OriginNotFound)?;
 		Ok(())
 	}
-}
-
-/// Apply every change on hand, returning whether any came through, or `None` once the origin
-/// closed.
-fn settle(follow: &mut moq_net::announce::Follow, unseen: &mut bool, last: &mut Option<Id>) -> Option<bool> {
-	let mut changed = false;
-	while let std::task::Poll::Ready(event) = follow.poll_next(&kio::Waiter::noop()) {
-		changed |= apply(unseen, last, event?);
-	}
-	Some(changed)
-}
-
-/// Apply one change to the path, returning whether it is one.
-fn apply(unseen: &mut bool, last: &mut Option<Id>, event: moq_net::announce::Event) -> bool {
-	match event {
-		moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => *unseen = true,
-		// An end is a gap that ended every request on the old route, so whatever serves the path
-		// next is delivered, even the same instance coming back.
-		moq_net::announce::Event::End(_) => {
-			*unseen = false;
-			*last = None;
-		}
-		// The same instance over another route, which its subscriptions ride out.
-		moq_net::announce::Event::Update(_) => return false,
-	}
-	true
 }
 
 #[cfg(test)]
