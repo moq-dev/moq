@@ -10,6 +10,13 @@ The 32-byte secret type moved out of `mdns` so `listen.reset.secret` shares it, 
 Name it `moq_tokio::secret::Secret`.
 Replace `Secret::load(value)` with `Secret::read(path)`, which reads a file of 64 hexadecimal characters and returns `secret::Error`; replace `Secret::new(hex)` and `str::parse` with `Secret::from([u8; 32])`, decoding the hex yourself.
 
+### `Connection::auth()` returns the `moq_net` handle (#6109)
+
+`Connection::auth()` returns a `moq_net::auth::Handle` that every session of the connection is built on, and the `connection::auth` module (`Handle`, `Auth`, `Watch`) is removed.
+Replace `moq_tokio::connection::auth::{Handle, Auth, Watch}` with `moq_net::auth::{Handle, Auth, Watch}`.
+A token it returns can now be named by a `Route`, and keeps riding that route's announcements on every reconnect.
+Its grant reads `None` while disconnected. A transiently refused token retries on a fixed backoff of 1s doubling to 30s rather than the reconnect `backoff`.
+
 ### Dropping an unfinished send stream resets it (#5909)
 
 `quic::driver::SendStream` and `quic::web::SendStream` send `RESET_STREAM` with code 0 when dropped before `finish()`, instead of finishing implicitly.

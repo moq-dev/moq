@@ -64,10 +64,6 @@ Checkpoint, 2026-10-19, against `main` at `2e1ec2ebf`:
 This run remains open, with no successor, until the unresolved conflicts are
 settled. The unattended instruction was to skip uncertain choices:
 
-- [Auth issuer](/quest/m1/auth/issuer.md) specifies a shared handle and one
-  live session's grant, but not how independent concurrent sessions select
-  grants and refusals. Existing reconnect code only designates one active
-  generation alongside draining predecessors.
 - [Binding linger](/quest/m1/linger-ffi.md) extends the hand-written C ABI,
   while [generated C](/quest/m1/c/README.md) freezes it except claim safety.
 - [Catalog HLS](/quest/m1/archive/catalog-hls.md) names `.hls.z` tracks,

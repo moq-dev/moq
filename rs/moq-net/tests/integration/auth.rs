@@ -71,6 +71,8 @@ cases!(
 	a_live_subscription_survives_union_renewal,
 	a_grant_update_too_large_for_one_message_is_unsupported,
 	nothing_outside_the_grant_reaches_the_peer,
+	a_shared_handle_presents_its_token_on_every_session,
+	a_handle_backs_one_active_session,
 );
 
 /// Run each case on moq-transport alone, whose namespace prefixes cannot carry every
@@ -91,6 +93,12 @@ prefix_cases!(
 	an_unrepresentable_update_revokes_only_its_token,
 	a_grant_too_large_for_one_message_is_unsupported,
 );
+
+/// moq-transport's AUTH_ERROR carries no code that may pass, so only lite retries.
+#[moq_clock::test]
+async fn lite_07_presents_a_transiently_refused_token_again() {
+	a_transient_refusal_is_presented_again(LITE_07).await
+}
 
 #[moq_clock::test]
 async fn lite_07_carries_pattern_grants() {
@@ -144,6 +152,16 @@ async fn moqt_16_route_auth_renews_its_announce() {
 #[moq_clock::test]
 async fn moqt_22_route_auth_renews_its_announce() {
 	a_route_auth_renews_its_announce(MOQT_22).await
+}
+
+#[moq_clock::test]
+async fn moqt_16_route_auth_survives_a_reconnect() {
+	a_route_auth_survives_a_reconnect("moq-transport-16").await
+}
+
+#[moq_clock::test]
+async fn moqt_22_route_auth_survives_a_reconnect() {
+	a_route_auth_survives_a_reconnect(MOQT_22).await
 }
 
 #[moq_clock::test]
@@ -281,24 +299,63 @@ async fn moqt_22_a_revoked_route_auth_remakes_its_announce() {
 /// request, and the server declines MoQ Solicit, so the client announces with
 /// PUBLISH_NAMESPACE rather than answering a SUBSCRIBE_NAMESPACE.
 async fn connect_route_auth(version: &'static str) -> (Pair, origin::Producer, origin::Producer) {
+	let client_origin = produce_origin(2);
+	let server_origin = produce_origin(1);
+	let pair = connect_route_auth_on(version, &client_origin, &server_origin, None).await;
+	(pair, client_origin, server_origin)
+}
+
+/// [`connect_route_auth`] between existing origins, optionally on a shared client handle.
+async fn connect_route_auth_on(
+	version: &'static str,
+	client_origin: &origin::Producer,
+	server_origin: &origin::Producer,
+	client_auth: Option<auth::Handle>,
+) -> Pair {
 	let declined = |f: fn(&mut moq_net::setup::Extensions)| {
 		let mut extensions = moq_net::setup::Extensions::default();
 		f(&mut extensions);
 		Some(extensions)
 	};
-	let client_origin = produce_origin(2);
-	let server_origin = produce_origin(1);
-	let pair = connect(Options {
+	connect(Options {
 		version: Some(version),
 		client_publish: Some(client_origin.clone()),
 		server_subscribe: Some(server_origin.clone()),
 		server_requests: true,
 		client_extensions: declined(|e| e.auth = false),
 		server_extensions: declined(|e| e.solicit = false),
+		client_auth,
 		..Default::default()
 	})
-	.await;
-	(pair, client_origin, server_origin)
+	.await
+}
+
+/// A route naming a shared handle's auth carries it on the next session too, with no
+/// re-add or re-announce from the application.
+async fn a_route_auth_survives_a_reconnect(version: &'static str) {
+	within(async {
+		let handle = auth::Handle::new();
+		let client_origin = produce_origin(2);
+		let server_origin = produce_origin(1);
+		let mut first = connect_route_auth_on(version, &client_origin, &server_origin, Some(handle.clone())).await;
+		let mut tokens = serve(first.requests.take().unwrap(), |_| Some(Grant::all()));
+		let token = handle.add("first").await.expect("kept for requests");
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
+		broadcast.announce(origin::Route::default().with_auth(token)).unwrap();
+		let (token, _first) = tokens.next().await.expect("the announce's token");
+		assert_eq!(token, b"first");
+
+		first.server.abort(Error::Cancel);
+		first.client.closed().await;
+
+		let mut second = connect_route_auth_on(version, &client_origin, &server_origin, Some(handle)).await;
+		let mut tokens = serve(second.requests.take().unwrap(), |_| Some(Grant::all()));
+		let (token, _second) = tokens.next().await.expect("the announce's token on the new session");
+		assert_eq!(token, b"first");
+		wait_announced(&server_origin.consume(), "room/x", true).await;
+	})
+	.await
+	.expect("timed out");
 }
 
 /// A route's auth reaches the peer's acceptor on the announcement, and swapping it
@@ -405,6 +462,8 @@ struct Options {
 	version: Option<&'static str>,
 	/// The connection credential the client's SETUP presents.
 	client_token: Option<&'static [u8]>,
+	/// The handle the client builds its session on, when not its own.
+	client_auth: Option<auth::Handle>,
 }
 
 struct Pair {
@@ -440,6 +499,9 @@ async fn connect(opts: Options) -> Pair {
 	}
 	if let Some(subscribe) = opts.client_subscribe {
 		client = client.with_subscriber(subscribe);
+	}
+	if let Some(handle) = opts.client_auth {
+		client = client.with_auth(handle);
 	}
 
 	let mut server = Server::new().with_versions(version.into());
@@ -945,7 +1007,7 @@ async fn dropping_the_requests_refuses_queued_tokens(version: &'static str) {
 	.expect("timed out");
 }
 
-/// A closed session holds no grant: every token ended with it.
+/// A closed session holds no grant: no session is live, and every token ended with it.
 async fn a_closed_session_holds_no_grant(version: &'static str) {
 	within(async {
 		let pair = connect(Options {
@@ -959,7 +1021,7 @@ async fn a_closed_session_holds_no_grant(version: &'static str) {
 		let token = pair.client.auth().grant();
 
 		pair.server.abort(Error::Cancel);
-		wait_for(token, |g| g == &Some(Grant::default())).await;
+		wait_for(token, Option::is_none).await;
 	})
 	.await
 	.expect("timed out");
@@ -1834,6 +1896,177 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 
 		// Neither the narrowing nor the widening is a publication outside the grant.
 		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A handle passed to the client presents its token on every session it backs: added before
+/// any session, granted on the first, cleared while disconnected, and granted again on the
+/// next, without the token ending in between.
+async fn a_shared_handle_presents_its_token_on_every_session(version: &'static str) {
+	within(async {
+		let handle = auth::Handle::new();
+		let added = moq_clock::sim::spawn({
+			let handle = handle.clone();
+			async move { handle.add("token").await }
+		});
+		let options = || Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_requests: true,
+			client_auth: Some(handle.clone()),
+			..Default::default()
+		};
+
+		let mut first = connect(options()).await;
+		let mut tokens = serve(first.requests.take().unwrap(), |token| match token {
+			b"" => Some(Grant::default()),
+			_ => Some(grant(&["first"], &[])),
+		});
+		let token = added.await.expect("joined").expect("granted on the first session");
+		let _first = presented(&mut tokens).await;
+		wait_for(token.grant(), |g| g == &Some(grant(&["first"], &[]))).await;
+
+		first.server.abort(Error::Cancel);
+		first.client.closed().await;
+		assert_eq!(token.grant().peek(), None, "no session is live");
+		assert!(
+			futures::FutureExt::now_or_never(token.closed()).is_none(),
+			"a session ending is no verdict"
+		);
+
+		let mut second = connect(options()).await;
+		let mut tokens = serve(second.requests.take().unwrap(), |token| match token {
+			b"" => Some(Grant::default()),
+			_ => Some(grant(&["second"], &[])),
+		});
+		let _second = presented(&mut tokens).await;
+		wait_for(token.grant(), |g| g == &Some(grant(&["second"], &[]))).await;
+		wait_for(handle.grant(), |g| g == &Some(grant(&["second"], &[]))).await;
+	})
+	.await
+	.expect("timed out");
+}
+
+/// The setup token and the handle's token, in either order, once both are presented.
+async fn presented(
+	tokens: &mut futures::channel::mpsc::UnboundedReceiver<(Vec<u8>, auth::Issued)>,
+) -> Vec<(Vec<u8>, auth::Issued)> {
+	let mut both = vec![
+		tokens.next().await.expect("a token"),
+		tokens.next().await.expect("another token"),
+	];
+	both.sort_by(|a, b| a.0.cmp(&b.0));
+	assert_eq!(both[0].0, b"");
+	assert_eq!(both[1].0, b"token");
+	both
+}
+
+/// A handle backs one active session: another fails loudly until the first drains. The
+/// draining session keeps presenting the handle's tokens beside its successor, even one
+/// its peer has not answered yet, since its requests may still rely on them. A token added
+/// after the drain rides only the successor: a draining session opens no new streams.
+async fn a_handle_backs_one_active_session(version: &'static str) {
+	within(async {
+		use futures::FutureExt;
+
+		let handle = auth::Handle::new();
+		let options = || Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_requests: true,
+			client_auth: Some(handle.clone()),
+			..Default::default()
+		};
+		let mut first = connect(options()).await;
+		let mut first_requests = first.requests.take().unwrap();
+		let added = moq_clock::sim::spawn({
+			let handle = handle.clone();
+			async move { handle.add("token").await }
+		});
+		let mut first_issued = Vec::new();
+		let unanswered = loop {
+			let request = first_requests.next().await.expect("a token");
+			if request.token().is_empty() {
+				first_issued.push(request.accept(Grant::default()));
+				continue;
+			}
+			assert_eq!(request.token().as_ref(), b"token");
+			break request;
+		};
+
+		let parsed: Version = version.parse().unwrap();
+		let mut mock = moq_net::transport::memory::Config::default();
+		mock.protocol = Some(parsed.alpn().to_string());
+		let (transport, _peer) = create_mock_session_pair(mock);
+		let concurrent = Client::new()
+			.with_versions(parsed.into())
+			.with_auth(handle.clone())
+			.connect(now(), transport)
+			.await;
+		assert!(matches!(concurrent, Err(Error::Duplicate)), "{:?}", concurrent.err());
+
+		first.server.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		first.client.draining().recv().await.expect("the GOAWAY");
+		let mut second = connect(options()).await;
+		let mut second_tokens = serve(second.requests.take().unwrap(), |_| Some(Grant::all()));
+		let _second_issued = presented(&mut second_tokens).await;
+		let _token = added.await.expect("joined").expect("granted on the second session");
+
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			unanswered.closed().now_or_never().is_none(),
+			"the draining session withdrew its unanswered token"
+		);
+		let first_grant = unanswered.accept(Grant::all());
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			first_grant.closed().now_or_never().is_none(),
+			"the draining session dropped its late grant"
+		);
+
+		let later = handle.add("later").await.expect("granted on the second session");
+		let (token, _later) = second_tokens.next().await.expect("the active session presents it");
+		assert_eq!(token, b"later");
+		assert!(
+			first_requests.next().now_or_never().is_none(),
+			"the draining session opened a new stream"
+		);
+		drop(later);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A refusal that may pass, such as an overloaded verifier, presents the token again
+/// after a backoff rather than ending it.
+async fn a_transient_refusal_is_presented_again(version: &'static str) {
+	within(async {
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut requests = pair.requests.take().unwrap();
+		let (tx, mut issued) = futures::channel::mpsc::unbounded();
+		moq_clock::sim::spawn(async move {
+			let mut refused = false;
+			while let Some(request) = requests.next().await {
+				if request.token().is_empty() || refused {
+					let _ = tx.unbounded_send(request.accept(Grant::default()));
+				} else {
+					refused = true;
+					request.reject(SessionError::TooManyRequests, "busy");
+				}
+			}
+		});
+		let token = pair.client.auth().add("token").await.expect("granted on the retry");
+		assert_eq!(token.grant().peek(), Some(Grant::default()));
+		let _setup = issued.next().await;
+		let _token = issued.next().await;
 	})
 	.await
 	.expect("timed out");

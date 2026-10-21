@@ -139,6 +139,13 @@ export interface Established {
 	// private: plumbing
 	/** Settles with the peer's GOAWAY; the session keeps serving until it closes. */
 	readonly goaway: GetPromise<Drain>;
+	// private: plumbing
+	/**
+	 * This session's side of its auth handle.
+	 *
+	 * @internal
+	 */
+	readonly auth: import("./auth_session.ts").AuthSession;
 }
 
 type View = Broadcast | OriginProducer | OriginConsumer | Established;

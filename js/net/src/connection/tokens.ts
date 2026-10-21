@@ -47,7 +47,9 @@ interface Entry {
 }
 
 /**
- * The configured tokens one session holds on their own AUTH streams.
+ * The configured tokens an auth handle holds on their own AUTH streams, beside the
+ * latest dial's connection credential. A handle shared across reconnects keeps them on
+ * every session it backs.
  *
  * A change presents the new tokens at once and withdraws the ones they replace only after
  * every new one has its answer, so the grant never narrows in between.
@@ -63,6 +65,12 @@ export class Held {
 	constructor(handle: Handle, credential: Credential) {
 		this.#handle = handle;
 		this.#credential = credential;
+	}
+
+	/** A new dial on the handle, whose credential decides which tokens ride AUTH. */
+	dialed(credential: Credential, tokens: readonly string[]) {
+		this.#credential = credential;
+		this.update(tokens);
 	}
 
 	/** Hold exactly `tokens`, other than the connection credential. */
@@ -111,18 +119,24 @@ export class Held {
 	}
 }
 
-// The tokens each connection holds, so a reconnecting wrapper can update them.
-const held = new WeakMap<Established, Held>();
+// The tokens each auth handle holds, so a handle shared across reconnects holds them once
+// and a reconnecting wrapper can update them.
+const held = new WeakMap<Handle, Held>();
 
 /** Present `tokens` on `connection`, beside the credential its dial carried. @internal */
 export function hold(connection: Established, credential: Credential, tokens: readonly string[]): Held {
+	const existing = held.get(connection.auth);
+	if (existing) {
+		existing.dialed(credential, tokens);
+		return existing;
+	}
 	const tokensHeld = new Held(connection.auth, credential);
 	tokensHeld.update(tokens);
-	held.set(connection, tokensHeld);
+	held.set(connection.auth, tokensHeld);
 	return tokensHeld;
 }
 
 /** The tokens `connection` holds, if it was dialed with any. @internal */
 export function heldOf(connection: Established): Held | undefined {
-	return held.get(connection);
+	return held.get(connection.auth);
 }

@@ -753,7 +753,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// fail requests that land before the replacement is up.
 	going_away: crate::goaway::GoingAway,
 	// Our grant (MoQ Auth): a subscription it stops covering is cancelled.
-	auth: crate::auth::Handle,
+	auth: crate::auth::Link,
 	// What this session may allocate up front for objects still arriving.
 	frames: frame::Budget,
 	// Namespaces the peer may have announced at once (`session::Limits::announces`).
@@ -847,7 +847,7 @@ where
 			tasks,
 			version,
 			going_away,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			frames: Default::default(),
 			announces: Default::default(),
 			validity: Default::default(),
@@ -857,7 +857,7 @@ where
 
 	/// Bound what we subscribe to by the grant this session's tokens earn (MoQ Auth),
 	/// and what the peer may publish to us by the session's limit, as either changes.
-	pub fn with_auth(mut self, auth: crate::auth::Handle) -> Self {
+	pub fn with_auth(mut self, auth: crate::auth::Link) -> Self {
 		self.auth = auth;
 		let this = self.clone();
 		self.tasks.push(async move { this.run_limit().await });
@@ -6807,13 +6807,13 @@ mod tests {
 	) -> (
 		Subscriber<crate::lite::test_transport::ScriptedSession>,
 		crate::lite::test_transport::Log,
-		crate::auth::Handle,
+		crate::auth::Link,
 		Vec<crate::auth::Auth>,
 		crate::util::TaskSet,
 	) {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let log = session.log.clone();
-		let auth = crate::auth::Handle::new(true);
+		let auth = crate::auth::Link::new(true);
 		let setup = auth.present(bytes::Bytes::new(), true).unwrap();
 		auth.granted(setup.id(), crate::auth::Grant::default());
 		let unanswered = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
@@ -9293,8 +9293,8 @@ mod tests {
 		// Admitted by its own token, which holds the one slot for the request's life.
 		let path = crate::Path::new("room/host").to_owned();
 		let hold: crate::auth::Hold = std::sync::Arc::new(subscriber.announces.acquire().unwrap());
-		let auth = crate::auth::Handle::new(true);
-		let mut requests = auth.requests().unwrap();
+		let auth = crate::auth::Link::new(true);
+		let mut requests = auth.handle().requests().unwrap();
 		let token = crate::setup::Token {
 			kind: crate::setup::Token::OUT_OF_BAND,
 			value: vec![0x00, 0xff],
@@ -9752,8 +9752,8 @@ mod tests {
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
 
-		let auth = crate::auth::Handle::new(true);
-		let requests = auth.requests().unwrap();
+		let auth = crate::auth::Link::new(true);
+		let requests = auth.handle().requests().unwrap();
 		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(
 			0,
@@ -9764,7 +9764,7 @@ mod tests {
 			},
 		);
 		// We let the peer announce only "other".
-		auth.authorize(&crate::auth::Grant {
+		auth.handle().authorize(&crate::auth::Grant {
 			publish: crate::Pattern::subtree("other").unwrap().into(),
 			subscribe: crate::Patterns::new(),
 			expires: None,
@@ -10068,7 +10068,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_covering_peer_grant_never_skips_the_verifier() {
 		const VERSION: Version = Version::Draft18;
-		let auth = crate::auth::Handle::new(true);
+		let auth = crate::auth::Link::new(true);
 		let _cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
 		auth.granted(0, crate::auth::Grant::all());
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth);
@@ -10121,8 +10121,8 @@ mod tests {
 			subscribe: crate::Patterns::new(),
 			expires: None,
 		};
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&limit("room"));
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&limit("room"));
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let consulted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -10159,7 +10159,7 @@ mod tests {
 			"the verifier ran though the limit covers the announce"
 		);
 
-		auth.authorize(&limit("other"));
+		auth.handle().authorize(&limit("other"));
 		for _ in 0..50 {
 			let _ = futures::poll!(acceptor.as_mut());
 			assert!(futures::poll!(run.as_mut()).is_pending(), "the announce ended");
@@ -10176,8 +10176,8 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_token_authorized_announce_is_exempt_from_the_limit() {
 		const VERSION: Version = Version::Draft18;
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&crate::auth::Grant::default());
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::default());
 		let (mut subscriber, mut requests, consumer, session) = announce_harness_with(VERSION, auth.clone());
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let acceptor = async move {
@@ -10204,7 +10204,7 @@ mod tests {
 		}
 		assert!(routed, "the token admits the announce outside the limit");
 
-		auth.authorize(&crate::auth::Grant {
+		auth.handle().authorize(&crate::auth::Grant {
 			publish: crate::Pattern::subtree("other").unwrap().into(),
 			subscribe: crate::Patterns::new(),
 			expires: None,
@@ -10225,8 +10225,8 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_token_authorized_announce_admits_its_subscriptions() {
 		const VERSION: Version = Version::Draft18;
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&crate::auth::Grant::default());
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::default());
 		// The announce's peer says nothing; the subscription's accepts it.
 		let subscribe_ok = {
 			let log = crate::lite::test_transport::Log::default();
@@ -11029,9 +11029,9 @@ mod tests {
 		origin::Consumer,
 		crate::lite::test_transport::ScriptedSession,
 	) {
-		let auth = crate::auth::Handle::new(false);
+		let auth = crate::auth::Link::new(false);
 		if let Some(limit) = &limit {
-			auth.authorize(limit);
+			auth.handle().authorize(limit);
 		}
 		announce_harness_with(version, auth)
 	}
@@ -11039,7 +11039,7 @@ mod tests {
 	/// An announce harness over `auth`, set up by the caller, taking its requests.
 	fn announce_harness_with(
 		version: Version,
-		auth: crate::auth::Handle,
+		auth: crate::auth::Link,
 	) -> (
 		Subscriber<crate::lite::test_transport::ScriptedSession>,
 		crate::auth::Requests,
@@ -11053,7 +11053,7 @@ mod tests {
 	/// An announce harness over `auth` and `session`, both set up by the caller.
 	fn announce_harness_on(
 		version: Version,
-		auth: crate::auth::Handle,
+		auth: crate::auth::Link,
 		session: crate::lite::test_transport::ScriptedSession,
 	) -> (
 		Subscriber<crate::lite::test_transport::ScriptedSession>,
@@ -11068,7 +11068,7 @@ mod tests {
 		let peer_setup = peer::PeerSetup::default();
 		peer_setup.set(peer::Peer::default());
 
-		let requests = auth.requests().unwrap();
+		let requests = auth.handle().requests().unwrap();
 
 		let subscriber = Subscriber::new(
 			crate::time::sim(),
@@ -14962,7 +14962,7 @@ mod joining_fetch_tests {
 				.iter()
 				.any(|(id, _)| *id == ietf::Fetch::ID)
 		);
-		run.subscriber.auth.authorize(&crate::auth::Grant::default());
+		run.subscriber.auth.handle().authorize(&crate::auth::Grant::default());
 		settle().await;
 		let mut received = (&mut run._hold.2)
 			.now_or_never()

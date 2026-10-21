@@ -5,7 +5,8 @@ import { createMockTransportPair } from "../mock.ts";
 import { Reader } from "../stream.ts";
 import { offered } from "./extensions.ts";
 import { exchangeSetup } from "./handshake.ts";
-import { credential, extra, Held } from "./tokens.ts";
+import type { Established } from "./established.ts";
+import { credential, extra, Held, hold } from "./tokens.ts";
 
 const URL_ = new URL("https://relay.example.com/room");
 
@@ -41,8 +42,10 @@ test("no tokens present nothing", () => {
 function handle() {
 	const answers = new Map<string, (auth: Auth) => void>();
 	const closed: string[] = [];
+	const presented: string[] = [];
 	const fake = {
 		add(token: string) {
+			presented.push(token);
 			return new Promise<Auth>((resolve) => answers.set(token, resolve));
 		},
 	} as unknown as Handle;
@@ -53,7 +56,7 @@ function handle() {
 		// Let the answer and the settle it schedules run.
 		for (let i = 0; i < 3; i++) await Promise.resolve();
 	};
-	return { fake, answers, closed, answer };
+	return { fake, answers, closed, presented, answer };
 }
 
 test("a replaced token is withdrawn only once its replacement answers", async () => {
@@ -80,6 +83,20 @@ test("a token replaced before its answer closes when it arrives", async () => {
 	expect(closed).toEqual([]);
 	await answer("old");
 	expect(closed).toEqual(["old"]);
+});
+
+test("sessions sharing an auth handle present each configured token once", async () => {
+	const { fake, closed, presented, answer } = handle();
+	const first = { auth: fake } as unknown as Established;
+	const second = { auth: fake } as unknown as Established;
+	hold(first, credential(URL_, ["connection", "a"], true), ["connection", "a"]);
+	await answer("a");
+
+	// A reconnect on the same handle, whose credential now comes from the URL.
+	const url = new URL("https://relay.example.com/room?jwt=peer");
+	hold(second, credential(url, ["connection", "a"], true), ["connection", "a"]);
+	expect(presented).toEqual(["a", "connection"]);
+	expect(closed).toEqual([]);
 });
 
 test("a draft-17+ client presents its token in SETUP", async () => {

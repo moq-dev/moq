@@ -32,43 +32,16 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 	}
 }
 
-/// Where a session's tokens live: on the session itself, or on a connection that presents
-/// them again on every reconnect.
-#[derive(Clone)]
-pub(crate) enum Handle {
-	Session(moq_net::auth::Handle),
-	#[cfg(not(target_arch = "wasm32"))]
-	Connection(moq_tokio::connection::auth::Handle),
-}
-
-impl Handle {
-	fn grant(&self) -> Watch {
-		match self {
-			Self::Session(handle) => Watch::Session(handle.grant()),
-			#[cfg(not(target_arch = "wasm32"))]
-			Self::Connection(handle) => Watch::Connection(handle.grant()),
-		}
+/// Present `token` on `handle`, refusing one that nothing would send.
+async fn add(handle: moq_net::auth::Handle, token: String) -> Result<moq_net::auth::Auth, MoqError> {
+	let auth = handle.add(token).await?;
+	// A token the peer accepted carries a grant until it ends. Without AUTH, moq-transport
+	// accepts one at once for the requests that name it, but nothing here can name one, so
+	// it would never be sent. One already revoked is left for `closed` to report.
+	if auth.grant().peek().is_none() && poll_now(auth.closed()).is_pending() {
+		return Err(MoqError::Unsupported);
 	}
-
-	async fn add(self, token: String) -> Result<Token, MoqError> {
-		match self {
-			Self::Session(handle) => {
-				let auth = handle.add(token).await?;
-				// A token the peer accepted carries a grant until it ends. Without AUTH,
-				// moq-transport accepts one at once for the requests that name it, but nothing
-				// here can name one, so it would never be sent. One already revoked is left for
-				// `closed` to report. moq-tokio refuses the same for a client's connection.
-				if auth.grant().peek().is_none() && poll_now(auth.closed()).is_pending() {
-					return Err(MoqError::Unsupported);
-				}
-				Ok(Token::Session(auth))
-			}
-			#[cfg(not(target_arch = "wasm32"))]
-			Self::Connection(handle) => Ok(Token::Connection(
-				handle.add(token).await.map_err(crate::session::map_closed_error)?,
-			)),
-		}
-	}
+	Ok(auth)
 }
 
 /// Poll `future` once without waiting.
@@ -77,57 +50,8 @@ fn poll_now<F: std::future::Future>(future: F) -> std::task::Poll<F::Output> {
 	std::future::Future::poll(future, &mut std::task::Context::from_waker(std::task::Waker::noop()))
 }
 
-enum Watch {
-	Session(moq_net::auth::Watch),
-	#[cfg(not(target_arch = "wasm32"))]
-	Connection(moq_tokio::connection::auth::Watch),
-}
-
-impl Watch {
-	fn peek(&self) -> Option<MoqGrant> {
-		match self {
-			Self::Session(watch) => watch.peek(),
-			#[cfg(not(target_arch = "wasm32"))]
-			Self::Connection(watch) => watch.peek(),
-		}
-		.map(Into::into)
-	}
-
-	async fn changed(&mut self) -> Result<Option<MoqGrant>, MoqError> {
-		let grant = match self {
-			Self::Session(watch) => watch.changed().await?,
-			#[cfg(not(target_arch = "wasm32"))]
-			Self::Connection(watch) => watch.changed().await.map_err(crate::session::map_closed_error)?,
-		};
-		Ok(grant.map(Into::into))
-	}
-}
-
-enum Token {
-	Session(moq_net::auth::Auth),
-	#[cfg(not(target_arch = "wasm32"))]
-	Connection(moq_tokio::connection::auth::Auth),
-}
-
-impl Token {
-	fn grant(&self) -> Watch {
-		match self {
-			Self::Session(auth) => Watch::Session(auth.grant()),
-			#[cfg(not(target_arch = "wasm32"))]
-			Self::Connection(auth) => Watch::Connection(auth.grant()),
-		}
-	}
-
-	async fn closed(&self) -> Result<(), MoqError> {
-		match self {
-			Self::Session(auth) => match auth.closed().await {
-				moq_net::Error::Cancel => Ok(()),
-				err => Err(err.into()),
-			},
-			#[cfg(not(target_arch = "wasm32"))]
-			Self::Connection(auth) => auth.closed().await.map_err(crate::session::map_closed_error),
-		}
-	}
+fn peek(watch: &moq_net::auth::Watch) -> Option<MoqGrant> {
+	watch.peek().map(Into::into)
 }
 
 /// A session's authorization: the grant its peer gave it, and more tokens to present.
@@ -137,16 +61,16 @@ impl Token {
 /// elsewhere the grant stays `None`.
 #[derive(uniffi::Object)]
 pub struct MoqAuth {
-	handle: Handle,
+	handle: moq_net::auth::Handle,
 	/// The watch behind [`grant`](Self::grant), which reads without the lock.
-	peek: Watch,
+	peek: moq_net::auth::Watch,
 	/// The watch behind [`grant_changed`](Self::grant_changed), which tracks what this
 	/// handle last reported. Concurrent callers share it, so each watcher takes its own handle.
-	changed: Task<Watch>,
+	changed: Task<moq_net::auth::Watch>,
 }
 
 impl MoqAuth {
-	pub(crate) fn new(handle: Handle) -> Self {
+	pub(crate) fn new(handle: moq_net::auth::Handle) -> Self {
 		// Start from the grant as it is now, so a watcher reads that with `grant` and waits
 		// in `grant_changed` only for what follows, never for the same grant twice.
 		let mut changed = handle.grant();
@@ -166,7 +90,7 @@ impl MoqAuth {
 	/// A client session reads `None` while it reconnects.
 	pub fn grant(&self) -> Option<MoqGrant> {
 		let _guard = crate::ffi::enter();
-		self.peek.peek()
+		peek(&self.peek)
 	}
 
 	/// Wait for the grant to differ from the one this handle last reported, or held when it was
@@ -177,7 +101,9 @@ impl MoqAuth {
 	///
 	/// Errors once nothing will change it again, because the session ended.
 	pub async fn grant_changed(&self) -> Result<Option<MoqGrant>, MoqError> {
-		self.changed.run(|mut watch| async move { watch.changed().await }).await
+		self.changed
+			.run(|mut watch| async move { Ok(watch.changed().await?.map(Into::into)) })
+			.await
 	}
 
 	/// Present another token, resolving once the peer accepts it.
@@ -191,7 +117,7 @@ impl MoqAuth {
 	/// without AUTH, or moq-transport without the MoQ Auth extension.
 	pub async fn add(&self, token: String) -> Result<Arc<MoqAuthToken>, MoqError> {
 		let handle = self.handle.clone();
-		let token = crate::ffi::detached(handle.add(token)).await?;
+		let token = crate::ffi::detached(add(handle, token)).await?;
 		Ok(Arc::new(MoqAuthToken::new(token)))
 	}
 }
@@ -202,12 +128,12 @@ impl MoqAuth {
 #[derive(uniffi::Object)]
 pub struct MoqAuthToken {
 	/// The watch behind [`grant`](Self::grant), which does not keep the token presented.
-	peek: Watch,
-	token: Task<Token>,
+	peek: moq_net::auth::Watch,
+	token: Task<moq_net::auth::Auth>,
 }
 
 impl MoqAuthToken {
-	fn new(token: Token) -> Self {
+	fn new(token: moq_net::auth::Auth) -> Self {
 		Self {
 			peek: token.grant(),
 			token: Task::new(token),
@@ -220,13 +146,20 @@ impl MoqAuthToken {
 	/// This token's own grant, or `None` while the peer has not answered it or after it ended.
 	pub fn grant(&self) -> Option<MoqGrant> {
 		let _guard = crate::ffi::enter();
-		self.peek.peek()
+		peek(&self.peek)
 	}
 
 	/// Wait for the token to end: `Ok` when the peer closed it without an error, the peer's
 	/// revocation as [`MoqError::Protocol`], or the session's close.
 	pub async fn closed(&self) -> Result<(), MoqError> {
-		self.token.run(|token| async move { token.closed().await }).await
+		self.token
+			.run(|token| async move {
+				match token.closed().await {
+					moq_net::Error::Cancel => Ok(()),
+					err => Err(err.into()),
+				}
+			})
+			.await
 	}
 
 	/// Withdraw the token, removing its grant from the union.

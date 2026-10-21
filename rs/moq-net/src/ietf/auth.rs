@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use crate::auth::{Grant, Handle, Issue, Reply, Request, Serving};
+use crate::auth::{Grant, Issue, Link, Reply, Request, Serving};
 use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 use crate::{Error, Path, Pattern, Patterns, SessionError};
 
@@ -257,7 +257,7 @@ pub(super) async fn run_present<S>(
 	runtime: crate::time::Deadlines,
 	session: S,
 	control: Control,
-	handle: Handle,
+	handle: Link,
 	peer_setup: peer::PeerSetup,
 	version: Version,
 	going_away: crate::goaway::GoingAway,
@@ -295,10 +295,27 @@ where
 		let going_away = going_away.clone();
 		let violation = violation.clone();
 		tasks.push(async move {
-			// After a GOAWAY the peer must not see new requests.
-			let err = match going_away.is_set() {
-				true => Error::GoingAway,
-				false => present.run(token).await,
+			let mut token = token;
+			let err = loop {
+				// After a GOAWAY the peer must not see new requests.
+				if going_away.is_set() {
+					break Error::GoingAway;
+				}
+				let err = present.run(token).await;
+				let Some(delay) = present.handle.retry(present.id, &err) else {
+					break err;
+				};
+				tracing::debug!(?delay, "auth token refused transiently; presenting it again");
+				let mut deadline = crate::time::Deadline::after(&present.runtime, delay);
+				kio::wait(|waiter| match present.handle.poll_withdrawn(present.id, waiter) {
+					Poll::Ready(()) => Poll::Ready(()),
+					Poll::Pending => deadline.poll(waiter),
+				})
+				.await;
+				match present.handle.reopen(present.id) {
+					Some(next) => token = next,
+					None => break Error::Cancel,
+				}
 			};
 			let err = crate::auth::protocol_error(err);
 			if matches!(err, Error::ProtocolViolation) {
@@ -323,7 +340,7 @@ struct Present<S: crate::transport::poll::Session> {
 	runtime: crate::time::Deadlines,
 	session: S,
 	control: Control,
-	handle: Handle,
+	handle: Link,
 	version: Version,
 	id: u64,
 }
@@ -433,7 +450,7 @@ fn decode_reply<T: Message>(body: &super::Body, version: Version) -> Result<T, E
 #[derive(Clone)]
 pub(super) struct Serve {
 	pub runtime: crate::time::Deadlines,
-	pub handle: Handle,
+	pub handle: Link,
 	/// What the peer's connection credential earns by default.
 	pub peer_grant: Grant,
 }

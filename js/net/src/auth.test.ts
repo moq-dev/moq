@@ -1,8 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import type { Getter } from "@moq/signals";
-import { type Grant, type Issued, Unsupported } from "./auth.ts";
-import type { AuthSession } from "./auth_session.ts";
+import { Duplicate, type Grant, Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { AuthMessage as IetfAuthMessage, IetfAuthWire } from "./ietf/auth.ts";
@@ -67,17 +66,93 @@ interface Pair {
 	transport: MockTransport;
 }
 
-async function connect(opts: { publish?: OriginProducer; serverPublish?: OriginProducer; protocol: string }) {
+async function connect(opts: {
+	publish?: OriginProducer;
+	serverPublish?: OriginProducer;
+	protocol: string;
+	auth?: Handle;
+}) {
 	const pair = createMockTransportPair(opts.protocol);
 	const [client, server] = await Promise.all([
-		connectSession({ url, transport: pair.client, publish: opts.publish?.consume() }),
+		connectSession({ url, transport: pair.client, publish: opts.publish?.consume(), auth: opts.auth }),
 		acceptSession({ transport: pair.server, url, publish: opts.serverPublish?.consume() }),
 	]);
 	return { client, server, transport: pair.client } satisfies Pair;
 }
 
+/** Answer every token the peer presents with `answer`'s grant, holding each until the session ends. */
+function answer(requests: Requests, answer: (token: string) => Grant): Issued[] {
+	const issued: Issued[] = [];
+	void (async () => {
+		for (;;) {
+			const request = await requests.next();
+			if (!request) break;
+			issued.push(request.accept(answer(new TextDecoder().decode(request.token))));
+		}
+	})();
+	return issued;
+}
+
 // Every case runs on moq-lite-07-wip and on moq-transport with the MoQ Auth extension.
 describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
+	test("a shared handle presents its token on every session", async () => {
+		const handle = new Handle();
+		// Added before any session: it waits for the first.
+		const adding = handle.add("token");
+
+		const first = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+		answer(first.server.auth.requests(), (token) => (token ? grant(["first"], []) : grant([], [])));
+		const token = await adding;
+		await waitFor(token.grant, (g) => g?.publish.equals(patterns("first")) === true);
+		expect(first.client.auth).toBe(handle);
+
+		first.client.abort();
+		first.server.abort();
+		expect(token.grant.peek()).toBeUndefined();
+		expect(handle.grant.peek()).toBeUndefined();
+		let ended = false;
+		void token.closed.then(() => {
+			ended = true;
+		});
+		await nextTask();
+		expect(ended).toBe(false);
+
+		const second = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+		answer(second.server.auth.requests(), (token) => (token ? grant(["second"], []) : grant([], [])));
+		await waitFor(token.grant, (g) => g?.publish.equals(patterns("second")) === true);
+		await waitFor(handle.grant, (g) => g?.publish.equals(patterns("second")) === true);
+		expect(ended).toBe(false);
+		// A route naming the token carries it on the new session's requests, on moq-transport.
+		const carried = wireOf(second.client).auth.carried(token);
+		if (protocol === Lite.ALPN_07_WIP) expect(carried).toBeUndefined();
+		else expect(carried).toEqual(new TextEncoder().encode("token"));
+
+		token.close();
+		expect(await token.closed).toBeNull();
+		await waitFor(handle.grant, (g) => g?.publish.equals(patterns("")) === false);
+		second.client.abort();
+		second.server.abort();
+	});
+
+	test("a handle backs one active session", async () => {
+		const handle = new Handle();
+		const first = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+		const pair = createMockTransportPair(protocol);
+		await expect(connectSession({ url, transport: pair.client, auth: handle })).rejects.toBeInstanceOf(Duplicate);
+		pair.client.close();
+
+		first.client.abort();
+		first.server.abort();
+		const second = await connect({ publish: new OriginProducer(), protocol, auth: handle });
+		expect(second.client.auth).toBe(handle);
+
+		// Ending the handle ends the tokens it holds, and no session can be built on it.
+		handle.abort(new Error("done"));
+		await expect(handle.add("late")).rejects.toThrow("done");
+		second.client.abort();
+		second.server.abort();
+	});
+
 	test("both sides learn their default grant", async () => {
 		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 
@@ -279,11 +354,13 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 
 		// Checked before any stream notices the transport closing.
 		client.abort();
-		const closed = client.auth.grant.peek();
+		// No session is live, and every token ended with it.
+		expect(client.auth.grant.peek()).toBeUndefined();
+		const closed = wireOf(client).auth.grant.peek();
 		expect(closed?.publish.size).toBe(0);
 		expect(closed?.subscribe.size).toBe(0);
 		// What the session enforced is not revoked by its end.
-		expect((client.auth as AuthSession).scope.peek()?.publish.size).toBeGreaterThan(0);
+		expect(wireOf(client).auth.scope.peek()?.publish.size).toBeGreaterThan(0);
 		server.abort();
 	});
 
@@ -298,7 +375,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 		published.appendGroup().writeFrame({ payload: new Uint8Array([1]) });
 		const { client, server } = await connect({ serverPublish: origin, protocol });
 		const requests = server.auth.requests();
-		await (client.auth as AuthSession).ready(Path.from("room/x"), "subscribe");
+		await wireOf(client).auth.ready(Path.from("room/x"), "subscribe");
 		const setup = await requests.next();
 		if (!setup) throw new Error("missing setup token");
 		const initial = setup.accept(grant([], []));
@@ -361,7 +438,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 			if (!unanswered) throw new Error("missing token");
 			const track = new OriginProducer().createBroadcast(Path.from("room/x")).createTrack("video");
 			const reader = track.subscribe();
-			const ready = (client.auth as AuthSession).ready(Path.from("room/x"), "subscribe", {
+			const ready = wireOf(client).auth.ready(Path.from("room/x"), "subscribe", {
 				until: () => abandoned(track.demand()),
 			});
 			let settled = false;
@@ -472,8 +549,8 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 
 		// The grant drops as the session closes, which can land before the transport's close
 		// reaches the subscription; force that order.
-		(client.auth as AuthSession).close();
-		expect(client.auth.grant.peek()?.subscribe.size).toBe(0);
+		wireOf(client).auth.close();
+		expect(wireOf(client).auth.grant.peek()?.subscribe.size).toBe(0);
 		await nextTask();
 		expect(track.closed.peek()).toBeUndefined();
 
@@ -577,6 +654,65 @@ describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		client.abort();
 		server.abort();
 	});
+});
+
+// moq-transport's AUTH_ERROR carries no code that may pass, so only lite retries.
+test("lite-07 presents a transiently refused token again after a backoff", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	const refusals = () => warned.mock.calls.filter(([line]) => line === "auth token refused").length;
+	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_07_WIP });
+	const requests = server.auth.requests();
+	const issued: Issued[] = [];
+	let added = false;
+
+	/** Refuse `request` as busy, once the client has started its backoff. */
+	const refuse = async (request: Request | undefined) => {
+		expect(request && new TextDecoder().decode(request.token)).toBe("token");
+		const before = refusals();
+		request?.reject(SessionCode.TooManyRequests, "busy");
+		// The client starts its backoff as it logs the refusal.
+		await settles(() => refusals() > before);
+	};
+
+	/** The token presented again, exactly once `backoff` passes. */
+	const after = async (backoff: Milli) => {
+		let presented = false;
+		const next = requests.next().then((request) => {
+			presented = true;
+			return request;
+		});
+		clock.advance(Nano.fromMilli(Milli(backoff - 1)));
+		for (let i = 0; i < 10; i++) await nextTask();
+		expect(presented).toBe(false);
+		expect(added).toBe(false);
+		clock.advance(Nano.fromMilli(Milli(1)));
+		return await next;
+	};
+
+	try {
+		const setup = await requests.next();
+		if (!setup) throw new Error("missing setup token");
+		issued.push(setup.accept(grant([], [])));
+
+		const adding = client.auth.add("token");
+		void adding.then(() => {
+			added = true;
+		});
+		await refuse(await requests.next());
+		await refuse(await after(Milli(1000)));
+		const accepted = await after(Milli(2000));
+		if (!accepted) throw new Error("the token was not presented again");
+		issued.push(accepted.accept(grant(["a"], [])));
+		const token = await adding;
+		expect(token.grant.peek()?.publish.equals(patterns("a"))).toBe(true);
+	} finally {
+		client.abort();
+		server.abort();
+		warned.mockRestore();
+		restore();
+	}
 });
 
 // moq-lite carries patterns, so every grant arrives exactly as issued.
@@ -717,7 +853,7 @@ test.each([
 		const bytes = new TextEncoder().encode("bytes");
 		const copied = await client.auth.add(bytes);
 		bytes.fill(0);
-		expect((client.auth as AuthSession).carried(copied)).toEqual(new TextEncoder().encode("bytes"));
+		expect(wireOf(client).auth.carried(copied)).toEqual(new TextEncoder().encode("bytes"));
 		// The token ends with its session, like any other.
 		client.abort();
 		expect(await token.closed).toBeInstanceOf(Error);

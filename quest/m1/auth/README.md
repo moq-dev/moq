@@ -142,10 +142,6 @@ version is wip then), not lite-06. The UNAUTHORIZED stream code stays on lite-06
 (#5004), since a relay can narrow a session with no Auth Stream; it is 0x3B,
 because `main` assigned 0x3A to NOT_FETCHABLE first.
 
-## Required
-
-- [Auth outlives its session](/quest/m1/auth/issuer.md) - one `auth::Handle` spans a connection's sessions, so a route's auth survives a reconnect
-
 ## Related
 
 - [Request leases](/quest/m3/auth-request-lease.md) - deferred auth-server

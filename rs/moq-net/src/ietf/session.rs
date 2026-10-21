@@ -80,7 +80,7 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// peer's token requests during its handshake. Supports AUTH exactly when the
 	/// version can negotiate it and this side offers it; the peer's SETUP decides whether
 	/// it does.
-	pub auth: crate::auth::Handle,
+	pub auth: crate::auth::Link,
 
 	/// Uni streams that arrived before that pre-read SETUP (see [`PeerSetup::early`]),
 	/// classified by the session before it accepts any more.
@@ -1486,7 +1486,7 @@ async fn read_goaways<R: crate::transport::poll::RecvStream>(
 
 /// Closes the auth handle when the session driver ends without finishing, releasing
 /// anything still waiting on a token.
-struct AuthClose(crate::auth::Handle);
+struct AuthClose(crate::auth::Link);
 
 impl Drop for AuthClose {
 	fn drop(&mut self) {
@@ -1498,7 +1498,7 @@ impl Drop for AuthClose {
 /// instead of leaving it to wait for a subscription that never comes. See
 /// [`crate::auth::Enforce`].
 async fn enforce_grant<S: crate::transport::poll::Session>(
-	auth: crate::auth::Handle,
+	auth: crate::auth::Link,
 	origin: origin::Consumer,
 	mut session: S,
 ) -> Result<(), Error> {
@@ -1595,7 +1595,7 @@ mod tests {
 							auth: true,
 							..Default::default()
 						}),
-						auth: crate::auth::Handle::new(true),
+						auth: crate::auth::Link::new(true),
 						early_unis: Vec::new(),
 						extensions: Default::default(),
 					})
@@ -1651,7 +1651,7 @@ mod tests {
 						auth: true,
 						..Default::default()
 					}),
-					auth: crate::auth::Handle::new(true),
+					auth: crate::auth::Link::new(true),
 					early_unis: Vec::new(),
 					extensions: Default::default(),
 				})
@@ -1698,7 +1698,7 @@ mod tests {
 						auth: true,
 						..Default::default()
 					}),
-					auth: crate::auth::Handle::new(true),
+					auth: crate::auth::Link::new(true),
 					early_unis: Vec::new(),
 					extensions: Default::default(),
 				})
@@ -1798,7 +1798,7 @@ mod tests {
 				},
 				..Default::default()
 			}),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			early_unis: Vec::new(),
 			extensions: Default::default(),
 		})
@@ -1855,7 +1855,7 @@ mod tests {
 			peer_setup_stream: None,
 			// The requests wait on the peer's SETUP (MoQ Hidden).
 			peer_declared: Some(peer::Peer::default()),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			early_unis: Vec::new(),
 			extensions: Default::default(),
 		})
@@ -1931,7 +1931,7 @@ mod tests {
 				solicit,
 				..Default::default()
 			}),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			early_unis: Vec::new(),
 			extensions: Default::default(),
 		})
@@ -2017,7 +2017,7 @@ mod tests {
 			token: None,
 			peer_setup_stream: None,
 			peer_declared,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			early_unis: Vec::new(),
 			extensions: Default::default(),
 		})
@@ -2086,7 +2086,7 @@ mod tests {
 	/// A publishing draft-18 session with AUTH available locally, against a peer that
 	/// declared `auth`. Everything the session needs to keep running is held here.
 	struct AuthSession {
-		handle: crate::auth::Handle,
+		handle: crate::auth::Link,
 		log: crate::lite::test_transport::Log,
 		_origin: crate::origin::Producer,
 		_cam: crate::AnnounceProducer,
@@ -2103,7 +2103,7 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 
-		let handle = crate::auth::Handle::ietf(true);
+		let handle = crate::auth::Link::ietf(true);
 		let (driver, goaway) = start(Config {
 			runtime: crate::time::sim(),
 			session,
@@ -2148,12 +2148,12 @@ mod tests {
 		let session = auth_session(false);
 		let (handle, log) = (&session.handle, &session.log);
 
-		let auth = moq_clock::timeout(std::time::Duration::from_secs(1), handle.add("token"))
+		let auth = moq_clock::timeout(std::time::Duration::from_secs(1), handle.handle().add("token"))
 			.await
 			.expect("resolved promptly")
 			.expect("kept for requests");
 		assert_eq!(auth.grant().peek(), None, "no grant without the extension");
-		assert_eq!(handle.grant().peek(), None, "no grant without the extension");
+		assert_eq!(handle.handle().grant().peek(), None, "no grant without the extension");
 
 		for _ in 0..ANNOUNCE_TURNS {
 			if occurrences(log, b"solo-cam") > 0 {
@@ -2184,7 +2184,7 @@ mod tests {
 	}
 
 	/// What the draft-18 SETUP that `start` writes says about MoQ Auth and MoQ Solicit.
-	async fn our_setup(client: bool, auth: crate::auth::Handle, extensions: crate::setup::Extensions) -> (bool, bool) {
+	async fn our_setup(client: bool, auth: crate::auth::Link, extensions: crate::setup::Extensions) -> (bool, bool) {
 		const VERSION: Version = Version::Draft18;
 
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
@@ -2236,13 +2236,13 @@ mod tests {
 		no_solicit.solicit = false;
 
 		// A client's handle supports AUTH exactly when it offers it.
-		assert_eq!(our_setup(true, crate::auth::Handle::new(true), all).await, (true, true));
+		assert_eq!(our_setup(true, crate::auth::Link::new(true), all).await, (true, true));
 		assert_eq!(
-			our_setup(true, crate::auth::Handle::new(false), no_auth).await,
+			our_setup(true, crate::auth::Link::new(false), no_auth).await,
 			(false, true)
 		);
 		assert_eq!(
-			our_setup(true, crate::auth::Handle::new(true), no_solicit).await,
+			our_setup(true, crate::auth::Link::new(true), no_solicit).await,
 			(true, false)
 		);
 	}
@@ -2252,12 +2252,9 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_server_offers_auth_only_to_a_client_that_did() {
 		let all = crate::setup::Extensions::default();
+		assert_eq!(our_setup(false, crate::auth::Link::new(true), all).await, (true, true));
 		assert_eq!(
-			our_setup(false, crate::auth::Handle::new(true), all).await,
-			(true, true)
-		);
-		assert_eq!(
-			our_setup(false, crate::auth::Handle::new(false), all).await,
+			our_setup(false, crate::auth::Link::new(false), all).await,
 			(false, true)
 		);
 	}
@@ -2307,7 +2304,7 @@ mod tests {
 				..Default::default()
 			}),
 			// As `Server` builds it: offered by the client, so supported iff we offer it.
-			auth: crate::auth::Handle::new(offered),
+			auth: crate::auth::Link::new(offered),
 			early_unis: Vec::new(),
 			extensions: crate::setup::Extensions::default(),
 		})
@@ -2395,7 +2392,7 @@ mod tests {
 			// Pre-settled, so nothing waits on a SETUP the dead stream will never
 			// carry and the dispatch loop actually runs.
 			peer_declared: Some(peer::Peer::default()),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			early_unis: Vec::new(),
 			extensions: Default::default(),
 		})
@@ -2442,7 +2439,7 @@ mod tests {
 				}),
 				peer_setup_stream: None,
 				peer_declared: Some(peer::Peer::default()),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 				early_unis: Vec::new(),
 				extensions: Default::default(),
 			})
@@ -2715,7 +2712,7 @@ mod tests {
 			token: None,
 			peer_setup_stream: None,
 			peer_declared: Some(peer::Peer::default()),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			early_unis: Vec::new(),
 			extensions: Default::default(),
 		})
@@ -2859,7 +2856,7 @@ mod tests {
 					token: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer::Peer::default()),
-					auth: crate::auth::Handle::new(false),
+					auth: crate::auth::Link::new(false),
 					early_unis: Vec::new(),
 					extensions: Default::default(),
 				})
@@ -2927,7 +2924,7 @@ mod tests {
 					token: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer::Peer::default()),
-					auth: crate::auth::Handle::new(false),
+					auth: crate::auth::Link::new(false),
 					early_unis: Vec::new(),
 					extensions: Default::default(),
 					limits: Default::default(),
@@ -3031,7 +3028,7 @@ mod tests {
 			token: None,
 			peer_setup_stream: None,
 			peer_declared: None,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			early_unis: Vec::new(),
 			extensions: Default::default(),
 		})
@@ -3154,7 +3151,7 @@ mod tests {
 					token: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer::Peer::default()),
-					auth: crate::auth::Handle::new(false),
+					auth: crate::auth::Link::new(false),
 					early_unis: Vec::new(),
 					extensions: Default::default(),
 				})
@@ -3386,7 +3383,7 @@ mod tests {
 			token: None,
 			peer_setup_stream: None,
 			peer_declared: None,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			early_unis: Vec::new(),
 			extensions: Default::default(),
 		})
@@ -3490,7 +3487,7 @@ mod tests {
 			token: None,
 			peer_setup_stream: None,
 			peer_declared: Some(peer::Peer::default()),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			early_unis: Vec::new(),
 			extensions: Default::default(),
 		})

@@ -55,6 +55,8 @@ export interface ConnectionProps {
 	session?: Stream;
 	/** The origin whose broadcasts are served to the peer. Omit to publish nothing. */
 	publish?: OriginConsumer;
+	/** The auth handle to build the session on, or undefined for one of its own. */
+	handle?: Auth.Handle;
 	/**
 	 * Whether this side dialed. Only the dialing side aborts on a publication its grant does
 	 * not cover: a server publishes whatever the peer may read, not what it intends to push.
@@ -144,7 +146,7 @@ export class Connection implements Established {
 	 *
 	 * @internal
 	 */
-	constructor({ url, quic, version, session, publish, client = true, token }: ConnectionProps) {
+	constructor({ url, quic, version, session, publish, handle, client = true, token }: ConnectionProps) {
 		this.url = url;
 		// Older versions carry the credential in the URL instead.
 		this.#token = client && hasAuth(version) ? token : undefined;
@@ -170,7 +172,13 @@ export class Connection implements Established {
 				publish: new Path.Patterns([Path.Pattern.all()]),
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
 			},
+			handle,
+			draining: () => this.#goaway.peek() !== undefined,
 		});
+		// Left before anything observes the close, so a successor on the same handle never
+		// finds this session still active.
+		const leave = () => this.#auth.close();
+		void quic.closed.then(leave, leave);
 		this.#auth.violated.subscribe((err) => {
 			if (!err) return;
 			closeViolation(this.#quic, err);
@@ -193,14 +201,18 @@ export class Connection implements Established {
 			this.#auth,
 		);
 		this.#client = client;
-		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
+		registerWire(this, {
+			consume: (path) => this.#subscriber.consume(path),
+			goaway: this.#goaway,
+			auth: this.#auth,
+		});
 
 		void this.#run();
 	}
 
 	/** Our tokens and grants; see {@link Established.auth}. */
 	get auth(): Auth.Handle {
-		return this.#auth;
+		return this.#auth.handle;
 	}
 
 	/**

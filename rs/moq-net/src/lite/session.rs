@@ -21,7 +21,7 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 	/// The session-side GOAWAY halves, stored on the public [`crate::Session`].
 	pub goaway: crate::goaway::Handle,
 	/// The session's AUTH tokens and grants, stored on the public [`crate::Session`].
-	pub auth: crate::auth::Handle,
+	pub auth: crate::auth::Link,
 }
 
 /// Server: read the peer's single SETUP message off its Setup Stream before starting
@@ -186,7 +186,7 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// The session's auth handle, created before [`start`] so a server can take the
 	/// peer's token requests during its handshake. Supports AUTH exactly when `version`
 	/// does.
-	pub auth: crate::auth::Handle,
+	pub auth: crate::auth::Link,
 	/// What the peer may make this session hold.
 	pub limits: crate::session::Limits,
 }
@@ -472,7 +472,7 @@ struct Present<S: crate::transport::poll::Session> {
 	runtime: crate::time::Deadlines,
 	session: S,
 	version: Version,
-	handle: crate::auth::Handle,
+	handle: crate::auth::Link,
 	going_away: crate::goaway::GoingAway,
 	tokens: kio::Tasks<PresentToken<S>>,
 	/// Set by a token whose peer broke the protocol, which ends the session.
@@ -519,7 +519,7 @@ struct PresentToken<S: crate::transport::poll::Session> {
 	runtime: crate::time::Deadlines,
 	session: S,
 	version: Version,
-	handle: crate::auth::Handle,
+	handle: crate::auth::Link,
 	going_away: crate::goaway::GoingAway,
 	violation: kio::Shared<Option<Error>>,
 	id: u64,
@@ -527,8 +527,17 @@ struct PresentToken<S: crate::transport::poll::Session> {
 }
 
 enum PresentState<S: crate::transport::poll::Session> {
-	Open { token: bytes::Bytes },
-	Run { stream: Stream<S, Version>, answered: bool },
+	Open {
+		token: bytes::Bytes,
+	},
+	Run {
+		stream: Stream<S, Version>,
+		answered: bool,
+	},
+	/// Refused for a reason that may pass: present it again once the deadline fires.
+	Retry {
+		deadline: crate::time::Deadline,
+	},
 	Done,
 }
 
@@ -641,9 +650,28 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 								self.handle.refused(self.id);
 							}
 							*answered = true;
-							return Poll::Ready(err);
+							let Some(delay) = self.handle.retry(self.id, &err) else {
+								return Poll::Ready(err);
+							};
+							tracing::debug!(?delay, "auth token refused transiently; presenting it again");
+							let retry = PresentState::Retry {
+								deadline: crate::time::Deadline::after(&self.runtime, delay),
+							};
+							if let PresentState::Run { stream, .. } = std::mem::replace(&mut self.state, retry) {
+								stream.writer.abort(&Error::Cancel);
+							}
 						}
 					}
+				}
+				PresentState::Retry { deadline } => {
+					if self.handle.poll_withdrawn(self.id, waiter).is_ready() {
+						return Poll::Ready(Error::Cancel);
+					}
+					ready!(deadline.poll(waiter));
+					let Some(token) = self.handle.reopen(self.id) else {
+						return Poll::Ready(Error::Cancel);
+					};
+					self.state = PresentState::Open { token };
 				}
 				PresentState::Done => return Poll::Ready(Error::Cancel),
 			}
@@ -922,7 +950,7 @@ mod tests {
 			version: Version::Lite07,
 			our_setup: Setup::default(),
 			peer_setup: None,
-			auth: crate::auth::Handle::new(true),
+			auth: crate::auth::Link::new(true),
 		})
 		.unwrap();
 		let mut driver = start.driver;
@@ -954,7 +982,7 @@ mod tests {
 				version: Version::Lite07,
 				our_setup: Setup::default(),
 				peer_setup: None,
-				auth: crate::auth::Handle::new(true),
+				auth: crate::auth::Link::new(true),
 			})
 			.unwrap();
 			let mut driver = start.driver;
@@ -1040,7 +1068,7 @@ mod tests {
 			version: Version::Lite07,
 			our_setup: Setup::default(),
 			peer_setup: None,
-			auth: crate::auth::Handle::new(true),
+			auth: crate::auth::Link::new(true),
 		})
 		.unwrap();
 		let mut driver = start.driver;
@@ -1108,7 +1136,7 @@ mod tests {
 					our_setup: Setup::default(),
 					peer_setup: None,
 					client: false,
-					auth: crate::auth::Handle::new(version.has_auth()),
+					auth: crate::auth::Link::new(version.has_auth()),
 					limits: Default::default(),
 				})
 				.unwrap();
@@ -1162,7 +1190,7 @@ mod tests {
 					our_setup: Setup::default(),
 					peer_setup: None,
 					client: false,
-					auth: crate::auth::Handle::new(version.has_auth()),
+					auth: crate::auth::Link::new(version.has_auth()),
 					limits: Default::default(),
 				})
 				.unwrap();
@@ -1194,7 +1222,7 @@ mod tests {
 			version,
 			our_setup: Setup::default(),
 			peer_setup,
-			auth: crate::auth::Handle::new(version.has_auth()),
+			auth: crate::auth::Link::new(version.has_auth()),
 			limits: Default::default(),
 		})
 		.unwrap()
