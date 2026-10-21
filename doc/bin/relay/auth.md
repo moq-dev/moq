@@ -122,7 +122,8 @@ moq auth verify --key public.jwk --in alice.jwt
 moq auth serve --key public.jwk   # or --key-dir /etc/moq/keys/ or --key-set /etc/moq/keys.jwks
 ```
 
-The client dials `https://relay.example.com/rooms/123?jwt=<token>`. A
+The client dials `https://relay.example.com/rooms/123?jwt=<token>`, with one
+`jwt`: a query carrying two is refused. A
 moq-transport client can instead put the JWT in its SETUP's `AUTHORIZATION
 TOKEN` option with Token Type 0. HMAC, RSA, ECDSA, and EdDSA keys all work. A
 key can itself be **scoped** at generation (`--root`, `--publish`,
