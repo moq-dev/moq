@@ -959,6 +959,44 @@ test("a legacy cancel reaches the control stream", async () => {
 });
 
 /**
+ * A draft-14-16 SUBSCRIBE rides the control stream, where a reset tells the peer nothing, so
+ * one the peer never answers is cancelled with UNSUBSCRIBE at its deadline.
+ */
+test.each([
+	["14", Version.DRAFT_14, ALPN.DRAFT_14],
+	["15", Version.DRAFT_15, ALPN.DRAFT_15],
+	["16", Version.DRAFT_16, ALPN.DRAFT_16],
+] as const)("an unanswered draft %s subscribe is unsubscribed at its deadline", async (_, version, alpn) => {
+	jest.useFakeTimers();
+	const pair = createMockTransportPair(alpn);
+	const control = await Stream.open(pair.server, { version });
+	const session = new ControlStreamAdapter(pair.server, control, version, 100n, true);
+	void session.run().catch(() => undefined);
+	const peer = await Stream.accept(pair.client, version);
+	if (!peer) throw new Error("no control stream");
+	const subscriber = new Subscriber({ session });
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	try {
+		expect(await peer.reader.u53()).toBe(Subscribe.id);
+		const request = await Subscribe.decode(peer.reader, version);
+
+		const next = peer.reader.u53();
+		jest.advanceTimersByTime(10_000);
+		expect(await next).toBe(Unsubscribe.id);
+		expect((await Unsubscribe.decode(peer.reader, version)).requestId).toBe(request.requestId);
+		expect(((await track.closed) as Error).message).toContain("request timed out after 10000ms");
+	} finally {
+		warn.mockRestore();
+		track.close();
+		broadcast.close();
+		session.close();
+		jest.useRealTimers();
+	}
+});
+
+/**
  * A publisher that rejects a SUBSCRIBE has torn the request down before answering, so there
  * is nothing left to cancel. Naming a dead request id back at it is what a strict peer can
  * read as a protocol violation and close an otherwise healthy session over.
