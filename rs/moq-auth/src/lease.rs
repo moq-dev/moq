@@ -403,6 +403,23 @@ impl Consumer {
 		self.hold.state.lock().revalidate += 1;
 	}
 
+	/// Resolve once the lease has ended and the decider heard: after an auth server's
+	/// `end` POST returns or fails, so its request timeout bounds the wait, and as soon
+	/// as the lease ends when nobody needs telling. Take it before [`close`](Self::close)
+	/// to learn when that close was reported.
+	pub fn reported(&self) -> impl Future<Output = ()> + Send + 'static {
+		let state = self.hold.state.clone();
+		#[cfg(feature = "client")]
+		let context = self.hold.context.clone();
+		async move {
+			drop(state.wait(|state| ready_if(state.closed.is_some())).await);
+			#[cfg(feature = "client")]
+			if let Some(context) = context {
+				context.reported().await;
+			}
+		}
+	}
+
 	/// End the lease with the session's own close classification and the totals it
 	/// moved, and return the reason the lease ended with:
 	/// `reason`, or the producer's if it revoked first. [`Drop`] reports zero bytes.

@@ -43,6 +43,9 @@ typedef OriginDynamic = MoqOriginDynamic;
 /// A requested broadcast not yet accepted: fulfill it with a producer or reject it.
 typedef BroadcastRequest = MoqBroadcastRequest;
 
+/// A claim answer being filled before its exact route is announced.
+typedef BroadcastPrepared = MoqBroadcastPrepared;
+
 /// A stream of announce events under a prefix.
 typedef AnnounceConsumer = MoqAnnounceConsumer;
 
