@@ -609,12 +609,12 @@ CLI_LOG="${RUST_LOG:-info},moq_net::auth=debug"
 AUTH_VERSION="${INTEROP_VERSION:-moq-lite-07-wip}"
 
 # The clients that print the grant they received as an `auth granted` line. The
-# binding clients (python, go, c, gst) have no grant to print until moq-ffi
-# exposes one, and the browser's shared connection keeps its session private.
+# Python, Go, and C++ clients read it through moq-ffi; moq-c's frozen ABI and
+# GStreamer expose none, and the browser's shared connection keeps its session private.
 prints_grant() {
     [[ "$COMPAT" -eq 0 ]] || return 1
     case "$1" in
-        rust | js-native-node | js-native-bun) return 0 ;;
+        rust | python | go | cpp | js-native-node | js-native-bun) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -665,6 +665,9 @@ ffmpeg_h264() {
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 run_publisher() {
     local lang="$1" broadcast="$2" url="$3"
+    # The binding clients dial $AUTH_VERSION alone and print their grant only when it is checked.
+    local auth=()
+    if prints_grant "$lang"; then auth=(--auth-version "$AUTH_VERSION"); fi
     case "$lang" in
         rust)
             # A finished import stays up for its max-age; `stop_publisher` allows 10 s to close.
@@ -673,13 +676,13 @@ run_publisher() {
             ;;
         python)
             ffmpeg_h264 | "$PY" "$CLIENTS/python/interop.py" \
-                publish --url "$url" --broadcast "$broadcast"
+                publish --url "$url" --broadcast "$broadcast" ${auth[@]+"${auth[@]}"}
             ;;
         go)
-            ffmpeg_h264 | "$GO_INTEROP" publish --url "$url" --broadcast "$broadcast"
+            ffmpeg_h264 | "$GO_INTEROP" publish --url "$url" --broadcast "$broadcast" ${auth[@]+"${auth[@]}"}
             ;;
         cpp)
-            ffmpeg_h264 | "$CPP_INTEROP" publish --url "$url" --broadcast "$broadcast"
+            ffmpeg_h264 | "$CPP_INTEROP" publish --url "$url" --broadcast "$broadcast" ${auth[@]+"${auth[@]}"}
             ;;
         js-native)
             # exec, so the client leads the group and `stop_publisher` waits for its own close.
@@ -760,6 +763,8 @@ observe_group() {
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 run_subscriber() {
     local lang="$1" broadcast="$2" url="$3" publisher="${4:-}"
+    local auth=()
+    if prints_grant "$lang"; then auth=(--auth-version "$AUTH_VERSION"); fi
     case "$lang" in
         rust)
             # moq-cli only handles SIGINT, so -k forces SIGKILL if it ignores the
@@ -820,13 +825,13 @@ PYCODE
             ;;
         python)
             "$PY" "$CLIENTS/python/interop.py" \
-                subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"
+                subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${auth[@]+"${auth[@]}"}
             ;;
         go)
-            "$GO_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"
+            "$GO_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${auth[@]+"${auth[@]}"}
             ;;
         cpp)
-            "$CPP_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"
+            "$CPP_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${auth[@]+"${auth[@]}"}
             ;;
         c)
             "$C_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT"
@@ -1125,13 +1130,12 @@ run_media() {
     fi
 }
 
-# The publishers whose refusal the harness can read: the Rust CLI's log. The
-# binding publishers enforce the grant too, but surface it only through their
-# bindings, and the browser elements have no way to offer $AUTH_VERSION.
+# The publishers whose refusal the harness can read: each logs moq-net's error.
+# The browser elements have no way to offer $AUTH_VERSION.
 enforces_grant() {
     [[ "$COMPAT" -eq 0 ]] || return 1
     case "$1" in
-        rust) return 0 ;;
+        rust | python | go | cpp) return 0 ;;
         *) return 1 ;;
     esac
 }
