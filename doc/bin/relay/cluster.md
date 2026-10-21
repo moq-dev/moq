@@ -54,6 +54,8 @@ worker.
 
 Failover routes must carry copies of one publisher's broadcast. Independent
 importers use distinct epochs and switch as a restart, even when fed one stream.
+See [Redundant ingest](/setup/redundancy) to choose between publisher switching,
+subscriber selection, and several routes to one publisher.
 A source whose track differs in timescale, retention, publisher priority, or
 group order is refused for that track.
 

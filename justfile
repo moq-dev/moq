@@ -97,26 +97,25 @@ install:
 check $BASE="":
     sh/dispatch.sh check "$BASE"
 
-# The merge queue runs `ci` as two parallel jobs, since one runner doing both
-# takes about the sum of their times. Run `just ci` before pushing a PR into main.
-# MOQ_STRICT turns a missing tool into an error rather than a skipped check, so a
-# green run cannot have checked nothing; the `ci` nextest profile allows a longer
-# hang timeout for a loaded runner.
+# The merge queue runs this gate in one job. The test build also enforces
+# default-feature clippy; distinct feature permutations and optimized binding
+# builds run nightly and on release PRs. Missing tools fail under MOQ_STRICT.
 
-# Run the merge queue's Linux gate: both halves, or JOB `check` (lints, compiles) or `test` alone.
-ci $JOB="" $BASE="":
-    MOQ_STRICT=1 NEXTEST_PROFILE=ci sh/dispatch.sh "ci${JOB:+-$JOB}" "$BASE"
+# Run the merge queue's Linux gate over the branch diff against BASE.
+ci $BASE="":
+    MOQ_STRICT=1 NEXTEST_PROFILE=ci sh/dispatch.sh ci "$BASE"
 
-# `ci` and the queue select by diff, so a break outside the selection can reach
-# main; nightly and every release PR run `gate` so none reaches a release.
+# Run the queue's Linux gate over every package.
+gate:
+    just ci --all
 
-# Run `ci` over every package: both halves, or JOB `check` or `test` alone.
-gate $JOB="":
-    just ci "$JOB" --all
+# Report what CI selects before installing the dev shell or build caches.
+ci-select $BASE="":
+    sh/dispatch.sh ci "$BASE" --query
 
-# Report what a CI job (`check`, `test`, `platform`) selects, before installing the dev shell or build caches.
-ci-select $JOB $BASE="":
-    sh/dispatch.sh "ci-$JOB" "$BASE" --query
+# Report the native platform suites before installing their toolchains.
+ci-select-platform $BASE="":
+    sh/dispatch.sh ci-platform "$BASE" --query
 
 # Auto-fix lint and formatting for what the branch changed since BASE.
 fix $BASE="":

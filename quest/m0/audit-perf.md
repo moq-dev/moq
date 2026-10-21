@@ -22,8 +22,8 @@ follow-up through `/quest-plan`.
 
 Starting points (2026-10-19): there are 55 `[[bench]]` targets across 14 crates
 (counted from `rs/*/Cargo.toml`) and 27 JS bench files. Nightly stores their history with
-`github-action-benchmark` (`bench/costs`, `bench/rates`), but both
-steps set `fail-on-alert: false`, so regressions go unseen. Compare against
+`github-action-benchmark` (`bench/costs`, `bench/rates`), and
+<https://git.moq.dev/bench/> flags each series that moved beyond its own noise. Compare against
 that history and against the numbers this Plan records. The audit found
 `sh/gh/nightly.sh` skipped 13 targets: moq-e2ee, moq-json, moq-archive and
 moq-cli benches, mux `jitter`, and 5 of 6 moq-uring benches. The current fix
@@ -39,8 +39,8 @@ duplicate it.
 Audit evidence (2026-10-19, second checkpoint, incomplete):
 
 - History (updated 2026-10-20): `gh-pages` gains a commit per night, and Pages first deployed on
-  2026-10-20; the [benchmark regression table](/quest/m0/bench-site.md)
-  turns it into a page. Re-runs of the Benchmark site job add duplicate
+  2026-10-20; <https://git.moq.dev/bench/>
+  renders it as a regression table. Re-runs of the Benchmark site job add duplicate
   points for one commit, so compare by commit.
 - Rust: both the October 18 (`50da59e67`) and October 19 (`ad87ad34e`)
   Nightlies retain `bench-rust` (1,527 series each); the earlier note that
