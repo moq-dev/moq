@@ -11,6 +11,7 @@ import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import type { Datagram } from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import type * as Epoch from "./epoch.ts";
+import { toStreamCode } from "./error.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
 import * as Path from "./path.ts";
@@ -136,7 +137,8 @@ export interface DropRun extends Run {
 
 /**
  * Sorted, disjoint `drops` with `[start, end)` given up with `error`, which replaces whatever
- * it overlaps. Neighbours given up with the same error merge, so a wide DROP stays one run.
+ * it overlaps. Neighbours given up with the same stream code merge, so a wide DROP stays one
+ * run and a peer naming one sequence per DROP cannot grow the runs.
  */
 export function insertDrop(drops: readonly DropRun[], start: number, end: number, error: Error): DropRun[] {
 	if (start >= end) return [...drops];
@@ -147,7 +149,7 @@ export function insertDrop(drops: readonly DropRun[], start: number, end: number
 	const merged: DropRun[] = [];
 	for (const run of next) {
 		const last = merged[merged.length - 1];
-		if (last && last.end === run.start && last.error === run.error) last.end = run.end;
+		if (last && last.end === run.start && toStreamCode(last.error) === toStreamCode(run.error)) last.end = run.end;
 		else merged.push({ ...run });
 	}
 	return merged;

@@ -2873,10 +2873,13 @@ impl Producer {
 		let open: Vec<group::Handle> = match self.modify() {
 			Ok(mut state) => {
 				state.drop_groups(groups.clone(), err.clone());
+				// Only the live feed's copy: a drop judges the subscription, so a fetched head
+				// or fetch-only backfill may still complete.
 				state
 					.lookup
 					.range(groups)
-					.flat_map(|(_, slot)| slot.copies())
+					.filter(|(_, slot)| slot.visible)
+					.map(|(_, slot)| &slot.group)
 					.filter(|group| !group.is_aborted())
 					.cloned()
 					.collect()
@@ -15600,6 +15603,33 @@ mod test {
 			b"b"
 		);
 		assert!(matches!(whole.read_frame().now_or_never(), Some(Ok(None))));
+	}
+
+	/// A drop judges the subscription, not a fetch: a fetched head still arriving keeps
+	/// serving the group to its end after the drop ends the live copy.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_drop_spares_a_fetched_head_still_arriving() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(Timestamp::ZERO, &b"delta"[..]).unwrap();
+		let _fetch = consumer.fetch_group(0, None);
+		let mut head = dynamic.requested_group().await.unwrap().accept(Info::timed()).unwrap();
+		head.write_frame(Timestamp::ZERO, &b"snapshot"[..]).unwrap();
+
+		producer.drop_groups(0..1, StreamError::App(5));
+		head.write_frame(Timestamp::ZERO, &b"delta"[..]).unwrap();
+		head.finish().unwrap();
+
+		let mut group = consumer.peek_group(0).expect("the head still serves group 0");
+		for payload in [&b"snapshot"[..], b"delta"] {
+			assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], payload);
+		}
+		assert!(matches!(group.read_frame().await, Ok(None)));
 	}
 
 	/// A group the publisher cuts before a reader takes it is still handed out, so the
