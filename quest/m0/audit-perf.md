@@ -111,17 +111,31 @@ Audit evidence (2026-10-19, second checkpoint, incomplete):
   `sh/gh/nightly.test.py`. The Rust benchmark-tests leg failed on
   `benchmark_feed_fetch_wakes` tripping the sim spin check from `3899eea20`;
   fixed by yielding between setup phases.
-- Rust regression (open): Oct 19 to Oct 20 moved 84 series past +25%, while
-  the median moved only +0.4%. `track_subscriber_join` went 300 to 670 ns on CI,
-  and `track_subscriber_churn*` and `track_datagram_subscriber_join` also rose
-  80-110%. `annexb`/`cmaf` export, `catalog_estimate_fanout` and
-  `relay_auth_refresh` rose 27-60% but are not attributed yet. A local bisect of
-  `track_subscriber_join/1000` (one sample per commit at load 30-50) points to
-  `b004c0b07` (#5930, refresh on join): 232 ns at `45f2a548e`, 362 ns at
-  `b004c0b07`. Disabling kio's `sim` feature did not change it. An A/B
-  removing the `Cursor::new` join check (`joins_live` plus `TrackState::join`)
-  gave 562 ns vs 409 ns with it, inconclusive under load. Next: profile
-  subscribe at `45f2a548e` vs `b004c0b07` on a quiet host and fix the source.
+- Rust regression (fourth checkpoint, 2026-10-20): attributed with callgrind
+  instruction counts per iteration, which load does not move. Wall-clock
+  bisects on this shared host were wrong: `b004c0b07` (#5930) lowers a join
+  from 3,328 to 3,219 instructions.
+  - `track_subscriber_join` (and churn, datagram join): `fe722cec9` (#5929)
+    doubled a subscribe, 3,233 to 6,950 instructions. `Cursor::new` built a
+    placeholder window, then `update_servable` built the runs into fresh
+    `RangeInclusiveSet`s about five times. Fixed in this run's PR: 7,135 to
+    4,492 at the merged head. The remaining ~1,260 over the pre-#5929 cost is
+    `Window::new`'s three allocations (ranges, spans, groups).
+  - `relay_auth_refresh/16/16`: 291.7k to 292.7k (+0.4%). Not a regression;
+    the bench runs real loopback sockets with 10 samples of 300 ms, so CI
+    noise.
+  - `annexb-export-frames/1tracks-16frames/256`: 370k to 460k (+24%). +51k
+    lands in `c389bd051`..`49448d2ef` (#5921, #5932, #5948, #5958, #5942), +10k
+    in the commits after through `dcd7d2cbb`, +27k at `fe722cec9`. Main since
+    added +28k at `9f1fc92fe` or `32d691916` (#6019, #5998). The new cost sits
+    in `container::Consumer::discard` and `group::Consumer::poll_finished`. The
+    fix above recovers 8.5k. CMAF export moved +4%.
+  - `catalog_estimate_fanout/hang/tracks_4/4`: 94.5M to 97.4M (+3%, from
+    `fe722cec9`), so most of the CI +27-60% is noise. Main since added +9%:
+    +5M in `ad54a9721`..`76b2f499b` and +4M in `9b5214381`..`4327505086`.
+  - Next: finish both bisects with the scratch method (bench routine wrapped
+    in a never-inlined function, `--toggle-collect`, calls counted), then
+    fix at the source.
 - Still required before completing this run: confirm `gh-pages` history
   accumulates and compare at least five nights of Rust and binding series,
   restore the JS leg and its history, and turn the ranked gaps into
