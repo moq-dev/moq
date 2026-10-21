@@ -23,6 +23,8 @@ mod clock;
 pub(crate) mod datagram;
 mod delivered;
 mod expiry;
+// The DEFLATE codec behind compressed tracks.
+mod flate;
 // pending: /quest/m1/public-model/ingest.md
 pub(crate) mod ledger;
 // private: passthrough

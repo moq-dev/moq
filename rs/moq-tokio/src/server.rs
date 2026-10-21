@@ -317,6 +317,10 @@ impl Server {
 		if config.bind.is_some() && parts.quic() {
 			return Err(Error::NoBackend("--listen requires the quic feature"));
 		}
+		#[cfg(not(feature = "quic"))]
+		if config.reset.secret.is_some() && parts.quic() {
+			return Err(Error::NoBackend("--listen-reset-secret requires the quic feature"));
+		}
 
 		// Only the QUIC backend verifies client certificates; the qmux listeners
 		// (tcp/unix/websocket) never ask for one, even over `tls://`, so a
@@ -2635,10 +2639,25 @@ mod tests {
 		let occupied = dir.path().join("not-a-socket");
 		std::fs::write(&occupied, b"in the way").unwrap();
 
-		// A concrete port, so the release is observable.
-		let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe");
-		let port = probe.local_addr().expect("probe addr").port();
-		drop(probe);
+		// A concrete port, so the release is observable, reserved for the whole
+		// test so no other process can take it in between. The reservation is a
+		// wildcard bind that never listens, with `SO_REUSEADDR`, which Linux and
+		// macOS let a loopback listener that also sets it share, as the server's
+		// and the final check's both do. Two loopback listeners still collide, so
+		// the final check fails while the server holds the port.
+		let reserve = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).expect("reserve");
+		reserve.set_reuse_address(true).expect("reuse address");
+		let wildcard = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0));
+		reserve.bind(&wildcard.into()).expect("reserve port");
+		let port = reserve
+			.local_addr()
+			.expect("reserved addr")
+			.as_socket()
+			.expect("an inet addr")
+			.port();
+		let live = std::net::TcpListener::bind(("127.0.0.1", port)).expect("the reservation admits a listener");
+		std::net::TcpListener::bind(("127.0.0.1", port)).expect_err("a held port fails the final check");
+		drop(live);
 
 		let mut config = crate::listen::Config::default();
 		config.tcp.bind = Some(format!("127.0.0.1:{port}").parse().expect("parse addr"));
@@ -2874,6 +2893,24 @@ mod tests {
 			}
 			.init(),
 			Err(Error::NoBackend(_))
+		));
+	}
+
+	/// A reset secret on the default QUIC listener would never be read without a
+	/// QUIC backend.
+	#[cfg(not(feature = "quic"))]
+	#[test]
+	fn reset_secret_without_a_quic_backend_is_rejected() {
+		let mut config = crate::listen::Config::default();
+		config.reset.secret = Some("reset.key".into());
+
+		assert!(matches!(
+			Config {
+				listen: config,
+				..Default::default()
+			}
+			.init(),
+			Err(Error::NoBackend(reason)) if reason.starts_with("--listen-reset-secret")
 		));
 	}
 

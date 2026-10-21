@@ -224,6 +224,7 @@ DATAGRAM Body {
   [Status (i)]
   [Properties Length (i), Properties (..)]
   [Timestamp (i)]
+  [Inflated Size (i)]
   Payload (b)
 }
 ~~~
@@ -240,6 +241,7 @@ A bit field, or 0 for a plain datagram, which has none of the optional fields be
 A receiver MUST drop a datagram with any other bit, or a bit without RELAYED.
 
 A datagram with a Status MUST have an empty Payload, as {{moqt}} sends no payload beside one; a Normal (0) Status is an empty object.
+It has no Inflated Size ({{moql}} DATAGRAM), even on a compressed track, as there is no payload to inflate.
 A non-zero Status carries no object: it has no Timestamp, even on a timed track.
 A receiver MUST drop a datagram whose Status no {{moqt}} draft defines: only 0 (Normal), 1 (DOES_NOT_EXIST, drafts 14 and 15), 3 (END_OF_GROUP), and 4 (END_OF_TRACK) are relayed.
 It MUST also drop one whose fields no {{moqt}} OBJECT_DATAGRAM Type can carry, such as STATUS with END_OF_GROUP.

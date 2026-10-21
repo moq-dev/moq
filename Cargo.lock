@@ -4987,6 +4987,7 @@ dependencies = [
  "arrayvec",
  "bytes",
  "criterion",
+ "flate2",
  "futures",
  "getrandom 0.4.3",
  "hashlink",

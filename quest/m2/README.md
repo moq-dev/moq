@@ -25,6 +25,7 @@ ranked just below deterministic TS legs, which it requires.
 
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
 - [moq.dev in the monorepo](/quest/m2/site/README.md) - moq.dev, moq.pub, and moq.watch build from `site/` against the in-tree packages, behind a cap on committed binary size
+- [Hand-drawn blog art as SVG](/quest/m2/site-svg.md) - the blog's hand-drawn PNGs become transparent palette SVGs, covers rasterized for social cards at build
 - [P2P](/quest/m2/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [Hard-fork the binding generator](/quest/m2/uniffi-fork.md) - one moq-dev repo holds the chosen generator's core and every language backend, released under one tag and one pin
 - [Benchmark sources](/quest/m2/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
@@ -143,7 +144,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Probes resume on the peer](/quest/m2/quic-outage-probe.md) - after an outage, the next probe follows the peer's first packet instead of the backed-off timer
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides
 - [Socket close](/quest/m2/quic-socket-close.md) - moq-tokio's QUIC endpoint releases its socket on close, so it drops its wrapper
-- [TS health stats](/quest/m2/ts-health-stats.md) - the TS counters ride the stats plumbing beside the media counters
 - [Windows.Graphics.Capture](/quest/m2/capture-wgc.md) - the WGC display and window backend verified on real Windows hardware
 - [Windows capture parity](/quest/m2/capture-windows.md) - system audio and a settled app-capture policy
 - [Linux capture parity](/quest/m2/capture-linux.md) - Wayland window/system-audio capture with explicit display-selection and app-capture limits

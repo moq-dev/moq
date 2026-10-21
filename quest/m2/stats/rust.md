@@ -41,5 +41,4 @@
 
 ## Related
 
-- [TS health stats](/quest/m2/ts-health-stats.md) - adds TS-specific counters to the reports
 - [Encrypted native CLI](/quest/m2/e2ee/cli.md) - refuses stats and feedback on an encrypted broadcast
