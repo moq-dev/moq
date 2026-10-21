@@ -22,6 +22,11 @@ describe("resolve", () => {
 		expect(Audio.resolve).toBeUndefined();
 	});
 
+	test("the default Opus catalog declares the RFC 7845 preroll", () => {
+		// 80ms per RFC 7845 section 4.6, matching WARMUP in rs/moq-mux/src/codec/opus/mod.rs.
+		expect(Number(resolve(captured, "opus").catalog.warmup)).toBe(80);
+	});
+
 	// The exact frame duration does not imply encoder flush lateness.
 	test("keeps a 2.5ms Opus frame exact without a catalog hint", () => {
 		const resolved = resolve(captured, { mime: "opus", frameDuration: Milli(2.5) });
