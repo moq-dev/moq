@@ -5632,6 +5632,9 @@ impl Cursor {
 
 	fn poll_recv_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		if let Some(peeked) = self.peeked.take().filter(|peeked| take && !peeked.ordered) {
+			// The reserved group is still the one handed out, but bounded by the ranges in
+			// force now, which a `Control` may have replaced since the peek.
+			self.sync();
 			self.advance_arrival(peeked.group.sequence, peeked.index);
 			peeked.group.cache_refresh();
 			return Poll::Ready(Ok(Some(self.deliver(peeked.group))));
@@ -5790,6 +5793,8 @@ impl Cursor {
 	/// drift budget has convicted on the way.
 	fn poll_next_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		if let Some(peeked) = self.peeked.take().filter(|peeked| take && peeked.ordered) {
+			// Bounded by the ranges in force now, as on the arrival path.
+			self.sync();
 			return Poll::Ready(Ok(Some(self.advance_sequence(peeked.group))));
 		}
 		let Some(next) = self.next_sequence else {
@@ -7475,6 +7480,31 @@ mod test {
 			read_groups(|waiter| sub.poll_recv_group(waiter)),
 			vec![(4, vec![2, 3, 4])]
 		);
+	}
+
+	/// A range replaced between a peek and the take re-bounds the reserved group: it is
+	/// still the group handed out, positioned by the ranges in force when it is taken.
+	#[test]
+	fn a_peeked_group_is_bounded_by_the_ranges_at_handout() {
+		for ordered in [false, true] {
+			let producer = track_producer("test", Info::default());
+			framed(&producer, 4, 8).finish().unwrap();
+			let mut subscriber = producer.subscribe(replay());
+			let waiter = kio::Waiter::noop();
+			assert_eq!(
+				subscriber.poll_peek_group(ordered, &waiter).map(Result::unwrap),
+				Poll::Ready(Some(4))
+			);
+			let start = Anchor::Absolute(Position { group: 4, frame: 5 });
+			subscriber
+				.control()
+				.update(replay().with_ranges([Range { start, end: None }]))
+				.unwrap();
+			let Poll::Ready(Ok(Some(group))) = subscriber.poll_group(ordered, &waiter) else {
+				panic!("ordered={ordered}: the reserved group must be returned");
+			};
+			assert_eq!((group.sequence, group.index()), (4, 5), "ordered={ordered}");
+		}
 	}
 
 	/// The largest reports only while it is within the bounds: a cap below it or a floor
