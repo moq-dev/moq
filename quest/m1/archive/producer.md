@@ -18,7 +18,7 @@ Decided by the maintainer on 2026-10-17 (see the
 
 - **Input.** One producer records every broadcast under a prefix as it
   appears: ANNOUNCE finds each broadcast announced at its own path,
-  [TRACKS](/quest/m1/archive/tracks.md) lists its tracks, and each track
+  TRACKS (`broadcast::Consumer::tracks`) lists its tracks, and each track
   records through its own SUBSCRIBE. A covering-prefix route is capability,
   not inventory, so broadcasts served under one on request without their own
   announcement are not recorded, and a TRACKS refused with NOT_FOUND on an
@@ -151,10 +151,6 @@ mid-recording writing no marker.
 
 Public API: `archive::Producer` and its config replace `Writer`, `Control`,
 and the timeline-driven types. Wire: none.
-
-## Required
-
-- [TRACKS](/quest/m1/archive/tracks.md) - how it learns each broadcast's tracks
 
 ## Related
 

@@ -126,7 +126,10 @@ class TrackConsumer(_Stream[GroupConsumer]):
         return TrackInfo._from_ffi(self._inner.info())
 
     def update(self, subscription: Subscription) -> None:
-        """Change this subscriber's delivery preferences."""
+        """Change this subscriber's delivery preferences.
+
+        Raises on a time anchor the track can't serve.
+        """
         self._inner.update(subscription._ffi())
 
     def cancel(self) -> None:

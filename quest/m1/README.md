@@ -50,7 +50,6 @@ lands before the cut.
 - [Epoch correctness](/quest/m0/broadcast-epoch/README.md) - publisher identity, duplicate suppression, and catalog pinning gate the breaking cut
 - [Release builds](/quest/m0/release-link.md) - package artifacts can be built
 
-- [moq-net follows announced instances](/quest/m1/net-announced-follow.md) - the Rust equivalent of JS `request(path, { announced: true })`, replacing the follow loops in moq-ffi and moq-c
 - [Sink restart follow](/quest/m1/sink-restart-follow.md) - moq-cli's server and push sinks follow an epochless `Restart` where their output can mark it, and fail loud otherwise
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
@@ -76,7 +75,6 @@ lands before the cut.
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [Report relays that refuse TRACK_STATUS](/quest/m1/track-status-race.md) - moqx and any other relay refusing TRACK_STATUS with an undefined code get an upstream report
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
-- [Browser follows a renamed track](/quest/m1/browser-rename-check.md) - a real browser keeps playing when `@moq/publish` renames a track after a codec change, while size-only changes keep their identity
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
 - [One hang catalog consumer](/quest/m1/catalog-consumer-fold.md) - `moq-mux` reads hang catalogs through `hang`'s consumer
 - [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for an opt-in `hls` field
@@ -90,7 +88,6 @@ lands before the cut.
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence, and the media fixture's cold-start audio-tone flake is fixed at its cause
-- [Handshake deadline covers admission](/quest/m1/handshake-admission-deadline.md) - `listen.timeout` bounds a connection through auth admission on both listeners, replacing the hardcoded admission timeout
 - [Restart reset](/quest/m1/stateless-reset-key.md) - a relay restarted with the same `listen.reset_key` stateless-resets its predecessor's connections, so clients reconnect within an RTT instead of the idle timeout
 - [Drain cleanup](/quest/m1/drain-cleanup.md) - sessions force-closed at the drain deadline record their lease end and bytes before the relay or CLI exits, while unfinished handshakes stay bounded
 - [Rust redirect loops](/quest/m1/tokio-redirect-loop.md) - moq-tokio escalates its backoff when GOAWAY redirects bounce between peers, as JS does
@@ -108,7 +105,6 @@ lands before the cut.
 - [Resumed datagrams](/quest/m1/resume-datagrams.md) - a resumed track skips only datagrams it already delivered, not every lower sequence
 - [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
-- [HLS export drains after End](/quest/m1/hls-export-end-drain.md) - a cleanly ended broadcast still exports its retained segments
 - [A failed HLS export answers with an error](/quest/m1/hls-failure-signal.md) - playlists answer a no-store 5xx once their timeline fails, and so does the DASH manifest for a shared reference failure, so a truncated recording never looks complete
 - [Close tail drain](/quest/m1/close-tail-drain.md) - after a peer close, subscribers read the group streams their transport already delivered instead of aborting them, so a finished tail arrives on every version
 - [Binding linger](/quest/m1/linger-ffi.md) - `moq-ffi` and every binding finish a broadcast cleanly, so subscribers drain it until its media is stale
