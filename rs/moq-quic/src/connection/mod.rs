@@ -2209,7 +2209,6 @@ impl Connection {
         spin: bool,
         is_1rtt: bool,
     ) {
-        self.heard_since_sent = true;
         self.reset_keep_alive(now);
         self.reset_idle_timeout(now, space_id);
         self.permit_idle_reset = true;
@@ -2226,6 +2225,9 @@ impl Connection {
         let Some(packet) = packet else {
             return;
         };
+        // Only a protected packet is the peer's word: anyone on the path can send a Retry or a
+        // Version Negotiation packet.
+        self.heard_since_sent = true;
         if self.side.is_server() {
             if self.spaces[SpaceId::Initial].crypto.is_some() && space_id == SpaceId::Handshake {
                 // A server stops sending and processing Initial packets when it receives its first Handshake packet.
@@ -2709,7 +2711,9 @@ impl Connection {
             );
         }
         let result = self.process_decrypted_packet(now, remote, number, packet);
-        self.probe_on_heard(now);
+        if number.is_some() {
+            self.probe_on_heard(now);
+        }
         result
     }
 

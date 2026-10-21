@@ -3888,10 +3888,9 @@ fn probe_through_outage(
     probes
 }
 
-/// Connect over a 20 ms RTT, the client's last packet a PING whose ACK it has, so no packet the
-/// server sends after it acknowledges anything new
-fn settled_pair() -> (Pair, ConnectionHandle, ConnectionHandle) {
-    let mut pair = Pair::default();
+/// Connect `pair` over a 20 ms RTT, the client's last packet a PING whose ACK it has, so no
+/// packet the server sends after it acknowledges anything new
+fn settled_pair(mut pair: Pair) -> (Pair, ConnectionHandle, ConnectionHandle) {
     pair.latency = Duration::from_millis(10);
     let (client_ch, server_ch) = pair.connect();
     pair.time += Duration::from_millis(100);
@@ -3933,7 +3932,7 @@ fn assert_backs_off(probes: &[Duration]) {
 #[test]
 fn a_peer_heard_after_an_outage_brings_the_probe_forward() {
     let _guard = subscribe();
-    let (mut pair, client_ch, server_ch) = settled_pair();
+    let (mut pair, client_ch, server_ch) = settled_pair(Pair::default());
     let rtt = pair.latency * 2;
     let s = pair
         .client_streams(client_ch)
@@ -3979,7 +3978,7 @@ fn a_peer_heard_after_an_outage_brings_the_probe_forward() {
 #[test]
 fn a_peer_heard_through_a_one_way_outage_leaves_the_backoff() {
     let _guard = subscribe();
-    let (mut pair, client_ch, server_ch) = settled_pair();
+    let (mut pair, client_ch, server_ch) = settled_pair(Pair::default());
     let s = pair
         .client_streams(client_ch)
         .open(Dir::Uni, Default::default())
@@ -4001,7 +4000,7 @@ fn a_peer_heard_through_a_one_way_outage_leaves_the_backoff() {
 #[test]
 fn a_peer_heard_as_the_data_left_still_brings_the_probe_forward() {
     let _guard = subscribe();
-    let (mut pair, client_ch, server_ch) = settled_pair();
+    let (mut pair, client_ch, server_ch) = settled_pair(Pair::default());
     let rtt = pair.latency * 2;
     pair.server_conn_mut(server_ch).ping();
     pair.drive_server();
@@ -4035,6 +4034,50 @@ fn a_peer_heard_as_the_data_left_still_brings_the_probe_forward() {
     assert!(
         probed <= rtt,
         "the client probed {probed:?} after the outage, not {due:?}"
+    );
+}
+
+/// A Version Negotiation packet carries no packet protection, so anyone on the path can send
+/// one: it is not the peer heard again, and brings no probe forward.
+#[test]
+fn an_unprotected_packet_does_not_bring_the_probe_forward() {
+    let _guard = subscribe();
+    // Without connection IDs, a forged packet reaches the connection by its address alone.
+    let cids: fn() -> Box<dyn ConnectionIdGenerator> =
+        || Box::new(RandomConnectionIdGenerator::new(0));
+    let (mut pair, client_ch, server_ch) = settled_pair(Pair::new(
+        Arc::new(EndpointConfig {
+            connection_id_generator_factory: Arc::new(cids),
+            ..EndpointConfig::default()
+        }),
+        server_config(),
+    ));
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+    pair.client_send(client_ch, s).write(b"hello").unwrap();
+    let probes = probe_through_outage(
+        &mut pair,
+        (client_ch, server_ch),
+        Duration::from_secs(5),
+        false,
+        None,
+    );
+    assert_backs_off(&probes);
+
+    // Version Negotiation for a reserved version, with empty connection IDs.
+    let forged = hex!("80 00000000 00 00 0a1a2a3a");
+    pair.client
+        .inbound
+        .push_back((pair.time, None, BytesMut::from(&forged[..])));
+    let sent = client_probes(&mut pair, client_ch);
+    pair.drive_client();
+    pair.drive_client();
+    assert_eq!(
+        client_probes(&mut pair, client_ch),
+        sent,
+        "a forged packet brought the probe forward"
     );
 }
 
