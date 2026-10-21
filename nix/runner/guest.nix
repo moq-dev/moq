@@ -65,6 +65,12 @@
   };
   programs.nix-ld.enable = true;
 
+  # Without swap, the kernel's OOM killer waits until no page cache is left to
+  # evict, so a job that nearly fills memory instead re-reads its binaries and
+  # inputs from disk indefinitely. earlyoom kills the largest process once
+  # available memory drops below 10%.
+  services.earlyoom.enable = true;
+
   nix = {
     settings = {
       experimental-features = [

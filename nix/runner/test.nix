@@ -185,6 +185,8 @@ pkgs.testers.runNixOSTest {
     };
   };
   testScript = ''
+    from datetime import timedelta
+
     start_all()
     with subtest("the carrier-less TAP is configured without blocking the host uplink"):
         startup.wait_for_unit("network-online.target")
@@ -272,6 +274,14 @@ pkgs.testers.runNixOSTest {
         guest.succeed("systemctl stop fake-job")
         guest.succeed("systemctl start runner-reclaim.service")
         guest.succeed("journalctl -u runner-reclaim.service | grep -F 'Dropped caches'")
+
+    with subtest("a job that fills memory is killed and the guest stays reachable"):
+        guest.succeed("systemd-run --unit=memory-hog ${pkgs.python3}/bin/python3 ${./hog.py}")
+        # The hog stops short of the kernel's OOM killer, so only earlyoom ends it.
+        guest.wait_until_fails("systemctl is-active memory-hog", timeout=timedelta(minutes=1))
+        guest.succeed("journalctl -u earlyoom | grep -F 'sending SIGTERM to process'")
+        # sshd re-reads the binaries the hog evicted, which a loaded host can slow down.
+        router.wait_until_succeeds("${pkgs.openssh}/bin/ssh-keyscan -T 5 10.231.0.2 | grep -F ssh-ed25519", timeout=timedelta(minutes=1))
 
     with subtest("local Nix and mbx storage survive runner and VM restarts"):
         guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/marker")

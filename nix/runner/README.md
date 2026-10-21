@@ -94,6 +94,8 @@ state is shared with subsequent jobs, so route only trusted work to the runner.
 The guest hands freed memory back to the host and drops its page cache while no
 job runs, so an idle VM holds little more than its running services; the next job
 reads its caches from disk.
+The guest has no swap, so earlyoom kills the largest process once available memory
+drops below 10%, rather than letting a job that fills memory thrash the disk.
 For MoQ, set `MOQ_QUEUE_RUNNER` to the runner label after a representative CI run
 passes; release pull requests use hosted runners and main pull requests skip cloud CI.
 
@@ -102,4 +104,5 @@ startup without carrier, public egress for multiple guests, private-network and
 sibling-guest isolation including spoofed established replies, compatible host NAT
 settings, the runner's locked-memory budget, symlink-free home and work directories
 with state migrated from the former DynamicUser layout, free page reporting and
-idle cache drops, and Nix/mbx persistence across runner and guest restarts.
+idle cache drops, killing a job that fills memory while sshd still answers, and
+Nix/mbx persistence across runner and guest restarts.
