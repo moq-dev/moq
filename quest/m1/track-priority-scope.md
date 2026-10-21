@@ -115,9 +115,10 @@ Signed priority, decided with the maintainer:
 Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
 order, [receive memory](/quest/m1/quic/receive-memory.md), then
 [Rust request credit](/quest/m1/rs-request-credit.md), then this quest, which
-adds the send domain last. [A stalled subscriber holds bounded
-state](/quest/m1/egress-held-state.md) rewrites the same serve loops and
-lands after this. The moq-c half lands on the
+adds the send domain last. The publisher serve loops it rewrites already
+park one group per subscription for a stalled subscriber
+([moq-dev/moq#6140](https://github.com/moq-dev/moq/pull/6140)); keep that
+bound. The moq-c half lands on the
 [generated C package](/quest/m1/c/README.md), not the frozen hand-written
 ABI, so C users break once.
 

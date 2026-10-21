@@ -54,7 +54,8 @@ minting a name where the identity changes and updating in place otherwise:
   explicit pad name after caps renegotiation.
 - TS AAC/MP2/AC-3 and FLV legacy audio fix the config from the first header
   and silently ignore a later change; refuse or mint instead. A PMT that
-  changes a PID's stream type keeps the old importer.
+  changes a PID's stream type belongs to
+  [Live PAT/PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md).
 - `moq-audio`/`moq-ffi` `set_bitrate` should update the catalog's bitrate.
 
 FLV, fMP4, MKV, HLS import, and `moq-transcode` rungs already comply; keep

@@ -68,7 +68,7 @@ reaches `expires` closes as `Expired` rather than `Unauthorized`, which also
 stops the reconnect loop: refresh the token, then reconnect with the new URL.
 
 **End.** Every close reports `end` with the reason, the duration, and the
-bytes sent and received.
+bytes sent and received. A shutdown waits for these reports before exiting.
 
 **The link.** `https://` presents the relay's `connect.tls` client certificate
 when one is configured, so a remote server can tell which relay is asking;

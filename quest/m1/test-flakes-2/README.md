@@ -22,6 +22,9 @@ Rules every child keeps:
 - A paused clock auto-advances while the runtime idles, so it can fire a
   timer before a real socket delivers. Where real sockets fight the paused
   clock, make the timers mockable or move the test off real sockets.
+- A mocked clock still flakes when the code jitters its timers with `rand`
+  (the draft-16 cancel race was a retry sweep jittered past a fixed settle
+  budget). Wait out the jitter's whole window, not a count of small steps.
 
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did. moq-tokio's
@@ -44,9 +47,7 @@ Public API: none. Wire: none.
 ## Required
 
 - [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
-- [Draft-16 cancel race](/quest/m1/test-flakes-2/draft16-cancel-race.md) - the cancel-ahead-of-the-answer test settles the same way every run, fixing `run_publish_namespaces` if the order is real
 - [Relay bench holder](/quest/m1/test-flakes-2/relay-bench-holder.md) - the foreign-listener bench test fails fast when its holder cannot bind, instead of hanging on a fifo
-- [moq-tokio failed listen](/quest/m1/test-flakes-2/tokio-failed-listen.md) - the failed-listen test keeps its port reserved from first bind to final check
 
 ## Related
 

@@ -32,11 +32,6 @@ under the same names.
   target of `rs/moq-ffi` changes, and its `moq.h` C ABI) point at the
   generated package instead; update `AGENTS.md` in this quest.
 
-Decided 2026-10-20 (audit): this waits on
-[moq-ffi reporting a first dial's failure](/quest/m1/ffi-first-dial-failure.md),
-because the hand-written `moq_session_failure` already names a retrying first
-dial and the generated package must not drop that.
-
-## Required
-
-- [moq-ffi reports why a first dial fails](/quest/m1/ffi-first-dial-failure.md) - the generated C keeps what `moq_session_failure` reports today
+The hand-written `moq_session_failure` names a retrying first dial; the
+generated package must keep that, through the moq-ffi report added in
+[moq-dev/moq#6131](https://github.com/moq-dev/moq/pull/6131).

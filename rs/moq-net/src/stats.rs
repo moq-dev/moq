@@ -56,6 +56,12 @@
 //!   datagrams. A datagram is metered as the group it stands in for, so it also
 //!   bumps `groups`, `frames`, and `bytes`; this counter breaks out how many of
 //!   those took the datagram path.
+//! * `inflated`: cumulative bytes inflated from compressed groups for plain
+//!   readers (in-process consumers, and egress that cannot carry compression).
+//!   Every plain reader of a group shares one inflated copy, so each byte counts
+//!   once, on the side of the reader whose read inflated it. A received compressed
+//!   datagram inflates on arrival, counted on the receiving side. Kept separate from
+//!   `bytes`, which counts payload as stored or sent.
 //! * `requests` ([`Presence`]): cumulative request/response admissions under the
 //!   label and tier at admission. [`Handle::request`] meters their traffic
 //!   without starting or ending a connected session.
@@ -179,6 +185,8 @@ pub(crate) struct Counters {
 	groups: AtomicU64,
 	// Subset of `groups` carried over an unreliable QUIC datagram.
 	datagrams: AtomicU64,
+	// Bytes inflated from compressed groups for plain readers, once per group.
+	inflated: AtomicU64,
 	// Content the drift budget gave up on before delivery. Disjoint from the
 	// top-level payload counters, which count only what was handed over.
 	stale: ContentCounters,
@@ -232,6 +240,7 @@ impl Counters {
 		let frames = self.frames.load(Ordering::Relaxed);
 		let groups = self.groups.load(Ordering::Relaxed);
 		let datagrams = self.datagrams.load(Ordering::Relaxed);
+		let inflated = self.inflated.load(Ordering::Relaxed);
 		let stale = self.stale.snapshot();
 		Traffic {
 			announces_started,
@@ -246,6 +255,7 @@ impl Counters {
 			frames,
 			groups,
 			datagrams,
+			inflated,
 			stale,
 		}
 	}
@@ -454,6 +464,11 @@ pub struct Traffic {
 	/// A subset of `groups`: each one also counts there and its payload in
 	/// `frames` / `bytes`.
 	pub datagrams: u64,
+	/// Cumulative bytes inflated from compressed groups for plain readers. Every plain
+	/// reader shares one inflated copy per group, so each byte counts once. A received
+	/// compressed datagram counts here as it inflates on arrival. `bytes` still counts
+	/// payload as stored or sent.
+	pub inflated: u64,
 	/// Content skipped because it fell behind a subscriber's
 	/// [`max_delay`](crate::track::Subscription::max_delay) budget. Disjoint from the top-level payload
 	/// counters: skipped content is never handed over. A steady rate here means
@@ -500,6 +515,7 @@ struct TrafficSer {
 	frames: u64,
 	groups: u64,
 	datagrams: u64,
+	inflated: u64,
 	stale: Content,
 }
 
@@ -524,6 +540,7 @@ impl From<Traffic> for TrafficSer {
 			frames: t.frames,
 			groups: t.groups,
 			datagrams: t.datagrams,
+			inflated: t.inflated,
 			stale: t.stale,
 		}
 	}
@@ -550,6 +567,7 @@ struct TrafficDe {
 	frames: u64,
 	groups: u64,
 	datagrams: u64,
+	inflated: u64,
 	stale: Content,
 }
 
@@ -568,6 +586,7 @@ impl From<TrafficDe> for Traffic {
 			frames: d.frames,
 			groups: d.groups,
 			datagrams: d.datagrams,
+			inflated: d.inflated,
 			stale: d.stale,
 		}
 	}
@@ -600,6 +619,7 @@ impl Traffic {
 		self.frames += other.frames;
 		self.groups += other.groups;
 		self.datagrams += other.datagrams;
+		self.inflated += other.inflated;
 		self.stale.add(other.stale);
 	}
 
@@ -1805,6 +1825,13 @@ impl Meter {
 	/// keep it rather than drop it into an untagged meter.
 	pub(crate) fn is_tracked(&self) -> bool {
 		self.counters.is_some()
+	}
+
+	/// Bump `inflated` by `n`, bytes a plain read inflated from a compressed group.
+	pub(crate) fn inflated(&self, n: u64) {
+		if let Some(counters) = self.counters() {
+			counters.inflated.fetch_add(n, Ordering::Relaxed);
+		}
 	}
 
 	/// Record content skipped before delivery by the drift budget.
