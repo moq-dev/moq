@@ -914,6 +914,8 @@ export class Subscriber {
 				await stream.writer.u53(StreamId.Track);
 				await new TrackMessage(broadcast, track, epoch).encode(stream.writer, this.version);
 				const info = await TrackInfo.decode(stream.reader, this.version);
+				// Until js/net inflates, a compressed track is refused rather than read as garbage.
+				if (info.compress) throw new Error("compressed tracks are not supported");
 				return { info, stream };
 			},
 			signal,

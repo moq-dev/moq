@@ -5,6 +5,11 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `cluster.lan.secret` is a file path only (#5910)
+
+`--cluster-lan-secret`, `MOQ_CLUSTER_LAN_SECRET`, and `[cluster.lan] secret` no longer accept 64 hex characters inline.
+Write the hex to a file (`openssl rand -hex 32 > cluster.key`) and pass its path; `LanConfig::secret` is now a `PathBuf`.
+
 ### Admission runs under the handshake deadline (#5765)
 
 `listen.timeout` now bounds auth admission as part of the handshake, replacing the fixed ten-second admission timeout, so `"0"` also lets admission wait forever.

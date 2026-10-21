@@ -349,18 +349,15 @@ jobs:
           NEXTEST_PROFILE: ci
           MOQ_STRICT: 1
 
-  # Media QA with non-Chromium players against a Chromium fixture. The Chromium
-  # player already runs in interop.yml, nightly and on release PRs.
-  media-engines:
-    name: Media (${{ matrix.engine }} player)
+  # Media QA with a Firefox player against a Chromium fixture. The Chromium
+  # player already runs in interop.yml, nightly and on release PRs. WebKit has
+  # engine defects this cannot pass; see test/interop/README.md.
+  media-firefox:
+    name: Media (firefox player)
     runs-on: ubuntu-24.04-arm
     # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/gh-readonly-queue/main/')) && 'cache-write' || '' }}
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        engine: [firefox, webkit]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -373,20 +370,20 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Install publisher and player engines
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium ${{ matrix.engine }}"
+        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium firefox"
       - name: Media and negative controls
-        run: nix develop --command just test media --media-engines ${{ matrix.engine }}
+        run: nix develop --command just test media --media-engines firefox
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
           # Playwright checks a browser's libraries with the `ldd` on PATH, which in the
           # dev shell is Nix glibc's and can't see the ones `--with-deps` installed, so
-          # it refuses a Firefox or WebKit that launches fine.
+          # it refuses a Firefox that launches fine.
           PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: 1
       - name: Preserve measurements and traces
         if: ${{ failure() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: media-${{ matrix.engine }}
+          name: media-firefox
           path: ${{ runner.temp }}/moq-test-runs
           if-no-files-found: error
 

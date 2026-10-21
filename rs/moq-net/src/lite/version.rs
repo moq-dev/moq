@@ -260,6 +260,18 @@ impl Version {
 		}
 	}
 
+	/// Whether TRACK_INFO carries the compression flag, and a compressed Track's FRAME
+	/// and datagram its inflated size. Added in lite-07; an earlier peer receives the
+	/// frames inflated.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_compression(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether the stream error table has NOT_FETCHABLE, for a FETCH that reached a
 	/// datagram. Added in lite-07; earlier versions say NOT_FOUND instead.
 	#[allow(clippy::match_like_matches_macro)]

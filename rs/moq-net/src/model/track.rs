@@ -137,6 +137,15 @@ pub struct Info {
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
 	/// Higher is more urgent. Defaults to 127, the midpoint.
 	pub priority: u8,
+	/// Whether frames are DEFLATE compressed per group, so later frames compress against
+	/// earlier ones in the same group. Defaults to `false`.
+	///
+	/// Writers and readers see plain frames either way: the producer compresses each
+	/// frame as it is written and the cache stores the compressed form. A moq-lite-07 peer
+	/// receives the compressed bytes and the flag; every other session receives the
+	/// frames inflated, from one inflated copy per group shared by every plain reader.
+	/// Worth it for small, repetitive payloads like JSON; wasted on media.
+	pub compress: bool,
 	/// The ratio of a group's bytes after its first frame to the first frame past which a
 	/// joining subscriber asks for a new group, or `None` (the default) to never ask.
 	///
@@ -165,6 +174,7 @@ impl Default for Info {
 			timescale: None,
 			max_age: None,
 			priority: DEFAULT_PRIORITY,
+			compress: false,
 			refresh: None,
 			properties: None,
 		}
@@ -191,6 +201,12 @@ impl Info {
 	/// Set the publisher's tie-break priority, returning `self` for chaining.
 	pub fn with_priority(mut self, priority: u8) -> Self {
 		self.priority = priority;
+		self
+	}
+
+	/// Set whether frames are DEFLATE compressed per group, returning `self` for chaining.
+	pub fn with_compress(mut self, compress: bool) -> Self {
+		self.compress = compress;
 		self
 	}
 
@@ -2030,6 +2046,33 @@ impl TrackState {
 		Poll::Pending
 	}
 
+	/// Whether a group in `groups` may still land from the live feed, by the rule
+	/// [`Self::poll_arrival`] applies: not accounted for, not dropped, within the feed, and
+	/// in a gap a later arrival opened less than `grace` ago, or that nothing later opened.
+	/// Below the first arrival only when the feed was asked to start lower, as `floor` says.
+	/// With `delivered`, only a group it lacks counts.
+	fn may_land(&self, groups: ops::Range<u64>, floor: bool, grace: Duration, delivered: Option<&Delivered>) -> bool {
+		let start = match floor {
+			true => groups.start,
+			false => match self.arrivals.first() {
+				Some(first) => groups.start.max(first),
+				None => return false,
+			},
+		};
+		let start = start.max(self.start_sequence.unwrap_or(0));
+		let end = groups.end.min(self.final_sequence().unwrap_or(u64::MAX));
+		let now = self.cache.pool().now_wall();
+		self.arrivals.gaps(start..end).any(|(gap, opened)| {
+			opened
+				.and_then(|opened| opened.checked_add(grace))
+				.is_none_or(|folds| now < folds)
+				&& self
+					.drops
+					.gaps(&gap)
+					.any(|open| delivered.is_none_or(|delivered| !delivered.covers(open)))
+		})
+	}
+
 	/// Record the declared first sequence of the live feed, replacing any earlier
 	/// declaration: the signal is scoped to the current subscription's demand,
 	/// which may legitimately move in either direction. `None` clears it (the
@@ -2650,15 +2693,24 @@ impl Producer {
 		}
 		state.advance(sequence, false);
 		state.cache.finish_largest(sequence);
-		meter.datagram(payload.len() as u64);
-		state.push_datagram(
-			Datagram {
+		// A datagram is its own group, so it compresses alone.
+		let deflated = state
+			.info
+			.as_ref()
+			.unwrap()
+			.compress
+			.then(|| super::flate::Encoder::new().frame(&payload));
+		let datagram = super::datagram::Stored {
+			datagram: Datagram {
 				sequence,
 				timestamp,
 				payload,
-			}
-			.into(),
-		);
+			},
+			wire: None,
+			deflated,
+		};
+		meter.datagram(datagram.stored_len());
+		state.push_datagram(datagram);
 		let cache = state.cache.clone();
 		drop(state);
 		cache.settle(None);
@@ -2693,12 +2745,14 @@ impl Producer {
 		}
 		let meter = self.stats.meter();
 		let mut state = self.modify()?;
-		let timescale = state.info.as_ref().unwrap().timescale;
-		if !datagram
-			.wire
-			.as_ref()
-			.is_some_and(|wire| wire.status.is_some_and(|status| status != 0))
-		{
+		let info = state.info.as_ref().unwrap();
+		let timescale = info.timescale;
+		let status = datagram.wire.as_ref().and_then(|wire| wire.status);
+		// A datagram is its own group, so it compresses alone. A status has no payload.
+		if info.compress && datagram.deflated.is_none() && status.is_none() {
+			datagram.deflated = Some(super::flate::Encoder::new().frame(&datagram.payload));
+		}
+		if status.is_none_or(|status| status == 0) {
 			datagram.datagram.timestamp = group::on_track(datagram.timestamp, timescale)?;
 		}
 		if state.final_sequence().is_some_and(|fin| datagram.sequence >= fin) {
@@ -2706,11 +2760,34 @@ impl Producer {
 		}
 		state.advance(datagram.sequence, false);
 		state.cache.finish_largest(datagram.sequence);
-		meter.datagram(datagram.payload.len() as u64);
+		meter.datagram(datagram.stored_len());
 		state.push_datagram(datagram);
 		let cache = state.cache.clone();
 		drop(state);
 		cache.settle(None);
+		Ok(())
+	}
+
+	/// Insert a received datagram of a compressed track, whose payload is its own DEFLATE
+	/// stream that must inflate to exactly `size` bytes. Kept as it arrived, beside the
+	/// inflated payload.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) fn insert_deflated_datagram(&mut self, mut datagram: super::datagram::Stored, size: u64) -> Result<()> {
+		if !self.info.compress {
+			return Err(Error::ProtocolViolation);
+		}
+		// Refused before inflating, like an oversized plain payload.
+		let size = usize::try_from(size)
+			.ok()
+			.filter(|size| *size <= super::datagram::MAX_DATAGRAM_PAYLOAD)
+			.ok_or(Error::FrameTooLarge)?;
+		let payload = super::flate::Decoder::new().frame(&datagram.payload, size)?;
+		let inflated = payload.len() as u64;
+		datagram.deflated = Some(std::mem::replace(&mut datagram.datagram.payload, payload));
+		self.insert_wire_datagram(datagram)?;
+		// Only once stored, so a refused datagram counts toward nothing.
+		self.stats.meter().inflated(inflated);
 		Ok(())
 	}
 
@@ -4209,6 +4286,52 @@ impl Consumer {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}
+		})
+	}
+
+	/// Whether a group in `groups` may still land here; see `TrackState::may_land`. Never
+	/// once no producer is left to write one.
+	pub(super) fn may_land(
+		&self,
+		groups: ops::Range<u64>,
+		floor: bool,
+		grace: Duration,
+		delivered: Option<&Delivered>,
+	) -> bool {
+		if let Some(serving) = self.serving() {
+			return serving.may_land(groups, floor, grace, delivered);
+		}
+		self.with_state(|state| {
+			state.is_some_and(|state| !state.is_closed() && state.read().may_land(groups, floor, grace, delivered))
+		})
+	}
+
+	/// The wall clock this track's cache judges ages by.
+	pub(super) fn now(&self) -> crate::time::Instant {
+		if let Some(serving) = self.serving() {
+			return serving.now();
+		}
+		self.with_state(|state| match state {
+			Some(state) => state.read().cache.pool().now_wall(),
+			None => super::clock::wall(),
+		})
+	}
+
+	/// Poll for this track's wall clock reaching `at`; see [`Self::now`].
+	pub(super) fn poll_wall(&self, at: crate::time::Instant, waiter: &kio::Waiter) -> Poll<()> {
+		if let Some(serving) = self.serving() {
+			return serving.poll_wall(at, waiter);
+		}
+		self.with_state(|state| {
+			let Some(state) = state else {
+				return Poll::Ready(());
+			};
+			let state = state.read();
+			if state.cache.pool().now_wall() >= at {
+				return Poll::Ready(());
+			}
+			state.cache.watch_wall(at, waiter);
+			Poll::Pending
 		})
 	}
 
@@ -6305,9 +6428,10 @@ impl Subscriber {
 	/// is aborted, or `Poll::Pending` when none is buffered yet.
 	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
 		loop {
-			let Some(datagram) = ready!(self.poll_recv_wire_datagram(waiter))? else {
+			let Some(datagram) = ready!(self.poll_recv_stored_datagram(waiter))? else {
 				return Poll::Ready(Ok(None));
 			};
+			// A moq-transport status is no datagram an application can read.
 			if datagram
 				.wire
 				.as_ref()
@@ -6315,24 +6439,42 @@ impl Subscriber {
 			{
 				continue;
 			}
+			self.meter_datagram(datagram.payload.len() as u64);
 			return Poll::Ready(Ok(Some(datagram.datagram)));
 		}
 	}
 
+	/// Count a datagram handed on as `bytes` of payload, the single-frame group it stands in
+	/// for. Unlike a group (metered lazily as its frames are read), a datagram goes whole.
+	// private: passthrough
+	pub(crate) fn meter_datagram(&self, bytes: u64) {
+		self.stats.meter().datagram(bytes);
+	}
+
+	/// The next datagram as the track stores it: its wire metadata, any status, and a
+	/// compressed track's DEFLATE slice. Unmetered: the caller meters the form it hands on
+	/// with [`Self::meter_datagram`].
+	// private: passthrough
+	pub(crate) fn poll_recv_stored_datagram(
+		&mut self,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<super::datagram::Stored>>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.poll_recv_datagram(waiter),
+			Inner::Resume(resume, _) => resume.poll_recv_datagram(&self.delivered, waiter),
+		}
+	}
+
+	/// [`Self::poll_recv_stored_datagram`], metered as its plain payload: for a session that
+	/// never carries compression.
 	// private: passthrough
 	pub(crate) fn poll_recv_wire_datagram(
 		&mut self,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<super::datagram::Stored>>> {
-		let meter = self.stats.meter();
-		let res = match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll_recv_datagram(waiter),
-			Inner::Resume(resume, _) => resume.poll_recv_datagram(&self.delivered, waiter),
-		};
-		// Unlike a group (metered lazily as its frames are read), a datagram is
-		// delivered whole here, so count it as the single-frame group it stands in for.
+		let res = self.poll_recv_stored_datagram(waiter);
 		if let Poll::Ready(Ok(Some(datagram))) = &res {
-			meter.datagram(datagram.payload.len() as u64);
+			self.meter_datagram(datagram.payload.len() as u64);
 		}
 		res
 	}
@@ -8228,13 +8370,18 @@ mod test {
 			sequence: d.sequence,
 			timestamp: Some(d.timestamp.unwrap().value()),
 			payload: d.payload.clone(),
+			inflated: None,
 			ietf: None,
 		}
 		.encode_bytes(version)
 		.unwrap();
 
 		// Subscriber decodes the body and writes it downstream, preserving the sequence.
-		let wire = lite::Datagram::decode(body, version, false, |_| Some(crate::Timescale::MICRO)).unwrap();
+		let wire = lite::Datagram::decode(body, version, false, |_| lite::Format {
+			timescale: Some(crate::Timescale::MICRO),
+			compressed: false,
+		})
+		.unwrap();
 		let mut downstream = track_producer("test", Info::timed());
 		let mut downstream_dg = downstream.subscribe(None);
 		downstream
@@ -13696,6 +13843,47 @@ mod test {
 		// A fresh subscriber skips the evicted groups entirely.
 		let mut subscriber = producer.subscribe(replay());
 		assert!(subscriber.assert_group().sequence > 0, "evicted group is not delivered");
+	}
+
+	/// A plain reader inflating a finished compressed track pays the debt its inflated copies
+	/// add, though no writer is left to: the pool returns to its capacity.
+	#[test]
+	#[cfg(feature = "async")]
+	fn inflating_settles_the_pool_debt() {
+		let capacity = 1 << 20;
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
+		let broadcast = Arc::new(broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		});
+		let producer = Producer::new(broadcast, "test", Info::timed().with_compress(true));
+		let frame = bytes::Bytes::from(vec![0u8; 256 * 1024]);
+		let groups = 16;
+		for _ in 0..groups {
+			let mut group = producer.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, frame.clone()).unwrap();
+			group.finish().unwrap();
+		}
+		assert!(pool.used() < capacity, "the slices fit: {}", pool.used());
+
+		let consumer = producer.consume();
+		for sequence in 0..groups {
+			let Some(mut group) = consumer.peek_group(sequence) else {
+				continue;
+			};
+			match group.read_frame().now_or_never().expect("cached") {
+				Ok(Some(read)) => assert_eq!(read.payload.len(), frame.len()),
+				Ok(None) => panic!("group {sequence} ended without its frame"),
+				Err(err) => assert!(matches!(err, Error::Evicted), "group {sequence}: {err}"),
+			}
+		}
+		// The live edge and the group being read stay, whatever the budget.
+		let slack = 2 * (frame.len() as u64 + cache::ENTRY_OVERHEAD);
+		assert!(
+			pool.used() <= capacity + slack,
+			"inflated copies left the pool over capacity: {}",
+			pool.used()
+		);
 	}
 
 	/// The latest group is never in the eviction order, so it survives any budget.
