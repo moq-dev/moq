@@ -853,7 +853,7 @@ pub extern "C" fn moq_encode_video_bitrate(producer: u32, bitrate: u64) -> i32 {
 ///
 /// The handle is released, so nothing can be published to it afterwards.
 /// The broadcast keeps the finished track, catalog rendition included, until it closes or its
-/// [moq_publish_finish] linger ends, so a late subscriber can still drain it.
+/// `moq_publish_finish` linger ends, so a late subscriber can still drain it.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 	ffi::enter(move || {

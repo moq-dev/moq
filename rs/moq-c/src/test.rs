@@ -2254,6 +2254,7 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
+		compress: false,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
 	let payload = b"tail";
