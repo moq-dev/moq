@@ -561,6 +561,17 @@ rebase.
 | `recovery-point-sei` | shape | each recovery point keeps its SEI |
 | `dts-before-pts` | shape | no access unit is stamped to decode after it presents |
 
+## Programs without video
+
+`just test ts --clockless audio-scte35`, `--clockless sections`, and
+`--clockless pes` generate an audio/SCTE-35 program or a data-only program.
+The audio profile carries PCR on its audio PID; the data-only profiles use a
+PCR-only PID with no elementary-stream entry. These nightly arms run the same
+TSDuck compliance and PCR schedule checks, then compare every captured data
+unit and its placement with an exact source suffix through EOF. Audio content
+is not decoded in this profile. Rust tests also cover PCR wrap, media joining
+a data-only clock later, and refusal when a data-only PMT names no PCR.
+
 ## Mux overhead (`overhead.py`)
 
 A source that fills its multiplex with no null packets leaves the export no room
