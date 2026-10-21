@@ -58,7 +58,12 @@ and `Programs::stats` merges their rows by PID, so a per-program drop row
 would shadow the program that carries the PID. `Programs` owns the
 unclaimed-PID rows instead: a PID is dropped only when no program's PMT and
 no captured SI claims it, counted once at the multiplex rather than per
-program.
+program. A `--program N` import of an MPTS reassembles only its own PMT, so
+it cannot tell another program's PIDs from unclaimed ones; it counts only its
+own program's PIDs and leaves multiplex-wide accounting to `--program all`.
+When the PAT lists only the selected program, it counts as above. Chosen
+over passively acquiring every PMT, which adds a reassembler per program to
+an import that serves one.
 
 Prefer the existing `stats::Stream` row and its `refused` count over a new
 field; if a dropped PID needs a new `Class` or member, report the public API
@@ -73,8 +78,9 @@ packetization). JS: none. Draft
 Tests: generated `fixture::Mux` inputs with MPEG-2 video, each DSM-CC type,
 0x86 without CUEI, LATM, a PAT network entry with a NIT, a CAT plus
 scrambled ES, a PSIP base PID, an unlisted PID, media before its first PMT,
-and a two-program MPTS under `--program all` whose second program's media
-precedes its PMT, asserting the catalog, the
+a two-program MPTS under `--program all` whose second program's media
+precedes its PMT, and the same MPTS under `--program 1` with no rows for
+program 2's PIDs, asserting the catalog, the
 stats rows, and an export round trip of the carried streams. The MPEG-2 video arm also runs the TSDuck
 round trip and an FFmpeg decode of the export in `test/ts`.
 
