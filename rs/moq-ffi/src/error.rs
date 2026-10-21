@@ -167,54 +167,101 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 pub enum MoqError {
 	/// A protocol failure carrying the peer's session or stream code.
 	#[error("{details}")]
-	Protocol { details: MoqProtocolError },
+	Protocol {
+		/// The protocol registry, wire code, and diagnostic message.
+		details: MoqProtocolError,
+	},
 
 	/// The underlying QUIC/WebTransport connection failed.
 	#[error("transport: {reason}")]
-	Transport { reason: String },
+	Transport {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	/// A local failure without a session or stream code.
 	#[error("internal: {reason}")]
-	Internal { reason: String },
+	Internal {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// The media catalog or container could not be processed.
 	#[error("{reason}")]
-	Media { reason: String },
+	Media {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// Media could not be imported or exported.
 	#[error("{reason}")]
-	Mux { reason: String },
+	Mux {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// A JSON track could not be processed.
 	#[error("{reason}")]
-	JsonTrack { reason: String },
+	JsonTrack {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	// Native codec errors, behind the optional `audio`/`video` features.
+	/// An audio codec operation failed.
 	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
 	#[error("{reason}")]
-	Audio { reason: String },
+	Audio {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// A video codec operation failed.
 	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
 	#[error("{reason}")]
-	Video { reason: String },
+	Video {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// The connection URL could not be parsed.
 	#[error("url: {reason}")]
-	Url { reason: String },
+	Url {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// A timestamp is outside the supported range.
 	#[error("timestamp overflow")]
 	TimeOverflow,
 
+	/// The requested log level is invalid.
 	#[error("log level: {reason}")]
-	LogLevel { reason: String },
+	LogLevel {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	/// An owned native task panicked; cancellation is reported separately.
 	#[cfg(not(target_arch = "wasm32"))]
 	#[error("task: {reason}")]
-	Task { reason: String },
+	Task {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// JSON could not be parsed or encoded.
 	#[error("json: {reason}")]
-	Json { reason: String },
+	Json {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// The operation was cancelled.
 	#[error("cancelled")]
 	Cancelled,
 
+	/// The handle or connection is closed.
 	#[error("closed")]
 	Closed,
 
@@ -225,24 +272,43 @@ pub enum MoqError {
 	#[error("busy")]
 	Busy,
 
+	/// A connection could not be established.
 	#[error("connect: {reason}")]
-	Connect { reason: String },
+	Connect {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// The local server socket could not be bound.
 	#[error("bind: {reason}")]
-	Bind { reason: String },
+	Bind {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// A connection was refused during the handshake.
 	#[error("reject: {reason}")]
-	Reject { reason: String },
+	Reject {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// The request has already been accepted or rejected.
 	#[error("already responded")]
 	AlreadyResponded,
 
+	/// Codec configuration or bitstream parsing failed.
 	#[error("codec: {reason}")]
-	Codec { reason: String },
+	Codec {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// Authorization is required or invalid.
 	#[error("unauthorized")]
 	Unauthorized,
 
+	/// Authorization does not permit the requested operation.
 	#[error("forbidden")]
 	Forbidden,
 
@@ -275,31 +341,53 @@ pub enum MoqError {
 
 	/// A route carried an invalid hop id or too many hops.
 	#[error("invalid route: {reason}")]
-	InvalidRoute { reason: String },
+	InvalidRoute {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	/// A path pattern was empty, had a doubled slash, or used a reserved segment form.
 	#[error("invalid pattern: {reason}")]
-	InvalidPattern { reason: String },
+	InvalidPattern {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	/// An epoch was not a lowercase hyphenated UUIDv7.
 	#[error("{reason}")]
-	InvalidEpoch { reason: String },
+	InvalidEpoch {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	/// A catalog rendition named another broadcast, but this consumer came from a standalone
 	/// broadcast rather than an origin, so there is nothing to resolve the reference against.
 	#[error("unresolvable broadcast reference: {reason}")]
-	UnresolvableBroadcast { reason: String },
+	UnresolvableBroadcast {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
+	/// The logger could not be initialized.
 	#[error("log: {reason}")]
-	Log { reason: String },
+	Log {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	/// A configuration record held a value the constructor cannot use.
 	#[error("config: {reason}")]
-	Config { reason: String },
+	Config {
+		/// A diagnostic message describing the failure.
+		reason: String,
+	},
 
 	/// A catalog needs a newer moq-hang draft than this build reads; upgrade to read it.
 	#[error("unsupported catalog version {version}")]
-	UnsupportedCatalog { version: u64 },
+	UnsupportedCatalog {
+		/// The catalog version this build cannot read.
+		version: u64,
+	},
 }
 
 impl From<moq_net::Error> for MoqError {

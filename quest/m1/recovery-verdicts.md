@@ -20,7 +20,10 @@ longer triggers this, but other errors still can.
 
 - Classify by error, with one list mirrored in Rust and JS, settling
   `TooFarBehind` on both sides. Keep the existing rule that an error from a
-  copy whose route failed is never a verdict.
+  copy whose route failed is never a verdict. Rust `route_failed` is
+  narrower than JS `ROUTE_FAILURES`, and adding the JS guard in Rust hangs
+  `partial_group` ([moq-dev/moq#6143](https://github.com/moq-dev/moq/pull/6143));
+  align the two lists, fixing that hang at its cause.
 - A content error from one route may not repeat on another. Settle whether
   such an error may move to a different route once; it never asks the same
   route again.

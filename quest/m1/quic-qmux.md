@@ -17,8 +17,8 @@ Decided in the 2026-09-30 plan:
   negotiation, byte-stream framing, and socket stats (about 2.3k lines) onto
   it. Its session implements moq-net's `transport::poll` traits instead of
   `web-transport-trait` ([Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md)). The TypeScript `@moq/qmux`
-  keeps its own state machine and is the interop reference; it moves into
-  `js/` in [TS qmux](/quest/m1/ts-qmux.md).
+  keeps its own state machine and is the interop reference; it lives in
+  `js/qmux`.
 - **All four wire versions stay**: draft-02, draft-01, draft-00, and the
   legacy `webtransport` format, since published clients (and the TS peer)
   negotiate them. They differ only in record framing, so they share the one
@@ -64,6 +64,11 @@ The native scheduler does not wait for this dependent proof.
 Add the missing wire evidence before release: golden vectors for each of the four versions,
 bidirectional interoperability against the last web-transport `qmux` release (0.6.x, a
 test-only dependency), and the in-tree TypeScript qmux peer used by `js/net`.
+Move `just test qmux` onto the in-tree crate: it runs `test/qmux/interop.test.ts`,
+the TS client and TS server against qmux 0.6.3's `interop-server` and
+`interop-client` examples per draft, installed with `cargo install` and run
+nightly. Bring those examples into the new crate and point the suite at them,
+so the TS peer interoperates with the qmux that ships.
 
 Acceptance carried over from the deleted m0 qmux credit quests (web-transport#412 and #413
 are no longer pursued): a session returns connection-level credit for every byte it
@@ -102,10 +107,6 @@ as upstream releases and pin bumps; the bug stays on main until this lands.
 The release line gets no backport of the credit and close fixes; the
 stream-limit port in the [release shutdown backport](/quest/m0/ffi-shutdown-backport.md)
 is the exception.
-
-## Required
-
-- [TS qmux](/quest/m1/ts-qmux.md) - the in-tree TypeScript peer this quest's interop acceptance runs against
 
 ## Related
 
