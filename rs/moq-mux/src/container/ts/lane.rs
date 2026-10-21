@@ -17,7 +17,7 @@
 //! opens an H.264 buffering period: the export then releases it late enough for its HRD to rule
 //! that out.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use mpeg2ts::ts::TsPacket;
@@ -104,7 +104,7 @@ impl Layout {
 				taken * PACKET
 			);
 		};
-		let lanes = lanes
+		let lanes: Vec<(u16, u64)> = lanes
 			.iter()
 			.map(|&(pid, need)| {
 				let packets = match need {
@@ -114,6 +114,11 @@ impl Layout {
 				(pid, packets)
 			})
 			.collect();
+		if let Some((pid, _)) = lanes.iter().find(|(_, packets)| *packets == 0) {
+			anyhow::bail!(
+				"MPEG-TS --sync cannot carry PID {pid:#x}: the rate its stream declares is less than a packet a second"
+			);
+		}
 		let tables = (1..=tables).map(|n| n * spacing).collect();
 		Ok(Self {
 			rate,
@@ -411,7 +416,8 @@ pub(super) struct Grid {
 	placed: BTreeMap<u128, [u8; TsPacket::SIZE]>,
 	/// Where each unit's first packet sits: its PID and whether it opens a keyframe.
 	starts: BTreeMap<u128, (u16, bool)>,
-	/// The PAT then the PMT, numbered as they go out.
+	/// The PAT then the PMT, numbered as they go out. Each section's first packet carries an
+	/// adaptation field, whose `discontinuity_indicator` is set where the grid jumps.
 	tables: Vec<[u8; TsPacket::SIZE]>,
 	/// SI packets still to go out, in order, each no earlier than its position.
 	si: VecDeque<(u128, [u8; TsPacket::SIZE])>,
@@ -470,11 +476,17 @@ impl Grid {
 		}
 	}
 
-	/// Send `packets` of SI from slot `index` on, in the positions no lane owns.
+	/// Send `packets` of SI from slot `index` on, in the positions no lane owns. A PID whose
+	/// last emission is still queued sends none of this one, so SI the free positions cannot
+	/// carry skips emissions rather than piling up; each emission numbers from zero and flags
+	/// its break, so a skipped one leaves no gap.
 	pub fn push_si(&mut self, index: u128, packets: &[u8]) {
 		let from = self.layout.first(index);
+		let queued: HashSet<u16> = self.si.iter().map(|(_, packet)| pid(packet)).collect();
 		for packet in packets.as_chunks::<{ TsPacket::SIZE }>().0 {
-			self.si.push_back((from, *packet));
+			if !queued.contains(&pid(packet)) {
+				self.si.push_back((from, *packet));
+			}
 		}
 	}
 
@@ -516,7 +528,8 @@ impl Grid {
 	/// like the tables.
 	///
 	/// Tables that start a timeline number as the last repetition before them did, so a
-	/// receiver tuning in on them counts on into the next.
+	/// receiver tuning in on them counts on into the next; after a jump they flag the break
+	/// from the repetition the stream carried last.
 	pub fn lay(&mut self, index: u128) -> Laid {
 		self.next = Some(index + 1);
 		let jump = self.last.is_some_and(|last| index != last + 1);
@@ -551,6 +564,9 @@ impl Grid {
 						n => emission * (self.tables.len() as u128 - 1) + n as u128 - 1,
 					};
 					packet[3] = (packet[3] & 0xf0) | (counter & 0x0f) as u8;
+					if packet[1] & 0x40 != 0 && packet[3] & 0x20 != 0 && packet[4] > 0 {
+						packet[5] = (packet[5] & !0x80) | u8::from(jump) << 7;
+					}
 					packet
 				}),
 				Owner::Lane(_) => self.placed.remove(&at),
@@ -626,10 +642,30 @@ mod test {
 
 	fn tables() -> Vec<[u8; TsPacket::SIZE]> {
 		let mut pat = [0xffu8; TsPacket::SIZE];
-		pat[..4].copy_from_slice(&[0x47, 0x40, 0x00, 0x10]);
+		pat[..6].copy_from_slice(&[0x47, 0x40, 0x00, 0x30, 0x01, 0x80]);
 		let mut pmt = pat;
 		pmt[1..3].copy_from_slice(&[0x50, 0x00]);
 		vec![pat, pmt]
+	}
+
+	/// A jump numbers the tables on from a repetition the stream never carried, so they flag
+	/// the break in their counters as the PCR does; elsewhere they flag nothing.
+	#[test]
+	fn the_tables_flag_a_jump() {
+		let mut grid = Grid::new(Arc::new(layout()), tables());
+		let flagged = |laid: Laid| -> Vec<bool> {
+			laid.packets
+				.chunks(TsPacket::SIZE)
+				.filter(|packet| matches!(pid(packet), 0x0000 | 0x1000))
+				.map(|packet| packet[5] & 0x80 != 0)
+				.collect()
+		};
+		assert_eq!(flagged(grid.lay(PSI_SLOTS + 3)), [false, false], "a timeline's start");
+		assert_eq!(flagged(grid.lay(5 * PSI_SLOTS + 7)), [true, true], "a jump");
+		for index in 5 * PSI_SLOTS + 8..6 * PSI_SLOTS {
+			assert!(flagged(grid.lay(index)).is_empty(), "slot {index} repeats nothing");
+		}
+		assert_eq!(flagged(grid.lay(6 * PSI_SLOTS)), [false, false], "a repetition");
 	}
 
 	#[test]
@@ -689,6 +725,15 @@ mod test {
 		)
 		.unwrap_err();
 		assert!(err.to_string().contains("raise --mux-rate"), "{err}");
+	}
+
+	/// A lane of no packets would never own the positions a frame's packets wait for.
+	#[test]
+	fn a_lane_of_no_packets_is_refused() {
+		for need in [Need::Fixed(0), Need::Rest(0)] {
+			let err = Layout::new(RATE, 2, 80, &[(0x100, Need::Rest(u64::MAX)), (0x101, need)]).unwrap_err();
+			assert!(err.to_string().contains("PID 0x101"), "{need:?}: {err}");
+		}
 	}
 
 	#[test]
@@ -823,5 +868,26 @@ mod test {
 			si[1].0 >= si[0].0 + grid.layout().spacing as u128,
 			"SI paced like the tables"
 		);
+	}
+
+	#[test]
+	fn si_the_free_positions_cannot_carry_does_not_pile_up() {
+		let layout = Layout::new(RATE, 2, 80, &[(0x100, Need::Rest(u64::MAX)), (0x101, Need::Fixed(422))]).unwrap();
+		let mut grid = Grid::new(Arc::new(layout), tables());
+		let mut si = [0xffu8; TsPacket::SIZE];
+		si[..4].copy_from_slice(&[0x47, 0x40, 0x11, 0x10]);
+		let emission = si.repeat(40);
+		let mut sent = 0;
+		for index in 0..400 {
+			grid.push_si(index, &emission);
+			assert!(grid.si.len() <= 40, "slot {index}: {} SI packets queued", grid.si.len());
+			let laid = grid.lay(index);
+			sent += laid
+				.packets
+				.chunks(TsPacket::SIZE)
+				.filter(|packet| pid(packet) == 0x11)
+				.count();
+		}
+		assert!(sent >= 400, "the SI still fills the free positions: {sent} packets");
 	}
 }

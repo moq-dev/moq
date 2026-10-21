@@ -2454,9 +2454,10 @@ where
 	/// Give each track its lane of `rate` under [`Self::with_sync`], beside the tables in
 	/// `psi` and room for the SI, and lay every slot on them from now on.
 	fn lay_lanes(&mut self, rate: u64, psi: &Psi) -> anyhow::Result<()> {
+		// Flagged, so each emission has the adaptation field a jump sets the flag in ([`Grid::lay`]).
 		let mut tables = Vec::new();
-		section_packets(&mut tables, Pid::PAT, &psi.pat, false)?;
-		section_packets(&mut tables, psi.pmt_pid, &psi.pmt, false)?;
+		section_packets(&mut tables, Pid::PAT, &psi.pat, true)?;
+		section_packets(&mut tables, psi.pmt_pid, &psi.pmt, true)?;
 		let tables = tables.as_chunks::<{ TsPacket::SIZE }>().0.to_vec();
 		let mut needs: Vec<(u16, Need)> = self
 			.tracks
