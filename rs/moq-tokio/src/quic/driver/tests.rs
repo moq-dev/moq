@@ -44,7 +44,8 @@ use tracing::{error_span, info};
 use tracing_subscriber::EnvFilter;
 
 use super::{
-    ClientConfig, Credit, Endpoint, EndpointConfig, RecvStream, SendStream, TransportConfig,
+    ClientConfig, Credit, Endpoint, EndpointConfig, ReadError, ReadToEndError, RecvStream,
+    SendStream, TransportConfig, VarInt,
 };
 
 #[test]
@@ -1712,7 +1713,7 @@ async fn stream_stopped_2() {
         async { endpoint.accept().await.unwrap().await }
     )
     .unwrap();
-    let send_stream = conn.open_uni(Default::default()).await.unwrap();
+    let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
     let stopped = timeout(Duration::from_millis(100), send_stream.stopped())
         .instrument(error_span!("stopped"));
     tokio::pin!(stopped);
@@ -1722,11 +1723,61 @@ async fn stream_stopped_2() {
         _x = &mut stopped => {},
         _x = std::future::ready(()) => {}
     }
-    // drop the send stream
+    // finish and drop the send stream, since dropping it unfinished would reset it
+    send_stream.finish().unwrap();
     drop(send_stream);
     // make sure the stopped future still resolves
     let res = stopped.await;
     assert_eq!(res, Ok(Ok(None)));
+}
+
+/// A send stream dropped before `finish` is reset, so the peer can't mistake the truncated data
+/// for the whole stream.
+#[tokio::test]
+async fn dropped_send_stream_resets() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+
+    let (conn, server_conn) = tokio::try_join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    )
+    .unwrap();
+    let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
+    send_stream.write_all(b"truncated").await.unwrap();
+    drop(send_stream);
+
+    let mut recv_stream = server_conn.accept_uni().await.unwrap();
+    let res = recv_stream.read_to_end(usize::MAX).await;
+    assert!(
+        matches!(res, Err(ReadToEndError::Read(ReadError::Reset(code))) if code == VarInt::from_u32(0)),
+        "{res:?}"
+    );
+}
+
+/// A send stream finished before it drops still delivers its data and FIN.
+#[tokio::test]
+async fn finished_send_stream_survives_drop() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+
+    let (conn, server_conn) = tokio::try_join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    )
+    .unwrap();
+    let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
+    send_stream.write_all(b"complete").await.unwrap();
+    send_stream.finish().unwrap();
+    drop(send_stream);
+
+    let mut recv_stream = server_conn.accept_uni().await.unwrap();
+    let data = recv_stream.read_to_end(usize::MAX).await.unwrap();
+    assert_eq!(data, b"complete");
 }
 
 #[tokio::test]

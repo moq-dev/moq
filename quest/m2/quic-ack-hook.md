@@ -66,5 +66,5 @@ Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
 
 - [Starvation at frame granularity](/quest/m2/starvation-frames.md) - the
   moq-net consumer
-- [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - decides
+- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - decides
   what acknowledgment means over a reliable transport

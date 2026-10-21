@@ -3,6 +3,8 @@ mod codec;
 mod color;
 mod h264;
 mod h265;
+mod projection;
+mod stereo;
 mod vp9;
 
 pub use av1::*;
@@ -10,6 +12,8 @@ pub use codec::*;
 pub use color::*;
 pub use h264::*;
 pub use h265::*;
+pub use projection::*;
+pub use stereo::*;
 pub use vp9::*;
 
 use std::collections::{BTreeMap, btree_map};
@@ -241,6 +245,19 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub color: Option<Color>,
 
+	/// How the picture maps onto the viewer's field of view. Absent means rectilinear.
+	///
+	/// Live state, like [`color`](Self::color).
+	#[serde(default)]
+	pub projection: Option<Projection>,
+
+	/// How each eye's view is packed into the frame. Absent means mono.
+	///
+	/// Live state, like [`color`](Self::color).
+	#[serde(default)]
+	#[serde_as(as = "Option<DisplayFromStr>")]
+	pub stereo: Option<Stereo>,
+
 	/// The maximum bitrate of the video track, if known.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
@@ -330,6 +347,8 @@ impl VideoConfig {
 			display_aspect_width: None,
 			display_aspect_height: None,
 			color: None,
+			projection: None,
+			stereo: None,
 			bitrate: None,
 			enabled: true,
 			preference: 0,
