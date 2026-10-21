@@ -12,7 +12,10 @@
 }:
 
 {
-  imports = [ (modulesPath + "/profiles/qemu-guest.nix") ];
+  imports = [
+    (modulesPath + "/profiles/qemu-guest.nix")
+    ./image.nix
+  ];
 
   networking = {
     hostName = "github-runner";
@@ -31,7 +34,11 @@
     ];
   };
   boot = {
-    loader.grub.device = "/dev/vda";
+    loader = {
+      grub.enable = false;
+      systemd-boot.enable = true;
+      efi.canTouchEfiVariables = false;
+    };
     kernelParams = [ "console=ttyS0" ];
     kernelModules = [ "qemu_fw_cfg" ];
     growPartition = true;
@@ -41,18 +48,31 @@
   };
   fileSystems."/" = {
     device = "/dev/disk/by-label/nixos";
-    fsType = "ext4";
+    fsType = "xfs";
     autoResize = true;
+  };
+  fileSystems."/boot" = {
+    device = "/dev/disk/by-label/ESP";
+    fsType = "vfat";
+    options = [ "umask=0077" ];
   };
   system.stateVersion = "26.05";
 
-  system.build.image = import (modulesPath + "/../lib/make-disk-image.nix") {
-    inherit config lib pkgs;
-    format = "qcow2";
-    partitionTableType = "legacy";
-    diskSize = "auto";
-    additionalSpace = "1G";
-    copyChannel = false;
+  # Build the offline migration tool with the same image and disk budget.
+  system.build.runner-migrate = pkgs.writeShellApplication {
+    name = "runner-migrate";
+    runtimeInputs = with pkgs; [
+      coreutils
+      gptfdisk
+      libguestfs-with-appliance
+      psmisc
+      qemu_kvm
+    ];
+    text = ''
+      runner_image=${config.system.build.image}/${config.image.fileName}
+      runner_capacity=${toString resources.disk}G
+      ${builtins.readFile ./migrate.sh}
+    '';
   };
 
   services.openssh = {
