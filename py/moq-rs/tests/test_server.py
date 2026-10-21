@@ -550,3 +550,48 @@ async def test_client_context_keeps_the_body_error():
             await asyncio.gather(*reading, return_exceptions=True)
             if broadcast is not None:
                 broadcast.close()
+
+
+async def _await_grant(auth: moq.Auth, want: moq.Grant) -> None:
+    async def follow() -> None:
+        while auth.grant() != want:
+            await auth.grant_changed()
+
+    await asyncio.wait_for(follow(), timeout=5.0)
+
+
+async def test_session_auth_reads_the_grant():
+    """Both sides read the grant their peer gave them; a peer that verifies no tokens refuses one."""
+    version = ["moq-lite-07-wip"]
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"], versions=version) as server:
+        sessions: list = []
+        accepted = asyncio.Event()
+
+        async def accept_loop() -> None:
+            async for request in server:
+                sessions.append(await request.accept())
+                accepted.set()
+
+        accept_task = asyncio.create_task(accept_loop())
+        try:
+            async with moq.Client(
+                f"https://{server.local_addr}", tls_verify=False, bind="127.0.0.1:0", versions=version
+            ) as client:
+                session = client.session
+                assert session is not None
+                everything = moq.Grant(publish=("**",), subscribe=("**",))
+                await _await_grant(session.auth(), everything)
+                await asyncio.wait_for(accepted.wait(), timeout=5.0)
+                await _await_grant(sessions[0].auth(), everything)
+
+                with pytest.raises(moq.Error.Unsupported):
+                    await asyncio.wait_for(session.auth().add("extra"), timeout=5.0)
+                assert session.auth().grant() == everything
+        finally:
+            accept_task.cancel()
+            try:
+                await accept_task
+            except asyncio.CancelledError:
+                pass
+            for session in sessions:
+                session.cancel(0)

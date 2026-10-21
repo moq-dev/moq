@@ -274,16 +274,18 @@ impl Rendition {
 	/// Subscribe to the rendition, honoring its cross-broadcast reference (the catalog
 	/// `broadcast` field).
 	async fn subscribe(self, source: moq_mux::Source) -> Result<codec::Track> {
+		use hang::catalog::Reference;
+
 		match &self {
 			Self::Audio(name, config) => {
 				let track = source
-					.subscribe_track(config.broadcast.as_ref(), hang::catalog::Reference::track(config, name))
+					.subscribe_track(config.broadcast(), config.epoch(), config.track(name))
 					.await?;
 				codec::Track::opus(track, config)
 			}
 			Self::Video(name, config) => {
 				let track = source
-					.subscribe_track(config.broadcast.as_ref(), hang::catalog::Reference::track(config, name))
+					.subscribe_track(config.broadcast(), config.epoch(), config.track(name))
 					.await?;
 				codec::Track::video(track, config)
 			}

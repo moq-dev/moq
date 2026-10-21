@@ -2,7 +2,7 @@ import * as z from "zod/mini";
 import { CompressionSchema } from "./compression";
 import { u53Schema } from "./integers";
 import { ModeSchema } from "./mode";
-import { RelativeBroadcastSchema } from "./path";
+import { EpochSchema, RelativeBroadcastSchema } from "./path";
 
 /**
  * Schema for a single binary track: application data published as opaque payloads.
@@ -19,6 +19,11 @@ export const BinaryConfigSchema = z.looseObject({
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
+	// The publisher instance the reference names, when known. Absent accepts whichever instance
+	// resolves first. An epoch-aware route proving another instance fails the entry; an epochless
+	// route cannot prove one, so there it is best effort. Without `broadcast`, it names the
+	// catalog's own instance.
+	epoch: z.optional(EpochSchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),

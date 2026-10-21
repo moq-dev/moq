@@ -1306,6 +1306,10 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 	let mut names = BTreeSet::new();
 	let mut reference = |id: &str, config: &dyn Reference| {
 		let name = config.track(id);
+		if let Some(epoch) = config.epoch() {
+			// MSF has nowhere to name an instance, so its readers take whichever resolves first.
+			tracing::warn!(rendition = id, %epoch, "MSF cannot carry a reference epoch; advertising without it");
+		}
 		let namespace = match config.broadcast().filter(|rel| !rel.is_empty()) {
 			None => None,
 			Some(rel) => {

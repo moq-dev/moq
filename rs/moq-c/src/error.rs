@@ -4,44 +4,83 @@ use crate::ffi;
 
 // Keep these public constants as the single source for both Rust's return mapping and the
 // generated C header. -1, -11, -12, and -39 are retired and remain reserved.
+/// The MoQ protocol operation failed.
 pub const MOQ_ERROR_MOQ: i32 = -2;
+/// The URL could not be parsed.
 pub const MOQ_ERROR_URL: i32 = -3;
+/// The input is not valid UTF-8.
 pub const MOQ_ERROR_UTF8: i32 = -4;
+/// The connection could not be established.
 pub const MOQ_ERROR_CONNECT: i32 = -5;
+/// A required pointer is null or invalid.
 pub const MOQ_ERROR_INVALID_POINTER: i32 = -6;
+/// The resource handle is invalid.
 pub const MOQ_ERROR_INVALID_ID: i32 = -7;
+/// The requested resource was not found.
 pub const MOQ_ERROR_NOT_FOUND: i32 = -8;
+/// The media format is not recognized.
 pub const MOQ_ERROR_UNKNOWN_FORMAT: i32 = -9;
+/// Initialization failed.
 pub const MOQ_ERROR_INIT_FAILED: i32 = -10;
+/// The timestamp is outside the supported range.
 pub const MOQ_ERROR_TIMESTAMP_OVERFLOW: i32 = -13;
+/// The requested log level is invalid.
 pub const MOQ_ERROR_LEVEL: i32 = -14;
+/// The enum value or error code is invalid.
 pub const MOQ_ERROR_INVALID_CODE: i32 = -15;
+/// A Rust task panicked.
 pub const MOQ_ERROR_PANIC: i32 = -16;
+/// The origin is offline.
 pub const MOQ_ERROR_OFFLINE: i32 = -17;
+/// The media catalog or container could not be processed.
 pub const MOQ_ERROR_HANG: i32 = -18;
+/// The requested rendition index is out of range.
 pub const MOQ_ERROR_NO_INDEX: i32 = -19;
+/// A string contains an unexpected NUL byte.
 pub const MOQ_ERROR_NUL: i32 = -20;
+/// The session handle was not found.
 pub const MOQ_ERROR_SESSION_NOT_FOUND: i32 = -21;
+/// The origin handle was not found.
 pub const MOQ_ERROR_ORIGIN_NOT_FOUND: i32 = -22;
+/// The announcement handle was not found.
 pub const MOQ_ERROR_ANNOUNCEMENT_NOT_FOUND: i32 = -23;
+/// The broadcast handle was not found.
 pub const MOQ_ERROR_BROADCAST_NOT_FOUND: i32 = -24;
+/// The catalog handle was not found.
 pub const MOQ_ERROR_CATALOG_NOT_FOUND: i32 = -25;
+/// The media handle was not found.
 pub const MOQ_ERROR_MEDIA_NOT_FOUND: i32 = -26;
+/// The track handle was not found.
 pub const MOQ_ERROR_TRACK_NOT_FOUND: i32 = -27;
+/// The frame handle was not found.
 pub const MOQ_ERROR_FRAME_NOT_FOUND: i32 = -28;
+/// Media could not be imported or exported.
 pub const MOQ_ERROR_MUX: i32 = -29;
+/// An audio codec operation failed.
 pub const MOQ_ERROR_AUDIO: i32 = -30;
+/// The importer did not consume the complete input buffer.
 pub const MOQ_ERROR_BUFFER_NOT_CONSUMED: i32 = -31;
+/// The group handle was not found.
 pub const MOQ_ERROR_GROUP_NOT_FOUND: i32 = -32;
+/// The native transport helper failed.
 pub const MOQ_ERROR_NATIVE: i32 = -33;
+/// Authorization is required or invalid.
 pub const MOQ_ERROR_UNAUTHORIZED: i32 = -34;
+/// Authorization does not permit the requested operation.
 pub const MOQ_ERROR_FORBIDDEN: i32 = -35;
+/// A video codec operation failed.
 pub const MOQ_ERROR_VIDEO: i32 = -36;
+/// JSON could not be parsed or encoded.
 pub const MOQ_ERROR_JSON: i32 = -37;
+/// A JSON track could not be processed.
 pub const MOQ_ERROR_JSON_TRACK: i32 = -38;
+/// The configuration contains an invalid value.
 pub const MOQ_ERROR_INVALID_CONFIG: i32 = -40;
+/// A standalone consumer cannot resolve a rendition in another broadcast.
 pub const MOQ_ERROR_UNRESOLVABLE_BROADCAST: i32 = -41;
+/// The authorization token expired.
 pub const MOQ_ERROR_EXPIRED: i32 = -42;
+/// The catalog requires a newer moq-hang version than this build supports.
 pub const MOQ_ERROR_UNSUPPORTED_CATALOG: i32 = -43;
 
 /// Whether a protocol code is from the session or stream registry.

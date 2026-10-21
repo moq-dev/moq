@@ -47,4 +47,4 @@ none.
 ## Related
 
 - [#5695](https://github.com/moq-dev/moq/pull/5695) - adds `Route::auth`, bound to one session's handle
-- [Bindings](/quest/m1/auth/bindings.md) - exposes `Connection::auth()` through moq-ffi, so it should follow this shape
+- `rs/moq-ffi/src/auth.rs` - wraps both the session and the connection handle behind one `MoqAuth`; collapse it onto this shape
