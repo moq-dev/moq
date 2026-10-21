@@ -814,15 +814,23 @@ impl Schedule {
 	/// Whether nothing is left to lay out: every unit sent, and the clock past its decode time.
 	pub fn is_empty(&self) -> bool {
 		if let Some(grid) = &self.sync {
-			return grid.is_empty()
-				&& self
-					.horizon
-					.is_none_or(|horizon| grid.index().is_none_or(|next| next > horizon));
+			return grid.is_empty() && self.media_done();
 		}
 		self.units.is_empty()
 			&& self
 				.horizon
 				.is_none_or(|horizon| self.next.is_some_and(|next| next > horizon))
+	}
+
+	/// Under [`Self::sync`], whether every media packet placed has gone out and the clock is past
+	/// its decode time, whatever SI is still queued.
+	pub fn media_done(&self) -> bool {
+		self.sync.as_ref().is_some_and(|grid| {
+			!grid.holds_media()
+				&& self
+					.horizon
+					.is_none_or(|horizon| grid.index().is_none_or(|next| next > horizon))
+		})
 	}
 
 	/// Drop everything queued and start the grid afresh.

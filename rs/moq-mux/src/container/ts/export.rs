@@ -2953,9 +2953,11 @@ where
 			{
 				self.flush_packs(|_, due| due <= index + lead)?;
 			}
+			// With nothing more coming, SI joins only slots the media still runs to: an entry due
+			// in every slot would otherwise keep the grid from emptying.
 			if self.sync
 				&& let Some((index, _)) = self.schedule.upcoming()
-				&& known.is_none_or(|known| index < known)
+				&& known.map_or(!self.schedule.media_done(), |known| index < known)
 			{
 				self.queue_si(index)?;
 			}

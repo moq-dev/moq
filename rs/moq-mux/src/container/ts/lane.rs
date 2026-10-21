@@ -492,7 +492,12 @@ impl Grid {
 
 	/// Whether anything placed is still to go out.
 	pub fn is_empty(&self) -> bool {
-		self.placed.is_empty() && self.si.is_empty()
+		!self.holds_media() && self.si.is_empty()
+	}
+
+	/// Whether media placed is still to go out, whatever SI is queued.
+	pub fn holds_media(&self) -> bool {
+		!self.placed.is_empty()
 	}
 
 	/// The slot [`Self::lay`] lays next: on from the last, else the one before the first holding

@@ -9775,6 +9775,8 @@ struct Placed {
 	mux_rate: Option<u64>,
 	/// Export with [`Export::with_sync`], which needs `mux_rate`.
 	sync: bool,
+	/// Also carry an SDT from a snapshot track, re-emitted at this interval.
+	sdt: Option<Duration>,
 }
 
 impl Placed {
@@ -9788,6 +9790,7 @@ impl Placed {
 			rendition: false,
 			mux_rate: None,
 			sync: false,
+			sdt: None,
 		}
 	}
 }
@@ -9861,6 +9864,33 @@ async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
 		}
 	}
 	let mut data = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	// Held open: dropping the producer ends the track before export subscribes.
+	let _sdt = placed.sdt.map(|interval| {
+		let mut track = broadcast.create_track("0x0011-0x42.si", timed()).unwrap();
+		track
+			.write_frame(
+				Timestamp::ZERO,
+				Bytes::from(make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8])),
+			)
+			.unwrap();
+		catalog
+			.modify()
+			.unwrap()
+			.ext
+			.mpegts
+			.si
+			.entry(0x0011)
+			.or_default()
+			.insert(
+				0x42,
+				tscat::SiEntry {
+					track: "0x0011-0x42.si".to_string(),
+					interval: Some(interval),
+					..Default::default()
+				},
+			);
+		track
+	});
 
 	for (k, &pts) in placed.video.iter().enumerate() {
 		let slice = vec![if k == 0 { 0x65u8 } else { 0x41 }; 400];
@@ -10142,6 +10172,43 @@ async fn placed_pes_goes_out_whole_at_its_placement_under_sync() {
 			"{ms} ms: first byte at {first} ns, a slot past its placement"
 		);
 	}
+}
+
+/// Under `--sync`, an SI entry due in every slot goes out while the media does and stops with
+/// it, so the flush at the end returns.
+#[test]
+fn si_due_every_slot_ends_with_the_media_under_sync() {
+	let (sent, received) = std::sync::mpsc::channel();
+	// A thread of its own: a flush that never returns blocks the runtime that would time it out.
+	std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.start_paused(true)
+			.build()
+			.unwrap();
+		let _ = sent.send(runtime.block_on(export_placed(Placed {
+			mux_rate: Some(2_000_000),
+			sync: true,
+			sdt: Some(Duration::ZERO),
+			..Placed::new(vec![(1_000, pes_bare(0xbf, b"private_stream_2"))])
+		})));
+	});
+	let slices = received
+		.recv_timeout(Duration::from_secs(5))
+		.expect("the flush at the end never returned")
+		.unwrap();
+	let sdt = slices
+		.iter()
+		.filter(|slice| {
+			slice
+				.payload
+				.as_chunks::<188>()
+				.0
+				.iter()
+				.any(|packet| (u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])) == 0x0011)
+		})
+		.count();
+	assert!(sdt > 1, "the SDT repeats with the media: {sdt} slices");
 }
 
 /// Tune-in drops a PES placed before the keyframe departs, and keeps one placed beside it,
