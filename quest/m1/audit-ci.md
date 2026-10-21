@@ -68,9 +68,9 @@ Check first (from the test cost audit's m0 run, 2026-10-19):
   fixture in the entry itself, or a semantic conflict with a PR merged after it
   was queued. Check the entry's head branch and what merged around it before
   calling it a flake.
-- Owned elsewhere: [nightly media players](/quest/m1/media-engines-nightly.md),
-  release builds by [release builds link](/quest/m0/release-link.md), and Rust
-  advisories by [the dependency audit](/quest/m1/audit-deps.md).
+- Owned elsewhere: release builds by
+  [release builds link](/quest/m0/release-link.md), and Rust advisories by
+  [the dependency audit](/quest/m1/audit-deps.md).
 - Re-running a single job in place cannot redeploy Pages: the earlier
   attempt's `github-pages` artifact remains and `deploy-pages` refuses two.
   Delete the stale artifact first, or wait for the next Nightly.
