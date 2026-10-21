@@ -50,7 +50,9 @@ Decisions (maintainer, 2026-10-13):
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
   spare-desktop runner, its cache server, and the cache release it waited on.
   Reopened 2026-10-19, conditionally: [faster runners](/quest/m0/ci/runners.md)
-  compares it again once the pipeline is optimized.
+  compares it again once the pipeline is optimized. Since 2026-10-20 the
+  queue runs on the persistent `nix/runner` VM; that quest records its
+  measurements.
 
 Decided 2026-10-15: local CPU admission, test-cost reductions, and setup
 reductions are all m0. `quest gate` owns generic command admission; repositories
@@ -74,7 +76,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Require the release gates](/quest/m0/ci/release-gates.md) - release PRs require platform and the optional workflows; main requires only the Linux gate
-- [CI pipeline audit](/quest/m0/ci/audit.md) - every queue and nightly job earns its minutes, and the Rust cache reuses unchanged crates
 - [Pin Quest's gate](/quest/m0/ci/quest-gate-pin.md) - make shared command admission available
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - condition: the maintainer bootstrap; then measure hits, restore time, and expiry

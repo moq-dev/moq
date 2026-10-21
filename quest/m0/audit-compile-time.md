@@ -25,9 +25,9 @@ native build tools, and Nextest bounded to two jobs. These are single
 observations, not regression limits or evidence of an optimization.
 
 Scope: this audit owns per-crate build cost in one build (dev, release, and
-incremental). The [CI pipeline audit](/quest/m0/ci/audit.md) owns job-level CI
-cost: cache keys and hits, aws-lc-sys recompiling several times per cold job,
-both rustls backends in the gate, and `--timings` output in CI. Deduplicating
+incremental). The [CI workflow audit](/quest/m1/audit-ci.md) owns job-level CI
+cost: cache hits, aws-lc-sys recompiling several times per cold job, and both
+rustls backends in cold builds. Deduplicating
 or upgrading dependencies belongs to the
 [dependency audit](/quest/m1/audit-deps.md).
 
@@ -106,5 +106,5 @@ Remaining work before completing this run:
 
 ## Related
 
-- [CI pipeline audit](/quest/m0/ci/audit.md) - owns job-level CI build cost and caching
+- [CI workflow audit](/quest/m1/audit-ci.md) - owns job-level CI build cost and caching
 - [Dependency audit](/quest/m1/audit-deps.md) - owns deduplicating and upgrading dependencies
