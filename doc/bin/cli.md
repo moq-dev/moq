@@ -478,6 +478,13 @@ A report holds 1,024 rendition IDs at most: past that, each new ID replaces
 one that has ended.
 [Stats](/concept/stats#media-reports) has the schema.
 
+A TS import adds an `mpegts` section: each elementary stream's access units
+and quiet time, and the TR 101 290 counters it logs. A TS export adds its
+streams' rows and a `release` section: frames dropped late, the margin frames
+arrive with, and its clock's offset and drift from the source. A passthrough
+reports `release` alone at export and neither at import. See
+[MPEG-TS sections](/concept/stats#mpeg-ts-sections).
+
 ## Debugging
 
 `RUST_LOG=debug` prints the negotiated version and every subscription.

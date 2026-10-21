@@ -701,9 +701,19 @@ export class Decoder {
 		const channels = Math.min(sample.numberOfChannels, ring.channels);
 		const channelData: Float32Array[] = [];
 		for (let channel = 0; channel < channels; channel++) {
-			const data = new Float32Array(frames);
-			sample.copyTo(data, { format: "f32-planar", planeIndex: channel, frameOffset, frameCount: frames });
-			channelData.push(data);
+			if (frameOffset === 0) {
+				const data = new Float32Array(frames);
+				sample.copyTo(data, { format: "f32-planar", planeIndex: channel, frameCount: frames });
+				channelData.push(data);
+				continue;
+			}
+			// WebKit's GStreamer port (Linux WebKitGTK and WPE) reads out of bounds converting
+			// interleaved audio to planar at a nonzero frameOffset, and its hardened builds abort the
+			// page. Opus pre-skip trims the first frame of every stream, so copy the whole plane and
+			// trim it here.
+			const data = new Float32Array(sample.numberOfFrames);
+			sample.copyTo(data, { format: "f32-planar", planeIndex: channel });
+			channelData.push(data.slice(frameOffset, frameOffset + frames));
 		}
 
 		// Hand off to the ring. Shared transport writes directly; post transport

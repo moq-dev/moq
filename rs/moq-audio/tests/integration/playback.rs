@@ -42,6 +42,33 @@ fn input() -> playback::Input {
 	input
 }
 
+/// Open a device with [`open_any`] and wait until it pulls on its own clock.
+///
+/// A sink's writes are dropped until the device first reads them, and a device
+/// can take a while to start: PulseAudio's null sink, while idle, renders up
+/// to two seconds ahead and only picks a new stream up after that. Without the
+/// wait, every test here passed or failed on how that startup fell.
+async fn open() -> playback::Engine {
+	let engine = open_any().await;
+	let mut observer = engine.observe().expect("an observer");
+
+	// The first pull fills the device's buffer at once, so only a clock that
+	// keeps moving after it shows the device is playing.
+	let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+	let mut first = None;
+	loop {
+		let clock = observer.read().expect("an observation").clock;
+		if !clock.is_zero() && clock >= *first.get_or_insert(clock) + Duration::from_millis(100) {
+			return engine;
+		}
+		assert!(
+			tokio::time::Instant::now() < deadline,
+			"the device never started pulling"
+		);
+		tokio::time::sleep(Duration::from_millis(10)).await;
+	}
+}
+
 /// Open `$MOQ_AUDIO_DEVICE`, the system default, or the first device that will
 /// have us.
 ///
@@ -51,7 +78,7 @@ fn input() -> playback::Input {
 /// keeps these tests about our code rather than about the box's audio routing,
 /// and the environment variable pins a specific device when you want to hear
 /// the result rather than only meter it.
-async fn open() -> playback::Engine {
+async fn open_any() -> playback::Engine {
 	if let Ok(id) = std::env::var("MOQ_AUDIO_DEVICE") {
 		let mut config = playback::Config::default();
 		config.device = Some(id);
@@ -100,6 +127,33 @@ async fn plays_a_tone_through_the_default_device() {
 
 	assert!(peaked, "the mixer never saw the tone");
 	assert!(drained, "the device never drained the queue");
+}
+
+/// The device runs a period or two ahead of the speaker, not seconds.
+///
+/// PulseAudio's unconfigured buffer is two seconds, filled in bursts, so a
+/// sink's first writes were dropped until the next burst read it, and every
+/// test above passed or failed on how the bursts happened to fall.
+#[tokio::test]
+#[ignore = "needs an output device; run by just rs audio-devices"]
+async fn the_device_buffers_periods_not_seconds() {
+	let engine = open().await;
+	let mut observer = engine.observe().expect("an observer");
+
+	let mut latency = None;
+	for _ in 0..20 {
+		tokio::time::sleep(Duration::from_millis(50)).await;
+		latency = observer.read().expect("an observation").latency;
+		if latency.is_some() {
+			break;
+		}
+	}
+
+	let latency = latency.expect("the host never reported a latency");
+	assert!(
+		latency < Duration::from_millis(500),
+		"the device runs {latency:?} ahead of the speaker"
+	);
 }
 
 /// Two sinks on one device, which is the case a call with several participants
