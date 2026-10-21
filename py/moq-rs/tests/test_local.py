@@ -682,9 +682,9 @@ async def test_dynamic_broadcast_request():
     request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
     assert request.path == "dynamic/broadcast"
 
-    served = moq.BroadcastProducer()
-    track = served.publish_track("status", moq.TrackInfo(timescale=1_000_000))
-    request.accept(served)
+    prepared = request.prepare(moq.mint_epoch())
+    track = prepared.broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
+    served = prepared.publish()
     with pytest.raises(Exception):
         _ = request.path
 
@@ -1560,8 +1560,7 @@ async def test_dynamic_serves_a_request_under_a_prefix():
     pending = asyncio.create_task(consumer.request_broadcast("live/cam"))
     request = await asyncio.wait_for(dynamic.requested_broadcast(), timeout=5.0)
     assert request.path == "live/cam"
-    served = moq.BroadcastProducer()
-    request.accept(served)
+    served = request.prepare(moq.mint_epoch()).publish()
     await asyncio.wait_for(pending, timeout=5.0)
     dynamic.cancel()
     served.close()

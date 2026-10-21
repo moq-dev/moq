@@ -54,6 +54,7 @@ pub enum Error {
 	UnsupportedMappingFamily(u8),
 }
 
+/// A result using this module's error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Typed Opus configuration mirroring the parsed fields of an OpusHead packet.

@@ -166,7 +166,7 @@ class SmokeTest {
     fun `origin alias constructs and consumes`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.consume().use { /* lifecycle smoke */ }
-            origin.dynamic("", Route()).use { /* dynamic origin smoke */ }
+            origin.dynamic("").use { /* dynamic origin smoke */ }
         }
     }
 
@@ -581,15 +581,14 @@ class SmokeTest {
     @Test
     fun `dynamic serves a request under a prefix`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            origin.dynamic("live", Route()).use { dynamic ->
+            origin.dynamic("live").use { dynamic ->
                 val pending = async {
                     origin.consume().requestBroadcast("live/cam")
                 }
                 val request = dynamic.requestedBroadcast()
                 assertEquals("live/cam", request.path())
-                BroadcastProducer().use { served ->
-                    request.accept(served)
-                    pending.await()
+                request.prepare(mintEpoch()).use { prepared ->
+                    prepared.publish().use { pending.await() }
                 }
             }
         }
@@ -633,6 +632,36 @@ class SmokeTest {
                     input,
                     AudioEncoderOutput(codec = AudioCodec.opus(), track = "coarse", frameDurationUs = 2_000u),
                 )
+            }
+        }
+    }
+
+    /**
+     * Both sides read the grant their peer gave them, and a peer that verifies no tokens
+     * of its own refuses another one as unsupported.
+     */
+    @Test
+    fun `session auth reads the grant`() = runTest {
+        val version = listOf("moq-lite-07-wip")
+        Server.listen(
+            ServerConfig(bind = "127.0.0.1:0", versions = version, tls = ServerTls(generate = listOf("localhost"))),
+        ).use { server ->
+            // Not requests().first(): ending that collection cancels the server.
+            val accepted = async { server.server.accept()!!.accept() }
+            val moq = Moq.connect(
+                "https://${server.localAddr}",
+                ClientConfig(bind = "127.0.0.1:0", versions = version, tls = ClientTls(insecure = true), once = true),
+            )
+            moq.use {
+                val everything = Grant(publish = listOf("**"), subscribe = listOf("**"), expiresUs = null)
+                assertEquals(everything, moq.auth().grants().first { it != null })
+                val session = accepted.await()
+                assertEquals(everything, session.auth().grants().first { it != null })
+                assertNull(everything.expires)
+
+                assertFailsWith<MoqException.Unsupported> { moq.auth().add("extra") }
+                assertEquals(everything, moq.auth().grant())
+                session.cancel(0u)
             }
         }
     }

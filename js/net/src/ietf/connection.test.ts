@@ -11,9 +11,10 @@ import { Connection } from "./connection.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Group } from "./object.ts";
-import { Parameters, SetupOption, SetupOptions } from "./parameters.ts";
-import { initialMaxRequestId, MaxRequestId, RequestError, RequestOk } from "./request.ts";
+import { Parameters } from "./parameters.ts";
+import { MaxRequestId, RequestError, RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";
+import { initialMaxRequestId, SetupOption, SetupOptions } from "./setup_options.ts";
 import { SubscribeError, SubscribeOk } from "./subscribe.ts";
 import {
 	SUBSCRIBE_TRACKS_ID,

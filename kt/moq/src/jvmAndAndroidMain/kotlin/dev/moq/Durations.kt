@@ -13,6 +13,10 @@ import kotlin.time.Duration.Companion.microseconds
 val ConnectionStats.rtt: Duration?
     get() = rttUs?.toLong()?.microseconds
 
+/** How long until the grant lapses, measured when it was read, or null for never. */
+val Grant.expires: Duration?
+    get() = expiresUs?.toLong()?.microseconds
+
 /** Delay before the first reconnect attempt, or null for the default. */
 val Backoff.initial: Duration?
     get() = initialUs?.toLong()?.microseconds

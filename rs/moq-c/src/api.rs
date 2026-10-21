@@ -1740,7 +1740,6 @@ pub unsafe extern "C" fn moq_origin_create_broadcast(origin: u32, path: *const c
 ///
 /// # Safety
 /// - The caller must ensure that prefix is a valid pointer to prefix_len bytes of data.
-/// - `route` may be NULL, or must point at a readable [moq_route].
 /// - `on_request` must be non-NULL; a missing callback is refused before the route is advertised.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_request` callback.
 #[unsafe(no_mangle)]
@@ -1748,31 +1747,14 @@ pub unsafe extern "C" fn moq_origin_dynamic(
 	origin: u32,
 	prefix: *const c_char,
 	prefix_len: usize,
-	route: *const moq_route,
 	on_request: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let origin = ffi::parse_id(origin)?;
 		let prefix = unsafe { ffi::parse_str(prefix, prefix_len)? };
-		let route = unsafe { parse_route(route)? };
 		let on_request = unsafe { ffi::OnStatus::new(user_data, on_request)? };
-		State::lock().origin.dynamic(origin, prefix, route, on_request)
-	})
-}
-
-/// Re-price a served route in place. The prefix cannot change.
-///
-/// Returns a zero on success, or a negative code on failure.
-///
-/// # Safety
-/// - `route` may be NULL, or must point at a readable [moq_route].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_origin_dynamic_update(dynamic: u32, route: *const moq_route) -> i32 {
-	ffi::enter(move || {
-		let dynamic = ffi::parse_id(dynamic)?;
-		let route = unsafe { parse_route(route)? };
-		State::lock().origin.dynamic_update(dynamic, route)
+		State::lock().origin.dynamic(origin, prefix, on_request)
 	})
 }
 
@@ -1808,19 +1790,61 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 	})
 }
 
-/// Accept a broadcast request with an unannounced broadcast producer.
+/// Start a broadcast request answer under `epoch`, hidden until published.
 ///
-/// Consumes the request handle. Returns a zero on success, or a negative code
-/// on failure.
+/// Consumes the request handle, writes the new broadcast handle to `broadcast`
+/// (which cannot announce itself; only [moq_broadcast_prepared_publish] does),
+/// and returns a positive prepared-answer handle or a negative error.
+///
+/// # Safety
+/// - `epoch` must point at `epoch_len` readable bytes containing a UUIDv7 epoch.
+/// - `broadcast` must point at writable storage for one handle.
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_broadcast_request_accept(request: u32, broadcast: u32) -> i32 {
+pub unsafe extern "C" fn moq_broadcast_request_prepare(
+	request: u32,
+	epoch: *const c_char,
+	epoch_len: usize,
+	broadcast: *mut u32,
+) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let broadcast = ffi::parse_id(broadcast)?;
+		let epoch = unsafe { ffi::parse_str(epoch, epoch_len)? }
+			.parse()
+			.map_err(|_| Error::InvalidCode)?;
+		let broadcast_out = unsafe { broadcast.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let mut state = State::lock();
-		let pending = state.origin.broadcast_request_take(request)?;
-		let consumer = state.publish.producer(broadcast)?.consume();
-		pending.accept(&consumer);
+		let (pending, driver) = state.origin.broadcast_request_take(request)?;
+		let prepared = pending.prepare(epoch)?;
+		let broadcast = state.publish.create((prepared.broadcast().clone(), driver.clone()))?;
+		let id = state.origin.prepared_insert(prepared, driver)?;
+		*broadcast_out = broadcast.into();
+		Ok(id)
+	})
+}
+
+/// Publish a prepared claim answer and resolve every waiting requester.
+///
+/// Consumes the prepared handle. The broadcast handle returned by
+/// [moq_broadcast_request_prepare] remains owned by the caller.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_broadcast_prepared_publish(prepared: u32) -> i32 {
+	ffi::enter(move || {
+		let prepared = ffi::parse_id(prepared)?;
+		let (prepared, driver) = State::lock().origin.prepared_take(prepared)?;
+		driver.check()?;
+		let result = prepared.publish();
+		driver.check()?;
+		result?;
+		Ok(())
+	})
+}
+
+/// Free a prepared claim answer without publishing it.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_broadcast_prepared_free(prepared: u32) -> i32 {
+	ffi::enter(move || {
+		let prepared = ffi::parse_id(prepared)?;
+		State::lock().origin.prepared_take(prepared)?;
 		Ok(())
 	})
 }
@@ -1833,8 +1857,10 @@ pub extern "C" fn moq_broadcast_request_accept(request: u32, broadcast: u32) -> 
 pub extern "C" fn moq_broadcast_request_reject(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let pending = State::lock().origin.broadcast_request_take(request)?;
+		let (pending, driver) = State::lock().origin.broadcast_request_take(request)?;
+		driver.check()?;
 		pending.reject(moq_net::Error::App(error_code));
+		driver.check()?;
 		Ok(())
 	})
 }

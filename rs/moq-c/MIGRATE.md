@@ -9,6 +9,12 @@ How to update your code for each breaking change, newest first.
 `moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.
 Publish a replacement under a new name, and expect a finished track's demand terminal callback when the broadcast closes rather than at the finish.
 
+### A claim answers by publishing (#5678)
+
+`moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
+`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer under the epoch you pass: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under that epoch.
+`moq_broadcast_prepared_free` refuses an answer you will not publish.
+
 ### `moq_track_info` gains `compress` (#5928)
 
 The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.

@@ -11,6 +11,13 @@ extension ConnectionStatsDuration on MoqConnectionStats {
   Duration? get rtt => rttUs == null ? null : Duration(microseconds: rttUs!);
 }
 
+/// Duration views over an authorization grant.
+extension GrantDuration on MoqGrant {
+  /// How long until the grant lapses, measured when it was read, or null for never.
+  Duration? get expires =>
+      expiresUs == null ? null : Duration(microseconds: expiresUs!);
+}
+
 /// Duration views over the reconnect pacing.
 extension BackoffDuration on MoqBackoff {
   /// Delay before the first reconnect attempt, or null for the default.

@@ -45,7 +45,7 @@ const QUEUE = 32;
 // conversion at all, and Web Audio resamples the device to it far better than we could.
 const DEFAULT_SAMPLE_RATE = 48_000;
 
-// Signals the capture reads.
+/** Signals the capture reads. */
 export type CaptureInput = {
 	// The track or decoded samples to pump PCM off.
 	source: Getter<Source | undefined>;
@@ -84,6 +84,7 @@ type CaptureOutput = {
  * resample and restamp them, which is the whole thing publishing a file has to avoid.
  */
 export class Capture {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<CaptureInput>;
 
 	/** Override the capture rate in Hz. Defaults to the device's, snapped to one every codec takes. */
@@ -97,6 +98,7 @@ export class Capture {
 		format: new Signal<Format | undefined>(undefined),
 		root: new Signal<AudioNode | undefined>(undefined),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// Whether the track's context is suspended until the page's first click or keypress.

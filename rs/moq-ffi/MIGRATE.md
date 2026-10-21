@@ -10,6 +10,12 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer::finish` lets go, instead of unlisting when its producer finishes or is released.
 Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
 
+### A claim answers by publishing (#5678)
+
+`MoqOriginProducer::dynamic(prefix)` takes no `MoqRoute`, and `MoqOriginDynamic::update` is gone.
+`MoqBroadcastRequest::accept` is replaced by `prepare(epoch)`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
+Mint a fresh epoch per output run with `moq_mint_epoch()`. Dropping a prepared answer unpublished refuses the request.
+
 ### `MoqTrackInfo` gains `compress` (#5928)
 
 It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.
