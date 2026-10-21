@@ -6,7 +6,7 @@ use moq_net::track::Position;
 use moq_net::{Timescale, Timestamp, broadcast, group, track};
 use object_store::ObjectStoreExt;
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use moq_clock::sleep;
 
 use super::*;
 use crate::Info;
@@ -63,7 +63,7 @@ async fn subscribed(track: &track::Producer) {
 }
 
 async fn finished(task: JoinHandle<Result<()>>) {
-	tokio::time::timeout(Duration::from_secs(1000), task)
+	moq_clock::timeout(Duration::from_secs(1000), task)
 		.await
 		.expect("the producer ends with its broadcast")
 		.unwrap()

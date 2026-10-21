@@ -79,7 +79,7 @@ struct Put {
 
 /// A sequence received ahead of the one being stored.
 enum Pending {
-	Group(group::Consumer, Instant),
+	Group(Box<group::Consumer>, Instant),
 	Datagram(Datagram, Instant),
 }
 
@@ -97,7 +97,7 @@ struct Run {
 	/// Received sequences not stored yet, waiting on a lower one.
 	pending: BTreeMap<u64, Pending>,
 	/// The group being stored, frame by frame.
-	current: Option<group::Consumer>,
+	current: Option<Box<group::Consumer>>,
 	/// When the gap below the lowest pending sequence is given up.
 	gap: Option<Instant>,
 	groups_done: bool,
@@ -106,7 +106,8 @@ struct Run {
 
 enum Event {
 	Frame(u64, moq_net::Result<Option<moq_net::frame::Frame>>),
-	Group(moq_net::Result<Option<group::Consumer>>),
+	// Boxed, since a group consumer dwarfs every other event and waits in `Run::pending`.
+	Group(moq_net::Result<Option<Box<group::Consumer>>>),
 	Datagram(moq_net::Result<Option<Datagram>>),
 	Timer,
 }
@@ -268,7 +269,7 @@ impl<S: ObjectStore> Track<S> {
 				if !run.groups_done
 					&& let Poll::Ready(group) = subscriber.poll_recv_group(waiter)
 				{
-					return Poll::Ready(Event::Group(group));
+					return Poll::Ready(Event::Group(group.map(|group| group.map(Box::new))));
 				}
 				if !run.datagrams_done
 					&& let Poll::Ready(datagram) = subscriber.poll_recv_datagram(waiter)
