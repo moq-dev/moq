@@ -44,9 +44,10 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         try ffi.info()
     }
 
-    /// Change this subscriber's delivery preferences.
-    public func update(subscription: Subscription) {
-        ffi.update(subscription: subscription)
+    /// Change this subscriber's delivery preferences. Throws on a time anchor the track
+    /// can't serve.
+    public func update(subscription: Subscription) throws {
+        try ffi.update(subscription: subscription)
     }
 
     /// Cancel all current and future reads.

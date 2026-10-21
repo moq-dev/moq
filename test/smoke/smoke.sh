@@ -769,19 +769,6 @@ run_subscriber() {
             [[ "${n:-0}" -ge 1 ]]
             ;;
         python)
-            # moq-rs occasionally SIGABRTs from its dedicated runtime thread
-            # during process teardown, after the subscriber has received data.
-            # Retry only that abnormal exit once; ordinary protocol/time-out
-            # failures remain failures, and a repeated abort is still surfaced.
-            local status
-            if RUST_BACKTRACE="${RUST_BACKTRACE:-1}" run_client "$PY" "$CLIENTS/python/smoke.py" \
-                subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"; then
-                return 0
-            else
-                status=$?
-            fi
-            [[ "$status" -eq 134 ]] || return "$status"
-            echo "warning: moq-rs subscriber aborted during teardown; retrying once" >&2
             RUST_BACKTRACE="${RUST_BACKTRACE:-1}" run_client "$PY" "$CLIENTS/python/smoke.py" \
                 subscribe --url "$URL" --broadcast "$broadcast" --timeout "$TIMEOUT"
             ;;
