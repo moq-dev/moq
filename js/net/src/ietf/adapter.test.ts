@@ -12,7 +12,8 @@ import {
 	PublishNamespaceDone,
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
-import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW, RequestError, RequestOk } from "./request.ts";
+import { MaxRequestId, RequestError, RequestOk } from "./request.ts";
+import { initialMaxRequestId, REQUEST_WINDOW } from "./setup_options.ts";
 import { Subscribe, SubscribeUpdate } from "./subscribe.ts";
 import { SubscribeNamespaceLegacy } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
