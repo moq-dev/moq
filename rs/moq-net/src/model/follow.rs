@@ -488,7 +488,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_a_held_takeover_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.dynamic("live", Route::default()).unwrap();
+		let dynamic = origin.dynamic("live").unwrap();
 		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
 
 		// The wait is on the dynamic route's answer when the exact path takes over without an epoch.
@@ -504,7 +504,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_a_dropped_takeover_again() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.dynamic("live", Route::default()).unwrap();
+		let dynamic = origin.dynamic("live").unwrap();
 		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
 
 		let (dropped, _publish) = futures::join!(available(&mut announced), async {
@@ -524,7 +524,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_a_gap_while_resolving_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.dynamic("", Route::default()).unwrap();
+		let dynamic = origin.dynamic("").unwrap();
 		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
 
 		let (_arrival, _publish) = futures::join!(available(&mut announced), async {
@@ -547,7 +547,7 @@ mod tests {
 		let exact = origin.publish("live", route(&epoch)).unwrap();
 		let first = available(&mut announced).await;
 
-		let dynamic = origin.dynamic("", route(&epoch)).unwrap();
+		let dynamic = origin.dynamic_route("", route(&epoch)).unwrap();
 		exact.unannounce();
 		let served = broadcast::Info::new().produce();
 		let (again, ()) = futures::join!(available(&mut announced), async {

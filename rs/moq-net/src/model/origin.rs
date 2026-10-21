@@ -8211,7 +8211,7 @@ mod tests {
 		assert_eq!(listed(&mut tracks).await, "synced");
 
 		let server = producer
-			.dynamic(
+			.dynamic_route(
 				"room/alice",
 				Route::default().with_epoch(epoch()).with_hops(hops(&[10])).with_cost(1),
 			)
@@ -8232,7 +8232,7 @@ mod tests {
 	async fn a_front_through_a_covering_prefix_lists_nothing() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let server = producer.dynamic("room", Route::default()).unwrap();
+		let server = producer.dynamic_route("room", Route::default()).unwrap();
 		let pending = consumer.request_broadcast("room/alice", None);
 		let upstream = broadcast::Info::new().produce();
 		let _video = upstream.create_track("video", None).unwrap();
