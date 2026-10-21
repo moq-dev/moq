@@ -500,7 +500,7 @@ interface StreamFlowState {
 	recvConsumed: bigint;
 }
 
-/** A `WebTransport` session carried over QMux on a WebSocket. */
+/** A `WebTransport` session carried over a WebSocket, for hosts without native WebTransport. */
 export default class Session implements WebTransport {
 	// The transport: a native `WebSocketStream` when the platform has one (real
 	// backpressure), otherwise the `WebSocketStream` ponyfill over a plain
@@ -541,23 +541,23 @@ export default class Session implements WebTransport {
 		return this.#protocol;
 	}
 
-	/** Resolves once the handshake completes, or rejects if it fails. */
+	/** Resolves once the WebSocket opens and the session can carry streams. */
 	readonly ready: Promise<void>;
 	#readyResolve: () => void;
 	#readyReject: (err: Error) => void;
-	/** Resolves on a graceful close, or rejects on a transport error. */
+	/** Resolves with the close code and reason on a clean close, or rejects with a {@link SessionError}. */
 	readonly closed: Promise<WebTransportCloseInfo>;
 	#closedResolve: (info: WebTransportCloseInfo) => void;
 	#closedReject: (err: Error) => void;
 
-	/** Bidirectional streams the peer opens. */
+	/** Bidirectional streams the peer opens, in arrival order. */
 	readonly incomingBidirectionalStreams: ReadableStream<WebTransportBidirectionalStream>;
 	#incomingBidirectionalQueue: IncomingStreamQueue<WebTransportBidirectionalStream>;
-	/** Unidirectional streams the peer opens. */
+	/** Unidirectional streams the peer opens, in arrival order. */
 	readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
 	#incomingUnidirectionalQueue: IncomingStreamQueue<ReadableStream<Uint8Array>>;
 
-	/** Datagrams sent as QMux DATAGRAM frames, dropped when unsupported or oversized. */
+	/** Unreliable datagrams sent and received as QMux DATAGRAM frames. */
 	readonly datagrams = new Datagrams((data) => this.#sendDatagram(data));
 
 	// Flow control state
@@ -1761,7 +1761,7 @@ export default class Session implements WebTransport {
 		});
 	}
 
-	/** Open a bidirectional stream once the session is ready. */
+	/** Open a bidirectional stream, waiting for the peer to grant stream credit. */
 	async createBidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WebTransportBidirectionalStream> {
 		await this.ready;
 
@@ -1841,7 +1841,7 @@ export default class Session implements WebTransport {
 		return { readable: recvStream.readable, writable: writer };
 	}
 
-	/** Open a unidirectional stream once the session is ready. */
+	/** Open a send-only stream, waiting for the peer to grant stream credit. */
 	async createUnidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WritableStream<Uint8Array>> {
 		await this.ready;
 
@@ -2020,7 +2020,7 @@ export default class Session implements WebTransport {
 		void sleep(Nano.fromMilli(Milli(100))).then(() => this.#transportClose());
 	}
 
-	/** Close the session, sending `closeCode` and `reason` to the peer. */
+	/** Close the session with an application code and reason; a no-op once closed. */
 	close(info?: { closeCode?: number; reason?: string }) {
 		if (this.#closed) return;
 		const code = info?.closeCode ?? 0;
@@ -2042,7 +2042,7 @@ export default class Session implements WebTransport {
 		this.#wss?.setHighWaterMark?.(this.#sendBufferSize);
 	}
 
-	/** Always `"default"`, since TCP owns congestion control. */
+	/** Always `"default"`: the underlying TCP connection does its own congestion control. */
 	get congestionControl(): string {
 		return "default";
 	}
