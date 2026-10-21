@@ -2,10 +2,11 @@
 
 ## Goal
 
-A SIGTERM or SIGINT that reaches `moq-relay` at any point after it starts
-serving drains it with a GOAWAY instead of killing it. An embedder whose
-startup fails can still be stopped by its own signals, and a second signal
-during a drain still exits at once.
+When the relay owns its signals (`Relay::with_signals(true)`, as `moq-relay`
+does), a SIGTERM or SIGINT that arrives at any point after it starts serving
+starts the drain instead of killing it. An embedder whose startup fails can
+still be stopped by its own signals, and a second signal during a drain still
+exits at once. An embedder that passes `with_signals(false)` keeps its signals.
 
 ## Plan
 
