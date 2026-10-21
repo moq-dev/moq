@@ -168,6 +168,7 @@ impl Server {
 				cost: None,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				token: None,
 				ietf: self.extensions.ietf && version.has_ietf(),
 			}
 		} else {
@@ -300,12 +301,15 @@ impl Server {
 			}
 			PausedHandshake::Boxed(_) => false,
 		});
+		let token = match &handshake {
+			PausedHandshake::LiteSetup { client_setup, .. } => client_setup.setup.token.clone(),
+			_ => None,
+		};
 		Ok(Handshake {
 			path,
 			role,
 			origin,
-			// moq-lite carries no SETUP token.
-			token: None,
+			token,
 			assigned_hop: crate::Hop::random(),
 			auth,
 			inner: Some(RequestInner {
@@ -639,6 +643,7 @@ where
 				version,
 				path: None,
 				authority: None,
+				token: None,
 				peer_setup_stream: Some(peer_setup.stream),
 				peer_declared: Some(peer_setup.declared),
 				auth: auth.clone(),
@@ -774,6 +779,7 @@ where
 						version: v,
 						path: None,
 						authority: None,
+						token: None,
 						peer_setup_stream: None,
 						peer_declared: Some(peer_declared),
 						auth: auth.clone(),
@@ -852,10 +858,11 @@ where
 		self.auth.clone()
 	}
 
-	/// The credential the client presented in its SETUP's `AUTHORIZATION TOKEN` option.
+	/// The connection credential the client presented in its SETUP: moq-transport's
+	/// `AUTHORIZATION TOKEN` option, or moq-lite-07's Token parameter.
 	///
-	/// Only moq-transport carries one, so moq-lite sessions return `None`. The transport
-	/// has not verified it: authorize on it the way you would a URL token.
+	/// Older moq-lite versions carry none, so they return `None`. The transport has not
+	/// verified it: authorize on it the way you would a URL token.
 	pub fn token(&self) -> Option<&setup::Token> {
 		self.token.as_ref()
 	}
@@ -1186,6 +1193,7 @@ mod tests {
 			role,
 			cost: None,
 			hop,
+			token: None,
 			ietf: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
