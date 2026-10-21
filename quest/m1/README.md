@@ -114,8 +114,6 @@ lands before the cut.
 - [Binding docs](/quest/m1/docs-bindings.md) - every public moq-ffi and moq-c item has rustdoc, carried into the generated bindings and `moq.h`
 - [JS export docs](/quest/m1/docs-js.md) - every public JS export and class member has TSDoc, and `just check` enforces it
 
-- [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
-
 - [Nightly media players](/quest/m1/media-engines-nightly.md) - the Firefox and WebKit player rows pass, or an engine that cannot play leaves the nightly matrix
 
 - [moq-net compiles once](/quest/m1/net-erase-transport.md) - the session drivers stop monomorphizing per transport and per crate, saving several MiB of the relay, FFI library, `libmoq` and CLI
