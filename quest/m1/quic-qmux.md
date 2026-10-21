@@ -17,8 +17,8 @@ Decided in the 2026-09-30 plan:
   negotiation, byte-stream framing, and socket stats (about 2.3k lines) onto
   it. Its session implements moq-net's `transport::poll` traits instead of
   `web-transport-trait` ([Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md)). The TypeScript `@moq/qmux`
-  keeps its own state machine and is the interop reference; it moves into
-  `js/` in [TS qmux](/quest/m1/ts-qmux.md).
+  keeps its own state machine and is the interop reference; it lives in
+  `js/qmux`.
 - **All four wire versions stay**: draft-02, draft-01, draft-00, and the
   legacy `webtransport` format, since published clients (and the TS peer)
   negotiate them. They differ only in record framing, so they share the one
@@ -64,6 +64,9 @@ The native scheduler does not wait for this dependent proof.
 Add the missing wire evidence before release: golden vectors for each of the four versions,
 bidirectional interoperability against the last web-transport `qmux` release (0.6.x, a
 test-only dependency), and the in-tree TypeScript qmux peer used by `js/net`.
+Restore the TS-driven suite `js/qmux` did not import (moq-dev/web-transport's
+`js/qmux/tests/interop.test.ts` with the `interop-server` and `interop-client` qmux
+examples it spawns): TS client and TS server against the Rust peer, per draft, wired into CI.
 
 Acceptance carried over from the deleted m0 qmux credit quests (web-transport#412 and #413
 are no longer pursued): a session returns connection-level credit for every byte it
@@ -90,10 +93,6 @@ Decided 2026-10-20 (maintainer): moved to m1. moq stops depending on the
 web-transport repo, so the qmux credit and close fixes ship here instead of
 as upstream releases and pin bumps; the bug stays on main until this lands.
 The release line keeps its current qmux and gets no backport.
-
-## Required
-
-- [TS qmux](/quest/m1/ts-qmux.md) - the in-tree TypeScript peer this quest's interop acceptance runs against
 
 ## Related
 

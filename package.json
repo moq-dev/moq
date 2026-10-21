@@ -28,6 +28,7 @@
 		"doc",
 		"js/net",
 		"js/p2p",
+		"js/qmux",
 		"js/clock",
 		"js/pattern",
 		"js/auth",
