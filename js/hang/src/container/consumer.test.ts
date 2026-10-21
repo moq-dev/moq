@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { type Micro, Milli } from "@moq/clock";
+import { Manual, type Micro, Milli, Nano } from "@moq/clock";
 import { Format as LocFormat, Producer as LocProducer } from "@moq/loc";
 import { Group, Error as NetError, SessionCode, StreamCode, Time, Track, Varint } from "@moq/net";
 import { AudioConfigSchema } from "../catalog/audio.ts";
@@ -845,36 +845,41 @@ test("Consumer skips groups via PTS-span when over the max delay", async () => {
 });
 
 test("Consumer measures arrivals as they land", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("audio"),
 		maxDelay: 5000 as Milli,
 	});
-
-	// Nothing observed yet: the cold-start estimate.
-	expect(consumer.spread.peek()).toBe(100 as Milli);
-
-	// Groups arriving exactly as fast as their media, across four resample intervals. Nothing is
-	// late, so the evidence pulls the estimate down from the cold start.
-	for (let i = 0; i < 5; i++) {
-		writeGroupWithLegacyFrames(track, i, [(i * 520_000) as Micro]);
-		await settle(520);
-	}
-	expect(consumer.spread.peek()).toBeLessThan(100 as Milli);
-
-	// A replacement on the same path continues the estimate rather than restarting cold.
 	const next = new Track.Producer("next");
-	const replacement = new Consumer(next.subscribe(), {
-		format: new LegacyFormat("audio"),
-		maxDelay: 5000 as Milli,
-		predecessor: consumer,
-	});
-	expect(replacement.spread.peek()).toBe(consumer.spread.peek());
 
-	track.close();
-	consumer.close();
-	next.close();
-	replacement.close();
+	try {
+		// Nothing observed yet: the cold-start estimate.
+		expect(consumer.spread.peek()).toBe(100 as Milli);
+
+		// Groups arriving exactly as fast as their media, across four resample intervals. Nothing is
+		// late, so the evidence pulls the estimate down from the cold start.
+		for (let i = 0; i < 5; i++) {
+			writeGroupWithLegacyFrames(track, i, [(i * 520_000) as Micro]);
+			await clock.advanceAsync(Nano.fromMilli(Milli(520)));
+		}
+		expect(consumer.spread.peek()).toBeLessThan(100 as Milli);
+
+		// A replacement on the same path continues the estimate rather than restarting cold.
+		const replacement = new Consumer(next.subscribe(), {
+			format: new LegacyFormat("audio"),
+			maxDelay: 5000 as Milli,
+			predecessor: consumer,
+		});
+		expect(replacement.spread.peek()).toBe(consumer.spread.peek());
+		replacement.close();
+	} finally {
+		track.close();
+		consumer.close();
+		next.close();
+		restore();
+	}
 });
 
 // --- Ordering ---

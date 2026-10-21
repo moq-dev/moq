@@ -380,10 +380,12 @@ can hear, so the target should rise readily and fall grudgingly, and it does:
 - **Falling** is driven by the forget factor alone, over the 20 s half-life
   above. Old mass in the tail has to decay out before the quantile can move
   down, and nothing can make it decay faster.
-- **A single bad observation does not move the target at all.** Once the prior
-  is spent it adds `1 - FORGET` weight, 1.7%, well under the 5% the 95th
+- **A single bad observation does not move the target on its own.** Once the
+  prior is spent it adds `1 - FORGET` weight, 1.7%, well under the 5% the 95th
   percentile needs. It takes a few intervals of genuine lateness before the
-  target responds, which is the correct answer to a one-off straggler. Only in
+  target responds, which is the correct answer to a one-off straggler. A path
+  whose recent lateness already holds nearly 5% of the weight sits on the
+  boundary, so one more late interval tips it up for a fold or two. Only in
   the first few seconds, while an observation can take up to `FRESH_MAX`, can
   one interval move it, and then it decays like any other evidence.
 
