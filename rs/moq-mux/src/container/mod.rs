@@ -54,6 +54,7 @@ pub enum Read {
 	Frame {
 		/// The group's sequence number. Only equality means anything: numbers may skip.
 		group: u64,
+		/// The media frame delivered by the group.
 		frame: Frame,
 	},
 	/// Media after an item already read will never reach this reader: a group was skipped,
@@ -75,6 +76,7 @@ pub enum Read {
 	End {
 		/// The group's sequence number. Only equality means anything: numbers may skip.
 		group: u64,
+		/// Where the media stops, at the scale the marker was encoded with.
 		end: moq_net::Timestamp,
 	},
 }

@@ -248,6 +248,7 @@ impl<S: Stream> Export<S> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
+	/// Poll for the next MKV byte chunk, or `None` once the export ends.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Bytes>>> {
 		// 1. Drain catalog updates.
 		while let Some(catalog) = self.catalog.as_mut() {
