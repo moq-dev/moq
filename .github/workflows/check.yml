@@ -14,11 +14,16 @@ on:
     # would post a passing context over a failed one; on main PRs that is free.
     types: [opened, synchronize, reopened, edited, closed]
   merge_group:
-    types: [checks_requested]
+    # `destroyed` only cancels the dead group's in-flight run, like `closed`.
+    # GitHub keeps that run queued when the group is rebuilt behind a departed
+    # entry, where it holds the queue runner ahead of the live groups until they
+    # time out. Actions delivers this type although its docs omit it.
+    types: [checks_requested, destroyed]
 
 # Cancel in-flight runs when a new commit lands on the same PR, or when the PR
 # is merged/closed (the close event shares this group and supersedes the build).
-# Each merge group has its own queue ref, separate from the PR ref.
+# Each merge group has its own queue ref, shared by its `destroyed` event and
+# separate from the PR ref.
 concurrency:
   group: check-${{ github.ref }}
   cancel-in-progress: true
@@ -27,9 +32,9 @@ jobs:
   # One checkout, dev shell, cache restore, and dispatcher for lints and tests.
   check:
     name: Check
-    # A close/merge run exists only to cancel the superseded in-flight build via
-    # the concurrency group above.
-    if: github.event.action != 'closed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
+    # A close/merge or destroyed-group run exists only to cancel the superseded
+    # in-flight build via the concurrency group above.
+    if: github.event.action != 'closed' && github.event.action != 'destroyed' && (github.event_name != 'pull_request' || github.base_ref == 'release')
     # Leave the variable unset until the local runner is online and verified.
     runs-on: ${{ github.event_name == 'merge_group' && vars.MOQ_QUEUE_RUNNER || 'ubuntu-24.04-arm' }}
     # `main` and its merge queue write the Rust cache; see .github/actions/rust-cache.

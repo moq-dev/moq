@@ -1,8 +1,10 @@
 mod aac;
 mod codec;
+mod layout;
 
 pub use aac::*;
 pub use codec::*;
+pub use layout::*;
 
 use std::collections::{BTreeMap, btree_map};
 
@@ -127,6 +129,13 @@ pub struct AudioConfig {
 	#[serde(rename = "numberOfChannels")]
 	pub channel_count: u32,
 
+	/// What the decoded channels carry, or the codec's own channel order when absent.
+	///
+	/// Live state, like video `color`.
+	#[serde(default)]
+	#[serde_as(as = "Option<DisplayFromStr>")]
+	pub layout: Option<AudioLayout>,
+
 	/// The maximum bitrate of the audio track in bits per second.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
@@ -199,6 +208,7 @@ impl AudioConfig {
 			codec: codec.into(),
 			sample_rate,
 			channel_count,
+			layout: None,
 			bitrate: None,
 			enabled: true,
 			description: None,
