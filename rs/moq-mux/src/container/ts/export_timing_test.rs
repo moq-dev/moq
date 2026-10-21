@@ -1014,6 +1014,11 @@ fn assert_same_synced(a: &Leg, b: &Leg, from: u64) -> usize {
 		let stats = leg.export.stats();
 		assert_eq!((stats.overruns, stats.late), (0, 0), "a lane fell behind");
 	}
+	same_synced(a, b, from)
+}
+
+/// As [`assert_same_synced`], whatever the legs counted.
+fn same_synced(a: &Leg, b: &Leg, from: u64) -> usize {
 	let (a, b) = (slots(a, from), slots(b, from));
 	let common: Vec<u64> = a.keys().filter(|at| b.contains_key(at)).copied().collect();
 	assert!(
@@ -1166,9 +1171,15 @@ async fn complementary_losses(reorder: bool, stop: bool) {
 		path_b.finish(&mut [&mut b]).await;
 
 		let from = 2 * GOP * VIDEO_US;
-		assert!(assert_same_synced(&a, &c, from) > 0, "lag {lag}: leg A lost nothing");
-		assert!(assert_same_synced(&b, &c, from) > 0, "lag {lag}: leg B lost nothing");
-		assert!(assert_same_synced(&a, &b, from) > 0);
+		// A stopped leg may resume behind the slots it laid, and drop what it reads for them.
+		for (leg, stopped) in [(&a, stop), (&b, stop), (&c, false)] {
+			let stats = leg.export.stats();
+			assert_eq!(stats.overruns, 0, "lag {lag}: a lane fell behind");
+			assert!(stopped || stats.late == 0, "lag {lag}: {} packets late", stats.late);
+		}
+		assert!(same_synced(&a, &c, from) > 0, "lag {lag}: leg A lost nothing");
+		assert!(same_synced(&b, &c, from) > 0, "lag {lag}: leg B lost nothing");
+		assert!(same_synced(&a, &b, from) > 0);
 		let (a, b, c) = (slots(&a, from), slots(&b, from), slots(&c, from));
 		for (at, clean) in &c {
 			let (Some(a), Some(b)) = (a.get(at), b.get(at)) else {

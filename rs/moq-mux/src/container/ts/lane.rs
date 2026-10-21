@@ -523,6 +523,9 @@ impl Grid {
 		let tables = Layout::repeats_tables(index) || jump || self.last.is_none();
 		self.last = Some(index);
 		let first = self.layout.first(index);
+		// What a restarted grid holds behind the slot it runs on from went out as stuffing.
+		let ahead = self.placed.split_off(&first);
+		self.late += std::mem::replace(&mut self.placed, ahead).len() as u64;
 		let owners = self.layout.owners(index);
 		let count = owners.len();
 		let mut out = Laid {
@@ -671,6 +674,7 @@ mod test {
 			if next == last + 1 {
 				assert!(!grid.lay(next).jump);
 				assert!(grid.is_empty(), "what it missed never goes out");
+				assert_eq!(grid.late(), 1, "and reached the grid after its position went out");
 			}
 		}
 	}
