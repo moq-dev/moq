@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Client::connect` has no timeout of its own (#5765)
+
+`Client::connect` waits on the auth server for as long as its caller does, and dropping the future drops the request.
+A caller without its own deadline, such as a handshake deadline, wraps the call in one, for example `tokio::time::timeout(Duration::from_secs(10), client.connect(request))`.
+`attach`, revalidate, and end keep their ten-second bound and still report a stalled server as `Error::Unavailable`.
+
 ### Typed admission refusals (#5996)
 
 `Error::Refused` now carries a `Refusal`; construct `Error::Refused(Refusal::default())` for an unattributed refusal and match `Error::Refused(refusal)` to read `reason`, `root`, and `tier`.
