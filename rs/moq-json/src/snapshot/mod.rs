@@ -237,34 +237,37 @@ mod test {
 	/// catalog group aged out of the relay cache underneath it.
 	#[test]
 	fn a_lost_group_waits_for_its_replacement() {
-		let track = moq_net::broadcast::Info::new()
-			.produce()
-			.create_track("test", timed())
-			.unwrap();
-		let mut consumer = Consumer::<Value>::new(track.subscribe(None), consumer::Config::default());
-		let waiter = kio::Waiter::noop();
+		// Lost on this side, then reset by the publisher: the reader sees the same loss either way.
+		for lost in [moq_net::Error::Old, moq_net::Error::Stream(moq_net::StreamError::Old)] {
+			let track = moq_net::broadcast::Info::new()
+				.produce()
+				.create_track("test", timed())
+				.unwrap();
+			let mut consumer = Consumer::<Value>::new(track.subscribe(None), consumer::Config::default());
+			let waiter = kio::Waiter::noop();
 
-		// Group 0 delivers a value, then stays open with the reader parked on its next frame.
-		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":1}"#))
-			.unwrap();
-		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 1 })));
-		assert!(consumer.poll_latest(&waiter).is_pending());
+			// Group 0 delivers a value, then stays open with the reader parked on its next frame.
+			let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":1}"#))
+				.unwrap();
+			assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 1 })));
+			assert!(consumer.poll_latest(&waiter).is_pending());
 
-		// The relay reclaims the group out from under the reader.
-		group.abort(moq_net::Error::Old).unwrap();
-		assert!(
-			consumer.poll_latest(&waiter).is_pending(),
-			"a lost group must not end the reader"
-		);
+			// The group is lost out from under the reader.
+			group.abort(lost).unwrap();
+			assert!(
+				consumer.poll_latest(&waiter).is_pending(),
+				"a lost group must not end the reader"
+			);
 
-		// The replacement arrives and the reader picks up where the value now lives.
-		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":2}"#))
-			.unwrap();
-		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 2 })));
+			// The replacement arrives and the reader picks up where the value now lives.
+			let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":2}"#))
+				.unwrap();
+			assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 2 })));
+		}
 	}
 
 	/// Nothing replaces a lost group once the track is finished, so the reader ends cleanly on the
