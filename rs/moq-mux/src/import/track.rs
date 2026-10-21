@@ -1474,7 +1474,9 @@ mod tests {
 			let request = broadcast.reserve_track("video").unwrap();
 			let mut import = Track::video(request, catalog.reserve(), VideoInit::new(format, init)).unwrap();
 
-			import.decode(keyframe, Some(Timestamp::from_micros(1_000).unwrap())).unwrap();
+			import
+				.decode(keyframe, Some(Timestamp::from_micros(1_000).unwrap()))
+				.unwrap();
 			let frame = first_frame(&consumer, "video").await;
 			assert!(frame.keyframe, "{format}: the first frame opens a group");
 			assert_eq!(frame.timestamp, Timestamp::from_micros(1_000).unwrap(), "{format}");
@@ -1484,6 +1486,56 @@ mod tests {
 			);
 			import.finish().unwrap();
 		}
+	}
+
+	/// MP3 through [`Track::audio`]: the catalog comes from the frame header, and
+	/// a group spans frames until the caller cuts it. No test had published MP3.
+	#[tokio::test(start_paused = true)]
+	async fn mp3_groups_span_frames_until_a_cut() {
+		// MPEG-1 Layer III, 128 kbps, 44.1 kHz, joint stereo.
+		let header = [0xFF, 0xFB, 0x90, 0x44];
+		let (broadcast, catalog) = new_broadcast();
+		let consumer = broadcast.consume();
+		let request = broadcast.reserve_track("audio").unwrap();
+		let mut import = Track::audio(
+			request,
+			catalog.reserve(),
+			AudioInit::new(AudioFormat::Mp3, header.to_vec()),
+		)
+		.unwrap();
+
+		let audio = catalog.snapshot().audio.renditions["audio"].clone();
+		assert_eq!((audio.sample_rate, audio.channel_count), (44_100, 2));
+
+		// Delay-tolerant, so the first group is still delivered once the second exists.
+		let replay = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(30));
+		let mut track = consumer.track("audio").unwrap().subscribe(Some(replay)).await.unwrap();
+		for i in 0..4u64 {
+			if i == 2 {
+				import.cut(None).unwrap();
+			}
+			let frame = [&header[..], &[i as u8; 8]].concat();
+			import
+				.decode(frame, Some(Timestamp::from_micros(i * 26_122).unwrap()))
+				.unwrap();
+		}
+		import.finish().unwrap();
+
+		// Frames carrying audio per group, ignoring any empty end-of-group marker.
+		let mut groups = Vec::new();
+		while let Some(mut group) = track.recv_group().await.unwrap() {
+			let mut frames = 0;
+			while let Some(frame) = group.read_frame().await.unwrap() {
+				frames += usize::from(
+					!hang::container::Frame::decode(frame.payload)
+						.unwrap()
+						.payload
+						.is_empty(),
+				);
+			}
+			groups.push(frames);
+		}
+		assert_eq!(groups, [2, 2]);
 	}
 
 	/// [`TrackStream`] finds the frames in a raw byte stream however it is chunked,
@@ -1500,13 +1552,18 @@ mod tests {
 				annexb(&[h265::fixtures::VPS, h265::fixtures::SPS, h265::fixtures::PPS, H265_IDR]),
 				H265_IDR,
 			),
-			(VideoFormat::Av01, av1_keyframe.clone(), &av1_keyframe[av1_keyframe.len() - 3..]),
+			(
+				VideoFormat::Av01,
+				av1_keyframe.clone(),
+				&av1_keyframe[av1_keyframe.len() - 3..],
+			),
 		];
 		for (format, stream, last) in cases {
 			let (broadcast, catalog) = new_broadcast();
 			let consumer = broadcast.consume();
 			let request = broadcast.reserve_track("video").unwrap();
-			let mut import = TrackStream::video(request, catalog.reserve(), VideoInit::new(format, Vec::new())).unwrap();
+			let mut import =
+				TrackStream::video(request, catalog.reserve(), VideoInit::new(format, Vec::new())).unwrap();
 
 			for chunk in stream.chunks(3) {
 				import.decode(chunk).unwrap();
@@ -1515,7 +1572,10 @@ mod tests {
 
 			let frame = first_frame(&consumer, "video").await;
 			assert!(frame.keyframe, "{format}: the first frame opens a group");
-			assert!(frame.payload.ends_with(last), "{format}: the frame ends with its picture");
+			assert!(
+				frame.payload.ends_with(last),
+				"{format}: the frame ends with its picture"
+			);
 		}
 	}
 }
