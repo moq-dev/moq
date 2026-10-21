@@ -100,6 +100,9 @@ struct Run {
 	current: Option<Box<group::Consumer>>,
 	/// When the gap below the lowest pending sequence is given up.
 	gap: Option<Instant>,
+	/// When the first sequence arrived while nothing was stored, so nothing says where the track
+	/// starts: arrival is not sequence order, and a lower one may still be on its way.
+	first: Option<Instant>,
 	groups_done: bool,
 	datagrams_done: bool,
 }
@@ -241,6 +244,7 @@ impl<S: ObjectStore> Track<S> {
 			pending: BTreeMap::new(),
 			current: None,
 			gap: None,
+			first: None,
 			groups_done: false,
 			datagrams_done: false,
 		};
@@ -327,16 +331,24 @@ impl<S: ObjectStore> Track<S> {
 				return Ok(());
 			};
 			let sequence = *entry.key();
-			if let Some(next) = self.next {
-				if sequence < next.group {
+			let waiting = match self.next {
+				Some(next) if sequence < next.group => {
 					entry.remove();
 					continue;
 				}
-				let given_up = entry.get().arrived() + run.max_delay;
-				if sequence > next.group && !draining && moq_clock::now() < given_up {
-					run.gap = Some(given_up);
-					return Ok(());
+				Some(next) => (sequence > next.group).then(|| entry.get().arrived()),
+				// Nothing is below 0; anything else waits from the first arrival, so a stream of
+				// ever lower sequences cannot hold the track back.
+				None => {
+					let first = *run.first.get_or_insert(entry.get().arrived());
+					(sequence > 0).then_some(first)
 				}
+			};
+			if let Some(waiting) = waiting
+				&& !draining && moq_clock::now() < waiting + run.max_delay
+			{
+				run.gap = Some(waiting + run.max_delay);
+				return Ok(());
 			}
 			match entry.remove() {
 				Pending::Datagram(datagram, arrived) => {

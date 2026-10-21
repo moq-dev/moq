@@ -58,7 +58,8 @@ pub struct Config {
 	/// above [`Self::duration`], or objects are cut by it instead.
 	pub flush: Duration,
 	/// The longest a missing group is waited for, capping the publisher's max age. A group still
-	/// missing then is a gap, and the frames behind it wait for that verdict.
+	/// missing then is a gap, and the frames behind it wait for that verdict. A track with nothing
+	/// stored waits this long from its first arrival for a lower sequence, unless that one is 0.
 	pub max_delay: Duration,
 	/// Prune old objects (a DVR), or keep everything when `None` (an archive).
 	pub dvr: Option<Dvr>,

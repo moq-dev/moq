@@ -231,6 +231,43 @@ async fn a_lost_group_is_a_gap_that_never_stalls_later_groups() {
 	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 4, frame: 0 })));
 }
 
+/// Arrival is not sequence order, so a fresh track's first arrival waits for a lower sequence.
+#[tokio::test(start_paused = true)]
+async fn a_fresh_track_waits_for_a_group_below_its_first_arrival() {
+	let store = store();
+	let broadcast = broadcast::Info::new().produce();
+	let video = broadcast.create_track("video", timed()).unwrap();
+	let config = config().with_flush(SECOND).with_max_delay(2 * SECOND);
+	let task = spawn(&store, &broadcast, config);
+	subscribed(&video).await;
+
+	group(&video, 2, &[(2000, "c")]);
+	settle().await;
+	group(&video, 1, &[(1000, "b")]);
+	settle().await;
+	// Nothing is stored until the wait from the first arrival gives up on group 0.
+	sleep(SECOND + SECOND / 2).await;
+	assert!(objects(&store, "video", true).await.is_empty());
+
+	sleep(2 * SECOND).await;
+	let stored = objects(&store, "video", true).await;
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(1, 0, 1000)]);
+	assert_eq!(
+		contents(&stored)[0],
+		[
+			(1, "group", vec!["1000/b".to_string()]),
+			(2, "group", vec!["2000/c".to_string()]),
+		]
+	);
+
+	// Group 0 arriving after that is too late.
+	group(&video, 0, &[(0, "a")]);
+	video.finish().unwrap();
+	broadcast.close();
+	finished(task).await;
+	assert_eq!(objects(&store, "video", true).await.len(), 1);
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_oversized_timed_group_splits_into_ordered_unique_keys() {
 	let store = store();
