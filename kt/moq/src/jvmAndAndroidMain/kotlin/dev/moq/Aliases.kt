@@ -43,6 +43,8 @@ typealias OriginConsumer = uniffi.moq.MoqOriginConsumer
 typealias OriginDynamic = uniffi.moq.MoqOriginDynamic
 /** A requested broadcast not yet accepted: fulfill it with a producer or reject it. */
 typealias BroadcastRequest = uniffi.moq.MoqBroadcastRequest
+/** A claim answer being filled before its exact route is announced. */
+typealias BroadcastPrepared = uniffi.moq.MoqBroadcastPrepared
 /** A stream of announce events under a prefix. */
 typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
 /** A literal prefix, an optional relative pattern, and the hidden-path opt-in for announcement discovery. */

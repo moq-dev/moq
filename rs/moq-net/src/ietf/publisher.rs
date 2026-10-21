@@ -8109,7 +8109,10 @@ mod serve_tests {
 
 		for version in ALL_VERSIONS {
 			let mut h = serve(version);
-			let claim = h._origin.dynamic("live", crate::origin::Route::default()).unwrap();
+			let claim = h
+				._origin
+				.dynamic_route("live", crate::origin::Route::default())
+				.unwrap();
 			let auth = crate::auth::Handle::new(false);
 			auth.authorize(&nothing());
 			h.publisher = h.publisher.clone().with_auth(auth);
@@ -8129,7 +8132,10 @@ mod serve_tests {
 
 		for version in ALL_VERSIONS {
 			let mut h = serve(version);
-			let claim = h._origin.dynamic("live", crate::origin::Route::default()).unwrap();
+			let claim = h
+				._origin
+				.dynamic_route("live", crate::origin::Route::default())
+				.unwrap();
 			let auth = crate::auth::Handle::new(false);
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
 
@@ -8453,7 +8459,7 @@ mod serve_tests {
 		for version in [Version::Draft21, Version::Draft22] {
 			for path in [".", "./child", ".session", ".session/extension"] {
 				let h = serve(version);
-				let claim = h._origin.dynamic("", crate::origin::Route::default()).unwrap();
+				let claim = h._origin.dynamic_route("", crate::origin::Route::default()).unwrap();
 				settle().await;
 				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
 				let mark = h.log.writes.lock().unwrap().len();
@@ -10720,7 +10726,7 @@ mod serve_tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let (claim, published) = match parked {
 			Parked::Resolving => (
-				Some(origin.dynamic("room", crate::origin::Route::default()).unwrap()),
+				Some(origin.dynamic_route("room", crate::origin::Route::default()).unwrap()),
 				None,
 			),
 			Parked::Acking | Parked::Ending => {

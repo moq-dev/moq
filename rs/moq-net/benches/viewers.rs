@@ -181,7 +181,7 @@ fn bench_churn(c: &mut Criterion) {
 				room.leave(subscription);
 			}
 			b.iter(|| {
-				let covering = room.producer.dynamic("room", origin::Route::default()).unwrap();
+				let covering = room.producer.dynamic("room").unwrap();
 				room.poll();
 				drop(covering);
 				room.poll();
