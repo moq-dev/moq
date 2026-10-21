@@ -1252,8 +1252,10 @@ export class Subscriber {
 					console.warn(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
 				}
 			} else if ("drop" in resp) {
+				// The publisher will never send these groups, so they are accounted for without a
+				// stream, and a reader of one still arriving ends with the drop's error now.
 				entry.tail.account(resp.drop.start, resp.drop.end + 1);
-				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1);
+				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1, resp.drop.cause(this.version));
 			}
 		}
 	}

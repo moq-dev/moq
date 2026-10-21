@@ -119,14 +119,43 @@ export function insertRun(runs: Run[], start: number, end: number): void {
 	runs.splice(first, last - first, merged);
 }
 
-/** The sorted, disjoint `runs` with `[start, end)` taken out. */
-export function removeRun(runs: readonly Run[], start: number, end: number): Run[] {
+/** The sorted, disjoint `runs` with `[start, end)` taken out, each part keeping its run's fields. */
+export function removeRun<R extends Run>(runs: readonly R[], start: number, end: number): R[] {
 	return runs.flatMap((run) =>
 		[
-			{ start: run.start, end: Math.min(run.end, start) },
-			{ start: Math.max(run.start, end), end: run.end },
+			{ ...run, start: run.start, end: Math.min(run.end, start) },
+			{ ...run, start: Math.max(run.start, end), end: run.end },
 		].filter((part) => part.start < part.end),
 	);
+}
+
+/** A run of sequences given up, with the error they were given up with. */
+export interface DropRun extends Run {
+	error: Error;
+}
+
+/**
+ * Sorted, disjoint `drops` with `[start, end)` given up with `error`, which replaces whatever
+ * it overlaps. Neighbours given up with the same error merge, so a wide DROP stays one run.
+ */
+export function insertDrop(drops: readonly DropRun[], start: number, end: number, error: Error): DropRun[] {
+	if (start >= end) return [...drops];
+	const next = removeRun(drops, start, end);
+	let at = 0;
+	while (at < next.length && next[at].start < start) at++;
+	next.splice(at, 0, { start, end, error });
+	const merged: DropRun[] = [];
+	for (const run of next) {
+		const last = merged[merged.length - 1];
+		if (last && last.end === run.start && last.error === run.error) last.end = run.end;
+		else merged.push({ ...run });
+	}
+	return merged;
+}
+
+/** The error `drops` gave `sequence` up with, if any. */
+export function dropAt(drops: readonly DropRun[], sequence: number): Error | undefined {
+	return drops.find((run) => run.start <= sequence && sequence < run.end)?.error;
 }
 
 // private: plumbing
@@ -150,8 +179,8 @@ export function runGaps(runs: readonly Run[], start: number, end: number): Run[]
 export type Recv =
 	/** A group to serve. It has already left the buffer, so dropping this is dropping the group. */
 	| { kind: "group"; group: GroupConsumer }
-	/** Sequences `[start, end)` this cursor gave up without serving. */
-	| { kind: "drop"; start: number; end: number }
+	/** Sequences `[start, end)` this cursor gave up without serving, and why. */
+	| { kind: "drop"; start: number; end: number; error: Error }
 	/** Nothing readable, but the track is live and may produce more. */
 	| { kind: "idle" }
 	/** The producer finished, yet groups above the cap are still held: raising it releases them. */
@@ -392,8 +421,11 @@ export const hooks: {
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
 	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
 	// pending: /quest/m1/public-model/ingest.md
-	/** Record sequences `[start, end)` an upstream publisher explicitly gave up. */
-	dropTrackGroups: (producer: Producer, start: number, end: number) => void;
+	/**
+	 * Record sequences `[start, end)` an upstream publisher explicitly gave up with `error`,
+	 * ending the groups still arriving in them with it.
+	 */
+	dropTrackGroups: (producer: Producer, start: number, end: number, error: Error) => void;
 	// pending: /quest/m1/public-model/serve.md
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
@@ -423,6 +455,8 @@ export const hooks: {
 	cachedGroup: (subscriber: Subscriber, sequence: number) => GroupConsumer | undefined;
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
 	holdsGroup: (subscriber: Subscriber, sequence: number) => boolean;
+	/** The error the subscriber's track gave `sequence` up with, if it did, and what changes it. */
+	givenUp: (subscriber: Subscriber, sequence: number) => { error?: Error; changed: Getter<unknown> };
 	// private: capability gap
 	/** A subscriber's largest location now, and whether it can still advance. */
 	peekLargest: (subscriber: Subscriber) => { largest?: Location; ended: boolean };
@@ -573,6 +607,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	holdsGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	givenUp: () => {
 		throw new Error("track.ts not loaded");
 	},
 	peekLargest: () => {
