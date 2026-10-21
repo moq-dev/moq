@@ -14,9 +14,14 @@ shared resolution in `moq_mux::Source` and `@moq/watch`, and the Hang draft
 text; this quest owns the following behavior it left out.
 
 - Share it in `moq_mux` (a `Source::follow`-style API; the shape is open)
-  rather than per reader. `Source::bind` binds once today, as
-  `failed_binding_does_not_retry_a_later_publisher` asserts; that changes.
-  The "no retarget" rule applies only to readers that follow no announcement.
+  rather than per reader, built on `origin::Consumer::announced_broadcast`
+  rather than another hand-rolled loop. Follow unpinned and check each
+  handed-out instance's epoch, as `Source::bind` does: a pinned
+  `announced_broadcast` waits out an epochless route, which would break the
+  best effort the reference epoch promises there. `Source::bind` binds once
+  today, as `failed_binding_does_not_retry_a_later_publisher` asserts; that
+  changes. The "no retarget" rule applies only to readers that follow no
+  announcement.
 - `moqsrc`: Start binds the rendition, End idles its pad, and Restart
   restarts its pump.
 - Exporters: a late first announcement starts the rendition and End ends

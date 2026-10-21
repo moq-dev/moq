@@ -35,6 +35,14 @@ normative:
     date: false
 
 informative:
+  moqepoch:
+    title: "MoQ Epoch Extension"
+    target: https://datatracker.ietf.org/doc/draft-lcurley-moq-epoch/
+    author:
+      -
+        ins: L. Curley
+        name: Luke Curley
+    date: false
   h273:
     title: "Coding-independent code points for video signal type identification"
     target: https://www.itu.int/rec/T-REC-H.273
@@ -685,7 +693,7 @@ It MUST fail the rendition rather than fall back to another instance, including 
 A later catalog update naming another Epoch for an already-resolved path MUST NOT replace the resolved broadcast; the renditions naming the other Epoch fail instead.
 A new catalog instance resolves its references afresh.
 
-A route without an Epoch, such as one over an older moq-lite version or MoQ Transport, cannot prove which instance it serves, so there `epoch` is best effort: the consumer reads the broadcast it resolved.
+A route without an Epoch, such as one over an older moq-lite version or MoQ Transport without the epoch extension {{moqepoch}}, cannot prove which instance it serves, so there `epoch` is best effort: the consumer reads the broadcast it resolved.
 A consumer MUST NOT treat a catalog's `epoch` as evidence that a subscription may resume across routes.
 A consumer that predates the field ignores it and does not gain its guarantee.
 
