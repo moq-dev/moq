@@ -196,6 +196,10 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
+## Authorization
+
+On `moq-lite-07-wip` (opt in with `ClientConfig::versions`), `session->auth()->grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects; `grant_changed()` waits for the next one. `add(token)` presents a fresh token without reconnecting and resolves to an `AuthToken` whose grant joins the union until `cancel()`; it is presented again on every reconnect. A refusal resolves to an `Error` carrying the relay's code.
+
 ## Stats
 
 `session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. While a client session reconnects, `session->failure()` returns why as a `moq::Error`.

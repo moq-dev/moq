@@ -158,6 +158,7 @@ client = moq.Client(
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
   - `await .status() → ConnectionStatus`, `.connects()`, `.failure()`. Watch reconnects; `connects()` counts connections, 1 on the first, and `failure()` says why a reconnect is under way.
   - `.bandwidth() → Bandwidth`. Divide the send estimate between encoders and app-owned tracks.
+  - `.auth() → Auth`. On `moq-lite-07-wip`, `.grant()` reads the peer's `Grant` and `await .add(token) → AuthToken` presents a fresh token without reconnecting.
 
 ### Publishing
 
