@@ -3567,12 +3567,13 @@ async fn finish_serves_finished_tracks_to_a_late_subscriber() {
 	}
 	video.finish().unwrap();
 	audio.finish().unwrap();
+	// A binding's garbage collector may release a finished handle before the broadcast finishes.
+	drop((video, audio));
 
 	let finish = broadcast.finish().unwrap();
 	assert_eq!(finish.linger_us(), 5_000_000);
 	assert!(matches!(broadcast.consume(), Err(MoqError::Closed)));
 	broadcast.close().unwrap();
-	drop((video, audio));
 
 	let late = await_announced(&consumer, "finish").await;
 	let track = late.subscribe_track("audio".into(), None).await.unwrap();

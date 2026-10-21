@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Finished tracks stay until the broadcast ends (#PRNUM)
+
+`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.
+Publish a replacement under a new name, and expect a finished track's demand terminal callback when the broadcast closes rather than at the finish.
+
 ### Anchors can name a time (#6074)
 
 `moq_anchor` gains `timestamp_us`, read with the new `MOQ_ANCHOR_TIME` kind, which changes its ABI.

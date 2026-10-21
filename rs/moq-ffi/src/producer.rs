@@ -101,11 +101,12 @@ impl Drop for BroadcastProducer {
 /// The finished importers a broadcast keeps, or `None` once it ended.
 type Keeping = Option<Vec<Box<dyn kio::MaybeSend>>>;
 
-/// Finished importers a broadcast keeps until it ends.
+/// Finished producers a broadcast keeps until it ends.
 ///
-/// An importer's track unlists once its last producer drops, and a finish holds only listed
-/// tracks. An importer handle lets go of its producer when it finishes, so the broadcast keeps it
-/// here instead, and [`MoqBroadcastProducer::finish`] still holds the track.
+/// A track unlists once its last producer drops, and a finish holds only listed tracks. An
+/// importer lets go of its producer when it finishes, and a binding may release a raw track's
+/// handle whenever its garbage collector runs, so the broadcast keeps them here instead, and
+/// [`MoqBroadcastProducer::finish`] still holds the track.
 #[derive(Clone)]
 pub(crate) struct Finished(Arc<std::sync::Mutex<Keeping>>);
 
@@ -116,12 +117,12 @@ impl Default for Finished {
 }
 
 impl Finished {
-	/// Keep a finished importer until the broadcast ends, or drop it now if it already has.
-	pub(crate) fn keep(&self, importer: impl kio::MaybeSend + 'static) {
-		let importer: Box<dyn kio::MaybeSend> = Box::new(importer);
+	/// Keep a finished producer until the broadcast ends, or drop it now if it already has.
+	pub(crate) fn keep(&self, producer: impl kio::MaybeSend + 'static) {
+		let producer: Box<dyn kio::MaybeSend> = Box::new(producer);
 		let mut kept = self.0.lock().unwrap();
 		if let Some(kept) = kept.as_mut() {
-			kept.push(importer);
+			kept.push(producer);
 		}
 	}
 
@@ -157,6 +158,7 @@ impl MoqTrackDynamic {
 
 struct DynamicProducer {
 	inner: moq_net::broadcast::Dynamic,
+	finished: Finished,
 }
 
 struct TrackDynamicProducer {
@@ -169,7 +171,7 @@ impl DynamicProducer {
 		// accepts it (raw, at a chosen timescale) or publishes media onto it (importer accepts).
 		// The subscriber's subscribe stays pending until then.
 		let request = self.inner.requested_track().await?;
-		Ok(Arc::new(MoqTrackRequest::new(request)))
+		Ok(Arc::new(MoqTrackRequest::new(request, self.finished.clone())))
 	}
 }
 
@@ -245,6 +247,7 @@ impl MoqBroadcastProducer {
 			Ok(Arc::new(MoqBroadcastDynamic {
 				task: Task::new(DynamicProducer {
 					inner: state.broadcast.dynamic(),
+					finished: state.finished.clone(),
 				})
 				.supervised(state.driver.clone()),
 			}))
@@ -306,6 +309,7 @@ impl MoqBroadcastProducer {
 			let producer = broadcast.create_track(name, Some(info))?;
 			Ok(Arc::new(MoqTrackProducer {
 				inner: std::sync::Mutex::new(Some(producer)),
+				finished: state.finished.clone(),
 			}))
 		})
 	}
@@ -535,12 +539,14 @@ impl MoqGroupRequest {
 #[derive(uniffi::Object)]
 pub struct MoqTrackRequest {
 	inner: std::sync::Mutex<Option<moq_net::track::Request>>,
+	finished: Finished,
 }
 
 impl MoqTrackRequest {
-	pub(crate) fn new(request: moq_net::track::Request) -> Self {
+	pub(crate) fn new(request: moq_net::track::Request, finished: Finished) -> Self {
 		Self {
 			inner: std::sync::Mutex::new(Some(request)),
+			finished,
 		}
 	}
 
@@ -588,6 +594,7 @@ impl MoqTrackRequest {
 		let request = self.take()?;
 		Ok(Arc::new(MoqTrackProducer {
 			inner: std::sync::Mutex::new(Some(request.accept(Some(info)))),
+			finished: self.finished.clone(),
 		}))
 	}
 
@@ -605,6 +612,7 @@ impl MoqTrackRequest {
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
 	inner: std::sync::Mutex<Option<moq_net::track::Producer>>,
+	finished: Finished,
 }
 
 impl MoqTrackProducer {
@@ -727,7 +735,8 @@ impl MoqTrackProducer {
 	/// End the track at the live edge.
 	///
 	/// [`finish_at`](Self::finish_at) declares the boundary ahead of time, so this keeps
-	/// that boundary. The handle remains so a later [`abort`](Self::abort) can still run.
+	/// that boundary. The handle remains so a later [`abort`](Self::abort) can still run, and
+	/// the broadcast keeps the finished track until it ends, so its finish still holds it.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
@@ -735,6 +744,7 @@ impl MoqTrackProducer {
 		if track.end().is_none() {
 			track.finish()?;
 		}
+		self.finished.keep(track.clone());
 		Ok(())
 	}
 
