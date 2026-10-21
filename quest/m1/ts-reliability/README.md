@@ -106,7 +106,7 @@ refused means an error or a counted drop.
 | Private sections (0x05), SCTE-35 (0x86 + `CUEI`) | Preserved: `verbatim` section, `pts_adjustment` rebased | landed |
 | MPEG-1/2 video (0x01/0x02) | Preserved: `pesPacket`, keeping its clock role; today clock only, payload discarded | [routes](/quest/m1/ts-reliability/stream-routes.md) |
 | DSM-CC types (0x0A to 0x0D), 0x86 without `CUEI` | Today PES-parsed into damage, or dropped uncounted | [routes](/quest/m1/ts-reliability/stream-routes.md) |
-| CAT, EMM/ECM, ATSC PSIP, other SI PIDs, unlisted PIDs, TS scrambling | Outside the profile, raw lane; today dropped uncounted | [routes](/quest/m1/ts-reliability/stream-routes.md) |
+| CAT, EMM/ECM, ATSC PSIP, other SI PIDs, unlisted PIDs, TS scrambling | Outside the profile, raw lane; counted when the import reads every program. Today dropped uncounted | [routes](/quest/m1/ts-reliability/stream-routes.md) |
 | DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
 | Program identity, program and ES descriptors | Preserved, but captured once | [PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) |
 | PMT add, remove, retype; PID reuse; PAT changes | Normalized: in place under fresh track names, PMT rebuilt at the next `version_number`; program identity changes refused; a removed program retires, and returns as a new epoch. Today stale tracks on import, refusal or stale PMT on export | [PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) |

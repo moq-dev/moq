@@ -2,12 +2,14 @@
 
 ## Goal
 
-TS import gives every PID it reads, other than the null PID 0x1FFF, one
-declared route: decoded, whole-PES `pesPacket`, `verbatim` section, captured
-PSI/SI, or not carried. Null packets are stuffing, rebuilt by export, and
-stay uncounted. A PID the
-semantic lane does not carry shows in `ts::stats` with a count and one
-warning, so an operator sees what to move to the raw lane. A known
+TS import gives every PID of the programs it imports, other than the null
+PID 0x1FFF, one declared route: decoded, whole-PES `pesPacket`, `verbatim`
+section, captured PSI/SI, or not carried. Null packets are stuffing, rebuilt
+by export, and stay uncounted. A PID the semantic lane does not carry shows
+in `ts::stats` with a count and one warning, so an operator sees what to
+move to the raw lane. Multiplex-wide PIDs no program claims are counted when
+the import reads every program (an SPTS, or `--program all`); a
+`--program N` import of an MPTS reports only its own program. A known
 `stream_type` never implies carriage it does not get.
 
 ## Plan
