@@ -1,4 +1,4 @@
-# [L] moq-transport passthrough
+# moq-transport passthrough
 
 ## Goal
 
@@ -80,6 +80,10 @@ Work owned by this README, after the children land:
   before working around it.
 - FETCH cases are skipped upstream. Section 8 stays out while PUBLISH is
   declined.
+
+## Required
+
+- [Timed tracks cross lite-07](/quest/m1/ietf-extension/serve-timed.md) - moq-transport timestamps reach `ietf` extension peers over lite-07, with `unchecked` derived from `Info::ietf()`
 
 ## Related
 
