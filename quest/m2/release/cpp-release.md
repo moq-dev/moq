@@ -24,10 +24,12 @@ The nightly dry run is green: the
 [2026-10-20 Nightly](https://github.com/moq-dev/moq/actions/runs/39421743227)
 checked the installed consumers of all four packaged archives and built both
 OBS plugins against them. It packages this run's prebuilt moq-ffi input,
-while a tag with `cpp/moq/FFI_VERSION` unset builds moq-ffi from source; that
-path last packaged all four targets in the
-[2026-10-16 Nightly](https://github.com/moq-dev/moq/actions/runs/38897397428).
-This quest owns tagging and verifying the published downloads.
+while a tag with `cpp/moq/FFI_VERSION` unset builds moq-ffi from source, a
+path no nightly checks. So if the pin is still unset, first dispatch
+`release-cpp.yml` on the ref to be tagged without `prebuilt-test`: it runs
+the tag's source build and archive check on all four hosts, then both OBS
+builds, and publishes nothing. This quest owns that dry run, tagging, and verifying the
+published downloads.
 
 Decided in the 2026-10-10 audit: the tag also waits for Codecs and the epoch
 rename, so consumers take the binding breaks in one
