@@ -1425,7 +1425,7 @@ async fn closes_at_expires(clock: &moq_clock::Installed, consumer: moq_auth::lea
 	let supervised = tokio::spawn(moq_relay::supervise(
 		server,
 		lease.expect("admitted"),
-		moq_relay::shutdown::Observer::disabled(),
+		moq_relay::shutdown::Observer::disabled().serve(),
 		None,
 	));
 

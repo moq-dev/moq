@@ -5,6 +5,20 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `supervise` takes a `Serving` guard (#6144)
+
+`moq_relay::supervise` takes the `shutdown::Serving` from `Observer::serve` in place of the `Observer`.
+Take it before the session's SETUP reply, and bound that reply with `Observer::until_deadline`, so the drain waits for the session to report its end but not for a stalled reply:
+
+```rust
+let serving = shutdown.serve();
+let (session, driver) = shutdown
+	.until_deadline(request.ok())
+	.await
+	.context("the SETUP reply was still pending at the drain deadline")??;
+moq_relay::supervise(session, lease, serving, None).await
+```
+
 ### Admission runs under the handshake deadline (#5765)
 
 `listen.timeout` now bounds auth admission as part of the handshake, replacing the fixed ten-second admission timeout, so `"0"` also lets admission wait forever.

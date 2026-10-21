@@ -230,8 +230,13 @@ impl Serving {
 		if let Some(subscribe) = subscribe {
 			request = request.with_subscriber(subscribe);
 		}
-		let (session, driver) = request.ok().await?;
-		let result = moq_relay::supervise(session, lease, self.shutdown.clone(), None).await;
+		let serving = self.shutdown.serve();
+		let (session, driver) = self
+			.shutdown
+			.until_deadline(request.ok())
+			.await
+			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
+		let result = moq_relay::supervise(session, lease, serving, None).await;
 		driver.await??;
 		result
 	}
@@ -1147,7 +1152,7 @@ mod tests {
 			}
 		});
 		let server = accepting.await.unwrap();
-		tokio::spawn(moq_relay::supervise(server, lease.unwrap(), observer.clone(), None));
+		tokio::spawn(moq_relay::supervise(server, lease.unwrap(), observer.serve(), None));
 		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		reading.store(false, Ordering::Relaxed);
 
