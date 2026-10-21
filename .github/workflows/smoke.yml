@@ -391,9 +391,10 @@ jobs:
 
   # Publish the relay report from main only (nightly or on demand), never from a
   # PR. moq has one Pages site, so this commits under relays/ on the gh-pages
-  # branch the nightly benchmark table also writes, then deploys that whole
-  # branch. Sharing nightly.yml's concurrency group keeps the two writers from
-  # racing the branch or each other's deploy.
+  # branch the nightly benchmark table and the interop report also write, then
+  # deploys that whole branch. Sharing nightly.yml's concurrency group, with every
+  # waiting writer queued, keeps the writers from racing the branch or each
+  # other's deploy.
   relays-report:
     name: Publish relay report
     needs: relays
@@ -403,6 +404,7 @@ jobs:
     concurrency:
       group: benchmark-pages
       cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
       pages: write

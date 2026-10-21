@@ -23,6 +23,7 @@ default:
 harness:
     ./lib/harness.test.sh
     ./interop/relay-log.test.sh
+    python3 interop/report.test.py
     cd .. && bun test test/interop/compat/resolve.test.ts test/interop/compat/claims.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
@@ -43,6 +44,14 @@ harness:
 interop *args:
     just rs test -p moq-net --lib varint_interop ietf_datagram_interop ietf_track_status_interop auth_unsupported_interop --run-ignored all
     ./interop/interop.sh "$@"
+
+# The harnesses append one record per case to MOQ_TEST_RESULTS; flags link the page to its
+# workflow run. See interop/report.py.
+
+# Render interop case records as a static HTML report.
+[positional-arguments]
+interop-report results out *args:
+    python3 interop/report.py "$@"
 
 # Nightly main vs newest installable registry releases: tokens, moq-lite session
 # versions, decoded catalogs/containers, and group FETCH. See interop/README.md.

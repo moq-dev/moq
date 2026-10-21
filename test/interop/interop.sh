@@ -198,7 +198,113 @@ needs_js() {
     needs js || needs js-native || needs js-native-node || needs js-native-bun
 }
 
+# Released-wire compatibility (compat.sh) pins one version and may run released
+# binaries that predate AUTH, so it runs anonymous: it compares the wire, and the
+# default matrix covers auth.
+COMPAT=0
+[[ -n "${INTEROP_VERSION:-}" ]] && COMPAT=1
+
+# The clients that print the grant they received as an `auth granted` line. The
+# binding clients (python, go, c, gst) have no grant to print until moq-ffi
+# exposes one, and the browser's shared connection keeps its session private.
+prints_grant() {
+    [[ "$COMPAT" -eq 0 ]] || return 1
+    case "$1" in
+        rust | js-native-node | js-native-bun) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# The publishers whose refusal the harness can read: the Rust CLI's log. The
+# binding publishers enforce the grant too, but surface it only through their
+# bindings, and the browser elements have no way to offer $AUTH_VERSION.
+enforces_grant() {
+    [[ "$COMPAT" -eq 0 ]] || return 1
+    case "$1" in
+        rust) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 harness_begin interop "$RERUN"
+
+# ── results ─────────────────────────────────────────────────────────────────
+# Each mode is its own suite in the CI report.
+SUITE=interop
+[[ "$NEGATIVE" -eq 0 ]] || SUITE=interop-negative
+[[ "$MEDIA" -eq 0 ]] || SUITE=media
+
+# The lite drafts the finite-track drop lanes cross between Rust and Node.
+DROP_VERSIONS=(moq-lite-05 moq-lite-06 moq-lite-07-wip)
+
+# Record a case for the CI report: `record <outcome> case=C [field=value...]` (see
+# harness_result). Every session in a case dials the same relay with each client's own
+# transport and version choice, unless compat.sh pins one version for the whole run.
+record() {
+    harness_result "$1" suite="$SUITE" transport=auto version="${INTEROP_VERSION:-auto}" "${@:2}"
+}
+
+# Call <action> <name> <media.ts args...> for each media run on <engine>. The planning
+# pass and the real one share it, so they cannot disagree on which runs exist.
+media_runs() {
+    local action="$1" engine="$2"
+    if [[ -n "$MEDIA_CASES" ]]; then
+        "$action" "$engine: media cases: $MEDIA_CASES" --player-engine "$engine" --cases "$MEDIA_CASES" --focused
+        return
+    fi
+    "$action" "$engine: media output + lifecycle" --player-engine "$engine"
+    "$action" "$engine: control: frozen video" --player-engine "$engine" --fault frozen-video --cases none --expect-fail "video progress"
+    "$action" "$engine: control: silent audio" --player-engine "$engine" --fault silent-audio --cases none --expect-fail "audio tone"
+    "$action" "$engine: control: offset audio" --player-engine "$engine" --fault audio-offset --cases none --expect-fail "audio/video sync"
+    "$action" "$engine: control: leaked session" --player-engine "$engine" --leak --cases detach --expect-fail "resource baseline"
+    "$action" "$engine: control: lagging latecomer" --player-engine "$engine" --lag --cases late-join --expect-fail "late join reaches live"
+}
+
+# shellcheck disable=SC2329  # invoked indirectly via media_runs
+plan_media() {
+    record "not run" case="$1" publisher=js subscriber=js
+}
+
+# Record every case this run will reach as `not run`, before any build, so one the run
+# never reaches still shows in the report. Mirrors the dispatch at the end of this file.
+plan_cases() {
+    local pub sub engine runtime version
+    if [[ "$MEDIA" -eq 1 ]]; then
+        for engine in "${MEDIA_ENGINE_LIST[@]}"; do media_runs plan_media "$engine"; done
+        return
+    fi
+    if [[ "$NEGATIVE" -eq 1 ]]; then
+        for sub in "${SUB_LIST[@]}"; do record "not run" case="no publisher" publisher=none subscriber="$sub"; done
+        return
+    fi
+    if [[ "$TAIL_ONLY" -eq 0 ]]; then
+        for pub in "${PUB_LIST[@]}"; do
+            for sub in "${SUB_LIST[@]}"; do record "not run" case=media publisher="$pub" subscriber="$sub"; done
+            [[ "$IN_TREE" -eq 0 ]] || record "not run" case="relay close" publisher="$pub"
+            ! prints_grant "$pub" || record "not run" case=grant publisher="$pub"
+        done
+        for pub in "${PUB_LIST[@]}"; do
+            enforces_grant "$pub" || continue
+            for sub in "${SUB_LIST[@]}"; do record "not run" case=unauthorized publisher="$pub" subscriber="$sub"; done
+            record "not run" case="unauthorized publisher" publisher="$pub"
+        done
+        ! needs js || record "not run" case="refused session" subscriber=js
+    fi
+    [[ "$IN_TREE" -eq 1 ]] || return 0
+    record "not run" case="CLI FETCH" publisher=rust subscriber=rust
+    record "not run" case=tail publisher=rust subscriber=rust
+    for runtime in js-native-node js-native-bun; do
+        needs "$runtime" || continue
+        record "not run" case=tail publisher=rust subscriber="$runtime"
+        record "not run" case=tail publisher="$runtime" subscriber=rust
+    done
+    needs js-native-node || return 0
+    for version in "${DROP_VERSIONS[@]}"; do
+        record "not run" case=drop publisher=rust subscriber=js-native-node version="$version"
+        record "not run" case=drop publisher=js-native-node subscriber=rust version="$version"
+    done
+}
+plan_cases
 
 TARGET_BASE=""    # cargo target dir (resolved in require_tools)
 PY=""             # python interpreter with the workspace moq build (set in prepare)
@@ -526,12 +632,6 @@ if harness_probe "$URL/certificate.sha256"; then
     exit 1
 fi
 
-# Released-wire compatibility (compat.sh) pins one version and may run released
-# binaries that predate AUTH, so it runs anonymous: it compares the wire, and the
-# default matrix covers auth.
-COMPAT=0
-[[ -n "${INTEROP_VERSION:-}" ]] && COMPAT=1
-
 # The relay's auth server: `moq auth serve` verifying every token this run mints
 # against one fresh key. It answers only POST, so readiness is any HTTP reply.
 if [[ "$COMPAT" -eq 0 ]]; then
@@ -607,17 +707,6 @@ CLI_LOG="${RUST_LOG:-info},moq_net::auth=debug"
 # The lite version with AUTH, which no client offers by default. The clients the
 # harness reads a grant or a refusal from dial it. Compat dials its pinned version.
 AUTH_VERSION="${INTEROP_VERSION:-moq-lite-07-wip}"
-
-# The clients that print the grant they received as an `auth granted` line. The
-# binding clients (python, go, c, gst) have no grant to print until moq-ffi
-# exposes one, and the browser's shared connection keeps its session private.
-prints_grant() {
-    [[ "$COMPAT" -eq 0 ]] || return 1
-    case "$1" in
-        rust | js-native-node | js-native-bun) return 0 ;;
-        *) return 1 ;;
-    esac
-}
 
 # The `auth granted` line a token minted with at most one publish and one
 # subscribe pattern implies. Every client that prints one dials $AUTH_VERSION,
@@ -915,11 +1004,19 @@ run_cell() {
 run_round() {
     local pub="$1" broadcast="$2" pub_pid="$3" want_pass="$4" from="$5"
     local pids=() names=() i sub sub_url sub_grant why
+    # The report's case: media must flow, or (want_pass=0) the token or the missing
+    # publisher must keep it from flowing.
+    local case=media publisher="${pub%-denied}"
+    if [[ "$want_pass" -eq 0 ]]; then
+        case=unauthorized
+        [[ "$pub" != none ]] || case="no publisher"
+    fi
     sub_url=$(token_url --subscribe "**/$broadcast")
     sub_grant=$(grant_line "" "**/$broadcast")
     for sub in "${SUB_LIST[@]}"; do
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
+            record fail case="$case" publisher="$publisher" subscriber="$sub" detail="subscriber client unavailable"
             overall=1
             continue
         fi
@@ -940,12 +1037,21 @@ run_round() {
         why=""
         if harness_wait "${pids[$i]}"; then got=1; else got=0; fi
         elapsed=$(cat "$HARNESS_RUN/$pub-${names[$i]}.secs" 2>/dev/null || echo "?")
+        local cell=(case="$case" publisher="$publisher" subscriber="${names[$i]}" log="$HARNESS_RUN/$pub-${names[$i]}.log")
+        [[ "$elapsed" == "?" ]] || cell+=(seconds="$elapsed")
         if [[ "$got" -eq "$want_pass" ]] && why=$(check_grant "${names[$i]}" "$HARNESS_RUN/$pub-${names[$i]}.log" "$sub_grant"); then
             echo "  PASS  $pub -> ${names[$i]} (${elapsed}s)"
+            record pass "${cell[@]}"
             round_pass=1
         else
             echo "  FAIL  $pub -> ${names[$i]} (${elapsed}s of ${TIMEOUT}s)${why:+ $why}"
             sed 's/^/        /' "$HARNESS_RUN/$pub-${names[$i]}.log" 2>/dev/null || true
+            if [[ -z "$why" && "$want_pass" -eq 1 ]]; then
+                why="no data within ${TIMEOUT}s"
+            elif [[ -z "$why" ]]; then
+                why="saw data it should not have"
+            fi
+            record fail "${cell[@]}" detail="$why"
             overall=1
         fi
     done
@@ -962,8 +1068,12 @@ run_round() {
         stop_publisher "$pub_pid" "${pub%-denied}"
     fi
     # A round that expects no data ends its subscribers by timing out, which is its point.
-    [[ "$want_pass" -eq 0 || "$IN_TREE" -eq 0 ]] || check_idle_outs "$pub" "$from"
-    return 0
+    [[ "$want_pass" -eq 1 && "$IN_TREE" -eq 1 ]] || return 0
+    if check_idle_outs "$pub" "$from"; then
+        record pass case="relay close" publisher="$publisher" log="$HARNESS_RUN/relay.log"
+    else
+        record fail case="relay close" publisher="$publisher" log="$HARNESS_RUN/relay.log" detail="relay connections did not all close cleanly"
+    fi
 }
 
 # Raw-track clients have no codecs: every byte, group, and the declared end is checked.
@@ -984,11 +1094,13 @@ run_tail_client() {
 }
 
 run_drop_pair() {
-    local pub="$1" sub="$2" version="$3" pid subscriber_pid
+    local pub="$1" sub="$2" version="$3" pid subscriber_pid started=$SECONDS
     local name="drop-${version}-${pub}-${sub}"
     local fifo="$HARNESS_RUN/tail-ack" broadcast="$name-$$-$RANDOM"
+    local cell=(case=drop publisher="$pub" subscriber="$sub" version="$version" log="$HARNESS_RUN/$name-sub.log")
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  drop $version $pub -> $sub (client unavailable)"
+        record fail "${cell[@]}" detail="client unavailable"
         overall=1
         return
     fi
@@ -1004,12 +1116,15 @@ run_drop_pair() {
         harness_wait "$pid" || true
         if grep -qx 'tail acknowledged' "$HARNESS_RUN/$name-pub.log"; then
             echo "  PASS  drop $version $pub -> $sub (group 1 cut; clean end 4)"
+            record pass "${cell[@]}" seconds=$((SECONDS - started))
         else
             echo "  FAIL  drop $version $pub -> $sub (publisher did not acknowledge)"
+            record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="publisher did not acknowledge"
             overall=1
         fi
     else
         echo "  FAIL  drop $version $pub -> $sub (drop did not settle before timeout)"
+        record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="drop did not settle before timeout"
         overall=1
         cat "$HARNESS_RUN/$name-pub.log" "$HARNESS_RUN/$name-sub.log"
         harness_reap "$pid"
@@ -1026,10 +1141,12 @@ run_tail_publisher() {
 }
 
 run_tail_pair() {
-    local pub="$1" sub="$2" name="tail-$1-$2" pid subscriber_pid
+    local pub="$1" sub="$2" name="tail-$1-$2" pid subscriber_pid started=$SECONDS
     local fifo="$HARNESS_RUN/tail-ack" broadcast="tail-$1-$2-$$-$RANDOM"
+    local cell=(case=tail publisher="$pub" subscriber="$sub" log="$HARNESS_RUN/$name-sub.log")
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  tail $pub -> $sub (client unavailable)"
+        record fail "${cell[@]}" detail="client unavailable"
         overall=1
         return
     fi
@@ -1048,13 +1165,16 @@ run_tail_pair() {
         harness_wait "$pid" || true
         if grep -qx 'tail acknowledged' "$HARNESS_RUN/$name-pub.log"; then
             echo "  PASS  tail $pub -> $sub (groups 0,1,2,3; clean end 4)"
+            record pass "${cell[@]}" seconds=$((SECONDS - started))
         else
             echo "  FAIL  tail $pub -> $sub (publisher did not acknowledge)"
+            record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="publisher did not acknowledge"
             overall=1
             cat "$HARNESS_RUN/$name-pub.log"
         fi
     else
         echo "  FAIL  tail $pub -> $sub (missing groups or clean end)"
+        record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="missing groups or clean end"
         overall=1
         cat "$HARNESS_RUN/$name-pub.log" "$HARNESS_RUN/$name-sub.log"
         harness_reap "$pid"
@@ -1066,6 +1186,7 @@ run_tail_pair() {
 # Exercise this checkout's CLI FETCH under the same relay close check as live readers.
 run_fetch_round() {
     local name="fetch-rust" fifo="$HARNESS_RUN/fetch-ack" broadcast="fetch-$$-$RANDOM" pid from
+    local started=$SECONDS why=""
     from=$(relay_next_line)
     mkfifo "$fifo"
     exec 9<>"$fifo"
@@ -1084,48 +1205,50 @@ PYCODE
             echo "  PASS  CLI FETCH (group 0; 262144 bytes)"
         else
             echo "  FAIL  CLI FETCH (publisher did not acknowledge)"
+            why="publisher did not acknowledge"
             overall=1
             cat "$HARNESS_RUN/$name-pub.log"
         fi
     else
         echo "  FAIL  CLI FETCH"
+        why="incorrect or missing FETCH payload"
         overall=1
         harness_reap "$pid"
     fi
     exec 9>&-
     rm "$fifo"
-    check_idle_outs "$name" "$from"
+    check_idle_outs "$name" "$from" || why="${why:-relay connections did not all close cleanly}"
+    local cell=(case="CLI FETCH" publisher=rust subscriber=rust seconds=$((SECONDS - started)) log="$HARNESS_RUN/$name-pub.log")
+    if [[ -z "$why" ]]; then record pass "${cell[@]}"; else record fail "${cell[@]}" detail="$why"; fi
 }
 
 # One media.ts invocation. It reports its own verdict (a negative control passes by failing on the
 # assertion it names), so the exit code is the whole answer.
+# shellcheck disable=SC2329  # invoked indirectly via media_runs
 run_media() {
     local name="$1" log started status=0
     shift
     log="$HARNESS_RUN/media-${name//[^[:alnum:]._-]/-}.log"
     started=$SECONDS
     (cd "$CLIENTS/js" && bun media.ts --url "$MEDIA_URL" --timeout "$TIMEOUT" "$@") >"$log" 2>&1 || status=$?
+    local cell=(case="$name" publisher=js subscriber=js seconds=$((SECONDS - started)) log="$log")
     if [[ "$status" -eq 0 ]]; then
         echo "  PASS  $name ($((SECONDS - started))s)"
+        record pass "${cell[@]}"
         # The measurements are the point even when nothing fails: a skew or frame rate creeping
         # toward its bound is worth seeing before it crosses.
         grep -E '^(  |=== )' "$log" || true
     else
         echo "  FAIL  $name ($((SECONDS - started))s)"
+        record fail "${cell[@]}" detail="media.ts exited $status"
         sed 's/^/        /' "$log" >&2 || true
         overall=1
     fi
 }
 
-# The publishers whose refusal the harness can read: the Rust CLI's log. The
-# binding publishers enforce the grant too, but surface it only through their
-# bindings, and the browser elements have no way to offer $AUTH_VERSION.
-enforces_grant() {
-    [[ "$COMPAT" -eq 0 ]] || return 1
-    case "$1" in
-        rust) return 0 ;;
-        *) return 1 ;;
-    esac
+# shellcheck disable=SC2329  # invoked indirectly via media_runs
+fail_media() {
+    record fail case="$1" publisher=js subscriber=js detail="browser client unavailable"
 }
 
 # Check that a publisher refused for <broadcast> failed loud: Unauthorized, naming the path.
@@ -1143,21 +1266,11 @@ if [[ "$MEDIA" -eq 1 ]]; then
     # passes only by failing there, which is what keeps the positive run from being vacuous.
     if is_broken js; then
         echo "  FAIL  media checks (browser client unavailable)"
+        for engine in "${MEDIA_ENGINE_LIST[@]}"; do media_runs fail_media "$engine"; done
         overall=1
     else
         echo "=== media output and lifecycle ==="
-        for engine in "${MEDIA_ENGINE_LIST[@]}"; do
-            if [[ -n "$MEDIA_CASES" ]]; then
-                run_media "$engine: media cases: $MEDIA_CASES" --player-engine "$engine" --cases "$MEDIA_CASES" --focused
-                continue
-            fi
-            run_media "$engine: media output + lifecycle" --player-engine "$engine"
-            run_media "$engine: control: frozen video" --player-engine "$engine" --fault frozen-video --cases none --expect-fail "video progress"
-            run_media "$engine: control: silent audio" --player-engine "$engine" --fault silent-audio --cases none --expect-fail "audio tone"
-            run_media "$engine: control: offset audio" --player-engine "$engine" --fault audio-offset --cases none --expect-fail "audio/video sync"
-            run_media "$engine: control: leaked session" --player-engine "$engine" --leak --cases detach --expect-fail "resource baseline"
-            run_media "$engine: control: lagging latecomer" --player-engine "$engine" --lag --cases late-join --expect-fail "late join reaches live"
-        done
+        for engine in "${MEDIA_ENGINE_LIST[@]}"; do media_runs run_media "$engine"; done
     fi
 elif [[ "$NEGATIVE" -eq 1 ]]; then
     # Negative control: no publisher. Every subscriber must FAIL (time out with
@@ -1171,6 +1284,7 @@ elif [[ "$TAIL_ONLY" -eq 0 ]]; then
         if is_broken "$pub"; then
             for sub in "${SUB_LIST[@]}"; do
                 echo "  FAIL  $pub -> $sub (publisher client unavailable)"
+                record fail case=media publisher="$pub" subscriber="$sub" detail="publisher client unavailable"
             done
             overall=1
             continue
@@ -1180,9 +1294,13 @@ elif [[ "$TAIL_ONLY" -eq 0 ]]; then
         start_publisher "$pub" "$pub" "$broadcast" "$(token_url --publish "$broadcast")"
         run_round "$pub" "$broadcast" "$PUB_PID" 1 "$from"
         if why=$(check_grant "$pub" "$HARNESS_RUN/pub-$pub.log" "$(grant_line "$broadcast" "")"); then
-            prints_grant "$pub" && echo "  PASS  $pub grant"
+            if prints_grant "$pub"; then
+                echo "  PASS  $pub grant"
+                record pass case=grant publisher="$pub" log="$HARNESS_RUN/pub-$pub.log"
+            fi
         else
             echo "  FAIL  $pub $why"
+            record fail case=grant publisher="$pub" log="$HARNESS_RUN/pub-$pub.log" detail="$why"
             overall=1
         fi
     done
@@ -1201,12 +1319,15 @@ elif [[ "$TAIL_ONLY" -eq 0 ]]; then
         if ! check_denied "$log" "$broadcast"; then
             echo "  FAIL  $pub publisher did not fail with Unauthorized naming $broadcast:"
             sed 's/^/        /' "$log" 2>/dev/null || true
+            record fail case="unauthorized publisher" publisher="$pub" log="$log" detail="did not fail with Unauthorized naming the broadcast"
             overall=1
         elif ! why=$(check_grant "$pub" "$log" "$(grant_line "$allowed" "")"); then
             echo "  FAIL  $pub $why"
+            record fail case="unauthorized publisher" publisher="$pub" log="$log" detail="$why"
             overall=1
         else
             echo "  PASS  $pub publisher refused: Unauthorized"
+            record pass case="unauthorized publisher" publisher="$pub" log="$log"
         fi
     done
 
@@ -1217,13 +1338,16 @@ elif [[ "$TAIL_ONLY" -eq 0 ]]; then
         echo "=== browser close code ==="
         if is_broken js; then
             echo "  FAIL  refused session (browser client unavailable)"
+            record fail case="refused session" subscriber=js detail="browser client unavailable"
             overall=1
         else
             started=$SECONDS
             if (cd "$CLIENTS/js" && bun close.ts --url "$URL" --timeout "$TIMEOUT") >"$HARNESS_RUN/close.log" 2>&1; then
                 echo "  PASS  refused session ($((SECONDS - started))s)"
+                record pass case="refused session" subscriber=js seconds=$((SECONDS - started)) log="$HARNESS_RUN/close.log"
             else
                 echo "  FAIL  refused session ($((SECONDS - started))s)"
+                record fail case="refused session" subscriber=js seconds=$((SECONDS - started)) log="$HARNESS_RUN/close.log" detail="close.ts failed"
                 sed 's/^/        /' "$HARNESS_RUN/close.log" >&2 || true
                 overall=1
             fi
@@ -1243,7 +1367,7 @@ if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 && "$IN_TREE" -eq 1 ]]; then
         fi
     done
     if needs js-native-node; then
-        for version in moq-lite-05 moq-lite-06 moq-lite-07-wip; do
+        for version in "${DROP_VERSIONS[@]}"; do
             run_drop_pair rust js-native-node "$version"
             run_drop_pair js-native-node rust "$version"
         done

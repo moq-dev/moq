@@ -335,6 +335,7 @@ contract](../README.md).
 ```text
 interop.sh              orchestrator: build clients, run the relay + matrix or media checks
 interop.toml            relay config (token auth via `moq auth serve`, self-signed localhost)
+report.py               the CI report: case records to a static pass/fail page
 bare-fin.ts             the JS side of `just test bare-fin`, driven by moq-net's tests
 varint.ts               the JS side of the varint check, driven by moq-net's tests
 clients/
@@ -361,6 +362,25 @@ clients/
 `.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
 release PRs that touch `test/interop/`). A red cell means a real interop break in the
 current tree.
+
+The scheduled run on `main` publishes its report to <https://git.moq.dev/interop/>;
+every other run keeps it as the `interop-report` artifact. The report is a pass/fail
+table of publisher by subscriber for each suite, case, transport, and version, plus each
+workflow step's outcome. A red cell links to its run and to the failure artifact, and
+its tooltip names the log inside that artifact.
+
+The report reads records, never logs. With `MOQ_TEST_RESULTS` set, `interop.sh` and
+`compat.sh` append one JSON line per case through `harness_result` (`test/lib/harness.sh`):
+suite, case, publisher, subscriber, transport, version, outcome, seconds, detail, and
+log. A run first records every case it will reach as `not run`, before building
+anything, so a harness that dies in setup or mid-suite leaves red `not run` cells
+rather than missing ones. Transport and version are `auto` where each client negotiates
+its own; the drop lanes and wire-compat pin a version. `report.py` renders the page:
+
+```bash
+MOQ_TEST_RESULTS=/tmp/results.jsonl just test interop
+just test interop-report /tmp/results.jsonl /tmp/interop-report
+```
 
 ## Subscription termination
 
