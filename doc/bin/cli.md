@@ -307,10 +307,11 @@ moq --connect https://relay.example.com/anon --broadcast event-replay.hang impor
 
 `export archive` records every broadcast announced at or under `--broadcast`
 with [moq-archive](https://docs.rs/moq-archive), each publisher instance under
-`<broadcast>/<epoch>` in the store, until the connection ends. Every track is
-stored as its own objects, cut at group boundaries about every 2 s of media (or
-wall clock for an [untimed](/concept/moq-lite#subscriptions) track) and flushed
-at least every 4 s. A broadcast restarted under a new
+`<broadcast>/@<epoch>` in the store, until the connection ends. A broadcast
+path segment that starts with `@` is stored as `%40`, so no recording lands
+inside another. Every track is stored as its own objects, cut about every 2 s
+of media (or wall clock for an [untimed](/concept/moq-lite#subscriptions)
+track) and at least every 4 s, splitting a long group between frames. A broadcast restarted under a new
 [epoch](/concept/moq-lite#publisher-epochs) records under its own key; a route
 without an epoch gets a fresh one each time it announces, so it never resumes
 or stitches into an older recording. Any recording that fails ends the export.

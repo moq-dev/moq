@@ -21,7 +21,7 @@ const GRACE: Duration = Duration::from_secs(30);
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
 	/// Where to record: `file:///dir`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://container/prefix`.
-	/// Each broadcast records under `<broadcast>/<epoch>` beneath it.
+	/// Each broadcast records under `<broadcast>/@<epoch>` beneath it.
 	pub store: Url,
 
 	/// Keep only this much recent content (a DVR), deleting older objects. Unset keeps everything.
@@ -51,7 +51,7 @@ pub struct ImportArgs {
 type Instance = (moq_net::PathOwned, Option<moq_net::Epoch>);
 
 /// Record every broadcast announced at or under `prefix` into `args.store`, each publisher
-/// instance under `<path>/<epoch>`, until the announcements end.
+/// instance under `<path>/@<epoch>`, until the announcements end.
 ///
 /// A route without an epoch names no instance, so each one it announces records under an epoch
 /// minted here: a restarted export never resumes it, and never stitches two instances together.
@@ -137,14 +137,22 @@ async fn record(
 	(instance, result)
 }
 
-/// The key prefix one instance records under: its path's segments, then its epoch.
+/// The key prefix one instance records under: its path's segments, then `@<epoch>`.
+///
+/// A path segment's key never starts with `@`, since a leading one is percent-encoded like `%`
+/// always is, so no instance's prefix lies inside another's, whatever paths a publisher picks.
 fn key(root: &Path, (path, epoch): &Instance) -> anyhow::Result<Path> {
 	let epoch = epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
 	let mut key = root.clone();
 	for segment in path.as_str().split('/').filter(|segment| !segment.is_empty()) {
-		key = key.join(PathPart::from(segment));
+		let part = PathPart::from(segment);
+		key = match part.as_ref().strip_prefix('@') {
+			Some(rest) => key.join(PathPart::parse(&format!("%40{rest}"))?),
+			None => key.join(part),
+		};
 	}
-	Ok(key.join(PathPart::parse(epoch.as_str()).context("an epoch is one key segment")?))
+	let epoch = format!("@{epoch}");
+	Ok(key.join(PathPart::parse(&epoch).context("an epoch is one key segment")?))
 }
 
 /// Republish the recording at `args.store` as the broadcast `name`, announced under `epoch`.
@@ -244,7 +252,7 @@ mod tests {
 	}
 
 	/// `export archive` records each broadcast announced under its prefix into its own
-	/// `<path>/<epoch>`, and leaves out what is announced elsewhere.
+	/// `<path>/@<epoch>`, and leaves out what is announced elsewhere.
 	#[tokio::test]
 	async fn each_broadcast_records_under_its_own_key_prefix() {
 		// `open_store` reads the credential variables.
@@ -289,8 +297,8 @@ mod tests {
 			broadcast.close();
 		}
 		let complete = [
-			format!("live/a/{}/.end", epochs[0]),
-			format!("live/b/{}/.end", epochs[1]),
+			format!("live/a/@{}/.end", epochs[0]),
+			format!("live/b/@{}/.end", epochs[1]),
 		];
 		tokio::time::timeout(Duration::from_secs(10), async {
 			while !complete.iter().all(|end| dir.path().join(end).exists()) {
@@ -304,11 +312,11 @@ mod tests {
 		let files = files(dir.path());
 		for (path, epoch) in [("live/a", &epochs[0]), ("live/b", &epochs[1])] {
 			for file in [".end", "video/.info", "video/end"] {
-				assert!(files.contains(&format!("{path}/{epoch}/{file}")), "{files:?}");
+				assert!(files.contains(&format!("{path}/@{epoch}/{file}")), "{files:?}");
 			}
 			assert!(
 				files.contains(&format!(
-					"{path}/{epoch}/video/0000000000000000000-0000000000000000000-0000000000000000000"
+					"{path}/@{epoch}/video/0000000000000000000-0000000000000000000-0000000000000000000"
 				)),
 				"{files:?}"
 			);
@@ -330,7 +338,41 @@ mod tests {
 		let pinned = (moq_net::Path::new("live/a").to_owned(), Some(epoch.clone()));
 		assert_eq!(
 			key(&Path::from("rec"), &pinned).unwrap().as_ref(),
-			format!("rec/live/a/{epoch}")
+			format!("rec/live/a/@{epoch}")
 		);
+	}
+
+	/// A path segment's key never starts with `@`, so a path that spells out another instance's
+	/// key prefix records beside it, never inside it.
+	#[test]
+	fn keys_are_prefix_free() {
+		let epoch = moq_net::Epoch::mint();
+		let victim = key(
+			&Path::from("rec"),
+			&(moq_net::Path::new("live/a").to_owned(), Some(epoch.clone())),
+		)
+		.unwrap();
+		let hostile = format!("live/a/@{epoch}");
+		let nested = key(
+			&Path::from("rec"),
+			&(moq_net::Path::new(&hostile).to_owned(), Some(moq_net::Epoch::mint())),
+		)
+		.unwrap();
+		assert!(nested.prefix_match(&victim).is_none(), "{nested} is under {victim}");
+		assert!(
+			nested.as_ref().starts_with(&format!("rec/live/a/%40{epoch}/@")),
+			"{nested}"
+		);
+
+		// `%` is escaped too, so an escaped-looking segment keys apart from the `@` one.
+		let literal = key(
+			&Path::from("rec"),
+			&(
+				moq_net::Path::new(&format!("live/a/%40{epoch}")).to_owned(),
+				Some(epoch),
+			),
+		)
+		.unwrap();
+		assert!(literal.as_ref().starts_with("rec/live/a/%2540"), "{literal}");
 	}
 }
