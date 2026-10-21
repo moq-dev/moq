@@ -101,6 +101,48 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    /// Both sides read the grant their peer gave them, and a peer that verifies no
+    /// tokens of its own refuses another one as unsupported.
+    func testSessionAuthReadsTheGrant() async throws {
+        let version = ["moq-lite-07-wip"]
+        let server = try Server(bind: "127.0.0.1:0", versions: version, tls: ServerTls(generate: ["localhost"]))
+        defer { server.cancel() }
+        let addr = try await server.listen()
+        async let accepted = server.accept()
+
+        let client = try Client(bind: "127.0.0.1:0", versions: version, tls: ClientTls(insecure: true), once: true)
+        defer { client.cancel() }
+        let session = try await client.connect(to: "https://\(addr)")
+        guard let request = try await accepted else { return XCTFail("server closed before accept") }
+        let peer = try await request.accept()
+
+        // Ending both sessions ends any wait below, so a grant that never arrives fails
+        // rather than hangs.
+        let watchdog = Task {
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+            peer.cancel(code: 0)
+            session.cancel(code: 0)
+        }
+        defer { watchdog.cancel() }
+
+        let everything = Grant(publish: ["**"], subscribe: ["**"], expiresUs: nil)
+        for auth in [session.auth(), peer.auth()] {
+            var grant = auth.grant()
+            while grant != everything {
+                grant = try await auth.grantChanged()
+            }
+        }
+
+        do {
+            _ = try await session.auth().add(token: "extra")
+            XCTFail("the default acceptor refuses a token")
+        } catch MoqError.Unsupported {}
+        XCTAssertEqual(session.auth().grant(), everything)
+
+        peer.cancel(code: 0)
+        session.cancel(code: 0)
+    }
+
     /// `cancel()` releases the listening socket before it returns, so the same
     /// address binds again with no retry.
     func testServerCloseReleasesPort() async throws {

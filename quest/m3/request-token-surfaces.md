@@ -18,7 +18,7 @@ or acceptor to mirror.
 So each surface here exposes that unified shape once Rust has it, and only
 for the surface a named consumer uses. Start by asking that consumer which
 surface it needs. Do not build all three. Through moq-ffi, follow the session
-AUTH shape that [Bindings](/quest/m1/auth/bindings.md) settles. Update every
+AUTH shape of `MoqAuth` in `rs/moq-ffi/src/auth.rs`. Update every
 wrapper, as the cross-package table requires.
 
 Public API: whatever the chosen surface needs to present and accept auths

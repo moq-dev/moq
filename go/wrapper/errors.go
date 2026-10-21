@@ -41,7 +41,7 @@ var (
 	ErrVideo = ffi.ErrMoqErrorVideo
 	// ErrURL matches a malformed URL passed when connecting or publishing.
 	ErrURL = ffi.ErrMoqErrorUrl
-	// ErrTimeOverflow matches a timestamp that overflowed its timescale.
+	// ErrTimeOverflow matches a timestamp outside the supported range.
 	ErrTimeOverflow = ffi.ErrMoqErrorTimeOverflow
 	// ErrLogLevel matches an unparseable log level string passed to LogLevel.
 	ErrLogLevel = ffi.ErrMoqErrorLogLevel

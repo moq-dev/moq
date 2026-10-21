@@ -90,6 +90,9 @@ Decided by the maintainer on 2026-10-20, when the quest was first started
   splits each fill into its per-group requests internally, keeping its ABI
   unchanged, and maps `moq_subscription.max_delay_us` to `Some`: a frozen C
   subscriber cannot ask for max-age alone, as today. Not a blocker.
+- **Bench.** Fills fan out, so add a fill bench swept over both axes,
+  subscribers x misses, so a cost that grows with either shows up as a slope
+  (decided 2026-10-21).
 
 ## Related
 

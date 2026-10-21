@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise sampler-owned generator lifetime with deterministic fake counters."""
 import os
+import random
 import signal
 import socket
 import sys
@@ -102,11 +103,17 @@ class PortOwnership(unittest.TestCase):
             holder.write_text('''#!/usr/bin/env python3
 import signal, socket, sys
 prefix, port = sys.argv[1], int(sys.argv[2])
-tcp = socket.socket()
-tcp.bind(('127.0.0.1', port))
-tcp.listen()
-udp = socket.socket(type=socket.SOCK_DGRAM)
-udp.bind(('127.0.0.1', port))
+try:
+    tcp = socket.socket()
+    tcp.bind(('127.0.0.1', port))
+    tcp.listen()
+    udp = socket.socket(type=socket.SOCK_DGRAM)
+    udp.bind(('127.0.0.1', port))
+except OSError as error:
+    # Another owner already holds the port, which is just as foreign: report it and release the relay.
+    with open(prefix + '.ready', 'w') as ready: ready.write(f'busy: {error}\\n')
+    with open(prefix + '.release', 'w') as release: release.write('release\\n')
+    sys.exit()
 with open(prefix + '.ready', 'w') as ready: ready.write('ready\\n')
 connection, _ = tcp.accept()
 connection.close()
@@ -126,19 +133,27 @@ ROOT=$1 RUN=$2 RELAY_PID=
 HOLDERS=()
 trap 'for pid in "${HOLDERS[@]}" "$RELAY_PID"; do if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; done' EXIT
 source "$ROOT/bench/relay.sh"
+RANDOM=$SEED
 relay_config() {
     : > "$1"
     mkfifo "$1.ready" "$1.release"
     python3 "$RUN/hold.py" "$1" "$2" &
     HOLDERS+=("$!")
     IFS= read -r ready < "$1.ready"
+    printf '%s\\n' "$ready" >> "$RUN/holds"
+    # Reseeding redraws this port, so once a holder owns one every later attempt collides with it.
+    [[ $ready == ready ]] || SEED=$((SEED + 1))
+    RANDOM=$SEED
 }
 start_relay "$3" "$RUN"
 '''
-            result = self.run_shell(script, run, relay)
+            result = self.run_shell(script, run, relay, SEED=str(random.randrange(32768)))
             self.assertEqual(result.returncode, 1, result.stderr)
             self.assertIn('relay failed to start', result.stderr)
             self.assertIn('Address already in use: fixture collision', result.stderr)
+            holds = (run / 'holds').read_text().splitlines()
+            self.assertIn('ready', holds)
+            self.assertTrue(any(hold.startswith('busy') for hold in holds), holds)
 
     def test_startup_requires_tcp_and_udp_owned_by_the_relay(self):
         with tempfile.TemporaryDirectory() as directory:
