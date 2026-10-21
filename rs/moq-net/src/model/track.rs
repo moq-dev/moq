@@ -519,6 +519,11 @@ struct Slot {
 	// group's place while it lasts; `group` stays the slot, still written by the feed,
 	// so an abandoned fetch leaves the group servable rather than gone. Boxed: rare.
 	head: Option<Box<group::Handle>>,
+
+	// A cut on an ended track that outlived its expiry: readers no longer get it, as they
+	// no longer get the group it was. Atomic because an ended track's sweep holds only a
+	// read guard, so it cannot reclaim the slot.
+	retired: AtomicBool,
 }
 
 impl Slot {
@@ -541,7 +546,7 @@ impl Slot {
 	/// Why the publisher gave up this live-feed group readers were shown, once nothing
 	/// serves it: a reader is handed the group to see that error, never a missing group.
 	fn cut(&self) -> Option<&Error> {
-		match self.visible && !self.pending && self.is_aborted() {
+		match self.visible && !self.pending && self.is_aborted() && !self.retired.load(Ordering::Relaxed) {
 			true => self.group.cut_error(),
 			false => None,
 		}
@@ -1477,13 +1482,18 @@ impl TrackState {
 
 	/// Expire an ended track's idle groups, whose closed channel refuses the write
 	/// [`Self::evict_expired_scan`] takes: abort them in place, releasing their frames,
-	/// and leave the slots, which every read path already skips.
+	/// and retire expired cuts, leaving slots that every read path skips.
 	pub(super) fn expire_closed(&self, scan: ExpiryScan) {
 		for (sequence, stamp) in &self.evict {
 			let Some(slot) = self.lookup.get(sequence) else {
 				continue;
 			};
-			if slot.stamp == *stamp && !slot.is_aborted() && slot.is_expired(&scan) {
+			if slot.stamp != *stamp || (slot.is_aborted() && slot.cut().is_none()) || !slot.is_expired(&scan) {
+				continue;
+			}
+			if slot.is_aborted() {
+				slot.retired.store(true, Ordering::Relaxed);
+			} else {
 				slot.abort(Error::Old);
 			}
 		}
@@ -1777,6 +1787,7 @@ impl TrackState {
 				pending,
 				arrived: now,
 				head: None,
+				retired: AtomicBool::new(false),
 			},
 		);
 		if let Some(replaced) = replaced {
@@ -11822,6 +11833,38 @@ mod test {
 			stale_finished.peek_group(0).is_none(),
 			"a sealed track's latest expired"
 		);
+	}
+
+	/// A cut on an ended track expires like the group it was: a stale consumer's reader
+	/// gets it within the window, and nothing once the sweep retires it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn closed_track_retires_an_expired_cut() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let producer = track_producer_pooled("cut", pool.clone());
+		let mut group = producer.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, &b"a"[..]).unwrap();
+		group.abort(Error::Stream(StreamError::App(5))).unwrap();
+		producer.finish().unwrap();
+		let stale = producer.consume();
+		drop(producer);
+
+		let mut reader = stale.subscribe(replay()).now_or_never().unwrap().unwrap();
+		assert_eq!(
+			reader.assert_group().sequence,
+			0,
+			"the cut is handed out within the window"
+		);
+
+		// The first pass dates the activity it has not seen yet; the next one expires it.
+		for _ in 0..2 {
+			pool.step(Duration::from_secs(2));
+			pool.sweep();
+		}
+
+		let mut late = stale.subscribe(replay()).now_or_never().unwrap().unwrap();
+		let res = late.recv_group().now_or_never().expect("should not block");
+		assert!(matches!(res, Ok(None)), "the expired cut is gone");
 	}
 
 	/// An abort after every group below the declared end finished leaves the end standing.

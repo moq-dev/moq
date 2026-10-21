@@ -4116,7 +4116,10 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let mut start = source.map_or(group.sequence, |source| source.min(group.sequence));
 		// A group given up cannot be where the feed starts. This stops at the held group
 		// at the latest, since it was not skipped.
-		if let Some((skipped, _)) = self.skipped.get_key_value(&start) {
+		// Adjacent runs given up with different errors stay separate, so walk them all.
+		while start < group.sequence
+			&& let Some((skipped, _)) = self.skipped.get_key_value(&start)
+		{
 			start = skipped.end.min(group.sequence);
 		}
 		let skipped = std::mem::take(&mut self.skipped);
@@ -6498,6 +6501,34 @@ mod serve_group_test {
 		relay.settle();
 		assert_eq!(relay.opened(), 1, "the held group is served");
 		assert!(relay.started_at(6), "named the skipped group");
+	}
+
+	/// Adjacent ranges skipped with different errors before the start resolves are all
+	/// passed over, so SUBSCRIBE_START names neither.
+	#[moq_clock::test]
+	async fn held_first_group_starts_past_adjacent_skips() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let mut relay = RelayRun::new(&mut track, 4);
+
+		track.drop_groups(4..5, StreamError::Old);
+		// Group 5's first frame is gone.
+		let mut headless = track.create_group(group::Info { sequence: 5 }).unwrap();
+		headless.start_at(1).unwrap();
+		headless
+			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
+			.unwrap();
+		headless.finish().unwrap();
+		write_group(&mut track, 6, 6);
+		relay.settle();
+
+		track.start_at(4).unwrap();
+		relay.settle();
+		assert_eq!(relay.opened(), 1, "the held group is served");
+		assert!(relay.started_at(6), "named a skipped group");
 	}
 
 	/// A track that ends without a group still ends the subscription, with no stream owed.
