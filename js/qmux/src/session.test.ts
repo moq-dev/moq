@@ -443,6 +443,34 @@ describe("Session integration (scripted peer)", () => {
 		reader.releaseLock();
 	});
 
+	test("opening a high stream index doesn't cost a slot per skipped stream", async () => {
+		// The peer may open any index under its credit, implicitly opening every
+		// lower one. Tracking each skipped index would let one tiny frame make us
+		// allocate (and loop) once per stream below it.
+		const { session, peer } = connect({ maxStreamsUni: 1n << 40n });
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+
+		const high = Stream.Id.create((1n << 40n) - 1n, Stream.Dir.Uni, true);
+		peer.send({ type: "stream", id: high, data: new Uint8Array([1]), fin: true });
+		// A skipped lower stream is still openable, and a finished one stays closed.
+		const low = Stream.Id.create(7n, Stream.Dir.Uni, true);
+		peer.send({ type: "stream", id: low, data: new Uint8Array([2]), fin: true });
+		peer.send({ type: "stream", id: high, offset: 1n, data: new Uint8Array([3]), fin: false });
+		peer.send({ type: "ping_request", sequence: 1n });
+		await waitFor(() => peer.has("ping_response"));
+
+		const acceptor = session.incomingUnidirectionalStreams.getReader();
+		const first = await acceptor.read();
+		const second = await acceptor.read();
+		const firstData = await first.value?.getReader().read();
+		const secondData = await second.value?.getReader().read();
+		expect([firstData?.value?.[0], secondData?.value?.[0]]).toEqual([1, 2]);
+		expect(peer.has("connection_close")).toBe(false);
+		acceptor.releaseLock();
+		session.close();
+	});
+
 	test("RESET_STREAM final_size consumes connection flow control", async () => {
 		const { session, peer } = connect({ maxData: 4n, maxStreamDataUni: 10n });
 		await session.ready;

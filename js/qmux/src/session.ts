@@ -499,29 +499,28 @@ interface StreamFlowState {
 	recvConsumed: bigint;
 }
 
-/** Compact open/terminal tracking for peer-initiated receive streams.
+/** Which peer-initiated stream indexes have had a frame, so a late STREAM frame
+ *  cannot resurrect one whose receive half already reached FIN or RESET_STREAM.
  *
- * Opening stream N implicitly opens every lower stream. `holes` distinguishes
- * one of those not-yet-seen streams from an id whose receive half has already
- * reached FIN or RESET_STREAM, so a late STREAM frame cannot resurrect it. */
+ * Opening stream N implicitly opens every lower one, but those stay unseen until
+ * their own first frame. Only indexes seen out of order are stored, never the
+ * gaps: a peer jumping straight to a high index costs one entry, not one per
+ * skipped stream. */
 class RecvOpen {
-	#createdMax?: bigint;
-	#holes = new Set<bigint>();
+	// Every index below this has been seen.
+	#floor = 0n;
+	// Seen indexes above the floor.
+	#above = new Set<bigint>();
 
+	/** Whether the stream was seen, which means closed if it isn't live. */
 	isClosed(index: bigint): boolean {
-		return this.#createdMax !== undefined && index <= this.#createdMax && !this.#holes.has(index);
+		return index < this.#floor || this.#above.has(index);
 	}
 
 	record(index: bigint) {
-		if (this.#createdMax !== undefined && index <= this.#createdMax) {
-			this.#holes.delete(index);
-			return;
-		}
-
-		for (let hole = (this.#createdMax ?? -1n) + 1n; hole < index; hole++) {
-			this.#holes.add(hole);
-		}
-		this.#createdMax = index;
+		if (index < this.#floor) return;
+		this.#above.add(index);
+		while (this.#above.delete(this.#floor)) this.#floor++;
 	}
 }
 
