@@ -14,6 +14,8 @@
  */
 export class RecvStream {
 	#queue: Uint8Array[] = [];
+	// Bytes handed to the reader so far: the stream offset where #queue starts.
+	#delivered = 0n;
 	#fin = false;
 	#error?: Error;
 	#wake?: () => void;
@@ -55,6 +57,7 @@ export class RecvStream {
 						});
 					}
 					const chunk = this.#queue.shift() as Uint8Array;
+					this.#delivered += BigInt(chunk.byteLength);
 					controller.enqueue(chunk);
 					// Credit must track *delivery*, not receipt — do NOT move onConsume
 					// into push(). With a zero high-water mark, pull only runs for an
@@ -88,9 +91,31 @@ export class RecvStream {
 		this.#signal();
 	}
 
-	/** Abort the readable because the peer reset its sending side. */
-	reset(err: Error): number {
-		const discarded = this.error(err);
+	/** Abort the readable because the peer reset its sending side, once the reader
+	 *  has the first `reliableSize` bytes of the stream (RESET_STREAM_AT). Discards
+	 *  the buffered bytes past that prefix and returns how many. */
+	reset(err: Error, reliableSize = 0n): number {
+		let discarded = 0;
+		if (!this.#error) {
+			this.#error = err;
+			let keep = reliableSize - this.#delivered;
+			const queue: Uint8Array[] = [];
+			for (const chunk of this.#queue) {
+				const size = BigInt(chunk.byteLength);
+				if (keep >= size) {
+					queue.push(chunk);
+					keep -= size;
+				} else {
+					const kept = keep > 0n ? Number(keep) : 0;
+					if (kept > 0) queue.push(chunk.subarray(0, kept));
+					discarded += chunk.byteLength - kept;
+					keep = 0n;
+				}
+			}
+			// pull() delivers what is left before surfacing the error.
+			this.#queue = queue;
+			this.#signal();
+		}
 		this.#notifyTerminal();
 		return discarded;
 	}

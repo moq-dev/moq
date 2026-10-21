@@ -69,8 +69,6 @@ interface Waiter {
 export interface SchedulerOptions {
 	/** Called after each frame is actually written (to track send activity). */
 	onActivity?: () => void;
-	/** Soft cap on buffered control bytes before we warn. */
-	controlHighWater?: number;
 }
 
 /** Default `sendOrder` for streams that don't set one. */
@@ -84,12 +82,19 @@ const DATAGRAM_QUEUE_LIMIT = 1024;
 export class SendScheduler {
 	#sink: SendSink;
 	#onActivity: () => void;
-	#controlHighWater: number;
 	#closed?: Error;
 
-	// Control frames preempt all stream data, FIFO among themselves.
+	// Control frames preempt all stream data, FIFO among themselves. Lossless and
+	// uncapped, so whatever the peer can trigger here must be bounded by design:
+	// at most one RESET_STREAM or STOP_SENDING per stream, and flow-control and
+	// stream-count updates only as the peer spends credit it has already received
+	// (which a peer not reading our writes never gets more of).
 	#control: Uint8Array[] = [];
-	#controlBytes = 0;
+
+	// Control frames where only the newest matters (QX_PING requests and
+	// responses), keyed by kind. A newer frame replaces one still unsent, so a peer
+	// that pings faster than it reads our responses can't grow this lane.
+	#latest = new Map<string, Uint8Array>();
 
 	// Datagrams: serviced after control, ahead of stream data. Bounded and lossy
 	// (unlike #control) since unreliable datagrams are meant to be droppable —
@@ -110,7 +115,6 @@ export class SendScheduler {
 	constructor(sink: SendSink, options?: SchedulerOptions) {
 		this.#sink = sink;
 		this.#onActivity = options?.onActivity ?? (() => {});
-		this.#controlHighWater = options?.controlHighWater ?? 256 * 1024;
 		// Start the writer loop. It never rejects — failures are captured by #fail.
 		void this.#run();
 	}
@@ -119,14 +123,14 @@ export class SendScheduler {
 	enqueueControl(bytes: Uint8Array): void {
 		if (this.#closed) throw this.#closed;
 		this.#control.push(bytes);
-		this.#controlBytes += bytes.byteLength;
-		if (this.#controlBytes > this.#controlHighWater) {
-			// Control frames now ride behind transport backpressure (the loop), so
-			// they can't flood the socket buffer — but a wedged socket can still let
-			// them pile up in memory. Warn rather than drop: dropping flow-control or
-			// reset frames would corrupt the session.
-			console.warn(`qmux: control backlog ${this.#controlBytes} bytes exceeds high-water`);
-		}
+		this.#signal();
+	}
+
+	/** Queue a control frame that supersedes any unsent one with the same `key`.
+	 *  Serviced after the FIFO control lane, ahead of datagrams and stream data. */
+	replaceControl(key: string, bytes: Uint8Array): void {
+		if (this.#closed) throw this.#closed;
+		this.#latest.set(key, bytes);
 		this.#signal();
 	}
 
@@ -194,7 +198,8 @@ export class SendScheduler {
 		for (const waiter of this.#ready.values()) waiter.reject(err);
 		this.#ready.clear();
 		this.#sendOrders.clear();
-		// Drop any queued datagrams — best-effort, and they must not outlive close.
+		// Drop any queued pings and datagrams: neither means anything once closed.
+		this.#latest.clear();
 		this.#datagrams.length = 0;
 		this.#signal();
 	}
@@ -228,7 +233,12 @@ export class SendScheduler {
 	async #run(): Promise<void> {
 		try {
 			while (true) {
-				if (this.#control.length === 0 && this.#datagrams.length === 0 && this.#ready.size === 0) {
+				if (
+					this.#control.length === 0 &&
+					this.#latest.size === 0 &&
+					this.#datagrams.length === 0 &&
+					this.#ready.size === 0
+				) {
 					if (this.#closed) return;
 					await new Promise<void>((resolve) => {
 						this.#wake = resolve;
@@ -242,7 +252,15 @@ export class SendScheduler {
 
 				if (this.#control.length > 0) {
 					const bytes = this.#control.shift() as Uint8Array;
-					this.#controlBytes -= bytes.byteLength;
+					await this.#sink.write(bytes);
+					this.#onActivity();
+					continue;
+				}
+
+				const latest = this.#latest.entries().next();
+				if (!latest.done) {
+					const [key, bytes] = latest.value;
+					this.#latest.delete(key);
 					await this.#sink.write(bytes);
 					this.#onActivity();
 					continue;
@@ -282,7 +300,7 @@ export class SendScheduler {
 		for (const waiter of this.#ready.values()) waiter.reject(err);
 		this.#ready.clear();
 		this.#control.length = 0;
-		this.#controlBytes = 0;
+		this.#latest.clear();
 		this.#datagrams.length = 0;
 	}
 }

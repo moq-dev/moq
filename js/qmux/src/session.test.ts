@@ -533,23 +533,167 @@ describe("Session integration (scripted peer)", () => {
 		session.close();
 	});
 
-	test("receive offsets are preserved but not enforced yet", async () => {
+	test("contiguous receive offsets are delivered in order", async () => {
 		const { session, peer } = connect();
 		await session.ready;
 		peer.send({ type: "transport_parameters", params: peerParams() });
 
 		const id = Stream.Id.create(0n, Stream.Dir.Uni, true);
 		peer.send({ type: "stream", id, offset: 0n, data: new Uint8Array([1, 2]), fin: false });
-		peer.send({ type: "stream", id, offset: 99n, data: new Uint8Array([3]), fin: true });
+		peer.send({ type: "stream", id, offset: 2n, data: new Uint8Array([3]), fin: true });
 
 		const incoming = await session.incomingUnidirectionalStreams.getReader().read();
 		if (incoming.done || !incoming.value) throw new Error("expected incoming stream");
 		const reader = incoming.value.getReader();
-		const first = await reader.read();
-		const second = await reader.read();
-		expect(Array.from(first.value ?? [])).toEqual([1, 2]);
-		expect(Array.from(second.value ?? [])).toEqual([3]);
+		expect(Array.from((await reader.read()).value ?? [])).toEqual([1, 2]);
+		expect(Array.from((await reader.read()).value ?? [])).toEqual([3]);
+		expect((await reader.read()).done).toBe(true);
 		session.close();
+	});
+
+	// The transport is ordered, so a frame that doesn't start where the last one
+	// ended would deliver bytes out of order or twice: a protocol violation.
+	for (const [name, offset] of [
+		["a gap", 3n],
+		["an overlap", 1n],
+		["a duplicate", 0n],
+	] as const) {
+		test(`a STREAM frame with ${name} closes the session`, async () => {
+			const { session, peer } = connect();
+			await session.ready;
+			peer.send({ type: "transport_parameters", params: peerParams() });
+
+			const id = Stream.Id.create(0n, Stream.Dir.Uni, true);
+			peer.send({ type: "stream", id, offset: 0n, data: new Uint8Array([1, 2]), fin: false });
+			peer.send({ type: "stream", id, offset, data: new Uint8Array([3, 4]), fin: false });
+
+			const err = await expectSessionFailure(session);
+			expect((err.cause as Error).message).toContain("does not continue the stream");
+			await waitFor(() => sentCloseCode(peer) === 1002);
+		});
+	}
+
+	test("a FIN at the wrong offset closes the session", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+
+		const id = Stream.Id.create(0n, Stream.Dir.Uni, true);
+		peer.send({ type: "stream", id, offset: 0n, data: new Uint8Array([1, 2]), fin: false });
+		peer.send({ type: "stream", id, offset: 5n, data: new Uint8Array(), fin: true });
+
+		await expectSessionFailure(session);
+		await waitFor(() => sentCloseCode(peer) === 1002);
+	});
+
+	test("a new stream must start at offset zero", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+
+		peer.send({
+			type: "stream",
+			id: Stream.Id.create(0n, Stream.Dir.Uni, true),
+			offset: 4n,
+			data: new Uint8Array([1]),
+			fin: false,
+		});
+
+		await expectSessionFailure(session);
+		await waitFor(() => sentCloseCode(peer) === 1002);
+	});
+
+	test("frames without OFF from a pre-offset sender continue the stream", async () => {
+		// Senders released before offsets were encoded omit OFF on every frame,
+		// which reads as offset zero. Their frames are contiguous by construction.
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+
+		// 0x0a = STREAM | LEN, 0x0b = STREAM | LEN | FIN; server-initiated uni id 3.
+		peer.sendRaw(new Uint8Array([0x0a, 0x03, 0x02, 1, 2]));
+		peer.sendRaw(new Uint8Array([0x0b, 0x03, 0x01, 3]));
+
+		const incoming = await session.incomingUnidirectionalStreams.getReader().read();
+		if (incoming.done || !incoming.value) throw new Error("expected incoming stream");
+		const reader = incoming.value.getReader();
+		expect(Array.from((await reader.read()).value ?? [])).toEqual([1, 2]);
+		expect(Array.from((await reader.read()).value ?? [])).toEqual([3]);
+		expect((await reader.read()).done).toBe(true);
+		expect(peer.has("connection_close")).toBe(false);
+		session.close();
+	});
+
+	test("serverCertificateHashes is refused rather than silently ignored", () => {
+		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
+		// Pinning can't be enforced over WebSocket; connecting anyway would drop the
+		// authentication the caller asked for.
+		expect(
+			() =>
+				new Session("https://example/test", {
+					serverCertificateHashes: [{ algorithm: "sha-256", value: new Uint8Array(32) }],
+				}),
+		).toThrow("serverCertificateHashes");
+
+		// An empty list pins nothing, so there's nothing to refuse.
+		new Session("https://example/test", { serverCertificateHashes: [] }).close();
+	});
+
+	test("a peer that pings without reading gets only its newest ping answered", async () => {
+		const { session, peer } = connect();
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+		await waitFor(() => peer.has("transport_parameters"));
+
+		// The peer stops reading but keeps pinging. Queuing a response per request
+		// would grow our memory without bound.
+		peer.blockWrites();
+		for (let i = 1n; i <= 1000n; i++) peer.send({ type: "ping_request", sequence: i });
+		await settle();
+		peer.unblockWrites();
+
+		const answered = () =>
+			peer
+				.received()
+				.filter((f): f is Frame.PingResponse => f.type === "ping_response")
+				.map((f) => f.sequence);
+		await waitFor(() => answered().includes(1000n));
+		await settle();
+		// At most one response was already on its way into the wedged socket; the
+		// rest collapsed into the newest.
+		expect(answered().length).toBeLessThanOrEqual(2);
+		expect(peer.has("connection_close")).toBe(false);
+		session.close();
+	});
+
+	test("keep-alives don't pile up behind a wedged socket", async () => {
+		const clock = new Manual();
+		const uninstall = clock.install();
+		try {
+			const { session, peer } = connect({ maxIdleTimeout: 300n });
+			await session.ready;
+			await waitFor(() => peer.has("transport_parameters"));
+			peer.send({ type: "transport_parameters", params: peerParams() });
+			await settle();
+
+			// Our writes stall, but the peer keeps talking, so the session stays up and
+			// every keep-alive tick finds our send side silent.
+			peer.blockWrites();
+			for (let i = 0; i < 40; i++) {
+				await clock.advanceAsync(Nano.fromMilli(Milli(50)));
+				peer.send({ type: "ping_response", sequence: 0n });
+				await settle();
+			}
+			peer.unblockWrites();
+			await waitFor(() => peer.has("ping_request"));
+			await settle();
+
+			expect(peer.count("ping_request")).toBeLessThanOrEqual(2);
+			expect(peer.has("connection_close")).toBe(false);
+			session.close();
+		} finally {
+			uninstall();
+		}
 	});
 
 	test("close() sends APPLICATION_CLOSE, resolves closed, and is idempotent", async () => {
@@ -953,7 +1097,7 @@ describe("Session integration (scripted peer)", () => {
 		// Peer opens a server-initiated uni stream and sends 4×200B (=800 ≤ window).
 		const id = Stream.Id.create(0n, Stream.Dir.Uni, true);
 		for (let i = 0; i < 4; i++) {
-			peer.send({ type: "stream", id, data: new Uint8Array(200), fin: false });
+			peer.send({ type: "stream", id, offset: BigInt(i * 200), data: new Uint8Array(200), fin: false });
 		}
 		// A ping after the data acts as a barrier: the Session processes frames in
 		// order, so once we see the PONG, all four STREAM frames have been received.
@@ -1043,7 +1187,7 @@ describe("Session integration (scripted peer)", () => {
 		await waitFor(() => peer.has("ping_response"));
 		expect(peer.count("max_streams_uni")).toBe(0);
 
-		peer.send({ type: "stream", id, data: new Uint8Array(), fin: true });
+		peer.send({ type: "stream", id, offset: 1n, data: new Uint8Array(), fin: true });
 		await waitFor(() => peer.count("max_streams_uni") === 1);
 		session.close();
 	});
@@ -1168,7 +1312,7 @@ describe("Session integration (scripted peer)", () => {
 			// means exactly one refusal.
 			const id = Stream.Id.create(0n, Stream.Dir.Uni, true);
 			for (let i = 0; i < 8; i++) {
-				peer.send({ type: "stream", id, data: new Uint8Array(3), fin: false });
+				peer.send({ type: "stream", id, offset: BigInt(i * 3), data: new Uint8Array(3), fin: false });
 			}
 			peer.send({ type: "ping_request", sequence: 1n });
 			await waitFor(() => peer.has("ping_response"), 5000);
@@ -1612,5 +1756,102 @@ describe("STREAM frame size", () => {
 		const stream = peer.received().find((f) => f.type === "stream") as Frame.Data;
 		expect(stream.data.byteLength).toBe(Frame.MAX_FRAME_PAYLOAD);
 		session.close();
+	});
+});
+
+/** Encode a RESET_STREAM_AT (0x24) frame, which our own encoder never emits. */
+function resetStreamAt(id: Stream.Id, code: number, finalSize: bigint, reliableSize: bigint): Uint8Array {
+	let buffer = new Uint8Array(new ArrayBuffer(1 + 8 * 4), 0, 1);
+	buffer[0] = 0x24;
+	buffer = id.value.encode(buffer);
+	buffer = VarInt.from(code).encode(buffer);
+	buffer = VarInt.from(finalSize).encode(buffer);
+	buffer = VarInt.from(reliableSize).encode(buffer);
+	return buffer;
+}
+
+describe("RESET_STREAM_AT (qmux-02)", () => {
+	/** A qmux-02 server session with one client-initiated uni stream carrying `chunks`. */
+	async function open(chunks: number[][], config?: Config) {
+		const { session, peer } = accept({ protocol: "qmux-02", config });
+		await session.ready;
+		peer.send({ type: "transport_parameters", params: peerParams() });
+
+		const id = Stream.Id.create(0n, Stream.Dir.Uni, false);
+		let offset = 0n;
+		for (const chunk of chunks) {
+			peer.send({ type: "stream", id, offset, data: new Uint8Array(chunk), fin: false });
+			offset += BigInt(chunk.length);
+		}
+
+		const acceptor = session.incomingUnidirectionalStreams.getReader();
+		const incoming = await acceptor.read();
+		acceptor.releaseLock();
+		if (incoming.done || !incoming.value) throw new Error("expected an incoming stream");
+		return { session, peer, id, reader: incoming.value.getReader() };
+	}
+
+	async function readError(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<unknown> {
+		return reader.read().then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+	}
+
+	/** Send a RESET_STREAM_AT and wait until the session has processed it, so a
+	 *  read can't race ahead and pull the buffered bytes first. */
+	async function reset(peer: FakePeer, frame: Uint8Array) {
+		peer.sendRaw(frame);
+		peer.send({ type: "ping_request", sequence: 1n });
+		await waitFor(() => peer.has("ping_response"));
+	}
+
+	test("the reliable prefix is delivered before the reset surfaces", async () => {
+		const { session, peer, id, reader } = await open([
+			[1, 2, 3],
+			[4, 5, 6],
+		]);
+		await reset(peer, resetStreamAt(id, 7, 6n, 4n));
+
+		expect(Array.from((await reader.read()).value ?? [])).toEqual([1, 2, 3]);
+		expect(Array.from((await reader.read()).value ?? [])).toEqual([4]);
+		const err = await readError(reader);
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).streamErrorCode).toBe(7);
+		session.close();
+	});
+
+	test("a prefix the reader already has resets immediately", async () => {
+		const { session, peer, id, reader } = await open([[1, 2, 3]]);
+		expect(Array.from((await reader.read()).value ?? [])).toEqual([1, 2, 3]);
+
+		await reset(peer, resetStreamAt(id, 7, 3n, 2n));
+		expect(await readError(reader)).toBeInstanceOf(StreamError);
+		session.close();
+	});
+
+	test("the delivered prefix and the discarded tail both return connection credit", async () => {
+		// A 10-byte window replenishes once 5 or more are consumed: the discarded
+		// tail (4) or the prefix (6) alone stays below that, so MAX_DATA 20 needs both.
+		const { session, peer, id, reader } = await open([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]], { maxData: 10n });
+		await reset(peer, resetStreamAt(id, 0, 10n, 6n));
+		expect(peer.has("max_data")).toBe(false);
+
+		expect(Array.from((await reader.read()).value ?? [])).toEqual([1, 2, 3, 4, 5, 6]);
+		expect(await readError(reader)).toBeInstanceOf(StreamError);
+
+		await waitFor(() => peer.has("max_data"));
+		expect((peer.received().find((f) => f.type === "max_data") as Frame.MaxData).max).toBe(20n);
+		session.close();
+	});
+
+	test("a reliable prefix beyond the bytes received is a protocol violation", async () => {
+		const { session, peer, id } = await open([[1, 2]]);
+		// The transport is ordered, so bytes 2..4 can never arrive after the reset.
+		peer.sendRaw(resetStreamAt(id, 0, 4n, 4n));
+
+		const err = await expectSessionFailure(session);
+		expect((err.cause as Error).message).toContain("reliable_size");
+		await waitFor(() => sentCloseCode(peer) === 1002);
 	});
 });

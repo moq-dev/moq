@@ -75,8 +75,10 @@ export function maxStreamPayload(version: WireFormat, budget: bigint, id: Stream
 export interface Data {
 	type: "stream";
 	id: Stream.Id;
-	/** Byte offset of this payload. QMux senders always encode it; receivers
-	 * preserve it without enforcing continuity yet. Defaults to zero when omitted. */
+	/** Byte offset of this payload, absent when the frame omits the OFF bit.
+	 * QMux senders always encode it, and receivers require it to continue the
+	 * stream exactly. Senders released before offsets were encoded omit it on
+	 * every frame, so an absent offset continues the stream instead. */
 	offset?: bigint;
 	data: Uint8Array;
 	fin: boolean;
@@ -91,8 +93,9 @@ export interface ResetStream {
 	finalSize: bigint;
 	/** Set (to the frame's Reliable Size) when this was decoded from a
 	 * RESET_STREAM_AT frame (0x24, draft-02); absent for a plain RESET_STREAM.
-	 * The session uses its presence to enforce that RESET_STREAM_AT is only
-	 * accepted when we advertised the `reset_stream_at` transport parameter. */
+	 * The session delivers that many bytes before surfacing the reset, and uses
+	 * its presence to enforce that RESET_STREAM_AT is only accepted when we
+	 * advertised the `reset_stream_at` transport parameter. */
 	reliableSize?: bigint;
 }
 
@@ -285,7 +288,7 @@ export function usesRecords(version: WireFormat): boolean {
 const QX_PING_REQUEST = 0x348c67529ef8c7bdn;
 const QX_PING_RESPONSE = 0x348c67529ef8c7ben;
 // RESET_STREAM_AT (draft-ietf-quic-reliable-stream-reset), permitted by QMux
-// draft-02. Decode-only: accepted, validated, and treated as a plain reset.
+// draft-02. Decode-only: we accept it but never send it.
 const RESET_STREAM_AT = 0x24n;
 // max_record_size transport parameter ID
 const MAX_RECORD_SIZE_ID = 0x0571c59429cd0845n;
@@ -796,7 +799,7 @@ function decodeQMux(buffer: Uint8Array): Any | null {
 		[v, buffer] = VarInt.decode(buffer);
 		const id = new Stream.Id(v);
 
-		let offset = 0n;
+		let offset: bigint | undefined;
 		if (hasOff) {
 			[v, buffer] = VarInt.decode(buffer);
 			offset = v.value;
@@ -828,9 +831,8 @@ function decodeQMux(buffer: Uint8Array): Any | null {
 		return { type: "reset_stream", id, code, finalSize };
 	}
 
-	// RESET_STREAM_AT (draft-02). On a reliable, ordered transport all stream data
-	// up to final_size has already arrived, so we treat it as a plain reset;
-	// reliable_size > final_size is a FRAME_ENCODING_ERROR.
+	// RESET_STREAM_AT (draft-02): a reset that still delivers its first
+	// reliable_size bytes. reliable_size > final_size is a FRAME_ENCODING_ERROR.
 	if (frameType === RESET_STREAM_AT) {
 		[v, buffer] = VarInt.decode(buffer);
 		const id = new Stream.Id(v);
@@ -995,7 +997,7 @@ function decodeQMuxOne(buffer: Uint8Array): [Any | null, Uint8Array] | null {
 		[v, buffer] = VarInt.decode(buffer);
 		const id = new Stream.Id(v);
 
-		let offset = 0n;
+		let offset: bigint | undefined;
 		if (hasOff) {
 			[v, buffer] = VarInt.decode(buffer);
 			offset = v.value;

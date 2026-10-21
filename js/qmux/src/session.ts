@@ -643,8 +643,10 @@ export default class Session implements WebTransport {
 		if (options?.requireUnreliable) {
 			throw new Error("not allowed to use WebSocket; requireUnreliable is true");
 		}
-		if (options?.serverCertificateHashes) {
-			console.warn("serverCertificateHashes is not supported; trying anyway");
+		// Pinning can't be honored over WebSocket, and connecting anyway would
+		// silently drop the authentication the caller asked for.
+		if (options?.serverCertificateHashes?.length) {
+			throw new Error("not allowed to use WebSocket; serverCertificateHashes is not supported");
 		}
 
 		const dial = typeof source === "string" || source instanceof URL;
@@ -1133,10 +1135,23 @@ export default class Session implements WebTransport {
 		}
 	}
 
-	#accountRecv(streamId: bigint, bytes: number): boolean {
-		if (!isQmux(this.#version) || bytes === 0) return true;
+	/** Check that a STREAM frame continues its stream, then charge it to flow
+	 *  control. Throws on a gap, overlap, or duplicate; returns false when the
+	 *  frame exceeds a receive window. */
+	#accountRecv(frame: Frame.Data): boolean {
+		if (!isQmux(this.#version)) return true;
 
-		const bytesN = BigInt(bytes);
+		const flow = this.#streamFlow.get(frame.id.value.value);
+		// The transport is ordered, so a frame must start exactly where the last one
+		// ended (draft-02 §4.1): there is nothing to reassemble, and anything else
+		// would deliver bytes out of order or twice. An absent offset comes from a
+		// sender released before offsets were encoded, whose frames are contiguous.
+		if (flow && frame.offset !== undefined && frame.offset !== flow.recvOffset) {
+			throw new Error(`STREAM offset ${frame.offset} does not continue the stream at ${flow.recvOffset}`);
+		}
+
+		const bytesN = BigInt(frame.data.byteLength);
+		if (bytesN === 0n) return true;
 
 		// Connection-level check
 		if (this.#recvDataOffset + bytesN > this.#recvDataMax) {
@@ -1145,7 +1160,6 @@ export default class Session implements WebTransport {
 		this.#recvDataOffset += bytesN;
 
 		// Stream-level check
-		const flow = this.#streamFlow.get(streamId);
 		if (flow) {
 			if (flow.recvOffset + bytesN > flow.recvMax) {
 				return false;
@@ -1336,7 +1350,7 @@ export default class Session implements WebTransport {
 			}
 
 			// Validate recv flow control before accepting
-			if (!this.#accountRecv(streamId, frame.data.byteLength)) {
+			if (!this.#accountRecv(frame)) {
 				this.#sendConnectionClose(1002, "flow control error");
 				this.#abort(1002, "flow control error");
 				return;
@@ -1429,7 +1443,7 @@ export default class Session implements WebTransport {
 			}
 		} else {
 			// Existing stream — validate recv flow control
-			if (!this.#accountRecv(streamId, frame.data.byteLength)) {
+			if (!this.#accountRecv(frame)) {
 				this.#sendConnectionClose(1002, "flow control error");
 				this.#abort(1002, "flow control error");
 				return;
@@ -1485,6 +1499,16 @@ export default class Session implements WebTransport {
 			}
 		}
 
+		// RESET_STREAM_AT (draft-02 §9.2): the transport is ordered, so every byte
+		// the peer sent arrived before this frame. A reliable prefix longer than
+		// that promises bytes that will never come.
+		if (
+			frame.reliableSize !== undefined &&
+			frame.reliableSize > (this.#streamFlow.get(streamId)?.recvOffset ?? 0n)
+		) {
+			throw new Error("RESET_STREAM_AT reliable_size exceeds the bytes received");
+		}
+
 		const resetGap = this.#accountReset(frame);
 		if (resetGap === null) {
 			this.#sendConnectionClose(1002, "flow control error");
@@ -1502,7 +1526,9 @@ export default class Session implements WebTransport {
 			return;
 		}
 
-		const discarded = recv.reset(new StreamError(streamCode(frame.code.value), "RESET_STREAM"));
+		// Only bytes past the reliable prefix are discarded; the reader still gets
+		// the prefix before the reset surfaces.
+		const discarded = recv.reset(new StreamError(streamCode(frame.code.value), "RESET_STREAM"), frame.reliableSize);
 		this.#accountConnConsumed(resetGap + BigInt(discarded));
 		this.#recvStreams.delete(streamId);
 		this.#maybeDeleteStreamFlow(streamId);
@@ -1676,7 +1702,15 @@ export default class Session implements WebTransport {
 		if (this.#closed) return;
 		const bytes = Frame.encode(frame, this.#version);
 		this.#validateRecordSize(bytes);
-		this.#scheduler?.enqueueControl(bytes);
+		if (frame.type === "ping_request" || frame.type === "ping_response") {
+			// Only the newest ping matters: answering the latest request proves
+			// liveness for all before it, and a newer keep-alive makes an unsent one
+			// moot. Coalescing keeps a peer that pings without reading from growing
+			// the control backlog.
+			this.#scheduler?.replaceControl(frame.type, bytes);
+		} else {
+			this.#scheduler?.enqueueControl(bytes);
+		}
 	}
 
 	/** Register a stream's initial send priority and expose a mutable `sendOrder`

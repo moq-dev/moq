@@ -168,9 +168,9 @@ describe("QMux draft-00 wire format", () => {
 		expect(arr(Frame.encode(frame, "qmux-00"))).toEqual(arr(wire));
 	});
 
-	test("stream without OFF still decodes as offset zero", () => {
+	test("stream without OFF decodes with no offset", () => {
 		const decoded = Frame.decode(bytes(0x0a, 0x04, 0x02, 0x68, 0x69), "qmux-00") as Frame.Data;
-		expect(decoded.offset).toBe(0n);
+		expect(decoded.offset).toBeUndefined();
 		expect(arr(decoded.data)).toEqual([0x68, 0x69]);
 	});
 
