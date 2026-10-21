@@ -16,7 +16,8 @@ type Comment = { type: string; value: string; end?: number };
 type Binding =
 	| { kind: "local"; name: string }
 	| { kind: "import"; specifier: string; name: string }
-	| { kind: "namespace"; specifier: string };
+	// `documented` is set for an `export * as Name`, whose own statement carries the doc.
+	| { kind: "namespace"; specifier: string; documented?: boolean };
 
 // A name's declarations, each with the statement that carries its comments.
 type Declarations = Array<{ statement: Node; declaration: Node }>;
@@ -50,10 +51,16 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 
 	const found: string[] = [];
 	const seen = new Set<string>();
+	const aliases = new Set<Binding>();
 
 	// Report each declaration once, under the first public name that reaches it.
 	// Under `types`, a name reached only through `export type *` that is purely a value is skipped.
 	const visit = (file: string, path: string, binding: Binding, types: boolean) => {
+		// The `export * as Name` statement is what a consumer sees, whichever package it names.
+		if (binding.kind === "namespace" && binding.documented === false && !aliases.has(binding)) {
+			aliases.add(binding);
+			found.push(`${relative(root, file)}: ${path}`);
+		}
 		const resolved = resolveBinding(file, binding);
 		if (!resolved) return;
 		if (resolved.kind === "namespace") {
@@ -180,6 +187,8 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 	};
 
 	// `export *` never re-exports a default, nor a name the re-exporting module exports itself.
+	// `chain` holds only the active path, so a module reached again in another context (a value
+	// star after a type star, or under different shadowing) is walked again; `seen` stops repeats.
 	const walk = (file: string, prefix: string, types = false, chain = new Set<string>(), hidden?: Set<string>) => {
 		if (chain.has(file)) return;
 		chain.add(file);
@@ -192,6 +201,7 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 			const target = dtsPath(files, file, star.specifier);
 			if (target) walk(target, prefix, types || star.types, chain, shadowed);
 		}
+		chain.delete(file);
 	};
 
 	for (const entrypoint of entrypoints) {
@@ -237,7 +247,11 @@ function parseModule(source: string): Module {
 					const exported = moduleName(s.exported);
 					if (s.type === "ExportNamespaceSpecifier") {
 						if (statement.source)
-							module.exports.set(exported, { kind: "namespace", specifier: statement.source.value });
+							module.exports.set(exported, {
+								kind: "namespace",
+								specifier: statement.source.value,
+								documented: documented(statement, module.header),
+							});
 					} else if (s.type === "ExportSpecifier") {
 						const name = moduleName(s.local);
 						module.exports.set(
@@ -337,14 +351,20 @@ function isElement(superClass: unknown): boolean {
 
 // The name of a class member a consumer can use, or undefined for one that needs no doc:
 // constructors, private and protected members, `#private`, an element's custom element
-// reactions, and members keyed by an expression, such as symbol brands.
+// reactions, and members keyed by a symbol other than a well-known one, such as brands.
 function memberName(member: unknown, element: boolean): string | undefined {
 	const m = member as {
 		type: string;
 		kind?: string;
 		computed?: boolean;
 		accessibility?: string;
-		key?: { type: string; name?: string; value?: unknown };
+		key?: {
+			type: string;
+			name?: string;
+			value?: unknown;
+			object?: { type: string; name?: string };
+			property?: { type: string; name?: string };
+		};
 	};
 	if (m.type === "ClassPrivateProperty" || m.type === "ClassPrivateMethod") return undefined;
 	if (m.type === "TSIndexSignature" || m.type === "StaticBlock") return undefined;
@@ -354,6 +374,10 @@ function memberName(member: unknown, element: boolean): string | undefined {
 	let name: string | undefined;
 	if (m.key.type === "Identifier" && !m.computed) name = m.key.name;
 	else if (m.key.type === "StringLiteral" || m.key.type === "NumericLiteral") name = String(m.key.value);
+	// A well-known symbol (`[Symbol.dispose]`) is a protocol a consumer uses, unlike a private brand.
+	else if (m.key.type === "MemberExpression" && m.key.object?.name === "Symbol" && m.key.property?.name) {
+		name = `[Symbol.${m.key.property.name}]`;
+	}
 	return name === undefined || (element && REACTIONS.has(name)) ? undefined : name;
 }
 

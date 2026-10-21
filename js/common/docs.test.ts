@@ -61,11 +61,13 @@ test("re-exports resolve through stars, namespaces, aliases, imports, and defaul
 		"/dist/local.d.ts": "declare const local: number;\nexport { local as renamed };\n",
 		"/dist/index.d.ts": [
 			'export * from "./inner.js";',
+			"/** Documented. */",
 			'export * as Ns from "./ns";',
 			'export { default as Element } from "./element.ts";',
 			'export { renamed } from "./local";',
 			'import { documented } from "./inner";',
 			"export { documented as again };",
+			"/** Documented. */",
 			'export * as External from "@moq/other";',
 			'export { Other } from "@moq/other";',
 		].join("\n"),
@@ -175,6 +177,31 @@ test("an extensionless specifier prefers the file over a directory index", () =>
 		"/dist/index.d.ts": 'export * from "./foo";\n',
 	});
 	expect(found).toEqual(["foo.d.ts: file"]);
+});
+
+test("a namespace re-export needs its own doc, whichever package it names", () => {
+	const found = check({
+		"/dist/ns.d.ts": "/** Documented. */\nexport declare const value: number;\n",
+		"/dist/index.d.ts": 'export * as Local from "./ns";\nexport * as External from "@moq/other";\n',
+	});
+	expect(found).toEqual(["index.d.ts: Local", "index.d.ts: External"]);
+});
+
+test("a well-known symbol member needs a doc, unlike a brand", () => {
+	const found = check({
+		"/dist/index.d.ts":
+			"/** Documented. */\nexport declare class Handle {\n    readonly [BRAND] = true;\n    [Symbol.dispose](): void;\n}\n",
+	});
+	expect(found).toEqual(["index.d.ts: Handle.[Symbol.dispose]"]);
+});
+
+test("a module reached by a type-only star is walked again as values", () => {
+	const found = check({
+		"/dist/foo.d.ts": "export declare function run(): void;\n",
+		"/dist/bar.d.ts": 'export * from "./foo";\n',
+		"/dist/index.d.ts": 'export type * from "./foo";\nexport * from "./bar";\n',
+	});
+	expect(found).toEqual(["foo.d.ts: run"]);
 });
 
 test("an explicit export shadows the same name from a star", () => {

@@ -40,7 +40,7 @@ comparing against these baselines:
   writing them. `libmoq` and the `moq-native` tombstone export nothing.
 - JS: every published package's build runs `js/common/docs.ts`, which fails
   on an undocumented export or public class member, so check only that its
-  exemptions (private, protected, symbol-keyed, and custom element reactions)
+  exemptions (private, protected, symbol brands, and custom element reactions)
   still hold up and that docs say something.
 - Links: GET (not HEAD) every external URL in `doc/` with a browser user
   agent; 262 answered except npmjs.com package pages, which refuse
