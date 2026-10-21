@@ -14,6 +14,9 @@
 //!
 //! Run with `cargo bench -p moq-net`.
 
+// `iter_custom` timings measure the host clock on purpose.
+#![allow(clippy::disallowed_methods)]
+
 use std::{
 	hint::black_box,
 	time::{Duration, Instant},
@@ -413,6 +416,54 @@ fn bench_stamp(c: &mut Criterion) {
 	g.finish();
 }
 
+/// Read every frame of fresh compressed groups with N plain readers each.
+///
+/// The group inflates once into a copy every plain reader shares, so the cost should
+/// slope with the groups and stay nearly flat in the readers; a per-reader inflate
+/// shows up as a slope over the readers.
+fn bench_inflate(c: &mut Criterion) {
+	const FRAMES: usize = 32;
+	let payloads: Vec<Bytes> = (0..FRAMES)
+		.map(|index| Bytes::from(format!("{{\"frame\":{index},\"status\":\"{}\"}}", "ok".repeat(100))))
+		.collect();
+	let mut g = c.benchmark_group("group_inflate");
+	for groups in [1usize, 16] {
+		for readers in [1usize, 8, 64] {
+			g.throughput(Throughput::Elements((groups * readers * FRAMES) as u64));
+			let id = BenchmarkId::new(format!("groups{groups}"), readers);
+			g.bench_with_input(id, &readers, |b, &readers| {
+				b.iter_batched(
+					|| {
+						let broadcast = broadcast::Producer::new(broadcast::Info::default());
+						let track = broadcast.create_track("bench", timed().with_compress(true)).unwrap();
+						let consumers: Vec<group::Consumer> = (0..groups)
+							.flat_map(|_| {
+								let mut group = track.append_group().unwrap();
+								for payload in &payloads {
+									group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+								}
+								group.finish().unwrap();
+								(0..readers).map(move |_| group.consume()).collect::<Vec<_>>()
+							})
+							.collect();
+						(broadcast, track, consumers)
+					},
+					|(broadcast, track, mut consumers)| {
+						for consumer in &mut consumers {
+							while let Some(frame) = consumer.read_frame().now_or_never().unwrap().unwrap() {
+								black_box(frame);
+							}
+						}
+						(broadcast, track, consumers)
+					},
+					BatchSize::SmallInput,
+				);
+			});
+		}
+	}
+	g.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_write,
@@ -420,6 +471,7 @@ criterion_group!(
 	bench_roundtrip,
 	bench_track_recv,
 	bench_stamp,
-	bench_relay_frames
+	bench_relay_frames,
+	bench_inflate
 );
 criterion_main!(benches);

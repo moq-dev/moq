@@ -169,7 +169,7 @@ mod test {
 			.expect("catalog track should create");
 
 		let origin = crate::source::produce_origin();
-		let dynamic = origin.dynamic("", Default::default()).unwrap();
+		let dynamic = origin.dynamic_route("", Default::default()).unwrap();
 		let requesting = origin.consume().request_broadcast("a/pub", None);
 		let served = broadcast.consume();
 		// The handler hands its route back: dropping it would retract the route and end

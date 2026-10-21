@@ -22,6 +22,9 @@ Rules every child keeps:
 - A paused clock auto-advances while the runtime idles, so it can fire a
   timer before a real socket delivers. Where real sockets fight the paused
   clock, make the timers mockable or move the test off real sockets.
+- A mocked clock still flakes when the code jitters its timers with `rand`
+  (the draft-16 cancel race was a retry sweep jittered past a fixed settle
+  budget). Wait out the jitter's whole window, not a count of small steps.
 
 Added 2026-10-15 (maintainer): three flakes seen while landing that day's
 merge batch, ranked by how likely each hides a product bug.
@@ -43,14 +46,16 @@ which #6032 had already finished, so it reuses #6032's reserved-port fix as
 its own child. moq-uring's `host_tracks_moq_clock` was seen the same day
 but #6056 had already fixed it by measuring the calibration gap.
 
+Added 2026-10-21 (maintainer): three small flakes and a fresh-worktree
+interop failure from the m0/m1 merge run, kept in one child since each is
+small.
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
-- [Draft-16 cancel race](/quest/m1/test-flakes-2/draft16-cancel-race.md) - the cancel-ahead-of-the-answer test settles the same way every run, fixing `run_publish_namespaces` if the order is real
-- [Relay bench holder](/quest/m1/test-flakes-2/relay-bench-holder.md) - the foreign-listener bench test fails fast when its holder cannot bind, instead of hanging on a fifo
-- [moq-tokio failed listen](/quest/m1/test-flakes-2/tokio-failed-listen.md) - the failed-listen test keeps its port reserved from first bind to final check
+- [Three flakes and fresh-worktree interop](/quest/m1/test-flakes-2/three-flakes.md) - OBS stop drain, the js/net RSS test, the audio harness RTT sample, and interop's bun install
 
 ## Related
 

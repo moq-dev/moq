@@ -2956,7 +2956,7 @@ mod session_tests {
 
 		let mut old = Publisher::standalone(video_rendition());
 		let serving = std::sync::Arc::new(Mutex::new(old.broadcast.consume()));
-		let pool = std::sync::Arc::new(origin.dynamic("", epoch()).unwrap());
+		let pool = std::sync::Arc::new(origin.dynamic_route("", epoch()).unwrap());
 		let (handler, answer) = (pool.clone(), serving.clone());
 		let handler = super::RUNTIME.spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
@@ -2969,7 +2969,7 @@ mod session_tests {
 
 		let mut new = Publisher::standalone(video_rendition());
 		*serving.lock().unwrap() = new.broadcast.consume();
-		pool.update(epoch()).unwrap();
+		pool.update_route(epoch()).unwrap();
 		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
 
 		stop(session);

@@ -1,7 +1,7 @@
-import { race } from "@moq/signals";
-import { ProtocolViolation, StreamError } from "../error.ts";
+import { error, ProtocolViolation, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
-import type { Reader, Stream, Writer } from "../stream.ts";
+import { Reader, type Stream, type Writer } from "../stream.ts";
+import type { Session } from "./adapter.ts";
 import { type RequestCondition, type RequestKind, toRequestCode } from "./error.ts";
 import { FetchError } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
@@ -25,15 +25,6 @@ export function finCancels(version: IetfVersion): boolean {
 		version === Version.DRAFT_17 ||
 		version === Version.DRAFT_18
 	);
-}
-
-/** Wait for request cancellation, including STOP_SENDING after a clean requester FIN. */
-export async function cancelled(stream: Stream, version: IetfVersion): Promise<void> {
-	const read = stream.reader.closed.then(() => (finCancels(version) ? undefined : stream.writer.closed));
-	// Legacy virtual response writers finish while the adapted control request lives.
-	if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16)
-		return read.catch(() => undefined);
-	await race([read, stream.writer.closed]).catch(() => undefined);
 }
 
 /**
@@ -88,8 +79,8 @@ export async function refuseUpdate(
 }
 
 /** Refuse an unrecognized reserved namespace before it reaches the application. */
-export async function refuseReserved(stream: Stream, version: IetfVersion): Promise<void> {
-	await refuse(stream, version, "subscribe", {
+export async function refuseReserved(request: RequestStream): Promise<void> {
+	await request.refuse("subscribe", {
 		condition: "does_not_exist",
 		reasonPhrase: "reserved namespace does not exist",
 	});
@@ -135,32 +126,17 @@ export async function nextMessage(reader: Reader, version: IetfVersion, client: 
 	}
 }
 
-/** Wait for a request's FIN or reset while still validating its GOAWAY messages. @internal */
-export async function ended(stream: Stream, version: IetfVersion, client: boolean): Promise<void> {
-	if (version <= Version.DRAFT_16) return cancelled(stream, version);
-	const read = (async () => {
-		if ((await nextMessage(stream.reader, version, client)) !== undefined)
-			throw new ProtocolViolation("unexpected request stream message");
-		if (!finCancels(version)) await stream.writer.closed;
-	})();
-	await race([read, stream.writer.closed]);
-}
-
 /**
- * Read one whole namespace update without abandoning a partial frame.
+ * Decode a namespace update the peer sent on its SUBSCRIBE_NAMESPACE.
  * @internal
  */
 export async function namespaceUpdate(
-	reader: Reader,
+	framed: Framed,
 	version: IetfVersion,
-	client: boolean,
-): Promise<{ requestId: bigint; prefix?: Path.Valid; refused?: RequestCondition } | undefined> {
+): Promise<{ requestId: bigint; prefix?: Path.Valid; refused?: RequestCondition }> {
+	if (framed.type !== 0x02) throw new ProtocolViolation("expected namespace REQUEST_UPDATE");
 	try {
-		// Inside the normalization, so an oversized or truncated type is malformed too.
-		const type = await nextMessage(reader, version, client);
-		if (type === undefined) return undefined;
-		if (type !== 0x02) throw new ProtocolViolation("expected namespace REQUEST_UPDATE");
-		return await Message.decode(reader, async (body) => {
+		return await Message.decode(framed.reader, async (body) => {
 			const requestId = await body.u62();
 			// Drafts 14-16 define no namespace update. The update's own Request ID is all its
 			// refusal names; the target is what the adapter routed it by.
@@ -183,6 +159,175 @@ export async function namespaceUpdate(
 }
 
 /**
+ * One message off a request stream, read whole so a taker that stops partway consumes nothing.
+ * @internal
+ */
+export interface Framed {
+	type: number;
+	/** The length-prefixed body, for the message's own `decode`. */
+	reader: Reader;
+}
+
+/**
+ * The single owner of one request stream, after its request message.
+ *
+ * Every read goes through it. From the first wait on it keeps reading, consuming GOAWAYs and
+ * acting on the end as they arrive, with the next message held in one slot until taken, so no
+ * reader is left detached. Every close goes through it once, and a protocol violation closes
+ * the session with its code once.
+ * @internal
+ */
+export class RequestStream {
+	/** Where answers to the request go. */
+	readonly writer: Writer;
+	readonly #stream: Stream;
+	readonly #session: Session;
+	readonly #quic?: WebTransport;
+	// The next message, read ahead of whoever takes it. Unset until someone first waits.
+	#ahead?: Promise<Framed | undefined>;
+	#taking = false;
+	#closed = false;
+	#violated = false;
+	readonly #ended: Promise<void>;
+	#end!: () => void;
+
+	/** Own `stream` for a request on `session`, closing `quic` over the peer's violations. */
+	constructor(stream: Stream, session: Session, quic?: WebTransport) {
+		this.#stream = stream;
+		this.writer = stream.writer;
+		this.#session = session;
+		this.#quic = quic;
+		this.#ended = new Promise((resolve) => {
+			this.#end = resolve;
+		});
+	}
+
+	/**
+	 * Settles once the peer ends the request, by FIN where that cancels or by resetting either
+	 * direction, or once it closes here or over a violation. Never rejects.
+	 */
+	get ended(): Promise<void> {
+		void this.#read();
+		return this.#ended;
+	}
+
+	/** Take the next message, or undefined once the peer finishes. One taker at a time. */
+	async next(): Promise<Framed | undefined> {
+		if (this.#taking) throw new Error("request stream already being read");
+		this.#taking = true;
+		try {
+			const framed = await this.#read();
+			if (framed !== undefined) this.#ahead = this.#readAhead();
+			return framed;
+		} finally {
+			this.#taking = false;
+		}
+	}
+
+	/** Refuse the request and end it. */
+	async refuse(kind: RequestKind, refusal: Refusal): Promise<void> {
+		await writeRefusal(this.writer, this.#session.version, kind, refusal);
+		this.close();
+	}
+
+	/** End the request cleanly: FIN, and stop reading. Only the first close counts. */
+	close(): void {
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#stream.close();
+		this.#end();
+	}
+
+	/**
+	 * Reset the request with `err`. A protocol violation closes the session with its code
+	 * first, even after the request ended. Only the first close of each counts.
+	 */
+	abort(err: unknown): void {
+		const e = error(err);
+		if (e instanceof ProtocolViolation && !this.#violated) {
+			this.#violated = true;
+			// Before the session's own close, which would send a clean code.
+			try {
+				this.#quic?.close({ closeCode: e.code, reason: e.message });
+			} catch {
+				// Already closed.
+			}
+			this.#session.close();
+		}
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#stream.abort(e);
+		this.#end();
+	}
+
+	/** Await `task`, which owns the request: whatever it throws ends the request, and so does returning. */
+	async serve(task: Promise<void>): Promise<void> {
+		try {
+			await task;
+		} catch (err) {
+			this.abort(err);
+			throw err;
+		}
+		this.close();
+	}
+
+	// Start reading on the first wait.
+	#read(): Promise<Framed | undefined> {
+		if (this.#ahead === undefined) {
+			const version = this.#session.version;
+			this.#ahead = this.#readAhead();
+			// The read ahead stops at an untaken message, so watch for the peer's end apart from it.
+			this.#stream.reader.closed.then(
+				() => {
+					if (finCancels(version)) this.#end();
+				},
+				() => this.#end(),
+			);
+			// Drafts 14-16 adapt the request onto the control stream, whose virtual writer
+			// finishes while the request lives.
+			if (version > Version.DRAFT_16)
+				this.writer.closed.then(
+					() => this.#end(),
+					() => this.#end(),
+				);
+		}
+		return this.#ahead;
+	}
+
+	// Act on the end as soon as it arrives, even while the message before it waits untaken.
+	#readAhead(): Promise<Framed | undefined> {
+		const read = this.#readFramed();
+		read.then(
+			(framed) => {
+				if (framed === undefined && finCancels(this.#session.version)) this.#end();
+			},
+			(err: unknown) => {
+				if (err instanceof ProtocolViolation) this.abort(err);
+				this.#end();
+			},
+		);
+		return read;
+	}
+
+	async #readFramed(): Promise<Framed | undefined> {
+		const reader = this.#stream.reader;
+		const version = this.#session.version;
+		const type = await nextMessage(reader, version, this.#session.client);
+		if (type === undefined) return undefined;
+		try {
+			const size = await reader.u16();
+			const framed = new Uint8Array(2 + size);
+			framed[0] = size >> 8;
+			framed[1] = size & 0xff;
+			framed.set(await reader.read(size), 2);
+			return { type, reader: new Reader(undefined, framed, version) };
+		} catch (err) {
+			throw malformed(err, "request stream message");
+		}
+	}
+}
+
+/**
  * A request message the peer sent that does not decode, including one cut short by FIN,
  * breaks the protocol. A reset stream does not.
  * @internal
@@ -191,7 +336,11 @@ export function malformed(err: unknown, what: string): unknown {
 	if (
 		err instanceof ProtocolViolation ||
 		err instanceof StreamError ||
-		(typeof err === "object" && err !== null && "source" in err && err.source === "session")
+		// A transport failure, including a reset whose code the browser did not report.
+		(typeof err === "object" &&
+			err !== null &&
+			"source" in err &&
+			(err.source === "session" || err.source === "stream"))
 	)
 		return err;
 	return new ProtocolViolation(`malformed ${what}`, { cause: err });

@@ -46,6 +46,7 @@ pub mod panic;
 pub mod quic;
 #[cfg(any(feature = "quic", feature = "tcp", feature = "websocket"))]
 mod resolve;
+pub mod secret;
 #[cfg(feature = "_transport")]
 pub mod server;
 #[doc(hidden)]

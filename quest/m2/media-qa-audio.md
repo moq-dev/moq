@@ -41,5 +41,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [A/V clock](/quest/m1/av-clock.md) - changes what drives sync; these cases should pass before and after it
-- [Nightly media players](/quest/m1/media-engines-nightly.md) - Firefox and WebKit inherit these cases once their rows pass
 - [Audio outlives video](/quest/m2/audio-bufferbloat-av.md) - the same pattern publisher under bufferbloat
