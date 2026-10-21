@@ -864,8 +864,11 @@ mod metadata_tests {
 		for _ in 0..3 {
 			track.finish().unwrap();
 		}
-		let kept = broadcast.state.lock().unwrap().as_ref().unwrap().finished.0.lock().unwrap().as_ref().unwrap().len();
-		assert_eq!(kept, 1);
+		let state = broadcast.state.lock().unwrap();
+		let finished = &state.as_ref().unwrap().finished;
+		let kept = finished.0.lock().unwrap().as_ref().map(Vec::len);
+		drop(state);
+		assert_eq!(kept, Some(1));
 	}
 
 	#[test]
