@@ -12,13 +12,12 @@
 //!   written before its first object. `timescale` is absent on an untimed track. Properties never
 //!   change for a track name. The source's max age is not stored: it bounds the live cache, not
 //!   the archive.
-//! - `<track>/<group>-<frame>-<pts>` on a timed track, `<track>/<group>` on an untimed one: an
-//!   object, keyed by its first sequence, the index of its first frame within it, and that
-//!   frame's timestamp in the track's timescale. Each field is 19 zero-padded decimal digits,
+//! - `<track>/<group>-<frame>-<pts>` on a timed track, `<track>/<group>-<frame>` on an untimed
+//!   one: an object, keyed by its first sequence, the index of its first frame within it, and
+//!   that frame's timestamp in the track's timescale. Each field is 19 zero-padded decimal digits,
 //!   so a sorted listing is content order and answers group and time lookups; there is no index
-//!   object. A timed group may split between frames across objects, which the frame index keeps
-//!   unique and ordered even where timestamps repeat or go backward. An untimed group never
-//!   splits: while it is open, its object is rewritten in place under the same key.
+//!   object. A group may split between frames across objects, which the frame index keeps unique
+//!   and ordered even where timestamps repeat or go backward. Every object is written once.
 //! - `<track>/end`: how the track's last run ended, `{"finish":{"group":5,"frame":0}}` for a
 //!   clean end at that exclusive position or `{"error":52}` for the stream error code. It sorts
 //!   after every object key, and DVR pruning never deletes it.

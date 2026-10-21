@@ -61,15 +61,13 @@ pub(crate) struct Start {
 }
 
 impl Start {
-	/// `<group>-<frame>-<pts>` on a timed track, `<group>` on an untimed one, zero-padded so
-	/// keys sort in content order.
+	/// `<group>-<frame>-<pts>` on a timed track, `<group>-<frame>` on an untimed one,
+	/// zero-padded so keys sort in content order.
 	pub(crate) fn name(&self) -> Result<String> {
-		let group = id(self.group)?;
+		let (group, frame) = (id(self.group)?, id(self.frame)?);
 		match self.pts {
-			Some(pts) => Ok(format!("{group}-{}-{}", id(self.frame)?, id(pts)?)),
-			None if self.frame == 0 => Ok(group),
-			// An untimed group is never split, so no untimed object starts mid-group.
-			None => Err(Error::Path(format!("{group}-{}", self.frame))),
+			Some(pts) => Ok(format!("{group}-{frame}-{}", id(pts)?)),
+			None => Ok(format!("{group}-{frame}")),
 		}
 	}
 
@@ -82,9 +80,9 @@ impl Start {
 				frame: parse_id(frame).ok_or_else(invalid)??,
 				pts: Some(parse_id(pts).ok_or_else(invalid)??),
 			}),
-			(false, [group]) => Ok(Self {
+			(false, [group, frame]) => Ok(Self {
 				group: parse_id(group).ok_or_else(invalid)??,
-				frame: 0,
+				frame: parse_id(frame).ok_or_else(invalid)??,
 				pts: None,
 			}),
 			_ => Err(invalid()),
@@ -445,29 +443,25 @@ mod tests {
 
 		let untimed = Start {
 			group: 7,
-			frame: 0,
+			frame: 2,
 			pts: None,
 		};
 		let name = untimed.name().unwrap();
-		assert_eq!(name, "0000000000000000007");
+		assert_eq!(name, "0000000000000000007-0000000000000000002");
 		assert_eq!(Name::parse(&name, false).unwrap(), Name::Object(untimed));
 		assert!(matches!(Name::parse(&name, true), Err(Error::Path(_))));
 
 		assert_eq!(Name::parse(".info", true).unwrap(), Name::Info);
 		assert_eq!(Name::parse("end", false).unwrap(), Name::End);
-		for bad in ["7", "segments", "0000000000000000007-x", "0009007199254740992"] {
+		for bad in [
+			"7",
+			"segments",
+			"0000000000000000007",
+			"0000000000000000007-x",
+			"0009007199254740992-0000000000000000000",
+		] {
 			assert!(Name::parse(bad, false).is_err(), "{bad}");
 		}
-	}
-
-	#[test]
-	fn an_untimed_object_never_starts_mid_group() {
-		let start = Start {
-			group: 1,
-			frame: 2,
-			pts: None,
-		};
-		assert!(matches!(start.name(), Err(Error::Path(_))));
 	}
 
 	#[test]

@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use futures::TryStreamExt;
+use moq_net::track::Position;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
 
@@ -15,8 +16,8 @@ pub(super) struct Stored {
 	pub info: Info,
 	/// Every object's key, oldest first.
 	pub objects: Vec<Path>,
-	/// The newest object, which says where the track continues.
-	pub newest: Option<Object>,
+	/// Where the track continues: just past its newest object's last frame.
+	pub next: Option<Position>,
 	/// How its last run ended, when the producer that stored it saw that.
 	pub end: Option<End>,
 }
@@ -69,13 +70,13 @@ async fn load_track<S: ObjectStore>(store: &Store<S>, dir: &Path) -> Result<Stor
 	}
 	objects.sort();
 
-	let newest = match objects.last() {
+	let next = match objects.last() {
 		Some((start, path)) => {
 			let object = Object::decode(store.inner().get(path).await?.bytes().await?, timed)?;
 			if object.start()? != *start {
 				return Err(Error::Path(path.to_string()));
 			}
-			Some(object)
+			Some(object.end()?)
 		}
 		None => None,
 	};
@@ -83,7 +84,7 @@ async fn load_track<S: ObjectStore>(store: &Store<S>, dir: &Path) -> Result<Stor
 	Ok(Stored {
 		info,
 		objects: objects.into_iter().map(|(_, path)| path).collect(),
-		newest,
+		next,
 		end,
 	})
 }

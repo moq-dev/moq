@@ -143,6 +143,10 @@ fn key(group: u64, frame: u64, pts: u64) -> String {
 	format!("{group:019}-{frame:019}-{pts:019}")
 }
 
+fn untimed(group: u64, frame: u64) -> String {
+	format!("{group:019}-{frame:019}")
+}
+
 async fn end(store: &Store<Mock>, track: &str) -> Option<End> {
 	let key = format!("{}/end", crate::path::encode_track(track).unwrap());
 	get(store, &key).await.map(|bytes| End::decode(&bytes).unwrap())
@@ -306,8 +310,10 @@ async fn an_oversized_timed_group_splits_into_ordered_unique_keys() {
 	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 1, frame: 0 })));
 }
 
+/// An open untimed group is cut at each flush, so it never holds more than a flush of frames in
+/// memory, and a stored object is never rewritten.
 #[tokio::test(start_paused = true)]
-async fn an_open_untimed_group_is_rewritten_in_place_and_cut_by_wall_clock() {
+async fn an_open_untimed_group_is_cut_at_each_flush() {
 	let store = store();
 	let broadcast = broadcast::Info::new().produce();
 	let data = broadcast.create_track("data", track::Info::default()).unwrap();
@@ -318,25 +324,53 @@ async fn an_open_untimed_group_is_rewritten_in_place_and_cut_by_wall_clock() {
 	open.write_frame(None, "a").unwrap();
 	settle().await;
 	sleep(SECOND).await;
-	assert_eq!(
-		contents(&objects(&store, "data", false).await),
-		[[(0, "group", vec!["a".to_string()])]]
-	);
+	let head = untimed(0, 0);
+	let first = get(&store, &format!("data/{head}")).await.unwrap();
 
 	open.write_frame(None, "b").unwrap();
 	settle().await;
 	sleep(SECOND).await;
+	assert_eq!(get(&store, &format!("data/{head}")).await.unwrap(), first);
 	let stored = objects(&store, "data", false).await;
-	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), ["0000000000000000000"]);
+	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [head, untimed(0, 1)]);
 	assert_eq!(
 		contents(&stored),
-		[[(0, "group", vec!["a".to_string(), "b".to_string()])]]
+		[
+			[(0, "group", vec!["a".to_string()])],
+			[(0, "group", vec!["b".to_string()])]
+		]
 	);
-	open.finish().unwrap();
 
-	// Past the duration, the next group starts the next object.
+	open.finish().unwrap();
+	data.finish().unwrap();
+	broadcast.close();
+	finished(task).await;
+	assert_eq!(end(&store, "data").await, Some(End::Finish(At { group: 1, frame: 0 })));
+	let info = Info::decode(&get(&store, "data/.info").await.unwrap()).unwrap();
+	assert_eq!(info.timescale, None);
+}
+
+/// Without a flush due, an untimed group splits once its own run in an object lasts the duration
+/// of wall clock, and the next group starts the next object past the duration.
+#[tokio::test(start_paused = true)]
+async fn an_untimed_group_splits_by_wall_clock() {
+	let store = store();
+	let broadcast = broadcast::Info::new().produce();
+	let data = broadcast.create_track("data", track::Info::default()).unwrap();
+	let task = spawn(&store, &broadcast, config());
+	subscribed(&data).await;
+
+	let mut open = data.create_group(group::Info { sequence: 0 }).unwrap();
+	for payload in ["a", "b", "c", "d", "e"] {
+		open.write_frame(None, payload).unwrap();
+		settle().await;
+		sleep(SECOND / 2).await;
+	}
+	open.finish().unwrap();
+	settle().await;
+	sleep(2 * SECOND).await;
 	let mut next = data.create_group(group::Info { sequence: 1 }).unwrap();
-	next.write_frame(None, "c").unwrap();
+	next.write_frame(None, "f").unwrap();
 	next.finish().unwrap();
 	settle().await;
 	data.finish().unwrap();
@@ -346,10 +380,17 @@ async fn an_open_untimed_group_is_rewritten_in_place_and_cut_by_wall_clock() {
 	let stored = objects(&store, "data", false).await;
 	assert_eq!(
 		stored.keys().cloned().collect::<Vec<_>>(),
-		["0000000000000000000", "0000000000000000001"]
+		[untimed(0, 0), untimed(0, 4), untimed(1, 0)]
 	);
-	let info = Info::decode(&get(&store, "data/.info").await.unwrap()).unwrap();
-	assert_eq!(info.timescale, None);
+	let strings = |frames: &[&str]| frames.iter().map(|frame| frame.to_string()).collect::<Vec<_>>();
+	assert_eq!(
+		contents(&stored),
+		[
+			vec![(0, "group", strings(&["a", "b", "c", "d"]))],
+			vec![(0, "group", strings(&["e"]))],
+			vec![(1, "group", strings(&["f"]))],
+		]
+	);
 }
 
 #[tokio::test(start_paused = true)]
@@ -433,16 +474,18 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 		.collect();
 	assert_eq!(frames, ["0/a", "100/b", "200/c", "300/d"]);
 
-	// The untimed group's object was read back and rewritten with the rest.
+	// The untimed group continues in its own object too.
 	let stored = objects(&store, "data", false).await;
 	assert_eq!(
-		contents(&stored),
-		[[(
-			0,
-			"group",
-			vec!["a", "b", "c", "d"].into_iter().map(String::from).collect()
-		)]]
+		stored.keys().cloned().collect::<Vec<_>>(),
+		[untimed(0, 0), untimed(0, 2)]
 	);
+	let frames: Vec<String> = contents(&stored)
+		.into_iter()
+		.flatten()
+		.flat_map(|(_, _, frames)| frames)
+		.collect();
+	assert_eq!(frames, ["a", "b", "c", "d"]);
 	assert!(complete(&store).await);
 }
 
@@ -549,7 +592,7 @@ async fn track_names_stay_one_segment_through_a_resume() {
 
 	let stored = keys(&store).await;
 	for dir in ["a%2Fb", "%2Ehidden", "end"] {
-		assert!(stored.contains(&format!("{dir}/0000000000000000000")), "{stored:?}");
+		assert!(stored.contains(&format!("{dir}/{}", untimed(0, 0))), "{stored:?}");
 		assert!(stored.contains(&format!("{dir}/.info")), "{stored:?}");
 	}
 

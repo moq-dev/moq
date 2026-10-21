@@ -19,8 +19,8 @@ use super::*;
 const VIDEO: &str = "video/1080p";
 const CHAT: &str = "chat.json";
 
-/// Real time, so the S3 client's own timers behave: a flush short enough to rewrite the open
-/// untimed group while the test waits, and long enough that no put outlasts it.
+/// Real time, so the S3 client's own timers behave: a flush short enough to store the untimed
+/// group while the test waits, and long enough that no put outlasts it.
 fn config() -> Config {
 	Config::default()
 		.with_duration(Duration::from_secs(2))
@@ -75,8 +75,8 @@ async fn stored<S: ObjectStore>(store: &Store<S>, paths: &[Path]) {
 	.expect("the producer stores the objects");
 }
 
-/// Record in two runs: the first is stopped once it stored a split timed track and an open
-/// untimed group, and the second resumes both, appending to the open group in place.
+/// Record in two runs: the first is stopped once it stored a split timed track and the head of
+/// an untimed group, and the second resumes both, continuing that group in a new object.
 async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	let (first, _tracks) = source(4, &[(0, &["c0"])]);
 	let run = tokio::spawn(Producer::new(store.clone(), first.consume(), config()).run());
@@ -93,7 +93,7 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 				VIDEO,
 				"0000000000000000002-0000000000000000000-0000000000000002000",
 			),
-			path(store, CHAT, "0000000000000000000"),
+			path(store, CHAT, "0000000000000000000-0000000000000000000"),
 		],
 	)
 	.await;
@@ -156,7 +156,8 @@ async fn recordings_are_byte_identical_on_every_backend() {
 		[
 			".end",
 			"chat%2Ejson/.info",
-			"chat%2Ejson/0000000000000000000",
+			"chat%2Ejson/0000000000000000000-0000000000000000000",
+			"chat%2Ejson/0000000000000000000-0000000000000000001",
 			"chat%2Ejson/end",
 			"video%2F1080p/.info",
 			"video%2F1080p/0000000000000000000-0000000000000000000-0000000000000000000",
@@ -166,9 +167,13 @@ async fn recordings_are_byte_identical_on_every_backend() {
 		]
 	);
 	assert_eq!(
-		decode(&expected, "chat%2Ejson/0000000000000000000", false),
-		[(0, vec!["c0".into(), "c1".into()]), (1, vec!["c2".into()])],
-		"the resumed open group is appended in place"
+		decode(&expected, "chat%2Ejson/0000000000000000000-0000000000000000000", false),
+		[(0, vec!["c0".into()])],
+	);
+	assert_eq!(
+		decode(&expected, "chat%2Ejson/0000000000000000000-0000000000000000001", false),
+		[(0, vec!["c1".into()]), (1, vec!["c2".into()])],
+		"the resumed group continues in its own object"
 	);
 	assert_eq!(
 		decode(

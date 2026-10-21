@@ -42,8 +42,8 @@ archive (per-track `.timeline.z` records named by the catalog's root
   stall. Anything younger is still in the live cache.
 - **Per-track objects, keyed by position.** Groups coalesce in order into
   objects cut by duration, keyed
-  `<prefix>/<track>/<first group>-<first frame>-<first pts>` (`<first group>`
-  for an untimed track, `<track>` percent-encoded as one
+  `<prefix>/<track>/<first group>-<first frame>-<first pts>`
+  (`<first group>-<first frame>` for an untimed track, `<track>` percent-encoded as one
   segment), beside a small per-track `.info` holding its timescale and
   priority. Each stored sequence keeps its form, group or datagram. A
   track's `end` records how it ended, clean or with its error code, written

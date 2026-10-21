@@ -21,6 +21,7 @@
 //! # }
 //! ```
 
+mod ordered;
 mod resume;
 mod track;
 
@@ -50,12 +51,12 @@ use crate::{Error, Result, Store};
 #[non_exhaustive]
 pub struct Config {
 	/// How much content an object holds before it is cut at the next group boundary: media time
-	/// on a timed track, wall-clock time on an untimed one. A timed group whose own run in an
-	/// object reaches it splits between frames; an untimed group never splits.
+	/// on a timed track, wall-clock time on an untimed one. A group whose own run in an object
+	/// reaches it splits between frames.
 	pub duration: Duration,
 	/// The longest a frame waits in memory before its object is stored, however idle its track.
-	/// A timed object is cut there; an untimed one is rewritten in place and stays open. Keep it
-	/// above [`Self::duration`], or objects are cut by it instead.
+	/// The object is cut there, mid-group if need be. Keep it above [`Self::duration`], or
+	/// objects are cut by it instead.
 	pub flush: Duration,
 	/// The longest a missing group is waited for, capping the publisher's max age. A group still
 	/// missing then is a gap, and the frames behind it wait for that verdict. A track with nothing

@@ -20,8 +20,8 @@ Decided by the maintainer on 2026-10-17 (see the
   track with its own cursor, a LIST of that track's key prefix StartAfter its
   newest known key, since one prefix-wide cursor skips a new key under a
   lexically earlier track. A delimiter LIST of the broadcast prefix finds
-  tracks added since. It also re-reads a track's newest object, which the
-  producer may rewrite in place while an untimed group is open.
+  tracks added since. Every object is written once, an open group continuing
+  in the next object (decided 2026-10-21).
 - Each served track advertises no Publisher Max Age limit (TRACK_INFO's
   encoded `0`), not the source's: the store's retention bounds what it holds,
   and DVR pruning is the publisher dropping a group early, which TRACK_INFO

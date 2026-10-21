@@ -1,6 +1,6 @@
 //! One track's recorder: its runs, in order, into duration-cut objects.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
@@ -9,11 +9,12 @@ use std::time::Duration;
 use bytes::Bytes;
 use moq_clock::Instant;
 use moq_net::track::{Anchor, Order, Position, Range, Subscription};
-use moq_net::{Datagram, StreamError, Timescale, group};
+use moq_net::{StreamError, Timescale, group};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
 
 use super::Shared;
+use super::ordered::{Item, Ordered};
 use super::resume::Stored;
 use crate::layout::{self, End, Entry, Object};
 use crate::segment::Frame;
@@ -54,7 +55,7 @@ struct Track<S> {
 	/// Objects a newer one superseded, oldest first, with when.
 	superseded: VecDeque<(Instant, Path)>,
 	/// Writes owed to the store, in order.
-	puts: Vec<Put>,
+	puts: Vec<(Path, Bytes)>,
 	end: Option<End>,
 }
 
@@ -62,56 +63,17 @@ struct Building {
 	object: Object,
 	/// When it was opened, which cuts an untimed object by wall clock.
 	opened: Instant,
-	/// The arrival of its oldest frame not stored yet, which bounds the flush.
-	unstored: Option<Instant>,
-	/// Whether it is in the store under its key, as an untimed object rewritten in place is.
-	stored: bool,
-	/// On a timed track, the timestamp its last entry's run in this object starts at.
+	/// The arrival of its oldest frame, which bounds the flush.
+	unstored: Instant,
+	/// Where its last entry's run in this object starts: the timestamp on a timed track, the
+	/// arrival on an untimed one, which splits an oversized group.
 	run_pts: u64,
-}
-
-struct Put {
-	path: Path,
-	bytes: Bytes,
-	/// Rewrite an untimed object in place, rather than create an immutable one.
-	overwrite: bool,
-}
-
-/// A sequence received ahead of the one being stored.
-enum Pending {
-	Group(Box<group::Consumer>, Instant),
-	Datagram(Datagram, Instant),
-}
-
-impl Pending {
-	fn arrived(&self) -> Instant {
-		match self {
-			Self::Group(_, at) | Self::Datagram(_, at) => *at,
-		}
-	}
-}
-
-/// One subscription's progress.
-struct Run {
-	max_delay: Duration,
-	/// Received sequences not stored yet, waiting on a lower one.
-	pending: BTreeMap<u64, Pending>,
-	/// The group being stored, frame by frame.
-	current: Option<Box<group::Consumer>>,
-	/// When the gap below the lowest pending sequence is given up.
-	gap: Option<Instant>,
-	/// When the first sequence arrived while nothing was stored, so nothing says where the track
-	/// starts: arrival is not sequence order, and a lower one may still be on its way.
-	first: Option<Instant>,
-	groups_done: bool,
-	datagrams_done: bool,
+	run_at: Instant,
 }
 
 enum Event {
 	Frame(u64, moq_net::Result<Option<moq_net::frame::Frame>>),
-	// Boxed, since a group consumer dwarfs every other event and waits in `Run::pending`.
-	Group(moq_net::Result<Option<Box<group::Consumer>>>),
-	Datagram(moq_net::Result<Option<Datagram>>),
+	Next(Option<(u64, Item)>),
 	Timer,
 }
 
@@ -139,25 +101,13 @@ impl<S: ObjectStore> Track<S> {
 		track.timescale = timescale(&stored.info)?;
 		track.info = Some(stored.info);
 		track.end = stored.end;
-		let now = moq_clock::now();
+		track.next = stored.next;
 		let mut objects = stored.objects;
 		track.newest = objects.pop();
 		if track.shared.config.dvr.is_some() {
 			// Their age is unknown, so their window starts now.
+			let now = moq_clock::now();
 			track.superseded = objects.into_iter().map(|path| (now, path)).collect();
-		}
-		if let Some(newest) = stored.newest {
-			track.next = Some(newest.end()?);
-			// An untimed object keeps growing in place; a timed one is immutable.
-			if track.timescale.is_none() {
-				track.object = Some(Building {
-					object: newest,
-					opened: now,
-					unstored: None,
-					stored: true,
-					run_pts: 0,
-				});
-			}
 		}
 		Ok(track)
 	}
@@ -234,51 +184,39 @@ impl<S: ObjectStore> Track<S> {
 			Ok(track) => track,
 			Err(err) => return Ok(error(&err)),
 		};
-		let mut subscriber = match track.subscribe(subscription).await {
+		let subscriber = match track.subscribe(subscription).await {
 			Ok(subscriber) => subscriber,
 			Err(err) => return Ok(error(&err)),
 		};
 
-		let mut run = Run {
-			max_delay,
-			pending: BTreeMap::new(),
-			current: None,
-			gap: None,
-			first: None,
-			groups_done: false,
-			datagrams_done: false,
-		};
+		let mut ordered = Ordered::new(subscriber, max_delay, self.next.map(|next| next.group));
+		// The group being stored, frame by frame.
+		let mut current: Option<Box<group::Consumer>> = None;
 		loop {
-			self.advance(&mut run, false)?;
 			self.flush_due(moq_clock::now())?;
 			self.write().await?;
 			self.prune().await?;
-			if run.groups_done && run.datagrams_done {
-				break;
-			}
 
-			let deadlines = [self.flush_at(), run.gap, self.prune_at()];
-			let mut timer = deadlines
+			let mut timer = [self.flush_at(), self.prune_at()]
 				.into_iter()
 				.flatten()
 				.min()
 				.map(|at| Box::pin(moq_clock::sleep_until(at)));
 			let event = kio::wait(|waiter| {
-				if let Some(current) = run.current.as_mut() {
-					let index = current.index();
-					if let Poll::Ready(frame) = current.poll_read_frame(waiter) {
-						return Poll::Ready(Event::Frame(index, frame));
+				match current.as_mut() {
+					Some(current) => {
+						let index = current.index();
+						if let Poll::Ready(frame) = current.poll_read_frame(waiter) {
+							return Poll::Ready(Event::Frame(index, frame));
+						}
+						// Arrival times decide the waits, so arrivals are taken meanwhile.
+						ordered.poll_arrivals(waiter);
 					}
-				}
-				if !run.groups_done
-					&& let Poll::Ready(group) = subscriber.poll_recv_group(waiter)
-				{
-					return Poll::Ready(Event::Group(group.map(|group| group.map(Box::new))));
-				}
-				if !run.datagrams_done
-					&& let Poll::Ready(datagram) = subscriber.poll_recv_datagram(waiter)
-				{
-					return Poll::Ready(Event::Datagram(datagram));
+					None => {
+						if let Poll::Ready(next) = ordered.poll_next(waiter) {
+							return Poll::Ready(Event::Next(next));
+						}
+					}
 				}
 				ready_at(&mut timer, waiter).map(|()| Event::Timer)
 			})
@@ -286,82 +224,19 @@ impl<S: ObjectStore> Track<S> {
 
 			let now = moq_clock::now();
 			match event {
-				Event::Frame(index, read) => self.frame(&mut run, index, read, now)?,
-				Event::Group(Ok(Some(group))) => {
-					if self.next.is_none_or(|next| group.sequence >= next.group) {
-						run.pending.insert(group.sequence, Pending::Group(group, now));
-					}
-				}
-				Event::Datagram(Ok(Some(datagram))) => {
-					if self.next.is_none_or(|next| datagram.sequence >= next.group) {
-						run.pending.insert(datagram.sequence, Pending::Datagram(datagram, now));
-					}
-				}
-				// How the track ended is read from the subscription below.
-				Event::Group(_) => run.groups_done = true,
-				Event::Datagram(_) => run.datagrams_done = true,
-				Event::Timer => {}
-			}
-		}
-
-		// Everything received is stored, gaps and all, now that nothing more arrives.
-		while run.current.is_some() || !run.pending.is_empty() {
-			self.advance(&mut run, true)?;
-			if let Some(current) = run.current.as_mut() {
-				let index = current.index();
-				let read = kio::wait(|waiter| current.poll_read_frame(waiter)).await;
-				self.frame(&mut run, index, read, moq_clock::now())?;
-			}
-		}
-
-		let end = match kio::wait(|waiter| subscriber.poll_finished(waiter)).await {
-			Ok(end) => End::Finish(end.into()),
-			Err(err) => error(&err),
-		};
-		self.flush()?;
-		self.write().await?;
-		Ok(end)
-	}
-
-	/// Take pending sequences in order while the next one is here or its gap was given up.
-	fn advance(&mut self, run: &mut Run, draining: bool) -> Result<()> {
-		run.gap = None;
-		while run.current.is_none() {
-			let Some(entry) = run.pending.first_entry() else {
-				return Ok(());
-			};
-			let sequence = *entry.key();
-			let waiting = match self.next {
-				Some(next) if sequence < next.group => {
-					entry.remove();
-					continue;
-				}
-				Some(next) => (sequence > next.group).then(|| entry.get().arrived()),
-				// Nothing is below 0; anything else waits from the first arrival, so a stream of
-				// ever lower sequences cannot hold the track back.
-				None => {
-					let first = *run.first.get_or_insert(entry.get().arrived());
-					(sequence > 0).then_some(first)
-				}
-			};
-			if let Some(waiting) = waiting
-				&& !draining && moq_clock::now() < waiting + run.max_delay
-			{
-				run.gap = Some(waiting + run.max_delay);
-				return Ok(());
-			}
-			match entry.remove() {
-				Pending::Datagram(datagram, arrived) => {
+				Event::Frame(index, read) => self.frame(&mut current, index, read, now)?,
+				Event::Next(Some((sequence, Item::Datagram(datagram)))) => {
 					let frame = Frame {
 						timestamp: self.stamp(datagram.timestamp)?,
 						payload: datagram.payload,
 					};
-					self.push(sequence, 0, frame, true, arrived)?;
+					self.push(sequence, 0, frame, true, now)?;
 					self.next = Some(Position::group(sequence + 1));
 				}
-				Pending::Group(mut group, _) => {
-					// A resumed group continues after its stored frames. The clamp also starts a group
-					// whose head is held elsewhere at its first frame, rather than lagging behind it.
+				Event::Next(Some((sequence, Item::Group(mut group)))) => {
+					// A resumed group continues after its stored frames. The clamp also starts a
+					// group whose head is held elsewhere at its first frame, rather than lagging
+					// behind it.
 					let stored = self
 						.next
 						.filter(|next| next.group == sequence)
@@ -371,23 +246,32 @@ impl<S: ObjectStore> Track<S> {
 						group: sequence,
 						frame: group.index(),
 					});
-					run.current = Some(group);
+					current = Some(group);
 				}
+				Event::Next(None) => break,
+				Event::Timer => {}
 			}
 		}
-		Ok(())
+
+		let end = match kio::wait(|waiter| ordered.poll_finished(waiter)).await {
+			Ok(end) => End::Finish(end.into()),
+			Err(err) => error(&err),
+		};
+		self.close()?;
+		self.write().await?;
+		Ok(end)
 	}
 
 	/// Store the frame read at `index` of the group being stored, or move past that group once it
 	/// ended, cleanly or not (aborted, or past the budget), keeping what it stored.
 	fn frame(
 		&mut self,
-		run: &mut Run,
+		current: &mut Option<Box<group::Consumer>>,
 		index: u64,
 		read: moq_net::Result<Option<moq_net::frame::Frame>>,
 		now: Instant,
 	) -> Result<()> {
-		let sequence = run.current.as_ref().expect("reading a group").sequence;
+		let sequence = current.as_ref().expect("reading a group").sequence;
 		match read {
 			Ok(Some(frame)) => {
 				let frame = Frame {
@@ -404,7 +288,7 @@ impl<S: ObjectStore> Track<S> {
 				if let Err(err) = ended {
 					tracing::debug!(track = %self.name, sequence, %err, "group ended early");
 				}
-				run.current = None;
+				*current = None;
 				self.next = Some(Position::group(sequence + 1));
 			}
 		}
@@ -441,7 +325,13 @@ impl<S: ObjectStore> Track<S> {
 							false => pts.saturating_sub(building.run_pts) >= duration,
 						}
 					}
-					_ => boundary && now.saturating_duration_since(building.opened) >= config.duration,
+					_ => {
+						let since = match boundary {
+							true => building.opened,
+							false => building.run_at,
+						};
+						now.saturating_duration_since(since) >= config.duration
+					}
 				};
 			if cut {
 				self.close()?;
@@ -454,15 +344,16 @@ impl<S: ObjectStore> Track<S> {
 				entries: Vec::new(),
 			},
 			opened: now,
-			unstored: None,
-			stored: false,
+			unstored: now,
 			run_pts: 0,
+			run_at: now,
 		});
 		let pts = frame.timestamp.unwrap_or(0);
 		match building.object.entries.last_mut() {
 			Some(Entry::Group { sequence: last, frames }) if *last == sequence && !datagram => frames.push(frame),
 			_ => {
 				building.run_pts = pts;
+				building.run_at = now;
 				building.object.entries.push(match datagram {
 					true => Entry::Datagram { sequence, frame },
 					false => Entry::Group {
@@ -472,41 +363,20 @@ impl<S: ObjectStore> Track<S> {
 				});
 			}
 		}
-		building.unstored.get_or_insert(now);
 		Ok(())
 	}
 
-	/// When the object's oldest unstored frame is due in the store.
+	/// When the object's oldest frame is due in the store.
 	fn flush_at(&self) -> Option<Instant> {
-		let unstored = self.object.as_ref()?.unstored?;
-		Some(unstored + self.shared.config.flush)
+		Some(self.object.as_ref()?.unstored + self.shared.config.flush)
 	}
 
+	/// Store the object once its oldest frame is due, so its group continues in the next.
 	fn flush_due(&mut self, now: Instant) -> Result<()> {
 		if self.flush_at().is_some_and(|at| at <= now) {
-			self.flush()?;
+			self.close()?;
 		}
 		Ok(())
-	}
-
-	/// Store the object: a timed one is closed, so its group continues in the next; an untimed
-	/// one is rewritten in place and stays open.
-	fn flush(&mut self) -> Result<()> {
-		match self.timescale {
-			Some(_) => self.close(),
-			None => {
-				let Some(building) = self.object.as_mut() else {
-					return Ok(());
-				};
-				if building.unstored.take().is_some() {
-					let bytes = building.object.encode(false)?;
-					building.stored = true;
-					let path = self.object_path()?;
-					self.queue(path, bytes, true);
-				}
-				Ok(())
-			}
-		}
 	}
 
 	/// Store the object for good and start the next one at the following frame.
@@ -514,49 +384,29 @@ impl<S: ObjectStore> Track<S> {
 		let Some(building) = self.object.take() else {
 			return Ok(());
 		};
-		if building.unstored.is_none() && building.stored {
-			return Ok(());
-		}
-		let timed = self.timescale.is_some();
-		let bytes = building.object.encode(timed)?;
+		let bytes = building.object.encode(self.timescale.is_some())?;
 		let path = push(&self.dir, &building.object.start()?.name()?)?;
-		self.queue(path, bytes, !timed);
-		Ok(())
-	}
-
-	fn object_path(&self) -> Result<Path> {
-		let building = self.object.as_ref().expect("an open object");
-		push(&self.dir, &building.object.start()?.name()?)
-	}
-
-	fn queue(&mut self, path: Path, bytes: Bytes, overwrite: bool) {
-		if self.newest.as_ref() != Some(&path) {
-			let superseded = self.newest.replace(path.clone());
-			if let Some(superseded) = superseded
-				&& self.shared.config.dvr.is_some()
-			{
-				self.superseded.push_back((moq_clock::now(), superseded));
-			}
+		if let Some(superseded) = self.newest.replace(path.clone())
+			&& self.shared.config.dvr.is_some()
+		{
+			self.superseded.push_back((moq_clock::now(), superseded));
 		}
-		self.puts.push(Put { path, bytes, overwrite });
+		self.puts.push((path, bytes));
+		Ok(())
 	}
 
 	/// Perform the owed writes in order.
 	async fn write(&mut self) -> Result<()> {
 		let store = self.shared.store.inner();
-		for put in std::mem::take(&mut self.puts) {
-			let payload = PutPayload::from(put.bytes.clone());
-			if put.overwrite {
-				store.put(&put.path, payload).await?;
-				continue;
-			}
-			match store.put_opts(&put.path, payload, PutMode::Create.into()).await {
+		for (path, bytes) in std::mem::take(&mut self.puts) {
+			let payload = PutPayload::from(bytes.clone());
+			match store.put_opts(&path, payload, PutMode::Create.into()).await {
 				Ok(_) => {}
 				// Written already, by an earlier attempt that failed to report success.
 				Err(object_store::Error::AlreadyExists { .. }) => {
-					let existing = store.get(&put.path).await?.bytes().await?;
-					if existing != put.bytes {
-						return Err(Error::Conflict(put.path.to_string()));
+					let existing = store.get(&path).await?.bytes().await?;
+					if existing != bytes {
+						return Err(Error::Conflict(path.to_string()));
 					}
 				}
 				Err(err) => return Err(err.into()),
