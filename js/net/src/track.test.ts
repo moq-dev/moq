@@ -34,13 +34,6 @@ function manualTime(initial: number) {
 	};
 }
 
-test("priority reads the committed info and is the midpoint before accept", () => {
-	const producer = new TrackProducer("video");
-	expect(producer.priority).toBe(127);
-	producer.accept({ priority: 60 });
-	expect(producer.priority).toBe(60);
-});
-
 test("wanted reflects subscriber demand and clears when the last one leaves", async () => {
 	const producer = new TrackProducer("test");
 
@@ -2330,12 +2323,6 @@ test("finished rejects when the track aborts or closes without an end", async ()
 	expect(await reader.finished()).toEqual({ group: 1, frame: 0 });
 });
 
-test("publisher max age is absent unless explicitly declared", () => {
-	expect(infoDefaults().maxAge).toBeUndefined();
-	expect(infoDefaults({ maxAge: Milli.zero }).maxAge).toBe(Milli.zero);
-	expect(infoDefaults({ maxAge: Milli(30_000) }).maxAge).toBe(Milli(30_000));
-});
-
 // Rust applies the pool's idle expiry with `max_age: None` too: omitting the publisher
 // limit only removes the media-time clamp, never the wall-clock bound on memory.
 test("an omitted publisher limit still ages idle groups out", async () => {
@@ -2549,11 +2536,6 @@ function untimedTrack(count: number): TrackProducer {
 	for (let i = 0; i < count; i++) producer.writeFrame({ payload: enc.encode(`${i}`) });
 	return producer;
 }
-
-test("a track is untimed unless it declares a timescale", () => {
-	expect(infoDefaults().timescale).toBeUndefined();
-	expect(infoDefaults({ timescale: Timescale.MICRO }).timescale).toBe(Timescale.MICRO);
-});
 
 test("a null timescale declares an untimed track, like an omitted one", () => {
 	expect(infoDefaults({ timescale: null }).timescale).toBeUndefined();

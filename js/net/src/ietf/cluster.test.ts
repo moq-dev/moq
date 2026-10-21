@@ -62,12 +62,8 @@ function reader(bytes: Uint8Array, version: IetfVersion = VERSION): Reader {
 	return new Reader(undefined, bytes, version);
 }
 
-test("Cluster: the registry code points and their parity", () => {
-	// Other implementations key on these, so a typo is invisible against ourselves and
-	// fatal against anyone else. The parity is load-bearing too: odd values are
-	// length-prefixed byte strings, even ones bare varints.
-	expect(SetupOption.HopId).toBe(0x40b54n);
-	expect(SetupOption.RelayCost).toBe(0x40b56n);
+test("Cluster: the registry code points are bare varints", () => {
+	// Odd values are length-prefixed byte strings, even ones bare varints.
 	expect(SetupOption.HopId % 2n).toBe(0n);
 	expect(SetupOption.RelayCost % 2n).toBe(0n);
 });

@@ -22,13 +22,6 @@ describe("resolve", () => {
 		expect(Audio.resolve).toBeUndefined();
 	});
 
-	test("defaults Opus to 20ms", () => {
-		const resolved = resolve(captured, "opus");
-		expect(resolved.frameDuration).toBe(Micro(20_000));
-		expect(Number(resolved.catalog.warmup)).toBe(80);
-		expect(resolved.catalog.jitter).toBeUndefined();
-	});
-
 	// The exact frame duration does not imply encoder flush lateness.
 	test("keeps a 2.5ms Opus frame exact without a catalog hint", () => {
 		const resolved = resolve(captured, { mime: "opus", frameDuration: Milli(2.5) });

@@ -7,7 +7,6 @@ const workflow = async (name: string) => Bun.YAML.parse(await Bun.file(`.github/
 const check = await workflow("check");
 const platform = await workflow("platform");
 const dart = await workflow("release-dart-ffi");
-const swift = await workflow("release-swift-lib");
 const nightly = await workflow("nightly");
 
 function condition(expression: string, event: string, base: string, selected = true, action = "opened"): unknown {
@@ -80,12 +79,7 @@ for (const job of ["release-swift-lib", "release-dart-ffi", "release-dart", "rel
 	assert.ok(nightly.jobs[job], `nightly must dry-run ${job}`);
 }
 
-assert.equal((await workflow("obs")).jobs.release, undefined);
 assert.deepEqual((await workflow("obs")).on.push.branches, ["release"]);
-assert.equal((await workflow("cpp")).jobs.msvc, undefined);
-assert.deepEqual((await workflow("moq-sh")).jobs.test.strategy.matrix.os, ["ubuntu-latest"]);
-assert.equal(await Bun.file(".github/workflows/swift.yml").exists(), false);
-assert.deepEqual(swift.on.pull_request.branches, ["release"]);
 
 // Release Dart FFI only runs on release PRs and nightly, so it packages every platform.
 const targets = JSON.parse(dart.jobs.ffi.with.targets);

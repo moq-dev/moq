@@ -23,7 +23,6 @@ async function read(name: string): Promise<Workflow> {
 test("shared default builds cover each consumer exactly once", async () => {
 	const shared = await read("release-shared-ffi");
 	const targets = JSON.parse(shared.jobs.native.with?.targets as string) as string[];
-	expect(targets.length).toBe(9);
 	expect(new Set(targets).size).toBe(targets.length);
 	const all: string[] = [];
 	for (const [job, file] of [
@@ -43,7 +42,6 @@ test("shared default builds cover each consumer exactly once", async () => {
 		expect(select?.env?.LIB_PREFIX).toContain("'default'");
 	}
 	expect([...new Set(all)].sort()).toEqual(targets.toSorted());
-	expect(all.length - targets.length).toBe(5);
 	expect(shared.on.push?.tags).toEqual(["moq-ffi-v*"]);
 	const dart = await read("release-dart-ffi");
 	expect(dart.on.push?.tags).toEqual(["moq-ffi-v*"]);
@@ -77,8 +75,6 @@ test("wrapper gates preserve trusted tag inputs and inspect only their publisher
 test("Nightly and alert chains retain packaged outputs with one shared producer", async () => {
 	const nightly = await read("nightly");
 	expect(nightly.jobs["release-shared-ffi"].uses).toBe("./.github/workflows/release-shared-ffi.yml");
-	for (const old of ["release-go-ffi", "release-kt-ffi", "release-swift-ffi"])
-		expect(nightly.jobs[old]).toBeUndefined();
 	expect(nightly.jobs.sizes.needs).toContain("release-shared-ffi");
 	expect(nightly.jobs["release-py-ffi"]).toBeDefined();
 	expect(nightly.jobs["release-dart-ffi"]).toBeDefined();

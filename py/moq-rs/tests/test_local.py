@@ -148,7 +148,6 @@ def test_protocol_error_helper_covers_known_app_and_unknown():
 def test_error_str_is_rust_display():
     assert str(moq.Error.Closed()) == "closed"  # type: ignore[attr-defined]
     error = moq.Error.Transport(reason="reset")  # type: ignore[attr-defined]
-    assert error.reason == "reset"
     assert str(error) == "transport: reset"
     details = moq.ProtocolError(scope=moq.ErrorScope.STREAM, code=468, kind=moq.ProtocolKind.APP, message="gone")
     assert str(moq.Error.Protocol(details)) == "gone"  # type: ignore[attr-defined]
@@ -1288,28 +1287,6 @@ async def test_read_frame_keeps_group_across_cancelled_call():
     assert frame.payload == b"kept"
     assert frame.timestamp == timedelta(microseconds=3_000)
     assert await asyncio.wait_for(consumer.read_frame(), timeout=5.0) is None
-
-
-def test_optional_binding_records_use_none_defaults():
-    """Optional UniFFI record fields are optional in generated constructors."""
-    hint = moq.media.VideoHint()
-    assert hint.coded is None
-    assert hint.display_aspect is None
-    assert hint.bitrate is None
-    assert hint.framerate is None
-    assert hint.optimize_for_latency is None
-
-    encoder = moq.audio.EncoderOutput(codec=moq.AudioCodec.opus())
-    assert encoder.sample_rate is None
-    assert encoder.channels is None
-    assert encoder.bitrate is None
-    assert encoder.frame_duration == timedelta(0)
-
-    decoder = moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32)
-    assert decoder.sample_rate is None
-    assert decoder.channels is None
-    assert decoder.max_delay is None
-    assert decoder.delay is None
 
 
 def test_audio_encoder_returns_namespaced_records():

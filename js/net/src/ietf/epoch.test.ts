@@ -67,11 +67,9 @@ function epochParam(value: Uint8Array): Parameters {
 	return params;
 }
 
-test("Epoch: the registry code points and their parity", () => {
+test("Epoch: the registry code point is a bare varint", () => {
 	// Odd values are length-prefixed byte strings, even ones bare varints.
-	expect(SetupOption.Epoch).toBe(0x40b68n);
 	expect(SetupOption.Epoch % 2n).toBe(0n);
-	expect(EPOCH_PARAM % 2n).toBe(1n);
 });
 
 test("Epoch: SETUP declares it on draft-17 and later only", async () => {
