@@ -1860,6 +1860,33 @@ impl TrackState {
 		Poll::Pending
 	}
 
+	/// Whether a group in `groups` may still land from the live feed, by the rule
+	/// [`Self::poll_arrival`] applies: not accounted for, not dropped, within the feed, and
+	/// in a gap a later arrival opened less than `grace` ago, or that nothing later opened.
+	/// Below the first arrival only when the feed was asked to start lower, as `floor` says.
+	/// With `delivered`, only a group it lacks counts.
+	fn may_land(&self, groups: ops::Range<u64>, floor: bool, grace: Duration, delivered: Option<&Delivered>) -> bool {
+		let start = match floor {
+			true => groups.start,
+			false => match self.arrivals.first() {
+				Some(first) => groups.start.max(first),
+				None => return false,
+			},
+		};
+		let start = start.max(self.start_sequence.unwrap_or(0));
+		let end = groups.end.min(self.final_sequence().unwrap_or(u64::MAX));
+		let now = self.cache.pool().now_wall();
+		self.arrivals.gaps(start..end).any(|(gap, opened)| {
+			opened
+				.and_then(|opened| opened.checked_add(grace))
+				.is_none_or(|folds| now < folds)
+				&& self
+					.drops
+					.gaps(&gap)
+					.any(|open| delivered.is_none_or(|delivered| !delivered.covers(open)))
+		})
+	}
+
 	/// Record the declared first sequence of the live feed, replacing any earlier
 	/// declaration: the signal is scoped to the current subscription's demand,
 	/// which may legitimately move in either direction. `None` clears it (the
@@ -3984,6 +4011,52 @@ impl Consumer {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}
+		})
+	}
+
+	/// Whether a group in `groups` may still land here; see `TrackState::may_land`. Never
+	/// once no producer is left to write one.
+	pub(super) fn may_land(
+		&self,
+		groups: ops::Range<u64>,
+		floor: bool,
+		grace: Duration,
+		delivered: Option<&Delivered>,
+	) -> bool {
+		if let Some(serving) = self.serving() {
+			return serving.may_land(groups, floor, grace, delivered);
+		}
+		self.with_state(|state| {
+			state.is_some_and(|state| !state.is_closed() && state.read().may_land(groups, floor, grace, delivered))
+		})
+	}
+
+	/// The wall clock this track's cache judges ages by.
+	pub(super) fn now(&self) -> crate::time::Instant {
+		if let Some(serving) = self.serving() {
+			return serving.now();
+		}
+		self.with_state(|state| match state {
+			Some(state) => state.read().cache.pool().now_wall(),
+			None => super::clock::wall(),
+		})
+	}
+
+	/// Poll for this track's wall clock reaching `at`; see [`Self::now`].
+	pub(super) fn poll_wall(&self, at: crate::time::Instant, waiter: &kio::Waiter) -> Poll<()> {
+		if let Some(serving) = self.serving() {
+			return serving.poll_wall(at, waiter);
+		}
+		self.with_state(|state| {
+			let Some(state) = state else {
+				return Poll::Ready(());
+			};
+			let state = state.read();
+			if state.cache.pool().now_wall() >= at {
+				return Poll::Ready(());
+			}
+			state.cache.watch_wall(at, waiter);
+			Poll::Pending
 		})
 	}
 

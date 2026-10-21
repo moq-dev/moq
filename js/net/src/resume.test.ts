@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
 import { NotFound, StreamCode, StreamError } from "./error.ts";
@@ -1353,4 +1353,215 @@ test("the largest follows the serving copy across a swap without moving back, an
 	front.consumer.close();
 	a.close();
 	b.close();
+});
+
+/** A manual clock, installed until `restore`. */
+function manual() {
+	const clock = new Manual();
+	return { clock, restore: clock.install() };
+}
+
+const SECOND = Milli(1000);
+
+test.each(["lands", "dropped", "expired"])(
+	"an arrival reader gets a group still in flight on the replaced route (%s)",
+	async (outcome) => {
+		const { clock, restore } = manual();
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: SECOND });
+		try {
+			ta.write(0);
+			expect(drain(sub)).toEqual([0]);
+			front.serve(b.consume());
+			await settle();
+			tb.write(2);
+			expect(drain(sub)).toEqual([2]);
+			expect(drain(sub)).toEqual([]);
+			expect(ta.producer.demand().wanted.peek()).toBeDefined();
+
+			if (outcome === "dropped") hooks.dropTrackGroups(ta.producer, 1, 2);
+			if (outcome === "expired") await clock.advanceAsync(Nano.fromMilli(SECOND));
+			if (outcome !== "lands") {
+				// The groups drained above are released once their close settles.
+				await settle();
+				expect(drain(sub)).toEqual([]);
+				await settle();
+				expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+			}
+			ta.write(1);
+			expect(drain(sub)).toEqual(outcome === "lands" ? [1] : []);
+		} finally {
+			sub.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+			restore();
+		}
+	},
+);
+
+test("an ordered reader keeps no copy for a group it passed", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: SECOND });
+	const next = () => {
+		const recv = hooks.tryNextGroup(sub);
+		if (recv.kind !== "group") return undefined;
+		recv.group.close();
+		return recv.group.sequence;
+	};
+	ta.write(0);
+	expect(next()).toBe(0);
+	front.serve(b.consume());
+	await settle();
+	tb.write(2);
+	expect(next()).toBe(2);
+	// Group 2 is released once its close settles.
+	await settle();
+	expect(next()).toBeUndefined();
+	await settle();
+	expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test.each([true, false])(
+	"a group the replaced copy gets late backs the serving copy's (ordered: %p)",
+	async (ordered) => {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+		const view = ordered ? sub.ordered() : undefined;
+		const next = () => (view ? view.nextGroup() : sub.recvGroup());
+		ta.write(0);
+		(await next())?.close();
+		front.serve(b.consume());
+		await settle();
+
+		const failing = tb.write(1, 1, false);
+		const group = await next();
+		if (group?.sequence !== 1) throw new Error("expected group 1");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.0");
+		// The reader reads on before the old route has group 1 at all.
+		const later = next();
+		await settle();
+
+		// The old route finishes group 1 only now, and the new route's copy of it fails.
+		ta.write(1, 2);
+		failing.close(new StreamError(StreamCode.SessionClosed));
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("1.1");
+		expect(await group.readFrame()).toBeUndefined();
+
+		group.close();
+		tb.write(2);
+		expect((await later)?.sequence).toBe(2);
+		view?.close();
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	},
+);
+
+test("a clean end waits for a group the replaced copy still carries", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: SECOND });
+	try {
+		ta.write(0);
+		ta.write(2);
+		expect(drain(sub)).toEqual([0, 2]);
+
+		// The new route has only the group already handed out, and ends there.
+		tb.write(2);
+		tb.producer.close();
+		front.serve(b.consume());
+		await settle();
+		const next = sub.recvGroup();
+		expect(await isPending(next)).toBe(true);
+
+		ta.write(1);
+		expect((await next)?.sequence).toBe(1);
+		expect(await sub.recvGroup()).toBeUndefined();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+test.each([false, true])(
+	"a datagram read keeps a replaced copy's unread group for the first group read (datagrams first: %p)",
+	async (datagramsFirst) => {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		copy(b);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(10_000) });
+		expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
+		ta.write(0);
+		front.serve(b.consume());
+		await settle();
+		if (datagramsFirst) expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
+		expect(drain(sub)).toEqual([0]);
+
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	},
+);
+
+test("a datagram reader keeps replaced copies only within its budget", async () => {
+	const { clock, restore } = manual();
+	const front = new Front();
+	const sources: BroadcastProducer[] = [];
+	const copies: ReturnType<typeof copy>[] = [];
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(100) });
+	try {
+		for (let sequence = 0; sequence < 20; sequence++) {
+			const source = new BroadcastProducer();
+			const held = copy(source);
+			sources.push(source);
+			copies.push(held);
+			front.serve(source.consume());
+			await settle();
+			held.write(sequence);
+			expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
+			await settle();
+			const subscribed = copies.filter((held) => held.producer.demand().wanted.peek() !== undefined);
+			expect(subscribed.length).toBeLessThanOrEqual(3);
+			await clock.advanceAsync(Nano.fromMilli(Milli(50)));
+		}
+		// The unread groups still within the budget are read.
+		expect(drain(sub)).toEqual([18, 19]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const source of sources) source.close();
+		restore();
+	}
 });

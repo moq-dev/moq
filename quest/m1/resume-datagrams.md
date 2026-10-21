@@ -26,7 +26,3 @@ it.
   delivers a replay of 10 and a new 5. The reader gets 5 once, and 10 only once.
 
 Public API: behavior only. Wire: none.
-
-## Related
-
-- [Resumed in-flight groups](/quest/m1/resume-in-flight.md) - the group side of what a replaced copy still delivers

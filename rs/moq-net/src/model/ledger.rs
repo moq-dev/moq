@@ -160,6 +160,23 @@ impl Ledger {
 		}
 	}
 
+	/// The gaps within `groups`, each with when a later arrival opened it: `None` for the
+	/// one past the last run, which nothing has opened yet.
+	pub fn gaps(&self, groups: Range<u64>) -> impl Iterator<Item = (Range<u64>, Option<Instant>)> + '_ {
+		let first = self.runs.partition_point(|run| run.groups.end <= groups.start);
+		let mut below = groups.start;
+		self.runs[first..]
+			.iter()
+			.map(|run| (run.groups.clone(), Some(run.since)))
+			.chain(std::iter::once((u64::MAX..u64::MAX, None)))
+			.map_while(move |(run, since)| {
+				let gap = below..run.start.min(groups.end);
+				below = below.max(run.end);
+				(gap.start < groups.end).then_some((gap, since))
+			})
+			.filter(|(gap, _)| !gap.is_empty())
+	}
+
 	/// Gaps whose age bounds a held fetch, including the gap before the first arrival.
 	pub fn folds(&self, grace: Duration) -> impl Iterator<Item = (Range<u64>, Instant)> + '_ {
 		let mut below = 0;
@@ -207,6 +224,24 @@ mod tests {
 		assert!(ledger.covers(4..10));
 		assert!(!ledger.covers(2..5));
 		assert!(ledger.covers(7..7), "an empty range is always covered");
+	}
+
+	/// The gaps within a span, each with the age of the run that opened it, and the one past
+	/// every run with none.
+	#[test]
+	fn gaps_within_a_span() {
+		let now = Instant::now();
+		let later = now + GRACE;
+		let mut ledger = Ledger::default();
+		assert_eq!(ledger.gaps(2..5).collect::<Vec<_>>(), vec![(2..5, None)]);
+		arrive(&mut ledger, 2..3, now);
+		arrive(&mut ledger, 5..6, later);
+		assert_eq!(
+			ledger.gaps(0..8).collect::<Vec<_>>(),
+			vec![(0..2, Some(now)), (3..5, Some(later)), (6..8, None)]
+		);
+		assert_eq!(ledger.gaps(4..6).collect::<Vec<_>>(), vec![(4..5, Some(later))]);
+		assert_eq!(ledger.gaps(5..6).count(), 0, "covered");
 	}
 
 	/// A gap older than the grace folds away, so a lossy track keeps only the gaps it can
