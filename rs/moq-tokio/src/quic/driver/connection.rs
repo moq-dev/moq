@@ -6,8 +6,8 @@ use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker, ready},
 };
@@ -1378,10 +1378,11 @@ impl State {
         self.close(0u32.into(), Bytes::new(), shared);
     }
 
-    /// Resolves the stream's `stopped` waiters on a local reset, which no stream event reports
-    pub(crate) fn stopped_by_reset(&mut self, id: StreamId) {
+    /// Resolves the stream's `stopped` waiters on a local reset, which no stream event reports,
+    /// with the peer's STOP_SENDING code if it arrived before the reset
+    pub(crate) fn stopped_by_reset(&mut self, id: StreamId, stopped: Option<VarInt>) {
         if let Some(waiters) = self.stopped.remove(&id) {
-            waiters.reset.store(true, Ordering::Relaxed);
+            let _ = waiters.reset.set(stopped);
             waiters.notify.notify_waiters();
         }
     }
@@ -1429,8 +1430,9 @@ fn wake_all(wakers: &mut FxHashMap<StreamId, Waker>) {
 #[derive(Debug, Default)]
 pub(crate) struct StopWaiters {
     pub(crate) notify: Notify,
-    /// The stream was reset locally, so it will neither finish nor be stopped by the peer
-    pub(crate) reset: AtomicBool,
+    /// The stream was reset locally, with the peer's STOP_SENDING code if it arrived first. A
+    /// later STOP_SENDING no longer counts.
+    pub(crate) reset: OnceLock<Option<VarInt>>,
 }
 
 fn wake_stream_notify(stream_id: StreamId, wakers: &mut FxHashMap<StreamId, Arc<StopWaiters>>) {
