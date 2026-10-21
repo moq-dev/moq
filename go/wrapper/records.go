@@ -144,3 +144,21 @@ func connectionStatsFromFFI(s ffi.MoqConnectionStats) ConnectionStats {
 		Version:              s.Version,
 	}
 }
+
+// Grant is what the peer lets this side do, in this side's own paths. An empty
+// pattern list grants nothing in that direction; "**" grants everything.
+type Grant struct {
+	// Publish lists the broadcast patterns this side may publish to the peer.
+	Publish []string
+	// Subscribe lists the broadcast patterns this side may subscribe to from the peer.
+	Subscribe []string
+	// Expires is how long until the grant lapses, measured when it was read, or nil for never.
+	Expires *time.Duration
+}
+
+func grantFromFFI(g *ffi.MoqGrant) *Grant {
+	if g == nil {
+		return nil
+	}
+	return &Grant{Publish: g.Publish, Subscribe: g.Subscribe, Expires: optFromMicros(g.ExpiresUs)}
+}

@@ -41,7 +41,7 @@ from .publish import (
     TrackRequest,
 )
 from .server import Request, Server, Transport
-from .session import Bandwidth, Reservation, Session
+from .session import Auth, AuthToken, Bandwidth, Reservation, Session
 from .subscribe import (
     BroadcastConsumer,
     GroupConsumer,
@@ -59,6 +59,7 @@ from .types import (
     ErrorScope,
     FetchGroupOptions,
     Frame,
+    Grant,
     Order,
     ProtocolError,
     ProtocolKind,
@@ -87,6 +88,8 @@ __all__ = [
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",
+    "Auth",
+    "AuthToken",
     "Backoff",
     "Bandwidth",
     "BroadcastConsumer",
@@ -104,6 +107,7 @@ __all__ = [
     "ProtocolError",
     "ProtocolKind",
     "FetchGroupOptions",
+    "Grant",
     "GroupConsumer",
     "GroupDemand",
     "GroupRequest",
