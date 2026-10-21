@@ -1567,12 +1567,21 @@ export class Publisher {
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
 			// in the order we asked, which is oldest-first, exactly backwards for live media.
 			// Failing here drops the group and lets the next one compete for the next slot.
-			const stream = await Writer.tryOpen(this.#quic, {
-				version: this.version,
-				sendOrder: priority.rank(group.sequence, start),
-				cancel: unsubscribed,
-				waitUntilAvailable: false,
-			});
+			// Watch the group while the transport parks the open, and release that watch
+			// once the open settles. tryOpen owns resetting a slot that arrives too late.
+			const opened = Promise.withResolvers<void>();
+			const abandoned = hooks.guardGroup(group, () => opened.promise).catch(() => {});
+			let stream: Writer | undefined;
+			try {
+				stream = await Writer.tryOpen(this.#quic, {
+					version: this.version,
+					sendOrder: priority.rank(group.sequence, start),
+					cancel: race([unsubscribed, abandoned]),
+					waitUntilAvailable: false,
+				});
+			} finally {
+				opened.resolve();
+			}
 			if (!stream) {
 				const failed = new Error("no stream slot");
 				group.close(failed);
