@@ -24,7 +24,13 @@ backporting async `shutdown()` as-is. Why: making `shutdown()` async breaks
 the 0.4.x Python, Swift, and Kotlin bindings. `main` keeps async `shutdown()`
 and gains no `drain()`; callers move to it at the next breaking cut.
 
-Follow the backport workflow. #5609 cherry-picks as is. The drain backport
+Decided 2026-10-20 (maintainer): keep #5609 in the backport, on a qmux
+0.5.3 published from web-transport's `qmux-v0.5.x`. Why: `release` locks
+qmux 0.5.2, which lacks the builder session config #5609 uses, and
+moq-dev/web-transport#427 already carries that config for 0.5.
+
+Follow the backport workflow. #5609 moves `release` to qmux 0.5.3 and takes
+its builder session config instead of 0.6.3's. The drain backport
 adapts 7bbac3272's session close to the `release` line's moq-net and keeps
 its tests, renamed to `drain()`. Follow the Cross-Package Sync row for
 `rs/moq-ffi`: every binding and its docs gain `drain()`, or the PR says why
@@ -34,6 +40,10 @@ qmux credit fix is out of scope: it arrives with
 
 Public API: additive (`MoqSession.drain()` and its binding wrappers). Wire:
 none.
+
+## Required
+
+- [qmux 0.5.3](/quest/m0/qmux-0.5.3.md) - crates.io publishes qmux 0.5.3 with the builder session config #5609 needs
 
 ## Related
 
