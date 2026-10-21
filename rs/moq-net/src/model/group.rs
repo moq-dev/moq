@@ -2200,6 +2200,44 @@ impl Consumer {
 		self.expired
 	}
 
+	/// Why a wire publisher waiting on the transport, for stream credit or to drain, should
+	/// give up on this group: the drift budget convicted it ([`Error::Old`]), or its copy
+	/// was aborted (evicted, cut, or failed upstream) before this cursor read it all and no
+	/// route will continue it. `pending` as in [`Self::poll_expired_while_pending`].
+	///
+	/// A machine parked on stream credit reads nothing, so without this an aborted group,
+	/// which never expires, would wait for credit it could only spend on a reset.
+	// pending: /quest/m1/public-model/serve.md
+	pub(crate) fn poll_abandoned(&mut self, waiter: &kio::Waiter, pending: bool) -> Option<Error> {
+		if self.poll_expired_while_pending(waiter, pending) {
+			return Some(Error::Old);
+		}
+		let unread = |state: &GroupState, cursor: &Cursor| !cursor.capped() && state.fin.is_none_or(|fin| cursor.index < fin);
+		let cursor = &self.cursor;
+		let aborted = match cursor.state.poll(waiter, |state| match &state.abort {
+			Some(err) if unread(state, cursor) => Poll::Ready(Some(err.clone())),
+			Some(_) => Poll::Ready(None),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(aborted)) => aborted?,
+			// Closed without an abort: only an unfinished group is lost with its producer.
+			Poll::Ready(Err(state)) => match unread(&*state, cursor) {
+				true => Error::Dropped,
+				false => return None,
+			},
+			Poll::Pending => return None,
+		};
+		// A front's reader may continue the group from another route's copy when it reads.
+		if self
+			.recover
+			.as_ref()
+			.is_some_and(|recover| recover.wants(Some(&aborted), waiter))
+		{
+			return None;
+		}
+		Some(aborted)
+	}
+
 	/// Whether expiry can still discard content or unblock a group that may grow.
 	fn expiry_pending(&self) -> bool {
 		self.cursor.expiry_pending()
