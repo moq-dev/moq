@@ -76,12 +76,15 @@ deprecation output too.
   `cognitive_complexity` and `too_many_arguments` crate-wide.
 - Rust `#[allow(deprecated)]`: 2, in a `moq-relay` cluster test and
   `moq-video` AVFoundation capture. No `#[deprecated]` items of our own.
-- JS: 33 `biome-ignore`, 45 `@ts-expect-error`, no `@deprecated` exports.
+- TypeScript: 39 `biome-ignore` and 47 `@ts-expect-error`, of which 6 and 2
+  sit outside `js/` (`demo/carla`, `sh/gh`, `test/audio-quality`,
+  `test/smoke`). No `@deprecated` exports.
 - Python: 30 `noqa` or `type: ignore`, 24 of them in `py/moq-rs/tests`.
   Kotlin, Go, Swift, Dart, and C/C++ had none found by a plain grep; confirm
   with each toolchain's own syntax.
 
-Count with `git grep` so only tracked files count. Generated UniFFI bindings
+Count with `git grep` over the whole tree, not per language directory, so
+only tracked files count and none outside `rs/`, `js/`, or `py/` are missed. Generated UniFFI bindings
 are untracked (`kt/.gitignore`) and carry their own suppressions, such as
 Kotlin's 139 `@Suppress`; leave them out, and fix a noisy one in the generator
 config instead of the output.
