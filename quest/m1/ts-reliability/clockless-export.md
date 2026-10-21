@@ -4,7 +4,8 @@
 
 `moq import ts` carries, and `moq export ts` rebuilds, an audio-only program
 carrying SCTE-35 or other private sections, and a program of only `verbatim`
-or `pesPacket` tracks, instead of refusing it. Basic opaque carriage does not
+or `pesPacket` tracks whose PMT names a PCR PID, instead of refusing it. A
+data-only program without a PCR PID stays refused: nothing places its data. Basic opaque carriage does not
 wait for the typed cue API.
 
 ## Plan
@@ -25,8 +26,8 @@ Found 2026-10-20 in the fidelity audit (`Export::build_psi`, `Import::finish`):
   `Import::finish` ends with "reached end of input without a media
   timestamp".
 
-Import: when the PMT lists no media stream, anchor the timebase at the first
-PCR, so placement alone puts the data on the catalog clock. A media stream a
+Import: when the PMT lists no media stream but names a PCR PID, anchor the
+timebase at the first PCR, so placement alone puts the data on the catalog clock. A media stream a
 later PMT adds shares that anchor, since PCR and PTS run on one program
 clock. The era must come from the PCR too: `placement()` reduces its
 unwrapped ticks `% PCR_WRAP`, and `PtsUnwrap::pcr` picks the era from the
@@ -51,7 +52,9 @@ audio plus SCTE-35, audio plus `pesPacket`, sections only, and `pesPacket`
 only, each through import and export with byte-exact section and PES
 payloads and placements. A data-only import crosses the PCR wrap with
 continuous timestamps, from a generated PCR that starts just before the
-wrap. Add generated audio-plus-SCTE-35 and sections-only arms to the
+wrap. Keep a refusal test for a data-only program whose PMT has no PCR
+(`PCR_PID` 0x1FFF): its section and whole-PES streams count in `refused`
+and nothing publishes. Add generated audio-plus-SCTE-35 and sections-only arms to the
 TSDuck round trip in `test/ts`, so `compliance.py` grades `PCR_PID`, PCR
 repetition and the PMT both when the clock rides audio and when it rides
 its own PID.

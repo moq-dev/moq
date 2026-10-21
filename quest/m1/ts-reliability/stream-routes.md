@@ -46,9 +46,13 @@ Found 2026-10-20 in the fidelity audit (`Import::ensure_stream`,
   Count them in `refused` instead, since the semantic lane cannot carry them
   and the raw lane can.
 
-A PID counts as dropped only once the first PMT has arrived: packets on a
-PID before then are acquisition, as `Import::decode` already treats them, so
-media that precedes its PMT on a mid-stream join never shows as refused.
+A PID counts as dropped only once every program the current PAT lists has
+delivered its PMT: packets on a PID before then are acquisition, as
+`Import::decode` already treats them, so media that precedes its PMT on a
+mid-stream join never shows as refused, including one program's media
+arriving before its PMT while another program's PMT is already known. A PAT
+that adds a program suspends the count for PIDs no PMT claims until that
+program's PMT arrives.
 Under `--program all`, every per-program `Import` reads the whole multiplex
 and `Programs::stats` merges their rows by PID, so a per-program drop row
 would shadow the program that carries the PID. `Programs` owns the
@@ -69,7 +73,8 @@ packetization). JS: none. Draft
 Tests: generated `fixture::Mux` inputs with MPEG-2 video, each DSM-CC type,
 0x86 without CUEI, LATM, a PAT network entry with a NIT, a CAT plus
 scrambled ES, a PSIP base PID, an unlisted PID, media before its first PMT,
-and a two-program MPTS under `--program all`, asserting the catalog, the
+and a two-program MPTS under `--program all` whose second program's media
+precedes its PMT, asserting the catalog, the
 stats rows, and an export round trip of the carried streams. The MPEG-2 video arm also runs the TSDuck
 round trip and an FFmpeg decode of the export in `test/ts`.
 

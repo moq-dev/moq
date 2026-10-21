@@ -31,6 +31,10 @@ What the code does today:
   quest owns the PMT-level remap.
 - A PAT naming another PMT PID adds a reassembler but never drops the old
   one. `Programs` ignores a program a later PAT adds, without a warning.
+- Under `--program all`, a later PAT that removes one program reaches every
+  per-program `Import`; the removed program's `handle_pat` errors,
+  `Programs::feed` propagates it, and the whole multiplex ingest stops,
+  including unrelated programs.
 - `Export` builds the PAT/PMT once. A track added afterwards fails the export
   ("TS track layout changed after PAT/PMT was emitted"), and a track that
   leaves the catalog keeps its PID in the PMT forever. A switch to another
@@ -54,6 +58,11 @@ Decided 2026-10-20 by the maintainer: change in place with fresh names.
   `program.pmtPid`, which the export follows with a new PAT. `Programs`
   publishes a program a later PAT adds as its own broadcast, as it does for
   the first PAT, rather than ignoring it.
+- A later PAT that removes a program retires that program's broadcast: its
+  tracks finish and it is unannounced, while the other programs carry on.
+  If the program returns, it publishes a new epoch of its broadcast, never
+  the retired instance's names for new content. A single-program import
+  whose selected program leaves the PAT ends, as today.
 
 Why: it matches the 2026-10-15 identity decision (changed content gets a new
 name; a new epoch stays reserved for a whole-broadcast restart). Rejected:
@@ -72,7 +81,9 @@ section says how a consumer revises the PMT. Hang's core stays TS-free.
 Tests use the generated `fixture::Mux` builder: PMT add, remove, retype,
 descriptor-only change, version rollover (31 to 0), PID reuse after removal,
 program descriptor and CUEI changes, PMT PID move, and an identity change
-that must refuse. Each asserts the catalog, the track names, and the exported
+that must refuse, plus a `--program all` MPTS whose PAT drops one program
+and later restores it: the other program runs uninterrupted, and the
+returning one publishes a new epoch. Each asserts the catalog, the track names, and the exported
 PMT. Extend the TSDuck round trip with a generated mid-stream PMT revision so
 `compliance.py` checks the rebuilt version sequence in CI.
 
