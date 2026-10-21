@@ -4128,7 +4128,14 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			),
 		};
 		debug_assert!(self.opening.is_none(), "one group waits for stream credit at a time");
-		self.opening = Some(GroupServe::new(self.ctx.clone(), sequence, frame_start, capped, rank, group));
+		self.opening = Some(GroupServe::new(
+			self.ctx.clone(),
+			sequence,
+			frame_start,
+			capped,
+			rank,
+			group,
+		));
 	}
 }
 
@@ -4230,11 +4237,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		let options = match &mut self.rank {
 			Rank::Group(group) => SendOptions {
 				group: Some(&*group),
-				priority: crate::priority::in_group(
-					self.sequence,
-					self.frame_start,
-					self.ctx.steer_seen.order,
-				),
+				priority: crate::priority::in_group(self.sequence, self.frame_start, self.ctx.steer_seen.order),
 			},
 			Rank::Queue(handle) => SendOptions {
 				group: None,
