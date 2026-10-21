@@ -1360,10 +1360,13 @@ fn retry_wait(delay: Duration, retry_start: tokio::time::Instant, timeout: Durat
 	Some(wait.min(timeout.checked_sub(retry_start.elapsed())?))
 }
 
-/// Where `url` dials, without its query or fragment, where a peer may mint fresh credentials on
-/// every redirect. Two URLs that differ only there reach the same endpoint.
+/// Where `url` dials, without its userinfo, query, or fragment, where a peer may mint fresh
+/// credentials on every redirect. Two URLs that differ only there reach the same endpoint.
 fn endpoint(url: &Url) -> Url {
 	let mut bare = url.clone();
+	// Only fails for a URL that cannot carry userinfo, which then has none to strip.
+	let _ = bare.set_username("");
+	let _ = bare.set_password(None);
 	bare.set_query(None);
 	bare.set_fragment(None);
 	bare
@@ -2865,11 +2868,12 @@ mod tests {
 	}
 
 	#[test]
-	fn an_endpoint_ignores_the_query_and_fragment() {
+	fn an_endpoint_ignores_the_credentials() {
 		assert_eq!(
-			endpoint(&url("tcp://relay:1/path?jwt=a#x")),
-			endpoint(&url("tcp://relay:1/path?jwt=b"))
+			endpoint(&url("tcp://token-a:secret@relay:1/path?jwt=a#x")),
+			endpoint(&url("tcp://token-b@relay:1/path?jwt=b"))
 		);
+		// The path is part of the request target, so it names a different endpoint.
 		assert_ne!(endpoint(&url("tcp://relay:1/a")), endpoint(&url("tcp://relay:1/b")));
 	}
 }
