@@ -2395,7 +2395,11 @@ export class Request {
 	}
 
 	/** @internal Publish a prepared answer after its tracks have been filled. */
-	publishPrepared(answer: broadcast.Producer, announcer: broadcast.Announcer, epoch: Epoch.Valid): broadcast.Producer {
+	publishPrepared(
+		answer: broadcast.Producer,
+		announcer: broadcast.Announcer,
+		epoch: Epoch.Valid,
+	): broadcast.Producer {
 		if (!this.#server.has(this)) throw new Error("request is closed");
 		if (answer.closed.peek() !== undefined) throw new Error("broadcast is closed");
 		hooks.attachAnnouncer(answer, announcer);
