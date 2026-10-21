@@ -22,7 +22,3 @@ parks it instead leaves one pending open per group, bounded only by the 10 s
   its open is parked, and the open released at expiry.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [A stalled subscriber holds bounded state](/quest/m1/egress-held-state.md) - the Rust side of bounded egress

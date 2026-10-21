@@ -210,6 +210,56 @@ fn the_eos_is_posted_once_per_publication() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
+/// Start `sink` playing and publish one frame on `sink_0`, so its track has media to drain.
+fn play_one_frame(sink: &gst::Element) -> gst::Pad {
+	let pad = sink.request_pad_simple("sink_0").expect("request sink_0");
+	// A running time places the wall clock, which the first published frame needs.
+	let clock = gst::SystemClock::obtain();
+	sink.set_clock(Some(&clock)).expect("use the system clock");
+	sink.set_base_time(clock.time());
+	sink.set_state(gst::State::Playing).expect("start playing");
+	assert!(send_caps(&pad));
+	let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
+	segment.set_start(gst::ClockTime::ZERO);
+	assert!(pad.send_event(gst::event::Segment::new(&segment)));
+	assert_eq!(pad.chain(h264_keyframe()), Ok(gst::FlowSuccess::Ok));
+	pad
+}
+
+// Lingering is opt-in: by default the end of stream closes the broadcast and posts EOS at once, even
+// with media a late subscriber could still have drained.
+#[test]
+fn published_media_posts_the_eos_at_once_by_default() {
+	init();
+	let sink = publisher();
+	assert!(!sink.property::<bool>("linger"));
+	let seen = recording_bus(&sink);
+	let pad = play_one_frame(&sink);
+
+	assert!(pad.send_event(gst::event::Eos::new()));
+	assert_eq!(posted_eos(&seen), 1);
+	let _ = sink.set_state(gst::State::Null);
+}
+
+// With `linger`, published media is served until it is stale, so the EOS that ends `gst-launch` waits
+// for it. Stopping the pipeline is the interrupt: it closes the broadcast at once, and the run it ended
+// owes no EOS.
+#[test]
+fn a_lingering_sink_holds_the_eos_until_the_pipeline_stops() {
+	init();
+	let sink = publisher();
+	sink.set_property("linger", true);
+	let seen = recording_bus(&sink);
+	let pad = play_one_frame(&sink);
+
+	assert!(pad.send_event(gst::event::Eos::new()));
+	assert_eq!(status_of(&sink, "sink_0"), "ended");
+	assert_eq!(posted_eos(&seen), 0, "the finished broadcast is still serving its tail");
+
+	assert_eq!(sink.set_state(gst::State::Null), Ok(gst::StateChangeSuccess::Success));
+	assert_eq!(posted_eos(&seen), 0, "the stopped run owes no EOS");
+}
+
 // After the publication ends, a buffer that got past the pad's own EOS flag (a flush clears it) must
 // report the end rather than be dropped as if it had been published.
 #[test]

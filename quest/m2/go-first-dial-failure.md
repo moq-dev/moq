@@ -23,4 +23,3 @@ Public API: Go additive. Wire: none.
 ## Required
 
 - [Binding linger](/quest/m1/linger-ffi.md) - touches the same binding docs
-- [Bindings](/quest/m1/auth/bindings.md) - touches the same binding docs

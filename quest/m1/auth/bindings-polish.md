@@ -9,7 +9,7 @@ one auth handle type instead of two, and Swift exposes grants as an
 
 ## Plan
 
-Decided 2026-10-21 with the maintainer: one m1 quest after the bindings land.
+Decided 2026-10-21 with the maintainer: one m1 quest.
 
 - **OBS reconnect.** A reconnect dials the URL's original token, not the one
   presented mid-stream through `MoQOutput::PresentToken`. Once tokens can
@@ -28,7 +28,6 @@ Public API: Swift additive. Wire: none.
 
 ## Required
 
-- [Bindings](/quest/m1/auth/bindings.md) - lands the binding auth surface this polishes
 - [Auth outlives its session](/quest/m1/auth/issuer.md) - one handle per connection, which the enum collapse needs
 - [Token in band](/quest/m1/auth/token-in-band.md) - tokens that ride SETUP, which the OBS reconnect needs
 

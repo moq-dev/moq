@@ -64,7 +64,7 @@ from moq_ffi import (
     MoqVideoPixelFormat as VideoPixelFormat,
 )
 
-from ._records import Backoff, ConnectionStats, Datagram, Frame, Subscription, TrackInfo
+from ._records import Backoff, ConnectionStats, Datagram, Frame, Grant, Subscription, TrackInfo
 
 __all__ = [
     "Anchor",
@@ -79,6 +79,7 @@ __all__ = [
     "ErrorScope",
     "Frame",
     "FetchGroupOptions",
+    "Grant",
     "Order",
     "ProtocolError",
     "ProtocolKind",
