@@ -810,6 +810,29 @@ describe("Session integration (scripted peer)", () => {
 		session.close();
 	});
 
+	test("a maxRecordSize below the protocol minimum is refused up front", () => {
+		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
+		expect(
+			() => new Session("https://example/test", { config: { maxRecordSize: DEFAULT_MAX_RECORD_SIZE - 1n } }),
+		).toThrow("maxRecordSize");
+	});
+
+	test("requireProtocol fails a handshake that picked no application protocol", async () => {
+		(globalThis as { WebSocketStream?: unknown }).WebSocketStream = FakePeer;
+		// The scripted server answers with the bare `qmux-01`, ignoring our pairs.
+		const session = new Session("https://example/test", {
+			protocols: ["moq-lite-04"],
+			versions: { "moq-lite-04": "qmux-01" },
+			requireProtocol: true,
+			config: { maxIdleTimeout: 0n },
+		});
+
+		const err = await settleTo(session.ready);
+		expect((err as Error).message).toContain("no application protocol");
+		await expectSessionFailure(session);
+		expect(FakePeer.last?.closeInfo).toBeDefined();
+	});
+
 	test("close() sends APPLICATION_CLOSE, resolves closed, and is idempotent", async () => {
 		const { session, peer } = connect();
 		await session.ready;

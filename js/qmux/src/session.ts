@@ -539,6 +539,9 @@ export default class Session implements WebTransport {
 	// [[AcceptOptions.protocol]]: stands in for `socket.protocol` when the host
 	// doesn't expose the negotiated subprotocol.
 	#protocolOverride?: string;
+	// [[SessionOptions.requireProtocol]] on a dial: the server must pick one of
+	// our application protocols, not answer with none.
+	#requireProtocol = false;
 	#closed?: Error;
 	#closeReason?: Error;
 
@@ -661,6 +664,11 @@ export default class Session implements WebTransport {
 		// Every value goes on the wire as a varint; refuse one that can't, here
 		// rather than as a handshake that never completes.
 		for (const value of Object.values(this.#config)) VarInt.from(value);
+		// Record-framed peers reject a max_record_size below the default minimum.
+		if (this.#config.maxRecordSize < Frame.DEFAULT_MAX_RECORD_SIZE) {
+			throw new Error(`maxRecordSize must be at least ${Frame.DEFAULT_MAX_RECORD_SIZE}`);
+		}
+		this.#requireProtocol = dial && (options?.requireProtocol ?? false);
 		this.#ourParams = configToTransportParams(this.#config);
 		this.#sendBufferSize = options?.sendBufferSize ?? DEFAULT_SEND_BUFFER_SIZE;
 
@@ -742,7 +750,18 @@ export default class Session implements WebTransport {
 			(conn) => {
 				// The session may have been closed before the socket finished opening.
 				if (this.#closed) return;
-				this.#startSession(this.#protocolOverride ?? conn.protocol, new WritableStreamSink(conn.writable));
+				const protocol = this.#protocolOverride ?? conn.protocol;
+				// A server may complete the handshake without picking any offered
+				// subprotocol, which would otherwise fall back to the legacy format.
+				if (this.#requireProtocol && parseProtocol(protocol, detectVersion(protocol)) === "") {
+					this.#closeReason ??= new Error(
+						`server negotiated no application protocol (${JSON.stringify(protocol)})`,
+					);
+					this.#abort(1002, "no application protocol");
+					this.#transportClose();
+					return;
+				}
+				this.#startSession(protocol, new WritableStreamSink(conn.writable));
 				void this.#readLoop(conn.readable.getReader());
 			},
 			(err: unknown) => {
