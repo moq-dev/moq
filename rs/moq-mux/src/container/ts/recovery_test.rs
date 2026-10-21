@@ -84,7 +84,7 @@ enum Profile {
 	/// band.
 	Resized,
 	/// H.264 closed GOP whose PCR declares a discontinuity at [`SPLICE`], where the clock jumps
-	/// [`JUMP`] ahead.
+	/// about [`JUMP`] ahead.
 	Spliced,
 	/// [`Closed`](Self::Closed) for two minutes.
 	Long,
