@@ -194,10 +194,16 @@ fn main() -> anyhow::Result<()> {
 		cue_at.len()
 	);
 
+	let first = &packets[pmt_idx];
 	let mut out = Vec::new();
 	for (i, p) in packets.iter().enumerate() {
 		if i > pmt_idx && pid_of(p) == pmt_pid.as_u16() {
-			anyhow::ensure!(p[1] & 0x40 != 0, "a PMT spanning packets cannot be rewritten in place");
+			// Only a repeat of the first PMT has its augmented form: a revised PMT, another
+			// program's section, or a PMT spanning packets would each need its own.
+			anyhow::ensure!(
+				p[..3] == first[..3] && p[3] & 0xf0 == first[3] & 0xf0 && p[4..] == first[4..],
+				"packet {i} on the PMT PID is not a repeat of the first PMT, which this generator cannot rewrite"
+			);
 			// The input's own continuity counter, so the rewrite adds no counter error.
 			out.extend_from_slice(&[p[0], p[1], p[2], (aug_pmt[3] & 0xf0) | (p[3] & 0x0f)]);
 			out.extend_from_slice(&aug_pmt[4..]);

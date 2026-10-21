@@ -479,11 +479,14 @@ impl<E: catalog::Catalog> Import<E> {
 		tracing::warn!(pid = pid.as_u16(), "dropped a PSI section with a bad CRC");
 	}
 
-	fn handle_pmt(&mut self, pmt: Pmt) -> anyhow::Result<()> {
+	fn handle_pmt(&mut self, mut pmt: Pmt) -> anyhow::Result<()> {
 		// PMTs of several programs may share one PID; only the chosen one maps streams.
 		if self.program.is_some_and(|program| program != pmt.program_number) {
 			return Ok(());
 		}
+		// A PID listed twice is routed by its first entry, so the listing kept below says the same.
+		let mut seen = HashSet::new();
+		pmt.streams.retain(|es| seen.insert(es.pid));
 		// Which PID speaks for the program clock, so a `discontinuity_indicator` there
 		// can be read as a timebase reset rather than a counter jump.
 		if self.pcr_pid != pmt.pcr_pid {
@@ -889,6 +892,10 @@ impl<E: catalog::Catalog> Import<E> {
 		let generation = self.placement.generation;
 		let (mut units, mut unplaced) = (0, 0);
 		if let Some(mut section) = self.sections.remove(&pid.as_u16()) {
+			// Its row outlives the route, as a retired stream's does.
+			self.retired_stats
+				.entry(pid.as_u16())
+				.or_insert_with(|| stats::Stream::new(".ts", stats::Class::Data));
 			section.settle(&self.placement);
 			(units, unplaced) = section.release(&self.timebase, &self.pts, generation)?;
 			unplaced += section.held.len() as u64;
@@ -9937,5 +9944,32 @@ pub(super) mod test {
 				.expect_err("another identity is refused");
 			assert!(err.to_string().contains("identity"), "{err:#}");
 		}
+	}
+
+	/// A section-framed PID the PMT drops keeps its stats row, so what it delivered stays counted.
+	#[test]
+	fn a_dropped_section_route_keeps_its_stats_row() {
+		const VIDEO_PID: u16 = 0x0050;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let streams = [
+			(StreamType::Mpeg2Video, VIDEO_PID),
+			(StreamType::Dts8ChannelLosslessAudio, 0x21),
+		];
+		let mut bytes = synth_pmt(&streams, true);
+		bytes.extend_from_slice(&pcr_packet(VIDEO_PID, 27_000_000));
+		bytes.extend_from_slice(&pes_packet(VIDEO_PID, 99_000));
+		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
+		bytes.extend_from_slice(&pcr_packet(VIDEO_PID, 29_700_000));
+		bytes.extend_from_slice(&synth_pmt(&streams[..1], true));
+		import.decode(&bytes).unwrap();
+
+		let row = &import.stats().streams[&0x21];
+		assert_eq!((row.units, row.quiet), (1, None));
 	}
 }

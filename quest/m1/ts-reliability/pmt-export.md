@@ -32,6 +32,9 @@ Decided 2026-10-20 by the maintainer:
   keeps the PCR PID unless its track retires. A TS receiver sees an
   ordinary PMT revision and a Hang player sees a rendition switch.
 
+A `programDescriptors` change is an entry change too: the PMT carries the
+revised `program_info` at the next `version_number`.
+
 Rust: `rs/moq-mux` TS export. Draft
 ([mpegts](/drafts/draft-lcurley-moq-mpegts.md)): the rebuild section says
 how a consumer revises the PMT.
