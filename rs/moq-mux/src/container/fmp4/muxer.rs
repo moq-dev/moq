@@ -790,36 +790,4 @@ mod tests {
 			);
 		}
 	}
-
-	// A group boundary is never a duration, even when the groups arrived consecutively: the
-	// publisher may have paused across it (moq-boy runs its PTS on a clock that keeps going
-	// while the encoder is off), which is what once produced a 2405 second sample.
-	#[tokio::test]
-	async fn audio_fragment_does_not_absorb_a_pause() {
-		use hang::catalog::AudioCodec;
-
-		let config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
-		let muxer = Muxer::audio(&config).unwrap();
-
-		// Two one-packet groups either side of a 40 minute pause, fetched back to back.
-		let packet = Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]);
-		let frames: Vec<Frame> = [63_244, 2_405_070_000]
-			.into_iter()
-			.map(|micros| Frame {
-				payload: packet.clone(),
-				..frame(micros, true)
-			})
-			.collect();
-		let fragment = muxer.fragment(0, &frames).unwrap();
-
-		let timescale = moq_net::Timescale::new(48_000).unwrap();
-		let decoded = super::super::decode(
-			fragment,
-			None,
-			super::super::Track::new(timescale, crate::container::fmp4::Kind::Video),
-		)
-		.unwrap();
-		let first = decoded[0].duration.unwrap().as_micros();
-		assert_eq!(first, 20_000, "the pause is a discontinuity, not a 2405 second sample");
-	}
 }

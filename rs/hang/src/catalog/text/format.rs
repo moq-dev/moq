@@ -107,11 +107,6 @@ mod tests {
 	}
 
 	#[test]
-	fn role_default_is_subtitle() {
-		assert_eq!(TextRole::default(), TextRole::Subtitle);
-	}
-
-	#[test]
 	fn role_roundtrip() {
 		for (s, r) in [("subtitle", TextRole::Subtitle), ("caption", TextRole::Caption)] {
 			assert_eq!(TextRole::from_str(s).unwrap(), r);

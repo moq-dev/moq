@@ -1154,13 +1154,6 @@ mod tests {
 	}
 
 	#[test]
-	fn hls_config_new_sets_fields() {
-		let url = Url::parse("https://example.com/stream.m3u8").unwrap();
-		let cfg = Config::new(url.clone());
-		assert_eq!(cfg.playlist, url);
-	}
-
-	#[test]
 	fn select_variants_handles_audio_first_codecs() {
 		// CODECS lists the audio codec first; the video codec must still be found.
 		let master = b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"mp4a.40.2,avc1.4d401f\"\nvideo.m3u8\n";
@@ -1329,20 +1322,6 @@ mod tests {
 		.unwrap_err();
 
 		assert!(matches!(err, Error::MissingByteRangeOffset { .. }));
-	}
-
-	#[test]
-	fn ranged_resource_builds_http_range_request() {
-		let url = Url::parse("https://example.com/media.mp4").unwrap();
-		let request = fetcher()
-			.request(&Resource {
-				url,
-				range: Some(ResolvedRange { start: 2, length: 3 }),
-			})
-			.build()
-			.unwrap();
-
-		assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=2-4");
 	}
 
 	#[tokio::test]

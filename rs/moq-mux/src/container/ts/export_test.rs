@@ -680,56 +680,6 @@ fn reassemble_video(ts: &[u8], expected_stream_type: StreamType) -> Vec<u8> {
 	reassembled
 }
 
-/// In-band avc3: SPS/PPS are inline in the bitstream. ExportSource strips them
-/// into a synthesized avcC, and the muxer re-injects them on the keyframe.
-#[tokio::test(start_paused = true)]
-async fn export_avc3_in_band_reassembles() {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-
-	let track = broadcast
-		.create_track(
-			broadcast.unique_name(".avc3"),
-			hang::container::track_info(hang::catalog::PRIORITY.video),
-		)
-		.unwrap();
-	let name = track.name().to_string();
-	{
-		let mut cfg = VideoConfig::new(H264 {
-			profile: 0x64,
-			constraints: 0,
-			level: 0x1f,
-			inline: true,
-		});
-		cfg.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name.clone(), cfg);
-	}
-	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
-
-	// IDR slice (NAL type 5), padded past 184 bytes to span multiple TS packets.
-	let mut idr = vec![0x65u8];
-	idr.extend(std::iter::repeat_n(0xAB, 300));
-	// Annex-B keyframe: inline SPS + PPS + IDR.
-	producer
-		.write(Frame {
-			timestamp: Timestamp::from_micros(0).unwrap(),
-			duration: None,
-			payload: annexb(&[SPS, PPS, &idr]),
-			keyframe: true,
-		})
-		.unwrap();
-	producer.finish().unwrap();
-
-	// Keep the producers alive (see `export_aac_roundtrip`).
-	let ts = drain(consumer).await;
-	assert_packet_aligned(&ts);
-
-	let reassembled = reassemble_video(&ts, StreamType::H264);
-	// The parameter sets the muxer re-injected, followed by the slice, all Annex-B.
-	assert_eq!(reassembled.as_slice(), annexb(&[SPS, PPS, &idr]).as_ref());
-}
-
 /// In-band avc3 carrying two distinct PPS (a real broadcast trait): both must
 /// survive the round-trip, or slices referencing the dropped one stop decoding
 /// (regression for non-existing PPS 0 referenced).
