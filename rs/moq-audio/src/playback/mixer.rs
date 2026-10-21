@@ -20,6 +20,7 @@ use std::time::Duration;
 use fixed_resample::ResamplingProd;
 use fixed_resample::{ReadStatus, ResamplingCons};
 
+use super::observe::{self, Ledger};
 #[cfg(feature = "aec")]
 use crate::resample::Remix;
 use crate::{Error, Layout};
@@ -157,6 +158,8 @@ pub(super) struct Mixer {
 	bus: Vec<f32>,
 	/// Scratch for the sink being read, in the device's layout.
 	scratch: Vec<f32>,
+	/// Counts what the mix played, for an [`Observer`](super::Observer).
+	ledger: Ledger,
 	/// Where echo cancellation reads what was played. Fed the clipped mix, since
 	/// that is the signal the speaker gets and therefore the one the microphone
 	/// hears back.
@@ -178,6 +181,7 @@ impl Mixer {
 		retired: SyncSender<Retired>,
 		rate: u32,
 		layout: Layout,
+		observe: Arc<observe::Shared>,
 	) -> Result<Self, Error> {
 		// Sinks remix by speaker position, so a bus without any has nothing to
 		// remix into.
@@ -196,6 +200,7 @@ impl Mixer {
 			step: 1.0 / (rate as f32 * RAMP),
 			bus: vec![0.0; CHUNK * channels],
 			scratch: vec![0.0; CHUNK * channels],
+			ledger: Ledger::new(observe, rate),
 			#[cfg(feature = "aec")]
 			reference: None,
 			#[cfg(feature = "aec")]
@@ -227,6 +232,11 @@ impl Mixer {
 				entry.completion.played(&entry.cons);
 			}
 		}
+	}
+
+	/// Report the host's latency for the buffer about to be filled.
+	pub(super) fn latency(&self, latency: Option<Duration>) {
+		self.ledger.latency(latency);
 	}
 
 	/// Fill one device buffer, interleaved at the device's channel count.
@@ -285,6 +295,7 @@ impl Mixer {
 			step,
 			bus,
 			scratch,
+			ledger,
 			#[cfg(feature = "aec")]
 			reference,
 			#[cfg(feature = "aec")]
@@ -303,6 +314,15 @@ impl Mixer {
 
 			bus[..samples].fill(0.0);
 
+			// What the observer counts: frames every sink still being written
+			// supplied, and whether any of them is readable at all. A finished
+			// sink plays its tail, which carries the mix while nothing written
+			// is readable yet (a rendition switch), but it running out is the
+			// tail ending, not a gap.
+			let mut supplied = frames;
+			let mut playing = false;
+			let mut tail = 0;
+
 			for entry in entries.iter_mut() {
 				// Read even at zero volume: this is live audio, so a muted sink
 				// stays on the timeline instead of queueing up and jumping when
@@ -314,6 +334,19 @@ impl Mixer {
 					ReadStatus::InputNotReady | ReadStatus::UnderflowOccurred { num_frames_read: 0 }
 				) {
 					entry.played_at = played_at;
+				}
+				let read = match status {
+					ReadStatus::InputNotReady => None,
+					ReadStatus::UnderflowOccurred { num_frames_read } => Some(num_frames_read),
+					ReadStatus::Ok | ReadStatus::OverflowCorrected { .. } => Some(frames),
+				};
+				match read {
+					Some(read) if entry.completion.writing() => {
+						playing = true;
+						supplied = supplied.min(read);
+					}
+					Some(read) => tail = tail.max(read),
+					None => {}
 				}
 
 				let target = entry.gain.volume();
@@ -340,6 +373,10 @@ impl Mixer {
 			for sample in &mut bus[..samples] {
 				*sample = sample.clamp(-1.0, 1.0);
 			}
+			if !playing && tail > 0 {
+				(playing, supplied) = (true, tail);
+			}
+			ledger.add(&bus[..samples], channels, supplied, playing);
 
 			// Tap the mix on its way out. Overflow means the microphone stopped
 			// draining, which the canceller notices on its own; there is nothing
@@ -395,7 +432,7 @@ mod tests {
 			let (commands, rx) = sync_channel(depth);
 			let (retired_tx, retired) = sync_channel(MAX_SINKS);
 			Self {
-				mixer: Mixer::new(rx, retired_tx, RATE, layout).unwrap(),
+				mixer: Mixer::new(rx, retired_tx, RATE, layout, Default::default()).unwrap(),
 				commands,
 				retired,
 				next: 0,

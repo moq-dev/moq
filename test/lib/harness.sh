@@ -81,6 +81,8 @@ harness_begin() {
     root="${root%/}"
     [[ -n "${MOQ_TEST_RUNS:-}" ]] || root="$root/moq-test-$(id -u)"
     mkdir -p "$root"
+    # Harnesses change directory after this, so a relative root would move under them.
+    root=$(CDPATH='' cd -- "$root" && pwd)
     HARNESS_RUN=$(mktemp -d "$root/$name-XXXXXXXX")
     # A run directory holds relay configs and generated keys, so keep it to the
     # owner even where the temp root itself is world-readable.

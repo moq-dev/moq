@@ -9,12 +9,15 @@ MoQ never negotiates. One core serves the tokio backend, the thread-per-core
 BBR correctness, reliable stream resets, hierarchical stream scheduling with
 per-broadcast fairness, bounded incomplete-message memory, wider limits for
 relay peers, and endpoint sharding.
-Per-stream acknowledgment progress, per-stream deadlines, qmux on the shared
-stream state machine, and the experiments (the egress profile, ECN
-measurement, deadline keep-alive) live in [m2](/quest/m2/README.md); media
-probing is its own [m2 quest](/quest/m2/quic-probe.md); L4S,
-careful resume, and a receive-timestamps spike toward GCC live in
-[m3](/quest/m3/README.md). None of them gate this line.
+qmux on the shared stream state machine is its own m1 quest,
+[quic-qmux](/quest/m1/quic-qmux.md), outside this epic.
+Per-stream acknowledgment progress, per-stream deadlines, and the experiments
+(the egress profile, ECN measurement, deadline keep-alive) live in
+[m2](/quest/m2/README.md); media
+probing is its own [m2 epic](/quest/m2/probe/README.md); receive timestamps
+and a delay-based uplink controller are the
+[m2 realtime epic](/quest/m2/quic-realtime/README.md); L4S and careful resume
+live in [m3](/quest/m3/README.md). None of them gate this line.
 
 ## Plan
 
@@ -51,6 +54,9 @@ Decided in the 2026-09-30 audit: deadlines, qmux, BBR loss parity, ECN
 measurement, ACK progress, and the ACK hook moved to m2, since no m1 quest
 consumes them. Decided 2026-10-08: L4S and careful resume moved on to m3,
 and GCC shrank to a receive-timestamps spike, since none has a consumer.
+Decided 2026-10-20 (maintainer): qmux moved back to m1 as a milestone
+child, because moq stops depending on the web-transport repo and its credit
+and close fixes now ship in-tree.
 
 Decided in the 2026-10-10 receive-memory plan: native message assembly holds
 connection credit until complete-unit handoff, while stream credit advances
@@ -63,24 +69,15 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 ## Required
 
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
-- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - `RESET_STREAM_AT`,
-  so a reset WebTransport stream still delivers its header
-- [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - strict
-  subscription priority, fair buckets, and newest-first group order replace
-  the lossy scalar; retransmits follow the same order
-- [Schedule datagrams by subscription priority](/quest/m1/quic/datagram-priority.md) -
-  datagrams join their subscription's send group instead of preempting every stream
-- [Relay peers get wider limits](/quest/m1/quic/peer-limits.md) - MAX_STREAMS
-  and MAX_DATA are raised after SETUP identifies a cluster peer
-- [Shard the endpoint](/quest/m1/quic/shard.md) - the library shards a
-  server endpoint across cores by default, replacing the `--workers` group
 
 ## Related
 
+- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - the m1
+  qmux port onto `moq-quic`'s stream state
 - [Scope track priority](/quest/m1/track-priority-scope.md) - the
   per-broadcast fairness policy on cluster sessions
-- [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
+- [Native probing](/quest/m2/probe/native.md) - moq-quic retransmits in-flight data during ProbeBW_UP to probe up to a session's target
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides
-- [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - measures whether receive timestamps give a cheaper, more accurate forward delay than half the RTT
+- [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - receive timestamps and a delay-based controller for native publisher uplinks

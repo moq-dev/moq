@@ -1,12 +1,12 @@
 //! A deviceless [`Output`] for tests: it records what the speaker would have
-//! played and when, on tokio's clock, so a paused runtime measures playback
+//! played and when, on the ambient clock, so a paused runtime measures playback
 //! without waiting on it.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use moq_audio::playback::Input;
-use tokio::time::Instant;
+use moq_clock::Instant;
 
 use super::output::{Output, Sink, Speaker};
 use super::window::Event;
@@ -43,7 +43,7 @@ impl Recorder {
 	pub fn present(&self, media: &super::media::Media<Self>) -> Option<hang::moq_net::Timestamp> {
 		let mut video = media.video.lock().unwrap();
 		let presentation = media.presentation.lock().unwrap();
-		let now = Instant::now().into_std();
+		let now = moq_clock::now();
 		let mut shown = None;
 		while video
 			.front()
@@ -116,7 +116,7 @@ pub(super) struct FakeSink {
 
 impl Sink for FakeSink {
 	async fn finish(self) {
-		tokio::time::sleep_until(self.end).await;
+		moq_clock::sleep_until(self.end).await;
 	}
 
 	fn write(&mut self, samples: &[u8]) -> anyhow::Result<()> {

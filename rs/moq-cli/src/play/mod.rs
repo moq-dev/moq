@@ -27,6 +27,8 @@ mod headless;
 #[cfg(feature = "play")]
 mod media;
 #[cfg(feature = "play")]
+mod metrics;
+#[cfg(feature = "play")]
 mod output;
 #[cfg(feature = "play")]
 mod video;

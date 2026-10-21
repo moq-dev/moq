@@ -111,10 +111,8 @@ connection view and the dashboard flow.
 
 ## Required
 
-- [Schema](/quest/m2/stats/schema.md) - hang defines the `stats` and
-  `echo` catalog sections, their snapshot types, and the draft text
-- [Rust reporters](/quest/m2/stats/rust.md) - the CLI, players, encoders, and
-  moq-mux remuxes publish stats and feedback
+- [Rust reporters](/quest/m2/stats/rust.md) - the player, encoders, and
+  gateways publish stats and feedback, as the CLI remuxes do
 - [Browser reporters](/quest/m2/stats/js.md) - `<moq-publish>` publishes
   stats and `<moq-watch>` publishes feedback
 - [Client health](/quest/m2/stats/health.md) - two snapshots become a

@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 //! Media muxers and demuxers for MoQ.
 //!
 //! Sits between [`moq_net`] (pub/sub transport) and [`hang`] (media
@@ -39,6 +41,7 @@ mod pace;
 pub mod rate;
 pub mod select;
 mod source;
+mod stats;
 pub mod timeline;
 
 pub use clock::Clock;

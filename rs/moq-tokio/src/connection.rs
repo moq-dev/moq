@@ -1,7 +1,6 @@
 //! The reconnect loop around a session, and the [`Monitor`] that observes it.
 
 pub mod auth;
-pub use auth::Auth;
 
 use std::task::{Poll, ready};
 use std::time::Duration;
@@ -59,7 +58,7 @@ fn settles_walk(err: &Error) -> bool {
 /// A GOAWAY naming no new URI is no failure: a restarting peer sends one to each session until
 /// it goes, and each of those
 /// serves, so it restarts the timeout instead.
-#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -190,7 +189,7 @@ pub enum Status {
 ///
 /// The URI is dialed exactly as given, so it must carry whatever credentials the
 /// new endpoint needs. Nothing from the current session is copied onto it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, usage::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, usage_rs::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum Redirect {
@@ -313,13 +312,7 @@ fn is_local_ip(ip: std::net::IpAddr) -> bool {
 		// it by that rather than by the v6 rules.
 		std::net::IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
 			Some(v4) => is_local_v4(v4),
-			// Loopback (::1), unspecified (::), unique local (fc00::/7), link local (fe80::/10).
-			None => {
-				ip.is_loopback()
-					|| ip.is_unspecified()
-					|| (ip.segments()[0] & 0xfe00) == 0xfc00
-					|| (ip.segments()[0] & 0xffc0) == 0xfe80
-			}
+			None => ip.is_loopback() || ip.is_unspecified() || ip.is_unique_local() || ip.is_unicast_link_local(),
 		},
 	}
 }
@@ -329,7 +322,7 @@ fn is_local_v4(ip: std::net::Ipv4Addr) -> bool {
 }
 
 /// How a reconnect loop reacts to a peer's GOAWAY.
-#[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -469,6 +462,8 @@ impl Resolved {
 /// distinguishes a permanent give-up from a graceful close.
 #[derive(Default)]
 struct State {
+	/// Tokens to queue before publishing a replacement session to its consumers.
+	tokens: std::sync::Mutex<Vec<std::sync::Weak<auth::Replay>>>,
 	/// Current connection status, or `None` before the first connect.
 	status: Option<Status>,
 	/// How many sessions have been live on this handle, counting the current one.
@@ -484,6 +479,9 @@ struct State {
 	transport: Option<crate::Transport>,
 	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
 	error: Option<Error>,
+	/// Why nothing is live while the loop retries: the last session's close reason or
+	/// the latest failed dial. Cleared by the next connect.
+	failure: Option<Error>,
 	/// The currently-connected session, or `None` while reconnecting. Read by
 	/// [`Monitor`] to snapshot live connection stats.
 	session: Option<moq_net::Session>,
@@ -517,6 +515,7 @@ impl Shared {
 			return;
 		}
 		if let Ok(mut state) = self.state.write() {
+			auth::replay(&state, session, state.connects + 1);
 			// A migration replaces a live session without a disconnect in between, so
 			// its end is counted here, keeping `started - ended` at 1 while connected.
 			if state.session.is_some() {
@@ -525,6 +524,7 @@ impl Shared {
 			state.status = Some(Status::Connected);
 			state.connects += 1;
 			state.presence.sessions_started += 1;
+			state.failure = None;
 			state.version = Some(session.version());
 			state.transport = Some(transport);
 			state.session = Some(session.clone());
@@ -562,10 +562,19 @@ impl Shared {
 		let _ = self.recv_bw.set(None);
 	}
 
-	/// Record the error the loop gave up with, for [`Connection::closed`].
+	/// Record why the loop is retrying, for [`Monitor::failure`].
+	fn retrying(&self, err: &Error) {
+		if let Ok(mut state) = self.state.write() {
+			state.failure = Some(err.clone());
+		}
+	}
+
+	/// Record the error the loop gave up with, for [`Connection::closed`]. Nothing is
+	/// retrying anymore, so [`Monitor::failure`] stops reporting.
 	fn failed(&self, err: Error) {
 		if let Ok(mut state) = self.state.write() {
 			state.error = Some(err);
+			state.failure = None;
 		}
 	}
 }
@@ -579,6 +588,10 @@ impl Drop for Shared {
 		// nothing left able to reach it. Releasing it drops the last clone, which
 		// is what closes the transport.
 		self.disconnected();
+		// Nothing retries anymore, however the loop ended.
+		if let Ok(mut state) = self.state.write() {
+			state.failure = None;
+		}
 	}
 }
 
@@ -628,6 +641,16 @@ impl Monitor {
 		self.state.read().session.as_ref().map(moq_net::Session::stats)
 	}
 
+	/// Why the loop is retrying: the error that ended the last session or failed the
+	/// latest dial, or `None` once a session connects.
+	///
+	/// Read it while [`Connection::status`] reports [`Status::Disconnected`]: a redial
+	/// that keeps failing never changes the status, so this is where its reason shows.
+	/// The loop giving up reports through [`Connection::closed`] instead.
+	pub fn failure(&self) -> Option<Error> {
+		self.state.read().failure.clone()
+	}
+
 	/// Snapshot statistics and protocol together, or `None` while disconnected.
 	pub fn snapshot(&self) -> Option<Snapshot> {
 		let state = self.state.read();
@@ -671,7 +694,7 @@ pub struct Connection {
 	/// Persistent send-bitrate estimate, fed by the loop from each live session.
 	send_bandwidth: BandwidthConsumer,
 	/// Persistent recv-bitrate estimate, fed by the loop from each live session.
-	recv_bandwidth: BandwidthConsumer,
+	recv_bandwidth: moq_net::bandwidth::Weak,
 	/// The last status returned by [`status`](Self::status), for change detection.
 	/// Per-clone: a clone starts from its parent's cursor and diverges from there.
 	last_reported: Option<Status>,
@@ -705,7 +728,7 @@ impl Connection {
 		let send_bw = BandwidthProducer::new();
 		let recv_bw = BandwidthProducer::new();
 		let send_bandwidth = send_bw.consume();
-		let recv_bandwidth = recv_bw.consume();
+		let recv_bandwidth = recv_bw.weak();
 
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
@@ -845,6 +868,15 @@ impl Connection {
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
 					let ended = run_session(shared, &session, &mut draining).await;
+					// Before any status moves, so a watcher woken by `Disconnected` finds why. Only
+					// a retry has a reason to report; a session that ends the loop reports through
+					// `closed` instead.
+					if let Ended::Closed(Err(err)) = &ended
+						&& client.reconnect
+						&& !err.is_terminal()
+					{
+						shared.retrying(err);
+					}
 
 					// A session that stayed up past the initial backoff is healthy; one that
 					// ended sooner counts as a failed attempt however it ended.
@@ -918,7 +950,9 @@ impl Connection {
 						// peers bouncing us between them eventually give up.
 						let restarting = msg.uri().is_empty();
 						if !restarting {
-							retry.last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
+							let err = Error::Reconnect("peer redirected immediately".to_string());
+							shared.retrying(&err);
+							retry.last_error = Some(err);
 						}
 						// A restart's pacing is not capped by the window: a delay longer than the
 						// window would otherwise spend it all and end the loop without a redial.
@@ -996,6 +1030,7 @@ impl Connection {
 					if err.is_terminal() || !client.reconnect {
 						return Err(err);
 					}
+					shared.retrying(&err);
 					retry.last_error = Some(err);
 				}
 			}
@@ -1200,7 +1235,7 @@ impl Connection {
 	/// [`moq_net::Session::recv_bandwidth`]. Persistent across reconnects like
 	/// [`send_bandwidth`](Self::send_bandwidth); `None` while disconnected or unavailable.
 	pub fn recv_bandwidth(&self) -> BandwidthConsumer {
-		self.recv_bandwidth.clone()
+		self.recv_bandwidth.consume()
 	}
 
 	/// Poll whether the connection loop has stopped.
@@ -1222,8 +1257,9 @@ impl Connection {
 	}
 
 	/// Present tokens that survive session replacement and observe the live grant union.
-	pub fn auth(&self) -> Auth {
-		Auth {
+	/// A route names a session's own `moq_net::auth::Auth` instead, re-added after a reconnect.
+	pub fn auth(&self) -> auth::Handle {
+		auth::Handle {
 			connection: self.state.clone(),
 			pacing: self.pacing,
 		}
@@ -1404,14 +1440,14 @@ async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared
 /// polled through the waiter's own waker.
 async fn run_session(shared: &Shared, session: &moq_net::Session, draining: &mut Option<Draining>) -> Ended {
 	let mut send = session.send_bandwidth();
-	let mut recv = session.recv_bandwidth();
+	let mut recv = RecvBandwidth::default();
 	let goaway = session.draining();
 	let closed = session.closed();
 	tokio::pin!(closed);
 
 	kio::wait(|waiter| {
 		poll_forward(&mut send, &shared.send_bw, waiter);
-		poll_forward(&mut recv, &shared.recv_bw, waiter);
+		recv.poll(&shared.recv_bw, waiter, || session.recv_bandwidth());
 
 		// Retire the predecessor once it closes or overstays its handover window.
 		// The replacement is already serving, so the state stays as it is.
@@ -1434,6 +1470,44 @@ async fn run_session(shared: &Shared, session: &moq_net::Session, draining: &mut
 			.map(|err| Ended::Closed(Err(err.into())))
 	})
 	.await
+}
+
+/// Own the live session's receive consumer only while an external consumer needs it.
+#[derive(Default)]
+struct RecvBandwidth {
+	source: Option<BandwidthConsumer>,
+}
+
+impl RecvBandwidth {
+	fn poll(
+		&mut self,
+		out: &BandwidthProducer,
+		waiter: &kio::Waiter,
+		source: impl FnOnce() -> Option<BandwidthConsumer>,
+	) {
+		loop {
+			match out.poll_unused(waiter) {
+				Poll::Pending => break,
+				Poll::Ready(Err(_)) => {
+					self.source = None;
+					return;
+				}
+				Poll::Ready(Ok(())) => {
+					self.source = None;
+					let _ = out.set(None);
+				}
+			}
+			match out.poll_used(waiter) {
+				// Demand can arrive during retirement, before a waiter was armed.
+				Poll::Ready(Ok(())) => continue,
+				Poll::Ready(Err(_)) | Poll::Pending => return,
+			}
+		}
+		if self.source.is_none() {
+			self.source = source();
+		}
+		poll_forward(&mut self.source, out, waiter);
+	}
 }
 
 /// Mirror `bw`'s live estimate into `out` for as long as it changes, dropping the source handle once
@@ -1486,7 +1560,7 @@ mod tests {
 	/// Updating with an empty CLI preserves a standing TOML value over typed defaults.
 	#[test]
 	fn cli_does_not_clobber_toml_backoff() {
-		#[derive(usage::Cli)]
+		#[derive(usage_rs::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(settings)]
 		struct Wrapper {
@@ -1524,7 +1598,7 @@ mod tests {
 	/// GOAWAY typed defaults remain overrideable by a standing TOML layer.
 	#[test]
 	fn cli_does_not_clobber_toml_goaway() {
-		#[derive(usage::Cli)]
+		#[derive(usage_rs::Cli)]
 		#[usage(unknown_flags = "error", args_override_self = false)]
 		#[usage(settings)]
 		struct Wrapper {
@@ -1931,6 +2005,92 @@ mod tests {
 		assert!(bw.is_none());
 	}
 
+	#[test]
+	fn receive_demand_is_forwarded_across_sessions_without_becoming_demand() {
+		let out = BandwidthProducer::new();
+		let handle = out.weak();
+		let waiter = kio::Waiter::noop();
+		let first = BandwidthProducer::new();
+		first.set(Some(moq_net::bandwidth::Rate::from_bps(123))).unwrap();
+		let mut forward = RecvBandwidth::default();
+		forward.poll(&out, &waiter, || Some(first.consume()));
+		assert!(!first.is_used(), "the connection handle is not demand");
+		let reader = handle.consume();
+		forward.poll(&out, &waiter, || Some(first.consume()));
+		assert!(first.is_used());
+		assert_eq!(reader.peek(), Some(moq_net::bandwidth::Rate::from_bps(123)));
+		let clone = reader.clone();
+		drop(reader);
+		forward.poll(&out, &waiter, || Some(first.consume()));
+		assert!(first.is_used(), "a remaining clone is demand");
+		drop(clone);
+		forward.poll(&out, &waiter, || Some(first.consume()));
+		assert!(!first.is_used(), "the last drop releases the live session's consumer");
+		let reader = handle.consume();
+		assert_eq!(reader.peek(), None, "an unused estimate is cleared");
+		forward.poll(&out, &waiter, || Some(first.consume()));
+		assert!(first.is_used(), "demand can resume on the same session");
+		drop(forward);
+		assert!(!first.is_used());
+		out.set(None).unwrap();
+		assert_eq!(reader.peek(), None, "disconnected");
+		let second = BandwidthProducer::new();
+		second.set(Some(moq_net::bandwidth::Rate::from_bps(456))).unwrap();
+		let mut forward = RecvBandwidth::default();
+		forward.poll(&out, &waiter, || Some(second.consume()));
+		assert!(second.is_used(), "the same reader demands the replacement session");
+		assert_eq!(reader.peek(), Some(moq_net::bandwidth::Rate::from_bps(456)));
+		drop(reader);
+		forward.poll(&out, &waiter, || Some(second.consume()));
+		assert!(!second.is_used());
+	}
+
+	#[test]
+	fn receive_demand_arriving_during_retirement_is_forwarded() {
+		use std::sync::{Arc, Mutex};
+		use std::task::{Wake, Waker};
+
+		struct Demand {
+			handle: moq_net::bandwidth::Weak,
+			consumer: Mutex<Option<BandwidthConsumer>>,
+		}
+		impl Wake for Demand {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				*self.consumer.lock().unwrap() = Some(self.handle.consume());
+			}
+		}
+
+		let out = BandwidthProducer::new();
+		out.set(Some(moq_net::bandwidth::Rate::from_bps(123))).unwrap();
+		let demand = Arc::new(Demand {
+			handle: out.weak(),
+			consumer: Mutex::new(None),
+		});
+		let waiter = kio::Waiter::new(Waker::from(demand.clone()));
+		let mut reader = out.consume();
+		assert!(reader.poll_changed(&waiter).is_ready());
+		assert!(reader.poll_changed(&waiter).is_pending());
+		drop(reader);
+		let source = BandwidthProducer::new();
+		let mut forward = RecvBandwidth::default();
+		// Clearing the unused estimate wakes the old reader's waiter. It creates
+		// fresh demand precisely between the unused and used checks.
+		forward.poll(&out, &kio::Waiter::noop(), || Some(source.consume()));
+		assert!(demand.consumer.lock().unwrap().is_some());
+		assert!(
+			source.is_used(),
+			"new demand must be forwarded without unrelated activity"
+		);
+		out.abort(moq_net::Error::Cancel).unwrap();
+		forward.poll(&out, &kio::Waiter::noop(), || {
+			panic!("a closed output must not acquire a source")
+		});
+		assert!(!source.is_used());
+	}
+
 	const WALK_TIMEOUT: Duration = Duration::from_secs(30);
 
 	fn url(value: &str) -> Url {
@@ -2144,6 +2304,114 @@ mod tests {
 		assert!(matches!(err, Error::Reconnect(_)), "{err}");
 		assert!(err.to_string().contains(&refused), "{err}");
 		assert!(started.elapsed() >= Duration::from_millis(100));
+	}
+
+	/// A redial that keeps failing reports why while it retries, and the connect that
+	/// finally lands clears it. Without this a caller only learns the reason once the
+	/// loop gives up, which with no retry window is never.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_failing_redial_reports_why_until_it_connects() {
+		// Hold the failing listener until the runtime ends: a released port can
+		// become another process's listener while the connection keeps retrying.
+		let failing = dead().await.socket_addrs(|| None).unwrap();
+		assert!(
+			std::net::TcpListener::bind(failing[0]).is_err(),
+			"the failing port stays reserved"
+		);
+		let (live, mut accepted, _task) = serve(crate::origin::spawn()).await;
+
+		// Unique to this test: the table is process-wide.
+		const HOST: &str = "failing-redial.test";
+		crate::resolve::hosts::point(HOST, failing);
+
+		let mut config = crate::connect::Config::default();
+		config.backoff.initial = Some(MIN_BACKOFF);
+		config.backoff.max = Some(MIN_BACKOFF);
+		config.backoff.timeout = Some(Duration::ZERO);
+		let client = config.init(Default::default()).unwrap();
+		let mut connection = client.connect(url(&format!("tcp://{HOST}:1/")));
+		let monitor = connection.monitor();
+
+		let failure = kio::wait(|waiter| {
+			monitor.state.poll(waiter, |state| match &state.failure {
+				Some(err) => Poll::Ready(err.clone()),
+				None => Poll::Pending,
+			})
+		})
+		.await
+		.unwrap_or_else(|_| panic!("the connection ended before reporting its retry reason"));
+		assert_eq!(
+			monitor
+				.failure()
+				.expect("the monitor reports the retry reason")
+				.to_string(),
+			failure.to_string()
+		);
+		assert!(
+			matches!(&failure, Error::Tcp(err) if matches!(err.as_ref(), crate::tcp::Error::Connect(reason) if !reason.is_empty())),
+			"{failure}"
+		);
+		let transition = futures::FutureExt::now_or_never(connection.status());
+		assert!(transition.is_none(), "a failed redial is no status transition");
+
+		crate::resolve::hosts::point(HOST, [live]);
+		assert_eq!(connection.status().await.unwrap(), Status::Connected);
+		assert!(monitor.failure().is_none(), "the connect must clear the failure");
+		let _session = accepted.recv().await.unwrap();
+	}
+
+	/// Closing a connection between retries ends the retry, so its reason goes with it.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn closing_between_retries_clears_the_failure() {
+		// A held port, not a released one: another test's server could claim a
+		// released port, and the dial would connect instead of failing.
+		let mut config = crate::connect::Config::default();
+		config.backoff.initial = Some(MIN_BACKOFF);
+		config.backoff.max = Some(MIN_BACKOFF);
+		config.backoff.timeout = Some(Duration::ZERO);
+		let client = config.init(Default::default()).unwrap();
+		let connection = client.connect(dead().await);
+		let mut monitor = connection.monitor();
+
+		kio::wait(|waiter| {
+			monitor.state.poll(waiter, |state| match state.failure {
+				Some(_) => Poll::Ready(()),
+				None => Poll::Pending,
+			})
+		})
+		.await
+		.unwrap_or_else(|_| panic!("the connection ended before reporting its retry reason"));
+
+		connection.close().await.expect("close");
+		// Resolves with an error once the loop's state is final.
+		let ended = monitor.presence_changed().await;
+		assert!(ended.is_err(), "nothing connected, so only the end moves presence");
+		assert!(monitor.failure().is_none(), "nothing is retrying");
+	}
+
+	/// A session that ends the loop reports through `closed`, not as a retry reason.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_session_that_ends_the_loop_reports_no_failure() {
+		const WAIT: Duration = Duration::from_secs(10);
+
+		let (addr, mut accepted, _task) = serve(crate::origin::spawn()).await;
+		let client = crate::connect::Config::default()
+			.init(Default::default())
+			.unwrap()
+			.with_reconnect(false);
+		let connection = client.connect(url(&format!("tcp://{addr}/")));
+		let monitor = connection.monitor();
+
+		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		session.abort(moq_net::Error::App(7));
+		let closed = tokio::time::timeout(WAIT, connection.closed())
+			.await
+			.expect("the connection did not close");
+		assert!(closed.is_err(), "the abort ends the loop with an error");
+		assert!(monitor.failure().is_none(), "nothing is retrying");
 	}
 
 	/// A settled answer from one candidate ends the walk instead of being buried.

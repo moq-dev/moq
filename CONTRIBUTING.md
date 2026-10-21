@@ -15,7 +15,7 @@ Have at least these sections:
 
 - **Problem**: a summary of the problem and why this PR is needed.
 - **Approach**: a summary of the approach taken to solve the problem.
-- **Impact**: a bullet point for every public API/wire change made.
+- **Impact**: a bullet point for every public API/wire change made. A breaking one also gets a `MIGRATE.md` entry in each affected package.
 - **Alternatives**: any alternative approaches considered.
 - **Follow-ups**: any issues encountered or quests created.
 
@@ -23,14 +23,15 @@ When pushing additional commits to an existing PR, update the title and descript
 When taking over someone else's PR, push commits on top of theirs so they keep credit.
 
 Create a draft PR.
-Switch it to "Ready for review" when you're finished and local `just check` passes.
+Run `just ci` before switching it to "Ready for review" and before every push.
 Fix any merge conflicts and failing CI checks.
 
 # Merge queue
 
-PRs into `main` land through a merge queue, which re-runs **Check** and **Test** on the PR combined with the latest `main` and the PRs queued ahead of it.
-The **macOS** and **Windows** platform gates (selected by **Platform scope**) run only there; main PRs report them as skipped.
-Enqueue a reviewed PR with `gh pr merge <number>`.
+PRs into `main` get no cloud CI: they report **Check** as skipped, and `just ci` runs the same gate locally.
+The merge queue runs Check on the PR combined with the latest `main` and the PRs queued ahead of it.
+Enqueue with `gh pr merge <number>` once the review is clean.
+Both select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
 
 A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
 Read the removal reason in the PR timeline and the merge group run, fix the cause, and enqueue again.
@@ -83,6 +84,7 @@ For an advisory against Quinn, follow the advisory triage in [`rs/moq-quic/READM
 `main` is the trunk; `release` is what ships, and release-plz and every branch-triggered publish run only there.
 
 - A release is cut by hand: a PR merging `main` into `release`, with a merge commit.
+- A breaking cut first renames, on `main`, each changed `MIGRATE.md`'s `## Unreleased` to its version transition (`## 0.3 -> 0.4`), leaving an empty `## Unreleased` above it.
 - Suggest a `release` backport for any serious bug fix (crash, security, data loss, broken interop), whether found on `main` or reported against a release. Land it on `main` first, then port it onto `release` as a separate PR that keeps the published API, so it ships as a patch.
 - After any release publishes, patch or breaking, run `just test wire-compat --remeasure` on `main` and land the rewritten `test/interop/compat/planned-breaks.json` with refreshed reasons. Otherwise the nightly wire-compat check fails on the stale pins.
 - Nothing merges `release` into `main` automatically. Before cutting a minor or breaking release, the maintainer merges `release` into `main` once, so trunk carries the published versions, CHANGELOGs, and any `release`-only commits. It lands as a merge commit with `--admin`, never squashed, so the cut starts from an advanced merge base.

@@ -58,9 +58,8 @@ Settled constraints either way:
 The harness drives a real browser, injects main-thread busy loops of varying
 length, and counts stalled or dropped video frames and audio underruns. The
 sweep runs N players over one relay and records CPU, memory, and delivery
-against N, per the fan-out rule. Follow the artifact conventions of
-[Browser benchmarks](/quest/m2/browser-benchmarks.md) and reuse the existing
-browser harness pieces instead of starting another.
+against N, per the fan-out rule. Extend `bench/browser` (`just bench-browser`, see `bench/README.md`) and its
+artifact conventions instead of starting another harness.
 
 The rewritten implementation quest names the chosen model, the public handle
 shape of `Player` and `<moq-watch>`, what happens to the composable classes,
@@ -74,5 +73,4 @@ follow-up wires the capture worklet to the encoder worker with a
 ## Related
 
 - [Watch worker](/quest/m2/watch-worker.md) - the implementation this rewrites
-- [Browser benchmarks](/quest/m2/browser-benchmarks.md) - artifact conventions; may absorb the harness later
 - [A/V clock](/quest/m1/av-clock.md) - the `Sync` shape the implementation moves; the prototype can pace against today's

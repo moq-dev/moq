@@ -165,6 +165,9 @@ struct Unit {
 	keyframe: bool,
 	/// It was pushed after its due slot went out, so it goes out as soon as it can.
 	late: bool,
+	/// The first byte's placement in nanoseconds and payload prefix (the section pointer field).
+	/// It keeps no deadline of ours: it goes out as soon after as the buffers let it.
+	place: Option<(u128, usize)>,
 	/// Its bytes in the PID's decoder buffer, until it decodes.
 	held: usize,
 	/// The decode time and bytes of each frame of a PES that packs several, which leave the
@@ -675,6 +678,36 @@ impl Schedule {
 		timing: Timing,
 		packets: Vec<u8>,
 		keyframe: bool,
+		frames: Vec<(u128, usize)>,
+	) -> anyhow::Result<()> {
+		self.queue(pid, timing, None, packets, keyframe, frames)
+	}
+
+	/// Queue a PES or section placed at `place` nanoseconds on the media timeline:
+	/// its first byte goes out then, never earlier, with its TS header and `prefix` payload
+	/// bytes (the section pointer field) just before it. It
+	/// decodes at `decode`, or each of `frames` at its own time, as [`Self::push_frames`]
+	/// lists them, which only the PID's decoder buffer reads: the unit misses no deadline.
+	pub fn push_placed(
+		&mut self,
+		pid: u16,
+		(place, decode): (u128, u128),
+		prefix: usize,
+		packets: Vec<u8>,
+		keyframe: bool,
+		frames: Vec<(u128, usize)>,
+	) -> anyhow::Result<()> {
+		let timing = Timing { by: place, decode };
+		self.queue(pid, timing, Some((place, prefix)), packets, keyframe, frames)
+	}
+
+	fn queue(
+		&mut self,
+		pid: u16,
+		timing: Timing,
+		place: Option<(u128, usize)>,
+		packets: Vec<u8>,
+		keyframe: bool,
 		mut frames: Vec<(u128, usize)>,
 	) -> anyhow::Result<()> {
 		if packets.is_empty() {
@@ -694,7 +727,18 @@ impl Schedule {
 					.filter(|packet| self::pid(*packet) == pid)
 			};
 			let bytes: usize = on_pid().map(|packet| payload(packet).len()).sum();
-			if bytes > size {
+			// The PES header leaves the decoder buffer with the first frame after it.
+			if let Some(first) = frames.first_mut() {
+				first.1 += bytes - on_pid().map(|packet| elementary(packet).len()).sum::<usize>();
+			}
+			// A placed PES's frames leave the buffer one by one as it streams in, so only each
+			// has to fit; any other unit arrives whole by its first frame's decode time.
+			if let Some(largest) = frames.iter().map(|&(_, bytes)| bytes).max().filter(|_| place.is_some()) {
+				anyhow::ensure!(
+					largest <= size,
+					"MPEG-TS PES on PID {pid} holds a {largest}-byte frame, exceeding its {size}-byte decoder buffer"
+				);
+			} else if bytes > size {
 				// Only the error names the elementary size, so the PES headers are parsed here.
 				let headers: usize = on_pid()
 					.filter(|packet| packet[1] & 0x40 != 0)
@@ -706,10 +750,6 @@ impl Schedule {
 				anyhow::bail!(
 					"MPEG-TS access unit on PID {pid} has {elementary} payload bytes ({bytes} bytes with PES headers), exceeding its {size}-byte decoder buffer"
 				);
-			}
-			// The PES header leaves the decoder buffer with the first frame after it.
-			if let Some(first) = frames.first_mut() {
-				first.1 += bytes - on_pid().map(|packet| elementary(packet).len()).sum::<usize>();
 			}
 		}
 		// The deadline its last frame would have on its own.
@@ -730,6 +770,7 @@ impl Schedule {
 			sent: 0,
 			keyframe,
 			late: self.next.is_some_and(|next| due < next),
+			place,
 			held: 0,
 			frames,
 			runs,
@@ -766,7 +807,19 @@ impl Schedule {
 
 	/// The first slot `unit` may go out in: [`ahead`] of its due slot, and never before the
 	/// slot after the unit pushed ahead of it needs. A packed PES is due by its first frame.
+	///
+	/// A placed PES goes no earlier than the slot whose bytes reach its placement: at a
+	/// multiplex rate the one whose span holds it, where [`Self::padded`] times each packet,
+	/// and otherwise the first that opens at or after it, as nothing times the packets
+	/// within an unpadded slot. Slot `index` opens one slot behind its boundary ([`grid_pcr`]).
 	fn release(&self, unit: &Unit) -> u128 {
+		if let Some((place, _)) = unit.place {
+			let slot = PCR_INTERVAL.as_nanos();
+			return match self.rate {
+				Some(_) => place / slot + 1,
+				None => place.div_ceil(slot) + 1,
+			};
+		}
 		if unit.late {
 			return 0;
 		}
@@ -816,8 +869,10 @@ impl Schedule {
 		}
 
 		let mut take = self.admit(index, usize::MAX);
-		for (unit, take) in self.units.iter_mut().zip(take.iter_mut()) {
-			if unit.due <= index && *take < unit.remaining() {
+		// A placed PES is due only once released, which may come after its due slot.
+		let released: Vec<bool> = self.units.iter().map(|unit| self.release(unit) <= index).collect();
+		for ((unit, take), released) in self.units.iter_mut().zip(take.iter_mut()).zip(released) {
+			if unit.due <= index && released && *take < unit.remaining() {
 				if self.buffers.get(&unit.pid).is_some_and(|buffer| buffer.size.is_some()) {
 					unit.held += unit.packets_on(unit.sent + *take..unit.count(), unit.pid) * PAYLOAD;
 				}
@@ -979,6 +1034,18 @@ impl Schedule {
 				let packet = opening.as_deref().unwrap_or(rest);
 				let packet = &packet[..TsPacket::SIZE];
 				let pid = self::pid(packet);
+				// The first PES or section byte waits, with its TS header and pointer just before it.
+				if let Some((place, prefix)) = unit.place
+					&& pid == unit.pid
+					&& packet[1] & 0x40 != 0
+				{
+					let header = (TsPacket::SIZE - payload(packet).len() + prefix) as u128;
+					let at = place as i128 - (header * 8 * 1_000_000_000 / u128::from(rate)) as i128;
+					if now < at {
+						waiting.push(Reverse((at, lane)));
+						continue;
+					}
+				}
 				let buffer = self.buffers.get(&pid);
 				let duration = buffer.map_or(0, |buffer| {
 					(TsPacket::SIZE as u128 * 8 * 1_000_000_000).div_ceil(u128::from(buffer.rate))
@@ -1088,7 +1155,11 @@ impl Schedule {
 					}
 					continue;
 				}
-				if !self.ended && !unit.late && pid == unit.pid && done > unit.timing.decode as i128 {
+				if !self.ended
+					&& !unit.late && unit.place.is_none()
+					&& pid == unit.pid
+					&& done > unit.timing.decode as i128
+				{
 					return Err(self.missed(pid, rate));
 				}
 				self.transport.insert(tb, (arrived, since));
@@ -1172,11 +1243,9 @@ impl Schedule {
 		}
 		let end = time(count);
 		if !self.ended
-			&& let Some(unit) = self
-				.units
-				.iter()
-				.find(|unit| !unit.late && unit.timing.by as i128 <= end && unit.remaining() > 0)
-		{
+			&& let Some(unit) = self.units.iter().find(|unit| {
+				!unit.late && unit.place.is_none() && unit.timing.by as i128 <= end && unit.remaining() > 0
+			}) {
 			return Err(self.missed(unit.pid, rate));
 		}
 		for unit in self.units.iter().filter(|unit| unit.remaining() == 0) {
@@ -1377,6 +1446,29 @@ mod tests {
 			}
 		}
 		out
+	}
+
+	/// The pointer byte goes just before placement, so it cannot cost a section another packet.
+	#[test]
+	fn placed_first_byte_accounts_for_the_section_pointer() {
+		for prefix in [0, 1] {
+			let mut schedule = Schedule::new(Duration::from_millis(500));
+			schedule.set_rate(Some(1_600_000));
+			let mut packet = unit(7, 1);
+			packet[1] |= 0x40;
+			// A packet starts at 69 ms on this rate's lattice; each byte takes 5 us.
+			let place = 69_000_000 + (4 + prefix as u128) * 5_000;
+			schedule
+				.push_placed(7, (place, place), prefix, packet, true, Vec::new())
+				.unwrap();
+			let wire = wire(&mut schedule, &unit(8, 1));
+			let (start, _) = wire.iter().find(|(_, packet)| pid(packet) == 7).unwrap();
+			let first = start * 1_000_000_000.0 + (4 + prefix) as f64 * 5_000.0;
+			assert!(
+				(first - place as f64).abs() < 0.5,
+				"prefix {prefix}: first byte at {first} ns, expected {place} ns"
+			);
+		}
 	}
 
 	/// The peak fills in bytes of a transport buffer fed by `pids` on the wire at `rate` and

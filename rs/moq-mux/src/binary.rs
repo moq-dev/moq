@@ -35,7 +35,7 @@
 //!
 //! A payload timed on the broadcast [`Clock`](crate::Clock) is written at that timestamp as given,
 //! and the entry advertises how late payloads reach the transport as its `jitter` and `delay`, the
-//! way a media rendition does. A capture [`Instant`](std::time::Instant) converts with
+//! way a media rendition does. A capture [`Instant`](moq_clock::Instant) converts with
 //! [`Clock::capture`](crate::Clock::capture) on the catalog's clock:
 //!
 //! ```no_run
@@ -43,7 +43,7 @@
 //! #     catalog: &moq_mux::catalog::Producer,
 //! #     thumbnail: &mut moq_mux::binary::Snapshot,
 //! #     jpeg: bytes::Bytes,
-//! #     captured: std::time::Instant,
+//! #     captured: moq_clock::Instant,
 //! # ) -> moq_mux::Result<()> {
 //! let at = catalog.clock().capture(captured)?;
 //! thumbnail.update(moq_net::Timed::from(jpeg).at(at))?;
@@ -348,20 +348,20 @@ impl Consumer {
 
 	/// The mode the publisher chose.
 	///
-	/// [`Mode::Snapshot`] is lossy: intermediate payloads are superseded and only the newest is
-	/// yielded. [`Mode::Stream`] preserves every payload. Check this when the application can only
+	/// [`Mode::Snapshot`] is lossy: groups may be skipped once superseded beyond the subscription
+	/// drift budget. [`Mode::Stream`] preserves every payload. Check this when the application can only
 	/// work with one of them.
 	pub fn mode(&self) -> &Mode {
 		&self.mode
 	}
 
 	/// Get the next payload, or `None` once the track ends.
-	pub async fn next(&mut self) -> crate::Result<Option<Bytes>> {
+	pub async fn next(&mut self) -> crate::Result<Option<Timed<Bytes>>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
 	/// Poll for the next payload, without blocking.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<Option<Bytes>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<Option<Timed<Bytes>>>> {
 		let result = match &mut self.inner {
 			Inner::Snapshot(consumer) => consumer.poll_next(waiter),
 			Inner::Stream(consumer) => consumer.poll_next(waiter),
@@ -370,6 +370,19 @@ impl Consumer {
 		match result {
 			std::task::Poll::Ready(value) => std::task::Poll::Ready(value.map_err(Into::into)),
 			std::task::Poll::Pending => std::task::Poll::Pending,
+		}
+	}
+
+	/// Skip to the newest snapshot state; stream mode returns `UnsupportedMode`.
+	pub async fn latest(&mut self) -> crate::Result<Option<Timed<Bytes>>> {
+		kio::wait(|waiter| self.poll_latest(waiter)).await
+	}
+
+	/// Poll for the newest snapshot state without discarding records from a lossless stream.
+	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<Option<Timed<Bytes>>>> {
+		match &mut self.inner {
+			Inner::Snapshot(consumer) => consumer.poll_latest(waiter).map(|result| result.map_err(Into::into)),
+			Inner::Stream(_) => std::task::Poll::Ready(Err(crate::Error::UnsupportedMode(self.mode.to_string()))),
 		}
 	}
 }
@@ -447,8 +460,12 @@ mod test {
 	fn drain(mut consumer: Consumer) -> Vec<Bytes> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
-		while let Poll::Ready(Ok(Some(payload))) = consumer.poll_next(&waiter) {
-			out.push(payload);
+		while let Poll::Ready(Ok(Some(payload))) = if consumer.mode() == &Mode::Snapshot {
+			consumer.poll_latest(&waiter)
+		} else {
+			consumer.poll_next(&waiter)
+		} {
+			out.push(payload.value);
 		}
 		out
 	}
@@ -468,7 +485,7 @@ mod test {
 			.binary_stream(timed_track(&mut broadcast, "bare"), Config::default())
 			.unwrap();
 
-		let anchor = std::time::Instant::now();
+		let anchor = moq_clock::Instant::now();
 		for i in 0..20u64 {
 			let now = moq_net::Timestamp::from_micros(i * 100_000).unwrap();
 			let at = |late: u64| anchor + std::time::Duration::from_millis(i * 100 + late);
@@ -495,14 +512,15 @@ mod test {
 
 	/// A captured payload measures through the real clock: written right after capture, it
 	/// advertises no delay beyond the scheduling noise of the test itself.
-	#[test]
-	fn a_capture_measures_through_the_clock() {
+	#[moq_clock::test]
+	async fn a_capture_measures_through_the_clock() {
+		moq_clock::sleep(std::time::Duration::from_secs(1)).await;
 		let (mut broadcast, catalog) = catalog();
 		let mut telemetry = catalog
 			.binary_stream(timed_track(&mut broadcast, "telemetry"), Config::default())
 			.unwrap();
 
-		let captured = std::time::Instant::now();
+		let captured = moq_clock::Instant::now();
 		let at = catalog.clock().capture(captured).unwrap();
 		telemetry.append(Timed::from(&b"now"[..]).at(at)).unwrap();
 		let late = catalog
@@ -548,7 +566,7 @@ mod test {
 			.binary_stream(timed_track(&mut broadcast, "ahead"), Config::default())
 			.unwrap();
 
-		let anchor = std::time::Instant::now();
+		let anchor = moq_clock::Instant::now();
 		for i in 0..20u64 {
 			let now = moq_net::Timestamp::from_micros(i * 100_000).unwrap();
 			let at = |late: u64| anchor + std::time::Duration::from_millis(i * 100 + late);
@@ -860,8 +878,11 @@ mod test {
 				.await
 				.unwrap();
 			telemetry.finish().unwrap();
-			assert_eq!(reader.next().await.unwrap(), Some(Bytes::from_static(b"heartbeat")));
-			assert_eq!(reader.next().await.unwrap(), None);
+			assert_eq!(
+				reader.next().await.unwrap().map(|value| value.value),
+				Some(Bytes::from_static(b"heartbeat"))
+			);
+			assert_eq!(reader.next().await.unwrap().map(|value| value.value), None);
 		}
 
 		#[test]
@@ -952,7 +973,7 @@ mod test {
 				.unwrap();
 
 			let listing = telemetry.listing.as_mut().unwrap();
-			let anchor = std::time::Instant::now();
+			let anchor = moq_clock::Instant::now();
 			for i in 0..60u64 {
 				let now = moq_net::Timestamp::from_micros(i * 40_000).unwrap();
 				// Every other payload reaches the transport 10ms later than the rest.

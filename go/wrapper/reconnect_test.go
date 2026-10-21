@@ -2,6 +2,7 @@ package moq_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -146,6 +147,23 @@ func TestServerCloseReleasesPort(t *testing.T) {
 	defer func() { _ = second.Close() }()
 }
 
+// The keylog opt-in reaches the native server, which refuses it without SSLKEYLOGFILE.
+func TestListenKeylogRequiresSSLKEYLOGFILE(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), reconnectTimeout)
+	defer cancel()
+	t.Setenv("SSLKEYLOGFILE", "")
+
+	server, err := moq.Listen(ctx, "127.0.0.1:0", moq.WithTLSGenerate("localhost"), moq.WithServerQUICKeylog(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = server.Close()
+
+	if _, err := moq.Listen(ctx, "127.0.0.1:0", moq.WithTLSGenerate("localhost"), moq.WithServerQUICKeylog(true)); !errors.Is(err, moq.ErrConfig) {
+		t.Fatalf("keylog without SSLKEYLOGFILE: got %v, want ErrConfig", err)
+	}
+}
+
 // A Go worker survives a relay restart the way a moq-c worker does: the session
 // redials with backoff, the publisher re-announces its broadcast to the fresh
 // relay, and the subscriber's subscription receives frames again. The connect count
@@ -217,6 +235,12 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	if frame, err := trackConsumer.ReadFrame(ctx); err != nil || frame == nil {
 		t.Fatalf("frame before restart: frame=%+v err=%v", frame, err)
 	}
+	if err := subscriber.Session().Failure(); err != nil {
+		t.Fatalf("failure before any drop: %v", err)
+	}
+	if version := subscriber.Session().Stats().Version; version == nil || *version == "" {
+		t.Fatal("a live session must report its negotiated version")
+	}
 
 	// Drop every session and the listener, then bind a replacement on the same
 	// port: a deploy, with an origin the replacement has never seen.
@@ -226,6 +250,10 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	// Both workers observe the reconnect and advance their connect count past the first.
 	waitConnects(t, ctx, publisher.Session(), 2)
 	waitConnects(t, ctx, subscriber.Session(), 2)
+	// The connect that advanced the count also cleared the drop's reason.
+	if err := subscriber.Session().Failure(); err != nil {
+		t.Fatalf("failure after reconnect: %v", err)
+	}
 
 	// The publisher re-announces the broadcast the fresh relay never saw.
 	awaitAnnouncement(t, ctx, announced, "live")
@@ -275,5 +303,44 @@ func TestDialWebSocketOptions(t *testing.T) {
 
 	if _, err := moq.Dial(ctx, url, moq.WithWebSocketDelay(-time.Millisecond)); err == nil {
 		t.Fatal("negative websocket delay dialed")
+	}
+}
+
+// Every connection knob reaches the native client and the dial still connects,
+// and a negative duration fails Dial instead of wrapping into an enormous one.
+func TestDialConnectionOptions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), reconnectTimeout)
+	defer cancel()
+
+	r := startRelay(t, ctx, "127.0.0.1:0")
+	defer r.server.Close()
+
+	if len(moq.Versions()) == 0 {
+		t.Fatal("no versions offered")
+	}
+
+	url := "https://" + r.addr
+	client, err := moq.Dial(ctx, url,
+		moq.WithTLSVerify(false),
+		moq.WithTLSHostName("localhost"),
+		moq.WithVersions(moq.Versions()...),
+		moq.WithConnectTimeout(5*time.Second),
+		moq.WithRace(0),
+		moq.WithResolutionDelay(0),
+		moq.WithQUICIdleTimeout(5*time.Second),
+		moq.WithQUICKeepAlive(0),
+		moq.WithQUICGSO(false),
+		moq.WithQUICMTUDiscovery(true),
+		moq.WithQUICCongestionControl(moq.CongestionControlLoss),
+		moq.WithQUICKeylog(false),
+		moq.WithWebSocketEnabled(false),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+
+	if _, err := moq.Dial(ctx, url, moq.WithQUICIdleTimeout(-time.Millisecond)); err == nil {
+		t.Fatal("negative idle timeout dialed")
 	}
 }

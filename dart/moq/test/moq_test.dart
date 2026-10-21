@@ -1,10 +1,13 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'dart:typed_data';
 
+import 'package:moq/audio.dart' as moq_audio;
 import 'package:moq/media.dart' as moq_media;
 import 'package:moq/flate.dart' as moq_flate;
 import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
+import 'package:moq/video.dart' as moq_video;
 import 'package:test/test.dart';
 
 const timeout = Duration(seconds: 10);
@@ -27,16 +30,6 @@ void main() {
         init: moq_media.ContainerInit(
           format: moq_media.ContainerFormat.fmp4,
           data: Uint8List(0),
-          timebase: timebase,
-        ),
-      ),
-      throwsA(isA<CodecMoqException>()),
-    );
-    expect(
-      () => moq_media.ContainerStreamProducer(
-        broadcast: other,
-        init: moq_media.ContainerStreamInit(
-          format: moq_media.ContainerFormat.fmp4,
           timebase: timebase,
         ),
       ),
@@ -113,6 +106,39 @@ void main() {
     broadcast.close();
   });
 
+  test(
+    'an ascending subscription reads a cached backlog oldest first',
+    () async {
+      final broadcast = BroadcastProducer();
+      final track = broadcast.publishTrack(
+        name: 'backlog',
+        info: TrackInfo(timescale: 1000000),
+      );
+      for (var ms = 0; ms < 3; ms++) {
+        final group = track.appendGroup();
+        group.writeFrame(
+          frame: Frame(payload: utf8.encode('x'), timestampUs: ms * 1000),
+        );
+        group.finish();
+      }
+
+      final consumer = track.consume(
+        subscription: Subscription(
+          maxDelayUs: 10000000,
+          ranges: [Range(start: RelativeMoqAnchor(2))],
+          order: Order.ascending,
+        ),
+      );
+      final sequences = <int>[];
+      for (var i = 0; i < 3; i++) {
+        final group = await consumer.recvGroup().timeout(timeout);
+        sequences.add(group!.sequence());
+      }
+      expect(sequences, [0, 1, 2]);
+      broadcast.close();
+    },
+  );
+
   test('connects, announces, subscribes, and delivers a frame', () async {
     final relay = MoqOriginProducer(config: MoqOriginConfig());
     final server = MoqServer(
@@ -161,7 +187,8 @@ void main() {
 
     // Routed subscriptions pull their source lazily when the consumer is first read.
     final nextGroup = consumer.nextGroup();
-    await track.demand().used().timeout(timeout);
+    final demand = track.demand();
+    while (await demand.wantedChanged().timeout(timeout) == null) {}
 
     final producer = track.appendGroup();
     producer.writeFrame(
@@ -199,7 +226,18 @@ void main() {
       'https://${server.localAddr}',
       options: ConnectOptions(
         tlsVerify: false,
+        tlsHostName: 'localhost',
         bind: '127.0.0.1:0',
+        versions: versions(),
+        timeout: Duration(seconds: 5),
+        race: Duration.zero,
+        resolutionDelay: Duration.zero,
+        idleTimeout: Duration(seconds: 5),
+        keepAlive: Duration.zero,
+        gso: false,
+        mtuDiscovery: true,
+        congestionControl: CongestionControl.loss,
+        keylog: false,
         reconnect: false,
         backoff: Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000),
         websocketEnabled: false,
@@ -248,6 +286,26 @@ void main() {
     );
   });
 
+  test(
+    'keylog without SSLKEYLOGFILE fails the listen',
+    () {
+      expect(
+        Server.listen(
+          options: const ListenOptions(
+            bind: '127.0.0.1:0',
+            tlsGenerate: ['localhost'],
+            keylog: true,
+          ),
+        ),
+        throwsA(isA<ConfigMoqException>()),
+      );
+    },
+    // dart:io cannot unset a variable, so a run that inherits one skips.
+    skip: (Platform.environment['SSLKEYLOGFILE'] ?? '').isNotEmpty
+        ? 'SSLKEYLOGFILE is set'
+        : false,
+  );
+
   test('closing a server releases its port', () async {
     final first = await Server.listen(
       options: const ListenOptions(
@@ -280,6 +338,22 @@ void main() {
     expect(
       Frame(payload: Uint8List(0), timestampUs: 20000).timestamp,
       const Duration(milliseconds: 20),
+    );
+    expect(
+      moq_video.Frame(timestampUs: 33333, data: Uint8List(0)).timestamp,
+      const Duration(microseconds: 33333),
+    );
+    expect(moq_video.DecoderOutput().maxDelay, isNull);
+    expect(
+      moq_audio.EncoderOutput(codec: moq_audio.Codec.opus()).frameDuration,
+      Duration.zero,
+    );
+    expect(
+      moq_audio.DecoderOutput(
+        format: moq_audio.SampleFormat.f32,
+        maxDelayUs: 500,
+      ).maxDelay,
+      const Duration(microseconds: 500),
     );
   });
 
@@ -370,7 +444,10 @@ void main() {
     final broadcast = MoqBroadcastProducer();
     final producer = moq_json.SnapshotProducer(
       broadcast: broadcast,
-      track: broadcast.publishTrack(name: 'status', info: null),
+      track: broadcast.publishTrack(
+        name: 'status',
+        info: MoqTrackInfo(timescale: 1000000),
+      ),
       config: moq_json.SnapshotConfig(),
     );
     final track = await broadcast
@@ -382,11 +459,175 @@ void main() {
       config: moq_json.SnapshotConfig(),
     );
 
-    producer.update(value: jsonEncode({'state': 'live'}));
-    final value = await consumer.next().timeout(timeout);
-    expect(jsonDecode(value!), {'state': 'live'});
+    for (var n = 1; n <= 4; n++) {
+      producer.update(value: jsonEncode({'n': n}), timestampUs: n * 1000);
+    }
+
+    // next() yields every state in order; latest() skips the buffered third.
+    moq_json.Value? value = await consumer.next().timeout(timeout);
+    expect(jsonDecode(value!.value), {'n': 1});
+    expect(value.timestampUs, 1000);
+    value = await consumer.next().timeout(timeout);
+    expect(jsonDecode(value!.value), {'n': 2});
+    value = await consumer.latest().timeout(timeout);
+    expect(jsonDecode(value!.value), {'n': 4});
+    expect(value.timestampUs, 4000);
 
     consumer.cancel();
+    producer.finish();
+    broadcast.close();
+  });
+
+  test('decoded video frame owns its picture', () async {
+    final broadcast = BroadcastProducer();
+    final video = moq_video.Producer(
+      catalog: moq_media.CatalogProducer(broadcast: broadcast),
+      input: moq_video.EncoderInput(
+        format: moq_video.PixelFormat.rgba,
+        width: 320,
+        height: 240,
+        framerate: 30,
+      ),
+      // Software so the encode is deterministic everywhere.
+      output: moq_video.EncoderOutput(
+        codec: moq_video.Codec.h264,
+        track: 'camera',
+        kind: moq_video.SoftwareEncoder(),
+      ),
+    );
+
+    // Seed the track so a subscriber joining below lands on encoded media.
+    final rgba = Uint8List(320 * 240 * 4)..fillRange(0, 320 * 240 * 4, 0x80);
+    video.cut();
+    for (var i = 0; i < 10; i++) {
+      video.write(
+        frame: moq_video.Frame(timestampUs: i * 33333, data: rgba),
+      );
+    }
+
+    final consumer = broadcast.consume();
+    final catalogs = await moq_media.CatalogConsumer.subscribe(
+      broadcast: consumer,
+    ).timeout(timeout);
+    final catalog = await catalogs.next().timeout(timeout);
+    final decoder = await moq_video.Consumer.subscribe(
+      broadcast: consumer,
+      id: 'camera',
+      catalogVideo: catalog!.video['camera']!,
+      output: moq_video.DecoderOutput(),
+    ).timeout(timeout);
+
+    // Keep the encoder fed so the decoder sees frames after it joined.
+    for (var i = 10; i < 40; i++) {
+      video.write(
+        frame: moq_video.Frame(timestampUs: i * 33333, data: rgba),
+      );
+    }
+
+    final frame = await decoder.next().timeout(timeout);
+    // The frame outlives its consumer's cancellation.
+    decoder.cancel();
+    final pixels = frame!.width() * frame.height();
+    expect(
+      frame.pixels(format: moq_video.PixelFormat.i420).length,
+      pixels * 3 ~/ 2,
+    );
+    final packed = frame.pixels(format: moq_video.PixelFormat.rgba);
+    expect(packed.length, pixels * 4);
+    for (var i = 3; i < packed.length; i += 4) {
+      expect(packed[i], 0xFF);
+    }
+    expect(frame.surface(), isNull);
+    frame.dispose();
+
+    video.finish();
+    catalogs.cancel();
+    broadcast.close();
+  });
+
+  // A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
+  test('audio consumer reports its playout delay', () async {
+    final broadcast = BroadcastProducer();
+    final audio = moq_audio.Producer(
+      catalog: moq_media.CatalogProducer(broadcast: broadcast),
+      input: moq_audio.EncoderInput(
+        format: moq_audio.SampleFormat.f32,
+        sampleRate: 48000,
+        channels: 1,
+      ),
+      output: moq_audio.EncoderOutput(
+        codec: moq_audio.Codec.opus(),
+        track: 'mic',
+      ),
+    );
+
+    final consumer = broadcast.consume();
+    final catalogs = await moq_media.CatalogConsumer.subscribe(
+      broadcast: consumer,
+    ).timeout(timeout);
+    final rendition = (await catalogs.next().timeout(timeout))!.audio['mic']!;
+
+    final fixedOutput = moq_audio.DecoderOutput(
+      format: moq_audio.SampleFormat.f32,
+      delayUs: 80000,
+    );
+    expect(fixedOutput.delay, const Duration(milliseconds: 80));
+    final fixed = await moq_audio.Consumer.subscribe(
+      broadcast: consumer,
+      id: 'mic',
+      catalogAudio: rendition,
+      output: fixedOutput,
+    ).timeout(timeout);
+    final estimated = await moq_audio.Consumer.subscribe(
+      broadcast: consumer,
+      id: 'mic',
+      catalogAudio: rendition,
+      output: moq_audio.DecoderOutput(format: moq_audio.SampleFormat.f32),
+    ).timeout(timeout);
+    expect(fixed.delay, const Duration(milliseconds: 80));
+    final initial = estimated.delay;
+
+    // Two 20 ms Opus frames of silence at 48 kHz mono.
+    for (var i = 0; i < 2; i++) {
+      audio.write(
+        frame: moq_audio.Frame(
+          timestampUs: i * 20000,
+          data: Uint8List(960 * 4),
+        ),
+      );
+    }
+    expect(await fixed.next().timeout(timeout), isNotNull);
+    expect(await estimated.next().timeout(timeout), isNotNull);
+
+    expect(fixed.delay, const Duration(milliseconds: 80));
+    expect(estimated.delay, isNot(initial));
+
+    fixed.cancel();
+    estimated.cancel();
+    audio.finish();
+    catalogs.cancel();
+    broadcast.close();
+  });
+
+  test('audio producer encodes opus', () {
+    final broadcast = BroadcastProducer();
+    final producer = moq_audio.Producer(
+      catalog: moq_media.CatalogProducer(broadcast: broadcast),
+      input: moq_audio.EncoderInput(
+        format: moq_audio.SampleFormat.f32,
+        sampleRate: 48000,
+        channels: 1,
+      ),
+      output: moq_audio.EncoderOutput(
+        codec: moq_audio.Codec.opus(),
+        track: 'mic',
+        preset: moq_audio.Preset.lowLatency,
+      ),
+    );
+    producer.write(
+      frame: moq_audio.Frame(timestampUs: 0, data: Uint8List(960 * 4)),
+    );
+    expect(producer.demand().name(), 'mic');
     producer.finish();
     broadcast.close();
   });

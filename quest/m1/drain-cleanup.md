@@ -85,8 +85,3 @@ process exits relative to the deadline.
 
 Public API: possibly a small shared drain helper in `moq_relay::shutdown`.
 Wire: none.
-
-## Related
-
-- [Handshake deadline covers admission](/quest/m1/handshake-admission-deadline.md) - bounds pending admissions, which the drain deadline must keep cutting
-- [Session outcomes](/quest/m1/session-outcomes.md) - counts how sessions end, which needs this end recorded

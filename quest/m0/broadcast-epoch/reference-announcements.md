@@ -21,7 +21,7 @@ text; this quest owns the following behavior it left out.
   restarts its pump.
 - Exporters: a late first announcement starts the rendition and End ends
   it. Restart behavior belongs to
-  [restart followers](/quest/m1/restart-followers.md).
+  [sink restart follow](/quest/m1/sink-restart-follow.md).
 - A replacement is a Restart for an announcement follower, never a seamless
   same-epoch resume. A proven Takeover preserves the same instance.
 - A reference with an `epoch` follows only its own instance: following never
@@ -39,5 +39,5 @@ epoch, and concurrent old/new consumers, in the moq-mux unit tests and the
 
 ## Related
 
-- [Restart followers](/quest/m1/restart-followers.md) - consumers that follow an epochless Restart of their own broadcast
+- [Sink restart follow](/quest/m1/sink-restart-follow.md) - exporters and sinks that follow an epochless Restart of their own broadcast
 - [Export rendition rebind](/quest/m1/export-rendition-rebind.md) - exporters rebuild a rendition whose reference changes

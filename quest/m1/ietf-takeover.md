@@ -38,5 +38,4 @@ IETF takeover support only; paths and unnegotiated versions stay unchanged.
 
 ## Required
 
-- [IETF epochs](/quest/m1/ietf-epochs.md) - negotiated announcement/request identity
 - [Announcement takeover](/quest/m1/announce-takeover.md) - shared semantics, model and lite-07 proof

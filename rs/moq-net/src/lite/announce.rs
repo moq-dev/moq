@@ -15,6 +15,7 @@ const ANNOUNCE_END: u64 = 1;
 const ANNOUNCE_UPDATE: u64 = 2;
 // lite-07: another publisher instance replaces the advertisement.
 const ANNOUNCE_RESTART: u64 = 3;
+const SYNCED: u64 = 4;
 
 /// Whether the negotiated version can update a live advertisement's metadata. On lite-05 an
 /// update travels as a duplicate ANNOUNCE (a second `active` for an already-announced path); on
@@ -75,6 +76,8 @@ pub enum AnnounceBroadcast<'a> {
 	/// An unknown lite-06+ announce type. The length-prefixed body was skipped so
 	/// the stream stays up; it does not assign an announce id.
 	Skipped,
+	/// The initial set has been delivered (lite-07+).
+	Synced,
 }
 
 /// A path suffix as it travels: the first `keep` segments of a base announcement's
@@ -204,6 +207,7 @@ impl AnnounceBroadcast<'_> {
 			Self::Update { id, hops, cost } => AnnounceBroadcast::Update { id, hops, cost },
 			Self::Restart { id, epoch, hops, cost } => AnnounceBroadcast::Restart { id, epoch, hops, cost },
 			Self::Skipped => AnnounceBroadcast::Skipped,
+			Self::Synced => AnnounceBroadcast::Synced,
 		}
 	}
 }
@@ -245,6 +249,8 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 			// subscribe stream). The body varies by type.
 			let typ = match self {
 				Self::Active { .. } => ANNOUNCE_START,
+				Self::Synced if version.has_synced() => SYNCED,
+				Self::Synced => return Err(EncodeError::Version),
 				Self::EndedId { .. } => ANNOUNCE_END,
 				Self::Update { .. } => ANNOUNCE_UPDATE,
 				Self::Restart { .. } if version.has_announce_restart() => ANNOUNCE_RESTART,
@@ -282,6 +288,7 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 					hops.encode(w, version)?;
 					cost.encode(w, version)?;
 				}
+				Self::Synced => {}
 				Self::Ended { .. } | Self::Skipped => unreachable!("refused above"),
 			}
 			if w.since(&prefix) > MAX_MESSAGE_SIZE {
@@ -311,7 +318,7 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 				encode_hops(w, version, hops)?;
 			}
 			// The id-referencing forms only exist on lite-06+.
-			Self::EndedId { .. } | Self::Update { .. } | Self::Restart { .. } | Self::Skipped => {
+			Self::EndedId { .. } | Self::Update { .. } | Self::Restart { .. } | Self::Skipped | Self::Synced => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -337,6 +344,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 					hops: HopsRef::decode(&mut body, version)?,
 					cost: Cost::decode(&mut body, version)?,
 				},
+				SYNCED if version.has_synced() => Self::Synced,
 				ANNOUNCE_END => Self::EndedId { id: body.varint()? },
 				ANNOUNCE_UPDATE => Self::Update {
 					id: body.varint()?,
@@ -558,9 +566,8 @@ impl Message for AnnounceInit<'_> {
 ///
 /// `origin` is the responder's session origin id. In Lite05 the publisher no
 /// longer stamps it onto each Announce's hop chain; the subscriber appends it on
-/// receipt instead. `active` is the number of currently-active broadcasts the
-/// publisher sends as the initial set immediately after this message, letting the
-/// receiver block until the initial set has arrived.
+/// receipt instead. Lite05/06 carry `active`, the number of starts immediately
+/// following; lite07 marks the initial set with SYNCED instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnnounceOk {
 	pub origin: Hop,
@@ -574,7 +581,7 @@ impl Message for AnnounceOk {
 		}
 
 		let origin = Hop::decode(r, version)?;
-		let active = r.varint()?;
+		let active = if version.has_synced() { 0 } else { r.varint()? };
 		Ok(Self { origin, active })
 	}
 
@@ -584,7 +591,10 @@ impl Message for AnnounceOk {
 		}
 
 		self.origin.encode(w, version)?;
-		w.varint(self.active)
+		if !version.has_synced() {
+			w.varint(self.active)?;
+		}
+		Ok(())
 	}
 }
 
@@ -592,6 +602,39 @@ impl Message for AnnounceOk {
 mod tests {
 	use super::*;
 	use bytes::Buf;
+
+	#[test]
+	fn synced_replaces_only_lite07s_count() {
+		for version in [Version::Lite06, Version::Lite07] {
+			let mut bytes = Vec::new();
+			AnnounceOk {
+				origin: Hop::new(1).unwrap(),
+				active: 7,
+			}
+			.encode(&mut Encoder::new(&mut bytes, version.into()), version)
+			.unwrap();
+			assert_eq!(
+				bytes,
+				if version == Version::Lite06 {
+					vec![2, 1, 7]
+				} else {
+					vec![1, 1]
+				}
+			);
+		}
+		let mut bytes = Vec::new();
+		AnnounceBroadcast::Synced
+			.encode(&mut Encoder::new(&mut bytes, Version::Lite07.into()), Version::Lite07)
+			.unwrap();
+		assert_eq!(bytes, vec![4, 0]);
+		assert!(matches!(
+			AnnounceBroadcast::Synced.encode(
+				&mut Encoder::new(&mut Vec::new(), Version::Lite06.into()),
+				Version::Lite06
+			),
+			Err(EncodeError::Version)
+		));
+	}
 
 	// Forge an ANNOUNCE_BROADCAST with the draft's explicit `restart` status (2) for the given version.
 	fn encode_forged_restart(version: Version) -> bytes::Bytes {

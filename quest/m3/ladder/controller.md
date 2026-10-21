@@ -74,5 +74,3 @@ priority where the subscriber's order wins, and a custom ladder order.
 ## Related
 
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - viewer stalls for `moq import`; its `moq transcode --echo` leg, split out if revived, feeds this controller
-- [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - supplies the
-  fair subscription buckets beneath this rendition policy

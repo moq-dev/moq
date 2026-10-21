@@ -49,6 +49,7 @@ impl<T> Queue<T> {
 
 	/// Dequeue the next message, waiting while the queue is open and empty.
 	/// Returns `None` once the queue is closed and drained.
+	#[cfg(test)]
 	async fn pop(&self) -> Option<T> {
 		kio::wait(|waiter| self.poll_pop(waiter)).await
 	}
@@ -66,7 +67,7 @@ impl<T> Queue<T> {
 			.map(|mut state| state.messages.pop_front())
 	}
 
-	/// Stop future pushes; buffered messages still drain, then `pop` returns `None`.
+	/// Stop future pushes; buffered messages still drain, then `poll_pop` returns `None`.
 	fn close(&self) {
 		self.0.lock().closed = true;
 	}
@@ -96,9 +97,9 @@ impl<T> Default for Queue<T> {
 struct QueueWriter<T>(Queue<T>);
 
 impl<T> QueueWriter<T> {
-	/// Enqueue a message, dropped silently if the reader already closed its side.
-	fn push(&self, item: T) {
-		let _ = self.0.push(item);
+	/// Enqueue a message, returning false if the reader already closed its side.
+	fn push(&self, item: T) -> bool {
+		self.0.push(item)
 	}
 }
 
@@ -262,6 +263,9 @@ pub struct VirtualSendStream {
 	/// Accumulates bytes until the request_id can be parsed,
 	/// then registers the stream and flushes.
 	pending: Option<OutgoingRegistration>,
+	/// Draft-16 only, once registered: what follows the request, held until whole so
+	/// each REQUEST_UPDATE is routed back to its request before it leaves.
+	updates: Option<UpdateRouting>,
 }
 
 struct OutgoingRegistration {
@@ -275,19 +279,11 @@ struct OutgoingRegistration {
 }
 
 impl OutgoingRegistration {
-	/// Try to parse the request_id (and optionally namespace) from the accumulated bytes.
+	/// Try to parse the request_id (and optionally namespace) from the accumulated bytes,
+	/// with the length of the message that carried it.
 	/// Returns Ok(None) if not enough data yet, Err if the message is malformed.
-	fn try_parse(&self) -> Result<Option<RequestId>, crate::Error> {
-		let mut r = Decoder::new(&self.buf, self.version.into());
-		let Ok(type_id) = r.varint() else {
-			return Ok(None);
-		};
-		let Ok(size) = r.u16() else {
-			return Ok(None);
-		};
-
-		// We know the full message size now: header bytes + body.
-		let Ok(mut body) = r.sub(size as usize) else {
+	fn try_parse(&self) -> Result<Option<(RequestId, usize)>, crate::Error> {
+		let Some((type_id, len, mut body)) = whole_message(&self.buf, self.version) else {
 			return Ok(None);
 		};
 
@@ -305,7 +301,7 @@ impl OutgoingRegistration {
 			}
 		}
 
-		Ok(Some(request_id))
+		Ok(Some((request_id, len)))
 	}
 
 	fn register(self, request_id: RequestId) {
@@ -327,6 +323,7 @@ impl VirtualSendStream {
 		Self {
 			control_tx,
 			pending: None,
+			updates: None,
 		}
 	}
 
@@ -334,6 +331,7 @@ impl VirtualSendStream {
 		Self {
 			control_tx,
 			pending: Some(pending),
+			updates: None,
 		}
 	}
 }
@@ -346,11 +344,30 @@ impl VirtualSendStream {
 		if let Some(pending) = &mut self.pending {
 			pending.buf.extend_from_slice(&chunk);
 
-			if let Some(request_id) = pending.try_parse()? {
+			if let Some((request_id, len)) = pending.try_parse()? {
 				let mut pending = self.pending.take().unwrap();
-				let buf = std::mem::take(&mut pending.buf).freeze();
+				let mut buf = std::mem::take(&mut pending.buf);
+				let rest = buf.split_off(len);
+				if pending.version == Version::Draft16 {
+					self.updates = Some(UpdateRouting {
+						shared: Arc::clone(&pending.shared),
+						version: pending.version,
+						request_id,
+						buf: BytesMut::new(),
+					});
+				}
 				pending.register(request_id);
-				if !self.control_tx.push(buf) {
+				if !self.control_tx.push(buf.freeze()) {
+					return Err(crate::Error::Closed);
+				}
+				if !rest.is_empty() {
+					return self.push(rest.freeze());
+				}
+			}
+		} else if let Some(updates) = &mut self.updates {
+			updates.buf.extend_from_slice(&chunk);
+			while let Some(message) = updates.next()? {
+				if !self.control_tx.push(message) {
 					return Err(crate::Error::Closed);
 				}
 			}
@@ -362,8 +379,45 @@ impl VirtualSendStream {
 	}
 }
 
+/// Draft-16 answers a REQUEST_UPDATE on the control stream by the update's own Request
+/// ID, which names no stream, so each update we send is recorded against the request it
+/// rides, in [`Shared::updates`], before it leaves. Drafts 14 and 15 answer no update of
+/// ours that anything reads.
+struct UpdateRouting {
+	shared: Arc<Shared>,
+	version: Version,
+	/// The request whose stream carries the updates.
+	request_id: RequestId,
+	buf: BytesMut,
+}
+
+impl UpdateRouting {
+	/// The next whole message, recorded first when it is an update.
+	fn next(&mut self) -> Result<Option<Bytes>, crate::Error> {
+		let Some((type_id, len, mut body)) = whole_message(&self.buf, self.version) else {
+			return Ok(None);
+		};
+		if type_id == ietf::SubscribeUpdate::ID {
+			let own = RequestId::decode(&mut body, self.version)?;
+			self.shared.route_update(own, self.request_id);
+		}
+		Ok(Some(self.buf.split_to(len).freeze()))
+	}
+}
+
+/// The type, whole length, and body of the first message in `buf`, once all of it is there.
+fn whole_message(buf: &[u8], version: Version) -> Option<(u64, usize, Decoder<'_>)> {
+	let mut r = Decoder::new(buf, version.into());
+	let type_id = r.varint().ok()?;
+	let size = r.u16().ok()? as usize;
+	let len = buf.len() - r.remaining() + size;
+	let body = r.sub(size).ok()?;
+	Some((type_id, len, body))
+}
+
 impl crate::transport::poll::SendStream for VirtualSendStream {
 	type Error = crate::Error;
+	type Group = crate::transport::poll::Ungrouped;
 
 	fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		let len = buf.len();
@@ -378,7 +432,11 @@ impl crate::transport::poll::SendStream for VirtualSendStream {
 		Poll::Ready(self.push(chunk).map(|()| len))
 	}
 
-	fn set_priority(&mut self, _order: i32) {}
+	fn set_priority(&mut self, _order: i64) {}
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match *group {}
+	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		// Flush any remaining buffered data (e.g. if registration never completed).
@@ -386,6 +444,11 @@ impl crate::transport::poll::SendStream for VirtualSendStream {
 			&& !pending.buf.is_empty()
 		{
 			let _ = self.control_tx.push(pending.buf.freeze());
+		}
+		if let Some(updates) = self.updates.take()
+			&& !updates.buf.is_empty()
+		{
+			let _ = self.control_tx.push(updates.buf.freeze());
 		}
 		Ok(())
 	}
@@ -406,6 +469,7 @@ pub enum AdapterSend<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for AdapterSend<S> {
 	type Error = crate::Error;
+	type Group = <S::SendStream as crate::transport::poll::SendStream>::Group;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		match self {
@@ -421,10 +485,18 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 		}
 	}
 
-	fn set_priority(&mut self, order: i32) {
+	fn set_priority(&mut self, order: i64) {
 		match self {
 			Self::Real(s) => s.set_priority(order),
 			Self::Virtual(s) => s.set_priority(order),
+		}
+	}
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match self {
+			Self::Real(s) => s.set_group(group),
+			// Rides the control stream, which no group schedules.
+			Self::Virtual(_) => {}
 		}
 	}
 
@@ -643,6 +715,11 @@ struct Shared {
 	/// writer, which FINs the matching VirtualRecvStream.
 	streams: Mutex<HashMap<RequestId, QueueWriter<Bytes>>>,
 
+	/// Draft-16: our REQUEST_UPDATEs' own Request IDs → the open request each updates, so
+	/// the one answer each is owed reaches that request's stream. Bounded by what we sent,
+	/// and an entry goes with its answer or its request. Locked after `streams`.
+	updates: Mutex<HashMap<RequestId, RequestId>>,
+
 	/// Namespace → request_id reverse lookup (for v14/v15 namespace-keyed messages).
 	namespaces: Namespaces,
 }
@@ -691,14 +768,24 @@ impl Shared {
 	}
 
 	/// Deliver a message to an open virtual stream, dropping it if the stream is gone.
-	fn push(&self, request_id: RequestId, raw: Bytes) {
-		if let Some(tx) = self.streams.lock().unwrap().get(&request_id) {
-			tx.push(raw);
+	/// An answer to one of our updates goes to the request it updated.
+	/// Returns whether a stream took it.
+	fn push(&self, request_id: RequestId, raw: Bytes) -> bool {
+		let streams = self.streams.lock().unwrap();
+		let request_id = self.updates.lock().unwrap().remove(&request_id).unwrap_or(request_id);
+		match streams.get(&request_id) {
+			Some(tx) => tx.push(raw),
+			None => false,
 		}
 	}
 
 	/// Deliver a final message and FIN the stream: the removed writer drops after it.
+	/// A refusal of one of our updates is only its answer, which leaves the request open.
 	fn close(&self, request_id: RequestId, raw: Bytes) {
+		if self.updates.lock().unwrap().contains_key(&request_id) {
+			self.push(request_id, raw);
+			return;
+		}
 		let tx = self.streams.lock().unwrap().remove(&request_id);
 		self.namespaces.forget(request_id);
 		if let Some(tx) = tx {
@@ -706,9 +793,23 @@ impl Shared {
 		}
 	}
 
+	/// Expect the answer to our update `own` on `request_id`'s stream, while it is open.
+	fn route_update(&self, own: RequestId, request_id: RequestId) {
+		let streams = self.streams.lock().unwrap();
+		if streams.contains_key(&request_id) {
+			self.updates.lock().unwrap().insert(own, request_id);
+		}
+	}
+
 	/// Drop every routing entry a request owns, whether or not its stream is still around.
 	fn forget(&self, request_id: RequestId) {
-		self.streams.lock().unwrap().remove(&request_id);
+		let mut streams = self.streams.lock().unwrap();
+		streams.remove(&request_id);
+		let mut updates = self.updates.lock().unwrap();
+		if !updates.is_empty() {
+			updates.retain(|_, updated| *updated != request_id);
+		}
+		drop((updates, streams));
 		self.namespaces.forget(request_id);
 	}
 }
@@ -737,7 +838,11 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 	/// Open a real (non-virtual) bidi stream, bypassing control stream multiplexing.
 	/// Used for v16 SubscribeNamespace which moved to its own bidi stream.
 	pub async fn open_native_bi(&mut self) -> Result<(AdapterSend<S>, AdapterRecv<S>), crate::Error> {
-		let (send, recv) = self.inner.open_bi().await.map_err(|_| crate::Error::Closed)?;
+		let (send, recv) = self
+			.inner
+			.open_bi(Default::default())
+			.await
+			.map_err(|_| crate::Error::Closed)?;
 		Ok((AdapterSend::Real(send), AdapterRecv::Real(recv)))
 	}
 
@@ -791,6 +896,7 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		let msg = crate::ietf::GoAway {
 			new_session_uri: std::borrow::Cow::Borrowed(uri),
 			timeout: timeout_ms,
+			request_id: None,
 		};
 
 		// The size prefix is a u16 on a stream shared with every other request, so the
@@ -810,6 +916,35 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		}
 	}
 
+	/// Refuse an update no request here can apply, naming its own Request ID. Draft 14
+	/// answers no update.
+	fn refuse_update(&self, request_id: RequestId) {
+		if self.version == Version::Draft14 {
+			return;
+		}
+		let mut raw = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut raw, self.version.into());
+		let msg = ietf::RequestError {
+			request_id: Some(request_id),
+			error_code: super::error::request::to_code(
+				&crate::Error::Unsupported,
+				super::error::request::Kind::Subscribe,
+				self.version,
+			),
+			reason_phrase: "update not supported".into(),
+			retry_interval: 0,
+		};
+		if let Err(err) = w
+			.varint(ietf::RequestError::ID)
+			.and_then(|()| crate::coding::Encode::encode(&msg, &mut w, self.version))
+		{
+			tracing::warn!(%err, "failed to encode REQUEST_ERROR");
+			return;
+		}
+		// A closed control stream means the session is ending; there is no one to answer.
+		let _ = self.shared.control.push(raw.into());
+	}
+
 	/// Queue a MAX_REQUEST_ID granting the peer room up to `max`.
 	fn send_max_request_id(&self, max: RequestId) {
 		let mut raw = Vec::new();
@@ -826,11 +961,27 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		let _ = self.shared.control.push(raw.into());
 	}
 
-	/// Writer task: drains the queue and writes to the control stream.
+	/// Writer task: drains the queue and writes to the control stream. The peer's
+	/// STOP_SENDING, seen while idle or as a failed write, is a protocol violation.
 	async fn run_write(&self, mut writer: Writer<S::SendStream, Version>) -> Result<(), Error> {
-		while let Some(msg) = self.shared.control.pop().await {
+		loop {
+			let msg = kio::wait(|waiter| {
+				// Never finished, so any end is the peer's or the session's.
+				if let Poll::Ready(res) = writer.poll_closed(&mut waiter.context()) {
+					let err = res
+						.err()
+						.map_or(Error::ProtocolViolation, super::session::control_stream_error);
+					return Poll::Ready(Err(err));
+				}
+				self.shared.control.poll_pop(waiter).map(Ok)
+			})
+			.await?;
+			let Some(msg) = msg else { break };
 			let mut buf = std::io::Cursor::new(msg);
-			writer.write_all(&mut buf).await?;
+			writer
+				.write_all(&mut buf)
+				.await
+				.map_err(super::session::control_stream_error)?;
 		}
 		Ok(())
 	}
@@ -842,12 +993,20 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		goaway: crate::goaway::Protocol,
 	) -> Result<(), Error> {
 		loop {
-			let type_id = match reader.varint_maybe().await? {
+			let type_id = match reader
+				.varint_maybe()
+				.await
+				.map_err(super::session::control_stream_error)?
+			{
 				Some(id) => id,
-				None => return Ok(()),
+				None => return Err(Error::ProtocolViolation),
 			};
 
-			let body = reader.decode::<ietf::Body>().await?.0;
+			let body = reader
+				.decode::<ietf::Body>()
+				.await
+				.map_err(super::session::control_stream_error)?
+				.0;
 
 			// Reconstruct raw message bytes: [type_id][size][body]
 			let raw = encode_raw(type_id, &body, self.version);
@@ -858,12 +1017,18 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 					let permit = self.control.accept(request_id)?;
 					self.shared.open_incoming(request_id, raw, permit)?
 				}
-				Route::Response(request_id) => self.shared.push(request_id, raw),
+				Route::Response(request_id) => {
+					self.shared.push(request_id, raw);
+				}
 				Route::FollowUp { own, target } => {
 					// SUBSCRIBE_UPDATE takes a request ID of its own (draft-14 section 9.1),
 					// done as soon as it is delivered, so it is granted straight back.
 					drop(self.control.accept(own)?);
-					self.shared.push(target, raw)
+					// An update whose request is gone, or rides a stream of its own like draft 16's
+					// SUBSCRIBE_NAMESPACE, is still owed its one answer.
+					if !self.shared.push(target, raw) {
+						self.refuse_update(own);
+					}
 				}
 				Route::CloseStream(request_id) => self.shared.close(request_id, raw),
 				Route::MaxRequestId(max) => self.control.max_request_id(max),
@@ -1141,14 +1306,23 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 	fn poll_open_bi(
 		&mut self,
 		_cx: &mut Context<'_>,
+		// Rides the control stream, which no group schedules.
+		_: crate::transport::poll::SendOptions<'_, <Self::SendStream as crate::transport::poll::SendStream>::Group>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let (send, recv) = self.shared.open_outgoing(self.version);
 		Poll::Ready(Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))))
 	}
 
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		self.inner
-			.poll_open_uni(cx)
+			.poll_open_uni(cx, options)
 			.map(|r| r.map(AdapterSend::Real).map_err(|_| crate::Error::Closed))
 	}
 
@@ -1158,10 +1332,21 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 			.map(|r| r.map(AdapterRecv::Real).map_err(|_| crate::Error::Closed))
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+	fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as crate::transport::poll::SendStream>::Group> {
+		self.inner.send_group(priority)
+	}
+
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> Result<(), Self::Error> {
 		self.inner
-			.poll_send_datagram(cx, payload)
-			.map(|r| r.map_err(|_| crate::Error::Closed))
+			.send_datagram(payload, options)
+			.map_err(|_| crate::Error::Closed)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -1336,13 +1521,15 @@ mod tests {
 	/// Drafts 14 and 15 name the subscription in the second field; draft 16 names
 	/// the existing request there. The first field is the update's own Request ID,
 	/// so a body that carries only that ID cannot tell the two apart.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_subscribe_update_reaches_its_target() {
 		let update_id = RequestId(10);
 		let target_id = RequestId(4);
 
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
 			let update = ietf::SubscribeUpdate {
+				max_age: None,
+				new_group: None,
 				request_id: update_id,
 				subscription_request_id: Some(target_id),
 				start_location: ietf::Location { group: 1, object: 2 },
@@ -1379,6 +1566,92 @@ mod tests {
 				"{version}: update {update_id} did not reach {target_id}"
 			);
 		}
+	}
+
+	/// Draft-16 answers our REQUEST_UPDATE by the update's own Request ID. The answer
+	/// reaches the request it updated, a refusal leaves that request open, and an update
+	/// written in pieces is recorded all the same.
+	#[moq_clock::test]
+	async fn our_update_answers_reach_their_request() {
+		const VERSION: Version = Version::Draft16;
+		let shared = Arc::new(Shared::default());
+		let (mut send, mut recv) = shared.open_outgoing(VERSION);
+		let update = |request_id| {
+			encode_msg(
+				&ietf::PublishNamespaceUpdate {
+					request_id: RequestId(request_id),
+					namespace_request_id: Some(RequestId(4)),
+					hops: None,
+					cost: None,
+					authorization_token: None,
+				},
+				VERSION,
+			)
+		};
+
+		// The request and the first byte of its update in one write, the rest in another.
+		let first = update(6);
+		let request = encode_msg(&publish_namespace(RequestId(4), "ns"), VERSION);
+		send.write_chunk([request.clone(), first.slice(..1)].concat().into())
+			.await
+			.unwrap();
+		send.write_chunk(first.slice(1..)).await.unwrap();
+		assert_eq!(shared.control.pop().await.unwrap(), request);
+		assert_eq!(shared.control.pop().await.unwrap(), first);
+
+		let ok = ietf::RequestOk {
+			request_id: Some(RequestId(6)),
+			active: None,
+		};
+		assert!(matches!(
+			classify_msg(VERSION, ietf::RequestOk::ID, &encode_body(&ok, VERSION)).unwrap(),
+			Route::Response(RequestId(6))
+		));
+		let ok = encode_msg(&ok, VERSION);
+		assert!(shared.push(RequestId(6), ok.clone()), "the answer found no stream");
+		assert_eq!(recv.read_chunk(usize::MAX).await.unwrap(), Some(ok.clone()));
+		assert!(!shared.push(RequestId(6), ok), "a second answer was routed");
+
+		send.write_chunk(update(8)).await.unwrap();
+		assert_eq!(shared.control.pop().await.unwrap(), update(8));
+		let error = encode_msg(
+			&ietf::RequestError {
+				request_id: Some(RequestId(8)),
+				error_code: 0,
+				reason_phrase: "refused".into(),
+				retry_interval: 0,
+			},
+			VERSION,
+		);
+		shared.close(RequestId(8), error.clone());
+		assert_eq!(recv.read_chunk(usize::MAX).await.unwrap(), Some(error));
+		assert!(
+			shared.push(RequestId(4), Bytes::from_static(b"later")),
+			"the refusal closed the request"
+		);
+
+		// An update outstanding when its request goes leaves nothing behind.
+		send.write_chunk(update(10)).await.unwrap();
+		assert_eq!(shared.updates.lock().unwrap().len(), 1);
+		drop(recv);
+		assert!(shared.updates.lock().unwrap().is_empty());
+	}
+
+	/// Before draft-16 an answer to our update names nothing we route.
+	#[moq_clock::test]
+	async fn draft_15_update_answers_are_not_routed() {
+		const VERSION: Version = Version::Draft15;
+		let shared = Arc::new(Shared::default());
+		let (mut send, _recv) = shared.open_outgoing(VERSION);
+		send.write_chunk(encode_msg(&publish_namespace(RequestId(4), "ns"), VERSION))
+			.await
+			.unwrap();
+		// A SUBSCRIBE_UPDATE's header and its own Request ID 6, all that routing reads.
+		send.write_chunk(Bytes::from_static(&[0x02, 0x00, 0x01, 0x06]))
+			.await
+			.unwrap();
+		assert!(!shared.push(RequestId(6), Bytes::from_static(b"ok")));
+		assert!(shared.updates.lock().unwrap().is_empty());
 	}
 
 	#[test]
@@ -1429,7 +1702,7 @@ mod tests {
 		assert_eq!(r.rest(), b"hello");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_virtual_recv_stream_reads_initial_then_followup() {
 		let initial = Bytes::from_static(b"initial");
 		let follow = Queue::new();
@@ -1452,7 +1725,7 @@ mod tests {
 		assert_eq!(result, None);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_virtual_recv_stream_partial_reads() {
 		let initial = Bytes::from_static(b"hello world");
 		let mut stream = detached_recv(initial, Queue::new());
@@ -1470,7 +1743,7 @@ mod tests {
 		assert_eq!(&buf[..n], b"d");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_virtual_send_stream_errors_once_control_closes() {
 		// The adapter closes the control queue when its run() exits; writes must
 		// fail fast instead of buffering into a queue nobody drains.
@@ -1490,7 +1763,7 @@ mod tests {
 		assert!(!follow.push(Bytes::from_static(b"late")));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_virtual_send_stream_writes_to_channel() {
 		let control = Queue::new();
 		let mut stream = VirtualSendStream::new(control.clone());
@@ -1520,7 +1793,7 @@ mod tests {
 		ietf::PublishNamespace {
 			request_id,
 			track_namespace: crate::Path::new(namespace),
-			cluster: None,
+			params: Default::default(),
 			authorization_token: None,
 		}
 	}
@@ -1624,7 +1897,7 @@ mod tests {
 		assert!(matches!(route, Route::CloseStream(RequestId(42))));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_publish_namespace_done_closes_only_inbound() {
 		// The peer withdraws the advertisement it made, so its own stream closes and
 		// ours keeps running.
@@ -1650,7 +1923,7 @@ mod tests {
 		assert!(ours.read_chunk(usize::MAX).now_or_never().is_none());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_publish_namespace_cancel_closes_only_outbound() {
 		// The peer rejects the advertisement we made, so ours closes and the one it
 		// sent us keeps running.
@@ -1710,7 +1983,7 @@ mod tests {
 		.unwrap()
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_duplicate_publish_namespace_keeps_the_first() {
 		// The peer advertises the same namespace twice. The session refuses the second, so
 		// the first still owns the name and its withdrawal must reach the first's stream.
@@ -1736,7 +2009,7 @@ mod tests {
 		assert!(matches!(done(&shared, "cluster/ns", version), Route::Ignore));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_withdrawal_releases_the_namespace() {
 		// A namespace the peer withdraws must be advertisable again on a new request.
 		let version = Version::Draft14;
@@ -1758,7 +2031,7 @@ mod tests {
 		));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_local_withdrawal_releases_the_namespace() {
 		// We withdraw our own advertisement by dropping the request that carried it, so a
 		// later CANCEL must name the re-advertisement rather than the request that is gone.
@@ -1776,7 +2049,7 @@ mod tests {
 		));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn surviving_duplicate_remains_reachable_after_owner_closes() {
 		for version in [Version::Draft14, Version::Draft15] {
 			let shared = Arc::new(Shared::default());
@@ -1852,7 +2125,7 @@ mod tests {
 		}
 		script.extend_from_slice(then);
 		let mut session = ScriptedSession::new(script);
-		let (_, recv) = session.open_bi().await.unwrap();
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		// We are the server, so the client's request IDs are even.
 		let control = Control::new(None, false).with_window(window, false, VERSION);
 		let adapter = ControlStreamAdapter::new(session, control, VERSION);
@@ -1861,9 +2134,51 @@ mod tests {
 		(adapter, Reader::new(recv, VERSION), writer, log)
 	}
 
+	#[moq_clock::test]
+	async fn a_legacy_control_stream_fin_or_reset_is_a_protocol_violation() {
+		use crate::lite::test_transport::{DeadStreamSession, ScriptedSession};
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let mut session = ScriptedSession::eof(Vec::new());
+			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
+			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
+			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
+
+			let mut session = DeadStreamSession::bis(0);
+			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
+			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
+			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
+		}
+	}
+
+	/// A STOP_SENDING on a legacy control stream ends the session even with nothing queued
+	/// to write, while the peer keeps its own half open.
+	#[moq_clock::test]
+	async fn a_legacy_control_stream_stopped_while_idle_is_a_protocol_violation() {
+		use crate::transport::memory;
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let (mut session, mut peer) = memory::pair(memory::Config::default());
+			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
+			let mut remote = crate::coding::Stream::accept(&mut peer, version).await.unwrap();
+			remote.reader.abort(&Error::Cancel);
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
+			let res = moq_clock::timeout(
+				std::time::Duration::from_secs(10),
+				adapter.run(stream.reader, stream.writer, protocol),
+			)
+			.await
+			.expect("an idle writer missed the STOP_SENDING");
+			assert!(matches!(res, Err(Error::ProtocolViolation)), "{version:?}: {res:?}");
+		}
+	}
+
 	/// A request ID at the MAX_REQUEST_ID we advertised closes the session with the
 	/// draft's TOO_MANY_REQUESTS, before the request is queued.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_request_past_the_window_closes_the_session() {
 		let (adapter, reader, writer, _) = windowed(1, &[0, 2], &[]).await;
 		let (_, goaway) = crate::goaway::Handle::new(true);
@@ -1875,10 +2190,12 @@ mod tests {
 	}
 
 	/// An update's own request ID counts against the window, not the subscription it targets.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_update_past_the_window_closes_the_session() {
 		const VERSION: Version = Version::Draft14;
 		let update = ietf::SubscribeUpdate {
+			max_age: None,
+			new_group: None,
 			request_id: RequestId(4),
 			subscription_request_id: Some(RequestId(0)),
 			start_location: ietf::Location { group: 0, object: 0 },
@@ -1899,8 +2216,46 @@ mod tests {
 		);
 	}
 
+	/// An update aimed at no open request, such as draft 16's SUBSCRIBE_NAMESPACE riding a
+	/// stream of its own, still gets its one answer on drafts 15 and 16: a REQUEST_ERROR
+	/// naming the update. Draft 14 answers no update.
+	#[moq_clock::test]
+	async fn an_unroutable_update_is_refused() {
+		use crate::lite::test_transport::{Log, ScriptedSession, SinkSend};
+		use crate::transport::poll::Session as _;
+
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			// Own Request ID 2, aimed at request 0, which nothing here holds. Draft 14 carries
+			// its fixed start, end group, priority and forward before the parameters.
+			let body: &[u8] = match version {
+				Version::Draft14 => &[2, 0, 0, 0, 0, 128, 1, 0],
+				_ => &[2, 0, 0],
+			};
+			let script = encode_raw(ietf::SubscribeUpdate::ID, &Bytes::copy_from_slice(body), version);
+			let mut session = ScriptedSession::new(script.to_vec());
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, false), version);
+			let log = Log::default();
+			let writer = Writer::new(SinkSend::new(log.clone()), version);
+			let (_, goaway) = crate::goaway::Handle::new(true);
+			let mut run = std::pin::pin!(adapter.run(Reader::new(recv, version), writer, goaway));
+			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}");
+
+			let written = log.writes.lock().unwrap().clone();
+			match version {
+				Version::Draft14 => assert!(written.is_empty(), "{version}: {written:?}"),
+				// [type, length (2), Request ID, NOT_SUPPORTED, ...]
+				_ => assert_eq!(
+					(written[0], written[3], written[4]),
+					(ietf::RequestError::ID as u8, 2, 0x3),
+					"{version}: {written:?}"
+				),
+			}
+		}
+	}
+
 	/// Requests that end are granted back with MAX_REQUEST_ID, once half the window has.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn retired_requests_are_granted_back() {
 		use crate::transport::poll::Session as _;
 
@@ -1939,7 +2294,7 @@ mod tests {
 		assert!(weak.upgrade().is_none());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn receive_drop_before_registration_releases_namespace() {
 		for version in [Version::Draft14, Version::Draft15] {
 			let shared = Arc::new(Shared::default());

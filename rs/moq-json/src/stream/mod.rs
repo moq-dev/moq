@@ -50,6 +50,9 @@ pub use encoder::{Config, Encoder, Pending};
 pub use producer::Producer;
 
 #[cfg(test)]
+use futures::FutureExt;
+
+#[cfg(test)]
 mod test {
 	use std::task::Poll;
 
@@ -123,16 +126,13 @@ mod test {
 	fn demand_follows_subscribers() {
 		let (producer, consumer) = producer(Config::default());
 		let demand = producer.demand();
-		let waiter = kio::Waiter::noop();
-		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Ok(()))));
+		assert_eq!(demand.wanted(), Some(0));
 
 		drop(consumer);
-		assert!(matches!(demand.poll_unused(&waiter), Poll::Ready(Ok(()))));
-		assert!(demand.poll_used(&waiter).is_pending());
+		assert_eq!(demand.wanted(), None);
 
 		let _consumer = producer.consume();
-		assert!(matches!(demand.poll_used(&waiter), Poll::Ready(Ok(()))));
-		assert!(demand.poll_unused(&waiter).is_pending());
+		assert_eq!(demand.wanted(), Some(0));
 	}
 
 	fn compressed() -> Config {
@@ -159,7 +159,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) {
-			out.push(value);
+			out.push(value.value);
 		}
 		out
 	}
@@ -211,14 +211,17 @@ mod test {
 
 	#[test]
 	fn all_records_ride_one_group() {
-		let (mut producer, track) = producer(compressed());
+		let (mut producer, mut track) = producer(compressed());
 		for n in 0..50 {
 			producer.append(&json!({ "n": n })).unwrap();
 		}
 		producer.finish().unwrap();
 
 		// Never rolled: a single group holds the whole log.
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		assert_eq!(drain(consume(track, true)).len(), 50);
 	}
 
@@ -231,7 +234,7 @@ mod test {
 		for n in 0..3 {
 			producer.append(&json!({ "n": n })).unwrap();
 			match consumer.poll_next(&waiter) {
-				Poll::Ready(Ok(Some(value))) => assert_eq!(value, json!({ "n": n })),
+				Poll::Ready(Ok(Some(value))) => assert_eq!(value.value, json!({ "n": n })),
 				other => panic!("expected record, got {other:?}"),
 			}
 		}
@@ -286,7 +289,15 @@ mod test {
 				.is_err()
 		);
 
-		assert_eq!(subscriber.latest(), None, "a rejected record opened a group");
+		assert_eq!(
+			subscriber
+				.largest()
+				.now_or_never()
+				.flatten()
+				.map(|position| position.group),
+			None,
+			"a rejected record opened a group"
+		);
 
 		let waiter = kio::Waiter::noop();
 		assert!(
@@ -408,7 +419,7 @@ mod test {
 
 		assert!(matches!(
 			consumer.poll_next(&waiter),
-			Poll::Ready(Ok(Some(value))) if value == json!({ "n": 0 })
+			Poll::Ready(Ok(Some(value))) if value.value == json!({ "n": 0 })
 		));
 		assert!(matches!(
 			consumer.poll_next(&waiter),

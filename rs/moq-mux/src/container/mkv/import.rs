@@ -4,7 +4,7 @@ use std::io::Cursor;
 
 use crate::Result;
 use bytes::{Buf, Bytes, BytesMut};
-use hang::catalog::{AAC, AudioCodec, AudioConfig, H264, H265, VP9, VideoCodec, VideoConfig};
+use hang::catalog::{AAC, AudioCodec, AudioConfig, H265, VP9, VideoCodec, VideoConfig};
 use moq_net::Timestamp;
 use mp4_atom::Atom;
 use webm_iterable::WebmIterator;
@@ -339,7 +339,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry
 				&& let Err(e) = self.add_track(reserved, children)
 			{
-				if matches!(e, crate::Error::Mkv(Error::InvalidSubtitle(_))) {
+				if matches!(
+					e,
+					crate::Error::Mkv(Error::InvalidSubtitle(_) | Error::InvalidAspect(_))
+				) {
 					return Err(e);
 				}
 				tracing::warn!(error = ?e, "skipping MKV track");
@@ -621,7 +624,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			let sequence = match &track.track {
-				Media::Text(text) => sequence.max(text.track().latest().map_or(0, |latest| latest + 1)),
+				Media::Text(text) => sequence.max(text.next_sequence()),
 				_ => sequence,
 			};
 			track.track.seek(sequence)?;
@@ -634,7 +637,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
-			if let Some(g) = track.group.take() {
+			if let Some(mut g) = track.group.take() {
 				g.finish()?;
 			}
 			track.track.finish()?;
@@ -659,57 +662,202 @@ fn build_video_config(
 	codec_private: Option<&Bytes>,
 	video_children: Option<&[MatroskaSpec]>,
 ) -> Result<VideoConfig> {
-	let (width, height) = video_children
-		.map(|cs| {
-			let mut w = None;
-			let mut h = None;
-			for c in cs {
-				match c {
-					MatroskaSpec::PixelWidth(v) => w = Some(*v as u32),
-					MatroskaSpec::PixelHeight(v) => h = Some(*v as u32),
-					_ => {}
-				}
-			}
-			(w, h)
-		})
-		.unwrap_or((None, None));
-
 	let mut config = match codec_id {
-		"V_VP8" => {
-			let mut config = VideoConfig::new(VideoCodec::VP8);
-			config.coded_width = width;
-			config.coded_height = height;
-			config
-		}
-		"V_VP9" => {
-			let mut config = VideoConfig::new(VP9 {
-				profile: 0,
-				level: 0,
-				bit_depth: 8,
-				color_primaries: 1,
-				chroma_subsampling: 1,
-				transfer_characteristics: 1,
-				matrix_coefficients: 1,
-				full_range: false,
-			});
-			config.coded_width = width;
-			config.coded_height = height;
-			config
-		}
+		"V_VP8" => VideoConfig::new(VideoCodec::VP8),
+		"V_VP9" => VideoConfig::new(VP9 {
+			profile: 0,
+			level: 0,
+			bit_depth: 8,
+			color_primaries: 1,
+			chroma_subsampling: 1,
+			transfer_characteristics: 1,
+			matrix_coefficients: 1,
+			full_range: false,
+		}),
 		"V_MPEG4/ISO/AVC" => build_h264_config(codec_private)?,
 		"V_MPEGH/ISO/HEVC" => build_h265_config(codec_private)?,
 		"V_AV1" => build_av1_config(codec_private)?,
 		other => return Err(Error::UnsupportedVideoCodec(other.to_string()).into()),
 	};
 
+	let mut width = None;
+	let mut height = None;
+	for child in video_children.unwrap_or_default() {
+		match child {
+			MatroskaSpec::PixelWidth(v) => width = Some(*v),
+			MatroskaSpec::PixelHeight(v) => height = Some(*v),
+			_ => {}
+		}
+	}
+
 	if config.coded_width.is_none() {
-		config.coded_width = width;
+		config.coded_width = width.map(|v| v as u32);
 	}
 	if config.coded_height.is_none() {
-		config.coded_height = height;
+		config.coded_height = height.map(|v| v as u32);
+	}
+	// The codec config outranks the Colour element a muxer added, which only fills its gaps.
+	let colour = video_children
+		.and_then(|cs| {
+			cs.iter().find_map(|c| match c {
+				MatroskaSpec::Colour(Master::Full(colour)) => Some(colour),
+				_ => None,
+			})
+		})
+		.map(|colour| matroska_color(colour))
+		.transpose()?
+		.flatten();
+	crate::codec::color::fill(&mut config.color, colour.as_ref(), "Colour");
+	if let Some(children) = video_children
+		&& let Some(aspect) = matroska_aspect(children, (width, height))?
+	{
+		let coded = width
+			.zip(height)
+			.and_then(|(w, h)| crate::codec::video::reduce_aspect(w.into(), h.into()));
+		if Some(aspect) != coded || config.display_aspect_width.is_some() {
+			crate::codec::video::fill_display_aspect(&mut config, aspect, "Matroska");
+		}
 	}
 
 	Ok(config)
+}
+
+/// The whole picture's display aspect, or `None` when the samples are square by default.
+///
+/// `DisplayWidth`/`DisplayHeight` size the picture after `PixelCrop*`, but the catalog carries no
+/// crop and its aspect covers the whole decoded picture. So the cropped sample shape is applied to
+/// the full frame, as FFmpeg does, instead of squeezing the uncropped picture into the cropped ratio.
+fn matroska_aspect(children: &[MatroskaSpec], pixels: (Option<u64>, Option<u64>)) -> Result<Option<(u32, u32)>> {
+	let (mut width, mut height, mut unit) = (None, None, 0);
+	let (mut left, mut right, mut top, mut bottom) = (0, 0, 0, 0);
+	for child in children {
+		match child {
+			MatroskaSpec::DisplayWidth(v) => width = Some(*v),
+			MatroskaSpec::DisplayHeight(v) => height = Some(*v),
+			MatroskaSpec::DisplayUnit(v) => unit = *v,
+			MatroskaSpec::PixelCropLeft(v) => left = *v,
+			MatroskaSpec::PixelCropRight(v) => right = *v,
+			MatroskaSpec::PixelCropTop(v) => top = *v,
+			MatroskaSpec::PixelCropBottom(v) => bottom = *v,
+			_ => {}
+		}
+	}
+	// 0 pixels, 1 centimeters, 2 inches, 3 aspect ratio, 4 unknown; both fields share the unit.
+	if unit > 4 {
+		return Err(Error::InvalidAspect("unknown DisplayUnit").into());
+	}
+	if unit != 0 && (width.is_none() || height.is_none()) {
+		return Err(Error::InvalidAspect("non-pixel DisplayUnit without both display dimensions").into());
+	}
+	// A missing pixel-unit dimension defaults to the cropped size, which keeps samples square.
+	if width.is_none() && height.is_none() {
+		return Ok(None);
+	}
+
+	let (shown_width, shown_height) = if (left, right, top, bottom) == (0, 0, 0, 0) {
+		let width = width.or(pixels.0).ok_or(Error::InvalidAspect("missing PixelWidth"))?;
+		let height = height.or(pixels.1).ok_or(Error::InvalidAspect("missing PixelHeight"))?;
+		(u128::from(width), u128::from(height))
+	} else {
+		let frame_width = pixels.0.ok_or(Error::InvalidAspect("missing PixelWidth"))?;
+		let frame_height = pixels.1.ok_or(Error::InvalidAspect("missing PixelHeight"))?;
+		let cropped = |size: u64, first: u64, second: u64| {
+			size.checked_sub(first)
+				.and_then(|size| size.checked_sub(second))
+				.filter(|size| *size > 0)
+				.ok_or(Error::InvalidAspect("crop leaves no picture"))
+		};
+		let cropped_width = cropped(frame_width, left, right)?;
+		let cropped_height = cropped(frame_height, top, bottom)?;
+		// display / cropped is the sample shape; scale the whole frame by it.
+		let scale = |display: u64, frame: u64, cropped_other: u64| {
+			u128::from(display)
+				.checked_mul(u128::from(frame))
+				.and_then(|size| size.checked_mul(u128::from(cropped_other)))
+				.ok_or(Error::InvalidAspect("unrepresentable display dimensions"))
+		};
+		(
+			scale(width.unwrap_or(cropped_width), frame_width, cropped_height)?,
+			scale(height.unwrap_or(cropped_height), frame_height, cropped_width)?,
+		)
+	};
+	let aspect = crate::codec::video::reduce_aspect(shown_width, shown_height)
+		.ok_or(Error::InvalidAspect("invalid or unrepresentable display dimensions"))?;
+	Ok(Some(aspect))
+}
+
+/// The colour a Matroska `Colour` element signals. Its code points are H.273's, `Range` counts 0
+/// as unspecified, 1 as limited, and 2 as full, and a partial mastering display is dropped. A code
+/// point past 255 or a light level past 65535 has no representation, so it is refused.
+pub(super) fn matroska_color(children: &[MatroskaSpec]) -> Result<Option<hang::catalog::Color>> {
+	use hang::catalog::{Chromaticity, Color, ContentLight, Mastering};
+
+	let (mut primaries, mut transfer, mut matrix, mut full_range) = (2, 2, 2, None);
+	let (mut max_cll, mut max_fall) = (None, None);
+	let mut mastering = None;
+	let code = |value: u64| u8::try_from(value).map_err(|_| Error::InvalidColour("code point"));
+	let light = |value: u64| u16::try_from(value).map_err(|_| Error::InvalidColour("light level"));
+	for child in children {
+		match child {
+			MatroskaSpec::Primaries(v) => primaries = code(*v)?,
+			MatroskaSpec::TransferCharacteristics(v) => transfer = code(*v)?,
+			MatroskaSpec::MatrixCoefficients(v) => matrix = code(*v)?,
+			MatroskaSpec::Range(1) => full_range = Some(false),
+			MatroskaSpec::Range(2) => full_range = Some(true),
+			MatroskaSpec::MaxCLL(v) => max_cll = Some(light(*v)?),
+			MatroskaSpec::MaxFALL(v) => max_fall = Some(light(*v)?),
+			MatroskaSpec::MasteringMetadata(Master::Full(fields)) => {
+				// Red, green, blue, and white x and y, then the max and min luminance.
+				let mut v = [None; 10];
+				for field in fields {
+					let (i, value) = match field {
+						MatroskaSpec::PrimaryRChromaticityX(x) => (0, x),
+						MatroskaSpec::PrimaryRChromaticityY(x) => (1, x),
+						MatroskaSpec::PrimaryGChromaticityX(x) => (2, x),
+						MatroskaSpec::PrimaryGChromaticityY(x) => (3, x),
+						MatroskaSpec::PrimaryBChromaticityX(x) => (4, x),
+						MatroskaSpec::PrimaryBChromaticityY(x) => (5, x),
+						MatroskaSpec::WhitePointChromaticityX(x) => (6, x),
+						MatroskaSpec::WhitePointChromaticityY(x) => (7, x),
+						MatroskaSpec::LuminanceMax(x) => (8, x),
+						MatroskaSpec::LuminanceMin(x) => (9, x),
+						_ => continue,
+					};
+					// Chromaticities lie in 0..=1 and luminances are nonnegative (Matroska's ranges).
+					let valid = match i {
+						0..=7 => (0.0..=1.0).contains(value),
+						_ => value.is_finite() && *value >= 0.0,
+					};
+					if !valid {
+						return Err(Error::InvalidColour("mastering value").into());
+					}
+					v[i] = Some(*value);
+				}
+				let xy = |i: usize| Some(Chromaticity { x: v[i]?, y: v[i + 1]? });
+				mastering = (|| {
+					Some(Mastering {
+						red: xy(0)?,
+						green: xy(2)?,
+						blue: xy(4)?,
+						white: xy(6)?,
+						max_luminance: v[8]?,
+						min_luminance: v[9]?,
+					})
+				})();
+			}
+			_ => {}
+		}
+	}
+
+	let mut color = crate::codec::color::cicp(primaries, transfer, matrix, full_range).unwrap_or_default();
+	color.mastering = mastering;
+	if max_cll.is_some() || max_fall.is_some() {
+		color.content_light = Some(ContentLight {
+			max_cll: max_cll.unwrap_or(0),
+			max_fall: max_fall.unwrap_or(0),
+		});
+	}
+	Ok((color != Color::default()).then_some(color))
 }
 
 fn build_audio_config(
@@ -813,18 +961,7 @@ fn build_h264_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 		codec_id: "V_MPEG4/ISO/AVC",
 		purpose: "AVCDecoderConfigurationRecord",
 	})?;
-	let avcc = crate::codec::h264::Avcc::parse(avcc_bytes)?;
-
-	let mut config = VideoConfig::new(H264 {
-		profile: avcc.profile,
-		constraints: avcc.constraints,
-		level: avcc.level,
-		inline: false,
-	});
-	config.description = Some(avcc_bytes.clone());
-	config.coded_width = avcc.coded_width;
-	config.coded_height = avcc.coded_height;
-	Ok(config)
+	crate::codec::h264::config(avcc_bytes)
 }
 
 fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
@@ -848,6 +985,7 @@ fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 		constraint_flags: hvcc.general_constraint_indicator_flags,
 	});
 	config.description = Some(description.freeze());
+	crate::codec::h265::apply_hvcc_sps(&hvcc, &mut config)?;
 	Ok(config)
 }
 
@@ -863,6 +1001,7 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	av1c.encode_body(&mut description)?;
 
 	let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av1c));
+	config.color = crate::codec::av1::color(&av1c.config_obus);
 	config.description = Some(description.freeze());
 	Ok(config)
 }

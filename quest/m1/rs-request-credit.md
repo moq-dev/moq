@@ -4,15 +4,16 @@
 
 A moq-net request (subscribe, track info, fetch, announce interest; lite and
 moq-transport) whose stream open finds no stream credit fails at once with a
-local error, instead of waiting for the peer to grant more. A relay resetting a
+local error, instead of waiting for the peer to grant more. This holds on
+every in-tree backend; iroh, an accepted exception that stays on upstream
+noq, keeps waiting. A relay resetting a
 downstream stream because of it sends `Internal`. Publisher group streams are
 out of scope.
 
 ## Plan
 
-Decided 2026-10-07 with [JS requests](/quest/m1/js-request-deadline.md): a
-request without credit is refused, which sheds load rather than parking work
-the caller can't see. Accepted: a relay asking a peer that grants few streams
+Decided 2026-10-07: a request without credit is refused, which sheds load
+rather than parking work the caller can't see. Accepted: a relay asking a peer that grants few streams
 gets hard failures in bursts where it used to wait, and nothing retries them.
 Rust gets no answer timer: a request lives until it is answered, its demand
 leaves, or the session closes, and a relay shouldn't kill a subscribe on a
@@ -27,9 +28,12 @@ session trait. Also note that
 rather than dropping it, so the next request inherits it; the non-waiting open
 should avoid that. `quic::web` is in-tree and can ask `moq-quic` directly,
 but the backends `moq-tokio` wraps through `web-transport-trait` (qmux,
-iroh) have no credit query there; prefer adding one upstream in
-moq-dev/web-transport over leaving them waiting, and say in the PR which
-backends fail fast.
+iroh) have no credit query there. Decided 2026-10-20 (maintainer): no new
+work in moq-dev/web-transport, so qmux gets its query when it moves in-tree
+([qmux on moq-quic](/quest/m1/quic-qmux.md)), and iroh, an accepted
+exception, keeps waiting. Whichever of this quest and quic-qmux lands second
+gives the in-tree qmux session the non-waiting open, so this quest does not
+wait on the port. Say in the PR which backends fail fast.
 
 Propose the error variant's name in the PR. Public API: one new `Error`
 variant, and possibly a `transport::poll` session method. Wire: none.

@@ -29,15 +29,29 @@ merge batch, ranked by how likely each hides a product bug.
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did. moq-tokio's
 `a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
-known exception, tracked by [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md).
+known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
+
+Added 2026-10-19 (maintainer): three more, the redial pair first since CI
+hit it. The same day's test cost audit added the macOS QUIC connects, and the
+redundant failover drift first: it may hide a TS export bug and failed two of
+three loaded `just check` runs.
+
+Added 2026-10-20 (maintainer): three more from that day's merge batch, the
+draft-16 cancel race first since it fails on a mocked clock and so may hide
+an ordering bug. The failed-listen test was meant to join the redial quest,
+which #6032 had already finished, so it reuses #6032's reserved-port fix as
+its own child. moq-uring's `host_tracks_moq_clock` was seen the same day
+but #6056 had already fixed it by measuring the calibration gap.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Interop close code](/quest/m1/test-flakes-2/interop-close-code.md) - the browser reliably sees `unauthorized` for a refused session
-- [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
-- [uring teardown close](/quest/m1/test-flakes-2/uring-teardown-close.md) - moq-uring's published-close teardown test holds under load, fixed at its cause
+- [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
+- [Draft-16 cancel race](/quest/m1/test-flakes-2/draft16-cancel-race.md) - the cancel-ahead-of-the-answer test settles the same way every run, fixing `run_publish_namespaces` if the order is real
+- [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md) - moq-tokio's loopback QUIC tests stop timing out on the macOS Platform job
+- [Relay bench holder](/quest/m1/test-flakes-2/relay-bench-holder.md) - the foreign-listener bench test fails fast when its holder cannot bind, instead of hanging on a fifo
+- [moq-tokio failed listen](/quest/m1/test-flakes-2/tokio-failed-listen.md) - the failed-listen test keeps its port reserved from first bind to final check
 
 ## Related
 

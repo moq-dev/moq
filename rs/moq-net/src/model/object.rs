@@ -1,69 +1,94 @@
 //! Private relay metadata; public readers see only the frame or datagram payload.
 use bytes::Bytes;
 
-use crate::Timescale;
+use crate::Timestamp;
 
-/// How the publisher serialized the keys inside immutable properties.
+/// The moq-transport drafts a list of properties came from, which share its key and
+/// integer encoding and what each property means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// private: passthrough
 pub(crate) enum Encoding {
-	Absolute,
-	DeltaQuic,
-	Delta { seven: bool },
+	/// Drafts 14 and 15: absolute keys and QUIC varints.
+	Draft14,
+	/// Draft 16: delta keys and QUIC varints.
+	Draft16,
+	/// Draft 17: delta keys and leading-ones varints without the seven-byte form.
+	Draft17,
+	/// Draft 18: delta keys and leading-ones varints.
+	Draft18,
+	/// Draft 19 and later: as draft 18, with property 0x06 as SUBGROUP_DELIVERY_TIMEOUT.
+	Draft19,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// private: passthrough
 pub(crate) enum Value {
 	Int(u64),
 	Bytes(Bytes),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// private: passthrough
 pub(crate) struct Property {
 	pub id: u64,
 	pub value: Value,
 }
 
-/// The common timestamp needs no vector allocation; all other properties stay opaque.
+/// An object's relay properties, held as one encoded [`Block`].
+///
+/// On a timed track, the mutable Timestamp is never held: it is the frame's, which egress
+/// restates. On an untimed one it has no units, so it stays in the block like any other.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// private: passthrough
 pub(crate) struct Properties {
-	pub timestamp: Option<u64>,
-	pub values: Vec<Property>,
-	pub immutable: Option<Encoding>,
-	/// The units of the Timestamps above, when the track declared any. The cache keeps the
-	/// track in its own units, so egress converts mutable ones to the units it declares.
-	pub timescale: Option<Timescale>,
-	/// The immutable block holds a Timestamp, which keeps its ingress units.
-	pub sealed_time: bool,
-	/// Property 0x06 means SUBGROUP_DELIVERY_TIMEOUT on the ingress draft.
-	pub delivery_timeout: bool,
+	/// The Timestamp the block's Immutable Properties hold on a timed track, which keeps
+	/// its ingress units.
+	pub sealed_time: Option<Timestamp>,
+	/// The properties, if there are any.
+	pub block: Option<Block>,
+}
+
+/// An object's properties, but for a timed track's mutable Timestamp, as one encoded list.
+///
+/// Kept encoded because a decoded list costs many times its wire size, and a relay holds
+/// one per cached object. Egress decodes it only to re-encode for another draft.
+#[derive(Clone, Debug, PartialEq, Eq)]
+// private: passthrough
+pub(crate) struct Block {
+	/// The properties in ascending ID order, serialized as `encoding` does. Never empty.
+	pub bytes: Bytes,
+	/// How `bytes` is serialized: its key and integer encoding.
+	pub encoding: Encoding,
+	/// `bytes` holds Immutable Properties (0x0b), serialized as `encoding` does.
+	pub immutable: bool,
 }
 
 impl Properties {
 	#[cfg(feature = "async")]
-	pub fn is_plain(&self) -> bool {
-		self.values.is_empty()
-	}
-
-	#[cfg(feature = "async")]
 	pub fn is_empty(&self) -> bool {
-		self.timestamp.is_none() && self.values.is_empty()
+		self.block.is_none()
 	}
 
 	pub fn heap(&self) -> u64 {
-		(self.values.capacity() * size_of::<Property>()) as u64
-			+ self
-				.values
-				.iter()
-				.map(|property| match &property.value {
-					Value::Bytes(bytes) => bytes.len() as u64,
-					Value::Int(_) => 0,
-				})
-				.sum::<u64>()
+		self.block.as_ref().map_or(0, |block| block.bytes.len() as u64)
 	}
+}
+
+/// The Track Properties moq-net does not interpret, which a relay forwards unchanged.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+// private: passthrough
+pub(crate) struct TrackProperties {
+	/// In arrival order, which is ascending, with Immutable Properties (0x0b) as its
+	/// serialized bytes.
+	pub values: Vec<Property>,
+	/// How the publisher serialized the list and the keys inside Immutable Properties.
+	/// Set beside any values, and never [`Encoding::Draft14`], which predates the list.
+	pub encoding: Option<Encoding>,
 }
 
 /// Object numbering is separate from the public frame's ordinal in its group.
 #[derive(Clone, Debug)]
+// private: passthrough
 pub(crate) struct Fields {
 	pub id: u64,
 	pub properties: Properties,

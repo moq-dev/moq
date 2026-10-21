@@ -44,7 +44,8 @@ use tracing::{error_span, info};
 use tracing_subscriber::EnvFilter;
 
 use super::{
-    ClientConfig, Credit, Endpoint, EndpointConfig, RecvStream, SendStream, TransportConfig,
+    ClientConfig, Credit, Endpoint, EndpointConfig, ReadError, ReadToEndError, RecvStream,
+    SendStream, TransportConfig, VarInt,
 };
 
 #[test]
@@ -164,7 +165,7 @@ fn read_after_close() {
             .expect("endpoint")
             .await
             .expect("connection");
-        let mut s = new_conn.open_uni().await.unwrap();
+        let mut s = new_conn.open_uni(Default::default()).await.unwrap();
         s.write_all(MSG).await.unwrap();
         s.finish().unwrap();
         // Wait for the stream to be closed, one way or another.
@@ -709,12 +710,18 @@ async fn zero_rtt() {
                 }
             });
             info!("sending 0.5-RTT");
-            let mut s = connection.open_uni().await.expect("open_uni");
+            let mut s = connection
+                .open_uni(Default::default())
+                .await
+                .expect("open_uni");
             s.write_all(MSG0).await.expect("write");
             s.finish().unwrap();
             connection.authenticated().await.expect("connected");
             info!("sending 1-RTT");
-            let mut s = connection.open_uni().await.expect("open_uni");
+            let mut s = connection
+                .open_uni(Default::default())
+                .await
+                .expect("open_uni");
             s.write_all(MSG1).await.expect("write");
             // The peer might close the connection before ACKing
             let _ = s.finish();
@@ -752,7 +759,10 @@ async fn zero_rtt() {
         .unwrap_or_else(|_| panic!("missing 0-RTT keys"));
 
     // Send something before the handshake can make progress, thereby forcing 0-RTT
-    let mut stream_0rtt = connection.open_uni().await.expect("0-RTT open uni");
+    let mut stream_0rtt = connection
+        .open_uni(Default::default())
+        .await
+        .expect("0-RTT open uni");
     info!("sending 0-RTT");
     stream_0rtt.write_all(MSG0).await.expect("0-RTT write");
     stream_0rtt.finish().unwrap();
@@ -817,7 +827,7 @@ fn echo_dualstack() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "receive-window stress test; run nightly with just rs quic-stress"]
 #[cfg_attr(target_os = "solaris", ignore = "Hangs in poll() on Solaris")]
 fn stress_receive_window() {
     run_echo(EchoArgs {
@@ -831,7 +841,7 @@ fn stress_receive_window() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "receive-window stress test; run nightly with just rs quic-stress"]
 #[cfg_attr(target_os = "solaris", ignore = "Hangs in poll() on Solaris")]
 fn stress_stream_receive_window() {
     // Note that there is no point in running this with too many streams,
@@ -847,7 +857,7 @@ fn stress_stream_receive_window() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "receive-window stress test; run nightly with just rs quic-stress"]
 #[cfg_attr(target_os = "solaris", ignore = "Hangs in poll() on Solaris")]
 fn stress_both_windows() {
     run_echo(EchoArgs {
@@ -958,7 +968,10 @@ fn run_echo(args: EchoArgs) {
 
                 for i in 0..args.nr_streams {
                     println!("Opening stream {i}");
-                    let (mut send, mut recv) = new_conn.open_bi().await.expect("stream open");
+                    let (mut send, mut recv) = new_conn
+                        .open_bi(Default::default())
+                        .await
+                        .expect("stream open");
                     let msg = gen_data(args.stream_size, SEED);
 
                     let send_task = async {
@@ -1130,7 +1143,7 @@ async fn rebind_recv() {
         info!("got conn");
         connected_send.notify_one();
         write_recv.notified().await;
-        let mut stream = connection.open_uni().await.unwrap();
+        let mut stream = connection.open_uni(Default::default()).await.unwrap();
         stream.write_all(MSG).await.unwrap();
         stream.finish().unwrap();
         // Wait for the stream to be closed, one way or another.
@@ -1494,7 +1507,7 @@ async fn remote_address_monitoring() {
             .unwrap();
 
         // send data from the new socket to trigger migration on the server
-        let mut stream = client_conn.open_uni().await.unwrap();
+        let mut stream = client_conn.open_uni(Default::default()).await.unwrap();
         stream.write_all(b"hello").await.unwrap();
         stream.finish().unwrap();
     };
@@ -1528,13 +1541,13 @@ async fn stream_id_flow_control() {
     // If `open_uni` doesn't get unblocked when the previous stream is dropped, this will time out.
     tokio::join!(
         async {
-            client.open_uni().await.unwrap();
+            client.open_uni(Default::default()).await.unwrap();
         },
         async {
-            client.open_uni().await.unwrap();
+            client.open_uni(Default::default()).await.unwrap();
         },
         async {
-            client.open_uni().await.unwrap();
+            client.open_uni(Default::default()).await.unwrap();
         },
         async {
             server.accept_uni().await.unwrap();
@@ -1570,9 +1583,13 @@ async fn two_datagram_readers() {
             x
         },
         async {
-            server.send_datagram(b"one"[..].into()).unwrap();
+            server
+                .send_datagram(b"one"[..].into(), Default::default())
+                .unwrap();
             done.notified().await;
-            server.send_datagram_wait(b"two"[..].into()).await.unwrap();
+            server
+                .send_datagram(b"two"[..].into(), Default::default())
+                .unwrap();
         }
     );
     assert!(*a == *b"one" || *b == *b"one");
@@ -1651,7 +1668,7 @@ async fn stream_stopped() {
             .unwrap()
             .await
             .unwrap();
-        let mut stream = conn.open_uni().await.unwrap();
+        let mut stream = conn.open_uni(Default::default()).await.unwrap();
         let stopped1 = stream.stopped();
         let stopped2 = stream.stopped();
         let stopped3 = stream.stopped();
@@ -1696,7 +1713,7 @@ async fn stream_stopped_2() {
         async { endpoint.accept().await.unwrap().await }
     )
     .unwrap();
-    let send_stream = conn.open_uni().await.unwrap();
+    let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
     let stopped = timeout(Duration::from_millis(100), send_stream.stopped())
         .instrument(error_span!("stopped"));
     tokio::pin!(stopped);
@@ -1706,11 +1723,61 @@ async fn stream_stopped_2() {
         _x = &mut stopped => {},
         _x = std::future::ready(()) => {}
     }
-    // drop the send stream
+    // finish and drop the send stream, since dropping it unfinished would reset it
+    send_stream.finish().unwrap();
     drop(send_stream);
     // make sure the stopped future still resolves
     let res = stopped.await;
     assert_eq!(res, Ok(Ok(None)));
+}
+
+/// A send stream dropped before `finish` is reset, so the peer can't mistake the truncated data
+/// for the whole stream.
+#[tokio::test]
+async fn dropped_send_stream_resets() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+
+    let (conn, server_conn) = tokio::try_join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    )
+    .unwrap();
+    let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
+    send_stream.write_all(b"truncated").await.unwrap();
+    drop(send_stream);
+
+    let mut recv_stream = server_conn.accept_uni().await.unwrap();
+    let res = recv_stream.read_to_end(usize::MAX).await;
+    assert!(
+        matches!(res, Err(ReadToEndError::Read(ReadError::Reset(code))) if code == VarInt::from_u32(0)),
+        "{res:?}"
+    );
+}
+
+/// A send stream finished before it drops still delivers its data and FIN.
+#[tokio::test]
+async fn finished_send_stream_survives_drop() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+
+    let (conn, server_conn) = tokio::try_join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    )
+    .unwrap();
+    let mut send_stream = conn.open_uni(Default::default()).await.unwrap();
+    send_stream.write_all(b"complete").await.unwrap();
+    send_stream.finish().unwrap();
+    drop(send_stream);
+
+    let mut recv_stream = server_conn.accept_uni().await.unwrap();
+    let data = recv_stream.read_to_end(usize::MAX).await.unwrap();
+    assert_eq!(data, b"complete");
 }
 
 #[tokio::test]
@@ -1762,7 +1829,7 @@ async fn stream_drop_removes_blocked_reader() {
             .unwrap()
             .await
             .unwrap();
-        let mut stream = conn.open_uni().await.unwrap();
+        let mut stream = conn.open_uni(Default::default()).await.unwrap();
         // need to send some data to actually start the stream
         stream.write_all(b"hello").await.unwrap();
 
@@ -1806,7 +1873,7 @@ async fn recv_stream_cancel_stop_drop() {
                 .unwrap()
                 .await
                 .unwrap();
-            let mut send = conn.open_uni().await.unwrap();
+            let mut send = conn.open_uni(Default::default()).await.unwrap();
             _ = send.write_all(b"hello").await;
             // Don't drop (finish) the send stream until the read has been
             // cancelled by the server, ensuring that read_to_end can't complete
@@ -1871,7 +1938,7 @@ async fn held_reads_spend_the_connection_window() {
         async { endpoint.accept().await.unwrap().await }
     )
     .unwrap();
-    let mut send = client.open_uni().await.unwrap();
+    let mut send = client.open_uni(Default::default()).await.unwrap();
     let writer = tokio::spawn(async move {
         // The receiver walks away before this finishes.
         let _ = send.write_all(&[7; 4 * WINDOW]).await;
@@ -2045,7 +2112,7 @@ async fn unreachable_sends_are_loss_once_established() {
     let server_conn = server_conn.unwrap();
 
     outage.active.store(true, Ordering::SeqCst);
-    let mut send = client_conn.open_uni().await.unwrap();
+    let mut send = client_conn.open_uni(Default::default()).await.unwrap();
     send.write_all(b"hello").await.unwrap();
     send.finish().unwrap();
     outage.dropped.notified().await;

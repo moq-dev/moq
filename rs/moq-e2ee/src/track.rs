@@ -23,12 +23,18 @@ pub struct Producer {
 	next: u64,
 }
 
+/// The grouped-frame and datagram keys a claimed physical name protects with.
+pub(crate) struct Keys {
+	pub group: TrackKey,
+	pub datagram: TrackKey,
+}
+
 impl Producer {
-	pub(crate) fn new(inner: moq_net::track::Producer, group_key: TrackKey, datagram_key: TrackKey) -> Self {
+	pub(crate) fn new(inner: moq_net::track::Producer, keys: Keys) -> Self {
 		Self {
 			inner,
-			group_key: Arc::new(Mutex::new(group_key)),
-			datagram_key,
+			group_key: Arc::new(Mutex::new(keys.group)),
+			datagram_key: keys.datagram,
 			next: 0,
 		}
 	}
@@ -146,6 +152,92 @@ impl fmt::Debug for Producer {
 			.field("name", &self.name())
 			.field("next", &self.next)
 			.finish()
+	}
+}
+
+/// A reserved track its subscribers wait on until it is accepted.
+///
+/// Made by [`broadcast::Producer::reserve_track`](crate::broadcast::Producer::reserve_track),
+/// with its physical name already claimed. Accept it once its [`demand`](Self::demand) shows a
+/// subscriber, or up front. Dropping it without [`accept`](Self::accept) rejects the waiting
+/// subscribers.
+pub struct Request {
+	inner: moq_net::track::Request,
+	keys: Keys,
+}
+
+impl Request {
+	pub(crate) fn new(inner: moq_net::track::Request, keys: Keys) -> Self {
+		Self { inner, keys }
+	}
+
+	/// The physical track name.
+	pub fn name(&self) -> &str {
+		self.inner.name()
+	}
+
+	/// Watch subscriber demand without keeping the track alive.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.inner.demand()
+	}
+
+	/// Serve the track, resolving every waiting subscriber.
+	pub fn accept(self, info: impl Into<Option<moq_net::track::Info>>) -> Producer {
+		Producer::new(self.inner.accept(info), self.keys)
+	}
+
+	/// Fail every waiting subscriber with `err`. The physical name stays claimed.
+	pub fn reject(self, err: moq_net::Error) {
+		self.inner.reject(err);
+	}
+}
+
+impl fmt::Debug for Request {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		f.debug_struct("track::Request").field("name", &self.name()).finish()
+	}
+}
+
+/// The pollable state of a [`broadcast::Consumer::subscribe`](crate::broadcast::Consumer::subscribe);
+/// awaited via the [`kio::Pending`] wrapper, whose `DerefMut` exposes [`Self::update`].
+pub struct Subscribing {
+	inner: kio::Pending<moq_net::track::Subscribing>,
+	generation: crate::generation::Consumer,
+}
+
+impl Subscribing {
+	pub(crate) fn new(
+		inner: kio::Pending<moq_net::track::Subscribing>,
+		generation: crate::generation::Consumer,
+	) -> Self {
+		Self { inner, generation }
+	}
+
+	/// Poll until the track is found, yielding a decrypting [`Consumer`].
+	///
+	/// # Errors
+	///
+	/// A net error if the track is aborted or not found.
+	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Consumer>> {
+		let subscriber = ready!(self.inner.poll_ok(waiter))?;
+		Poll::Ready(self.generation.consume(subscriber))
+	}
+
+	/// Change the subscription preferences before (or after) it resolves.
+	///
+	/// # Errors
+	///
+	/// [`moq_net::Error::Closed`] if the track already ended.
+	pub fn update(&mut self, subscription: moq_net::track::Subscription) -> Result<()> {
+		Ok(self.inner.update(subscription)?)
+	}
+}
+
+impl kio::Task for Subscribing {
+	type Output = Result<Consumer>;
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+		self.poll_ok(waiter)
 	}
 }
 

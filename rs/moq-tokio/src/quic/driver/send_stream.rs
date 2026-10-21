@@ -10,15 +10,16 @@ use moq_quic::{ClosedStream, ConnectionError, FinishError, StreamId, Written};
 use thiserror::Error;
 
 use crate::quic::driver::{
-    VarInt,
+    SendGroup, VarInt,
     connection::{ConnectionRef, State},
 };
 
 /// A stream that can only be used to send data
 ///
-/// If dropped, streams that haven't been explicitly [`reset()`] will be implicitly [`finish()`]ed,
-/// continuing to (re)transmit previously written data until it has been fully acknowledged or the
-/// connection is closed.
+/// If dropped, streams that haven't been explicitly [`finish()`]ed are [`reset()`], with code 0
+/// unless the peer stopped them, so the peer can't mistake a truncated stream for a complete one.
+/// A finished stream keeps (re)transmitting previously written data until it has been fully
+/// acknowledged or the connection is closed.
 ///
 /// # Cancellation
 ///
@@ -35,6 +36,9 @@ pub struct SendStream {
     conn: ConnectionRef,
     stream: StreamId,
     is_0rtt: bool,
+    finished: bool,
+    /// The offset and code a drop before `finish` resets at
+    drop_reset: (u64, VarInt),
 }
 
 impl SendStream {
@@ -43,6 +47,8 @@ impl SendStream {
             conn,
             stream,
             is_0rtt,
+            finished: false,
+            drop_reset: (0, VarInt::from_u32(0)),
         }
     }
 
@@ -185,6 +191,7 @@ impl SendStream {
         let mut conn = self.conn.state.lock("finish");
         match conn.inner.send_stream(self.stream).finish() {
             Ok(()) => {
+                self.finished = true;
                 conn.wake();
                 Ok(())
             }
@@ -214,23 +221,55 @@ impl SendStream {
         Ok(())
     }
 
-    /// Set the priority of the send stream
+    /// Close the send stream immediately, but still deliver its first `offset` bytes.
+    ///
+    /// Like [`SendStream::reset()`], except the data before `offset` still reaches the peer.
+    /// A peer that accepts RESET_STREAM_AT reads it before the error. Otherwise the reset waits a
+    /// round trip until the peer acknowledges the data, and the peer's application may never read
+    /// it: see [`moq_quic::SendStream::reset_at`].
+    ///
+    /// # Panics
+    /// When `offset` is past the data written.
+    pub fn reset_at(&mut self, offset: u64, error_code: VarInt) -> Result<(), ClosedStream> {
+        let mut conn = self.conn.state.lock("SendStream::reset_at");
+        if self.is_0rtt && conn.check_0rtt().is_err() {
+            return Ok(());
+        }
+        conn.inner
+            .send_stream(self.stream)
+            .reset_at(offset, error_code)?;
+        conn.wake();
+        Ok(())
+    }
+
+    /// Set the priority within the stream's send group, or session-wide when ungrouped
     ///
     /// Every send stream has an initial priority of 0. Locally buffered data from streams with
     /// higher priority will be transmitted before data from streams with lower priority. Changing
     /// the priority of a stream with pending data may only take effect after that data has been
     /// transmitted. Using many different priority levels per connection may have a negative
     /// impact on performance.
-    pub fn set_priority(&self, priority: i32) -> Result<(), ClosedStream> {
+    pub fn set_priority(&self, priority: i64) -> Result<(), ClosedStream> {
         let mut conn = self.conn.state.lock("SendStream::set_priority");
         conn.inner.send_stream(self.stream).set_priority(priority)?;
         Ok(())
     }
 
     /// Get the priority of the send stream
-    pub fn priority(&self) -> Result<i32, ClosedStream> {
+    pub fn priority(&self) -> Result<i64, ClosedStream> {
         let mut conn = self.conn.state.lock("SendStream::priority");
         conn.inner.send_stream(self.stream).priority()
+    }
+
+    /// Move the stream into a send group, or with `None` back to the ungrouped streams, which
+    /// go before every group
+    ///
+    /// # Panics
+    /// - when `group` belongs to another connection
+    pub fn set_group(&self, group: Option<&SendGroup>) -> Result<(), ClosedStream> {
+        let mut conn = self.conn.state.lock("SendStream::set_group");
+        let group = group.map(SendGroup::id);
+        conn.inner.send_stream(self.stream).set_group(group)
     }
 
     /// Completes when the peer stops the stream or reads the stream to completion
@@ -278,6 +317,11 @@ impl SendStream {
     /// Get the identity of this stream
     pub fn id(&self) -> StreamId {
         self.stream
+    }
+
+    /// Reset at `offset` with `code`, instead of at 0 with code 0, if dropped before `finish`
+    pub(crate) fn set_drop_reset(&mut self, offset: u64, code: VarInt) {
+        self.drop_reset = (offset, code);
     }
 
     /// Attempt to write bytes from buf into the stream.
@@ -343,15 +387,21 @@ impl Drop for SendStream {
         if conn.error.is_some() || (self.is_0rtt && conn.check_0rtt().is_err()) {
             return;
         }
-        match conn.inner.send_stream(self.stream).finish() {
-            Ok(()) => conn.wake(),
-            Err(FinishError::Stopped(reason)) => {
-                if conn.inner.send_stream(self.stream).reset(reason).is_ok() {
-                    conn.wake();
-                }
+        // Fails harmlessly when already reset.
+        let mut stream = conn.inner.send_stream(self.stream);
+        let reset = match stream.stopped() {
+            // Echo the code, as RFC 9000 section 3.5 asks, even after `finish`: the peer reads
+            // nothing more, so retransmitting the rest is wasted.
+            Ok(Some(code)) => stream.reset(code),
+            _ if self.finished => return,
+            _ => {
+                let (offset, code) = self.drop_reset;
+                let offset = offset.min(stream.offset());
+                stream.reset_at(offset, code)
             }
-            // Already finished or reset, which is fine.
-            Err(FinishError::ClosedStream) => {}
+        };
+        if reset.is_ok() {
+            conn.wake();
         }
     }
 }

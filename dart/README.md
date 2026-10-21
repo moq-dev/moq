@@ -6,8 +6,11 @@ This directory contains two packages:
 - `moq` is the independently-versioned ergonomic API applications should use.
 
 Run `just dart check` from the repository root. The check rebuilds
-`moq-ffi` without optional codec features, verifies the generated source,
+`moq-ffi` in the dev profile with its default codec features, verifies the generated source,
 analyzes and tests both packages, and validates their publish layout.
+
+`just dart bench` pins an optimized native library through the hook's existing
+`library` user define. Published packages download optimized release libraries.
 
 `dart test` drives the Native Assets hook, so the round-trip tests in
 `moq/test/` exercise the same load path a Flutter application uses. There is no

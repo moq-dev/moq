@@ -202,22 +202,16 @@ impl Announced {
 	}
 }
 
-/// Waits for a route covering one exact path, then resolves it.
+/// Follows one exact path, resolving each publisher instance that serves it.
 struct AnnouncedBroadcast {
+	inner: moq_net::origin::AnnouncedBroadcast,
 	origin: moq_net::origin::Consumer,
-	path: moq_net::PathOwned,
 	driver: Background,
 }
 
 impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		// `routed_broadcast` rides out the churn between something covering the path
-		// and the path actually resolving (failover, an advertise-only announce
-		// racing its handler).
-		let broadcast = self
-			.driver
-			.watch(async { Ok(self.origin.routed_broadcast(&self.path).await?) })
-			.await?;
+		let broadcast = self.driver.watch(async { Ok(self.inner.available().await?) }).await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(
 			broadcast,
 			self.origin.clone(),
@@ -287,7 +281,7 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 	}
 }
 
-/// Waits for a specific broadcast to be announced.
+/// Follows a specific broadcast across the publisher instances that serve it.
 #[derive(uniffi::Object)]
 pub struct MoqAnnouncedBroadcast {
 	task: Task<AnnouncedBroadcast>,
@@ -448,7 +442,7 @@ impl MoqOriginConsumer {
 		}))
 	}
 
-	/// Resolve the broadcast at `path`, waiting until something can serve it.
+	/// Follow the broadcast at `path`, resolving each publisher instance that serves it.
 	///
 	/// This is how you resolve a path right after connecting: announcements arrive over the
 	/// session after it opens, so `request_broadcast` on its own races them. A
@@ -457,21 +451,14 @@ impl MoqOriginConsumer {
 	pub fn announced_broadcast(&self, path: String) -> Result<Arc<MoqAnnouncedBroadcast>, MoqError> {
 		let _guard = crate::ffi::enter();
 		self.driver.check()?;
-		let path = moq_net::Path::new(&path).to_owned();
-
-		// Probe the permission eagerly so an unreachable path fails here, rather than
-		// surfacing later as a `Closed` the caller can't tell from the origin ending.
-		self.inner
-			.scope(&path, &moq_net::Patterns::from(moq_net::Pattern::all()))?;
+		// Following checks the permission eagerly, so an unreachable path fails here rather
+		// than surfacing later as a `Closed` the caller can't tell from the origin ending.
+		let inner = self.inner.announced_broadcast(path.as_str(), None)?;
 
 		Ok(Arc::new(MoqAnnouncedBroadcast {
 			task: Task::new(AnnouncedBroadcast {
-				// The wait runs on the *unrooted* cursor. `announced_broadcast` narrows with
-				// `scope`, which leaves the root alone, so the broadcast is handed out named by
-				// its full path. Rooting the cursor at `path` would name it "" instead, making
-				// it its own root, and a catalog's `../sibling` reference would read as escaping.
+				inner,
 				origin: self.inner.clone(),
-				path,
 				driver: self.driver.clone(),
 			}),
 		}))
@@ -603,9 +590,14 @@ impl MoqAnnounceConsumer {
 
 #[uniffi::export]
 impl MoqAnnouncedBroadcast {
-	/// Wait until the broadcast is announced. Returns `Closed` if cancelled or the origin is closed.
+	/// Wait for the next publisher instance serving the broadcast. Returns `Closed` if cancelled
+	/// or the origin is closed.
 	///
-	/// Its end arrives as a [`MoqAnnounceEvent::End`] on the origin's announcements.
+	/// The first call resolves the instance serving the path, once one is announced. Each later
+	/// call waits for another to take over, as a restarted publisher or a replacement session
+	/// does, or for the broadcast to return after it went offline. Drop everything read from the
+	/// previous instance then and read the new one: the old one's tracks end when its route
+	/// dies, with an error unless this side closed that session.
 	pub async fn available(&self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		self.task.run(|mut state| async move { state.available().await }).await
 	}
@@ -668,10 +660,7 @@ mod supervision_tests {
 
 	#[tokio::test]
 	async fn container_importers_keep_the_origin_failure_after_other_owners_are_released() {
-		use crate::media::{
-			MoqContainerFormat, MoqContainerInit, MoqContainerStreamInit, MoqMediaContainerProducer,
-			MoqMediaContainerStreamProducer, MoqMediaTimebase,
-		};
+		use crate::media::{MoqContainerFormat, MoqContainerInit, MoqMediaContainerProducer, MoqMediaTimebase};
 		let (inner, completion, trigger) = crate::ffi::panicking_origin();
 		let origin = MoqOriginProducer::from_inner(Origin {
 			inner,
@@ -689,10 +678,11 @@ mod supervision_tests {
 			},
 		)
 		.unwrap();
-		let stream = MoqMediaContainerStreamProducer::new(
+		let independent = MoqMediaContainerProducer::new(
 			&broadcast,
-			MoqContainerStreamInit {
+			MoqContainerInit {
 				format: MoqContainerFormat::Ts,
+				data: Vec::new(),
 				timebase: None,
 			},
 		)
@@ -706,9 +696,9 @@ mod supervision_tests {
 		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
 		drop(completion);
 		assert!(matches!(container.cut(), Err(MoqError::Task { .. })));
-		assert!(matches!(stream.write(Vec::new()), Err(MoqError::Task { .. })));
+		assert!(matches!(independent.write(Vec::new()), Err(MoqError::Task { .. })));
 		assert!(matches!(container.finish(), Err(MoqError::Task { .. })));
-		assert!(matches!(stream.finish(), Err(MoqError::Task { .. })));
+		assert!(matches!(independent.finish(), Err(MoqError::Task { .. })));
 	}
 
 	#[tokio::test]

@@ -111,8 +111,7 @@ export class Publish {
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta (Draft17 only)
 		}
-		const trackNamespace = await Namespace.decode(r);
-		const trackName = await r.string();
+		const { namespace: trackNamespace, name: trackName } = await Namespace.decodeTrack(r);
 		const trackAlias = await r.u62();
 
 		if (version === Version.DRAFT_14) {
@@ -151,26 +150,6 @@ export class Publish {
 			largest,
 			forward,
 		});
-	}
-}
-
-export class PublishOk {
-	static id = 0x1e;
-
-	async #encode(_w: Writer): Promise<void> {
-		throw new Error("PUBLISH_OK messages are not supported");
-	}
-
-	async encode(w: Writer, _version: IetfVersion): Promise<void> {
-		return Message.encode(w, this.#encode.bind(this));
-	}
-
-	static async decode(r: Reader, _version: IetfVersion): Promise<PublishOk> {
-		return Message.decode(r, PublishOk.#decode);
-	}
-
-	static async #decode(_r: Reader): Promise<PublishOk> {
-		throw new Error("PUBLISH_OK messages are not supported");
 	}
 }
 

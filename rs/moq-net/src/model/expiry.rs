@@ -27,13 +27,17 @@ use super::Timestamp;
 ///
 /// Waking every parked read on every track change instead costs a backlog of N parked
 /// reads N wakes per append: an audio backlog of ~800 one-frame groups pins a runtime.
-pub(crate) struct Wakes {
+pub(super) struct Wakes {
 	/// The earliest parked deadline in floored micros, or `u64::MAX`, so a write that
 	/// crosses nothing skips the lock.
 	///
 	/// Relaxed: a read registers before resolving the edge, under the group locks a
 	/// write takes before it presents, so a write the read missed sees its deadline.
 	earliest: AtomicU64,
+	/// The lowest sequence a parked time end watches for a start, or `u64::MAX`, so a first
+	/// frame below every one skips the lock. Ordered by the starts index's lock, which a
+	/// read takes after registering and a first frame before checking this.
+	starts_from: AtomicU64,
 	parked: kio::Lock<Parked>,
 }
 
@@ -53,6 +57,9 @@ struct Parked {
 	/// Exact cache arrivals, independent of the live edge and neighbouring groups.
 	arrivals: BTreeMap<u64, kio::WaiterList>,
 	arrival_sweep: usize,
+	/// Reads parked on a time end, by the lowest sequence whose start could move it.
+	starts: BTreeMap<u64, kio::WaiterList>,
+	starts_sweep: usize,
 	/// Reads by wall-clock deadline, released by the pool's driver.
 	wall: BTreeMap<crate::time::Instant, kio::WaiterList>,
 	/// The earliest `wall` deadline the pool was asked to release, so arming a later one
@@ -67,6 +74,7 @@ impl Default for Wakes {
 	fn default() -> Self {
 		Self {
 			earliest: AtomicU64::new(u64::MAX),
+			starts_from: AtomicU64::new(u64::MAX),
 			parked: kio::Lock::default(),
 		}
 	}
@@ -74,7 +82,7 @@ impl Default for Wakes {
 
 impl Wakes {
 	/// A frame write left its group presenting up to `latest`: wake the reads it expires.
-	pub(crate) fn presented(&self, latest: Timestamp) {
+	pub(super) fn presented(&self, latest: Timestamp) {
 		let at = micros(latest.as_micros());
 		if at < self.earliest.load(Ordering::Relaxed) {
 			return;
@@ -94,7 +102,7 @@ impl Wakes {
 	}
 
 	/// Park `waiter` until the edge reaches `reach` plus `budget`.
-	pub(crate) fn watch_deadline(&self, reach: Timestamp, budget: Duration, waiter: &kio::Waiter) {
+	pub(super) fn watch_deadline(&self, reach: Timestamp, budget: Duration, waiter: &kio::Waiter) {
 		let deadline = micros(reach.as_micros()).saturating_add(micros(budget.as_micros()));
 		// No timestamp reaches it.
 		if deadline == u64::MAX {
@@ -108,7 +116,7 @@ impl Wakes {
 	/// Park `waiter` until the wall clock reaches `at`. When `at` is earlier than any
 	/// deadline the pool already releases for this track, so the caller asks it to, returns
 	/// `Some` of the one it replaces.
-	pub(crate) fn watch_wall(
+	pub(super) fn watch_wall(
 		&self,
 		at: crate::time::Instant,
 		waiter: &kio::Waiter,
@@ -122,13 +130,13 @@ impl Wakes {
 	}
 
 	/// The wall-clock deadline the pool releases for this track next.
-	pub(crate) fn wall_armed(&self) -> Option<crate::time::Instant> {
+	pub(super) fn wall_armed(&self) -> Option<crate::time::Instant> {
 		self.parked.lock().wall_armed
 	}
 
 	/// The wall clock reached `now`: wake the reads due by then, returning the earliest
 	/// deadline left for the pool to release next.
-	pub(crate) fn release_wall(&self, now: crate::time::Instant) -> Option<crate::time::Instant> {
+	pub(super) fn release_wall(&self, now: crate::time::Instant) -> Option<crate::time::Instant> {
 		let mut woken = Vec::new();
 		let next = {
 			let mut parked = self.parked.lock();
@@ -145,7 +153,7 @@ impl Wakes {
 	}
 
 	/// Park `waiter` until a group lands above `sequence`.
-	pub(crate) fn watch_landing(&self, sequence: u64, waiter: &kio::Waiter) {
+	pub(super) fn watch_landing(&self, sequence: u64, waiter: &kio::Waiter) {
 		self.parked
 			.lock()
 			.landings
@@ -156,7 +164,7 @@ impl Wakes {
 
 	/// Park `waiter`, holding group `sequence` from another copy, until it or a group
 	/// above it lands.
-	pub(crate) fn watch_held(&self, sequence: u64, waiter: &kio::Waiter) {
+	pub(super) fn watch_held(&self, sequence: u64, waiter: &kio::Waiter) {
 		let mut parked = self.parked.lock();
 		let parked = &mut *parked;
 		// Sweep only once the map has doubled, so each sweep is paid for by the keys
@@ -170,7 +178,7 @@ impl Wakes {
 	}
 
 	/// Park until this exact group is cached, or a declared boundary excludes it.
-	pub(crate) fn watch_arrival(&self, sequence: u64, waiter: &kio::Waiter) {
+	pub(super) fn watch_arrival(&self, sequence: u64, waiter: &kio::Waiter) {
 		let mut parked = self.parked.lock();
 		if parked.arrivals.len() >= parked.arrival_sweep {
 			parked.arrivals.retain(|_, list| !list.is_empty());
@@ -179,8 +187,38 @@ impl Wakes {
 		parked.arrivals.entry(sequence).or_default().register(waiter);
 	}
 
+	/// Park `waiter` until a group at or above `from` starts.
+	pub(super) fn watch_start(&self, from: u64, waiter: &kio::Waiter) {
+		let mut parked = self.parked.lock();
+		if parked.starts.len() >= parked.starts_sweep {
+			parked.starts.retain(|_, list| !list.is_empty());
+			parked.starts_sweep = (parked.starts.len() * 2).max(HELD_SWEEP_MIN);
+		}
+		parked.starts.entry(from).or_default().register(waiter);
+		self.starts_from.fetch_min(from, Ordering::Relaxed);
+	}
+
+	/// Group `sequence` started: wake the time ends it could move.
+	pub(super) fn started(&self, sequence: u64) {
+		if sequence < self.starts_from.load(Ordering::Relaxed) {
+			return;
+		}
+		let mut woken = Vec::new();
+		{
+			let mut parked = self.parked.lock();
+			while let Some(entry) = parked.starts.first_entry()
+				&& *entry.key() <= sequence
+			{
+				woken.push(entry.remove());
+			}
+			let from = parked.starts.first_key_value().map_or(u64::MAX, |(from, _)| *from);
+			self.starts_from.store(from, Ordering::Relaxed);
+		}
+		woken.iter_mut().for_each(kio::WaiterList::wake);
+	}
+
 	/// Wake only cache arrivals whose outcome this insertion or boundary changes.
-	pub(crate) fn arrived(&self, groups: impl std::ops::RangeBounds<u64>) {
+	pub(super) fn arrived(&self, groups: impl std::ops::RangeBounds<u64>) {
 		let groups = (groups.start_bound().cloned(), groups.end_bound().cloned());
 		let mut woken = Vec::new();
 		{
@@ -196,7 +234,7 @@ impl Wakes {
 	/// nearest servable group beneath it, up, and continues a held group of its own
 	/// sequence. Reads below `oldest`, the first group still cached, can no longer expire
 	/// and are forgotten; held groups are not.
-	pub(crate) fn landed(&self, below: Option<u64>, sequence: u64, oldest: u64) {
+	pub(super) fn landed(&self, below: Option<u64>, sequence: u64, oldest: u64) {
 		let mut woken = Vec::new();
 		{
 			let mut parked = self.parked.lock();
@@ -218,17 +256,19 @@ impl Wakes {
 	}
 
 	/// Wake every parked read, for a change that moves every budget at once.
-	pub(crate) fn wake_all(&self) {
+	pub(super) fn wake_all(&self) {
 		let parked = {
 			let mut parked = self.parked.lock();
 			self.earliest.store(u64::MAX, Ordering::Relaxed);
+			self.starts_from.store(u64::MAX, Ordering::Relaxed);
 			std::mem::take(&mut *parked)
 		};
 		let lists = parked.deadlines.into_values().chain(parked.landings.into_values());
 		let lists = lists
 			.chain(parked.held.into_values())
 			.chain(parked.wall.into_values())
-			.chain(parked.arrivals.into_values());
+			.chain(parked.arrivals.into_values())
+			.chain(parked.starts.into_values());
 		for mut list in lists {
 			list.wake();
 		}

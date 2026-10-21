@@ -152,6 +152,7 @@ def run(action, plan):
         raise RuntimeError("add these cross-tree JS inputs to the js pattern in sh/dispatch.sh: "
                            + " ".join(missing))
     command("python3", "sh/rs/stats-docs.py")
+    command("python3", "sh/rs/model-markers.py")
     # These inexpensive shared checks still protect every package's imports.
     result = subprocess.run(["grep", "-rn", "--include=*.ts", "--include=*.tsx",
                              "--exclude-dir=node_modules", "--exclude-dir=dist",
@@ -160,7 +161,7 @@ def run(action, plan):
         raise RuntimeError("import.meta.env scan found a reference or failed")
     command("bun", "js/common/deps.ts")
     if plan["wasm"]:
-        command("just", "js", "wasm")
+        command("just", "js", "wasm", "dev")
     scripts("check")
     if plan["all"]:
         command("bunx", "tsc", "--noEmit", "--project", "test/tsconfig.json")
@@ -180,7 +181,7 @@ def run(action, plan):
         finally:
             Path(name).unlink()
     # The fallback also covers unowned inputs, including demo/pub's Worker.
-    command("bun", "biome", "check", *(["js", "test", "doc", "demo"] if plan["all"] else
+    command("bun", "biome", "check", *(["js", "bench/browser", "test", "doc", "demo"] if plan["all"] else
                                        [p["directory"] for p in packages.values()] + ["js/common"]))
     scripts("build")
     for name in ("@moq/watch", "@moq/publish"):

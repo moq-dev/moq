@@ -1,11 +1,7 @@
 package dev.moq.media
 
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
+import dev.moq.pull
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.onCompletion
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.microseconds
 import dev.moq.Frame
@@ -19,8 +15,6 @@ typealias TrackProducer = uniffi.moq.MoqMediaTrackProducer
 typealias TrackStreamProducer = uniffi.moq.MoqMediaTrackStreamProducer
 /** The write side of a container, which publishes each track it describes. */
 typealias ContainerProducer = uniffi.moq.MoqMediaContainerProducer
-/** The write side of a container fed a raw byte stream. */
-typealias ContainerStreamProducer = uniffi.moq.MoqMediaContainerStreamProducer
 /** The read side of a media track: yields frames with codec metadata in decode order. */
 typealias TrackConsumer = uniffi.moq.MoqMediaTrackConsumer
 /** A finite fetched media group: yields container-decoded frames until the group ends. */
@@ -49,8 +43,6 @@ typealias AudioInit = uniffi.moq.MoqAudioInit
 typealias VideoInit = uniffi.moq.MoqVideoInit
 /** A shared source timestamp offset that does not keep its broadcast open. */
 typealias Timebase = uniffi.moq.MoqMediaTimebase
-/** A byte-stream container format and an optional shared source timebase. */
-typealias ContainerStreamInit = uniffi.moq.MoqContainerStreamInit
 /** A container format, its leading bytes, and an optional shared source timebase. */
 typealias ContainerInit = uniffi.moq.MoqContainerInit
 /** The catalog description of an audio track: codec, sample rate, channels, whether it is enabled, and container. */
@@ -66,9 +58,15 @@ typealias Target = uniffi.moq.MoqMediaTarget
 typealias Named = uniffi.moq.MoqMediaTarget.Named
 /** A subscriber-requested track. */
 typealias Requested = uniffi.moq.MoqMediaTarget.Requested
-/** A track name, container, and live delivery options. */
+/** A catalog rendition: its ID (catalog key) and its video or audio config. */
+typealias Rendition = uniffi.moq.MoqRendition
+/** A catalog video rendition. */
+typealias VideoRendition = uniffi.moq.MoqRendition.Video
+/** A catalog audio rendition. */
+typealias AudioRendition = uniffi.moq.MoqRendition.Audio
+/** A catalog rendition and live delivery options. */
 typealias TrackConfig = uniffi.moq.MoqMediaTrackConfig
-/** A fetched group name, sequence, container, and delivery options. */
+/** A catalog rendition's group sequence and fetch delivery options. */
 typealias GroupConfig = uniffi.moq.MoqMediaGroupConfig
 /** The packaging advertised for a media track. */
 typealias Container = uniffi.moq.MoqContainer
@@ -76,18 +74,11 @@ typealias Container = uniffi.moq.MoqContainer
 /**
  * Stream of catalog updates. Terminates when the underlying track ends.
  *
- * The Flow's [onCompletion] forwards Kotlin coroutine cancellation to the
+ * The Flow forwards Kotlin coroutine cancellation to the
  * native consumer's `cancel()` so structured concurrency propagates through
  * to the QUIC stream.
  */
-fun CatalogConsumer.updates(): Flow<Catalog> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun CatalogConsumer.updates(): Flow<Catalog> = pull({ cancel() }) { next() }
 
 /**
  * Subscribe to the catalog track and return the first catalog, cancelling the
@@ -104,24 +95,10 @@ suspend fun catalog(broadcast: dev.moq.BroadcastConsumer): Catalog {
 }
 
 /** Stream of decoded media frames in decode order. */
-fun TrackConsumer.frames(): Flow<MediaFrame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun TrackConsumer.frames(): Flow<MediaFrame> = pull({ cancel() }) { next() }
 
 /** Stream of decoded frames from one finite media group. */
-fun GroupConsumer.frames(): Flow<MediaFrame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
+fun GroupConsumer.frames(): Flow<MediaFrame> = pull({ cancel() }) { next() }
 
 /** Presentation timestamp of a container-decoded frame. */
 val MediaFrame.timestamp: Duration

@@ -95,6 +95,7 @@ func TestErrorSentinels(t *testing.T) {
 		{"InvalidPattern", ffi.NewMoqErrorInvalidPattern(""), moq.ErrInvalidPattern},
 		{"InvalidEpoch", ffi.NewMoqErrorInvalidEpoch(""), moq.ErrInvalidEpoch},
 		{"UnresolvableBroadcast", ffi.NewMoqErrorUnresolvableBroadcast(""), moq.ErrUnresolvableBroadcast},
+		{"UnsupportedCatalog", ffi.NewMoqErrorUnsupportedCatalog(5), moq.ErrUnsupportedCatalog},
 		{"AlreadyCommitted", ffi.NewMoqErrorAlreadyCommitted(), moq.ErrAlreadyCommitted},
 		{"Log", ffi.NewMoqErrorLog(""), moq.ErrLog},
 		{"Config", ffi.NewMoqErrorConfig(""), moq.ErrConfig},
@@ -128,5 +129,14 @@ func TestExpiredIsAuthError(t *testing.T) {
 	}
 	if !moq.IsAuthError(ffi.NewMoqErrorExpired()) {
 		t.Fatal("an expired request token is not an auth error")
+	}
+}
+
+func TestTrackRevocationIsAuth(t *testing.T) {
+	err := ffi.NewMoqErrorProtocol(ffi.MoqProtocolError{
+		Scope: moq.ErrorScopeStream, Code: 0x3b, Kind: moq.ProtocolKindUnauthorized, Message: "unauthorized",
+	})
+	if !moq.IsAuthError(err) {
+		t.Fatalf("a track revocation is not an auth error: %v", err)
 	}
 }

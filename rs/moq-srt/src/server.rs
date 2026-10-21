@@ -20,11 +20,12 @@
 //! everything and routes by prefix, use [`crate::run`].
 
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant as StdInstant};
 
 use futures::{SinkExt, StreamExt};
 use moq_mux::container::Frame;
 use moq_net::origin;
+use moq_net::time::Instant;
 use srt_tokio::access::{AccessControlList, ConnectionMode, RejectReason, StandardAccessControlEntry};
 use srt_tokio::options::{PacketCount, SocketOptions, StreamId};
 use srt_tokio::{ConnectionRequest, SrtIncoming, SrtListener, SrtSocket};
@@ -582,17 +583,27 @@ pub(crate) async fn serve_subscribe(
 		// Sample the muxer's generation alongside the frame it describes, so a new
 		// program clock re-anchors the pacing rather than mapping the new timeline
 		// through the old anchor.
-		for chunk in egress.push(&frame, subscriber.discontinuity(), Instant::now()) {
-			socket.send(chunk).await?;
+		for (at, payload) in egress.push(&frame, subscriber.discontinuity(), moq_net::time::now()) {
+			socket.send((host_instant(at), payload)).await?;
 		}
 	}
 
-	if let Some(chunk) = egress.flush() {
-		socket.send(chunk).await?;
+	if let Some((at, payload)) = egress.flush() {
+		socket.send((host_instant(at), payload)).await?;
 	}
 	socket.close().await?;
 
 	Ok(())
+}
+
+/// The std instant `at` names, since srt-tokio paces on std's clock. A late payload
+/// keeps its past instant, so TSBPD still sees its spacing from its neighbors.
+fn host_instant(at: Instant) -> StdInstant {
+	let (now, host) = (moq_net::time::now(), StdInstant::now());
+	match at.checked_duration_since(now) {
+		Some(ahead) => host + ahead,
+		None => host.checked_sub(now - at).unwrap_or(host),
+	}
 }
 
 /// Clamp a paced send instant up to the connection's first one, seeding that floor
@@ -655,6 +666,15 @@ mod tests {
 	use bytes::Bytes;
 	use std::time::Duration;
 
+	/// A late payload keeps its spacing on std's clock instead of collapsing onto now.
+	#[test]
+	fn a_late_payload_keeps_its_past_host_instant() {
+		let now = StdInstant::now();
+		let late = host_instant(moq_net::time::now() - Duration::from_millis(100));
+		assert!(late < now, "{late:?} should precede {now:?}");
+		assert!(host_instant(moq_net::time::now() + Duration::from_millis(100)) > now);
+	}
+
 	#[test]
 	fn send_buffer_uses_standard_srt_window() {
 		let mut options = SocketOptions::default();
@@ -670,7 +690,7 @@ mod tests {
 	/// already buffered from an earlier pacing instant.
 	#[test]
 	fn chunker_flushes_before_the_pacing_instant_changes() {
-		let first = Instant::now();
+		let first = moq_net::time::now();
 		let second = first + Duration::from_millis(25);
 		let mut chunker = SrtChunker::default();
 
@@ -721,7 +741,7 @@ mod tests {
 		const MESSAGES: usize = 128;
 		for sequence in 0..MESSAGES {
 			sender
-				.send((Instant::now(), Bytes::copy_from_slice(&sequence.to_be_bytes())))
+				.send((StdInstant::now(), Bytes::copy_from_slice(&sequence.to_be_bytes())))
 				.await
 				.unwrap();
 		}
@@ -761,7 +781,7 @@ mod tests {
 		// Drive pace + clamp exactly like `serve_subscribe`, with controlled `now`s so
 		// the second frame re-anchors (its media outruns wall-clock) and the third is a
 		// reorder whose media trails the new anchor.
-		let start = Instant::now();
+		let start = Instant::ZERO + Duration::from_secs(1);
 		let mut pacer = moq_mux::Pacer::default();
 		let mut floor = None;
 
@@ -785,7 +805,7 @@ mod tests {
 	/// step as a rewind would drag the whole stream onto the reorder's instant.
 	#[test]
 	fn a_reorder_is_not_a_rewind() {
-		let start = Instant::now();
+		let start = Instant::ZERO + Duration::from_secs(1);
 		let mut egress = Egress::default();
 
 		let first = egress.push(&frame(1_400_000, &[1; SRT_PAYLOAD]), 0, start);
@@ -812,7 +832,7 @@ mod tests {
 	fn the_33_bit_wrap_is_not_a_rewind() {
 		// 2^33 ticks of the 90 kHz TS clock, in microseconds: where a PTS wraps.
 		const WRAP: u64 = (1u64 << 33) * 100 / 9;
-		let start = Instant::now();
+		let start = moq_net::time::now();
 		let mut egress = Egress::default();
 
 		let before = egress.push(&frame(WRAP - 25_000, &[1; SRT_PAYLOAD]), 0, start);
@@ -839,7 +859,7 @@ mod tests {
 	#[test]
 	fn a_new_clock_re_anchors_the_pacing() {
 		const SLOT: Duration = Duration::from_millis(25);
-		let start = Instant::now();
+		let start = moq_net::time::now();
 		let mut egress = Egress::default();
 
 		// Ten minutes into the program, on the muxer's 25ms grid.
@@ -871,7 +891,7 @@ mod tests {
 	#[test]
 	fn a_new_clock_flushes_the_partial_chunk_first() {
 		const SLOT: Duration = Duration::from_millis(25);
-		let start = Instant::now();
+		let start = moq_net::time::now();
 		let mut egress = Egress::default();
 
 		// A partial chunk buffered under the first generation, then a new clock paced at

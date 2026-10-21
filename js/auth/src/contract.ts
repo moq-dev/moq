@@ -1,14 +1,29 @@
 /**
- * The JSON a relay POSTs to an auth server per session event, and the grant it answers with.
+ * The JSON a relay POSTs to an auth server per session event, and the grant or refusal it answers with.
  *
- * Mirrors `moq_auth::Request` and `moq_auth::Grant` in the Rust crate: a server written
+ * Mirrors `moq_auth::Request`, `moq_auth::Grant`, and `moq_auth::Refusal` in the Rust crate: a server written
  * in TypeScript validates a request and builds a grant with these schemas.
  *
  * @module
  */
 
+import { Pattern } from "@moq/pattern";
 import * as z from "@zod/mini";
-import { PatternListSchema } from "./claims.ts";
+import { AccessSchema } from "./access.ts";
+
+const PathSchema = z.string().check(
+	z.refine(
+		(path) => {
+			try {
+				Pattern.literal(path);
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		{ message: "invalid path" },
+	),
+);
 
 /** How a session reached the relay; `http` is a one-shot request on the relay's web listener. */
 export const TransportSchema = z.pipe(
@@ -30,10 +45,12 @@ export const TransportSchema = z.pipe(
 		"unknown",
 	),
 );
+/** A value parsed by {@link TransportSchema}. */
 export type Transport = z.infer<typeof TransportSchema>;
 
 /** The single direction a client declared at SETUP. */
 export const RoleSchema = z.enum(["publisher", "subscriber"]);
+/** A value parsed by {@link RoleSchema}. */
 export type Role = z.infer<typeof RoleSchema>;
 
 /**
@@ -52,6 +69,7 @@ export const PeerSchema = z.object({
 	/** The issuer's distinguished name. */
 	issuer: z.string(),
 });
+/** A value parsed by {@link PeerSchema}. */
 export type Peer = z.infer<typeof PeerSchema>;
 
 /** A credential from a moq-transport SETUP's `AUTHORIZATION TOKEN` option, unparsed. */
@@ -63,6 +81,7 @@ export const TokenSchema = z.object({
 		.string()
 		.check(z.regex(/^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?$/)),
 });
+/** A value parsed by {@link TokenSchema}. */
 export type Token = z.infer<typeof TokenSchema>;
 
 /** Byte totals for a session, both directions from the relay's point of view. */
@@ -72,6 +91,7 @@ export const BytesSchema = z.object({
 	/** Bytes the relay received from the peer. */
 	received: z.int().check(z.nonnegative()),
 });
+/** A value parsed by {@link BytesSchema}. */
 export type Bytes = z.infer<typeof BytesSchema>;
 
 const BaseRequestSchema = z.object({
@@ -128,6 +148,7 @@ export const RequestSchema = z.discriminatedUnion("event", [
 		bytes: BytesSchema,
 	}),
 ]);
+/** A value parsed by {@link RequestSchema}. */
 export type Request = z.infer<typeof RequestSchema>;
 
 /**
@@ -139,10 +160,10 @@ export type Request = z.infer<typeof RequestSchema>;
  */
 export const GrantSchema = z
 	.object({
-		/** Patterns the session may publish, relative to the root. */
-		publish: z.optional(PatternListSchema),
-		/** Patterns the session may subscribe to, relative to the root. */
-		subscribe: z.optional(PatternListSchema),
+		/** Publish paths and an optional upload cap, relative to the root. */
+		publish: z.optional(AccessSchema),
+		/** Subscribe paths and an optional download cap, relative to the root. */
+		subscribe: z.optional(AccessSchema),
 		/** The path the patterns are relative to, replacing the dialed one. Absent means the dialed path. */
 		root: z.optional(z.string()),
 		/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
@@ -153,13 +174,15 @@ export const GrantSchema = z
 		revalidate: z.optional(z.int().check(z.positive())),
 		/** An opaque label handed to stats, so traffic can be bucketed. */
 		tier: z.optional(z.string()),
+		/** The literal path this session's stats record under, independent of its root. Absent records under the empty label. */
+		label: z.optional(PathSchema),
 		/** The session is a cluster peer (another relay): what it announces entered the cluster elsewhere. */
 		peer: z.optional(z.boolean()),
 		/** The peer is upstream: the relay never offers it a route learned from another upstream. Requires `peer`. */
 		upstream: z.optional(z.boolean()),
 	})
 	.check(
-		z.refine((grant) => (grant.publish?.length ?? 0) > 0 || (grant.subscribe?.length ?? 0) > 0, {
+		z.refine((grant) => (grant.publish?.path.size ?? 0) > 0 || (grant.subscribe?.path.size ?? 0) > 0, {
 			message: "a grant must name something",
 		}),
 		z.refine((grant) => grant.revalidate === undefined || grant.expires !== undefined, {
@@ -169,4 +192,17 @@ export const GrantSchema = z
 			message: "an upstream grant must be a peer",
 		}),
 	);
+/** A value parsed by {@link GrantSchema}. */
 export type Grant = z.infer<typeof GrantSchema>;
+
+/** The reason and verified attribution an auth server returns with HTTP 403. */
+export const RefusalSchema = z.object({
+	/** Unknown reason strings read as `refused`. */
+	reason: z.pipe(z.string(), z.catch(z.enum(["refused", "forbidden", "expired"]), "refused")),
+	/** A root named by a verified credential, never an unverified request path. */
+	root: z.optional(PathSchema),
+	/** The tier resolved by the decider; absent uses the default tier. */
+	tier: z.optional(z.string()),
+});
+/** A typed refusal returned by an admission decider. */
+export type Refusal = z.infer<typeof RefusalSchema>;

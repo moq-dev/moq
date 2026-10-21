@@ -9,8 +9,11 @@ from moq_ffi import (
     MoqClient,
     MoqClientConfig,
     MoqClientTls,
+    MoqCongestionControl,
     MoqQuicConfig,
     MoqWebSocketConfig,
+    moq_qlog_supported,
+    moq_versions,
 )
 
 from ._records import Backoff, _opt_us, _strs
@@ -18,6 +21,18 @@ from .origin import AnnounceConsumer, AnnouncedBroadcast, OriginConsumer, Origin
 from .publish import BroadcastProducer
 from .session import Session
 from .subscribe import BroadcastConsumer
+
+CongestionControl = MoqCongestionControl
+
+
+def versions() -> list[str]:
+    """The protocol versions offered by default, most preferred first, as ``versions`` spells them."""
+    return moq_versions()
+
+
+def qlog_supported() -> bool:
+    """Whether this build can write qlog traces; ``qlog`` raises `moq.Error` otherwise."""
+    return moq_qlog_supported()
 
 
 class Client:
@@ -51,7 +66,16 @@ class Client:
     :meth:`Session.status` for the connect/disconnect transitions.
 
     ``versions`` restricts the protocol versions offered, most preferred first, spelled
-    like ``"moq-lite-03"``; empty offers every supported version.
+    like ``"moq-lite-03"``; empty offers every supported version, which :func:`versions` lists.
+
+    ``timeout`` bounds one connect, dial and handshake together (zero waits forever).
+    ``race`` and ``resolution_delay`` pace Happy Eyeballs. ``tls_host_name`` verifies the
+    certificate against another name (SNI). ``idle_timeout``, ``keep_alive`` (zero disables
+    it), ``gso``, ``mtu_discovery``, ``congestion_control``, and ``qlog`` (a directory, when
+    :func:`qlog_supported`) tune QUIC. ``None`` keeps the library default throughout.
+
+    ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
+    decrypting a capture; without ``SSLKEYLOGFILE`` the client refuses to build.
     """
 
     def __init__(
@@ -64,9 +88,20 @@ class Client:
         tls_fingerprints: Sequence[str] = (),
         tls_cert: str | None = None,
         tls_key: str | None = None,
+        tls_host_name: str | None = None,
         bind: str | None = None,
         versions: Sequence[str] = (),
+        timeout: timedelta | None = None,
+        race: timedelta | None = None,
+        resolution_delay: timedelta | None = None,
         max_streams: int | None = None,
+        idle_timeout: timedelta | None = None,
+        keep_alive: timedelta | None = None,
+        gso: bool | None = None,
+        mtu_discovery: bool | None = None,
+        congestion_control: CongestionControl | None = None,
+        qlog: str | None = None,
+        keylog: bool = False,
         websocket_enabled: bool | None = None,
         websocket_delay: timedelta | None = None,
         reconnect: bool = True,
@@ -80,6 +115,9 @@ class Client:
         self._config = MoqClientConfig(
             bind=bind,
             versions=_strs(versions, "versions"),
+            timeout_us=_opt_us(timeout, "timeout"),
+            race_us=_opt_us(race, "race"),
+            resolution_delay_us=_opt_us(resolution_delay, "resolution_delay"),
             tls=MoqClientTls(
                 insecure=not tls_verify,
                 roots=_strs(tls_roots, "tls_roots"),
@@ -87,8 +125,18 @@ class Client:
                 fingerprints=_strs(tls_fingerprints, "tls_fingerprints"),
                 cert=tls_cert,
                 key=tls_key,
+                host_name=tls_host_name,
             ),
-            quic=MoqQuicConfig(max_streams=max_streams),
+            quic=MoqQuicConfig(
+                max_streams=max_streams,
+                idle_timeout_us=_opt_us(idle_timeout, "idle_timeout"),
+                keep_alive_us=_opt_us(keep_alive, "keep_alive"),
+                gso=gso,
+                mtu_discovery=mtu_discovery,
+                congestion_control=congestion_control,
+                qlog=qlog,
+                keylog=keylog,
+            ),
             websocket=MoqWebSocketConfig(
                 enabled=websocket_enabled,
                 delay_us=_opt_us(websocket_delay, "websocket_delay"),
@@ -154,7 +202,7 @@ class Client:
         return self._require_consumer().announced(prefix, filter=filter, hidden=hidden)
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
-        """Await announcement of the broadcast at exactly ``path``.
+        """Follow the broadcast at exactly ``path`` across its publisher instances.
 
         See :meth:`OriginConsumer.announced_broadcast`.
         """
@@ -189,9 +237,20 @@ def connect(
     tls_fingerprints: Sequence[str] = (),
     tls_cert: str | None = None,
     tls_key: str | None = None,
+    tls_host_name: str | None = None,
     bind: str | None = None,
     versions: Sequence[str] = (),
+    timeout: timedelta | None = None,
+    race: timedelta | None = None,
+    resolution_delay: timedelta | None = None,
     max_streams: int | None = None,
+    idle_timeout: timedelta | None = None,
+    keep_alive: timedelta | None = None,
+    gso: bool | None = None,
+    mtu_discovery: bool | None = None,
+    congestion_control: CongestionControl | None = None,
+    qlog: str | None = None,
+    keylog: bool = False,
     websocket_enabled: bool | None = None,
     websocket_delay: timedelta | None = None,
     reconnect: bool = True,
@@ -214,9 +273,20 @@ def connect(
         tls_fingerprints=tls_fingerprints,
         tls_cert=tls_cert,
         tls_key=tls_key,
+        tls_host_name=tls_host_name,
         bind=bind,
         versions=versions,
+        timeout=timeout,
+        race=race,
+        resolution_delay=resolution_delay,
         max_streams=max_streams,
+        idle_timeout=idle_timeout,
+        keep_alive=keep_alive,
+        gso=gso,
+        mtu_discovery=mtu_discovery,
+        congestion_control=congestion_control,
+        qlog=qlog,
+        keylog=keylog,
         websocket_enabled=websocket_enabled,
         websocket_delay=websocket_delay,
         reconnect=reconnect,

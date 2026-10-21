@@ -469,3 +469,18 @@ test("lite06 ignores a legacy cold price and writes its saturation ceiling", asy
 	expect(await r.u62()).toBe(12n);
 	expect(await r.u62()).toBe(2n ** 62n - 1n);
 });
+
+test("SYNCED is empty and belongs only to lite-07", async () => {
+	expect(
+		await bytes((w) => encodeAnnounceBroadcast(w, { status: "synced" }, Version.DRAFT_07), Version.DRAFT_07),
+	).toEqual(new Uint8Array([4, 0]));
+	expect(await roundTrip({ status: "synced" }, Version.DRAFT_07)).toEqual({ status: "synced" });
+	await expect(roundTrip({ status: "synced" }, Version.DRAFT_06)).rejects.toThrow();
+});
+
+test("ANNOUNCE_OK omits Active Count only on lite-07", async () => {
+	for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+		const wire = await bytes((w) => new AnnounceOk(HopSchema.parse(1n), 7).encode(w, version), version);
+		expect(wire).toEqual(new Uint8Array(version === Version.DRAFT_06 ? [2, 1, 7] : [1, 1]));
+	}
+});

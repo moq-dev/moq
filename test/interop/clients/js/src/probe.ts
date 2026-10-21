@@ -7,14 +7,14 @@
  * Both are sampled in the same tick, which is what makes their difference a synchronization
  * measurement rather than two unrelated timelines.
  *
- * Everything lands on the element's dataset. Playwright may evaluate in a different JavaScript
- * world, where DOM nodes are shared but custom-element instance fields are not, so a dataset string
- * is the only reading a driver can trust.
+ * Each sample is logged to the console for the driver. Reading the page instead would mean
+ * evaluating in it, and Playwright evaluation grants user activation, which would invalidate the
+ * gesture checks.
  *
  * @module
  */
 import type MoqWatch from "@moq/watch/element";
-import { AUDIBLE_RMS, SAMPLE_MS, type Sample, TONE_FLOOR_DB } from "./contract";
+import { AUDIBLE_RMS, SAMPLE_EVENT, SAMPLE_MS, type Sample, TONE_FLOOR_DB } from "./contract";
 import { resources } from "./instrument";
 import * as Pattern from "./pattern";
 
@@ -82,7 +82,12 @@ function readCanvas(canvas: HTMLCanvasElement | null) {
 		}
 	}
 
-	return { painted, ...Pattern.decode(pixels, canvas.width, canvas.height) };
+	return {
+		painted,
+		frameWidth: canvas.width,
+		frameHeight: canvas.height,
+		...Pattern.decode(pixels, canvas.width, canvas.height),
+	};
 }
 
 /**
@@ -100,7 +105,7 @@ export function watchResources(): void {
 }
 
 /**
- * Start sampling a player onto `el.dataset.interopState`, and mark it ready for a driver to poll.
+ * Start sampling a player to the console, beginning immediately.
  *
  * Returns a function that stops sampling.
  */
@@ -124,6 +129,9 @@ export function attach(el: MoqWatch): () => void {
 			}
 		}
 
+		const ui = document.querySelector("moq-watch-ui")?.shadowRoot;
+		const control = ui?.querySelector<HTMLButtonElement>("button.control[aria-label]");
+		const centerPlay = ui?.querySelector<HTMLButtonElement>("button.center-play");
 		const state: Sample = {
 			seq: seq++,
 			broadcastActive: el.broadcast.out.active.peek() !== undefined,
@@ -133,6 +141,10 @@ export function attach(el: MoqWatch): () => void {
 			...readCanvas(el.querySelector("canvas")),
 			videoFrames: el.video.out.stats.peek()?.frameCount ?? 0,
 			videoTimestamp: el.video.out.timestamp.peek() ?? undefined,
+			videoCodedWidth: el.video.out.frame.peek()?.codedWidth,
+			videoCodedHeight: el.video.out.frame.peek()?.codedHeight,
+			videoTrack: el.catalog?.video?.renditions.video?.track ?? "video",
+			videoCodec: el.catalog?.video?.renditions.video?.codec,
 			hasAudio: el.catalog?.audio !== undefined,
 			audioBytes: el.audio.out.stats.peek()?.bytesReceived ?? 0,
 			audioContext: el.audio.out.context.peek()?.state,
@@ -140,16 +152,17 @@ export function attach(el: MoqWatch): () => void {
 			audioStalled: el.audio.out.stalled.peek(),
 			delay: el.sync.out.delay.peek(),
 			...(analyser ? analyze(analyser, spectrum, wave) : {}),
+			controlLabel: control?.getAttribute("aria-label") ?? undefined,
+			centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,
 			paused: el.paused,
 			pausedAttribute: el.hasAttribute("paused"),
 			resources: resources(),
 		};
 
-		el.dataset.interopState = JSON.stringify(state);
+		console.debug(SAMPLE_EVENT + JSON.stringify(state));
 	};
 
 	sample();
-	el.dataset.interopReady = "";
 
 	const timer = self.setInterval(sample, SAMPLE_MS);
 	return () => self.clearInterval(timer);

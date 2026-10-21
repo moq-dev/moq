@@ -24,12 +24,19 @@ pub enum Error {
 
 	/// An existing `.info` has a different priority.
 	#[error("priority {existing} does not match {intended}")]
-	Priority { existing: u8, intended: u8 },
+	Priority {
+		/// The priority already recorded.
+		existing: u8,
+		/// The priority the caller wanted to record.
+		intended: u8,
+	},
 
 	/// An existing `.info` has a different timescale, `None` when untimed.
 	#[error("timescale {existing:?} does not match {intended:?}")]
 	TimescaleMismatch {
+		/// The timescale already recorded.
 		existing: Option<u64>,
+		/// The timescale the caller wanted to record.
 		intended: Option<u64>,
 	},
 
@@ -41,7 +48,9 @@ pub enum Error {
 		epoch_text(existing)
 	)]
 	EpochMismatch {
+		/// The epoch already recorded.
 		existing: Option<moq_net::Epoch>,
+		/// The epoch of the source being recorded now.
 		intended: Option<moq_net::Epoch>,
 	},
 

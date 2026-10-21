@@ -39,11 +39,13 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     for received groups: with arrival order immediate and the judgments
     gated, the whole moq-net suite passes except the two tests that assert
     the old design. Consequences:
-    - `largest()` stops reporting a frameless newest group as (N, 0) and
-      reports the last frame that exists. This touches
-      [Live largest location](/quest/m1/largest.md); align with it there.
+    - The cache's internal largest stops reporting a frameless newest group
+      as (N, 0) and reports the last frame that exists. The public
+      `largest()` stream (#5725) deliberately does not: the maintainer
+      decided on 2026-10-17 that it counts every sequence seen, an empty
+      group at its head, so a late group below it never moves it.
     - Regression guard: `rejoin_waits_for_the_answers_first_frame`
-      (`rs/moq-net/tests/rejoin.rs`, fails when the judgments count a
+      (`rs/moq-net/tests/integration/rejoin.rs`, fails when the judgments count a
       frameless group) and
       `revealing_a_presented_group_wakes_a_read_it_expires` stay;
       `a_withheld_group_holds_the_end` and
@@ -62,7 +64,7 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     it).
   - ✅ Make one open frame per group a compile-time guarantee. Drop public
     `Clone` from `group::Producer`; the model and sessions keep a
-    crate-private duplicate. The chunked writer is owned:
+    crate-private non-writing handle. The chunked writer is owned:
     `group::Producer::create_frame(self, info) -> Result<frame::Producer>`
     aborts the group with the error on failure (an oversized frame, a
     timestamp mismatch, or a closed group are bugs or protocol errors),
@@ -70,10 +72,16 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     back, and `frame.group()` gives read access (demand, info, closed)
     while the frame is open. `write_frame(&mut self)` stays for one-shot
     frames. The borrowing `create_frame` and `ProducerOwned` go, with the
-    stale "caller's promise" doc; `FrameOpen` stays only as a backstop for
-    crate-internal duplicates. `track::Producer` keeps `Clone`: several
+    stale "caller's promise" doc. `track::Producer` keeps `Clone`: several
     writers creating groups is legitimate, and `claim_sequence` already
     refuses a duplicate sequence.
+    - #6020 dropped `Clone`, added the crate-private non-writing
+      `group::Handle`, and deleted `FrameOpen` (decided 2026-10-18, #5892),
+      so the backstop above goes. This item keeps the
+      public owned chunked writer. Its callers that hold a
+      `&mut group::Producer` (hang's `Frame::write_to`, moq-mux's LOC and
+      fMP4 encoders) cannot call a consuming `create_frame(self)`; weigh
+      that before landing it.
     - Compile probe at dd95d5804: 26 `group::Producer` clone sites, 16
       model-internal and 7 in the sessions (kept by the crate-private
       duplicate), and 3 outside the crate (2 in
@@ -108,13 +116,17 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - **Received end** (`track::Producer::finish_at_pending`, `set_tail_pending`;
   both subscribers). Without it, a custom subscriber over unordered streams
   ends readers at a hole. **Decision**:
-  - Public after [Tail arrivals](/quest/m1/tail-arrivals.md), as one call
-    that returns a handle the session settles when its tail is in.
+  - Public after Tail arrivals, as one call that returns a handle the
+    session settles when its tail is in.
   - Keep it private.
   - ✅ Public after Tail arrivals, with the shape left to that quest. Once
     the model records arrivals per track bounded by the subscription's
     grace, it may own the grace timer itself, so a plain `finish_at` on a
     received track could be enough and no settle handle is needed.
+  - Tail arrivals landed the record (`TrackState::arrivals`) without a
+    timer: the model folds a gap only on a write, so the session still
+    settles the tail with `set_tail_pending(false)`. The shape is this
+    quest's to settle.
 - **Session end** (`track::Producer::close`, `abort_session`; both
   subscribers): public. Fold `abort_session` into the public `abort` (abort
   open groups too) unless the implementer finds a reader-visible difference,
@@ -126,6 +138,16 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   must be set before any reader sees the track, so it lives on
   `track::Request` (for example a pre-accept `request_start(floor)`), with
   the public `start_at` resolving it.
+  Decided 2026-10-19 by the maintainer (#5862): the same shape must let a
+  lazily served relay track be accepted with content it already holds, so
+  no reader observes it accepted but empty and IETF SUBSCRIBE_OK never omits
+  Largest Location. Accept it idle (the `Feed::Idle` gate `poll_live`
+  already waits on), let the caller write its retained groups, then go
+  live. Not a closure: #5862's `accept_with(info, |producer| …)` is
+  rejected, as callback parameters are. Fix the IETF subscriber's own
+  TRACK_STATUS `accept` → `set_idle` race with it. Regression test: accept,
+  replay a retained group on the same task, and SUBSCRIBE_OK carries
+  Largest Location on a multi-thread runtime over many runs.
 - **Idle copy** (`track::Producer::set_idle`, `set_live`, `is_live`,
   `idle_newest`, `track::IDLE_LINGER`, `poll_past`; lite subscriber,
   `set_idle`, `set_live`, and `poll_past` also IETF). They keep a lingering copy's cache from serving stale groups
@@ -148,6 +170,11 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   `track::TrackState`, `track::FetchOutcome`, `finish_track_at`,
   `poll_landed`): moved to [the deferred quest](/quest/m1/public-model/deferred.md),
   which waits on Model ranges.
+- `track::Producer::received` (lite and IETF subscribers; JS
+  `hooks.receiveTrack`) marks a session's copy so the local-write rewind
+  check skips it (#5803). It goes public with the other ingest calls, unless
+  [time provenance](/quest/m1/lite-time-provenance.md) makes received
+  timestamps checkable first.
 - Passthrough, stay private and marked: `group::Producer::wire`,
   `set_wire`, `mark_gap`, `set_end_object`, `group::Wire`, the `object` and
   `datagram` modules, `track::Producer::insert_wire_datagram`,
@@ -178,10 +205,9 @@ Tests: each public call gets a mock-time test in its language, and the
 built-in subscribers move onto the public calls, so their existing suites
 cover the behavior.
 
-## Required
+## Closes
 
-- [Narrow the model before it goes public](/quest/m1/public-model/narrow.md) - its visibility rewrite and marker lint guard every model API this child edits
-- [Tail arrivals](/quest/m1/tail-arrivals.md) - settles the received-end semantics before they become public
+- [#5862](https://github.com/moq-dev/moq/issues/5862) - no way to accept a track::Request with content
 
 ## Related
 

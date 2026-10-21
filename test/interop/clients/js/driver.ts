@@ -19,7 +19,6 @@ import {
 	finishTraces,
 	launch,
 	open,
-	type PlayerState,
 	POLL_INTERVAL_MS,
 	pageUrl,
 	pause,
@@ -32,6 +31,7 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
+import type { Sample } from "./src/contract";
 
 /** Remove the page's players, which closes their sessions, and wait until every transport has. */
 async function closeSessions(page: Page): Promise<void> {
@@ -78,7 +78,7 @@ if (
 
 const PAUSE_STABILITY_MS = 750;
 
-async function waitForStablePause(page: Page, errors: BrowserErrors, deadline: number): Promise<PlayerState> {
+async function waitForStablePause(page: Page, errors: BrowserErrors, deadline: number): Promise<Sample> {
 	let previous = await readPlayerState(page);
 	let stableSince = Date.now();
 	while (Date.now() < deadline) {
@@ -123,7 +123,7 @@ try {
 		const start = Date.now();
 		const startupDeadline = start + timeoutMs;
 		let reloaded = false;
-		let playing: PlayerState | undefined;
+		let playing: Sample | undefined;
 		while (Date.now() < startupDeadline) {
 			throwPageErrors(errors);
 			const state = await readPlayerState(page);

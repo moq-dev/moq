@@ -1,7 +1,7 @@
 //! A thread-per-core io_uring worker for the native MoQ stack.
 //!
 //! One [`Worker`] per pinned thread. It owns a `SINGLE_ISSUER | DEFER_TASKRUN |
-//! COOP_TASKRUN` ring, a userspace timer heap, a local task set, and the UDP
+//! COOP_TASKRUN` ring, a userspace timer queue, a local task set, and the UDP
 //! sockets bound through it. The caller owns the thread loop: drive everything
 //! with [`Worker::block_on`], spawn extra `!Send` tasks through [`Handle`], and
 //! wake the worker from other threads through any [`std::task::Waker`] it hands
@@ -16,7 +16,8 @@
 //! serves many connections on one socket (demuxed by connection id, dials
 //! included), each a [`quic::Connection`] wrapped by [`transport::Session`],
 //! so `moq_net::Client::connect_lite` and `Server::accept_lite` run real
-//! moq-lite sessions on the worker. The socket is the identity: whatever is
+//! moq-lite sessions on the worker, and [`transport::Local`] lets the
+//! `Send`-bounded moq-transport paths run there too. The socket is the identity: whatever is
 //! built on it runs on the worker that adopted it, and a socket adopted as a
 //! member of a steered reuseport group ([`udp::Bound`]) issues connection ids
 //! that steer back to it. [`Handle::run`] supplies time and schedules driver
@@ -32,10 +33,13 @@
 //!
 //! Requires Linux 6.12; [`Worker::new`] refuses older kernels with a legible
 //! error instead of degrading. The crate compiles to nothing off Linux.
+
+#![warn(missing_docs)]
 // Off Linux the crate compiles to nothing, so these doc links have no target.
 #![cfg_attr(not(target_os = "linux"), allow(rustdoc::broken_intra_doc_links))]
 #![cfg(target_os = "linux")]
 
+mod clock;
 mod error;
 pub mod metrics;
 mod park;

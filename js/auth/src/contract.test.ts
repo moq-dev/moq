@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { GrantSchema, RequestSchema, TokenSchema } from "./contract.ts";
+import { GrantSchema, RefusalSchema, RequestSchema, TokenSchema } from "./contract.ts";
 
 // The fixtures below are what the Rust `moq_auth::Request` and `Grant` serialize to,
 // so a server written against these schemas reads what a relay sends.
@@ -109,8 +109,9 @@ test("a grant round trips and is validated", () => {
 		expires: 4102444800,
 		revalidate: 60,
 		tier: "websocket",
+		label: "project/key/123",
 	});
-	expect(grant.publish).toEqual(["alice/**"]);
+	expect(grant.publish?.toJSON()).toEqual(["alice/**"]);
 
 	expect(() => GrantSchema.parse({})).toThrow(/name something/);
 	expect(() => GrantSchema.parse({ publish: ["**"], revalidate: 60 })).toThrow(/must expire/);
@@ -119,4 +120,23 @@ test("a grant round trips and is validated", () => {
 	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800, revalidate: 0.5 })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800.5 })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["a/**/b/**"] })).toThrow();
+	expect(() => GrantSchema.parse({ publish: ["**"], label: "project/*" })).toThrow(/invalid path/);
+});
+
+test("an auth endpoint grant accepts a capped role", () => {
+	const grant = GrantSchema.parse({ publish: { path: "alice/**", rate: 8_000_000 } });
+	expect(grant).toHaveProperty("publish.rate", 8_000_000);
+});
+
+test("refusal reasons preserve verified attribution and accept future reasons", () => {
+	for (const reason of ["refused", "forbidden", "expired"] as const) {
+		expect(RefusalSchema.parse({ reason, root: "tenant", tier: "edge" })).toEqual({
+			reason,
+			root: "tenant",
+			tier: "edge",
+		});
+		expect(RefusalSchema.parse({ reason })).toEqual({ reason });
+	}
+	expect(RefusalSchema.parse({ reason: "future" })).toEqual({ reason: "refused" });
+	expect(RefusalSchema.safeParse({ reason: 42 }).success).toBe(false);
 });

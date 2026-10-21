@@ -1,6 +1,6 @@
 import { ProtocolViolation, SessionCode } from "../error.ts";
 import * as Varint from "../varint.ts";
-import type { SetupOptions } from "./parameters.ts";
+import type { Parameters, SetupOptions } from "./parameters.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /**
@@ -51,13 +51,6 @@ export interface Token {
  * @internal
  */
 export const TOKEN_OUT_OF_BAND = 0x0n;
-
-/**
- * Token Type 1: a Common Access Token (draft-ietf-moq-c4m).
- *
- * @internal
- */
-export const TOKEN_CAT = 0x1n;
 
 /** Draft-17 replaced QUIC's two-bit-length varint with a leading-ones one. */
 function leadingOnes(version: IetfVersion): boolean {
@@ -187,6 +180,20 @@ function decode(raw: Uint8Array, version: IetfVersion, setup: boolean): Token {
  * @internal
  */
 export function tokenIntoSetup(params: SetupOptions, token: Token, version: IetfVersion) {
+	params.setBytes(AUTHORIZATION_TOKEN, encode(token, version));
+}
+
+/**
+ * Carry `value`, a token in a format agreed out of band, on a request, by value.
+ *
+ * @internal
+ */
+export function tokenIntoRequest(params: Parameters, value: Uint8Array, version: IetfVersion) {
+	params.bytes.set(AUTHORIZATION_TOKEN, encode({ kind: TOKEN_OUT_OF_BAND, value }, version));
+}
+
+/** A Token structure by value: USE_VALUE, its type, then the token. */
+function encode(token: Token, version: IetfVersion): Uint8Array {
 	const varint = (v: bigint) => (leadingOnes(version) ? Varint.encodeLeadingOnes(v) : Varint.encode(v));
 	const aliasType = varint(USE_VALUE);
 	const kind = varint(token.kind);
@@ -195,5 +202,5 @@ export function tokenIntoSetup(params: SetupOptions, token: Token, version: Ietf
 	out.set(aliasType, 0);
 	out.set(kind, aliasType.length);
 	out.set(token.value, aliasType.length + kind.length);
-	params.setBytes(AUTHORIZATION_TOKEN, out);
+	return out;
 }

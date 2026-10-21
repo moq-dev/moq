@@ -1,11 +1,25 @@
 use std::{
+	cell::{Cell, RefCell},
 	collections::BTreeMap,
-	sync::{Arc, Mutex},
-	task::Poll,
+	marker::PhantomData,
+	sync::{
+		Arc, Mutex,
+		atomic::{AtomicU64, Ordering},
+	},
+	task::{Context, Poll},
 	time::Duration,
 };
 
 use crate::Instant;
+
+thread_local! {
+	/// The queue [`Deadlines::enter`] made this thread's ambient clock.
+	static ENTERED: RefCell<Option<Deadlines>> = const { RefCell::new(None) };
+	/// The live [`Entered`] guards on this thread, innermost last.
+	static GUARDS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+	/// The id the next [`Entered`] guard on this thread takes.
+	static NEXT_GUARD: Cell<u64> = const { Cell::new(0) };
+}
 
 /// A deadline queue for caller-driven code, advanced only by the instants it is handed.
 ///
@@ -13,11 +27,24 @@ use crate::Instant;
 /// [`advance`](Self::advance) with `now`, polls its work (which arms and polls
 /// [`Deadline`]s), then [`park`](Self::park)s, returning the earliest deadline as
 /// the instant it next wants to be polled by. Clones share the queue.
+///
+/// A runtime that reads the host clock itself, such as an io_uring worker, also
+/// [`enter`](Self::enter)s its queue to make it the thread's ambient clock.
 #[derive(Clone)]
-pub struct Deadlines(Arc<Mutex<State>>);
+pub struct Deadlines(Arc<Queue>);
+
+struct Queue {
+	/// The latest instant the queue was handed, readable without the lock. Only
+	/// written under it, so a reader holding the lock sees the instant it moved to.
+	now: AtomicU64,
+	state: Mutex<State>,
+	/// The clock installed where the queue was made, whose wall time it reads
+	/// while entered, so its wall and instants come from one clock.
+	#[cfg(feature = "manual")]
+	installed: Option<crate::Installed>,
+}
 
 struct State {
-	now: Instant,
 	/// Orders deadlines armed for the same instant by when they were armed.
 	next: u64,
 	armed: BTreeMap<(Instant, u64), Arc<Mutex<kio::WaiterList>>>,
@@ -26,15 +53,25 @@ struct State {
 	owner: kio::WaiterList,
 }
 
+impl Queue {
+	fn now(&self) -> Instant {
+		Instant::from_nanos(self.now.load(Ordering::Acquire))
+	}
+}
+
 impl Deadlines {
 	/// A queue at `now`.
 	pub fn new(now: Instant) -> Self {
-		Self(Arc::new(Mutex::new(State {
-			now,
-			next: 0,
-			armed: BTreeMap::new(),
-			owner: kio::WaiterList::new(),
-		})))
+		Self(Arc::new(Queue {
+			now: AtomicU64::new(now.to_nanos()),
+			state: Mutex::new(State {
+				next: 0,
+				armed: BTreeMap::new(),
+				owner: kio::WaiterList::new(),
+			}),
+			#[cfg(feature = "manual")]
+			installed: crate::installed::current(),
+		}))
 	}
 
 	/// Move to `now`, waking every deadline at or before it, in arming order.
@@ -60,14 +97,14 @@ impl Deadlines {
 
 	fn advance_to(&self, now: Instant, polling: bool) {
 		let due = {
-			let mut state = self.0.lock().unwrap();
-			if now < state.now {
+			let mut state = self.0.state.lock().unwrap();
+			if now < self.0.now() {
 				// Unlocked first: a poisoned queue would turn every armed deadline's
 				// drop into a second panic, aborting the unwind.
 				drop(state);
 				panic!("time moved backwards");
 			}
-			state.now = now;
+			self.0.now.store(now.to_nanos(), Ordering::Release);
 			if polling {
 				drop(state.owner.take());
 			}
@@ -88,25 +125,107 @@ impl Deadlines {
 	/// one is armed. Ends the poll [`Self::advance`] began: one lock, so a deadline
 	/// armed elsewhere is either reported here or wakes the owner.
 	pub fn park(&self, waiter: &kio::Waiter) -> Option<Instant> {
-		let mut state = self.0.lock().unwrap();
+		let mut state = self.0.state.lock().unwrap();
 		waiter.register(&mut state.owner);
 		state.armed.first_key_value().map(|((at, _), _)| *at)
 	}
 
 	/// The earliest armed deadline, without registering for changes.
 	pub fn next(&self) -> Option<Instant> {
-		self.0.lock().unwrap().armed.first_key_value().map(|((at, _), _)| *at)
+		self.0
+			.state
+			.lock()
+			.unwrap()
+			.armed
+			.first_key_value()
+			.map(|((at, _), _)| *at)
 	}
 
 	/// The latest instant the queue was handed.
 	pub fn now(&self) -> Instant {
-		self.0.lock().unwrap().now
+		self.0.now()
 	}
+
+	/// Make this queue the calling thread's ambient clock until the guard drops.
+	///
+	/// While entered, [`now`](crate::now) reads the instant last handed to
+	/// [`advance`](Self::advance), and [`sleep`](crate::sleep) and the other ambient
+	/// timers arm [`Deadline`]s here. Wall time comes from the clock installed on the
+	/// runtime the queue was made in, if any, and otherwise from the clock the thread
+	/// would read. For a runtime that advances the queue from its own reading of the
+	/// clock, so nothing it runs reads that clock again.
+	pub fn enter(&self) -> Entered {
+		let previous = ENTERED.with(|entered| entered.replace(Some(self.clone())));
+		let id = NEXT_GUARD.with(|next| next.replace(next.get() + 1));
+		GUARDS.with(|guards| guards.borrow_mut().push(id));
+		Entered {
+			previous,
+			id,
+			thread: PhantomData,
+		}
+	}
+}
+
+/// Keeps a [`Deadlines`] queue the thread's ambient clock; dropping it restores the one before.
+///
+/// Guards must drop in reverse order of entering. Dropping one while a later
+/// guard is still live restores the clock from before it, retires the later
+/// guards (their drops do nothing), and panics.
+#[must_use = "the queue stops being the ambient clock when this drops"]
+pub struct Entered {
+	previous: Option<Deadlines>,
+	/// This guard's entry in the thread's live guards.
+	id: u64,
+	/// Restores the thread it was entered on.
+	thread: PhantomData<*const ()>,
+}
+
+impl Drop for Entered {
+	fn drop(&mut self) {
+		let retired_later = GUARDS.with(|guards| {
+			let mut guards = guards.borrow_mut();
+			// Gone already: an outer guard dropped out of order retired this one.
+			let index = guards.iter().position(|id| *id == self.id)?;
+			let later = guards.len() - index - 1;
+			guards.truncate(index);
+			Some(later)
+		});
+		let Some(later) = retired_later else { return };
+		// The state is repaired before any panic, so a caught panic leaves no
+		// retired queue as the ambient clock.
+		let previous = self.previous.take();
+		ENTERED.with(|entered| *entered.borrow_mut() = previous);
+		if later > 0 && !std::thread::panicking() {
+			panic!("an Entered guard dropped while a later one is still live");
+		}
+	}
+}
+
+impl std::fmt::Debug for Entered {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Entered").finish_non_exhaustive()
+	}
+}
+
+/// The instant of the queue entered on this thread, if any.
+pub(crate) fn now() -> Option<Instant> {
+	ENTERED.with(|entered| entered.borrow().as_ref().map(Deadlines::now))
+}
+
+/// The installed clock behind the queue entered on this thread, if any.
+#[cfg(feature = "manual")]
+pub(crate) fn installed() -> Option<crate::Installed> {
+	ENTERED.with(|entered| entered.borrow().as_ref().and_then(|queue| queue.0.installed.clone()))
+}
+
+/// The queue entered on this thread, if any.
+pub(crate) fn entered() -> Option<Deadlines> {
+	ENTERED.with(|entered| entered.borrow().clone())
 }
 
 /// A queue the simulator keeps in step without keeping it alive.
 #[cfg(feature = "sim")]
-pub(crate) struct WeakDeadlines(std::sync::Weak<Mutex<State>>);
+pub(crate) struct WeakDeadlines(std::sync::Weak<Queue>);
 
 #[cfg(feature = "sim")]
 impl WeakDeadlines {
@@ -116,6 +235,33 @@ impl WeakDeadlines {
 
 	pub(crate) fn upgrade(&self) -> Option<Deadlines> {
 		self.0.upgrade().map(Deadlines)
+	}
+}
+
+/// The [`Deadline`] behind an ambient [`Sleep`](crate::Sleep) on an entered queue,
+/// with the waiter its polls register.
+pub(crate) struct Timer {
+	deadline: Deadline,
+	park: kio::Park,
+}
+
+impl Timer {
+	pub(crate) fn new(deadlines: &Deadlines, at: Option<Instant>) -> Self {
+		let mut deadline = Deadline::new(deadlines);
+		deadline.set(at);
+		Self {
+			deadline,
+			park: kio::Park::default(),
+		}
+	}
+
+	pub(crate) fn set(&mut self, at: Option<Instant>) {
+		self.deadline.set(at);
+	}
+
+	pub(crate) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		let waiter = self.park.hold(cx);
+		self.deadline.poll(waiter)
 	}
 }
 
@@ -161,13 +307,13 @@ impl Deadline {
 		if self.at == at {
 			return;
 		}
-		let mut state = self.deadlines.0.lock().unwrap();
+		let mut state = self.deadlines.0.state.lock().unwrap();
 		if let Some(key) = self.key.take() {
 			state.armed.remove(&key);
 		}
 		self.at = at;
 		let Some(at) = at else { return };
-		if at <= state.now {
+		if at <= self.deadlines.0.now() {
 			// Already reached: wake whoever is parked on it, and the owner in case
 			// nobody polled it yet, so it fires now.
 			let mut owner = state.owner.take();
@@ -199,12 +345,20 @@ impl Deadline {
 		// Register under the queue's lock, so an `advance` past `at` either happened
 		// first (and we see it) or wakes this registration. A disarmed deadline
 		// registers too, so arming it for a reached instant wakes its poller.
-		let state = self.deadlines.0.lock().unwrap();
-		if self.at.is_some_and(|at| state.now >= at) {
+		let _state = self.deadlines.0.state.lock().unwrap();
+		if self.at.is_some_and(|at| self.deadlines.0.now() >= at) {
 			return Poll::Ready(());
 		}
 		waiter.register(&mut self.waiters.lock().unwrap());
 		Poll::Pending
+	}
+}
+
+impl kio::Task for Deadline {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		self.poll(waiter)
 	}
 }
 
@@ -222,6 +376,7 @@ impl std::fmt::Debug for Deadline {
 
 #[cfg(test)]
 mod tests {
+	use std::future::Future;
 	use std::sync::atomic::{AtomicUsize, Ordering};
 
 	use super::*;
@@ -485,5 +640,95 @@ mod tests {
 		assert!(moved.is_err());
 		drop(deadline);
 		assert_eq!(deadlines.next(), None);
+	}
+
+	/// An entered queue is the thread's ambient clock: `now` reads the instant it was
+	/// handed, and the ambient timers arm on it and fire only as it advances.
+	#[test]
+	fn an_entered_queue_is_the_ambient_clock() {
+		let start = Instant::ZERO + Duration::from_secs(10);
+		let deadlines = Deadlines::new(start);
+		let entered = deadlines.enter();
+		assert_eq!(crate::now(), start);
+
+		let mut sleep = std::pin::pin!(crate::sleep(Duration::from_secs(1)));
+		assert_eq!(deadlines.next(), Some(start + Duration::from_secs(1)));
+		let (wakes, waiter) = counter();
+		let waker = waiter.waker().clone();
+		let mut cx = Context::from_waker(&waker);
+		assert!(sleep.as_mut().poll(&mut cx).is_pending());
+
+		deadlines.advance(start + Duration::from_millis(999));
+		assert_eq!(crate::now(), start + Duration::from_millis(999));
+		assert_eq!(wakes.count.load(Ordering::SeqCst), 0);
+		deadlines.advance(start + Duration::from_secs(1));
+		assert_eq!(wakes.count.load(Ordering::SeqCst), 1, "the sleep was not woken");
+		assert!(sleep.as_mut().poll(&mut cx).is_ready());
+
+		drop(entered);
+		assert!(crate::now() > start + Duration::from_secs(1), "the host clock is back");
+	}
+
+	/// A sleep that never fires leaves nothing armed for the queue's owner to park on.
+	#[test]
+	fn a_never_firing_sleep_arms_nothing() {
+		let deadlines = Deadlines::new(Instant::ZERO);
+		let _entered = deadlines.enter();
+		let mut sleep = crate::sleep(Duration::MAX);
+		assert_eq!(deadlines.next(), None);
+		sleep.reset(Instant::ZERO + Duration::from_secs(1));
+		assert_eq!(deadlines.next(), Some(Instant::ZERO + Duration::from_secs(1)));
+	}
+
+	/// Entering nests, and dropping a guard restores the queue entered before it.
+	#[test]
+	fn entering_nests() {
+		let outer = Deadlines::new(Instant::ZERO + Duration::from_secs(1));
+		let inner = Deadlines::new(Instant::ZERO + Duration::from_secs(2));
+		let _outer = outer.enter();
+		{
+			let _inner = inner.enter();
+			assert_eq!(crate::now(), Instant::ZERO + Duration::from_secs(2));
+		}
+		assert_eq!(crate::now(), Instant::ZERO + Duration::from_secs(1));
+		std::thread::spawn(|| {
+			assert!(
+				crate::now() > Instant::ZERO + Duration::from_secs(2),
+				"other threads keep their own clock"
+			)
+		})
+		.join()
+		.unwrap();
+	}
+
+	/// Dropping an outer guard while an inner one is live refuses, rather than let
+	/// the inner guard's drop bring the outer queue back.
+	#[test]
+	#[should_panic(expected = "an Entered guard dropped while a later one is still live")]
+	fn entered_guards_drop_in_order() {
+		let outer = Deadlines::new(Instant::ZERO);
+		let inner = Deadlines::new(Instant::ZERO);
+		let outer = outer.enter();
+		let _inner = inner.enter();
+		drop(outer);
+	}
+
+	/// A caught out-of-order drop leaves the clock from before the outer guard,
+	/// and the retired inner guard's drop does not bring a queue back.
+	#[test]
+	fn a_caught_out_of_order_drop_restores_the_clock() {
+		let outer = Deadlines::new(Instant::ZERO + Duration::from_secs(1));
+		let inner = Deadlines::new(Instant::ZERO + Duration::from_secs(2));
+		let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let outer = outer.enter();
+			let _inner = inner.enter();
+			drop(outer);
+		}));
+		assert!(result.is_err(), "the out-of-order drop did not panic");
+		assert!(super::entered().is_none(), "a dropped queue is still the ambient clock");
+		assert!(
+			crate::now() > Instant::ZERO + Duration::from_secs(2),
+			"the host clock is back"
+		);
 	}
 }

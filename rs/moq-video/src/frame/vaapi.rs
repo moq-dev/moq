@@ -27,7 +27,8 @@ use moq_vaapi::vpp::Processor;
 use moq_vaapi::{Matrix, VA_FOURCC_NV12};
 
 use super::{DmaBuf, DmaBufExport, DmaBufFrame, DmaBufLayout, DmaBufPlane, DrmFormat, I420};
-use crate::{Color, Error, Size};
+use crate::color::{self, Color};
+use crate::{Error, Size};
 
 /// Environment variable naming the render node, such as `/dev/dri/renderD129`, that [`device`] returns.
 const DEVICE_ENV: &str = "MOQ_VAAPI_DEVICE";
@@ -96,31 +97,27 @@ pub(crate) fn import(buffer: &DmaBuf) -> Result<(VaapiDmaBuf, DmaBufExport), Err
 			})
 			.collect(),
 		fd,
-		color: buffer.color().map(color),
+		color: buffer.color().map(color).transpose()?,
 	};
 	Ok((descriptor, export))
 }
 
-/// Returns the `moq-vaapi` color space matching `color`.
-pub(crate) fn color(color: Color) -> moq_vaapi::Color {
-	match color {
-		Color::Bt601Limited => moq_vaapi::Color {
-			matrix: Matrix::Bt601,
-			full_range: false,
-		},
-		Color::Bt601Full => moq_vaapi::Color {
-			matrix: Matrix::Bt601,
-			full_range: true,
-		},
-		Color::Bt709Limited => moq_vaapi::Color {
-			matrix: Matrix::Bt709,
-			full_range: false,
-		},
-		Color::Bt709Full => moq_vaapi::Color {
-			matrix: Matrix::Bt709,
-			full_range: true,
-		},
-	}
+/// Returns the `moq-vaapi` matrix and range of `color`, which is all its video
+/// processor reads.
+///
+/// # Errors
+///
+/// Fails for a matrix `moq-vaapi` cannot name.
+pub(crate) fn color(color: Color) -> Result<moq_vaapi::Color, Error> {
+	let matrix = match color.matrix {
+		color::Matrix::Bt601 => Matrix::Bt601,
+		color::Matrix::Bt709 => Matrix::Bt709,
+		other => return Err(Error::Unsupported(format!("VA-API has no {other:?} matrix"))),
+	};
+	Ok(moq_vaapi::Color {
+		matrix,
+		full_range: color.range == color::Range::Full,
+	})
 }
 
 /// Returns whether `format` is packed RGB, which carries no YUV matrix of its own.
@@ -168,9 +165,12 @@ pub(crate) fn resize(buffer: &DmaBuf, size: Size) -> Result<DmaBuf, Error> {
 	let (input_space, output_space, label) = match is_rgb(buffer.format()) {
 		true => {
 			let inferred = Color::infer(Size::new(buffer.width(), buffer.height()));
-			(None, Some(color(inferred)), Some(inferred))
+			(None, Some(color(inferred)?), Some(inferred))
 		}
-		false => (buffer.color().map(color), buffer.color().map(color), buffer.color()),
+		false => {
+			let space = buffer.color().map(color).transpose()?;
+			(space, space, buffer.color())
+		}
 	};
 
 	let exported = PROCESSOR.with(|slot| -> Result<ExportedFrame, Error> {

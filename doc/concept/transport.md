@@ -71,13 +71,19 @@ records, with no datagrams. The application supplies signaling and ICE and
 keeps ownership of the peer connection; closing the transport closes only its
 channel. SCTP ordering means one lost packet can hold back every stream.
 
+Native peers use `moq-tokio`'s `webrtc` feature, which runs its own ICE agent:
+host candidates on every interface, server-reflexive candidates from the STUN
+servers it is given, and mDNS resolution of a browser's `.local` candidates.
+The application still carries the offer, answer, and candidates; the offering
+peer connects as the MoQ client and the answering peer accepts.
+
 ## iroh (peer-to-peer, experimental)
 
 [iroh](https://www.iroh.computer/) swaps "dial a hostname" for "dial a public
 key". Two native MoQ endpoints on the same network can exchange media with no
 relay, no DNS, and no certificate authority: the endpoint's key is its address
 and its TLS identity. Build `moq` from source with
-`cargo build -p moq-cli --release --features iroh,play` for native playback;
+`cargo build -p moq-cli --release --features iroh,play,openh264` for native playback;
 published binaries, Docker images, and the Nix package leave iroh out.
 
 ```bash

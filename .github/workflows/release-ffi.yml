@@ -19,10 +19,6 @@ on:
         description: "Generate and upload the bindings for `language`"
         type: boolean
         default: true
-      default-features:
-        description: "Build moq-ffi with its default features (audio and video)"
-        type: boolean
-        default: true
       reuse-native:
         description: "Consume the coordinator's native libraries and bindings"
         type: boolean
@@ -89,8 +85,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # No Rust cache: its entry would evict the store every pull request
-      # restores from the 10 GB budget. See cache.yml.
+      # No Rust cache: shipped binaries compile from source rather than from
+      # whatever the shared R2 cache holds.
 
       - name: Install cross-compilation tools (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -109,18 +105,13 @@ jobs:
         env:
           BUILD_TARGET: ${{ matrix.target }}
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-          DEFAULT_FEATURES: ${{ inputs.default-features }}
           # Set iOS deployment target to avoid ___chkstk_darwin linker errors.
           IPHONEOS_DEPLOYMENT_TARGET: ${{ contains(matrix.target, 'apple-ios') && '16.0' || '' }}
         run: |
-          args=(--target "$BUILD_TARGET" --version "$BUILD_VERSION" --output dist)
-          if [[ "$DEFAULT_FEATURES" == false ]]; then
-            args+=(--no-default-features)
-          fi
-          just rs package-ffi "${args[@]}"
+          just rs package-ffi --target "$BUILD_TARGET" --version "$BUILD_VERSION" --output dist
 
       - name: Upload lib
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ inputs.language }}-lib-${{ matrix.target }}
           # Only the lib/ contents, so a caller's download is <target>/<libname>.
@@ -148,8 +139,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      # No Rust cache: its entry would evict the store every pull request
-      # restores from the 10 GB budget. See cache.yml.
+      # No Rust cache: shipped binaries compile from source rather than from
+      # whatever the shared R2 cache holds.
 
       # Go uses a third-party generator; build.sh skips Go when it is absent.
       - name: Install uniffi-bindgen-go
@@ -166,7 +157,7 @@ jobs:
 
       - name: Download binding metadata
         if: contains(fromJSON(inputs.targets), 'x86_64-unknown-linux-gnu')
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ${{ inputs.language }}-lib-x86_64-unknown-linux-gnu
           path: binding-library
@@ -175,19 +166,15 @@ jobs:
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
           REUSE_LIBRARY: ${{ contains(fromJSON(inputs.targets), 'x86_64-unknown-linux-gnu') }}
-          DEFAULT_FEATURES: ${{ inputs.default-features }}
         run: |
           args=(--bindings-only --version "$BUILD_VERSION" --output dist)
           if [[ "$REUSE_LIBRARY" == true ]]; then
             args+=(--library binding-library/libmoq_ffi.so)
           fi
-          if [[ "$DEFAULT_FEATURES" == false ]]; then
-            args+=(--no-default-features)
-          fi
           just rs package-ffi "${args[@]}"
 
       - name: Upload bindings
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ matrix.language }}-bindings
           path: dist/bindings/${{ matrix.language }}/

@@ -67,18 +67,35 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send), RecvStream(recv))))
 	}
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, poll::Ungrouped>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		backend::Session::poll_open_uni(&mut self.0, cx)
 			.map_err(Error)
-			.map(|res| res.map(SendStream))
+			.map(|res| res.map(|send| SendStream(send).scheduled(options)))
 	}
-	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_open_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, poll::Ungrouped>,
+	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		backend::Session::poll_open_bi(&mut self.0, cx)
 			.map_err(Error)
-			.map(|res| res.map(|(send, recv)| (SendStream(send), RecvStream(recv))))
+			.map(|res| res.map(|(send, recv)| (SendStream(send).scheduled(options), RecvStream(recv))))
 	}
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		backend::Session::poll_send_datagram(&mut self.0, cx, payload).map_err(Error)
+	fn send_group(&mut self, _: i64) -> Option<poll::Ungrouped> {
+		None
+	}
+	/// The backend cannot rank a datagram against a stream, so `options` are ignored, and a
+	/// datagram it has no room for is dropped.
+	fn send_datagram(&mut self, payload: Bytes, _: poll::SendOptions<'_, poll::Ungrouped>) -> Result<(), Self::Error> {
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		match backend::Session::poll_send_datagram(&mut self.0, &mut cx, &payload) {
+			Poll::Ready(res) => res.map_err(Error),
+			Poll::Pending => Ok(()),
+		}
 	}
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
 		backend::Session::poll_recv_datagram(&mut self.0, cx).map_err(Error)
@@ -104,16 +121,28 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 }
 /// An outgoing WebTransport stream adapted to moq-net.
 pub struct SendStream<S>(S);
+impl<S: backend::SendStream + 'static> SendStream<S> {
+	/// Schedule a newly opened stream, which has no group to join.
+	fn scheduled(mut self, options: poll::SendOptions<'_, poll::Ungrouped>) -> Self {
+		poll::SendStream::set_priority(&mut self, options.priority);
+		self
+	}
+}
 impl<S: backend::SendStream + 'static> poll::SendStream for SendStream<S> {
 	type Error = Error<S::Error>;
+	type Group = poll::Ungrouped;
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		backend::SendStream::poll_write(&mut self.0, cx, buf).map_err(Error)
 	}
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		backend::SendStream::poll_write_buf(&mut self.0, cx, buf).map_err(Error)
 	}
-	fn set_priority(&mut self, order: i32) {
+	fn set_priority(&mut self, order: i64) {
+		let order = order.clamp(i32::MIN.into(), i32::MAX.into()) as i32;
 		backend::SendStream::set_priority(&mut self.0, order)
+	}
+	fn set_group(&mut self, group: &Self::Group) {
+		match *group {}
 	}
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		backend::SendStream::finish(&mut self.0).map_err(Error)
@@ -279,7 +308,9 @@ mod tests {
 			poll::Session::stats(&session).rtt(),
 			Some(std::time::Duration::from_millis(7))
 		);
-		let Poll::Ready(Ok((mut send, mut recv))) = poll::Session::poll_open_bi(&mut session, &mut cx) else {
+		let Poll::Ready(Ok((mut send, mut recv))) =
+			poll::Session::poll_open_bi(&mut session, &mut cx, Default::default())
+		else {
 			panic!("open failed")
 		};
 		let mut buf = Bytes::from_static(b"abcd");

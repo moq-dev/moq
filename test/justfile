@@ -4,7 +4,7 @@
 # in the root `just check`.
 #
 # Two cross-language interop tests exist:
-#   - https://github.com/moq-dev/smoke installs each client from its PUBLIC
+#   - `just test smoke` (smoke/) installs each client from its PUBLIC
 #     package registry to catch packaging breakage in a release.
 #   - `just test interop` (interop/, below) builds every client from THIS checkout
 #     to catch interop regressions before anything is published.
@@ -17,16 +17,16 @@ set working-directory := '.'
 default:
     @just --justfile {{ quote(justfile()) }} --list test
 
-# Port isolation across private temp roots and keyboard activation under a canvas.
+# Port isolation across private temp roots, plus Chromium checks of the watch and publish controls.
 # The browser check is not `*.test.ts`: plain `bun test` runs lack Playwright Chromium,
 # which this recipe installs, as the interop and wasm harnesses do.
 harness:
     ./lib/harness.test.sh
     ./interop/relay-log.test.sh
-    cd .. && bun test test/interop/compat/resolve.test.ts
+    cd .. && bun test test/interop/compat/resolve.test.ts test/interop/compat/claims.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
-    cd interop/clients/js && bun test ./harness.browser.ts ./capture-channel-count.browser.ts ./open-gop.browser.ts ./src/contract.test.ts ./src/resume.test.ts
+    cd interop/clients/js && bun test ./harness.browser.ts ./signals-dom.browser.ts ./publish-ui.browser.ts ./capture-channel-count.browser.ts ./open-gop.browser.ts ./src/contract.test.ts ./src/resume.test.ts
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
@@ -51,6 +51,16 @@ interop *args:
 wire-compat *args:
     ./interop/compat.sh "$@"
 
+# Installs each client from its public registry, inside test/smoke's own Nix
+# shell rather than this repo's toolchain. The first argument picks a smoke
+# recipe and the rest pass through, e.g. `just test smoke full` or `just test
+# smoke relays --only moq-dev-rs`. With none, the Rust-only matrix. See smoke/README.md.
+
+# Published-package interop smoke.
+[positional-arguments]
+smoke *args:
+    nix develop ./smoke --command just --justfile smoke/justfile "$@"
+
 # Paint a short-side transcode rung from a coded portrait through moq-watch.
 portrait:
     ./portrait/run.sh
@@ -67,7 +77,7 @@ interop-negative *args:
 # republish, late join). Ends with negative controls that inject a frozen picture, silence, a
 # shifted tone, and a leaked session; each must fail the assertion it names. --timeout 30 gives
 
-# headless Chromium cold-start headroom.
+# headless Chromium cold-start headroom. --media-engines selects player engines; the fixture stays Chromium.
 [positional-arguments]
 media *args:
     ./interop/interop.sh --media --timeout 30 "$@"
@@ -87,14 +97,15 @@ drill *args:
 native-play:
     ./native-play/run.sh
 
-# Plays a tone in headless Chromium through moq-shaper and grades what the listener
-# heard (underruns, skip-aheads, silence, the resolved delay) against
-# audio-quality/budgets.json. The full matrix is 24 rows at 60 s; nightly runs it with
-# --enforce. Narrow it with `--profiles mild --codecs opus --rings plain --duration 20`.
-# `--replays` grades only the recorded traces, in seconds, as PRs touching the player do.
+# Plays a tone in headless Chromium and the native `moq play` through moq-shaper and grades
+# what the listener heard (underruns, skip-aheads, silence, the resolved delay) against
+# audio-quality/budgets.json. The full matrix is 36 rows at 60 s; nightly runs it with
+# --enforce. Narrow it with `--profiles mild --codecs opus --rings plain --duration 20`;
+# `--rings pulse` is the native player alone.
+# `--replays` grades only the recorded traces, in seconds, as nightly and release PRs touching the player do.
 # See audio-quality/README.md.
 
-# Grade browser audio playout over an impaired path.
+# Grade browser and native audio playout over an impaired path.
 [positional-arguments]
 audio-quality *args:
     ./audio-quality/run.sh "$@"
@@ -117,11 +128,6 @@ audio-quality-record *args:
 drill-sensitivity *args:
     ./drill/sensitivity.sh "$@"
 
-# Select or run the PR's affected sensitivity mutations against its base.
-[positional-arguments]
-drill-pr mode base="":
-    python3 ./drill/pr.py "$@"
-
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
 # ts` output with FFmpeg, TSDuck and a custom analyzer (the T-STD buffer model, PCR
 # spacing and byte schedule). Flags: `--analyze-only file.ts`
@@ -136,9 +142,19 @@ drill-pr mode base="":
 [positional-arguments]
 ts *args:
     python3 ./ts/fragment_pes.test.py
+    python3 ./ts/drop_nulls.test.py
+    python3 ./ts/compliance.test.py
     python3 ./ts/pcr-timing.test.py
     python3 ./ts/open-gop.test.py
+    python3 ./ts/holes.test.py
+    python3 ./ts/passthrough.test.py
+    python3 ./ts/klv.test.py
     ./ts/run.sh "$@"
+
+# Carry a hardware encoder's capture, which the T-STD model passes, whole through the round-trip.
+[positional-arguments]
+ts-passthrough-capture *args:
+    ./ts/run.sh --passthrough --source ../rs/moq-mux/src/container/ts/test_data/scte35/kyrion_dirtystart.ts "$@"
 
 # Table-placement grader: acquisition, interleave, phase, drift and missing-table controls.
 ts-pair-controls:
@@ -158,6 +174,7 @@ ts-tstd:
 
 # Prove FFmpeg decode/content and TSDuck structure/PCR assertions reject damaged TS.
 ts-controls:
+    python3 ./ts/decode.test.py
     bash ./ts/controls.sh
 
 # A JS viewer watching a live track through a relay that drains (SIGTERM, after
@@ -185,7 +202,7 @@ video:
 
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:
-    cargo nextest run --locked -p moq-tokio --test max_age --run-ignored all
+    cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:

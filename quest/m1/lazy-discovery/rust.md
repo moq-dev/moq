@@ -23,7 +23,10 @@ Facts (2026-10-10, `origin/main` e5446b036):
   (`rs/moq-net/src/lite/subscriber.rs:601`); the IETF subscriber has the
   equivalent.
 - `OriginConsumer::follow` exists (`rs/moq-net/src/model/origin.rs:4473`);
-  Rust has no announced-gated request like JS's, so the fold's shape is open.
+  `origin::Consumer::announced_broadcast` is Rust's announced request.
+- `origin::Consumer::announced_broadcast` registers no discovery interest
+  yet. This quest makes it register interest for its path, as JS does, since
+  the session stops asking for its whole scope.
 - moq-relay reads `origin.consume().announced()` for the root in its web,
   internal, and cluster paths, so a relay's watch set is the root.
 
@@ -33,7 +36,7 @@ covering-set changes a watch causes, so a change costs the prefixes it covers
 or uncovers and stays flat over unrelated held watches
 (`js/net/bench/forward.ts`); an announce request stays open while anything at
 or beneath its prefix is watched, so a narrower watch rides it and never takes
-its routes over (nothing tells when a fresh request has caught up); a narrower
+its routes over (nothing tells when a fresh request has synced); a narrower
 request already open when a broader watch arrives stays open until the broader
 request goes; a route reported by overlapping requests is inserted once,
 driven by the first reporter, and if it changes hands anyway (a request
