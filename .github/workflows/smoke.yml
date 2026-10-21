@@ -10,17 +10,10 @@ on:
       history_url:
         description: Seed the relay report history from this URL instead of the deployed site
         required: false
-  # On PRs that touch the harness itself (smoke.sh / token.sh / clients), run
-  # the matrix against the published packages to catch a broken cell before it
-  # merges. Published-package regressions still surface nightly; this guards
-  # changes to the test. Other PRs don't change what is published.
-  pull_request:
-    paths:
-      - "test/smoke/**"
-      - ".github/workflows/smoke.yml"
-  # Merges of the same: the build caches below (mbx, cargo binaries) only save
-  # from the default branch's push or dispatch runs, never from the nightly
-  # schedule, so this is what keeps them warm for pull requests.
+  # Merges that touch the harness itself (smoke.sh / token.sh / clients) run the
+  # matrix against the published packages. The build caches below (mbx, cargo
+  # binaries) only save from the default branch's push or dispatch runs, never
+  # from the nightly schedule, so this also keeps them warm.
   push:
     branches: [main]
     paths:

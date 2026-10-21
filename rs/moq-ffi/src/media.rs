@@ -1,3 +1,5 @@
+//! Publish and consume media catalogs and encoded frames.
+
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
@@ -15,7 +17,9 @@ use crate::producer::{MoqBroadcastProducer, MoqTrackRequest};
 /// A width and height in pixels.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqDimensions {
+	/// The width in pixels.
 	pub width: u32,
+	/// The height in pixels.
 	pub height: u32,
 }
 
@@ -43,7 +47,10 @@ pub enum MoqContainer {
 	/// The legacy hang container.
 	Legacy,
 	/// CMAF (fMP4), carrying the initialization segment.
-	Cmaf { init: Vec<u8> },
+	Cmaf {
+		/// The CMAF initialization segment.
+		init: Vec<u8>,
+	},
 	/// LOC, the low-overhead container.
 	Loc,
 }
@@ -76,12 +83,18 @@ impl From<MoqContainer> for hang::catalog::Container {
 	}
 }
 
+/// A catalog snapshot describing the available media renditions.
 #[derive(uniffi::Record)]
 pub struct MoqCatalog {
+	/// Video renditions keyed by their catalog IDs.
 	pub video: HashMap<String, MoqVideo>,
+	/// Audio renditions keyed by their catalog IDs.
 	pub audio: HashMap<String, MoqAudio>,
+	/// The final rendered size after rotation, when specified.
 	pub display: Option<MoqDimensions>,
+	/// The clockwise rotation in degrees, when specified.
 	pub rotation: Option<f64>,
+	/// Whether to flip horizontally after rotation, when specified.
 	pub flip: Option<bool>,
 	/// Untyped application catalog sections, keyed by section name, each value a JSON string.
 	/// These are the top-level catalog keys beyond `video`/`audio`, carried through verbatim
@@ -90,6 +103,7 @@ pub struct MoqCatalog {
 	pub sections: HashMap<String, String>,
 }
 
+/// A video rendition and the configuration needed to decode it.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqVideo {
 	/// Human-readable rendition name for track pickers.
@@ -103,20 +117,26 @@ pub struct MoqVideo {
 	/// the ID is the track name.
 	#[uniffi(default = None)]
 	pub track: Option<String>,
+	/// The codec string identifying this rendition's encoded format.
 	pub codec: String,
+	/// The codec initialization bytes, when required.
 	pub description: Option<Vec<u8>>,
 	/// The encoded pixel dimensions.
 	pub coded: Option<MoqDimensions>,
 	/// The aspect ratio the whole picture is displayed at; absent means the decoded shape.
 	pub display_aspect: Option<MoqDimensions>,
+	/// The maximum encoded bitrate in bits per second.
 	pub bitrate: Option<u64>,
 	/// Whether this rendition may be selected; when false, no frames are coming.
 	#[uniffi(default = true)]
 	pub enabled: bool,
+	/// The frame rate in frames per second, when specified.
 	pub framerate: Option<f64>,
+	/// The framing used to carry this rendition.
 	pub container: MoqContainer,
 }
 
+/// An audio rendition and the configuration needed to decode it.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqAudio {
 	/// Human-readable rendition name for track pickers.
@@ -130,14 +150,20 @@ pub struct MoqAudio {
 	/// the ID is the track name.
 	#[uniffi(default = None)]
 	pub track: Option<String>,
+	/// The codec string identifying this rendition's encoded format.
 	pub codec: String,
+	/// The codec initialization bytes, when required.
 	pub description: Option<Vec<u8>>,
+	/// The number of samples per second.
 	pub sample_rate: u32,
+	/// The number of audio channels.
 	pub channel_count: u32,
+	/// The maximum encoded bitrate in bits per second.
 	pub bitrate: Option<u64>,
 	/// Whether this rendition may be selected; when false, no frames are coming.
 	#[uniffi(default = true)]
 	pub enabled: bool,
+	/// The framing used to carry this rendition.
 	pub container: MoqContainer,
 	/// The publisher's worst-case delay between a frame being ready and its flush, in
 	/// microseconds, which floors an estimated playout delay. Absent means frames flush at once.
@@ -603,9 +629,15 @@ mod test {
 #[derive(Clone, uniffi::Enum)]
 pub enum MoqMediaTarget {
 	/// A new track with an explicit name, or a unique name derived from its format.
-	Named { name: Option<String> },
+	Named {
+		/// The explicit track name, or absent to allocate a unique name from its format.
+		name: Option<String>,
+	},
 	/// A requested track whose name and ownership are already fixed.
-	Requested { request: Arc<MoqTrackRequest> },
+	Requested {
+		/// The pending track request to accept.
+		request: Arc<MoqTrackRequest>,
+	},
 }
 
 impl MoqMediaTarget {
@@ -1097,9 +1129,19 @@ fn reserve_track(
 #[derive(Clone, uniffi::Enum)]
 pub enum MoqRendition {
 	/// A video rendition.
-	Video { id: String, config: MoqVideo },
+	Video {
+		/// The rendition ID in the catalog.
+		id: String,
+		/// The rendition configuration.
+		config: MoqVideo,
+	},
 	/// An audio rendition.
-	Audio { id: String, config: MoqAudio },
+	Audio {
+		/// The rendition ID in the catalog.
+		id: String,
+		/// The rendition configuration.
+		config: MoqAudio,
+	},
 }
 
 impl MoqRendition {

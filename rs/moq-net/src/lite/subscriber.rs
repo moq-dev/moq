@@ -550,8 +550,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			Some(size) => entry.producer.insert_deflated_datagram(datagram, size)?,
 			None => entry.producer.insert_wire_datagram(datagram)?,
 		}
+		// A datagram-only feed may never answer with SUBSCRIBE_START, which waits for a group.
 		if !live {
-			entry.producer.set_live(Some(Position::group(dg.sequence)));
+			entry.producer.set_live(Some(Position::group(dg.sequence)), None);
 		}
 		Ok(())
 	}
@@ -905,14 +906,19 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						// cache holds the group, so a fetch held for the feed that sees it
 						// accounted also finds it.
 						let reading = Reading::open(&entry.tail, Some(hdr.sequence), self.subscriber.runtime.now());
-						// A route's first group says where its live feed is, when its answer did
+						// A route's first group says where its live feed is, when its answer does
 						// not: even one the cache already holds, as an idle copy asked from its
 						// head gets back. The copy goes live once the cache shows that group.
-						if !entry.producer.is_live() {
-							entry.producer.set_live(Some(Position {
-								group: hdr.sequence,
-								frame: hdr.frame_start,
-							}));
+						// Lite-07's answer does, and a group can overtake it: on a descending
+						// track the first to land is the newest, not where the feed starts.
+						if !entry.producer.is_live() && !self.subscriber.version.has_largest() {
+							entry.producer.set_live(
+								Some(Position {
+									group: hdr.sequence,
+									frame: hdr.frame_start,
+								}),
+								None,
+							);
 						}
 						let mut group = match received {
 							Ok(group) => group,
@@ -6933,7 +6939,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									lite::SubscribeResponse::Start(start) => {
 										// Where the live feed is, on versions whose answer says.
 										if serve.subscriber.version.has_largest() {
-											self.serving.set_live(start.largest);
+											self.serving.set_live(start.largest, Some(start.group));
 											if let Some(largest) = start.largest {
 												self.serving.report_largest(largest);
 											}
