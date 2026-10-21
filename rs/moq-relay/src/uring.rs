@@ -77,6 +77,9 @@ struct Serve {
 	/// `listen.timeout`, which each worker's endpoint starts at a connection's
 	/// first packet.
 	timeout: Option<std::time::Duration>,
+	/// `listen.reset.secret`, shared so any worker resets any worker's
+	/// connections, a restarted group's included.
+	reset_secret: Option<[u8; 32]>,
 }
 
 /// A bound group of io_uring QUIC workers sharing one port.
@@ -102,6 +105,7 @@ pub struct Workers {
 	alpns: Arc<Vec<String>>,
 	versions: moq_net::Versions,
 	timeout: Option<std::time::Duration>,
+	reset_secret: Option<[u8; 32]>,
 
 	threads: Vec<(u16, std::thread::JoinHandle<()>)>,
 	stops: Vec<Arc<Stop>>,
@@ -214,6 +218,15 @@ impl Workers {
 		let mut udp = moq_uring::udp::Config::default();
 		udp.gso = quic.gso.unwrap_or(true);
 
+		let reset_secret = listen
+			.reset
+			.secret
+			.as_deref()
+			.map(moq_tokio::secret::Secret::read)
+			.transpose()
+			.context("invalid --listen-reset-secret")?
+			.map(|secret| *secret.as_bytes());
+
 		let (failures_tx, failures) = tokio::sync::mpsc::unbounded_channel();
 		tracing::info!(workers = count, %addr, "bound io_uring QUIC workers");
 
@@ -228,6 +241,7 @@ impl Workers {
 			alpns: Arc::new(alpns),
 			versions,
 			timeout: listen.resolved_timeout(),
+			reset_secret,
 			threads: Vec::new(),
 			stops: Vec::new(),
 			failures,
@@ -280,6 +294,7 @@ impl Workers {
 			versions: self.versions.clone(),
 			local: self.addr,
 			timeout: self.timeout,
+			reset_secret: self.reset_secret,
 		};
 
 		let cores = match self.pin {
@@ -522,6 +537,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 		let mut endpoint_config = moq_uring::quic::endpoint::Config::default().with_server(server);
 		endpoint_config.activity = serve.shutdown.activity.clone();
 		endpoint_config.handshake.timeout = serve.timeout;
+		endpoint_config.reset_secret = serve.reset_secret;
 		let endpoint =
 			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
@@ -823,10 +839,19 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 		request = request.with_subscriber(publisher);
 	}
 	let lease = lease.preparing(request.auth(), request.role())?;
-	let (session, driver) = deadline
-		.bound(request.ok())
-		.await
-		.inspect_err(|err| crate::connection::setup_failed(&stats, err.downcast_ref()))?;
+	let serving = serve.shutdown.serve();
+	// Bounded by the drain deadline too, like the tokio path, so a peer that stalls
+	// the SETUP reply cannot hold the drain. That is a tokio timer, so it runs on the
+	// shared runtime, and dropping it aborts the task.
+	let shutdown = serve.shutdown.clone();
+	let expired = std::pin::pin!(lifecycle.shared(&serve.tokio, async move { shutdown.expired().await }));
+	let reply = std::pin::pin!(deadline.bound(request.ok()));
+	let (session, driver) = match futures::future::select(reply, expired).await {
+		futures::future::Either::Left((reply, _)) => {
+			reply.inspect_err(|err| crate::connection::setup_failed(&stats, err.downcast_ref()))?
+		}
+		futures::future::Either::Right(_) => anyhow::bail!("the SETUP reply was still pending at the drain deadline"),
+	};
 	let driver_handle = handle.clone();
 	let driver = async move {
 		match driver_handle.run(driver).await {
@@ -840,7 +865,12 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 	// supervision (credential expiry, GOAWAY drain) runs with the timers and the
 	// shutdown broadcast on the shared runtime.
 	let lifecycle = lifecycle.clone();
-	Ok(async move { lifecycle.supervise(session, lease, registration, transport).await }.boxed())
+	Ok(async move {
+		lifecycle
+			.supervise(serving, session, lease, registration, transport)
+			.await
+	}
+	.boxed())
 }
 
 #[cfg(test)]

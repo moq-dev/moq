@@ -37,24 +37,32 @@ const AAC_CODEC = "mp4a.40.2";
 import { Micro, Milli } from "@moq/clock";
 import { Framer } from "./framer";
 
-// Selects the audio codec and its encoder settings. Either the bare codec name (all defaults) or an
-// object with the mime plus tuning knobs.
+/**
+ * Selects the audio codec and its encoder settings. Either the bare codec name (all defaults) or an
+ * object with the mime plus tuning knobs.
+ */
 export type Codec = Opus | Aac;
 
+/** Opus, by name with every default or as a config. */
 export type Opus = "opus" | OpusConfig;
+/** AAC, by name with every default or as a config. */
 export type Aac = "aac" | AacConfig;
 
-// AAC encoder settings. AAC-LC has a fixed 1024-sample frame and no real-time tuning knobs, so
-// bitrate is the only thing to configure.
+/**
+ * AAC encoder settings. AAC-LC has a fixed 1024-sample frame and no real-time tuning knobs, so
+ * bitrate is the only thing to configure.
+ */
 export type AacConfig = {
 	mime: "aac";
 
 	bitrate?: number; // bits/sec, defaults to channelCount * 64kbps
 };
 
-// Opus encoder settings. bitrate and frameDuration also shape the catalog (decoders need them); the
-// rest are encode-only knobs that map directly to the matching OpusEncoderConfig fields:
-// https://developer.mozilla.org/en-US/docs/Web/API/AudioEncoder/configure#opus
+/**
+ * Opus encoder settings. bitrate and frameDuration also shape the catalog (decoders need them); the
+ * rest are encode-only knobs that map directly to the matching OpusEncoderConfig fields:
+ * https://developer.mozilla.org/en-US/docs/Web/API/AudioEncoder/configure#opus
+ */
 export type OpusConfig = {
 	mime: "opus";
 
@@ -76,7 +84,7 @@ export interface Stats {
 	bytes: number;
 }
 
-// Signals the encoder reads.
+/** Signals the encoder reads. */
 export type EncoderInput = {
 	// Whether to encode this rendition. Defaults to true. When false it stops encoding, ending the epoch,
 	// but stays in the catalog with `enabled: false` and its last config, and stays registered so a
@@ -144,6 +152,7 @@ export class Encoder {
 	/** The full track name of this rendition, e.g. `"audio/data"`. */
 	readonly name: string;
 
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<EncoderInput>;
 
 	/** Linear gain applied before encoding, where 1 is unity. Each change ramps over {@link fade}. */
@@ -179,6 +188,7 @@ export class Encoder {
 		active: new Signal<boolean>(false),
 		stats: new Signal<Stats>({ frames: 0, bytes: 0 }),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// The encode chain currently publishing, or undefined while nothing is. The read loop pushes
@@ -752,6 +762,7 @@ export class Encoder {
 		this.#live?.track.close(cause);
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#signals.close();
 	}

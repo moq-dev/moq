@@ -49,8 +49,10 @@ instead host sessions with `--listen`, or both at once, admitting clients the
 way the relay does (see [Authentication](/bin/relay/auth)). Listening imports and
 exports share the relay's shutdown behavior: SIGINT or SIGTERM sends accepted
 sessions a reconnect-to-me GOAWAY and waits up to `--drain-timeout` (default
-`10s`), exiting once they have all left. Sessions on versions without GOAWAY,
-such as `moq-lite-03`, get none and are closed when the window ends. A second
+`10s`), exiting once they have all left. Sessions still open when the window
+ends are closed, and the process exits once each has reported its `end` to the
+auth server. Sessions on versions without GOAWAY, such as `moq-lite-03`, get
+none and are closed the same way. A second
 signal exits immediately; `--drain-timeout 0s` closes sessions immediately.
 Pending handshakes and admission requests share the same drain window, and an
 open stdin pipe does not keep the process alive afterward. Admission is part of
@@ -477,6 +479,13 @@ keeps its final counts, and one that returns under the same ID continues them.
 A report holds 1,024 rendition IDs at most: past that, each new ID replaces
 one that has ended.
 [Stats](/concept/stats#media-reports) has the schema.
+
+A TS import adds an `mpegts` section: each elementary stream's access units
+and quiet time, and the TR 101 290 counters it logs. A TS export adds its
+streams' rows and a `release` section: frames dropped late, the margin frames
+arrive with, and its clock's offset and drift from the source. A passthrough
+reports `release` alone at export and neither at import. See
+[MPEG-TS sections](/concept/stats#mpeg-ts-sections).
 
 ## Debugging
 

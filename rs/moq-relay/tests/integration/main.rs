@@ -11,6 +11,7 @@ mod cluster_close;
 mod cluster_idle;
 mod cluster_unknown;
 mod connection;
+mod drain;
 mod embed;
 mod goaway_cluster;
 mod hidden_cluster;

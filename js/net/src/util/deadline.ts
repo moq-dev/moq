@@ -16,10 +16,17 @@ function sessionFailure(err: unknown): boolean {
 	return source === "session" || name === "InvalidStateError";
 }
 
+// A stream the deadline resets, with the request written on it and the message withdrawing it.
+interface Recorded {
+	stream: Stream;
+	written?: Promise<boolean>;
+	withdraw?: () => Promise<void>;
+}
+
 /** One fatal deadline for a request, including every stream its setup creates. @internal */
 export class Deadline {
 	#opening = false;
-	#streams: Stream[] = [];
+	#streams: Recorded[] = [];
 	#failure?: Error;
 
 	/** Record a create so deadline failures reset its stream even if it opens late. */
@@ -38,8 +45,27 @@ export class Deadline {
 			stream.abort(this.#failure);
 			throw this.#failure;
 		}
-		this.#streams.push(stream);
+		this.#streams.push({ stream });
 		return stream;
+	}
+
+	/**
+	 * Write the request on an opened stream, and what withdraws it if the deadline fails after.
+	 *
+	 * A draft-14-16 request rides the control stream, where a reset tells the peer nothing, so
+	 * one that reached the peer is withdrawn by message first. Without `withdraw` the reset alone ends it.
+	 */
+	async send(stream: Stream, write: () => Promise<void>, withdraw?: () => Promise<void>): Promise<void> {
+		if (this.#failure) throw this.#failure;
+		const recorded = this.#streams.find((recorded) => recorded.stream === stream);
+		if (!recorded) throw new Error("request sent on a stream the deadline did not open");
+		const sending = write();
+		recorded.written = sending.then(
+			() => true,
+			() => false,
+		);
+		recorded.withdraw = withdraw;
+		await sending;
 	}
 
 	/** Wait for the first answer under the request's single deadline. */
@@ -51,17 +77,25 @@ export class Deadline {
 				`request timed out after ${REQUEST_TIMEOUT_MS}ms`,
 			);
 		} catch (cause) {
-			this.#failure =
+			const failure =
 				cause instanceof TimeoutError
 					? this.#opening
 						? new NoStreamCredit({ cause })
 						: controlTimeout(cause)
 					: error(cause);
+			this.#failure = failure;
 			// Other failures keep the caller's cancellation ordering, including legacy UNSUBSCRIBE.
 			if (cause instanceof TimeoutError || cause instanceof NoStreamCredit) {
-				for (const stream of this.#streams) stream.abort(this.#failure);
+				await Promise.all(this.#streams.map((recorded) => Deadline.#reset(recorded, failure)));
 			}
-			throw this.#failure;
+			throw failure;
 		}
+	}
+
+	static async #reset({ stream, written, withdraw }: Recorded, failure: Error) {
+		// The withdrawal names a request the peer must already have, so a write still in
+		// flight finishes first, and one that never landed is not withdrawn.
+		if (withdraw && written && (await written)) await withdraw().catch(() => undefined);
+		stream.abort(failure);
 	}
 }
