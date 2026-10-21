@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use url::Url;
 
+use crate::auth::MoqAuth;
 use crate::bandwidth::MoqBandwidth;
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -890,6 +891,7 @@ pub struct MoqSession {
 	/// One allocator for the session. Every [`bandwidth`](Self::bandwidth) handle
 	/// clones it, so they share one reservation registry.
 	bandwidth: Arc<MoqBandwidth>,
+	auth: Arc<MoqAuth>,
 }
 
 impl MoqSession {
@@ -943,7 +945,13 @@ impl MoqSession {
 		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
 		let consumer = Arc::new(MoqOriginConsumer::from_inner(subscribe));
 		let bandwidth = Arc::new(MoqBandwidth::new(Self::mint_allocator(&inner)));
+		let auth = Arc::new(MoqAuth::new(match &inner {
+			#[cfg(not(target_arch = "wasm32"))]
+			Inner::Connection(connection) => crate::auth::Handle::Connection(connection.auth()),
+			Inner::Session(session) => crate::auth::Handle::Session(session.auth()),
+		}));
 		Self {
+			auth,
 			inner: inner.clone(),
 			closed: Task::new(inner.clone()),
 			status: Task::new(inner),
@@ -1097,6 +1105,14 @@ impl MoqSession {
 	/// an unlimited allocator, which reports `None` for every reservation.
 	pub fn bandwidth(&self) -> Arc<MoqBandwidth> {
 		self.bandwidth.clone()
+	}
+
+	/// The session's authorization: the grant its peer gave it, and more tokens to present.
+	///
+	/// Every call returns the same handle. A client session's handle survives reconnects,
+	/// presenting each added token again on every new connection.
+	pub fn auth(&self) -> Arc<MoqAuth> {
+		self.auth.clone()
 	}
 
 	/// Hold receive-estimate demand until the returned consumer is released.

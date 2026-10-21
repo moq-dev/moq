@@ -6767,3 +6767,133 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	}
 	assert_eq!(sequences, vec![0, 1, 2]);
 }
+
+/// Wait until `auth` reports `want`, following its changes.
+async fn await_grant(auth: &crate::auth::MoqAuth, want: crate::auth::MoqGrant) {
+	tokio::time::timeout(TIMEOUT, async {
+		while auth.grant().as_ref() != Some(&want) {
+			auth.grant_changed().await.expect("grant watch ended");
+		}
+	})
+	.await
+	.unwrap_or_else(|_| panic!("timed out waiting for {want:?}, last {:?}", auth.grant()));
+}
+
+fn grant(publish: &[&str], subscribe: &[&str]) -> crate::auth::MoqGrant {
+	let patterns = |patterns: &[&str]| patterns.iter().map(|p| p.to_string()).collect();
+	crate::auth::MoqGrant {
+		publish: patterns(publish),
+		subscribe: patterns(subscribe),
+		expires_us: None,
+	}
+}
+
+/// Both sides of a session read the grant their peer gave them, and a peer that verifies no
+/// tokens of its own refuses another one as unsupported.
+#[tokio::test]
+async fn auth_reads_the_peer_grant() {
+	let (server, client, accepted) = tokio::time::timeout(TIMEOUT, shutdown_pair()).await.expect("pair");
+	assert!(Arc::ptr_eq(&client.auth(), &client.auth()), "one handle per session");
+
+	// Each side's origins span the root, so its peer grants it everything.
+	await_grant(&client.auth(), grant(&["**"], &["**"])).await;
+	await_grant(&accepted.auth(), grant(&["**"], &["**"])).await;
+
+	let err = tokio::time::timeout(TIMEOUT, client.auth().add("extra".into()))
+		.await
+		.expect("add timed out")
+		.err()
+		.expect("the default acceptor refuses a token");
+	assert!(matches!(err, MoqError::Unsupported), "refusal: {err:?}");
+	assert_eq!(client.auth().grant(), Some(grant(&["**"], &["**"])), "a refusal leaves the union");
+
+	client.cancel(0);
+	accepted.cancel(0);
+	server.cancel();
+}
+
+/// A token added through a client session joins the union with its own grant, leaves it on
+/// cancel, and a refusal or revocation carries the peer's code.
+#[tokio::test]
+async fn auth_tokens_join_and_leave_the_union() {
+	let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+	let mut config = moq_tokio::listen::Config::default();
+	config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+	config.version = vec![version];
+	let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
+	let addr = listener.tcp_local_addr().unwrap();
+
+	let publish = |pattern: &str| moq_net::auth::Grant {
+		publish: pattern.parse::<moq_net::Pattern>().unwrap().into(),
+		..Default::default()
+	};
+	let serving = tokio::spawn(async move {
+		let request = listener.accept().await.expect("accept");
+		let mut requests = request.auth().requests().unwrap();
+		let (session, driver) = request.ok().await.unwrap();
+		let mut issued = Vec::new();
+		while let Some(request) = requests.next().await {
+			match request.token().as_ref() {
+				b"" => issued.push(request.accept(publish("setup/**"))),
+				b"extra" => issued.push(request.accept(publish("extra/**"))),
+				b"revoked" => request
+					.accept(publish("revoked/**"))
+					.revoke(moq_net::SessionError::Expired, "revoked"),
+				_ => request.reject(moq_net::SessionError::Unauthorized, "unknown token"),
+			}
+		}
+		drop((session, driver, issued));
+	});
+
+	let client = MoqClient::new(MoqClientConfig {
+		versions: vec!["moq-lite-07-wip".into()],
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
+	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("tcp://{addr}")))
+		.await
+		.expect("connect timed out")
+		.unwrap();
+	let auth = session.auth();
+	await_grant(&auth, grant(&["setup/**"], &[])).await;
+
+	let extra = tokio::time::timeout(TIMEOUT, auth.add("extra".into()))
+		.await
+		.expect("add timed out")
+		.unwrap();
+	assert_eq!(extra.grant(), Some(grant(&["extra/**"], &[])));
+	// Patterns are kept sorted.
+	await_grant(&auth, grant(&["extra/**", "setup/**"], &[])).await;
+
+	extra.cancel();
+	await_grant(&auth, grant(&["setup/**"], &[])).await;
+	assert!(matches!(extra.closed().await, Err(MoqError::Cancelled)));
+
+	let refused = tokio::time::timeout(TIMEOUT, auth.add("bogus".into()))
+		.await
+		.expect("add timed out")
+		.err()
+		.expect("refused");
+	assert_protocol(
+		&refused,
+		crate::error::MoqErrorScope::Session,
+		MoqProtocolKind::Unauthorized,
+	);
+
+	let revoked = tokio::time::timeout(TIMEOUT, auth.add("revoked".into()))
+		.await
+		.expect("add timed out")
+		.unwrap();
+	let closed = tokio::time::timeout(TIMEOUT, revoked.closed())
+		.await
+		.expect("closed timed out")
+		.unwrap_err();
+	assert_protocol(&closed, crate::error::MoqErrorScope::Session, MoqProtocolKind::Expired);
+	assert_eq!(revoked.grant(), None, "an ended token grants nothing");
+	assert_eq!(auth.grant(), Some(grant(&["setup/**"], &[])));
+
+	session.cancel(0);
+	tokio::time::timeout(TIMEOUT, serving).await.expect("server ended").unwrap();
+}
