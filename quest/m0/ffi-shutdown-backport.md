@@ -13,8 +13,9 @@ sessions accept the QUIC stream limit:
 - qmux sessions get the QUIC stream limit (#5609) instead of the 100-stream
   default.
 
-Check: release-plz publishes the release commits, and PyPI's newest moq-ffi
-contains both.
+Check: release-plz publishes the release commits, and the newest moq-ffi on
+PyPI, the Swift package, and Maven Central contains both. Swift and Kotlin
+publish from their own tag workflows, so check each.
 
 ## Plan
 
@@ -25,8 +26,10 @@ and gains no `drain()`; callers move to it at the next breaking cut.
 
 Follow the backport workflow. #5609 cherry-picks as is. The drain backport
 adapts 7bbac3272's session close to the `release` line's moq-net and keeps
-its tests, renamed to `drain()`. Run the Python, Swift, and Kotlin binding
-tests. The qmux credit fix is out of scope: it arrives with
+its tests, renamed to `drain()`. Follow the Cross-Package Sync row for
+`rs/moq-ffi`: every binding and its docs gain `drain()`, or the PR says why
+one has none. Run each binding's tests and `just test interop --all`. The
+qmux credit fix is out of scope: it arrives with
 [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md).
 
 Public API: additive (`MoqSession.drain()` and its binding wrappers). Wire:
