@@ -97,7 +97,9 @@ class StreamProducer:
     carries is refused.
     """
 
-    def __init__(self, broadcast: BroadcastProducer, track: publish.TrackProducer, *, compression: bool = False) -> None:
+    def __init__(
+        self, broadcast: BroadcastProducer, track: publish.TrackProducer, *, compression: bool = False
+    ) -> None:
         config = MoqJsonStreamConfig(compression=compression)
         self._inner = MoqJsonStreamProducer(broadcast._inner, track._inner, config)
 
