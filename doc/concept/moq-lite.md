@@ -98,7 +98,10 @@ authorization and hidden names work exactly as without one.
   the latest UUIDv7 timestamp, so hosts with skewed clocks can lose a restart
   until the old instance retracts.
 - **Same epoch resumes.** A subscription moves between routes with the same
-  epoch without a seam, continuing from the first frame it lacks. A route
+  epoch without a seam, continuing from the first frame it lacks. That is a
+  floor, not a promise: groups the outage held back still arrive only while
+  the subscriber's max age covers them, so a route that dies silently, noticed
+  only at the idle timeout, costs whatever aged out meanwhile. A route
   without an epoch keeps its subscriptions until that route goes, which is how
   a transcoder claim stays on the worker that first served it, and a track that
   fails ends instead of resuming, so request the path again.

@@ -18,6 +18,7 @@
 
 use crate::support;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
@@ -600,6 +601,118 @@ async fn lite_resumes_after_a_lagging_route_dies() {
 	assert_eq!(next(&mut rx).await, (1, payload(1, 2)));
 	assert_eq!(next(&mut rx).await, (1, payload(1, 3)));
 	assert_eq!(next(&mut rx).await, (2, payload(2, 0)));
+}
+
+/// `P` publishes through the relay `O`, which `M1` and `M2` both pull from, and `E`
+/// reads through `M1` with `budget`, leaving `M2` cold. `P` writes a one-second group of
+/// ten frames every second. `M1` is killed partway through group 4: it falls silent
+/// without a close, and each peer notices only at its own idle timeout. `O` notices
+/// after group 6, so its copy of the track goes idle and the cancel resets group 7 in
+/// flight, which `P` never gave up. `E` notices a quarter second past group 9 and resumes
+/// on `M2`, which asks `O` again.
+///
+/// Returns every frame `E` read after the kill, by group.
+async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
+	const FRAMES: u64 = 10;
+	const STEP: Duration = Duration::from_millis(100);
+	const KILLED: u64 = 4;
+	const O_NOTICES: u64 = 6;
+	const E_NOTICES: u64 = 9;
+
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
+	let (p, o, m1, m2, e) = (
+		produce_origin(1),
+		produce_origin(2),
+		produce_origin(3),
+		produce_origin(4),
+		produce_origin(5),
+	);
+	let broadcast = p.create_broadcast("live").unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
+	broadcast
+		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.unwrap();
+	let p_o = link(version, &p, &o).await;
+	let o_m1 = link(version, &o, &m1).await;
+	let o_m2 = link(version, &o, &m2).await;
+	let m1_e = link(version, &m1, &e).await;
+
+	let consumer = e.consume();
+	consumer.routed("live").await.unwrap();
+	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let prefs = track::Subscription::default().with_max_delay(budget);
+	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
+	let m2_e = priced_link(version, &m2, &e, Some(1_000)).await;
+	settle().await;
+
+	let mut after = BTreeMap::<u64, Vec<String>>::new();
+	for sequence in 0..=E_NOTICES + 3 {
+		let mut group = track.append_group().unwrap();
+		for frame in 0..FRAMES {
+			let timestamp = Timestamp::from_millis(sequence * 1_000 + frame * STEP.as_millis() as u64).unwrap();
+			group.write_frame(timestamp, payload(sequence, frame)).unwrap();
+			if sequence < KILLED || (sequence, frame) == (KILLED, 0) {
+				assert_eq!(next(&mut rx).await, (sequence, payload(sequence, frame)));
+			}
+			if (sequence, frame) == (KILLED, 0) {
+				for pair in [&o_m1, &m1_e] {
+					pair.client_transport.set_latency(Duration::from_secs(3600));
+				}
+			}
+			moq_clock::sleep(STEP).await;
+		}
+		group.finish().unwrap();
+		if sequence == O_NOTICES {
+			o_m1.server.abort(Error::Cancel);
+			o_m1.client.abort(Error::Cancel);
+		}
+		if sequence == E_NOTICES {
+			// Off the group boundary, so no group's age sits on the budget.
+			moq_clock::sleep(STEP * 5 / 2).await;
+			// The groups `O` asks for again reach it newest first, as a congested `P` sends
+			// a descending track.
+			p_o.server_transport.hold_unis();
+			m1_e.server.abort(Error::Cancel);
+			m1_e.client.abort(Error::Cancel);
+			moq_clock::sleep(STEP).await;
+			p_o.server_transport.release_unis_by_priority();
+		}
+		while let Ok((group, frame)) = rx.try_recv() {
+			let (_, payload) = frame.unwrap_or_else(|err| panic!("group {group} failed: {err}"));
+			after.entry(group).or_default().push(String::from_utf8(payload).unwrap());
+		}
+	}
+	drop((broadcast, p_o, o_m1, o_m2, m1_e, m2_e));
+	after
+}
+
+/// The rest of group 4 from the frame `E` lacks, then each group in `groups` whole.
+fn resumed(groups: std::ops::RangeInclusive<u64>) -> BTreeMap<u64, Vec<String>> {
+	let mut expected = BTreeMap::from([(4, (1..10).map(|frame| format!("4.{frame}")).collect())]);
+	for group in groups {
+		expected.insert(group, (0..10).map(|frame| format!("{group}.{frame}")).collect());
+	}
+	expected
+}
+
+/// A budget that outlasts the outage gets every group it held back.
+#[moq_clock::test]
+async fn resume_delivers_an_outage_within_the_budget() {
+	let after = moq_clock::timeout(TEST_TIMEOUT, undetected_outage(Duration::from_secs(10)))
+		.await
+		.expect("timed out");
+	assert_eq!(after, resumed(5..=12));
+}
+
+/// A budget shorter than the outage gets only the groups it still covers: a group is
+/// stale once its successor arrived a full budget ago. Group 4 is the one being read, so
+/// it continues regardless.
+#[moq_clock::test]
+async fn resume_delivers_the_outage_tail_within_the_budget() {
+	let after = moq_clock::timeout(TEST_TIMEOUT, undetected_outage(Duration::from_secs(4)))
+		.await
+		.expect("timed out");
+	assert_eq!(after, resumed(6..=12));
 }
 
 macro_rules! route_flap_tests {

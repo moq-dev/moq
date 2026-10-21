@@ -442,7 +442,7 @@ pub(crate) struct TrackState {
 	// creation, and only a session's copy goes idle: when its upstream subscription ends
 	// with the copy still held, until the route's answer shows in the cache.
 	feed: Feed,
-	// Readers start at this group: the route's live feed went on past a gap after
+	// Readers start at this group: the route's live feed starts past a gap after
 	// everything cached, so nothing bounds how old the cache below it is.
 	live_floor: Option<u64>,
 	// The newest group cached when the track went idle: what the route's answer is
@@ -2204,17 +2204,30 @@ impl TrackState {
 			.map(|(sequence, _)| *sequence);
 		self.datagram_offset += self.datagrams.len();
 		self.datagrams.clear();
+		// An open group stops because this copy dropped its feed, not because the publisher
+		// gave it up: its stream resets as a cut would, so it leaves the cache first, and the
+		// next feed sends it again.
+		let open: Vec<u64> = self
+			.lookup
+			.iter()
+			.filter(|(_, slot)| slot.visible && !slot.is_aborted() && !slot.copies().any(group::Handle::is_finished))
+			.map(|(&sequence, _)| sequence)
+			.collect();
+		for sequence in open {
+			self.uncache(sequence);
+		}
 	}
 
 	/// The route answered with its largest position (`None` for nothing yet): the cache
-	/// is current up to there. A feed that went on past a gap after everything cached
-	/// leaves the cache unjudgeable, since nothing bounds how far an old group reached, so
-	/// readers skip it; whatever the feed delivers stays.
+	/// is current up to there. `start` is the first group the feed serves, when the answer
+	/// names it; otherwise the largest stands in. A feed that starts past a gap after
+	/// everything cached leaves the cache unjudgeable, since nothing bounds how far an old
+	/// group reached, so readers skip it; whatever the feed delivers stays.
 	///
 	/// Readers wait until the cache shows that position: before then its newest group would
 	/// read as the live edge, though the route already holds a newer one.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	fn set_live(&mut self, largest: Option<Position>) {
+	fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) {
 		if self.feed != Feed::Idle {
 			return;
 		}
@@ -2227,8 +2240,11 @@ impl TrackState {
 				.find(|(_, slot)| slot.is_shown())
 				.map(|(sequence, _)| *sequence)
 		});
+		// A feed asked from the cache's head resends what follows it, newest first on a
+		// descending track, so its largest alone would read as a gap.
+		let start = start.or(largest.map(|largest| largest.group));
 		self.live_floor = match (largest, cached) {
-			(Some(largest), Some(cached)) if largest.group > cached.saturating_add(1) => Some(cached + 1),
+			(Some(_), Some(cached)) if start.is_some_and(|start| start > cached.saturating_add(1)) => Some(cached + 1),
 			// The route has nothing, so whatever is cached is not its feed.
 			(None, Some(cached)) => Some(cached.saturating_add(1)),
 			_ => self.live_floor,
@@ -2930,14 +2946,14 @@ impl Producer {
 		}
 	}
 
-	/// The route answered with its largest position, `None` for nothing yet; see
-	/// [`Self::set_idle`]. Readers resume once the cache shows that position. A no-op
-	/// unless idle.
+	/// The route answered with its largest position, `None` for nothing yet, and the first
+	/// group its feed serves when the answer names it; see [`Self::set_idle`]. Readers
+	/// resume once the cache shows the largest position. A no-op unless idle.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: capability gap
-	pub(crate) fn set_live(&mut self, largest: Option<Position>) {
+	pub(crate) fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) {
 		if let Ok(mut state) = self.modify() {
-			state.set_live(largest);
+			state.set_live(largest, start);
 		}
 	}
 
@@ -7647,7 +7663,7 @@ mod test {
 		reader.set_groups(..);
 		assert!(reader.poll_largest(&noop).is_pending(), "the copy is idle");
 
-		producer.set_live(Some(Position::group(2)));
+		producer.set_live(Some(Position::group(2)), None);
 		assert!(
 			reader.poll_largest(&noop).is_pending(),
 			"the same largest is not reported again"
@@ -7668,7 +7684,7 @@ mod test {
 
 		let mut reader = producer.subscribe(replay());
 		assert!(reader.poll_largest(&noop).is_pending(), "the copy is idle");
-		producer.set_live(Some(Position::group(5)));
+		producer.set_live(Some(Position::group(5)), None);
 		let _answer = framed(&producer, 5, 1);
 		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(5))));
 
@@ -7693,7 +7709,7 @@ mod test {
 		let (flag, waiter) = Flag::waiter();
 		assert!(reader.poll_largest(&waiter).is_pending(), "the copy is idle");
 
-		producer.set_live(Some(Position::group(5)));
+		producer.set_live(Some(Position::group(5)), None);
 		producer.report_largest(Position::group(5));
 		assert!(
 			reader.poll_largest(&waiter).is_pending(),
@@ -9201,7 +9217,7 @@ mod test {
 		open.abort(Error::Cancel).unwrap();
 
 		let mut answer = producer.receive_group(group::Info { sequence: 2 }).unwrap();
-		producer.set_live(Some(Position::group(2)));
+		producer.set_live(Some(Position::group(2)), None);
 		answer
 			.write_frame(Timestamp::from_millis(533).unwrap(), bytes::Bytes::from_static(b""))
 			.unwrap();
@@ -9209,6 +9225,34 @@ mod test {
 
 		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(Duration::from_millis(400)));
 		assert_eq!(drain(&mut subscriber), vec![2]);
+	}
+
+	/// The cancel that idles a copy resets the group in flight, which the publisher never
+	/// gave up: no reader hears it dropped, and the next feed sends it again.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_reset_group_is_not_dropped_and_comes_again() {
+		let mut producer = track_producer("test", Info::timed());
+		append_at(&mut producer, 0);
+		let mut open = producer.append_group().unwrap();
+		open.write_frame(Timestamp::from_millis(1000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+
+		producer.set_idle();
+		open.abort(Error::Cancel).unwrap();
+
+		let mut subscriber = producer.subscribe(replay());
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_drop(&waiter).is_pending(), "nothing was given up");
+
+		let mut again = producer.receive_group(group::Info { sequence: 1 }).unwrap();
+		producer.set_live(Some(Position::group(1)), None);
+		again
+			.write_frame(Timestamp::from_millis(1000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		producer.reveal_group(&again.handle());
+		assert_eq!(drain(&mut subscriber), vec![0, 1]);
+		assert!(subscriber.poll_drop(&waiter).is_pending(), "nothing was given up");
 	}
 
 	#[test]
@@ -10623,7 +10667,7 @@ mod test {
 		assert!(consumer.is_live(), "accepting the track starts its live feed");
 		producer.set_idle();
 		assert!(!consumer.is_live(), "an idle accepted copy is not live");
-		producer.set_live(None);
+		producer.set_live(None, None);
 		assert!(consumer.is_live(), "the answered copy is live again");
 
 		// The fetch handler holds the same producer lifetime, so both leave.

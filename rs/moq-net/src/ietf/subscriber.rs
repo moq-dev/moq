@@ -3144,7 +3144,7 @@ where
 						&& (poll_headed(&fill, waiter).is_ready()
 							|| largest.is_some_and(|largest| track.poll_past(largest.group, waiter).is_ready()))
 					{
-						track.set_live(largest);
+						track.set_live(largest, None);
 						resuming = None;
 					}
 					// The last subscriber left: the upstream subscription goes with it, as on
