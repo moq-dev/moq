@@ -13,18 +13,18 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-default = ["moq-net", "quic", "aws-lc-rs", "websocket", "tcp", "uds"]
+default = ["net", "quic", "aws-lc-rs", "websocket", "tcp", "uds"]
 # MoQ sessions over moq-net: `Client`, `Server`, `origin`, and the `connect`, `listen`,
 # and `transport` modules. Every transport feature turns it on, since none works without it.
-moq-net = ["dep:moq-net", "dep:web-transport-trait"]
+net = ["dep:moq-net", "dep:web-transport-trait"]
 # The async QUIC driver alone (`quic::driver`): moq-quic on tokio, without moq-net or
 # the MoQ backend. Needs a crypto-provider feature.
-quic-driver = ["dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash", "dep:socket2"]
+driver = ["dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash", "dep:socket2"]
 # QUIC and WebTransport over moq-quic, for `https://`, `moqt://`, and `moql://`.
 quic = [
     "_transport",
     "_certs",
-    "quic-driver",
+    "driver",
     "dep:http",
     "dep:kio",
     "dep:rustls-native-certs",
@@ -41,7 +41,7 @@ quic = [
 _certs = ["dep:rcgen", "dep:rustls-webpki"]
 # Private "any transport is compiled" marker. Not one to enable on its own: every
 # backend that can move bytes turns it on, and `uds` reaches it through `tcp`.
-_transport = ["moq-net"]
+_transport = ["net"]
 # Filesystem watcher for hot-reloading on-disk TLS certs, keys, and root CAs.
 watch = ["dep:notify"]
 # Capture qlog traces (`--*-quic-qlog <DIR>`). Off by default so production
@@ -167,13 +167,13 @@ socket2 = { workspace = true, features = ["all"] }
 # The examples and integration tests run MoQ sessions, which a driver-only build lacks.
 [[example]]
 name = "chat"
-required-features = ["moq-net"]
+required-features = ["net"]
 
 [[example]]
 name = "clock"
-required-features = ["moq-net"]
+required-features = ["net"]
 
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"
-required-features = ["moq-net"]
+required-features = ["net"]

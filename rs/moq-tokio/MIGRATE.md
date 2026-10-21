@@ -4,11 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### MoQ sessions need the `moq-net` feature (#6132)
+### MoQ sessions need the `net` feature (#6132)
 
-moq-net is optional, behind the default `moq-net` feature that every transport feature (`quic`, `websocket`, `tcp`, `uds`, `iroh`, `webrtc`) turns on.
+moq-net is optional, behind the default `net` feature that every transport feature (`quic`, `websocket`, `tcp`, `uds`, `iroh`, `webrtc`) turns on.
 A build with `default-features = false` and no transport feature loses `client`, `connect`, `connection`, `listen`, `origin`, `transport`, their root re-exports (`Client`, `Connection`, `ConnectError`, `Transport`, ...), `Error::MoqNet`, `Error::Connect`, `Error::connect_error`, `Error::is_auth`, and the `moq_net` re-export.
-Enable `moq-net`, or a transport feature, to keep them.
+Enable `net`, or a transport feature, to keep them.
 
 ### Dropping an unfinished send stream resets it (#5909)
 

@@ -21,12 +21,12 @@ pub(crate) use backend::{Client, Closer, Options, Server, accept};
 #[cfg(feature = "quic")]
 pub use backend::{Connection, Error};
 /// The flow-control limits a live QUIC connection can change; see [`driver::Connection::set_limits`].
-#[cfg(feature = "quic-driver")]
+#[cfg(feature = "driver")]
 pub use moq_quic::{Limits, LimitsError};
 
 // cargo fmt formats submodules with the crate root's config, so `just rs fix`
 // formats this one separately with its own (quinn's).
-#[cfg(feature = "quic-driver")]
+#[cfg(feature = "driver")]
 #[rustfmt::skip]
 pub mod driver;
 

@@ -172,7 +172,7 @@ pub enum Error {
 
 impl Error {
 	/// A configuration no retry can fix, unlike a certificate file read mid-rotation.
-	#[cfg(feature = "moq-net")]
+	#[cfg(feature = "net")]
 	pub(crate) fn is_terminal(&self) -> bool {
 		!matches!(
 			self,

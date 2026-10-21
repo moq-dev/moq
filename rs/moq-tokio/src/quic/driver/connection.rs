@@ -284,7 +284,7 @@ impl Future for ConnectionDriver {
         conn.forward_app_events(&self.conn.shared);
 
         // Every datagram sent or received passes through this poll.
-        #[cfg(feature = "moq-net")]
+        #[cfg(feature = "net")]
         {
             let stats = conn.inner.stats();
             self.conn.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
@@ -643,7 +643,7 @@ impl Connection {
     }
 
     /// The wire counters the driver updates as it sends and receives.
-    #[cfg(feature = "moq-net")]
+    #[cfg(feature = "net")]
     pub(crate) fn wire(&self) -> moq_net::transport::Wire {
         self.0.shared.wire.clone()
     }
@@ -1075,7 +1075,7 @@ pub(crate) struct Shared {
     /// Refreshed by every driver poll, so readers never wake the driver to sample.
     ///
     /// Only moq-net reads them, so a driver-only build skips the per-poll stats.
-    #[cfg(feature = "moq-net")]
+    #[cfg(feature = "net")]
     wire: moq_net::transport::Wire,
 }
 

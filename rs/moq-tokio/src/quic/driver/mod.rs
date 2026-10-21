@@ -5,7 +5,7 @@
 //! keep a prefix reliable, [`RecvStream::read_held`] to hold receive credit until a message is
 //! complete, and [`Connection::set_limits`] to change flow control on a live connection.
 //!
-//! It needs no MoQ session: enable the `quic-driver` feature (with `aws-lc-rs` or `ring`) and
+//! It needs no MoQ session: enable the `driver` feature (with `aws-lc-rs` or `ring`) and
 //! `default-features = false` to build it without moq-net. The entry point is the [`Endpoint`].
 //!
 //! [QUIC](https://en.wikipedia.org/wiki/QUIC) is a modern transport protocol addressing

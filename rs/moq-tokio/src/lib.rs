@@ -19,27 +19,27 @@
 //! and to build a plain-TLS listener's `rustls::ServerConfig` from
 //! [`tls::Listen::server_config`].
 //!
-//! MoQ sessions need the `moq-net` feature, which every transport turns on. Without
-//! it, `quic-driver` and a crypto provider build [`quic::driver`] alone: an async
+//! MoQ sessions need the `net` feature, which every transport turns on. Without
+//! it, `driver` and a crypto provider build [`quic::driver`] alone: an async
 //! QUIC stack for any application, MoQ or not.
 
 #![warn(missing_docs)]
 
 // The protocol crates need a compiled provider for reset and retry-token keys. A rustls provider
 // installed at runtime cannot supply constructors removed by their compile-time feature gates.
-#[cfg(all(feature = "quic-driver", not(any(feature = "aws-lc-rs", feature = "ring"))))]
+#[cfg(all(feature = "driver", not(any(feature = "aws-lc-rs", feature = "ring"))))]
 compile_error!("a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature");
 
-#[cfg(any(feature = "moq-net", all(feature = "watch", feature = "_certs")))]
+#[cfg(any(feature = "net", all(feature = "watch", feature = "_certs")))]
 mod abort;
 pub mod accept;
 pub use moq_sock::bind;
 pub mod cli;
-#[cfg(feature = "moq-net")]
+#[cfg(feature = "net")]
 pub mod client;
-#[cfg(feature = "moq-net")]
+#[cfg(feature = "net")]
 pub mod connect;
-#[cfg(feature = "moq-net")]
+#[cfg(feature = "net")]
 pub mod connection;
 pub mod crypto;
 mod error;
@@ -47,10 +47,10 @@ mod error;
 pub mod failover;
 #[cfg(feature = "jemalloc")]
 pub mod jemalloc;
-#[cfg(feature = "moq-net")]
+#[cfg(feature = "net")]
 pub mod listen;
 mod log;
-#[cfg(feature = "moq-net")]
+#[cfg(feature = "net")]
 pub mod origin;
 pub mod panic;
 pub mod quic;
@@ -63,7 +63,7 @@ pub mod settings;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 pub mod tls;
-#[cfg(feature = "moq-net")]
+#[cfg(feature = "net")]
 pub mod transport;
 #[cfg(all(feature = "uds", unix))]
 pub mod unix;
@@ -94,21 +94,21 @@ fn qmux_config() -> qmux::Config {
 
 // Enumerated rather than globbed, so the root surface is a deliberate list and a
 // new `pub` item in these modules doesn't silently join it.
-#[cfg(feature = "moq-net")]
+#[cfg(feature = "net")]
 pub use client::Client;
-#[cfg(feature = "moq-net")]
+#[cfg(feature = "net")]
 pub use connect::{Addrs, ConnectError};
-#[cfg(feature = "moq-net")]
+#[cfg(feature = "net")]
 pub use connection::{Backoff, Connection, Redirect, Status};
 pub use error::{Error, Result};
 pub use log::{Log, RedactedUrl};
 #[cfg(feature = "_transport")]
 pub use server::{Listener, Server};
-#[cfg(feature = "moq-net")]
+#[cfg(feature = "net")]
 pub use transport::Transport;
 
 // Re-export these crates.
-#[cfg(feature = "moq-net")]
+#[cfg(feature = "net")]
 pub use moq_net;
 pub use rustls;
 

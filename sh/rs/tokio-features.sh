@@ -20,11 +20,11 @@ cargo clippy --locked -p moq-tokio --all-features -- -D warnings
 
 # The QUIC driver is public API for applications without a MoQ session, so its
 # build must not reach moq-net, the MoQ backend's dependencies, or another QUIC stack.
-driver=(--no-default-features --features "quic-driver,aws-lc-rs")
+driver=(--no-default-features --features "driver,aws-lc-rs")
 cargo clippy --locked -p moq-tokio --all-targets "${driver[@]}" -- -D warnings
 graph=$(cargo tree --locked -p moq-tokio -e normal --prefix none "${driver[@]}")
 if leaked=$(grep -E '^(moq-net|reqwest|notify|quinn[a-z-]*|noq[a-z-]*|web-transport[a-z-]*) ' <<<"$graph"); then
-    echo "rs: moq-tokio's quic-driver build must not depend on:" >&2
+    echo "rs: moq-tokio's driver build must not depend on:" >&2
     sort -u <<<"$leaked" >&2
     exit 1
 fi
@@ -34,7 +34,7 @@ if ((all)); then
     cargo clippy --locked -p moq-tokio --no-default-features --features quic,aws-lc-rs -- -D warnings
     cargo clippy --locked -p moq-tokio --no-default-features --features quic,ring -- -D warnings
 
-    for feature in moq-net aws-lc-rs ring tcp uds websocket webrtc; do
+    for feature in net aws-lc-rs ring tcp uds websocket webrtc; do
         cargo clippy --locked -p moq-tokio --no-default-features --features "$feature" -- -D warnings
     done
 fi
