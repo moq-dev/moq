@@ -111,8 +111,8 @@ impl<S: ObjectStore> Track<S> {
 		Ok(track)
 	}
 
-	/// Wait for the next run, pruning meanwhile: the newest of the queued track infos, or `None`
-	/// once the listing ended.
+	/// Wait for the next run, pruning meanwhile: the queued track info, which the listing keeps
+	/// to the newest, or `None` once the listing ended.
 	async fn idle(&mut self, queue: &kio::Queue<moq_net::track::Info>) -> Result<Option<moq_net::track::Info>> {
 		loop {
 			let mut timer = self.prune_at().map(|at| Box::pin(moq_clock::sleep_until(at)));
@@ -124,13 +124,7 @@ impl<S: ObjectStore> Track<S> {
 			})
 			.await;
 			match popped {
-				// A track removed and re-added while a run was still draining queues it twice.
-				Some(Ok(mut info)) => {
-					while let Ok(Some(newer)) = queue.try_pop() {
-						info = newer;
-					}
-					return Ok(Some(info));
-				}
+				Some(Ok(info)) => return Ok(Some(info)),
 				Some(Err(kio::Closed)) => return Ok(None),
 				None => self.prune().await?,
 			}
@@ -174,9 +168,11 @@ impl<S: ObjectStore> Track<S> {
 			},
 			None => Range::oldest(),
 		};
+		// The cap, since `info` may describe an older instance than the one subscribed, and a
+		// backlog a smaller budget skipped is not sent again. The wait for a gap is narrowed below.
 		let subscription = Subscription::default()
 			.with_order(Order::Ascending)
-			.with_max_delay(delay(config, info))
+			.with_max_delay(config.max_delay)
 			.with_ranges([range]);
 
 		let subscribed = match self.shared.broadcast.track(&self.name) {

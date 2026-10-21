@@ -195,6 +195,9 @@ impl<S: ObjectStore> Producer<S> {
 						recorders.push(record.boxed());
 						queue
 					});
+					// Only the newest info matters, so one still queued is replaced: a blocked
+					// recorder holds at most one, however often its track is re-added.
+					let _ = queue.try_pop();
 					// Only fails once closed, which happens when the listing ends.
 					let _ = queue.try_push(info);
 				}

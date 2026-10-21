@@ -72,43 +72,77 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 	let prefix = moq_net::Path::new(&prefix).to_owned();
 	let mut announced = origin.clone().with_hidden(hidden).announced();
 	let mut recordings = tokio::task::JoinSet::new();
-	// How many recordings of each instance run, so a re-announced one is not recorded twice.
-	let mut running: HashMap<Instance, usize> = HashMap::new();
+	let mut running = Running::default();
 
 	tracing::info!(%prefix, store = %args.store, "recording");
 	notify_ready();
 
 	loop {
-		tokio::select! {
+		let instance = tokio::select! {
 			event = announced.next() => {
-				let (announce, restart) = match event.context("announcements ended")? {
-					moq_net::announce::Event::Start(announce) => (announce, false),
-					// Another publisher instance: an epochless one is still a new recording.
-					moq_net::announce::Event::Restart(announce) => (announce, true),
+				let announce = match event.context("announcements ended")? {
+					// Another publisher instance, or the same one announced again.
+					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => announce,
 					_ => continue,
 				};
 				if !announce.prefix.has_prefix(&prefix) {
 					continue;
 				}
 				let instance: Instance = (announce.prefix, announce.route.epoch);
-				let count = running.entry(instance.clone()).or_default();
-				if *count > 0 && !(restart && instance.1.is_none()) {
+				if !running.start(&instance) {
 					continue;
 				}
-				*count += 1;
-				let key = key(&root, &instance)?;
-				let store = moq_archive::Store::new(store.clone(), key);
-				recordings.spawn(record(origin.clone(), instance, store, config.clone()));
+				instance
 			}
 			Some(done) = recordings.join_next() => {
 				let (instance, result) = done.context("recording panicked")?;
 				result?;
-				if let Some(count) = running.get_mut(&instance) {
-					*count -= 1;
-					if *count == 0 {
-						running.remove(&instance);
-					}
+				if !running.done(&instance) {
+					continue;
 				}
+				instance
+			}
+		};
+		let key = key(&root, &instance)?;
+		let store = moq_archive::Store::new(store.clone(), key);
+		recordings.spawn(record(origin.clone(), instance, store, config.clone()));
+	}
+}
+
+/// The epoch-pinned instances recording, so each records under its key once at a time, and again
+/// when it was announced anew meanwhile.
+#[derive(Default)]
+struct Running(HashMap<Instance, bool>);
+
+impl Running {
+	/// Whether to record `instance` now that it was announced. An epochless one is a new instance
+	/// each time, under a fresh key.
+	fn start(&mut self, instance: &Instance) -> bool {
+		if instance.1.is_none() {
+			return true;
+		}
+		match self.0.get_mut(instance) {
+			Some(again) => {
+				*again = true;
+				false
+			}
+			None => {
+				self.0.insert(instance.clone(), false);
+				true
+			}
+		}
+	}
+
+	/// Whether to record `instance` again, now that its recording ended.
+	fn done(&mut self, instance: &Instance) -> bool {
+		match self.0.get_mut(instance) {
+			Some(again) if *again => {
+				*again = false;
+				true
+			}
+			_ => {
+				self.0.remove(instance);
+				false
 			}
 		}
 	}
@@ -322,6 +356,24 @@ mod tests {
 			);
 		}
 		assert!(!files.iter().any(|file| file.starts_with("other")), "{files:?}");
+	}
+
+	/// An epochless route announced again while its last recording drains is a new recording, and
+	/// an epoch-pinned one records again once its recording ends.
+	#[test]
+	fn a_re_announced_instance_is_recorded() {
+		let mut running = Running::default();
+		let epochless = (moq_net::Path::new("live/a").to_owned(), None);
+		assert!(running.start(&epochless));
+		assert!(running.start(&epochless));
+		assert!(!running.done(&epochless));
+
+		let pinned = (moq_net::Path::new("live/b").to_owned(), Some(moq_net::Epoch::mint()));
+		assert!(running.start(&pinned));
+		assert!(!running.start(&pinned));
+		assert!(running.done(&pinned));
+		assert!(!running.done(&pinned));
+		assert!(running.start(&pinned));
 	}
 
 	/// A route without an epoch records under one minted per instance, so two instances never

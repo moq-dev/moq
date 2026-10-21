@@ -31,8 +31,9 @@ pub(super) struct Ordered {
 	next: Option<u64>,
 	/// Received sequences waiting on a lower one.
 	pending: BTreeMap<u64, Item>,
-	/// Each pending sequence with when it arrived, oldest first; ones handed out are dropped
-	/// lazily. The oldest dates the gap, so a later, lower arrival never extends the wait.
+	/// Each pending sequence with when it arrived, oldest first. The front is always pending,
+	/// and the ones handed out behind it go once it does, so this holds at most what arrived
+	/// within a max delay. The oldest dates the gap, so a later, lower arrival never extends it.
 	arrivals: VecDeque<(u64, Instant)>,
 	timer: Option<Pin<Box<moq_clock::Sleep>>>,
 	groups_done: bool,
@@ -101,6 +102,7 @@ impl Ordered {
 			let gap = match self.next {
 				Some(next) if sequence < next => {
 					entry.remove();
+					self.trim();
 					continue;
 				}
 				Some(next) => sequence > next,
@@ -109,13 +111,6 @@ impl Ordered {
 			};
 			if gap && !draining {
 				// The oldest arrival still pending is when this gap was first seen.
-				while self
-					.arrivals
-					.front()
-					.is_some_and(|(sequence, _)| !self.pending.contains_key(sequence))
-				{
-					self.arrivals.pop_front();
-				}
 				let (_, since) = self.arrivals.front().expect("a pending sequence arrived");
 				let deadline = *since + self.max_delay;
 				if moq_clock::now() < deadline {
@@ -129,8 +124,20 @@ impl Ordered {
 				}
 			}
 			let item = self.pending.remove(&sequence).expect("the lowest pending sequence");
+			self.trim();
 			self.next = Some(sequence.saturating_add(1));
 			return Poll::Ready(Some((sequence, item)));
+		}
+	}
+
+	/// Drop arrivals handed out, up to the oldest one still pending.
+	fn trim(&mut self) {
+		while self
+			.arrivals
+			.front()
+			.is_some_and(|(sequence, _)| !self.pending.contains_key(sequence))
+		{
+			self.arrivals.pop_front();
 		}
 	}
 
@@ -222,5 +229,18 @@ mod tests {
 		moq_clock::sleep(Duration::from_millis(1)).await;
 		assert_eq!(next(&mut ordered), Some(9));
 		assert_eq!(next(&mut ordered), Some(10));
+	}
+
+	/// A gap-free track keeps no arrival it handed out.
+	#[tokio::test(start_paused = true)]
+	async fn handed_out_arrivals_are_dropped() {
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track("t", track::Info::default()).unwrap();
+		let mut ordered = ordered(&broadcast, None).await;
+		for sequence in 0..100 {
+			group(&track, sequence);
+			assert_eq!(next(&mut ordered), Some(sequence));
+		}
+		assert!(ordered.arrivals.is_empty());
 	}
 }
