@@ -32,7 +32,3 @@ the session on main. JS already contains the failure per namespace
   withdrawn normally, and the first is offered again after the wait.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Drain cleanup](/quest/m1/drain-cleanup.md) - what a drain does to sessions at its deadline

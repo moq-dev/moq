@@ -680,6 +680,12 @@ impl Lease {
 		}
 	}
 
+	/// Resolve once the lease has ended and the decider heard; see
+	/// [`moq_auth::lease::Consumer::reported`]. Take it before [`close`](Self::close).
+	pub(crate) fn reported(&self) -> impl Future<Output = ()> + Send + 'static {
+		self.consumer.reported()
+	}
+
 	/// End the lease with the session's close classification and the totals it
 	/// moved, and learn what ended the session: that, or for a gateway the
 	/// decider's reason if it revoked first. Dropping the consumer reports zero bytes.
@@ -699,7 +705,11 @@ impl Lease {
 				self.consumer.close(reason, bytes)
 			}
 			Some(refresh) => {
-				if let Some(ended) = refresh.ended().now_or_never() {
+				// The session has closed by now, withdrawing every grant it was issued.
+				// That is the effect of `reason`, not a verdict that overrides it.
+				if let Some(ended) = refresh.ended().now_or_never()
+					&& ended != lease::Reason::Dropped
+				{
 					if let Some(kind) = uncovered(&ended) {
 						self.stats.fail(kind);
 					}

@@ -49,8 +49,10 @@ instead host sessions with `--listen`, or both at once, admitting clients the
 way the relay does (see [Authentication](/bin/relay/auth)). Listening imports and
 exports share the relay's shutdown behavior: SIGINT or SIGTERM sends accepted
 sessions a reconnect-to-me GOAWAY and waits up to `--drain-timeout` (default
-`10s`), exiting once they have all left. Sessions on versions without GOAWAY,
-such as `moq-lite-03`, get none and are closed when the window ends. A second
+`10s`), exiting once they have all left. Sessions still open when the window
+ends are closed, and the process exits once each has reported its `end` to the
+auth server. Sessions on versions without GOAWAY, such as `moq-lite-03`, get
+none and are closed the same way. A second
 signal exits immediately; `--drain-timeout 0s` closes sessions immediately.
 Pending handshakes and admission requests share the same drain window, and an
 open stdin pipe does not keep the process alive afterward.

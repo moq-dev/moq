@@ -363,8 +363,10 @@ ALPN because extended CONNECT is disabled. A later WebSocket upgrade on the same
 keep-alive connection joins the drain when its headers arrive. The internal
 listener is unaffected.
 
-The relay exits as soon as every admitted connection has left, when the window
-ends, or immediately on a second signal. Once it commits to exit, WebSocket
+The relay exits as soon as every admitted connection has left, or immediately on
+a second signal. When the window ends, it stops waiting for connections still
+pending and exits once every session it closed has reported its `end` to the
+auth server, each report bounded by that server's request timeout. Once it commits to exit, WebSocket
 upgrades receive 503; plain HTTP is served until the public listener stops.
 `0` skips the GOAWAY.
 Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are
