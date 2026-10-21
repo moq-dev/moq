@@ -114,6 +114,11 @@ func (f *BroadcastFinish) Linger() time.Duration {
 // Wait keeps the broadcast up for its linger, or until [BroadcastFinish.Close],
 // then closes it. Cancelling ctx closes the broadcast at once.
 func (f *BroadcastFinish) Wait(ctx context.Context) error {
+	// The bridge starts no call on a done ctx, so it would never reach the close.
+	if err := ctx.Err(); err != nil {
+		f.inner.Close()
+		return err
+	}
 	return bridge.CallErr(ctx, f.inner.Close, f.inner.Wait)
 }
 

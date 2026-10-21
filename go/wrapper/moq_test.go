@@ -186,6 +186,36 @@ func TestBroadcastFinishLingersUntilCancelled(t *testing.T) {
 	finish.Close()
 }
 
+func TestBroadcastFinishWaitOnDoneContextCloses(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxAge := time.Hour
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Priority: 127, MaxAge: &maxAge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := track.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	finish, err := broadcast.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := finish.Wait(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait = %v, want cancelled", err)
+	}
+	// Closed by the cancelled wait, so a second wait fails at once instead of lingering.
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := finish.Wait(ctx); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("second Wait = %v, want closed", err)
+	}
+}
+
 func TestBroadcastCloseTwiceIsNoop(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
