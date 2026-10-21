@@ -160,6 +160,36 @@
     after = [ "runner-token.service" ];
   };
 
+  # Free page reporting hands back only free pages. The disk bypasses the host's
+  # cache, so the guest's page cache keeps every file a job touched resident on the
+  # host until it is dropped between jobs.
+  systemd.services.runner-reclaim = {
+    serviceConfig.Type = "oneshot";
+    path = [ pkgs.procps ];
+    # A write-heavy build can leave sync running long enough for a job to start,
+    # so check again right before dropping.
+    script = ''
+      idle() {
+        if pgrep -f Runner.Worker >/dev/null; then
+          echo "A job is running; keeping caches."
+          return 1
+        fi
+      }
+      idle || exit 0
+      sync
+      idle || exit 0
+      echo 3 > /proc/sys/vm/drop_caches
+      echo "Dropped caches."
+    '';
+  };
+  systemd.timers.runner-reclaim = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "5min";
+      OnUnitInactiveSec = "5min";
+    };
+  };
+
   environment.systemPackages = with pkgs; [
     git
     just
