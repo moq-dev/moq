@@ -99,6 +99,13 @@ impl Follow {
 		}
 	}
 
+	/// Poll until every source feeding this follower has synced, registering `waiter` until
+	/// then. A path [`poll_next`](Self::poll_next) has not started by then is not announced,
+	/// rather than not heard yet. See [`announce::Consumer::poll_synced`](crate::announce::Consumer::poll_synced).
+	pub fn poll_synced(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.announced.poll_synced(waiter)
+	}
+
 	/// The cursor's next event, counting what it delivers and when it runs dry.
 	fn poll_announced(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
 		let poll = self.announced.poll_next(waiter);

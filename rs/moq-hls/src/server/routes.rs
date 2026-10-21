@@ -1083,8 +1083,9 @@ mod tests {
 		.await
 		.expect("sibling resolve timed out")
 		.expect("sibling broadcast");
-		drop(media);
-		drop(media_broadcast);
+		// Only the sibling goes: the catalog keeps listing the rendition, so the request
+		// reaches the media fetch rather than missing the rendition.
+		media_broadcast.close();
 		tokio::time::timeout(TIMEOUT, remote_media.closed())
 			.await
 			.expect("sibling close timed out");
@@ -1093,7 +1094,7 @@ mod tests {
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 
-		drop((catalog, catalog_broadcast));
+		drop((catalog, catalog_broadcast, media));
 		pair.accept.abort();
 	}
 }
