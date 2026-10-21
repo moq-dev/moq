@@ -72,15 +72,13 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		if (!declarations.some(({ statement }) => documented(statement))) found.push(`${where}: ${path}`);
 
 		const members = new Map<string, boolean>();
-		const nested = new Map<string, Declarations>();
 		for (const { declaration } of declarations) {
 			if (declaration.type === "ClassDeclaration") {
 				const superClass = declaration.superClass;
 				const base = resolveClass(file, superClass);
-				const inherited = base ? load(base.file).locals.get(base.name) : undefined;
-				if (base && inherited && !seen.has(`${base.file}#${base.name}`)) {
-					seen.add(`${base.file}#${base.name}`);
-					check(base.file, base.name, inherited);
+				if (base && !seen.has(base.key)) {
+					seen.add(base.key);
+					check(base.file, base.name, base.declarations);
 				}
 				const element = isElement(superClass);
 				for (const member of declaration.body.body) {
@@ -88,41 +86,44 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 					if (name === undefined) continue;
 					members.set(name, (members.get(name) ?? false) || documented(member));
 				}
-			} else if (declaration.type === "TSModuleDeclaration" && declaration.body.type === "TSModuleBlock") {
-				for (const statement of declaration.body.body) {
-					const inner = statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
-					for (const name of declared(inner)) {
-						const list = nested.get(name) ?? [];
-						list.push({ statement, declaration: inner as Node });
-						nested.set(name, list);
-					}
-				}
 			}
 		}
 		for (const [name, ok] of members) {
 			if (!ok) found.push(`${where}: ${path}.${name}`);
 		}
-		for (const [name, list] of nested) check(file, `${path}.${name}`, list);
+		for (const [name, list] of namespaceMembers(declarations)) check(file, `${path}.${name}`, list);
 	};
 
-	// The package class a superclass expression names, plain (`Base`) or through a namespace
-	// import (`base.Parent`); undefined for a global or another package's class.
-	const resolveClass = (file: string, superClass: unknown): { file: string; name: string } | undefined => {
+	// The package class a superclass expression names: plain (`Base`), or a member (`ns.Parent`) of
+	// a namespace import or a declared namespace. Undefined for a global or another package's class.
+	const resolveClass = (
+		file: string,
+		superClass: unknown,
+	): { key: string; file: string; name: string; declarations: Declarations } | undefined => {
+		const local = (base: ReturnType<typeof resolveBinding>) => {
+			const declarations = base?.kind === "local" ? load(base.file).locals.get(base.name) : undefined;
+			if (base?.kind !== "local" || !declarations) return undefined;
+			return { key: `${base.file}#${base.name}`, file: base.file, name: base.name, declarations };
+		};
 		const node = superClass as { type: string; name?: string; object?: unknown; property?: unknown } | null;
-		if (node?.type === "Identifier" && node.name) {
-			const base = resolveBinding(file, { kind: "local", name: node.name });
-			return base?.kind === "local" ? base : undefined;
-		}
+		if (node?.type === "Identifier" && node.name)
+			return local(resolveBinding(file, { kind: "local", name: node.name }));
+
 		const object = node?.object as { type: string; name: string } | undefined;
 		const property = node?.property as { type: string; name: string } | undefined;
 		if (node?.type !== "MemberExpression" || object?.type !== "Identifier" || property?.type !== "Identifier") {
 			return undefined;
 		}
-		const namespace = resolveBinding(file, { kind: "local", name: object.name });
-		if (namespace?.kind !== "namespace") return undefined;
-		const next = findExport(namespace.file, property.name, new Set());
-		const base = next ? resolveBinding(next.file, next.binding) : undefined;
-		return base?.kind === "local" ? base : undefined;
+		const owner = resolveBinding(file, { kind: "local", name: object.name });
+		if (owner?.kind === "namespace") {
+			const next = findExport(owner.file, property.name, new Set());
+			return next ? local(resolveBinding(next.file, next.binding)) : undefined;
+		}
+		const namespace = local(owner);
+		const declarations = namespace && namespaceMembers(namespace.declarations).get(property.name);
+		if (!namespace || !declarations) return undefined;
+		const name = `${namespace.name}.${property.name}`;
+		return { key: `${namespace.file}#${name}`, file: namespace.file, name, declarations };
 	};
 
 	// Follow a binding to the file and local name that declares it; undefined for another package.
@@ -166,17 +167,18 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 		return undefined;
 	};
 
-	// `export *` never re-exports a default, so a file reached through one skips it.
-	const walk = (file: string, prefix: string, chain = new Set<string>(), star = false) => {
+	// `export *` never re-exports a default, nor a name the re-exporting module exports itself.
+	const walk = (file: string, prefix: string, chain = new Set<string>(), hidden?: Set<string>) => {
 		if (chain.has(file)) return;
 		chain.add(file);
 		const module = load(file);
 		for (const [name, binding] of module.exports) {
-			if (!(star && name === "default")) visit(file, prefix + name, binding);
+			if (!hidden?.has(name)) visit(file, prefix + name, binding);
 		}
+		const shadowed = new Set([...(hidden ?? ["default"]), ...module.exports.keys()]);
 		for (const specifier of module.stars) {
 			const target = dtsPath(files, file, specifier);
-			if (target) walk(target, prefix, chain, true);
+			if (target) walk(target, prefix, chain, shadowed);
 		}
 	};
 
@@ -238,12 +240,16 @@ function parseModule(source: string): Module {
 				break;
 			case "ExportDefaultDeclaration": {
 				const declaration = statement.declaration;
-				if (declaration.type === "Identifier") {
-					module.exports.set("default", { kind: "local", name: declaration.name });
-				} else {
-					declare("default", statement, declaration as Node);
-					module.exports.set("default", { kind: "local", name: "default" });
-				}
+				// A named default declaration also binds its name, which an `export { Name }` can use.
+				const id = (declaration as { id?: { type: string; name: string } | null }).id;
+				const name =
+					declaration.type === "Identifier"
+						? declaration.name
+						: id?.type === "Identifier"
+							? id.name
+							: "default";
+				if (declaration.type !== "Identifier") declare(name, statement, declaration as Node);
+				module.exports.set("default", { kind: "local", name });
 				break;
 			}
 			default:
@@ -251,6 +257,23 @@ function parseModule(source: string): Module {
 		}
 	}
 	return module;
+}
+
+// Everything an ambient namespace among `declarations` declares, by name; all of it is exported.
+function namespaceMembers(declarations: Declarations): Map<string, Declarations> {
+	const members = new Map<string, Declarations>();
+	for (const { declaration } of declarations) {
+		if (declaration.type !== "TSModuleDeclaration" || declaration.body.type !== "TSModuleBlock") continue;
+		for (const statement of declaration.body.body) {
+			const inner = statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
+			for (const name of declared(inner)) {
+				const list = members.get(name) ?? [];
+				list.push({ statement, declaration: inner as Node });
+				members.set(name, list);
+			}
+		}
+	}
+	return members;
 }
 
 // A doc comment is a non-empty `/** */` block before the node. A file's `@module` block documents

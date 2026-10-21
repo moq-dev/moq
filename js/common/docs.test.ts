@@ -113,6 +113,36 @@ test("members inherited from an unexported package class are checked", () => {
 	expect(found).toEqual(["base.d.ts: Base", "base.d.ts: Base.run"]);
 });
 
+test("members inherited from a class in a declared namespace are checked", () => {
+	const found = check({
+		"/dist/index.d.ts": [
+			"declare namespace Hidden {",
+			"    class Parent {",
+			"        run(): void;",
+			"    }",
+			"}",
+			"/** Documented. */",
+			"export declare class Derived extends Hidden.Parent {}",
+		].join("\n"),
+	});
+	expect(found).toEqual(["index.d.ts: Hidden.Parent", "index.d.ts: Hidden.Parent.run"]);
+});
+
+test("an explicit export shadows the same name from a star", () => {
+	const found = check({
+		"/dist/inner.d.ts": "export declare const name: number;\n",
+		"/dist/index.d.ts": '/** Documented. */\nexport declare const name: number;\nexport * from "./inner";\n',
+	});
+	expect(found).toEqual([]);
+});
+
+test("a named default declaration is also exported by its name", () => {
+	const found = check({
+		"/dist/index.d.ts": "/** Documented. */\nexport default class Thing {}\nexport { Thing };\n",
+	});
+	expect(found).toEqual([]);
+});
+
 test("a module block does not document the statement after it", () => {
 	const found = check({
 		"/dist/index.d.ts": "/**\n * The package.\n *\n * @module\n */\nexport declare const first: number;\n",
