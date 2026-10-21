@@ -2849,7 +2849,10 @@ mod tests {
 				}
 				let caught = caught.unwrap_or_else(|| panic!("tail {tail}, cycle {cycle}: never caught"));
 				// Never before the run first returns to an endpoint it left.
-				assert!(caught + 1 >= tail + cycle, "tail {tail}, cycle {cycle}: caught at {caught}");
+				assert!(
+					caught + 1 >= tail + cycle,
+					"tail {tail}, cycle {cycle}: caught at {caught}"
+				);
 			}
 		}
 
@@ -2867,10 +2870,7 @@ mod tests {
 			endpoint(&url("tcp://relay:1/path?jwt=a#x")),
 			endpoint(&url("tcp://relay:1/path?jwt=b"))
 		);
-		assert_ne!(
-			endpoint(&url("tcp://relay:1/a")),
-			endpoint(&url("tcp://relay:1/b"))
-		);
+		assert_ne!(endpoint(&url("tcp://relay:1/a")), endpoint(&url("tcp://relay:1/b")));
 	}
 }
 
