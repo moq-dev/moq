@@ -10,7 +10,7 @@ import { parse } from "@babel/parser";
 
 type Program = ReturnType<typeof parse>["program"];
 type Node = Program["body"][number];
-type Comment = { type: string; value: string };
+type Comment = { type: string; value: string; end?: number };
 
 type Binding =
 	| { kind: "local"; name: string }
@@ -26,6 +26,8 @@ type Module = {
 	imports: Map<string, Binding>;
 	exports: Map<string, Binding>;
 	stars: string[];
+	// Where the first statement starts; a `@module` block above it documents the module.
+	header: number;
 	// Whether the file carries a `@module` block, which an entrypoint needs.
 	described: boolean;
 };
@@ -62,14 +64,16 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 
 		const declarations = load(resolved.file).locals.get(resolved.name);
 		if (!declarations) throw new Error(`${relative(root, resolved.file)}: cannot find ${resolved.name}`);
-		check(resolved.file, path, declarations);
+		check(resolved.file, path, key, declarations);
 	};
 
 	// Check one name's declarations, the public members of a class and of the package's classes it
 	// extends, and everything a namespace declares, since an ambient namespace exports all of it.
-	const check = (file: string, path: string, declarations: Declarations) => {
+	// `key` names the declaration by file and local path, so each is reported once.
+	const check = (file: string, path: string, key: string, declarations: Declarations) => {
 		const where = relative(root, file);
-		if (!declarations.some(({ statement }) => documented(statement))) found.push(`${where}: ${path}`);
+		const header = load(file).header;
+		if (!declarations.some(({ statement }) => documented(statement, header))) found.push(`${where}: ${path}`);
 
 		const members = new Map<string, boolean>();
 		for (const { declaration } of declarations) {
@@ -78,20 +82,25 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 				const base = resolveClass(file, superClass);
 				if (base && "key" in base && !seen.has(base.key)) {
 					seen.add(base.key);
-					check(base.file, base.name, base.declarations);
+					check(base.file, base.name, base.key, base.declarations);
 				}
 				const element = isElement(superClass);
 				for (const member of declaration.body.body) {
 					const name = memberName(member, element);
 					if (name === undefined) continue;
-					members.set(name, (members.get(name) ?? false) || documented(member));
+					members.set(name, (members.get(name) ?? false) || documented(member, header));
 				}
 			}
 		}
 		for (const [name, ok] of members) {
 			if (!ok) found.push(`${where}: ${path}.${name}`);
 		}
-		for (const [name, list] of namespaceMembers(declarations)) check(file, `${path}.${name}`, list);
+		for (const [name, list] of namespaceMembers(declarations)) {
+			const nested = `${key}.${name}`;
+			if (seen.has(nested)) continue;
+			seen.add(nested);
+			check(file, `${path}.${name}`, nested, list);
+		}
 	};
 
 	// What a superclass expression names: a module through a namespace import, or a package
@@ -187,7 +196,14 @@ export function undocumented(root: string, files: Map<string, string>, entrypoin
 }
 
 function parseModule(source: string): Module {
-	const module: Module = { locals: new Map(), imports: new Map(), exports: new Map(), stars: [], described: false };
+	const module: Module = {
+		locals: new Map(),
+		imports: new Map(),
+		exports: new Map(),
+		stars: [],
+		header: 0,
+		described: false,
+	};
 	const declare = (name: string, statement: Node, declaration: Node) => {
 		const list = module.locals.get(name) ?? [];
 		list.push({ statement, declaration });
@@ -195,9 +211,8 @@ function parseModule(source: string): Module {
 	};
 
 	const ast = parse(source, { sourceType: "module", plugins: [["typescript", { dts: true }], "jsx"] });
-	module.described = (ast.comments ?? []).some(
-		(c) => c.type === "CommentBlock" && /^\*[\s\S]*@module\b/.test(c.value),
-	);
+	module.header = ast.program.body[0]?.start ?? Number.POSITIVE_INFINITY;
+	module.described = (ast.comments ?? []).some((c) => isModuleBlock(c, module.header));
 	for (const statement of ast.program.body) {
 		switch (statement.type) {
 			case "ImportDeclaration":
@@ -259,8 +274,17 @@ function parseModule(source: string): Module {
 // Everything an ambient namespace among `declarations` declares, by name; all of it is exported.
 function namespaceMembers(declarations: Declarations): Map<string, Declarations> {
 	const members = new Map<string, Declarations>();
-	for (const { declaration } of declarations) {
+	for (const { statement: outer, declaration } of declarations) {
 		if (declaration.type !== "TSModuleDeclaration" || declaration.body.type !== "TSModuleBlock") continue;
+		// `namespace Outer.Inner { ... }` declares `Inner` inside `Outer`, with the same body.
+		const names = path(declaration.id);
+		if (names.length > 1) {
+			const inner = { ...declaration, id: qualified(names.slice(1)) } as Node;
+			const list = members.get(names[1]) ?? [];
+			list.push({ statement: outer, declaration: inner });
+			members.set(names[1], list);
+			continue;
+		}
 		for (const statement of declaration.body.body) {
 			const inner = statement.type === "ExportNamedDeclaration" ? statement.declaration : statement;
 			for (const name of declared(inner)) {
@@ -273,11 +297,15 @@ function namespaceMembers(declarations: Declarations): Map<string, Declarations>
 	return members;
 }
 
-// A doc comment is a non-empty `/** */` block before the node. A file's `@module` block documents
-// the module, not the statement it happens to precede.
-function documented(node: { leadingComments?: Comment[] | null }): boolean {
+// A `@module` doc block above a file's first statement, which documents the module.
+function isModuleBlock(c: Comment, header: number): boolean {
+	return c.type === "CommentBlock" && (c.end ?? 0) <= header && /^\*[\s\S]*@module\b/.test(c.value);
+}
+
+// A doc comment is a non-empty `/** */` block before the node, other than the file's module block.
+function documented(node: { leadingComments?: Comment[] | null }, header: number): boolean {
 	return (node.leadingComments ?? []).some(
-		(c) => c.type === "CommentBlock" && /^\*[\s*]*[^\s*/]/.test(c.value) && !/@module\b/.test(c.value),
+		(c) => c.type === "CommentBlock" && /^\*[\s*]*[^\s*/]/.test(c.value) && !isModuleBlock(c, header),
 	);
 }
 
@@ -350,5 +378,23 @@ function declared(declaration: unknown): string[] {
 		return (d.declarations ?? []).flatMap((v) => (v.id.type === "Identifier" && v.id.name ? [v.id.name] : []));
 	}
 	if (!/Declaration$|^TSDeclareFunction$/.test(d.type)) return [];
+	if (d.type === "TSModuleDeclaration") return path(d.id).slice(0, 1);
 	return d.id?.type === "Identifier" && d.id.name ? [d.id.name] : [];
+}
+
+// The names of a dotted namespace id (`Outer.Inner`), outermost first; empty for a string id.
+function path(id: unknown): string[] {
+	const node = id as { type: string; name?: string; left?: unknown; right?: unknown } | null | undefined;
+	if (node?.type === "Identifier" && node.name) return [node.name];
+	if (node?.type === "TSQualifiedName") return [...path(node.left), ...path(node.right)];
+	return [];
+}
+
+// A dotted namespace id from its names, the inverse of {@link path}.
+function qualified(names: string[]): unknown {
+	const [first, ...rest] = names;
+	return rest.reduce<unknown>(
+		(left, name) => ({ type: "TSQualifiedName", left, right: { type: "Identifier", name } }),
+		{ type: "Identifier", name: first },
+	);
 }

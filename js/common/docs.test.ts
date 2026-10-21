@@ -137,6 +137,29 @@ test("members inherited through nested namespaces are checked", () => {
 	expect(found).toEqual(["base.d.ts: Inner.Parent", "base.d.ts: Inner.Parent.run"]);
 });
 
+test("a dotted namespace is checked like a nested one", () => {
+	const found = check({
+		"/dist/index.d.ts": [
+			"/** Documented. */",
+			"export declare namespace Outer.Inner {",
+			"    class Parent {",
+			"        run(): void;",
+			"    }",
+			"}",
+			"/** Documented. */",
+			"export declare class Derived extends Outer.Inner.Parent {}",
+		].join("\n"),
+	});
+	expect(found).toEqual(["index.d.ts: Outer.Inner.Parent", "index.d.ts: Outer.Inner.Parent.run"]);
+});
+
+test("only a block above the first statement is the module block", () => {
+	const source =
+		"/** Documented. */\nexport declare const a: number;\n/** Mentions @module. */\nexport declare const b: number;\n";
+	const found = undocumented(root, new Map([["/dist/index.d.ts", source]]), ["/dist/index.d.ts"]);
+	expect(found).toEqual(["index.d.ts: no @module block"]);
+});
+
 test("an explicit export shadows the same name from a star", () => {
 	const found = check({
 		"/dist/inner.d.ts": "export declare const name: number;\n",
