@@ -42,9 +42,11 @@ freshest. Baselines:
   ([docs-mux](https://github.com/moq-dev/moq/pull/6088),
   [docs-bindings](https://github.com/moq-dev/moq/pull/6091)); check that they
   landed and set the lint.
-- JS: the [docs-js](https://github.com/moq-dev/moq/pull/6163) follow-up adds a
-  build check for undocumented exports. If it landed, run it; if not, walk each
-  published package's `exports` with the TypeScript compiler API.
+- JS: since [docs-js](https://github.com/moq-dev/moq/pull/6163), every
+  published package's build runs `js/common/docs.ts`, which fails on an
+  undocumented export or public class member, so check only that its
+  exemptions (private, protected, symbol brands, and custom element reactions)
+  still hold up and that docs say something.
 - Links: GET (not HEAD) every external URL in `doc/` with a browser user
   agent. 316 URLs: all answered except placeholder and local hosts, relay
   URLs that only speak MoQ, npmjs.com and w3.org pages that refuse

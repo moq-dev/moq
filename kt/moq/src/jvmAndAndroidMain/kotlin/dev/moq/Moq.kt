@@ -69,6 +69,14 @@ class Moq internal constructor(
     fun bandwidth(): Bandwidth = session.bandwidth()
 
     /**
+     * The session's authorization: the grant its peer gave it, and more tokens to present.
+     *
+     * Collect [Auth.grants] to follow the grant, and [Auth.add] a fresh token before the
+     * current one expires; each added token is presented again on every reconnect.
+     */
+    fun auth(): Auth = session.auth()
+
+    /**
      * Drain finished tracks within one second, throwing on failure.
      * Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
      * Lite versions, including the default lite-06, wait only for transport ACKs.

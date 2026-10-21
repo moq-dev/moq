@@ -1049,7 +1049,7 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 		video, expected,
 		"continuous leading pictures survive; only join and later-hole orphans are trimmed"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(
 		(stats.dropped, stats.trimmed),
 		(2, 2),
@@ -5563,7 +5563,7 @@ async fn a_start_group_cut_short_starts_at_the_next() {
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe the export starts at: {audio:?}"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(stats.dropped, 0, "nothing that went out lost a frame");
 	assert_eq!(stats.gaps, 1, "the cut is counted");
 	assert!(stats.trimmed >= 5, "the cut-off start is counted: {}", stats.trimmed);
@@ -5640,7 +5640,7 @@ async fn audio_dropped_ahead_of_a_moved_start_is_not_started() {
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe: {audio:?}"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
 	assert!(stats.trimmed > 0);
 }
@@ -5684,7 +5684,7 @@ async fn a_stale_start_group_holds_the_audio_behind_the_next_keyframe() {
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe the export starts at: {audio:?}"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
 	assert!(stats.trimmed > 0);
 }
@@ -9033,7 +9033,7 @@ async fn a_follower_takes_its_own_instance_winning_back_for_no_replacement() {
 	info.epoch = Some(epoch.clone());
 	let mut served = info.produce();
 	let mut catalog = crate::catalog::Producer::<()>::new(&mut served, Default::default()).unwrap();
-	let pool = origin.dynamic("pool", route(epoch)).unwrap();
+	let pool = origin.dynamic_route("pool", route(epoch)).unwrap();
 	let consumer = served.consume();
 	tokio::spawn(async move {
 		while let Ok(request) = pool.requested_broadcast().await {
@@ -9179,7 +9179,7 @@ async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 	let mut served = info.produce();
 	let mut catalog = crate::catalog::Producer::<()>::new(&mut served, Default::default()).unwrap();
 	let mut track = aac_rendition(&mut served, &mut catalog, "a.aac");
-	let pool = origin.dynamic("pool", route).unwrap();
+	let pool = origin.dynamic_route("pool", route).unwrap();
 	let consumer = served.consume();
 	tokio::spawn(async move {
 		while let Ok(request) = pool.requested_broadcast().await {
@@ -9225,10 +9225,10 @@ async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	let mut follower = super::Follower::new(open_export(source).await.unwrap()).unwrap();
 	let quiet = Duration::from_secs(1);
 
-	let pool = origin.dynamic("pool", route(moq_net::Epoch::mint())).unwrap();
+	let pool = origin.dynamic_route("pool", route(moq_net::Epoch::mint())).unwrap();
 	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "a start");
 	drop(pool);
-	let pool = origin.dynamic("pool", route(moq_net::Epoch::mint())).unwrap();
+	let pool = origin.dynamic_route("pool", route(moq_net::Epoch::mint())).unwrap();
 	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "a restart");
 	drop(pool);
 	assert!(tokio::time::timeout(quiet, follower.next()).await.is_err(), "an end");

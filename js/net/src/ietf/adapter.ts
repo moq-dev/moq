@@ -7,8 +7,9 @@ import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { initialMaxRequestId, MaxRequestId, REQUEST_WINDOW } from "./request.ts";
+import { MaxRequestId } from "./request.ts";
 import { refuseUpdate } from "./request_stream.ts";
+import { initialMaxRequestId, REQUEST_WINDOW } from "./setup_options.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** The peer used a request ID the draft closes the session for. */
