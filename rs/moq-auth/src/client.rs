@@ -32,7 +32,9 @@ impl Client {
 	/// caller's client identity and roots; `unix://` speaks HTTP over the socket at
 	/// the URL's path. Anything else is refused here rather than at the first session.
 	pub fn new(url: Url, tls: Option<rustls::ClientConfig>) -> crate::Result<Self> {
-		let builder = reqwest::Client::builder().timeout(TIMEOUT);
+		// No client-wide timeout: `connect` runs under its caller's deadline, and the
+		// requests that run after the handshake are bounded one by one.
+		let builder = reqwest::Client::builder();
 
 		let (builder, url) = match url.scheme() {
 			"http" => {
@@ -71,6 +73,11 @@ impl Client {
 	/// Admit a session: POST `connect`, validate the reply, and return the lease the
 	/// session holds. The session reports its end and totals through [`lease::Consumer::close`]
 	/// or drop; credential expiry alone never reports that the connection ended.
+	///
+	/// Waits on the server for as long as the caller does: the connection's handshake
+	/// deadline is the bound, and dropping the future drops the request. Every later
+	/// request for the session ([`attach`](Self::attach), revalidate, end) is bounded
+	/// on its own, since nothing else bounds it.
 	pub async fn connect(&self, request: Request) -> crate::Result<lease::Consumer> {
 		let context = Context::new(request.clone(), self.identity.clone());
 		admit(self.clone(), request, context).await
@@ -284,11 +291,17 @@ impl Post for Client {
 }
 
 /// Admit a session through `server` and spawn the driver behind its lease.
+///
+/// The connection's own `connect` runs under the caller's deadline; an attached
+/// credential arrives after the handshake, so its request is bounded here.
 async fn admit<S: Post>(server: S, mut request: Request, context: Context) -> crate::Result<lease::Consumer> {
 	request.event = Event::Connect;
 	let admission = context.admitting()?;
 
-	let grant = ask(&server, &request).await?;
+	let grant = match context.owner {
+		true => ask(&server, &request).await?,
+		false => bounded(ask(&server, &request)).await?,
+	};
 	if context.connection.lifecycle.read().ended.is_some() {
 		return Err(Error::Refused(Default::default()));
 	}
@@ -319,6 +332,16 @@ async fn ask<S: Post>(server: &S, request: &Request) -> crate::Result<Grant> {
 		other => other,
 	})?;
 	Ok(grant)
+}
+
+/// Finish a request that nothing else bounds within [`TIMEOUT`], or report the
+/// server as unavailable, so a stalled server cannot pile up requests.
+async fn bounded<T>(request: impl Future<Output = crate::Result<T>>) -> crate::Result<T> {
+	moq_clock::timeout(TIMEOUT, request).await.unwrap_or_else(|_| {
+		Err(Error::Unavailable(format!(
+			"the auth server did not answer within {TIMEOUT:?}"
+		)))
+	})
 }
 
 /// `url` without its userinfo, query, or fragment, any of which may carry a credential.
@@ -358,7 +381,7 @@ impl<S: Post> Driver<S> {
 			bytes,
 		};
 		// The session is already gone; nothing to do with a failure but say so.
-		if let Err(err) = self.server.post_end(&request).await {
+		if let Err(err) = bounded(self.server.post_end(&request)).await {
 			tracing::warn!(id = %request.id, %err, "failed to report the session end");
 		}
 	}
@@ -429,7 +452,7 @@ impl<S: Post> Driver<S> {
 		let server = self.server.clone();
 		let mut request = self.request.clone();
 		request.event = Event::Revalidate;
-		Box::pin(async move { ask(&server, &request).await })
+		Box::pin(async move { bounded(ask(&server, &request)).await })
 	}
 }
 
@@ -730,6 +753,49 @@ mod tests {
 			),
 			"an attached lease outlived its connection's End"
 		);
+	}
+
+	/// `connect` waits as long as its caller does, so a server answering past the
+	/// fixed bound still admits the session. An attached credential arrives after the
+	/// handshake, which nothing else bounds, so it keeps the bound.
+	#[tokio::test(start_paused = true)]
+	async fn connect_waits_for_a_slow_server_but_attach_does_not() {
+		#[derive(Clone)]
+		struct Slow(Script);
+		impl Post for Slow {
+			async fn post(&self, request: &Request) -> crate::Result<Grant> {
+				tokio::time::sleep(TIMEOUT + Duration::from_secs(1)).await;
+				self.0.post(request).await
+			}
+			async fn post_end(&self, request: &Request) -> crate::Result<()> {
+				self.0.post_end(request).await
+			}
+		}
+		let script = Script::new(Log::default(), |_| Some(Ok(grant(None, None))));
+		let server = Slow(script.clone());
+
+		let start = tokio::time::Instant::now();
+		let owner = match admit(
+			server.clone(),
+			request(),
+			Context::new(request(), script.identity.clone()),
+		)
+		.await
+		{
+			Ok(owner) => owner,
+			Err(err) => panic!("connect gave up on a slow server: {err}"),
+		};
+		assert_eq!(start.elapsed(), TIMEOUT + Duration::from_secs(1));
+
+		let mut attached = request();
+		attached.query = Some("jwt=replacement".into());
+		let context = owner.context().unwrap().attach(&attached, &script.identity).unwrap();
+		let start = tokio::time::Instant::now();
+		let Err(err) = admit(server, attached, context).await else {
+			panic!("an attached credential waited past its bound");
+		};
+		assert!(matches!(err, Error::Unavailable(_)), "{err:?}");
+		assert_eq!(start.elapsed(), TIMEOUT);
 	}
 
 	#[tokio::test]

@@ -87,8 +87,14 @@ impl<R: Incoming> Connection<R> {
 
 	async fn serve(request: R, lifecycle: &Lifecycle) -> anyhow::Result<()> {
 		// Abandoned at the drain deadline, so the deadline bounds this task and its
-		// socket like it bounds a session.
-		let admitted = lifecycle.admit(request.admission(&lifecycle.auth)).await;
+		// socket like it bounds a session, and at the handshake deadline, so a peer
+		// cannot hold the connection open behind a decision that never comes.
+		// Boxed: the admission future is large, and nesting it inline overflows debug stacks.
+		let admitted = request
+			.within(Box::pin(lifecycle.admit(request.admission(&lifecycle.auth))))
+			.await
+			.inspect_err(|_| lifecycle.cluster.refusals.record(Refusal::Unavailable))
+			.map_err(|err| err.context("admission timed out"))?;
 		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
 			Err(err) => {
@@ -231,6 +237,7 @@ impl Lifecycle {
 	}
 
 	/// Keep the connection span across a worker-to-shared-runtime handoff and return panics to its owner.
+	/// Dropping the returned future aborts the task, so it never outlives its connection.
 	#[cfg(all(target_os = "linux", feature = "_uring"))]
 	pub(crate) async fn shared<T: Send + 'static>(
 		&self,
@@ -238,9 +245,17 @@ impl Lifecycle {
 		task: impl std::future::Future<Output = T> + Send + 'static,
 	) -> anyhow::Result<T> {
 		use anyhow::Context as _;
-		runtime
-			.spawn(moq_tokio::panic::isolate(task).instrument(self.span.clone()))
-			.await
+
+		struct AbortOnDrop(tokio::task::AbortHandle);
+		impl Drop for AbortOnDrop {
+			fn drop(&mut self) {
+				self.0.abort();
+			}
+		}
+
+		let task = runtime.spawn(moq_tokio::panic::isolate(task).instrument(self.span.clone()));
+		let _abort = AbortOnDrop(task.abort_handle());
+		task.await
 			.context("connection task failed")?
 			.ok_or_else(|| anyhow::anyhow!("connection task panicked"))
 	}
