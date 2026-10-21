@@ -992,15 +992,17 @@ export class Publisher {
 				}
 
 				stream.close();
+				// Its bytes still hold the connection until acknowledged, so a group gone stale
+				// meanwhile is reset like one still serving, as the Rust `GroupServe` does. Awaited
+				// even without a marker: PUBLISH_DONE waits on this group, so the track, whose
+				// timeline judges the budget, stays open until the stream settles.
+				const delivered = await race([
+					hooks.guardGroup(group, () => stream.closed).then(() => true),
+					unsubscribed.then(() => false),
+				]);
 				// Only a stream that closed cleanly delivered the marker: one reset after its FIN
 				// may not have, which leaves the standalone fallback in place, as in Rust.
-				if (marked) {
-					const delivered = stream.closed.then(
-						() => true,
-						() => false,
-					);
-					streams.terminalSent = (await race([delivered, unsubscribed.then(() => false)])) === true;
-				}
+				if (marked) streams.terminalSent = delivered === true;
 			} catch (err: unknown) {
 				stream.reset(error(err));
 			} finally {

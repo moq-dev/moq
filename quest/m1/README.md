@@ -107,9 +107,7 @@ lands before the cut.
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
 - [lite-06 max sequence](/quest/m1/lite06-max-sequence.md) - group sequence 2^62-1 reaches a lite-06 subscriber or is refused loudly, instead of vanishing
 - [Track live signal](/quest/m1/track-live.md) - a reader can wait for its track's feed to be live, so a player skips old cached groups while a fresh upstream subscription starts
-- [moq-mux docs](/quest/m1/docs-mux.md) - every public moq-mux item has rustdoc and the crate warns on missing docs
 - [Binding docs](/quest/m1/docs-bindings.md) - every public moq-ffi and moq-c item has rustdoc, carried into the generated bindings and `moq.h`
-- [JS export docs](/quest/m1/docs-js.md) - every public JS export and class member has TSDoc, and `just check` enforces it
 
 - [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
 
