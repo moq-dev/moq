@@ -580,7 +580,7 @@ enum NamespaceEvent {
 	Answered(crate::PathOwned, Result<Answer, Error>),
 }
 
-/// What came back for an update in flight.
+/// What came back for a PUBLISH_NAMESPACE or an update in flight.
 enum Answer {
 	/// The peer's REQUEST_OK or REQUEST_ERROR, or a draft-16 PUBLISH_NAMESPACE_CANCEL.
 	Message(super::request_stream::Framed),
@@ -2913,7 +2913,7 @@ where
 			updates,
 			..
 		} = ns;
-		let Some(watch) = watched.get(suffix) else {
+		let Some(watch) = watched.get_mut(suffix) else {
 			return Ok(());
 		};
 		let refused = watch.refused;
@@ -2957,7 +2957,7 @@ where
 			// Nothing to send. A namespace that is no longer advertisable is no longer
 			// pending either, and leaving that set would keep the retry timer armed
 			// forever for a wire message that can never happen.
-			if !wanted && let Some(watch) = watched.get_mut(suffix) {
+			if !wanted {
 				watch.deferred = false;
 			}
 			return Ok(());
@@ -2989,7 +2989,7 @@ where
 						tracing::debug!(broadcast = %absolute, "publish_namespace for another epoch");
 						let old = requests.remove(suffix);
 						refused = self
-							.advertise_namespace(requests, path, suffix.clone(), advert.params(), auth)
+							.advertise_namespace(requests, watch, path, suffix.clone(), advert.params(), auth)
 							.await?;
 						if let Some(old) = old {
 							self.end_request(old).await;
@@ -2999,13 +2999,13 @@ where
 						tracing::debug!(broadcast = %absolute, renamed, "publish_namespace restart");
 						self.withdraw_namespace(target, requests, suffix.clone()).await?;
 						refused = self
-							.advertise_namespace(requests, path, suffix.clone(), advert.params(), auth)
+							.advertise_namespace(requests, watch, path, suffix.clone(), advert.params(), auth)
 							.await?;
 					}
 					(true, None) => {
 						tracing::debug!(broadcast = %absolute, "publish_namespace");
 						refused = self
-							.advertise_namespace(requests, path, suffix.clone(), advert.params(), auth)
+							.advertise_namespace(requests, watch, path, suffix.clone(), advert.params(), auth)
 							.await?;
 					}
 				}
@@ -3066,13 +3066,11 @@ where
 			}
 		};
 
-		if let Some(watch) = watched.get_mut(suffix) {
-			// A peer that asked not to be offered this again outranks the retry timer;
-			// anything else it should hold and does not comes back on one.
-			watch.refused = refused;
-			watch.deferred = wanted && !sent.wanted() && refused.pending();
-			watch.sent = sent;
-		}
+		// A peer that asked not to be offered this again outranks the retry timer;
+		// anything else it should hold and does not comes back on one.
+		watch.refused = refused;
+		watch.deferred = wanted && !sent.wanted() && refused.pending();
+		watch.sent = sent;
 		Ok(())
 	}
 
@@ -3080,10 +3078,17 @@ where
 	/// so an update or withdrawal reuses the same stream. A declined request records
 	/// nothing: a peer that wants none of this rejects each one and stays connected.
 	///
+	/// A request stream that fails on its own, reset or ended before its answer, ends only
+	/// this advertisement, which comes back on `watch`'s growing backoff. Only the control
+	/// stream failing, the peer breaking the protocol, or a draft-14/15 header that failed
+	/// to send ends the loop. Those last two close the session here, since the solicited
+	/// path runs this inside a request task whose errors end only that stream.
+	///
 	/// Returns what the refusal, if any, said about coming back.
 	async fn advertise_namespace(
 		&self,
 		requests: &mut HashMap<crate::PathOwned, NamespaceRequest<S>>,
+		watch: &mut Watched,
 		path: &crate::PathOwned,
 		suffix: crate::PathOwned,
 		params: ietf::AdvertParams,
@@ -3100,56 +3105,85 @@ where
 			return Ok(Refused::No);
 		};
 
-		request.writer.varint(ietf::PublishNamespace::ID).await?;
-		request
-			.writer
-			.encode(&ietf::PublishNamespace {
-				request_id,
-				track_namespace: path.as_path(),
-				params,
-				authorization_token: auth.as_ref().and_then(|auth| self.request_token(auth)),
-			})
-			.await?;
-
-		// Bounded for the same reason the open is: a peer that takes the stream and answers
-		// nothing would park this loop forever, and every withdrawal queued behind it.
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
-		let Some((type_id, body)) = self.read_response(&mut request, &mut messages).await? else {
-			tracing::debug!(broadcast = %self.origin.absolute(path), "no answer to the advertisement");
-			return Ok(Refused::No);
+		let sent = async {
+			request.writer.varint(ietf::PublishNamespace::ID).await?;
+			request
+				.writer
+				.encode(&ietf::PublishNamespace {
+					request_id,
+					track_namespace: path.as_path(),
+					params,
+					authorization_token: auth.as_ref().and_then(|auth| self.request_token(auth)),
+				})
+				.await
+		}
+		.await;
+		let answer = match sent {
+			Ok(()) => self.read_response(&mut request, &mut messages).await,
+			// A sequential-ID peer cannot accept any later request when this header failed
+			// before it learned the allocated ID.
+			Err(err) if matches!(self.version, Version::Draft14 | Version::Draft15) => {
+				self.session.clone().close(
+					super::error::to_session_code(&crate::SessionError::Internal),
+					"failed to send PUBLISH_NAMESPACE",
+				);
+				return Err(err);
+			}
+			Err(err) => Err(err),
 		};
 
-		match (self.version, type_id) {
-			(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
-				let msg: ietf::PublishNamespaceOk = body.message(self.version)?;
-				tracing::debug!(message = ?msg, "publish namespace ok");
-			}
-			(Version::Draft14, ietf::PublishNamespaceError::ID) => {
-				let msg: ietf::PublishNamespaceError = body.message(self.version)?;
-				tracing::warn!(message = ?msg, "publish namespace error");
-				// Draft-14's error carries no retry interval, so our own backoff stands.
+		let absolute = self.origin.absolute(path);
+		let super::request_stream::Framed(type_id, body) = match answer {
+			Ok(Answer::Message(framed)) => framed,
+			Ok(Answer::Late) => {
+				tracing::debug!(broadcast = %absolute, "no answer to the advertisement");
 				return Ok(Refused::No);
 			}
-			(_, ietf::RequestOk::ID) => {
-				let msg: ietf::RequestOk = body.message(self.version)?;
-				// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count). Closed
-				// here because the solicited path runs this inside a request task, whose
-				// errors end only that stream.
-				if msg.active.is_some() {
-					self.session.clone().close(
-						super::error::to_session_code(&crate::SessionError::ProtocolViolation),
-						"ACTIVE_COUNT on a PUBLISH_NAMESPACE answer",
-					);
-					return Err(Error::ProtocolViolation);
+			Ok(Answer::Ended) => {
+				tracing::debug!(broadcast = %absolute, "advertisement ended before its answer");
+				return Ok(watch.lapsed(self.runtime.now()));
+			}
+			Err(err) if !super::subscriber::is_protocol_violation(&err) => {
+				tracing::debug!(broadcast = %absolute, %err, "advertisement failed");
+				return Ok(watch.lapsed(self.runtime.now()));
+			}
+			Err(err) => return Err(messages.failed(err)),
+		};
+
+		// `None` when the peer holds the namespace.
+		let refused = (|| {
+			match (self.version, type_id) {
+				(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
+					let msg: ietf::PublishNamespaceOk = body.message(self.version)?;
+					tracing::debug!(message = ?msg, "publish namespace ok");
 				}
-				tracing::debug!(message = ?msg, "publish namespace ok");
+				(Version::Draft14, ietf::PublishNamespaceError::ID) => {
+					let msg: ietf::PublishNamespaceError = body.message(self.version)?;
+					tracing::warn!(message = ?msg, "publish namespace error");
+					// Draft-14's error carries no retry interval, so our own backoff stands.
+					return Ok(Some(Refused::No));
+				}
+				(_, ietf::RequestOk::ID) => {
+					let msg: ietf::RequestOk = body.message(self.version)?;
+					// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count).
+					if msg.active.is_some() {
+						return Err(Error::ProtocolViolation);
+					}
+					tracing::debug!(message = ?msg, "publish namespace ok");
+				}
+				(_, ietf::RequestError::ID) => {
+					let msg: ietf::RequestError = body.message(self.version)?;
+					tracing::warn!(message = ?msg, "publish namespace error");
+					return Ok(Some(self.refusal(msg.retry_interval)));
+				}
+				_ => return Err(Error::UnexpectedMessage),
 			}
-			(_, ietf::RequestError::ID) => {
-				let msg: ietf::RequestError = body.message(self.version)?;
-				tracing::warn!(message = ?msg, "publish namespace error");
-				return Ok(self.refusal(msg.retry_interval));
-			}
-			_ => return Err(Error::UnexpectedMessage),
+			Ok(None)
+		})()
+		.map_err(|err| messages.failed(err))?;
+		if let Some(refused) = refused {
+			return Ok(refused);
 		}
 
 		requests.insert(
@@ -3504,7 +3538,8 @@ where
 		.await
 	}
 
-	/// Read the peer's answer to one advertisement, or `None` if it did not answer in time.
+	/// Read the peer's answer to one advertisement: [`Answer::Late`] if it did not answer in
+	/// time, [`Answer::Ended`] if it ended the request instead.
 	///
 	/// Bounded for the same reason [`Self::open_request`] is, and it is the same peer
 	/// behavior seen a step later: a stream the peer accepts and never answers on holds the
@@ -3514,19 +3549,16 @@ where
 		&self,
 		request: &mut Stream<S, Version>,
 		messages: &mut super::request_stream::Messages<S>,
-	) -> Result<Option<(u64, ietf::Body)>, Error> {
-		let mut read = std::pin::pin!(async {
-			let super::request_stream::Framed(type_id, body) = messages.message(&mut request.reader).await?;
-			Ok::<_, Error>((type_id, body))
-		});
+	) -> Result<Answer, Error> {
+		let mut read = std::pin::pin!(messages.next(&mut request.reader));
 		let mut timeout = crate::time::Deadline::after(&self.runtime, ADVERTISE_TIMEOUT);
 
 		kio::wait(|waiter| {
 			if let Poll::Ready(res) = waiter.poll_future(read.as_mut()) {
-				return Poll::Ready(res.map(Some));
+				return Poll::Ready(res.map(|answer| answer.map_or(Answer::Ended, Answer::Message)));
 			}
 			if timeout.poll(waiter).is_ready() {
-				return Poll::Ready(Ok(None));
+				return Poll::Ready(Ok(Answer::Late));
 			}
 			Poll::Pending
 		})
@@ -14773,6 +14805,153 @@ mod tests {
 				);
 			}
 			assert!(!run.is_finished(), "fin={fin}: the loop ended");
+		}
+	}
+
+	/// A peer that resets or ends one namespace's PUBLISH_NAMESPACE before answering it ends
+	/// only that advertisement: the next namespace is still answered and withdrawn as usual,
+	/// and the failed one is offered again after a backoff rather than in a loop.
+	#[moq_clock::test]
+	async fn a_failed_advertisement_ends_only_its_namespace() {
+		for version in [Version::Draft14, Version::Draft19] {
+			for fin in [true, false] {
+				fails_one_advertisement(version, fin).await;
+			}
+		}
+	}
+
+	async fn fails_one_advertisement(version: Version, fin: bool) {
+		use crate::transport::memory;
+
+		let origin = unheld_origin();
+		let mut cams: HashMap<&str, _> = ["a-cam", "b-cam"]
+			.into_iter()
+			.map(|name| (name, origin.announce(name, crate::origin::Route::default()).unwrap()))
+			.collect();
+		settle().await;
+
+		let (session, mut peer) = memory::pair(memory::Config::default());
+		let publisher = Publisher::new(
+			crate::time::sim(),
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			declared(Some(false)),
+			version,
+		);
+		let run = moq_clock::sim::spawn(publisher.run_publish_namespaces());
+
+		// The next advertisement, with the namespace it names.
+		let mut offered = async || {
+			let mut stream = moq_clock::timeout(Duration::from_secs(10), Stream::accept(&mut peer, version))
+				.await
+				.expect("no advertisement")
+				.unwrap();
+			assert_eq!(stream.reader.varint().await.unwrap(), ietf::PublishNamespace::ID);
+			let body: ietf::Body = stream.reader.decode().await.unwrap();
+			let name = match body.0.windows(5).any(|window| window == b"a-cam") {
+				true => "a-cam",
+				false => "b-cam",
+			};
+			(stream, name)
+		};
+
+		let (mut failed, first) = offered().await;
+		match fin {
+			true => failed.writer.finish().unwrap(),
+			false => failed.writer.abort(&Error::Cancel),
+		}
+		let ended = moq_clock::Instant::now();
+
+		let (mut held, second) = offered().await;
+		assert_ne!(
+			first, second,
+			"{version} fin={fin}: the other namespace was never offered"
+		);
+		let mut ok = bytes::Bytes::from(publish_namespace_ok(version).await);
+		held.writer.write_all(&mut ok).await.unwrap();
+
+		let (_again, name) = offered().await;
+		assert_eq!(
+			name, first,
+			"{version} fin={fin}: the failed namespace was not offered again"
+		);
+		assert!(
+			ended.elapsed() >= RETRY_BASE,
+			"{version} fin={fin}: re-offered after {:?}",
+			ended.elapsed()
+		);
+
+		cams.remove(second);
+		match version {
+			Version::Draft14 => assert_eq!(held.reader.varint().await.unwrap(), ietf::PublishNamespaceDone::ID),
+			_ => assert!(
+				held.reader.varint().await.is_err(),
+				"{version} fin={fin}: not withdrawn"
+			),
+		}
+		assert!(!run.is_finished(), "{version} fin={fin}: the loop ended");
+	}
+
+	/// A draft-14/15 PUBLISH_NAMESPACE whose header fails to send closes the session: its
+	/// request ID is spent, and a peer that requires the next ID would refuse every later
+	/// request. Later drafts back off that namespace instead.
+	#[moq_clock::test]
+	async fn a_failed_legacy_header_closes_the_session() {
+		use crate::transport::{memory, poll::Session as _};
+
+		for version in [Version::Draft14, Version::Draft15, Version::Draft19] {
+			let origin = unheld_origin();
+			let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+			settle().await;
+
+			// One message at a time, so the header's body waits behind its type.
+			let (session, mut peer) = memory::pair(memory::Config {
+				stream_buffer: 0,
+				..Default::default()
+			});
+			let publisher = Publisher::new(
+				crate::time::sim(),
+				session,
+				origin.consume(),
+				Control::new(None, false),
+				None,
+				declared(Some(false)),
+				version,
+			);
+			let run = moq_clock::sim::spawn(publisher.run_publish_namespaces());
+
+			let mut stream = moq_clock::timeout(Duration::from_secs(10), Stream::accept(&mut peer, version))
+				.await
+				.expect("no advertisement")
+				.unwrap();
+			stream.reader.abort(&Error::Cancel);
+
+			match version {
+				Version::Draft14 | Version::Draft15 => {
+					let closed = moq_clock::timeout(Duration::from_secs(10), peer.closed())
+						.await
+						.unwrap_or_else(|_| panic!("{version}: the session stayed open"));
+					let code = super::super::error::to_session_code(&crate::SessionError::Internal);
+					assert!(
+						matches!(closed, memory::Error::Session { code: c, .. } if c == code),
+						"{version}: {closed:?}"
+					);
+					let res = moq_clock::timeout(Duration::from_secs(10), run)
+						.await
+						.unwrap_or_else(|_| panic!("{version}: the loop kept running"));
+					assert!(res.unwrap().is_err(), "{version}: the loop ended cleanly");
+				}
+				_ => {
+					// Offered again after the backoff, on a session that stays open.
+					moq_clock::timeout(Duration::from_secs(10), Stream::accept(&mut peer, version))
+						.await
+						.unwrap_or_else(|_| panic!("{version}: not offered again"))
+						.unwrap();
+					assert!(!run.is_finished(), "{version}: the loop ended");
+				}
+			}
 		}
 	}
 

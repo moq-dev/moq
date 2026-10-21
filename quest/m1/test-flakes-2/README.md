@@ -50,7 +50,6 @@ Public API: none. Wire: none.
 - [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
 - [Draft-16 cancel race](/quest/m1/test-flakes-2/draft16-cancel-race.md) - the cancel-ahead-of-the-answer test settles the same way every run, fixing `run_publish_namespaces` if the order is real
 - [Relay bench holder](/quest/m1/test-flakes-2/relay-bench-holder.md) - the foreign-listener bench test fails fast when its holder cannot bind, instead of hanging on a fifo
-- [moq-tokio failed listen](/quest/m1/test-flakes-2/tokio-failed-listen.md) - the failed-listen test keeps its port reserved from first bind to final check
 
 ## Related
 
