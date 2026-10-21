@@ -5,7 +5,7 @@
 A JS publisher sets `compress` on a track's `Info` and js/net DEFLATEs each
 group on lite-07, and a JS consumer reads a compressed lite-07 track as plain
 frames. On any other session a JS publisher sends plain frames without the
-flag, and the refusal [Core](/quest/m1/compress/core.md) added is gone.
+flag, and the refusal Core added is gone.
 
 ## Plan
 
@@ -21,7 +21,3 @@ Tests: Rust and JS publish compressed tracks to each other over lite-07
 through moq-relay; a JS publisher on lite-06 sends plain frames.
 
 Public API: `Info.compress` in `@moq/net`. Wire: none beyond Core.
-
-## Required
-
-- [Core](/quest/m1/compress/core.md) - fixes the lite-07 wire and the Rust model this mirrors

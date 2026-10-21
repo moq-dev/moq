@@ -184,7 +184,7 @@ node = "us-west.local:4443"
 
 [cluster.lan]
 enabled = true
-# secret = "/etc/moq/cluster.key"     # Optional. 64 hex chars, or a file holding them.
+# secret = "/etc/moq/cluster.key"     # Optional. A file holding 64 hex chars (openssl rand -hex 32).
 # app = "default"                     # DNS-SD subtype; moq-cli shares this name.
 ```
 
