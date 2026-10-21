@@ -104,19 +104,20 @@ subtree and each subscriber with one to read it, so every cell also covers the
 
 Clients that print the grant the relay sent back over AUTH, as an
 `auth granted publish=[...] subscribe=[...]` line, must report exactly what
-their token implies: the Rust CLI (a `moq_net::auth` debug log) and the native
+their token implies: the Rust CLI (a `moq_net::auth` debug log), the Python,
+Go, and C++ clients (read through moq-ffi before they start), and the native
 JS subscribers. A cell whose grant is missing or wrong fails even when media
-flowed. The binding clients (Python, Go, C, GStreamer) have no grant to print
-until moq-ffi exposes one, and the browser's shared connection keeps its session
-private, so their cells check media alone. AUTH is only on the work-in-progress
+flowed. moq-c's frozen ABI and GStreamer expose no grant, and the browser's
+shared connection keeps its session private, so their cells check media alone. AUTH is only on the work-in-progress
 moq-lite-07, so the printing clients dial `moq-lite-07-wip` alone and a printing
 client that reports nothing never got its grant. The native JS subscribers dial
 WebTransport alone and offer it there. The rest keep
 their defaults, so the matrix also crosses versions through the relay, which
 accepts both.
 
-After the matrix, each publisher whose refusal the harness can read (Rust) runs
-once more with a token that excludes its broadcast. It must fail loud, logging
+After the matrix, each publisher whose refusal the harness can read (Rust,
+Python, Go, and C++, which log moq-net's error) runs once more with a token that
+excludes its broadcast. It must fail loud, logging
 Unauthorized and naming the path, and every subscriber must time out. The
 browser publisher enforces its grant too, but its elements cannot offer
 `moq-lite-07-wip` yet.
