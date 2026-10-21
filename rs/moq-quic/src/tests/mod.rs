@@ -3532,7 +3532,7 @@ fn datagram_of_max_size_keeps_connection() {
         .datagrams()
         .max_size()
         .unwrap();
-    assert_eq!(max_size, WINDOW - Datagram::SIZE_BOUND);
+    assert_eq!(max_size, Datagram::max_payload(WINDOW as u64) as usize);
 
     pair.client_datagrams(client_ch)
         .send(vec![0xAB; max_size].into(), Default::default())
