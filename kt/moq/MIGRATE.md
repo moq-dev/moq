@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Anchors can name a time (#6074)
+
+`Anchor` gains `AnchorTime`, so exhaustive `when` expressions need a branch for it.
+`TrackConsumer.update` now throws `MoqException` on a time anchor an untimed track can't serve.
+
 ### JSON consumers emit timestamps (#5677)
 
 `values()` emits `json.Value` (`value`, plus `timestamp` as a `Duration?`) instead of a string, and `valuesAs<T>()` emits `Timed<T>(value, timestamp)`.

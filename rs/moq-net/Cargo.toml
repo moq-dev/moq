@@ -130,6 +130,10 @@ name = "track"
 harness = false
 required-features = ["async"]
 
+[[bench]]
+name = "tracks"
+harness = false
+
 # Declares a pending tail through the hidden `fuzz` module.
 [[bench]]
 name = "tail"
