@@ -67,9 +67,9 @@ wall-clock bisect blamed the wrong commit. Count instructions instead:
 
 ### Open regressions from the m0 run
 
-The m0 run attributed these, but none has a fix yet. Each is independently
-landable with its own regression bench, so recommend each as a `/quest-plan`
-follow-up unless it turns out trivial:
+The m0 run attributed these, but none has a fix yet. Fix each in this run's PR
+with its own regression bench, unless it needs a maintainer decision or is too
+large to review alongside the rest; those become `/quest-plan` follow-ups:
 
 1. Export reap goes quadratic,
    [#5942](https://github.com/moq-dev/moq/pull/5942) (`49448d2ef`), +42k on
