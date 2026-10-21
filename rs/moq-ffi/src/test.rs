@@ -6805,7 +6805,11 @@ async fn auth_reads_the_peer_grant() {
 		.err()
 		.expect("the default acceptor refuses a token");
 	assert!(matches!(err, MoqError::Unsupported), "refusal: {err:?}");
-	assert_eq!(client.auth().grant(), Some(grant(&["**"], &["**"])), "a refusal leaves the union");
+	assert_eq!(
+		client.auth().grant(),
+		Some(grant(&["**"], &["**"])),
+		"a refusal leaves the union"
+	);
 
 	client.cancel(0);
 	accepted.cancel(0);
@@ -6895,5 +6899,8 @@ async fn auth_tokens_join_and_leave_the_union() {
 	assert_eq!(auth.grant(), Some(grant(&["setup/**"], &[])));
 
 	session.cancel(0);
-	tokio::time::timeout(TIMEOUT, serving).await.expect("server ended").unwrap();
+	tokio::time::timeout(TIMEOUT, serving)
+		.await
+		.expect("server ended")
+		.unwrap();
 }

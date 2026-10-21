@@ -196,8 +196,9 @@ void main() {
     );
     expectEverything(client.auth().grant());
 
-    serverSession.cancel(code: 0);
+    // The client drains first: cancelling the server session would fail its shutdown.
     await client.close();
+    serverSession.cancel(code: 0);
     server.cancel();
   });
 
