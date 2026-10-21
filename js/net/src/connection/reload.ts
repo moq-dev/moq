@@ -448,7 +448,10 @@ export class Reload {
 					// A pinned WebSocket URL can win the race against the primary. Judge the
 					// redirect against that endpoint, not the primary we never reached.
 					const socket = this.#redirect.peek() ? undefined : this.websocket?.url;
-					if (!this.#migrate(connection, dialed(dialing, connection.transport, socket), ended)) return;
+					const at = dialed(dialing, connection.transport, socket);
+					const before = this.#redirect.peek();
+					if (!this.#migrate(connection, at, ended)) return;
+					const after = this.#redirect.peek();
 
 					// Two peers that each outlive the initial delay can still bounce us between
 					// them forever. Returning to an endpoint that already sent us elsewhere in this
@@ -460,8 +463,10 @@ export class Reload {
 					// never add up to a loop.
 					const lived = Instant.durationSince(now(), connected);
 					if (lived >= Nano.fromMilli(this.delay?.max ?? DEFAULT_DELAY.max)) this.#redirects.reset();
-					const from = endpoint(dialing);
-					const to = endpoint(this.#redirect.peek() ?? url);
+					// Only a redirect this GOAWAY named is a move. An empty or ignored one reconnects
+					// in place, even when that reruns the race a WebSocket fallback won.
+					const from = endpoint(at);
+					const to = after && after !== before ? endpoint(after) : from;
 					if (to !== from && this.#redirects.move(from, to)) {
 						this.#retry(effect, undefined, new Error("redirect loop"));
 						return;
