@@ -37,6 +37,11 @@ Found 2026-10-20 in the fidelity audit (`Import::ensure_stream`,
   drop silently. Count each in a `ts::stats` row; null packets stay
   uncounted. ATSC PSIP and conditional access are outside the semantic
   profile; the guide points them at the raw lane.
+- **The PAT's network PID entry** (`program_number` 0) is filtered out on
+  import, and `Export::build_psi` writes a PAT with only the program, while
+  the NIT itself passes through on 0x0010 as a snapshot track. Export lists
+  program 0 on 0x0010 whenever the catalog carries a NIT snapshot, so the
+  rebuilt PAT points a receiver at the NIT it carries.
 - **TS-scrambled packets** on an elementary PID become PES parse damage.
   Count them in `refused` instead, since the semantic lane cannot carry them
   and the raw lane can.
@@ -52,7 +57,7 @@ packetization). JS: none. Draft
 `pesPacket` examples and the DSM-CC types among the section-framed ones.
 
 Tests: generated `fixture::Mux` inputs with MPEG-2 video, each DSM-CC type,
-0x86 without CUEI, LATM, a CAT plus scrambled ES, a PSIP base PID, and an
+0x86 without CUEI, LATM, a PAT network entry with a NIT, a CAT plus scrambled ES, a PSIP base PID, and an
 unlisted PID, asserting the catalog, the stats rows, and an export
 round trip of the carried streams. The MPEG-2 video arm also runs the TSDuck
 round trip and an FFmpeg decode of the export in `test/ts`.

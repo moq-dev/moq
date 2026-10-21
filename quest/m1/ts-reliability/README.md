@@ -110,11 +110,12 @@ refused means an error or a counted drop.
 | DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
 | Program identity, program and ES descriptors | Preserved, but captured once | [PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) |
 | PMT add, remove, retype; PID reuse; PAT changes | Normalized: in place under fresh track names, PMT rebuilt at the next `version_number`; program identity changes refused. Today stale tracks on import, refusal or stale PMT on export | [PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) |
-| Programs without video | Today audio plus `pesPacket` only; sections or no media refused | [clockless export](/quest/m1/ts-reliability/clockless-export.md) |
+| Programs without video | Today export refuses sections without video and any program without media; import refuses a program without media | [clockless export](/quest/m1/ts-reliability/clockless-export.md) |
 | PCR | Normalized: rebased, carried on the first video (else audio) PID | landed |
 | Mux rate, null stuffing | Normalized: re-padded to `muxRate` while the source is CBR | landed |
 | PSI and SI repetition | Normalized: PAT/PMT every 500 ms and at keyframes, SI at DVB maxima | landed |
-| Media PES headers, TS packet layer, PAT network PID entry | Normalized: rebuilt by export; the raw lane keeps them | landed |
+| Media PES headers, TS packet layer | Normalized: rebuilt by export; the raw lane keeps them | landed |
+| PAT network PID entry | Preserved: listed on 0x0010 when a NIT is carried; today dropped | [routes](/quest/m1/ts-reliability/stream-routes.md) |
 
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
 decoder-time admission (#5306) have landed; PSI runs and catalog linger
@@ -125,7 +126,7 @@ remain with their current quests.
 - [Live PAT/PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) - a revised PMT or PAT never leaves a track name meaning other content
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
-- [Clockless export](/quest/m1/ts-reliability/clockless-export.md) - TS export rebuilds audio-only and data-only programs
+- [Clockless export](/quest/m1/ts-reliability/clockless-export.md) - TS import and export carry audio-only and data-only programs
 
 ## Related
 

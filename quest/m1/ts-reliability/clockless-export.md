@@ -1,15 +1,15 @@
-# [M] TS export rebuilds programs without video
+# [M] TS round trip of programs without video
 
 ## Goal
 
-`moq export ts` rebuilds an audio-only program carrying SCTE-35 or other
-private sections, and a program of only `verbatim` or `pesPacket` tracks,
-instead of refusing it. Basic opaque carriage does not wait for the typed
-cue API.
+`moq import ts` carries, and `moq export ts` rebuilds, an audio-only program
+carrying SCTE-35 or other private sections, and a program of only `verbatim`
+or `pesPacket` tracks, instead of refusing it. Basic opaque carriage does not
+wait for the typed cue API.
 
 ## Plan
 
-Found 2026-10-20 in the fidelity audit (`Export::build_psi`):
+Found 2026-10-20 in the fidelity audit (`Export::build_psi`, `Import::finish`):
 
 - Any section-framed track fails the export with "requires a video track
   for the program clock" unless a video track exists, even when an audio
@@ -18,8 +18,17 @@ Found 2026-10-20 in the fidelity audit (`Export::build_psi`):
 - With no video or audio track the PCR has no PID, so a `pesPacket`-only
   program (KLV, teletext) or a sections-only one fails "requires a video or
   audio track for the PCR".
-- The import side already carries these programs: sections and whole PES
-  are placed by the source PCR, whatever PID carried it.
+- Import carries audio plus sections or `pesPacket`: the audio PTS anchors
+  the timebase, and sections and whole PES are placed by the source PCR,
+  whatever PID carried it. A data-only program fails instead: placed units
+  wait in `release` for a media PTS to anchor the timebase, and
+  `Import::finish` ends with "reached end of input without a media
+  timestamp".
+
+Import: when the PMT lists no media stream, anchor the timebase at the first
+PCR, so placement alone puts the data on the catalog clock. A media stream a
+later PMT adds shares that anchor, since PCR and PTS run on one program
+clock.
 
 Find why the video requirement exists before removing it: sections may lean
 on the video tune-in point (`video_start`) or the video decode clock. Then
@@ -28,7 +37,7 @@ PCR-only PID when there is no media at all. The schedule already writes a PCR
 in an adaptation-only packet when no clock-PID packet can open the slot. A
 data-only program has no tune-in point, so its first frame starts the output.
 
-Rust: `rs/moq-mux` TS export. JS: none. Draft
+Rust: `rs/moq-mux` TS import and export. JS: none. Draft
 ([mpegts](/drafts/draft-lcurley-moq-mpegts.md)): the rebuild section says a
 consumer picks a PCR PID for a program without media and MUST NOT refuse one
 for lacking video.
