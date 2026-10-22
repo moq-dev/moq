@@ -794,13 +794,16 @@ export class AuthSession {
 		let closed = false;
 		// The peer refused the last attempt with a reply, rather than losing its stream.
 		let refused = false;
-		// The peer granted the token at some point, so a clean close ends the grant.
+		// The peer granted the token, so a clean close ends the grant. A retry clears it.
 		let granted = false;
+		// The peer replied to an earlier attempt, so it knows AUTH.
+		let replied = false;
 		let delay: Milli | undefined;
 		for (;;) {
 			refused = false;
-			// Whether this attempt's stream got a grant, so a close is not the peer predating AUTH.
-			let answered = false;
+			// Whether the peer answered this token, so a close is not the peer predating AUTH:
+			// a grant on this stream, or a reply to an earlier one that this retry follows.
+			let answered = replied;
 			try {
 				const stream = await wire.present(presented.token);
 				presented.stream = stream;
@@ -844,6 +847,7 @@ export class AuthSession {
 						reply.refused instanceof StreamError && reply.refused.code === StreamCode.GoingAway;
 					if (!goingAway && !(reply.refused instanceof Unsupported)) this.#replied = true;
 					result = reply.refused;
+					replied = true;
 					// A peer going away judged nothing, so the successor presents the token instead.
 					refused = !goingAway;
 					stream.close();
@@ -871,6 +875,7 @@ export class AuthSession {
 			// carries such a code.
 			if (!refused || !transient(result) || this.#closed || presented.withdrawn) break;
 			presented.grant = undefined;
+			granted = false;
 			// Unanswered again, as on its first presentation: a request or publication the token
 			// might cover waits for the retry's verdict rather than being judged without it.
 			this.#unsettle(presented);

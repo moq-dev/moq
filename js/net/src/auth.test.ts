@@ -725,6 +725,48 @@ test("lite-07 presents a transiently refused token again after a backoff", async
 	}
 });
 
+// The peer replied to the first presentation, so it knows AUTH: a reset is a lost stream.
+test("lite-07 keeps a shared token whose retry stream is reset", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	const logged = (line: string) => warned.mock.calls.filter(([first]) => first === line).length;
+	const handle = new Handle();
+	const { client, server } = await connect({
+		publish: new OriginProducer(),
+		protocol: Lite.ALPN_07_WIP,
+		auth: handle,
+	});
+	const requests = server.auth.requests();
+	let read: ReturnType<typeof spyOn> | undefined;
+	try {
+		const setup = await requests.next();
+		setup?.accept(grant([], []));
+
+		let rejected: unknown;
+		handle.add("token").catch((err) => {
+			rejected = err;
+		});
+		const request = await requests.next();
+		request?.reject(SessionCode.TooManyRequests, "busy");
+		await settles(() => logged("auth token refused") > 0);
+
+		read = spyOn(LiteAuthWire.prototype, "read").mockRejectedValue(
+			new StreamError(StreamCode.Cancel, { message: "reset" }),
+		);
+		await clock.advance(Nano.fromMilli(Milli(1000)));
+		await settles(() => logged("auth token ended") > 0);
+		for (let i = 0; i < 10; i++) await nextTask();
+		expect(rejected).toBeUndefined();
+	} finally {
+		read?.mockRestore();
+		client.abort();
+		server.abort();
+		warned.mockRestore();
+		restore();
+	}
+});
+
 test("lite-07 presents a token added after a GOAWAY only on the successor", async () => {
 	const protocol = Lite.ALPN_07_WIP;
 	const handle = new Handle();

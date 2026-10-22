@@ -513,7 +513,7 @@ impl<S: crate::transport::poll::Session> Present<S> {
 				handle: self.handle.clone(),
 				violation: self.violation.clone(),
 				id,
-				state: PresentState::Open { token },
+				state: PresentState::Open { token, answered: false },
 			});
 		}
 		let _ = self.tokens.poll(waiter);
@@ -540,6 +540,9 @@ struct PresentToken<S: crate::transport::poll::Session> {
 enum PresentState<S: crate::transport::poll::Session> {
 	Open {
 		token: bytes::Bytes,
+		/// The peer already replied to this token, so it knows AUTH: a retry's stream lost
+		/// before its reply is not the peer predating AUTH.
+		answered: bool,
 	},
 	Run {
 		stream: Stream<S, Version>,
@@ -557,7 +560,10 @@ impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let err = ready!(self.poll_present(waiter));
-		let answered = matches!(self.state, PresentState::Run { answered: true, .. });
+		let answered = matches!(
+			self.state,
+			PresentState::Open { answered: true, .. } | PresentState::Run { answered: true, .. }
+		);
 		if let PresentState::Run { stream, .. } = std::mem::replace(&mut self.state, PresentState::Done) {
 			stream.writer.abort(&Error::Cancel);
 		}
@@ -590,12 +596,13 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 		let mut cx = Context::from_waker(waiter.waker());
 		loop {
 			match &mut self.state {
-				PresentState::Open { token } => {
+				PresentState::Open { token, answered } => {
 					// After a GOAWAY, sent or received, the peer must not see new streams.
 					if !self.handle.active() {
 						return Poll::Ready(Error::GoingAway);
 					}
 					let token = token.clone();
+					let answered = *answered;
 					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
 						Ok(stream) => stream,
 						Err(err) => return Poll::Ready(err),
@@ -607,10 +614,7 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 					if let Err(err) = res {
 						return Poll::Ready(err);
 					}
-					self.state = PresentState::Run {
-						stream,
-						answered: false,
-					};
+					self.state = PresentState::Run { stream, answered };
 				}
 				PresentState::Run { stream, answered } => {
 					if let Err(err) = ready!(stream.writer.poll_flush(&mut cx)) {
@@ -682,7 +686,7 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 					let Some(token) = self.handle.reopen(self.id) else {
 						return Poll::Ready(Error::Cancel);
 					};
-					self.state = PresentState::Open { token };
+					self.state = PresentState::Open { token, answered: true };
 				}
 				PresentState::Done => return Poll::Ready(Error::Cancel),
 			}
@@ -963,6 +967,62 @@ mod tests {
 		.expect("the session outlived a malformed AUTH_ERROR");
 		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
 		assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
+	}
+
+	/// A retry's stream that ends before its reply is lost, not a peer without AUTH: the
+	/// peer already answered the token, so a shared handle keeps it for the next session.
+	#[moq_clock::test]
+	async fn a_lost_retry_keeps_a_shared_token() {
+		let version = Version::Lite07;
+		let mut grant = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut grant, version.into());
+		w.varint(0).unwrap();
+		let prefix = w.prefix_varint();
+		for _ in 0..3 {
+			w.varint(0).unwrap();
+		}
+		w.fill(prefix).unwrap();
+		let mut busy = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut busy, version.into());
+		w.varint(1).unwrap();
+		let prefix = w.prefix_varint();
+		w.varint(SessionError::TooManyRequests.to_code().into()).unwrap();
+		w.bytes(b"busy").unwrap();
+		w.fill(prefix).unwrap();
+
+		// The setup token is granted, ours is refused transiently, and its retry's stream ends.
+		let transport = ScriptedSession::per_stream_eof(vec![grant, busy, Vec::new()]);
+		let log = transport.log.clone();
+		let handle = crate::auth::Handle::new();
+		let start = start(Config {
+			runtime: crate::time::sim(),
+			client: true,
+			limits: Default::default(),
+			session: transport,
+			setup_stream: None,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			version,
+			our_setup: Setup::default(),
+			peer_setup: None,
+			auth: crate::auth::Link::attach(&handle, true, false).unwrap(),
+		})
+		.unwrap();
+		let mut driver = start.driver;
+		let token = handle.present(bytes::Bytes::from_static(b"token")).unwrap();
+
+		let res = moq_clock::timeout(
+			std::time::Duration::from_secs(5),
+			kio::wait(|waiter| driver.poll(waiter)),
+		)
+		.await;
+		assert!(res.is_err(), "the session ended: {res:?}");
+		assert_eq!(log.bi_opens(), 3, "the token was not presented again");
+		assert!(
+			futures::FutureExt::now_or_never(token.closed()).is_none(),
+			"a lost retry ended the token"
+		);
 	}
 
 	#[moq_clock::test]
