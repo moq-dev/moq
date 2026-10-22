@@ -30,8 +30,10 @@ the methods exactly as moq-net has them today.
     `broadcast::Dynamic`, whose `requested_track` yields its own
     `track::Request`, so generic code serves undeclared names (as
     [E2EE dynamic names](/quest/m2/e2ee/dynamic-names.md) needs). A track
-    dynamic's `requested_group` yields its own `group::Request`, whose
-    `accept` returns its own group producer.
+    dynamic's `requested_fill` yields its own `track::Fill`, whose
+    `accept` returns its own group producer and whose `drop_groups` names
+    the rest dropped
+    ([dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)).
   - Pending operations: `track::Consumer::subscribe` resolves to the
     wrapper's own subscriber, so E2EE decrypts behind it; `Querying` and
     `Fetching` resolve to the wrapper's logical metadata and groups.
@@ -58,3 +60,10 @@ the methods exactly as moq-net has them today.
   to `MIGRATE.md`.
 
 Public API: new moq-net traits, plus the hidden test-wrapper feature. Wire: none.
+
+Decided 2026-10-22 (maintainer): the traits break moq-net's public API, so
+they wait for the breaking release cut.
+
+## Required
+
+- [Breaking release cut](/quest/m2/release/cut.md) - the traits land after the cut that ships m1's breaks

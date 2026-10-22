@@ -655,7 +655,7 @@ where
 					request_id,
 					track_namespace: key.0.as_path(),
 					track_name: key.1.as_ref().into(),
-					subscriber_priority: super::super::priority::to_wire(0),
+					subscriber_priority: super::super::priority::ABSENT_WIRE,
 					// No update can change it, so it takes the order a reader gets by default.
 					group_order: track::Order::default().into(),
 					filter: Filter::NextObject,
@@ -1203,7 +1203,7 @@ pub(super) struct Forward {
 	/// FILL_PARAMETERS (draft-20+), the backfill it resumes with.
 	pub(super) fill: Option<ietf::Fill>,
 	/// The aggregate priority, in the model's higher-first terms.
-	pub(super) priority: Option<u8>,
+	pub(super) priority: Option<i8>,
 	pub(super) max_age: Option<u64>,
 	pub(super) new_group: Option<u64>,
 }

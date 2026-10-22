@@ -332,6 +332,14 @@ where
 		self.publish_estimate()
 	}
 
+	/// Declare a segment boundary the source drew at `pts`: the timeline closes a record at the
+	/// first group starting at or after it, instead of pacing records by duration.
+	pub(crate) fn boundary(&mut self, pts: moq_net::Timestamp) {
+		if let Some(recorder) = self.recorder.as_mut() {
+			recorder.cut(pts);
+		}
+	}
+
 	/// Whether the next [`write`](Self::write) has to be a keyframe, i.e. no group is currently open
 	/// (at the start, or after a [`cut`](Self::cut) / [`seek`](Self::seek)).
 	///

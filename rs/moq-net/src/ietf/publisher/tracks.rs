@@ -281,7 +281,7 @@ where
 			prefix: prefix.clone(),
 			forward: msg.forward,
 			params: Params {
-				priority: msg.subscriber_priority.unwrap_or(128),
+				priority: msg.subscriber_priority.unwrap_or(crate::ietf::priority::ABSENT_WIRE),
 				order: msg.group_order,
 				filter: msg.filter.unwrap_or(Filter::Unfiltered),
 				max_age: None,

@@ -10,12 +10,13 @@ reliable stream resets (#5690), hierarchical send groups (#5711, #5770), one
 `Limits` type for relay peers (#5871), and endpoint sharding (#5688) are on
 `main`. What remains is bounded incomplete-message memory; per-broadcast
 fairness gives the crate-private send domains (#5872) their consumer in
-[Scope track priority](/quest/m1/track-priority-scope.md).
+[Broadcast fairness](/quest/m2/broadcast-fairness.md).
 qmux already runs on the shared stream state machine, outside this epic.
 Per-stream acknowledgment progress, per-stream deadlines, and the experiments
 (the egress profile, ECN measurement, deadline keep-alive) live in
-[m2](/quest/m2/README.md); media
-probing is its own [m2 epic](/quest/m2/probe/README.md); receive timestamps
+[m2](/quest/m2/README.md); padding and the browser rung disable stay in the
+[m2 probe epic](/quest/m2/probe/README.md); native probing is
+[m1](/quest/m1/probe-native.md); receive timestamps
 and a delay-based uplink controller are the
 [m2 realtime epic](/quest/m2/quic-realtime/README.md); L4S and careful resume
 live in [m3](/quest/m3/README.md). None of them gate this line.
@@ -73,8 +74,8 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 ## Related
 
-- [Scope track priority](/quest/m1/track-priority-scope.md) - the
-  per-broadcast fairness policy on cluster sessions
+- [Broadcast fairness](/quest/m2/broadcast-fairness.md) - the
+  per-broadcast fairness policy on cluster sessions, a consumer for send domains
 - [Native probing](/quest/m1/probe-native.md) - moq-quic retransmits in-flight data during ProbeBW_UP to probe up to a session's target
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a redial starts at the previous connection's rate

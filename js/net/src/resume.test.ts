@@ -8,6 +8,7 @@ import { Route } from "./hop.ts";
 import type { Session as IetfSession } from "./ietf/adapter.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { hooks, MAX_DATAGRAMS } from "./internal.ts";
+import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front, routeFailed } from "./resume.ts";
@@ -511,7 +512,7 @@ test("a replacement delivers unseen datagrams below the newest sequence", async 
 	}
 });
 
-test.each([0, 100])("datagram identities stay within the reader's %p ms budget", (budget) => {
+test.each([0, 100])("datagram identities stay within the reader's %p ms budget", async (budget) => {
 	const clock = new Manual();
 	const restore = clock.install();
 	try {
@@ -524,16 +525,16 @@ test.each([0, 100])("datagram identities stay within the reader's %p ms budget",
 		const recv = () => hooks.tryRecvDatagram(sub);
 		send(10);
 		expect(recv().kind).toBe("datagram");
-		clock.advance(Nano(60_000_000_000));
+		await clock.advance(Nano(60_000_000_000));
 		send(10);
 		expect(recv().kind).toBe("idle");
 		send(5);
 		expect(recv().kind).toBe("datagram");
 		if (budget > 0) {
-			clock.advance(Nano(budget * 500_000));
+			await clock.advance(Nano(budget * 500_000));
 			send(10);
 			expect(recv().kind).toBe("idle");
-			clock.advance(Nano(budget * 500_000));
+			await clock.advance(Nano(budget * 500_000));
 		}
 		send(10);
 		expect(recv().kind).toBe("datagram");
@@ -811,21 +812,25 @@ for (const fails of [true, false]) {
 	});
 }
 
-test("track info keeps one answer across routes", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	a.createTrack("seq", { priority: 1 });
-	b.createTrack("seq", { priority: 2 });
-	front.serve(a.consume());
-	expect((await front.consumer.track("seq").info()).priority).toBe(1);
-	front.serve(b.consume());
-	await expect(front.consumer.track("seq").info()).rejects.toThrow("changed its properties");
-
-	front.consumer.close();
-	a.close();
-	b.close();
-});
+for (const [field, first, second] of [
+	["priority", { priority: 1 }, { priority: 2 }],
+	["compression", { compress: true }, { compress: false }],
+] as const) {
+	test(`track info keeps one ${field} answer across routes`, async () => {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		a.createTrack("seq", first);
+		b.createTrack("seq", second);
+		front.serve(a.consume());
+		expect(await front.consumer.track("seq").info()).toMatchObject(first);
+		front.serve(b.consume());
+		await expect(front.consumer.track("seq").info()).rejects.toThrow("changed its properties");
+		front.consumer.close();
+		a.close();
+		b.close();
+	});
+}
 
 test("a datagram reader lets go of the copies a swap replaced", async () => {
 	const front = new Front();
@@ -1525,7 +1530,7 @@ test.each(["lands", "dropped", "expired"])(
 			expect(ta.producer.demand().wanted.peek()).toBeDefined();
 
 			if (outcome === "dropped") hooks.dropTrackGroups(ta.producer, 1, 2, new NotFound("group"));
-			if (outcome === "expired") await clock.advanceAsync(Nano.fromMilli(SECOND));
+			if (outcome === "expired") await clock.advance(Nano.fromMilli(SECOND));
 			if (outcome !== "lands") {
 				// The groups drained above are released once their close settles.
 				await settle();
@@ -1750,6 +1755,44 @@ test.each([Milli(100), Milli(3_600_000)])(
 		}
 	},
 );
+
+test.each([
+	["fails", (answer: Lister) => answer.abort(new Error("old route failed"))],
+	["ends", (answer: Lister) => answer.finish()],
+	["changes", (answer: Lister) => answer.add("gone", { priority: 0 })],
+])("a listing follows the source that took over as the old one's listing %s", async (_, end) => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const from = a.consume();
+	// The old source's listing is answered, as a session answers its peer's.
+	const answer = wireOf(from).lister();
+	answer.synced();
+	b.createTrack("seq");
+	front.serve(from);
+	const tracks = front.consumer.tracks();
+	try {
+		expect(await tracks.next()).toMatchObject({ kind: "synced" });
+
+		// The new source takes over just as the old source's listing settles, which a later
+		// reader of it sees at the same moment the front's reader does.
+		const witness = from.tracks();
+		expect(await witness.next()).toMatchObject({ kind: "synced" });
+		const takeover = () => front.serve(b.consume());
+		const settled = witness.next().then(takeover, takeover);
+		end(answer);
+		await settled;
+		expect(await tracks.next()).toMatchObject({ kind: "added", name: "seq" });
+		b.createTrack("late");
+		expect(await tracks.next()).toMatchObject({ kind: "added", name: "late" });
+	} finally {
+		tracks.close();
+		answer.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
 
 test("only delivery codes are a route failing", () => {
 	// Mirrors `only_delivery_codes_are_a_route_failing` in rs/moq-net/src/model/resume.rs.

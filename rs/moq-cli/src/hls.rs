@@ -18,6 +18,11 @@ pub struct ImportArgs {
 	/// Playlist URL (http/https) or local file path.
 	#[usage(value_hint = usage_rs::ValueHint::AnyPath, extensions("m3u8", "m3u"))]
 	pub playlist: String,
+
+	/// Publish each fMP4 fragment whole as CMAF instead of splitting it into one frame per
+	/// sample. Keeps the source's exact sample timing, but every player has to parse ISO BMFF.
+	#[usage(long)]
+	pub passthrough: bool,
 }
 
 /// HLS export (serve over HTTP) args.
@@ -46,7 +51,7 @@ pub struct ExportArgs {
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
 /// announced under `epoch`. Once the playlist ends, serve the finished broadcast until its
 /// media is stale.
-pub async fn import(target: ImportTarget, playlist: String, epoch: moq_net::Epoch) -> anyhow::Result<()> {
+pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoch) -> anyhow::Result<()> {
 	let ImportTarget {
 		origin,
 		name,
@@ -64,8 +69,9 @@ pub async fn import(target: ImportTarget, playlist: String, epoch: moq_net::Epoc
 	// publisher that cannot serve its declared tracks yet.
 	let mut listed = catalog.consume()?;
 
-	let playlist = playlist_url(&playlist)?;
-	let mut importer = moq_hls::import::Import::new(producer.clone(), catalog, moq_hls::import::Config::new(playlist))?;
+	let mut config = moq_hls::import::Config::new(playlist_url(&args.playlist)?);
+	config.passthrough = args.passthrough;
+	let mut importer = moq_hls::import::Import::new(producer.clone(), catalog, config)?;
 
 	tracing::info!(%name, "importing HLS");
 

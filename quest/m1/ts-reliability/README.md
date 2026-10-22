@@ -41,10 +41,9 @@ periodic cuts, and an intact object alone do not ensure available PAT/PMT,
 codec configuration, clock context, or references for every MPTS program.
 
 The README owns the guide and integration proof for the modes present in
-m1: semantic remux and raw import/carriage. The deferred raw export quest
-extends the guide and proves its output when it lands; it does not block
-this proof. Reuse the children's fixtures and CI recipes, including their
-known-bad controls. Publish
+m1: semantic remux and raw import/carriage. Raw export and its packet-level
+proof landed in #5856; the guide covers it too. Reuse the children's
+fixtures and CI recipes, including their known-bad controls. Publish
 a coverage table linking each supported profile and loss guarantee to its
 test; unsupported or unmeasured cells stay explicit. Keep CLI instructions
 and the MPEG-TS draft consistent in each feature change.

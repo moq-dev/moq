@@ -26,10 +26,10 @@ function manualTime(initial: number) {
 	const clock = new Manual();
 	const restore = clock.install();
 	const to = (ms: number) => Nano(Nano.fromMilli(Milli(ms)) - clock.now());
-	clock.advance(to(initial));
+	clock.jump(to(initial));
 	return {
-		set: (ms: number) => clock.advance(to(ms)),
-		advance: (ms: number) => clock.advanceAsync(to(ms)),
+		set: (ms: number) => clock.jump(to(ms)),
+		advance: (ms: number) => clock.advance(to(ms)),
 		restore,
 	};
 }
@@ -450,14 +450,15 @@ test("a maxDelay or maxAge that is not a duration is refused, not rounded into o
 	expect(() => producer.subscribe({ maxDelay: Milli(Number.MAX_SAFE_INTEGER + 1) })).toThrow(RangeError);
 });
 
-test("priority 255 is accepted and 256 is refused", () => {
+test("priority -128..=127 is accepted and anything outside is refused", () => {
 	const producer = new TrackProducer("video");
-	producer.accept({ priority: 255 });
-	expect(producer.priority).toBe(255);
-	expect(() => producer.accept({ priority: 256 })).toThrow(RangeError);
-	expect(() => producer.accept({ priority: -1 })).toThrow(RangeError);
+	producer.accept({ priority: 127 });
+	expect(producer.priority).toBe(127);
+	expect(new TrackProducer("audio").subscribe({ priority: -128 }).subscription.peek()?.priority).toBe(-128);
+	expect(() => producer.accept({ priority: 128 })).toThrow(RangeError);
+	expect(() => producer.accept({ priority: -129 })).toThrow(RangeError);
 	expect(() => producer.accept({ priority: 1.5 })).toThrow(RangeError);
-	expect(() => producer.subscribe({ priority: 256 })).toThrow(RangeError);
+	expect(() => producer.subscribe({ priority: 128 })).toThrow(RangeError);
 });
 
 test("infoDefaults re-validates timescale and the safe maxAge bound", () => {
@@ -1395,7 +1396,7 @@ test("an abandoned open group ages out with no further write", async () => {
 		if (!group) throw new Error("missing group");
 		expect(await group.readString()).toBe("first");
 		const read = group.readFrame().catch((err: unknown) => err);
-		await clock.advance(10_000 + CACHE_WINDOW_MS + 1);
+		await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
 		expect(await read).toBeInstanceOf(TooFarBehind);
 	} finally {
 		producer.close();
@@ -2496,8 +2497,8 @@ test("an ended track's buffered groups age out for a stale subscriber", async ()
 			group.close();
 			producer.close(abort);
 
-			// Nothing writes after close, so only the scheduled cache cleanup runs.
-			await clock.advance(10_000 + CACHE_WINDOW_MS + 100);
+			// Nothing writes after close; the scheduled cleanup can lag by one scan slice.
+			await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
 			if (abort) expect(() => stale.tryRecvGroup()).toThrow(abort);
 			else expect(stale.tryRecvGroup()).toBeUndefined();
 		} finally {

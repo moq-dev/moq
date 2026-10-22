@@ -28,8 +28,8 @@ archive (per-track `.timeline.z` records named by the catalog's root
 - **Discovery is pull**, decided 2026-10-19 in place of SUBSCRIBE_ALL's push:
   ANNOUNCE finds the broadcasts under a prefix, a moq-lite TRACKS request
   lists each broadcast's tracks as they appear, and the archive SUBSCRIBEs per
-  track, gating the lite-07 cut (`broadcast::Consumer::tracks` in Rust;
-  [TRACKS in js/net](/quest/m1/archive/tracks-js.md)).
+  track, gating the lite-07 cut (`broadcast::Consumer::tracks` in Rust,
+  `broadcast.Consumer.tracks()` in JS).
   moq-transport answers SUBSCRIBE_TRACKS through the same hook (Rust now,
   [js/net](/quest/m1/archive/subscribe-tracks-js.md) next) and, in Rust, learns
   an IETF peer's tracks with a FORWARD=0 SUBSCRIBE_TRACKS whose held PUBLISHes
@@ -85,7 +85,6 @@ from a host. Each child fixes the stale docs it touches.
 
 ## Required
 
-- [TRACKS in js/net](/quest/m1/archive/tracks-js.md) - `@moq/net` lists a broadcast's tracks over lite-07's Tracks Stream and answers listings of its own broadcasts, mirroring Rust
 - [Archive consumer](/quest/m1/archive/consumer.md) - `archive::Consumer` serves a stored prefix as a broadcast from its key listing, and `moq export/import archive` use the new pair
 - [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - the root `archive` section is gone; an opt-in per-rendition `hls` field marks each aligned HLS segment's first group and pts and declares its nominal duration
 - [SUBSCRIBE_TRACKS in js/net](/quest/m1/archive/subscribe-tracks-js.md) - `@moq/net` answers SUBSCRIBE_TRACKS as Rust does, instead of NOT_SUPPORTED

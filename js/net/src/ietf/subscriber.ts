@@ -29,6 +29,7 @@ import {
 	scopeHead,
 	scopeOverlaps,
 } from "../internal.ts";
+import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
@@ -54,7 +55,7 @@ import {
 	ObjectIdGap,
 } from "./object.ts";
 import { Parameters } from "./parameters.ts";
-import { fromWire, toWire } from "./priority.ts";
+import { ABSENT_WIRE, fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
 import {
 	type AdvertParams,
@@ -726,6 +727,8 @@ export class Subscriber {
 	#createConsume(path: Path.Valid, instance: ReturnType<BroadcastCache["instance"]>): broadcast.Consumer {
 		// moq-transport resolves metadata through SUBSCRIBE and has no one-shot group fetch here.
 		const consumer = new ConsumeBroadcast();
+		// Registered before anyone can list the broadcast, so no reader syncs on an empty answer.
+		void this.#refuseListing(wireOf(consumer).lister());
 		void (async () => {
 			for (;;) {
 				const request = await wireOf(consumer).requested();
@@ -736,6 +739,22 @@ export class Subscriber {
 			}
 		})();
 		return this.#consumes.insert(path, instance, consumer);
+	}
+
+	// moq-transport lists no tracks here: refuse each listing until the broadcast closes, since an
+	// empty answer would claim the peer lists nothing.
+	async #refuseListing(lister: Lister): Promise<void> {
+		try {
+			for (;;) {
+				while (!lister.used.peek()) {
+					if (lister.ended.peek() !== undefined) return;
+					await race([Signal.race(lister.used, lister.ended)]);
+				}
+				lister.abort(new Error("track listing requires moq-lite-07 or newer"));
+			}
+		} finally {
+			lister.close();
+		}
 	}
 
 	// The adapter is gone. If the transport has already closed, that close is the
@@ -1198,7 +1217,7 @@ export class Subscriber {
 			// No TIMESCALE (always so on drafts 14-16, which can't carry it) means no timeline,
 			// and the track must not claim one when served onward.
 			timescale: ok.properties.timescale,
-			priority: fromWire(ok.properties.priority ?? 128),
+			priority: fromWire(ok.properties.priority ?? ABSENT_WIRE),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
 			unchecked: ok.properties.timescale != null,
