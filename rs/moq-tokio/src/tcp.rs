@@ -336,7 +336,7 @@ impl Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						tokio::time::sleep(delay).await;
+						moq_clock::sleep(delay).await;
 					}
 				}
 			}
@@ -345,6 +345,7 @@ impl Listener {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use moq_net::transport::poll::Session as _;

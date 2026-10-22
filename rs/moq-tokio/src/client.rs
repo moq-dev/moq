@@ -217,6 +217,12 @@ impl Client {
 		self
 	}
 
+	/// Share `bandwidth`'s reservations with every session this client dials.
+	pub(crate) fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
+		self.moq = self.moq.with_bandwidth(bandwidth);
+		self
+	}
+
 	/// Price the links this client dials; see [`moq_net::Client::with_cost`].
 	pub fn with_cost(mut self, cost: u64) -> Self {
 		self.moq = self.moq.with_cost(cost);
@@ -321,7 +327,7 @@ impl Client {
 
 		let session = match self.timeout.is_zero() {
 			true => attempt.await?,
-			false => tokio::time::timeout(self.timeout, attempt)
+			false => moq_clock::timeout(self.timeout, attempt)
 				.await
 				.map_err(|_| Error::ConnectTimeout(self.timeout))??,
 		};
@@ -368,7 +374,7 @@ impl Client {
 		// arm was still pending.
 		let dialed = match self.timeout.is_zero() {
 			true => attempt.await?,
-			false => match tokio::time::timeout(self.timeout, attempt).await {
+			false => match moq_clock::timeout(self.timeout, attempt).await {
 				Ok(res) => res?,
 				Err(_) => return Err(Error::ConnectTimeout(self.timeout)),
 			},
@@ -773,6 +779,7 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 

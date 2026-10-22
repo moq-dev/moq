@@ -470,6 +470,7 @@ fn with_jwt(query: Option<&str>, token: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use futures::FutureExt;

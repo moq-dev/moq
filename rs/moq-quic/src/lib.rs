@@ -40,6 +40,7 @@ mod entropy;
 pub mod fuzz;
 mod range_set;
 #[cfg(all(test, any(feature = "rustls-aws-lc-rs", feature = "rustls-ring")))]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests;
 pub mod transport_parameters;
 mod varint;
