@@ -1837,11 +1837,25 @@ struct TracksRecv<S: crate::transport::poll::Session> {
 	/// Each event fans out to every reader, so a peer streaming add/remove churn must not
 	/// hold the thread for as long as its bytes keep arriving.
 	budget: kio::coop::Budget,
+	/// A listing is a subscribe: it waits for a token that may cover the broadcast, and
+	/// ends once the session stops allowing it.
+	gate: crate::auth::Gate,
+	/// The gate let the listing through, and this hop synced its readers.
+	admitted: bool,
 }
 
 impl<S: crate::transport::poll::Session> TracksRecv<S> {
 	/// Apply the peer's events until it ends the listing, or the error that ends it.
 	fn poll(&mut self, source: &SourceServe<S>, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		ready!(self.gate.poll_ready(waiter));
+		if self.gate.poll_denied(waiter).is_ready() {
+			return Poll::Ready(Err(Error::Unauthorized));
+		}
+		if !std::mem::replace(&mut self.admitted, true) {
+			// Synced with this hop, which holds nothing yet: a relay never waits on its
+			// upstream, so the peer's tracks follow as live adds.
+			source.lister.synced();
+		}
 		let mut cx = waiter.context();
 		let version = source.subscriber.version;
 		let stream = match &mut self.stream {
@@ -1926,15 +1940,18 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 						self.lister.abort(Error::Unsupported);
 						continue;
 					}
-					// Synced with this hop, which holds nothing yet: a relay never waits on its
-					// upstream, so the peer's tracks follow as live adds.
-					self.lister.synced();
 					listing = Some(TracksRecv {
 						session: self.subscriber.session.clone(),
 						stream: None,
 						listed: HashMap::new(),
 						synced: false,
 						budget: kio::coop::Budget::new(32),
+						gate: crate::auth::Gate::new(
+							self.subscriber.auth.clone(),
+							self.path.clone(),
+							crate::auth::Direction::Subscribe,
+						),
+						admitted: false,
 					});
 				}
 				Some(_) if self.lister.poll_unused(waiter).is_ready() => {
@@ -3611,6 +3628,108 @@ mod tests {
 				"{stage}: an unused track kept waiting on TRACK_INFO"
 			);
 		}
+	}
+
+	/// A lite-07 source of `room` over `session`, a consumer to list it through, and the
+	/// route that keeps it served.
+	fn listed_source(
+		session: SinkSession,
+		auth: crate::auth::Handle,
+	) -> (SourceServe<SinkSession>, crate::broadcast::Consumer, kio::Producer<()>) {
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session,
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: Version::Lite07,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth,
+		});
+		let broadcast = crate::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let dynamic = broadcast.dynamic();
+		let route = kio::Producer::new(());
+		let serve = SourceServe::new(
+			subscriber,
+			MintedSource {
+				validity: Default::default(),
+				path: Path::new("room").to_owned(),
+				epoch: None,
+				source: crate::model::broadcast::SourceGuard::new(broadcast),
+				dynamic,
+				route: route.consume(),
+			},
+		);
+		(serve, consumer, route)
+	}
+
+	/// A listing is a subscribe: it waits for a token that may cover the broadcast before
+	/// syncing its readers or asking the peer, which would refuse it until then.
+	#[moq_clock::test]
+	async fn a_listing_waits_for_its_token() {
+		let auth = crate::auth::Handle::new(true);
+		let token = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
+		let open = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(open.consume());
+		let (mut serve, consumer, _route) = listed_source(session.clone(), auth);
+		let mut tracks = consumer.tracks().unwrap();
+
+		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
+		assert_eq!(session.log.bi_opens(), 0, "asked the peer before the token settled");
+		assert!(
+			tracks.next().now_or_never().is_none(),
+			"synced before the token settled"
+		);
+
+		drop(token);
+		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
+		assert_eq!(session.log.bi_opens(), 1);
+		assert!(matches!(
+			tracks.next().now_or_never(),
+			Some(Ok(Some(crate::broadcast::TracksEvent::Synced)))
+		));
+	}
+
+	/// A listing outside the session's scope is refused before it reaches the wire.
+	#[moq_clock::test]
+	async fn a_listing_outside_the_scope_is_refused() {
+		let auth = crate::auth::Handle::new(false);
+		auth.authorize(&crate::auth::Grant::default());
+		let open = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(open.consume());
+		let (mut serve, consumer, _route) = listed_source(session.clone(), auth);
+		let mut tracks = consumer.tracks().unwrap();
+
+		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
+		assert!(matches!(tracks.next().now_or_never(), Some(Err(Error::Unauthorized))));
+		assert_eq!(session.log.bi_opens(), 0);
+	}
+
+	/// A narrower scope resets a live listing with UNAUTHORIZED rather than keep listing
+	/// what the session no longer allows, and leaves the session up.
+	#[moq_clock::test]
+	async fn a_narrower_limit_resets_a_listing() {
+		let auth = crate::auth::Handle::new(false);
+		let open = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(open.consume());
+		let (mut serve, consumer, _route) = listed_source(session.clone(), auth.clone());
+		let mut tracks = consumer.tracks().unwrap();
+
+		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
+		assert_eq!(session.log.bi_opens(), 1);
+		assert!(matches!(
+			tracks.next().now_or_never(),
+			Some(Ok(Some(crate::broadcast::TracksEvent::Synced)))
+		));
+
+		auth.authorize(&crate::auth::Grant::default());
+		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
+		assert!(matches!(tracks.next().now_or_never(), Some(Err(Error::Unauthorized))));
+		assert_eq!(session.log.resets(), vec![crate::StreamError::Unauthorized.to_code()]);
+		assert!(session.log.closes().is_empty());
 	}
 
 	/// A track waiting on an unanswered token ends once nobody wants it, rather than

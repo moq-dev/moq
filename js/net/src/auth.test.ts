@@ -623,6 +623,40 @@ test("a fetch abandoned while its token waits never reaches the wire", async () 
 	}
 });
 
+// The peer refuses a listing its token has not yet authorized, so the request waits for it.
+test("a listing waits for its token before reaching the wire", async () => {
+	const origin = new OriginProducer();
+	const broadcast = origin.createBroadcast(Path.from("room/x"));
+	broadcast.announce();
+	broadcast.createTrack("video");
+	const { client, server, transport } = await connect({ serverPublish: origin, protocol: Lite.ALPN_07_WIP });
+	const requests = server.auth.requests();
+	const setup = await requests.next();
+	if (!setup) throw new Error("missing setup token");
+	const initial = setup.accept(grant([], []));
+	await waitFor(client.auth.grant, (g) => g !== undefined);
+	const adding = client.auth.add("first");
+	try {
+		const unanswered = await requests.next();
+		if (!unanswered) throw new Error("missing token");
+		const opened = transport.sendStreams.bidi.length;
+		const tracks = wireOf(client).consume(Path.from("room/x")).tracks();
+		for (let i = 0; i < 10; i++) await nextTask();
+		expect(transport.sendStreams.bidi.length).toBe(opened);
+		const issued = unanswered.accept(grant([], ["room"]));
+		await adding;
+		expect(await tracks.next()).toEqual({ kind: "synced" });
+		expect(await tracks.next()).toMatchObject({ kind: "added", name: "video" });
+		tracks.close();
+		issued.close();
+	} finally {
+		initial.close();
+		client.abort();
+		server.abort();
+		await adding.catch(() => void 0);
+	}
+});
+
 // The window between the wait seeing the caller leave and acting on it spans a few
 // microtasks, so sweep where the new caller lands.
 test.each(Array.from({ length: 17 }, (_, gap) => gap))(

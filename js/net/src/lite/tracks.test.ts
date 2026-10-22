@@ -1,5 +1,7 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
+import { type Getter, Signal } from "@moq/signals";
+import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer, type Tracks } from "../broadcast.ts";
 import { accept, connect } from "../connection/index.ts";
 import * as Epoch from "../epoch.ts";
@@ -10,6 +12,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
+import type { Limits } from "../util/limits.ts";
 import { wireOf } from "../wire.ts";
 import { Publisher } from "./publisher.ts";
 import { StreamId } from "./stream.ts";
@@ -103,7 +106,7 @@ test("older versions have no tracks stream", async () => {
 });
 
 /** A lite-07 subscriber whose publisher the test plays by hand. */
-function handPlayed(limits?: { announces: number; subscriptions: number; fetches: number }) {
+function handPlayed({ limits, grant }: { limits?: Limits; grant?: Getter<Grant | undefined> } = {}) {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const closing = spyOn(pair.client, "close");
 	const subscriber = new Subscriber(
@@ -113,7 +116,7 @@ function handPlayed(limits?: { announces: number; subscriptions: number; fetches
 		undefined,
 		undefined,
 		undefined,
-		undefined,
+		grant,
 		limits,
 	);
 	// The TRACKS request the subscriber opens next.
@@ -218,7 +221,7 @@ test("a peer's malformed listing closes the session", async () => {
 
 test("a listing past the announces cap is reset, and the session stays", async () => {
 	const cap = 3;
-	const { subscriber, listed, closing } = handPlayed({ announces: cap, subscriptions: 10, fetches: 10 });
+	const { subscriber, listed, closing } = handPlayed({ limits: { announces: cap, subscriptions: 10, fetches: 10 } });
 	const tracks = subscriber.consume(Path.from("room")).tracks();
 	const peer = await listed();
 	for (let i = 0; i <= cap; i++) await peer.send({ kind: "added", name: `t${i}`, info });
@@ -278,6 +281,36 @@ test("a version without the Tracks Stream refuses the listing", async () => {
 	const subscriber = new Subscriber(pair.client, Version.DRAFT_06, randomHop());
 	const tracks = subscriber.consume(Path.from("room")).tracks();
 	expect(await next(tracks)).toBe("error: Error: track listing requires moq-lite-07 or newer");
+});
+
+function scoped(prefix: string): Grant {
+	return { publish: new Path.Patterns(), subscribe: new Path.Patterns([Path.Pattern.subtree(prefix)]) };
+}
+
+test("a listing our grant does not cover is refused, and never reaches the wire", async () => {
+	const { subscriber, pair } = handPlayed({ grant: new Signal<Grant | undefined>(scoped("other")) });
+	const tracks = subscriber.consume(Path.from("room")).tracks();
+	expect(await next(tracks)).toBe(`error: ${StreamCode.Unauthorized}`);
+	expect(pair.client.sendStreams.bidi).toHaveLength(0);
+});
+
+test("a grant that stops covering a listing resets it with UNAUTHORIZED, and the session stays", async () => {
+	const grant = new Signal<Grant | undefined>(scoped("room"));
+	const { subscriber, listed, closing } = handPlayed({ grant });
+	const tracks = subscriber.consume(Path.from("room")).tracks();
+	const peer = await listed();
+	await peer.send({ kind: "added", name: "a", info });
+	expect(await next(tracks)).toBe("synced");
+	expect(await next(tracks)).toBe("+a");
+
+	grant.set(scoped("other"));
+	expect(await next(tracks)).toBe(`error: ${StreamCode.Unauthorized}`);
+	const reset = await peer.stream.reader.done().then(
+		() => undefined,
+		(err: unknown) => fromTransport(err),
+	);
+	expect((reset as StreamError).code).toBe(StreamCode.Unauthorized);
+	expect(closing).not.toHaveBeenCalled();
 });
 
 /** A lite-07 publisher serving `origin`, answering TRACKS streams the test writes by hand. */

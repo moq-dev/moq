@@ -664,22 +664,31 @@ export class Subscriber {
 	// Answer listings of a consumed broadcast from the peer's TRACKS while anyone lists it, until
 	// the broadcast closes. Every listing of the broadcast shares one TRACKS stream.
 	async #runListing(broadcast: Path.Valid, consumed: Consumed, lister: Lister) {
+		const unlisted = async () => {
+			while (lister.used.peek() && lister.ended.peek() === undefined) {
+				await Signal.race(lister.used, lister.ended);
+			}
+		};
 		try {
 			for (;;) {
-				while (!lister.used.peek()) {
-					if (lister.ended.peek() !== undefined || this.#closed.signal.aborted) return;
+				if (lister.ended.peek() !== undefined || this.#closed.signal.aborted) return;
+				if (!lister.used.peek()) {
 					await untilAborted(race([Signal.race(lister.used, lister.ended)]), this.#closed.signal).catch(
 						() => {},
 					);
+					continue;
 				}
 				if (!hasTracks(this.version)) {
 					// An empty answer would claim the peer lists nothing.
 					lister.abort(new Error("track listing requires moq-lite-07 or newer"));
 					continue;
 				}
-				// Synced with this hop, which holds nothing yet: a relay never waits on its upstream,
-				// so the peer's tracks follow as live adds.
-				lister.synced();
+				// A listing is a subscribe: one opened before a token that covers it is answered
+				// would be refused by the peer.
+				const ready = await this.#auth
+					?.ready(broadcast, "subscribe", { signal: this.#closed.signal, until: unlisted })
+					.catch(() => false);
+				if (ready === false) continue;
 				await this.#listTracks(broadcast, consumed, lister);
 			}
 		} finally {
@@ -688,12 +697,27 @@ export class Subscriber {
 	}
 
 	// Forward the peer's TRACKS listing of `broadcast` into `lister` until the peer ends it, it
-	// fails, or nobody lists the broadcast any more.
+	// fails, our grant stops covering the broadcast, or nobody lists the broadcast any more.
 	async #listTracks(broadcast: Path.Valid, consumed: Consumed, lister: Lister): Promise<void> {
+		// Armed before the first check and held to the end, so a shrink is never missed.
+		const refused = unauthorized(broadcast);
+		const revoked = new AbortController();
+		const disposeGrant = this.#grant?.subscribe(() => {
+			if (this.#denied(broadcast)) revoked.abort(refused);
+		});
+		if (this.#denied(broadcast)) {
+			disposeGrant?.();
+			lister.abort(refused);
+			return;
+		}
+		// Synced with this hop, which holds nothing yet: a relay never waits on its upstream,
+		// so the peer's tracks follow as live adds.
+		lister.synced();
+
 		// Each listed track holds an announces slot: discovery state the peer makes us hold.
 		const listed = new Set<string>();
 		const unused = new AbortController();
-		const stop = AbortSignal.any([unused.signal, this.#closed.signal]);
+		const stop = AbortSignal.any([unused.signal, revoked.signal, this.#closed.signal]);
 		const disposeUsed = lister.used.subscribe((used) => {
 			if (!used) unused.abort(new StreamError(StreamCode.Cancel, { message: "listing unused" }));
 		});
@@ -740,6 +764,13 @@ export class Subscriber {
 				}
 			}
 		} catch (err) {
+			if (revoked.signal.aborted) {
+				// Reset rather than cancel, so the peer reads a revocation instead of a routine end.
+				console.debug(`tracks revoked: broadcast=${broadcast}`);
+				stream?.abort(refused);
+				lister.abort(refused);
+				return;
+			}
 			if (unused.signal.aborted) {
 				// Nobody lists the broadcast any more: cancel the peer's listing.
 				stream?.close();
@@ -752,6 +783,7 @@ export class Subscriber {
 			stream?.abort(e);
 			lister.abort(e);
 		} finally {
+			disposeGrant?.();
 			disposeUsed();
 			this.#announces.release(listed.size);
 		}
