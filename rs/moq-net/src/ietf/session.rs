@@ -138,7 +138,7 @@ where
 	// signal), the protocol tasks below hold the other.
 	// A moq-transport client MUST send an empty New Session URI: it cannot tell a
 	// server to open connections (draft-19 sect 10.4).
-	let (goaway_handle, goaway) = crate::goaway::Handle::new(&runtime, !client);
+	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 
 	// What the peer's connection credential earns by default, from the caller's real
 	// handles before the empty-half defaulting below.
@@ -279,8 +279,8 @@ where
 						let Some(payload) = payload else {
 							return;
 						};
-						let timeout_ms = payload.goaway.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
-						adapter.send_goaway(&payload.goaway.uri, timeout_ms, version);
+						let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
+						adapter.send_goaway(&payload.uri, timeout_ms, version);
 					});
 				}
 				drop(tasks);
@@ -842,9 +842,9 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	.await?;
 
 	if let Some(payload) = payload {
-		let timeout_ms = payload.goaway.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
+		let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
 		let msg = ietf::GoAway {
-			new_session_uri: std::borrow::Cow::Borrowed(payload.goaway.uri.as_ref()),
+			new_session_uri: std::borrow::Cow::Borrowed(payload.uri.as_ref()),
 			timeout: timeout_ms,
 			request_id: (version == Version::Draft18).then(|| control.goaway()).transpose()?,
 		};
@@ -2519,8 +2519,7 @@ mod tests {
 		}
 
 		// Held so the trigger side stays alive for as long as the loop runs.
-		let (_goaway, goaway) =
-			crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
+		let (_goaway, goaway) = crate::goaway::Handle::new(false);
 		// Without `accepted`, the peer's SETUP has not arrived yet, which is the state a
 		// group stream racing ahead of it lands in.
 		let read = accepted.is_some();
@@ -3284,8 +3283,7 @@ mod tests {
 
 			let mut session = DeadStreamSession::unis(1);
 			let recv = session.accept_uni().await.unwrap();
-			let (_handle, protocol) =
-				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let err = run_goaway(Reader::new(recv, version), version, true, protocol)
 				.await
 				.unwrap_err();
@@ -3305,8 +3303,7 @@ mod tests {
 			let mut session =
 				crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![two]);
 			let stream = std::future::poll_fn(|cx| session.poll_accept_uni(cx)).await.unwrap();
-			let (handle, protocol) =
-				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
+			let (handle, protocol) = crate::goaway::Handle::new(false);
 
 			let err = read_goaways(Reader::new(stream, version), version, true, protocol)
 				.await
@@ -3399,8 +3396,7 @@ mod tests {
 			let first = u64::from(client);
 			control.accept(RequestId(first)).unwrap();
 			control.accept(RequestId(first + 4)).unwrap();
-			let (handle, goaway_protocol) =
-				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), !client);
+			let (handle, goaway_protocol) = crate::goaway::Handle::new(!client);
 			let mut setup = std::pin::pin!(run_setup(
 				session,
 				VERSION,

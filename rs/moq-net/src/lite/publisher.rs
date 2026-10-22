@@ -6863,7 +6863,7 @@ mod tests {
 		// A SETUP that declares no origin of its own, so only the assigned one applies.
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 		peer_setup.set(crate::lite::Setup::default());
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
@@ -7035,7 +7035,7 @@ mod tests {
 		estimate: &kio::Producer<crate::session::Estimate>,
 	) -> ProbeServe<S> {
 		let origin = Hop::random().produce();
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
 			session,
@@ -7335,7 +7335,7 @@ mod tests {
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 		peer_setup.set(crate::lite::Setup::default());
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
 			session: ScriptedSession::new(Vec::new()),
@@ -7467,8 +7467,7 @@ mod tests {
 
 					let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 					peer_setup.set(crate::lite::Setup::default());
-					let (_, goaway) =
-						crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+					let (_, goaway) = crate::goaway::Handle::new(true);
 					let publisher = Publisher::new(PublisherConfig {
 						estimate: kio::Producer::default().weak(),
 						runtime: crate::time::sim(),
@@ -7557,7 +7556,7 @@ mod tests {
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 		peer_setup.set(crate::lite::Setup::default());
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 		let version = Version::Lite07;
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
@@ -7675,7 +7674,7 @@ mod tests {
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 		peer_setup.set(crate::lite::Setup::default());
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 		let version = Version::Lite07;
 		let publisher = Publisher::new(PublisherConfig {
 			estimate: kio::Producer::default().weak(),
@@ -7837,8 +7836,7 @@ mod tests {
 			let log = session.log.clone();
 
 			let origin = Hop::random().produce();
-			let (_, goaway) =
-				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+			let (_, goaway) = crate::goaway::Handle::new(true);
 			let mut publisher = Publisher::new(PublisherConfig {
 				estimate: kio::Producer::default().weak(),
 				runtime: crate::time::sim(),
@@ -7880,7 +7878,7 @@ mod tests {
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 		peer_setup.set(crate::lite::Setup::default());
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
 			session: ScriptedSession::new(Vec::new()),
@@ -7947,7 +7945,7 @@ mod tests {
 		broadcast.announce(Default::default()).unwrap();
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 		peer_setup.set(crate::lite::Setup::default());
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 		let publisher = Publisher::new(PublisherConfig {
 			runtime: crate::time::sim(),
 			session: ScriptedSession::new(Vec::new()),
