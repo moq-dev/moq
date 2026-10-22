@@ -7954,10 +7954,10 @@ fn continuity_errors(frames: &[Frame]) -> usize {
 
 /// The output of an export reading the [`Moving`](crate::container::test_util::Moving)
 /// rendition's track `a` up to frame `read`, before the catalog moves the rendition to `track`
-/// in `broadcast` described by `sps`. Both tracks run on to frame 120, the new one from frame
-/// 60, a keyframe two seconds in.
+/// in `broadcast` described by `sps`. Both tracks run on to frame 120 in step, the new one from
+/// frame `start`, marked 0xb0 before frame 60, a keyframe two seconds in, and 0xb1 from it.
 async fn moved_export(
-	read: u64,
+	(start, read): (u64, u64),
 	(track, broadcast, sps): (&str, Option<&str>, &'static [u8]),
 	sync: bool,
 ) -> Vec<Frame> {
@@ -7972,25 +7972,32 @@ async fn moved_export(
 	if sync {
 		export = export.with_mux_rate(2_000_000).with_sync();
 	}
+	let write = |moving: &mut Moving, i: u64, mark: u8| {
+		moving.a.write(marked_frame(i, mark)).unwrap();
+		let next = match broadcast {
+			None => &mut moving.b,
+			Some(_) => &mut moving.other,
+		};
+		if i >= start {
+			let mark = if i < 60 { 0xb0 } else { 0xb1 };
+			next.write(marked_frame(i, mark)).unwrap();
+		}
+	};
 	for i in 0..read {
-		moving.a.write(marked_frame(i, 0xa1)).unwrap();
+		write(&mut moving, i, 0xa1);
 	}
 	let mut frames = drain_frames(&mut export).await;
 
 	moving.point(track, broadcast, sps);
 	frames.extend(drain_frames(&mut export).await);
-	let next = match broadcast {
-		None => &mut moving.b,
-		Some(_) => &mut moving.other,
-	};
 	for i in read..120 {
-		moving.a.write(marked_frame(i, 0xa2)).unwrap();
-		if i >= 60 {
-			next.write(marked_frame(i, 0xb1)).unwrap();
-		}
+		write(&mut moving, i, 0xa2);
 		frames.extend(drain_frames(&mut export).await);
 	}
-	next.finish().unwrap();
+	match broadcast {
+		None => moving.b.finish().unwrap(),
+		Some(_) => moving.other.finish().unwrap(),
+	}
 	moving.catalog.finish().unwrap();
 	let (rest, end) = drain_to_end(&mut export).await;
 	frames.extend(rest);
@@ -8007,7 +8014,7 @@ async fn a_moved_rendition_continues_on_its_pid() {
 	use crate::container::test_util::{Moving, marks};
 
 	for (track, broadcast, sps) in [("b", None, Moving::MAIN_SPS), ("a", Some("other"), SPS)] {
-		let frames = moved_export(45, (track, broadcast, sps), false).await;
+		let frames = moved_export((60, 45), (track, broadcast, sps), false).await;
 		let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 		let video = reassemble_video(&ts, StreamType::H264);
 		let expected: Vec<u8> = [vec![0xa1; 45], vec![0xb1; 60]].concat();
@@ -8032,14 +8039,18 @@ async fn a_moved_rendition_continues_on_its_pid() {
 
 /// Under `--sync`, legs the catalog moves at different points of the old track render the new
 /// track identically: its units take their lane positions from its own groups, whatever the
-/// old track left on each leg.
+/// old track left on each leg. The second leg last read the old track's group 1, the sequence
+/// the new track's first group it reads has too.
 #[tokio::test(start_paused = true)]
 async fn synced_legs_agree_after_a_move() {
 	use crate::container::test_util::{Moving, marks};
 
 	let mut legs = Vec::new();
-	for read in [45, 50] {
-		let frames = moved_export(read, ("b", None, Moving::MAIN_SPS), true).await;
+	for (read, expected) in [
+		(20, [vec![0xa1; 20], vec![0xb0; 30]]),
+		(50, [vec![0xa1; 50], Vec::new()]),
+	] {
+		let frames = moved_export((30, read), ("b", None, Moving::MAIN_SPS), true).await;
 		// The video PID's payload. The PCR rides a PID the PMT lists no stream on, which
 		// [`reassemble_video`]'s reader refuses.
 		let mut video = None;
@@ -8060,13 +8071,14 @@ async fn synced_legs_agree_after_a_move() {
 				es.extend_from_slice(payload);
 			}
 		}
-		let expected: Vec<u8> = [vec![0xa1; read as usize], vec![0xb1; 60]].concat();
+		let expected: Vec<u8> = [expected[0].clone(), expected[1].clone(), vec![0xb1; 60]].concat();
 		assert_eq!(marks(&es), expected, "read {read}");
 		assert_eq!(continuity_errors(&frames), 0);
 		legs.push(frames);
 	}
-	// From the slot that carries the new track's first unit, the legs carry the same packets.
-	let from = legs[0]
+	// From the slot that carries the new track's frame both legs read first, they carry the
+	// same packets.
+	let from = legs[1]
 		.iter()
 		.find(|frame| marks(&frame.payload).contains(&0xb1))
 		.expect("the new track went out")
@@ -8079,7 +8091,7 @@ async fn synced_legs_agree_after_a_move() {
 			.collect()
 	};
 	let (first, second) = (after(&legs[0]), after(&legs[1]));
-	let carried: Vec<u8> = first.iter().flat_map(|(_, payload)| payload.iter().copied()).collect();
+	let carried: Vec<u8> = second.iter().flat_map(|(_, payload)| payload.iter().copied()).collect();
 	assert_eq!(
 		marks(&carried),
 		vec![0xb1; 60],

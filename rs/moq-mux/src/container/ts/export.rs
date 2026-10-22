@@ -2106,6 +2106,11 @@ where
 			track.buffer = buffer;
 			track.finished = false;
 			track.subscribed = moq_clock::now();
+			// Group sequences are the old track's own, so the new track's first read opens one.
+			track.group = None;
+			if let Some(sync) = &mut track.sync {
+				sync.lane.forget();
+			}
 		}
 		Ok(())
 	}
