@@ -105,8 +105,8 @@ choices. They follow the product model.
   termination code, so we close the session with it.
 
 - **Deduplicated subscriptions and discovery.** Shared subscriptions and overlapping
-  namespace prefixes are coalesced internally, so `DUPLICATE_SUBSCRIPTION` and
-  `PREFIX_OVERLAP` are never sent.
+  namespace prefixes are coalesced internally. Only `SUBSCRIBE_TRACKS`, described
+  above, sends `PREFIX_OVERLAP`, and on draft 18 `DUPLICATE_SUBSCRIPTION`.
 
 - **Subscriber max age is negotiated.** The [Timestamp extension](/draft/moq-timestamp)
   carries a subscriber's `max_delay` in `SUBSCRIBE` and `REQUEST_UPDATE` only
