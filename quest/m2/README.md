@@ -148,6 +148,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - hopeless retransmits
   become resets, and a tail loss probe fires early while there is still time
 - [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) - every backend implements moq-net's `transport::poll` traits, and the generic `web_transport_trait` adapters are deleted
+- [QUIC driver poll waits](/quest/m2/driver-poll.md) - the `moq_tokio::quic::driver` stream, datagram, close, and accept waits get leak-free `poll_*` forms, named like moq-uring's driver; `handshake_confirmed` and `Endpoint::wait_idle` stay async
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - a written
   verdict on marking versus dropping, and whether Linode and OVH keep marks
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
@@ -226,3 +227,4 @@ ranked just below deterministic TS legs, which it requires.
 - [Test cost audit](/quest/m2/audit-test-cost.md) - the slowest, flakiest, and least valuable tests are fixed, deleted, or planned once the release ships
 
 - [Quest tree audit](/quest/m2/audit-quests.md) - repeat the whole-tree audit after the release ships, against the m1 baseline
+- [CI workflow audit](/quest/m2/audit-ci.md) - repeat the per-workflow and per-job review after the release ships, against the m1 baselines

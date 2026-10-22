@@ -35,4 +35,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [CI workflow audit](/quest/m1/audit-ci.md) - owns per-job cost; this quest only changes the gate
+- [CI workflow audit](/quest/m2/audit-ci.md) - owns per-job cost; this quest only changes the gate
