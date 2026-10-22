@@ -1,9 +1,10 @@
-# [XS] JS refuses an unrequested partial lite group
+# [S] JS refuses an unrequested partial lite group
 
 ## Goal
 
 A JS lite subscriber refuses a group stream whose `frameStart` is above 0 as a
-protocol violation instead of exposing its first frame as frame 0.
+protocol violation, closing the session, instead of exposing its first frame
+as frame 0.
 
 ## Plan
 
@@ -16,9 +17,19 @@ looks complete, corrupting the frame positions resumption and deduplication
 rely on.
 
 Decided 2026-10-22: refuse rather than model the offset. A JS subscriber never
-asks for a mid-group start, so a nonzero `frameStart` is a peer bug. Close the
-track with `ProtocolViolation`, folding the compressed-group check into the
-same rule. [JS ranges](/quest/m1/subscribe-ranges/js.md) carries the offset
-through the group model when it adds frame bounds.
+asks for a mid-group start, so a nonzero `frameStart` is a peer bug. Raise
+`ProtocolViolation`, folding the compressed-group check into the same rule.
+
+The violation must close the session, as `ProtocolViolation` promises, so a
+hostile peer cannot repeat it on every stream (found in review of the planning
+PR). Today `runGroup` catches every error, closes the group, resets the
+stream, and returns, so nothing reaches the dispatch in `lite/connection.ts`.
+The existing check for a group past the track's declared end throws the same
+way and is swallowed too; fix both, letting the violation escape `runGroup`
+while ordinary group errors stay stream-scoped. Test that each closes the
+session.
+
+[JS ranges](/quest/m1/subscribe-ranges/js.md) carries the offset through the
+group model when it adds frame bounds.
 
 Public API: none. Wire: none.
