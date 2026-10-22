@@ -251,21 +251,12 @@ prints_grant() {
 }
 
 # The publishers whose refusal the harness can read: each logs moq-net's error.
-# The browser elements have no way to offer $AUTH_VERSION.
+# The browser driver reports no session error.
 enforces_grant() {
     [[ "$COMPAT" -eq 0 && "$VERSION" == auto ]] || return 1
     case "$1" in
         rust | python | go | cpp) return 0 ;;
         *) return 1 ;;
-    esac
-}
-
-# The clients that can offer one version alone. The browser elements and GStreamer's moqsrc
-# take no version, so a pinned pass skips their cells rather than letting them negotiate another.
-pins_version() {
-    case "$1" in
-        js | gst) return 1 ;;
-        *) return 0 ;;
     esac
 }
 
@@ -873,7 +864,7 @@ run_publisher() {
             # WebCodecs (lazily, once a subscriber creates demand). exec, so the
             # driver leads the group and `stop_publisher` waits for its own close.
             cd "$CLIENTS/js" && exec bun driver.ts publish \
-                --url "$url" --broadcast "$broadcast"
+                --url "$url" --broadcast "$broadcast" ${FLAGS[@]+"${FLAGS[@]}"}
             ;;
         *)
             echo "unknown publisher: $lang" >&2
@@ -1028,12 +1019,13 @@ PYCODE
             # (which provides filesink); a private registry keeps the scan off the
             # user's cache. buffer-mode=2 makes filesink unbuffered so the first frame
             # reaches head immediately.
-            local n
+            local n version
+            version=$(cell_version gst)
             n=$(
                 trap '' PIPE
                 GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
                     timeout -k 3 "$TIMEOUT" gst-launch-1.0 -q \
-                    moqsrc name=s url="$url" broadcast="$broadcast" \
+                    moqsrc name=s url="$url" broadcast="$broadcast" ${version:+versions="$version"} \
                     s.video_0 ! filesink location=/dev/stdout buffer-mode=2 \
                     2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true
             )
@@ -1044,13 +1036,9 @@ PYCODE
             # the real player's pause/resume controls. Every publisher but the
             # Rust CLI carries audio (the browser from a fake microphone, the
             # FFI clients from a synthetic Opus tone), so validate audio there.
-            if [[ "$publisher" != "rust" ]]; then
-                (cd "$CLIENTS/js" && bun driver.ts subscribe \
-                    --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" --expect-audio)
-            else
-                (cd "$CLIENTS/js" && bun driver.ts subscribe \
-                    --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT")
-            fi
+            if [[ "$publisher" != "rust" ]]; then FLAGS+=(--expect-audio); fi
+            (cd "$CLIENTS/js" && bun driver.ts subscribe \
+                --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"})
             ;;
         js-native-bun)
             # Native @moq/net via moq's WebTransport polyfill, under bun.
@@ -1108,11 +1096,6 @@ run_round() {
     sub_url=$(token_url --subscribe "$(subscribe_grant "$broadcast")")
     sub_grant=$(grant_line "" "**/$broadcast")
     for sub in "${SUB_LIST[@]}"; do
-        if [[ "$VERSION" != auto ]] && ! pins_version "$sub"; then
-            echo "  SKIP  $pub -> $sub (subscriber cannot pin $VERSION)"
-            record skip case="$case" publisher="$publisher" subscriber="$sub" detail="subscriber cannot pin a version"
-            continue
-        fi
         if is_broken "$sub"; then
             echo "  FAIL  $pub -> $sub (subscriber client unavailable)"
             record fail case="$case" publisher="$publisher" subscriber="$sub" detail="subscriber client unavailable"
@@ -1397,15 +1380,6 @@ run_matrix() {
     for pub in "${PUB_LIST[@]}"; do
         broadcast="interop-${pub}-$$-${RANDOM}.hang"
         echo "=== publisher: $pub  broadcast: $broadcast ==="
-        if [[ "$VERSION" != auto ]] && ! pins_version "$pub"; then
-            for sub in "${SUB_LIST[@]}"; do
-                echo "  SKIP  $pub -> $sub (publisher cannot pin $VERSION)"
-                record skip case=media publisher="$pub" subscriber="$sub" detail="publisher cannot pin a version"
-            done
-            record skip case="relay close" publisher="$pub" detail="publisher cannot pin a version"
-            record skip case="negotiated version" publisher="$pub" detail="publisher cannot pin a version"
-            continue
-        fi
         if is_broken "$pub"; then
             for sub in "${SUB_LIST[@]}"; do
                 echo "  FAIL  $pub -> $sub (publisher client unavailable)"

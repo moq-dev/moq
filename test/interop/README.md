@@ -119,8 +119,8 @@ After the matrix, each publisher whose refusal the harness can read (Rust,
 Python, Go, and C++, which log moq-net's error) runs once more with a token that
 excludes its broadcast. It must fail loud, logging
 Unauthorized and naming the path, and every subscriber must time out. The
-browser publisher enforces its grant too, but its elements cannot offer
-`moq-lite-07-wip` yet.
+browser publisher enforces its grant too, but its driver reports no session
+error to read.
 
 Tokens use patterns no prefix could carry, so every cell checks that AUTH\_OK
 delivers them as minted: a publisher is granted its exact broadcast, a subscriber
@@ -154,10 +154,8 @@ Some cases change shape on moq-transport:
   passes mint `name/**` for both roles instead of the exact and `**/name`
   patterns above.
 
-The browser elements and GStreamer's `moqsrc` take no version, so a pinned pass
-records their cells as skipped rather than letting them negotiate moq-lite.
-Native JS covers `@moq/net` on moq-transport, including publishing through the
-tails.
+The browser pins through the `versions` attribute on `<moq-watch>` and
+`<moq-publish>`, and GStreamer through the `versions` property on `moqsrc`.
 
 ## Running locally
 

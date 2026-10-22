@@ -28,6 +28,16 @@ function parseUrl(value: string | null): URL | undefined {
 	}
 }
 
+// Parse the `versions` attribute: a comma-separated list, or the defaults when absent or empty.
+// The connection checks the names and reports an unsupported one on `connection.error`.
+function parseVersions(value: string | null): string[] | undefined {
+	const versions = value
+		?.split(",")
+		.map((version) => version.trim())
+		.filter((version) => version !== "");
+	return versions?.length ? versions : undefined;
+}
+
 function parseVolume(value: string | null): number {
 	if (!value?.trim()) return 0.5;
 	const volume = Number(value);
@@ -38,6 +48,7 @@ function parseVolume(value: string | null): number {
 
 const OBSERVED = [
 	"url",
+	"versions",
 	"name",
 	"paused",
 	"volume",
@@ -304,6 +315,15 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
+			const versions = effect.get(this.connection.versions);
+			if (versions) {
+				this.setAttribute("versions", versions.join(","));
+			} else {
+				this.removeAttribute("versions");
+			}
+		});
+
+		this.signals.run((effect) => {
 			const name = effect.get(this.#name);
 			this.setAttribute("name", name.toString());
 		});
@@ -410,6 +430,8 @@ export default class MoqWatch extends HTMLElement {
 
 		if (name === "url") {
 			this.connection.url.set(parseUrl(newValue));
+		} else if (name === "versions") {
+			this.connection.versions.set(parseVersions(newValue));
 		} else if (name === "name") {
 			this.#name.set(Moq.Path.from(newValue ?? ""));
 		} else if (name === "paused") {
@@ -451,6 +473,15 @@ export default class MoqWatch extends HTMLElement {
 
 	set url(value: string | URL | undefined) {
 		this.connection.url.set(value ? new URL(value) : undefined);
+	}
+
+	/** The protocol versions to offer, most preferred first, mirrored by the `versions` attribute; undefined offers the defaults. */
+	get versions(): readonly string[] | undefined {
+		return this.connection.versions.peek();
+	}
+
+	set versions(value: readonly string[] | undefined) {
+		this.connection.versions.set(value);
 	}
 
 	/** The broadcast name, mirrored by the `name` attribute. */
