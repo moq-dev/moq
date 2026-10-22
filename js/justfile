@@ -133,6 +133,11 @@ slow-group-bench:
     bun install --frozen-lockfile
     bun hang/bench/slow-group.ts
 
+# Sweep the audio jitter estimator's held history against in-order and reordered frames.
+jitter-bench:
+    bun install --frozen-lockfile
+    bun hang/bench/jitter.ts
+
 # Sweep decoder count against PCM callback size during audio warmup.
 audio-warmup-bench:
     bun install --frozen-lockfile

@@ -20,9 +20,9 @@ use rustc_hash::FxHashMap;
 use crate::transport::{Reader, Transport, Writer};
 use crate::{Config, Error, SharedSocketStats};
 
-/// How long a closing session keeps writing to deliver its close frame before it drops the
-/// transport anyway, like QUIC's draining period. A peer that stopped reading cannot hold the
-/// transport open past it.
+/// How long a closing session keeps the transport open to deliver its close and finish graceful
+/// shutdown, like QUIC's draining period. A peer that stopped reading or never finishes its send
+/// half cannot hold the transport open past it.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The most bytes gathered before the writer flushes the transport.
@@ -332,7 +332,7 @@ impl Timer {
 }
 
 /// Drain the connection into `writer` until it has nothing left to say.
-async fn run_writer<W: Writer>(inner: Arc<Inner>, mut writer: W) {
+async fn run_writer<W: Writer>(inner: Arc<Inner>, mut writer: W, reader: tokio::task::JoinHandle<()>) {
 	let mut timer = Timer::default();
 	let result = async {
 		loop {
@@ -378,12 +378,17 @@ async fn run_writer<W: Writer>(inner: Arc<Inner>, mut writer: W) {
 	.await;
 
 	// Shut the transport down gracefully, unless it already failed, within what is left of
-	// the close bound.
+	// the close bound. The drained connection has already woken the reader; waiting for it to
+	// drop its half lets the close drain the peer instead of leaving that to the reader.
 	if result.is_ok() {
 		let bound = timer
 			.closing
 			.map_or(CLOSE_TIMEOUT, |at| at.saturating_duration_since(moq_clock::now()));
-		let _ = moq_clock::timeout(bound, writer.close()).await;
+		let close = async {
+			let _ = reader.await;
+			writer.close().await
+		};
+		let _ = moq_clock::timeout(bound, close).await;
 	}
 	inner.writer_done(result);
 }
@@ -503,8 +508,8 @@ impl Session {
 		});
 
 		let (writer, reader) = transport.split();
-		tokio::spawn(run_writer(inner.clone(), writer));
-		tokio::spawn(run_reader(inner.clone(), reader));
+		let reader = tokio::spawn(run_reader(inner.clone(), reader));
+		tokio::spawn(run_writer(inner.clone(), writer, reader));
 
 		Ok(Self {
 			guard: Arc::new(Guard(inner.clone())),
