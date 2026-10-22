@@ -2,17 +2,17 @@ The `/rs` Cargo workspace. Extends the root `AGENTS.md`.
 
 # Crates
 
-One crate per component from the root list, named `moq-<component>` (`hang` is the exception). Keep them modular; a crate does one thing. Beyond that list:
+Component crates are named `moq-<component>` (`hang` is the exception); infrastructure like `kio` is not. Keep them modular; a crate does one thing. The ones whose role isn't obvious from the name:
 
 - `kio`: "easy async" primitives everything else polls through.
 - `moq-tokio`: configures the QUIC backends (`moq-quic`, our quinn fork, and Iroh) and the fallback transports for native binaries, on tokio. `moq-sock` holds the socket plumbing it shares with `moq-uring`, the experimental thread-per-core io\_uring runtime.
 - `moq-cli` builds the `moq` binary and owns the CLI surface for the gateway crates. Binaries never carry a `-cli` suffix.
 
-`moq-net`, `moq-mux`, `moq-relay` (including the config conventions every binary shares), and `moq-ffi` have their own `AGENTS.md`.
+`moq-net`, `moq-mux`, `moq-relay` (including its layered config), and `moq-ffi` have their own `AGENTS.md`.
 
 # Producer / Consumer
 
-Most crates use a split-handle pattern: a `Producer` writes, any number of `Consumer`s read, state is shared via `kio`. Handles are refcounted: clones share state, the last drop closes cleanly, `abort(err)` closes with an error. A parked clone that keeps something alive is a bug in the holder. A track, group, or frame consumer seeing `Error::Dropped` is a bug too: its producer went away unfinished without calling `abort` with a specific error, so find that path and abort with the real cause. Lifecycle watchers like `broadcast::Demand` return `Dropped` after `close()` by design.
+Most crates use a split-handle pattern: a `Producer` writes, any number of `Consumer`s read, state is shared via `kio`. Handles are refcounted: clones share state, the last drop closes cleanly, `abort(err)` closes with an error. A parked clone that keeps something alive is a bug in the holder, and a consumer never keeps its producer or parent alive. A track, group, or frame consumer seeing `Error::Dropped` is a bug too: its producer went away unfinished without calling `abort` with a specific error, so find that path and abort with the real cause. Lifecycle watchers like `broadcast::Demand` return `Dropped` after `close()` by design.
 
 # Async / poll
 
@@ -31,22 +31,22 @@ Prefer poll. New logic is a `poll_*` with an `async` helper, not the other way a
 # Conventions
 
 - `thiserror` with `#[from]` for libraries; `anyhow` with `.context("...")` for binaries.
-- Public error enums are always `#[non_exhaustive]`. Don't re-export a third-party error type unless the crate is a thin wrapper that re-exports the dependency.
+- Don't re-export a third-party error type unless the crate is a thin wrapper that re-exports the dependency.
 - Make terminal operations consume `self` (`fn close(self)`). Rely on `Drop` instead of a `close` the user can forget.
 - Take `&[T]` / `&str` for data the callee only reads; return owned values. Take `Vec<T>` only when storing it.
 - Typed units only: `std::time::Duration`, `moq_net::Timestamp`, never `f64` seconds or bare `u64` millis. `serde_as` converts at the edge.
+- Flushing, cutting, and expiry advance on max(wall clock, pts) through a timer: peer timestamps are untrusted, and a sparse track may never send another frame.
 - `if let` / `let else` over a `match` whose only job is to bind. Keep `match` when both arms do work.
 - Derive `Serialize`/`Deserialize`; a hand-written impl is a second copy of the wire shape. Reach for `serde_with` for what the derive can't express.
 - Public modules with short names: `broadcast::Consumer`, not `BroadcastConsumer`. Keep `mod encoder` private and re-export flat as `encode::Encoder`.
-- Workspace members and shared dependency versions live in the root `Cargo.toml`; crates reference deps via `{ workspace = true }`, except internal dev-dependencies, which are path-only so releases publish (`_publish-test` enforces it).
+- Workspace members and shared dependency versions live in the root `Cargo.toml`; crates reference deps via `{ workspace = true }`, except internal dev-dependencies, which are path-only so releases publish.
 - Use newtypes and enums instead of untyped strings.
-- Have the language make misuse impossible: terminal operations consume `self`, cleanup in `Drop`, etc.
 
 # Semver
 
 - Don't add `#[non_exhaustive]` by default. It earns its keep on error enums, enums that will gain variants, and `Config`-style structs with `pub` fields plus a `Default`/constructor. Builders with private fields don't need it.
 - Append new variants to the end of a public fieldless enum with implicit discriminants; inserting reorders `as` values.
-- A deprecated item gets `#[doc(hidden)]` and `#[deprecated(note)]`. A renamed flag or env var stays as a hidden arg with its original `env`, reported by the section's `deprecated()` into `moq_tokio::cli::Deprecated`; callers must reject startup when the collection is non-empty and name the replacement rather than honor the old spelling. Never advertise the dead name in docs or `--help`.
+- A renamed flag or env var stays as a hidden arg with its original `env`, reported by the section's `deprecated()` into `moq_tokio::cli::Deprecated`; callers must reject startup when the collection is non-empty and name the replacement rather than honor the old spelling. Never advertise the dead name in docs or `--help`.
 
 # Testing
 

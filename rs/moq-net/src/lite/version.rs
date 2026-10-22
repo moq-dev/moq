@@ -345,6 +345,18 @@ impl Version {
 		}
 	}
 
+	/// Whether received frame timestamps are the publisher's media time. Lite05/06 stamp an
+	/// untimed track's payloads with their send time, which a receiver cannot tell from it,
+	/// so it drops every timestamp received on them and the track arrives untimed.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_media_time(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether discovery streams end their initial set with SYNCED rather than a count.
 	#[allow(clippy::match_like_matches_macro)]
 	pub fn has_synced(self) -> bool {

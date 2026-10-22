@@ -69,7 +69,7 @@ Check first (from the test cost audit's m0 run, 2026-10-19):
   was queued. Check the entry's head branch and what merged around it before
   calling it a flake.
 - Owned elsewhere: Rust advisories by
-  [the dependency audit](/quest/m1/audit-deps.md). The release toolchain now
+  [the dependency audit](/quest/m2/audit-deps.md). The release toolchain now
   links.
 - Re-running a single job in place cannot redeploy Pages: the earlier
   attempt's `github-pages` artifact remains and `deploy-pages` refuses two.
@@ -83,11 +83,12 @@ Check first (from the m0 CI pipeline audit, 2026-10-21):
   per-crate drill-down behind that table. Re-measure from those, not from log
   timestamps.
 - An `rs/moq-ffi` change selects every binding, and the bindings were about
-  half of the slowest entries: C++ with the OBS plugin about 4.5 minutes
-  (the generated `moq.cpp` compiles six times at `-O0`, once per consumer
-  build and standard), Dart 45 to 160 seconds, Kotlin 30 to 110 (a cold
-  Gradle daemon is 65), Go about a minute. The dispatcher runs modules one
-  after another, and most binding steps use one core of eight.
+  half of the slowest entries: C++ with the OBS plugin about 4.5 minutes,
+  Dart 45 to 160 seconds, Kotlin 30 to 110, Go about a minute.
+  [moq-dev/moq#6247](https://github.com/moq-dev/moq/pull/6247) compiles
+  `moq.cpp` twice instead of six times and keeps the Gradle daemon warm
+  across queue jobs; re-measure both. The dispatcher runs modules one after
+  another, and most binding steps use one core of eight.
 - A core Rust change (moq-net, moq-quic, moq-tokio) spends 3 to 4.5 minutes
   compiling the test build and 2 to 2.5 running it, plus separate builds for
   `cargo doc` (25 to 60 s), the io_uring clippy (20 to 50 s), the wasm32

@@ -605,7 +605,7 @@ async fn decode(
 	// diagnosed by the rate at which these climb, and stdin may never end, so
 	// they have to surface as they accumulate rather than at exit.
 	let mut log = ts::stats::Log::default();
-	let mut sampled = tokio::time::Instant::now();
+	let mut sampled = moq_clock::now();
 	let sections = report.as_ref().map(crate::report::Stats::sections);
 	let report_mpegts = |snapshot: &ts::stats::Snapshot| {
 		if let Some(sections) = &sections {
@@ -630,7 +630,7 @@ async fn decode(
 			}
 
 			if sampled.elapsed() >= ts::stats::Log::INTERVAL {
-				sampled = tokio::time::Instant::now();
+				sampled = moq_clock::now();
 				if let Some(stats) = decoder.stats() {
 					report_mpegts(&stats);
 					log.sample(stats);
@@ -787,6 +787,7 @@ impl CaptureArgs {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub(crate) mod tests {
 	use std::time::Duration;
 
@@ -1185,7 +1186,7 @@ pub(crate) mod tests {
 
 		let _env = crate::test_env::EnvGuard::clear(&["MOQ_CONNECT", "MOQ_HOP"]);
 		let _ = moq_tokio::crypto::install_default();
-		for version in ["moq-lite-06", "moq-transport-14"] {
+		for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-14"] {
 			let fixture = moq_relay::test_relay().await.unwrap();
 			let ready = fixture.relay.ready();
 			tokio::spawn(fixture.relay.run());
@@ -1339,8 +1340,9 @@ pub(crate) mod tests {
 			// Joining once every group is out, with a budget half the jump, reads every group
 			// after it past the marker, and none of the groups the jump left more than
 			// the budget behind. An IETF subscription starts at the newest group, so only lite
-			// has the groups behind it to read.
-			if version.starts_with("moq-lite") {
+			// has the groups behind it to read, and a lite-06 subscriber drops the timestamps
+			// that carry the jump.
+			if version == "moq-lite-07-wip" {
 				let late =
 					read(start(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10))).await)
 						.await
