@@ -44,5 +44,9 @@ must not starve the socket.
 
 Acceptance: turns and enters per received datagram on the chat shape
 (request-reply is the worst case), CPU per Gbps and p99 latency on the fanout
-shape, via `just bench BASE` on Linux. The existing starvation test keeps its
-meaning with a budget of 1 and gains a sibling proving the budget bound.
+shape, on Linux with the io_uring workers at both base and current. Use
+`just bench-runtime` at each revision with the same worker count, or extend
+the existing harness to compare those io_uring runs: `just bench BASE` uses
+the default Tokio runtime and cannot prove this change. The existing
+starvation test keeps its meaning with a budget of 1 and gains a sibling
+proving the budget bound.

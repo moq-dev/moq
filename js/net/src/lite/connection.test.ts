@@ -199,7 +199,7 @@ function holdFins(transport: MockTransport, streams: "uni" | "incoming-bidi") {
 function mockDeadline() {
 	const clock = new Manual();
 	return {
-		expire: () => clock.advanceAsync(Nano.fromMilli(Milli(1000))),
+		expire: () => clock.advance(Nano.fromMilli(Milli(1000))),
 		restore: clock.install(),
 	};
 }

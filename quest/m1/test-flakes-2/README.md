@@ -47,7 +47,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [OBS drain and JS allocation flakes](/quest/m1/test-flakes-2/three-flakes.md) - reproduce the OBS stop-drain failure and verify the existing RSS replacement under load
+- [OBS drain under load](/quest/m1/test-flakes-2/three-flakes.md) - verify the existing close-tail fix against the reproduced OBS stop-drain failure; the merged JS allocation replacement passed under load
 
 ## Related
 

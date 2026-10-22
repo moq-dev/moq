@@ -181,9 +181,9 @@ type Read = Container.Read;
 // A manual clock installed at `ms`, so parked sleeps only wake when a test advances it.
 function manualAt(ms: number) {
 	const clock = new Manual();
-	clock.advance(Nano.fromMilli(Milli(ms)));
+	clock.jump(Nano.fromMilli(Milli(ms)));
 	const restore = clock.install();
-	return { advance: (by: number) => clock.advanceAsync(Nano.fromMilli(Milli(by))), restore };
+	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), restore };
 }
 function sample(group: number, timestamp: number, keyframe = true): Read {
 	return {

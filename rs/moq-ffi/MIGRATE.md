@@ -12,6 +12,11 @@ On moq-lite, a client session asks its relay for announcements only under paths 
 Resolve the path with `announced_broadcast`, or hold `announced` over its prefix while requesting.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
+### `MoqContainerFormat::Fmp4` unwraps to Legacy (#6250)
+
+A container import with `MoqContainerFormat::Fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `MoqContainerFormat::Cmaf` to keep publishing CMAF.
+
 ### Catalog references carry their epoch
 
 `MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `epoch: None`.
