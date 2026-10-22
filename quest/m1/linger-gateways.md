@@ -21,9 +21,12 @@ Decided (2026-10-16):
   wait. `ts::Programs::finish` already returns a `Finish` for every
   program; `moq-srt` drops them today, keeping its close-now behavior.
 - A newer epoch cuts the old linger short. Requests on a replaced instance
-  already end with an error, because instances are never stitched, so the
-  old instance has nothing left to serve once replaced. Recommended: put the
-  cut where every gateway gets it at once, rather than in each gateway.
+  stay on the old instance until dropped or its route goes; replacement
+  alone does not end them (`AnnounceEvent::Restart` in
+  `rs/moq-net/src/model/origin.rs`). Cutting a finished instance short is
+  therefore an explicit linger rule, not a consequence of route selection.
+  Recommended: put the cut where every gateway gets it at once, rather than
+  in each gateway.
 
 Define a clean end per protocol (such as an RTMP `deleteStream`, an SRT or RTC
 close after the final media, an HLS playlist that ends). HLS import never
