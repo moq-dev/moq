@@ -3861,7 +3861,8 @@ where
 	/// group FETCHes of their own. The subscribe's request id names the FETCH. The data
 	/// arrives on its own fetch stream and [`Self::recv_fill`] stitches it. A refusal or a
 	/// failed send settles the fill as [`Fill::Done`], as a failed draft-20 fill does: only
-	/// a stream that starts mid-group is lost, and a whole group still stands alone.
+	/// a stream that starts mid-group is lost, and a whole group still stands alone. A
+	/// malformed answer closes the session.
 	fn start_joining_fetch(&self, subscribe_id: RequestId, track: &track::Producer) -> Option<JoiningTask> {
 		let fill = self.state.lock().subscribes.get(&subscribe_id)?.fill.clone();
 		let track = track.clone();
@@ -3943,6 +3944,16 @@ where
 				this.finish_joining_fetch(stream, progress).await
 			}
 			.await;
+			// A refusal costs only the head, but a malformed answer is the peer breaking the
+			// protocol, which closes the session as it would on any request.
+			if let Err(err) = &res
+				&& is_protocol_violation(err)
+			{
+				this.session.close(
+					super::error::to_session_code(&SessionError::from(err)),
+					err.to_string().as_ref(),
+				);
+			}
 			// Release a mid-group tail parked on the head.
 			if res.is_err()
 				&& let Ok(mut state) = fill.write()
@@ -15849,6 +15860,28 @@ mod joining_fetch_tests {
 				"{version}: the track is still live"
 			);
 			assert!(!run.fill_outstanding(), "{version}: no head is coming");
+			assert!(run.session.log.closes().is_empty(), "{version}: the session stays up");
+		}
+	}
+
+	/// A malformed answer to the joining FETCH is not a refusal: the peer broke the
+	/// protocol, so the session closes.
+	#[moq_clock::test]
+	async fn a_malformed_fetch_answer_closes_the_session() {
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		for version in JOINING_DRAFTS {
+			// A SUBSCRIBE_OK where FETCH_OK or a refusal belongs.
+			let run = JoinRun::start(
+				version,
+				None,
+				subscribe_ok(version, largest),
+				subscribe_ok(version, largest),
+			)
+			.await;
+			assert!(
+				!run.session.log.closes().is_empty(),
+				"{version}: an unexpected answer closes the session"
+			);
 		}
 	}
 
