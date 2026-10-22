@@ -4,10 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A claim answers by publishing (#5678)
+
+`OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
+Replace `request.accept(broadcast)` with `prepared = request.prepare(moq.mint_epoch())`, fill `prepared.broadcast`, then `prepared.publish()`, which announces it at the exact path under that epoch and returns its producer.
+
 ### Anchors can name a time (#6074)
 
 `Anchor` gains a `TIME` variant, the group containing a presentation time.
 `TrackConsumer.update` now raises on a time anchor an untimed track can't serve.
+
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Rebuild or reinstall the complete `moq-ffi` wheel, keeping its generated Python code
+and native library together; application calls are unchanged.
 
 ### JSON consumers yield `json.Timed` (#5677)
 

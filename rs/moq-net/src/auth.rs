@@ -290,8 +290,11 @@ impl Attached {
 	/// Present the handle's token `id` on this session, returning the answer when the
 	/// session settles it at once: `Ok` when only a request can carry it, so nothing will
 	/// answer, and [`Error::Unsupported`] when nothing can.
+	///
+	/// A draining session takes no new tokens, so its verdict never ends one its successor
+	/// carries.
 	fn offer(&mut self, id: u64, token: &Bytes) -> Option<Result<()>> {
-		if self.closed.is_some() {
+		if !self.active() {
 			return None;
 		}
 		let answered = match (self.supported, self.requests) {
@@ -549,6 +552,10 @@ impl Handle {
 		let state = &mut *guard;
 		if let Some(err) = &state.closed {
 			return Err(err.clone());
+		}
+		// A draining session takes no new tokens, and a handle of its own has no successor.
+		if state.bound && !state.links.values().any(Attached::active) {
+			return Err(Error::GoingAway);
 		}
 		let id = state.next_id;
 		state.next_id += 1;
@@ -831,6 +838,12 @@ impl Link {
 		self.with(|link| link.goaway = Some(goaway));
 	}
 
+	/// Whether the session still takes new work: open, with no GOAWAY sent or received.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn active(&self) -> bool {
+		self.read(|link, _| link.active())
+	}
+
 	/// Whether this side speaks AUTH: false on a version without it, on a side that does
 	/// not offer it, and once the peer turns out not to.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
@@ -1003,8 +1016,9 @@ impl Link {
 			slot.refused = false;
 			slot.streamed = false;
 			slot.grant = None;
-			// Answered, so nothing waits on the token through the backoff.
-			slot.answered = Some(Err(err.clone()));
+			// Unanswered again, as on its first presentation: a request or publication the
+			// token might cover waits for the retry's verdict rather than being judged without it.
+			slot.answered = None;
 			let delay = slot.retry.map_or(RETRY_INITIAL, |delay| (delay * 2).min(RETRY_MAX));
 			slot.retry = Some(delay);
 			link.epoch += 1;
@@ -1014,11 +1028,12 @@ impl Link {
 	}
 
 	/// The token to present again once a [`retry`](Self::retry) delay passes, or `None`
-	/// when it is no longer wanted here.
+	/// when it is no longer wanted here, or the session is draining and its successor
+	/// presents it instead.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn reopen(&self, id: u64) -> Option<Bytes> {
 		self.with(|link| {
-			if link.closed.is_some() {
+			if !link.active() {
 				return None;
 			}
 			let slot = link.slots.get_mut(&id)?;
@@ -1033,19 +1048,33 @@ impl Link {
 	/// End the token on this session: refused or revoked by the peer, withdrawn by us, or
 	/// its stream lost. A token that was never answered records `err` as its answer. The
 	/// peer's verdict ends one of the handle's tokens on every session; anything else
-	/// leaves it for the next session to present.
+	/// leaves it for the next session to present, except on a handle of the session's own.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn ended(&self, id: u64, err: Error) {
-		self.with_state(|state, link| {
-			let link = attached(&mut state.links, link);
+		self.with_state(|state, link_id| {
+			// A draining session's verdict is stale while an active session still presents the
+			// token: that session's own answer decides, even mid-retry with no grant right now.
+			let superseded = !attached(&mut state.links, link_id).active()
+				&& state.links.iter().any(|(other, link)| {
+					*other != link_id
+						&& link.active() && link
+						.slots
+						.get(&id)
+						.is_some_and(|slot| slot.ended.is_none() && !slot.withdrawn)
+				});
+			// A handle of the session's own has no next session to present it, so any end is final.
+			let bound = state.bound;
+			let link = attached(&mut state.links, link_id);
 			let Some(slot) = link.slots.get_mut(&id) else {
 				return;
 			};
 			let verdict = !slot.setup
+				&& !superseded
 				&& link.closed.is_none()
 				&& !slot.withdrawn
 				&& slot.ended.is_none()
-				&& (slot.refused
+				&& (bound
+					|| slot.refused
 					|| matches!(err, Error::Unsupported)
 					// The peer ended the grant without revoking it.
 					|| (matches!(err, Error::Cancel) && slot.grant.is_some()));
@@ -1495,12 +1524,12 @@ pub struct Requests {
 }
 
 impl Requests {
-	/// Poll for the next token, or `None` once the session ends.
+	/// Poll for the next token, or `None` once the handle ends.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Request>> {
 		self.queue.poll_next(waiter)
 	}
 
-	/// Wait for the next token the peer presents, or `None` once the session ends.
+	/// Wait for the next token the peer presents, or `None` once the handle ends.
 	#[cfg(feature = "async")]
 	pub async fn next(&mut self) -> Option<Request> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
@@ -2492,6 +2521,29 @@ mod tests {
 		assert!(gate.poll_denied(&waiter).is_pending());
 	}
 
+	/// A token waiting out a transient refusal is unanswered, so a publication it might
+	/// cover waits for the retry instead of being judged unauthorized.
+	#[test]
+	fn a_retrying_token_holds_a_publication() {
+		let handle = Link::new(true);
+		let _token = handle.present(Bytes::from_static(b"jwt"), false).unwrap();
+		let id = opened(&handle);
+		handle.refused(id);
+		let busy = Error::Session(SessionError::TooManyRequests);
+		assert_eq!(handle.retry(id, &busy), Some(RETRY_INITIAL));
+
+		let mut gate = Gate::new(handle.clone(), crate::Path::new("room").to_owned(), Direction::Publish);
+		let waiter = kio::Waiter::noop();
+		assert!(
+			gate.poll_ready(&waiter).is_pending(),
+			"judged before the retry answered"
+		);
+		handle.reopen(id);
+		handle.granted(id, Grant::all());
+		assert!(gate.poll_ready(&waiter).is_ready());
+		assert!(handle.within_grant(Direction::Publish, "room"));
+	}
+
 	/// A route withdrawn while its request waits on a token ends the wait, and the request
 	/// is refused against the union as it stands.
 	#[test]
@@ -2781,6 +2833,113 @@ mod tests {
 			third.poll_opening(&kio::Waiter::noop()).is_pending(),
 			"a refused token stays ended"
 		);
+	}
+
+	/// A session's own handle has no successor: a token added after its GOAWAY fails at once,
+	/// and one whose stream ends without a verdict ends for good.
+	#[test]
+	fn a_sessions_own_handle_ends_its_tokens() {
+		let link = Link::new(true);
+		let auth = link.present(Bytes::from_static(b"jwt"), false).unwrap();
+		let id = opened(&link);
+		link.ended(id, Error::Stream(crate::StreamError::Internal));
+		assert!(matches!(
+			auth.poll_answered(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Stream(_)))
+		));
+
+		let (goaway, _protocol) = crate::goaway::Handle::new(false);
+		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		link.drain_with(std::sync::Arc::new(goaway));
+		assert!(matches!(
+			link.present(Bytes::from_static(b"late"), false),
+			Err(Error::GoingAway)
+		));
+	}
+
+	/// A token added while a session without AUTH drains rides only its successor, so the
+	/// draining session cannot end it as unsupported.
+	#[test]
+	fn a_draining_session_takes_no_new_token() {
+		let handle = Handle::new();
+		let draining = Link::attach(&handle, false, false).unwrap();
+		let (goaway, _protocol) = crate::goaway::Handle::new(false);
+		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		draining.drain_with(std::sync::Arc::new(goaway));
+		let successor = Link::attach(&handle, true, false).unwrap();
+
+		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		assert!(Selector::Token(auth.id()).ended(&handle.state.read()).is_none());
+		let id = opened(&successor);
+		successor.granted(id, Grant::all());
+		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+	}
+
+	/// A draining session's late refusal ends the token there alone while its successor
+	/// presents it, so a stale verdict never withdraws a live grant.
+	#[test]
+	fn a_draining_refusal_leaves_the_successors_grant() {
+		let handle = Handle::new();
+		let draining = Link::attach(&handle, true, false).unwrap();
+		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let id = opened(&draining);
+		let (goaway, _protocol) = crate::goaway::Handle::new(false);
+		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		draining.drain_with(std::sync::Arc::new(goaway));
+
+		let successor = Link::attach(&handle, true, false).unwrap();
+		assert_eq!(opened(&successor), id);
+		successor.granted(id, Grant::all());
+		draining.refused(id);
+		draining.ended(id, Error::Session(SessionError::Unauthorized));
+		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
+		assert_eq!(auth.grant().peek(), Some(Grant::all()));
+	}
+
+	/// A draining session's late refusal leaves a token its successor is still deciding,
+	/// including one the successor granted and then transiently refused.
+	#[test]
+	fn a_draining_refusal_defers_to_the_successors_retry() {
+		let handle = Handle::new();
+		let draining = Link::attach(&handle, true, false).unwrap();
+		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		let id = opened(&draining);
+		let (goaway, _protocol) = crate::goaway::Handle::new(false);
+		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		draining.drain_with(std::sync::Arc::new(goaway));
+
+		let successor = Link::attach(&handle, true, false).unwrap();
+		assert_eq!(opened(&successor), id);
+		successor.granted(id, Grant::all());
+		successor.refused(id);
+		let busy = Error::Session(SessionError::TooManyRequests);
+		assert_eq!(successor.retry(id, &busy), Some(RETRY_INITIAL));
+
+		draining.refused(id);
+		draining.ended(id, Error::Session(SessionError::Unauthorized));
+		assert!(Selector::Token(id).ended(&handle.state.read()).is_none());
+
+		assert_eq!(successor.reopen(id).as_deref(), Some(b"jwt".as_slice()));
+		successor.granted(id, Grant::all());
+		assert_eq!(auth.grant().peek(), Some(Grant::all()));
+	}
+
+	/// A retry that wakes after this side sent a GOAWAY opens nothing: the successor presents it.
+	#[test]
+	fn a_draining_session_presents_no_retry() {
+		let link = Link::new(true);
+		let (goaway, _protocol) = crate::goaway::Handle::new(false);
+		let goaway = std::sync::Arc::new(goaway);
+		link.drain_with(goaway.clone());
+		let _auth = link.present(Bytes::from_static(b"jwt"), false).unwrap();
+		let id = opened(&link);
+		link.refused(id);
+		let busy = Error::Session(SessionError::TooManyRequests);
+		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL));
+
+		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		assert!(!link.active());
+		assert_eq!(link.reopen(id), None);
 	}
 
 	/// A refusal that may pass is presented again after a doubling backoff, and settles nothing.

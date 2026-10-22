@@ -89,7 +89,7 @@ export interface Issued {
 
 /** The tokens the peer presents, for an application that answers them itself. */
 export interface Requests {
-	/** The next token the peer presents, or undefined once the session ends. */
+	/** The next token the peer presents, or undefined once the handle ends. */
 	next(): Promise<Request | undefined>;
 	/** Refuse every later token. */
 	close(): void;

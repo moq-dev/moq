@@ -1095,12 +1095,13 @@ export class Publisher {
 		let startSequence: number | undefined;
 		let endSent = false;
 
-		// Drop whatever part of `[start, end)` this subscription has not been served or dropped yet.
-		const drop = async (start: number, end: number): Promise<boolean> => {
+		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
+		// yet, given up with `err`.
+		const drop = async (start: number, end: number, err: Error): Promise<boolean> => {
 			if (!served) return true;
 			for (const gap of runGaps(served, start, end)) {
 				insertRun(served, gap.start, gap.end);
-				const msg = new SubscribeDrop({ start: gap.start, end: gap.end - 1, error: 0 });
+				const msg = SubscribeDrop.given(gap.start, gap.end - 1, err, this.version);
 				if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
 					return false;
 			}
@@ -1222,7 +1223,7 @@ export class Publisher {
 					case "error":
 						throw recv.error;
 					case "drop":
-						if (!(await drop(recv.start, recv.end))) return false;
+						if (!(await drop(recv.start, recv.end, recv.error))) return false;
 						continue;
 					case "idle":
 						// A start past everything the track has (a subscriber resuming just after
@@ -1272,7 +1273,8 @@ export class Publisher {
 						if (startSequence !== undefined) {
 							const end =
 								bounds.endGroup === undefined ? boundary() : Math.min(boundary(), bounds.endGroup + 1);
-							if (!(await drop(startSequence, end))) return false;
+							const unserved = new StreamError(StreamCode.NotFound, { message: "group not served" });
+							if (!(await drop(startSequence, end, unserved))) return false;
 						}
 						if (!endSent) {
 							if (!(await sendEnd())) return false;
@@ -1335,7 +1337,7 @@ export class Publisher {
 				const task = opened.then(async (writer) => {
 					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
 					if (emitRange && failed instanceof Error) {
-						pendingDrops.push(new SubscribeDrop({ start: group.sequence, end: group.sequence, error: 0 }));
+						pendingDrops.push(SubscribeDrop.given(group.sequence, group.sequence, failed, this.version));
 						drops.update((revision) => revision + 1);
 					}
 				});
@@ -1647,7 +1649,10 @@ export class Publisher {
 			stream.close();
 			group.close();
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
-			return await stream.closed.then(() => undefined, error);
+			// Its bytes still hold the connection until acknowledged, so a group gone stale
+			// meanwhile is reset like one still serving, as the Rust `GroupServe` does.
+			await hooks.guardGroup(group, () => stream.closed);
+			return undefined;
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);

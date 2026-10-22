@@ -237,7 +237,7 @@ impl<O: Output> Media<O> {
 					// A rendition pointing at a broadcast we can't reach is that
 					// rendition's problem, not the catalog's: fall through to the
 					// next one like an unsupported codec does.
-					let rendition = match source.resolve(config.broadcast.as_ref()).await {
+					let rendition = match source.resolve(config.broadcast.as_ref(), config.epoch.as_ref()).await {
 						Ok(rendition) => rendition,
 						Err(err) => {
 							tracing::warn!(track = name, %err, "cannot resolve video rendition");
@@ -304,7 +304,7 @@ impl<O: Output> Media<O> {
 					if playback.finished(&reference) {
 						continue;
 					}
-					let rendition = match source.resolve(config.broadcast.as_ref()).await {
+					let rendition = match source.resolve(config.broadcast.as_ref(), config.epoch.as_ref()).await {
 						Ok(rendition) => rendition,
 						Err(err) => {
 							tracing::warn!(track = name, %err, "cannot resolve audio rendition");
@@ -1618,7 +1618,7 @@ mod tests {
 		let mut served = moq_net::broadcast::Info::new().produce();
 		let served_catalog = catalog::Producer::new(&mut served, Default::default()).unwrap();
 		let mut new = rendition(&served, &served_catalog, "audio");
-		let pool = origin.dynamic("", route).unwrap();
+		let pool = origin.dynamic_route("", route).unwrap();
 		drop(exact);
 		let consumer = served.consume();
 		tokio::spawn(async move {
@@ -1664,7 +1664,7 @@ mod tests {
 		}
 
 		exact.unannounce();
-		let pool = origin.dynamic("", route).unwrap();
+		let pool = origin.dynamic_route("", route).unwrap();
 		let consumer = mirror.consume();
 		tokio::spawn(async move {
 			while let Ok(request) = pool.requested_broadcast().await {

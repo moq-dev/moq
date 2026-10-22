@@ -239,10 +239,10 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 
 - **`OriginProducer(*, cache_capacity_bytes=None)`**. Manage broadcast announcements. Set `cache_capacity_bytes` to bound cached groups under this origin.
   - `.consume() → OriginConsumer`
-  - `.dynamic(prefix, route=Route()) → OriginDynamic`
+  - `.dynamic(prefix) → OriginDynamic`
   - `.create_broadcast(path) → BroadcastProducer`
 - **`OriginDynamic`**. Async source of broadcasts requested by consumers.
-  - `await .requested_broadcast() → BroadcastRequest`. Call `.accept(broadcast)` to serve it, or `.reject(code)` to fail the requester.
+  - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare(mint_epoch())`, fill its `.broadcast`, then `.publish()` to serve it under a new epoch, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce` whose `.route.epoch` names the publisher run; on a restart, request the path again); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches

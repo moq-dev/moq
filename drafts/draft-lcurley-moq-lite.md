@@ -1508,7 +1508,8 @@ SUBSCRIBE_DROP Message {
 ~~~
 
 **Group Start** and **Group End** are the inclusive range of group sequences the publisher gave up.
-**Error Code** is an application-specific error code; 0 means the groups are simply unavailable.
+**Error Code** is a [stream error code](#error-codes) saying why the groups were given up, as a reset retaining the Group Stream header would: for example NOT_FOUND for a sequence the publisher never had, or OLD for one past its budget.
+A subscriber MUST end the readers of a dropped group it holds with that error, including a group whose stream is still arriving, rather than end it cleanly.
 
 For every sequence in the subscription's range, the publisher MUST send a Group Stream, send a datagram, or name it in SUBSCRIBE_DROP.
 This includes sequences it skipped and streams reset before their headers were delivered.
@@ -1808,6 +1809,7 @@ The `Message Length` describes the payload size on the wire.
 - Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_END. Every sequence is accounted for by a Group Stream, a datagram, or a drop; a publisher SHOULD send a drop as soon as it gives a sequence up.
+- SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving. In lite-05 and lite-06 it is application-specific, so a subscriber there reads every drop as NOT_FOUND.
 - SUBSCRIBE_END declares the final boundary while lower groups can still be in flight; the Subscribe Stream FIN follows once every Group Stream has finished or been reset.
 - Added the Spread Hash tie-break after the shortest path: a hash of the requested path and the route's Hop IDs, so equal-cost advertisers of one prefix share its paths.
 - Added a local link preference to route selection, after the newest Epoch and before the 0 Hop ID check: the higher preference a subscriber assigns to the arriving link wins, and an unassigned link is neutral. Not carried on the wire.

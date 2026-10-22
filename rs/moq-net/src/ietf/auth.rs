@@ -295,27 +295,11 @@ where
 		let going_away = going_away.clone();
 		let violation = violation.clone();
 		tasks.push(async move {
-			let mut token = token;
-			let err = loop {
-				// After a GOAWAY the peer must not see new requests.
-				if going_away.is_set() {
-					break Error::GoingAway;
-				}
-				let err = present.run(token).await;
-				let Some(delay) = present.handle.retry(present.id, &err) else {
-					break err;
-				};
-				tracing::debug!(?delay, "auth token refused transiently; presenting it again");
-				let mut deadline = crate::time::Deadline::after(&present.runtime, delay);
-				kio::wait(|waiter| match present.handle.poll_withdrawn(present.id, waiter) {
-					Poll::Ready(()) => Poll::Ready(()),
-					Poll::Pending => deadline.poll(waiter),
-				})
-				.await;
-				match present.handle.reopen(present.id) {
-					Some(next) => token = next,
-					None => break Error::Cancel,
-				}
+			// After a GOAWAY the peer must not see new requests. AUTH_ERROR carries no code
+			// that may pass, so unlike moq-lite a refusal is never presented again.
+			let err = match going_away.is_set() {
+				true => Error::GoingAway,
+				false => present.run(token).await,
 			};
 			let err = crate::auth::protocol_error(err);
 			if matches!(err, Error::ProtocolViolation) {

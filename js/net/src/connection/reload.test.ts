@@ -262,6 +262,41 @@ test("an announced request follows the reconnect on the same handle", async () =
 	}
 });
 
+test("an ended auth handle gives up instead of retrying", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/");
+	const servers: Promise<{ abort(): void }>[] = [];
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		servers.push(accept(pair.server, url));
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	// An unbounded retry window, so only the ended handle can stop the loop.
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+	});
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		await waitUntil(() => reload.established.peek() !== undefined);
+		const aborted = new Error("auth handle aborted");
+		reload.auth.abort(aborted);
+		(await servers[0])?.abort();
+
+		await waitUntil(() => reload.error.peek() !== undefined);
+		expect(reload.error.peek()).toBe(aborted);
+		expect(servers.length).toBe(1);
+	} finally {
+		warned.mockRestore();
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 test("a reload that gives up keeps requests pending until it is disposed", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");

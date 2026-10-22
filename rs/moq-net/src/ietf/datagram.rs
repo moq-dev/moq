@@ -80,10 +80,10 @@ impl ObjectDatagram {
 }
 
 impl crate::model::datagram::Wire {
-	/// Whether a moq-transport draft defines a datagram of this shape, as its ingress checks
-	/// one, and a draft of its block's encoding when it has one: that draft sent it. Egress
-	/// resolves the Object ID and priority each draft needs.
-	pub(crate) fn defined(&self) -> bool {
+	/// Whether `version`, the draft its track's publisher spoke, defines a datagram of this
+	/// shape, as its ingress checks one. Egress resolves the Object ID and priority each
+	/// draft needs.
+	pub(crate) fn defined(&self, version: Version) -> bool {
 		let shape = ObjectDatagram {
 			track_alias: 0,
 			group_id: 0,
@@ -96,17 +96,10 @@ impl crate::model::datagram::Wire {
 				None => DatagramBody::Payload(Bytes::new()),
 			},
 		};
-		let kind = shape.kind();
-		let family = self.properties.block.as_ref().map(|block| block.encoding);
-		Version::ALL
-			.into_iter()
-			.filter(|version| family.is_none_or(|family| super::object::encoding(*version) == family))
-			.any(|version| {
-				ObjectDatagram::valid(kind, version)
-					&& self.status.is_none_or(|status| {
-						super::object::status_defined(status, version)
-							&& (family.is_none() || carries_properties(status, version))
-					})
+		ObjectDatagram::valid(shape.kind(), version)
+			&& self.status.is_none_or(|status| {
+				super::object::status_defined(status, version)
+					&& (self.properties.block.is_none() || carries_properties(status, version))
 			})
 	}
 }

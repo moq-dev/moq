@@ -32,12 +32,12 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 	}
 }
 
-/// Present `token` on `handle`, refusing one that nothing would send.
+/// Present `token` on every session of `handle`, resolving once a peer accepts it.
 async fn add(handle: moq_net::auth::Handle, token: String) -> Result<moq_net::auth::Auth, MoqError> {
 	let auth = handle.add(token).await?;
 	// A token the peer accepted carries a grant until it ends. Without AUTH, moq-transport
-	// accepts one at once for the requests that name it, but nothing here can name one, so
-	// it would never be sent. One already revoked is left for `closed` to report.
+	// accepts one at once for the requests that name it, but nothing here can name one, so it
+	// would never be sent. One already revoked is left for `closed` to report.
 	if auth.grant().peek().is_none() && poll_now(auth.closed()).is_pending() {
 		return Err(MoqError::Unsupported);
 	}
@@ -48,10 +48,6 @@ async fn add(handle: moq_net::auth::Handle, token: String) -> Result<moq_net::au
 fn poll_now<F: std::future::Future>(future: F) -> std::task::Poll<F::Output> {
 	let future = std::pin::pin!(future);
 	std::future::Future::poll(future, &mut std::task::Context::from_waker(std::task::Waker::noop()))
-}
-
-fn peek(watch: &moq_net::auth::Watch) -> Option<MoqGrant> {
-	watch.peek().map(Into::into)
 }
 
 /// A session's authorization: the grant its peer gave it, and more tokens to present.
@@ -90,7 +86,7 @@ impl MoqAuth {
 	/// A client session reads `None` while it reconnects.
 	pub fn grant(&self) -> Option<MoqGrant> {
 		let _guard = crate::ffi::enter();
-		peek(&self.peek)
+		self.peek.peek().map(Into::into)
 	}
 
 	/// Wait for the grant to differ from the one this handle last reported, or held when it was
@@ -146,7 +142,7 @@ impl MoqAuthToken {
 	/// This token's own grant, or `None` while the peer has not answered it or after it ended.
 	pub fn grant(&self) -> Option<MoqGrant> {
 		let _guard = crate::ffi::enter();
-		peek(&self.peek)
+		self.peek.peek().map(Into::into)
 	}
 
 	/// Wait for the token to end: `Ok` when the peer closed it without an error, the peer's

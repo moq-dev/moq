@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 //! UniFFI bindings for [`moq_net`].

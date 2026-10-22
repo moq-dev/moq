@@ -1,3 +1,5 @@
+//! Publish broadcasts, tracks, and groups.
+
 use std::sync::Arc;
 
 use moq_mux::catalog::hang::Extra;
@@ -96,11 +98,13 @@ pub(crate) struct BroadcastProducer {
 	pub(crate) driver: Background,
 }
 
+/// A broadcast in which tracks can be published.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastProducer {
 	pub(crate) state: std::sync::Mutex<Option<BroadcastProducer>>,
 }
 
+/// A handler for requests for tracks in a broadcast.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastDynamic {
 	task: Task<DynamicProducer>,
@@ -165,6 +169,7 @@ impl MoqBroadcastProducer {
 		})
 	}
 
+	#[cfg(test)]
 	pub(crate) fn consume_inner(&self) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		self.with_state(|state| Ok(state.broadcast.consume()))
 	}
@@ -217,8 +222,7 @@ impl MoqBroadcastProducer {
 
 	/// Create a standalone broadcast, not attached to any origin.
 	///
-	/// Use it to serve a dynamic broadcast request ([`MoqBroadcastRequest::accept`](crate::origin::MoqBroadcastRequest::accept))
-	/// or for local pub/sub via [`consume`](Self::consume). To publish at a path, use
+	/// Use it for local pub/sub via [`consume`](Self::consume). To publish at a path, use
 	/// [`MoqOriginProducer::create_broadcast`](crate::origin::MoqOriginProducer::create_broadcast) instead.
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
@@ -478,6 +482,7 @@ impl MoqTrackRequest {
 
 // ---- Track Producer ----
 
+/// A track to which groups, frames, or datagrams can be published.
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
 	inner: std::sync::Mutex<Option<moq_net::track::Producer>>,
@@ -628,6 +633,7 @@ impl MoqTrackProducer {
 	}
 }
 
+/// A group to which frames can be published.
 #[derive(uniffi::Object)]
 pub struct MoqGroupProducer {
 	sequence: u64,

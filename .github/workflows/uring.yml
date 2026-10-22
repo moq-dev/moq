@@ -4,27 +4,9 @@ permissions:
   contents: read
 
 on:
-  pull_request:
-    # Main PRs skip it; nightly.yml's `rs uring` runs the whole suite on main.
-    # `edited` catches a main PR retargeted to release.
-    branches: [release]
-    types: [opened, synchronize, reopened, edited, closed]
-    paths:
-      # The shared Rust selector walks reverse dependencies, including feature
-      # dependencies. Broad paths keep newly added shared crates covered.
-      - "rs/**"
-      - "sh/rs/**"
-      - "sh/changed.sh"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "justfile"
-      - ".cargo/**"
-      - ".config/nextest.toml"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/actions/**"
-      - ".github/workflows/uring.yml"
+  # release-gate.yml calls it on release PRs; nightly.yml's `rs uring` runs the
+  # whole suite on main.
+  workflow_call:
 
 concurrency:
   group: uring-${{ github.ref }}
@@ -33,7 +15,6 @@ concurrency:
 jobs:
   uring:
     name: io_uring
-    if: github.event.action != 'closed'
     # This image provides a 6.12+ kernel; MOQ_STRICT fails the tests if that changes.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60

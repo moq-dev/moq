@@ -462,12 +462,13 @@ impl Target {
 	}
 }
 
-/// The model's info for a track the publisher described (SUBSCRIBE_OK or TRACK_STATUS_OK).
+/// The model's info for a track a `version` publisher described (SUBSCRIBE_OK or
+/// TRACK_STATUS_OK).
 ///
 /// The copy keeps the units the publisher declared, so it matches a copy of the same
 /// instance that arrived over another route: resuming across routes refuses one whose
 /// metadata differs. A sealed TIMESCALE travels downstream unchanged, so it must too.
-fn accepted_info(properties: &ietf::Properties) -> track::Info {
+fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info {
 	let mut info = track::Info::default()
 		.with_timescale(properties.timescale)
 		.with_max_age(properties.max_cache_duration)
@@ -475,14 +476,18 @@ fn accepted_info(properties: &ietf::Properties) -> track::Info {
 		// A publisher answering NEW_GROUP_REQUEST refreshes on any join with a delta to skip;
 		// this session carries the request back to it.
 		.with_refresh(properties.dynamic_groups.then_some(0));
-	info.properties =
-		Some(std::sync::Arc::new(properties.unknown.clone())).filter(|unknown| !unknown.values.is_empty());
+	info.properties = Some(std::sync::Arc::new(crate::model::object::TrackProperties {
+		version,
+		values: properties.unknown.clone(),
+	}));
 	info
 }
 
-/// Why a track answered with `properties` is neither processed nor forwarded, if it is not.
-fn refused(properties: &ietf::Properties) -> Option<Error> {
-	properties.unknown.refused(&accepted_info(properties))
+/// Why a track a `version` publisher answered with `properties` is neither processed nor
+/// forwarded, if it is not.
+fn refused(properties: &ietf::Properties, version: Version) -> Option<Error> {
+	let info = accepted_info(properties, version);
+	info.properties.as_deref()?.refused(&info)
 }
 
 /// The Largest Group a subscription knows: its SUBSCRIBE_OK's, or a newer one since.
@@ -2206,7 +2211,7 @@ where
 		if self.going_away.is_set() {
 			route.cost = crate::origin::Cost::DRAIN;
 		}
-		entry.dynamic = Some(self.origin.dynamic(path, route)?);
+		entry.dynamic = Some(self.origin.dynamic_route(path, route)?);
 		entry.generation += 1;
 		tracing::info!(route = %self.origin.absolute(path), "namespace authorized again");
 		Ok(Some(entry.generation))
@@ -2271,7 +2276,7 @@ where
 				if *newest == id {
 					entry.route = route.clone();
 					if let Some(dynamic) = &entry.dynamic {
-						dynamic.update(entry.route.clone())?;
+						dynamic.update_route(entry.route.clone())?;
 					}
 				}
 				Ok(())
@@ -2298,7 +2303,7 @@ where
 					return Ok(());
 				}
 				// Propagates Error::Unauthorized if the namespace is out of scope.
-				let dynamic = self.origin.dynamic(&path, route.clone())?;
+				let dynamic = self.origin.dynamic_route(&path, route.clone())?;
 
 				entry.insert(BroadcastState {
 					route: route.clone(),
@@ -2353,7 +2358,7 @@ where
 				if *newest != state.route {
 					state.route = newest.clone();
 					if let Some(dynamic) = &state.dynamic {
-						dynamic.update(state.route.clone())?;
+						dynamic.update_route(state.route.clone())?;
 					}
 				}
 				if state.tokens == 0
@@ -2522,7 +2527,7 @@ where
 			route.cost = crate::origin::Cost::DRAIN;
 		}
 		if let Some(dynamic) = &entry.dynamic {
-			let _ = dynamic.update(entry.route.clone());
+			let _ = dynamic.update_route(entry.route.clone());
 		}
 	}
 
@@ -2702,10 +2707,19 @@ where
 			}
 		};
 
-		// Retirement cancels only the wait for an ID. On drafts 14-16 the peer grants
-		// MAX_REQUEST_ID credit back only for requests it receives, so an allocated ID is
-		// always sent; the response wait below cancels it if the source retired meanwhile.
-		let request_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
+		// Retirement and revocation cancel only the wait for an ID. On drafts 14-16 the peer
+		// grants MAX_REQUEST_ID credit back only for requests it receives, so an allocated ID
+		// is always sent; the response wait below cancels it if either landed meanwhile.
+		let mut timeout = crate::time::Deadline::after(&self.runtime, Control::REQUEST_ID_TIMEOUT);
+		let request_id = kio::wait(|waiter| {
+			if gate.poll_denied(waiter).is_ready() {
+				return Poll::Ready(Err(Error::Unauthorized));
+			}
+			validity.check(waiter)?;
+			self.control.poll_credit(waiter, &mut timeout)
+		})
+		.await;
+		let request_id = match request_id {
 			Ok(id) => id,
 			Err(err) => {
 				target.fail(err);
@@ -2829,7 +2843,8 @@ where
 		}
 
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
-		let mut retired = false;
+		// A local terminal ended the wait, so the peer still holds the request to cancel.
+		let mut unanswered = false;
 		let setup = {
 			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream, &mut messages));
 			loop {
@@ -2839,8 +2854,12 @@ where
 						return Poll::Ready(Setup::Response(Err(err)));
 					}
 					if let Err(err) = validity.check(waiter) {
-						retired = true;
+						unanswered = true;
 						return Poll::Ready(Setup::Response(Err(err)));
+					}
+					if gate.poll_denied(waiter).is_ready() {
+						unanswered = true;
+						return Poll::Ready(Setup::Response(Err(Error::Unauthorized)));
 					}
 					// An answer that has already arrived wins over the local terminals. Both can
 					// be ready in one poll, and taking abandonment there would discard a response
@@ -2919,8 +2938,8 @@ where
 			// A track that needs a property we do not understand, or carries more than we
 			// could forward, is neither processed nor forwarded: the subscription is
 			// cancelled and the subscribers refused.
-			Ok(Some(accepted)) if refused(&accepted.properties).is_some() => {
-				let err = refused(&accepted.properties).expect("checked by the guard");
+			Ok(Some(accepted)) if refused(&accepted.properties, self.version).is_some() => {
+				let err = refused(&accepted.properties, self.version).expect("checked by the guard");
 				tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, %err, "subscribe refused");
 				// Refuse before waiting on the peer to acknowledge the cancellation.
 				if let Some(pending) = self.take_pending(request_id) {
@@ -2946,15 +2965,16 @@ where
 			}
 			Err(err) => {
 				tracing::debug!(%err, "subscribe response error");
-				if retired {
-					self.cancel_subscribe(stream, request_id).await;
-				}
+				// Refuse before waiting on the peer to acknowledge the cancellation.
 				if let Some(pending) = self.take_pending(request_id) {
 					pending.reject(err.clone());
 				}
 				self.remove_subscribe(request_id);
 				if let Some(idle) = resumed {
 					let _ = idle.track.abort(err);
+				}
+				if unanswered {
+					self.cancel_subscribe(stream, request_id).await;
 				}
 				return None;
 			}
@@ -2969,10 +2989,13 @@ where
 		let timescale = properties
 			.timescale
 			.or(resumed.as_ref().and_then(|idle| idle.timescale));
-		let info = accepted_info(&ietf::Properties {
-			timescale,
-			..properties
-		});
+		let info = accepted_info(
+			&ietf::Properties {
+				timescale,
+				..properties
+			},
+			self.version,
+		);
 		// The copy already holds the track: it is current again up to the answer's Largest
 		// Location once the join's head lands or a newer group does, since leaving cut the
 		// group it was in.
@@ -3129,7 +3152,7 @@ where
 						&& (poll_headed(&fill, waiter).is_ready()
 							|| largest.is_some_and(|largest| track.poll_past(largest.group, waiter).is_ready()))
 					{
-						track.set_live(largest);
+						track.set_live(largest, None);
 						resuming = None;
 					}
 					// The last subscriber left: the upstream subscription goes with it, as on
@@ -3850,7 +3873,7 @@ where
 		let _ = stream.writer.finish();
 		let ok = match response {
 			// A track that needs a property we do not understand is not forwarded.
-			Ok(ok) => match refused(&ok.properties) {
+			Ok(ok) => match refused(&ok.properties, self.version) {
 				Some(err) => Err(err),
 				None => Ok(ok),
 			},
@@ -3867,7 +3890,7 @@ where
 
 		tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status known");
 		let dynamic = request.dynamic();
-		let mut track = request.accept(accepted_info(&ok.properties));
+		let mut track = request.accept(accepted_info(&ok.properties, self.version));
 		track.received();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 		track.set_idle();
@@ -6977,6 +7000,144 @@ mod tests {
 			vec![crate::ietf::error::CANCELLED],
 			"and must stop the direction the publisher writes",
 		);
+	}
+
+	/// A subscriber whose grant from the peer covers everything until `auth.ended(0, ..)`
+	/// revokes it, with the token handle to hold meanwhile.
+	fn revocable_auth() -> (crate::auth::Link, crate::auth::Auth) {
+		let auth = crate::auth::Link::new(true);
+		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
+		auth.granted(0, crate::auth::Grant::all());
+		(auth, cred)
+	}
+
+	/// A grant revoked while the SUBSCRIBE waits for request-ID credit refuses the request
+	/// at once, not after the ten-second give-up.
+	#[moq_clock::test]
+	async fn a_revocation_never_waits_behind_subscribe_credit() {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			// MAX_REQUEST_ID admits nothing, so the SUBSCRIBE waits for credit.
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			let log = session.log.clone();
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let (auth, _cred) = revocable_auth();
+			let mut subscriber = Subscriber::new(
+				crate::time::sim(),
+				session,
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(Some(RequestId(1)), false),
+				None,
+				peer::PeerSetup::declared(peer::Peer::default()),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			)
+			.with_auth(auth.clone());
+
+			let producer = crate::broadcast::Info::default().produce();
+			let mut dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let track = consumer.track("video").unwrap();
+			let subscription = track.subscribe(None);
+			let request = dynamic.requested_track().await.expect("no track requested");
+
+			let serving = moq_clock::sim::spawn(async move {
+				subscriber
+					.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+					.await;
+			});
+			settle().await;
+			assert!(
+				log.writes.lock().unwrap().is_empty(),
+				"{version}: a SUBSCRIBE went out without credit"
+			);
+
+			auth.ended(0, Error::Session(SessionError::Unauthorized));
+			let result = moq_clock::timeout(Duration::from_secs(1), subscription)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: the revocation waited behind the credit"));
+			assert!(
+				matches!(result, Err(Error::Unauthorized)),
+				"{version}: the request outlived its grant: {:?}",
+				result.err()
+			);
+			moq_clock::timeout(Duration::from_secs(1), serving)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: run_subscribe outlived its grant"))
+				.unwrap();
+			assert!(
+				log.writes.lock().unwrap().is_empty(),
+				"{version}: nothing was sent without credit"
+			);
+			assert!(log.closes().is_empty(), "{version}: the session stays up");
+		}
+	}
+
+	/// A grant revoked while the SUBSCRIBE waits for its answer refuses the request and
+	/// cancels the subscribe at once, not once the peer answers or acknowledges the cancel.
+	#[moq_clock::test]
+	async fn a_revocation_never_waits_behind_subscribe_ok() {
+		for version in [Version::Draft14, Version::Draft16, Version::Draft18, Version::Draft22] {
+			// A peer that accepts the stream and then says nothing at all, not even
+			// acknowledging the cancellation's FIN.
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_unacked_fin();
+			let log = session.log.clone();
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let (auth, _cred) = revocable_auth();
+			let mut subscriber = Subscriber::new(
+				crate::time::sim(),
+				session,
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::declared(peer::Peer::default()),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			)
+			.with_auth(auth.clone());
+
+			let producer = crate::broadcast::Info::default().produce();
+			let mut dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let track = consumer.track("video").unwrap();
+			let subscription = track.subscribe(None);
+			let request = dynamic.requested_track().await.expect("no track requested");
+			let unsubscribes = subscriber.unsubscribes();
+
+			let serving = moq_clock::sim::spawn(async move {
+				subscriber
+					.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+					.await;
+			});
+			// Let the SUBSCRIBE go out. No SUBSCRIBE_OK is coming.
+			settle().await;
+			assert!(occurrences(&log, &[ietf::Subscribe::ID as u8]) > 0, "{version}");
+
+			auth.ended(0, Error::Session(SessionError::Unauthorized));
+			let result = moq_clock::timeout(Duration::from_secs(1), subscription)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: the revocation waited behind SUBSCRIBE_OK"));
+			assert!(
+				matches!(result, Err(Error::Unauthorized)),
+				"{version}: the request outlived its grant: {:?}",
+				result.err()
+			);
+			// Only the wire cleanup still waits on the peer's acknowledgement.
+			settle().await;
+			drop(serving);
+			// A subscribe revoked before SUBSCRIBE_OK must still be cancelled: by UNSUBSCRIBE
+			// where the draft has one, and by stopping the publisher's direction on every draft.
+			if unsubscribes {
+				assert!(occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0, "{version}");
+			}
+			assert_eq!(log.stops(), vec![crate::ietf::error::CANCELLED], "{version}");
+			assert!(log.closes().is_empty(), "{version}: the session stays up");
+		}
 	}
 
 	/// An unanswered epochless request cannot prove which instance the peer resolved.
@@ -12262,10 +12423,13 @@ mod stitch_tests {
 		let track = broadcast
 			.create_track(
 				"video",
-				accepted_info(&ietf::Properties {
-					timescale,
-					..Default::default()
-				}),
+				accepted_info(
+					&ietf::Properties {
+						timescale,
+						..Default::default()
+					},
+					ingress,
+				),
 			)
 			.unwrap();
 		let mut h = Harness::with_timescale(Fill::Done, vec![script], timescale);
@@ -12446,7 +12610,7 @@ mod stitch_tests {
 		let relayed = bytes::Bytes::copy_from_slice(decoder.bytes().unwrap());
 		let decoded = super::super::object::read(&relayed, version, Some(Timescale::MILLI)).unwrap();
 		assert_eq!(decoded.timestamp, Some(Timestamp::new(42, Timescale::MILLI).unwrap()));
-		assert_eq!(super::super::object::listed(&decoded.properties).len(), 1);
+		assert_eq!(super::super::object::listed(&decoded.properties, version).len(), 1);
 	}
 
 	fn object_stream(version: Version, first: bool, objects: &[(u64, &[u8], Option<u64>)]) -> Vec<u8> {
@@ -12602,7 +12766,7 @@ mod stitch_tests {
 			);
 			if let Some(end) = end_object {
 				assert_eq!(
-					super::super::object::listed(&end.properties)
+					super::super::object::listed(&end.properties, version)
 						.first()
 						.map(|property| property.id),
 					legacy.then_some(0x3e)
@@ -12682,7 +12846,7 @@ mod stitch_tests {
 		let version = Version::Draft14;
 		let status = [0x10, 7];
 		let leaves = |properties: &crate::model::object::Properties| {
-			super::super::object::write(properties, None, version, None).unwrap()
+			super::super::object::write(properties, Some(version), None, version, None).unwrap()
 		};
 
 		let script = object_stream(
@@ -12859,7 +13023,7 @@ mod stitch_tests {
 					.unwrap();
 				assert_eq!(frame.fields.as_ref().unwrap().id, id);
 				assert_eq!(
-					super::super::object::listed(&frame.fields.as_ref().unwrap().properties)[0].id,
+					super::super::object::listed(&frame.fields.as_ref().unwrap().properties, version)[0].id,
 					0x3e
 				);
 			}
@@ -12955,8 +13119,7 @@ mod stitch_tests {
 			] {
 				let script = object_stream(ingress, true, &[(0, &properties, None)]);
 				let (bytes, log) = relay_passthrough_stream(script, ingress, egress).await;
-				let encoding = super::super::object::encoding;
-				if !super::super::object::same_bytes(encoding(ingress), encoding(egress)) {
+				if !super::super::object::same_bytes(ingress, egress) {
 					assert!(!log.resets().is_empty(), "incompatible immutable bytes must be refused");
 					continue;
 				}
@@ -12966,6 +13129,41 @@ mod stitch_tests {
 				assert_eq!(decoder.varint().unwrap(), 0);
 				assert_eq!(decoder.bytes().unwrap(), properties);
 			}
+		}
+	}
+
+	/// Draft 19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT. A draft-18 publisher's 0x06 is
+	/// dropped on its way to draft 19 when mutable, and refused when sealed, through a
+	/// moq-lite hop too: drafts 18 and 19 serialize a block alike, so only the track's
+	/// carried ingress draft tells them apart.
+	#[moq_clock::test]
+	async fn passthrough_keeps_0x06_from_crossing_draft_19() {
+		let (ingress, egress) = (Version::Draft18, Version::Draft19);
+		// 0x06 = 42 and 0x20 = 7, mutable.
+		let mutable = [0x06, 42, 0x20 - 0x06, 7];
+		let script = object_stream(ingress, true, &[(0, &mutable, None)]);
+		let (bytes, log) = relay_passthrough_stream(script, ingress, egress).await;
+		assert!(log.resets().is_empty());
+		let mut decoder = Decoder::new(&bytes, egress.into());
+		ietf::GroupHeader::decode(&mut decoder, egress).unwrap();
+		assert_eq!(decoder.varint().unwrap(), 0);
+		assert_eq!(decoder.bytes().unwrap(), [0x20, 7], "the mutable 0x06 crossed");
+
+		// 0x0b = { 0x06 = 42 }, sealed.
+		let sealed = [0x0b, 2, 0x06, 42];
+		let script = object_stream(ingress, true, &[(0, &sealed, None)]);
+		let (_, log) = relay_passthrough_stream(script, ingress, egress).await;
+		assert!(!log.resets().is_empty(), "the sealed 0x06 crossed");
+
+		// Within a side of draft 19 both cross unchanged.
+		for properties in [&mutable[..], &sealed] {
+			let script = object_stream(ingress, true, &[(0, properties, None)]);
+			let (bytes, log) = relay_passthrough_stream(script, ingress, ingress).await;
+			assert!(log.resets().is_empty());
+			let mut decoder = Decoder::new(&bytes, ingress.into());
+			ietf::GroupHeader::decode(&mut decoder, ingress).unwrap();
+			assert_eq!(decoder.varint().unwrap(), 0);
+			assert_eq!(decoder.bytes().unwrap(), properties);
 		}
 	}
 
@@ -12981,7 +13179,9 @@ mod stitch_tests {
 			{
 				let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let track = broadcast.create_track("video", None).unwrap();
+				let track = broadcast
+					.create_track("video", accepted_info(&Default::default(), version))
+					.unwrap();
 				let mut h = Harness::with_timescale(Fill::Done, vec![], None);
 				h.subscriber.version = version;
 				h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
@@ -13107,7 +13307,9 @@ mod stitch_tests {
 			for (egress, status) in pairs {
 				let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let track = broadcast.create_track("video", None).unwrap();
+				let track = broadcast
+					.create_track("video", accepted_info(&Default::default(), ingress))
+					.unwrap();
 				let mut h = Harness::with_timescale(Fill::Done, vec![], None);
 				h.subscriber.version = ingress;
 				h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());

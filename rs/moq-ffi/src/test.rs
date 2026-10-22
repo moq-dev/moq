@@ -2208,6 +2208,39 @@ async fn video_publish_named_track() {
 	assert!(catalog.video.contains_key("hd"), "catalog: {:?}", catalog.video.keys());
 }
 
+/// The raw-stream producer frames Annex-B written in arbitrary chunks, and
+/// `finish` publishes the last access unit even with no start code after it.
+#[tokio::test]
+async fn track_stream_producer_publishes_its_last_access_unit() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	let stream = MoqMediaTrackStreamProducer::video(
+		&broadcast,
+		MoqMediaTarget::Named {
+			name: Some("video".into()),
+		},
+		video_init(MoqVideoFormat::Avc3, Vec::new()),
+	)
+	.unwrap();
+	let track = consumer.subscribe_track("video".into(), None).await.unwrap();
+
+	let idr = [0x65, 0x88, 0x84, 0x21];
+	let mut bytes = h264_init();
+	bytes.extend_from_slice(&[0, 0, 0, 1]);
+	bytes.extend_from_slice(&idr);
+	for chunk in bytes.chunks(5) {
+		stream.write(chunk.to_vec()).unwrap();
+	}
+	stream.finish().unwrap();
+
+	let frame = tokio::time::timeout(TIMEOUT, track.read_frame())
+		.await
+		.expect("timed out waiting for the access unit")
+		.unwrap()
+		.expect("finish dropped the last access unit");
+	assert!(frame.payload.ends_with(&idr), "{:02x?}", frame.payload);
+}
+
 #[tokio::test]
 async fn requested_track_keeps_its_name() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -2678,7 +2711,7 @@ async fn announced_filters_patterns_and_reports_captures() {
 		})
 		.unwrap();
 
-	let _broad = origin.dynamic("room".into(), MoqRoute::default()).unwrap();
+	let _broad = origin.dynamic("room".into()).unwrap();
 	let overlap = next_announced(&announced).await;
 	assert_eq!(overlap.prefix, "room");
 	assert_eq!(overlap.captures, None, "an overlap does not pin the wildcard");
@@ -3552,7 +3585,7 @@ async fn announced_broadcast() {
 }
 
 fn serve(origin: &MoqOriginProducer, prefix: &str) -> Arc<MoqOriginDynamic> {
-	origin.dynamic(prefix.into(), MoqRoute::default()).unwrap()
+	origin.dynamic(prefix.into()).unwrap()
 }
 
 #[tokio::test]
@@ -3572,9 +3605,12 @@ async fn dynamic_broadcast_request() {
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "dynamic/broadcast");
 
-	let served = MoqBroadcastProducer::new().unwrap();
+	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let served = prepared.broadcast();
 	let track = served.publish_track("status".into(), Some(timed_info())).unwrap();
-	request.accept(&served).unwrap();
+	// Only publish announces the answer, under its epoch and after admission.
+	assert!(matches!(served.announce(MoqRoute::default()), Err(MoqError::Closed)));
+	prepared.publish().unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
 	let broadcast = tokio::time::timeout(TIMEOUT, request_broadcast)
@@ -3621,8 +3657,9 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 		.expect("timed out waiting for the prefix request")
 		.unwrap();
 	assert_eq!(request.path().unwrap(), "live/cam");
-	let served = MoqBroadcastProducer::new().unwrap();
-	request.accept(&served).unwrap();
+	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let served = prepared.broadcast();
+	prepared.publish().unwrap();
 	tokio::time::timeout(TIMEOUT, request_broadcast)
 		.await
 		.expect("timed out waiting for the request to resolve")
@@ -3662,8 +3699,9 @@ async fn dynamic_keeps_the_origin_alive() {
 		.await
 		.expect("the handler must still receive requests")
 		.unwrap();
-	let served = MoqBroadcastProducer::new().unwrap();
-	request.accept(&served).unwrap();
+	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
+	let served = prepared.broadcast();
+	prepared.publish().unwrap();
 	tokio::time::timeout(TIMEOUT, request_broadcast)
 		.await
 		.expect("timed out waiting for the request to resolve")
@@ -4727,8 +4765,7 @@ async fn announced_broadcast_retries_a_dropped_wait() {
 	assert!(matches!(dropped.await, Err(err) if err.is_cancelled()));
 
 	let retry = tokio::spawn(async move { followed.available().await });
-	let served = MoqBroadcastProducer::new().unwrap();
-	request.accept(&served).unwrap();
+	let served = request.prepare(moq_mint_epoch()).unwrap().publish().unwrap();
 	tokio::time::timeout(TIMEOUT, retry)
 		.await
 		.expect("the retry waited for another instance")
@@ -4796,15 +4833,20 @@ async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 		.expect("timed out waiting for the broadcast")
 		.unwrap();
 
-	let dynamic = origin.dynamic("".into(), route).unwrap();
+	// A peer's covering route under the same epoch, which the public claim cannot express.
+	let dynamic = origin
+		.inner()
+		.inner
+		.dynamic_route("", route.clone().try_into().unwrap())
+		.unwrap();
 	broadcast.unannounce().unwrap();
 	let again = tokio::spawn(async move { followed.available().await });
 	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the instance never asked the route above the path")
 		.unwrap();
-	let served = MoqBroadcastProducer::new().unwrap();
-	request.accept(&served).unwrap();
+	let served = moq_net::broadcast::Info::new().produce();
+	request.accept(served.consume());
 
 	let again = tokio::time::timeout(TIMEOUT, again)
 		.await
@@ -4815,7 +4857,7 @@ async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
 		again.inner().is_clone(first.inner()),
 		"the route above did not carry the instance on"
 	);
-	served.close().unwrap();
+	drop((served, dynamic));
 	broadcast.close().unwrap();
 }
 

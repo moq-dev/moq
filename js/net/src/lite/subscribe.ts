@@ -1,11 +1,20 @@
 import type * as Epoch from "../epoch.ts";
-import { ProtocolViolation } from "../error.ts";
+import { fromTransport, ProtocolViolation, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Location, Order } from "../track.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, hasGroupOrder, hasLargest, hasOrder, hasRefresh, resolvesStart, Version } from "./version.ts";
+import {
+	hasDropCode,
+	hasFrameBounds,
+	hasGroupOrder,
+	hasLargest,
+	hasOrder,
+	hasRefresh,
+	resolvesStart,
+	Version,
+} from "./version.ts";
 
 /**
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
@@ -573,6 +582,25 @@ export class SubscribeDrop {
 		this.start = props.start;
 		this.end = props.end;
 		this.error = props.error;
+	}
+
+	/** Name `[start, end]` given up with `err`, as `version` carries it. */
+	static given(start: number, end: number, err: unknown, version: Version): SubscribeDrop {
+		// Before lite-07 the code is the application's, so it says nothing of why.
+		return new SubscribeDrop({ start, end, error: hasDropCode(version) ? toStreamCode(err) : 0 });
+	}
+
+	/**
+	 * The error the dropped groups' readers end with, as `version` reads the code.
+	 *
+	 * Before lite-07 the code is the application's, so every drop reads as NOT_FOUND: the
+	 * groups are not there to deliver.
+	 */
+	cause(version: Version): Error {
+		if (!hasDropCode(version)) return new StreamError(StreamCode.NotFound, { message: "dropped" });
+		if (this.error > 0xffff_ffff)
+			return new StreamError(StreamCode.Internal, { message: `dropped: ${this.error}` });
+		return fromTransport({ source: "stream", streamErrorCode: this.error });
 	}
 
 	async #encode(w: Writer) {

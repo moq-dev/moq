@@ -4,18 +4,24 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `mdns::Secret` is `secret::Secret`, read from a file (#5910)
-
-The 32-byte secret type moved out of `mdns` so `listen.reset.secret` shares it, and it no longer parses inline hex.
-Name it `moq_tokio::secret::Secret`.
-Replace `Secret::load(value)` with `Secret::read(path)`, which reads a file of 64 hexadecimal characters and returns `secret::Error`; replace `Secret::new(hex)` and `str::parse` with `Secret::from([u8; 32])`, decoding the hex yourself.
-
 ### `Connection::auth()` returns the `moq_net` handle (#6109)
 
 `Connection::auth()` returns a `moq_net::auth::Handle` that every session of the connection is built on, and the `connection::auth` module (`Handle`, `Auth`, `Watch`) is removed.
 Replace `moq_tokio::connection::auth::{Handle, Auth, Watch}` with `moq_net::auth::{Handle, Auth, Watch}`.
 A token it returns can now be named by a `Route`, and keeps riding that route's announcements on every reconnect.
 Its grant reads `None` while disconnected. A transiently refused token retries on a fixed backoff of 1s doubling to 30s rather than the reconnect `backoff`.
+
+### MoQ sessions need the `net` feature (#6132)
+
+moq-net is optional, behind the default `net` feature that every transport feature (`quic`, `websocket`, `tcp`, `uds`, `iroh`, `webrtc`) turns on.
+A build with `default-features = false` and no transport feature loses `client`, `connect`, `connection`, `listen`, `origin`, `transport`, their root re-exports (`Client`, `Connection`, `ConnectError`, `Transport`, ...), `Error::MoqNet`, `Error::Connect`, `Error::connect_error`, `Error::is_auth`, and the `moq_net` re-export.
+Enable `net`, or a transport feature, to keep them.
+
+### `mdns::Secret` is `secret::Secret`, read from a file (#5910)
+
+The 32-byte secret type moved out of `mdns` so `listen.reset.secret` shares it, and it no longer parses inline hex.
+Name it `moq_tokio::secret::Secret`.
+Replace `Secret::load(value)` with `Secret::read(path)`, which reads a file of 64 hexadecimal characters and returns `secret::Error`; replace `Secret::new(hex)` and `str::parse` with `Secret::from([u8; 32])`, decoding the hex yourself.
 
 ### Dropping an unfinished send stream resets it (#5909)
 

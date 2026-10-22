@@ -8,13 +8,25 @@ import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
 import { Delivered } from "./delivered.ts";
-import { GroupTooLarge, ProtocolViolation, TimestampMismatch, TooFarBehind } from "./error.ts";
+import {
+	GroupTooLarge,
+	ProtocolViolation,
+	StreamCode,
+	StreamError,
+	TimestampMismatch,
+	TooFarBehind,
+	toStreamCode,
+} from "./error.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import {
+	type DropRun,
+	dropAt,
 	finalSequence,
 	groupBounds,
 	hooks,
+	insertDrop,
 	insertRun,
+	type Land,
 	type Recv,
 	type RecvDatagram,
 	type ResumeSource,
@@ -51,6 +63,17 @@ const MAX_DATAGRAMS = 64;
  * datagrams are dropped there; a payload above this cap could never fit anywhere.
  */
 const MAX_DATAGRAM_BYTES = 65535;
+
+// A group ended with one of these is a deliberate hole, never a cut readers see: cache policy,
+// a reader that fell behind, or a cancel such as a relay's own unsubscribe. Mirrors Rust's
+// `group::Handle::commit_abort`.
+const HOLES: ReadonlySet<number> = new Set([
+	StreamCode.Cancel,
+	StreamCode.DeliveryTimeout,
+	StreamCode.TooFarBehind,
+	StreamCode.Old,
+	StreamCode.Evicted,
+]);
 
 /**
  * A position within a track: a group's sequence and a frame's index inside it.
@@ -425,11 +448,12 @@ class TrackState {
 	/** The producer fanning into this sink, so a subscriber can mint a sibling of itself. */
 	producer?: Producer;
 	groups = new Signal<GroupConsumer[]>([]);
-	// Sequences the upstream publisher gave up: an incoming SUBSCRIBE_DROP or a producer
-	// cut. Kept apart from the cache so reclaim cannot erase a disposition a downstream
-	// publisher still has to forward, and as runs so a wide DROP costs one entry. Replaced
-	// rather than mutated, so a cursor can tell it changed by identity.
-	drops = new Signal<readonly Run[]>([]);
+	// Sequences the upstream publisher gave up, with the error each was given up with: an
+	// incoming SUBSCRIBE_DROP or a producer cut. Kept apart from the cache so reclaim cannot
+	// erase a disposition a downstream publisher still has to forward, and as runs so a wide
+	// DROP costs one entry. Replaced rather than mutated, so a cursor can tell it changed by
+	// identity.
+	drops = new Signal<readonly DropRun[]>([]);
 	// Every group still in the producer's replay cache, including groups this
 	// subscriber already consumed, sorted by sequence. Drift anchors have the same
 	// lifetime as content. Sorted so the latency guard, evaluated per group and per
@@ -557,6 +581,8 @@ let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | undefined;
 // Whether the producer still caches a group that has not failed; assigned in its static block.
 let cachedHolds: (producer: Producer, sequence: number) => boolean;
+// Whether a group may still land on the producer's live feed; assigned in its static block.
+let mayLand: (producer: Producer, land: Land) => boolean;
 
 // The sequence-order cursor lives inside `Subscriber` (it shares the group buffer and the
 // drift anchor with the arrival cursor), so `Ordered` reaches it through this bridge,
@@ -766,17 +792,49 @@ export class Producer {
 			hooks.arriveGroup(mirror, entry.arrived);
 			return mirror;
 		};
-		hooks.dropTrackGroups = (producer, start, end) => producer.#drop(start, end);
+		hooks.dropTrackGroups = (producer, start, end, error) => producer.#drop(start, end, error, true);
+		mayLand = (producer, land) => producer.#mayLand(land);
 	}
 
-	#drop(start: number, end: number): void {
+	// Whether a group may still land from the live feed, by the rule a pending tail is judged
+	// by; see {@link Land}. Mirrors the Rust `TrackState::may_land`.
+	#mayLand(land: Land): boolean {
+		if (this.#state.closed.peek() !== undefined) return false;
+		let start = land.start;
+		if (!land.floor) {
+			const first = this.#arrivals.first();
+			if (first === undefined) return false;
+			start = Math.max(start, first);
+		}
+		start = Math.max(start, this.#served?.start ?? 0);
+		const declared = this.#state.end.peek();
+		const end = declared === undefined ? land.end : Math.min(land.end, finalSequence(declared));
+		const at = now();
+		const limit = Nano.fromMilli(land.grace);
+		const drops = this.#state.drops.peek();
+		return this.#arrivals
+			.gaps(start, end)
+			.some(
+				(gap) =>
+					(gap.since === undefined || Instant.durationSince(at, gap.since) < limit) &&
+					runGaps(drops, gap.start, gap.end).some((open) => !land.delivered?.covers(open.start, open.end)),
+			);
+	}
+
+	// Record `[start, end)` given up with `error`. An upstream drop (`open`) also ends the
+	// groups still arriving in it with that error, so their readers settle now rather than
+	// once the stream's reset lands; one that finished here stays whole.
+	#drop(start: number, end: number, error: Error, open = false): void {
 		if (start >= end) return;
 		for (const state of [this.#state, ...this.#sinks]) {
-			state.drops.update((drops) => {
-				const next = [...drops];
-				insertRun(next, start, end);
-				return next;
-			});
+			state.drops.update((drops) => insertDrop(drops, start, end, error));
+		}
+		if (open) {
+			for (const [sequence, entry] of this.#cached) {
+				if (sequence >= start && sequence < end && entry.group.closed.peek() === undefined) {
+					entry.group.close(error);
+				}
+			}
 		}
 		// A pending tail owes nothing the publisher gave up.
 		this.#arrive(start, end);
@@ -1192,11 +1250,11 @@ export class Producer {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: now() };
 		this.#undrop(group.sequence);
 		group.closed.then((closed) => {
-			if (!(closed instanceof Error) || closed instanceof TooFarBehind) return;
+			if (!(closed instanceof Error) || HOLES.has(toStreamCode(closed))) return;
 			// A re-created group already replaced this one.
 			const current = this.#cached.get(group.sequence);
 			if (current && current.group !== group) return;
-			this.#drop(group.sequence, group.sequence + 1);
+			this.#drop(group.sequence, group.sequence + 1, closed);
 		});
 		const sequence = group.sequence;
 		if (this.#remote) {
@@ -1591,8 +1649,6 @@ export class Subscriber {
 	// Every group sequence this reader handed out, so a re-created group or one a second route
 	// delivers is handed out once.
 	#delivered = new Delivered();
-	// Whether a resumed reader has read groups, so a datagram read keeps copies they still need.
-	#groupsRead = false;
 	// What {@link largest} last reported, and whether it ended: moving the bounds afterwards
 	// does not bring it back.
 	#largestSeen?: Location;
@@ -1610,8 +1666,8 @@ export class Subscriber {
 	// What the lite publisher forwards as drops: sequences given up and not reported yet,
 	// the track's drops last folded in, and every sequence already reported. Drops are
 	// persistent track state, so they are tracked here rather than removed for everyone.
-	#pending: Run[] = [];
-	#dropsSeen?: { drops: readonly Run[]; start: number; end?: number };
+	#pending: DropRun[] = [];
+	#dropsSeen?: { drops: readonly DropRun[]; start: number; end?: number };
 	#reported: Run[] = [];
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
@@ -1831,6 +1887,14 @@ export class Subscriber {
 		hooks.holdsGroup = (subscriber, sequence) => {
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && cachedHolds(producer, sequence);
+		};
+		hooks.givenUp = (subscriber, sequence) => {
+			const drops = subscriber.#state.drops;
+			return { error: dropAt(drops.peek(), sequence), changed: drops };
+		};
+		hooks.mayLand = (subscriber, land) => {
+			const producer = subscriber.#state.producer;
+			return producer !== undefined && mayLand(producer, land);
 		};
 		hooks.resumeSubscriber = (name, subscription, source) => {
 			const state = new TrackState(subscription);
@@ -2133,20 +2197,21 @@ export class Subscriber {
 		if (this.#resume) return this.#tryResumed(false);
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
-		// The first part of `[from, to)` this cursor has not reported yet, now reported.
-		const report = (from: number, to: number): Recv | undefined => {
+		// The first part of `[from, to)` this cursor has not reported yet, now reported, with why.
+		const report = (from: number, to: number, error: Error): Recv | undefined => {
 			if (!dispositions) return undefined;
 			const [gap] = runGaps(this.#reported, Math.max(from, start), Math.min(to, end ?? to));
 			if (!gap) return undefined;
 			insertRun(this.#reported, gap.start, gap.end);
-			return { kind: "drop", ...gap };
+			return { kind: "drop", ...gap, error };
 		};
+		const old = () => new StreamError(StreamCode.Old, { message: "group is past the budget" });
 
 		while (groups.length > 0 && groups[0].sequence < start) {
 			const skipped = groups.shift();
 			if (!skipped) break;
 			skipped.close();
-			const dropped = report(skipped.sequence, skipped.sequence + 1);
+			const dropped = report(skipped.sequence, skipped.sequence + 1, old());
 			if (dropped) return dropped;
 		}
 		if (dispositions) {
@@ -2156,12 +2221,13 @@ export class Subscriber {
 			const seen = this.#dropsSeen;
 			if (!seen || seen.drops !== drops || seen.start !== start || seen.end !== end) {
 				this.#dropsSeen = { drops, start, end };
-				for (const run of drops) insertRun(this.#pending, run.start, run.end);
+				for (const run of drops) this.#pending = insertDrop(this.#pending, run.start, run.end, run.error);
 			}
 			for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
-				const dropped = report(run.start, run.end);
+				const dropped = report(run.start, run.end, run.error);
 				if (!dropped || dropped.kind !== "drop") continue;
-				if (dropped.end < run.end) this.#pending.unshift({ start: dropped.end, end: run.end });
+				if (dropped.end < run.end)
+					this.#pending.unshift({ start: dropped.end, end: run.end, error: run.error });
 				return dropped;
 			}
 		}
@@ -2179,8 +2245,9 @@ export class Subscriber {
 				group.close();
 				continue;
 			}
-			if (dispositions && group.closed.peek() instanceof Error) {
-				const dropped = report(group.sequence, group.sequence + 1);
+			const failed = group.closed.peek();
+			if (dispositions && failed instanceof Error) {
+				const dropped = report(group.sequence, group.sequence + 1, failed);
 				if (dropped) return dropped;
 				continue;
 			}
@@ -2190,7 +2257,7 @@ export class Subscriber {
 			}
 			if (this.#isStale(group, drift)) {
 				group.close();
-				const dropped = report(group.sequence, group.sequence + 1);
+				const dropped = report(group.sequence, group.sequence + 1, old());
 				if (dropped) return dropped;
 				continue;
 			}
@@ -2210,7 +2277,6 @@ export class Subscriber {
 	// A group from the routes' copies; see #resume.
 	#tryResumed(ordered: boolean): Recv {
 		const resume = this.#resume as ResumeSource;
-		this.#groupsRead = true;
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		if (closed !== undefined) return { kind: "done" };
@@ -2323,7 +2389,7 @@ export class Subscriber {
 			datagram.sequence >= start && (end === undefined || datagram.sequence < end);
 		if (this.#resume) {
 			for (;;) {
-				const recv = this.#resume.tryDatagram(this.#groupsRead ? this.#delivered : undefined);
+				const recv = this.#resume.tryDatagram(this.#delivered);
 				if (recv.kind !== "datagram" || inRange(recv.datagram)) return recv;
 			}
 		}

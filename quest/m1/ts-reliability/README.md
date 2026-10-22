@@ -127,10 +127,11 @@ remain with their current quests.
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
 - [Clockless export](/quest/m1/ts-reliability/clockless-export.md) - TS import and export carry audio-only and data-only programs
+- [Arrival stamps](/quest/m1/ts-reliability/arrival-stamps.md) - frames carry their local arrival time, so a stalled path never lets late frames out
+- [Release clock false alarms](/quest/m1/ts-reliability/release-clock-false-alarms.md) - no false jitter leap at a 500 ms delay and no false drift alarm
 
 ## Related
 
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - TS identity alone is not ST 2022-7, which also needs matching RTP headers
-- [TS health counters](/quest/m2/ts-health-stats.md) - ingress and egress evidence need distinct monitoring points
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
 

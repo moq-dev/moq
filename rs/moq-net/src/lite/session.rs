@@ -332,7 +332,6 @@ where
 			session: session.clone(),
 			version,
 			handle: auth.clone(),
-			going_away: goaway.going_away.clone(),
 			tokens: kio::Tasks::new(),
 			violation: Default::default(),
 			started: false,
@@ -473,7 +472,6 @@ struct Present<S: crate::transport::poll::Session> {
 	session: S,
 	version: Version,
 	handle: crate::auth::Link,
-	going_away: crate::goaway::GoingAway,
 	tokens: kio::Tasks<PresentToken<S>>,
 	/// Set by a token whose peer broke the protocol, which ends the session.
 	violation: kio::Shared<Option<Error>>,
@@ -498,7 +496,6 @@ impl<S: crate::transport::poll::Session> Present<S> {
 				session: self.session.clone(),
 				version: self.version,
 				handle: self.handle.clone(),
-				going_away: self.going_away.clone(),
 				violation: self.violation.clone(),
 				id,
 				state: PresentState::Open { token },
@@ -520,7 +517,6 @@ struct PresentToken<S: crate::transport::poll::Session> {
 	session: S,
 	version: Version,
 	handle: crate::auth::Link,
-	going_away: crate::goaway::GoingAway,
 	violation: kio::Shared<Option<Error>>,
 	id: u64,
 	state: PresentState<S>,
@@ -580,8 +576,8 @@ impl<S: crate::transport::poll::Session> PresentToken<S> {
 		loop {
 			match &mut self.state {
 				PresentState::Open { token } => {
-					// After a GOAWAY the peer must not see new streams.
-					if self.going_away.is_set() {
+					// After a GOAWAY, sent or received, the peer must not see new streams.
+					if !self.handle.active() {
 						return Poll::Ready(Error::GoingAway);
 					}
 					let token = token.clone();

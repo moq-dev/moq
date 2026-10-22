@@ -22,7 +22,7 @@ export class Unsupported extends Error {
 	}
 }
 
-/** A handle already backs a session that is open and not draining. */
+/** A handle already backs a session that is open and not draining, or its requests were already taken. */
 export class Duplicate extends Error {
 	constructor(message = "auth handle already backs an active session") {
 		super(message);
@@ -203,6 +203,8 @@ class HandleState {
 	attach(session: AuthSession) {
 		this.vacant();
 		this.sessions.push(session);
+		// The successor is live now, so its predecessor's grants no longer apply.
+		this.refresh();
 	}
 
 	/** A session closed: it presents nothing anymore. A handle of its own ends with it. */
@@ -226,6 +228,10 @@ class HandleState {
 
 	add(bytes: Uint8Array): Token {
 		if (this.closed) throw this.closed;
+		// A draining session takes no new tokens, and a handle of its own has no successor.
+		if (this.own && !this.sessions.some((session) => session.active)) {
+			throw new StreamError(StreamCode.GoingAway);
+		}
 		const token = new Token(bytes, (token) => this.withdraw(token));
 		this.tokens.add(token);
 		for (const session of [...this.sessions]) session.offer(token);
@@ -278,6 +284,15 @@ export function vacant(handle: Handle) {
 }
 
 /**
+ * Why `handle` ended, or undefined while it can still back a session.
+ *
+ * @internal
+ */
+export function ended(handle: Handle): Error | undefined {
+	return stateOf(handle).closed;
+}
+
+/**
  * The tokens this side presents and the grant they earn, across every session built on it.
  *
  * A session made without one creates its own, returned by `Established.auth`, which ends with
@@ -323,14 +338,14 @@ export class Handle {
 	 * publishes and consumes for the connection's own credential and refusing any other.
 	 *
 	 * Call it as soon as connect or accept resolves, in the same task: whoever answers is
-	 * decided once, right after. Throws once that has happened.
+	 * decided once, right after. Throws {@link Duplicate} once that has happened.
 	 *
 	 * The peer's stream credit bounds how many tokens wait unanswered, since each holds its
 	 * stream open until answered or withdrawn. A withdrawn token leaves the queue.
 	 */
 	requests(): Requests {
 		const state = stateOf(this);
-		if (state.acceptor !== "undecided") throw new Error("auth requests already taken or answered by default");
+		if (state.acceptor !== "undecided") throw new Duplicate("auth requests already taken or answered by default");
 		const queue = new RequestQueue();
 		// A session of its own that carries no AUTH never receives a token.
 		if (state.closed || (state.own && !state.live?.negotiated)) queue.close();
@@ -582,9 +597,18 @@ export class AuthSession {
 		return this.#byToken.get(token)?.grant;
 	}
 
-	/** Present one of the handle's tokens on this session. */
+	/** Whether this session still presents the handle's `token`. */
+	presents(token: Token): boolean {
+		const presented = this.#byToken.get(token);
+		return presented !== undefined && !presented.ended && !presented.withdrawn;
+	}
+
+	/**
+	 * Present one of the handle's tokens on this session. A draining session takes no new
+	 * tokens, so its verdict never ends one its successor carries.
+	 */
 	offer(token: Token) {
-		if (this.#closed || this.#byToken.has(token)) return;
+		if (!this.active || this.#byToken.has(token)) return;
 		if (!this.#wire && !this.#requests) {
 			this.#state.verdict(token, new Unsupported());
 			return;
@@ -816,12 +840,12 @@ export class AuthSession {
 					console.warn("auth token refused", reply.refused);
 					// A refused setup token leaves an empty union, not an unknown (unrestricted)
 					// one. A grant the acceptor could not tell, or never judged, is unknown, not empty.
-					const unjudged =
-						reply.refused instanceof Unsupported ||
-						(reply.refused instanceof StreamError && reply.refused.code === StreamCode.GoingAway);
-					if (!unjudged) this.#replied = true;
+					const goingAway =
+						reply.refused instanceof StreamError && reply.refused.code === StreamCode.GoingAway;
+					if (!goingAway && !(reply.refused instanceof Unsupported)) this.#replied = true;
 					result = reply.refused;
-					refused = true;
+					// A peer going away judged nothing, so the successor presents the token instead.
+					refused = !goingAway;
 					stream.close();
 					break;
 				}
@@ -847,8 +871,9 @@ export class AuthSession {
 			// carries such a code.
 			if (!refused || !transient(result) || this.#closed || presented.withdrawn) break;
 			presented.grant = undefined;
-			// Answered, so nothing waits on the token through the backoff.
-			this.#settle(presented);
+			// Unanswered again, as on its first presentation: a request or publication the token
+			// might cover waits for the retry's verdict rather than being judged without it.
+			this.#unsettle(presented);
 			this.#recompute();
 			delay = delay === undefined ? RETRY_INITIAL : Milli(Math.min(delay * 2, RETRY_MAX));
 			presented.retry = new AbortController();
@@ -857,6 +882,12 @@ export class AuthSession {
 			if (this.#closed || presented.withdrawn || presented.ended) {
 				refused = false;
 				result = null;
+				break;
+			}
+			// After a GOAWAY the peer must not see new streams: the successor presents it.
+			if (this.#draining()) {
+				refused = false;
+				result = new StreamError(StreamCode.GoingAway);
 				break;
 			}
 		}
@@ -874,10 +905,18 @@ export class AuthSession {
 		this.#ended.update((n) => n + 1);
 		// Only the peer's verdict ends one of the handle's tokens on every session: a refusal,
 		// Unsupported, or a clean close after a grant. Anything else leaves it for the next.
+		// A draining session's verdict is stale while an active session still presents the
+		// token: that session's own answer decides, even mid-retry with no grant right now.
+		const superseded =
+			!this.active &&
+			owner !== undefined &&
+			this.#state.sessions.some((session) => session !== this && session.active && session.presents(owner));
+		// A handle of the session's own has no next session to present it, so any end is final.
 		const verdict =
 			!this.#closed &&
 			!presented.withdrawn &&
-			(refused || result instanceof Unsupported || (result === null && granted));
+			!superseded &&
+			(this.#state.own || refused || result instanceof Unsupported || (result === null && granted));
 		if (owner && verdict) this.#state.verdict(owner, result);
 		// Closed before the union shrinks, so the scope never reads it as a revocation.
 		if (closed) this.close();
@@ -896,6 +935,14 @@ export class AuthSession {
 		presented.isAnswered = true;
 		if (presented.setup) this.#setupPending.update((n) => n - 1);
 		if (presented.token.byteLength > 0 && !this.#closed) this.#pending.update((n) => n - 1);
+	}
+
+	/** Count `presented` as unanswered again, as a retry presents it anew. */
+	#unsettle(presented: Presented) {
+		if (!presented.isAnswered) return;
+		presented.isAnswered = false;
+		if (presented.setup) this.#setupPending.update((n) => n + 1);
+		if (presented.token.byteLength > 0) this.#pending.update((n) => n + 1);
 	}
 
 	#recompute() {
