@@ -2317,6 +2317,7 @@ impl Announcing {
 		}
 
 		let mut entries = Vec::with_capacity(self.prefixes.len());
+		let mut superseded = Vec::new();
 		for (prefix, claim) in &self.prefixes {
 			shared.reannounced(prefix, &route.hops);
 			let id = shared.next_route;
@@ -2342,9 +2343,14 @@ impl Announcing {
 				claim: claim.clone(),
 			});
 			shared.sync_route(prefix, claim);
+			superseded.extend(shared.routes.superseded(prefix));
 			entries.push((prefix.clone(), id));
 		}
 		drop(shared);
+		// Outside the table lock, which never nests a broadcast's.
+		for broadcast in superseded {
+			broadcast.supersede();
+		}
 
 		// Ingress announce guard: held while the route is advertised.
 		let guard = serving
@@ -2459,6 +2465,8 @@ impl AnnounceProducer {
 		// The requests an epoch change released, refused once the table lock is gone: the
 		// refusal wakes their fronts, which read the table.
 		let mut released = Vec::new();
+		// The broadcasts a newer epoch now replaces, told outside the table lock too.
+		let mut superseded = Vec::new();
 		for (prefix, id) in &self.entries {
 			shared.reannounced(prefix, &route.hops);
 			let stale = shared.withdrawn_through(prefix, &route.hops);
@@ -2492,12 +2500,16 @@ impl AnnounceProducer {
 			}
 			shared.sync_route(prefix, &claim);
 			shared.prune_withdrawn(prefix);
+			superseded.extend(shared.routes.superseded(prefix));
 		}
 		drop(shared);
 		for producer in released {
 			if let Ok(mut request) = producer.write() {
 				request.resolved.get_or_insert(Err(Error::Unroutable));
 			}
+		}
+		for broadcast in superseded {
+			broadcast.supersede();
 		}
 		Ok(true)
 	}
@@ -4242,6 +4254,23 @@ impl RouteTable {
 		let mut nodes = Vec::new();
 		self.root.walk(&mut |node| nodes.push(node));
 		nodes.into_iter().flat_map(|node| node.entries.iter())
+	}
+
+	/// The broadcasts published exactly at `prefix` under an epoch older than the newest one
+	/// advertised there. See [`broadcast::Finish::poll_closed`].
+	fn superseded(&self, prefix: &Path) -> Vec<broadcast::Consumer> {
+		let Some(newest) = self
+			.at(prefix)
+			.filter(|entry| entry.live())
+			.filter_map(|entry| entry.epoch.as_ref())
+			.max()
+		else {
+			return Vec::new();
+		};
+		self.at(prefix)
+			.filter(|entry| entry.epoch.as_ref().is_some_and(|epoch| epoch < newest))
+			.filter_map(|entry| entry.source.clone())
+			.collect()
 	}
 
 	/// Add a route at its prefix, creating the nodes down to it.
@@ -10828,6 +10857,60 @@ mod tests {
 		queued(&dynamic).await.accept(&fresh);
 		let replaced = retry.await.expect("the new instance resolves");
 		assert!(!replaced.is_clone(&resolved), "rejoined the first instance's front");
+	}
+
+	/// A newer epoch at the path ends a finished broadcast's linger at once, so the finished
+	/// instance neither stands next to its replacement nor returns when the replacement ends.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_newer_epoch_ends_the_linger() {
+		let producer = origin(1).produce();
+		let old = producer
+			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
+			.unwrap();
+		let track = old
+			.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(30)))
+			.unwrap();
+		track.finish().unwrap();
+		let watch = old.consume();
+		let start = moq_clock::now();
+		let wait = moq_clock::sim::spawn(old.finish().wait());
+
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert!(!watch.is_closed());
+		let _new = producer
+			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
+			.unwrap();
+		wait.await.unwrap();
+		assert_eq!(moq_clock::now() - start, Duration::from_secs(1));
+		assert!(watch.is_closed());
+	}
+
+	/// Only a newer epoch ends a linger: an older instance arriving late, or one at
+	/// another path, leaves it to run out.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn an_older_epoch_leaves_the_linger() {
+		let producer = origin(1).produce();
+		let (older, newer) = (crate::Epoch::mint(), crate::Epoch::mint());
+		let finished = producer
+			.publish("room/alice", Route::default().with_epoch(newer))
+			.unwrap();
+		let track = finished
+			.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(5)))
+			.unwrap();
+		track.finish().unwrap();
+		let start = moq_clock::now();
+		let wait = moq_clock::sim::spawn(finished.finish().wait());
+
+		let _late = producer
+			.publish("room/alice", Route::default().with_epoch(older))
+			.unwrap();
+		let _elsewhere = producer
+			.publish("room/bob", Route::default().with_epoch(crate::Epoch::mint()))
+			.unwrap();
+		wait.await.unwrap();
+		assert_eq!(moq_clock::now() - start, Duration::from_secs(5));
 	}
 
 	/// Announce cursors follow the newest epoch over a cheaper one, and deliver a

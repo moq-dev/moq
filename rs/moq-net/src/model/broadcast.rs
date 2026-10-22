@@ -122,6 +122,9 @@ struct BroadcastState {
 	// Set once the broadcast ends: `Producer::close()` or the last producer-side
 	// handle dropping. Every lookup after it answers `Unroutable`.
 	closing: bool,
+
+	// Set once its origin advertises a newer epoch at its path, which ends a `Finish` at once.
+	superseded: bool,
 }
 
 impl BroadcastState {
@@ -482,7 +485,8 @@ impl Producer {
 	/// drop. A held track takes no more groups, not even one below its end, so nothing lands
 	/// after the linger is fixed. Keep it for its [`linger`](Finish::linger), then drop it to [close](Self::close)
 	/// the broadcast; `Finish::wait` does both on a runtime. Dropping it early is how an
-	/// interrupt ends the linger.
+	/// interrupt ends the linger, and a newer epoch at its path ends it too; see
+	/// [`Finish::poll_closed`].
 	pub fn finish(self) -> Finish {
 		let tracks: Vec<track::TrackWeak> = self.state.read().tracks.values().cloned().collect();
 		// Held outside the lock: a track whose last producer drops meanwhile unlists itself
@@ -546,13 +550,26 @@ impl Finish {
 		self.linger
 	}
 
-	/// `Ready` once the broadcast closed elsewhere, so the linger is over early.
+	/// `Ready` once the broadcast closed elsewhere, or its origin advertises a newer
+	/// [epoch](crate::origin::Route::epoch) at its path, so the linger is over early.
+	///
+	/// A request for the path resolves to the newer instance, so this one has nothing left
+	/// to serve, and keeping it announced would bring it back if the newer one ends.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.producer.alive.token.poll_closed(waiter)
+		if self.producer.alive.token.poll_closed(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		self.producer
+			.state
+			.poll(waiter, |state| match state.superseded {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			})
+			.map(|_| ())
 	}
 
-	/// Keep the broadcast up for [`Self::linger`] on the ambient runtime's clock, or until it
-	/// closes elsewhere, then close it. The linger counts from the first poll.
+	/// Keep the broadcast up for [`Self::linger`] on the ambient runtime's clock, or until
+	/// [`Self::poll_closed`] ends it early, then close it. The linger counts from the first poll.
 	#[cfg(feature = "async")]
 	pub async fn wait(self) {
 		let linger = Linger {
@@ -1275,6 +1292,16 @@ impl Demand {
 		match ready {
 			Poll::Ready(_) => Poll::Ready(Ok(())),
 			Poll::Pending => Poll::Pending,
+		}
+	}
+}
+
+impl Consumer {
+	/// End any [`Finish`] of this broadcast early: its origin now advertises a newer epoch
+	/// at its path.
+	pub(super) fn supersede(&self) {
+		if !self.state.read().superseded {
+			self.state.lock().superseded = true;
 		}
 	}
 }
