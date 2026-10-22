@@ -86,7 +86,6 @@ The 19 children comprise 15 reproduced or source-confirmed findings, three
 contract/lifetime investigations, and one security-review pointer. Each
 child records whether its behavior is new on main or inherited from release.
 
-- [Review HLS admission](/quest/m1/release-audit/hls-admission.md) - resolve the security-sensitive resource-boundary review before the cut
 - [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
 - [Bound export reorder storage](/quest/m1/release-audit/export-reorder.md) - flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
 - [Validate CMAF counts before allocation](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count

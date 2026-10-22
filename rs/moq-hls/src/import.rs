@@ -57,6 +57,8 @@ const MAX_RENDITION_FAILURES: usize = 3;
 #[non_exhaustive]
 pub struct Config {
 	/// The master or media playlist URL to import. Local files use a `file://` URL.
+	/// Only a local entry playlist permits filesystem resources; HTTP(S) entries
+	/// fetch every resource through `client`.
 	pub playlist: Url,
 
 	/// HTTP client used to fetch the playlist and segments, for example one carrying
@@ -184,11 +186,18 @@ fn resolve_map(url: Url, range: Option<&ByteRange>) -> Result<Resource> {
 /// ranges (and validating that the server honored them).
 struct Fetcher {
 	client: Client,
+	/// Filesystem access is authorized by the caller's entry URL, never a playlist URI.
+	local: bool,
 }
 
 impl Fetcher {
-	fn new(client: Option<Client>) -> Result<Self> {
-		let client = match client {
+	fn new(config: &Config) -> Result<Self> {
+		let local = match config.playlist.scheme() {
+			"file" => true,
+			"http" | "https" => false,
+			_ => return Err(Error::ResourceRefused),
+		};
+		let client = match config.client.clone() {
 			Some(client) => client,
 			None => Client::builder()
 				.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
@@ -196,7 +205,7 @@ impl Fetcher {
 				.timeout(REQUEST_TIMEOUT)
 				.build()?,
 		};
-		Ok(Self { client })
+		Ok(Self { client, local })
 	}
 
 	async fn media_playlist(&self, url: Url) -> Result<MediaPlaylist> {
@@ -214,6 +223,11 @@ impl Fetcher {
 
 	async fn fetch(&self, resource: &Resource) -> Result<Bytes> {
 		let url = &resource.url;
+		match url.scheme() {
+			"http" | "https" => (),
+			"file" if self.local => (),
+			_ => return Err(Error::ResourceRefused),
+		}
 		if url.scheme() == "file" {
 			let path = url.to_file_path().map_err(|_| Error::InvalidFileUrl)?;
 			let Some(range) = resource.range else {
@@ -630,10 +644,11 @@ pub struct Import {
 impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
+		let fetcher = Fetcher::new(&cfg)?;
 		let base_url = cfg.playlist;
 		Ok(Self {
 			sink: Sink::new(broadcast, catalog, cfg.passthrough),
-			fetcher: Fetcher::new(cfg.client)?,
+			fetcher,
 			base_url,
 			video: Vec::new(),
 			audio: None,
@@ -696,8 +711,9 @@ impl Import {
 					deadline = moq_clock::now() + STEP_RETRY_BUDGET;
 					outcome
 				}
+				Err(err @ Error::ResourceRefused) => return Err(err),
 				// A status the origin actually sent is its answer: a 404 playlist is not going to
-				// become a 200 on the next pass. Everything else rides the backoff budget.
+				// become a 200 on the next pass. Other errors ride the backoff budget.
 				Err(err) if err.status().is_some_and(|status| !crate::status_retryable(status)) => {
 					return Err(err);
 				}
@@ -805,6 +821,8 @@ impl Import {
 					wrote_segments += count;
 					ok += 1;
 				}
+				// Admission is settled by the caller's input policy, not rendition health.
+				Err(err @ Error::ResourceRefused) => return Err(err),
 				Err(err) => match on_error {
 					OnError::Fail => return Err(err),
 					// Keep the other renditions going: one bad variant or segment shouldn't
@@ -1196,7 +1214,86 @@ mod tests {
 	}
 
 	fn fetcher() -> Fetcher {
-		Fetcher::new(None).unwrap()
+		Fetcher::new(&Config::new(Url::parse("https://example.com/master.m3u8").unwrap())).unwrap()
+	}
+
+	#[tokio::test]
+	async fn remote_import_refuses_local_resources() {
+		let dir = temp_dir();
+		let path = dir.join("resource");
+		std::fs::write(&path, b"sentinel").unwrap();
+		for scheme in ["http", "https"] {
+			let base = Url::parse(&format!("{scheme}://example.com/master.m3u8")).unwrap();
+			let url = resolve_uri(&base, Url::from_file_path(&path).unwrap().as_str()).unwrap();
+			let fetcher = Fetcher::new(&Config::new(base)).unwrap();
+			assert!(matches!(
+				fetcher.fetch_url(url.clone()).await,
+				Err(Error::ResourceRefused)
+			));
+			assert!(matches!(
+				fetcher.fetch(&ranged_resource(url)).await,
+				Err(Error::ResourceRefused)
+			));
+		}
+	}
+
+	#[tokio::test]
+	async fn admission_failure_ends_import_without_retrying() {
+		tokio::time::pause();
+		let sink = sink();
+		let mut import = Import::new(
+			sink.broadcast.clone(),
+			sink.catalog.clone(),
+			Config::new(Url::parse("https://example.com/master.m3u8").unwrap()),
+		)
+		.unwrap();
+		import.video.push(TrackState::new(
+			"video[0]".to_string(),
+			Url::parse("file:///refused.m3u8").unwrap(),
+			select_muxed(),
+			sink,
+		));
+		assert!(matches!(
+			futures::FutureExt::now_or_never(import.run()),
+			Some(Err(Error::ResourceRefused))
+		));
+	}
+
+	#[tokio::test]
+	async fn local_import_allows_local_resources() {
+		let dir = temp_dir();
+		let path = dir.join("resource");
+		std::fs::write(&path, b"sentinel").unwrap();
+		let url = Url::from_file_path(&path).unwrap();
+		let fetcher = Fetcher::new(&Config::new(url.clone())).unwrap();
+		assert_eq!(fetcher.fetch_url(url.clone()).await.unwrap(), b"sentinel"[..]);
+		assert_eq!(fetcher.fetch(&ranged_resource(url)).await.unwrap(), b"nti"[..]);
+	}
+
+	#[tokio::test]
+	async fn configured_http_client_keeps_its_policy() {
+		let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+		listener.set_nonblocking(true).unwrap();
+		let url = Url::parse(&format!("http://{}/resource", listener.local_addr().unwrap())).unwrap();
+		let mut config = Config::new(url.clone());
+		config.client = Some(Client::builder().https_only(true).build().unwrap());
+		let error = Fetcher::new(&config).unwrap().fetch_url(url).await.unwrap_err();
+		assert!(matches!(error, Error::Reqwest(_)));
+		assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+	}
+
+	#[tokio::test]
+	async fn unsupported_resources_are_refused() {
+		for scheme in ["ftp", "data", "custom"] {
+			let url = Url::parse(&format!("{scheme}://example.com/resource?token=secret")).unwrap();
+			assert!(matches!(
+				Fetcher::new(&Config::new(url.clone())),
+				Err(Error::ResourceRefused)
+			));
+			let error = fetcher().fetch_url(url).await.unwrap_err();
+			assert!(matches!(error, Error::ResourceRefused));
+			assert!(!format!("{error} {error:?}").contains("secret"));
+		}
 	}
 
 	fn ranged_resource(url: Url) -> Resource {

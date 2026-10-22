@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Import resource admission follows the entry URL
+
+HTTP(S) entry playlists now refuse filesystem resources with `Error::ResourceRefused`.
+A resource admission failure ends the import immediately.
+Use a local file entry playlist when importing local media. HTTP(S) resources still
+use the configured `import::Config::client`, including its redirect policy.
+Other URL schemes are refused when constructing the import or fetching a resource.
+
 ### HLS import unwraps fMP4 to Legacy (#6250)
 
 `import::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.

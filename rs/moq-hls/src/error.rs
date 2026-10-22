@@ -51,6 +51,10 @@ pub enum Error {
 	#[error("requested range is unavailable: {0}")]
 	RangeUnavailable(String),
 
+	/// A resource uses an unsupported scheme or requires unauthorized filesystem access.
+	#[error("resource is outside the import input policy")]
+	ResourceRefused,
+
 	/// A `file://` URL could not be turned back into a filesystem path.
 	#[error("invalid file URL")]
 	InvalidFileUrl,
