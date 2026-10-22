@@ -400,7 +400,7 @@ export const hooks: {
 	 * end may refine the group boundary it falls just before. Throws `ProtocolViolation` on
 	 * any other second end. Readers then hold at a hole below it until the hole fills, folds
 	 * past the grace, or the track closes, since QUIC may deliver a lower group's stream after
-	 * a higher one. Mirrors the Rust `finish_at_pending`; assigned by `track.ts`.
+	 * a higher one. Mirrors the Rust `finish_at` on a `received()` copy; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
 	// private: capability gap
@@ -424,9 +424,6 @@ export const hooks: {
 	startTrack: (producer: Producer, served: { start?: number; requested?: number }) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
-	// pending: /quest/m1/public-model/ingest.md
-	/** Access the existing producer while a request awaits immutable wire metadata. */
-	pendingTrackProducer: (request: Request) => Producer;
 	/** Have a producer write through a broadcast's sequence namespace for its name. */
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
@@ -453,12 +450,6 @@ export const hooks: {
 	bufferedLargest: (subscriber: Subscriber) => Location | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
 	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
-	// pending: /quest/m1/public-model/ingest.md
-	/**
-	 * Record sequences `[start, end)` an upstream publisher explicitly gave up with `error`,
-	 * ending the groups still arriving in them with it.
-	 */
-	dropTrackGroups: (producer: Producer, start: number, end: number, error: Error) => void;
 	// pending: /quest/m1/public-model/serve.md
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
@@ -553,6 +544,8 @@ export const hooks: {
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
 	/** Return when a group joined its track at this hop, on the installed clock. */
 	groupArrived: (group: GroupConsumer) => Instant;
+	/** Whether a group counts as content: its first frame landed, or it ended. */
+	groupStarted: (group: GroupConsumer) => boolean;
 	/** Record when a track's mirror of a group joined that track at this hop. */
 	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
@@ -601,9 +594,6 @@ export const hooks: {
 	makeRequest: () => {
 		throw new Error("track.ts not loaded");
 	},
-	pendingTrackProducer: () => {
-		throw new Error("track.ts not loaded");
-	},
 	bindSequence: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -627,9 +617,6 @@ export const hooks: {
 	},
 	groupProgress: () => {
 		throw new Error("group.ts not loaded");
-	},
-	dropTrackGroups: () => {
-		throw new Error("track.ts not loaded");
 	},
 	tryRecvGroup: () => {
 		throw new Error("track.ts not loaded");
@@ -728,6 +715,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupArrived: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupStarted: () => {
 		throw new Error("group.ts not loaded");
 	},
 	expireGroup: () => {

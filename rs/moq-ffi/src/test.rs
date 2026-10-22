@@ -1819,14 +1819,9 @@ fn write_legacy(group: &mut moq_net::group::Producer, transport_us: u64, media_u
 }
 
 fn write_raw(group: &mut moq_net::group::Producer, transport_us: u64, payload: bytes::Bytes) {
-	let mut frame = group
-		.create_frame(moq_net::frame::Info {
-			size: payload.len() as u64,
-			timestamp: Some(moq_net::Timestamp::from_micros(transport_us).unwrap()),
-		})
+	group
+		.write_frame(moq_net::Timestamp::from_micros(transport_us).unwrap(), payload)
 		.unwrap();
-	frame.write(payload).unwrap();
-	frame.finish().unwrap();
 }
 
 /// A broadcast with one legacy-container track, and a raw consumer subscribed to it.

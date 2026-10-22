@@ -187,14 +187,14 @@ impl State {
 				request.reject(err.clone());
 			}
 			if let Some(producer) = track.producer {
-				let _ = producer.abort_session(err.clone());
+				let _ = producer.abort(err.clone());
 			}
 			if let Fill::Ready { producer, .. } = &*track.fill.read() {
 				let _ = producer.handle().abort(err.clone());
 			}
 		}
 		for (_, producer) in self.lingering.drain() {
-			let _ = producer.abort_session(err.clone());
+			let _ = producer.abort(err.clone());
 		}
 	}
 	fn close(&mut self) {
@@ -777,8 +777,6 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	going_away: crate::goaway::GoingAway,
 	// Our grant (MoQ Auth): a subscription it stops covering is cancelled.
 	auth: crate::auth::Handle,
-	// What this session may allocate up front for objects still arriving.
-	frames: frame::Budget,
 	// Namespaces the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
 }
@@ -860,7 +858,8 @@ where
 		Self {
 			runtime,
 			session,
-			origin,
+			// Its own frame budget, so a peer's declared sizes crowd out no other session.
+			origin: origin.with_own_frames(),
 			control,
 			session_origin: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
 			self_origin,
@@ -872,7 +871,6 @@ where
 			version,
 			going_away,
 			auth: crate::auth::Handle::new(false),
-			frames: Default::default(),
 			announces: Default::default(),
 			validity: Default::default(),
 			epoch: None,
@@ -3062,6 +3060,9 @@ where
 				frame: largest.object,
 			})
 		});
+		// A fresh copy is staged until the answer is written in below, so no reader sees it
+		// before its Largest and start.
+		let mut staged = None;
 		let (mut track, dynamic) = match resumed {
 			Some(idle) => {
 				if !self.state.lock().subscribes.contains_key(&request_id) {
@@ -3076,23 +3077,19 @@ where
 					self.remove_subscribe(request_id);
 					return None;
 				};
-				let request = match live {
-					true => request.resolving_start(),
-					false => request,
-				};
+				// Pending until the answer is written in below, so a relay serving the copy
+				// never reads the requested floor as where the feed starts.
+				let request = request.request_start(start.map(|start| start.group));
 				// Serves cache misses with a group FETCH. Registered before accepting, so a
 				// miss queued meanwhile waits for it rather than failing for want of a handler.
 				let dynamic = request.dynamic();
-				(request.accept(info), dynamic)
+				let copy = request.stage(info);
+				let track = track::Producer::clone(&copy);
+				staged = Some(copy);
+				(track, dynamic)
 			}
 		};
-		// A live join starts at the publisher's edge; an absolute one where it asked. With
-		// no Largest the join skips nothing, so every group is owed: a lower one's stream
-		// may still arrive after a higher one's.
-		let _ = match live {
-			true => track.start_at(largest.map_or(0, |largest| largest.group)),
-			false => track.start_at(start.map(|start| start.group)),
-		};
+		track.received();
 		// Object IDs can start past zero or skip, while readers see frame ordinals, so only
 		// the group carries over: its first frame is the edge a reader can count on.
 		if let Some(largest) = largest {
@@ -3100,6 +3097,16 @@ where
 				group: largest.group,
 				frame: 0,
 			});
+		}
+		// A live join starts at the publisher's edge; an absolute one where it asked. With
+		// no Largest the join skips nothing, so every group is owed: a lower one's stream
+		// may still arrive after a higher one's. This resolves the pending start.
+		let _ = match live {
+			true => track.start_at(largest.map_or(0, |largest| largest.group)),
+			false => track.start_at(start.map(|start| start.group)),
+		};
+		if let Some(staged) = staged {
+			staged.commit();
 		}
 		let mut fetching: Option<JoiningTask> = None;
 		{
@@ -3336,9 +3343,8 @@ where
 										fill.end();
 									}
 								}
-								// The tail settled, so readers may end at an END_OF_TRACK's boundary.
-								track.set_tail_pending(false);
-								// A no-op once an END_OF_TRACK declared the end.
+								// A no-op once an END_OF_TRACK declared the end, whose readers wait
+								// for a missing group only as long as the grace.
 								let _ = track.finish();
 							}
 							Err(err) => {
@@ -4004,9 +4010,10 @@ where
 
 		tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status known");
 		let dynamic = request.dynamic();
-		let mut track = request.accept(accepted_info(&ok.properties, self.version));
-		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
-		track.set_idle();
+		// Nothing feeds this copy live: what it caches is fetched, never the live edge. Idle
+		// from the accept, so no reader takes it as live in between.
+		let track = request.idle().accept(accepted_info(&ok.properties, self.version));
+		track.received();
 		Some(Idle {
 			demand: track.demand(),
 			track,
@@ -4303,8 +4310,9 @@ fn end_track(track: &mut track::Producer, end: track::Position, properties: bool
 		let _ = track.clone().abort(Error::Unsupported);
 		return Err(Error::Unsupported);
 	}
-	// Lower groups may still be on the wire, behind the one that carried the end.
-	if let Err(err) = track.finish_at_pending(end) {
+	// Lower groups may still be on the wire, behind the one that carried the end: the
+	// received copy holds readers at a hole for the grace.
+	if let Err(err) = track.finish_at(end) {
 		tracing::warn!(%err, ?end, "invalid END_OF_TRACK");
 		let _ = track.clone().abort(Error::ProtocolViolation);
 		return Err(Error::ProtocolViolation);
@@ -4569,7 +4577,6 @@ struct GroupIngest {
 	/// The object being read is one the group started past, so it is read and dropped.
 	dropping: bool,
 	phase: IngestPhase,
-	budget: frame::Budget,
 }
 
 enum IngestPhase {
@@ -4584,7 +4591,7 @@ enum IngestPhase {
 	/// Reading the status of an empty object.
 	Status { timestamp: Option<crate::Timestamp> },
 	/// Streaming the object payload.
-	Payload { frame: frame::ProducerOwned },
+	Payload { frame: frame::Producer },
 	/// Discarding a dropped object's payload: the bytes of it still to read.
 	Skip { size: usize },
 	/// An explicit end-of-group or end-of-track status arrived.
@@ -4610,7 +4617,6 @@ impl GroupIngest {
 			inflated: None,
 			dropping: false,
 			phase: IngestPhase::Delta,
-			budget: subscriber.frames.clone(),
 		}
 	}
 }
@@ -4992,7 +4998,7 @@ where
 			fields,
 			inflated: super::object::inflated(decoded.inflated, producer.compressed())?,
 		};
-		let mut frame = producer.create_frame_owned(header, &self.frames)?;
+		let mut frame = producer.create_object(header)?;
 		if let Err(err) = std::future::poll_fn(|cx| stream.poll_read_frame(cx, &mut frame)).await {
 			let _ = frame.abort(err.clone());
 			return Err(err);
@@ -5812,12 +5818,12 @@ impl GroupIngest {
 						self.phase = IngestPhase::Skip { size };
 						continue;
 					}
-					// `create_frame_owned` is the allocation chokepoint: it rejects an
-					// oversized `size` and allocates up front only within the budget, so
-					// no pre-check is needed.
+					// `create_object` is the allocation chokepoint: it rejects an oversized
+					// `size` and allocates up front only within the origin's budget, so no
+					// pre-check is needed.
 					let timestamp = object_time(self.timescale, *timestamp)?;
 					let header = self.header(group, frame::Info { size, timestamp })?;
-					let frame = group.create_frame_owned(header, &self.budget)?;
+					let frame = group.create_object(header)?;
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Status { timestamp } => {
@@ -5826,7 +5832,7 @@ impl GroupIngest {
 						if !self.dropping {
 							let timestamp = object_time(self.timescale, *timestamp)?;
 							let header = self.header(group, frame::Info { size: 0, timestamp })?;
-							let frame = group.create_frame_owned(header, &self.budget)?;
+							let frame = group.create_object(header)?;
 							group.restore(frame.finish()?);
 						}
 						self.phase = IngestPhase::Delta;
