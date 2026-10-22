@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Milli } from "@moq/clock";
-import { Jitter } from "./jitter";
+import { type Entry, History, Jitter } from "./jitter";
 
 // The conformance corpus beside doc/concept/audio-jitter.md, read directly so this is graded
 // against the document rather than against another implementation.
@@ -113,5 +113,54 @@ describe("Jitter", () => {
 			fork.observe((20_000 + Math.floor(i / 50) * 1000) as Milli, (8000 + i * 20) as Milli);
 		expect(fork.measured).toBeLessThanOrEqual(learned);
 		expect(warm.measured).toBe(learned);
+	});
+});
+
+// The documented scan: the first entry with the smallest key at or before `media`.
+function scan(history: History, media: number): Entry | undefined {
+	let reference: Entry | undefined;
+	for (let i = 0; i < history.length; i++) {
+		const entry = history.at(i);
+		if (entry.media > media) break;
+		if (!reference || entry.arrival - entry.media < reference.arrival - reference.media) reference = entry;
+	}
+	return reference;
+}
+
+describe("History", () => {
+	// A tied entry with a different (arrival, media) rounds the delay differently, so the tree must
+	// pick exactly the entry the scan would.
+	it("picks the entry the scan would, ties included", () => {
+		const history = new History();
+		let seed = 1;
+		let newest = Number.NEGATIVE_INFINITY;
+		for (let i = 0; i < 400; i++) {
+			seed = (seed * 1103515245 + 12345) % 2 ** 31;
+			// Mostly in order, with an occasional reordered frame and a timestamp jump.
+			const media = i % 37 === 0 ? i * 20 - 900 : i % 89 === 0 ? i * 20 + 3000 : i * 20;
+			// Whole milliseconds of jitter tie often; the occasional fraction does not.
+			const jitter = i % 5 === 0 ? seed / 2 ** 21 : seed % 8;
+			if (media > newest) {
+				newest = media;
+				history.push(i * 20 + jitter, media);
+			}
+			for (const query of [media - 30, media - 10, media, media + 10, media + 1e6]) {
+				expect(history.reference(query)).toEqual(scan(history, query));
+			}
+		}
+	});
+
+	it("caps a timestamp rate the peer chooses, and the wrapped ring answers every prefix", () => {
+		const history = new History();
+		for (let i = 0; i < 8192 + 5000; i++) {
+			const media = i / 1000;
+			history.push(i + (i % 7), media);
+			if (i % 997 === 0) {
+				for (const query of [media - 3, media - 0.5, media]) {
+					expect(history.reference(query)).toEqual(scan(history, query));
+				}
+			}
+		}
+		expect(history.length).toBe(8192);
 	});
 });

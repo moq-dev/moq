@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON `delta_ratio` is `deltas`
+
+`json::Config::delta_ratio` and `with_delta_ratio` are replaced by `deltas: bool` and `with_deltas` (default `true`).
+Call `with_deltas(false)` where you called `with_delta_ratio(0)`.
+Snapshot groups roll on joiner demand: create the track with `Info::refresh` and drive `json::Snapshot::refresh` (or `poll_refresh`) beside your updates.
+
 ### Priorities are signed (#6142)
 
 `track_info` on the catalog producer and tracks takes an `i8` priority, higher first, with 0 unset; pass `hang::catalog::PRIORITY` as before.

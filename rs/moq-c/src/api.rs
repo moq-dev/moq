@@ -423,14 +423,14 @@ pub struct moq_audio_config {
 /// Options for a JSON snapshot track (lossy latest-value mode).
 ///
 /// The same config is passed to a producer and its consumers, but the consumer reads only
-/// `compression`; `delta_ratio` is producer-only.
+/// `compression`; `deltas` is producer-only.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_json_snapshot_config {
-	/// How aggressively the producer emits deltas instead of full snapshots. `0` disables deltas
-	/// (one snapshot per group); a positive value allows roughly that many snapshots' worth of
-	/// deltas before rolling. Ignored by the consumer.
-	pub delta_ratio: u32,
+	/// Encode updates as deltas against the group's snapshot. When off, each update opens a new
+	/// group with a full snapshot. When on, a joiner that would download more than eight
+	/// snapshots' worth of deltas gets the value restated in a fresh group. Ignored by the consumer.
+	pub deltas: bool,
 
 	/// DEFLATE-compress each group. Must match on the producer and consumer.
 	pub compression: bool,
@@ -3293,7 +3293,7 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let producer = moq_mux::json::Config::default()
 			.with_compression(config.compression)
-			.with_delta_ratio(config.delta_ratio);
+			.with_deltas(config.deltas);
 		State::lock().publish.json_snapshot(broadcast, name, producer)
 	})
 }
