@@ -1712,7 +1712,9 @@ impl Handle {
 
 	/// Abort the group with `err` unless it already holds every frame: the publisher gave
 	/// up a group still arriving, while one that finished here stays whole.
-	pub(super) fn abort_open(&self, err: Error) {
+	// private: capability gap
+	// Sessions cancel an unfinished FETCH while its writer belongs to its data stream.
+	pub(crate) fn abort_open(&self, err: Error) {
 		if let Ok(state) = self.state.write()
 			&& state.fin.is_none()
 		{
@@ -2752,6 +2754,14 @@ impl Consumer {
 	/// The parent track's timescale, or `None` when it declared no timeline.
 	pub fn timescale(&self) -> Option<Timescale> {
 		self.track.timescale
+	}
+
+	/// The timescale a moq-lite hop serves the parent track at (see
+	/// [`track::Info::lite_timescale`]).
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) fn lite_timescale(&self) -> Option<Timescale> {
+		self.track.lite_timescale()
 	}
 
 	/// The draft the parent track's moq-transport publisher spoke, which serialized every

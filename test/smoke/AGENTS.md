@@ -4,8 +4,7 @@ Cross-language interop smoke for the published MoQ packages.
 # Required
 
 - Install the published artifact each cell claims to test.
-- MoQ package versions stay at latest: `@moq/*` on the `latest` tag, PyPI `moq-rs`, `moq.dev/moq`, `moqdev/*` images, and GitHub release tarballs. `cloudflare.sh` and `moxygen.sh` build from unpinned Git HEAD.
-- No package lock files under `test/smoke/` (`go.sum`, `bun.lock`, `Cargo.lock`, `uv.lock`, and the rest of the list in `.gitignore`). `flake.lock` pins the dev toolchain. The moq flake is not a flake input; `just nix-channel` builds `github:moq-dev/moq#moq-relay` and `#moq` with `--refresh`.
+- MoQ packages are tested at latest, with no package lock files here; `freshness.sh` enforces both. `cloudflare.sh` and `moxygen.sh` build from unpinned Git HEAD, and `just nix-channel` builds the moq flake with `--refresh` rather than locking it as an input.
 - npm `playwright` is the one version pin, and it matches the flake's `PLAYWRIGHT_VERSION`. Bump the toolchain with `nix flake update` and the pin together.
 - `moq-relay` and `moq` come from a channel (PATH, `RELAY_BIN`/`MOQ_BIN`, `just nix-channel`, or `clients/docker`). The harness leaves installing them to that channel.
 - A red cell is the result. `mark_broken` drops that package's cells and lets the rest of the matrix run. Retries belong on transient registry and release downloads. A client that failed to exchange media gets no retry, no longer timeout, and no skip.

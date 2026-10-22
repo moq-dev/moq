@@ -132,7 +132,7 @@ pub async fn accept(
 	//
 	// Bound the wait for resolution + the first catalog: an unannounced broadcast, or an
 	// announced-but-catalog-less one, would otherwise park this handler forever.
-	let source = tokio::time::timeout(CATALOG_TIMEOUT, async {
+	let source = moq_clock::timeout(CATALOG_TIMEOUT, async {
 		let broadcast = subscriber.request_broadcast(broadcast.as_path(), None).await?;
 		EgressSource::new(moq_mux::Source::new(subscriber.clone(), broadcast)).await
 	})
@@ -151,7 +151,7 @@ pub async fn accept(
 	let (creds, inbound, registration) = mux.register();
 	let mut rtc = session::rtc_config_with_codecs(&codecs)
 		.set_local_ice_credentials(creds)
-		.build(std::time::Instant::now());
+		.build(moq_clock::now().into_std());
 	for addr in mux.candidates() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);
@@ -181,7 +181,6 @@ pub async fn accept(
 			registration: Some(registration),
 			cancel: Some(cancel),
 			role: "whep server",
-			broadcast: None,
 		},
 	})
 }

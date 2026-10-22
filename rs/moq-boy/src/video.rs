@@ -6,9 +6,10 @@
 //! encode and the avc3 publish; this module keeps moq-boy's threading,
 //! frame-dropping, force-keyframe and timing-stats behavior.
 
+use moq_clock::Instant;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 
