@@ -288,6 +288,7 @@ pub fn rtp_destination(url: &url::Url) -> anyhow::Result<(String, u16)> {
 		url::Host::Ipv6(ip) => ip.to_string(),
 	};
 	let port = url.port().context("--rtp url must include a port: udp://HOST:PORT")?;
+	anyhow::ensure!(port != 0, "--rtp takes udp://HOST:PORT, PORT not 0: {url}");
 	Ok((host, port))
 }
 
@@ -300,11 +301,12 @@ struct Unsent {
 }
 
 impl Unsent {
-	/// Send `datagram`, or count it lost: a full send queue or a route briefly down loses that
-	/// datagram, as the network would, not the stream. A receiver not listening yet answers with
-	/// ICMP, which a connected socket reports on a later send, and is not counted.
-	async fn send(&mut self, socket: &tokio::net::UdpSocket, datagram: &[u8]) {
-		match socket.send(datagram).await {
+	/// Send `datagram` now, or count it lost: a full send queue or a route briefly down loses
+	/// that datagram, as the network would, not the stream, and the export never waits on the
+	/// socket. A receiver not listening yet answers with ICMP, which a connected socket reports
+	/// on a later send, and is not counted.
+	fn send(&mut self, socket: &std::net::UdpSocket, datagram: &[u8]) {
+		match socket.send(datagram) {
 			Err(err) if err.kind() != std::io::ErrorKind::ConnectionRefused => {
 				self.count += 1;
 				self.last = Some(err);
@@ -507,7 +509,7 @@ impl Subscribe {
 				Err(err) => break Err(err),
 			};
 			match &rtp {
-				Some(socket) => unsent.send(socket, &frame.payload).await,
+				Some(socket) => unsent.send(socket, &frame.payload),
 				None => {
 					stdout.write_all(&frame.payload).await?;
 					stdout.flush().await?;
@@ -547,8 +549,10 @@ impl Subscribe {
 		}
 	}
 
-	/// A UDP socket bound to an ephemeral port and connected to `url`, `udp://HOST:PORT`.
-	async fn rtp_socket(url: &url::Url) -> anyhow::Result<tokio::net::UdpSocket> {
+	/// A UDP socket bound to an ephemeral port and connected to `url`, `udp://HOST:PORT`. It is
+	/// nonblocking, and sent on directly ([`Unsent::send`]): tokio's own readiness would refuse
+	/// a send until its reactor first saw the socket writable.
+	async fn rtp_socket(url: &url::Url) -> anyhow::Result<std::net::UdpSocket> {
 		let (host, port) = rtp_destination(url)?;
 		let addr = tokio::net::lookup_host((host.as_str(), port))
 			.await?
@@ -560,7 +564,7 @@ impl Subscribe {
 		};
 		let socket = tokio::net::UdpSocket::bind(local).await?;
 		socket.connect(addr).await?;
-		Ok(socket)
+		Ok(socket.into_std()?)
 	}
 
 	/// Write the multiplex the broadcast's `m2ts` track carries, each run of packets as its
@@ -624,12 +628,12 @@ mod tests {
 	/// A datagram the socket refuses is counted and dropped, and the export sends on.
 	#[tokio::test]
 	async fn an_rtp_datagram_the_socket_refuses_is_counted_not_fatal() {
-		let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-		socket.connect("127.0.0.1:9").await.unwrap();
+		let url = url::Url::parse("udp://127.0.0.1:9").unwrap();
+		let socket = Subscribe::rtp_socket(&url).await.unwrap();
 		let mut unsent = Unsent::default();
 		// Longer than any UDP datagram over IPv4 can be.
-		unsent.send(&socket, &[0; 70_000]).await;
-		unsent.send(&socket, &[0; 1_328]).await;
+		unsent.send(&socket, &[0; 70_000]);
+		unsent.send(&socket, &[0; 1_328]);
 		assert_eq!(unsent.count, 1);
 		unsent.report();
 		assert_eq!((unsent.count, unsent.last.is_none()), (0, true));

@@ -129,8 +129,8 @@ pub(super) fn ssrc(path: &str, epoch: &moq_net::Epoch) -> u32 {
 
 #[cfg(test)]
 mod test {
+	use super::super::lane::Need;
 	use super::*;
-	use crate::container::ts::lane::Need;
 
 	/// 34 packets a slot, so runs straddle slots.
 	const RATE: u64 = 34 * 188 * 8 * 40;

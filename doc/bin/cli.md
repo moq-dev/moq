@@ -462,9 +462,10 @@ revision than the other or around an SI table the catalog adds or drops, which
 each leg takes up when its catalog update arrives. With `--rtp udp://HOST:PORT`
 it sends the multiplex as RTP (RFC 2250) instead of to stdout, for an SMPTE ST
 2022-7 pair: two legs send the same datagram, headers included, wherever both
-hold its packets, and each withholds one it cannot vouch for, so legs that lose
-different groups send between them every datagram a clean leg sends (the
-framing is `Export::with_rtp`'s, in [`moq-mux`](https://docs.rs/moq-mux)). SI
+hold its packets, and each withholds one it cannot vouch for, so legs whose
+losses fall in different datagrams send between them every datagram a clean leg
+sends; a datagram both lost part of goes out from neither (the framing is
+`Export::with_rtp`'s, in [`moq-mux`](https://docs.rs/moq-mux)). SI
 one leg missed, and a unit of a sparse track (such as SCTE-35) lost with no
 later jump in it, still go out as stuffing where the other leg has them. The
 SSRC follows the publisher [epoch](/concept/moq-lite#publisher-epochs), so

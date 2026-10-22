@@ -1,5 +1,5 @@
-//! TS admission and layout across PID count and access units per PID, and padded layout
-//! across queued tracks and access-unit size.
+//! TS admission and layout across PID count and access units per PID, padded layout across
+//! queued tracks and access-unit size, and RTP packetization across rate and unsure share.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -13,6 +13,9 @@ mod export {
 #[path = "../src/container/ts/lane.rs"]
 #[allow(dead_code)]
 mod lane;
+#[path = "../src/container/ts/rtp.rs"]
+#[allow(dead_code)]
+mod rtp;
 #[path = "../src/container/ts/schedule.rs"]
 #[allow(dead_code)]
 mod schedule;
@@ -135,5 +138,39 @@ fn tables(c: &mut Criterion) {
 	}
 	group.finish();
 }
-criterion_group!(benches, admission, tables);
+
+/// RTP packetization of a synced multiplex across its rate and the share of each slot's
+/// positions the leg is unsure of: none, one in 64, every one.
+fn rtp(c: &mut Criterion) {
+	let mut group = c.benchmark_group("ts_rtp");
+	group.measurement_time(Duration::from_secs(1));
+	group.warm_up_time(Duration::from_millis(200));
+	group.sample_size(10);
+	for rate in [10_000_000u64, 100_000_000, 1_000_000_000] {
+		let layout =
+			std::sync::Arc::new(lane::Layout::new(rate, 2, 0, &[(0x100, lane::Need::Rest(u64::MAX))]).unwrap());
+		let slots: Vec<Vec<u8>> = (0..64).map(|index| packet(0x100).repeat(layout.count(index))).collect();
+		for every in [0usize, 64, 1] {
+			let unsure: Vec<Vec<usize>> = slots
+				.iter()
+				.map(|slot| match every {
+					0 => Vec::new(),
+					every => (0..slot.len() / 188).step_by(every).collect(),
+				})
+				.collect();
+			let mbps = rate / 1_000_000;
+			group.bench_function(BenchmarkId::new(format!("{mbps}Mb/s"), every), |b| {
+				b.iter(|| {
+					let mut packetizer = rtp::Packetizer::new(layout.clone(), 0x1234_5678);
+					for (index, (slot, unsure)) in slots.iter().zip(&unsure).enumerate() {
+						black_box(packetizer.push(index as u128, slot, unsure));
+					}
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, admission, tables, rtp);
 criterion_main!(benches);
