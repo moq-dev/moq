@@ -35,22 +35,29 @@ Decided with the maintainer on 2026-10-22:
   (`moq_net::time` or `moq_clock`) and calls `update` again with the last
   estimate. `moq_net::time` re-exports only `Instant` and `now` from
   moq-clock, so add `sleep_until` to that re-export rather than giving moq-c
-  a direct moq-clock dependency. A shared async follower in moq-mux was rejected because it would
-  move timers into the policy.
+  a direct moq-clock dependency. A shared async follower in moq-mux was
+  rejected because it would move timers into the policy.
 - `Control` stores only `target`, `policy`, and `applied` today, so it must
-  also remember the last clamped `desired` from `update`. `deadline()` is
-  the earliest time the ramp allowance clears the hysteresis threshold
-  toward it, or reaches `policy.max` for the exempt final step. It returns
-  `None` when `target` equals `desired`, when the last estimate was a drop,
-  or when `desired` is below `policy.max` and within hysteresis of `target`.
-  That last raise can never clear the threshold, because the ramp is capped
-  at `desired`. A settled controller therefore never wakes, and a due
-  deadline never spins the caller's select arm. Unit-test the
-  sub-hysteresis case.
+  also remember the pending raise: the last clamped `desired` from `update`.
+  Invariant: `deadline()` is `Some(t)` only if `update` with the same
+  estimate at `t` will apply a raise. Every `update` that cannot lead to
+  one clears the pending raise:
+  - an unavailable (`None`) estimate, which holds the target
+  - a drop
+  - reaching `desired`
+  - a `desired` below `policy.max` and within hysteresis of `target`, which
+    can never clear the threshold because the ramp is capped at `desired`
+
+  Otherwise `deadline()` is the earliest time the ramp allowance clears the
+  hysteresis threshold, or reaches `policy.max` for the exempt final step.
+  A due deadline therefore never spins the caller's select arm. Unit-test
+  each clearing case, including a scheduled raise followed by a `None`
+  estimate.
 - Fix all three callers in the same PR.
 
-The new method is an additive change to the public `moq_mux::rate` API;
-add a `MIGRATE.md` entry only if an existing signature changes. Cover the
+Public API: additive. It adds `moq_mux::rate::Control::deadline` and a
+`sleep_until` re-export in `moq_net::time`. Add a `MIGRATE.md` entry only
+if an existing signature changes. Wire: none. Cover the
 attack-then-recovery case with paused time in the moq-mux unit tests. Cover
 it again on one caller's loop to prove the timer arm wakes without a grant
 change.
