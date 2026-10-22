@@ -76,5 +76,6 @@ refused.
 
 ## Related
 
+- [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) - the JS publisher mirrors the bound settled here
 - [Interop covers late join and FETCH](/quest/m1/interop-coverage/late-join.md) - the cross-implementation joining FETCH case
 - [IETF request order](/quest/m2/ietf-request-order.md) - d14/15 request IDs and their ordering races
