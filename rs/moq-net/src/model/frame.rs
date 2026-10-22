@@ -15,6 +15,7 @@ use arrayvec::ArrayVec;
 use bytes::Bytes;
 
 use crate::group::{self, GroupState};
+use crate::time::Instant;
 use crate::{Error, IntoBytes, Result, Timestamp, stats};
 
 /// A chunk of data with an upfront size and an optional presentation timestamp.
@@ -36,7 +37,8 @@ pub struct Info {
 	pub timestamp: Option<Timestamp>,
 }
 
-/// A completed frame: an optional timestamp and its full, contiguous payload.
+/// A completed frame: an optional timestamp, its full, contiguous payload, and when it
+/// arrived.
 ///
 /// This is the stored form of every finished frame in a group. The payload is a
 /// single [`Bytes`], so a consumer gets it with one zero-copy slice.
@@ -46,6 +48,28 @@ pub struct Frame {
 	pub timestamp: Option<Timestamp>,
 	/// The full frame payload.
 	pub payload: Bytes,
+	// Restamped as the frame enters a group's cache; see [`Self::arrived`].
+	pub(super) arrived: Instant,
+}
+
+impl Frame {
+	/// A frame of `payload` presented at `timestamp`, or `None` on an untimed track.
+	pub fn new(timestamp: impl Into<Option<Timestamp>>, payload: impl IntoBytes) -> Self {
+		Self {
+			timestamp: timestamp.into(),
+			payload: payload.into_bytes(),
+			arrived: super::clock::now(),
+		}
+	}
+
+	/// When the frame's last byte landed in this node's cache, on the ambient clock.
+	///
+	/// A frame read from a group carries the instant it was written, received, or fetched
+	/// into it, so a reader judges lateness on that rather than on when it got around to
+	/// reading. A frame not yet written to a group carries when it was built.
+	pub fn arrived(&self) -> Instant {
+		self.arrived
+	}
 }
 
 /// A frame with the relay metadata its group keeps beside it, read only by wire egress.
@@ -97,9 +121,9 @@ impl From<Info> for Header {
 ///
 /// `N` defaults to 8. Most reads are not big batches: at the live edge a frame arrives
 /// at a time, so the capacity past the first frame or two is idle stack, and a
-/// publisher holds one buffer per in-flight group. 8 costs 384 bytes and still reads
+/// publisher holds one buffer per in-flight group. 8 costs 448 bytes and still reads
 /// ~5x faster than a frame at a time (`benches/group.rs`). Ask for a larger `N` when
-/// you know you are draining a backlog: 32 is ~8x, for 1.5 KB.
+/// you know you are draining a backlog: 32 is ~8x, for 1.75 KB.
 ///
 /// A default on a const parameter only applies in type position, so name the type to
 /// get it: `let buf: frame::Buffer = Buffer::new()`.
@@ -491,10 +515,7 @@ impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
 			.as_mut()
 			.expect("frame owns its group")
 			.borrow_mut()
-			.frame_commit(Frame {
-				timestamp: self.info.timestamp,
-				payload,
-			})?;
+			.frame_commit(Frame::new(self.info.timestamp, payload))?;
 		self.done = true;
 		Ok(())
 	}

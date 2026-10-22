@@ -1241,7 +1241,7 @@ impl Producer {
 		state.cache += size;
 		let slots = state.reserve_frame();
 		let now = state.charge.add(size + slots);
-		state.frames.push_back(Frame { timestamp, payload });
+		state.frames.push_back(Frame::new(timestamp, payload));
 		if let Some(flate) = &mut state.flate {
 			flate.push(inflated);
 		}
@@ -1330,7 +1330,10 @@ impl Producer {
 		let mut now = None;
 		let mut latest = None;
 		let mut deflated = deflated.into_iter();
+		// The whole batch lands at once.
+		let arrived = super::clock::now();
 		for mut frame in frames.drain() {
+			frame.arrived = arrived;
 			frame.timestamp =
 				on_track(frame.timestamp, self.handle.track.timescale).expect("timestamp scale checked above");
 			if let Some(flate) = &mut state.flate {
@@ -3416,10 +3419,7 @@ mod test {
 				1 => {
 					let mut buffer = frame::Buffer::<1>::new();
 					buffer
-						.push(Frame {
-							timestamp: Some(Timestamp::ZERO),
-							payload: bytes::Bytes::new(),
-						})
+						.push(Frame::new(Timestamp::ZERO, bytes::Bytes::new()))
 						.unwrap();
 					group.write_frames(&mut buffer).unwrap();
 				}
@@ -3450,10 +3450,7 @@ mod test {
 	#[test]
 	fn one_frame_fits_the_charged_slots() {
 		let mut frames: VecDeque<Frame> = VecDeque::new();
-		frames.push_back(Frame {
-			timestamp: Some(Timestamp::ZERO),
-			payload: Bytes::new(),
-		});
+		frames.push_back(Frame::new(Timestamp::ZERO, Bytes::new()));
 		let capacity = frames.capacity();
 		assert!(
 			capacity <= FRAME_SLOTS,
@@ -3809,10 +3806,7 @@ mod test {
 		let head = Head {
 			start: 0,
 			first_object: true,
-			frames: vec![Frame {
-				timestamp: None,
-				payload: Bytes::from_static(b"ab"),
-			}],
+			frames: vec![Frame::new(None, Bytes::from_static(b"ab"))],
 			objects: Vec::new(),
 			sizes: None,
 		};
@@ -3839,14 +3833,8 @@ mod test {
 			start: 0,
 			first_object: true,
 			frames: vec![
-				Frame {
-					timestamp: None,
-					payload: Bytes::from_static(b"a"),
-				},
-				Frame {
-					timestamp: None,
-					payload: Bytes::from_static(b"b"),
-				},
+				Frame::new(None, Bytes::from_static(b"a")),
+				Frame::new(None, Bytes::from_static(b"b")),
 			],
 			objects: vec![None, fields(1)],
 			sizes: None,
@@ -4343,6 +4331,46 @@ mod test {
 			.unwrap()
 			.unwrap();
 		assert_eq!(chunk, Some(Bytes::from_static(b"foo")));
+	}
+
+	/// Each frame is stamped when its last byte lands, whichever way it is written, and
+	/// readers see that stamp however late they read.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn frames_carry_when_they_landed() {
+		use std::time::Duration;
+
+		let start = moq_clock::now();
+		let mut producer = Info { sequence: 0 }.produce();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
+
+		moq_clock::sleep(Duration::from_millis(10)).await;
+		let mut chunked = producer
+			.create_frame(frame::Info {
+				size: 2,
+				timestamp: Some(Timestamp::ZERO),
+			})
+			.unwrap();
+		chunked.write(Bytes::from_static(b"b")).unwrap();
+		moq_clock::sleep(Duration::from_millis(10)).await;
+		chunked.write(Bytes::from_static(b"c")).unwrap();
+		chunked.finish().unwrap();
+
+		moq_clock::sleep(Duration::from_millis(10)).await;
+		let mut batch = frame::Buffer::<2>::new();
+		batch.push(Frame::new(Timestamp::ZERO, Bytes::from_static(b"d"))).unwrap();
+		moq_clock::sleep(Duration::from_millis(10)).await;
+		batch.push(Frame::new(Timestamp::ZERO, Bytes::from_static(b"e"))).unwrap();
+		producer.write_frames(&mut batch).unwrap();
+		producer.finish().unwrap();
+
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		let mut consumer = producer.consume();
+		let mut arrived = Vec::new();
+		while let Some(frame) = consumer.read_frame().await.unwrap() {
+			arrived.push(frame.arrived().duration_since(start).as_millis());
+		}
+		assert_eq!(arrived, [0, 20, 40, 40], "stamped on completion, a batch at its write");
 	}
 
 	/// A frame whose timestamp is at a different scale is converted to the group's
@@ -4885,10 +4913,7 @@ mod test {
 		let mut batch = frame::Buffer::<2>::new();
 		for index in 1..3 {
 			batch
-				.push(Frame {
-					timestamp: None,
-					payload: verbose(index),
-				})
+				.push(Frame::new(None, verbose(index)))
 				.unwrap();
 		}
 		group.write_frames(&mut batch).unwrap();

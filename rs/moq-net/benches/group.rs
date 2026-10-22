@@ -86,10 +86,7 @@ fn bench_write(c: &mut Criterion) {
 				|| (fresh_group(), frame::Buffer::<32>::new()),
 				|(mut ctx, mut buf)| {
 					for _ in 0..n {
-						let frame = frame::Frame {
-							timestamp: Some(Timestamp::ZERO),
-							payload: payload.clone(),
-						};
+						let frame = frame::Frame::new(Timestamp::ZERO, payload.clone());
 						// A full buffer hands the frame back: flush, then take it.
 						if let Err(frame) = buf.push(frame) {
 							ctx.group.write_frames(&mut buf).unwrap();
