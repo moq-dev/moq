@@ -770,6 +770,7 @@ export class AuthSession {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#pending.set(0);
+		this.#setupPending.set(0);
 		for (const presented of this.#presented) {
 			presented.ended = true;
 			presented.isAnswered = true;

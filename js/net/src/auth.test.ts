@@ -656,6 +656,28 @@ describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 	});
 });
 
+// Close ends every token here unanswered, so nothing waiting on the setup token stays parked.
+test("closing a session settles its unanswered setup token", async () => {
+	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Lite.ALPN_07_WIP });
+	const requests = server.auth.requests();
+	try {
+		await requests.next();
+		let settled = false;
+		void wireOf(client)
+			.auth.setupAnswered()
+			.then(() => {
+				settled = true;
+			});
+		for (let i = 0; i < 10; i++) await nextTask();
+		expect(settled).toBe(false);
+		client.abort();
+		await settles(() => settled);
+	} finally {
+		client.abort();
+		server.abort();
+	}
+});
+
 // moq-transport's AUTH_ERROR carries no code that may pass, so only lite retries.
 test("lite-07 presents a transiently refused token again after a backoff", async () => {
 	const clock = new Manual();
