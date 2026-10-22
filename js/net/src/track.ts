@@ -1599,12 +1599,15 @@ export class Producer {
 	 * at or past it is refused. Unlike {@link close} it is not terminal: call `close()` once
 	 * the remaining groups are written. Readers end once the live edge reaches the end's
 	 * group, independently of closure. Throws if the track is closed, already has an end, or
-	 * `end` would orphan a group or frame already produced, including a group an earlier
-	 * producer of the name wrote, which a replacement continues.
+	 * `end` falls before or inside a group already produced, including one an earlier producer
+	 * of the name wrote, which a replacement continues.
 	 */
 	finishAt(end: Location): void {
-		if (finalSequence(end) < this.#sequence.next) {
-			throw new ProtocolViolation(`track end ${end.group}/${end.frame} is below the name's next sequence`);
+		// A replacement continues its name's timeline, so it can't end before or inside a group
+		// an earlier producer wrote; only its own last group can be cut mid-way.
+		const ownLast = end.frame !== 0 && this.#received === end.group + 1;
+		if (end.group < this.#sequence.next && !ownLast) {
+			throw new ProtocolViolation(`track end ${end.group}/${end.frame} is inside the name's earlier groups`);
 		}
 		this.#finishAt(end);
 	}

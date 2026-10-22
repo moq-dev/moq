@@ -2960,16 +2960,19 @@ impl Producer {
 	///
 	/// Repeating the declared end is a no-op, and a mid-group end may refine the group
 	/// boundary it falls just before (a peer may name only the boundary first). Any other
-	/// second end is [`Error::ProtocolViolation`], and so is one below a group an earlier
-	/// producer of the name wrote, which a replacement continues.
+	/// second end is [`Error::ProtocolViolation`], and so is one before or inside a group an
+	/// earlier producer of the name wrote, which a replacement continues.
 	///
 	/// On a [received](Self::received) copy, groups below the end may still be in flight:
 	/// readers wait for a missing one until a grace passes, the subscription's max delay
 	/// or one second without one, before ending at the boundary.
 	pub fn finish_at(&mut self, end: Position) -> Result<()> {
 		let mut state = self.modify()?;
-		// A received copy answers to its publisher's end, which the session judges.
-		if !state.received && end.final_sequence().is_some_and(|fin| fin < state.sequence.next()) {
+		// A replacement continues its name's timeline, so it can't end before or inside a group
+		// an earlier producer wrote; only its own last group can be cut mid-way. A received
+		// copy answers to its publisher's end, which the session judges.
+		let own_last = end.frame != 0 && state.max_sequence == Some(end.group);
+		if !state.received && end.group < state.sequence.next() && !own_last {
 			return Err(Error::ProtocolViolation);
 		}
 		match state.end {
