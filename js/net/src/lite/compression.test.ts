@@ -66,7 +66,7 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 		} finally {
 			for (const origin of [source, destination]) origin.close();
 			for (const peer of peers) peer.abort();
-			await clock.advanceAsync(Nano.zero);
+			await clock.advance(Nano.zero);
 			restore();
 		}
 	});
