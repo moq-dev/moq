@@ -2230,9 +2230,6 @@ impl Connection {
         let Some(packet) = packet else {
             return;
         };
-        // Only a protected packet is the peer's word: anyone on the path can send a Retry or a
-        // Version Negotiation packet.
-        self.heard_since_sent = true;
         if self.side.is_server() {
             if self.spaces[SpaceId::Initial].crypto.is_some() && space_id == SpaceId::Handshake {
                 // A server stops sending and processing Initial packets when it receives its first Handshake packet.
@@ -2716,7 +2713,11 @@ impl Connection {
             );
         }
         let result = self.process_decrypted_packet(now, remote, number, packet);
-        if number.is_some() {
+        // Only a protected packet is the peer's word: anyone on the path can send a Retry or a
+        // Version Negotiation packet. One from another address, such as a probe of a new path,
+        // says nothing of the active one.
+        if number.is_some() && remote == self.path.remote {
+            self.heard_since_sent = true;
             self.probe_on_heard(now);
         }
         result
