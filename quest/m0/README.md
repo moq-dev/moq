@@ -68,7 +68,7 @@ source, and unwinding so a panic closes only its connection.
 
 Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
 quests here. The nixpkgs bump broke the Linux zigbuild release builds (its
-GCC 16 miscompiles lld 21, fixed upstream and waiting on `nixpkgs-unstable`),
+GCC 16 miscompiles lld 21; fixed by bumping nixpkgs past the upstream fix),
 and fat LTO in the release profile broke the fuzz build. Audio quality has been
 red since it landed, against budgets recorded locally; re-measuring them on
 the runner moved here from Watch (maintainer, 2026-10-13). The other red jobs
@@ -83,7 +83,6 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 ## Required
 
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
-- [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
 - [qmux 0.5.3](/quest/m0/qmux-0.5.3.md) - crates.io publishes qmux 0.5.3 with the builder session config the release backport of #5609 needs
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
 - [Release fixed delay](/quest/m0/release-fixed-delay.md) - a fixed latency on `release`, which moq.dev runs, ignores the catalog's jitter and delay as `main` already does
