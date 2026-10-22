@@ -117,7 +117,7 @@ child records whether its behavior is new on main or inherited from release.
 - [Compressed tracks](/quest/m1/compress/README.md) - mid-group widening and application migration have existing owners
 - [Archive consumer](/quest/m1/archive/consumer.md) - current producer and CLI reader still need the new-format roundtrip
 - [Measured release performance](/quest/m1/release-perf/README.md) - existing paired benchmark regressions and their confirmation runs
-- [Transport performance audit](/quest/m1/audit-perf.md) - congestion-control coverage remains outstanding
+- [Transport performance audit](/quest/m2/audit-perf.md) - congestion-control coverage remains outstanding
 - [Binding timestamps](/quest/m1/binding-timestamps.md) - exact timestamps across language APIs
 - [Dependency audit](/quest/m2/audit-deps.md) - existing advisory inventory
 - [Release gates](/quest/m0/ci/release-gates.md) - post-cut ruleset verification

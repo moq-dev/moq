@@ -112,6 +112,6 @@ Check first (from the m0 CI pipeline audit, 2026-10-21):
   on 2026-10-20 and passed on the 2026-10-21 Nightly; it is owned by
   [Audio devices on ARM](/quest/m1/audio-devices-arm.md). Owned elsewhere
   besides the above: the Rust and JS benchmark legs by the
-  [performance audit](/quest/m1/audit-perf.md), Audio quality's budgets by
+  [performance audit](/quest/m2/audit-perf.md), Audio quality's budgets by
   the [audio jitter target](/quest/m1/audio-jitter-target/README.md), and the
   bun advisories with the Rust ones.
