@@ -1,7 +1,7 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { GroupTooLarge, NotFound, TimestampMismatch } from "./error.ts";
+import { GroupTooLarge, NotFound, ProtocolViolation, TimestampMismatch } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { TrackSequences } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -133,6 +133,8 @@ test("an empty replacement ends past its predecessor's groups", async () => {
 
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	const subscriber = second.subscribe();
+	expect(() => second.finishAt({ group: 0, frame: 0 })).toThrow(ProtocolViolation);
+	expect(() => second.finishAt({ group: 0, frame: 1 })).toThrow(ProtocolViolation);
 	second.close();
 	expect(await subscriber.finished()).toEqual({ group: 1, frame: 0 });
 	broadcast.close();
