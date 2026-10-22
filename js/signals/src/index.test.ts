@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, Second } from "@moq/clock";
+import { Manual, Milli, Nano, now, Second } from "@moq/clock";
 import { Computed, type Dispose, Effect, type GetPromise, Once, race, Signal } from "./index.ts";
 
 const NO_SUBSCRIPTION_WARNING = "Effect did not subscribe to any signals; it will never rerun.";
@@ -585,7 +585,7 @@ describe("Effect", () => {
 			expect(runs).toBe(1); // parked awaiting the task
 
 			// Five seconds pass. The warning fires, but the next run must stay shut.
-			await clock.advanceAsync(Nano.fromSecond(Second(5)));
+			await clock.advance(Nano.fromSecond(Second(5)));
 			expect(runs).toBe(1);
 			expect(warn).toHaveBeenCalled();
 
@@ -634,7 +634,7 @@ describe("Effect", () => {
 			await settle();
 
 			// The wait let go, so five seconds later a closed effect is not warned about.
-			await clock.advanceAsync(Nano.fromSecond(Second(5)));
+			await clock.advance(Nano.fromSecond(Second(5)));
 			const warned = warn.mock.calls.some((call) => String(call[0]).includes("spawn is still running"));
 			expect(warned).toBe(false);
 		} finally {
@@ -864,19 +864,19 @@ describe("Effect", () => {
 			effect.interval(() => fired.push("tick"), ms(4));
 			effect.timeout((child) => child.cleanup(() => fired.push("timeout")), ms(6));
 
-			await clock.advanceAsync(ms(3));
+			await clock.advance(ms(3));
 			expect(fired).toEqual([]);
-			await clock.advanceAsync(ms(1));
+			await clock.advance(ms(1));
 			expect(fired).toEqual(["tick"]);
-			await clock.advanceAsync(ms(2));
+			await clock.advance(ms(2));
 			expect(fired).toEqual(["tick", "timeout"]);
-			await clock.advanceAsync(ms(2));
+			await clock.advance(ms(2));
 			expect(fired).toEqual(["tick", "timeout", "tick"]);
-			await clock.advanceAsync(ms(2));
+			await clock.advance(ms(2));
 			expect(fired).toEqual(["tick", "timeout", "tick", "timer"]);
 
 			effect.close();
-			await clock.advanceAsync(ms(20));
+			await clock.advance(ms(20));
 			expect(fired).toEqual(["tick", "timeout", "tick", "timer"]);
 		} finally {
 			effect.close();
@@ -1413,4 +1413,75 @@ test("races from another package copy release their source listeners", async () 
 	const source = counted<number>();
 	expect(await race([copy.Signal.race(source), Promise.resolve("other")])).toBe("other");
 	expect(source.listeners).toBe(0);
+});
+
+test("an effect interval arms its first period synchronously and steps subsequent periods", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const effect = new Effect();
+	const at: number[] = [];
+	try {
+		effect.interval(() => at.push(clock.now()), Nano(10));
+		clock.jump(Nano(10));
+		await clock.advance(Nano.zero);
+		expect(at).toEqual([10]);
+		await clock.advance(Nano(30));
+		expect(at).toEqual([10, 20, 30, 40]);
+	} finally {
+		effect.close();
+		restore();
+	}
+});
+
+test("an effect interval refuses a zero period synchronously", () => {
+	const effect = new Effect();
+	try {
+		expect(() => effect.interval(() => {}, Nano.zero)).toThrow(RangeError);
+	} finally {
+		effect.close();
+	}
+});
+
+test("an effect interval delays a full period after a stalled event loop", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const effect = new Effect();
+	const at: number[] = [];
+	try {
+		effect.interval(() => at.push(clock.now()), Nano(10));
+		clock.jump(Nano(35));
+		await clock.advance(Nano.zero);
+		expect(at).toEqual([35]);
+		await clock.advance(Nano(9));
+		expect(at).toEqual([35]);
+		await clock.advance(Nano(1));
+		expect(at).toEqual([35, 45]);
+	} finally {
+		effect.close();
+		restore();
+	}
+});
+
+test("an effect interval starts its next period on a newly installed clock's origin", async () => {
+	const first = new Manual();
+	first.jump(Nano(1000));
+	const restoreFirst = first.install();
+	const second = new Manual();
+	let restoreSecond: (() => void) | undefined;
+	const effect = new Effect();
+	const at: number[] = [];
+	try {
+		effect.interval(() => {
+			at.push(now());
+			if (at.length === 1) restoreSecond = second.install();
+		}, Nano(10));
+		await first.advance(Nano(10));
+		expect(at).toEqual([1010]);
+		await second.advance(Nano(10));
+		expect(at).toEqual([1010, 10]);
+	} finally {
+		effect.close();
+		restoreSecond?.();
+		restoreFirst();
+	}
 });

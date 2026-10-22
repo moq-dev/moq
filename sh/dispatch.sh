@@ -56,7 +56,8 @@ declare -A scope=(
     # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
     # fails a check that reads a cross-tree input this pattern misses.
     # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
-    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+    # Root Nix inputs own the browser version every npm Playwright pin matches.
+    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
@@ -280,7 +281,10 @@ for module in "${selected[@]}"; do
         # The preamble keeps docs and target-specific lints; the test build
         # below enforces default-feature clippy without a second compile.
         check:rs) just rs lint-changed "$rs_list" ;;
-        check:bench) cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring ;;
+        check:bench)
+            python3 bench/compare.test.py
+            cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
+            ;;
         check:quest) quest check ;;
         check:drill) just test drill-sensitivity --apply-only ;;
         check:obs_compile) just obs compile ;;

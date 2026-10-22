@@ -71,6 +71,13 @@ impl session::MediaSink for IngestSink {
 	fn abort(&mut self, err: moq_net::Error) {
 		self.bridges.abort(err);
 	}
+
+	fn finish(&mut self) -> Result<moq_net::broadcast::Finish> {
+		self.bridges.finish()?;
+		self.catalog.finish()?;
+		// Taken while the bridges are alive, so it holds the tracks just finished.
+		Ok(self.broadcast.clone().finish())
+	}
 }
 
 #[cfg(test)]
@@ -101,5 +108,42 @@ mod tests {
 
 		let info = broadcast.consume().track("0.avc3").unwrap().query().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));
+	}
+
+	/// A clean end finishes every track, the catalog and a video track that never got a frame
+	/// included, so the finished broadcast serves them to a late subscriber for the retention.
+	#[tokio::test]
+	async fn finish_keeps_every_track_for_its_retention() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let max_age = Duration::from_secs(3);
+		let mut sink = IngestSink::new(broadcast, moq_mux::catalog::Config::default().with_max_age(max_age)).unwrap();
+		let audio = str0m::media::MediaKind::Audio;
+		sink.on_track("0".into(), audio, str0m::format::Codec::Opus, Some((48_000, 2)))
+			.unwrap();
+		let video = str0m::media::MediaKind::Video;
+		sink.on_track("1".into(), video, str0m::format::Codec::Vp8, None)
+			.unwrap();
+		let payload = bytes::Bytes::from_static(&[0xfc, 0xff, 0xfe]);
+		sink.on_frame(
+			"0".into(),
+			codec::Frame {
+				timestamp_us: 20_000,
+				payload,
+			},
+		)
+		.unwrap();
+
+		let finish = sink.finish().unwrap();
+		assert_eq!(finish.linger(), max_age);
+		drop(sink);
+		let mut catalog = consumer.track("catalog.json").unwrap().subscribe(None).await.unwrap();
+		assert!(
+			catalog.recv_group().await.unwrap().is_some(),
+			"the late subscriber reads the catalog"
+		);
+		assert!(consumer.track("0.opus").is_ok());
+		drop(finish);
+		assert!(consumer.is_closed());
 	}
 }

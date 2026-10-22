@@ -21,8 +21,7 @@
 	},
 	"dependencies": {
 		"@moq/flate": "workspace:^",
-		"@moq/net": "workspace:^",
-		"@moq/signals": "workspace:^"
+		"@moq/net": "workspace:^"
 	},
 	"peerDependencies": {
 		"@zod/mini": "^4.5.0",

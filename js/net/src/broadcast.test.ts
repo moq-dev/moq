@@ -58,6 +58,48 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	expect((await pendingRequest(consumer))?.name).toBe("video");
 });
 
+test("a staged track resolves its subscribers at commit, with what was written", async () => {
+	const consumer = new TestConsumer();
+	const track = consumer.track("video");
+	const reader = track.subscribe().ordered();
+	const request = await pendingRequest(consumer);
+	if (!request) throw new Error("expected request");
+
+	const staged = request.stage({ timescale: Timescale.MILLI });
+	staged.producer.writeFrame(textFrame("hello"));
+	const pending = Symbol("pending");
+	expect(await Promise.race([track.info(), Promise.resolve(pending)])).toBe(pending);
+
+	staged.commit();
+	expect((await track.info()).timescale).toBe(Timescale.MILLI);
+	expect(await reader.readString()).toBe("hello");
+});
+
+test("disposing an uncommitted staged track rejects the request", async () => {
+	const consumer = new TestConsumer();
+	const info = consumer.track("video").info();
+	const request = await pendingRequest(consumer);
+	if (!request) throw new Error("expected request");
+
+	{
+		using staged = request.stage({ timescale: Timescale.MILLI });
+		staged.producer.writeFrame(textFrame("hello"));
+	}
+	await expect(info).rejects.toThrow();
+});
+
+test("a disposed staged track refuses a later commit", async () => {
+	const consumer = new TestConsumer();
+	const info = consumer.track("video").info();
+	const request = await pendingRequest(consumer);
+	if (!request) throw new Error("expected request");
+
+	const staged = request.stage({ timescale: Timescale.MILLI });
+	staged[Symbol.dispose]();
+	expect(() => staged.commit()).toThrow("staged track already committed or dropped");
+	await expect(info).rejects.toThrow("staged track dropped");
+});
+
 // A replacement continues the name's timeline, so its groups can't start before the highest one an
 // earlier producer checked, while a new broadcast starts over.
 test("a replacement producer refuses a rewind past its predecessor", () => {
@@ -898,13 +940,13 @@ test("finish serves finished tracks until stale", async () => {
 			done = true;
 		});
 
-		await clock.advanceAsync(Nano.fromMilli(Milli(4_000)));
+		await clock.advance(Nano.fromMilli(Milli(4_000)));
 		const late = consumer.track("audio").subscribe().ordered();
 		expect(await late.readString()).toBe("audio");
 		expect(done).toBe(false);
 		expect(broadcast.route).toBeDefined();
 
-		await clock.advanceAsync(Nano.fromMilli(Milli(1_000)));
+		await clock.advance(Nano.fromMilli(Milli(1_000)));
 		await wait;
 		expect(Number(clock.now())).toBe(Nano.fromMilli(Milli(5_000)));
 		expect(consumer.closed.peek()).toBeNull();
@@ -963,7 +1005,7 @@ test("closing the broadcast elsewhere ends the linger", async () => {
 		finishedTrack(broadcast, "video", 30).close();
 		const finish = broadcast.finish();
 		const wait = finish.wait();
-		await clock.advanceAsync(Nano.fromMilli(Milli(1_000)));
+		await clock.advance(Nano.fromMilli(Milli(1_000)));
 		broadcast.close();
 		await wait;
 		expect(Number(clock.now())).toBe(Nano.fromMilli(Milli(1_000)));

@@ -1,7 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Group, Error as NetError, Time, Track } from "@moq/net";
-import { DEFAULT_MAX_FRAME_SIZE } from "../codec.ts";
 import { Consumer, Producer, Rolled } from "./index.ts";
 
 // Ask for a replay window, so the superseded first group is delivered rather than skipped by the
@@ -173,18 +172,14 @@ test("an ended log refuses with its own error", () => {
 });
 
 // A payload past the group budget is refused before anything is written, so the log carries on: the
-// next payload lands and decodes, which with compression proves the window never moved. One past the
-// decoder's cap is refused the same way rather than ending the track.
+// next payload lands and decodes, which with compression proves the window never moved.
 for (const compression of [false, true]) {
 	test(`an oversized payload is refused and the log continues (compression=${compression})`, async () => {
 		const track = new Track.Producer("test");
 		const producer = new Producer({ track, compression: compression ? "deflate" : "none" });
 		producer.append({ value: payloads(1)[0] });
 
-		const huge = new Uint8Array(DEFAULT_MAX_FRAME_SIZE + 1);
-		expect(() => producer.append({ value: huge.subarray(0, Group.MAX_GROUP_CACHE_BYTES) })).toThrow(
-			NetError.GroupTooLarge,
-		);
+		const huge = new Uint8Array(Group.MAX_GROUP_CACHE_BYTES);
 		expect(() => producer.append({ value: huge })).toThrow(NetError.GroupTooLarge);
 
 		producer.append({ value: payloads(2)[1] });
@@ -193,16 +188,22 @@ for (const compression of [false, true]) {
 	});
 }
 
-// The budget check stands in for the decoder's cap: a payload that fits is one every consumer can
-// inflate.
-test("the group budget is within the decoder's cap", () => {
-	expect(Group.MAX_GROUP_CACHE_BYTES).toBeLessThanOrEqual(DEFAULT_MAX_FRAME_SIZE);
+// A compressed payload is charged its inflated size, since that is what every reader's decoder holds
+// the group to: two payloads that each fit, and deflate to almost nothing, still overflow together.
+test("a compressed log is charged its inflated size", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer({ track, compression: "deflate" });
+	const half = new Uint8Array(Group.MAX_GROUP_CACHE_BYTES / 2 + 1);
+	producer.append({ value: half });
+	expect(() => producer.append({ value: half })).toThrow(NetError.GroupTooLarge);
+	producer.finish();
+	expect(await drain(track.subscribe(), true)).toEqual([half]);
 });
 
 test("a refused first payload publishes nothing", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer({ track, compression: "deflate" });
-	expect(() => producer.append({ value: new Uint8Array(DEFAULT_MAX_FRAME_SIZE + 1) })).toThrow(
+	expect(() => producer.append({ value: new Uint8Array(Group.MAX_GROUP_CACHE_BYTES + 1) })).toThrow(
 		NetError.GroupTooLarge,
 	);
 	producer.finish();
