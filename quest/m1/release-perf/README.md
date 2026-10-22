@@ -86,9 +86,9 @@ and 12% less on fanout, with the same delivery.
 - JS `net/bench/frames.ts` on bun: lite rows 1.2 to 1.3x, IETF rows 1.3 to
   2.2x ([JS frames](/quest/m1/release-perf/js-frames.md)).
 
-The raw report lived in a scratch directory that has since been removed. The
-[comparison harness](/quest/m1/release-perf/compare-harness.md) keeps the next
-one.
+The raw report lived in a scratch directory that has since been removed.
+`just bench <base>` now pairs full Criterion IDs; point `MOQ_BENCH_ARTIFACTS`
+outside the worktree to keep the next one.
 
 ## Required
 
@@ -99,9 +99,8 @@ one.
 - [Stats report](/quest/m1/release-perf/stats-report.md) - the stats drain locks each row once and its bench counts the wire walk; per-label bytes stay, at an accepted O(live sessions)
 - [Re-check](/quest/m1/release-perf/recheck.md) - the screen-only moves are re-measured with instruction counts, and the ones that hold are fixed or accepted
 - [JS frames](/quest/m1/release-perf/js-frames.md) - the js/net frame path is no slower than release in a browser, or the gap is accepted
-- [Comparison harness](/quest/m1/release-perf/compare-harness.md) - `just bench <base>` pairs full Criterion IDs and keeps its report
 
 ## Related
 
 - [Performance audit](/quest/m1/audit-perf.md) - compares nightly to nightly; this epic compares main to release
-- [Benchmark regressions in CI](/quest/m2/bench-ci.md) - PR-time comparison against the base branch
+- [Nightly benchmark regressions](/quest/m1/bench-ci.md) - paired nightly-to-nightly comparison on one runner

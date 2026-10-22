@@ -57,6 +57,9 @@ type ControlMessage =
 	| "subscribe-ok"
 	| "subscribe-update"
 	| "subscribe-namespace"
+	| "subscribe-tracks"
+	| "tracks-update"
+	| "publish-ok"
 	| "publish"
 	| "publish-namespace"
 	| "fetch"
@@ -97,6 +100,37 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 	const epoch = id === MSG_PARAM_EPOCH && from17;
 
 	switch (message) {
+		case "subscribe-tracks":
+			return (
+				auth ||
+				forward ||
+				(from19 &&
+					(objectTimeout ||
+						id === MSG_PARAM_MAX_CACHE_DURATION ||
+						subgroupTimeout ||
+						priority ||
+						filter ||
+						order ||
+						fill ||
+						range ||
+						trackRange ||
+						newGroup ||
+						include))
+			);
+		case "tracks-update":
+			return auth || id === 0x34n || forward || priority || filter || fill || range || trackRange || newGroup;
+		case "publish-ok":
+			return (
+				expires ||
+				(!draft20(version) &&
+					(forward ||
+						priority ||
+						filter ||
+						(order && !from19) ||
+						objectTimeout ||
+						subgroupTimeout ||
+						newGroup))
+			);
 		case "subscribe":
 			return (
 				id === MSG_PARAM_MAX_AGE ||

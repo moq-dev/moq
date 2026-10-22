@@ -104,6 +104,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
 			ready!(reader.poll_decode::<DataType>(&mut cx))?;
+			reader.set_priority(crate::priority::RECV_CONTROL);
 			*setup = Some(reader);
 		}
 		// A closed transport can still yield a complete buffered SETUP. Decode it
@@ -346,7 +347,7 @@ where
 		session_stream: setup_stream,
 		ending: None,
 		publisher,
-		subscriber: SubscriberDriver::new(subscriber, early),
+		subscriber: SubscriberDriver::new(subscriber, early, client),
 		session,
 	};
 

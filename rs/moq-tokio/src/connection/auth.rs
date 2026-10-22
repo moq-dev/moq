@@ -313,7 +313,7 @@ async fn present(
 			let attempt = async {
 				if opening.is_none() {
 					if let Some(delay) = delay {
-						tokio::time::sleep(delay).await;
+						moq_clock::sleep(delay).await;
 					}
 					let handle = session.auth();
 					let bytes = replay.bytes.clone();
@@ -401,6 +401,7 @@ async fn present(
 }
 
 #[cfg(all(test, feature = "tcp"))]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 
@@ -429,10 +430,7 @@ mod tests {
 		let client = async {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions(versions.clone())
-				.connect(
-					now,
-					crate::transport::Session::new(client, moq_net::transport::Binding::InBand),
-				)
+				.connect(now, client)
 				.await
 				.unwrap();
 			(session, AbortOnDrop::new(tokio::spawn(moq_net::time::run(driver))))
@@ -440,10 +438,7 @@ mod tests {
 		let server = async {
 			let request = moq_net::Server::new()
 				.with_versions(versions.clone())
-				.accept_request(
-					now,
-					crate::transport::Session::new(server, moq_net::transport::Binding::InBand),
-				)
+				.accept_request(now, server)
 				.await
 				.unwrap();
 			let mut requests = request.auth().requests().unwrap();

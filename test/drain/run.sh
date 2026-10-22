@@ -119,7 +119,7 @@ if [[ $status -eq 0 ]]; then
     elif ! harness_wait "$A_PID"; then
         echo "error: relay A exited with a failure" >&2
         status=1
-    elif ! grep -q "drain ended with no established sessions; exiting" "$HARNESS_RUN/relay-a.log"; then
+    elif ! grep -q "drain ended with every session gone; exiting" "$HARNESS_RUN/relay-a.log"; then
         echo "error: relay A did not report that every session left on its own" >&2
         status=1
     else

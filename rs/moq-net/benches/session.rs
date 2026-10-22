@@ -120,6 +120,8 @@ struct Shape {
 	window: usize,
 	/// Group streams a viewer's relay may have open toward it at once.
 	credit: Option<usize>,
+	/// Publish compressed groups and exercise negotiated versus plain fallback egress.
+	compress: bool,
 	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
 	/// Hold each viewer's resolved metadata query between FETCHes, isolating
@@ -144,6 +146,7 @@ impl Shape {
 		window: 1024 * 1024,
 		credit: None,
 		fetch: false,
+		compress: false,
 		query: false,
 	};
 
@@ -381,7 +384,11 @@ impl Cluster {
 				let broadcast = origin
 					.publish(path(publisher * shape.broadcasts + index), Default::default())
 					.unwrap();
-				this.tracks.push(broadcast.create_track(TRACK, timed()).unwrap());
+				this.tracks.push(
+					broadcast
+						.create_track(TRACK, timed().with_compress(shape.compress))
+						.unwrap(),
+				);
 				this._broadcasts.push(broadcast);
 			}
 
@@ -1256,6 +1263,20 @@ fn session(c: &mut Criterion) {
 		return;
 	}
 	let base = Shape::BASE;
+
+	delivery(
+		c,
+		"compression",
+		[1, 16].into_iter().flat_map(|publishers| {
+			[1, 16].map(move |viewers| Shape {
+				publishers,
+				viewers,
+				compress: true,
+				frame: 1024,
+				..base
+			})
+		}),
+	);
 
 	delivery(
 		c,
