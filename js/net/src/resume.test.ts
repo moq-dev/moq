@@ -310,7 +310,7 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 	let sub: track.Subscriber | undefined;
 	let disposeB: (() => void) | undefined;
 	try {
-		await clock.advanceAsync(Nano(0));
+		await clock.advance(Nano(0));
 		const active = request.active.peek();
 		if (!active) throw new Error("expected the incumbent route");
 		sub = active.track("seq").subscribe({ maxDelay: Milli(60_000) });
@@ -349,11 +349,11 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 			group.close();
 		}
 		disposeB = serve(origin, b.broadcast, 9n);
-		await clock.advanceAsync(Nano(0));
+		await clock.advance(Nano(0));
 		expect(request.active.peek()).toBe(active);
 		disposeA();
 		a.stop(new StreamError(StreamCode.SessionClosed));
-		await clock.advanceAsync(Nano(0));
+		await clock.advance(Nano(0));
 		for (let frame = 2; frame < 4; frame++) seen.push(dec.decode((await interrupted.readFrame())?.payload));
 		expect(await interrupted.readFrame()).toBeUndefined();
 		interrupted.close();
@@ -364,7 +364,7 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 		expect(await successor.readFrame()).toBeUndefined();
 		successor.close();
 		expect(seen).toEqual(Array.from({ length: 12 }, (_, index) => `${Math.floor(index / 4)}.${index % 4}`));
-		await clock.advanceAsync(Nano(0));
+		await clock.advance(Nano(0));
 		expect(sub.tryRecvGroup()).toBeUndefined();
 		// The source is still open, so the resumed subscription must stay live.
 		expect(sub.closed.peek()).toBeUndefined();
