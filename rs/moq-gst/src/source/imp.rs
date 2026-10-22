@@ -767,6 +767,7 @@ async fn follow_catalog(
 	let playback = Playback {
 		pads: pads.clone(),
 		timeline: Arc::default(),
+		restarts: Restarts::default(),
 		finished: Arc::default(),
 	};
 	let mut active: HashMap<String, ActiveTrack> = HashMap::new();
@@ -1016,6 +1017,7 @@ fn reconcile(
 					descriptor: d.shape.container.clone(),
 					pads: pads.clone(),
 					timeline: playback.timeline.clone(),
+					restarts: playback.restarts.clone(),
 					finished: playback.finished.clone(),
 					state: state.clone(),
 					cancel: cancel_rx,
@@ -1071,7 +1073,35 @@ fn plan_reconcile<S: PartialEq>(desired: &HashMap<String, S>, active: &HashMap<S
 struct Playback {
 	pads: Pads,
 	timeline: Arc<Timeline>,
+	restarts: Restarts,
 	finished: Finished,
+}
+
+/// The timeline of each sibling instance a rendition restarted on, shared by every rendition
+/// reading that instance so their first frames fix one mapping for all of them.
+#[derive(Clone, Default)]
+struct Restarts(Arc<Mutex<Vec<Restart>>>);
+
+/// An instance some rendition restarted on, and the timeline its renditions share while any reads it.
+type Restart = (moq_net::broadcast::Consumer, std::sync::Weak<Timeline>);
+
+impl Restarts {
+	/// The timeline of `instance`, new unless another rendition already restarted on it.
+	fn timeline(&self, instance: &moq_net::broadcast::Consumer) -> Arc<Timeline> {
+		let mut restarts = self.0.lock().unwrap();
+		// Forget an instance no rendition reads any more, releasing its handle.
+		restarts.retain(|(_, timeline)| timeline.strong_count() > 0);
+		if let Some(timeline) = restarts
+			.iter()
+			.find(|(known, _)| known.is_clone(instance))
+			.and_then(|(_, timeline)| timeline.upgrade())
+		{
+			return timeline;
+		}
+		let timeline = Arc::default();
+		restarts.push((instance.clone(), Arc::downgrade(&timeline)));
+		timeline
+	}
 }
 
 /// Each pad's rendition with a track it played to the end. A new subscription to a finished
@@ -1117,6 +1147,8 @@ struct Pump {
 	descriptor: hang::catalog::Container,
 	pads: Pads,
 	timeline: Arc<Timeline>,
+	/// The run's [`Playback::restarts`].
+	restarts: Restarts,
 	/// The run's [`Playback::finished`].
 	finished: Finished,
 	/// Shared with this rendition's [`ActiveTrack::state`].
@@ -1155,6 +1187,7 @@ impl Pump {
 			descriptor,
 			pads,
 			mut timeline,
+			restarts,
 			finished,
 			state,
 			mut cancel,
@@ -1237,10 +1270,10 @@ impl Pump {
 			let mut track = moq_mux::container::Consumer::new(subscriber, container);
 
 			let pad = match &owned {
-				// Another instance on the pad this pump owns: a new stream, on a timeline of its own,
-				// since the instance's timestamps share no origin with the run's.
+				// Another instance on the pad this pump owns: a new stream, on that instance's own
+				// timeline, since its timestamps share no origin with the run's.
 				Some((pad, _)) => {
-					timeline = Arc::default();
+					timeline = restarts.timeline(&broadcast);
 					tokio::task::block_in_place(|| begin(pad, &name, &caps));
 					pad.clone()
 				}
@@ -1524,9 +1557,10 @@ fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
 
 #[cfg(test)]
 mod tests {
-	use super::{PumpState, Timeline, ended, plan_reconcile};
+	use super::{PumpState, Restarts, Timeline, ended, plan_reconcile};
 	use moq_net::Timestamp;
 	use std::collections::HashMap;
+	use std::sync::Arc;
 
 	/// A pump cancelled as its track ends records the end only when no media is left to read,
 	/// passing over the markers a publisher closes with.
@@ -1622,6 +1656,31 @@ mod tests {
 		let plan = plan_reconcile(&desired, &HashMap::new());
 		assert!(plan.remove.is_empty());
 		assert_eq!(sorted(plan.add), vec!["a", "b"]);
+	}
+
+	/// Renditions restarting on the same sibling instance share its timeline, and the next
+	/// instance starts another.
+	#[tokio::test(start_paused = true)]
+	async fn renditions_restarting_on_one_instance_share_its_timeline() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let consumer = origin.consume();
+		let mut audio = moq_mux::follow::Instances::new(&consumer, "source", None).unwrap();
+		let mut video = moq_mux::follow::Instances::new(&consumer, "source", None).unwrap();
+		let started = async |follow: &mut moq_mux::follow::Instances| match follow.next().await.unwrap() {
+			moq_mux::follow::Event::Start(broadcast) => broadcast,
+			moq_mux::follow::Event::End => panic!("expected a start"),
+		};
+		let restarts = Restarts::default();
+
+		let _first = origin.publish("source", Default::default()).unwrap();
+		let shared = restarts.timeline(&started(&mut audio).await);
+		assert!(Arc::ptr_eq(&shared, &restarts.timeline(&started(&mut video).await)));
+
+		let _second = origin.publish("source", Default::default()).unwrap();
+		let next = restarts.timeline(&started(&mut audio).await);
+		assert!(!Arc::ptr_eq(&shared, &next), "another instance has its own timeline");
+		assert!(Arc::ptr_eq(&next, &restarts.timeline(&started(&mut video).await)));
 	}
 
 	#[test]
@@ -2873,6 +2932,7 @@ mod session_tests {
 			descriptor: Container::Legacy,
 			pads: Pads::default(),
 			timeline: std::sync::Arc::default(),
+			restarts: super::Restarts::default(),
 			finished: std::sync::Arc::default(),
 			state: std::sync::Arc::new(super::PumpState::new()),
 			cancel,

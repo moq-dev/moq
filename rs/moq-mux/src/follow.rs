@@ -49,8 +49,8 @@ impl Instances {
 	}
 
 	/// Hand out `broadcast` once and never report its end, which its owner follows.
-	pub(crate) fn fixed(broadcast: moq_net::broadcast::Consumer, epoch: Option<&moq_net::Epoch>) -> Self {
-		Self::with(Feed::Fixed(Some(broadcast)), epoch)
+	pub(crate) fn fixed(broadcast: moq_net::broadcast::Consumer) -> Self {
+		Self::with(Feed::Fixed(Some(broadcast)), None)
 	}
 
 	fn with(feed: Feed, epoch: Option<&moq_net::Epoch>) -> Self {
@@ -79,7 +79,7 @@ impl Instances {
 			};
 			if let Poll::Ready(next) = next {
 				let broadcast = next?;
-				if proves_other(self.epoch.as_ref(), &broadcast) {
+				if crate::source::check_epoch(self.epoch.as_ref(), &broadcast).is_err() {
 					tracing::debug!(path = %broadcast.info().path, "skipping an instance of another epoch");
 					match self.current.take() {
 						Some(_) => return Poll::Ready(Ok(Event::End)),
@@ -107,12 +107,6 @@ impl Instances {
 	pub async fn next(&mut self) -> crate::Result<Event> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
-}
-
-/// Whether `broadcast` is proven to be another instance than `epoch` names. An epochless route
-/// cannot prove its instance, so only a known mismatch counts.
-fn proves_other(epoch: Option<&moq_net::Epoch>, broadcast: &moq_net::broadcast::Consumer) -> bool {
-	matches!((epoch, &broadcast.info().epoch), (Some(expected), Some(actual)) if expected != actual)
 }
 
 #[cfg(test)]

@@ -311,7 +311,9 @@ impl Source {
 	///
 	/// With an `epoch`, only that instance (or an epochless route, which cannot prove another
 	/// one) is handed out: another taking over ends the rendition rather than substituting for
-	/// it. Rejects an escaping reference exactly as [`resolve`](Self::resolve) does.
+	/// it. A self-reference whose epoch the catalog instance contradicts fails with
+	/// [`Error::EpochMismatch`](crate::Error::EpochMismatch), since no other instance can come.
+	/// Rejects an escaping reference exactly as [`resolve`](Self::resolve) does.
 	pub fn follow(
 		&self,
 		rel: Option<&moq_net::path::Relative<'_>>,
@@ -319,9 +321,31 @@ impl Source {
 	) -> crate::Result<crate::follow::Instances> {
 		let path = self.target(rel)?;
 		Ok(match path == self.path {
-			true => crate::follow::Instances::fixed(self.broadcast(), epoch),
+			true => {
+				let broadcast = self.broadcast();
+				check_epoch(epoch, &broadcast)?;
+				crate::follow::Instances::fixed(broadcast)
+			}
 			false => crate::follow::Instances::new(&self.origin, &path, epoch)?,
 		})
+	}
+}
+
+/// Fail with [`Error::EpochMismatch`](crate::Error::EpochMismatch) when `broadcast` is proven to
+/// be another instance than `epoch` names. An epochless route cannot prove its instance, so only
+/// a known mismatch fails.
+pub(crate) fn check_epoch(
+	epoch: Option<&moq_net::Epoch>,
+	broadcast: &moq_net::broadcast::Consumer,
+) -> crate::Result<()> {
+	let info = broadcast.info();
+	match (epoch, &info.epoch) {
+		(Some(expected), Some(actual)) if expected != actual => Err(crate::Error::EpochMismatch {
+			path: info.path.to_string(),
+			expected: expected.clone(),
+			actual: actual.clone(),
+		}),
+		_ => Ok(()),
 	}
 }
 
@@ -394,18 +418,7 @@ impl Binding {
 				}
 			}
 		};
-		// An epochless route cannot prove its instance, so only a known mismatch fails.
-		let info = broadcast.info();
-		if let (Some(expected), Some(actual)) = (&self.epoch, &info.epoch)
-			&& expected != actual
-		{
-			return Poll::Ready(Err(crate::Error::EpochMismatch {
-				path: info.path.to_string(),
-				expected: expected.clone(),
-				actual: actual.clone(),
-			}));
-		}
-		Poll::Ready(Ok(broadcast))
+		Poll::Ready(check_epoch(self.epoch.as_ref(), &broadcast).map(|()| broadcast))
 	}
 
 	/// The bound broadcast, awaiting the origin's answer when it hasn't arrived yet.
@@ -693,6 +706,11 @@ mod tests {
 			let own = source.resolve(rel.as_ref(), Some(&catalog)).await.unwrap();
 			assert!(own.is_clone(&source.broadcast()), "{reference:?}");
 			assert!(is_mismatch(source.resolve(rel.as_ref(), Some(&other)).await, &other));
+			assert!(source.follow(rel.as_ref(), Some(&catalog)).is_ok());
+			assert!(matches!(
+				source.follow(rel.as_ref(), Some(&other)),
+				Err(crate::Error::EpochMismatch { .. })
+			));
 		}
 	}
 
