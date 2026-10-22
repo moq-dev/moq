@@ -12,8 +12,9 @@ echo path of a catalog soliciting feedback. Both use the `@moq/hang` schemas.
   - The encoder `Stats` signals are already per rendition (`frames`,
     `bytes`, `keyframes`). Add drops and the target bitrate.
   - Fold them into the stats snapshot keyed by rendition ID, and write it
-    through the `moq-json` snapshot producer with its `.z` sibling. A `stats`
-    attribute enables it.
+    through the `@moq/json` snapshot producer on one track with
+    `compress: true`, matching the [m1 compression migration](/quest/m1/compress/migrate.md).
+    A `stats` attribute enables it.
   - `transport` carries PROBE rtt only, because `WebTransport.getStats()`
     returns nothing useful in Chromium or Firefox today.
 - `js/watch`:

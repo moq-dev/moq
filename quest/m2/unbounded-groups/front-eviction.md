@@ -40,8 +40,10 @@ See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
   moq-transport, a hole that covers whole objects refills; one inside an
   object is `Evicted`.
 - Downstream encoders that roll groups by the removed constants (moq-json,
-  moq-flate, moq-mux TS, moq-stats) keep their own local roll triggers if
-  they still need one.
+  moq-mux TS, moq-stats) keep their own local roll triggers if they still
+  need one. The [m1 compression migration](/quest/m1/compress/migrate.md)
+  deletes moq-flate; recheck the surviving JSON stream budget and track
+  compression paths instead of retaining a deleted helper's cap.
 - Benchmarks: keep `group.rs` flat. Add a case swept over frames held and
   runs evicted, and one over concurrent readers refilling a hole.
 
