@@ -17,7 +17,7 @@ import { TRACK_STATUS_ERROR_14 } from "./track.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 /** Whether the draft treats the requester finishing its messages as cancellation. */
-export function finCancels(version: IetfVersion): boolean {
+function finCancels(version: IetfVersion): boolean {
 	return (
 		version === Version.DRAFT_14 ||
 		version === Version.DRAFT_15 ||

@@ -42,6 +42,10 @@ ranked just below deterministic TS legs, which it requires.
 - [C++ FFI reuse](/quest/m2/cpp-ffi-reuse.md) - C++ packages link the shared default-feature FFI build once it is proven compatible
 - [Unprefixed C++ free functions](/quest/m2/cpp-free-function-prefix.md) - generated free functions drop `moq_`, and `moq.hpp` deletes its five pass-through wrappers
 
+- [Native compression flush](/quest/m2/native-compression-flush.md) - report the per-frame nonfinal flush requirement in existing browser discussions
+- [Native synchronous codecs](/quest/m2/native-compression-sync.md) - report the stateful small-frame synchronous API requirement
+- [Native browser codecs](/quest/m2/native-compression-adopt.md) - adopt native operations when timing, frame and resource contracts hold
+
 - [Time test sweep](/quest/m2/time-test-sweep.md) - unrelated test conversion and the workspace lint ratchet
 
 - [Pipelined requests](/quest/m2/pipeline-requests/README.md) - SUBSCRIBE and the first FETCH go out with the track-info request at every hop, so first data arrives a round trip sooner per hop
@@ -158,7 +162,6 @@ ranked just below deterministic TS legs, which it requires.
 - [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - moq-uring receives from the buffer ring and transmits into caller-owned buffers with no copy, once a profile says where
 - [BBR media study](/quest/m2/quic-bbr-natural-drain.md) - whether bounded drain credit avoids ProbeRTT deadline interference, and where our BBR differs from Google's
 - [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - native publishers pick `Realtime`, a receive-ts delay-based controller that keeps the uplink queue near empty for teleoperation
-- [Probes resume on the peer](/quest/m2/quic-outage-probe.md) - after an outage, the next probe follows the peer's first packet instead of the backed-off timer
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides
 - [Socket close](/quest/m2/quic-socket-close.md) - moq-tokio's QUIC endpoint releases its socket on close, so it drops its wrapper
 - [Windows.Graphics.Capture](/quest/m2/capture-wgc.md) - the WGC display and window backend verified on real Windows hardware
@@ -196,6 +199,7 @@ ranked just below deterministic TS legs, which it requires.
 - [FromStr parsers](/quest/m2/from-str-trait.md) - hang, moq-auth, and moq-msf implement `FromStr` instead of inherent `from_str`
 - [Drop dead items](/quest/m2/drop-dead-items.md) - the audit's uncalled public items and test helpers are removed
 - [Dependency and alternatives audit](/quest/m2/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
+- [Dead code and API surface audit](/quest/m2/audit-dead-code.md) - repeat the removal audit before the next major release
 - [Test coverage audit](/quest/m2/audit-test-coverage.md) - repeat the coverage audit against the m1 baselines after the next release ships
 - [Documentation audit](/quest/m2/audit-docs.md) - repeat the docs audit after the release ships, against the m1 baselines
 - [Test cost audit](/quest/m2/audit-test-cost.md) - the slowest, flakiest, and least valuable tests are fixed, deleted, or planned once the release ships

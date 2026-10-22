@@ -1565,6 +1565,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod session_tests {
 	use std::collections::BTreeMap;
 	use std::sync::Mutex;

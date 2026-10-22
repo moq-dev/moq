@@ -11,7 +11,9 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use moq_clock::Instant;
 
 use str0m::{Candidate, Event, Rtc};
 use tokio::net::UdpSocket;
@@ -186,7 +188,9 @@ impl Session {
 				// block; egress sessions never get here so the clock stays untouched.
 				if let MediaRole::Ingest(sink) = &mut self.role {
 					let media_us = media_time_to_micros(&data.time);
-					let timestamp_us = self.ingest_clock.normalize(data.mid, data.network_time, media_us);
+					let timestamp_us =
+						self.ingest_clock
+							.normalize(data.mid, Instant::from_std(data.network_time), media_us);
 					sink.on_frame(
 						data.mid,
 						codec::Frame {
@@ -506,7 +510,7 @@ pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> str0m::RtcConf
 /// [`rtc_config_with_codecs`] directly so it can inject the mux's known
 /// credentials before building.
 pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
-	rtc_config_with_codecs(codecs).build(std::time::Instant::now())
+	rtc_config_with_codecs(codecs).build(moq_clock::now().into_std())
 }
 
 /// Bind an ephemeral UDP socket for a single client session, read by its own

@@ -78,5 +78,4 @@ target, and the clock never ends past the target or moves backward.
 
 ## Related
 
-- [Every crate on moq-clock](/quest/m1/time/crates.md) - the Rust side of the same clock contract
 - [Time test sweep](/quest/m2/time-test-sweep.md) - legacy JS tests converted there get stepped `advance` for free

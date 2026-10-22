@@ -21,13 +21,13 @@ Decided with the maintainer on 2026-10-17 (see the
 - **Padding is the browser's sender.** Native sessions retransmit in-flight
   data instead ([native probing](/quest/m1/probe-native.md)). Padding is
   ordinary stream data that any controller counts and paces, and it
-  implements the [target](/quest/m1/probe-target.md) quest's sender hook in
-  `js/net`. Decided 2026-10-20: browser-only. A native session without
+  implements the sender hook in `js/net`, mirroring Rust's
+  `transport::Probe`. Decided 2026-10-20: browser-only. A native session without
   native probing (iroh on noq, or moq-quic under CUBIC) has no sender, so
   [native rung disable](/quest/m1/simulcast-rung-disable.md) never stops a
   rung there.
-- **The browser's send target.** The `js/net` mirror of the
-  [send target](/quest/m1/probe-target.md) lands here, beside the sender that
+- **The browser's send target.** The `js/net` mirror of the Rust send
+  target (`Allocator::set_target`, `Session::bandwidth`, `transport::Probe`) lands here, beside the sender that
   uses it: the same reservation sum, opt-out, and sender seam, matching the
   Rust API. `js/net` already owns its connection's `Allocator`
   (`js/net/src/connection/reload.ts`). Moved here in review of
@@ -75,5 +75,4 @@ Tests, on `@moq/clock`'s `Manual`:
 
 ## Required
 
-- [Session send target](/quest/m1/probe-target.md) - the target this probes to and the sender hook it implements
 - [lite-07 padding](/quest/m1/lite07-padding.md) - the stream type the padding is sent on
