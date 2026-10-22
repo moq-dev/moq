@@ -11,6 +11,8 @@ The built-in publishers' live-edge reads stay private and carry
 
 ## Plan
 
+Decided 2026-10-22 (maintainer): ready now. [moq-dev/moq#6138](https://github.com/moq-dev/moq/pull/6138) merged; Public serving lives on only for its own leftover, which this quest does not wait for.
+
 Settled by the maintainer on 2026-10-22 (moq-dev/moq#6278):
 
 - ✅ No public live signal. A reader gets nothing from an idle copy's cache
