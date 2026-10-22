@@ -42,6 +42,14 @@ noise.
   match payload billing per label, such as per signing key. The drain runs
   once a second, using under 0.01% of a core at 10,000 sessions. Deleting
   those bytes was rejected.
+- `track_gc/idle` is accepted at about 20 ns, flat across track counts, after
+  [#6291](https://github.com/moq-dev/moq/pull/6291) skipped the clock read
+  with no wall deadline and reused the bench's waiter (36.7 ns before). The
+  remaining ~8 ns over release's 11.6 ns is the lock and driver registration
+  that the wall-clock aging from
+  [#5548](https://github.com/moq-dev/moq/pull/5548) needs. An earliest-deadline
+  atomic cannot prove a replacement driver is registered, and a lock-free
+  notification primitive is not worth ~8 ns.
 
 ### Release as a baseline
 
@@ -60,7 +68,7 @@ usually pays for a feature.
 | `track_gap_flush/512` | 1.8 us | 48 us | 27x | same |
 | `track_gap_flush/64` | 1.5 us | 6.2 us | 4.1x | same |
 | `stats/session-report/1000x10` | 11.0 us | 86.8 us | 7.9x | [Stats report](/quest/m1/release-perf/stats-report.md) |
-| `track_gc/idle/16384` | 11.6 ns | 73.7 ns | 6.3x | [Idle GC](/quest/m1/release-perf/gc-idle.md) |
+| `track_gc/idle/16384` | 11.6 ns | 73.7 ns | 6.3x | accepted (above) |
 | `origin/resume_overlap/sequence/1r_64g_32c` | 93 us | 426 us | 4.6x | [Resume duplicates](/quest/m1/release-perf/resume-duplicates.md) |
 | `session_delivery_group_cost/moq-transport-22/.../viewers=64/.../fetch` | 1.19 ms | 3.86 ms | 3.2x | accepted (above) |
 | `group_write_frames/single/8192` | 424 us | 486 us | 1.17x | [Re-check](/quest/m1/release-perf/recheck.md) |
@@ -95,7 +103,6 @@ one.
 - [FETCH fan-out](/quest/m1/release-perf/fetch-fanout.md) - a relay serves later viewers' lite FETCHes of a group from its cache, so per-viewer cost falls with viewers again
 - [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) - an arrival and a gap flush cost O(log gaps), not O(gaps)
 - [Resume duplicates](/quest/m1/release-perf/resume-duplicates.md) - an ordered resume skips copies of an already-delivered group without consuming them
-- [Idle GC](/quest/m1/release-perf/gc-idle.md) - an idle track GC skips the wall-clock pass when nothing is due
 - [Stats report](/quest/m1/release-perf/stats-report.md) - the stats drain locks each row once and its bench counts the wire walk; per-label bytes stay, at an accepted O(live sessions)
 - [Re-check](/quest/m1/release-perf/recheck.md) - the screen-only moves are re-measured with instruction counts, and the ones that hold are fixed or accepted
 - [JS frames](/quest/m1/release-perf/js-frames.md) - the js/net frame path is no slower than release in a browser, or the gap is accepted
