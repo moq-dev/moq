@@ -310,7 +310,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 			const track = wireOf(client).consume(Path.from("room/x")).track("video").subscribe();
 			await nextTask();
 			expect(track.closed.peek()).toBeUndefined();
-			clock.advance(Nano.fromMilli(Milli(7)));
+			clock.jump(Nano.fromMilli(Milli(7)));
 			const firstGrant = unanswered.accept(grant([], ["room"]));
 			const first = await adding;
 			expect(await track.recvGroup()).toBeDefined();

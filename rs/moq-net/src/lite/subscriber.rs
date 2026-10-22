@@ -598,9 +598,11 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	/// Aborts whatever is still subscribed when the session ends.
 	cleanup: SubscriptionCleanup,
-	/// One machine per permitted prefix. Only an error ends the session; a
+	/// Which prefixes to ask the peer about.
+	discovery: crate::discovery::Discovery,
+	/// One machine per prefix asked about. Only an error ends the session; a
 	/// prefix finishing cleanly (publisher FIN) just retires.
-	prefixes: Vec<AnnouncePrefix<S>>,
+	prefixes: HashMap<PathOwned, AnnouncePrefix<S>>,
 	uni: UniAccept<S>,
 	/// PROBE feedback; finishes quietly when unsupported or given up on.
 	bandwidth: Option<RecvBandwidth<S>>,
@@ -611,16 +613,13 @@ pub(super) struct SubscriberDriver<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
-	pub fn new(subscriber: Subscriber<S>, early: Vec<Reader<S::RecvStream, Version>>) -> Self {
-		// The wire speaks announce interest by prefix: ask for each granted
-		// pattern's literal head and let the origin's scope filter what arrives.
-		let prefixes = crate::model::interest_prefixes(&subscriber.origin.allowed())
-			.into_iter()
-			.map(|prefix| AnnouncePrefix::new(subscriber.clone(), prefix))
-			.collect();
-
+	pub fn new(subscriber: Subscriber<S>, early: Vec<Reader<S::RecvStream, Version>>, client: bool) -> Self {
+		// Lite03/04 mark no initial set, so a watch would read as synced before the peer
+		// answers it. Asking for everything at connect keeps their discovery eager instead.
+		let lazy = client && !matches!(subscriber.version, Version::Lite03 | Version::Lite04);
 		Self {
-			prefixes,
+			discovery: crate::discovery::Discovery::new(&subscriber.origin, lazy, subscriber.runtime.clone()),
+			prefixes: HashMap::new(),
 			cleanup: SubscriptionCleanup(subscriber.subscribes.clone()),
 			uni: UniAccept::new(subscriber.clone(), early),
 			bandwidth: Some(RecvBandwidth::new(subscriber.clone())),
@@ -660,14 +659,34 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 	}
 
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut i = 0;
-		while i < self.prefixes.len() {
-			match self.prefixes[i].poll(waiter) {
-				Poll::Ready(Ok(())) => {
-					self.prefixes.swap_remove(i);
+		loop {
+			while let Poll::Ready(change) = self.discovery.poll(waiter) {
+				match change {
+					crate::discovery::Change::Open(prefix, snapshot) => {
+						let machine = AnnouncePrefix::new(self.subscriber.clone(), prefix.clone(), snapshot);
+						self.prefixes.insert(prefix, machine);
+					}
+					// Dropping the machine resets its stream, which the peer reads as the
+					// request ending, and retracts every route it reported.
+					crate::discovery::Change::Close(prefix) => {
+						self.prefixes.remove(&prefix);
+					}
 				}
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-				Poll::Pending => i += 1,
+			}
+			let mut ended = Vec::new();
+			for (prefix, machine) in &mut self.prefixes {
+				match machine.poll(waiter) {
+					Poll::Ready(Ok(())) => ended.push(prefix.clone()),
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Pending => {}
+				}
+			}
+			if ended.is_empty() {
+				break;
+			}
+			for prefix in ended {
+				self.prefixes.remove(&prefix);
+				self.discovery.ended(&prefix);
 			}
 		}
 		if let Poll::Ready(res) = self.uni.poll(waiter) {
@@ -777,6 +796,12 @@ enum UniState<S: crate::transport::poll::Session> {
 	Setup {
 		reader: Reader<S::RecvStream, Version>,
 	},
+	/// Discarding a lite-07+ padding stream until FIN.
+	Padding {
+		reader: Reader<S::RecvStream, Version>,
+		/// A peer that keeps chunks ready must not hold the driver for as long as they arrive.
+		budget: kio::coop::Budget,
+	},
 	Group(GroupRecv<S>),
 	Done,
 }
@@ -802,7 +827,9 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 	/// Abort the stream with the given error, wherever the reader currently lives.
 	fn abort(&mut self, err: &Error) {
 		match &mut self.state {
-			UniState::Start { reader } | UniState::Setup { reader } => reader.abort(err),
+			UniState::Start { reader } | UniState::Setup { reader } | UniState::Padding { reader, .. } => {
+				reader.abort(err)
+			}
 			UniState::Group(recv) => recv.reader.abort(err),
 			UniState::Done => {}
 		}
@@ -826,6 +853,10 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 					self.state = match kind {
 						lite::DataType::Group => UniState::Group(GroupRecv::new(self.subscriber.clone(), reader)),
 						lite::DataType::Setup => UniState::Setup { reader },
+						lite::DataType::Padding => UniState::Padding {
+							reader,
+							budget: kio::coop::Budget::new(32),
+						},
 					};
 				}
 				UniState::Setup { reader } => {
@@ -851,6 +882,21 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 						}
 					}
 				}
+				UniState::Padding { reader, budget } => {
+					if !self.subscriber.version.has_padding() {
+						self.abort(&Error::UnexpectedStream);
+						return Poll::Ready(Ok(()));
+					}
+					// Reading rather than cancelling returns credit as each chunk arrives.
+					let mut cx = waiter.context();
+					loop {
+						ready!(budget.poll_yield(waiter));
+						if ready!(reader.poll_read_chunk(&mut cx, usize::MAX))?.is_none() {
+							return Poll::Ready(Ok(()));
+						}
+					}
+				}
+
 				UniState::Group(recv) => {
 					let res = ready!(recv.poll_serve(waiter));
 					if let Err(err) = res {
@@ -1584,15 +1630,14 @@ struct PrefixRun {
 }
 
 impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
-	fn new(subscriber: Subscriber<S>, prefix: PathOwned) -> Self {
-		// Taken now, while the session is being set up, so a consumer of the origin never
-		// reads as synced before the request even goes out.
-		let snapshot = Some(subscriber.origin.snapshot(&prefix));
+	/// `snapshot` was taken when the prefix was first wanted, so a consumer of the
+	/// origin never reads as synced before the request even goes out.
+	fn new(subscriber: Subscriber<S>, prefix: PathOwned, snapshot: crate::model::Snapshot) -> Self {
 		Self {
 			subscriber,
 			prefix,
 			state: PrefixState::Open,
-			snapshot,
+			snapshot: Some(snapshot),
 		}
 	}
 
@@ -2625,6 +2670,99 @@ mod tests {
 			Some(4..8),
 			"a live-edge floor starts where START resolved it"
 		);
+	}
+
+	async fn receive_padding(version: Version, bytes: Vec<u8>) {
+		let mut session = crate::lite::test_transport::ScriptedSession::new(bytes);
+		let stream = Stream::open(&mut session, version).await.unwrap();
+		let log = session.log.clone();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: session.clone(),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
+		});
+		let mut uni = UniServe {
+			subscriber,
+			state: UniState::Start { reader: stream.reader },
+		};
+		let waiter = kio::Waiter::noop();
+		if version == Version::Lite07 {
+			assert!(uni.poll_serve(&waiter).is_pending());
+			// The same stream can keep sending before FIN, without accumulating a body.
+			for _ in 0..8 {
+				session.push(&[0; 4096]);
+				assert!(uni.poll_serve(&waiter).is_pending());
+			}
+			// A body that is all ready at once still yields the driver before FIN.
+			session.push(&[0; 64 * 8192]);
+			session.close(crate::lite::test_transport::Close::Fin);
+			assert!(uni.poll_serve(&waiter).is_pending());
+			let mut polls = 1;
+			let res = loop {
+				if let Poll::Ready(res) = uni.poll_serve(&waiter) {
+					break res;
+				}
+				polls += 1;
+				assert!(polls < 64, "padding never finished");
+			};
+			assert!(res.is_ok());
+			assert!(log.stops().is_empty());
+		} else {
+			assert!(uni.poll_serve(&waiter).is_ready());
+			// An unsupported stream is stopped without ending the session.
+			drop(uni);
+			assert!(!log.stops().is_empty());
+		}
+		assert!(log.closes().is_empty());
+	}
+
+	#[moq_clock::test]
+	async fn padding_is_discarded_only_on_lite07() {
+		for version in [
+			Version::Lite01,
+			Version::Lite02,
+			Version::Lite03,
+			Version::Lite04,
+			Version::Lite05,
+			Version::Lite06,
+			Version::Lite07,
+		] {
+			let mut bytes = Vec::new();
+			crate::coding::Encoder::new(&mut bytes, version.into())
+				.varint(2)
+				.unwrap();
+			receive_padding(version, bytes).await;
+		}
+	}
+
+	/// Both runtimes receive the other's encoded padding and keep the session live.
+	#[moq_clock::test]
+	#[ignore = "requires Bun; run by just test interop"]
+	async fn lite_padding_interop() {
+		for (version, alpn) in [
+			(Version::Lite05, "moq-lite-05"),
+			(Version::Lite06, "moq-lite-06"),
+			(Version::Lite07, "moq-lite-07-wip"),
+		] {
+			let mut bytes = Vec::new();
+			let mut writer = crate::coding::Encoder::new(&mut bytes, version.into());
+			lite::DataType::Padding.encode(&mut writer, version).unwrap();
+			writer.slice(&[0xab; 4096]);
+			let echo: Vec<u8> = serde_json::from_slice(&crate::test_interop::bun(
+				"lite-padding.ts",
+				serde_json::json!({ "alpn": alpn, "bytes": bytes }),
+			))
+			.unwrap();
+			assert_eq!(echo, bytes);
+			receive_padding(version, echo).await;
+		}
 	}
 
 	/// A GROUP needs no negotiated extension, so it proceeds before SETUP, or after a
@@ -5346,7 +5484,11 @@ mod tests {
 			going_away: Default::default(),
 			auth: crate::auth::Handle::new(false),
 		});
-		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
+		let mut prefix = AnnouncePrefix::new(
+			subscriber.clone(),
+			Path::new("").to_owned(),
+			subscriber.origin.snapshot(""),
+		);
 		let mut cursor = consumer.announced();
 
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
@@ -5413,7 +5555,14 @@ mod tests {
 			going_away: Default::default(),
 			auth: crate::auth::Handle::new(false),
 		});
-		(AnnouncePrefix::new(subscriber, Path::new("").to_owned()), consumer)
+		(
+			AnnouncePrefix::new(
+				subscriber.clone(),
+				Path::new("").to_owned(),
+				subscriber.origin.snapshot(""),
+			),
+			consumer,
+		)
 	}
 
 	/// The origin's consumers sync once the counted starts are in and read, never before.
@@ -5586,7 +5735,11 @@ mod tests {
 		});
 		let slots = crate::session::Slots::new(2);
 		subscriber.announces = slots.clone();
-		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
+		let mut prefix = AnnouncePrefix::new(
+			subscriber.clone(),
+			Path::new("").to_owned(),
+			subscriber.origin.snapshot(""),
+		);
 
 		let err = kio::wait(|waiter| prefix.poll(waiter))
 			.await

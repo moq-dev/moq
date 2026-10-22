@@ -2125,13 +2125,13 @@ test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while 
 	try {
 		await opened(0);
 		await streams[0].reading;
-		await clock.advanceAsync(Nano.fromMilli(Milli(5_000)));
+		await clock.advance(Nano.fromMilli(Milli(5_000)));
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await opened(1);
 		if (stage === "answer") await streams[1].reading;
-		await clock.advanceAsync(Nano.fromMilli(Milli(4_999)));
+		await clock.advance(Nano.fromMilli(Milli(4_999)));
 		expect(failure).toBeUndefined();
-		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await clock.advance(Nano.fromMilli(Milli(1)));
 		await fetch;
 		if (stage === "answer") expect((failure as StreamError).code).toBe(StreamCode.ControlTimeout);
 		else {

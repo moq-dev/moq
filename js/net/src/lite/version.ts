@@ -137,6 +137,21 @@ export function hasTracks(version: Version): boolean {
 	}
 }
 
+/** Whether either endpoint may open a Padding Stream (0x2). Added in lite-07. */
+export function hasPadding(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin from each hop chain. */
 export function hasAnnounceOk(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-05+ announce behavior.

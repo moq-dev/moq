@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A client session asks only about what its readers watch (#6165)
+
+On moq-lite, a client session no longer asks its peer for announcements under its whole subscribe scope at connect.
+It asks only under the prefixes its subscribe origin's readers watch, with `announced()`, `follow`, `routed`, `routed_broadcast`, or `announced_broadcast`, and stops asking 2s after nothing at or beneath a prefix is watched.
+`request_broadcast` watches nothing, so on a client it fails with `Error::Unroutable` for a path no reader watches, even when the peer announces it.
+Resolve a path with `routed_broadcast` or `announced_broadcast`, or hold an `announced()` stream over its prefix while requesting, the way `routed` already did after connecting.
+A broadcast resolved through a discovered route keeps its path watched until dropped.
+A server session, and a client fed into a `Producer::peer` or `Producer::upstream` handle, still asks for everything it may, so a relay discovers as before.
+Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.upstream()` (or `peer()`) instead of a plain handle.
+moq-transport sessions, and moq-lite-03/04 sessions (whose announce streams mark no initial set), are unchanged.
+
 ### Frames carry their arrival time
 
 `frame::Frame` gains a private arrival stamp, read with `Frame::arrived()`, so it can no longer be built with a struct literal.

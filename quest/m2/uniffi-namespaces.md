@@ -11,7 +11,9 @@ and C from [moq-dev/uniffi](/quest/m2/uniffi-fork.md).
 
 Decided with the maintainer on 2026-10-13: fix
 [mozilla/uniffi-rs#3026](https://github.com/mozilla/uniffi-rs/issues/3026)
-in the fork instead of waiting for upstream.
+in the fork instead of waiting for upstream. That issue shows closed only
+because our [#5498](https://github.com/moq-dev/moq/pull/5498) auto-closed it;
+it remains unfixed upstream.
 
 - `TypeUniverse` keys types by `(module_path, name)` instead of bare name,
   and each generator qualifies cross-crate references through the other

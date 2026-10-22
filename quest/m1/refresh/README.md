@@ -16,8 +16,8 @@ Boundaries:
   themselves without a timer.
 - Joining is the only trigger. There is no explicit subscriber request; a
   decoder that lost sync rereads the cached group from its start.
-- Non-goals: flate modes, json stream mode, and importers that cannot force
-  a keyframe (CMAF, TS).
+- Non-goals: json stream mode and importers that cannot force a keyframe
+  (CMAF, TS).
 
 ## Plan
 

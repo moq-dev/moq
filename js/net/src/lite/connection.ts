@@ -33,6 +33,7 @@ import {
 	hasAuth,
 	hasDatagrams,
 	hasGoaway,
+	hasPadding,
 	hasProbeRtt,
 	hasSetupStream,
 	hasTrackStream,
@@ -410,6 +411,8 @@ export class Connection implements Established {
 		if (typ === DataType.Group) {
 			const msg = await Group.decode(stream, this.#version);
 			await this.#subscriber.runGroup(msg, stream);
+		} else if (typ === DataType.Padding && hasPadding(this.#version)) {
+			await stream.discard();
 		} else if (typ === DataType.Setup) {
 			// Claim the stream before decoding, so two incomplete SETUPs are duplicates too.
 			if (this.#setupSeen) throw new ProtocolViolation("duplicate SETUP");

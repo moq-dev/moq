@@ -14,8 +14,9 @@ fairness gives the crate-private send domains (#5872) their consumer in
 qmux already runs on the shared stream state machine, outside this epic.
 Per-stream acknowledgment progress, per-stream deadlines, and the experiments
 (the egress profile, ECN measurement, deadline keep-alive) live in
-[m2](/quest/m2/README.md); media
-probing is its own [m2 epic](/quest/m2/probe/README.md); receive timestamps
+[m2](/quest/m2/README.md); padding and the browser rung disable stay in the
+[m2 probe epic](/quest/m2/probe/README.md); native probing is
+[m1](/quest/m1/probe-native.md); receive timestamps
 and a delay-based uplink controller are the
 [m2 realtime epic](/quest/m2/quic-realtime/README.md); L4S and careful resume
 live in [m3](/quest/m3/README.md). None of them gate this line.
