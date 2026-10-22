@@ -8,26 +8,19 @@ costs about one cheap skip per duplicate again.
 
 ## Plan
 
-Found by reading code on 2026-10-21 (4.6x at `1r_64g_32c`, confirmed).
+Implemented in [#6292](https://github.com/moq-dev/moq/pull/6292):
 
-- Release: each segment did a non-consuming `poll_seek_group(floor, cap)`, so
-  a duplicate below the floor cost nothing.
-- Main: each copy has its own `track::Subscriber` (from
-  [#4741](https://github.com/moq-dev/moq/pull/4741)), and the `Delivered`
-  dedupe comes from [#5446](https://github.com/moq-dev/moq/pull/5446). For
-  each group handed out, `resume::Reader::poll_lowest` peeks all 32 copies,
-  and [#6019](https://github.com/moq-dev/moq/pull/6019) added peeking every
-  copy (its own PR measured about 1.3x of the cost). For each copy whose head
-  was already delivered, it then fully consumes the head with
-  `sub.poll_next_group`. That runs the meter, the inner `hand_out`,
-  `forget_past_budget`, `count_stale`, and builds a group consumer, only to
-  discard it.
+- Skip superseded copies whose eligible range is already delivered, retaining
+  them for recovery of groups still being read.
+- Advance ordered copy cursors without delivery, metering, or cache refresh;
+  propagate the floor through nested readers and pending copies.
+- Keep the existing reader, publisher-copy, and group benchmark sweeps, and
+  add overlapping copies whose serving replacement awaits its first group.
+- At 32 copies and 64 groups, the covered-copy guard removes about 74% of
+  drain instructions in both modes. While the new copy waits, ordered seek
+  removes 58% versus the guard alone; arrival is unchanged.
 
-Fix: in ordered mode, move a copy's cursor up to the floor with a seek that
-builds no consumer, meter entry, or `hand_out`, as release did per segment.
-Cache each copy's peek across polls and re-peek only the copy that delivered.
-#6019 also lists skipping peek-then-take when only one live copy remains; do
-that here if it falls out of the same change.
-
-Before fixing, check whether `origin/arrival/1r_64g_32c` regressed by the
-same factor. If it didn't, that confirms the lost seek is the cause.
+Source work is complete. Automatic approval review rejected removing this
+completed quest as unauthorized abandonment. Retire the quest and its links
+once that narrow removal is explicitly approved; do not bypass the rejection.
+The draft PR records the decision and final validation.
