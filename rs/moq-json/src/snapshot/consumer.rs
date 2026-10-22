@@ -178,7 +178,7 @@ mod timestamps {
 				.unwrap();
 			let mut subscriber = track.subscribe(None);
 			let mut subscription = subscriber.subscription();
-			subscription.max_delay = std::time::Duration::MAX;
+			subscription.max_delay = None;
 			subscriber.update(subscription).unwrap();
 			let mut config = crate::snapshot::Config::default().with_delta_ratio(100);
 			config.compression = compression;

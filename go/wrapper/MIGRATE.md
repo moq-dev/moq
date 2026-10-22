@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Dynamic tracks serve fills
+
+`TrackDynamic.RequestedGroup` is now `RequestedFill`, returning a `*Fill` (`StartGroup`, `StartFrame`, `EndGroup`, `Priority`, `MaxDelay`, `Order`, `Next`, `Accept(sequence)`, `DropGroups(start, end)`, `IsUsed`, `Unused`), and `All` ranges over fills.
+`GroupRequest` and `GroupDemand` are removed: serve each group `Next` names, and watch `IsUsed` or `Unused` on the fill.
+A refusal carries no application code: `DropGroups` fails the waiting fetches with `ErrNotFound`.
+
+### `Subscription.MaxDelay` is a pointer
+
+`Subscription.MaxDelay` is a `*time.Duration`, where nil leaves the publisher's max age alone to bound delivery.
+A zero-value `Subscription` now means that rather than live edge only: point `MaxDelay` at a zero duration to keep skipping at once.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.Finish()` lets go.

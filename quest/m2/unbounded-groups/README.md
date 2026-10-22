@@ -65,9 +65,7 @@ Decided 2026-10-16 (maintainer interview):
   the relay cache docs, the json/flate docs, and the e2ee draft's 32 MiB
   interop cap. There is no new page.
 
-The refill API is the
-[Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)
-`track::Dynamic` range request. A handler serves a range by writing into a
+The refill API is the `track::Dynamic` fill (`track::Fill`). A handler serves a range by writing into a
 group producer bounded to that range, the same API as a live write, so an
 origin can regenerate data from disk or an archive.
 

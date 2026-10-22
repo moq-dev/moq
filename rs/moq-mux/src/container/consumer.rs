@@ -183,6 +183,7 @@ impl<F: Container> Consumer<F> {
 		let start = track.floor();
 		let max_delay = subscription
 			.max_delay
+			.unwrap_or(std::time::Duration::MAX)
 			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		Self {
 			name: track.name().into(),
@@ -1116,7 +1117,7 @@ mod tests {
 		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
 
 		assert_eq!(consumer.max_delay, max_delay);
-		assert_eq!(consumer.subscriber().subscription().max_delay, max_delay);
+		assert_eq!(consumer.subscriber().subscription().max_delay, Some(max_delay));
 	}
 
 	#[tokio::test]

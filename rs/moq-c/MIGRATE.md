@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Group requests come from fills
+
+The ABI is unchanged. A track's dynamic handler now also gets group requests for history a subscription covers that the cache lacks, not only for fetches; each run arrives one group at a time, the next once the previous is accepted, aborted, or freed.
+`moq_group_request_abort` no longer delivers its error code: the waiting fetches fail as not found.
+`moq_subscription.max_delay_us` always sets a budget, so a C subscriber cannot ask for the publisher's max age alone.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 `moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.

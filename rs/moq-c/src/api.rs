@@ -3197,9 +3197,10 @@ pub extern "C" fn moq_group_request_accept(request: u32) -> i32 {
 	})
 }
 
-/// Reject a group request with an application error code, failing the waiting fetches.
+/// Reject a group request, failing the waiting fetches as not found.
 ///
-/// Consumes the request handle. Returns a zero on success, or a negative code on failure.
+/// The error code is not delivered. Consumes the request handle. Returns a zero on success,
+/// or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {

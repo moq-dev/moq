@@ -14,7 +14,7 @@ Mirror the Rust names, including `Time(pts)` ends and their refusal on an untime
 Decided in the 2026-10-05 audit: the producer half of
 [JavaScript FETCH](/quest/m1/js-fetch.md) folds in here, so `@moq/net`'s
 on-demand request surface takes range requests from the start instead of the
-per-group `requested_group` shape Rust is replacing. That quest keeps only
+per-group `requested_group` shape Rust replaced with `requested_fill`. That quest keeps only
 IETF FETCH dispatch. Resized from [M] to [L] for it.
 
 - Expose an owned request handle rather than a storage callback; dropping a

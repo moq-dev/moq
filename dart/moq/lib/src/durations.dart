@@ -35,8 +35,19 @@ extension BackoffDuration on MoqBackoff {
 
 /// Duration views over the subscription knobs.
 extension SubscriptionDuration on MoqSubscription {
-  /// Upper bound on buffering before a stalled group is skipped.
-  Duration get maxDelay => Duration(microseconds: maxDelayUs);
+  /// Upper bound on buffering before a stalled group is skipped, or null for the
+  /// publisher's max age alone.
+  Duration? get maxDelay =>
+      maxDelayUs == null ? null : Duration(microseconds: maxDelayUs!);
+}
+
+/// Duration views over a fill.
+extension FillDuration on MoqFill {
+  /// The most tolerant age budget among its readers, or null for the publisher's max age alone.
+  Duration? get maxDelay {
+    final us = maxDelayUs();
+    return us == null ? null : Duration(microseconds: us);
+  }
 }
 
 /// Duration views over the publisher-side track settings.

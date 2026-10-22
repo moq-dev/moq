@@ -586,25 +586,21 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 		result <- fetchResult{group: group, err: err}
 	}()
 
-	request, err := dynamic.RequestedGroup(ctx)
+	fill, err := dynamic.RequestedFill(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.Sequence() != 7 || request.Priority() != 11 {
-		t.Fatalf("unexpected request: sequence=%d priority=%d", request.Sequence(), request.Priority())
+	if fill.StartGroup() != 7 || fill.EndGroup() != 8 || fill.Priority() != 11 {
+		t.Fatalf("unexpected fill: start=%d end=%d priority=%d", fill.StartGroup(), fill.EndGroup(), fill.Priority())
 	}
-	demand, err := request.Demand()
+	if next := fill.Next(); next == nil || *next != 7 || !fill.IsUsed() {
+		t.Fatalf("unexpected fill: next=%v used=%v", next, fill.IsUsed())
+	}
+	produced, err := fill.Accept(7)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if demand.Sequence() != 7 || !demand.IsUsed() {
-		t.Fatalf("unexpected demand: sequence=%d used=%v", demand.Sequence(), demand.IsUsed())
-	}
-	produced, err := request.Accept()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), Timestamp: ts(time.Duration(request.Sequence()*20_000) * time.Microsecond)}); err != nil {
+	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), Timestamp: ts(7 * 20_000 * time.Microsecond)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := produced.Finish(); err != nil {
@@ -821,8 +817,9 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 	}
 
 	order := moq.OrderAscending
+	maxDelay := 10 * time.Second
 	consumer, err := track.Consume(&moq.Subscription{
-		MaxDelay: 10 * time.Second,
+		MaxDelay: &maxDelay,
 		Ranges:   []moq.Range{{Start: moq.AnchorRelative{Groups: 2}}},
 		Order:    &order,
 	})

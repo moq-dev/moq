@@ -922,7 +922,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 	consumer
 		.update(MoqSubscription {
 			priority: 10,
-			max_delay_us: 25_000,
+			max_delay_us: Some(25_000),
 			ranges: Some(vec![MoqRange {
 				start: MoqAnchor::Absolute { group: 0, frame: 0 },
 				end: None,
@@ -1998,14 +1998,18 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 			.await
 	});
 
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!(request.sequence(), 5);
+	assert_eq!(
+		(request.start_group(), request.start_frame(), request.end_group()),
+		(5, 0, 6)
+	);
 	assert_eq!(request.priority(), 11);
+	assert_eq!(request.next(), Some(5));
 
-	let group = request.accept().unwrap();
+	let group = request.accept(5).unwrap();
 	group
 		.write_frame(MoqFrame {
 			payload: b"fetched".to_vec(),
@@ -2026,52 +2030,25 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 }
 
 #[tokio::test]
-async fn group_request_demand_ends_when_the_fetcher_leaves() {
+async fn fill_goes_unused_when_the_fetcher_leaves() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();
 	let dynamic = track.dynamic().unwrap();
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	let demand = request.demand().unwrap();
-	assert_eq!(demand.sequence(), 5);
-	assert!(demand.is_used());
+	assert!(fill.is_used());
 
 	fetch.abort();
-	tokio::time::timeout(TIMEOUT, demand.unused())
+	tokio::time::timeout(TIMEOUT, fill.unused())
 		.await
 		.expect("timed out waiting for the abandoned fetch to become unused")
 		.unwrap();
-	assert!(!demand.is_used());
-
-	request.abort(404).unwrap();
-	assert!(matches!(request.demand(), Err(MoqError::Closed)));
-}
-
-/// An accepted request's demand closes cleanly while its fetch gets the group.
-#[tokio::test]
-async fn group_request_demand_closes_after_accept() {
-	tokio::time::pause();
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), None).unwrap();
-	let dynamic = track.dynamic().unwrap();
-	let consumer = broadcast.consume().unwrap();
-
-	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
-	let request = dynamic.requested_group().await.unwrap();
-	let demand = request.demand().unwrap();
-	let group = request.accept().unwrap();
-	group.finish().unwrap();
-
-	for result in [demand.used().await, demand.unused().await] {
-		assert!(matches!(result, Err(MoqError::Closed)), "got {result:?}");
-	}
-	assert!(!demand.is_used());
-	fetch.await.expect("fetch task panicked").unwrap();
+	assert!(!fill.is_used());
 }
 
 #[tokio::test]
@@ -2082,26 +2059,19 @@ async fn dynamic_track_rejects_fetch_miss() {
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_group())
+	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	request.abort(404).unwrap();
+	fill.drop_groups(5, 6);
+	assert_eq!(fill.next(), None, "the dropped group is answered");
 
 	let result = tokio::time::timeout(TIMEOUT, fetch)
 		.await
 		.expect("timed out waiting for rejected fetch")
 		.expect("fetch task panicked");
-	match result {
-		Err(MoqError::Protocol { details: protocol }) => {
-			assert_eq!(protocol.scope, crate::error::MoqErrorScope::Stream);
-			assert_eq!(protocol.code, 64 + 404);
-			assert_eq!(protocol.kind, crate::error::MoqProtocolKind::App);
-		}
-		Err(other) => panic!("expected Protocol App(404), got {other:?}"),
-		Ok(_) => panic!("expected Protocol App(404), got a group"),
-	}
-	assert!(matches!(request.accept(), Err(MoqError::Closed)));
+	assert!(matches!(result, Err(MoqError::NotFound)), "got {:?}", result.err());
+	assert!(fill.accept(5).is_err(), "a dropped group is answered already");
 }
 
 #[tokio::test]
@@ -2137,12 +2107,12 @@ async fn requested_track_dynamic_survives_accept() {
 	let track_dynamic = request.dynamic().unwrap();
 	let _track = request.accept(Some(timed_info())).unwrap();
 
-	let group_request = tokio::time::timeout(TIMEOUT, track_dynamic.requested_group())
+	let fill = tokio::time::timeout(TIMEOUT, track_dynamic.requested_fill())
 		.await
-		.expect("timed out waiting for group request")
+		.expect("timed out waiting for fill")
 		.unwrap();
-	assert_eq!(group_request.sequence(), 9);
-	let group = group_request.accept().unwrap();
+	assert_eq!(fill.start_group(), 9);
+	let group = fill.accept(9).unwrap();
 	group
 		.write_frame(MoqFrame {
 			payload: b"archive".to_vec(),
@@ -4143,7 +4113,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 	consumer
 		.update(MoqSubscription {
 			priority: 10,
-			max_delay_us: 25_000,
+			max_delay_us: Some(25_000),
 			ranges: Some(vec![MoqRange {
 				start: MoqAnchor::Absolute { group: 0, frame: 0 },
 				end: None,
@@ -7027,7 +6997,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 
 	let subscription = MoqSubscription {
 		priority: 0,
-		max_delay_us: 10_000_000,
+		max_delay_us: Some(10_000_000),
 		ranges: Some(vec![MoqRange {
 			start: MoqAnchor::Relative { groups: 2 },
 			end: None,
@@ -7261,7 +7231,7 @@ async fn time_anchors_start_at_the_containing_group() {
 
 	let since = |timestamp_us| MoqSubscription {
 		priority: 0,
-		max_delay_us: 10_000_000,
+		max_delay_us: Some(10_000_000),
 		ranges: Some(vec![MoqRange {
 			start: MoqAnchor::Time { timestamp_us },
 			end: None,

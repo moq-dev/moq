@@ -43,8 +43,8 @@ Rules every child follows:
   the mark as the item goes public; the lint fails on a mark left behind, or
   on one naming a deleted quest.
 - Items replaced by another quest's new API wait for that quest instead of
-  growing a public shape it deletes: fetch and per-group requests
-  ([Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)), announce
+  growing a public shape it deletes: fetch
+  ([Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md)), announce
   interest ([Rust lazy discovery](/quest/m1/lazy-discovery/rust.md)).
 
 Inventory method, to rerun before each child starts (counts drift). Rust:

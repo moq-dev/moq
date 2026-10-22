@@ -34,9 +34,8 @@ relay bounds a sparse FETCH only if the model can request ranges:
   publisher delivers what it has and fills the rest as upstream answers.
 - **Model.** `Subscription` gains `ranges` beside its `order`, mirroring the wire;
   `request_groups` as a separate API was rejected. A publisher's
-  `track::Dynamic` receives range requests for misses, replacing per-group
-  `requested_group`, and `fetch_group` becomes a one-range subscription or is
-  removed. This breaks published moq-net APIs.
+  `track::Dynamic` receives a `track::Fill` per run of misses (landed), and
+  `fetch_group` becomes a one-range subscription or is removed. This breaks published moq-net APIs.
 - **moq-transport.** Some deployments use non-contiguous group numbers, so a
   relay never probes upstream one group at a time. Upstream, each run of
   locally missing groups becomes one standalone range FETCH, capped below the
@@ -95,7 +94,6 @@ every sequence delivered or dropped.
 
 ## Required
 
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - `Dynamic` fills misses by range, replacing `requested_group`
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream

@@ -122,6 +122,15 @@ impl Ledger {
 		(run.groups.start <= sequence).then_some(run.groups.end)
 	}
 
+	/// The accounted runs overlapping `groups`, clipped to it, lowest first.
+	pub fn accounted(&self, groups: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
+		let first = self.runs.partition_point(|run| run.groups.end <= groups.start);
+		self.runs[first..]
+			.iter()
+			.take_while(move |run| run.groups.start < groups.end)
+			.map(move |run| run.groups.start.max(groups.start)..run.groups.end.min(groups.end))
+	}
+
 	/// Whether every group in `groups` is accounted for.
 	pub fn covers(&self, groups: Range<u64>) -> bool {
 		// Runs merge on insert, so one run covers the span or none does.

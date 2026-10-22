@@ -11,16 +11,16 @@ from moq_ffi import (
     MoqBroadcastDynamic,
     MoqBroadcastFinish,
     MoqBroadcastProducer,
-    MoqGroupDemand,
+    MoqFill,
     MoqGroupProducer,
-    MoqGroupRequest,
+    MoqOrder,
     MoqTrackDemand,
     MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
 )
 
-from ._records import _from_us, _subscription, _track_info
+from ._records import _from_us, _opt_from_us, _subscription, _track_info
 from ._stream import _Stream
 from .types import (
     Frame,
@@ -193,68 +193,74 @@ class TrackRequest:
         self._inner.abort(error_code)
 
 
-class GroupDemand:
-    """A watch-only handle to the callers waiting on a requested group.
+class Fill:
+    """A run of groups readers miss, for a :class:`TrackDynamic` to serve.
 
-    Returned by ``GroupRequest.demand()``. Weak: holding it does not keep the
-    request alive. The last caller to leave withdraws the request, so once
-    unused, demand never returns: drop the request. Waits raise
-    ``moq.Error.Closed`` after the request is accepted or dropped, and keep
-    the rejection reason after it is rejected.
+    Call :meth:`accept` for each group you have and :meth:`drop_groups` for the rest;
+    :meth:`next` names what is still owed, in the fill's order. Dropping the fill names
+    whatever is left as dropped while a reader still wants it; once nobody does, it is
+    withdrawn, so stop serving it when :meth:`unused` returns.
     """
 
-    def __init__(self, inner: MoqGroupDemand) -> None:
+    def __init__(self, inner: MoqFill) -> None:
         self._inner = inner
 
     @property
-    def sequence(self) -> int:
-        """The sequence of the group this watches."""
-        return self._inner.sequence()
-
-    def is_used(self) -> bool:
-        """Whether the group has at least one waiting caller right now."""
-        return self._inner.is_used()
-
-    async def used(self) -> None:
-        """Wait until the group has at least one waiting caller."""
-        await self._inner.used()
-
-    async def unused(self) -> None:
-        """Wait until the group has no waiting callers."""
-        await self._inner.unused()
-
-
-class GroupRequest:
-    """A request to produce one uncached group for a fetch consumer."""
-
-    def __init__(self, inner: MoqGroupRequest) -> None:
-        self._inner = inner
+    def start_group(self) -> int:
+        """The first group to fill."""
+        return self._inner.start_group()
 
     @property
-    def sequence(self) -> int:
-        """The requested group sequence within the track."""
-        return self._inner.sequence()
+    def start_frame(self) -> int:
+        """The frame within the first group to start from."""
+        return self._inner.start_frame()
+
+    @property
+    def end_group(self) -> int:
+        """The exclusive end group."""
+        return self._inner.end_group()
 
     @property
     def priority(self) -> int:
-        """The consumer's delivery priority for this fetch."""
+        """The most urgent delivery priority among the readers waiting on it."""
         return self._inner.priority()
 
-    def demand(self) -> GroupDemand:
-        """A watch-only handle to whether any caller still wants this group."""
-        return GroupDemand(self._inner.demand())
+    @property
+    def max_delay(self) -> timedelta | None:
+        """The most tolerant age budget among its readers, ``None`` for the publisher's max age alone."""
+        return _opt_from_us(self._inner.max_delay_us())
 
-    def accept(self) -> GroupProducer:
-        """Accept the request and return a producer for the group."""
-        return GroupProducer(self._inner.accept())
+    @property
+    def order(self) -> MoqOrder:
+        """Which end to fill first."""
+        return self._inner.order()
 
-    def abort(self, error_code: int) -> None:
-        """Reject the fetch with an application error code."""
-        self._inner.abort(error_code)
+    def next(self) -> int | None:
+        """The next group still owed in the fill's order, ``None`` once every group is answered."""
+        return self._inner.next()
+
+    def accept(self, sequence: int) -> GroupProducer:
+        """Insert group ``sequence`` and return a producer for it.
+
+        The first group starts at :attr:`start_frame`, so its frames keep their indices.
+        """
+        return GroupProducer(self._inner.accept(sequence))
+
+    def drop_groups(self, start: int, end: int) -> None:
+        """Name groups ``start`` up to the exclusive ``end`` as never to be delivered."""
+        self._inner.drop_groups(start, end)
+
+    def is_used(self) -> bool:
+        """Whether a reader still waits on this fill."""
+        return self._inner.is_used()
+
+    async def unused(self) -> None:
+        """Wait until no reader waits on this fill."""
+        await self._inner.unused()
 
 
-class TrackDynamic(_Stream[GroupRequest]):
-    """Async source of uncached group requests for one track.
+class TrackDynamic(_Stream[Fill]):
+    """Async source of the fills readers of one track need: runs of groups the cache lacks.
 
     Usable as an async context manager that cancels on exit.
     """
@@ -262,15 +268,15 @@ class TrackDynamic(_Stream[GroupRequest]):
     def __init__(self, inner: MoqTrackDynamic) -> None:
         self._inner = inner
 
-    async def _next(self) -> GroupRequest:
-        return await self.requested_group()
+    async def _next(self) -> Fill:
+        return await self.requested_fill()
 
-    async def requested_group(self) -> GroupRequest:
-        """Wait for the next uncached group request."""
-        return GroupRequest(await self._inner.requested_group())
+    async def requested_fill(self) -> Fill:
+        """Wait for the next fill."""
+        return Fill(await self._inner.requested_fill())
 
     def cancel(self) -> None:
-        """Cancel current and future group request waits."""
+        """Cancel current and future fill waits."""
         self._inner.cancel()
 
 

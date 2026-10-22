@@ -3258,7 +3258,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 	assert_eq!(moq_publish_group_finish(group), 0);
 	assert_eq!(fetch.recv_timeout(TIMEOUT).unwrap().unwrap(), (0, payload.to_vec()));
 
-	// A rejected fetch fails with the application code.
+	// A rejected fetch fails as not found.
 	let fetch = fetch_group(broadcast, "data", 6, 0, 0);
 	let request = id(group_cb.recv());
 	assert_eq!(moq_group_request_abort(request, 9), 0);
@@ -3266,7 +3266,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 		.recv_timeout(TIMEOUT)
 		.unwrap()
 		.expect_err("a rejected fetch fails");
-	assert!(matches!(err, moq_net::Error::App(9)), "got {err:?}");
+	assert!(matches!(err, moq_net::Error::NotFound), "got {err:?}");
 
 	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);

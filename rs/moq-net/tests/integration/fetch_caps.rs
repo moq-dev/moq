@@ -53,7 +53,7 @@ async fn an_over_cap_peer_cannot_cancel_another_peers_held_fetch() {
 		let mut a = Box::pin(peers[0].2.track("video").unwrap().fetch_group(7, None));
 		let request_a = match moq_clock::timeout(
 			TIMEOUT,
-			futures::future::select(std::pin::pin!(groups.requested_group()), &mut a),
+			futures::future::select(std::pin::pin!(groups.requested_fill()), &mut a),
 		)
 		.await
 		.unwrap()
@@ -64,7 +64,7 @@ async fn an_over_cap_peer_cannot_cancel_another_peers_held_fetch() {
 		let mut b = Box::pin(peers[1].2.track("video").unwrap().fetch_group(8, None));
 		let request_b = match moq_clock::timeout(
 			TIMEOUT,
-			futures::future::select(std::pin::pin!(groups.requested_group()), &mut b),
+			futures::future::select(std::pin::pin!(groups.requested_fill()), &mut b),
 		)
 		.await
 		.unwrap()
@@ -72,8 +72,8 @@ async fn an_over_cap_peer_cannot_cancel_another_peers_held_fetch() {
 			futures::future::Either::Left((request, _)) => request.unwrap(),
 			futures::future::Either::Right(_) => panic!("{version}: fetch answered before the publisher"),
 		};
-		assert_eq!(request_a.sequence(), 7);
-		assert_eq!(request_b.sequence(), 8);
+		assert_eq!(request_a.start().group, 7);
+		assert_eq!(request_b.start().group, 8);
 		let extra = peers[0].2.track("video").unwrap().fetch_group(9, None);
 		let (err, refused) = moq_clock::timeout(TIMEOUT, futures::future::join(peers[0].1.client.closed(), extra))
 			.await
@@ -83,11 +83,8 @@ async fn an_over_cap_peer_cannot_cancel_another_peers_held_fetch() {
 			matches!(err, moq_net::Error::Session(moq_net::SessionError::TooManyRequests)),
 			"{version}: {err}"
 		);
-		assert!(
-			request_b.demand().is_used(),
-			"{version}: the other peer still holds its request"
-		);
-		let mut group = request_b.accept(info).unwrap();
+		assert!(request_b.is_used(), "{version}: the other peer still holds its request");
+		let mut group = request_b.accept(8, info).unwrap();
 		group.write_frame(None, &b"other peer"[..]).unwrap();
 		group.finish().unwrap();
 		let mut served = moq_clock::timeout(TIMEOUT, b).await.unwrap().unwrap();

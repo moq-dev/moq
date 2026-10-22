@@ -120,7 +120,7 @@ mod timestamps {
 				.unwrap();
 			let mut subscriber = track.subscribe(None);
 			let mut subscription = subscriber.subscription();
-			subscription.max_delay = std::time::Duration::MAX;
+			subscription.max_delay = None;
 			subscriber.update(subscription).unwrap();
 			let config = crate::stream::Config { compression };
 			let mut producer = crate::stream::Producer::new(track, config.clone());

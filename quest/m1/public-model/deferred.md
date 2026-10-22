@@ -45,7 +45,7 @@ built-in sessions moved onto the public calls.
 
 ## Required
 
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - replaces per-group fetch requests, the peeks, and `fork`
+- [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - replaces per-group fetches, the peeks, and `fork`
 - [Public ingest](/quest/m1/public-model/ingest.md) - settles the received-end shape JS mirrors
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - the JS `Track.Request`/`Track.Dynamic` range requests that answer track info and fetches
 - [Public routes and answering](/quest/m1/public-model/answer.md) - the public `Broadcast.requested` handout this completes

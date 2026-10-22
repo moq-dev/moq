@@ -8,7 +8,7 @@
 //!   group for group until the track goes `unused` again. The group open at
 //!   that point is finished first, so a later reader of that sequence gets the
 //!   whole group rather than an aborted one.
-//! - A fetch of a specific group (`requested_group`) fetches that same group
+//! - A fetch of a specific group (`requested_fill`) fetches that same group
 //!   from the source and transcodes just that group with a fresh encoder. A
 //!   fetch that starts mid-group is refused: a fresh encode's frames are only
 //!   valid after the head that same encode produced. A fetch every caller
@@ -388,9 +388,9 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 	}
 }
 
-/// The fetch path: serve requests for specific (past) groups.
+/// The fetch path: serve fills of specific (past) groups, each one group at a time.
 ///
-/// Fetch tasks run under a local [`JoinSet`](tokio::task::JoinSet) rather than
+/// Fill tasks run under a local [`JoinSet`](tokio::task::JoinSet) rather than
 /// detached. Retirement takes whatever the handler already had queued, closes
 /// admission by dropping it, and drains every group below the track's final
 /// sequence. Other teardown aborts them, so no source subscription or encoder
@@ -412,7 +412,7 @@ async fn fetches(
 		// Reap finished fetches so the set doesn't grow without bound.
 		while tasks.try_join_next().is_some() {}
 
-		// Take a slot before popping a request, so retirement never strands one in
+		// Take a slot before popping a fill, so retirement never strands one in
 		// the handler while all slots are busy.
 		let permit = tokio::select! {
 			biased;
@@ -424,26 +424,26 @@ async fn fetches(
 			permit = limit.clone().acquire_owned() => permit.expect("the semaphore stays open"),
 		};
 
-		let request = tokio::select! {
+		let fill = tokio::select! {
 			biased;
 			() = retire.fired() => {
 				retired = true;
 				break;
 			},
 			_ = finishing.wait_for(|finished| *finished) => break,
-			request = dynamic.requested_group() => match request {
-				Ok(request) => request,
+			fill = dynamic.requested_fill() => match fill {
+				Ok(fill) => fill,
 				// The output track closed; nothing more to serve.
 				Err(_) => break,
 			},
 		};
 
-		spawn_fetch(&mut tasks, rung.clone(), request, permit);
+		spawn_fill(&mut tasks, rung.clone(), fill, permit);
 	}
 
 	if retired {
 		// A consumer that asked for a group before retirement is already waiting on
-		// it, whether or not this loop had reached it yet: the request queues on the
+		// it, whether or not this loop had reached it yet: the fill queues on the
 		// dynamic handler the moment the fetch is made. Take what is queued now, so
 		// dropping the handler below does not cancel a fetch that beat retirement.
 		//
@@ -452,14 +452,14 @@ async fn fetches(
 		// handler admits a cache miss for as long as it is alive, so a drain that
 		// waited for a slot with it still open would keep taking those in too and
 		// the rung would never finish. Dropping it closes admission and releases
-		// whatever arrived after the pass; the requests already popped are held
+		// whatever arrived after the pass; the fills already popped are held
 		// here, so they are unaffected.
 		let mut queued = Vec::new();
 		loop {
 			tokio::select! {
 				biased;
-				request = dynamic.requested_group() => match request {
-					Ok(request) => queued.push(request),
+				fill = dynamic.requested_fill() => match fill {
+					Ok(fill) => queued.push(fill),
 					// The output track closed; nothing left to serve.
 					Err(_) => break,
 				},
@@ -469,9 +469,9 @@ async fn fetches(
 		}
 		drop(dynamic);
 
-		for request in queued {
+		for fill in queued {
 			let permit = limit.clone().acquire_owned().await.expect("the semaphore stays open");
-			spawn_fetch(&mut tasks, rung.clone(), request, permit);
+			spawn_fill(&mut tasks, rung.clone(), fill, permit);
 		}
 
 		// Finish every group the handler accepted, or its producer stays open and
@@ -491,66 +491,61 @@ async fn fetches(
 	Ok(())
 }
 
-/// Spawn one fetch, holding its concurrency slot for the life of the task.
-fn spawn_fetch(
+/// Spawn one fill, holding its concurrency slot for the life of the task.
+fn spawn_fill(
 	tasks: &mut tokio::task::JoinSet<()>,
 	rung: Rung,
-	request: moq_net::group::Request,
+	fill: moq_net::track::Fill,
 	permit: tokio::sync::OwnedSemaphorePermit,
 ) {
 	tasks.spawn(async move {
 		let _permit = permit;
-		let sequence = request.sequence();
-		if let Err(err) = fetch(rung, request).await {
-			tracing::warn!(%err, sequence, "transcode fetch failed");
+		let mut last = None;
+		while fill.is_used()
+			&& let Some(sequence) = fill.next()
+			&& last != Some(sequence)
+		{
+			last = Some(sequence);
+			if let Err(err) = fetch(&rung, &fill, sequence).await {
+				tracing::warn!(%err, sequence, "transcode fetch failed");
+			}
 		}
 	});
 }
 
-/// Transcode one specifically requested group, fetching it from the source.
+/// Transcode group `sequence` of a fill, fetching it from the source.
 ///
-/// A failure while someone still wants the group rejects the request: a source
-/// fetch error passes through, and a pipeline or container error rejects with
-/// [`moq_net::Error::Cancel`]. Dropping it would auto-reject with [`moq_net::Error::Dropped`], which
-/// reads as "the handler vanished" and hides the actual failure. Once nobody
-/// wants the group, the request is dropped instead: the last caller already
-/// withdrew the attempt, and accepting afterwards would cache the group under a
-/// fresh request for the same sequence, whose own accept is then
-/// [`moq_net::Error::Duplicate`].
-async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error> {
+/// A failure while someone still wants the group drops it. Once nobody wants the
+/// fill, it is left unanswered instead: the last caller already withdrew it, and
+/// accepting afterwards would cache the group a fresh fill is about to serve.
+async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Result<(), Error> {
+	let reject = || fill.drop_groups(sequence..sequence + 1);
 	// A fresh encode of this group need not match the bytes the reader's head
 	// came from (the live encoder, or an earlier fetch), so its tail cannot
 	// continue that head. Refuse it so the reader moves on to the next group
 	// boundary instead of decoding a splice.
-	if request.frame_start() != 0 {
-		tracing::debug!(
-			sequence = request.sequence(),
-			frame = request.frame_start(),
-			"refusing a fetch that starts mid-group"
-		);
-		request.reject(moq_net::Error::NotFound);
+	let start = fill.start();
+	if start.group == sequence && start.frame != 0 {
+		tracing::debug!(sequence, frame = start.frame, "refusing a fetch that starts mid-group");
+		reject();
 		return Ok(());
 	}
-
-	// Watched until accept. After that the callers resolve from the cache, and
-	// this handle going unused is them picking the group up, not abandoning it.
-	let demand = request.demand();
 
 	let track = match rung.broadcast.track(&rung.source) {
 		Ok(track) => track,
 		Err(err) => {
-			request.reject(err.clone());
+			reject();
 			return Err(err.into());
 		}
 	};
-	let options = moq_net::group::Fetch::default().with_priority(request.priority());
+	let options = moq_net::group::Fetch::default().with_priority(fill.priority());
 	let mut source = tokio::select! {
 		biased;
-		_ = demand.unused() => return abandon(request),
-		source = track.fetch_group(request.sequence(), options) => match source {
+		_ = fill.unused() => return abandon(sequence),
+		source = track.fetch_group(sequence, options) => match source {
 			Ok(source) => source,
 			Err(err) => {
-				request.reject(err.clone());
+				reject();
 				return Err(err.into());
 			}
 		},
@@ -565,7 +560,7 @@ async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error
 	let pipeline = match rung.pipeline().await {
 		Ok(pipeline) => pipeline,
 		Err(err) => {
-			request.reject(moq_net::Error::Cancel);
+			reject();
 			return Err(err);
 		}
 	};
@@ -573,18 +568,18 @@ async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error
 	let container = match rung.container() {
 		Ok(container) => container,
 		Err(err) => {
-			request.reject(moq_net::Error::Cancel);
+			reject();
 			return Err(err);
 		}
 	};
 
 	// Accepting is what publishes the group. One last look, so a caller who
-	// left while the pipeline was opening does not race a fresh request.
-	if !demand.is_used() {
-		return abandon(request);
+	// left while the pipeline was opening does not race a fresh fill.
+	if !fill.is_used() {
+		return abandon(sequence);
 	}
 
-	let output = match request.accept(None) {
+	let output = match fill.accept(sequence, None) {
 		Ok(output) => output,
 		Err(err) => return Err(err.into()),
 	};
@@ -596,14 +591,10 @@ async fn fetch(rung: Rung, request: moq_net::group::Request) -> Result<(), Error
 	Ok(())
 }
 
-/// Drop a fetch nobody is waiting on.
-///
-/// Dropping rejects with [`moq_net::Error::Dropped`]. No caller is left to see
-/// it, and keeping the request would let this encode publish the group a fresh
-/// request is about to serve.
-fn abandon(request: moq_net::group::Request) -> Result<(), Error> {
-	tracing::debug!(sequence = request.sequence(), "dropping a fetch nobody wants");
-	drop(request);
+/// Leave a fill nobody is waiting on: it was withdrawn, so this encode must not publish
+/// the group a fresh fill is about to serve.
+fn abandon(sequence: u64) -> Result<(), Error> {
+	tracing::debug!(sequence, "leaving a fetch nobody wants");
 	Ok(())
 }
 

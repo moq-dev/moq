@@ -690,7 +690,7 @@ mod tests {
 			})
 			.await;
 
-			assert_eq!(observed, max_delay, "live start: {live_start}");
+			assert_eq!(observed, Some(max_delay), "live start: {live_start}");
 		}
 	}
 

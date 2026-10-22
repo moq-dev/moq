@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Dynamic tracks serve fills
+
+`TrackDynamic.requestedGroup()` is now `requestedFill()`, returning a `Fill` (`startGroup()`, `startFrame()`, `endGroup()`, `priority()`, `maxDelayUs()`, `order()`, `next()`, `accept(sequence)`, `dropGroups(start, end)`, `isUsed()`, `unused()`).
+`GroupRequest` and `GroupDemand` are removed: serve each group `next()` names, and watch `isUsed()` or `unused()` on the fill.
+A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
+`Subscription.maxDelayUs` and `maxDelay` are nullable, where null leaves the publisher's max age alone to bound delivery.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.finish()` lets go.

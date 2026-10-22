@@ -53,6 +53,3 @@ the priority table in `doc/concept/moq-lite.md`: it now describes the field
 FETCH, answered through the model's ranges. Run `just drafts check` and
 `just test interop --all`.
 
-## Required
-
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the misses a relay fills upstream by range
