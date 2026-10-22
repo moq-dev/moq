@@ -4407,7 +4407,10 @@ impl Consumer {
 					&& track.abort.is_none()
 					&& group.live_first_frame() == Some(0)
 					&& group.is_finished();
-				let consumer = group.try_consume().filter(|_| whole)?;
+				if !whole {
+					return None;
+				}
+				let consumer = group.try_consume()?;
 				group.cache_refresh();
 				consumer
 			};
