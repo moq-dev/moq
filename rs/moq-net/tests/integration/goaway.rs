@@ -317,8 +317,7 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 	/// Block until the peer closes its half of the stream, i.e. it finished
 	/// processing the control message and dropped the stream.
 	async fn wait_processed<R: moq_net::transport::poll::RecvStream>(mut recv: R) {
-		let mut buf = [0u8; 16];
-		while let Ok(Some(_)) = recv.read(&mut buf).await {}
+		while let Ok(Some(_)) = recv.read_chunk(usize::MAX).await {}
 	}
 
 	moq_clock::timeout(TEST_TIMEOUT, async {

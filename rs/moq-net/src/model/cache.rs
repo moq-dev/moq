@@ -699,6 +699,10 @@ pub(super) struct Track {
 	// Here rather than on the track state so a frame write advances it without the track
 	// lock, and wakes only the readers following it.
 	largest: kio::Shared<Largest>,
+
+	// What the frames this track's groups are still receiving may allocate up front,
+	// shared with every track minted from the same origin handle.
+	frames: super::frame::Budget,
 }
 
 /// The greatest location a track has written or its source reported, followed by the track
@@ -785,10 +789,12 @@ impl Track {
 		next
 	}
 
-	/// Open an account against `pool` for the track behind `state`.
-	pub(super) fn new(pool: Pool, state: kio::Weak<TrackState>) -> Arc<Self> {
+	/// Open an account against `pool` for the track behind `state`, its frames
+	/// allocating up front within `frames`.
+	pub(super) fn new(pool: Pool, frames: super::frame::Budget, state: kio::Weak<TrackState>) -> Arc<Self> {
 		let track = Arc::new(Self {
 			pool,
+			frames,
 			written: AtomicU64::new(0),
 			next_expiry: AtomicU64::new(0),
 			expiry_cursor: AtomicUsize::new(0),
@@ -807,6 +813,11 @@ impl Track {
 	/// The pool this track caches into.
 	pub(super) fn pool(&self) -> &Pool {
 		&self.pool
+	}
+
+	/// What this track's frames may allocate up front.
+	pub(super) fn frames(&self) -> &super::frame::Budget {
+		&self.frames
 	}
 
 	/// The track holding this account's groups, while it is still open.
@@ -1274,7 +1285,7 @@ mod test {
 
 	fn charge(pool: &Pool) -> Charge {
 		// No track behind the account: nothing here settles debt, it just accounts.
-		Track::new(pool.clone(), kio::Weak::new()).charge()
+		Track::new(pool.clone(), Default::default(), kio::Weak::new()).charge()
 	}
 
 	fn bounded(capacity: u64) -> Pool {
@@ -1302,7 +1313,7 @@ mod test {
 	#[test]
 	fn wall_deadlines_wake_the_driver_and_then_the_read() {
 		let pool = Pool::unbounded();
-		let track = Track::new(pool.clone(), kio::Weak::new());
+		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let now = super::super::clock::wall();
 		let at = now + Duration::from_secs(1);
 		let (read, reading) = flag();
@@ -1334,7 +1345,7 @@ mod test {
 		let pool = Pool::unbounded();
 		let now = super::super::clock::wall();
 		pool.gc(now, &kio::Waiter::noop());
-		let track = Track::new(pool.clone(), kio::Weak::new());
+		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let (_read, reading) = flag();
 		track.watch_wall(now + Duration::from_secs(2), &reading);
 		track.watch_wall(now + Duration::from_secs(1), &reading);
@@ -1444,7 +1455,7 @@ mod test {
 
 	#[test]
 	fn charge_counts_gross_writes() {
-		let track = Track::new(bounded(1000), kio::Weak::new());
+		let track = Track::new(bounded(1000), Default::default(), kio::Weak::new());
 		let mut c = track.charge();
 		c.add(100);
 		assert_eq!(track.take_written(), ENTRY_OVERHEAD + 100);
@@ -1526,7 +1537,7 @@ mod test {
 	#[test]
 	fn expiry_gate_reuses_a_supplied_tick() {
 		let pool = Pool::new(Config::default().with_expiry(Duration::from_secs(1)));
-		let track = Track::new(pool, kio::Weak::new());
+		let track = Track::new(pool, Default::default(), kio::Weak::new());
 		// A supplied tick drives the gate on its own: claimed immediately, closed
 		// until the interval elapses, claimable again on the tick it reopens.
 		assert!(track.expiry_due(Some(0)));
@@ -1549,7 +1560,7 @@ mod test {
 		let pool = bounded(1000);
 		assert!(pool.inner.tracks.lock().is_empty());
 
-		let track = Track::new(pool.clone(), kio::Weak::new());
+		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		assert_eq!(pool.inner.tracks.lock().len(), 1);
 
 		// A registered account whose track is already gone is swept harmlessly.
@@ -1563,7 +1574,7 @@ mod test {
 	fn an_inert_pool_registers_nothing() {
 		// No window means no sweep, so a bare pool pays no registry cost.
 		let pool = Pool::unbounded();
-		let track = Track::new(pool.clone(), kio::Weak::new());
+		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		assert!(pool.inner.tracks.lock().is_empty());
 		pool.sweep();
 		drop(track);
@@ -1572,7 +1583,7 @@ mod test {
 	#[test]
 	fn expiry_gate_stays_closed_without_a_window() {
 		// No window means no time gate, and no clock read to reach it.
-		let track = Track::new(Pool::unbounded(), kio::Weak::new());
+		let track = Track::new(Pool::unbounded(), Default::default(), kio::Weak::new());
 		assert!(!track.expiry_due(None));
 		assert!(!track.expiry_due(Some(u64::MAX)));
 	}

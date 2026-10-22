@@ -4,6 +4,28 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON `delta_ratio` is `deltas`
+
+`json::Config::delta_ratio` and `with_delta_ratio` are replaced by `deltas: bool` and `with_deltas` (default `true`).
+Call `with_deltas(false)` where you called `with_delta_ratio(0)`.
+Snapshot groups roll on joiner demand: create the track with `Info::refresh` and drive `json::Snapshot::refresh` (or `poll_refresh`) beside your updates.
+
+### Priorities are signed (#6142)
+
+`track_info` on the catalog producer and tracks takes an `i8` priority, higher first, with 0 unset; pass `hang::catalog::PRIORITY` as before.
+
+### fMP4 import unwraps to Legacy (#6250)
+
+`container::fmp4::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.
+Call `.with_passthrough(true)` to keep publishing CMAF.
+`import::ContainerFormat::Fmp4` follows, and `"cmaf"` no longer parses as its alias but as the new `ContainerFormat::Cmaf`, which keeps CMAF.
+
+### `Container` decodes one frame instead of reading a group
+
+`Container::poll_read(group, waiter)` and its async `read(group)` are replaced by `Container::decode(frame)`, which decodes one `moq_net::frame::Frame` into media frames.
+Read the frame yourself and hand it over: `while let Some(frame) = group.read_frame().await? { for media in container.decode(frame)? { .. } }`.
+An implementation drops its `group.poll_read_frame` call and its `None` end-of-group case, and decodes the frame it is given.
+
 ### `Source` resolution takes the reference's epoch (#5699)
 
 `Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional epoch after `rel`.

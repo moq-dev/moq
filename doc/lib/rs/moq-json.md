@@ -13,9 +13,9 @@ stream are the catalog modes on the [hang](/concept/hang#data-tracks) page.
 Window is a third framing for a raw track: both ends opt into it, and a
 generic catalog reader will not pick it up.
 
-- **snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. An unchanged update publishes nothing. Several owners can edit their own keys in place instead of clobbering one document.
+- **snapshot**: lossy latest value, with RFC 7396 merge-patch deltas. An unchanged update publishes nothing. Several owners can edit their own keys in place instead of clobbering one document. Deltas ride one group until a joiner wants a fresh one: set the track's `refresh` ratio (8 is typical) and drive `Producer::refresh`, which restates the value in a new group. Without a ratio a group rolls only at its caps.
 - **stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
-- **window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice.
+- **window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` ratio the same way.
 
 Both sides choose the same compression. A bare value stays untimed; publish
 `moq_net::Timed::from(&value).at(captured)` to retain a capture timestamp.

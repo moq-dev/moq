@@ -136,7 +136,7 @@ pub async fn accept(
 	let (creds, inbound, registration) = mux.register();
 	let mut rtc = RtcConfig::new()
 		.set_local_ice_credentials(creds)
-		.build(std::time::Instant::now());
+		.build(moq_clock::now().into_std());
 	for addr in mux.candidates() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);
@@ -176,7 +176,6 @@ pub async fn accept(
 			registration: Some(registration),
 			cancel: Some(cancel),
 			role: "whip server",
-			broadcast: Some(handle),
 		},
 	})
 }
@@ -202,6 +201,7 @@ fn status_for(err: &Error) -> StatusCode {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use str0m::{
 		format::Codec,

@@ -28,6 +28,7 @@
 //!   storage.
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod archive_tests;
 mod history;
 pub mod master;
@@ -338,7 +339,7 @@ impl Broadcaster {
 		Ok(Some(mpd::render_manifest(
 			&mpd::Manifest {
 				availability_start,
-				publish: SystemTime::now(),
+				publish: SystemTime::from(moq_clock::wall()),
 				window: self.renditions.window(),
 				finished,
 				video,
@@ -425,7 +426,7 @@ async fn watch_catalog(
 				let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
 				delay = (delay * 2).min(CATALOG_RETRY_MAX);
 				tokio::select! {
-					_ = tokio::time::sleep(wait) => {}
+					_ = moq_clock::sleep(wait) => {}
 					_ = kio::wait(|waiter| broadcast.poll_closed(waiter)) => {
 						renditions.close();
 						return;
@@ -613,6 +614,7 @@ async fn watch(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
@@ -2526,7 +2528,7 @@ mod tests {
 		snapshot.video.renditions.insert("video0".to_string(), video_config());
 		snapshot.archive = Some(timelines.section());
 		let mut json = moq_json::snapshot::Config::default();
-		json.delta_ratio = 0;
+		json.deltas = false;
 		let mut catalog = moq_json::snapshot::Producer::new(
 			broadcast
 				.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
@@ -4920,8 +4922,9 @@ mod tests {
 		let (_track, mut video0) = early.publish("video0");
 		// A day of 10s GOPs per round.
 		const DAY: u64 = 86_400 / 10;
-		// A checkpoint, plus the edits one timeline group holds before the publisher rolls it.
-		let bound = segments::MAX_SEGMENTS * (1 + moq_json::window::ProducerConfig::default().op_ratio as usize);
+		// A checkpoint, plus the edits one timeline group holds before a join over its ratio rolls it.
+		let ratio = moq_mux::timeline::Producer::info().refresh.unwrap() as usize;
+		let bound = segments::MAX_SEGMENTS * (1 + ratio);
 		for day in 1..=3 {
 			for sequence in (day - 1) * DAY..day * DAY {
 				video0

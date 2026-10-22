@@ -243,6 +243,9 @@ impl PacketBuilder {
         if size != 0 {
             if ack_eliciting {
                 conn.spaces[space_id].time_of_last_ack_eliciting_packet = Some(now);
+                if space_id == SpaceId::Data {
+                    conn.heard_since_sent = false;
+                }
                 if conn.permit_idle_reset {
                     conn.reset_idle_timeout(now, space_id);
                 }

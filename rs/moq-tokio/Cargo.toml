@@ -146,6 +146,8 @@ chrono = "0.4"
 # be driven with synthetic daemon events.
 flume = "0.12"
 moq-clock = { path = "../moq-clock", features = ["sim"] }
+# A bufferbloated path for the receive-credit tests and benchmark.
+moq-shaper = { path = "../moq-shaper" }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 # rustls without a provider, as iroh builds it, so the default test build covers an
 # `http://` dial's certificate fetch with no process default installed.

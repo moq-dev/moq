@@ -1828,10 +1828,10 @@ impl Cluster {
 		dialed: DialMap,
 		http: ClientWithMiddleware,
 	) {
-		let mut tick = tokio::time::interval(CONNECT_API_POLL_INTERVAL);
+		let mut tick = moq_clock::interval(CONNECT_API_POLL_INTERVAL);
 		// A slow fetch must not bank missed ticks into a catch-up burst; just resume
 		// the cadence from the next whole interval.
-		tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+		tick.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Skip);
 		loop {
 			tick.tick().await;
 
@@ -1964,7 +1964,7 @@ impl Cluster {
 		let mut backoff = base_backoff;
 
 		loop {
-			let started = tokio::time::Instant::now();
+			let started = moq_clock::now();
 			let result = self.run_remote_once(&addrs, target).await;
 			let elapsed = started.elapsed();
 
@@ -1980,7 +1980,7 @@ impl Cluster {
 				}
 			}
 
-			tokio::time::sleep(backoff).await;
+			moq_clock::sleep(backoff).await;
 		}
 	}
 
@@ -2303,6 +2303,7 @@ fn remote_status(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;

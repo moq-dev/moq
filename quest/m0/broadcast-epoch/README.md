@@ -127,7 +127,3 @@ End+Start. The child quests own their focused regressions.
 ## Required
 
 - [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - native readers restart a replaced referenced sibling on its announcements, never past a named epoch
-
-## Related
-
-- [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - requests carry the serving prefix's epoch and new winners cannot reuse an old cached broadcast

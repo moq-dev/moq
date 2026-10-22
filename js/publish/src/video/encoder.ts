@@ -455,6 +455,10 @@ export class Encoder {
 						try {
 							if (effect.abort.aborted) break;
 							if (encoder.state !== "configured") continue;
+							// A pending input means the codec is saturated. Keep capture live instead of
+							// growing a stale encode queue whose lateness becomes permanent catalog delay.
+							// Drop before answering a keyframe request or advancing the frame-rate cursor.
+							if (encoder.encodeQueueSize > 0) continue;
 
 							// This doesn't need to be reactive.
 							const config = this.config.peek();

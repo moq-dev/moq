@@ -102,6 +102,12 @@ name = "synced"
 harness = false
 required-features = ["fuzz"]
 
+# Reaches the crate-private session interests through the hidden `fuzz` module.
+[[bench]]
+name = "interests"
+harness = false
+required-features = ["fuzz"]
+
 # Reaches the private message codecs through the hidden `fuzz` module.
 [[bench]]
 name = "codec"
@@ -134,11 +140,10 @@ required-features = ["async"]
 name = "tracks"
 harness = false
 
-# Declares a pending tail through the hidden `fuzz` module.
 [[bench]]
 name = "tail"
 harness = false
-required-features = ["fuzz"]
+required-features = ["async"]
 
 [[bench]]
 name = "priority"
@@ -174,6 +179,12 @@ required-features = ["fuzz"]
 [[bench]]
 name = "refresh"
 harness = false
+
+# Follows the session's probe target through the hidden `fuzz` module.
+[[bench]]
+name = "bandwidth"
+harness = false
+required-features = ["fuzz"]
 
 # Uses the hidden fuzz module to observe source selection without public API.
 [[bench]]

@@ -560,7 +560,7 @@ impl<S: Stream> Export<S> {
 				}
 				while let Some(source) = track.source.as_mut() {
 					match source.poll_event(waiter)? {
-						Poll::Ready(Some(Event::Frame(frame))) => {
+						Poll::Ready(Some(Event::Frame { frame, .. })) => {
 							track.group = source.group();
 							// A keyframe may carry new parameter sets, so check it still matches.
 							if !track.described || frame.keyframe {

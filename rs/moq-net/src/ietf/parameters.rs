@@ -35,6 +35,8 @@ pub enum ParameterVarInt {
 	MaxAge = super::max_age::OPTION,
 	/// EPOCH, from the MoQ Epoch extension.
 	Epoch = super::epoch::EPOCH,
+	/// DEFLATE-compressed tracks, from the MoQ Flate extension.
+	Flate = super::flate::OPTION,
 	#[num_enum(catch_all)]
 	Unknown(u64),
 }
@@ -98,6 +100,7 @@ impl Decode<Version> for Parameters {
 					ParameterVarInt::MaxRequestUpdates if !super::request_update::supported(version) => {
 						ParameterVarInt::Unknown(kind)
 					}
+					ParameterVarInt::Flate if !super::flate::supported(version) => ParameterVarInt::Unknown(kind),
 					kind => kind,
 				};
 				if !matches!(kind, ParameterVarInt::Unknown(_)) && params.get_varint(kind).is_some() {
@@ -557,7 +560,7 @@ macro_rules! encode_params {
 ///     0x20 => subscriber_priority: Option<u8>,
 /// );
 /// // forward: Option<bool> and subscriber_priority: Option<u8> are now in scope
-/// let subscriber_priority = subscriber_priority.unwrap_or(128);
+/// let subscriber_priority = subscriber_priority.unwrap_or(super::priority::ABSENT_WIRE);
 /// ```
 macro_rules! decode_params {
 	($r:expr, $version:expr, $($key:expr => $name:ident: $ty:ty $(where $gate:expr)?),* $(,)?) => {

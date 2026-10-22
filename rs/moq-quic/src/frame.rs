@@ -741,6 +741,12 @@ impl Iter {
     fn take_remaining(&mut self) -> Bytes {
         mem::take(&mut self.bytes)
     }
+
+    /// The payload past the frames parsed so far, so the mux can interleave its own frame types
+    #[cfg(feature = "mux")]
+    pub(crate) fn into_rest(self) -> Bytes {
+        self.bytes
+    }
 }
 
 impl Iterator for Iter {
@@ -945,6 +951,21 @@ impl Datagram {
             0
         } + self.data.len()
     }
+
+    /// The largest payload whose length-prefixed frame fits in `budget` bytes, if any frame does
+    ///
+    /// Exact, rather than reserving [`SIZE_BOUND`](FrameStruct::SIZE_BOUND)'s 8-byte length: a
+    /// 1200-byte `max_datagram_frame_size` carries 1197 bytes. Below two bytes not even an empty
+    /// frame fits, and RFC 9221 section 3 reads a limit of 0 as no DATAGRAM support.
+    pub(crate) fn max_payload(budget: u64) -> Option<u64> {
+        let mut payload = budget.checked_sub(2)?;
+        while payload > 0
+            && 1 + VarInt::from_u64(payload).map_or(8, VarInt::size) as u64 + payload > budget
+        {
+            payload -= 1;
+        }
+        Some(payload)
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1129,4 +1150,26 @@ mod test {
         1 << 30,
         VarInt::MAX.into_inner(),
     ];
+
+    #[test]
+    fn datagram_max_payload_is_exact() {
+        // Not even an empty frame fits
+        assert_eq!(Datagram::max_payload(0), None);
+        assert_eq!(Datagram::max_payload(1), None);
+        for budget in [2u64, 3, 64, 65, 66, 1200, 16385, 16386, 1 << 20] {
+            let payload = Datagram::max_payload(budget).unwrap();
+            let frame = |n: u64| {
+                Datagram {
+                    data: Bytes::from(vec![0; n as usize]),
+                }
+                .size(true) as u64
+            };
+            assert!(frame(payload) <= budget, "{budget}: {payload} overflows");
+            assert!(
+                frame(payload + 1) > budget,
+                "{budget}: {payload} isn't the largest"
+            );
+        }
+        assert_eq!(Datagram::max_payload(1200), Some(1197));
+    }
 }

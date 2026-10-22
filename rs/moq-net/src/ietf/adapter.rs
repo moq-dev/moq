@@ -4,7 +4,7 @@ use std::{
 	task::{Context, Poll},
 };
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 use crate::{
 	Error, PathOwned,
@@ -160,43 +160,8 @@ impl VirtualRecvStream {
 	}
 }
 
-impl crate::transport::poll::RecvStream for VirtualRecvStream {
+impl crate::transport::poll::Chunks for VirtualRecvStream {
 	type Error = crate::Error;
-
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		if dst.is_empty() {
-			return Poll::Ready(Ok(Some(0)));
-		}
-
-		std::task::ready!(self.poll_fill(cx));
-		if self.buffer.is_empty() {
-			return Poll::Ready(Ok(None));
-		}
-
-		let n = dst.len().min(self.buffer.len());
-		dst[..n].copy_from_slice(&self.buffer[..n]);
-		self.buffer.advance(n);
-		Poll::Ready(Ok(Some(n)))
-	}
-
-	fn poll_read_buf<B: BufMut>(
-		&mut self,
-		cx: &mut Context<'_>,
-		buf: &mut B,
-	) -> Poll<Result<Option<usize>, Self::Error>> {
-		if !buf.has_remaining_mut() {
-			return Poll::Ready(Ok(Some(0)));
-		}
-
-		std::task::ready!(self.poll_fill(cx));
-		if self.buffer.is_empty() {
-			return Poll::Ready(Ok(None));
-		}
-
-		let n = buf.remaining_mut().min(self.buffer.len());
-		buf.put(self.buffer.split_to(n));
-		Poll::Ready(Ok(Some(n)))
-	}
 
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 		if max == 0 {
@@ -214,25 +179,6 @@ impl crate::transport::poll::RecvStream for VirtualRecvStream {
 
 	fn stop(&mut self, _code: u32) {
 		self.rx.close();
-	}
-
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		if self.closed {
-			return Poll::Ready(Ok(()));
-		}
-
-		// Drain (and discard) remaining messages until the queue closes.
-		let waiter = self.park.hold(cx);
-		loop {
-			match self.rx.poll_pop(waiter) {
-				Poll::Ready(Some(_)) => {}
-				Poll::Ready(None) => {
-					self.closed = true;
-					return Poll::Ready(Ok(()));
-				}
-				Poll::Pending => return Poll::Pending,
-			}
-		}
 	}
 }
 
@@ -462,26 +408,61 @@ impl crate::transport::poll::SendStream for VirtualSendStream {
 
 // === Adapter Send/Recv Enums ===
 
+/// A failure on an adapter stream. A real stream keeps its transport's error, so the negotiated
+/// registry decodes a peer's reset rather than mistaking it for a lost connection.
+/// Virtual streams have only local errors.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum AdapterError<E: crate::transport::Error> {
+	#[error(transparent)]
+	Real(E),
+	#[error(transparent)]
+	Virtual(crate::Error),
+}
+
+impl<E: crate::transport::Error> crate::transport::Error for AdapterError<E> {
+	fn close_kind(&self) -> crate::transport::CloseKind {
+		match self {
+			Self::Real(err) => err.close_kind(),
+			Self::Virtual(err) => err.close_kind(),
+		}
+	}
+
+	fn session_error(&self) -> Option<(u32, String)> {
+		match self {
+			Self::Real(err) => err.session_error(),
+			Self::Virtual(err) => err.session_error(),
+		}
+	}
+
+	fn stream_error(&self) -> Option<u32> {
+		match self {
+			Self::Real(err) => err.stream_error(),
+			Self::Virtual(err) => err.stream_error(),
+		}
+	}
+}
+
 pub enum AdapterSend<S: crate::transport::poll::Session> {
 	Real(S::SendStream),
 	Virtual(VirtualSendStream),
 }
 
 impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for AdapterSend<S> {
-	type Error = crate::Error;
+	type Error = AdapterError<<S::SendStream as crate::transport::poll::SendStream>::Error>;
 	type Group = <S::SendStream as crate::transport::poll::SendStream>::Group;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_write(cx, buf).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_write(cx, buf),
+			Self::Real(s) => s.poll_write(cx, buf).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_write(cx, buf).map_err(AdapterError::Virtual),
 		}
 	}
 
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_write_buf(cx, buf).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_write_buf(cx, buf),
+			Self::Real(s) => s.poll_write_buf(cx, buf).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_write_buf(cx, buf).map_err(AdapterError::Virtual),
 		}
 	}
 
@@ -502,8 +483,8 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		match self {
-			Self::Real(s) => s.finish().map_err(|_| crate::Error::Closed),
-			Self::Virtual(s) => s.finish(),
+			Self::Real(s) => s.finish().map_err(AdapterError::Real),
+			Self::Virtual(s) => s.finish().map_err(AdapterError::Virtual),
 		}
 	}
 
@@ -516,42 +497,41 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_closed(cx).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_closed(cx),
+			Self::Real(s) => s.poll_closed(cx).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_closed(cx).map_err(AdapterError::Virtual),
 		}
 	}
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum AdapterRecv<S: crate::transport::poll::Session> {
 	Real(S::RecvStream),
-	Virtual(VirtualRecvStream),
+	Virtual(crate::transport::poll::Buffered<VirtualRecvStream>),
 }
 
 impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for AdapterRecv<S> {
-	type Error = crate::Error;
+	type Error = AdapterError<<S::RecvStream as crate::transport::poll::RecvStream>::Error>;
+	type Lease<'a>
+		= AdapterLease<'a, S>
+	where
+		S: 'a;
 
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<AdapterLease<'_, S>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_read(cx, dst).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_read(cx, dst),
+			Self::Real(s) => s
+				.poll_lease(cx, want)
+				.map(|r| r.map(AdapterLease::Real).map_err(AdapterError::Real)),
+			Self::Virtual(s) => s
+				.poll_lease(cx, want)
+				.map(|r| r.map(AdapterLease::Virtual).map_err(AdapterError::Virtual)),
 		}
 	}
 
-	fn poll_read_buf<B: BufMut>(
-		&mut self,
-		cx: &mut Context<'_>,
-		buf: &mut B,
-	) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn set_priority(&mut self, priority: i64) {
 		match self {
-			Self::Real(s) => s.poll_read_buf(cx, buf).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_read_buf(cx, buf),
-		}
-	}
-
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
-		match self {
-			Self::Real(s) => s.poll_read_chunk(cx, max).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_read_chunk(cx, max),
+			Self::Real(s) => s.set_priority(priority),
+			// Rides the control stream, which carries its credit.
+			Self::Virtual(_) => {}
 		}
 	}
 
@@ -561,11 +541,64 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 			Self::Virtual(s) => s.stop(code),
 		}
 	}
+}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+/// A [`Lease`](crate::transport::poll::Lease) of an [`AdapterRecv`].
+pub enum AdapterLease<'a, S: crate::transport::poll::Session + 'a> {
+	Real(<S::RecvStream as crate::transport::poll::RecvStream>::Lease<'a>),
+	Virtual(crate::transport::poll::BufferedLease<'a>),
+}
+
+impl<S: crate::transport::poll::Session> Buf for AdapterLease<'_, S> {
+	fn remaining(&self) -> usize {
 		match self {
-			Self::Real(s) => s.poll_closed(cx).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_closed(cx),
+			Self::Real(l) => l.remaining(),
+			Self::Virtual(l) => l.remaining(),
+		}
+	}
+
+	fn chunk(&self) -> &[u8] {
+		match self {
+			Self::Real(l) => l.chunk(),
+			Self::Virtual(l) => l.chunk(),
+		}
+	}
+
+	fn advance(&mut self, n: usize) {
+		match self {
+			Self::Real(l) => l.advance(n),
+			Self::Virtual(l) => l.advance(n),
+		}
+	}
+
+	fn copy_to_bytes(&mut self, n: usize) -> Bytes {
+		match self {
+			Self::Real(l) => l.copy_to_bytes(n),
+			Self::Virtual(l) => l.copy_to_bytes(n),
+		}
+	}
+}
+
+impl<S: crate::transport::poll::Session> crate::transport::poll::Lease for AdapterLease<'_, S> {
+	fn is_fin(&self) -> bool {
+		match self {
+			Self::Real(l) => l.is_fin(),
+			Self::Virtual(l) => l.is_fin(),
+		}
+	}
+
+	fn chunks(&self) -> impl Iterator<Item = &[u8]> {
+		let (real, virt) = match self {
+			Self::Real(l) => (Some(l.chunks()), None),
+			Self::Virtual(l) => (None, Some(l.chunks())),
+		};
+		real.into_iter().flatten().chain(virt.into_iter().flatten())
+	}
+
+	fn release(self) {
+		match self {
+			Self::Real(l) => l.release(),
+			Self::Virtual(l) => l.release(),
 		}
 	}
 }
@@ -1096,7 +1129,7 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 		// SUBSCRIBE_TRACKS (draft-18+, #1542): the half of the SUBSCRIBE_NAMESPACE split
 		// that subscribes to all tracks under a prefix. We don't implement PUBLISH
 		// replication, so this is impossible to honor. Reject loudly.
-		ietf::SUBSCRIBE_TRACKS_ID => {
+		ietf::SubscribeTracks::ID => {
 			tracing::error!(
 				version = ?version,
 				"received SUBSCRIBE_TRACKS (0x51); not supported in moq-lite (no PUBLISH replication)"
@@ -1298,7 +1331,10 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 
 		let waiter = self.park.hold(cx);
 		match std::task::ready!(self.shared.incoming.poll_pop(waiter)) {
-			Some((send, recv)) => Poll::Ready(Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv)))),
+			Some((send, recv)) => Poll::Ready(Ok((
+				AdapterSend::Virtual(send),
+				AdapterRecv::Virtual(crate::transport::poll::Buffered::new(recv)),
+			))),
 			None => Poll::Ready(Err(crate::Error::Closed)),
 		}
 	}
@@ -1310,7 +1346,10 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 		_: crate::transport::poll::SendOptions<'_, <Self::SendStream as crate::transport::poll::SendStream>::Group>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let (send, recv) = self.shared.open_outgoing(self.version);
-		Poll::Ready(Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))))
+		Poll::Ready(Ok((
+			AdapterSend::Virtual(send),
+			AdapterRecv::Virtual(crate::transport::poll::Buffered::new(recv)),
+		)))
 	}
 
 	fn poll_open_uni(
@@ -1465,8 +1504,13 @@ mod tests {
 	}
 
 	/// A receive stream with no request behind it, for exercising the reader alone.
-	fn detached_recv(initial: Bytes, rx: Queue<Bytes>) -> VirtualRecvStream {
-		VirtualRecvStream::new(initial, rx, Arc::new(Shared::default()), Arc::new(Mutex::new(None)))
+	fn detached_recv(initial: Bytes, rx: Queue<Bytes>) -> crate::transport::poll::Buffered<VirtualRecvStream> {
+		crate::transport::poll::Buffered::new(VirtualRecvStream::new(
+			initial,
+			rx,
+			Arc::new(Shared::default()),
+			Arc::new(Mutex::new(None)),
+		))
 	}
 
 	#[test]
@@ -1538,6 +1582,7 @@ mod tests {
 				forward: Some(false),
 				filter: Some(ietf::Filter::NextObject),
 				authorization_token: None,
+				fill: None,
 			};
 			let body = encode_body(&update, version);
 			let raw = encode_raw(ietf::SubscribeUpdate::ID, &body, version);
@@ -1554,14 +1599,14 @@ mod tests {
 				.unwrap();
 			let (_, mut recv) = shared.incoming.pop().await.unwrap();
 			assert_eq!(
-				recv.read_chunk(usize::MAX).await.unwrap(),
+				read_virtual(&mut recv).await.unwrap(),
 				Some(Bytes::from_static(b"request"))
 			);
 
 			assert_eq!(routed, target_id, "{version}: update {update_id} routed to {routed}");
 			shared.push(routed, raw.clone());
 			assert_eq!(
-				recv.read_chunk(usize::MAX).await.unwrap(),
+				read_virtual(&mut recv).await.unwrap(),
 				Some(raw),
 				"{version}: update {update_id} did not reach {target_id}"
 			);
@@ -1600,6 +1645,7 @@ mod tests {
 		assert_eq!(shared.control.pop().await.unwrap(), first);
 
 		let ok = ietf::RequestOk {
+			largest: None,
 			request_id: Some(RequestId(6)),
 			active: None,
 		};
@@ -1609,7 +1655,7 @@ mod tests {
 		));
 		let ok = encode_msg(&ok, VERSION);
 		assert!(shared.push(RequestId(6), ok.clone()), "the answer found no stream");
-		assert_eq!(recv.read_chunk(usize::MAX).await.unwrap(), Some(ok.clone()));
+		assert_eq!(read_virtual(&mut recv).await.unwrap(), Some(ok.clone()));
 		assert!(!shared.push(RequestId(6), ok), "a second answer was routed");
 
 		send.write_chunk(update(8)).await.unwrap();
@@ -1624,7 +1670,7 @@ mod tests {
 			VERSION,
 		);
 		shared.close(RequestId(8), error.clone());
-		assert_eq!(recv.read_chunk(usize::MAX).await.unwrap(), Some(error));
+		assert_eq!(read_virtual(&mut recv).await.unwrap(), Some(error));
 		assert!(
 			shared.push(RequestId(4), Bytes::from_static(b"later")),
 			"the refusal closed the request"
@@ -1710,18 +1756,17 @@ mod tests {
 		let mut stream = detached_recv(initial, follow);
 
 		// Read initial data
-		let mut buf = [0u8; 32];
-		let n = stream.read(&mut buf).await.unwrap().unwrap();
-		assert_eq!(&buf[..n], b"initial");
+		let chunk = stream.read_chunk(32).await.unwrap().unwrap();
+		assert_eq!(&chunk[..], b"initial");
 
 		// Send follow-up
 		tx.push(Bytes::from_static(b"followup"));
-		let n = stream.read(&mut buf).await.unwrap().unwrap();
-		assert_eq!(&buf[..n], b"followup");
+		let chunk = stream.read_chunk(32).await.unwrap().unwrap();
+		assert_eq!(&chunk[..], b"followup");
 
 		// Drop the writer → FIN
 		drop(tx);
-		let result = stream.read(&mut buf).await.unwrap();
+		let result = stream.read_chunk(32).await.unwrap();
 		assert_eq!(result, None);
 	}
 
@@ -1731,16 +1776,14 @@ mod tests {
 		let mut stream = detached_recv(initial, Queue::new());
 
 		// Read small chunks
-		let mut buf = [0u8; 5];
-		let n = stream.read(&mut buf).await.unwrap().unwrap();
-		assert_eq!(&buf[..n], b"hello");
+		let chunk = stream.read_chunk(5).await.unwrap().unwrap();
+		assert_eq!(&chunk[..], b"hello");
 
-		let n = stream.read(&mut buf).await.unwrap().unwrap();
-		assert_eq!(&buf[..n], b" worl");
+		let chunk = stream.read_chunk(5).await.unwrap().unwrap();
+		assert_eq!(&chunk[..], b" worl");
 
-		let mut buf = [0u8; 1];
-		let n = stream.read(&mut buf).await.unwrap().unwrap();
-		assert_eq!(&buf[..n], b"d");
+		let chunk = stream.read_chunk(1).await.unwrap().unwrap();
+		assert_eq!(&chunk[..], b"d");
 	}
 
 	#[moq_clock::test]
@@ -1836,10 +1879,7 @@ mod tests {
 
 		// Drain the advertisement the stream opened with, so both halves are quiescent
 		// and a later read only sees what the terminal message routes.
-		assert_eq!(
-			recv.read_chunk(usize::MAX).await.unwrap(),
-			Some(encode_msg(&msg, version))
-		);
+		assert_eq!(read_virtual(&mut recv).await.unwrap(), Some(encode_msg(&msg, version)));
 		recv
 	}
 
@@ -1870,10 +1910,15 @@ mod tests {
 		(shared, ours, theirs)
 	}
 
+	/// The next chunk of a virtual stream, read without a lease.
+	fn read_virtual(stream: &mut VirtualRecvStream) -> impl Future<Output = Result<Option<Bytes>, crate::Error>> + '_ {
+		std::future::poll_fn(|cx| crate::transport::poll::Chunks::poll_read_chunk(stream, cx, usize::MAX))
+	}
+
 	/// Read until the stream FINs, returning whether it did so within `limit` reads.
 	async fn drained(stream: &mut VirtualRecvStream, limit: usize) -> bool {
 		for _ in 0..limit {
-			if stream.read_chunk(usize::MAX).await.unwrap().is_none() {
+			if read_virtual(stream).await.unwrap().is_none() {
 				return true;
 			}
 		}
@@ -1920,7 +1965,7 @@ mod tests {
 		shared.close(RequestId(7), encode_msg(&done, version));
 		assert!(drained(&mut theirs, 4).await);
 		assert!(shared.streams.lock().unwrap().contains_key(&RequestId(4)));
-		assert!(ours.read_chunk(usize::MAX).now_or_never().is_none());
+		assert!(read_virtual(&mut ours).now_or_never().is_none());
 	}
 
 	#[moq_clock::test]
@@ -1948,7 +1993,7 @@ mod tests {
 		shared.close(RequestId(4), encode_msg(&cancel, version));
 		assert!(drained(&mut ours, 4).await);
 		assert!(shared.streams.lock().unwrap().contains_key(&RequestId(7)));
-		assert!(theirs.read_chunk(usize::MAX).now_or_never().is_none());
+		assert!(read_virtual(&mut theirs).now_or_never().is_none());
 	}
 
 	/// Classify the peer withdrawing its own advertisement of `namespace`.
@@ -2204,6 +2249,7 @@ mod tests {
 			forward: Some(true),
 			filter: Some(ietf::Filter::NextObject),
 			authorization_token: None,
+			fill: None,
 		};
 		let update = encode_raw(ietf::SubscribeUpdate::ID, &encode_body(&update, VERSION), VERSION);
 		// The target is in the window and the update's own ID is past it.

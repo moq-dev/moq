@@ -67,7 +67,8 @@
 //! route changes, serving, linger, teardown, and the origin's cache expiration.
 //! Standalone caches expose [`cache::Pool::gc`]. Frame read/write methods
 //! clear their expiration timestamp for the next cleanup pass. Datagrams use a bounded
-//! FIFO; model read/write APIs take no wall-clock time.
+//! FIFO; model read/write APIs take no time argument, though a frame write stamps
+//! its arrival from the ambient clock ([`frame::Frame::arrived`]).
 //!
 //! Both drivers implement [`time::Driver`]. `moq-uring` drives thread-local
 //! transports on its own timer heap. Tests advance time by supplying a later
@@ -80,6 +81,8 @@ pub mod auth;
 mod client;
 mod coding;
 #[cfg(feature = "async")]
+mod discovery;
+#[cfg(feature = "async")]
 mod driver;
 mod epoch;
 mod error;
@@ -90,6 +93,7 @@ pub mod goaway;
 #[doc(hidden)]
 pub mod fuzz;
 mod ietf;
+mod ledger;
 mod lite;
 mod model;
 pub mod path;

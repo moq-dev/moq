@@ -8,7 +8,9 @@
 use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll};
 
 mod cell;
+mod wake;
 pub(crate) use cell::SendCell;
+pub(crate) use wake::QueueWake;
 
 /// Prove a future's native Send bound here rather than inside every caller's future.
 pub(crate) fn sendable<F: Future + kio::MaybeSend>(future: F) -> impl Future<Output = F::Output> + kio::MaybeSend {

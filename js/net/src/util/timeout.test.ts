@@ -15,9 +15,9 @@ test("withTimeout: rejects with TimeoutError after deadline", async () => {
 	const restore = clock.install();
 	try {
 		const timed = withTimeout(pending, Nano(10), "timed out").catch((err: unknown) => err);
-		await clock.advanceAsync(Nano(9));
+		await clock.advance(Nano(9));
 		expect(await Promise.race([timed, "pending"])).toBe("pending");
-		await clock.advanceAsync(Nano(1));
+		await clock.advance(Nano(1));
 		expect(await timed).toBeInstanceOf(TimeoutError);
 	} finally {
 		restore();

@@ -494,7 +494,7 @@ impl Session {
 		}
 
 		// Wait for the peer to close the CONNECT stream after receiving the capsule.
-		if tokio::time::timeout(timeout, self.conn.closed()).await.is_err() {
+		if moq_clock::timeout(timeout, self.conn.closed()).await.is_err() {
 			tracing::debug!("timeout waiting for peer to close; force-closing connection");
 			self.conn.close(http3_code, b"");
 		}
@@ -703,6 +703,8 @@ pub struct SessionAccept {
 	qpack_decoder: Option<crate::quic::driver::RecvStream>,
 
 	accept_uni: Pin<Box<AcceptUni>>,
+	// Pending WebTransport headers must be decoded before returning this error.
+	uni_end: Option<SessionError>,
 	accept_bi: Pin<Box<AcceptBi>>,
 
 	// Keep track of work being done to read/write the WebTransport stream header.
@@ -748,6 +750,7 @@ impl SessionAccept {
 			qpack_encoder: None,
 
 			accept_uni,
+			uni_end: None,
 			accept_bi,
 
 			pending_uni: FuturesUnordered::new(),
@@ -785,18 +788,17 @@ impl SessionAccept {
 
 		loop {
 			// Accept any new streams.
-			if let Poll::Ready(Some(res)) = self.accept_uni.poll_next_unpin(cx) {
+			if self.uni_end.is_none()
+				&& let Poll::Ready(Some(res)) = self.accept_uni.poll_next_unpin(cx)
+			{
 				// Start decoding the header and add the future to the list of pending streams.
-				let recv = match res {
-					Ok(recv) => recv,
-					Err(e) => {
-						return Poll::Ready(Err(e.into()));
+				match res {
+					Ok(recv) => {
+						self.pending_uni.push(Box::pin(Self::decode_uni(recv, self.session_id)));
+						continue;
 					}
-				};
-				let pending = Self::decode_uni(recv, self.session_id);
-				self.pending_uni.push(Box::pin(pending));
-
-				continue;
+					Err(err) => self.uni_end = Some(err.into()),
+				}
 			}
 
 			// Poll the list of pending streams.
@@ -806,7 +808,8 @@ impl SessionAccept {
 					log_header_error(err, "unidirectional");
 					continue;
 				}
-				Poll::Ready(None) | Poll::Pending => return Poll::Pending,
+				Poll::Ready(None) => return self.uni_end.clone().map_or(Poll::Pending, |err| Poll::Ready(Err(err))),
+				Poll::Pending => return Poll::Pending,
 			};
 
 			// Decide if we keep looping based on the type.
@@ -1041,6 +1044,7 @@ impl web_transport_trait::Session for Session {
 }
 
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use std::{
 		io::{self, IoSliceMut},
@@ -1271,6 +1275,26 @@ mod tests {
 			logs_contain("failed to read capsule"),
 			"a truncated capsule stream was not reported"
 		);
+	}
+
+	#[tokio::test]
+	async fn webtransport_accepts_a_buffered_uni_after_the_peer_close() {
+		let (client, server, _endpoints) = pair().await;
+		let mut send = client.open_uni(Default::default()).await.unwrap();
+		// WebTransport stream type, session ID 0, then the application payload.
+		send.write_all(&[0x40, 0x54, 0x00, b'l', b'a', b's', b't'])
+			.await
+			.unwrap();
+		send.finish().unwrap();
+		assert!(send.stopped().await.unwrap().is_none());
+		client.close(0u32.into(), b"done");
+		server.closed().await;
+		let mut accept = SessionAccept::new(server, SESSION, Arc::new(CloseReason::new(false)));
+		let mut recv = kio::wait(|waiter| accept.poll_accept_uni(waiter))
+			.await
+			.expect("buffered uni precedes the close");
+		assert_eq!(recv.read_to_end(64).await.unwrap(), b"last");
+		assert!(kio::wait(|waiter| accept.poll_accept_uni(waiter)).await.is_err());
 	}
 
 	/// A uni stream reset before its header arrived reports the reset, not a foreign session.

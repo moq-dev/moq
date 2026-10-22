@@ -735,6 +735,18 @@ mod tests {
 	}
 
 	#[test]
+	fn a_staged_track_is_listed_until_dropped_uncommitted() {
+		let broadcast = Info::new().produce();
+		let request = broadcast.reserve_track("a").unwrap();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["synced"]);
+		let staged = request.stage(None);
+		assert_eq!(drain(&mut tracks), ["+a"]);
+		drop(staged);
+		assert_eq!(drain(&mut tracks), ["-a"]);
+	}
+
+	#[test]
 	fn a_track_served_on_request_is_never_listed() {
 		let broadcast = Info::new().produce();
 		let mut dynamic = broadcast.dynamic();

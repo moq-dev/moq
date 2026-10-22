@@ -27,6 +27,7 @@ pub(crate) mod epoch;
 pub(crate) mod error;
 mod fetch;
 mod filter;
+pub(crate) mod flate;
 mod goaway;
 mod group;
 pub mod hidden;
@@ -51,6 +52,7 @@ mod session;
 pub mod solicit;
 mod subscribe;
 mod subscribe_namespace;
+mod subscribe_tracks;
 #[cfg(feature = "async")]
 mod subscriber;
 pub(crate) mod token;
@@ -79,6 +81,7 @@ pub use request::*;
 pub use session::*;
 pub use subscribe::*;
 pub use subscribe_namespace::*;
+pub use subscribe_tracks::*;
 #[cfg(feature = "async")]
 use subscriber::*;
 pub use track::*;

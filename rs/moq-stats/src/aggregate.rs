@@ -1114,7 +1114,7 @@ mod tests {
 			source.announce(origin::Route::default()).expect("announce");
 			let name = traffic_track(&Tier::default(), Role::Publisher, false);
 			let track = source.create_track(name, timed()).expect("create track");
-			let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
+			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
 				traffic: moq_json::snapshot::Producer::new(track.clone(), config),
 				track,
@@ -1890,7 +1890,7 @@ mod tests {
 				.expect("create broadcast");
 			source.announce(origin::Route::default()).expect("announce");
 			let track = source.create_track(totals_track(false), timed()).expect("create track");
-			let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
+			let config = moq_json::snapshot::Config::default().with_deltas(false);
 			Self {
 				_source: source,
 				totals: moq_json::snapshot::Producer::new(track, config),

@@ -180,11 +180,11 @@ pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
 		events: libc::POLLIN,
 		revents: 0,
 	};
-	let deadline = std::time::Instant::now() + DMA_BUF_FENCE_TIMEOUT;
+	let deadline = moq_clock::now() + DMA_BUF_FENCE_TIMEOUT;
 	loop {
 		// A signal restarts the wait against the same deadline rather than
 		// granting a fresh budget, so the total stall stays bounded.
-		let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+		let remaining = deadline.saturating_duration_since(moq_clock::now());
 		if remaining.is_zero() {
 			return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
 		}
