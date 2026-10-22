@@ -326,3 +326,12 @@ test("encode enforces the max part count", () => {
 	expect(Path.encode(atLimit)).toBe(atLimit);
 	expect(() => Path.encode(`${atLimit}/extra` as Path.Valid)).toThrow();
 });
+
+test("path limits apply after normalizing separators", () => {
+	const atLimit = Array(Path.MAX_PARTS).fill("part").join("/");
+	expect(Path.decode(`///${atLimit.replaceAll("/", "///")}///`)).toBe(atLimit as Path.Valid);
+	expect(Path.decode("/".repeat(4096))).toBe(Path.empty());
+	expect(Path.encode(Path.empty())).toBe(Path.empty());
+	expect(() => Path.decode("a/".repeat(4096))).toThrow(/parts/);
+	expect(() => Path.encode("a/".repeat(4096) as Path.Valid)).toThrow(/parts/);
+});

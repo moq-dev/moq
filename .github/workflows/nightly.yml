@@ -110,6 +110,11 @@ jobs:
         if: ${{ !cancelled() }}
         run: nix develop --command just js bench varint
 
+      # Report malformed-input growth separately from deterministic unit tests.
+      - name: JS parsing benchmark
+        if: ${{ !cancelled() }}
+        run: nix develop --command just js bench parsing
+
       # Bytes and time for lite-06 against lite-07 frames, groups, and requests. No
       # threshold: it only has to keep running.
       - name: JS lite varint benchmark

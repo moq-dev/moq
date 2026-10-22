@@ -82,8 +82,12 @@ export function decode(raw: string): Valid {
  * emit a path the remote side is required to reject.
  */
 export function encode(path: Valid): Valid {
-	if (parts(path).length > MAX_PARTS) {
-		throw new Error(`path exceeds ${MAX_PARTS} parts`);
+	// Count separators with an early exit instead of splitting, so a hostile path never allocates per part.
+	let count = path === "" ? 0 : 1;
+	for (let i = path.indexOf("/"); i !== -1; i = path.indexOf("/", i + 1)) {
+		if (++count > MAX_PARTS) {
+			throw new Error(`path exceeds ${MAX_PARTS} parts`);
+		}
 	}
 	return path;
 }
