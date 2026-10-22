@@ -27,10 +27,16 @@ The core networking is delegated to a QUIC library but the rest is in applicatio
 
 Full documentation lives at **[doc.moq.dev](https://doc.moq.dev)**.
 
-- **[Run the demo](https://doc.moq.dev/setup/)** - try MoQ locally with a relay, demo media, and the web UI.
-- **[Agent setup](https://doc.moq.dev/setup/agent)** - teach your AI coding agent (Claude Code, Cursor, etc.) how to build with MoQ. The docs are also served as markdown via [llms.txt](https://doc.moq.dev/llms.txt).
-- **[Linux packages](https://doc.moq.dev/setup/install)** - install the relay and GStreamer plugin from `apt.moq.dev` / `rpm.moq.dev`.
-- **[Production setup](https://doc.moq.dev/setup/prod)** - deploy a relay with a real domain and TLS.
+| I want to | Start here |
+| --- | --- |
+| Try MoQ | [Local demo](https://doc.moq.dev/setup/) or [live web demo](https://moq.dev/) |
+| Add streaming to an app | [Choose a library](https://doc.moq.dev/lib/) and [find an example](https://doc.moq.dev/setup/examples) |
+| Connect existing media tools | [CLI, OBS, GStreamer, and gateways](https://doc.moq.dev/bin/) |
+| Run a relay | [Install](https://doc.moq.dev/setup/install), then [production setup](https://doc.moq.dev/setup/prod) |
+| Understand the design | [Concepts](https://doc.moq.dev/concept/) and [protocol drafts](https://doc.moq.dev/draft/) |
+| Diagnose a problem | [Troubleshooting](https://doc.moq.dev/setup/troubleshooting) and [inspect a relay](https://doc.moq.dev/bin/inspect) |
+| Change this repository | [Repository map](doc/setup/repository.md), [development guide](doc/setup/dev.md), and [contributing](CONTRIBUTING.md) |
+| Work with a coding agent | [Agent setup](doc/setup/agent.md); repository instructions start in [AGENTS.md](AGENTS.md) |
 
 The quickest way to see it in action (requires [Nix](https://nixos.org/download.html) with [flakes](https://wiki.nixos.org/wiki/Flakes)):
 
@@ -76,40 +82,29 @@ Think of `hang` as like HLS/DASH, while `moq-lite` is like HTTP.
 
 ## Libraries
 
-This repository provides both [Rust](rs) and [TypeScript](js) libraries with similar APIs but language-specific optimizations.
+Choose by the job you need done. The [library guide](https://doc.moq.dev/lib/)
+compares languages; the [repository map](doc/setup/repository.md) locates the
+implementation behind each feature.
 
-### Rust
+| Layer | Rust | TypeScript |
+| --- | --- | --- |
+| Live pub/sub | [moq-net](rs/moq-net) | [@moq/net](js/net) |
+| Media catalog and containers | [hang](rs/hang), [moq-mux](rs/moq-mux) | [@moq/hang](js/hang) |
+| Capture and playback | [moq-audio](rs/moq-audio), [moq-video](rs/moq-video) | [@moq/publish](js/publish), [@moq/watch](js/watch) |
+| Rooms and chat | [moq-room](rs/moq-room) | [@moq/room](js/room) |
+| Authorization | [moq-auth](rs/moq-auth) | [@moq/auth](js/auth) |
 
-| Crate                       | Description                                                                                                                           | Docs                                                                           |
-|-----------------------------|---------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
-| [moq-net](rs/moq-net)            | The networking layer: real-time pub/sub with built-in caching, fan-out, and prioritization. Negotiates either the `moq-lite` or `moq-transport` wire protocol. | [![docs.rs](https://docs.rs/moq-net/badge.svg)](https://docs.rs/moq-net)       |
-| [moq-relay](rs/moq-relay)   | A clusterable relay server. This relay performs fan-out connecting multiple clients and servers together.                             |                                                                                |
-| [moq-auth](rs/moq-auth)     | The authorization contract `moq-relay` speaks: requests, grants, leases, and the JWT that rides them. `moq auth` is the CLI.          | [![docs.rs](https://docs.rs/moq-auth/badge.svg)](https://docs.rs/moq-auth)     |
-| [moq-tokio](rs/moq-tokio) | Connect and listen over QUIC, WebTransport, WebSocket, TCP/TLS, and Unix sockets, plus optional iroh and WebRTC.                    | [![docs.rs](https://docs.rs/moq-tokio/badge.svg)](https://docs.rs/moq-tokio) |
-| [moq-c](rs/moq-c)             | C bindings for `moq-net`.                                                                                                             | [![docs.rs](https://docs.rs/moq-c/badge.svg)](https://docs.rs/moq-c)           |
-| [hang](rs/hang)             | Media-specific encoding/streaming layered on top of `moq-net`. Can be used as a library.                      | [![docs.rs](https://docs.rs/hang/badge.svg)](https://docs.rs/hang)             |
-| [moq-cli](rs/moq-cli)       | A CLI for publishing media to MoQ relays.                                                                                             |                                                                                |
-| [moq-mux](rs/moq-mux)       | Media muxers and demuxers (fMP4/CMAF, MPEG-TS, FLV, Matroska) for importing content into MoQ broadcasts.                              | [![docs.rs](https://docs.rs/moq-mux/badge.svg)](https://docs.rs/moq-mux)       |
-| [moq-gst](rs/moq-gst)       | A GStreamer plugin for publishing or consuming MoQ broadcasts. Not built by default; requires GStreamer dev libraries.                         |                                                                                |
-
-### TypeScript
-
-| Package                                  | Description                                                                                                        | NPM                                                                                                   |
-|------------------------------------------|--------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------|
-| **[@moq/net](js/net)**             | The networking layer: real-time pub/sub with built-in caching, fan-out, and prioritization. Negotiates either the `moq-lite` or `moq-transport` wire protocol. Intended for browsers, runs server-side with a WebTransport polyfill. | [![npm](https://img.shields.io/npm/v/@moq/net)](https://www.npmjs.com/package/@moq/net)     |
-| **[@moq/auth](js/auth)**             |  The authorization contract and JWT tooling for JS/TS environments (see [Authentication](https://doc.moq.dev/bin/relay/auth))                               | [![npm](https://img.shields.io/npm/v/@moq/auth)](https://www.npmjs.com/package/@moq/auth)   |
-| **[@moq/hang](js/hang)**           | Core media library: catalog, container, and support. Shared by `@moq/watch` and `@moq/publish`. | [![npm](https://img.shields.io/npm/v/@moq/hang)](https://www.npmjs.com/package/@moq/hang) |
-| **[@moq/demo](demo/web)** | Examples using `@moq/hang`.                                                                                  |                                                                                                       |
-| **[@moq/watch](js/watch)**         | Subscribe to and render MoQ broadcasts (Web Component + JS API).                                                        | [![npm](https://img.shields.io/npm/v/@moq/watch)](https://www.npmjs.com/package/@moq/watch)     |
-| **[@moq/publish](js/publish)**     | Publish media to MoQ broadcasts (Web Component + JS API).                                                               | [![npm](https://img.shields.io/npm/v/@moq/publish)](https://www.npmjs.com/package/@moq/publish) |
+The Rust core also has [Python](https://doc.moq.dev/lib/py/),
+[Swift](https://doc.moq.dev/lib/swift/), [Kotlin](https://doc.moq.dev/lib/kt/),
+[Go](https://doc.moq.dev/lib/go/), [Dart](https://doc.moq.dev/lib/dart/),
+[C++](https://doc.moq.dev/lib/cpp/), and [C](https://doc.moq.dev/lib/c/) bindings.
+[Layers](https://doc.moq.dev/lib/layers) maps their namespaces.
 
 ## Protocol
 
-Read the specifications:
-
-- [moq-lite](https://moq-dev.github.io/drafts/draft-lcurley-moq-lite.html)
-- [hang](https://moq-dev.github.io/drafts/draft-lcurley-moq-hang.html)
-- [use-cases](https://moq-dev.github.io/drafts/draft-lcurley-moq-use-cases.html)
+Start with the [layering overview](https://doc.moq.dev/concept/), then use the
+[Internet-Drafts index](https://doc.moq.dev/draft/) for the wire and format
+specifications. Their editable sources live in [drafts/](drafts/).
 
 ## Stability
 
@@ -119,11 +114,11 @@ Breaking wire changes are extremely rare.
 
 ## Development
 
-Contributions are welcome, including AI-assisted issues, pull requests, reviews, and comments. See [CONTRIBUTING.md](CONTRIBUTING.md#ai-contributions) for the attribution policy and guidance on when to open an issue before writing code.
+Contributions are welcome, including AI-assisted issues, pull requests, reviews, and comments. See [CONTRIBUTING.md](CONTRIBUTING.md#ai) for the attribution policy and guidance on when to open an issue before writing code.
 
 ```sh
 # See all available commands
-just
+just --list
 
 # Build everything
 just build

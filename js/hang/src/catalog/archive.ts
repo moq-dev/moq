@@ -11,7 +11,7 @@ const timescaleSchema = nonzeroU53Schema.check(z.lte(4_294_967_295));
 /**
  * The recording object format advertised in {@link Archive.version} when a store is present.
  */
-export const ARCHIVE_VERSION = 2;
+export const ARCHIVE_VERSION = 3;
 
 /**
  * Discovers each track's timeline and any durable archive.

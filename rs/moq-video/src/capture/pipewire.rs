@@ -180,7 +180,7 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 		_session: session,
 	};
 
-	let geo = match tokio::time::timeout(FORMAT_TIMEOUT, geo_rx).await {
+	let geo = match moq_clock::timeout(FORMAT_TIMEOUT, geo_rx).await {
 		Ok(Ok(result)) => result?,
 		Ok(Err(_)) => {
 			return Err(Error::Codec(anyhow::anyhow!(
@@ -195,7 +195,7 @@ async fn start(config: &Config, capture: Capture, session: Option<SessionGuard>)
 		}
 	};
 
-	let first = match tokio::time::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
+	let first = match moq_clock::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
 		Ok(Ok(Some(frame))) => frame,
 		Ok(Err(error)) => return Err(error),
 		Ok(Ok(None)) | Err(_) => {

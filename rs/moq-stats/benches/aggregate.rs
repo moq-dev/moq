@@ -50,7 +50,7 @@ impl Node {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();
-		let config = moq_json::snapshot::Config::default().with_delta_ratio(0);
+		let config = moq_json::snapshot::Config::default().with_deltas(false);
 		let frame = (0..KEYS)
 			.map(|key| {
 				let mut traffic = Traffic::default();

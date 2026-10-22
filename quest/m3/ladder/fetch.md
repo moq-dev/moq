@@ -19,9 +19,11 @@ still burns full-rate encodes on demand. Make it read the controller's
 applied target and participate in the same allocation. A disabled rung stays
 manually fetchable, and cache hits are untouched.
 
-Catalog mutations publish full HANG, HANGZ, and MSF snapshots today
-(`rs/moq-mux/src/catalog/producer.rs`). Coalesce every rung state
-change from one controller iteration into a single publication, and make a
+Catalog mutations publish full snapshots
+(`rs/moq-mux/src/catalog/producer.rs`). The
+[compression migration](/quest/m1/compress/migrate.md) removes the HANGZ
+sibling before this quest; coalesce every rung state change from one
+controller iteration into a single publication of each supported catalog, and make a
 later source catalog snapshot compose with current generated-rung state
 rather than overwrite it.
 

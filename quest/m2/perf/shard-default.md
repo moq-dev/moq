@@ -28,6 +28,22 @@ way until a measurement justifies the flip.
   `moq_sock::shard::MAX_SHARDS`, follows cgroup quotas.
 - With the default flipped, `runtime.io_uring` no longer needs an explicit
   count.
+- Worker mode must deliver at least what the shared runtime does. A
+  2026-10-22 runtime matrix (`f57c0aad`, one jemalloc + io-uring build,
+  `bench/relay.sh`, 1 publisher x 256 subscribers at 60 fps of 1,200-byte
+  one-frame groups, three rotated 60 s rounds on a 4-vCPU KVM host) measured:
+
+  | runtime | median relay cores | median RSS MB | lifetime p99 ms | skipped groups per round |
+  | --- | --- | --- | --- | --- |
+  | shared tokio | 1.315 | 176.4 | 15-17 | 0 / 0 / 0 |
+  | 2 tokio workers | 1.249 | 171.8 | 18-32 | 12 / 48 / 0 |
+  | 2 io_uring workers | 0.946 | 187.2 | 17-18 | 0 / 0 / 0 |
+
+  The generator shared the host (about 1.5 cores), so the tokio-worker skips
+  may be CPU contention, connection imbalance across two workers, or a worker
+  stall. Before flipping the default, reproduce them with the generator on a
+  separate host and find the cause; the flip requires worker mode to skip no
+  more groups than the shared runtime at the same load.
 
 Update `doc/bin/relay/` for the default change.
 
