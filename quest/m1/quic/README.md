@@ -10,7 +10,7 @@ reliable stream resets (#5690), hierarchical send groups (#5711, #5770), one
 `Limits` type for relay peers (#5871), and endpoint sharding (#5688) are on
 `main`. What remains is bounded incomplete-message memory; per-broadcast
 fairness gives the crate-private send domains (#5872) their consumer in
-[Scope track priority](/quest/m1/track-priority-scope.md).
+[Broadcast fairness](/quest/m2/broadcast-fairness.md).
 qmux on the shared stream state machine is its own m1 quest,
 [quic-qmux](/quest/m1/quic-qmux.md), outside this epic.
 Per-stream acknowledgment progress, per-stream deadlines, and the experiments
