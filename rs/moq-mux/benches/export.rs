@@ -75,28 +75,54 @@ async fn prepare(tracks: usize, frames: usize) -> (moq_mux::Source, moq_mux::cat
 	(source, stream, fixture)
 }
 
-async fn export(format: &str, source: moq_mux::Source, stream: moq_mux::catalog::Consumer) -> usize {
+/// Opened during setup so the timed drain has the same boundary across API changes.
+enum Export {
+	Flv(Box<moq_mux::container::flv::Export<moq_mux::catalog::Consumer>>),
+	Mkv(Box<moq_mux::container::mkv::Export<moq_mux::catalog::Consumer>>),
+	Ts(Box<moq_mux::container::ts::Export<moq_mux::catalog::Consumer>>),
+}
+
+fn open(format: &str, source: moq_mux::Source, stream: moq_mux::catalog::Consumer) -> Export {
+	match format {
+		"flv" => Export::Flv(Box::new(
+			moq_mux::container::flv::Export::new(source, stream).with_multitrack(true),
+		)),
+		"ts" => Export::Ts(Box::new(moq_mux::container::ts::Export::new(source, stream))),
+		_ => Export::Mkv(Box::new(
+			moq_mux::container::mkv::Export::new(source, stream).with_fragment_duration(Duration::ZERO),
+		)),
+	}
+}
+
+async fn export(export: Export) -> usize {
 	let mut chunks = 0;
-	if format == "flv" {
-		let mut export = moq_mux::container::flv::Export::new(source, stream).with_multitrack(true);
-		while let Some(chunk) = export.next().await.unwrap() {
-			std::hint::black_box(chunk);
-			chunks += 1;
+	match export {
+		Export::Flv(mut export) => {
+			while let Some(chunk) = export.next().await.unwrap() {
+				std::hint::black_box(chunk);
+				chunks += 1;
+			}
 		}
-	} else if format == "ts" {
-		let mut export = moq_mux::container::ts::Export::new(source, stream);
-		while let Some(chunk) = export.next().await.unwrap() {
-			std::hint::black_box(chunk);
-			chunks += 1;
+		Export::Ts(mut export) => {
+			while let Some(chunk) = export.next().await.unwrap() {
+				std::hint::black_box(chunk);
+				chunks += 1;
+			}
 		}
-	} else {
-		let mut export = moq_mux::container::mkv::Export::new(source, stream).with_fragment_duration(Duration::ZERO);
-		while let Some(chunk) = export.next().await.unwrap() {
-			std::hint::black_box(chunk);
-			chunks += 1;
+		Export::Mkv(mut export) => {
+			while let Some(chunk) = export.next().await.unwrap() {
+				std::hint::black_box(chunk);
+				chunks += 1;
+			}
 		}
 	}
 	chunks
+}
+
+// A stable profiling boundary excludes publishing and opening from instruction counts.
+#[inline(never)]
+fn profiled_export(runtime: &tokio::runtime::Runtime, opened: Export) -> usize {
+	runtime.block_on(export(opened))
 }
 
 fn bench_export(c: &mut Criterion) {
@@ -112,11 +138,14 @@ fn bench_export(c: &mut Criterion) {
 			for frames in [1, 16, 64] {
 				group.throughput(Throughput::Elements((tracks * frames) as u64));
 				group.bench_function(BenchmarkId::new(format, format!("{tracks}x{frames}")), |b| {
-					// Publishing the broadcast is setup; only exporting it is measured.
+					// Publishing and opening are setup; only draining the export is measured.
 					b.iter_batched(
-						|| runtime.block_on(prepare(tracks, frames)),
-						|(source, stream, fixture)| {
-							let chunks = runtime.block_on(export(format, source, stream));
+						|| {
+							let (source, stream, fixture) = runtime.block_on(prepare(tracks, frames));
+							(open(format, source, stream), fixture)
+						},
+						|(opened, fixture)| {
+							let chunks = profiled_export(&runtime, opened);
 							if format == "ts" {
 								assert!(chunks > 0);
 							} else {
