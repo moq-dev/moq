@@ -5,7 +5,8 @@
 When a moq-transport subscription delivers a group starting partway through
 and the fill or joining FETCH that should supply its head is refused or
 ends empty, moq-net keeps the tail as a group that starts at that object.
-Today it drops the whole group. A relay then forwards the tail to its
+Today, depending on a race, it either drops the whole group or keeps the
+tail as if it were the whole group. A relay then forwards the tail to its
 moq-transport subscribers instead of losing objects it received, which
 draft-18 §9.4 forbids ("A relay MUST NOT reorder or drop objects received
 on a multi-object stream").
@@ -23,8 +24,10 @@ The outcome is a race between the mid-group stream and the joining FETCH's
 refusal:
 
 - If the refusal lands first, the fill is no longer outstanding, and the
-  stream takes the unfilled path, which keeps the tail with its first
-  Object ID.
+  stream takes the unfilled path. That keeps the tail, but only the wire
+  metadata (`group::Wire.first_id`) records where it starts: the model
+  group begins at frame 0, so it looks complete, and `position_group`
+  serves the tail to moq-lite subscribers as a whole group.
 - If the stream arrives while the fill is still pending, it waits in
   `claim_fill`. Once the refusal settles the fill, `claim` returns no head,
   and the stream fails with "no fill to stitch a mid-group stream onto",
@@ -36,8 +39,10 @@ SUBSCRIBE_OK and refuses the joining FETCH
 
 The model already holds such a group: `group::Producer::start_at` trims a
 group's front, and a reader positioned below it gets `Error::Lagged`. The
-ingest fix is to give a stream that waited on a fill that settled with no
-head the same unfilled path, instead of failing it.
+ingest fix is to open a headless group trimmed to its first Object ID in
+both orders, rather than reuse today's unfilled path. Check that the
+moq-transport egress forwards a front-trimmed group as a subgroup stream
+starting at that Object ID.
 
 Open design points, with recommendations:
 
