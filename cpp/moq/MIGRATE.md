@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq::ContainerFormat::kFmp4` unwraps to Legacy (#PR)
+
+A container import with `moq::ContainerFormat::kFmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `moq::ContainerFormat::kCmaf` to keep publishing CMAF.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer::finish` lets go.

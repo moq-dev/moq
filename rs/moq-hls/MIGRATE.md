@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### HLS import unwraps fMP4 to Legacy (#PR)
+
+`import::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.
+Set `import::Config::passthrough` to keep publishing CMAF.
+
 ### A failed timeline fails its listings
 
 `export::Broadcaster::manifest` and `export::Rendition::media_playlist` return `Result<Option<String>>`.

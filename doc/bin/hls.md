@@ -63,7 +63,8 @@ and `--cors-origin` opens it to browsers. See `moq export hls --help`.
 
 Import handles classic HLS; LL-HLS parts are not implemented. It publishes the
 playlist's own media times, and anchors the catalog clock on the first imported
-segment.
+segment. Each fMP4 segment is split into one frame per sample; `--passthrough`
+publishes each fragment whole as CMAF instead, keeping its exact sample timing.
 
 The library, including the recorder cursors for mirroring a broadcast to
 storage, is [`moq-hls`](https://docs.rs/moq-hls).

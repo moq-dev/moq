@@ -794,7 +794,7 @@ pub enum ImportSource {
 	/// Raw H.264 Annex-B from stdin.
 	Avc3,
 	/// Fragmented MP4 / CMAF from stdin.
-	Fmp4,
+	Fmp4(Fmp4Import),
 	/// MPEG-TS from stdin.
 	Ts(TsImport),
 	/// FLV / RTMP container from stdin.
@@ -822,7 +822,9 @@ impl ImportSource {
 	pub fn stdin_format(&self) -> Option<PublishFormat> {
 		Some(match self {
 			Self::Avc3 => PublishFormat::Avc3,
-			Self::Fmp4 => PublishFormat::Fmp4,
+			Self::Fmp4(args) => PublishFormat::Fmp4 {
+				passthrough: args.passthrough,
+			},
 			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
 				pcr_pid: args.pcr_pid.map(|pid| pid.0),
 			},
@@ -846,9 +848,19 @@ impl ImportSource {
 			}
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => Some("`import capture` encodes, and its encoders do not count yet"),
-			Self::Avc3 | Self::Fmp4 | Self::Ts(_) | Self::Flv => None,
+			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
 		}
 	}
+}
+
+/// The fMP4 stdin container: whether to unwrap its fragments.
+#[derive(usage_rs::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct Fmp4Import {
+	/// Publish each fragment whole as CMAF instead of splitting it into one frame per sample.
+	/// Keeps the source's exact sample timing, but every player has to parse ISO BMFF.
+	#[usage(long)]
+	pub passthrough: bool,
 }
 
 /// The MPEG-TS stdin container: which programs of a multiplex to publish.

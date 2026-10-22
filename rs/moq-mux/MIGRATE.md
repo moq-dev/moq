@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### fMP4 import unwraps to Legacy (#PR)
+
+`container::fmp4::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.
+Call `.with_passthrough(true)` to keep publishing CMAF.
+`import::ContainerFormat::Fmp4` follows, and `"cmaf"` no longer parses as its alias but as the new `ContainerFormat::Cmaf`, which keeps CMAF.
+
 ### `Source` resolution takes the reference's epoch (#5699)
 
 `Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional epoch after `rel`.
