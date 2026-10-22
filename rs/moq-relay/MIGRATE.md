@@ -11,6 +11,11 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 Convert with `SystemTime::from` at a third-party boundary, or measure since `Wall::UNIX_EPOCH` with `saturating_duration_since`.
 The session JSON still carries integer Unix seconds.
 
+### `receive_window` has a floor (#5878)
+
+The `[quic]` and `[peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.
+Raise an explicit value below that, or remove it.
+
 ### WebSocket clients must offer a QMux subprotocol (#6231)
 
 The relay answers a WebSocket upgrade with 400 when its `Sec-WebSocket-Protocol` offers none of the relay's QMux subprotocols, instead of falling back to the legacy `webtransport` format.

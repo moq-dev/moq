@@ -67,6 +67,10 @@ pub struct Stats {
 
 	/// Total datagrams detected as lost.
 	pub packets_lost: Option<u64>,
+
+	/// Total receive streams evicted because incomplete messages exhausted the receive window.
+	/// A count above zero means the receive window is too small for what the peer sends.
+	pub streams_evicted: Option<u64>,
 }
 
 /// The congestion controller's view of the connection, as PROBE reports it.
@@ -700,7 +704,7 @@ fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 		packets_sent: stats.packets_sent(),
 		packets_received: stats.packets_received(),
 		packets_lost: stats.packets_lost(),
-		..Default::default()
+		streams_evicted: stats.streams_evicted(),
 	}
 }
 

@@ -5332,6 +5332,7 @@ dependencies = [
  "moq-ice",
  "moq-net",
  "moq-quic",
+ "moq-shaper",
  "moq-sock",
  "noq-proto",
  "notify",

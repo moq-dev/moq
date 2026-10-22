@@ -455,14 +455,11 @@ async fn forwards_the_setup_token() {
 			.await
 			.expect("open the control stream");
 		write_all(&mut send, &setup).await;
-		let mut reply = [0u8; 1];
-		assert_eq!(
-			tokio::time::timeout(TIMEOUT, recv.read(&mut reply))
-				.await
-				.expect("SERVER_SETUP timeout")
-				.expect("SERVER_SETUP"),
-			Some(1)
-		);
+		let reply = tokio::time::timeout(TIMEOUT, recv.read_chunk(1))
+			.await
+			.expect("SERVER_SETUP timeout")
+			.expect("SERVER_SETUP");
+		assert_eq!(reply.map(|chunk| chunk.len()), Some(1));
 		let seen = script.seen.lock().unwrap().clone();
 		let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
 		assert_eq!(connect.token, Some(token));

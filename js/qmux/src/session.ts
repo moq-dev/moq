@@ -24,6 +24,12 @@ import {
  */
 export type Version = Exclude<WireFormat, "webtransport">;
 
+/** Options for a new outgoing stream. `@types/web` doesn't declare `waitUntilAvailable` yet. */
+type SendStreamOptions = WebTransportSendStreamOptions & {
+	/** Wait for the peer to grant stream credit (the default) instead of rejecting at once. */
+	waitUntilAvailable?: boolean;
+};
+
 /** Configuration for a QMux session. */
 export interface Config {
 	/** Max concurrent bidirectional streams the peer can open. */
@@ -565,6 +571,9 @@ export default class Session implements WebTransport {
 	#ourParams: TransportParams;
 	#peerParams: TransportParams = { ...DEFAULT_TRANSPORT_PARAMS };
 	#paramsReceived = false;
+	// Settles once the peer's stream limits are known (or the session ends), so a
+	// create that refuses to wait judges the peer's real limit, not the zero placeholder.
+	#paramsSettled = Promise.withResolvers<void>();
 
 	// Send credits start at the legacy wire format's "unlimited" values to
 	// match the default #version. #handleOpen replaces them with QMux-shaped
@@ -977,6 +986,7 @@ export default class Session implements WebTransport {
 		}
 		this.#paramsReceived = true;
 		this.#peerParams = params;
+		this.#paramsSettled.resolve();
 
 		this.#connCredit.increaseMax(params.initialMaxData);
 		this.#bidiStreamCredit.increaseMax(params.initialMaxStreamsBidi);
@@ -1744,6 +1754,27 @@ export default class Session implements WebTransport {
 		}
 	}
 
+	/** Take one of the peer's stream slots for a new outgoing stream.
+	 *
+	 *  With `waitUntilAvailable: false` an exhausted limit rejects at once, the way
+	 *  Chrome's WebTransport does, instead of queueing behind the peer's next
+	 *  MAX_STREAMS. It still waits for the peer's TRANSPORT_PARAMETERS, the
+	 *  counterpart of the QUIC handshake that tells Chrome the limit up front. */
+	async #claimStream(dir: Stream.DirType, options: SendStreamOptions | undefined, refused: string) {
+		await this.ready;
+		if (this.#closed) throw this.#closed;
+
+		if (options?.waitUntilAvailable === false) {
+			if (isQmux(this.#version)) await this.#paramsSettled.promise;
+			if (this.#closed) throw this.#closed;
+			const credit = dir === Stream.Dir.Bi ? this.#bidiStreamCredit : this.#uniStreamCredit;
+			if (credit.tryClaim(1n) === 0n) throw new DOMException(refused, "NetworkError");
+			return;
+		}
+
+		await (dir === Stream.Dir.Bi ? this.#bidiStreamCredit : this.#uniStreamCredit).claim(1n);
+	}
+
 	/** Register a stream's initial send priority and expose a mutable `sendOrder`
 	 *  accessor on its writable (matching the W3C `WebTransportSendStream` API).
 	 *  Updating it re-prioritizes the stream's queued data immediately. */
@@ -1761,20 +1792,14 @@ export default class Session implements WebTransport {
 		});
 	}
 
-	/** Open a bidirectional stream, waiting for the peer to grant stream credit. */
-	async createBidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WebTransportBidirectionalStream> {
-		await this.ready;
-
-		if (this.#closed) {
-			throw this.#closed;
-		}
-
-		const sendOrder = options?.sendOrder ?? DEFAULT_SEND_ORDER;
-
-		// Wait for stream count permit
-		await this.#bidiStreamCredit.claim(1n);
+	/** Open a bidirectional stream, waiting for the peer to grant stream credit
+	 *  unless `waitUntilAvailable` is false. */
+	async createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream> {
+		await this.#claimStream(Stream.Dir.Bi, options, "Failed to create bidirectional stream.");
 		// close() may have torn down the session while the claim resumed.
 		if (this.#closed) throw this.#closed;
+
+		const sendOrder = options?.sendOrder ?? DEFAULT_SEND_ORDER;
 
 		const streamId = Stream.Id.create(this.#nextBiStreamId++, Stream.Dir.Bi, this.#isServer);
 		const streamIdVal = streamId.value.value;
@@ -1841,19 +1866,14 @@ export default class Session implements WebTransport {
 		return { readable: recvStream.readable, writable: writer };
 	}
 
-	/** Open a send-only stream, waiting for the peer to grant stream credit. */
-	async createUnidirectionalStream(options?: WebTransportSendStreamOptions): Promise<WritableStream<Uint8Array>> {
-		await this.ready;
-
-		if (this.#closed) {
-			throw this.#closed;
-		}
+	/** Open a send-only stream, waiting for the peer to grant stream credit
+	 *  unless `waitUntilAvailable` is false. */
+	async createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>> {
+		await this.#claimStream(Stream.Dir.Uni, options, "Failed to create send stream.");
+		// close() may have torn down the session while the claim resumed.
+		if (this.#closed) throw this.#closed;
 
 		const sendOrder = options?.sendOrder ?? DEFAULT_SEND_ORDER;
-
-		// Wait for stream count permit
-		await this.#uniStreamCredit.claim(1n);
-		if (this.#closed) throw this.#closed;
 
 		const streamId = Stream.Id.create(this.#nextUniStreamId++, Stream.Dir.Uni, this.#isServer);
 		const streamIdVal = streamId.value.value;
@@ -1941,6 +1961,8 @@ export default class Session implements WebTransport {
 			flow.sendCredit.close(closeErr);
 		}
 		this.#streamFlow.clear();
+
+		this.#paramsSettled.resolve();
 
 		// Close global credits so blocked claim() calls reject.
 		this.#connCredit.close(closeErr);
