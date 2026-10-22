@@ -632,9 +632,12 @@ int main()
 			auto first = TestOk(next.get(), "first frame");
 			CHECK(first.has_value());
 
-			// Large enough that it is still in flight when Stop() runs.
+			// Large enough to be in flight when Stop() runs, so a Stop() that cancels
+			// rather than drains cuts it off (256 KiB can land first under TSan). Small
+			// enough to drain well inside moq-net's one-second drain deadline, which cuts
+			// the track off by design, even under TSan on a loaded host.
 			auto large = keyframe;
-			large.resize(large.size() + 16 * 1024 * 1024, 0xff);
+			large.resize(large.size() + 2 * 1024 * 1024, 0xff);
 			auto last = videoPacket(large, 1);
 			o->Data(&last);
 			// OBS may destroy the output right after stopping it.
