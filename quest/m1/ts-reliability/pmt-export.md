@@ -38,14 +38,22 @@ revised `program_info` at the next `version_number`.
 Under `moq export ts --sync`, the revision is a function of the catalog
 alone, so identical legs revise their PMT identically.
 
+Decided 2026-10-22 by the maintainer: a revision is one transaction over
+everything the catalog configures. A `muxRate` change applies with the
+tables at the same boundary and, under `--sync`, rebuilds the grid there:
+today `Schedule::set_rate` updates the rate while the `--sync` `Grid` keeps
+the layout it was built at, so a running leg and a new joiner schedule the
+same broadcast differently (reproduced in the 2026-10-22 audit).
+
 Rust: `rs/moq-mux` TS export. Draft
 ([mpegts](/drafts/draft-lcurley-moq-mpegts.md)): the rebuild section says
 how a consumer revises the PMT.
 
 Tests use the generated `fixture::Mux` builder through import and export:
 PMT add, remove, retype, descriptor-only change, version rollover (31 to
-0), PID reuse after removal, and a program descriptor change, each
-asserting the exported PMT's streams and version sequence. Extend the
+0), PID reuse after removal, a program descriptor change, and a `muxRate`
+change under `--sync` with a leg joining after it, each asserting the
+exported PMT's streams and version sequence, and the two legs' packets. Extend the
 TSDuck round trip with a generated mid-stream PMT revision so
 `compliance.py` checks the rebuilt version sequence in CI.
 
