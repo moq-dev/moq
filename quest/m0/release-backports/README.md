@@ -11,7 +11,7 @@ compatibility. These patch backports can ship before the next breaking cut.
 Decided 2026-10-22 (maintainer): focused backports, rather than a broader
 stabilization audit. The four children are independently landable; splitting
 the parser and workflow changes keeps each implementation PR to one problem.
-The existing fixed-delay quest and PR retain their ownership.
+The existing fixed-delay quest retains ownership of its release deploy.
 
 The comparison used main
 [d44813cb70](https://github.com/moq-dev/moq/commit/d44813cb703bf0d5366266ae8206f794856c69f8)
@@ -21,6 +21,11 @@ The findings are source comparisons, not release-side reproductions or a
 release-clear verdict. Each implementation reproduces its behavior and ports
 only the fix, with release-compatible tests and the relevant release checks.
 New defects go to main first. Do not import main's transport or API rewrites.
+
+The fixed-delay backport
+[moq-dev/moq#6217](https://github.com/moq-dev/moq/pull/6217) merged into release
+as [fd26b8ffec](https://github.com/moq-dev/moq/commit/fd26b8ffec) during planning;
+it needs no additional implementation quest.
 
 This epic's remaining work is to reconcile the landed backports on the
 release candidate, confirm their checks, and hand the commit inventory to
@@ -41,10 +46,10 @@ findings; expanding this shortlist needs a separate scope decision.
 - [Publishing workflows](/quest/m0/release-backports/publishing.md) - privileged wrapper publication validates the triggering repository
 - [JS input parsing](/quest/m0/release-backports/parsing.md) - malformed certificates and paths cannot trigger disproportionate parsing work
 - [FFI cancellation](/quest/m0/release-backports/ffi-cancellation.md) - cancelled reads and accepts leave the next event for the next caller
-- [Fixed playback delay](/quest/m0/release-fixed-delay.md) - land the existing behavior-only backport without the watch API rework
 
 ## Related
 
+- [Fixed playback delay](/quest/m0/release-fixed-delay.md) - the merged behavior-only backport reaches moq.dev with its release deploy
 - [QPACK bound](/quest/m0/web-transport-proto-0.6.3.md) - existing upstream dependency fix for decoded CONNECT headers
 - [Draining shutdown](/quest/m0/ffi-shutdown-backport.md) - existing additive drain API and qmux stream-limit backport
 - [Resubscribe investigation](/quest/m0/release-resubscribe-hang.md) - benchmark correction and investigation retirement retain their existing owner
