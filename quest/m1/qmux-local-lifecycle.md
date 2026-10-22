@@ -4,9 +4,11 @@
 
 In the in-tree `@moq/qmux` (`js/qmux`), `writer.abort()` on a stream whose
 write is waiting for stream or connection send credit rejects that write and
-sends RESET_STREAM at once, and `close()` hands APPLICATION_CLOSE to the
-socket before closing it, even when the WebSocket is backed up. Neither
-outcome waits for the peer to grant credit or for a fixed delay. Rust
+sends RESET_STREAM at once. `close()` closes the socket only after
+APPLICATION_CLOSE is handed to it, or after a bounded stall: a backed-up
+WebSocket that drains in time delivers the frame, and one still wedged at the
+deadline closes without it. Neither outcome waits for the peer to grant
+credit, and close never relies on a fixed delay. Rust
 `rs/qmux` already behaves this way and is out of scope.
 
 ## Plan
@@ -33,9 +35,10 @@ control lane has flushed. Drop queued stream frames first, so
 APPLICATION_CLOSE goes out next. Bound the wait like Rust's `CLOSE_TIMEOUT`
 (`rs/qmux/src/session.rs`), started only while the writer is stalled.
 
-Test both with the controlled clock and a wedged socket: an abort blocked on
-each credit kind emits RESET_STREAM with no peer grant, and a close behind a
-full socket writes APPLICATION_CLOSE before the transport closes.
+Test with the controlled clock and a wedged socket: an abort blocked on each
+credit kind emits RESET_STREAM with no peer grant; a close behind a socket
+that drains before the deadline writes APPLICATION_CLOSE before the transport
+closes; and one that never drains closes at the deadline without it.
 
 Public API: none. Wire: none.
 
