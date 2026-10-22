@@ -332,6 +332,7 @@ impl Session {
 		});
 
 		let supervisor = Supervisor {
+			goaway: Some(goaway.deadline(&runtime)),
 			version,
 			local_close: protocol.local_close(),
 			runtime: runtime.clone(),
@@ -374,10 +375,11 @@ impl Session {
 /// The driver's transport-facing half of a [`Session`]: it executes the
 /// handles' close requests, publishes the transport's terminal error, and
 /// samples the connection stats (including the send-bandwidth estimate) while
-/// anyone is consuming them.
+/// anyone is consuming them, and enforces GOAWAY deadlines independently of writes.
 ///
 /// Finishes once the transport reports closed; everything else is moot then.
 pub(crate) struct Supervisor<S> {
+	goaway: Option<goaway::Deadline>,
 	version: Version,
 	local_close: Arc<std::sync::atomic::AtomicBool>,
 	runtime: crate::time::Deadlines,
@@ -450,6 +452,19 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 				});
 			}
 			return Poll::Ready(());
+		}
+
+		if let Some(goaway) = &mut self.goaway
+			&& let Poll::Ready(timeout) = goaway.poll(waiter)
+		{
+			self.goaway = None;
+			if let Some(timeout) = timeout {
+				tracing::warn!(?timeout, "peer did not leave before the GOAWAY deadline; closing");
+				self.session.close(
+					self.version.session_code(&SessionError::GoawayTimeout),
+					&Error::GoawayTimeout.to_string(),
+				);
+			}
 		}
 
 		// Execute the handle-side close requests. The channel closing is the

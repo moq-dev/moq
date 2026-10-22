@@ -36,7 +36,7 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("js", "js bench reader")
         self.assertEqual(result.returncode, 1)
         self.assertIn("just js bench frames", calls)
-        self.assertEqual(calls[-1], "just js signals-bench")
+        self.assertEqual(calls[-1], "just js clock-bench")
         self.assertIn("failed: just js bench reader", result.stderr)
 
     def test_bench_targets_share_one_invocation(self):
@@ -82,6 +82,30 @@ class NightlyTest(unittest.TestCase):
                     for manifest in (ROOT / "rs").glob("*/Cargo.toml")
                     for bench in tomllib.loads(manifest.read_text()).get("bench", [])}
         self.assertEqual(declared - covered, set(), "Cargo bench targets missing from Nightly")
+
+    def test_every_js_bench_runs_nightly(self):
+        recipes = {}
+        for block in re.split(r"\n(?=\S)", (ROOT / "js/justfile").read_text()):
+            if match := re.match(r"([\w-]+)( \w+)?:\n", block):
+                recipes[match[1]] = re.findall(r"^    bun (.+\.ts)$", block, re.M)
+        result, calls = self.run_group("js")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # The browser benches run in their own Nightly job.
+        workflow = (ROOT / ".github/workflows/nightly.yml").read_text()
+        calls += re.findall(r"just js \S+-bench\b", workflow)
+        entries = set()
+        for call in calls:
+            args = shlex.split(call)
+            if args[:2] != ["just", "js"]:
+                continue
+            for path in recipes[args[2]]:
+                entries.add(ROOT / "js" / path.replace("{{ name }}", args[-1]))
+        # Bundled helpers only run through the entry that names them.
+        helpers = {path for entry in entries for path in entry.parent.glob("*.ts")
+                   if f"/{path.name}" in entry.read_text()}
+        declared = {path for path in (ROOT / "js").glob("*/bench/*.ts") if not path.name.endswith(".test.ts")}
+        missing = {str(path.relative_to(ROOT)) for path in declared - entries - helpers}
+        self.assertEqual(missing, set(), "JS benches missing from Nightly")
 
     def test_dev_shell_jobs_trust_the_nix_cache(self):
         # Without the flake's substituter, the dev shell builds uncached tools from

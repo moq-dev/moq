@@ -157,8 +157,7 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 - [Request tokens beyond Rust](/quest/m3/request-token-surfaces.md) - JS, moq-ffi,
   and moq-cli request-token APIs, when a consumer needs one
 - [Token on FETCH](/quest/m3/auth-token-fetch.md) - TRACK_STATUS and FETCH carry
-  and honor a request token. Parked until the maintainer decides whether to
-  reverse the standalone-FETCH decision and bring it into this epic
+  and honor a request token, deferred until a consumer asks
 - [#5107](https://github.com/moq-dev/moq/pull/5107) - landed request-token
   decoding, including session-fatal REQUEST_UPDATE decode failures
 - [#5106](https://github.com/moq-dev/moq/pull/5106) - landed setup extension
