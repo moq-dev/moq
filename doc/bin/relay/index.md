@@ -75,8 +75,10 @@ relay.with_web(web).run().await?;
 - `run` consumes the relay, so clone the handles your tasks need first.
 - Build on `web().routes()`: `with_web` replaces the router, so `Router::new()`
   drops the built-in routes.
-- `run` drains on SIGTERM or SIGINT from the moment it serves. Before that, and
-  after a startup error, they keep their default action. To own the signals, for
+- `run` drains on SIGTERM or SIGINT from the moment it serves. Before that they
+  keep their default action, and still do after a startup error. With ACME, they
+  are caught from the first issuance on instead, which they end, so a container
+  can be stopped while it waits for a certificate. To own the signals, for
   example to leave DNS before draining, call `with_signals(false)` and fire
   `shutdown_trigger()` yourself. The drain reaches only MoQ sessions, so stop any extra listener
   (RTMP, SRT, ...) on your own deadline.

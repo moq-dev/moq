@@ -504,9 +504,11 @@ impl Relay {
 	/// `true`; pass `false` when the application owns the signals and fires
 	/// [`Self::shutdown_trigger`] itself, e.g. after withdrawing the node from DNS.
 	///
-	/// `run` installs the handlers once its startup can no longer fail, just
-	/// before it serves; a signal before that takes its default action. They stay
-	/// installed for the life of the process, since tokio never removes one.
+	/// `run` installs the handlers just before it serves, once its startup can no
+	/// longer fail, so a signal before that takes its default action. With ACME
+	/// it installs them before the first issuance instead, so a stop request
+	/// there still ends `run`. They stay installed for the life of the process,
+	/// since tokio never removes one, even after `run` fails.
 	#[must_use = "the relay with the signal choice is returned"]
 	pub fn with_signals(mut self, signals: bool) -> Self {
 		self.signals = signals;
@@ -561,14 +563,22 @@ impl Relay {
 			"no --auth-url or --auth-public configured; nobody can authenticate (an embedder decides by taking Relay::admissions)"
 		);
 
+		let mut handlers = None;
+
 		// Nothing else serves or reports ready until the certificate exists: a
 		// self-signed placeholder would only fail every browser that connects.
 		if let Some(mut acme) = acme {
 			let listener = web.https_listener().context("ACME needs the HTTPS listener")?;
+			// Issuance can take minutes, and as a container's PID 1 the relay
+			// ignores a signal left at its default action, so a stop would wait it
+			// out. That outweighs leaving the handlers installed if a later step fails.
+			if signals {
+				handlers = Some(shutdown::Signals::new()?);
+			}
 			tokio::select! {
 				res = acme.issue(listener) => res?,
-				// Before serving, a signal still takes its default action.
-				() = drain(shutdown_trigger.clone(), shutdown.clone(), None) => return Ok(()),
+				// No session exists yet, so this returns as soon as it starts.
+				() = drain(shutdown_trigger.clone(), shutdown.clone(), handlers.as_mut()) => return Ok(()),
 			}
 			cluster.critical.spawn("ACME renewal", acme.run());
 		}
@@ -592,11 +602,14 @@ impl Relay {
 				.context("failed to start the io_uring QUIC workers")?;
 		}
 
-		// After the last step that can fail, since a handler outlives a failed `run`,
-		// and before anything accepts a session a signal would kill without a GOAWAY.
+		// Without ACME, after the last step that can fail, since a handler outlives a
+		// failed `run`, and before anything accepts a session a signal would kill
+		// without a GOAWAY.
 		// Nothing awaits from here to the drain below, so a signal caught in between
 		// starts the drain at its first poll, as one just after READY would.
-		let signals = signals.then(shutdown::Signals::new).transpose()?;
+		if signals && handlers.is_none() {
+			handlers = Some(shutdown::Signals::new()?);
+		}
 
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		if let Some(uring) = uring.as_mut() {
@@ -726,7 +739,7 @@ impl Relay {
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
 			err = uring_failed => Err(err).context("io_uring QUIC workers failed"),
 			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
-			() = drain(shutdown_trigger, shutdown.clone(), signals) => Ok(()),
+			() = drain(shutdown_trigger, shutdown.clone(), handlers.as_mut()) => Ok(()),
 			else => Ok(()),
 		};
 
@@ -757,7 +770,11 @@ impl Relay {
 /// GOAWAY and waits for its peer to leave). Returns from [`Relay::run`] once
 /// [`shutdown::Observer::drained`] does, or on a second signal.
 /// Without `signals` only the trigger and the sessions count.
-async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, mut signals: Option<shutdown::Signals>) {
+async fn drain(
+	trigger: shutdown::Trigger,
+	mut shutdown: shutdown::Observer,
+	mut signals: Option<&mut shutdown::Signals>,
+) {
 	let window = shutdown.drain_timeout;
 	let mut signal = async || match signals.as_mut() {
 		Some(signals) => signals.recv().await,
@@ -880,10 +897,10 @@ mod tests {
 			let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
 			let _active = shutdown.activity.enter();
 			trigger.start();
-			let signals = crate::shutdown::Signals::new().unwrap();
+			let mut signals = crate::shutdown::Signals::new().unwrap();
 			crate::shutdown::raise(libc::SIGTERM).await;
 			let started = tokio::time::Instant::now();
-			super::drain(trigger, shutdown, Some(signals)).await;
+			super::drain(trigger, shutdown, Some(&mut signals)).await;
 			assert_eq!(started.elapsed(), std::time::Duration::ZERO, "waited out the drain");
 		}
 	}
