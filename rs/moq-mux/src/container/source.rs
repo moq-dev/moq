@@ -437,8 +437,7 @@ impl ExportSource {
 					// failed transport still fails the export. The field, not `instance_ended`, so
 					// the borrow stays off the consumer.
 					Poll::Ready(Err(crate::Error::Moq(
-						moq_net::Error::Dropped
-						| moq_net::Error::Cancel
+						moq_net::Error::Cancel
 						| moq_net::Error::Closed
 						| moq_net::Error::GoingAway
 						| moq_net::Error::SessionClosed
@@ -786,13 +785,13 @@ mod tests {
 	}
 
 	/// A sibling's failure still fails the export when its instance goes, whether its media is
-	/// malformed or its track is aborted with a protocol error: only an orderly shutdown of the
-	/// instance is the rendition's end.
+	/// malformed, its track is aborted with a protocol error, or its producers went away
+	/// unfinished: only an orderly shutdown of the instance is the rendition's end.
 	#[tokio::test(start_paused = true)]
 	async fn a_sibling_failure_outlives_its_instance() {
 		use std::time::Duration;
 
-		for malformed in [true, false] {
+		for failure in ["malformed", "violation", "dropped"] {
 			let origin = crate::source::produce_origin();
 			let _catalog = origin.publish("a/pub", Default::default()).unwrap();
 			tokio::task::yield_now().await;
@@ -811,14 +810,23 @@ mod tests {
 			let settle = tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)));
 			assert!(settle.await.is_err(), "nothing is written yet");
 			let mut group = track.append_group().unwrap();
-			if malformed {
-				// An empty Legacy audio frame is malformed.
-				group
-					.write_frame(moq_net::Timestamp::from_micros(0).unwrap(), bytes::Bytes::new())
-					.unwrap();
-			} else {
-				track.clone().abort(moq_net::Error::ProtocolViolation).unwrap();
-			}
+			let held = match failure {
+				"malformed" => {
+					// An empty Legacy audio frame is malformed.
+					group
+						.write_frame(moq_net::Timestamp::from_micros(0).unwrap(), bytes::Bytes::new())
+						.unwrap();
+					Some((group, track))
+				}
+				"violation" => {
+					track.clone().abort(moq_net::Error::ProtocolViolation).unwrap();
+					Some((group, track))
+				}
+				_ => {
+					drop((group, track));
+					None
+				}
+			};
 			drop(sibling);
 			tokio::time::sleep(Duration::from_millis(10)).await;
 			assert!(export.instance_ended(&kio::Waiter::noop()), "the instance has gone");
@@ -828,10 +836,10 @@ mod tests {
 				.expect("the read settles");
 			assert!(
 				read.is_err(),
-				"malformed: {malformed}: {:?}",
+				"{failure}: {:?}",
 				read.map(|frame| frame.map(|frame| frame.timestamp))
 			);
-			drop((group, track));
+			drop(held);
 		}
 	}
 
