@@ -835,6 +835,36 @@ async fn a_rendition_moved_to_another_codec_configuration_fails() {
 	assert!(!marks(&out).contains(&0xb1));
 }
 
+/// A move to a CMAF track is refused like a CMAF rendition listed from the start.
+#[tokio::test(start_paused = true)]
+async fn a_rendition_moved_to_a_cmaf_track_fails() {
+	use crate::container::test_util::{Moving, marked_frame};
+
+	let mut moving = Moving::new();
+	let mut exporter = crate::container::mkv::Export::new(moving.source().await, moving.catalog_stream().await);
+	for i in 0..30 {
+		moving.a.write(marked_frame(i, 0xa1)).unwrap();
+		drain_now(&mut exporter).await.unwrap();
+	}
+
+	let mut config = Moving::config("b", None, SPS);
+	config.container = hang::catalog::Container::Cmaf {
+		init: Bytes::from(vec![0u8; 32]),
+	};
+	moving
+		.catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert(Moving::RENDITION.to_string(), config);
+	let err = drain_now(&mut exporter).await.unwrap_err();
+	assert!(
+		matches!(&err, crate::Error::Mkv(crate::container::mkv::Error::UnsupportedCmafTrack { name, .. }) if name == Moving::RENDITION),
+		"{err:?}"
+	);
+}
+
 /// SimpleBlock count of one cluster, parsed behind the file header.
 fn count_blocks(header: &[u8], cluster: &[u8]) -> usize {
 	let mut cursor = Cursor::new([header, cluster].concat());

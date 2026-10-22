@@ -498,11 +498,14 @@ impl<S: Stream> Export<S> {
 	fn update_catalog(&mut self, mut catalog: Catalog) -> Result<()> {
 		self.source.retain_selectable(&mut catalog);
 
+		// Checked on every listing, so a rendition moved to a CMAF track is refused too.
 		let mut active: HashMap<String, ()> = HashMap::new();
-		for name in catalog.video.renditions.keys() {
+		for (name, config) in &catalog.video.renditions {
+			ensure_legacy(&config.container, "video", name)?;
 			active.insert(name.clone(), ());
 		}
-		for name in catalog.audio.renditions.keys() {
+		for (name, config) in &catalog.audio.renditions {
+			ensure_legacy(&config.container, "audio", name)?;
 			active.insert(name.clone(), ());
 		}
 
@@ -562,7 +565,6 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			ensure_legacy(&config.container, "video", name)?;
 			let Some(source) = ExportSource::for_video(&self.source, name, config, self.delay)? else {
 				continue;
 			};
@@ -575,7 +577,6 @@ impl<S: Stream> Export<S> {
 			if self.tracks.contains_key(name) {
 				continue;
 			}
-			ensure_legacy(&config.container, "audio", name)?;
 			let Some(source) = ExportSource::for_audio(&self.source, name, config, self.delay)? else {
 				continue;
 			};
