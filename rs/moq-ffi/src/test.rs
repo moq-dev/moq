@@ -27,7 +27,7 @@ async fn ffi_caught_up() {
 	rx.await.expect("ffi runtime dropped the catch-up task");
 }
 
-/// Spawn `fut` and wait until the FFI runtime has driven its inner `Task::run`.
+/// Poll `fut` once, then wait for the FFI runtime to drive what that started.
 async fn spawn_parked<F, T>(fut: F) -> tokio::task::JoinHandle<T>
 where
 	F: Future<Output = T> + Send + 'static,
@@ -3088,6 +3088,97 @@ async fn raw_read_frame_skips_empty_then_populated_groups() {
 	assert_eq!(frame.timestamp_us, 2_000);
 }
 
+/// Observe the operation's wake even after UniFFI stops forwarding it to the host.
+struct ForeignWake {
+	host: std::task::Waker,
+	ready: Arc<tokio::sync::Notify>,
+}
+
+impl std::task::Wake for ForeignWake {
+	fn wake(self: Arc<Self>) {
+		self.ready.notify_one();
+		self.host.wake_by_ref();
+	}
+}
+
+/// Exercise the real UniFFI cancel/free boundary, retaining the cancelled future until delivery.
+fn foreign_call(
+	future: impl Future<Output = Result<(), MoqError>> + Send + 'static,
+) -> (uniffi::Handle, Arc<tokio::sync::Notify>) {
+	let ready = Arc::new(tokio::sync::Notify::new());
+	let notify = ready.clone();
+	let future = async move {
+		let mut future = std::pin::pin!(future);
+		let result = std::future::poll_fn(|cx| {
+			let waker = std::task::Waker::from(Arc::new(ForeignWake {
+				host: cx.waker().clone(),
+				ready: notify.clone(),
+			}));
+			future.as_mut().poll(&mut std::task::Context::from_waker(&waker))
+		})
+		.await;
+		Ok(result)
+	};
+	let handle = uniffi::rust_future_new(future, crate::UniFfiTag);
+	extern "C" fn continuation(_: u64, _: uniffi::RustFuturePoll) {}
+	// SAFETY: This live handle lowers Result<(), MoqError> to (), and is freed by the test.
+	unsafe { uniffi::rust_future_poll::<()>(handle.clone(), continuation, 0) };
+	(handle, ready)
+}
+
+#[tokio::test]
+async fn foreign_cancel_before_free_preserves_frame() {
+	let (_broadcast, track, consumer) = raw_track();
+	let reading = consumer.clone();
+	let (cancelled, delivered) = foreign_call(async move { reading.read_frame().await.map(|_| ()) });
+	ffi_caught_up().await;
+	// SAFETY: The handle is live and has the unit FFI return type.
+	unsafe { uniffi::rust_future_cancel::<()>(cancelled.clone()) };
+	track.write_frame(group_frame(b"next")).unwrap();
+	delivered.notified().await;
+	// SAFETY: This is the only free of the cancelled handle.
+	unsafe { uniffi::rust_future_free::<()>(cancelled) };
+	track.finish().unwrap();
+	let frame = consumer
+		.read_frame()
+		.await
+		.unwrap()
+		.expect("cancelled read consumed the frame");
+	assert_eq!(frame.payload, b"next");
+}
+
+#[tokio::test]
+async fn foreign_cancel_before_free_preserves_session() {
+	let server = MoqServer::new();
+	server.set_bind("127.0.0.1:0".into()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let addr = server.listen().await.unwrap();
+	let accepting = server.clone();
+	let (cancelled, delivered) = foreign_call(async move { accepting.accept().await.map(|_| ()) });
+	ffi_caught_up().await;
+	// SAFETY: The handle is live and has the unit FFI return type.
+	unsafe { uniffi::rust_future_cancel::<()>(cancelled.clone()) };
+	let client = MoqClient::new();
+	client.set_tls_verify(false).unwrap();
+	client.set_reconnect(false).unwrap();
+	let connect = tokio::spawn(async move { client.connect(format!("https://{addr}")).await });
+	tokio::time::timeout(TIMEOUT, delivered.notified())
+		.await
+		.expect("session never reached the pending operation");
+	// SAFETY: This is the only free of the cancelled handle.
+	unsafe { uniffi::rust_future_free::<()>(cancelled) };
+	let request = tokio::time::timeout(TIMEOUT, server.accept())
+		.await
+		.expect("cancelled accept consumed the session")
+		.unwrap()
+		.unwrap();
+	let session = request.accept().await.unwrap();
+	let client_session = tokio::time::timeout(TIMEOUT, connect).await.unwrap().unwrap().unwrap();
+	session.cancel(0);
+	client_session.shutdown();
+	server.cancel();
+}
+
 /// Cancelling `read_frame` after it has taken the next group must not drop that
 /// group: the next read still returns its first frame.
 #[tokio::test]
@@ -4479,18 +4570,27 @@ async fn request_origin_setters_cancelled_after_cancel() {
 	server.cancel();
 }
 
-/// Stopping the runtime is process-wide, so the scenario runs in a child test process: this
-/// test re-runs its own binary filtered to itself with the marker set, and judges the exit.
+/// Stopping the runtime is process-wide, so a shutdown scenario runs in a child test process.
+///
+/// Returns true in the child. In the parent, re-runs this binary filtered to `test` with a
+/// marker set, judges its exit, and returns false.
+fn shutdown_child(test: &str) -> bool {
+	const MARKER: &str = "MOQ_FFI_TEST_SHUTDOWN_CHILD";
+	if std::env::var_os(MARKER).is_some() {
+		return true;
+	}
+	let status = std::process::Command::new(std::env::current_exe().unwrap())
+		.args(["--exact", &format!("test::{test}")])
+		.env(MARKER, "1")
+		.status()
+		.expect("failed to spawn the child test process");
+	assert!(status.success(), "child test process failed: {status}");
+	false
+}
+
 #[tokio::test]
 async fn shutdown_cancels_and_drops_cleanly() {
-	const MARKER: &str = "MOQ_FFI_TEST_SHUTDOWN_CHILD";
-	if std::env::var_os(MARKER).is_none() {
-		let status = std::process::Command::new(std::env::current_exe().unwrap())
-			.args(["--exact", "test::shutdown_cancels_and_drops_cleanly"])
-			.env(MARKER, "1")
-			.status()
-			.expect("failed to spawn the child test process");
-		assert!(status.success(), "child test process failed: {status}");
+	if !shutdown_child("shutdown_cancels_and_drops_cleanly") {
 		return;
 	}
 
@@ -4686,4 +4786,77 @@ async fn data_track_names_cannot_collide() {
 		Some(hang::catalog::Mode::Snapshot)
 	);
 	first.finish().unwrap();
+}
+
+/// A `Task::run` polled in place on a host thread must finish its poll before shutdown stops
+/// the drivers: a tokio timer polled after its driver is gone panics.
+#[test]
+fn shutdown_waits_for_an_in_place_poll() {
+	if !shutdown_child("shutdown_waits_for_an_in_place_poll") {
+		return;
+	}
+
+	let (entered, entered_rx) = std::sync::mpsc::channel();
+	let (release, release_rx) = std::sync::mpsc::channel::<()>();
+	let poller = std::thread::spawn(move || {
+		let task = crate::ffi::Task::new(());
+		let run = task.run(|_| async move {
+			entered.send(()).unwrap();
+			// Holds this poll open while shutdown starts on another thread.
+			release_rx.recv().unwrap();
+			// Register a timer without waiting for wall time to pass. A stopped driver panics here.
+			let mut timer = std::pin::pin!(tokio::time::sleep(Duration::from_secs(60)));
+			let _ = timer
+				.as_mut()
+				.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+			// Only shutdown may finish this call.
+			std::future::pending::<Result<(), MoqError>>().await
+		});
+		tokio::runtime::Builder::new_current_thread()
+			.build()
+			.unwrap()
+			.block_on(run)
+	});
+	entered_rx.recv().unwrap();
+
+	let shutdown = std::thread::spawn(|| crate::moq_ffi_shutdown());
+
+	// A fresh call resolves `Cancelled` on its first poll once shutdown has begun.
+	let probe = crate::ffi::Task::new(());
+	loop {
+		let mut call = std::pin::pin!(probe.run(|_| std::future::pending::<Result<(), MoqError>>()));
+		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		match call.as_mut().poll(&mut cx) {
+			std::task::Poll::Ready(result) => {
+				assert!(matches!(result, Err(MoqError::Cancelled)), "{result:?}");
+				break;
+			}
+			std::task::Poll::Pending => std::thread::yield_now(),
+		}
+	}
+
+	// Shutdown has begun: the held poll now polls its timer.
+	release.send(()).unwrap();
+	let result = poller.join().expect("the in-place poll panicked");
+	assert!(matches!(result, Err(MoqError::Cancelled)), "{result:?}");
+	shutdown.join().unwrap();
+}
+
+#[tokio::test]
+async fn server_cancel_during_listen_releases_the_port() {
+	let addr = std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+	let server = MoqServer::new();
+	server.set_bind(addr.to_string()).unwrap();
+	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let mut listen = Box::pin(server.listen());
+	let _ = listen
+		.as_mut()
+		.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+	assert!(
+		std::net::UdpSocket::bind(addr).is_err(),
+		"listen must bind on its first poll"
+	);
+	server.cancel();
+	std::net::UdpSocket::bind(addr).expect("cancel must release the port before it returns");
+	drop(listen);
 }
