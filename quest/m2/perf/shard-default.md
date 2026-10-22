@@ -22,6 +22,18 @@ way until a measurement justifies the flip.
   runtimes.
 - Flip the default only if sharding raises the throughput ceiling or cuts
   CPU per connection at saturation. A measured no-win deletes this quest.
+- Include physical-core, SMT and NIC-local placement on multi-NUMA hardware
+  against current pinning and an unpinned control. CPU selection currently
+  walks allowed logical CPU IDs; it does not coordinate NIC RSS queues or IRQ
+  affinity. Workers already pin before ring/pool allocation, so do not assume
+  all pool memory starts on the main thread's node. Sweep workers × flows and
+  publishers × subscribers, with quotas and multiple relay processes. Record
+  per-core softirq time, migrations, remote memory/cache misses, CPU per useful
+  byte, memory per worker and tail latency. Keep CID ownership intact while
+  evaluating RSS/RPS/XPS alignment; the Linux
+  [network scaling guide](https://docs.kernel.org/networking/scaling.html)
+  explains their separate roles. Hardware-specific results must not silently
+  become a universal pinning default.
 - Shard only where a group serves the same listener the shared runtime would
   open. A stream-only relay, or one with a QUIC-LB `lb_id`, stays shared
   unless a count is set. A count sized from `available_parallelism`, capped at
@@ -51,3 +63,5 @@ Update `doc/bin/relay/` for the default change.
 
 - [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - its per-thread spikes run on the workers
 - [UDP demux](/quest/m2/p2p/udp-demux.md) - demuxes each shard's socket
+- [Performance survey](/quest/m2/performance-survey/README.md) - paired benchmark evidence and memory/settings controls
+- [Socket queues](/quest/m2/performance-survey/socket-queues.md) - queue sizing and local drop attribution

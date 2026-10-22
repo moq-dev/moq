@@ -6,8 +6,9 @@ An announce cursor's work per event is independent of how many entries it
 holds back. When an origin holding K broadcasts goes away, each cursor does
 O(K log K) work, not O(K²). A route change that leaves a cursor's winning
 route unchanged allocates nothing for that cursor. Both properties have an
-operation-count regression test and a benchmark, and the fix is backported
-to `release`.
+operation-count regression test and a benchmark. It ships with the next cut
+from `main`; the maintainer decided on 2026-10-22 not to backport it to
+`release`.
 
 ## Plan
 
@@ -44,8 +45,7 @@ both fan-out axes: one origin withdrawing 1k and 10k broadcasts, and one
 broadcast's route churning, each under 1, 20, and 100 cursors, against `main`
 before the change.
 
-Backport: per CONTRIBUTING, land on `main`, then port onto `release` as a
-separate PR keeping the published API. No wire change, no public API change.
+No wire change, no public API change.
 
 ## Related
 
