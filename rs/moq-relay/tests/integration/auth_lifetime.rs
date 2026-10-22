@@ -1253,6 +1253,8 @@ fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathB
 
 	let key = rcgen::KeyPair::generate().expect("client keypair");
 	let mut params = rcgen::CertificateParams::new(vec!["client.localhost".to_string()]).expect("client params");
+	// Admission carries the leaf's expiry as a portable wall time.
+	params.not_after = ::time::OffsetDateTime::now_utc() + ::time::Duration::days(1);
 	params.use_authority_key_identifier_extension = true;
 	params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
 	let cert = params.signed_by(&key, &ca).expect("signed client cert");

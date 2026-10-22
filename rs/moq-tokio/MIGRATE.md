@@ -9,6 +9,7 @@ How to update your code for each breaking change, newest first.
 `tls::PeerIdentity::expiry` returns `Result<Option<moq_clock::Wall>, moq_clock::OutOfRange>` in place of `Option<SystemTime>`; use `peer.expiry()?`.
 Convert with `SystemTime::from` only where a third-party API needs it.
 A certificate expiry outside the portable 1970-2554 wall range returns `Err`, while a missing or unparseable certificate still returns `Ok(None)`.
+Certificate-backed relay admission therefore refuses a leaf with an expiry beyond that range, including rcgen's default year 4096; issue certificates with a representable `notAfter` to use this policy.
 
 ### MoQ sessions need the `net` feature (#6132)
 
