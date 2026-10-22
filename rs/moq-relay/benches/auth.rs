@@ -84,7 +84,7 @@ impl Fixture {
 			producers.push(receive.recv().await.unwrap().1);
 			let auth = connection.auth();
 			let added = futures::future::join_all((0..tokens).map(|index| auth.add(format!("token{index}")))).await;
-			let added: Vec<_> = added.into_iter().map(Result::unwrap).collect();
+			let added: Vec<_> = added.into_iter().map(|added| added.unwrap().0).collect();
 			if session == 0 {
 				let mut observed = added.last().unwrap().grant();
 				observed.changed().await.unwrap();

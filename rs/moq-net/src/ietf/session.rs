@@ -2141,10 +2141,11 @@ mod tests {
 		let session = auth_session(false);
 		let (handle, log) = (&session.handle, &session.log);
 
-		let auth = moq_clock::timeout(std::time::Duration::from_secs(1), handle.handle().add("token"))
+		let (auth, answer) = moq_clock::timeout(std::time::Duration::from_secs(1), handle.handle().add("token"))
 			.await
 			.expect("resolved promptly")
 			.expect("kept for requests");
+		assert_eq!(answer, crate::auth::Answer::Requests);
 		assert_eq!(auth.grant().peek(), None, "no grant without the extension");
 		assert_eq!(handle.handle().grant().peek(), None, "no grant without the extension");
 

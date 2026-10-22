@@ -69,6 +69,15 @@ macro_rules! ready_or {
 	};
 }
 
+/// How a peer accepted a token [`Handle::add`] presented.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+	/// Granted on its AUTH stream: its grant joins the union.
+	Granted,
+	/// Taken only for the requests that name it, on moq-transport without AUTH.
+	Requests,
+}
+
 /// What a peer lets this side do, in this side's own paths.
 ///
 /// The paths are relative to the session's root, the same paths the session
@@ -169,11 +178,8 @@ pub(crate) struct State {
 /// A token the application added, presented on every session of its handle.
 struct Token {
 	value: Bytes,
-	/// The first verdict any session's peer gave: `Ok` for a grant, or why it ended.
-	answered: Option<Result<()>>,
-	/// Whether a session's peer granted it on an AUTH stream, rather than only accepting it
-	/// for the requests that name it.
-	granted: bool,
+	/// The first verdict any session's peer gave: how it accepted the token, or why it ended.
+	answered: Option<Result<Answer>>,
 	/// Why the token ended for good: a peer's refusal or revocation, or the handle's end.
 	ended: Option<Error>,
 }
@@ -413,13 +419,13 @@ impl State {
 		self.links.values().rev().find(|link| link.closed.is_none())
 	}
 
-	/// Record a session's answer to token `id`: a grant settles the application's `add`, and
-	/// a refusal is the verdict that ends the token on every session.
-	fn answer(&mut self, id: u64, answer: Result<()>) {
+	/// Record a session's answer to token `id`: an acceptance settles the application's `add`,
+	/// and a refusal is the verdict that ends the token on every session.
+	fn answer(&mut self, id: u64, answer: Result<Answer>) {
 		match answer {
-			Ok(()) => {
+			Ok(answer) => {
 				if let Some(token) = self.tokens.get_mut(&id) {
-					token.answered.get_or_insert(Ok(()));
+					token.answered.get_or_insert(Ok(answer));
 				}
 			}
 			Err(err) => self.end_token(id, err),
@@ -528,13 +534,15 @@ impl Handle {
 		Watch::new(self.state.clone(), Selector::Union)
 	}
 
-	/// Present another token on every session of this handle, resolving once a peer answers it.
+	/// Present another token on every session of this handle, resolving once a peer accepts it
+	/// with how it did.
 	///
 	/// The grant joins the union while any clone of the returned [`Auth`] lives. With no
 	/// session live it waits for the next one. A refusal that may pass, such as an
 	/// unreachable auth server, is presented again after a backoff. On moq-transport
-	/// without AUTH there is no answer to wait for: it resolves at once with a grant that
-	/// stays unknown, and only a request that names it carries the token.
+	/// without AUTH there is no answer to wait for: it resolves at once with
+	/// [`Answer::Requests`] and a grant that stays unknown, and only a request that names it
+	/// carries the token.
 	///
 	/// # Errors
 	///
@@ -542,10 +550,10 @@ impl Handle {
 	/// (moq-lite without AUTH, or a peer that takes no tokens in band), the peer's refusal
 	/// as [`Error::Session`], or the handle's end.
 	#[cfg(feature = "async")]
-	pub async fn add(&self, token: impl Into<Bytes>) -> Result<Auth> {
+	pub async fn add(&self, token: impl Into<Bytes>) -> Result<(Auth, Answer)> {
 		let auth = self.present(token.into())?;
-		kio::wait(|waiter| auth.poll_answered(waiter)).await?;
-		Ok(auth)
+		let answer = kio::wait(|waiter| auth.poll_answered(waiter)).await?;
+		Ok((auth, answer))
 	}
 
 	/// Register a token and queue it on every open session.
@@ -567,7 +575,6 @@ impl Handle {
 			Token {
 				value: token.clone(),
 				answered: None,
-				granted: false,
 				ended: None,
 			},
 		);
@@ -577,7 +584,7 @@ impl Handle {
 			.filter_map(|link| link.offer(id, &token))
 			.collect();
 		for answer in answers {
-			state.answer(id, answer);
+			state.answer(id, answer.map(|()| Answer::Requests));
 		}
 		Ok(Auth {
 			presented: std::sync::Arc::new(Presented {
@@ -790,7 +797,7 @@ impl Link {
 			.collect();
 		state.links.insert(id, link);
 		for (token_id, answer) in answers {
-			state.answer(token_id, answer);
+			state.answer(token_id, answer.map(|()| Answer::Requests));
 		}
 		Ok(Self {
 			handle: handle.clone(),
@@ -987,10 +994,7 @@ impl Link {
 			slot.retry = None;
 			link.replied = true;
 			link.recompute();
-			if let Some(token) = state.tokens.get_mut(&id) {
-				token.granted = true;
-			}
-			state.answer(id, Ok(()));
+			state.answer(id, Ok(Answer::Granted));
 		});
 	}
 
@@ -1266,7 +1270,7 @@ impl Link {
 			// Nothing will read a withdrawn slot again.
 			link.slots.retain(|_, slot| !slot.withdrawn);
 			for (id, answer) in answers {
-				state.answer(id, answer);
+				state.answer(id, answer.map(|()| Answer::Requests));
 			}
 		});
 	}
@@ -1356,15 +1360,6 @@ impl Auth {
 		Watch::new(self.presented.state.clone(), self.presented.selector())
 	}
 
-	/// Whether a peer has granted this credential in band, on its AUTH stream, rather than
-	/// only accepting it for the requests that name it (moq-transport without AUTH).
-	///
-	/// Unlike [`grant`](Self::grant), it stays true while no session is live.
-	pub fn in_band(&self) -> bool {
-		let state = self.presented.state.read();
-		state.tokens.get(&self.presented.id).is_some_and(|token| token.granted)
-	}
-
 	/// Wait for the credential to end for good: a peer's refusal or revocation as
 	/// [`Error::Session`], [`Error::Cancel`] when the peer closed it without one, or the
 	/// handle's end. A session ending is not one: the next session presents it again.
@@ -1386,7 +1381,7 @@ impl Auth {
 	/// Poll for the first verdict on a handle's token: a grant on any session, or the
 	/// refusal or end that settles it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	fn poll_answered(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+	fn poll_answered(&self, waiter: &kio::Waiter) -> Poll<Result<Answer>> {
 		let id = self.presented.id;
 		let answered = |state: &State| match state.tokens.get(&id) {
 			Some(token) => token.answered.clone(),
@@ -2746,7 +2741,10 @@ mod tests {
 	fn a_request_carries_an_auth_without_the_auth_stream() {
 		let ietf = Link::ietf(false);
 		let auth = ietf.present(Bytes::from_static(b"jwt"), false).unwrap();
-		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+		assert!(matches!(
+			auth.poll_answered(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Answer::Requests))
+		));
 		assert_eq!(auth.grant().peek(), None);
 		assert_eq!(ietf.token(&auth).as_deref(), Some(b"jwt".as_slice()));
 		assert!(
@@ -2770,7 +2768,10 @@ mod tests {
 		let auth = handle.present(Bytes::from_static(b"jwt"), false).unwrap();
 		assert!(auth.poll_answered(&kio::Waiter::noop()).is_pending());
 		handle.unsupported();
-		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+		assert!(matches!(
+			auth.poll_answered(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Answer::Requests))
+		));
 		assert_eq!(handle.token(&auth).as_deref(), Some(b"jwt".as_slice()));
 	}
 
@@ -2825,7 +2826,10 @@ mod tests {
 		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&first);
 		first.granted(id, Grant::all());
-		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+		assert!(matches!(
+			auth.poll_answered(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Answer::Granted))
+		));
 		assert_eq!(auth.grant().peek(), Some(Grant::all()));
 
 		first.close(Error::Cancel);
@@ -2851,24 +2855,28 @@ mod tests {
 		);
 	}
 
-	/// A token granted in band stays so while no session is live, unlike one only requests
-	/// carry, so a caller can tell the two apart after a disconnect.
+	/// The answer records how the peer accepted a token, so a grant whose session drops before
+	/// the caller reads it is still told apart from a token only requests carry.
 	#[test]
-	fn a_grant_in_band_outlives_its_session() {
+	fn the_answer_outlives_its_session() {
 		let handle = Handle::new();
 		let session = Link::attach(&handle, true, false).unwrap();
 		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
-		assert!(!auth.in_band());
 		session.granted(opened(&session), Grant::all());
 		session.close(Error::Cancel);
 		assert_eq!(auth.grant().peek(), None);
-		assert!(auth.in_band());
+		assert!(matches!(
+			auth.poll_answered(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Answer::Granted))
+		));
 
 		let handle = Handle::new();
 		let _session = Link::attach(&handle, false, true).unwrap();
 		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
-		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
-		assert!(!auth.in_band());
+		assert!(matches!(
+			auth.poll_answered(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Answer::Requests))
+		));
 	}
 
 	/// A session's own handle has no successor: a token added after its GOAWAY fails at once,
@@ -2908,7 +2916,10 @@ mod tests {
 		assert!(Selector::Token(auth.id()).ended(&handle.state.read()).is_none());
 		let id = opened(&successor);
 		successor.granted(id, Grant::all());
-		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+		assert!(matches!(
+			auth.poll_answered(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Answer::Granted))
+		));
 	}
 
 	/// A draining session's late refusal ends the token there alone while its successor
@@ -2996,7 +3007,10 @@ mod tests {
 
 		link.reopen(id);
 		link.granted(id, Grant::all());
-		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+		assert!(matches!(
+			auth.poll_answered(&kio::Waiter::noop()),
+			Poll::Ready(Ok(Answer::Granted))
+		));
 	}
 }
 

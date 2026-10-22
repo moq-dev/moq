@@ -13,6 +13,15 @@ The handle backs one active session at a time, plus the ones draining after a GO
 `Auth::closed()` resolves only on the peer's verdict (a refusal, `Unsupported`, or a clean close after a grant) or the handle's end, which `Handle::abort` triggers; a session ending is not one.
 A handle a session creates for itself still ends with that session.
 On moq-lite, a token refused with a code that may pass (`Internal`, `TooManyRequests`, `Timeout`) is presented again after a backoff of 1s doubling to 30s, instead of `add` failing with that code.
+`Handle::add` resolves with `(Auth, Answer)` instead of `Auth`: `Answer::Granted` when a peer granted the token on its AUTH stream, or `Answer::Requests` when only the requests that name it carry it (moq-transport without AUTH).
+The answer holds after the session drops, unlike `Auth::grant()`, so read it rather than inferring support from a missing grant.
+
+```rust
+// Before
+let token = handle.add(jwt).await?;
+// After
+let (token, answer) = handle.add(jwt).await?;
+```
 
 ### Receive streams are read through leases (#5878)
 
