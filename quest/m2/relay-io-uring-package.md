@@ -30,7 +30,9 @@ ships, not the default.
 - Docs: `doc/bin/relay/` says packaged Linux builds include the runtime, how
   to turn it on, and the memlock note.
 - Decided 2026-10-22 from the io_uring audit: the docs carry a capability
-  matrix of what the ring serves itself (raw QUIC and WebTransport), what a
+  matrix of what the ring serves itself (raw QUIC and WebTransport), what
+  crosses runtimes (WebRTC media and SRT, received on the ring's one port
+  and handed to their tokio stacks), what a
   ring relay still serves from the shared tokio runtime (TCP, WebSocket,
   Unix, HTTP, iroh, outbound cluster dials), and what it refuses loudly
   (`listen.lb_id` QUIC-LB server ids). That refusal is a recorded exception
