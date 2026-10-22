@@ -664,7 +664,8 @@ async fn a_moved_tier_retags_the_live_session() {
 /// prefix keeps flowing, a wider one brings the path back, and neither session closes.
 #[tokio::test]
 async fn a_rechecked_grant_resizes_live_sessions() {
-	for scheme in ["tcp", "ws"] {
+	// Each scheme waits out two re-check cadences, so run them side by side.
+	futures::future::join_all(["tcp", "ws"].map(|scheme| async move {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let auth = build_auth(script.spawn().await);
 		let (port, relay) = match scheme {
@@ -799,7 +800,8 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			);
 		}
 		relay.abort();
-	}
+	}))
+	.await;
 }
 
 /// A re-check that moves the root still closes the session: nothing it holds is
@@ -823,11 +825,13 @@ async fn a_moved_root_closes_live_sessions() {
 /// 403, 401, and an empty grant are all a no.
 #[tokio::test]
 async fn a_refusal_closes_live_sessions() {
-	for (label, answer) in [
+	// Each answer waits out a re-check cadence, so run them side by side.
+	let answers = [
 		("403", Answer::Status(403)),
 		("401", Answer::Status(401)),
 		("empty grant", Answer::Grant(Grant::default())),
-	] {
+	];
+	futures::future::join_all(answers.map(|(label, answer)| async move {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
 		let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
@@ -848,7 +852,8 @@ async fn a_refusal_closes_live_sessions() {
 		}
 
 		relay.abort();
-	}
+	}))
+	.await;
 }
 
 /// The one-shot HTTP routes are sessions of their own: `/announced` is admitted
@@ -1031,38 +1036,22 @@ async fn the_end_carries_duration_and_bytes() {
 /// and the drain waits for that report rather than exiting under it.
 #[tokio::test]
 async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
+	let clock = manual();
 	let script = Script::new(grant(Duration::from_secs(3600)));
 	let gate = script.hold_ends();
 	let auth = build_auth(script.spawn().await);
-	let (trigger, observer) = moq_relay::shutdown::Observer::new(Duration::from_millis(100));
+	let drain_timeout = Duration::from_millis(100);
+	let (trigger, observer) = moq_relay::shutdown::Observer::new(drain_timeout);
 
-	let version = crate::memory::newest();
-	let mut config = moq_net::transport::memory::Config::default();
-	config.protocol = Some(version.alpn().to_string());
-	let (client_link, relay_link) = moq_net::transport::memory::pair(config);
-	tokio::spawn({
-		let observer = observer.clone();
-		async move {
-			let server = moq_net::Server::new().with_versions(version.into());
-			let handshake = server
-				.accept_request(moq_net::time::now(), relay_link)
-				.await
-				.expect("relay handshake");
-			let request = moq_relay::Accepted::new(handshake, moq_auth::Transport::Quic);
-			Connection::new(request, crate::memory::cluster(), auth)
-				.with_shutdown(observer)
-				.run()
-				.await;
-		}
-	});
-	let (client, driver) = moq_net::Client::new()
-		.with_versions(version.into())
-		.connect(moq_net::time::now(), client_link)
+	let lease = auth
+		.admit(auth.request(moq_auth::Transport::Quic, "/room"))
 		.await
-		.expect("client handshake");
-	tokio::spawn(moq_net::time::run(driver));
+		.expect("admitted before draining");
+	let (client, server) = memory_sessions().await;
+	let supervised = tokio::spawn(moq_relay::supervise(server, lease, observer.serve(), None));
 
-	// The client hears the GOAWAY and ignores it, so the deadline closes it.
+	// Keep the deadline from racing the client receiving GOAWAY under load.
+	tokio::time::pause();
 	trigger.start();
 	tokio::time::timeout(TIMEOUT, client.draining().recv())
 		.await
@@ -1072,6 +1061,10 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 		let observer = observer.clone();
 		async move { observer.drained().await }
 	});
+	clock.advance(drain_timeout);
+	tokio::time::advance(drain_timeout).await;
+	// The end report crosses HTTP, so resume real time after forcing the close.
+	tokio::time::resume();
 	tokio::time::timeout(TIMEOUT, script.end_arrived.notified())
 		.await
 		.expect("the end never reached the server");
@@ -1086,6 +1079,7 @@ async fn the_drain_waits_for_a_closed_session_to_report_its_end() {
 		.await
 		.expect("the drain outlived the end")
 		.unwrap();
+	supervised.await.expect("supervisor task").expect("drained session");
 	let ends = script.ends();
 	let [end] = ends.as_slice() else {
 		panic!("one end per session: {ends:?}")

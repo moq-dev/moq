@@ -37,7 +37,7 @@ native playback against its budgets.
 ## Required
 
 - [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser's measured target, proven on Chrome and Safari against the public relay
-- [AAC bursty discard](/quest/m1/audio-jitter-target/aac-bursty-discard.md) - AAC bursty discards about as much audio as Opus bursty, and its budgets are tightened from post-fix nightlies
+- [Capped budgets](/quest/m1/audio-jitter-target/capped-budgets.md) - post-cap nightlies confirm AAC bursty discards about as much audio as Opus bursty, and every browser row's budgets are re-measured from them
 - [Opus near-zero budgets](/quest/m1/audio-jitter-target/opus-near-zero-budgets.md) - post-flush nightlies confirm the first row no longer stalls, and its budgets are tightened from them
 
 ## Closes

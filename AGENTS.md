@@ -16,7 +16,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Dig into the root cause and fix it at the source. Never work around a fixable bug with a retry, sleep, or timeout, nor pass a flaky test by loosening its assertion or disabling production behavior.
 - Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused.
 - Treat anything received over the network as untrusted. Ask how a hostile peer could abuse it, such as memory, CPU, or state it makes the other side hold, and bound that cost by design (backpressure, flow control, ownership), never with a constant whose only effect is a runtime refusal. A peer must never crash the process, reach another tenant's data, or receive a credential it was not issued.
-- Reproduce bugs before fixing them. Land each fix with a regression test that fails without it, when one is easy.
+- Reproduce bugs before fixing them. Tests must be worth their weight long-term: cover edge cases, not old bugs or trivial values.
 - Unit tests mock time instead of depending on wall-clock timing or sleeps.
 - Impair a network with bufferbloat (a rate limit below the media bitrate, behind a deep but finite queue), whose overflow drops packets too. Random loss may prove correctness, such as retransmits happening, but never gates acceptance or performance.
 - Keep the PR to one problem: no unrelated refactors, formatting churn, or drive-by changes. Fix every instance of that problem and the gaps it exposes in the same PR.

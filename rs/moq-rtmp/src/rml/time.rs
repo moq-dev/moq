@@ -277,12 +277,4 @@ mod tests {
 		assert!(time1 > 20, "time1 was not greater than 20");
 		assert_eq!(time1, 50, "time1 was not equal to 50");
 	}
-
-	#[test]
-	fn can_set_timestamp_value() {
-		let mut time = RtmpTimestamp::new(50);
-		time.set(60);
-
-		assert_eq!(time, 60);
-	}
 }

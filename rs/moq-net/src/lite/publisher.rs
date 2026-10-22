@@ -2321,7 +2321,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 						group = group.compressed();
 					}
 					let capped = msg.end_frame.is_some();
-					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale, shared.version)?;
+					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale)?;
 
 					*self = Self::Serve {
 						group,
@@ -4377,14 +4377,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
 		let records = header.and_then(|()| {
-			lite::ietf::Records::start(
-				&mut writer,
-				self.ctx.ietf,
-				&self.group,
-				self.capped,
-				self.ctx.timescale,
-				self.ctx.version,
-			)
+			lite::ietf::Records::start(&mut writer, self.ctx.ietf, &self.group, self.capped, self.ctx.timescale)
 		});
 		let records = match records {
 			Ok(records) => records,
