@@ -88,10 +88,13 @@ No duplicate quest or workflow edit belongs here.
   and paired comparison correctness. Active PRs already address these.
 - [Perf](/quest/m2/perf/README.md) owns measured channel contention, relay
   allocations, ingest batching, worker quiescence and runtime selection.
-- [Release audit PR](https://github.com/moq-dev/moq/pull/6311) owns QMux
-  copying/resource growth, CMAF allocation abuse, media reorder queues,
-  watch teardown, and HLS contract investigations. MKV fragmentation below
-  concerns parser replay before those queues; recheck that PR before coding.
+- The [release audit](/quest/m1/release-audit/README.md) owns QMux copying
+  ([qmux-copy](/quest/m1/release-audit/qmux-copy.md)), CMAF allocation abuse
+  ([cmaf-counts](/quest/m1/release-audit/cmaf-counts.md)), media reorder queues
+  ([export-reorder](/quest/m1/release-audit/export-reorder.md)), watch teardown
+  ([watch-errors](/quest/m1/release-audit/watch-errors.md)), and the HLS
+  contract quests. MKV fragmentation below concerns parser replay before those
+  queues.
 - [Binding bytes](/quest/m2/ffi-bytes.md),
   [foreign polling](/quest/m2/ffi-poll-protocol.md),
   [Kotlin calls](/quest/m2/kt-ffi-calls.md),

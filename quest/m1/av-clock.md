@@ -62,6 +62,7 @@ Recommendations for the implementation:
 
 ## Required
 
+- [Sync.wait says what happened](/quest/m1/api-audit/sync-wait.md) - drops `probe` and `out.jitter` and makes `wait` report present or skip, which the handles build on
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the estimator this sits on, and the per-track targets this shape carries
 
 ## Related

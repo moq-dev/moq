@@ -37,8 +37,10 @@ stability. Both are additive and, per the freeze policy, target whichever lite
 wip is current when they land.
 
 Decided 2026-10-08: Restart and AUTH join Required, since both change the
-lite-07 wire. Decided 2026-10-17: compressed tracks join too, so lite-07
-ships with them. SUBSCRIBE_OK carrying live media time was dropped: no reader
+lite-07 wire. Compressed tracks joined on 2026-10-17 and landed
+([#5928](https://github.com/moq-dev/moq/pull/5928),
+[#6228](https://github.com/moq-dev/moq/pull/6228),
+[#6230](https://github.com/moq-dev/moq/pull/6230)). SUBSCRIBE_OK carrying live media time was dropped: no reader
 was named, and `set_live` covers it.
 
 The cut:
@@ -65,15 +67,12 @@ Required, because it adds `Max Age` to lite-07's SUBSCRIBE_DROP. Only
 line, because it is that line's lite-07 wire work; the rest is API work that
 does not block the rename.
 
-Decided 2026-10-17: the archive line's discovery request joins Required, so
-lite-07 ships what the archive and the IETF SUBSCRIBE_TRACKS mapping need.
-On 2026-10-19 TRACKS, a per-broadcast track listing, replaced SUBSCRIBE_ALL
-and kept that slot.
+The archive line's TRACKS request (a per-broadcast track listing that
+replaced SUBSCRIBE_ALL) landed in [#6158](https://github.com/moq-dev/moq/pull/6158)
+and [#6167](https://github.com/moq-dev/moq/pull/6167), and the padding stream
+type for the m2 browser [padding probes](/quest/m2/probe/padding.md) landed in
+[#6233](https://github.com/moq-dev/moq/pull/6233).
 The `Time(pts)` range end rides in Subscribe ranges, already Required.
-
-Decided 2026-10-20: the padding stream type joins Required, so the m2
-browser [padding probes](/quest/m2/probe/padding.md) can use lite-07 without
-a new version.
 
 Rust's lite-07 varints already carry the full 64 bits the draft specifies,
 so no codec work waits on the cut.

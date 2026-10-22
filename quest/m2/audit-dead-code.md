@@ -9,7 +9,7 @@ are planned for deletion when removal breaks a public API.
 
 Recurs once per major release (decided 2026-10-19). The PR that finishes
 this run also adds the next one with the same file name at the end of the next
-milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal
+milestone's `Required` (m0 to m1, m1 to m2, m2 to m3). The successor keeps the Goal
 and this paragraph; the rest of its Plan is rewritten with what this run
 learned: baselines, results, and what to check first. A successor placed in m2
 also lists the [release cut](/quest/m2/release/cut.md) under `Required`, so it
@@ -42,9 +42,8 @@ Start by comparing the live tree against these baselines:
 - Rustc misses unused `pub` items. Tokenizing the tree and keeping `pub`
   declarations whose name appears exactly once (`.scratch` script, not
   checked in) found, outside generated bindings:
-  - cfg(test) helpers `track::Subscriber::assert_error` and
-    `AnnounceConsumer::assert_next_restarted`/`assert_next_ended` in
-    moq-net's model, left alone because open PRs churned those files.
+  - cfg(test) helper `track::Subscriber::assert_error` in moq-net's model,
+    left alone because open PRs churned that file.
   - Public items no consumer calls: `moq_net::Version::uses_setup_negotiation`,
     `moq_tokio::Server::serve_both`, `quic::web` `ClientBuilder::with_server_certificates`
     and `ServerBuilder::with_certificate`, `hang` `Catalog::to_json_pretty`,

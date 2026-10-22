@@ -67,4 +67,4 @@ Work owned by this README, after the children land:
 
 ## Related
 
-- [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - its dynamic-groups child is the IETF half this epic promotes
+- [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - its dynamic-groups half landed in [#5708](https://github.com/moq-dev/moq/pull/5708) and is the IETF half this epic promotes

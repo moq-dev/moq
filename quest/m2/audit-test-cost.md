@@ -10,7 +10,7 @@ or planned, so the suite costs what it earns. Workflows and jobs belong to the
 
 Recurs once per major release (decided 2026-10-19). The PR that finishes
 this run also adds the next one with the same file name at the end of the next
-milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal
+milestone's `Required` (m0 to m1, m1 to m2, m2 to m3). The successor keeps the Goal
 and this paragraph; the rest of its Plan is rewritten with what this run
 learned: baselines, results, and what to check first. A successor placed in m2
 also lists the [release cut](/quest/m2/release/cut.md) under `Required`, so it
@@ -65,13 +65,12 @@ Check first:
   stops counting an unanswered handshake as active immediately while the
   closing period still answers late packets. Do not repeat the old request
   to skip draining. [moq-dev/moq#6240](https://github.com/moq-dev/moq/pull/6240)
-  proposes retiring the silent-peer quest as complete.
+  retired the silent-peer quest as complete.
 - moq-uring: three endpoint tests wait out moq-quic's fixed 10 s handshake
   idle timeout (30 s together). Neither moq-uring's `Transport` nor
   `--quic-idle-timeout` sets it. #6201 does not change that timeout. The
-  [retirement proposal](https://github.com/moq-dev/moq/pull/6240) records
-  keeping it separate with no new knob; follow its maintainer decision
-  rather than independently selecting another API in a cost audit.
+  [retirement](https://github.com/moq-dev/moq/pull/6240) settled keeping it
+  separate with no new knob; do not select another API in a cost audit.
 - CPU-bound simulations in a debug build: five TS export timing cases (3 to
   11 s each) and the jitter buffer's day of drift (6 to 13 s), whose `Steer`
   rebuilds the hull and median over its whole window on every step.

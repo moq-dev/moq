@@ -32,9 +32,6 @@ times on a loaded machine, as the first round did.
 The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
 fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 
-Added 2026-10-21 (maintainer): small flakes from the m0/m1 merge run, kept
-in one child.
-
 Public API: none. Wire: none.
 
 ## Related

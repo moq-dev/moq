@@ -20,8 +20,9 @@ This revisits part of the per-session request caps from #4820 (the m0 DoS
 review), so prove each removal first:
 
 - For each cap, show which existing bound covers it on each version: lite
-  streams consume QUIC stream credit; drafts 14 to 16 have the request
-  window; later drafts have MAX_REQUEST_ID. Drop `subscriptions` and
+  streams consume QUIC stream credit; drafts 14 to 16 have the
+  MAX_REQUEST_ID request window; draft 17 and later put each request on its
+  own stream, bounded by QUIC bidi stream credit. Drop `subscriptions` and
   `fetches` where covered, with a test that the peer is still bounded.
 - Keep the bounds with no other limit, such as lite announces and the
   drafts 14 to 16 request window.

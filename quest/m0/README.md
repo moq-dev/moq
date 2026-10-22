@@ -18,8 +18,7 @@ done. moq.pro pins this repository's `release` line, so the release gate below
 also keeps #4741 from reaching it early.
 
 Per-session request caps landed in #4820, idle fronts in #5054, and the
-lost demand-poll wake in #5091. The rest of the 2026-09-29 DoS review remains
-in m1 with relay session limits (status refreshed in the 2026-10-10 audit).
+lost demand-poll wake in #5091.
 
 Routing: Wildcard landed in #4403, so a service claims the prefix it could
 serve instead of enumerating broadcasts. Serving the relay's ingested-only

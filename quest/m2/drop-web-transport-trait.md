@@ -3,7 +3,7 @@
 ## Goal
 
 moq-tokio, moq-uring, moq-relay, moq-ffi and moq-wasm no longer depend on
-`web-transport-trait`. The qmux, iroh and wasm backends implement moq-net's
+`web-transport-trait`. The iroh and wasm backends implement moq-net's
 `transport::poll` traits, either directly or through a thin adapter per
 backend. The generic adapters over `web_transport_trait` are deleted:
 moq-tokio's `transport::Session<S>` with its async-to-poll emulation, and
@@ -23,7 +23,7 @@ layer instead of reopening it.
 - Native QUIC (`moq_tokio::quic::web`, `moq_uring::quic::web`) implements
   `poll::Session` itself, keeping its real send groups. It is a candidate for
   the first step, since its `web_transport_trait` impl only feeds the adapter.
-- qmux and iroh get their own impls. Flat backends use `Ungrouped`.
+- iroh gets its own impl. Flat backends use `Ungrouped`.
 - The browser backend in moq-wasm and the ffi backend implement the traits
   directly. Their adapters already clamp priorities themselves.
 - Report the public API impact per crate: deleted generic `Session<S>`

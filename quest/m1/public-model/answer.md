@@ -74,14 +74,14 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   (`pub(crate)`, and private in JS) once the identity handle above and the
   answer source give a peer's route a public shape, and move the
   out-of-crate tests and benches onto it.
-- `origin::interest_prefixes` (both subscribers): remove the need through
-  Rust lazy discovery ([moq-dev/moq#6165](https://github.com/moq-dev/moq/pull/6165)), which gives Rust
-  the origin's watched interests the way JS has them; make that public in
-  both languages there or here, whichever lands second.
-- `origin::Consumer::discovery`, `includes_hidden` (IETF publisher): fold
-  into the public `with_hidden` plus a getter, unless Lazy discovery deletes
-  them first. `beyond` (topping up a feed): re-inventory after Lazy
-  discovery; public only if it survives.
+- `origin::interest_prefixes` (both subscribers): Rust lazy discovery
+  ([moq-dev/moq#6165](https://github.com/moq-dev/moq/pull/6165)) landed
+  with the origin's watched interests still `pub(crate)`, so this quest makes
+  them public in both languages.
+- `origin::Consumer::discovery`, `includes_hidden` (IETF publisher): both
+  survived Lazy discovery; fold them into the public `with_hidden` plus a
+  getter. `beyond` (topping up a feed) also survived: re-inventory it, and
+  make it public only if a consumer needs it.
 - `origin::Consumer::request` (lite publisher): remove the need; it is the
   body of the public `request_broadcast`.
 - `origin::Producer::empty`, `origin::Consumer::empty` (sessions): public.

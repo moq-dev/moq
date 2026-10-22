@@ -92,8 +92,8 @@ cause). Out of scope for now: decoupling catalog publication from mux-rate
 measurement.
 
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
-decoder-time admission (#5306) have landed; PSI runs and catalog linger
-remain with their current quests.
+decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
+catalog linger (#5305).
 
 ## Required
 

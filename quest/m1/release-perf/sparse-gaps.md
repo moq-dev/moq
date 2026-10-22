@@ -11,7 +11,7 @@ faster than their size parameter.
 Found by reading code on 2026-10-21. Confirm each step with callgrind
 instruction counts at two sizes before and after the change.
 
-- `Ledger` (`rs/moq-net/src/model/ledger.rs`) stores its runs in a `Vec`.
+- `Ledger` (`rs/moq-net/src/ledger.rs`) stores its runs in a `Vec`.
   [#5802](https://github.com/moq-dev/moq/pull/5802) moved it from the session
   tail ([#4533](https://github.com/moq-dev/moq/pull/4533), which only ever
   held a few gaps) onto every track's live arrivals. Each arrival now pays

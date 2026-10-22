@@ -36,9 +36,9 @@ Decided 2026-10-22 (API audit):
   in a new crate; gate `pub use rustls` on `any(ring, aws-lc-rs)` so it
   exists under `rustls-aws-lc-rs`; point crate docs at
   `moq_tokio::quic::driver` instead of quinn.
-- Public only for tests: `lease::Producer::{due, failed}` and `Due` go
-  `pub(crate)` (drop the `tokio` feature), `connect::Config.quic` and
+- Public only for tests: moq-auth `lease::Producer::{due, failed}` and `Due`
+  go `pub(crate)` (drop moq-auth's `tokio` feature), `connect::Config.quic` and
   `listen::Config.quic` (read only by `deprecated()`) go `pub(crate)`, and
   moq-uring `manual` and kio `sim` are renamed `_manual`/`_sim` or gated.
 
-Public API: moq-tokio, moq-quic breaking. Wire: none.
+Public API: moq-tokio, moq-quic, moq-auth breaking. Wire: none.

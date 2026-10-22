@@ -62,8 +62,13 @@ Public API: qmux's `RecvStream` leases natively instead of through
 `Buffered`, and its window defaults or validation change (MIGRATE.md). Wire:
 QMux MAX_DATA and STOP_SENDING only, no MoQ format change.
 
+## Required
+
+- [Bound incomplete messages](/quest/m1/quic/receive-memory.md) - the receive leases ([#5878](https://github.com/moq-dev/moq/pull/5878)) this extends to qmux
+
 ## Related
 
 - [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md) - frame credit returns per segment, shrinking the floor's frame term
 - [WebSocket caps](/quest/m2/rate-websocket.md) - paced reads on the same sessions, inside the window
 - [Transport x version benches](/quest/m2/bench-transport-sweep.md) - where a per-session memory and throughput sweep belongs
+- [qmux drives its own socket](/quest/m2/perf/stream/driver.md) - replaces qmux's reader and writer tasks and its constructors' return type

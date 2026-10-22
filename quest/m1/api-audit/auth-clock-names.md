@@ -17,7 +17,8 @@ Decided 2026-10-22 (API audit):
   `origin(): Wall` (ms): name both `origin()` and document the unit split.
   Rust `Manual::install` returns a handle while JS returns a closure: match.
 - moq-net exposes both `time::now()` and `Instant::now()`; keep one.
-- moq-auth's public times (`Claims`, `Grant::expires`) are `SystemTime`;
-  add them to [wall time](/quest/m1/time/wall.md).
+- moq-auth's public times (`Claims`, `Grant::expires`) move from
+  `SystemTime` to `Wall` in [wall time](/quest/m1/time/wall.md)
+  ([#6298](https://github.com/moq-dev/moq/pull/6298)); nothing left here.
 
 Public API: moq-auth, moq-net, moq-clock, `@moq/clock` renames. Wire: none.

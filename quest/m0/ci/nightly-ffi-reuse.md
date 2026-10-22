@@ -15,8 +15,10 @@ quest.
 ## Plan
 
 `moq-ffi-v0.4.16` (2026-10-16) was cut from a `release` without #5549, so it
-ran the per-language workflows and verified nothing here. The Linux release
-toolchain now links; verify `Shipping sizes` on the next scheduled Nightly.
+ran the per-language workflows and verified nothing here; `moq-ffi-v0.4.17`
+was likewise cut without it. `Shipping sizes` has run (Nightly
+[39779729461](https://github.com/moq-dev/moq/actions/runs/39779729461),
+2026-10-22): check its Go keys below, so only the tag condition remains.
 
 The first scheduled Nightly after the change (run 38897397428, 2026-10-16)
 already verified the dry-run side: the nested job names match the publisher

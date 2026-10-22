@@ -32,3 +32,7 @@ split/pump/channel/mutex hops, per-record allocations, and TLS. Those shares
 decide whether the [codec](/quest/m2/perf/stream/codec.md) goes ahead. The
 [ablation](/quest/m2/perf/stream/ablation.md) adds a ring backend to this
 same harness.
+
+## Related
+
+- [Transport x version benches](/quest/m2/bench-transport-sweep.md) - adds qmux as a transport axis of the moq-net session bench
