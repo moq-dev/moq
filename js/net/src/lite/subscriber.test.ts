@@ -2,9 +2,19 @@ import { expect, jest, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import type { AuthSession } from "../auth_session.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import * as Epoch from "../epoch.ts";
-import { error, fromTransport, ProtocolViolation, reason, SessionCode, StreamCode, StreamError } from "../error.ts";
+import {
+	error,
+	fromTransport,
+	ProtocolViolation,
+	reason,
+	SessionCode,
+	StreamCode,
+	StreamError,
+	TimestampMismatch,
+} from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -1439,6 +1449,104 @@ test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 	},
 );
 
+// A TRACKS request carries no epoch for an epochless route, so it would list the replacement.
+test("a listing of an epochless handle retired while its token waits never reaches the wire", async () => {
+	const { quic, streams, opened } = fakeSession();
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => (release = resolve));
+	const auth = {
+		ready: (_path: Path.Valid, _direction: string, opts?: { signal?: AbortSignal }) =>
+			new Promise<boolean>((resolve, reject) => {
+				void released.then(() => resolve(true));
+				opts?.signal?.addEventListener("abort", () => reject(opts.signal?.reason), { once: true });
+			}),
+	} as unknown as AuthSession;
+	const version = Version.DRAFT_07;
+	const subscriber = new Subscriber(
+		quic,
+		version,
+		HopSchema.parse(1n),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		auth,
+	);
+	const announced = subscriber.announced();
+	await opened(0);
+	const send = async (encode: (writer: Writer) => Promise<void>) => {
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({
+				write: (chunk) => streams[0].inbound.enqueue(new Uint8Array(chunk)),
+			}),
+			version,
+		);
+		await encode(writer);
+	};
+	const path = Path.from("pool");
+	await send((writer) => new AnnounceOk(PEER, 0).encode(writer, version));
+	await send((writer) =>
+		encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_A] }, version),
+	);
+	await announced.next();
+	const held = subscriber.consume(Path.from("pool/job"));
+	const tracks = held.tracks();
+	const event = tracks.next().catch((err: unknown) => err);
+
+	await send((writer) => encodeAnnounceBroadcast(writer, { status: "endedId", id: 0n }, version));
+	await announced.next();
+	await send((writer) =>
+		encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_B] }, version),
+	);
+	await announced.next();
+	release();
+
+	const err = await event;
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.Unroutable);
+	expect(streams.length).toBe(1);
+	tracks.close();
+	held.close();
+	announced.close();
+	subscriber.close();
+});
+
+test("a listing whose readers leave as its token settles never reaches the wire", async () => {
+	const { quic, streams } = fakeSession();
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => (release = resolve));
+	let ask!: () => void;
+	const asked = new Promise<void>((resolve) => (ask = resolve));
+	// Ignores `until`, so the wait settles admitted after the readers left.
+	const auth = {
+		ready: () => {
+			ask();
+			return released.then(() => true);
+		},
+	} as unknown as AuthSession;
+	const subscriber = new Subscriber(
+		quic,
+		Version.DRAFT_07,
+		HopSchema.parse(1n),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		auth,
+	);
+	const held = subscriber.consume(Path.from("room"));
+	const tracks = held.tracks();
+	await asked;
+	release();
+	tracks.close();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	expect(streams.length).toBe(0);
+	held.close();
+	subscriber.close();
+});
+
 test.each(["track", "fetch", "open"] as const)(
 	"retirement settles coalesced fetches during %s setup",
 	async (stage) => {
@@ -1718,44 +1826,67 @@ async function groupStream(timestamp: number, version: Version = Version.DRAFT_0
 	);
 }
 
-// A received timestamp may not be media time (lite-05/06 stamp an untimed track's frames with
-// their send time), so a received group that rewinds or lands out of order is accepted at every
-// version. Only a local publisher's writes refuse a rewind.
-test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
-	"version %p accepts a received rewind",
-	async (version) => {
-		const { quic, streams, opened } = fakeSession();
-		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-		const broadcast = subscriber.consume(Path.from("room"));
-		// Old enough to keep every group, however far behind the newest start.
-		const track = broadcast.track("video").subscribe({ maxDelay: Milli(60_000) });
-		try {
-			await opened(0);
-			await answerTrackInfo(streams[0], version, 1000);
-			await (await opened(1)).reading;
-			await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4 }), await groupStream(1000, version));
-			// Starts before the group below it.
-			await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5 }), await groupStream(500, version));
-			// Lands below group 5 but starts after it.
-			await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3 }), await groupStream(2000, version));
-			const got = [];
-			for (let i = 0; i < 3; i++) {
-				const group = await track.recvGroup();
-				got.push([group?.sequence, (await group?.readFrame())?.payload.length]);
-			}
-			expect(got).toEqual([
-				[3, 1],
-				[4, 1],
-				[5, 1],
-			]);
-			expect(track.closed.peek()).toBeUndefined();
-		} finally {
-			track.close();
-			broadcast.close();
-			subscriber.close();
+// Lite-05/06 stamp an untimed track's frames with their send time, which a receiver cannot tell
+// from media time, so it drops every timestamp there: a group that rewinds or lands out of order is
+// accepted untimed.
+test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p drops received timestamps", async (version) => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	// Old enough to keep every group, however far behind the newest start.
+	const track = broadcast.track("video").subscribe({ maxDelay: Milli(60_000) });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		await (await opened(1)).reading;
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4 }), await groupStream(1000, version));
+		// Starts before the group below it.
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5 }), await groupStream(500, version));
+		// Lands below group 5 but starts after it.
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3 }), await groupStream(2000, version));
+		const got = [];
+		for (let i = 0; i < 3; i++) {
+			const group = await track.recvGroup();
+			const frame = await group?.readFrame();
+			got.push([group?.sequence, frame?.payload.length, frame?.timestamp]);
 		}
-	},
-);
+		expect(got).toEqual([
+			[3, 1, undefined],
+			[4, 1, undefined],
+			[5, 1, undefined],
+		]);
+		expect((await track.info()).timescale).toBeUndefined();
+		expect(track.closed.peek()).toBeUndefined();
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// Lite-07 timestamps are media time, so a received group is checked like a local write.
+test("a lite-07 rewind is refused", async () => {
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe({ maxDelay: Milli(60_000) });
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		await (await opened(1)).reading;
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4 }), await groupStream(1000, version));
+		// Starts before the group below it, so its stream is stopped with the refusal.
+		const rewound = await groupStream(500, version);
+		const stop = spyOn(rewound, "stop");
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5 }), rewound);
+		expect(stop.mock.calls[0]?.[0]).toBeInstanceOf(TimestampMismatch);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
 
 test("a publisher FIN without SUBSCRIBE_END still violates an open subscription", async () => {
 	const { quic, streams, opened, closes } = fakeSession();
@@ -1994,13 +2125,13 @@ test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while 
 	try {
 		await opened(0);
 		await streams[0].reading;
-		await clock.advanceAsync(Nano.fromMilli(Milli(5_000)));
+		await clock.advance(Nano.fromMilli(Milli(5_000)));
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await opened(1);
 		if (stage === "answer") await streams[1].reading;
-		await clock.advanceAsync(Nano.fromMilli(Milli(4_999)));
+		await clock.advance(Nano.fromMilli(Milli(4_999)));
 		expect(failure).toBeUndefined();
-		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await clock.advance(Nano.fromMilli(Milli(1)));
 		await fetch;
 		if (stage === "answer") expect((failure as StreamError).code).toBe(StreamCode.ControlTimeout);
 		else {

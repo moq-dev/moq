@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Effect interval deadlines
+
+`effect.interval` arms its first period before returning and waits a full period
+after a late callback. Each new period uses the clock installed when it arms,
+rather than keeping one clock for the interval's lifetime. Close the effect before
+restoring a manual clock if the interval should end with that clock's scope.
+
 ### Timers take a `Nano` (#5706)
 
 `effect.timer`, `effect.timeout`, and `effect.interval` take a `Nano` from `@moq/clock` instead of milliseconds, and run on the installed clock.

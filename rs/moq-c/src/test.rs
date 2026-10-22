@@ -2844,7 +2844,7 @@ fn track_demand_reports_the_wanted_group() {
 	let broadcast = publish_broadcast(origin, b"track-demand-wanted");
 	let name = b"data";
 	let info = moq_track_info {
-		priority: 127,
+		priority: 0,
 		max_age_us: 0,
 		max_age_present: false,
 		timescale: 0,
@@ -3171,7 +3171,7 @@ fn fetch_group(
 	broadcast: u32,
 	name: &str,
 	sequence: u64,
-	priority: u8,
+	priority: i8,
 	frame_start: u64,
 ) -> mpsc::Receiver<Result<(u64, Vec<u8>), moq_net::Error>> {
 	let consumer = State::lock()
@@ -3212,7 +3212,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 	let fetch = fetch_group(broadcast, "data", 5, 11, 0);
 	let request = id(group_cb.recv());
 	let mut sequence = 0u64;
-	let mut priority = 0u8;
+	let mut priority = 0i8;
 	let mut frame_start = 1u64;
 	assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
 	assert_eq!(unsafe { moq_group_request_priority(request, &mut priority) }, 0);
@@ -5629,8 +5629,22 @@ fn server_accepts_a_session() {
 	let bandwidth = id(moq_session_bandwidth(session));
 	assert_eq!(moq_bandwidth_close(bandwidth), 0);
 
-	// The broadcast the server publishes reaches the client.
-	let consumed = request_broadcast(received, b"demo");
+	// The broadcast the server publishes reaches the client. A client only asks the
+	// server about what it watches, so wait on the path rather than request it once.
+	let path = b"demo";
+	let announced_cb = Callback::new();
+	let task = id(unsafe {
+		moq_origin_announced_broadcast(
+			received,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			announced_cb.ptr,
+		)
+	});
+	let consumed = id(announced_cb.recv());
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(announced_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consumed), 0);
 
 	// Closing the accepted session is a clean terminal close.

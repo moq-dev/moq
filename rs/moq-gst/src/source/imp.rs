@@ -40,6 +40,7 @@ static NEXT_AUDIO_PAD_ID: AtomicU64 = AtomicU64::new(0);
 struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
+	versions: Option<String>,
 	tls_disable_verify: bool,
 	quic_keylog: bool,
 }
@@ -48,6 +49,8 @@ struct Settings {
 struct ResolvedSettings {
 	url: url::Url,
 	broadcast: String,
+	/// Empty offers every supported version.
+	versions: Vec<moq_net::Version>,
 	tls_disable_verify: bool,
 	quic_keylog: bool,
 }
@@ -63,6 +66,14 @@ impl TryFrom<Settings> for ResolvedSettings {
 				.as_ref()
 				.context("broadcast property is required")?
 				.clone(),
+			versions: value
+				.versions
+				.iter()
+				.flat_map(|versions| versions.split(','))
+				.map(str::trim)
+				.filter(|version| !version.is_empty())
+				.map(|version| version.parse().map_err(anyhow::Error::msg))
+				.collect::<Result<_>>()?,
 			tls_disable_verify: value.tls_disable_verify,
 			quic_keylog: value.quic_keylog,
 		})
@@ -205,9 +216,10 @@ impl SessionController {
 	}
 }
 
-/// The dial's configuration: TLS as set, retrying without a budget.
+/// The dial's configuration: versions and TLS as set, retrying without a budget.
 fn connect_config(settings: &ResolvedSettings) -> moq_tokio::connect::Config {
 	let mut config = moq_tokio::connect::Config::default();
+	config.version = settings.versions.clone();
 	config.tls.insecure = Some(settings.tls_disable_verify);
 	config.backoff.timeout = Some(std::time::Duration::ZERO);
 	config
@@ -261,6 +273,11 @@ impl ObjectImpl for MoqSrc {
 					.blurb("The broadcast name to subscribe to")
 					.mutable_ready()
 					.build(),
+				glib::ParamSpecString::builder("versions")
+					.nick("Versions")
+					.blurb("Comma-separated protocol versions to offer, most preferred first, like moq-lite-06; unset offers every stable version")
+					.mutable_ready()
+					.build(),
 				glib::ParamSpecBoolean::builder("tls-disable-verify")
 					.nick("TLS Disable Verify")
 					.blurb("Disable TLS certificate verification")
@@ -303,6 +320,7 @@ impl ObjectImpl for MoqSrc {
 		match pspec.name() {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
+			"versions" => settings.versions = value.get().unwrap(),
 			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
 			"quic-keylog" => settings.quic_keylog = value.get().unwrap(),
 			_ => unreachable!(),
@@ -314,6 +332,7 @@ impl ObjectImpl for MoqSrc {
 		match pspec.name() {
 			"url" => settings.url.to_value(),
 			"broadcast" => settings.broadcast.to_value(),
+			"versions" => settings.versions.to_value(),
 			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
 			"quic-keylog" => settings.quic_keylog.to_value(),
 			_ => unreachable!(),
@@ -1565,6 +1584,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod session_tests {
 	use std::collections::BTreeMap;
 	use std::sync::Mutex;
@@ -1577,7 +1597,9 @@ mod session_tests {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoCodec, VideoConfig};
 	use tokio::sync::watch;
 
-	use super::{NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, TrackKind, follow_catalog, follow_path};
+	use super::{
+		NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, Settings, TrackKind, follow_catalog, follow_path,
+	};
 
 	/// The pad-id counters are process-global, so a test reading one has to be the only test
 	/// allocating while it runs. `cargo test` shares a process across tests (nextest doesn't),
@@ -2506,9 +2528,29 @@ mod session_tests {
 		ResolvedSettings {
 			url: "https://127.0.0.1:1".parse().unwrap(),
 			broadcast: "test".into(),
+			versions: Vec::new(),
 			tls_disable_verify: false,
 			quic_keylog: false,
 		}
+	}
+
+	/// `versions` reaches the dial in order, and an unknown name fails the start instead of
+	/// offering the defaults.
+	#[test]
+	fn versions_reach_the_dial() {
+		let settings = |versions: &str| Settings {
+			url: Some("https://127.0.0.1:1".into()),
+			broadcast: Some("test".into()),
+			versions: Some(versions.into()),
+			..Default::default()
+		};
+		let resolved = ResolvedSettings::try_from(settings(" moq-transport-14 , moq-lite-06 ")).unwrap();
+		let config = super::connect_config(&resolved);
+		let expected: Vec<moq_net::Version> = vec!["moq-transport-14".parse().unwrap(), "moq-lite-06".parse().unwrap()];
+		assert_eq!(config.version, expected);
+
+		let err = ResolvedSettings::try_from(settings("moq-lite-06,moq-lite-99")).unwrap_err();
+		assert!(err.to_string().contains("moq-lite-99"), "{err}");
 	}
 
 	/// The source retries without a budget, so an outage of any length is ridden out

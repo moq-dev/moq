@@ -10,7 +10,7 @@ const clock = new Manual();
 const restore = clock.install();
 try {
     const pending = sleep(Nano.fromMilli(Milli(10)));
-    await clock.advanceAsync(Nano.fromMilli(Milli(10)));
+    await clock.advance(Nano.fromMilli(Milli(10)));
     await pending;
     console.log(now()); // 10,000,000 nanoseconds
 } finally {

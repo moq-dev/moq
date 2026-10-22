@@ -723,7 +723,7 @@ export class Publisher {
 			const groups = new Set<Promise<void>>();
 			const streams: StreamCount = { opened: 0 };
 			// One ranking for the whole subscription, shared by every group and the fill.
-			const ranked = new Priority(track);
+			const ranked = new Priority(track, info.priority);
 			ranking = ranked;
 
 			// Serve groups until the track ends or the requester cancels.
@@ -1024,6 +1024,9 @@ export class Publisher {
 				// competing at its rank until the stream settles.
 				void stream.closed.catch(() => {}).then(() => ranking.remove(stream));
 			}
+		} catch (err: unknown) {
+			// A failed open has no stream to reset, but still ends only this group.
+			group.close(error(err));
 		} finally {
 			group.close();
 		}

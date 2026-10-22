@@ -40,9 +40,9 @@ use std::{
 	time::Duration,
 };
 
-// The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
-// draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
-const DEFAULT_PRIORITY: u8 = 127;
+// The unset priority, the midpoint of the signed range. It goes out as byte 128 on moq-lite
+// and 127 on IETF, which flips priority (lower first): one urgency on both.
+const DEFAULT_PRIORITY: i8 = 0;
 
 /// Maximum number of datagrams retained in the per-track send buffer.
 ///
@@ -133,17 +133,19 @@ pub struct Info {
 	/// `2^53 - 1` milliseconds to no limit for older JavaScript readers. Sub-millisecond precision is truncated
 	/// (`Duration::as_millis`) at encode time.
 	pub max_age: Option<Duration>,
-	/// The publisher's priority for this track, used only to break ties between
-	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
-	/// Higher is more urgent. Defaults to 127, the midpoint.
-	pub priority: u8,
+	/// The publisher's priority for this track, higher first, defaulting to 0.
+	///
+	/// It breaks ties between subscriptions of equal subscriber priority. Reported in
+	/// TRACK_INFO (Lite05+).
+	pub priority: i8,
 	/// Whether frames are DEFLATE compressed per group, so later frames compress against
 	/// earlier ones in the same group. Defaults to `false`.
 	///
 	/// Writers and readers see plain frames either way: the producer compresses each
-	/// frame as it is written and the cache stores the compressed form. A moq-lite-07 peer
-	/// receives the compressed bytes and the flag; every other session receives the
-	/// frames inflated, from one inflated copy per group shared by every plain reader.
+	/// frame as it is written and the cache stores the compressed form. A moq-lite-07 peer or a
+	/// moq-transport draft-17+ peer negotiating the Flate extension receives the compressed
+	/// bytes and the flag. Other sessions receive one shared inflated copy per group,
+	/// unless a sealed compression declaration makes that fallback unsupported.
 	/// Worth it for small, repetitive payloads like JSON; wasted on media.
 	pub compress: bool,
 	/// The ratio of a group's bytes after its first frame to the first frame past which a
@@ -167,6 +169,14 @@ pub struct Info {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
 	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
+	/// Whether this timed track's timestamps arrived over moq-transport, whose peers may
+	/// stamp arrival times, so no group is checked for a rewind.
+	///
+	/// They stay on moq-transport: a moq-lite hop serves the track untimed, since its
+	/// receivers check every timestamp. Never set on an untimed track.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/ingest.md
+	pub(crate) unchecked: bool,
 }
 
 impl Default for Info {
@@ -178,6 +188,7 @@ impl Default for Info {
 			compress: false,
 			refresh: None,
 			properties: None,
+			unchecked: false,
 		}
 	}
 }
@@ -199,8 +210,8 @@ impl Info {
 		self
 	}
 
-	/// Set the publisher's tie-break priority, returning `self` for chaining.
-	pub fn with_priority(mut self, priority: u8) -> Self {
+	/// Set the publisher's priority, returning `self` for chaining.
+	pub fn with_priority(mut self, priority: i8) -> Self {
 		self.priority = priority;
 		self
 	}
@@ -215,6 +226,14 @@ impl Info {
 	pub fn with_refresh(mut self, refresh: impl Into<Option<u32>>) -> Self {
 		self.refresh = refresh.into();
 		self
+	}
+
+	/// The timescale a moq-lite hop serves this track at: none for an
+	/// [unchecked](Self::unchecked) one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) fn lite_timescale(&self) -> Option<Timescale> {
+		self.timescale.filter(|_| !self.unchecked)
 	}
 
 	/// The draft the track's moq-transport publisher spoke, `None` for a moq-lite one.
@@ -434,9 +453,6 @@ pub(crate) struct TrackState {
 	// [`Subscriber::poll_start`]) wait on it; everything else treats the floor as usual.
 	start_pending: bool,
 
-	// A session's copy of a remote track. Its groups skip the rewind check: a received
-	// timestamp may not be media time (a lite-05/06 untimed track carries send times).
-	received: bool,
 	// Sequences the upstream publisher gave up, with the error each was given up with: an
 	// incoming SUBSCRIBE_DROP or a producer cut. Kept apart from the cache so reclaiming a
 	// slot cannot erase a disposition a relay must forward, and as ranges so a wide DROP
@@ -699,7 +715,7 @@ pub(super) type FetchState = Requests<u64, PendingFetch>;
 /// One fetch attempt for a sequence, shared by every [`Fetching`] that joined it.
 pub(super) struct PendingFetch {
 	// The most demanding delivery priority across the joined fetches.
-	priority: u8,
+	priority: i8,
 
 	// The most tolerant reader budget. None is unbounded and therefore dominates.
 	max_delay: Option<Duration>,
@@ -831,9 +847,9 @@ impl TrackState {
 	/// so the watermark caps it instead.
 	///
 	/// Usually one group lookup each way; only unstarted or partial neighbors are skipped.
-	/// `None` on a received track, which only a local publisher's writes are checked on.
+	/// `None` on an [unchecked](Info::unchecked) track, whose timestamps may rewind.
 	pub(super) fn neighbors(&self, sequence: u64) -> Option<Neighbors> {
-		if self.received {
+		if self.info.as_ref().is_some_and(|info| info.unchecked) {
 			return None;
 		}
 		let bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2358,6 +2374,15 @@ impl TrackState {
 		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
+	/// Observe a shared track's terminal cause without extending its publisher lifetime.
+	// private: capability gap
+	// Sessions retain shared state while a FETCH owns its group writer.
+	pub(crate) fn poll_closed(producer: &kio::Producer<Self>, waiter: &kio::Waiter) -> Poll<Error> {
+		producer
+			.poll_closed(waiter)
+			.map(|()| producer.read().abort.clone().unwrap_or(Error::Dropped))
+	}
+
 	/// Abort shared track state without extending its publisher lifetime.
 	// pending: /quest/m1/public-model/deferred.md
 	pub(crate) fn abort(producer: &kio::Producer<Self>, err: Error) -> Result<()> {
@@ -2537,7 +2562,7 @@ impl Producer {
 	#[cfg(test)]
 	#[cfg(feature = "async")]
 	// private: test
-	pub(crate) fn publisher_priority(&self) -> u8 {
+	pub(crate) fn publisher_priority(&self) -> i8 {
 		self.info.priority
 	}
 
@@ -2963,16 +2988,6 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Mark this track as a session's copy of a remote one: its groups are never checked
-	/// for a rewind, which only a local publisher's writes refuse.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/ingest.md
-	pub(crate) fn received(&self) {
-		if let Ok(mut state) = self.modify() {
-			state.received = true;
-		}
-	}
-
 	/// Record sequences the upstream publisher explicitly gave up with `err`, ending the
 	/// groups still arriving in them with it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
@@ -3145,12 +3160,7 @@ impl Producer {
 
 	/// Poll until the track is closed or aborted; ready with the cause.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		self.state.poll_closed(waiter).map(|()| self.abort_reason())
-	}
-
-	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.
-	fn abort_reason(&self) -> Error {
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+		TrackState::poll_closed(&self.state, waiter)
 	}
 
 	/// Return true if the track has been closed.
@@ -3871,7 +3881,7 @@ impl Demand {
 	}
 
 	/// The publisher's tie-break priority, as set in [`Info::priority`].
-	pub(super) fn priority(&self) -> u8 {
+	pub(super) fn priority(&self) -> i8 {
 		// Always Some once the track exists; a closed one reads its last value.
 		self.state
 			.read()
@@ -4718,7 +4728,7 @@ impl group::Request {
 	}
 
 	/// The delivery priority the consumer requested for this group.
-	pub fn priority(&self) -> u8 {
+	pub fn priority(&self) -> i8 {
 		self.priority
 	}
 
@@ -4870,7 +4880,7 @@ pub struct Fetching {
 	// rather than a short answer.
 	frame_start: u64,
 	// This caller's priority, for a fetch that moves to a front's routes.
-	priority: u8,
+	priority: i8,
 	// This caller's own age cap. None means only the publisher's max age.
 	max_delay: Option<Duration>,
 	// The attempt this fetch joined; `None` on a cache hit, or when no handler
@@ -11770,10 +11780,7 @@ mod test {
 			let mut frames = frame::Buffer::<1>::new();
 			assert!(
 				frames
-					.push(frame::Frame {
-						timestamp: Some(Timestamp::ZERO),
-						payload: bytes::Bytes::from_static(b"x"),
-					})
+					.push(frame::Frame::new(Timestamp::ZERO, bytes::Bytes::from_static(b"x")))
 					.is_ok()
 			);
 			assert!(matches!(group.write_frames(&mut frames), Err(Error::Closed)));
@@ -15815,10 +15822,7 @@ mod test {
 		let mut batched = producer.append_group().unwrap();
 		let mut frames = frame::Buffer::<4>::new();
 		frames
-			.push(frame::Frame {
-				timestamp: Some(rewound),
-				payload: bytes::Bytes::from_static(b"x"),
-			})
+			.push(frame::Frame::new(rewound, bytes::Bytes::from_static(b"x")))
 			.unwrap();
 		assert!(matches!(
 			batched.write_frames(&mut frames),

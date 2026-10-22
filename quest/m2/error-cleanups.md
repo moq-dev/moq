@@ -2,7 +2,7 @@
 
 ## Goal
 
-`moq_net::Error::SessionClosed`, which nothing outside tests constructs, is
+`moq_net::Error::SessionClosed`, which has no meaning of its own, is
 deleted.
 
 ## Plan
@@ -18,6 +18,9 @@ behavior and its tests; only the `SessionClosed` removal remains here.
 
 `SessionClosed` has match arms in `rs/moq-net` (`error.rs`,
 `model/resume.rs`), `rs/moq-ffi/src/error.rs` and `rs/moq-relay`, and
-test-only uses in `rs/moq-hls`, `rs/moq-gst` and `rs/moq-relay`. Removing a
+test-only uses in `rs/moq-hls`, `rs/moq-gst` and `rs/moq-relay`.
+`rs/moq-net/src/model/track.rs`'s `close` constructs it only to convert it;
+decided 2026-10-22 (maintainer): keep the removal and construct
+`StreamError::Session(SessionError::Cancel)` there directly. Removing a
 public variant is a breaking Rust change: add the `rs/moq-net/MIGRATE.md`
 entry. Wire: none.

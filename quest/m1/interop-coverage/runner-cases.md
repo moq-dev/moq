@@ -51,14 +51,9 @@ from the stale client image. Rebuilt from the runner's current source, it
 passes against moxygen and Cloudflare draft-18. Cloudflare draft-14 has no
 SUBSCRIBE_NAMESPACE, so that cell is unsupported.
 
-Still to investigate, from the runs for #173:
-
-- moq-dev-js `subscribe-namespace-lifecycle` against Cloudflare draft-18
-  and aiomoqt never sees NAMESPACE_DONE, but only when the JS publisher and
-  subscriber share one process. Each half passes with a Rust counterpart,
-  and two separate Bun processes pass.
-- moq-dev-js `data-subgroup-basic` against imquic (draft-22,
-  WebTransport) receives no objects. moq-dev-rs passes there on the same
-  draft.
+Two moq-dev-js cells from the runs for #173 still fail, with causes not
+yet found:
+[JS namespace lifecycle in one process](/quest/m1/interop-coverage/js-namespace-done.md)
+and [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md).
 
 Public API: none. Wire: none.
