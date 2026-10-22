@@ -42,7 +42,7 @@ coverage on `main` at `3ab6cbf81d`.
 ## Required
 
 - [IETF matrix](/quest/m1/interop-coverage/ietf-matrix.md) - every interop client pair exchanges hang media over moq-transport through moq-relay
-- [Runner cases](/quest/m1/interop-coverage/runner-cases.md) - our runner clients run data-subgroup-basic and subscribe-namespace-lifecycle
+- [Runner cases](/quest/m1/interop-coverage/runner-cases.md) - our runner clients' data-subgroup-basic and subscribe-namespace-lifecycle land upstream and go green on the report
 - [Late join and FETCH](/quest/m1/interop-coverage/late-join.md) - a late subscriber gets the current group from object 0, and a standalone FETCH returns a past group exactly
 - [Control cases](/quest/m1/interop-coverage/control.md) - GOAWAY redirect, TRACK_STATUS, datagrams, and request-ID limits pass across implementations
 
