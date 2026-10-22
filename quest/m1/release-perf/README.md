@@ -48,7 +48,7 @@ noise.
   retired entry must be freed exactly once, so the batch is already amortized
   optimal; a representation that hides that reclamation would widen scope for
   no measured benefit. Sparse arrivals cost O(log gaps) amortized, and at 4096
-  gaps flush, read, and expiry instructions fell 84 to 95%.
+  gaps flush, read, and expiry instructions fell 80 to 95%.
 
 ### Release as a baseline
 
