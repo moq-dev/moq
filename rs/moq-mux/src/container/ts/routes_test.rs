@@ -343,6 +343,27 @@ async fn an_mpts_counts_strays_once_both_pmts_are_in() {
 	assert_eq!(rows, [DATA], "only program 1's own PIDs");
 }
 
+/// A PMT section on another program's PMT PID claims nothing: program 2's PMT arriving on
+/// program 1's PID never takes program 2's claim on a stray.
+#[tokio::test(start_paused = true)]
+async fn a_pmt_on_another_programs_pid_claims_nothing() {
+	const PMT2: u16 = 0x30;
+	const DATA2: u16 = 0x201;
+	let mut mux = Mux::default();
+	mux.pat(&[(1, PMT), (2, PMT2)]);
+	mux.pmt_with(PMT, 1, CLOCK, &[(0x06, DATA, KLVA)], 0);
+	mux.pmt_with(PMT2, 2, CLOCK, &[(0x06, DATA2, KLVA)], 0);
+	mux.packet(CLOCK, Flags::pcr(0));
+	mux.fill(UNLISTED, 2);
+	mux.pmt_at(1, PMT, 2, CLOCK, &[(0x06, UNLISTED, KLVA)], 0);
+	mux.fill(UNLISTED, 3);
+
+	let origin = crate::source::produce_origin();
+	let mut programs = Programs::new(origin, "event.hang", crate::catalog::Config::default());
+	programs.decode(&mux.bytes()).unwrap();
+	assert_eq!(programs.stats().streams[&UNLISTED].refused, 5);
+}
+
 /// A PMT the PAT lists but that never arrives holds the count back for TR 101 290's 0.5 s of
 /// program clock, timed on a program whose clock runs, and no longer.
 #[tokio::test(start_paused = true)]

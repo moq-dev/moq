@@ -1,6 +1,6 @@
 //! Every program of a multiplex, each imported as its own broadcast.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Context;
 use mpeg2ts::ts::{Pid, TsPacket};
@@ -207,6 +207,8 @@ struct Tables {
 	pat: PatReader,
 	/// A reassembler for each PMT PID the PAT lists.
 	pmts: HashMap<Pid, SectionReassembler>,
+	/// Each `(program_number, PMT PID)` the PAT lists: a PMT on another program's PID is ignored.
+	listed: HashSet<(u16, Pid)>,
 	/// The program and PCR PID whose clock times a PMT's lapse: the first program to deliver one.
 	clock: Option<(u16, Pid)>,
 	liveness: Liveness,
@@ -220,6 +222,7 @@ impl Tables {
 			scratch: Vec::new(),
 			pat: PatReader::default(),
 			pmts: HashMap::new(),
+			listed: HashSet::new(),
 			clock: None,
 			liveness: Liveness::default(),
 			// Every program's catalog carries the `mpegts` section, so the SI is captured.
@@ -240,6 +243,7 @@ impl Tables {
 			self.pmts.entry(*pid).or_default();
 		}
 		self.claims.pat(&listed, self.liveness.now());
+		self.listed = listed.into_iter().collect();
 	}
 
 	/// Read the tables and the clock out of `data`, counting each packet no table claims.
@@ -270,7 +274,9 @@ impl Tables {
 					if section.first() != Some(&psi::PMT_TABLE_ID) || !psi::crc_ok(&section) {
 						continue;
 					}
-					if let Some(pmt) = psi::Pmt::parse(&section) {
+					if let Some(pmt) = psi::Pmt::parse(&section)
+						&& self.listed.contains(&(pmt.program_number, pid))
+					{
 						self.pmt(&pmt);
 					}
 				}
