@@ -56,12 +56,21 @@ so Rust, FFI, and OBS publishers recover a stopped rendition in this release;
 padding and the browser's rung disable stay in m2, with only padding's
 lite-07 stream type here.
 
+Added 2026-10-22 (maintainer, clustering audit): three interim fixes for
+announce churn on today's hop-list mesh, each backported to `release`, so
+deployments get relief before the route layer ships; and stats groups as
+tracks, so per-group stats stop costing cluster announces.
+
 ## Required
 
 - [Epoch correctness](/quest/m0/broadcast-epoch/README.md) - publisher identity, duplicate suppression, and catalog pinning gate the breaking cut
 - [Readers follow restarts](/quest/m1/sink-restart-follow.md) - every moq-cli and moq-gst reader, moqsrc and `moq play` included, follows instances through `announced_broadcast` and an epochless `Restart` where its output can mark it; otherwise it stays on the old instance and fails once that route dies
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
+- [Announce cursors stay linear](/quest/m1/announce-cursor-cpu.md) - a withdrawal costs each announce cursor O(K log K), and a no-op route change allocates nothing; backported to `release`
+- [Path length setting](/quest/m1/max-hops-setting.md) - operators cap hop paths near their mesh diameter instead of 32; backported to `release`
+- [Draining relays don't pull peers back](/quest/m1/drain-peer-redial.md) - cluster peers fail over instead of redialing a draining relay, and peer redials back off with jitter; backported to `release`
+- [Stats groups as tracks](/quest/m1/stats-group-tracks.md) - one stable node broadcast per stats producer, with each group a produced track listed by TRACKS
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
