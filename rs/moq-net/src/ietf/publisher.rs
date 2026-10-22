@@ -9026,6 +9026,16 @@ mod serve_tests {
 		}
 	}
 
+	/// A request stream's session. Drafts 14-16 carry requests on the control stream adapter's
+	/// virtual streams, whose writers report closed while the request lives.
+	fn request_session(version: Version) -> ScriptedSession {
+		let session = ScriptedSession::new(Vec::new());
+		match version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => session.with_virtual_requests(),
+			_ => session,
+		}
+	}
+
 	/// A paused request observes the track ending without retaining upstream demand.
 	#[moq_clock::test]
 	async fn an_initially_paused_subscribe_holds_its_slot_without_demand() {
@@ -9044,7 +9054,9 @@ mod serve_tests {
 			h.publisher.subscriptions = crate::session::Slots::new(1);
 			let mut msg = subscribe(Filter::NextObject, None);
 			msg.forward = false;
-			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let mut request = request_session(version);
+			request.log = h.log.clone();
+			let stream = Stream::open(&mut request, version).await.unwrap();
 			let mut running = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
 			serve_until(running.as_mut(), "SUBSCRIBE_OK for the paused request", || {
 				!h.log.trail().is_empty() && Wire::read(&h.log, version).sent(ietf::SubscribeOk::ID).is_some()
@@ -9124,7 +9136,7 @@ mod serve_tests {
 			peer_setup,
 			version,
 		);
-		let mut request = ScriptedSession::new(Vec::new());
+		let mut request = request_session(version);
 		request.log = log.clone();
 		let stream = Stream::open(&mut request.clone(), version).await.unwrap();
 		let mut msg = subscribe(Filter::NextObject, None);
@@ -9246,7 +9258,7 @@ mod serve_tests {
 			let h = serve(version);
 			let mut first = h.track.create_group(group::Info { sequence: 0 }).unwrap();
 			first.write_frame(timestamp(), b"before".as_slice()).unwrap();
-			let mut request = ScriptedSession::new(Vec::new());
+			let mut request = request_session(version);
 			request.log = h.log.clone();
 			let stream = Stream::open(&mut request.clone(), version).await.unwrap();
 			let mut running = std::pin::pin!(

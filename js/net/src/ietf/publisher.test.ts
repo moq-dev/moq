@@ -2511,6 +2511,58 @@ test("drafts 14 to 16 apply an update and still end a subscription on UNSUBSCRIB
 	}
 });
 
+// A draft 14 to 16 request rides a virtual stream of the control stream, so a paused
+// subscription waits on its updates and its UNSUBSCRIBE there.
+test("drafts 14 to 16 pause and resume a subscription over the control stream", async () => {
+	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16] as const) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const control = await Stream.open(pair.server, { version });
+		const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, false);
+		void adapter.run().catch(() => undefined);
+		const peer = await Stream.accept(pair.client, version);
+		if (!peer) throw new Error("no control stream");
+
+		const path = Path.from("test");
+		const { pub, origin } = publisher(pair.server, { session: adapter });
+		const broadcast = publish(origin, path);
+		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+		await peer.writer.u53(Subscribe.id);
+		await new Subscribe({
+			requestId: 0n,
+			trackNamespace: path,
+			trackName: "video",
+			subscriberPriority: 0,
+			forward: false,
+		}).encode(peer.writer, version);
+		const server = await adapter.acceptBi();
+		if (!server) throw new Error("no subscribe stream");
+		expect(await server.reader.u53()).toBe(Subscribe.id);
+		const running = pub.runSubscribe(await Subscribe.decode(server.reader, version), server);
+
+		expect(await peer.reader.u53()).toBe(SubscribeOk.id);
+		await SubscribeOk.decode(peer.reader, version);
+
+		const parameters = new Parameters();
+		parameters.forward = true;
+		await peer.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 0n, ownRequestId: 2n, parameters }).encode(peer.writer, version);
+		if (version !== Version.DRAFT_14) {
+			expect(await peer.reader.u53()).toBe(RequestOk.id);
+			expect((await RequestOk.decode(peer.reader, version)).requestId).toBe(2n);
+		}
+		while (track.subscription.peek() === undefined) await track.subscription.changed();
+
+		await peer.writer.u53(Unsubscribe.id);
+		await new Unsubscribe({ requestId: 0n }).encode(peer.writer, version);
+
+		await running;
+		broadcast.close();
+		origin.close();
+		adapter.close();
+	}
+});
+
 // Drafts 14 to 16 define no namespace update, so one the adapter routes onto a namespace
 // subscription is refused, by name on drafts 15 and 16, and the subscription stands until
 // the peer ends it.

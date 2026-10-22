@@ -211,6 +211,8 @@ pub struct SinkSend {
 	finished: bool,
 	/// A finished stream still parks, like a peer that has not acknowledged the FIN.
 	unacked_fin: bool,
+	/// Reports closed from the start, like a draft 14-16 virtual request stream's writer.
+	closed: bool,
 	/// The send group the stream joined.
 	group: Option<usize>,
 }
@@ -261,6 +263,7 @@ impl SinkSend {
 			park: kio::Park::default(),
 			finished: false,
 			unacked_fin: false,
+			closed: false,
 			group: None,
 		}
 	}
@@ -285,6 +288,7 @@ impl SinkSend {
 			park: kio::Park::default(),
 			finished: false,
 			unacked_fin: false,
+			closed: false,
 			group: None,
 		}
 	}
@@ -360,7 +364,7 @@ impl poll::SendStream for SinkSend {
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		match self.finished && !self.unacked_fin {
+		match self.closed || (self.finished && !self.unacked_fin) {
 			true => Poll::Ready(Ok(())),
 			// Nothing to acknowledge yet, so park like a peer that never answers.
 			false => Poll::Pending,
@@ -916,6 +920,8 @@ pub struct ScriptedSession {
 	incoming_bidis: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
+	/// Set by [`Self::with_virtual_requests`].
+	virtual_requests: bool,
 	datagram_size: usize,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
@@ -944,6 +950,7 @@ impl ScriptedSession {
 			incoming_unis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
+			virtual_requests: false,
 			datagram_size: 0,
 			groups: false,
 		}
@@ -958,6 +965,13 @@ impl ScriptedSession {
 	/// Never acknowledge an opened stream's FIN, like a peer that stopped reading.
 	pub fn with_unacked_fin(mut self) -> Self {
 		self.unacked_fin = true;
+		self
+	}
+
+	/// Open bidirectional streams whose writers report closed while the request lives, as
+	/// the draft 14-16 control stream adapter's virtual request streams do.
+	pub fn with_virtual_requests(mut self) -> Self {
+		self.virtual_requests = true;
 		self
 	}
 
@@ -1093,6 +1107,7 @@ impl poll::Session for ScriptedSession {
 		};
 		let mut send = SinkSend::new(self.log.clone()).opened(options);
 		send.unacked_fin = self.unacked_fin;
+		send.closed = self.virtual_requests;
 		Poll::Ready(Ok((
 			send,
 			ScriptedRecv {

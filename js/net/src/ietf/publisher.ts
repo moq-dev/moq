@@ -1037,7 +1037,7 @@ export class Publisher {
 			await race([Promise.all(groups), unsubscribed]);
 			if (publishError instanceof Paused) {
 				track.close();
-				await Promise.all(groups);
+				await Promise.all([...groups, filling]);
 				return publishError;
 			}
 
@@ -1442,12 +1442,17 @@ export class Publisher {
 			if (fill.until !== undefined && BigInt(frame.sequence) >= fill.until) break;
 
 			const obj = new FetchFrame({ payload: frame.payload, timestamp: frame.timestamp });
-			await obj.encode(
-				stream,
-				{ group: Number(fill.sequence), object: frame.sequence, first },
-				timescale,
-				this.#session.version,
-			);
+			// A write parked on flow control must not outlive the subscriber either.
+			await race([
+				obj.encode(
+					stream,
+					{ group: Number(fill.sequence), object: frame.sequence, first },
+					timescale,
+					this.#session.version,
+				),
+				cancelled,
+			]);
+			if (left) throw new Error("unsubscribed before the fill finished");
 			first = false;
 		}
 	}

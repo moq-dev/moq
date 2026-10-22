@@ -933,7 +933,14 @@ where
 			} else {
 				kio::wait(|waiter| {
 					let mut cx = waiter.context();
-					if session.poll_closed(&mut cx).is_ready() || stream.writer.poll_closed(&mut cx).is_ready() {
+					if session.poll_closed(&mut cx).is_ready() {
+						return Poll::Ready(Wait::Cancelled);
+					}
+					// A draft 14-16 virtual writer reads closed while the request lives; its
+					// UNSUBSCRIBE arrives as an update read below instead.
+					if !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+						&& stream.writer.poll_closed(&mut cx).is_ready()
+					{
 						return Poll::Ready(Wait::Cancelled);
 					}
 					if !state.published {
@@ -1132,7 +1139,7 @@ where
 		// authority and listing; the peer cancelling also releases the setup demand.
 		let mut subscribing = std::pin::pin!(track.subscribe(subscription.clone()));
 		let subscribed = kio::wait(|waiter| {
-			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
+			if super::super::request_stream::poll_withdrawn(stream, self.version, &mut waiter.context()).is_ready() {
 				return Poll::Ready(Err(()));
 			}
 			waiter.poll_future(subscribing.as_mut()).map(Ok)
@@ -1143,7 +1150,7 @@ where
 			Err(err) => return self.resume_failed(stream, how.answer, err).await,
 		};
 		kio::wait(|waiter| {
-			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
+			if super::super::request_stream::poll_withdrawn(stream, self.version, &mut waiter.context()).is_ready() {
 				return Poll::Ready(Err(()));
 			}
 			subscriber.poll_live(waiter).map(|_| Ok(()))
