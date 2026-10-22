@@ -28,8 +28,8 @@ Rules every child follows:
   enforces the marks):
   - "moq-transport passthrough only" (decided 2026-10-13; subgroups were
     dropped from it in #5704): object IDs and `skip`, object and unknown track properties, END_OF_GROUP status
-    objects, datagram object IDs, dynamic groups, and upstream request
-    signaling. Owned by [moq-transport passthrough](/quest/m1/ietf-extension/README.md).
+    objects, datagram object IDs, and upstream request signaling. Dynamic
+    groups left this list when #5930 made `Demand::wanted` public. Owned by [moq-transport passthrough](/quest/m1/ietf-extension/README.md).
     A relay built on the public model drops them, as plain moq-lite does.
   - "tunes the built-in sessions": constants and wake or allocation batching
     that change cost, never behavior a third party can observe.

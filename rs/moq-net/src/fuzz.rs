@@ -111,7 +111,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 const LITE_KINDS: u8 = 22;
 
 /// How many types [`ietf_wire`] dispatches over.
-const IETF_KINDS: u8 = 40;
+const IETF_KINDS: u8 = 41;
 
 /// Split the two selector bytes off the input: a version and a type.
 fn select(data: &[u8], versions: usize) -> Option<(usize, u8, &[u8])> {
@@ -549,7 +549,7 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		14 => roundtrip::<ietf::PublishOk, _>(rest, version),
 		15 => roundtrip::<ietf::PublishError<'static>, _>(rest, version),
 		16 => roundtrip::<ietf::PublishDone<'static>, _>(rest, version),
-		17 => roundtrip::<ietf::PublishBlocked<'static>, _>(rest, version),
+		17 => roundtrip::<ietf::PublishSkipped<'static>, _>(rest, version),
 		18 => roundtrip::<ietf::Subscribe<'static>, _>(rest, version),
 		19 => roundtrip::<ietf::SubscribeOk, _>(rest, version),
 		20 => roundtrip::<ietf::SubscribeError<'static>, _>(rest, version),
@@ -572,6 +572,7 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		37 => roundtrip::<ietf::FetchObject, _>(rest, version),
 		38 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, version),
 		39 => roundtrip::<ietf::ObjectDatagram, _>(rest, version),
+		40 => roundtrip::<ietf::SubscribeTracks<'static>, _>(rest, version),
 		_ => unreachable!("kind is taken modulo IETF_KINDS"),
 	}
 }

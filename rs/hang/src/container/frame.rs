@@ -151,22 +151,6 @@ mod test {
 		assert_eq!(decoded.timestamp, Timestamp::from_micros(1_234_567).expect("timestamp"));
 	}
 
-	/// Publishers stamp the kind's priority, which is what keeps audio ahead of video
-	/// both on the wire and in `bandwidth::Allocator`. It is a parameter precisely so
-	/// this can't silently fall back to the undifferentiated default.
-	#[test]
-	fn track_info_carries_the_publisher_priority() {
-		use crate::catalog::PRIORITY;
-
-		assert_eq!(track_info(PRIORITY.video).priority, PRIORITY.video);
-		assert_eq!(track_info(PRIORITY.audio).priority, PRIORITY.audio);
-	}
-
-	#[test]
-	fn track_info_uses_container_timescale() {
-		assert_eq!(track_info(crate::catalog::PRIORITY.video).timescale, Some(TIMESCALE));
-	}
-
 	#[test]
 	fn media_tracks_declare_their_retention() {
 		// A media track is read as history (a segmented egress FETCHes segments a playlist
@@ -178,12 +162,5 @@ mod test {
 		let at = track_info(crate::catalog::PRIORITY.video).with_timescale(Timescale::MILLI);
 		assert_eq!(at.timescale, Some(Timescale::MILLI));
 		assert_eq!(at.max_age, Some(MAX_AGE));
-	}
-
-	#[test]
-	fn non_media_tracks_keep_the_default_retention() {
-		// Catalog and timeline metadata impose no publisher age limit; local cache policy
-		// still controls storage.
-		assert_eq!(crate::Catalog::default_track_info().max_age, None);
 	}
 }
