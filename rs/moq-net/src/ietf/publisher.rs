@@ -51,7 +51,17 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 /// Fails with [`Error::Unsupported`] for Immutable Properties the draft cannot carry:
 /// rewriting them for its encoding would break them, and forwarding them unchanged would
 /// change their meaning.
-fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Result<ietf::Properties, Error> {
+fn track_properties(
+	info: &track::Info,
+	wanted: bool,
+	version: Version,
+	negotiated: bool,
+) -> Result<ietf::Properties, Error> {
+	let compressed = info.compress && negotiated && super::flate::supported(version);
+	super::flate::egress(info, compressed)?;
+	let mut plain = info.clone();
+	plain.compress = compressed;
+	let info = &plain;
 	if !wanted {
 		return Ok(ietf::Properties::default());
 	}
@@ -125,6 +135,7 @@ struct FetchObjectInfo<'a> {
 	object: u64,
 	prior: FetchPrior,
 	timestamp: Option<Timestamp>,
+	inflated: Option<u64>,
 	timescale: Option<Timescale>,
 	version: Version,
 	fields: Option<&'a crate::model::object::Fields>,
@@ -174,6 +185,7 @@ async fn read_fetch(
 	skip: u64,
 	until: Option<u64>,
 	priority: u8,
+	compression: bool,
 ) -> Result<FetchedGroup, Error> {
 	let info = track.query().await?;
 	let cached = track.peek_group(sequence);
@@ -200,6 +212,9 @@ async fn read_fetch(
 			},
 		)
 		.await?;
+	if compression {
+		group = group.compressed();
+	}
 	let mut first = skip;
 	let mut frames = Vec::new();
 	// Reading an object past the range proves the range missed the group's end.
@@ -1323,7 +1338,12 @@ where
 						.info()
 						.timescale
 						.filter(|_| ietf::Properties::sends_timescale(self.version));
-					let mut properties = match track_properties(track.info(), msg.properties_wanted, self.version) {
+					let mut properties = match track_properties(
+						track.info(),
+						msg.properties_wanted,
+						self.version,
+						self.peer_setup.get().await.flate,
+					) {
 						Ok(properties) => properties,
 						Err(err) => return Ok(Subscribed::Refused(err.to_string(), err)),
 					};
@@ -1338,6 +1358,7 @@ where
 					// it carries.
 					let mut track_serve =
 						TrackServe::new(self.session.clone(), track, request_id, self.version, range, timescale)
+							.compression(self.peer_setup.get().await.flate)
 							.ranked(self.priority.clone());
 					// A fixed start is no join, so its NEW_GROUP_REQUEST asks as an update's would.
 					if fixed.start.is_some()
@@ -1958,6 +1979,11 @@ where
 					},
 				)
 				.await?;
+			let group = if self.peer_setup.get().await.flate {
+				group.compressed()
+			} else {
+				group
+			};
 			Self::write_fetch_group(&mut stream, group, sequence, skip, until, timescale, self.version).await
 		}
 		.await;
@@ -2049,6 +2075,7 @@ where
 									object: index,
 									prior: fetch_prior(version, prior, index)?,
 									timestamp: frame.timestamp,
+									inflated: frame.inflated,
 									timescale,
 									version,
 									fields: frame.fields.as_deref(),
@@ -2096,6 +2123,7 @@ where
 							object: index,
 							prior: fetch_prior(version, prior, index)?,
 							timestamp: frame.timestamp,
+							inflated: frame.inflated,
 							timescale,
 							version,
 							fields: frame.fields.as_deref(),
@@ -2149,6 +2177,7 @@ where
 			object,
 			prior,
 			timestamp,
+			inflated,
 			timescale,
 			version,
 			fields,
@@ -2178,6 +2207,8 @@ where
 			}
 		};
 
+		let properties = super::object::compression(properties.unwrap_or_default(), version, inflated)?;
+		let properties = (!properties.is_empty()).then_some(properties);
 		if version == Version::Draft14 {
 			let properties = properties.unwrap_or_default();
 			stream.buffer_varint(sequence)?;
@@ -2514,7 +2545,14 @@ where
 		// The subscriber cancelling is the only other way this ends early, and is owed
 		// nothing.
 		let group = {
-			let mut read = std::pin::pin!(read_fetch(&track, start.group, start.object, until, priority));
+			let mut read = std::pin::pin!(read_fetch(
+				&track,
+				start.group,
+				start.object,
+				until,
+				priority,
+				self.peer_setup.get().await.flate
+			));
 			let mut finished = false;
 			let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 			kio::wait(|waiter| {
@@ -2559,7 +2597,12 @@ where
 				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
 			}
 		}
-		let properties = match track_properties(&group.info, msg.properties_wanted, self.version) {
+		let properties = match track_properties(
+			&group.info,
+			msg.properties_wanted,
+			self.version,
+			self.peer_setup.get().await.flate,
+		) {
 			Ok(properties) => properties,
 			Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 		};
@@ -2692,6 +2735,7 @@ where
 						object,
 						prior: position,
 						timestamp: frame.timestamp,
+						inflated: frame.inflated,
 						timescale,
 						version: self.version,
 						fields: frame.fields.as_deref(),
@@ -2709,6 +2753,7 @@ where
 						object: end.id,
 						prior: fetch_prior(self.version, prior, end.id)?,
 						timestamp: None,
+						inflated: None,
 						timescale,
 						version: self.version,
 						fields: Some(end),
@@ -2902,11 +2947,13 @@ where
 			})
 			.await
 		};
-		let properties = match info.map(|info| track_properties(&info?, msg.properties_wanted, self.version)) {
-			Some(Ok(properties)) => properties,
-			Some(Err(err)) => return self.reject_track_status(stream, request_id, &err).await,
-			None => return Ok(()),
-		};
+		let negotiated = self.peer_setup.get().await.flate;
+		let properties =
+			match info.map(|info| track_properties(&info?, msg.properties_wanted, self.version, negotiated)) {
+				Some(Ok(properties)) => properties,
+				Some(Err(err)) => return self.reject_track_status(stream, request_id, &err).await,
+				None => return Ok(()),
+			};
 
 		// The answer stays gated until the transport takes it: one parked on stream credit
 		// when the grant narrows is reset rather than delivered.
@@ -4286,6 +4333,7 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	/// Serve the track's datagrams too, as OBJECT_DATAGRAMs. Off when the transport has no
 	/// datagrams; there is no stream fallback.
 	datagrams: bool,
+	compression: bool,
 	/// A track that always has another group ready still lets the session's other tasks run.
 	budget: kio::coop::Budget,
 	/// A subscription we initiated with PUBLISH, which a REQUEST_UPDATE may pause.
@@ -4331,6 +4379,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 		Self {
 			datagrams,
+			compression: false,
 			session,
 			track,
 			request_id,
@@ -4349,6 +4398,11 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			pausable: false,
 			dynamic,
 		}
+	}
+
+	fn compression(mut self, negotiated: bool) -> Self {
+		self.compression = negotiated && super::flate::supported(self.version) && self.track.info().compress;
+		self
 	}
 
 	/// Rank this subscription's group streams in `queue`, shared with the session's other
@@ -4476,6 +4530,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			}
 			match self.track.poll_recv_group(waiter) {
 				Poll::Ready(Ok(Some(group))) => {
+					let group = if self.compression { group.compressed() } else { group };
 					let sequence = group.sequence;
 					tracing::debug!(subscribe = %self.request_id, track = %self.track.name(), sequence, "serving group");
 
@@ -4506,7 +4561,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						// Object Property) only when TIMESCALE was declared for this version.
 						// Drafts 14-16 cannot, so the flag stays clear.
 						flags: ietf::GroupFlags {
-							has_extensions: self.timescale.is_some()
+							has_extensions: self.compression
+								|| self.timescale.is_some()
 								|| wire.as_ref().is_some_and(|wire| wire.extensions),
 							first_object: wire
 								.as_ref()
@@ -4650,6 +4706,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 					)
 				}
 			};
+			let (payload, inflated) = datagram.sent(self.compression);
+			let properties = super::object::compression(properties.unwrap_or_default(), self.version, inflated)?;
+			let properties = (!properties.is_empty()).then_some(properties);
 			let body = ietf::ObjectDatagram {
 				track_alias: self.request_id.0,
 				group_id: sequence,
@@ -4659,7 +4718,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				properties,
 				body: match status {
 					Some(status) => ietf::DatagramBody::Status(status),
-					None => ietf::DatagramBody::Payload(datagram.datagram.payload),
+					None => ietf::DatagramBody::Payload(payload.clone()),
 				},
 			};
 			let body = match body.encode_bytes(self.version) {
@@ -5126,6 +5185,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										delta,
 										timestamp: batched.timestamp,
 										size: batched.payload.len() as u64,
+										inflated: batched.inflated,
 										status: 0,
 										fields: batched.fields.as_deref(),
 									},
@@ -5173,6 +5233,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 												delta: object_delta(self.prior_object, id)?,
 												timestamp: next.timestamp,
 												size: next.size,
+												inflated: next.inflated,
 												status: 0,
 												fields: next.fields.as_deref(),
 											},
@@ -5204,6 +5265,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 													delta: object_delta(self.prior_object, end.id)?,
 													timestamp: None,
 													size: 0,
+													inflated: None,
 													status: 3,
 													fields: Some(&end),
 												},
@@ -5301,6 +5363,7 @@ struct Object<'a> {
 	delta: u64,
 	timestamp: Option<Timestamp>,
 	size: u64,
+	inflated: Option<u64>,
 	status: u64,
 	fields: Option<&'a crate::model::object::Fields>,
 }
@@ -5366,6 +5429,7 @@ fn buffer_object<W: crate::transport::poll::SendStream>(
 				ext
 			}
 		};
+		let ext = super::object::compression(ext, encoding.version, object.inflated)?;
 		writer.buffer_varint(ext.len() as u64)?;
 		writer.buffer_raw(&ext);
 	}
@@ -6396,7 +6460,7 @@ mod subscribe_cursor_test {
 		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();
 
 		let consumer = track.consume();
-		let read = moq_clock::sim::spawn(async move { read_fetch(&consumer, 0, 0, None, 0).await.map(|_| ()) });
+		let read = moq_clock::sim::spawn(async move { read_fetch(&consumer, 0, 0, None, 0, false).await.map(|_| ()) });
 		moq_clock::sim::yield_now().await;
 		// The track runs a full second past the group's successor.
 		for ms in [1000, 2000] {
@@ -8336,7 +8400,7 @@ mod serve_tests {
 					Version::Draft16 | Version::Draft17 => ietf::Properties::default(),
 					// Only draft-20 can carry the opt-out.
 					_ if !wanted && Filter::is_draft20(version) => ietf::Properties::default(),
-					_ => track_properties(&track::Info::timed(), true, version).unwrap(),
+					_ => track_properties(&track::Info::timed(), true, version, true).unwrap(),
 				};
 				assert_eq!(
 					ok,
@@ -9381,7 +9445,7 @@ mod serve_tests {
 			}
 			let properties = match ietf::Properties::sends_timescale(version) {
 				false => ietf::Properties::default(),
-				true => track_properties(&track::Info::timed(), true, version).unwrap(),
+				true => track_properties(&track::Info::timed(), true, version, true).unwrap(),
 			};
 			assert_eq!(ok.properties, properties, "{version}: wrong properties");
 			assert_eq!(
@@ -9986,7 +10050,7 @@ mod serve_tests {
 				let expected = match ietf::Properties::sends_timescale(version) {
 					// Drafts 14-16 write no properties, as their SUBSCRIBE_OK does not.
 					false => ietf::Properties::default(),
-					true => track_properties(&info, wanted, version).unwrap(),
+					true => track_properties(&info, wanted, version, true).unwrap(),
 				};
 				assert_eq!(ok.properties, expected, "{version} wanted={wanted}");
 
@@ -10185,20 +10249,23 @@ mod serve_tests {
 			};
 			assert_eq!(mutable.ietf(), Some(Version::Draft18), "hop={hop}");
 			assert_eq!(
-				ids(track_properties(&mutable, true, Version::Draft18).unwrap()),
+				ids(track_properties(&mutable, true, Version::Draft18, true).unwrap()),
 				[0x06, 0x3801],
 				"hop={hop}"
 			);
 			assert_eq!(
-				ids(track_properties(&mutable, true, Version::Draft19).unwrap()),
+				ids(track_properties(&mutable, true, Version::Draft19, true).unwrap()),
 				[0x3801],
 				"hop={hop}"
 			);
 
-			assert!(track_properties(&sealed, true, Version::Draft18).is_ok(), "hop={hop}");
+			assert!(
+				track_properties(&sealed, true, Version::Draft18, true).is_ok(),
+				"hop={hop}"
+			);
 			assert!(
 				matches!(
-					track_properties(&sealed, true, Version::Draft19),
+					track_properties(&sealed, true, Version::Draft19, true),
 					Err(Error::Unsupported)
 				),
 				"hop={hop}"
@@ -14419,6 +14486,7 @@ mod tests {
 			auth: false,
 			active_count: false,
 			epoch: false,
+			flate: false,
 		});
 		slot
 	}
@@ -16623,5 +16691,117 @@ mod fill_range_tests {
 				until: Some(10),
 			}
 		);
+	}
+}
+
+#[cfg(test)]
+mod compression_tests {
+	use super::*;
+	#[test]
+	fn sealed_compression_refuses_incompatible_egress() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+			let mut sealed = Vec::new();
+			let mut encoder = Encoder::new(&mut sealed, version.into());
+			encoder.varint(super::super::flate::COMPRESSION).unwrap();
+			encoder.varint(1).unwrap();
+			let info = track::Info {
+				compress: true,
+				properties: Some(Arc::new(crate::model::object::TrackProperties {
+					version,
+					values: vec![crate::model::object::Property {
+						id: 0x0b,
+						value: crate::model::object::Value::Bytes(sealed.into()),
+					}],
+				})),
+				..Default::default()
+			};
+			let outgoing = track_properties(&info, true, version, true).unwrap();
+			assert!(outgoing.compress);
+			let mut bytes = Vec::new();
+			outgoing
+				.encode(&mut Encoder::new(&mut bytes, version.into()), version)
+				.unwrap();
+			let decoded =
+				ietf::Properties::decode(&mut crate::coding::Decoder::new(&bytes, version.into()), version).unwrap();
+			assert!(decoded.compress);
+			assert_eq!(decoded.unknown, outgoing.unknown);
+			let mut contradiction = info.clone();
+			contradiction.compress = false;
+			assert!(
+				contradiction
+					.properties
+					.as_ref()
+					.unwrap()
+					.refused(&contradiction)
+					.is_some()
+			);
+			for wanted in [false, true] {
+				assert!(matches!(
+					track_properties(&info, wanted, version, false),
+					Err(Error::Unsupported)
+				));
+				assert!(matches!(
+					track_properties(&info, wanted, Version::Draft16, true),
+					Err(Error::Unsupported)
+				));
+			}
+			let plain = track::Info::default().with_compress(true);
+			assert!(!track_properties(&plain, true, version, false).unwrap().compress);
+			assert!(!track_properties(&plain, true, Version::Draft15, true).unwrap().compress);
+		}
+	}
+
+	/// The actual JS SETUP offer selects the plain egress of a compressed Rust track.
+	#[moq_clock::test]
+	#[ignore = "requires Bun; run by just test interop"]
+	async fn ietf_compression_fallback_interop() {
+		use crate::coding::Decode;
+		use crate::lite::test_transport::{Log, SinkSession};
+		for (version, draft) in [(Version::Draft17, 17), (Version::Draft22, 22)] {
+			let input = serde_json::json!({"draft": draft});
+			let bytes: Vec<u8> =
+				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+			let (parameters, consumed) = ietf::Parameters::decode_slice(&bytes, version).unwrap();
+			assert_eq!(consumed, bytes.len());
+			let negotiated = super::super::flate::from_setup(&parameters, version).unwrap();
+			assert!(!negotiated, "JS offered an unsupported codec");
+			let track = track::Producer::new(
+				Arc::new(crate::broadcast::Info::default()),
+				"data",
+				track::Info::timed().with_compress(true),
+			);
+			let subscriber = track.subscribe(None);
+			let frames = [vec![b'a'; 1024], vec![b'b'; 1024], Vec::new()];
+			let mut group = track.append_group().unwrap();
+			for payload in &frames {
+				group.write_frame(crate::Timestamp::ZERO, payload.clone()).unwrap();
+			}
+			group.finish().unwrap();
+			track.finish().unwrap();
+			let response = ietf::SubscribeOk {
+				request_id: None,
+				track_alias: 0,
+				largest: None,
+				properties: track_properties(track.info(), true, version, negotiated).unwrap(),
+			}
+			.encode_bytes(version)
+			.unwrap();
+			let log = Log::default();
+			let mut serve = TrackServe::new(
+				SinkSession::new(log.clone()),
+				subscriber,
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				Some(Timescale::MILLI),
+			)
+			.compression(negotiated);
+			kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
+			let written = log.writes.lock().unwrap().clone();
+			let input = serde_json::json!({"draft": draft, "response": response.to_vec(), "group": written});
+			let received: Vec<Vec<u8>> =
+				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+			assert_eq!(received, frames, "draft{draft}: plain JS fallback");
+		}
 	}
 }

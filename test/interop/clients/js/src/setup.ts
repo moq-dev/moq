@@ -13,6 +13,8 @@ const params = new URLSearchParams(location.search);
 const role = params.get("role");
 const url = params.get("url") ?? "";
 const broadcast = params.get("broadcast") ?? "";
+// The versions the element offers, or its defaults when absent.
+const versions = params.get("versions");
 
 function parseFault(value: string | null): Fault {
 	if (value === null) return "none";
@@ -24,6 +26,7 @@ function parseFault(value: string | null): Fault {
 if (role === "publish") {
 	const el = document.createElement("moq-publish") as MoqPublish;
 	el.setAttribute("url", url);
+	if (versions) el.setAttribute("versions", versions);
 	el.setAttribute("name", broadcast);
 	// Chromium's --use-fake-device-for-media-stream feeds getUserMedia fake
 	// camera and microphone input. Audio is encoded lazily when a player asks.
@@ -76,6 +79,7 @@ if (role === "publish") {
 	await customElements.whenDefined("moq-watch");
 	const el = document.createElement("moq-watch") as MoqWatch;
 	el.setAttribute("url", url);
+	if (versions) el.setAttribute("versions", versions);
 	el.setAttribute("name", broadcast);
 	if (params.get("muted") === "true") el.setAttribute("muted", "");
 	// A render target is what makes <moq-watch> actually subscribe to and decode

@@ -1955,6 +1955,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
 		let info = ready!(self.querying.poll_ok(waiter))?;
+		crate::ietf::flate::egress(&info, shared.version.has_compression())?;
 
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise).
 		writer.buffer(&lite::TrackInfo::serve(&info, shared.version))?;
@@ -2111,6 +2112,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 				Self::Confirm { subscribing, .. } => {
 					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
 					let mut track = ready!(subscribing.poll_ok(waiter))?;
+					crate::ietf::flate::egress(track.info(), shared.version.has_compression())?;
 					let Self::Confirm {
 						msg, latest, update, ..
 					} = std::mem::replace(
@@ -4091,6 +4093,16 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 	/// Send a datagram, recording its sequence once it went out.
 	fn serve_datagram(&mut self, datagram: crate::model::datagram::Stored) {
+		if let Some(wire) = &datagram.wire
+			&& crate::ietf::flate::egress_object(
+				&wire.properties,
+				self.track.info().ietf(),
+				self.ctx.version.has_compression(),
+			)
+			.is_err()
+		{
+			return;
+		}
 		let sequence = datagram.sequence;
 		// Metered in the form the wire carries.
 		let (payload, _) = datagram.sent(self.ctx.version.has_compression());
@@ -4508,6 +4520,14 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 							} else if *batch_pos < batch.len() {
 								let index = self.group.index() - batch.len() as u64 + *batch_pos as u64;
 								let batched = &mut batch[*batch_pos];
+								if let Some(fields) = &batched.fields
+									&& let Err(err) = crate::ietf::flate::egress_object(
+										&fields.properties,
+										self.group.ietf(),
+										self.ctx.version.has_compression(),
+									) {
+									break 'serve Err(err);
+								}
 								let buffered = records
 									.as_mut()
 									.map_or(Ok(()), |records| {
@@ -4554,6 +4574,14 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								match self.group.poll_next_frame(waiter) {
 									Poll::Ready(Ok(Some(next))) => {
 										let index = self.group.index() - 1;
+										if let Some(fields) = &next.fields
+											&& let Err(err) = crate::ietf::flate::egress_object(
+												&fields.properties,
+												self.group.ietf(),
+												self.ctx.version.has_compression(),
+											) {
+											break 'serve Err(err);
+										}
 										let buffered = records
 											.as_mut()
 											.map_or(Ok(()), |records| {

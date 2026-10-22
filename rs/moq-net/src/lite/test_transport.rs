@@ -598,6 +598,8 @@ pub struct SinkSession {
 	/// with no congestion controller exposed. Shared and mutable so a test can
 	/// change it mid-session, the way a real transport's figures move.
 	stats: Arc<Mutex<SinkStats>>,
+	/// Set by [`Self::with_probe`].
+	probe: Option<crate::transport::Probe>,
 }
 
 impl SinkSession {
@@ -624,6 +626,12 @@ impl SinkSession {
 	/// Accept datagrams up to `max_size` bytes, recording them in the log.
 	pub fn with_datagrams(mut self, max_size: usize) -> Self {
 		self.datagram_size = max_size;
+		self
+	}
+
+	/// Give the transport a sender for the session to hand its probe target.
+	pub fn with_probe(mut self) -> Self {
+		self.probe = Some(crate::transport::Probe::new());
 		self
 	}
 
@@ -787,6 +795,10 @@ impl poll::Session for SinkSession {
 
 	fn stats(&self) -> impl crate::transport::Stats {
 		*self.stats.lock().unwrap()
+	}
+
+	fn probe(&self) -> Option<crate::transport::Probe> {
+		self.probe.clone()
 	}
 }
 

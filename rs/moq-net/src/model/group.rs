@@ -1717,7 +1717,9 @@ impl Handle {
 
 	/// Abort the group with `err` unless it already holds every frame: the publisher gave
 	/// up a group still arriving, while one that finished here stays whole.
-	pub(super) fn abort_open(&self, err: Error) {
+	// private: capability gap
+	// Sessions cancel an unfinished FETCH while its writer belongs to its data stream.
+	pub(crate) fn abort_open(&self, err: Error) {
 		if let Ok(state) = self.state.write()
 			&& state.fin.is_none()
 		{
