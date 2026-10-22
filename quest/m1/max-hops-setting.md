@@ -5,7 +5,8 @@
 A relay operator can set the longest hop path a relay accepts or forwards,
 with today's 32 as the default. On a mesh whose diameter is a few hops, a
 cap near diameter plus a margin stops lite-06 path hunting from exploring
-long detours after a withdrawal. The setting is backported to `release`.
+long detours after a withdrawal. It ships with the next cut from `main`; the
+maintainer decided on 2026-10-22 not to backport it to `release`.
 
 ## Plan
 
@@ -33,7 +34,7 @@ the residual counterexamples' final state. A path longer than the cap is
 dropped on receive and never sent.
 
 Docs: `doc/bin/relay/cluster.md` gains the setting. Public API: one relay
-config field. Wire: none. Backport onto `release` as a separate PR.
+config field. Wire: none.
 
 ## Related
 

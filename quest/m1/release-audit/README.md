@@ -81,9 +81,14 @@ the security-sensitive HLS admission item is deliberately a public pointer.
 No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
 network-impairment performance result is implied by these checks.
 
+The 2026-10-22 binding and OBS audit at main
+[1f5caa7026](https://github.com/moq-dev/moq/commit/1f5caa7026) added the
+rate recovery child. Its two OBS findings went to m2 next to the other OBS
+work, because obs-moq ships on its own schedule.
+
 ## Required
 
-The 20 children comprise 16 reproduced or source-confirmed findings, three
+The children comprise reproduced or source-confirmed findings,
 contract/lifetime investigations, and one security-review pointer. Each
 child records whether its behavior is new on main or inherited from release.
 
@@ -101,6 +106,7 @@ child records whether its behavior is new on main or inherited from release.
 - [Report fatal watch ingestion failures](/quest/m1/release-audit/watch-errors.md) - failed audio/video reads reach the existing error output and tear down their resources
 - [Accept reordered HTTP/3 streams](/quest/m1/release-audit/webtransport-streams.md) - QPACK or a stalled header before SETTINGS does not reject or block a valid handshake
 - [Constrain auth credential redirects](/quest/m1/release-audit/auth-redirects.md) - JSON credentials cannot silently follow redirects to another origin
+- [Finish bitrate recovery](/quest/m1/release-audit/rate-recovery.md) - a quiet bandwidth grant no longer strands moq-video, moq-ffi, and moq-c encoders partway up the ramp
 - [Release finished FFI codecs](/quest/m1/release-audit/ffi-finished.md) - preserving finished tracks does not preserve drained encoders and scratch buffers
 - [Retire expiry metadata](/quest/m1/release-audit/expiry-index.md) - empty deadline entries do not accumulate with historical read budgets
 - [Preserve IETF timestamps](/quest/m1/release-audit/ietf-timestamps.md) - JS encoding uses exact same-scale conversion and rejects unsupported values before sending
