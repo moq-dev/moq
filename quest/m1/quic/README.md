@@ -11,8 +11,7 @@ reliable stream resets (#5690), hierarchical send groups (#5711, #5770), one
 `main`. What remains is bounded incomplete-message memory; per-broadcast
 fairness gives the crate-private send domains (#5872) their consumer in
 [Broadcast fairness](/quest/m2/broadcast-fairness.md).
-qmux on the shared stream state machine is its own m1 quest,
-[quic-qmux](/quest/m1/quic-qmux.md), outside this epic.
+qmux already runs on the shared stream state machine, outside this epic.
 Per-stream acknowledgment progress, per-stream deadlines, and the experiments
 (the egress profile, ECN measurement, deadline keep-alive) live in
 [m2](/quest/m2/README.md); media
@@ -74,8 +73,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 ## Related
 
-- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - the m1
-  qmux port onto `moq-quic`'s stream state
 - [Broadcast fairness](/quest/m2/broadcast-fairness.md) - the
   per-broadcast fairness policy on cluster sessions, a consumer for send domains
 - [Native probing](/quest/m1/probe-native.md) - moq-quic retransmits in-flight data during ProbeBW_UP to probe up to a session's target

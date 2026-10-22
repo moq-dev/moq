@@ -14,9 +14,9 @@ strict priority across the session, as today.
 ## Plan
 
 Needs a fresh `/quest-plan` before starting: there is no settled design.
-Revisit once [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md)
-gives every transport moq-quic's scheduler, and once the auth line carries a
-tenant identity.
+Every transport already shares moq-quic's scheduler since qmux moved onto it
+([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)); revisit once the
+auth line carries a tenant identity.
 
 Today every session schedules strictly: one `PriorityQueue` or one moq-quic
 send group per subscription, ranked by the subscriber's priority, then the
@@ -98,7 +98,6 @@ update moves an already-ranked stream.
 
 ## Required
 
-- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - every transport shares moq-quic's scheduler, so fairness has one implementation
 - [Rust request credit](/quest/m1/rs-request-credit.md) - the previous `transport::poll` break; the send domain goes on top
 
 ## Related
