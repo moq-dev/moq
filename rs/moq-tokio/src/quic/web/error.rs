@@ -114,8 +114,8 @@ impl CloseReason {
 	/// WT_SESSION_GONE, which tears down the streams of a closed session
 	/// (draft-ietf-webtrans-http3 §4.4), or None for any other code.
 	///
-	/// The reset can beat the close capsule; until the capsule lands, it reads as a
-	/// clean close, as a CONNECT stream that ends without one does.
+	/// The reset can beat the close capsule, so until it lands the code and reason are
+	/// unknown: [`WebTransportError::SessionGone`], never a guessed clean close.
 	pub(crate) fn session_gone(&self, code: crate::quic::driver::VarInt) -> Option<SessionError> {
 		if self.raw || code.into_inner() != WT_SESSION_GONE {
 			return None;
@@ -124,7 +124,7 @@ impl CloseReason {
 			self.reason
 				.get()
 				.cloned()
-				.unwrap_or_else(|| WebTransportError::Closed(0, String::new()).into()),
+				.unwrap_or_else(|| WebTransportError::SessionGone.into()),
 		)
 	}
 
@@ -139,7 +139,7 @@ impl CloseReason {
 		let conn = match &err {
 			SessionError::ConnectionError(conn)
 			| SessionError::SendDatagramError(crate::quic::driver::SendDatagramError::ConnectionLost(conn)) => Some(conn),
-			SessionError::WebTransportError(WebTransportError::Closed(..)) => None,
+			SessionError::WebTransportError(WebTransportError::Closed(..) | WebTransportError::SessionGone) => None,
 			_ => return err,
 		};
 
@@ -170,6 +170,10 @@ pub enum WebTransportError {
 
 	#[error("unknown session")]
 	UnknownSession,
+
+	/// The peer tore down the session's streams before its close reason arrived.
+	#[error("session gone")]
+	SessionGone,
 
 	#[error("read error: {0}")]
 	ReadError(#[from] crate::quic::driver::ReadExactError),
@@ -410,7 +414,7 @@ mod tests {
 		let close = CloseReason::new(false);
 		assert!(matches!(
 			close.session_gone(gone),
-			Some(SessionError::WebTransportError(WebTransportError::Closed(0, _)))
+			Some(SessionError::WebTransportError(WebTransportError::SessionGone))
 		));
 
 		close.set(WebTransportError::Closed(7, "bye".into()).into());
