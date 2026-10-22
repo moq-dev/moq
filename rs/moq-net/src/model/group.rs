@@ -2714,6 +2714,7 @@ impl Consumer {
 	/// A machine parked on stream credit reads nothing, so without this an aborted group,
 	/// which never expires, would wait for credit it could only spend on a reset.
 	// pending: /quest/m1/public-model/serve.md
+	#[cfg(feature = "async")]
 	pub(crate) fn poll_abandoned(&mut self, waiter: &kio::Waiter, pending: bool) -> Option<Error> {
 		if self.poll_expired_while_pending(waiter, pending) {
 			return Some(Error::Old);
