@@ -168,6 +168,17 @@ test("compressed patches cannot grow the value past the frame cap", () => {
 	expect(decoder.decode()).toBeUndefined();
 });
 
+test("a __proto__ patch key stays a member", () => {
+	const decoder = new Decoder<Doc>();
+	const json = (text: string) => new TextEncoder().encode(text);
+	decoder.snapshot(json(`{"a":{}}`));
+	decoder.delta(json(`{"__proto__":{"polluted":true},"a":{"__proto__":{"polluted":true}}}`));
+	expect(({} as Doc).polluted).toBeUndefined();
+	expect(JSON.stringify(decoder.decode())).toBe(
+		`{"a":{"__proto__":{"polluted":true}},"__proto__":{"polluted":true}}`,
+	);
+});
+
 test("frames apply without materializing", () => {
 	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
 	const decoder = new Decoder<Doc>({});

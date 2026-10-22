@@ -35,10 +35,11 @@ pub struct Decoder<T> {
 	/// Maximum bytes in an inflated frame or the reconstructed value's JSON.
 	limit: usize,
 
-	/// The reconstructed value's size in JSON bytes, counted as the snapshot plus every patch
-	/// applied since: a merge patch adds no more nodes to a value than its own bytes can hold.
-	/// Re-serializing can still print a number longer than its source (`9e9`), but the value's
-	/// memory follows its nodes, so the source bytes bound it as well as the compact JSON would.
+	/// The reconstructed value's size in JSON bytes: the snapshot's own bytes, then moved by each
+	/// patch's exact effect on the compact JSON. Measuring only what a patch touches keeps the
+	/// cost per frame proportional to that frame, never to the whole value. The snapshot is not
+	/// re-serialized, so a number printed longer than its source (`9e9`) goes uncounted, but the
+	/// value's memory follows its nodes, which its bytes bound all the same.
 	size: usize,
 
 	/// The current group's DEFLATE decoder (one window per group), rebuilt at each snapshot.
@@ -111,21 +112,12 @@ impl<T> Decoder<T> {
 				return Err(Error::TooLarge(self.limit));
 			}
 			let current = self.current.as_mut().expect("a snapshot precedes any delta");
-			crate::merge::apply_bytes(current, plain, &self.check)?;
-			self.size = self.size.saturating_add(plain.len());
-			if self.size <= self.limit {
-				return Ok(());
-			}
-
-			// The bound never shrinks on its own, so once it passes the limit measure the value itself:
-			// deletions may have freed room. Counting the compact JSON resets the bound to the real
-			// size, so the walk repeats only after another `limit - size` bytes of patches, not per
-			// delta. An oversized value is dropped before anything can materialize it.
-			let mut budget = Budget(self.limit);
-			if serde_json::to_writer(&mut budget, current).is_err() {
+			let growth = crate::merge::apply_bytes(current, plain, &self.check)?;
+			self.size = (self.size as i64).saturating_add(growth).max(0) as usize;
+			// An oversized value is dropped before anything can materialize it.
+			if self.size > self.limit {
 				return Err(Error::TooLarge(self.limit));
 			}
-			self.size = self.limit - budget.0;
 			Ok(())
 		})();
 		if result.is_err() {
@@ -137,22 +129,6 @@ impl<T> Decoder<T> {
 	/// The reconstructed value as raw JSON, or `None` before the first snapshot.
 	pub fn value(&self) -> Option<&Value> {
 		self.current.as_ref()
-	}
-}
-
-struct Budget(usize);
-
-impl std::io::Write for Budget {
-	fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-		if bytes.len() > self.0 {
-			return Err(std::io::Error::other("JSON size budget exceeded"));
-		}
-		self.0 -= bytes.len();
-		Ok(bytes.len())
-	}
-
-	fn flush(&mut self) -> std::io::Result<()> {
-		Ok(())
 	}
 }
 

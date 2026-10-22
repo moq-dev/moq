@@ -1,7 +1,7 @@
 import { DEFAULT_MAX_FRAME_SIZE, Decoder as Flate } from "@moq/flate";
 
 import { isDeflate } from "../compression.ts";
-import { merge } from "../diff.ts";
+import { isObject } from "../diff.ts";
 import { MissingSnapshot } from "../error.ts";
 import type { Config } from "./encoder.ts";
 
@@ -26,10 +26,10 @@ export class Decoder<T> {
 	#flate?: Flate;
 	// The reconstructed value, `undefined` until the first snapshot.
 	#current?: unknown;
-	// The reconstructed value's size in JSON bytes, counted as the snapshot plus every patch applied
-	// since: a merge patch adds no more nodes to a value than its own bytes can hold. Re-serializing
-	// can still print a number longer than its source (`9e9`), but the value's memory follows its
-	// nodes, so the source bytes bound it as well as the compact JSON would.
+	// The reconstructed value's size in JSON bytes: the snapshot's own bytes, then moved by what each
+	// patch adds, replaces, or removes (see {@link apply}). The snapshot is not re-serialized, so a
+	// number printed longer than its source (`9e9`) goes uncounted, but the value's memory follows
+	// its nodes, which its bytes bound all the same.
 	#size = 0;
 
 	constructor(config: Pick<Config<T>, "schema" | "compression"> = {}) {
@@ -60,15 +60,9 @@ export class Decoder<T> {
 	 */
 	delta(payload: Uint8Array): void {
 		if (this.#current === undefined) throw new MissingSnapshot();
-		const plain = this.#inflate(payload);
-		this.#current = merge(this.#current, this.#parse(plain));
-		this.#size += plain.byteLength;
-		if (this.#size <= DEFAULT_MAX_FRAME_SIZE) return;
-
-		// The bound never shrinks on its own, so once it passes the limit measure the value itself:
-		// deletions may have freed room. That resets the bound to the real size, so the measurement
-		// repeats only after another `limit - size` bytes of patches, not per delta.
-		this.#size = new TextEncoder().encode(JSON.stringify(this.#current)).byteLength;
+		const [value, growth] = apply(this.#current, this.#parse(this.#inflate(payload)));
+		this.#current = value;
+		this.#size += growth;
 		if (this.#size > DEFAULT_MAX_FRAME_SIZE) {
 			this.#current = undefined;
 			throw new Error(`reconstructed value exceeded ${DEFAULT_MAX_FRAME_SIZE} bytes`);
@@ -105,4 +99,50 @@ export class Decoder<T> {
 	#parse(plain: Uint8Array): unknown {
 		return JSON.parse(new TextDecoder().decode(plain));
 	}
+}
+
+const utf8 = new TextEncoder();
+
+// Bytes in a value's JSON, or none for an absent one.
+function bytes(value: unknown): number {
+	return value === undefined ? 0 : utf8.encode(JSON.stringify(value)).byteLength;
+}
+
+// Apply an RFC 7396 merge patch, mutating `target` where it can, and return the result with how many
+// JSON bytes it grew. Only the patch and what it replaces or removes are measured, never the
+// untouched rest, so the cost follows the frame rather than the value it lands on. A member counts its
+// key, value, colon, and comma, without the O(n) scan for whether an object has other members, so
+// the count can be off from the compact JSON by a byte per object but never drifts as members come
+// and go.
+function apply(target: unknown, patch: unknown): [unknown, number] {
+	if (!isObject(patch)) return [patch, bytes(patch) - bytes(target)];
+
+	let growth = 0;
+	let object: Record<string, unknown>;
+	if (isObject(target)) {
+		object = target;
+	} else {
+		object = {};
+		growth += 2 - bytes(target);
+	}
+
+	for (const [key, value] of Object.entries(patch)) {
+		const present = Object.hasOwn(object, key);
+		if (value === null) {
+			if (!present) continue;
+			growth -= bytes(key) + bytes(object[key]) + 2;
+			delete object[key];
+		} else if (present) {
+			const [next, grown] = apply(object[key], value);
+			object[key] = next;
+			growth += grown;
+		} else {
+			const [next, grown] = apply(undefined, value);
+			// Defined rather than assigned, so a `__proto__` key becomes a member instead of the
+			// object's prototype.
+			Object.defineProperty(object, key, { value: next, enumerable: true, writable: true, configurable: true });
+			growth += bytes(key) + 2 + grown;
+		}
+	}
+	return [object, growth];
 }

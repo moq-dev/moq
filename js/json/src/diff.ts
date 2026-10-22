@@ -13,7 +13,7 @@ export interface Diff {
 
 type Obj = Record<string, unknown>;
 
-function isObject(value: unknown): value is Obj {
+export function isObject(value: unknown): value is Obj {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 

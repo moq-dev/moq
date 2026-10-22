@@ -4,9 +4,19 @@ use serde_json::{Map, Value};
 
 /// Validate the complete frame before changing the retained value, then apply its patch in place.
 /// Existing object keys and numeric values are reused instead of building a patch tree.
-pub(crate) fn apply_bytes(target: &mut Value, bytes: &[u8], scratch: &RefCell<CheckScratch>) -> serde_json::Result<()> {
+///
+/// Returns how much the target's compact JSON grew (negative when it shrank). Only the patch and
+/// whatever it replaces or removes are measured, never the untouched rest of the value, so a peer
+/// pays for every byte it makes the caller count.
+pub(crate) fn apply_bytes(
+	target: &mut Value,
+	bytes: &[u8],
+	scratch: &RefCell<CheckScratch>,
+) -> serde_json::Result<i64> {
 	check(bytes, scratch)?;
-	apply_generated_bytes(target, bytes)
+	let growth = Cell::new(0);
+	apply(target, bytes, Some(&growth))?;
+	Ok(growth.get())
 }
 
 /// Validate one JSON value's syntax, rejecting any object that repeats a key.
@@ -19,17 +29,40 @@ pub(crate) fn check(bytes: &[u8], scratch: &RefCell<CheckScratch>) -> serde_json
 
 /// Apply a patch emitted by our serializer, whose keys and syntax were already checked.
 pub(crate) fn apply_generated_bytes(target: &mut Value, bytes: &[u8]) -> serde_json::Result<()> {
+	apply(target, bytes, None)
+}
+
+fn apply(target: &mut Value, bytes: &[u8], growth: Option<&Cell<i64>>) -> serde_json::Result<()> {
 	use serde::de::DeserializeSeed;
 	let mut decoder = serde_json::Deserializer::from_slice(bytes);
 	Patch {
 		target,
 		deletion: false,
+		growth,
 	}
 	.deserialize(&mut decoder)?;
 	Ok(())
 }
 
-use std::cell::RefCell;
+/// Bytes in `value`'s compact JSON.
+fn len(value: &(impl serde::Serialize + ?Sized)) -> i64 {
+	struct Count(i64);
+	impl std::io::Write for Count {
+		fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+			self.0 += bytes.len() as i64;
+			Ok(bytes.len())
+		}
+		fn flush(&mut self) -> std::io::Result<()> {
+			Ok(())
+		}
+	}
+	let mut count = Count(0);
+	// Neither a `Value` nor a `str` fails to serialize, and counting never fails to write.
+	let _ = serde_json::to_writer(&mut count, value);
+	count.0
+}
+
+use std::cell::{Cell, RefCell};
 
 #[derive(Default)]
 pub(crate) struct CheckScratch {
@@ -163,6 +196,24 @@ impl<'de> serde::Deserialize<'de> for Key<'de> {
 struct Patch<'a> {
 	target: &'a mut Value,
 	deletion: bool,
+	/// Accumulates the change in the target's compact JSON size, when the caller tracks it.
+	growth: Option<&'a Cell<i64>>,
+}
+
+impl Patch<'_> {
+	/// Replace the target wholesale, measuring only the old and new values.
+	fn replace(self, value: Value) -> bool {
+		grow(self.growth, || len(&value) - len(self.target));
+		*self.target = value;
+		false
+	}
+}
+
+/// Add to the running growth, measuring nothing when no caller tracks it.
+fn grow(growth: Option<&Cell<i64>>, by: impl FnOnce() -> i64) {
+	if let Some(growth) = growth {
+		growth.set(growth.get() + by());
+	}
 }
 
 impl<'de> serde::de::DeserializeSeed<'de> for Patch<'_> {
@@ -184,8 +235,7 @@ impl<'de> serde::de::Visitor<'de> for Patch<'_> {
 		if self.deletion {
 			Ok(true)
 		} else {
-			*self.target = Value::Null;
-			Ok(false)
+			Ok(self.replace(Value::Null))
 		}
 	}
 
@@ -194,33 +244,27 @@ impl<'de> serde::de::Visitor<'de> for Patch<'_> {
 	}
 
 	fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<bool, E> {
-		*self.target = Value::Bool(value);
-		Ok(false)
+		Ok(self.replace(Value::Bool(value)))
 	}
 
 	fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<bool, E> {
-		*self.target = Value::from(value);
-		Ok(false)
+		Ok(self.replace(Value::from(value)))
 	}
 
 	fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<bool, E> {
-		*self.target = Value::from(value);
-		Ok(false)
+		Ok(self.replace(Value::from(value)))
 	}
 
 	fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<bool, E> {
-		*self.target = Value::from(value);
-		Ok(false)
+		Ok(self.replace(Value::from(value)))
 	}
 
 	fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<bool, E> {
-		*self.target = Value::from(value);
-		Ok(false)
+		Ok(self.replace(Value::from(value)))
 	}
 
 	fn visit_string<E: serde::de::Error>(self, value: String) -> Result<bool, E> {
-		*self.target = Value::String(value);
-		Ok(false)
+		Ok(self.replace(Value::String(value)))
 	}
 
 	fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<bool, A::Error> {
@@ -228,12 +272,13 @@ impl<'de> serde::de::Visitor<'de> for Patch<'_> {
 		while let Some(value) = seq.next_element()? {
 			values.push(value);
 		}
-		*self.target = Value::Array(values);
-		Ok(false)
+		Ok(self.replace(Value::Array(values)))
 	}
 
 	fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+		let growth = self.growth;
 		if !self.target.is_object() {
+			grow(growth, || 2 - len(self.target));
 			*self.target = Value::Object(Map::new());
 		}
 		let object = self.target.as_object_mut().expect("target is an object");
@@ -242,16 +287,25 @@ impl<'de> serde::de::Visitor<'de> for Patch<'_> {
 				let remove = map.next_value_seed(Patch {
 					target: value,
 					deletion: true,
+					growth,
 				})?;
-				if remove {
-					object.remove(key.as_ref());
+				if remove && let Some(value) = object.remove(key.as_ref()) {
+					// The member, its colon, and the comma that separated it from a remaining one.
+					grow(growth, || {
+						-(len(key.as_ref()) + 1 + len(&value) + i64::from(!object.is_empty()))
+					});
 				}
 			} else {
+				// Measured whole once inserted, so the placeholder it starts from is never counted.
 				let mut value = Value::Null;
 				if !map.next_value_seed(Patch {
 					target: &mut value,
 					deletion: true,
+					growth: None,
 				})? {
+					grow(growth, || {
+						len(key.as_ref()) + 1 + len(&value) + i64::from(!object.is_empty())
+					});
 					object.insert(key.into_owned(), value);
 				}
 			}
@@ -275,16 +329,25 @@ mod test {
 			(json!({"old": 1}), json!({"new": {"absent": null, "kept": 1}})),
 			(json!(1), json!({"nested": {"absent": null, "kept": 1}})),
 			(json!({"old": 1}), json!([1, 2, 3])),
+			(json!({"only": [1, 2]}), json!({"only": null, "absent": null})),
+			(
+				json!({"a": "x", "b": 1e15}),
+				json!({"b": null, "a": {"esc\"aped": 9e9}}),
+			),
+			(json!({"a": {"b": 1}}), json!({"a": "flat"})),
 		] {
 			let mut expected = target.clone();
 			json_patch::merge(&mut expected, &patch);
-			apply_bytes(
+			let before = len(&target);
+			let growth = apply_bytes(
 				&mut target,
 				serde_json::to_string(&patch).unwrap().as_bytes(),
 				&RefCell::new(CheckScratch::default()),
 			)
 			.unwrap();
 			assert_eq!(target, expected);
+			// Counted from the touched members alone, yet exact for the whole value.
+			assert_eq!(before + growth, len(&target), "{patch}");
 		}
 	}
 

@@ -382,13 +382,15 @@ fn snapshot_budget(c: &mut Criterion) {
 			.map(|i| (format!("path-{i}"), json!({"bytes": 123})))
 			.collect();
 		let bytes = serde_json::to_vec(&value).unwrap();
-		for bounded in [false, true] {
+		// A value right at its limit is the worst case: every patch lands on the boundary, so a
+		// decoder that measured the whole value there would slope with `entries`.
+		for at_limit in [false, true] {
 			group.bench_with_input(
-				BenchmarkId::new(if bounded { "bounded" } else { "unbounded" }, entries),
+				BenchmarkId::new(if at_limit { "at_limit" } else { "default" }, entries),
 				&bytes,
 				|b, bytes| {
 					let mut config = moq_json::snapshot::consumer::Config::default();
-					config.max_size = bounded.then_some(8 * 1024 * 1024);
+					config.max_size = at_limit.then_some(bytes.len());
 					let mut decoder = moq_json::snapshot::Decoder::<Value>::new(config);
 					decoder.snapshot(bytes).unwrap();
 					b.iter(|| decoder.delta(black_box(br#"{"path-0":{"bytes":124}}"#)).unwrap());
