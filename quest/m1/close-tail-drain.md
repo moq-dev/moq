@@ -62,7 +62,7 @@ Decided (maintainer, 2026-10-14):
   reader got the tail and fails before the fix. Cover both the buffered-tail
   case and one where a control or accept error wins the poll order. Give
   `older_lite_close_keeps_ack_drain` that reader assertion.
-- Once #5530 has landed, switch `moq_net::transport::memory`'s
+- #5530 landed the in-memory transport: switch `moq_net::transport::memory`'s
   `SendStream::poll_closed` to resolve on `finish` (delivery into the
   channel), dropping its "finished and empty" rule. Do this unless the
   memory bench (`rs/moq-net/benches/memory.rs`) shows a regression; if it

@@ -2111,6 +2111,7 @@ where
 				stream
 					.writer
 					.encode(&ietf::RequestOk {
+						largest: None,
 						request_id: Some(request_id),
 						active: None,
 					})
@@ -2121,6 +2122,7 @@ where
 				stream
 					.writer
 					.encode(&ietf::RequestOk {
+						largest: None,
 						request_id: None,
 						active: None,
 					})
@@ -6054,6 +6056,7 @@ mod tests {
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
+				largest: None,
 				request_id: None,
 				active: None,
 			})
@@ -6149,6 +6152,7 @@ mod tests {
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestOk {
+					largest: None,
 					request_id: None,
 					active: None,
 				})
@@ -6231,6 +6235,7 @@ mod tests {
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestOk {
+					largest: None,
 					request_id: None,
 					active: count,
 				})
@@ -6283,6 +6288,7 @@ mod tests {
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
+				largest: None,
 				request_id: None,
 				active,
 			})
@@ -7336,8 +7342,7 @@ mod tests {
 		// The one real bidi everything is multiplexed onto.
 		let control_stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let running = adapter.clone();
-		let (_goaway_handle, goaway) =
-			crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_goaway_handle, goaway) = crate::goaway::Handle::new(true);
 		moq_clock::sim::spawn(async move {
 			let _ = running.run(control_stream.reader, control_stream.writer, goaway).await;
 		});
@@ -8464,6 +8469,7 @@ mod tests {
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestOk {
+					largest: None,
 					request_id: None,
 					active: None,
 				})
@@ -9818,6 +9824,9 @@ mod tests {
 				largest_location: None,
 				forward: true,
 				properties: ietf::Properties::default(),
+				subscriber_priority: None,
+				group_order: None,
+				filter: None,
 			};
 
 			// Errors are surfaced to the peer on the stream, not raised as a session error.
@@ -16136,6 +16145,7 @@ mod new_group_tests {
 		stream
 			.writer
 			.encode(&ietf::RequestOk {
+				largest: None,
 				request_id: None,
 				active: None,
 			})
