@@ -1,31 +1,36 @@
-# [S] A viewer's subscription updates stop chattering
+# [XS] Check a physical camera for subscription update chatter
 
 ## Goal
 
-A `js/watch` viewer sends a SUBSCRIBE_UPDATE only when its subscription
-meaningfully changes, not several times a second per track. In a reported
-`moq.dev/publish` session, the publisher logged an endless alternating
-`subscribe update` for audio and video.
+Waiting on a person with a physical camera. A reported `moq.dev/publish`
+session logged an endless alternating `subscribe update` for audio and video;
+every source measured since then is quiet, and a camera is the one source left.
+Delete this quest if the camera publish is quiet too.
 
 ## Plan
 
-Cause, from reading the code on 2026-10-20: `js/watch/src/media.ts` pushes
-`maxDelay` into `subscriber.update` on every change, and the subscriber loop
-(`js/net/src/lite/subscriber.ts`, `#sameSubscription`) compares it exactly.
-Video's `maxDelay` follows `sync.out.maxDelay`, which moves with the per-frame
-arrival spread (20 ms steps, at most every 500 ms) and every catalog estimate
-republish. Audio only joins once `maxDelay` passes `AUTO_MAX_DELAY`.
+[moq-dev/moq#6305](https://github.com/moq-dev/moq/pull/6305) measured steady
+SUBSCRIBE_UPDATEs per track at `5d5974f083` through `cdn.moq.dev`, 60 seconds
+after a five-second warmup:
 
-Settled: measure first with the bounded publisher encode queue. Count updates
-per track for a live camera publish and `bbb.hang`, then pick a cut with the numbers, and
-close this as unneeded if they are already quiet. Options weighed when
-planning:
+| Source | Track | Warmup updates | Measured updates |
+| --- | --- | --- | --- |
+| `demo/bbb.hang` | audio | 0 | 0 |
+| `demo/bbb.hang` | video | 1 | 0 |
+| Chromium fake camera | audio | 0 | 0 |
+| Chromium fake camera | video | 6 | 0 |
 
-- Round the subscription's `maxDelay` up to the next power of two ms in
-  `js/watch`, so it changes only when the target crosses a doubling.
-- Rate-limit sends to one per smoothed RTT per track in `js/net` and
-  `rs/moq-net`, latest value wins.
+To check, publish a physical camera and microphone from `moq.dev/publish`, then
+watch that broadcast from another tab or device. In the viewer tab's DevTools
+console, enable the Verbose level and filter on `subscribe update: id=`;
+`js/net`'s Lite subscriber logs one line per written update with its track.
+The publisher's own `subscribe update:` line can undercount, since it
+coalesces updates decoded while its serving loop is busy. After the first few
+seconds, count lines per track for a minute.
 
-Coalescing to one update "in flight" was ruled out: moq-lite's
-SUBSCRIBE_UPDATE has no acknowledgement, and the sender already sends only the
-latest value whenever the stream applies backpressure.
+- Quiet (no steady stream of lines): delete this quest and its
+  [m1](/quest/m1/README.md) entry.
+- Chatter: the likely cause is `js/watch/src/media.ts` pushing every
+  `maxDelay` change into `subscriber.update`, compared exactly by
+  `js/net/src/lite/subscriber.ts`. Replace this check with a fix, such as
+  rounding the subscription's `maxDelay` up to a power of two ms.

@@ -58,6 +58,7 @@ fn route(connections: usize, cids: usize) -> (Pair, Vec<BytesMut>) {
     let pair = Pair::new(Setup {
         clients: connections,
         client_cid_len: if cids == 2 { 0 } else { 8 },
+        ..Default::default()
     });
     let issued = pair.server_cids.lock().unwrap().clone();
     assert_eq!(
