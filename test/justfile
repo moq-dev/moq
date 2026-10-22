@@ -14,7 +14,7 @@ set fallback
 set working-directory := '.'
 
 # Where cargo puts the in-tree qmux interop examples `just test qmux` runs.
-qmux_examples := env("CARGO_TARGET_DIR", source_directory() / ".." / "target") / "debug" / "examples"
+qmux_examples := absolute_path(env("CARGO_TARGET_DIR", source_directory() / ".." / "target")) / "debug" / "examples"
 
 # List the cross-language suites.
 default:

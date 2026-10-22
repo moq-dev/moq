@@ -609,6 +609,11 @@ impl Connection {
 
         let frame = match frame {
             wire::Frame::TransportParameters(blob) => return self.on_params(blob, now),
+            wire::Frame::PingRequest(_) | wire::Frame::PingResponse(_)
+                if !self.config.version.uses_records() =>
+            {
+                return Err(TransportError::FRAME_ENCODING_ERROR("QX_PING on draft-00"));
+            }
             wire::Frame::PingRequest(seq) => {
                 let strict = self.config.version == Version::QMux02;
                 if strict

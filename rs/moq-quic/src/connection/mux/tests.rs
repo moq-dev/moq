@@ -298,6 +298,21 @@ fn rejects_empty_records() {
 }
 
 #[test]
+fn draft00_rejects_qx_ping() {
+    for ty in [0x348c67529ef8c7bd_u64, 0x348c67529ef8c7be] {
+        let mut pair = Pair::new(config(Version::QMux00));
+        let mut ping = Vec::new();
+        ping.write_var(ty);
+        ping.write_var(0);
+        pair.server.handle_record(ping.into(), pair.now);
+        assert_eq!(
+            transport_error(&mut pair.server).code,
+            TransportErrorCode::FRAME_ENCODING_ERROR
+        );
+    }
+}
+
+#[test]
 fn rejects_oversized_records() {
     let now = Instant::now();
     let mut server = Connection::new(config(Version::QMux01), Side::Server, now);
