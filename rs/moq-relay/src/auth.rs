@@ -1049,7 +1049,7 @@ impl Admission {
 
 /// The `moq_auth::Request` for an accepted transport request: every fact the
 /// transport knows, nothing parsed on the server's behalf.
-pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request {
+pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Result<Request, Error> {
 	let transport = transport(request.transport());
 	// A URL-less transport reports its root as empty; the contract says what was dialed.
 	let path = match request.path() {
@@ -1070,8 +1070,8 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 		.or_else(|| request.authority().map(str::to_owned));
 	out.alpn = request.alpn().map(str::to_owned);
 	out.role = request.role().and_then(role);
-	out.tls = request.peer_identity().as_ref().and_then(peer);
-	out
+	out.tls = request.peer_identity().as_ref().map(peer).transpose()?.flatten();
+	Ok(out)
 }
 
 /// Build an auth request from the path, credential, and role carried in SETUP.
@@ -1120,21 +1120,24 @@ pub(crate) fn role(role: moq_net::Role) -> Option<moq_auth::Role> {
 }
 
 /// The certificate facts for a verified peer, or `None` when the chain does not parse.
-pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::Peer> {
-	let fingerprint = identity.fingerprint()?;
-	Some(moq_auth::Peer {
+pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Result<Option<moq_auth::Peer>, Error> {
+	let Some(fingerprint) = identity.fingerprint() else {
+		return Ok(None);
+	};
+	Ok(Some(moq_auth::Peer {
 		name: identity.name().unwrap_or_else(|| fingerprint.clone()),
 		fingerprint,
-		expires: identity.expiry(),
+		expires: identity
+			.expiry()
+			.map_err(|err| Error::Request(format!("certificate expiry: {err}")))?,
 		issuer: identity.issuer().unwrap_or_default(),
-	})
+	}))
 }
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
-	use std::time::SystemTime;
 
 	fn patterns(texts: &[&str]) -> moq_auth::Access {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
@@ -1471,7 +1474,7 @@ mod tests {
 
 		let start = moq_clock::now();
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(SystemTime::from(moq_clock::wall()) + Duration::from_secs(10));
+		grant.expires = Some(moq_clock::wall() + Duration::from_secs(10));
 		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant));
 		for _ in 0..9 {
 			assert!(moq_clock::timeout(Duration::from_secs(1), lease.ended()).await.is_err());
@@ -1489,7 +1492,7 @@ mod tests {
 		use std::time::Duration;
 
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(SystemTime::from(moq_clock::wall()) - Duration::from_secs(1));
+		grant.expires = Some(moq_clock::wall() - Duration::from_secs(1));
 		assert!(matches!(grant.validate(), Err(moq_auth::Error::GrantExpired)));
 
 		let start = moq_clock::now();

@@ -992,7 +992,7 @@ impl TokenLog for SimpleTokenLog {
     fn check_and_insert(
         &self,
         nonce: u128,
-        _issued: SystemTime,
+        _issued: Wall,
         _lifetime: Duration,
     ) -> Result<(), TokenReuseError> {
         if self.0.lock().unwrap().insert(nonce) {

@@ -703,7 +703,7 @@ struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
 	/// The root clock the catalog advertised.
 	clock: hang::catalog::Clock,
-	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
+	arrival: std::ops::RangeInclusive<moq_clock::Wall>,
 }
 
 /// Import `data` on a catalog with the default clock.
@@ -713,9 +713,9 @@ async fn import_stream(data: &[u8]) -> Imported {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 
-	let before = std::time::SystemTime::now();
+	let before = moq_clock::wall();
 	import.decode(data).unwrap();
-	let after = std::time::SystemTime::now();
+	let after = moq_clock::wall();
 	import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();

@@ -580,7 +580,7 @@ impl Key {
 	/// [`Claims::authorize`].
 	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
 		let claims = self.verify_claims(token)?;
-		validate_times(&claims, moq_clock::wall().into())?;
+		validate_times(&claims, moq_clock::wall())?;
 		Ok(claims)
 	}
 
@@ -643,7 +643,7 @@ impl Key {
 }
 
 /// Refuse claims expired at `now` (`exp <= now`) or not yet valid (`nbf > now`), as `jose` does.
-pub(crate) fn validate_times(claims: &Claims, now: std::time::SystemTime) -> crate::Result<()> {
+pub(crate) fn validate_times(claims: &Claims, now: moq_clock::Wall) -> crate::Result<()> {
 	if claims.expires.is_some_and(|exp| exp <= now) {
 		return Err(crate::Error::TokenExpired);
 	}
@@ -714,7 +714,8 @@ mod tests {
 	fn patterns(texts: &[&str]) -> crate::Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
-	use std::time::{Duration, SystemTime};
+	use moq_clock::Wall;
+	use std::time::Duration;
 
 	fn create_test_key() -> Key {
 		let mut jwk = Jwk::new(
@@ -732,8 +733,8 @@ mod tests {
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]).into(),
 			subscribe: patterns(&["test-sub/**"]).into(),
-			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
-			issued: Some(SystemTime::now()),
+			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
+			issued: Some(moq_clock::wall()),
 			not_before: None,
 		}
 	}
@@ -1051,8 +1052,8 @@ mod tests {
 	#[test]
 	fn test_key_verify_only_registered_claims() {
 		let key = create_test_key();
-		let now = SystemTime::now()
-			.duration_since(SystemTime::UNIX_EPOCH)
+		let now = moq_clock::wall()
+			.checked_duration_since(Wall::UNIX_EPOCH)
 			.unwrap()
 			.as_secs();
 
@@ -1089,8 +1090,8 @@ mod tests {
 	fn test_key_verify_enforces_not_before() {
 		let key = create_test_key();
 		let at = |offset: i64| {
-			let now = SystemTime::now()
-				.duration_since(SystemTime::UNIX_EPOCH)
+			let now = moq_clock::wall()
+				.checked_duration_since(Wall::UNIX_EPOCH)
 				.unwrap()
 				.as_secs() as i64;
 			sign_raw(
@@ -1105,10 +1106,10 @@ mod tests {
 	/// `exp` is refused at the instant itself and `nbf` accepted at it, matching `jose`.
 	#[test]
 	fn validate_times_at_the_boundary() {
-		let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+		let now = Wall::UNIX_EPOCH + Duration::from_secs(1_000);
 		let second = Duration::from_secs(1);
 
-		let at = |expires: Option<SystemTime>, not_before: Option<SystemTime>| {
+		let at = |expires: Option<Wall>, not_before: Option<Wall>| {
 			let mut claims = create_test_claims();
 			claims.expires = expires;
 			claims.not_before = not_before;
@@ -1131,7 +1132,7 @@ mod tests {
 	fn test_key_verify_expired_token() {
 		let key = create_test_key();
 		let mut claims = create_test_claims();
-		claims.expires = Some(SystemTime::now() - Duration::from_secs(3600)); // 1 hour ago
+		claims.expires = Some(moq_clock::wall() - Duration::from_secs(3600)); // 1 hour ago
 		let token = key.sign(&claims).unwrap();
 
 		let result = key.verify(&token);
@@ -1142,8 +1143,8 @@ mod tests {
 	async fn token_validity_uses_the_ambient_wall() {
 		let key = create_test_key();
 		let mut claims = create_test_claims();
-		claims.issued = Some(moq_clock::wall().into());
-		claims.expires = Some((moq_clock::wall() + Duration::from_secs(10)).into());
+		claims.issued = Some(moq_clock::wall());
+		claims.expires = Some(moq_clock::wall() + Duration::from_secs(10));
 		let token = key.sign(&claims).unwrap();
 		key.verify(&token).unwrap();
 		moq_clock::sleep(Duration::from_secs(10)).await;
@@ -1177,8 +1178,8 @@ mod tests {
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]).into(),
 			subscribe: patterns(&["test-sub/**"]).into(),
-			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
-			issued: Some(SystemTime::now()),
+			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
+			issued: Some(moq_clock::wall()),
 			not_before: None,
 		};
 
@@ -1878,8 +1879,8 @@ mod tests {
 		use std::os::unix::fs::PermissionsExt;
 
 		fn temp_path(name: &str) -> std::path::PathBuf {
-			let unique = SystemTime::now()
-				.duration_since(SystemTime::UNIX_EPOCH)
+			let unique = moq_clock::wall()
+				.checked_duration_since(Wall::UNIX_EPOCH)
 				.unwrap()
 				.as_nanos();
 			std::env::temp_dir().join(format!("test_perms_{name}_{unique}.jwk"))

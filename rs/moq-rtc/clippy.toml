@@ -1,5 +1,5 @@
 # Production uses the ambient clock; legacy test-only clock cleanup is tracked separately.
-# `SystemTime` stays an allowed type until its wall times move to `moq_clock::Wall`.
+# str0m sender reports carry SystemTime; convert at that boundary.
 disallowed-methods = [
     { path = "std::time::Instant::now", reason = "read the ambient clock: moq_clock::now()" },
     { path = "std::time::Instant::elapsed", reason = "read the ambient clock: moq_clock::Instant::elapsed()" },

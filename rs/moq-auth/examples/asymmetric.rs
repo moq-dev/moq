@@ -7,7 +7,7 @@
 // A standalone program stamping a real token, so it reads the host clock.
 #![allow(clippy::disallowed_methods)]
 
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 fn main() -> anyhow::Result<()> {
 	// Generate an ECDSA P-256 key pair.
@@ -23,8 +23,8 @@ fn main() -> anyhow::Result<()> {
 		.with_root("rooms/meeting-123")
 		.with_publish(["alice/**".parse()?])
 		.with_subscribe(["**".parse()?])
-		.with_expires(SystemTime::now() + Duration::from_secs(3600))
-		.with_issued(SystemTime::now());
+		.with_expires(moq_clock::wall() + Duration::from_secs(3600))
+		.with_issued(moq_clock::wall());
 
 	let token = private_key.sign(&claims)?;
 	println!("Signed token:\n{token}\n");

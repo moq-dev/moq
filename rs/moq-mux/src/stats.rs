@@ -5,10 +5,11 @@
 //! the catalog [`Producer`](crate::catalog::Producer) for what a publisher writes, the export
 //! [`Source`](crate::Source) for what a viewer reads.
 
+use moq_clock::Wall;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 /// What one published track has written.
 #[derive(Default)]
@@ -56,7 +57,7 @@ impl Received {
 			return;
 		};
 		let wall = wall
-			.duration_since(UNIX_EPOCH)
+			.checked_duration_since(Wall::UNIX_EPOCH)
 			.map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(0));
 		let micros = u64::try_from(timestamp.as_micros()).unwrap_or(u64::MAX);
 		self.timestamp.store(micros, Relaxed);
@@ -73,7 +74,7 @@ impl Received {
 		if wall != 0
 			&& let Ok(timestamp) = moq_net::Timestamp::from_micros(self.timestamp.load(Relaxed))
 		{
-			let wall = UNIX_EPOCH + Duration::from_millis(wall);
+			let wall = Wall::UNIX_EPOCH + Duration::from_millis(wall);
 			report.arrival = Some(hang::echo::Arrival::new(timestamp, wall));
 		}
 		report
@@ -244,7 +245,7 @@ mod tests {
 		let track = registry.track("hd");
 		assert_eq!(registry.received()["hd"].arrival, None);
 
-		let wall = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+		let wall = Wall::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
 		crate::clock::fake_host_wall(wall);
 		track.frame(moq_net::Timestamp::from_millis(40).unwrap(), 100);
 		track.frame(moq_net::Timestamp::from_millis(80).unwrap(), 50);
@@ -260,7 +261,7 @@ mod tests {
 	fn an_unset_host_clock_records_no_arrival() {
 		let registry = Registry::<Received>::default();
 		let track = registry.track("hd");
-		crate::clock::fake_host_wall(UNIX_EPOCH + Duration::from_secs(86_400));
+		crate::clock::fake_host_wall(Wall::UNIX_EPOCH + Duration::from_secs(86_400));
 		track.frame(moq_net::Timestamp::from_millis(40).unwrap(), 100);
 		let report = &registry.received()["hd"];
 		assert_eq!((report.frames, report.bytes), (1, 100));

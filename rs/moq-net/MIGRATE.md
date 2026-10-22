@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Epoch wall time is a fallible `moq_clock::Wall`
+
+`Epoch::time` returns `Result<moq_clock::Wall, moq_clock::OutOfRange>` instead of `SystemTime`.
+Use `epoch.time()?` and convert with `SystemTime::from` only at a third-party API boundary.
+Every canonical UUIDv7 remains a valid identity, including one whose 48-bit timestamp is later than Wall's year 2554 limit; only its wall-time view fails.
+Epoch text, ordering, bytes, and protocol acceptance are unchanged.
+
 ### A dropped or cut group ends its reader with an error (#6143)
 
 A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `track::Subscriber` saw it is now handed out, and reading it fails with the publisher's error; before, it was skipped or ended cleanly.

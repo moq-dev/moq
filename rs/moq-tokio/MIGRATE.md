@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Certificate expiry uses `moq_clock::Wall`
+
+`tls::PeerIdentity::expiry` returns `Result<Option<moq_clock::Wall>, moq_clock::OutOfRange>` in place of `Option<SystemTime>`; use `peer.expiry()?`.
+Convert with `SystemTime::from` only where a third-party API needs it.
+A certificate expiry outside the portable 1970-2554 wall range returns `Err`, while a missing or unparseable certificate still returns `Ok(None)`.
+
 ### MoQ sessions need the `net` feature (#6132)
 
 moq-net is optional, behind the default `net` feature that every transport feature (`quic`, `websocket`, `tcp`, `uds`, `iroh`, `webrtc`) turns on.

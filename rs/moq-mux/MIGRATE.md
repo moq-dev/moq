@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Wall anchors use `moq_clock::Wall`
+
+`Clock::{at,wall_clock}` and `catalog::Timebase::place` use `moq_clock::Wall` in place of `SystemTime`.
+Pass `moq_clock::wall()` for the current wall, use `Wall::try_from(system_time)?` for a third-party timestamp, and convert returned values with `SystemTime::from` only at a third-party boundary.
+The portable wall range is 1970-2554; catalog encodings are unchanged.
+
 ### `Source` resolution takes the reference's epoch (#5699)
 
 `Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional epoch after `rel`.

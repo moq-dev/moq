@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Public wall times use `moq_clock::Wall`
+
+`catalog::Clock::wall_clock` and `echo::Arrival::{wall,new}` use `moq_clock::Wall` in place of `SystemTime`.
+Read the ambient wall with `moq_clock::wall()`, convert a third-party `SystemTime` with `Wall::try_from`, and convert back with `SystemTime::from` at that API's boundary.
+Times outside 1970-2554 fail with `TimestampOverflow`; catalog and echo JSON units are unchanged.
+
 ### `catalog::Reference` names its epoch (#5699)
 
 Every rendition and data track config gains an optional `epoch` beside `broadcast`, and `Archive` gains `replay_epoch` beside `replay`.

@@ -11,7 +11,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use moq_clock::Instant;
 
@@ -202,7 +201,7 @@ impl Session {
 			}
 			Event::SenderFeedback(feedback) => {
 				if matches!(&self.role, MediaRole::Ingest(_)) {
-					self.ingest_clock.observe(feedback.mid, feedback.sender_info);
+					self.ingest_clock.observe(feedback.mid, feedback.sender_info)?;
 				}
 			}
 			Event::KeyframeRequest(req) => {
@@ -305,9 +304,10 @@ pub(crate) struct IngestClock {
 
 impl IngestClock {
 	/// Record the newest RTP-to-NTP correlation for a track.
-	fn observe(&mut self, mid: str0m::media::Mid, sender: str0m::rtp::rtcp::SenderInfo) {
-		self.tracks.entry(mid).or_default().sender = Some(SenderAnchor::new(sender));
+	fn observe(&mut self, mid: str0m::media::Mid, sender: str0m::rtp::rtcp::SenderInfo) -> Result<()> {
+		self.tracks.entry(mid).or_default().sender = Some(SenderAnchor::new(sender)?);
 		self.establish_ntp_epoch();
+		Ok(())
 	}
 
 	/// Map a raw RTP-derived microsecond timestamp onto the session timeline.
@@ -390,22 +390,16 @@ struct SenderAnchor {
 }
 
 impl SenderAnchor {
-	fn new(sender: str0m::rtp::rtcp::SenderInfo) -> Self {
-		Self {
-			ntp_us: system_time_to_micros(sender.ntp_time),
+	fn new(sender: str0m::rtp::rtcp::SenderInfo) -> Result<Self> {
+		let wall = moq_clock::Wall::try_from(sender.ntp_time).map_err(Error::rtc)?;
+		Ok(Self {
+			ntp_us: wall.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH).as_micros() as i128,
 			rtp_us: media_time_to_micros(&sender.rtp_time) as i128,
-		}
+		})
 	}
 
 	fn capture_time_us(self, media_us: u64) -> i128 {
 		self.ntp_us + media_us as i128 - self.rtp_us
-	}
-}
-
-fn system_time_to_micros(time: SystemTime) -> i128 {
-	match time.duration_since(UNIX_EPOCH) {
-		Ok(duration) => duration.as_micros() as i128,
-		Err(err) => -(err.duration().as_micros() as i128),
 	}
 }
 
@@ -559,13 +553,24 @@ pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr)
 
 #[cfg(test)]
 mod tests {
-	use std::time::{Duration, UNIX_EPOCH};
+	use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 	use str0m::media::Mid;
 	use str0m::rtp::Ssrc;
 	use str0m::rtp::rtcp::SenderInfo;
 
 	use super::*;
+
+	#[test]
+	fn sender_report_refuses_times_outside_wall_range() {
+		for time in [
+			UNIX_EPOCH - Duration::from_nanos(1),
+			UNIX_EPOCH + Duration::from_secs(18_446_744_074),
+		] {
+			assert!(SenderAnchor::new(sender_info(1, time, 0)).is_err());
+		}
+		assert!(SenderAnchor::new(sender_info(1, UNIX_EPOCH, 0)).is_ok());
+	}
 
 	#[test]
 	fn media_flow_respects_negotiated_direction() {
@@ -696,8 +701,12 @@ mod tests {
 		// Both reports identify the same capture instant despite unrelated RTP
 		// bases. The 50 ms first-packet arrival skew must disappear permanently.
 		let report_time = UNIX_EPOCH + Duration::from_secs(1_700_000_001);
-		clock.observe(audio, sender_info(1, report_time, audio_base + 1_000_000));
-		clock.observe(video, sender_info(2, report_time, video_base + 1_000_000));
+		clock
+			.observe(audio, sender_info(1, report_time, audio_base + 1_000_000))
+			.unwrap();
+		clock
+			.observe(video, sender_info(2, report_time, video_base + 1_000_000))
+			.unwrap();
 
 		let audio_time = clock.normalize(audio, t0 + Duration::from_millis(1_020), audio_base + 1_020_000);
 		let video_time = clock.normalize(video, t0 + Duration::from_millis(1_070), video_base + 1_020_000);

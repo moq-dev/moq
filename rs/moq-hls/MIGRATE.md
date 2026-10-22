@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Playlist and manifest wall times use `moq_clock::Wall`
+
+Program date times, MPD availability and publish times, and `export::Renditions::anchor` use `moq_clock::Wall` instead of `SystemTime`.
+Pass `moq_clock::wall()` for now, convert third-party timestamps with `Wall::try_from`, and pass `wall.into()` to formatters that take `SystemTime`.
+HLS and DASH text encodings are unchanged.
+
 ### A failed timeline fails its listings
 
 `export::Broadcaster::manifest` and `export::Rendition::media_playlist` return `Result<Option<String>>`.

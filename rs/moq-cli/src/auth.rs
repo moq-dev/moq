@@ -589,9 +589,9 @@ fn read_token(path: &std::path::Path) -> anyhow::Result<String> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct UnixTimestamp(std::time::SystemTime);
+struct UnixTimestamp(moq_clock::Wall);
 
-impl From<UnixTimestamp> for std::time::SystemTime {
+impl From<UnixTimestamp> for moq_clock::Wall {
 	fn from(value: UnixTimestamp) -> Self {
 		value.0
 	}
@@ -603,10 +603,8 @@ impl std::str::FromStr for UnixTimestamp {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		let timestamp = s.parse::<i64>().context("expected unix timestamp")?;
 		let timestamp = timestamp.try_into().context("timestamp out of range")?;
-		// checked_add, because plain `+` panics on overflow and how far a SystemTime
-		// reaches is platform-dependent: a timespec holds i64 seconds, while Windows
-		// counts 100ns ticks and runs out far sooner.
-		let value = std::time::SystemTime::UNIX_EPOCH
+		// Reject timestamps outside Wall's portable 1970-2554 range.
+		let value = moq_clock::Wall::UNIX_EPOCH
 			.checked_add(std::time::Duration::from_secs(timestamp))
 			.context("timestamp out of range")?;
 		Ok(Self(value))
@@ -982,10 +980,10 @@ mod tests {
 		assert!("not-a-number".parse::<UnixTimestamp>().is_err());
 	}
 
-	// Whether the largest parseable timestamp is representable depends on the
-	// platform's SystemTime, so assert only that it never panics.
 	#[test]
-	fn timestamp_at_the_maximum_does_not_panic() {
-		let _ = i64::MAX.to_string().parse::<UnixTimestamp>();
+	fn timestamp_past_the_wall_range_is_rejected() {
+		assert!(i64::MAX.to_string().parse::<UnixTimestamp>().is_err());
+		assert!("18446744074".parse::<UnixTimestamp>().is_err());
+		assert!("18446744073".parse::<UnixTimestamp>().is_ok());
 	}
 }

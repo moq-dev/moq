@@ -33,6 +33,8 @@ mod instant;
 compile_error!("the `manual` feature installs on a tokio runtime, which the browser has none of");
 mod manual;
 mod runtime;
+#[cfg(feature = "serde")]
+pub mod serde;
 #[cfg(feature = "sim")]
 pub mod sim;
 mod timer;

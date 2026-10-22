@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Claim and grant times use `moq_clock::Wall`
+
+`Claims::{expires,issued,not_before}`, their builder arguments, `Grant::expires`, and `request::Peer::expires` use `moq_clock::Wall` instead of `SystemTime`.
+Stamp them with `moq_clock::wall()`, or use `Wall::try_from` for third-party timestamps.
+JWT and auth JSON still encode integer Unix seconds, with the same rounding; decoding dates before 1970 or past 2554 now fails on every platform.
+
 ### `Client::connect` has no timeout of its own (#5765)
 
 `Client::connect` waits on the auth server for as long as its caller does, and dropping the future drops the request.

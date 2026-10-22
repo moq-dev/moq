@@ -1,5 +1,4 @@
 # Production uses the ambient clock; legacy test-only clock cleanup is tracked separately.
-# `SystemTime` stays an allowed type until its wall times move to `moq_clock::Wall`.
 disallowed-methods = [
     { path = "std::time::Instant::now", reason = "read the ambient clock: moq_clock::now()" },
     { path = "std::time::Instant::elapsed", reason = "read the ambient clock: moq_clock::Instant::elapsed()" },
@@ -16,6 +15,7 @@ disallowed-methods = [
 ]
 
 disallowed-types = [
+    { path = "std::time::SystemTime", reason = "use moq_clock::Wall" },
     { path = "std::time::Instant", reason = "use moq_clock::Instant" },
     { path = "tokio::time::Instant", reason = "use moq_clock::Instant" },
     { path = "tokio::time::Sleep", reason = "use moq_clock::Sleep" },

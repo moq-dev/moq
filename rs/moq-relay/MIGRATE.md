@@ -5,6 +5,13 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Session start times use `moq_clock::Wall`
+
+`session::View::started` uses `moq_clock::Wall` instead of `SystemTime`.
+Convert with `SystemTime::from` at a third-party boundary, or measure since `Wall::UNIX_EPOCH` with `saturating_duration_since`.
+The session JSON still carries integer Unix seconds.
+`auth::request_for` now returns `Result<Request, auth::Error>`; propagate the result and refuse an unrepresentable certificate expiry with the existing request error instead of treating it as unbounded.
+
 ### io\_uring workers start serving separately (#6245)
 
 `uring::Workers::serve(cluster, auth, shutdown, sessions)` is now `spawn` with the same arguments, which sets every worker up without accepting, followed by `serve()`, which starts them accepting.

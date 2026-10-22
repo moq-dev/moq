@@ -814,7 +814,7 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 			.map(str::to_owned)
 	});
 	auth_request.alpn = alpn.clone();
-	auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
+	auth_request.tls = identity.as_ref().map(crate::auth::peer).transpose()?.flatten();
 	let admission = lifecycle.clone();
 	// The handshake deadline covers admission too, so a peer cannot hold the connection
 	// open behind a decision that never comes. Dropping the shared task withdraws it.

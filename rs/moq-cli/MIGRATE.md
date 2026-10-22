@@ -4,6 +4,11 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### Auth timestamps use the portable wall range
+
+`moq auth` Unix timestamp arguments and decoded token or grant times must fit 1970-2554 on every platform.
+Values before zero or after 18,446,744,073 whole Unix seconds are refused; flag names and integer-second encodings are unchanged.
+
 ### `export archive` records a prefix (#6160)
 
 `moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/@<epoch>`, until the connection ends, instead of one broadcast at `<url>`.

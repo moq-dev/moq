@@ -435,20 +435,21 @@ fn use_token_expired() {
     assert_eq!(pair.server.known_cids(), 0);
 }
 
-pub(super) struct FakeTimeSource(Mutex<SystemTime>);
+pub(super) struct FakeTimeSource(Mutex<Wall>);
 
 impl FakeTimeSource {
     pub(super) fn new() -> Self {
-        Self(Mutex::new(SystemTime::now()))
+        Self(Mutex::new(Wall::now()))
     }
 
     pub(super) fn advance(&self, dur: Duration) {
-        *self.0.lock().unwrap() += dur;
+        let mut time = self.0.lock().unwrap();
+        *time = *time + dur;
     }
 }
 
 impl TimeSource for FakeTimeSource {
-    fn now(&self) -> SystemTime {
+    fn now(&self) -> Wall {
         *self.0.lock().unwrap()
     }
 }

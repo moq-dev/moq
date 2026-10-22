@@ -1,7 +1,8 @@
+use moq_clock::{OutOfRange, Wall};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 /// One publisher instance's identity, the lowercase hyphenated text of a UUIDv7.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -24,12 +25,14 @@ impl Epoch {
 		&self.0
 	}
 
-	/// The wall-clock time encoded in the UUID, with millisecond precision.
-	pub fn time(&self) -> SystemTime {
+	/// The UUID's wall time in milliseconds, or an error outside Wall's range.
+	pub fn time(&self) -> Result<Wall, OutOfRange> {
 		// Parsing enforces the canonical UUID form, whose first 48 bits are Unix milliseconds.
 		let millis =
 			u64::from_str_radix(&self.0[..8], 16).unwrap() << 16 | u64::from_str_radix(&self.0[9..13], 16).unwrap();
-		UNIX_EPOCH + Duration::from_millis(millis)
+		Wall::UNIX_EPOCH
+			.checked_add(Duration::from_millis(millis))
+			.ok_or(OutOfRange)
 	}
 }
 
@@ -101,10 +104,11 @@ mod tests {
 			let text = row["text"].as_str().unwrap();
 			let epoch: Epoch = text.parse().unwrap();
 			assert_eq!(epoch.as_str(), text);
-			assert_eq!(
-				epoch.time().duration_since(UNIX_EPOCH).unwrap().as_millis(),
-				row["unix_ms"].as_u64().unwrap() as u128
-			);
+			let millis = row["unix_ms"].as_u64().unwrap();
+			match Wall::UNIX_EPOCH.checked_add(Duration::from_millis(millis)) {
+				Some(expected) => assert_eq!(epoch.time().unwrap(), expected),
+				None => assert_eq!(epoch.time(), Err(OutOfRange)),
+			}
 		}
 		for row in vectors["invalid"].as_array().unwrap() {
 			assert!(row.as_str().unwrap().parse::<Epoch>().is_err(), "{row}");

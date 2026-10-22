@@ -1,8 +1,9 @@
 use crate::Access;
+use moq_clock::Wall;
 use serde::{Deserialize, Serialize};
-use serde_with::{DurationSeconds, TimestampSeconds, serde_as};
+use serde_with::{DurationSeconds, serde_as};
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 /// What a session may do, as the auth server answered.
 ///
@@ -35,8 +36,8 @@ pub struct Grant {
 	pub mounts: BTreeMap<String, String>,
 
 	/// When the session closes, as unix seconds.
-	#[serde_as(as = "Option<TimestampSeconds<i64>>")]
-	pub expires: Option<SystemTime>,
+	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
+	pub expires: Option<Wall>,
 
 	/// How long until the relay asks again, in seconds.
 	#[serde_as(as = "Option<DurationSeconds<u64>>")]
@@ -76,8 +77,8 @@ impl Grant {
 		// Read the instant first, so a pause between the two reads shortens the grant
 		// instead of extending it.
 		let start = moq_clock::now();
-		let now = SystemTime::from(moq_clock::wall());
-		let remaining = self.expires?.duration_since(now).unwrap_or_default();
+		let now = moq_clock::wall();
+		let remaining = self.expires?.checked_duration_since(now).unwrap_or_default();
 		start.checked_add(remaining)
 	}
 
@@ -100,10 +101,7 @@ impl Grant {
 		if let Some(label) = &self.label {
 			moq_pattern::Pattern::literal(label).map_err(crate::Error::InvalidLabel)?;
 		}
-		if self
-			.expires
-			.is_some_and(|expires| expires <= SystemTime::from(moq_clock::wall()))
-		{
+		if self.expires.is_some_and(|expires| expires <= moq_clock::wall()) {
 			return Err(crate::Error::GrantExpired);
 		}
 		Ok(())
@@ -125,7 +123,7 @@ mod tests {
 			subscribe: patterns(&["**"]),
 			root: Some("pid/room".into()),
 			mounts: BTreeMap::new(),
-			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
+			expires: Some(Wall::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
 			label: Some("project/key/123".into()),
@@ -150,7 +148,7 @@ mod tests {
 			subscribe: patterns(&["**"]),
 			root: Some("pid/room".into()),
 			mounts: BTreeMap::new(),
-			expires: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
+			expires: Some(Wall::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
 			label: Some("project/key/123".into()),
@@ -190,7 +188,7 @@ mod tests {
 		assert!(matches!(grant.validate(), Err(crate::Error::UnboundedRevalidate)));
 
 		// Exact: no grace for an auth server whose clock runs behind.
-		let now = SystemTime::from(moq_clock::wall());
+		let now = moq_clock::wall();
 		grant.expires = Some(now);
 		assert!(matches!(grant.validate(), Err(crate::Error::GrantExpired)));
 
@@ -231,7 +229,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn deadline_is_the_exact_expiry() {
 		let start = moq_clock::now();
-		let now = SystemTime::from(moq_clock::wall());
+		let now = moq_clock::wall();
 		let mut grant = Grant::new(patterns(&["**"]), Access::default());
 		assert_eq!(grant.deadline(), None);
 
@@ -247,14 +245,11 @@ mod tests {
 		);
 	}
 
-	/// Regression: the furthest `expires` the wire carries overflowed the instant
-	/// and panicked. Windows' `SystemTime` cannot represent it, so the grant does not
-	/// parse there.
-	#[cfg(unix)]
-	#[moq_clock::test]
-	async fn deadline_past_the_clock_is_never() {
-		let grant: Grant = serde_json::from_str(r#"{"publish":["**"],"expires":9223372036854775807}"#).unwrap();
-		assert_eq!(grant.deadline(), None);
+	#[test]
+	fn refuses_expiry_outside_the_wall_range() {
+		for expires in [-1, 18_446_744_074, i64::MAX] {
+			assert!(serde_json::from_value::<Grant>(serde_json::json!({"publish":["**"],"expires":expires})).is_err());
+		}
 	}
 
 	#[test]

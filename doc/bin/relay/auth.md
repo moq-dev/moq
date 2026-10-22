@@ -30,6 +30,7 @@ parsed on the server's behalf: the `jwt` query parameter is a convention of
 `subscribe` pattern unions and optionally a `root` alias, read-only `mounts`,
 `expires`, a `revalidate` cadence, a stats `tier` and `label`, and `peer` / `upstream` to
 mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
+The Rust relay accepts wall times from 1970 through 2554; an auth server must keep grant and certificate expiry within that range.
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 

@@ -1747,15 +1747,21 @@ impl PeerIdentity {
 		Some(cert.issuer().to_string())
 	}
 
-	/// The leaf certificate's `notAfter`, if it parses. A `notAfter` before the
-	/// Unix epoch is reported as `None`.
-	pub fn expiry(&self) -> Option<std::time::SystemTime> {
-		use std::time::{Duration, UNIX_EPOCH};
+	/// The leaf certificate's parsed `notAfter`, or an error outside the wall range.
+	pub fn expiry(&self) -> std::result::Result<Option<moq_clock::Wall>, moq_clock::OutOfRange> {
+		use std::time::Duration;
 
-		let leaf = self.chain.first()?;
-		let (_, cert) = x509_parser::parse_x509_certificate(leaf).ok()?;
-		let secs = u64::try_from(cert.validity().not_after.timestamp()).ok()?;
-		Some(UNIX_EPOCH + Duration::from_secs(secs))
+		let Some(leaf) = self.chain.first() else {
+			return Ok(None);
+		};
+		let Ok((_, cert)) = x509_parser::parse_x509_certificate(leaf) else {
+			return Ok(None);
+		};
+		let secs = u64::try_from(cert.validity().not_after.timestamp()).map_err(|_| moq_clock::OutOfRange)?;
+		let wall = moq_clock::Wall::UNIX_EPOCH
+			.checked_add(Duration::from_secs(secs))
+			.ok_or(moq_clock::OutOfRange)?;
+		Ok(Some(wall))
 	}
 }
 
@@ -2327,11 +2333,24 @@ mod tests {
 		// The QUIC backend hands back the chain as a boxed Vec<CertificateDer>.
 		let identity: Box<dyn std::any::Any> = Box::new(vec![cert]);
 		let parsed = PeerIdentity::from_any(Some(identity)).expect("chain parsed");
-		let expiry = parsed.expiry().expect("expiry parsed");
+		let expiry = parsed.expiry().unwrap().expect("expiry parsed");
 		assert_eq!(
-			expiry.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+			expiry.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH).as_secs(),
 			2_000_000_000
 		);
+	}
+
+	#[cfg(feature = "quic")]
+	#[test]
+	fn peer_expiry_refuses_outside_wall_range() {
+		for seconds in [-1, 18_446_744_074] {
+			let key = rcgen::KeyPair::generate().unwrap();
+			let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+			params.not_after = ::time::OffsetDateTime::from_unix_timestamp(seconds).unwrap();
+			let cert = params.self_signed(&key).unwrap().into();
+			let peer = PeerIdentity { chain: vec![cert] };
+			assert_eq!(peer.expiry(), Err(moq_clock::OutOfRange));
+		}
 	}
 
 	#[cfg(feature = "quic")]

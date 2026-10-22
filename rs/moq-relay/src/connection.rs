@@ -90,8 +90,16 @@ impl<R: Incoming> Connection<R> {
 		// socket like it bounds a session, and at the handshake deadline, so a peer
 		// cannot hold the connection open behind a decision that never comes.
 		// Boxed: the admission future is large, and nesting it inline overflows debug stacks.
+		let admission = match request.admission(&lifecycle.auth) {
+			Ok(admission) => admission,
+			Err(err) => {
+				lifecycle.cluster.refusals.record_auth(&err);
+				request.reject((&err).into()).await;
+				return Err(err.into());
+			}
+		};
 		let admitted = request
-			.within(Box::pin(lifecycle.admit(request.admission(&lifecycle.auth))))
+			.within(Box::pin(lifecycle.admit(admission)))
 			.await
 			.inspect_err(|_| lifecycle.cluster.refusals.record(Refusal::Unavailable))
 			.map_err(|err| err.context("admission timed out"))?;
