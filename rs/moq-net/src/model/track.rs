@@ -49,7 +49,7 @@ const DEFAULT_PRIORITY: u8 = 127;
 /// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
 /// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog.
 /// The payload size limit also bounds the buffer's memory use.
-const MAX_DATAGRAMS: usize = 64;
+pub(super) const MAX_DATAGRAMS: usize = 64;
 
 /// Slack before the eviction order is rebuilt, so a track holding just a few groups
 /// doesn't rebuild on every write.
@@ -3724,12 +3724,13 @@ impl TrackWeak {
 		!self.state.is_closed() && self.state.is_used()
 	}
 
-	/// The readers' aggregate demand, or `None` while nobody subscribes.
-	pub(super) fn subscription(&self) -> Option<Subscription> {
+	/// The readers' aggregate demand and contribution count, or `None` without one.
+	pub(super) fn subscription(&self) -> Option<(Subscription, usize)> {
 		let state = self.state.read();
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
-		snapshot_subscription(&subs, bound)
+		let subs = subs.lock();
+		Some((clamp_combined(subs.combined(), bound)?, subs.len()))
 	}
 
 	/// End the track with `err` unless a reader holds it, atomically with lookups: a
@@ -5246,7 +5247,7 @@ fn below(runs: impl Iterator<Item = ops::RangeInclusive<u64>>, cap: Option<u64>)
 #[derive(Clone, PartialEq)]
 struct Published {
 	/// The window's groups, resolved for `revision` of the ranges.
-	runs: Arc<RangeInclusiveSet<u64>>,
+	runs: Servable,
 	/// The [`Preferences::ranges_revision`] `runs` were resolved for.
 	revision: u64,
 	cap: Option<u64>,
@@ -5255,8 +5256,8 @@ struct Published {
 }
 
 impl Published {
-	fn new(runs: Arc<RangeInclusiveSet<u64>>, revision: u64, cap: Option<u64>) -> Self {
-		let servable = Servable::new(below(runs.iter().cloned(), cap));
+	fn new(runs: Servable, revision: u64, cap: Option<u64>) -> Self {
+		let servable = runs.below(cap);
 		Self {
 			runs,
 			revision,
@@ -5282,16 +5283,54 @@ impl Servable {
 	/// Every group, for a reader no window narrows.
 	const ALL: Self = Self::Run { start: 0, end: None };
 
-	/// The groups in `runs`.
-	fn new(runs: RangeInclusiveSet<u64>) -> Self {
-		let mut iter = runs.iter();
-		match (iter.next(), iter.next()) {
-			(None, _) => Self::Run { start: 0, end: Some(0) },
-			(Some(run), None) => Self::Run {
-				start: *run.start(),
-				end: run.end().checked_add(1),
-			},
-			_ => Self::Runs(Arc::new(runs)),
+	/// No group.
+	const NONE: Self = Self::Run { start: 0, end: Some(0) };
+
+	/// The groups in `runs`, disjoint and lowest first. Only several runs allocate: every
+	/// subscriber resolves one, so the common single run stays off the heap.
+	fn new(runs: impl Iterator<Item = ops::RangeInclusive<u64>>) -> Self {
+		let mut runs = runs.peekable();
+		let Some(first) = runs.next() else {
+			return Self::NONE;
+		};
+		if runs.peek().is_none() {
+			return Self::Run {
+				start: *first.start(),
+				end: first.end().checked_add(1),
+			};
+		}
+		let mut set = RangeInclusiveSet::new();
+		set.insert(first);
+		set.extend(runs);
+		Self::Runs(Arc::new(set))
+	}
+
+	/// These groups below the exclusive `cap`.
+	fn below(&self, cap: Option<u64>) -> Self {
+		let Some(cap) = cap else {
+			return self.clone();
+		};
+		match self {
+			Self::Run { start, end } => {
+				let end = end.map_or(cap, |end| end.min(cap));
+				match end > *start {
+					true => Self::Run {
+						start: *start,
+						end: Some(end),
+					},
+					false => Self::NONE,
+				}
+			}
+			Self::Runs(runs) => {
+				let Some(last) = cap.checked_sub(1) else {
+					return Self::NONE;
+				};
+				Self::new(
+					runs.iter()
+						.take_while(|run| *run.start() <= last)
+						.map(|run| *run.start()..=(*run.end()).min(last)),
+				)
+			}
 		}
 	}
 }
@@ -5531,7 +5570,8 @@ impl Cursor {
 			};
 			(filter, state.datagram_offset + start)
 		};
-		let mut cursor = Self {
+		let published = Published::new(Servable::new(filter.window.runs(0)), filter.resolved, None);
+		Self {
 			state,
 			subscription,
 			min_sequence: 0,
@@ -5541,15 +5581,13 @@ impl Cursor {
 			next_sequence: Some(0),
 			peeked: None,
 			end_sequence: None,
-			servable: Servable::ALL,
-			// Replaced by the cursor's own below, before anything is handed out.
-			published: kio::Producer::new(Published::new(Arc::default(), 0, None)),
+			// Uncapped, the servable groups are the window's.
+			servable: published.servable.clone(),
+			published: kio::Producer::new(published),
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
 			drops: None,
-		};
-		cursor.update_servable();
-		cursor
+		}
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
@@ -5581,14 +5619,15 @@ impl Cursor {
 	/// Resolve [`Self::servable`] again once the window or cap moved, and publish it to the
 	/// groups already handed out. Costs the ranges, never the cache.
 	fn update_servable(&mut self) {
-		self.servable = Servable::new(self.admitted(0, self.end_sequence));
+		let runs = Servable::new(self.filter.window.runs(0));
 		let (revision, cap) = (self.filter.resolved, self.end_sequence);
+		self.servable = runs.below(cap);
 		let next = |current: &Published| {
 			// Ranges a `Control` republished past this window stay until this cursor syncs
 			// to them; the cap is this cursor's own.
 			let runs = match current.revision > revision {
 				true => current.runs.clone(),
-				false => Arc::new(self.admitted(0, None)),
+				false => runs.clone(),
 			};
 			let next = Published::new(runs, revision.max(current.revision), cap);
 			(next != *current).then_some(next)
@@ -6184,7 +6223,7 @@ impl Republish {
 			return;
 		};
 		drop(state);
-		let runs = Arc::new(admitted(&window, 0, None));
+		let runs = Servable::new(window.runs(0));
 		if let Ok(mut current) = published.write()
 			&& current.revision < revision
 		{
@@ -11135,7 +11174,7 @@ mod test {
 		};
 		let ranges = Subscription::default().with_groups(10..20);
 		// Nothing in 10..20 sits below a cap at 5.
-		let expected = (Servable::new(RangeInclusiveSet::new()), Some(5));
+		let expected = (Servable::NONE, Some(5));
 		for order in ["ranges first", "cap first", "cap between"] {
 			let producer = track_producer("test", Info::timed());
 			let mut subscriber = producer.subscribe(Subscription::default());
@@ -11158,6 +11197,50 @@ mod test {
 			assert!(published(&subscriber) == expected, "{order}");
 			let _ = subscriber.poll_recv_group(&kio::Waiter::noop());
 			assert!(published(&subscriber) == expected, "{order}, once the cursor syncs");
+		}
+	}
+
+	/// Capping a servable window in place keeps exactly the groups the set of its runs
+	/// keeps below the cap, so the single run stays off the heap without moving a bound.
+	#[test]
+	fn servable_below_matches_its_runs_below_the_cap() {
+		// Inclusive (first, last) bounds, lowest first.
+		let windows: [&[(u64, u64)]; 5] = [
+			&[],
+			&[(0, u64::MAX)],
+			&[(5, 9)],
+			&[(5, u64::MAX)],
+			&[(2, 3), (6, 8), (12, u64::MAX)],
+		];
+		let caps = [
+			None,
+			Some(0),
+			Some(2),
+			Some(3),
+			Some(5),
+			Some(7),
+			Some(9),
+			Some(10),
+			Some(13),
+			Some(u64::MAX),
+		];
+		for bounds in windows {
+			let runs = || bounds.iter().map(|&(first, last)| first..=last);
+			let servable = Servable::new(runs());
+			if let [(first, last)] = bounds {
+				assert!(
+					servable
+						== Servable::Run {
+							start: *first,
+							end: last.checked_add(1)
+						},
+					"{bounds:?}"
+				);
+			}
+			for cap in caps {
+				let expected = Servable::new(below(runs(), cap).into_iter());
+				assert!(servable.below(cap) == expected, "{bounds:?} below {cap:?}");
+			}
 		}
 	}
 

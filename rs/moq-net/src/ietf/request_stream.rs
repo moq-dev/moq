@@ -367,6 +367,13 @@ pub(super) struct Update {
 	pub(super) authorization_token: Option<super::token::RequestToken>,
 	/// NEW_GROUP_REQUEST (draft-15+), which only a track advertising DYNAMIC_GROUPS takes.
 	pub(super) new_group: Option<u64>,
+	/// FORWARD, `None` when unchanged. Only a subscription we initiated with PUBLISH may
+	/// pause; the rest serve forwarding subscriptions only.
+	pub(super) forward: Option<bool>,
+	/// The new Location Filter, which only a paused PUBLISH subscription resuming takes.
+	pub(super) filter: Option<super::Filter>,
+	/// FILL_PARAMETERS (draft-20+), which only a paused PUBLISH subscription resuming takes.
+	pub(super) fill: Option<super::Fill>,
 }
 
 impl Update {
@@ -401,7 +408,7 @@ impl Update {
 				if !data.is_empty() {
 					return Err(DecodeError::InvalidValue);
 				}
-				let (refused, authorization_token) = Self::refused(tokens, !forward);
+				let (refused, authorization_token) = Self::refused(tokens, false);
 				return Ok(Self {
 					request_id,
 					priority: Some(priority),
@@ -409,6 +416,9 @@ impl Update {
 					refused,
 					authorization_token,
 					new_group: None,
+					forward: Some(forward),
+					filter: None,
+					fill: None,
 				});
 			}
 			// The request it updates, which the adapter already routed by.
@@ -443,10 +453,7 @@ impl Update {
 		if !track_filter.is_empty() {
 			return Err(DecodeError::InvalidValue);
 		}
-		let unsupported = forward == Some(false)
-			|| filter.is_some()
-			|| fill.is_some()
-			|| !subgroup_filter.is_empty()
+		let unsupported = !subgroup_filter.is_empty()
 			|| !object_filter.is_empty()
 			|| !priority_filter.is_empty()
 			|| !property_filter.is_empty();
@@ -458,6 +465,9 @@ impl Update {
 			refused,
 			authorization_token,
 			new_group,
+			forward,
+			filter,
+			fill,
 		})
 	}
 
@@ -487,9 +497,11 @@ impl Decode<Version> for Update {
 	}
 }
 
-/// The namespace-only parameters of a modern REQUEST_UPDATE.
+/// The namespace-only parameters of a modern REQUEST_UPDATE. `TRACKS` marks one on a
+/// SUBSCRIBE_TRACKS, which from draft-19 may also carry TRACK_PROPERTY_FILTER and from
+/// draft-20 FORWARD.
 #[derive(Debug)]
-pub(super) struct NamespaceUpdate {
+pub(super) struct NamespaceUpdate<const TRACKS: bool = false> {
 	pub(super) request_id: super::RequestId,
 	pub(super) prefix: Option<crate::PathOwned>,
 	pub(super) refused: Option<Error>,
@@ -507,7 +519,7 @@ impl super::parameters::Param for NamespacePrefix {
 	}
 }
 
-impl Decode<Version> for NamespaceUpdate {
+impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if r.varint()? != super::SubscribeUpdate::ID {
 			return Err(DecodeError::InvalidValue);
@@ -518,6 +530,8 @@ impl Decode<Version> for NamespaceUpdate {
 			let request_id = super::RequestId::decode(&mut data, version)?;
 			decode_params!(&mut data, version,
 				0x03 => token: Vec<super::token::RequestToken>,
+				0x10 => _forward: Option<bool> where TRACKS && super::Filter::is_draft20(version),
+				0x29 => _track_filter: Vec<super::Opaque> where TRACKS && super::subscribe::has_range_filters(version),
 				0x34 => prefix: Option<NamespacePrefix>,
 			);
 			if !data.is_empty() {
@@ -668,6 +682,23 @@ mod tests {
 				0x03
 			);
 		}
+	}
+
+	/// From draft-19 a SUBSCRIBE_TRACKS update may carry TRACK_PROPERTY_FILTER (0x29), so it
+	/// decodes there, to be refused per request, while a SUBSCRIBE_NAMESPACE's still closes.
+	#[test]
+	fn track_property_filter_on_listing_update_decodes() {
+		// REQUEST_UPDATE, 6 bytes: Request ID 2, one parameter: 0x29 with a two-byte value.
+		const FRAME: &[u8] = &[0x02, 0x00, 0x06, 2, 1, 0x29, 2, 0, 0];
+		for version in [Version::Draft19, Version::Draft21, Version::Draft22] {
+			let mut buf = bytes::Bytes::from_static(FRAME);
+			let update = crate::coding::decode_buf(&mut buf, version, NamespaceUpdate::<true>::decode).unwrap();
+			assert!(update.refused.is_none(), "{version}: {:?}", update.refused);
+			let mut buf = bytes::Bytes::from_static(FRAME);
+			assert!(crate::coding::decode_buf(&mut buf, version, NamespaceUpdate::<false>::decode).is_err());
+		}
+		let mut buf = bytes::Bytes::from_static(FRAME);
+		assert!(crate::coding::decode_buf(&mut buf, Version::Draft18, NamespaceUpdate::<true>::decode).is_err());
 	}
 
 	/// TRACK_NAMESPACE_PREFIX (0x34) updates a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS only,

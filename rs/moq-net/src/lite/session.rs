@@ -353,13 +353,7 @@ where
 		setup: version
 			.has_setup_stream()
 			.then(|| SendSetup::new(session.clone(), our_setup, version, stats.clone())),
-		goaway: Some(SendGoaway::new(
-			runtime,
-			session.clone(),
-			goaway,
-			version,
-			stats.clone(),
-		)),
+		goaway: Some(SendGoaway::new(session.clone(), goaway, version, stats.clone())),
 		session_stream: setup_stream.map(|stream| stream.with_stats(&stats)),
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber, early),
@@ -761,55 +755,35 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 	}
 }
 
-/// Send our single GOAWAY when the drain trigger fires, then enforce its local
-/// deadline.
-///
-/// Runs on every version, including those with no GOAWAY message: the deadline is
-/// the sender's own timer, so a caller draining a lite-03 peer still gets the
-/// session closed on schedule; the peer just never learns why.
+/// Send our single GOAWAY when the drain trigger fires. The session supervisor
+/// enforces the deadline independently, including on versions with no GOAWAY message.
 struct SendGoaway<S: crate::transport::poll::Session> {
 	stats: crate::stats::Session,
 	version: Version,
-	runtime: crate::time::Deadlines,
 	goaway: crate::goaway::Protocol,
-	/// A dedicated handle for the trigger-phase close watch, since `session` opens
-	/// the Goaway stream and each pending operation needs its own handle.
+	/// Opening a stream and watching the session close each need their own handle.
 	closed: S,
 	session: S,
 	state: SendGoawayState<S>,
 }
 
 enum SendGoawayState<S: crate::transport::poll::Session> {
-	/// Parked on the send trigger, racing the transport close so a parked trigger
-	/// never blocks the driver. The trigger fires at most once.
 	Waiting,
-	/// Opening the Goaway control stream (0x5). Lite04+ only; earlier versions
-	/// jump straight to enforcement.
-	Open { payload: crate::goaway::Goaway },
-	/// Flushing the single GOAWAY message, then FIN and wait for the
-	/// acknowledgement before dropping: Writer's Drop resets the stream, and on
-	/// real QUIC a reset racing the FIN discards the unacked GOAWAY frame.
+	Open {
+		payload: crate::goaway::Goaway,
+	},
+	/// Keep the writer through FIN acknowledgement, since dropping it resets the stream.
 	Send {
 		stream: Stream<S, Version>,
-		timeout: Option<std::time::Duration>,
 		finished: bool,
 	},
-	/// The message is on the wire (or failed); enforce the local deadline.
-	Enforce(crate::goaway::Enforce<S>),
 }
 
 impl<S: crate::transport::poll::Session> SendGoaway<S> {
-	fn new(
-		runtime: crate::time::Deadlines,
-		session: S,
-		goaway: crate::goaway::Protocol,
-		version: Version,
-		stats: crate::stats::Session,
-	) -> Self {
+	fn new(session: S, goaway: crate::goaway::Protocol, version: Version, stats: crate::stats::Session) -> Self {
 		Self {
 			stats,
 			version,
-			runtime,
 			goaway,
 			closed: session.clone(),
 			session,
@@ -817,49 +791,28 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 		}
 	}
 
-	/// Move to enforcement, logging why the message never (fully) hit the wire.
-	///
-	/// Still enforce the deadline: the drain was requested, and failing to explain
-	/// it to the peer is no reason to hold the session open.
-	fn enforce_after(&mut self, err: Error, timeout: Option<std::time::Duration>) {
-		tracing::warn!(%err, "failed to send goaway");
-		self.state = SendGoawayState::Enforce(crate::goaway::Enforce::new(
-			&self.runtime,
-			self.session.clone(),
-			timeout,
-		));
-	}
-
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut cx = waiter.context();
 		loop {
+			if self.closed.poll_closed(&mut cx).is_ready() {
+				return Poll::Ready(());
+			}
 			match &mut self.state {
 				SendGoawayState::Waiting => {
-					if self.closed.poll_closed(&mut cx).is_ready() {
-						return Poll::Ready(());
-					}
 					let Some(payload) = ready!(self.goaway.poll_triggered(waiter)) else {
 						return Poll::Ready(());
 					};
-					// moq-lite has no timeout field on the wire; only the URI is sent.
-					// The deadline is still ours to honor, enforced locally below.
-					self.state = if self.version.has_goaway() {
-						SendGoawayState::Open { payload }
-					} else {
-						SendGoawayState::Enforce(crate::goaway::Enforce::new(
-							&self.runtime,
-							self.session.clone(),
-							payload.timeout,
-						))
-					};
+					if !self.version.has_goaway() {
+						return Poll::Ready(());
+					}
+					self.state = SendGoawayState::Open { payload };
 				}
 				SendGoawayState::Open { payload } => {
-					let timeout = payload.timeout;
 					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
 						Ok(stream) => stream,
 						Err(err) => {
-							self.enforce_after(err, timeout);
-							continue;
+							tracing::warn!(%err, "failed to send goaway");
+							return Poll::Ready(());
 						}
 					};
 					stream = stream.with_stats(&self.stats);
@@ -871,22 +824,16 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 						.buffer(&super::ControlType::Goaway)
 						.and_then(|()| stream.writer.buffer(&msg))
 					{
-						self.enforce_after(err, timeout);
-						continue;
+						tracing::warn!(%err, "failed to send goaway");
+						return Poll::Ready(());
 					}
 					self.state = SendGoawayState::Send {
 						stream,
-						timeout,
 						finished: false,
 					};
 				}
-				SendGoawayState::Send {
-					stream,
-					timeout,
-					finished,
-				} => {
-					let timeout = *timeout;
-					let res = if !*finished {
+				SendGoawayState::Send { stream, finished } => {
+					let result = if !*finished {
 						match ready!(stream.writer.poll_flush(&mut cx)) {
 							Ok(()) => {
 								*finished = true;
@@ -897,22 +844,15 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 					} else {
 						Ok(())
 					};
-					let res = match res {
+					let result = match result {
 						Ok(()) => ready!(stream.writer.poll_closed(&mut cx)),
 						Err(err) => Err(err),
 					};
-					match res {
-						Ok(()) => {
-							self.state = SendGoawayState::Enforce(crate::goaway::Enforce::new(
-								&self.runtime,
-								self.session.clone(),
-								timeout,
-							));
-						}
-						Err(err) => self.enforce_after(err, timeout),
+					if let Err(err) = result {
+						tracing::warn!(%err, "failed to send goaway");
 					}
+					return Poll::Ready(());
 				}
-				SendGoawayState::Enforce(enforce) => return enforce.poll(waiter),
 			}
 		}
 	}

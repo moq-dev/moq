@@ -277,7 +277,6 @@ where
 					let mut session = session.clone();
 					let adapter = adapter.clone();
 					let goaway = goaway.clone();
-					let runtime = runtime.clone();
 					tasks.push(async move {
 						let payload = kio::wait(|waiter| {
 							let mut cx = waiter.context();
@@ -292,7 +291,6 @@ where
 						};
 						let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
 						adapter.send_goaway(&payload.uri, timeout_ms, version);
-						crate::goaway::enforce(&runtime, &mut session, payload.timeout).await;
 					});
 				}
 				drop(tasks);
@@ -403,7 +401,6 @@ where
 				// Send SETUP and retain its writer for the session's lifetime. Only a failure
 				// ends the session; the other branches report how it closed.
 				let setup = err_only(run_setup(
-					runtime.clone(),
 					session.clone(),
 					version,
 					path,
@@ -786,7 +783,6 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 /// names the other extensions we offer.
 #[allow(clippy::too_many_arguments)]
 async fn run_setup<S: crate::transport::poll::Session>(
-	runtime: crate::time::Deadlines,
 	mut session: S,
 	version: Version,
 	path: Option<String>,
@@ -871,13 +867,9 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		// control-stream messages this channel otherwise carries.
 		let mut writer = writer.with_version(version);
 		writer.encode_message(&msg).await.map_err(control_stream_error)?;
-
-		let mut draining = std::pin::pin!(async {
-			crate::goaway::enforce(&runtime, &mut session, payload.timeout).await;
-			session.closed().await;
-		});
+		let mut closed = std::pin::pin!(session.closed());
 		kio::wait(|waiter| {
-			if waiter.poll_future(draining.as_mut()).is_ready() {
+			if waiter.poll_future(closed.as_mut()).is_ready() {
 				return std::task::Poll::Ready(Ok(()));
 			}
 			if writer.poll_closed(&mut waiter.context()).is_ready() {
@@ -1342,7 +1334,7 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 					| ietf::Fetch::ID
 					| ietf::SubscribeNamespace::ID
 					| ietf::SubscribeNamespaceLegacy::ID
-					| ietf::SUBSCRIBE_TRACKS_ID
+					| ietf::SubscribeTracks::ID
 					| ietf::TrackStatus::ID
 					| ietf::Publish::ID
 					| ietf::PublishNamespace::ID
@@ -1373,7 +1365,7 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 			| ietf::Fetch::ID
 			| ietf::SubscribeNamespace::ID
 			| ietf::SubscribeNamespaceLegacy::ID
-			| ietf::SUBSCRIBE_TRACKS_ID
+			| ietf::SubscribeTracks::ID
 			| ietf::TrackStatus::ID => {
 				publisher.handle_stream(id, data, stream, epoch)?.await;
 			}
@@ -1751,6 +1743,7 @@ mod tests {
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
+				largest: None,
 				request_id: None,
 				active: None,
 			})
@@ -3430,7 +3423,6 @@ mod tests {
 			control.accept(RequestId(first + 4)).unwrap();
 			let (handle, goaway_protocol) = crate::goaway::Handle::new(!client);
 			let mut setup = std::pin::pin!(run_setup(
-				crate::time::sim(),
 				session,
 				VERSION,
 				None,
@@ -3557,7 +3549,7 @@ mod tests {
 					"a 4097 byte full track name",
 				),
 				(
-					frame(version, ietf::SUBSCRIBE_TRACKS_ID, &oversized_prefix),
+					frame(version, ietf::SubscribeTracks::ID, &oversized_prefix),
 					SessionError::ProtocolViolation,
 					"a 4097 byte SUBSCRIBE_TRACKS prefix",
 				),
