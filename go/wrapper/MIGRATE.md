@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Higher is first and the zero value is the unset midpoint, so a `TrackInfo` that leaves `Priority` zero now gets the default rather than the least urgent priority; drop any `Priority: 127` that asked for the midpoint.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `media.ContainerFormatFmp4` unwraps to Legacy (#6250)
+
+A container import with `media.ContainerFormatFmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `media.ContainerFormatCmaf` to keep publishing CMAF.
+
 ### Catalog references carry their epoch
 
 `ffi.MoqVideo` and `ffi.MoqAudio` gain `Epoch`, the publisher instance their `Broadcast` reference names.

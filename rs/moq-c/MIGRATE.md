@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `MOQ_CONTAINER_FORMAT_FMP4` unwraps to Legacy (#6250)
+
+A container import with `MOQ_CONTAINER_FORMAT_FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `MOQ_CONTAINER_FORMAT_CMAF` to keep publishing CMAF.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 `moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.

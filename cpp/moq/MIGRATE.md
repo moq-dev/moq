@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Higher is first and 0 is the unset midpoint; `TrackInfo::priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it, widening first (`static_cast<int8_t>(int(old) - 128)`): 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### `moq::ContainerFormat::kFmp4` unwraps to Legacy (#6250)
+
+A container import with `moq::ContainerFormat::kFmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `moq::ContainerFormat::kCmaf` to keep publishing CMAF.
+
 ### Catalog references carry their epoch
 
 `Video` and `Audio` gain `epoch`, the publisher instance their `broadcast` reference names, right after `broadcast`; positional initializers shift by one.

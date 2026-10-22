@@ -25,9 +25,11 @@ the quests below. The run finishes after
 before the breaking cut sees its result and the rest of m1.
 
 What to check first: whether the nightly `sizes` job (`sh/size/`) has run.
-It needs the Linux release builds, which still fail to link
-([moq-dev/moq#6090](https://github.com/moq-dev/moq/pull/6090) was open on
-2026-10-21). If it has, its history replaces the local method below. Then
+The Linux release-link fix
+[moq-dev/moq#6090](https://github.com/moq-dev/moq/pull/6090) merged on
+2026-10-22 UTC; verify the first scheduled Nightly after it before treating
+the sizes history as available. Once it runs, its history replaces the local
+method below. Then
 re-attribute the native rows for the erasure quest, and measure `@moq/net`
 with the track compression codec in `js/net`.
 

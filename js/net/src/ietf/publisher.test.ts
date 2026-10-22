@@ -74,8 +74,8 @@ async function opens(read: Promise<{ done: boolean }>, clock: Manual): Promise<b
 		},
 		() => {},
 	);
-	await clock.advanceAsync(Nano.zero);
-	await clock.advanceAsync(Nano.fromMilli(Milli(STREAM_WAIT)));
+	await clock.advance(Nano.zero);
+	await clock.advance(Nano.fromMilli(Milli(STREAM_WAIT)));
 	return opened;
 }
 
@@ -793,16 +793,16 @@ test("a group stream whose FIN never completes is reset when the group expires",
 		await closeStarted;
 		// The newest group is never stale, however long its FIN takes. Kept inside the cache's
 		// idle window: a group evicted once superseded is no longer judged.
-		await clock.advanceAsync(Nano.fromMilli(Milli(budget * 2)));
+		await clock.advance(Nano.fromMilli(Milli(budget * 2)));
 		expect(reset).toBe(false);
 
 		// Its successor presents no further, so only the wall clock since it arrived convicts
 		// group 0, after the track has ended.
 		write(1);
 		track.close();
-		await clock.advanceAsync(Nano.fromMilli(Milli(budget - 1)));
+		await clock.advance(Nano.fromMilli(Milli(budget - 1)));
 		expect(reset).toBe(false);
-		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await clock.advance(Nano.fromMilli(Milli(1)));
 		await streamReset;
 	} finally {
 		client.close();

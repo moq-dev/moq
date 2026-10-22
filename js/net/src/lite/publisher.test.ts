@@ -929,14 +929,14 @@ test("lite draft-06: a group stream that never completes is reset once the group
 		sub.serve(1);
 		expect(await sub.servedHeader()).toBe(1);
 		await flush();
-		await clock.advanceAsync(Nano.fromMilli(Milli(budget * 10)));
+		await clock.advance(Nano.fromMilli(Milli(budget * 10)));
 		expect(reason).toBeUndefined();
 
 		sub.serve(2);
 		expect(await sub.servedSequence()).toBe(2);
-		await clock.advanceAsync(Nano.fromMilli(Milli(budget - 1)));
+		await clock.advance(Nano.fromMilli(Milli(budget - 1)));
 		expect(reason).toBeUndefined();
-		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await clock.advance(Nano.fromMilli(Milli(1)));
 		await reset;
 		expect(toStreamCode(fromTransport(reason))).toBe(StreamCode.Old);
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);

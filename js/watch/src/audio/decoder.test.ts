@@ -671,9 +671,9 @@ describe("fatal decoder errors", () => {
 // A manual clock installed at `ms`, so arrivals are stamped only as fast as a test advances it.
 function manualAt(ms: number) {
 	const clock = new Manual();
-	clock.advance(Nano.fromMilli(Milli(ms)));
+	clock.jump(Nano.fromMilli(Milli(ms)));
 	const restore = clock.install();
-	return { advance: (by: number) => clock.advanceAsync(Nano.fromMilli(Milli(by))), restore };
+	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), restore };
 }
 
 // A legacy container frame: the media timestamp, then one payload byte.
