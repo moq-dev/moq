@@ -174,8 +174,8 @@ impl Muxer {
 		use crate::container::Container as _;
 
 		let mut out: Vec<Frame> = Vec::new();
-		while let Some(frames) = self.container.read(group).await? {
-			for frame in frames {
+		while let Some(wire) = group.read_frame().await? {
+			for frame in self.container.decode(wire)? {
 				if let Some(bound) = self.container.end(&frame) {
 					if matches!(self.kind, Kind::Video(_))
 						&& let Some(last) = out.last_mut()

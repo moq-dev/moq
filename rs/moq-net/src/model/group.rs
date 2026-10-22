@@ -3418,9 +3418,7 @@ mod test {
 				0 => group.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap(),
 				1 => {
 					let mut buffer = frame::Buffer::<1>::new();
-					buffer
-						.push(Frame::new(Timestamp::ZERO, bytes::Bytes::new()))
-						.unwrap();
+					buffer.push(Frame::new(Timestamp::ZERO, bytes::Bytes::new())).unwrap();
 					group.write_frames(&mut buffer).unwrap();
 				}
 				_ => {
@@ -4358,9 +4356,13 @@ mod test {
 
 		moq_clock::sleep(Duration::from_millis(10)).await;
 		let mut batch = frame::Buffer::<2>::new();
-		batch.push(Frame::new(Timestamp::ZERO, Bytes::from_static(b"d"))).unwrap();
+		batch
+			.push(Frame::new(Timestamp::ZERO, Bytes::from_static(b"d")))
+			.unwrap();
 		moq_clock::sleep(Duration::from_millis(10)).await;
-		batch.push(Frame::new(Timestamp::ZERO, Bytes::from_static(b"e"))).unwrap();
+		batch
+			.push(Frame::new(Timestamp::ZERO, Bytes::from_static(b"e")))
+			.unwrap();
 		producer.write_frames(&mut batch).unwrap();
 		producer.finish().unwrap();
 
@@ -4912,9 +4914,7 @@ mod test {
 		group.write_frame(None, verbose(0)).unwrap();
 		let mut batch = frame::Buffer::<2>::new();
 		for index in 1..3 {
-			batch
-				.push(Frame::new(None, verbose(index)))
-				.unwrap();
+			batch.push(Frame::new(None, verbose(index))).unwrap();
 		}
 		group.write_frames(&mut batch).unwrap();
 		let mut frame = group.create_frame(untimed(verbose(3).len())).unwrap();

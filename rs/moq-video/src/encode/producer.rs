@@ -1645,10 +1645,8 @@ mod tests {
 						let mut groups = Vec::new();
 						while let Some(mut group) = subscriber.recv_group().await.unwrap() {
 							let mut frames = Vec::new();
-							while let Some(batch) =
-								kio::wait(|waiter| format.poll_read(&mut group, waiter)).await.unwrap()
-							{
-								for frame in batch {
+							while let Some(wire) = group.read_frame().await.unwrap() {
+								for frame in format.decode(wire).unwrap() {
 									// A duration marker closes the group but is not an encoded picture.
 									if format.end(&frame).is_none() {
 										frames.push(frame.payload.len());
