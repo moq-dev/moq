@@ -36,17 +36,24 @@ Decided 2026-10-22 by the maintainer, after the TS root-cause audit:
   LOC property, Legacy inference). It adds a wire field to every container
   to preserve spacing no consumer needs.
 - One clock serves TS, MKV and FLV. The counted path becomes the only one,
-  and it is not called `pop_counted`: the depth and delay are fixed for the
-  rendition's life, so they move into the constructor
-  (`DecodeClock::new(depth, delay)`) and the release is a plain `pop(flush)`.
+  and it is not called `pop_counted`: the depth is fixed for the
+  rendition's life, so it moves into the constructor
+  (`DecodeClock::new(reorder)`) and the release is a plain `pop(flush)`.
   A new rendition gets a new clock. Delete the timestamp-settled `pop`, its
   growing delay, `reach`, FLV's `author_dts`/`dts_reserve`, and the catalog
   `jitter`'s role in DTS.
 - The depth is a new optional `reorder` field on the Hang video rendition:
   the most frames that can precede a frame in decode order and follow it in
   presentation, the unit of H.264 `max_num_reorder_frames` and HEVC
-  `sps_max_num_reorder_pics`. The delay is `reorder` times the frame period
-  (the SPS's fixed rate, else the catalog `framerate`).
+  `sps_max_num_reorder_pics`.
+- DTS shifts by slots, not by a time: the nth frame of a group decodes at the
+  group's (n - `reorder`)th presentation slot, which no frame still to come
+  can precede. The group's first `reorder` frames extrapolate below the
+  keyframe's slot at the group's own slot spacing. Rejected: a delay of
+  `reorder` times a frame period, since the catalog `framerate` may change in
+  place and two exporters would build different clocks (found in review), and
+  freezing the rate or requiring an SPS fixed rate, which both add a rule
+  the slot shift does not need.
 - Absent means 0: no reordering and no decode delay, so a stream without
   B-frames pays no latency. Rejected: absent meaning the level's
   `MaxDpbFrames` (hundreds of ms on High profile streams that never reorder),
@@ -60,7 +67,10 @@ Decided 2026-10-22 by the maintainer, after the TS root-cause audit:
   `js/publish` refuses encoder output that reorders, since WebCodecs exposes
   no B-frame setting to declare.
 - An exporter that reads a frame reordered deeper than its rendition's
-  `reorder` refuses the export, never authors an invalid DTS. This bounds the
+  `reorder` refuses the export, never authors an invalid DTS. So does a
+  `reorder` above the codec level's `MaxDpbFrames` (at most 16), which no
+  conformant stream can reach, and a nonzero `reorder` on a codec whose
+  presentation order is its decode order. This bounds the
   clock's held frames by the declared depth whatever the timestamps do, which
   replaces the release audit's export-reorder quest: flat or backward PTS can
   no longer hold frames without bound or drain quadratically.
@@ -71,12 +81,15 @@ catalog, `js/publish`. Draft: `drafts/draft-lcurley-moq-hang.md` (the field
 and its absent meaning), `drafts/draft-lcurley-moq-mpegts.md` (how export
 authors DTS). Public API and wire: an optional catalog field whose absence
 now means "never reorders", a breaking change for any producer that reorders
-without it; add a `MIGRATE.md` entry for `hang` and `@moq/hang`.
+without it; add a `MIGRATE.md` entry for `hang`, `@moq/hang` and `moq-mux`, whose
+direct users must now set it.
 
 Tests: two exporters joining one B-frame source at different groups, and one
 losing a group, author identical DTS for every group both read, in TS, MKV
 and FLV; a stream without `reorder` exports with DTS equal to PTS; a frame
-reordered past the declared depth refuses the export; a source deepening its
+reordered past the declared depth refuses the export, and so does a `reorder`
+above the level's `MaxDpbFrames`; a framerate change mid-rendition leaves every
+DTS unchanged; a source deepening its
 reordering publishes a new rendition; flat and backward PTS through MKV and
 TS export retain at most `reorder` frames, swept over item count and payload
 size; each importer sets `reorder` from the SPS and from source offsets.
