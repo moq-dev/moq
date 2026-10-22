@@ -4,13 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+Each entry is a change from `quinn-proto`.
+
 ### Wall times use `moq_clock::Wall`
 
 `TimeSource::now` and `TokenLog::check_and_insert` take or return `moq_clock::Wall` in place of `SystemTime`.
 Custom clocks return `moq_clock::wall()` or convert third-party timestamps with `Wall::try_from`.
 The wall range is 1970-2554; encoded token seconds are unchanged, and out-of-range issue times or expiry arithmetic refuse a token instead of overflowing.
-
-Each entry is a change from `quinn-proto`.
 
 ### `StreamEvent::Acked` (#5817)
 

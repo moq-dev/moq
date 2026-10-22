@@ -186,11 +186,11 @@ enum Command {
 		#[usage(long)]
 		subscribe: Vec<Pattern>,
 
-		/// Expiration time as Unix seconds within 1970-2554.
+		/// Expiration time as a unix timestamp.
 		#[usage(long)]
 		expires: Option<UnixTimestamp>,
 
-		/// Issued-at time as Unix seconds within 1970-2554.
+		/// Issued-at time as a unix timestamp.
 		#[usage(long)]
 		issued: Option<UnixTimestamp>,
 	},
@@ -603,11 +603,10 @@ impl std::str::FromStr for UnixTimestamp {
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		let timestamp = s.parse::<i64>().context("expected unix timestamp")?;
 		let timestamp = timestamp.try_into().context("timestamp out of range")?;
-		// Reject timestamps outside Wall's portable 1970-2554 range.
-		let value = moq_clock::Wall::UNIX_EPOCH
-			.checked_add(std::time::Duration::from_secs(timestamp))
-			.context("timestamp out of range")?;
-		Ok(Self(value))
+		// Past 2554 saturates, like a decoded token time.
+		Ok(Self(
+			moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::from_secs(timestamp)),
+		))
 	}
 }
 
@@ -981,9 +980,10 @@ mod tests {
 	}
 
 	#[test]
-	fn timestamp_past_the_wall_range_is_rejected() {
-		assert!(i64::MAX.to_string().parse::<UnixTimestamp>().is_err());
-		assert!("18446744074".parse::<UnixTimestamp>().is_err());
-		assert!("18446744073".parse::<UnixTimestamp>().is_ok());
+	fn timestamp_past_the_wall_range_saturates() {
+		let last = moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
+		let parse = |text: &str| moq_clock::Wall::from(text.parse::<UnixTimestamp>().unwrap());
+		assert_eq!(parse(&i64::MAX.to_string()), last);
+		assert!(parse("18446744073") < last);
 	}
 }

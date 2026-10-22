@@ -984,10 +984,7 @@ async fn admit_http(
 		.or_else(|| query.jwt.map(|jwt| format!("jwt={jwt}")));
 	request.server_name = request_host(uri, headers);
 	request.remote = Some(remote.0);
-	request.tls = mtls
-		.map(|Extension(MtlsPeer(identity))| auth::peer(&identity))
-		.transpose()?
-		.flatten();
+	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
 	// The listener's timeout bounds admission as it bounds the request headers. An
 	// HTTP read has no handshake deadline to inherit, so the bound starts here.
 	let admit = state.auth.admit(request);

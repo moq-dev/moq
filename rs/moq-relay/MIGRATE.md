@@ -10,7 +10,6 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 `session::View::started` uses `moq_clock::Wall` instead of `SystemTime`.
 Convert with `SystemTime::from` at a third-party boundary, or measure since `Wall::UNIX_EPOCH` with `saturating_duration_since`.
 The session JSON still carries integer Unix seconds.
-`auth::request_for` now returns `Result<Request, auth::Error>`; propagate the result and refuse an unrepresentable certificate expiry with the existing request error instead of treating it as unbounded.
 
 ### WebSocket clients must offer a QMux subprotocol (#6231)
 

@@ -1,30 +1,25 @@
 //! JSON adapters that preserve existing wall-time encodings.
 
 use crate::Wall;
-use ::serde::{Deserializer, Serializer};
+use ::serde::{Deserialize, Deserializer, Serializer};
 use serde_with::{DeserializeAs, SerializeAs, TimestampSeconds};
 
 /// Encode a wall time as whole Unix seconds, matching serde_with's integer timestamp adapter.
+///
+/// Decoding saturates: before 1970 reads as the epoch, and past 2554 as Wall's last time.
 pub struct UnixSeconds;
 
 impl SerializeAs<Wall> for UnixSeconds {
 	fn serialize_as<S: Serializer>(value: &Wall, serializer: S) -> Result<S::Ok, S::Error> {
-		let since = value.saturating_duration_since(Wall::UNIX_EPOCH);
-		// The integer adapter rounds to the nearest second. Refuse a rounding
-		// carry past Wall's range rather than write a time our reader cannot read.
-		if since.as_secs() == u64::MAX / 1_000_000_000 && since.subsec_nanos() >= 500_000_000 {
-			return Err(::serde::ser::Error::custom(
-				"rounded Unix seconds exceed the wall time range",
-			));
-		}
 		TimestampSeconds::<i64>::serialize_as(&std::time::SystemTime::from(*value), serializer)
 	}
 }
 
 impl<'de> DeserializeAs<'de, Wall> for UnixSeconds {
 	fn deserialize_as<D: Deserializer<'de>>(deserializer: D) -> Result<Wall, D::Error> {
-		let value: std::time::SystemTime = TimestampSeconds::<i64>::deserialize_as(deserializer)?;
-		Wall::try_from(value).map_err(::serde::de::Error::custom)
+		let seconds = i64::deserialize(deserializer)?;
+		let since = std::time::Duration::from_secs(u64::try_from(seconds).unwrap_or(0));
+		Ok(Wall::UNIX_EPOCH.saturating_add(since))
 	}
 }
 
@@ -68,24 +63,20 @@ mod tests {
 	}
 
 	#[test]
-	fn refuses_rounding_past_the_wall_range() {
-		let seconds = u64::MAX / 1_000_000_000;
-		let last = Wall::UNIX_EPOCH + Duration::new(seconds, 499_999_999);
+	fn saturates_outside_the_wall_range() {
+		let last = Wall::UNIX_EPOCH.saturating_add(Duration::MAX);
+		for (seconds, expected) in [
+			(i64::MIN, Wall::UNIX_EPOCH),
+			(-1, Wall::UNIX_EPOCH),
+			(18_446_744_074, last),
+			(i64::MAX, last),
+		] {
+			let value: Value = serde_json::from_str(&format!(r#"{{"wall":{seconds}}}"#)).unwrap();
+			assert_eq!(value.wall, Some(expected));
+		}
+		// The last wall time rounds up past the range and reads back as itself.
 		let json = serde_json::to_string(&Value { wall: Some(last) }).unwrap();
-		assert_eq!(
-			serde_json::from_str::<Value>(&json).unwrap().wall,
-			Some(Wall::UNIX_EPOCH + Duration::from_secs(seconds))
-		);
-		for nanos in [500_000_000, (u64::MAX % 1_000_000_000) as u32] {
-			let wall = Wall::UNIX_EPOCH + Duration::new(seconds, nanos);
-			assert!(serde_json::to_string(&Value { wall: Some(wall) }).is_err());
-		}
-	}
-
-	#[test]
-	fn refuses_values_outside_the_wall_range() {
-		for seconds in [-1, 18_446_744_074, i64::MAX] {
-			assert!(serde_json::from_str::<Value>(&format!(r#"{{"wall":{seconds}}}"#)).is_err());
-		}
+		assert_eq!(json, r#"{"wall":18446744074}"#);
+		assert_eq!(serde_json::from_str::<Value>(&json).unwrap().wall, Some(last));
 	}
 }

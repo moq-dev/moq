@@ -8,7 +8,8 @@ How to update your code for each breaking change, newest first.
 
 `Claims::{expires,issued,not_before}`, their builder arguments, `Grant::expires`, and `request::Peer::expires` use `moq_clock::Wall` instead of `SystemTime`.
 Stamp them with `moq_clock::wall()`, or use `Wall::try_from` for third-party timestamps.
-JWT and auth JSON still encode integer Unix seconds, with the same rounding; decoding dates before 1970 or past 2554 now fails on every platform.
+JWT and auth JSON still encode integer Unix seconds, with the same rounding.
+Decoding saturates on every platform: a time before 1970 reads as `Wall::UNIX_EPOCH` and one past 2554 as the last representable `Wall`, so expiry checks are unchanged.
 
 ### `Client::connect` has no timeout of its own (#5765)
 

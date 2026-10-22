@@ -1049,7 +1049,7 @@ impl Admission {
 
 /// The `moq_auth::Request` for an accepted transport request: every fact the
 /// transport knows, nothing parsed on the server's behalf.
-pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Result<Request, Error> {
+pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request {
 	let transport = transport(request.transport());
 	// A URL-less transport reports its root as empty; the contract says what was dialed.
 	let path = match request.path() {
@@ -1070,8 +1070,8 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Result<
 		.or_else(|| request.authority().map(str::to_owned));
 	out.alpn = request.alpn().map(str::to_owned);
 	out.role = request.role().and_then(role);
-	out.tls = request.peer_identity().as_ref().map(peer).transpose()?.flatten();
-	Ok(out)
+	out.tls = request.peer_identity().as_ref().and_then(peer);
+	out
 }
 
 /// Build an auth request from the path, credential, and role carried in SETUP.
@@ -1120,18 +1120,14 @@ pub(crate) fn role(role: moq_net::Role) -> Option<moq_auth::Role> {
 }
 
 /// The certificate facts for a verified peer, or `None` when the chain does not parse.
-pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Result<Option<moq_auth::Peer>, Error> {
-	let Some(fingerprint) = identity.fingerprint() else {
-		return Ok(None);
-	};
-	Ok(Some(moq_auth::Peer {
+pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::Peer> {
+	let fingerprint = identity.fingerprint()?;
+	Some(moq_auth::Peer {
 		name: identity.name().unwrap_or_else(|| fingerprint.clone()),
 		fingerprint,
-		expires: identity
-			.expiry()
-			.map_err(|err| Error::Request(format!("certificate expiry: {err}")))?,
+		expires: identity.expiry(),
 		issuer: identity.issuer().unwrap_or_default(),
-	}))
+	})
 }
 
 #[cfg(test)]

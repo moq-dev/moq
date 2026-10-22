@@ -402,8 +402,7 @@ moq auth serve --listen 127.0.0.1:4440 --key-dir keys/ --public-subscribe 'anon/
 ```
 
 `--publish` and `--subscribe` take patterns: `alice` is one broadcast,
-`alice/**` is a subtree, `**` is everything under `--root`.
-`auth sign --expires` and `--issued` take Unix seconds within 1970-2554. `moq auth serve`
+`alice/**` is a subtree, `**` is everything under `--root`. `moq auth serve`
 answers a relay's auth requests with the same keys (see [Auth
 server](/bin/relay/auth#auth-server)). `moq auth sessions` and
 `moq auth revalidate` list and re-check sessions on a relay's internal

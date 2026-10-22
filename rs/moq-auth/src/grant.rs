@@ -245,11 +245,20 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn refuses_expiry_outside_the_wall_range() {
-		for expires in [-1, 18_446_744_074, i64::MAX] {
-			assert!(serde_json::from_value::<Grant>(serde_json::json!({"publish":["**"],"expires":expires})).is_err());
-		}
+	#[moq_clock::test]
+	async fn expiry_saturates_to_the_wall_range() {
+		let parse = |expires: i64| {
+			serde_json::from_value::<Grant>(serde_json::json!({"publish":["**"],"expires":expires})).unwrap()
+		};
+		let past = parse(-1);
+		assert_eq!(past.expires, Some(Wall::UNIX_EPOCH));
+		assert!(matches!(past.validate(), Err(crate::Error::GrantExpired)));
+
+		// The furthest expiry the wire carries must not overflow the instant.
+		let far = parse(i64::MAX);
+		assert_eq!(far.expires, Some(Wall::UNIX_EPOCH.saturating_add(Duration::MAX)));
+		far.validate().unwrap();
+		far.deadline();
 	}
 
 	#[test]

@@ -6,10 +6,9 @@ How to update your code for each breaking change, newest first.
 
 ### Certificate expiry uses `moq_clock::Wall`
 
-`tls::PeerIdentity::expiry` returns `Result<Option<moq_clock::Wall>, moq_clock::OutOfRange>` in place of `Option<SystemTime>`; use `peer.expiry()?`.
+`tls::PeerIdentity::expiry` returns `Option<moq_clock::Wall>` in place of `Option<SystemTime>`.
 Convert with `SystemTime::from` only where a third-party API needs it.
-A certificate expiry outside the portable 1970-2554 wall range returns `Err`, while a missing or unparseable certificate still returns `Ok(None)`.
-Certificate-backed relay admission therefore refuses a leaf with an expiry beyond that range, including rcgen's default year 4096; issue certificates with a representable `notAfter` to use this policy.
+A `notAfter` past 2554, such as rcgen's default year 4096, saturates to the last representable `Wall`, and one before 1970 to `Wall::UNIX_EPOCH`.
 
 ### qmux sessions are qmux 0.7 (#6231)
 

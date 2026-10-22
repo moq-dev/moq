@@ -45,7 +45,7 @@ pub trait Sealed: Sized {
 	fn transport(&self) -> impl std::fmt::Display + use<Self>;
 
 	/// What the auth decider is asked about this session.
-	fn admission(&self, auth: &auth::Auth) -> Result<moq_auth::Request, auth::Error>;
+	fn admission(&self, auth: &auth::Auth) -> moq_auth::Request;
 
 	/// Finish `work` before the handshake deadline, closing the session if it passes.
 	async fn within<T>(&self, work: impl std::future::Future<Output = T>) -> anyhow::Result<T>;
@@ -86,7 +86,7 @@ impl Sealed for moq_tokio::server::Request {
 		moq_tokio::server::Request::transport(self)
 	}
 
-	fn admission(&self, auth: &auth::Auth) -> Result<moq_auth::Request, auth::Error> {
+	fn admission(&self, auth: &auth::Auth) -> moq_auth::Request {
 		auth::request_for(auth, self)
 	}
 
@@ -157,8 +157,8 @@ impl<S: poll::Boxable> Sealed for Accepted<S> {
 		self.transport.as_str()
 	}
 
-	fn admission(&self, auth: &auth::Auth) -> Result<moq_auth::Request, auth::Error> {
-		Ok(auth::request_for_setup(auth, &self.handshake, self.transport))
+	fn admission(&self, auth: &auth::Auth) -> moq_auth::Request {
+		auth::request_for_setup(auth, &self.handshake, self.transport)
 	}
 
 	/// No listener deadline: whoever owns the transport bounds the handshake.
