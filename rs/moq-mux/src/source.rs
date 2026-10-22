@@ -260,7 +260,8 @@ impl Source {
 	///
 	/// Unlike [`resolve`](Self::resolve), this issues the request without awaiting or polling.
 	/// A path nothing announces yet resolves once something does, and a remote or dynamic
-	/// handler may answer later. Once answered, the binding never resolves the path again, even
+	/// handler may answer later. A client session that only discovers what is watched is asked
+	/// about the path while the binding waits. Once answered, the binding never resolves the path again, even
 	/// after its publisher is replaced or goes; [`follow`](Self::follow) does.
 	///
 	/// A path this source already resolved binds to that broadcast; otherwise the origin is
@@ -577,6 +578,46 @@ mod tests {
 			source.subscribe_track(None, None, "late").await.is_err(),
 			"the replacement's track is never read"
 		);
+	}
+
+	/// A sibling resolves through the session that announces it, even while another lazily
+	/// discovering session on the origin never answers its announce request.
+	#[tokio::test(start_paused = true)]
+	async fn a_stalled_session_does_not_hold_up_a_sibling() {
+		use crate::container::test_util::Link;
+
+		let healthy = produce_origin();
+		let _catalog = healthy.publish("a/pub", Default::default()).unwrap();
+		let _sibling = healthy.publish("a/source", Default::default()).unwrap();
+		let stalled = produce_origin();
+		let subscriber = produce_origin();
+		let _healthy = Link::lazy(&healthy, &subscriber, true).await;
+		let _stalled = Link::lazy(&stalled, &subscriber, false).await;
+
+		let timeout = std::time::Duration::from_secs(5);
+		let consumer = subscriber.consume();
+		let catalog = tokio::time::timeout(timeout, consumer.routed_broadcast("a/pub"))
+			.await
+			.expect("the catalog resolves")
+			.unwrap();
+		let source = Source::new(consumer, catalog);
+		let sibling = tokio::time::timeout(timeout, source.resolve(Some(&Relative::new("./source")), None))
+			.await
+			.expect("the sibling resolves without the stalled session")
+			.unwrap();
+		assert!(!sibling.is_closed());
+
+		// Nothing serves a later sibling yet and the stalled session never syncs, so its
+		// lookup keeps waiting rather than failing, and resolves once it is published.
+		let binding = source.bind(Some(&Relative::new("./late")), None).unwrap();
+		settle().await;
+		assert!(binding.poll_broadcast(&kio::Waiter::noop()).is_pending());
+		let _late = healthy.publish("a/late", Default::default()).unwrap();
+		let late = tokio::time::timeout(timeout, binding.broadcast())
+			.await
+			.expect("the later sibling resolves")
+			.unwrap();
+		assert!(!late.is_closed());
 	}
 
 	/// A sibling reference stays on the broadcast it first resolved too.

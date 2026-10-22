@@ -122,7 +122,3 @@ restarts that sibling while preserving the catalog's explicit epoch
 constraints; it never mixes instances through an old handle. Check
 exact and covering routes, matching/different/absent epochs, and legacy
 End+Start. The child quests own their focused regressions.
-
-## Related
-
-- [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - requests carry the serving prefix's epoch and new winners cannot reuse an old cached broadcast

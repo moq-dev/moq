@@ -10,6 +10,21 @@ Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.res
 Where you skipped such a rendition on that error, bound the call yourself: cancel the task or wrap it in `asyncio.wait_for`.
 Regenerate the bindings for the changed `resolve` checksum.
 
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announced_broadcast()`, instead of under its whole scope at connect.
+`MoqOriginConsumer.request_broadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
+Resolve the path with `announced_broadcast()`, or hold `announced()` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+Regenerate the bindings for the changed `request_broadcast` checksum.
+
+### Catalog references carry their epoch
+
+`MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names; it defaults to `None`, so only positional construction changes.
+`MoqBroadcastConsumer.resolve` takes the rendition's `epoch` after `reference`; pass it alongside, or `None` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, raise `MoqError.Mux` for a rendition whose broadcast is proven to serve another epoch.
+Rebuild or reinstall the complete wheel so its generated Python code and native library match.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer.finish()` lets go, instead of unlisting when its producer finishes or is released.
