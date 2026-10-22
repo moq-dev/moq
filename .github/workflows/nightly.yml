@@ -30,7 +30,7 @@ name: Nightly
 # Main PRs run no cloud CI beyond the merge queue's Check, so every
 # path-filtered gate (Android, C++, WASM, X11, the audio replays, the OSS
 # Scanner image, platform.yml and the release dry-runs) runs here on main too,
-# and on release PRs.
+# and release-gate.yml runs them on release PRs.
 #
 # A failure here lands on main rather than being caught in review, which is the
 # accepted trade. Anything that must block a merge belongs in check.yml.
@@ -173,7 +173,7 @@ jobs:
             artifact-path: target/coverage/js
           # OBS (over moq-ffi) and moq-c's C fixtures link a Rust staticlib from
           # outside cargo, so a stale `rs/moq-c/native-libs/*.txt` breaks them and
-          # no cargo build. obs.yml's path filter can't list every such input;
+          # no cargo build. release-gate.yml's OBS filter can't list every such input;
           # this diff-independent run catches what it misses, a day late.
           - name: OBS
             recipe: obs ci
@@ -226,10 +226,12 @@ jobs:
           path: ${{ matrix.artifact-path }}
           retention-days: 45
 
-  # gh-pages is the one Pages site, including the benchmark regression table and its
-  # history. smoke.yml also commits its relay report there under relays/; each
-  # writer touches only its own directory, deploys the whole branch, and holds
-  # the benchmark-pages group so they never race.
+  # gh-pages is the one Pages site, and each directory has one writer: this job owns
+  # bench/ (the regression table and its history) and the root index listing every
+  # report, smoke.yml owns relays/, and interop.yml owns interop/. Each commits only
+  # its own directory, deploys the whole branch, and holds the benchmark-pages group
+  # so they never race. `queue: max` keeps every waiting writer; the default queue
+  # holds one and cancels the older, which would silently drop a night's report.
   # Explicit Pages deployment works with GITHUB_TOKEN; a branch push alone does not.
   benchmark-site:
     name: Benchmark site
@@ -240,6 +242,7 @@ jobs:
     concurrency:
       group: benchmark-pages
       cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
       pages: write

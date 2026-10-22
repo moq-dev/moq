@@ -43,9 +43,8 @@ with three verdicts:
   stop producing it. Each report on the Pages site owns one `gh-pages`
   directory: its workflow commits only that directory, deploys the whole
   branch, and joins the `benchmark-pages` concurrency group with
-  `queue: max`, so no deploy drops another report (decided 2026-10-20 with the
-  [interop report](/quest/m1/interop-report.md); Nightly's `benchmark-site`
-  comment still claims a single writer until the first second writer lands).
+  `queue: max`, so no deploy drops another report (decided 2026-10-20; the
+  benchmark, relay, and interop reports do, through `sh/gh/pages-publish.sh`).
 - **Cost:** runner-minutes per month by runner type, from the org billing API
   and job timings, against that signal. macOS is the scarce one (a 5-job
   concurrency cap).
@@ -69,9 +68,9 @@ Check first (from the test cost audit's m0 run, 2026-10-19):
   fixture in the entry itself, or a semantic conflict with a PR merged after it
   was queued. Check the entry's head branch and what merged around it before
   calling it a flake.
-- Owned elsewhere: release builds by
-  [release builds link](/quest/m0/release-link.md), and Rust advisories by
-  [the dependency audit](/quest/m1/audit-deps.md).
+- Owned elsewhere: Rust advisories by
+  [the dependency audit](/quest/m1/audit-deps.md). The release toolchain now
+  links.
 - Re-running a single job in place cannot redeploy Pages: the earlier
   attempt's `github-pages` artifact remains and `deploy-pages` refuses two.
   Delete the stale artifact first, or wait for the next Nightly.

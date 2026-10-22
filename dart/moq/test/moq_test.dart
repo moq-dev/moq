@@ -387,6 +387,26 @@ void main() {
     second.close();
   });
 
+  test('a finished broadcast lingers until closed', () async {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(
+      name: 'status',
+      info: TrackInfo(maxAgeUs: 3600000000),
+    );
+    track.finish();
+    final finish = broadcast.finish();
+    expect(finish.linger, const Duration(hours: 1));
+    expect(
+      () => broadcast.publishTrack(name: 'events', info: null),
+      throwsA(isA<ClosedMoqException>()),
+    );
+    // A Dart future can't be cancelled, so closing is the interrupt: the wait
+    // ends instead of lingering for an hour.
+    final wait = finish.wait();
+    finish.close();
+    await wait.timeout(timeout);
+  });
+
   test('microsecond fields read back as Durations', () {
     final backoff = Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000);
     expect(backoff.initial, const Duration(milliseconds: 1));

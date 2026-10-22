@@ -1,7 +1,7 @@
 import { expect, setSystemTime, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
-import { ProtocolViolation, StreamCode, TimestampMismatch, TooFarBehind } from "./error.ts";
+import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -2694,17 +2694,69 @@ test("an explicit start floors an untimed track", () => {
 	expect(drain(live)).toEqual([4]);
 });
 
+// The error an upstream SUBSCRIBE_DROP gave groups up with.
+const DROPPED = new StreamError(StreamCode.NotFound, { message: "dropped" });
+
 test("explicit and producer-cut drops survive outside the group cache", async () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
-	hooks.dropTrackGroups(producer, 3, 4);
-	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 3, end: 4 });
+	hooks.dropTrackGroups(producer, 3, 4, DROPPED);
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 3, end: 4, error: DROPPED });
 
 	const group = new GroupProducer(4);
 	producer.writeGroup(group);
-	group.close(new Error("cut"));
+	const cut = new Error("cut");
+	group.close(cut);
 	await settle();
-	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 4, end: 5 });
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 4, end: 5, error: cut });
+
+	reader.close();
+	producer.close();
+});
+
+test("a group ended by a cancel or cache policy is a hole, not a drop", async () => {
+	const producer = new TrackProducer("video").accept({});
+	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
+	const holes = [
+		new StreamError(StreamCode.Cancel, { message: "cancel" }),
+		new StreamError(StreamCode.Old, { message: "old" }),
+		new StreamError(StreamCode.Evicted, { message: "evicted" }),
+		new StreamError(StreamCode.DeliveryTimeout, { message: "late" }),
+		new TooFarBehind(),
+	];
+	for (const [sequence, hole] of holes.entries()) {
+		const group = new GroupProducer(sequence);
+		producer.writeGroup(group);
+		group.close(hole);
+	}
+	await settle();
+	for (const sequence of holes.keys()) expect(hooks.givenUp(reader, sequence).error).toBeUndefined();
+
+	reader.close();
+	producer.close();
+});
+
+test("an upstream drop ends a group still arriving with its error", async () => {
+	const producer = new TrackProducer("video").accept({});
+	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
+	const arriving = new GroupProducer(3);
+	producer.writeGroup(arriving);
+	arriving.writeFrame({ payload: enc.encode("3") });
+	const finished = new GroupProducer(4);
+	producer.writeGroup(finished);
+	finished.writeFrame({ payload: enc.encode("4") });
+	finished.close();
+
+	const group = await reader.recvGroup();
+	expect(group?.sequence).toBe(3);
+	expect(await group?.readString()).toBe("3");
+	const cut = new StreamError(StreamCode(70), { message: "cut" });
+	hooks.dropTrackGroups(producer, 3, 5, cut);
+	// Settled by the drop itself, not a later reset; the finished group stays whole.
+	await expect(group?.readString()).rejects.toBe(cut);
+	const whole = await reader.recvGroup();
+	expect(whole?.sequence).toBe(4);
+	expect(await whole?.readString()).toBe("4");
 
 	reader.close();
 	producer.close();
@@ -2713,11 +2765,11 @@ test("explicit and producer-cut drops survive outside the group cache", async ()
 test("a drop below the window is reported once the window lowers to it", () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ maxDelay: Milli(60_000), groups: { start: { included: 5 } } });
-	hooks.dropTrackGroups(producer, 2, 3);
+	hooks.dropTrackGroups(producer, 2, 3, DROPPED);
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "idle" });
 
 	hooks.replaceGroups(reader, { start: { included: 0 } });
-	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2, end: 3 });
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2, end: 3, error: DROPPED });
 
 	reader.close();
 	producer.close();
@@ -2744,13 +2796,39 @@ test("a re-created cut group is served, not dropped", async () => {
 test("a wide drop is held and reported as one run", () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
-	hooks.dropTrackGroups(producer, 2, 2 ** 40);
-	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2, end: 2 ** 40 });
+	hooks.dropTrackGroups(producer, 2, 2 ** 40, DROPPED);
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2, end: 2 ** 40, error: DROPPED });
 
-	// A wider drop reports only what this cursor has not reported yet.
-	hooks.dropTrackGroups(producer, 1, 2 ** 40 + 2);
-	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 1, end: 2 });
-	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2 ** 40, end: 2 ** 40 + 2 });
+	// A wider drop reports only what this cursor has not reported yet, with its own error.
+	const wider = new StreamError(StreamCode.Old, { message: "old" });
+	hooks.dropTrackGroups(producer, 1, 2 ** 40 + 2, wider);
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 1, end: 2, error: wider });
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({
+		kind: "drop",
+		start: 2 ** 40,
+		end: 2 ** 40 + 2,
+		error: wider,
+	});
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "idle" });
+
+	reader.close();
+	producer.close();
+});
+
+test("adjacent drops with the same code merge into one run", () => {
+	const producer = new TrackProducer("video").accept({});
+	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
+	// Each DROP decodes to its own error, so runs must merge by code, not identity.
+	for (let sequence = 2; sequence < 5; sequence++) {
+		hooks.dropTrackGroups(
+			producer,
+			sequence,
+			sequence + 1,
+			new StreamError(StreamCode.NotFound, { message: "dropped" }),
+		);
+	}
+	const recv = hooks.tryRecvGroup(reader, true);
+	expect(recv.kind === "drop" ? [recv.start, recv.end, recv.error] : recv).toEqual([2, 5, DROPPED]);
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "idle" });
 
 	reader.close();
@@ -3239,7 +3317,7 @@ for (const abort of [false, true]) {
 		const next = reader.recvGroup();
 		expect(await settled(next)).toBe(false);
 
-		hooks.dropTrackGroups(producer, 0, 2);
+		hooks.dropTrackGroups(producer, 0, 2, DROPPED);
 		if (abort) producer.close(new Error("dropped"));
 		expect(await next).toBeUndefined();
 		if (abort) expect(await reader.closed).toBeNull();

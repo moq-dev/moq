@@ -219,7 +219,6 @@ unchanged.
 
 ## Related
 
-- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - settles what the same message's Error Code means on lite-07
 - [An evicted group is judged stale](/quest/m1/evicted-group-stale.md) - the sibling for groups a reader already holds after the cache evicts them
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
 - [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - the JS byte bound for groups and the runs between them; not required, since JS runs never outgrow the JS cache

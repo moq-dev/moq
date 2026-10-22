@@ -33,7 +33,7 @@ relay_connections() {
 # after the cell that stalled finished. Every client closes its session on the way out, so
 # each close shows up at once, and an idle-out is a real stall that a reconnect would
 # otherwise hide behind a slow cell. A connection still open after the idle timeout is about
-# to idle out, so it fails the same way.
+# to idle out, so it fails the same way. Returns whether every connection closed.
 check_idle_outs() {
     local pub="$1" from="$2" deadline=$((SECONDS + 15)) id reason role failed=0 connections
     # Plain grep, not -q: under pipefail an early exit fails the pipeline on SIGPIPE.
@@ -44,7 +44,7 @@ check_idle_outs() {
     if [[ -z "$connections" ]]; then
         echo "  FAIL  $pub round: relay log contains no connections"
         overall=1
-        return
+        return 1
     fi
     while read -r id reason; do
         [[ "$reason" == "open" || "$reason" == *"timed out"* ]] || continue
@@ -55,5 +55,8 @@ check_idle_outs() {
         relay_log_since "$from" | grep -E "conn\{id=$id |connection closed id=$id " | sed 's/^/        /'
         failed=1
     done <<<"$connections"
-    ((failed == 0)) || overall=1
+    ((failed == 0)) || {
+        overall=1
+        return 1
+    }
 }

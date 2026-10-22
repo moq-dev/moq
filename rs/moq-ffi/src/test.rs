@@ -1229,7 +1229,8 @@ async fn json_demand() {
 /// A demand handle waits without the producer, and fails once the track is gone.
 ///
 /// A raw track's `finish` keeps its handle open for a later `abort`, so its track ends when the
-/// handle is released; a media producer's `finish` releases it.
+/// handle is released; a media producer's `finish` hands it to the broadcast, so its track ends
+/// when the broadcast does.
 #[tokio::test]
 async fn demand_handle_outlives_finish() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -1254,6 +1255,7 @@ async fn demand_handle_outlives_finish() {
 	track.finish().unwrap();
 	drop(track);
 	media.finish().unwrap();
+	broadcast.close().unwrap();
 	let track_err = tokio::time::timeout(TIMEOUT, track_demand.until_wanted())
 		.await
 		.expect("timed out waiting for the finished raw track");
@@ -3563,6 +3565,162 @@ fn close_twice_is_a_noop() {
 		matches!(err, crate::error::MoqError::Closed),
 		"expected Closed error, got {err}"
 	);
+}
+
+/// A raw track with a millisecond max age, which is what a finish lingers for.
+fn aged_info(max_age_ms: u64) -> MoqTrackInfo {
+	MoqTrackInfo {
+		max_age_us: Some(max_age_ms * 1_000),
+		..timed_info()
+	}
+}
+
+/// Wait for the announcement of `path` to end, failing the test if it doesn't.
+async fn await_unannounced(announced: &MoqAnnounceConsumer) {
+	match next_event(announced).await {
+		MoqAnnounceEvent::End { .. } => {}
+		other => panic!("expected the announcement to end, got {other:?}"),
+	}
+}
+
+/// A finished broadcast stays announced and serves its finished tracks to a late subscriber,
+/// lingering for the longest max age among them; a live track adds nothing.
+#[tokio::test]
+async fn finish_serves_finished_tracks_to_a_late_subscriber() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let broadcast = create_announced(&origin, "finish");
+	next_announced(&announced).await;
+
+	let video = broadcast.publish_track("video".into(), Some(aged_info(2_000))).unwrap();
+	let audio = broadcast.publish_track("audio".into(), Some(aged_info(5_000))).unwrap();
+	let live = broadcast.publish_track("live".into(), Some(aged_info(60_000))).unwrap();
+	for track in [&video, &audio, &live] {
+		track
+			.write_frame(MoqFrame {
+				payload: b"tail".to_vec(),
+				timestamp_us: Some(0),
+			})
+			.unwrap();
+	}
+	video.finish().unwrap();
+	audio.finish().unwrap();
+	// A binding's garbage collector may release a finished handle before the broadcast finishes.
+	drop((video, audio));
+
+	let finish = broadcast.finish().unwrap();
+	assert_eq!(finish.linger_us(), 5_000_000);
+	assert!(matches!(broadcast.consume(), Err(MoqError::Closed)));
+	broadcast.close().unwrap();
+
+	let late = await_announced(&consumer, "finish").await;
+	let track = late.subscribe_track("audio".into(), None).await.unwrap();
+	let frame = tokio::time::timeout(TIMEOUT, track.read_frame())
+		.await
+		.expect("timed out reading the finished track")
+		.unwrap()
+		.expect("expected the finished track's frame");
+	assert_eq!(frame.payload, b"tail");
+
+	finish.close();
+	await_unannounced(&announced).await;
+	finish.close();
+	assert!(matches!(finish.wait().await, Err(MoqError::Closed)));
+	live.finish().unwrap();
+}
+
+/// Media tracks finish through their importer handles, which a finish must still hold.
+#[tokio::test]
+async fn finish_holds_finished_media_tracks() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
+	media
+		.write_frame(MoqFrame {
+			payload: b"opus frame".to_vec(),
+			timestamp_us: Some(0),
+		})
+		.unwrap();
+	media.finish().unwrap();
+	drop(media);
+
+	let finish = broadcast.finish().unwrap();
+	assert!(finish.linger_us() > 0, "the finished media track was not held");
+	finish.close();
+}
+
+/// Without a max age nothing lingers: the wait closes the broadcast at once.
+#[tokio::test]
+async fn finish_without_a_max_age_closes_on_wait() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let broadcast = create_announced(&origin, "finish");
+	next_announced(&announced).await;
+	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
+	track.finish().unwrap();
+
+	let finish = broadcast.finish().unwrap();
+	assert_eq!(finish.linger_us(), 0);
+	tokio::time::timeout(TIMEOUT, finish.wait())
+		.await
+		.expect("the wait outlived a zero linger")
+		.unwrap();
+	await_unannounced(&announced).await;
+}
+
+/// Closing the handle, the interrupt, ends a wait in progress and the broadcast with it.
+#[tokio::test]
+async fn closing_finish_ends_the_wait() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let broadcast = create_announced(&origin, "finish");
+	next_announced(&announced).await;
+	let track = broadcast
+		.publish_track("status".into(), Some(aged_info(3_600_000)))
+		.unwrap();
+	track.finish().unwrap();
+
+	let finish = broadcast.finish().unwrap();
+	let wait = spawn_parked({
+		let finish = finish.clone();
+		async move { finish.wait().await }
+	})
+	.await;
+	finish.close();
+	tokio::time::timeout(TIMEOUT, wait)
+		.await
+		.expect("the wait outlived the close")
+		.expect("the wait panicked")
+		.unwrap();
+	await_unannounced(&announced).await;
+}
+
+/// Dropping a wait in progress, as a cancelled foreign future does, closes the broadcast.
+#[tokio::test]
+async fn cancelling_the_wait_closes_the_broadcast() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let broadcast = create_announced(&origin, "finish");
+	next_announced(&announced).await;
+	let track = broadcast
+		.publish_track("status".into(), Some(aged_info(3_600_000)))
+		.unwrap();
+	track.finish().unwrap();
+
+	let finish = broadcast.finish().unwrap();
+	let mut wait = Box::pin(finish.wait());
+	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(wait.as_mut().poll(cx))).await;
+	assert!(first.is_pending());
+	drop(wait);
+	await_unannounced(&announced).await;
 }
 
 #[tokio::test]

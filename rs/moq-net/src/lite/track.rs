@@ -81,6 +81,29 @@ const COMPRESSION_NONE: u64 = 0;
 /// TRACK_INFO `Compression`: per-group DEFLATE (draft-lcurley-moq-flate).
 const COMPRESSION_DEFLATE: u64 = 1;
 
+/// What reading a track's groups and datagrams needs from its TRACK_INFO and, with the
+/// `ietf` extension, TRACK_PROPERTIES.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Framing {
+	/// The units of every frame Timestamp, or `None` on an untimed track.
+	pub timescale: Option<Timescale>,
+	/// The draft the track's moq-transport publisher spoke, which serialized its objects'
+	/// properties, or `None` for a moq-lite one, which carries no moq-transport state.
+	pub ietf: Option<crate::ietf::Version>,
+	/// The track is compressed, so a datagram's payload follows its inflated size.
+	pub compressed: bool,
+}
+
+impl From<&crate::track::Info> for Framing {
+	fn from(info: &crate::track::Info) -> Self {
+		Self {
+			timescale: info.timescale,
+			ietf: info.ietf(),
+			compressed: info.compress,
+		}
+	}
+}
+
 impl Message for TrackInfo {
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {

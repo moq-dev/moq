@@ -88,12 +88,10 @@ is published; older versions are unchanged.
 - [In-band auth](/quest/m1/auth/README.md) - lite-07 carries the Auth Stream and UNAUTHORIZED (0x3B)
 - [Identity proof](/quest/m1/cluster-routing/identity.md) - lite-07 carries the routing key and its per-session proof
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
-- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - settles what lite-07's DROP Error Code means
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 - [Compressed tracks in js/net](/quest/m1/compress/js.md) - JS reads and writes compressed lite-07 tracks instead of refusing them
 - [TRACKS in js/net](/quest/m1/archive/tracks-js.md) - JS speaks lite-07's Tracks Stream, which Rust already does
-- [Ingress-version provenance](/quest/m1/ietf-extension/lite.md) - the `ietf` extension carries a track's ingress version once instead of a code per block
 - [lite-07 padding](/quest/m1/lite07-padding.md) - lite-07 reserves the padding stream type the browser probes with
 
 ## Related

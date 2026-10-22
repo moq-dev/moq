@@ -8,7 +8,7 @@ trap 'rm -rf "$HARNESS_RUN"' EXIT
 # Connections from an earlier round cannot satisfy the current round's accounting.
 printf '%s\n' 'INFO conn{id=1 remote=localhost}: accepted' 'INFO connection closed id=1' >"$HARNESS_RUN/relay.log"
 overall=0
-check_idle_outs empty 3 >"$HARNESS_RUN/result"
+if check_idle_outs empty 3 >"$HARNESS_RUN/result"; then exit 1; fi
 [[ "$overall" == 1 ]]
 grep 'relay log contains no connections' "$HARNESS_RUN/result"
 
@@ -21,7 +21,7 @@ check_idle_outs clean 3
 
 printf '%s\n' 'INFO conn{id=3 remote=localhost}: accepted' 'WARN connection closed id=3 err=timed out' >>"$HARNESS_RUN/relay.log"
 overall=0
-check_idle_outs timeout 6 >"$HARNESS_RUN/result"
+if check_idle_outs timeout 6 >"$HARNESS_RUN/result"; then exit 1; fi
 [[ "$overall" == 1 ]]
 grep 'idled out instead of closing' "$HARNESS_RUN/result"
 

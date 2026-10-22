@@ -17,7 +17,7 @@ route dies, since its subscriptions then end with an error.
 Decided with the maintainer on 2026-10-20: widened from the server and push
 sinks to every moq-cli and moq-gst reader. Following a catalog's references
 to other broadcasts stays with
-[catalog references](/quest/m0/broadcast-epoch/catalog-references.md).
+[reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md).
 
 Readers with their own follow loop today move onto `announced_broadcast`:
 
@@ -50,7 +50,7 @@ Audit and fix the rest the same way:
   on the new instance.
 
 Share one helper (a `moq_mux` `Source::follow`-style API per
-[catalog references](/quest/m0/broadcast-epoch/catalog-references.md))
+[reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md))
 rather than one rule per reader, built on `announced_broadcast`. Each fix
 lands with a test that replaces the publisher while the reader runs.
 
