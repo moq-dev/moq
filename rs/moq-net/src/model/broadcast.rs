@@ -1860,7 +1860,7 @@ mod test {
 		);
 	}
 
-	/// A replacement can't declare an end in or below a group an earlier producer of the name
+	/// A replacement can't declare an end below a group an earlier producer of the name
 	/// wrote: a subscriber that received that group would read it as a contradiction.
 	#[test]
 	fn replacement_refuses_an_end_below_its_predecessor() {
@@ -1871,15 +1871,10 @@ mod test {
 		drop(first);
 
 		let mut second = producer.create_track("media", crate::track::Info::timed()).unwrap();
-		for end in [
-			crate::track::Position::group(0),
-			crate::track::Position { group: 0, frame: 1 },
-		] {
-			assert!(
-				matches!(second.finish_at(end), Err(Error::ProtocolViolation)),
-				"{end:?}"
-			);
-		}
+		assert!(matches!(
+			second.finish_at(crate::track::Position::group(0)),
+			Err(Error::ProtocolViolation)
+		));
 		second.finish_at(crate::track::Position::group(1)).unwrap();
 	}
 

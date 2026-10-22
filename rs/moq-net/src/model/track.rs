@@ -390,9 +390,6 @@ pub(crate) struct TrackState {
 	// The name's sequence namespace within the broadcast, which can run past this track's
 	// `max_sequence` when an earlier producer of the name wrote further.
 	sequence: Sequence,
-	// One past the highest sequence earlier producers of the name wrote, as of joining its
-	// namespace: a replacement continues their timeline, so it neither ends nor waits below.
-	inherited: u64,
 
 	// The checked starts cached groups hold, by sequence (see [`group::Origin::Bound`]), so a
 	// first frame finds its neighbors without walking groups not yet stamped. Filled through
@@ -2205,7 +2202,7 @@ impl TrackState {
 	fn edge(&self) -> u64 {
 		self.max_sequence
 			.map_or(0, |max| max.saturating_add(1))
-			.max(self.inherited)
+			.max(self.sequence.next())
 	}
 
 	/// Whether a group below `fin` the wire subscription still owes has yet to arrive.
@@ -2942,7 +2939,7 @@ impl Producer {
 		};
 		// A replacement continues its name's timeline: ending below an earlier producer's
 		// groups would contradict the ones subscribers already received.
-		let final_sequence = final_sequence.max(state.inherited);
+		let final_sequence = final_sequence.max(state.sequence.next());
 		state.set_end(Position::group(final_sequence))
 	}
 
@@ -2963,8 +2960,8 @@ impl Producer {
 	///
 	/// Repeating the declared end is a no-op, and a mid-group end may refine the group
 	/// boundary it falls just before (a peer may name only the boundary first). Any other
-	/// second end is [`Error::ProtocolViolation`], and so is one in or below a group an
-	/// earlier producer of the name wrote, which a replacement continues.
+	/// second end is [`Error::ProtocolViolation`], and so is one below a group an earlier
+	/// producer of the name wrote, which a replacement continues.
 	///
 	/// On a [received](Self::received) copy, groups below the end may still be in flight:
 	/// readers wait for a missing one until a grace passes, the subscription's max delay
@@ -2972,7 +2969,7 @@ impl Producer {
 	pub fn finish_at(&mut self, end: Position) -> Result<()> {
 		let mut state = self.modify()?;
 		// A received copy answers to its publisher's end, which the session judges.
-		if !state.received && end.group < state.inherited {
+		if !state.received && end.final_sequence().is_some_and(|fin| fin < state.sequence.next()) {
 			return Err(Error::ProtocolViolation);
 		}
 		match state.end {
@@ -3516,7 +3513,6 @@ fn set_sequence(state: &kio::Producer<TrackState>, sequence: Sequence) {
 	// A replacement's consumers want the group past what earlier producers wrote.
 	let next = sequence.next();
 	state.sequence = sequence;
-	state.inherited = next;
 	let subscriptions = state.subscriptions.clone();
 	drop(state);
 	let mut wakes = subscriptions.lock().want(next);

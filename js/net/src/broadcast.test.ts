@@ -134,7 +134,6 @@ test("an empty replacement ends past its predecessor's groups", async () => {
 	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
 	const subscriber = second.subscribe();
 	expect(() => second.finishAt({ group: 0, frame: 0 })).toThrow(ProtocolViolation);
-	expect(() => second.finishAt({ group: 0, frame: 1 })).toThrow(ProtocolViolation);
 	second.close();
 	expect(await subscriber.finished()).toEqual({ group: 1, frame: 0 });
 	broadcast.close();
