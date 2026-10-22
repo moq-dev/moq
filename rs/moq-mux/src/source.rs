@@ -367,7 +367,8 @@ impl Binding {
 ///
 /// A client session only asks its peer about paths something watches, so a sibling no
 /// listing covers would be unroutable when asked at once. Watching the path first and
-/// asking once that watch syncs answers from what the peer announces. An origin that
+/// asking once that watch reports a route, or syncs without one, answers from what the
+/// peer announces. An origin that
 /// already knows its routes syncs at once, so the request still goes out on binding.
 struct Lookup {
 	origin: moq_net::origin::Consumer,
@@ -399,9 +400,20 @@ impl Lookup {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<moq_net::broadcast::Consumer, moq_net::Error>> {
 		if self.request.is_none() {
 			if let Some(watch) = &mut self.watch {
-				// Synced only counts once every event queued before it was read.
-				while let Poll::Ready(Some(_)) = watch.poll_next(waiter) {}
-				ready!(watch.poll_synced(waiter));
+				// Ask as soon as any session reports a route: waiting for every session to
+				// sync would let one that never answers hold the lookup up. Synced only
+				// concludes that none serves the path, once every queued event is read.
+				let mut routed = false;
+				loop {
+					match watch.poll_next(waiter) {
+						Poll::Ready(Some(moq_net::announce::Event::End(_))) => routed = false,
+						Poll::Ready(Some(_)) => routed = true,
+						Poll::Ready(None) | Poll::Pending => break,
+					}
+				}
+				if !routed {
+					ready!(watch.poll_synced(waiter));
+				}
 			}
 			self.watch = None;
 			self.request = Some(self.origin.request_broadcast(&self.path, None).into_inner());
@@ -537,6 +549,34 @@ mod tests {
 			source.subscribe_track(None, None, "late").await.is_err(),
 			"the replacement's track is never read"
 		);
+	}
+
+	/// A sibling resolves through the session that announces it, even while another lazily
+	/// discovering session on the origin never answers its announce request.
+	#[tokio::test]
+	async fn a_stalled_session_does_not_hold_up_a_sibling() {
+		use crate::container::test_util::Link;
+
+		let healthy = produce_origin();
+		let _catalog = healthy.publish("a/pub", Default::default()).unwrap();
+		let _sibling = healthy.publish("a/source", Default::default()).unwrap();
+		let stalled = produce_origin();
+		let subscriber = produce_origin();
+		let _healthy = Link::lazy(&healthy, &subscriber, true).await;
+		let _stalled = Link::lazy(&stalled, &subscriber, false).await;
+
+		let timeout = std::time::Duration::from_secs(5);
+		let consumer = subscriber.consume();
+		let catalog = tokio::time::timeout(timeout, consumer.routed_broadcast("a/pub"))
+			.await
+			.expect("the catalog resolves")
+			.unwrap();
+		let source = Source::new(consumer, catalog);
+		let sibling = tokio::time::timeout(timeout, source.resolve(Some(&Relative::new("./source")), None))
+			.await
+			.expect("the sibling resolves without the stalled session")
+			.unwrap();
+		assert!(!sibling.is_closed());
 	}
 
 	/// A sibling reference stays on the broadcast it first resolved too.
