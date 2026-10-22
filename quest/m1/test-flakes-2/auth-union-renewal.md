@@ -35,4 +35,10 @@ swallowed. Then, if the 255 is real, correct the aggregate. Add a test with a
 mocked clock that tears the stream mid-update. Check the Rust subscriber for
 the same split write.
 
+The test's draft matrix runs only drafts 17 and 22, but
+`SubscribeUpdate`'s encode has a separate draft 14-16 path (an extra request
+ID and different fields). Add a representative draft 14-16 case, or every
+supported IETF ALPN, to both the existing test and the new one, so the
+legacy encoding is covered too.
+
 Public API: none. Wire: none.

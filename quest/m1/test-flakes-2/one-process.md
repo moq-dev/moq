@@ -33,10 +33,17 @@ Crypto provider: `rs/moq-relay/tests/integration/wire_stats.rs:20` unwraps
 binary ignores the result, so a second install panics. Match the rest, or
 install once for the binary.
 
-Grep the workspace for other `set_var`/`remove_var` calls in tests (moq-cli's
-`EnvGuard` serializes its own) and fix any that leak. Verify with a
-`cargo test` run of each touched crate as well as nextest. Make the
-`set_var` ban stick if a lint can do it cheaply, for example clippy's
-`disallowed_methods` in test code.
+Guarded writes count too: `moq-cli`'s `EnvGuard` (`rs/moq-cli/src/test_env.rs`)
+and the similarly guarded `moq-relay` config tests (`rs/moq-relay/src/config.rs`)
+serialize their own writes, but a guard only orders the tests that take it,
+not a `getenv` on any other thread. These test clap's `env` fallbacks, and
+clap reads the process environment with no injection hook, so run each such
+test in a child process given its environment by `Command::env` and
+`env_remove` (for example the test binary re-run on that one test), and drop
+`EnvGuard`. Grep the workspace for every other `set_var`/`remove_var` call in
+tests and move it the same way. Verify with a
+`cargo test` run of each touched crate as well as nextest. With no write
+left, make the ban stick with clippy's `disallowed_methods` on
+`std::env::set_var` and `remove_var`, workspace-wide.
 
 Public API: none. Wire: none.
