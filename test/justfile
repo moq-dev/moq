@@ -96,14 +96,16 @@ media *args:
 
 # Disrupts a real relay over real QUIC three ways: cancel a stalled reader, kill
 # the relay mid-group, and republish an interrupted publisher's name. Ordinary
-# tests, so `just check` runs them whenever moq-relay is selected; this is the
-# focused loop. Takes a filter, e.g. `just test drill relay_killed`. Includes the
-# no-publisher negative control. See drill/README.md.
+# tests, so `just check` runs the loopback lane whenever moq-relay is selected;
+# the impaired lane is ignored there and runs nightly as `just test drill impaired`.
+# This is the focused loop, both lanes. Takes a filter, e.g.
+# `just test drill relay_killed`. Includes the no-publisher negative control. See
+# drill/README.md.
 
 # Transport and lifecycle failure drills.
 [positional-arguments]
 drill *args:
-    just rs test -p moq-relay --test drills "$@"
+    just rs test -p moq-relay --test drills --run-ignored all "$@"
 
 # Play through a private Linux null device using the shipped headless binary.
 native-play:
@@ -161,6 +163,7 @@ ts *args:
     python3 ./ts/holes.test.py
     python3 ./ts/passthrough.test.py
     python3 ./ts/klv.test.py
+    python3 ./ts/clockless.test.py
     ./ts/run.sh "$@"
 
 # Carry a hardware encoder's capture, which the T-STD model passes, whole through the round-trip.

@@ -2432,7 +2432,7 @@ mod tests {
 	/// merely that one appeared: the task publishes once before it can notice its
 	/// producer is gone, so a first announcement races through either way and
 	/// proves nothing.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn stats_publishing_outlives_the_producer_handle() {
 		let config = crate::stats::Config {
 			enabled: true,

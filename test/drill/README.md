@@ -7,9 +7,11 @@ under a name it already used, and bursts of small groups crossing a two-relay
 cluster, with its peer link steady, flapping, or on moq-transport.
 
 The drills themselves are ordinary Rust integration tests in
-`rs/moq-relay/tests/drills.rs`, so `just check` already runs them whenever
-moq-relay or anything under it changes. This directory holds the focused recipe
-and the sensitivity proof.
+`rs/moq-relay/tests/drills.rs`, so `just check` already runs their loopback
+lane whenever moq-relay or anything under it changes. The impaired lane is
+`#[ignore]`d there and runs nightly (see [Two lanes](#two-lanes)). This
+directory holds the focused recipe, which runs both lanes, and the sensitivity
+proof.
 
 ```bash
 just test drill                 # the drills, plus the negative control
@@ -86,7 +88,9 @@ that port back fails every run.
 
 Every drill runs twice, as `<drill>::loopback` and `<drill>::impaired`. The
 `lanes!` macro generates both from one body, so a scenario cannot drift between
-them. In the impaired lane every client dials a `moq-shaper` in front of the
+them. The impaired lane draws a fresh seed on every run, which makes it a soak
+that explores the decision space rather than a merge gate, so pull requests run
+only loopback and Nightly runs `just test drill impaired`. In the impaired lane every client dials a `moq-shaper` in front of the
 relay instead of the relay itself. The shaper is a userspace UDP relay that
 forwards each datagram, both ways, after applying the same profile:
 
@@ -110,10 +114,11 @@ loopback lane keeps the defaults.
 `bursts_cross_a_flapping_peer` cuts the peer link with `Shaper::cut`, which
 drops every datagram both ways until it is restored, so its loopback lane puts a
 shaper on that link too, one that forwards untouched. The cut lasts until the
-subscriber sees the route withdrawn, which the relays' default 10s idle timeout
-bounds, rather than for a fixed time. The relays keep that default because a
-short one also bounds their side of an impaired handshake, which can go quiet
-for seconds between a client's backed-off retransmits.
+subscriber sees the route withdrawn, which the relays' idle timeout bounds,
+rather than for a fixed time. In the impaired lane the relays keep the default
+10s, because a short one also bounds their side of an impaired handshake, which
+can go quiet for seconds between a client's backed-off retransmits. Loopback has
+no such silence, so its relays take the clients' 2s.
 
 It is a datagram relay, not an HTTP or TCP proxy, neither of which can impair
 QUIC. It needs no capabilities, works the same on macOS and Linux, and touches

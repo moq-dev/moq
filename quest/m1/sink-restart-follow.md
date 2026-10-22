@@ -44,8 +44,6 @@ Audit and fix the rest the same way:
   streams in `moq-rtmp`, `moq-srt`, `moq-rtc`) and `--connect` (one push).
   SRT already rides the TS follower (`--linger`, `--stitch`); confirm its
   listen side does too. FLV and WebRTC need a decision.
-- `export archive`: a restart already fails a continued store under a new
-  epoch; decide what a mid-recording restart does.
 - `transcode`: its source broadcast; following means restarting the ladder
   on the new instance.
 

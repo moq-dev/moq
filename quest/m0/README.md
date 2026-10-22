@@ -94,7 +94,6 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [Release fixed delay](/quest/m0/release-fixed-delay.md) - a fixed latency on `release`, which moq.dev runs, ignores the catalog's jitter and delay as `main` already does
 - [Publisher stall estimate](/quest/m0/publish-stall-estimate.md) - a live browser publish holds its viewers at the Auto target instead of ratcheting their buffer up with every stall
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
-- [Performance audit](/quest/m0/audit-perf.md) - benchmarks that regressed since the last run are explained, fixed, or planned, and unbenched hot paths get coverage
 - [Simplification audit](/quest/m0/audit-simplify.md) - overbuilt code and APIs are collapsed, merged, or narrowed into a net simpler whole
 - [Lint override and deprecation audit](/quest/m0/audit-lints.md) - every lint suppression is still needed and says why, nothing calls a deprecated API, and stale Rust overrides fail the build
 - [Quest tree audit](/quest/m0/audit-quests.md) - the tree agrees with itself and with main

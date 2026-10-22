@@ -110,8 +110,8 @@ refused means an error or a counted drop.
 | DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
 | Program identity, program and ES descriptors | Preserved, but captured once | [PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) |
 | PMT add, remove, retype; PID reuse; PAT changes | Normalized: in place under fresh track names, PMT rebuilt at the next `version_number`; program identity changes refused; a removed program retires, and returns as a new epoch. Today stale tracks on import, refusal or stale PMT on export | [PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) |
-| Programs without video | Preserved when the PMT names a PCR PID; refused without one. Today export refuses sections without video and any program without media; import refuses a program without media | [clockless export](/quest/m1/ts-reliability/clockless-export.md) |
-| PCR | Normalized: rebased, carried on the first video PID, else audio, else a dedicated PCR-only PID; today video or audio only | [clockless export](/quest/m1/ts-reliability/clockless-export.md) |
+| Programs without video | Preserved when the PMT names a PCR PID; refused without one | landed |
+| PCR | Normalized: rebased, carried on the first video PID, else audio, else a dedicated PCR-only PID | landed |
 | Mux rate, null stuffing | Normalized: re-padded to `muxRate` while the source is CBR | landed |
 | PSI and SI repetition | Normalized: PAT/PMT every 500 ms and at keyframes, SI at DVB maxima | landed |
 | Media PES headers, TS packet layer | Normalized: rebuilt by export; the raw lane keeps them | landed |
@@ -125,7 +125,6 @@ remain with their current quests.
 
 - [Live PAT/PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) - a revised PMT or PAT never leaves a track name meaning other content
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
-- [Clockless export](/quest/m1/ts-reliability/clockless-export.md) - TS import and export carry audio-only and data-only programs
 - [Arrival stamps](/quest/m1/ts-reliability/arrival-stamps.md) - frames carry their local arrival time, so a stalled path never lets late frames out
 - [Release clock false alarms](/quest/m1/ts-reliability/release-clock-false-alarms.md) - no false jitter leap at a 500 ms delay and no false drift alarm
 

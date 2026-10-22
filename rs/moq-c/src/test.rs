@@ -4615,10 +4615,13 @@ fn video_raw_publish_rejects_invalid_config() {
 	// A size no encoder can take, but whose arithmetic is fine, is the backend's
 	// call rather than the boundary's: it must not be swept up by the check above.
 	// Asserted on the reason, not just the code, since a backend refusing it looks
-	// the same from the outside as the boundary refusing it.
+	// the same from the outside as the boundary refusing it. Wide rather than
+	// huge: the probe fills a frame of this size before the backend refuses it, so
+	// 65534x65534 costs seconds here, and moq-video's `validate_encodable` test
+	// already pins that its arithmetic passes.
 	let merely_huge = moq_video_encoder_input {
 		width: 65534,
-		height: 65534,
+		height: 2,
 		..valid_input
 	};
 	let huge = unsafe { moq_encode_video(broadcast, &merely_huge, &valid_output, 0) };

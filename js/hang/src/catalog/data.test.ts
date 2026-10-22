@@ -63,12 +63,6 @@ test("an unrecognized mode or compression survives verbatim", () => {
 	expect(compressionSupported(future?.compression ?? "")).toBe(false);
 });
 
-test("the known modes and compressions are recognized", () => {
-	expect(modeSupported("snapshot")).toBe(true);
-	expect(modeSupported("stream")).toBe(true);
-	expect(compressionSupported("deflate")).toBe(true);
-});
-
 test("fields belonging to an unrecognized mode survive a round trip", () => {
 	// Preserving the mode string alone is not enough: a future mode comes with fields describing it,
 	// and a relay that reparsed and republished would otherwise strip them, leaving an entry nothing

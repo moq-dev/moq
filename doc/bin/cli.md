@@ -24,7 +24,7 @@ Docker; see [Install](/setup/install).
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
 | `export` | `hls --listen` | Serve the broadcast as HLS over HTTP. |
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
-| `export` | `archive <url>` | Record the broadcast into an object store. |
+| `export` | `archive <url>` | Record every broadcast under the prefix into an object store. |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
 | `announced` | `[prefix]` | Follow the broadcasts announced on a relay. |
@@ -105,9 +105,11 @@ through as tracks. Each such PES goes through whole, at its place on the program
 is refused with a warning: any in a program with no PCR, and one whose PES carry
 an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
 or have a malformed header.
-SCTE-35 cues and private PES wait for a media timestamp; input ending or
-declaring a clock break before that timestamp is refused, so a program of data
-alone fails.
+SCTE-35 cues and private PES share the media clock, or anchor on the first PCR
+when the PMT declares only data. Audio-only and data-only programs round-trip
+without video; a data-only program still requires PCR. A program declaring
+media waits for its timestamp and is refused if input ends or declares a clock
+break before one arrives.
 PES and untimed section staging share a bounded budget, so a source that never
 supplies a PES boundary or clock fails rather than retaining bytes indefinitely.
 It takes one program: a multi-program
@@ -298,26 +300,31 @@ equivalents.
 ## Archive
 
 ```bash
-# Record a broadcast until it ends
-moq --connect https://relay.example.com/anon --broadcast event.hang export archive s3://recordings/event
+# Record every broadcast announced under `event`
+moq --connect https://relay.example.com/anon --broadcast event export archive s3://recordings
 
-# Replay it under another name
+# Replay a timeline recording under another name
 moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event
 ```
 
-`export archive` records one broadcast with
-[moq-archive](https://docs.rs/moq-archive), cutting each track into 2-10 s
-spans at group boundaries. An [untimed](/concept/moq-lite#subscriptions) track,
-as every track is over moq-lite before 05 and moq-transport 14-16, is stored
-one group per span and replays untimed. A store that already holds the recording is
-continued, unless the source now announces another
-[epoch](/concept/moq-lite#publisher-epochs): that is a restart, so the export
-fails; record it under a new prefix. `--retention 1h` keeps only the last
-hour, a DVR, which refuses an untimed track since it has no time to measure.
+`export archive` records every broadcast announced at or under `--broadcast`
+with [moq-archive](https://docs.rs/moq-archive), each publisher instance under
+`<broadcast>/@<epoch>` in the store, until the connection ends. Like
+`announced`, it leaves out a broadcast whose name starts with `.` unless
+`--broadcast` names it. A broadcast path segment that starts with `@` is
+stored as `%40`, so no recording lands inside another. Every track is stored as its own objects, cut about every 2 s
+of media (or wall clock for an [untimed](/concept/moq-lite#subscriptions)
+track) and at least every 4 s, splitting a long group between frames. A broadcast restarted under a new
+[epoch](/concept/moq-lite#publisher-epochs) records under its own key; a route
+without an epoch gets a fresh one each time it announces, so it never resumes
+or stitches into an older recording. Any recording that fails ends the export.
+`--retention 1h` keeps only the last hour, a DVR, deleting older objects
+`--retention-grace` (default 30 s) after they leave the window.
 
-`import archive` republishes a recording as live tracks, fetching spans on
-request. It ends where the recording ends; `--follow 2s` keeps polling a
-recording still being made.
+`import archive` republishes a timeline recording made by an older `moq` as
+live tracks, fetching spans on request. It ends where the recording ends;
+`--follow 2s` keeps polling a recording still being made. It does not yet read
+the per-track layout that `export archive` writes.
 
 Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
 `gs://bucket/prefix`, or `az://container/prefix`, with credentials from the
@@ -332,7 +339,7 @@ over one connection:
 moq --connect https://relay.example.com/anon \
     import --broadcast event.hang srt --listen 0.0.0.0:9000 \
     -- export --broadcast event.hang hls --listen 0.0.0.0:8080 \
-    -- export --broadcast event.hang archive file:///recordings/event
+    -- export --broadcast event.hang archive file:///recordings
 ```
 
 ## Publisher runs

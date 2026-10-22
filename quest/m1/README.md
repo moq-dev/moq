@@ -112,7 +112,6 @@ lite-07 stream type here.
 - [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [Close tail drain](/quest/m1/close-tail-drain.md) - after a peer close, subscribers read the group streams their transport already delivered instead of aborting them, so a finished tail arrives on every version
-- [GOAWAY deadline](/quest/m1/goaway-deadline.md) - the drain deadline counts from the trigger in moq-net and js/net, so a peer that stops reading cannot stall it
 - [Silent-peer close](/quest/m1/quic-silent-peer-drain.md) - moq-quic closes a connection that never heard its peer without the 3 s drain
 - [Binding linger](/quest/m1/linger-ffi.md) - `moq-ffi` and every binding finish a broadcast cleanly, so subscribers drain it until its media is stale
 - [JS linger](/quest/m1/linger-js.md) - `js/net` finishes a broadcast cleanly like Rust, and `@moq/publish` uses it when a source stops
@@ -124,13 +123,17 @@ lite-07 stream type here.
 - [lite-06 max sequence](/quest/m1/lite06-max-sequence.md) - group sequence 2^62-1 reaches a lite-06 subscriber or is refused loudly, instead of vanishing
 - [Track live signal](/quest/m1/track-live.md) - a reader can wait for its track's feed to be live, so a player skips old cached groups while a fresh upstream subscription starts
 
-- [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
 - [Binding check cost](/quest/m1/binding-check-cost.md) - `moq.cpp` compiles once per C++ standard and Gradle stays warm, measured before and after
 - [Audio devices on ARM](/quest/m1/audio-devices-arm.md) - `just rs audio-devices` passes on the hosted ARM runner
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - queue nextest at 24 threads, stale Pages artifacts cleared, the actionlint ignore dropped
 - [Smoke flake bumps](/quest/m1/smoke-dependabot.md) - `test/smoke/flake.lock` bumps with its Playwright pin, automated or documented
 
+- [Interop audio delivery](/quest/m1/interop-audio.md) - every interop subscriber decodes and checks the publishers' 440 Hz tone, and the Rust publisher sends Opus
+- [AAC in the native JS fallback](/quest/m1/libav-aac.md) - Node and Bun players decode AAC, and the Rust interop publisher adds an AAC track
+- [Native audio decode conformance](/quest/m1/audio-decode-conformance.md) - Opus and AAC decode through every moq-audio backend, moq-c, and moq-ffi is checked against known tones and clips, like moq-video's suite
 - [Playwright browsers from Nix](/quest/m1/playwright-nix.md) - every Playwright check runs on Nix's Chromium locally and in CI, with npm pinned to match
+
+- [Allocation-free single-range subscriber window](/quest/m1/window-alloc.md) - a one-range subscribe resolves its window without a heap allocation, recovering the join cost per-subscriber ranges added
 
 - [moq-net compiles once](/quest/m1/net-erase-transport.md) - the session drivers stop monomorphizing per transport and per crate, saving several MiB of the relay, FFI library, `libmoq` and CLI
 - [moq-net internals](/quest/m1/net-internals.md) - no per-group session clones, no transport type parameter in lite and IETF internals, and the `Local` check measured
@@ -143,9 +146,9 @@ lite-07 stream type here.
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over the even drafts 14 to 22
 - [Runner nightly](/quest/m1/interop-runner-nightly.md) - a nightly job runs the upstream interop runner against our relay and clients, so newly registered implementations with a published image are tested without a change here
 - [CI workflow audit](/quest/m1/audit-ci.md) - every workflow and job gives a signal someone sees, at a cost that signal justifies, or is fixed, moved, or deleted
-- [Documentation audit](/quest/m1/audit-docs.md) - stale pages, examples, links, and undocumented exports are fixed or planned
 - [Artifact size audit](/quest/m1/audit-size.md) - binary, FFI, WASM, and bundle growth since the m0 run is explained, fixed, or planned
 - [Compile time audit](/quest/m1/audit-compile-time.md) - build-time hotspots are measured against the m0 baselines and the worst are fixed or planned
+- [Performance audit](/quest/m1/audit-perf.md) - benchmarks that regressed since the m0 run are explained, fixed, or planned, and unbenched hot paths get coverage
 
 ## Related
 
