@@ -2,8 +2,8 @@
 
 ## Goal
 
-Every wait in `moq_tokio::quic::driver` has a `poll_*` form that leaks
-nothing: `Connection::poll_open_uni`, `poll_open_bi`, `poll_accept_uni`,
+The stream, datagram, close, and accept waits in `moq_tokio::quic::driver`
+have `poll_*` forms that leak nothing: `Connection::poll_open_uni`, `poll_open_bi`, `poll_accept_uni`,
 `poll_accept_bi`, `poll_recv_datagram` and `poll_closed`,
 `SendStream::poll_closed` (today's `stopped`), and `Endpoint::poll_accept`.
 `SendStream::poll_acked`, which [poll_acked](/quest/m2/quic-ack-hook.md)
@@ -31,36 +31,37 @@ waiters. Leak-free needs per-caller state that dies with the caller, as
 tokio's `Notified` has, and as kio's `Park` and `WaiterList` give through
 `Weak` entries.
 
-Options:
+Shape: poll forms take `&mut self, cx`, with a `kio::Park` in each handle. A
+clone gets an empty park, so a registration belongs to the handle that made
+it and dies with it. A handle that stops polling but stays alive keeps at most
+its one registration until its next poll or the signal; that is the standard
+poll contract, and it is bounded per handle. This is moq-uring's driver shape
+and moq-net's `poll::Session` shape, so a native impl forwards in one line,
+and kio stays private.
 
-- **A (recommended): `&mut self, cx`, with a `kio::Park` in each handle.** A
-  clone gets an empty park, so a registration belongs to the handle that made
-  it and dies with it. This is moq-uring's driver shape and moq-net's
-  `poll::Session` shape, so a native impl forwards in one line, and kio stays
-  private.
+```rust
+impl Connection {
+    pub fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<RecvStream, ConnectionError>>;
+    pub fn poll_open_uni(&mut self, cx: &mut Context<'_>, options: SendOptions<'_>) -> Poll<Result<SendStream, ConnectionError>>;
+    pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<ConnectionError>;
+}
+impl SendStream {
+    pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<VarInt>, StoppedError>>;
+}
+```
 
-  ```rust
-  impl Connection {
-      pub fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<RecvStream, ConnectionError>>;
-      pub fn poll_open_uni(&mut self, cx: &mut Context<'_>, options: SendOptions<'_>) -> Poll<Result<SendStream, ConnectionError>>;
-      pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<ConnectionError>;
-  }
-  impl SendStream {
-      pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<VarInt>, StoppedError>>;
-  }
-  ```
+Rejected shapes:
 
-- **B: `&self, &kio::Waiter`**, the convention in `rs/AGENTS.md`. Leak-free,
-  since the caller owns the waiter, and the handles stay `&self`. But kio
-  enters the driver's public signatures, so a kio break is a driver break,
-  and every `cx`-based caller (moq-net's traits) holds a `Park` anyway.
-- **C: a caller-owned `Wait` token** (`poll_closed(&self, cx, &mut Wait)`),
-  slab-backed, generation-checked, and released on drop. Leak-free and
-  `&self`, but a second waiter primitive beside kio's, with its own slab and
-  tests to carry.
-- **D: a stateless shared list.** Rejected: the leak above.
+- **`&self, &kio::Waiter`**, the convention in `rs/AGENTS.md`. Leak-free,
+  since the caller owns the waiter, but kio enters the driver's public
+  signatures, so a kio break is a driver break, and every `cx`-based caller
+  (moq-net's traits) holds a `Park` anyway.
+- **A caller-owned `Wait` token** (`poll_closed(&self, cx, &mut Wait)`),
+  slab-backed and released on drop: a second waiter primitive beside kio's,
+  with its own slab and tests to carry.
+- **A stateless shared list**: the leak above.
 
-Recommended mechanism: swap the `Notify`s, and the `stopped` map's entries,
+Mechanism: swap the `Notify`s, and the `stopped` map's entries,
 for `kio::WaiterList`s woken where the `Notify`s are signalled today, under
 the connection lock, and make the existing async forms thin wrappers. They can
 keep `&self` by owning their waiter (`kio::wait`), so no caller changes. Keep
@@ -69,16 +70,15 @@ from a closed connection before its error. The other `Notify` waits
 (`handshake_confirmed`, `Endpoint::wait_idle`) may move to the same lists,
 but get no poll form until a caller needs one.
 
-Maintainer question: A and B add kio as a direct dependency of the `driver`
-feature. kio is already in the driver-only tree through `moq-quic`'s
-moq-clock, which #6132 accepted (its decision 4), so no crate is added; B
-also makes it public API. Recommended: A.
+kio becomes a direct dependency of the `driver` feature. It is already in the
+driver-only tree through `moq-quic`'s moq-clock, which #6132 accepted (its
+decision 4), so no crate is added, and it stays out of the public API.
 
 Builds on the `stopped` waiter map as #6196 left it, which already records a
 local reset. It blocks the driver half of [poll_acked](/quest/m2/quic-ack-hook.md).
 
-The acceptance test is the measured leak: 1000 waiters that poll once and are
-dropped unresolved leave no live registration behind, checked before the
+The acceptance test is the measured leak: 1000 cloned handles that each poll
+once and are dropped unresolved leave no live registration behind, checked before the
 condition is ever signalled, so release on drop is what passes it, not the
 next wake. Also, on paused time: two handles waiting on each condition both
 wake; one handle polled 100 times holds one live registration; a clone's poll
