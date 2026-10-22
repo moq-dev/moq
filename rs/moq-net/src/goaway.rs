@@ -21,7 +21,7 @@ use std::{
 	time::Duration,
 };
 
-use crate::{Error, Result, SessionError};
+use crate::{Error, Result};
 
 /// Maximum New Session URI length, in bytes. Both wires cap it here, and a
 /// receiver treats anything longer as a protocol violation.
@@ -97,7 +97,8 @@ pub struct Producer {
 impl Producer {
 	/// Send the GOAWAY, consuming the handle: a session may only send one.
 	///
-	/// The session must stay driven for the message to reach the wire. With
+	/// The timeout starts at the driver poll this send wakes, independent of the
+	/// GOAWAY's own write. The session must stay driven for the message to reach the wire. With
 	/// [`Goaway::timeout`] set, the driver force-closes the session once the
 	/// deadline passes, so awaiting `Session::closed`
 	/// is how a caller observes the drain finishing either way. That holds on a
@@ -286,59 +287,40 @@ impl Protocol {
 	}
 }
 
-/// Enforces a sent GOAWAY's deadline: closes the session once it passes.
+/// The drain deadline, watched independently of the wire's send progress.
 ///
-/// The draft makes the deadline the sender's promise, not the peer's, so the
-/// driver arms this after the message hits the wire rather than making the
-/// caller hold a handle and await it.
+/// Armed from the instant of the driver poll that observes the send, which the
+/// send wakes. The queue's instant at the send itself is the driver's last poll,
+/// as stale as the session has been idle, so arming from it would cut the peer's
+/// window short.
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
-pub(crate) struct Enforce<S: crate::transport::poll::Session> {
-	session: S,
-	/// The armed deadline, or `None` when the GOAWAY carried no timeout (ready
-	/// immediately: there is nothing to enforce).
-	deadline: Option<(crate::time::Deadline, Duration)>,
+pub(crate) struct Deadline {
+	runtime: crate::time::Deadlines,
+	trigger: Option<kio::Consumer<Option<Goaway>>>,
+	armed: Option<(crate::time::Deadline, Duration)>,
 }
 
-impl<S: crate::transport::poll::Session> Enforce<S> {
+impl Deadline {
+	/// Ready with the timeout once it expires, or without one if nothing is to enforce.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn new(runtime: &crate::time::Deadlines, session: S, timeout: Option<Duration>) -> Self {
-		Self {
-			session,
-			deadline: timeout.map(|timeout| (crate::time::Deadline::after(runtime, timeout), timeout)),
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Option<Duration>> {
+		if let Some(trigger) = &self.trigger {
+			let timeout = match std::task::ready!(trigger.poll(waiter, |state| match &**state {
+				Some(goaway) => Poll::Ready(goaway.timeout),
+				None => Poll::Pending,
+			})) {
+				Ok(timeout) => timeout,
+				Err(_) => return Poll::Ready(None),
+			};
+			self.trigger = None;
+			self.armed = timeout.map(|timeout| (crate::time::Deadline::after(&self.runtime, timeout), timeout));
 		}
-	}
-
-	/// Ready once the session closes on its own or the deadline passes (closing it).
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let Some((deadline, timeout)) = &mut self.deadline else {
-			return Poll::Ready(());
+		let Some((deadline, timeout)) = &mut self.armed else {
+			return Poll::Ready(None);
 		};
-
-		let mut cx = waiter.context();
-		if self.session.poll_closed(&mut cx).is_ready() {
-			return Poll::Ready(());
-		}
 		std::task::ready!(deadline.poll(waiter));
-
-		tracing::warn!(?timeout, "peer did not leave before the GOAWAY deadline; closing");
-		self.session
-			.close(SessionError::GoawayTimeout.to_code(), &Error::GoawayTimeout.to_string());
-		Poll::Ready(())
+		Poll::Ready(Some(*timeout))
 	}
-}
-
-/// Enforce a sent GOAWAY's deadline: close the session once it passes.
-///
-/// The async form of [`Enforce`], for drivers that are still `async` themselves.
-#[cfg(feature = "async")]
-pub(crate) async fn enforce<S: crate::transport::poll::Session>(
-	runtime: &crate::time::Deadlines,
-	session: &mut S,
-	timeout: Option<Duration>,
-) {
-	let mut enforce = Enforce::new(runtime, session.clone(), timeout);
-	kio::wait(|waiter| enforce.poll(waiter)).await
 }
 
 /// The halves held by the public [`crate::Session`].
@@ -393,6 +375,16 @@ impl Handle {
 		}
 	}
 
+	/// Watch the local deadline on the driver's `runtime` without holding up the protocol's writes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub fn deadline(&self, runtime: &crate::time::Deadlines) -> Deadline {
+		Deadline {
+			runtime: runtime.clone(),
+			trigger: Some(self.trigger.consume()),
+			armed: None,
+		}
+	}
+
 	/// A fresh handle on the receive half.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn consumer(&self) -> Consumer {
@@ -403,6 +395,29 @@ impl Handle {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A session idle since its last poll still gives the peer the full timeout:
+	/// the window opens at the poll that observes the send, not the stale last one.
+	#[test]
+	fn an_idle_session_gives_the_peer_the_whole_timeout() {
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::ZERO);
+		let (handle, _protocol) = Handle::new(true);
+		let mut deadline = handle.deadline(&runtime);
+		let waiter = kio::Waiter::noop();
+		assert!(deadline.poll(&waiter).is_pending());
+
+		handle
+			.producer()
+			.send(Goaway::new().with_timeout(Duration::from_secs(1)))
+			.unwrap();
+		let sent = crate::time::Instant::ZERO + Duration::from_secs(5);
+		runtime.advance(sent);
+		assert!(deadline.poll(&waiter).is_pending());
+		runtime.advance(sent + Duration::from_secs(1) - Duration::from_nanos(1));
+		assert!(deadline.poll(&waiter).is_pending());
+		runtime.advance(sent + Duration::from_secs(1));
+		assert_eq!(deadline.poll(&waiter), Poll::Ready(Some(Duration::from_secs(1))));
+	}
 
 	/// A session sends at most one GOAWAY. Handing out the handle is always
 	/// allowed, so a caller never has to ask whether the slot is free; sending

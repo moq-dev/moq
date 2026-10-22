@@ -2,19 +2,22 @@
 
 ## Goal
 
-The hand-written C crate is gone: its final `moq-c` 0.7.x release points
-users at the generated `moq-c` 0.8.0, and the source, workflows, and docs that only served
-it are deleted. The generated `moq-c` package's `MIGRATE.md` tells C users how to move.
+The hand-written C crate is gone: its source, workflows, and docs that only
+served it are deleted once the generated `moq-c` publishes. The generated
+`moq-c` package's `MIGRATE.md` tells C users how to move.
 
 ## Plan
 
 - #4288 renamed libmoq to `moq-c` (`rs/moq-c`); this quest deletes that
-  hand-written crate. The code-free `rs/libmoq` stub left under the old name
-  is [Retire the libmoq stub](/quest/m2/release/libmoq-retire.md)'s, separately.
+  hand-written crate.
+- Decided 2026-10-20 (maintainer): no final hand-written notice release,
+  because the hand-written `moq-c` never published to a registry; the
+  generated package is the first `moq-c` users install.
+- The code-free `rs/libmoq` stub left under the old name is
+  [Retire the libmoq stub](/quest/m2/release/libmoq-retire.md)'s, separately.
 
 ## Required
 
-- [Final hand-written C notice](/quest/m2/release/c-final-release.md) - published before deleting its source
 - [Generated C publication](/quest/m2/release/c-publish.md) - the replacement is available and verified
 
 - [C consumers](/quest/m1/c/consumers.md) - nothing in the repository still calls the hand-written ABI

@@ -126,6 +126,9 @@ mod tests {
 			largest_location: Some(Location { group: 9, object: 0 }),
 			forward: true,
 			properties,
+			subscriber_priority: None,
+			group_order: None,
+			filter: None,
 		};
 
 		let fetch = Fetch {

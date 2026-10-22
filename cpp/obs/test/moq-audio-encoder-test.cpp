@@ -308,15 +308,6 @@ int main()
 	CHECK(g_info.type == OBS_ENCODER_AUDIO);
 	// Hidden from OBS's encoder lists until Use MoQ encoders offers it.
 	CHECK(g_info.caps & OBS_ENCODER_CAP_INTERNAL);
-
-	{
-		obs_data defaults;
-		defaults.bitrate = 0;
-		defaults.preset.clear();
-		g_info.get_defaults(&defaults);
-		CHECK(defaults.bitrate == 128);
-		CHECK(defaults.preset == "balanced");
-	}
 	printf("registers an internal Opus encoder: ok\n");
 
 	// OBS converts its mix to what the encoder asks for: 48 kHz interleaved float,

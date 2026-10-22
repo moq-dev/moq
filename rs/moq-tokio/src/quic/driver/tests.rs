@@ -476,6 +476,14 @@ fn blocking_server_pair(
     let mut server_config = crate::quic::driver::ServerConfig::with_crypto(Arc::new(
         QuicServerConfig::try_from(server_crypto).unwrap(),
     ));
+    // Loopback answers in microseconds. The default 333 ms initial RTT would hold every
+    // connection closed before its handshake in draining for three seconds.
+    let transport = Arc::new({
+        let mut transport = TransportConfig::default();
+        transport.initial_rtt(Duration::from_millis(10));
+        transport
+    });
+    server_config.transport_config(transport.clone());
     let blocker = Arc::new(HandshakeBlocker::default());
     server_config.crypto = Arc::new(BlockingServerConfig {
         inner: server_config.crypto.clone(),
@@ -505,9 +513,10 @@ fn blocking_server_pair(
         .with_root_certificates(roots)
         .with_no_client_auth();
     client_crypto.alpn_protocols = vec![client_alpn.to_vec()];
-    client.set_default_client_config(ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(client_crypto).unwrap(),
-    )));
+    let mut client_config =
+        ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto).unwrap()));
+    client_config.transport_config(transport);
+    client.set_default_client_config(client_config);
 
     (client, server, blocker)
 }
@@ -2232,4 +2241,26 @@ impl UdpSender for UnreachableSender {
     fn max_transmit_segments(&self) -> usize {
         self.inner.max_transmit_segments()
     }
+}
+
+/// A handshake the peer never answered has nobody to repeat its close to, so closing the endpoint
+/// must not wait out a closing period for it.
+#[tokio::test(start_paused = true)]
+async fn close_during_handshake_does_not_wait_for_silent_peer() {
+    let _guard = subscribe();
+    let client = endpoint();
+    // Bound but never read, so the handshake stays in flight.
+    let silent = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+    let connect = client
+        .connect(silent.local_addr().unwrap(), "localhost")
+        .unwrap();
+    // Let the driver send the Initial.
+    tokio::task::yield_now().await;
+
+    let start = tokio::time::Instant::now();
+    client.close(0u32.into(), b"closing");
+    client.wait_all_draining().await;
+    let elapsed = start.elapsed();
+    assert!(connect.await.is_err());
+    assert_eq!(elapsed, Duration::ZERO, "waited {elapsed:?}");
 }

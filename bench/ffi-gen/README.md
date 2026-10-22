@@ -217,7 +217,7 @@ and do not translate to BoltFFI's IR.
 | Call overhead | M: JNI or JNA direct mapping for Kotlin ([Kotlin calls](/quest/m2/kt-ffi-calls.md)); L: a C-extension Python backend, not yet planned | done |
 | Zero-copy byte returns | M: [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md) | M: bytes cross its wire buffer, with no borrowed return |
 | Namespaced types | M: [Namespaced external types](/quest/m2/uniffi-namespaces.md) | M: same-name types collide (RFC #700, open) |
-| Poll-native async | M: [Poll-native async](/quest/m2/ffi-poll.md) | M: the same poll-plus-continuation model, with per-method poll exports |
+| Poll-native async | M: [Poll-native async](/quest/m2/ffi-poll-migrate.md) | M: the same poll-plus-continuation model, with per-method poll exports |
 | Binding moq-ffi as written | none | M: drop `Arc` returns, rework wasm gating, and fix the gaps above |
 
 Either way the fork owns a large codebase. BoltFFI's is about 134k lines, written mostly

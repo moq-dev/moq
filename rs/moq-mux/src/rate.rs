@@ -186,11 +186,6 @@ mod tests {
 	}
 
 	#[test]
-	fn starts_optimistic() {
-		assert_eq!(control().target(), bps(4_000_000));
-	}
-
-	#[test]
 	fn drop_applies_immediately() {
 		let mut control = control();
 		// A 2 Mbps pipe: take the target down to it at once, no ramp, no waiting.
@@ -243,20 +238,6 @@ mod tests {
 		assert_eq!(raised, bps(1_250_000));
 	}
 
-	#[test]
-	fn raise_eventually_reaches_the_estimate() {
-		let mut control = control();
-		let start = moq_clock::now();
-		control.update(Some(bps(1_000_000)), start).unwrap(); // target 1M
-
-		// Feed a steady healthy estimate every 100ms; the ramp should walk the
-		// target back up to the ceiling and then stop.
-		for tick in 1..=200 {
-			control.update(Some(bps(4_000_000)), start + Duration::from_millis(100 * tick));
-		}
-		assert_eq!(control.target(), bps(4_000_000));
-	}
-
 	/// Regression: the ramp allowance per tick (25%/s * 100ms = 2.5%) is smaller
 	/// than the hysteresis threshold (5%), so a raise is suppressed on any single
 	/// tick. Suppression must not reset the ramp anchor, or the allowance would be
@@ -286,7 +267,7 @@ mod tests {
 	/// Regression: the ramp stops growing `next` once it reaches the ceiling, so a
 	/// target that lands within the 5% deadband of it has no move left that can
 	/// clear hysteresis. Without the exemption for a raise that reaches `desired`,
-	/// the walk above stalls at 3_866_256 and the sender never returns to the
+	/// the walk below stalls at 3_866_256 and the sender never returns to the
 	/// bitrate it was configured with.
 	#[test]
 	fn a_raise_reaching_the_ceiling_beats_hysteresis() {

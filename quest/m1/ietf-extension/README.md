@@ -48,9 +48,10 @@ cannot answer unambiguously is refused.
   turns it on. A non-relay peer that negotiated it would receive properties
   and status objects it can only discard.
 - **Dynamic groups** are supported rather than treated as an opaque track
-  property. A private request path carries NEW_GROUP_REQUEST upstream and
-  coalesces redundant requests until the largest group advances. Plain
-  moq-lite does not advertise this capability.
+  property. The public `Demand::wanted` path (#5930, through relays in
+  #6030) carries NEW_GROUP_REQUEST upstream and coalesces redundant requests
+  until the largest group advances, so dynamic groups are no longer part of
+  the private carve-out below.
 - **Immutable properties** keep their serialized inner bytes, and the track
   its ingress moq-transport version, including across relay hops. Refuse forwarding between
   the absolute-key/QUIC-varint drafts 14/15, delta-key/QUIC-varint draft 16,
