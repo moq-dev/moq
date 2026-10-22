@@ -381,8 +381,10 @@ impl StreamsState {
     /// Count `new_bytes` of connection credit the peer spent.
     fn spend(&mut self, new_bytes: u64) {
         self.data_recvd = self.data_recvd.saturating_add(new_bytes);
-        // Credit only returns between arrivals, so an arrival is when the most is spent.
-        let spent = (self.data_recvd + self.receive_window).saturating_sub(self.local_max_data);
+        // Credit only returns between arrivals, so an arrival is when the most is spent. A shrink
+        // leaves the advertised limit in place as debt, so that credit is still outstanding.
+        let spent = (self.data_recvd + self.receive_window + self.receive_window_shrink_debt)
+            .saturating_sub(self.local_max_data);
         self.peak_spent = self.peak_spent.max(spent);
     }
 
@@ -3782,6 +3784,18 @@ mod tests {
         data(&mut client, id, 0, 10, false);
         reset(&mut client, id, 100);
         assert_eq!(client.credit_stats().peak_spent, 100);
+    }
+
+    /// Shrinking the window keeps the limit already advertised, so the peer's credit spent past
+    /// the new window still counts toward the peak.
+    #[test]
+    fn shrink_debt_counts_toward_peak() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 500, false);
+        client.set_receive_window(100u32.into());
+        data(&mut client, id, 500, 500, false);
+        assert_eq!(client.credit_stats().peak_spent, 1000);
     }
 
     /// Bytes a reader took outlive an eviction until it stops the stream, so their credit
