@@ -360,3 +360,60 @@ async fn a_pmt_that_never_arrives_stops_holding_the_count() {
 	programs.decode(&mux.bytes()).unwrap();
 	assert_eq!(programs.stats().streams[&UNLISTED].refused, 2);
 }
+
+/// One PID through its whole life, packets flowing throughout: unlisted, added by a PMT
+/// revision, removed by the next, then added again. It keeps one row, whose counters never go
+/// back, whichever owner holds it: the import while carried, the dropped-PID count otherwise,
+/// which `Programs` holds for `--program all`.
+#[tokio::test(start_paused = true)]
+async fn a_pid_keeps_one_row_through_its_lifecycle() {
+	let mut steps = Vec::new();
+	let mut mux = Mux::default();
+	mux.pat(&[(1, PMT)]).pmt_at(0, PMT, 1, CLOCK, &[(0x06, DATA, KLVA)], 0);
+	mux.packet(CLOCK, Flags::pcr(0));
+	mux.fill(UNLISTED, 3);
+	steps.push(mux.out.len());
+	mux.pmt_at(1, PMT, 1, CLOCK, &[(0x06, DATA, KLVA), (0x06, UNLISTED, KLVA)], 0);
+	mux.packet(CLOCK, Flags::pcr(40 * MS));
+	mux.whole(UNLISTED, &klv(1, 32));
+	mux.whole(UNLISTED, &klv(2, 32));
+	// A later PCR places them.
+	mux.packet(CLOCK, Flags::pcr(60 * MS));
+	steps.push(mux.out.len());
+	mux.pmt_at(2, PMT, 1, CLOCK, &[(0x06, DATA, KLVA)], 0);
+	mux.fill(UNLISTED, 4);
+	steps.push(mux.out.len());
+	mux.pmt_at(3, PMT, 1, CLOCK, &[(0x06, DATA, KLVA), (0x06, UNLISTED, KLVA)], 0);
+	mux.packet(CLOCK, Flags::pcr(80 * MS));
+	mux.whole(UNLISTED, &klv(3, 32));
+	mux.packet(CLOCK, Flags::pcr(100 * MS));
+	steps.push(mux.out.len());
+	let data = mux.bytes();
+	// (track, units, refused) after each step.
+	let expected = [("", 0, 3), (".ts", 2, 3), ("", 2, 7), (".ts", 3, 7)];
+
+	let mut one = Imported::new();
+	let mut programs = Programs::new(
+		crate::source::produce_origin(),
+		"event.hang",
+		crate::catalog::Config::default(),
+	);
+	let mut at = 0;
+	for (end, (track, units, refused)) in steps.into_iter().zip(expected) {
+		one.import.decode(&data[at..end]).unwrap();
+		programs.decode(&data[at..end]).unwrap();
+		at = end;
+		for (owner, row) in [
+			("import", one.row(UNLISTED)),
+			("programs", programs.stats().streams[&UNLISTED].clone()),
+		] {
+			let class = row.class;
+			assert_eq!(
+				(row.track.as_str(), row.units, row.refused, row.damaged),
+				(track, units, refused, 0),
+				"{owner} at {end}"
+			);
+			assert_eq!(class, Class::Data, "{owner} at {end}");
+		}
+	}
+}
