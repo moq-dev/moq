@@ -31,6 +31,7 @@ import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Groups, Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
@@ -1024,6 +1025,9 @@ export class Publisher {
 				// competing at its rank until the stream settles.
 				void stream.closed.catch(() => {}).then(() => ranking.remove(stream));
 			}
+		} catch (err: unknown) {
+			// A failed open has no stream to reset, but still ends only this group.
+			group.close(error(err));
 		} finally {
 			group.close();
 		}
@@ -1351,21 +1355,10 @@ export class Publisher {
 				// Subscribe BEFORE reconciling, for the same reason as
 				// {@link runPublishNamespaces}: a publish landing while an advertisement
 				// waits for its reply only notifies listeners already registered.
-				// TODO Make a better helper within Signals.
-				let dispose!: Dispose;
-				const changed = new Promise<"changed">((resolve) => {
-					const table = this.#advertised.changed(() => resolve("changed"));
-					// A grant change re-diffs the same way, withdrawing what it no longer covers.
-					// The loop top re-reads the table, so an ended origin still stops it there.
-					const grant = this.#grant.changed(() => resolve("changed"));
-					// A token that ended leaves the request carrying it to be made again without.
-					const ended = this.#auth?.ended.changed(() => resolve("changed"));
-					dispose = () => {
-						table();
-						grant();
-						ended?.();
-					};
-				});
+				// A grant change re-diffs the same way, withdrawing what it no longer covers.
+				// The loop top re-reads the table, so an ended origin still stops it there.
+				// A token that ended leaves the request carrying it to be made again without.
+				const { changed, dispose } = nextChange(this.#advertised, this.#grant, this.#auth?.ended);
 
 				const advertised = this.#advertised.peek();
 				const updated = advertised ? presented(prefix, advertised, carries) : new Map<Path.Valid, Advertised>();
@@ -1510,23 +1503,11 @@ export class Publisher {
 				// for the peer's reply, and a publish that lands in that window notifies
 				// only the listeners already registered; one created afterwards would sleep
 				// through it and leave the namespace unadvertised until something unrelated
-				// changed.
-				// TODO Make a better helper within Signals.
-				const changed = new Promise<"changed">((resolve) => {
-					const table = this.#advertised.changed(() => resolve("changed"));
-					// A grant change re-diffs the same way, withdrawing what it no longer covers.
-					// The loop top re-reads the table, so an ended origin still stops it there.
-					const grant = this.#grant.changed(() => resolve("changed"));
-					// A token that ended leaves the request carrying it to be made again without.
-					const ended = this.#auth?.ended.changed(() => resolve("changed"));
-					const lapsed = this.#lapsed.changed(() => resolve("changed"));
-					dispose = () => {
-						table();
-						grant();
-						ended?.();
-						lapsed();
-					};
-				});
+				// changed. A grant change re-diffs the same way, withdrawing what it no longer
+				// covers; the loop top re-reads the table, so an ended origin still stops it there.
+				// A token that ended leaves the request carrying it to be made again without.
+				const change = nextChange(this.#advertised, this.#grant, this.#auth?.ended, this.#lapsed);
+				dispose = change.dispose;
 
 				// The peer no longer holds a namespace whose request ended while idle. The wait
 				// before offering it again doubles each time, so a peer that ends every one it
@@ -1569,8 +1550,8 @@ export class Publisher {
 
 				// Wait for the next change, which has already fired if one landed above.
 				const next = await (retry
-					? race([changed, this.#withdrawal.closing, closed, retryAfter(retry).then(() => advertised)])
-					: race([changed, this.#withdrawal.closing, closed]));
+					? race([change.changed, this.#withdrawal.closing, closed, retryAfter(retry).then(() => advertised)])
+					: race([change.changed, this.#withdrawal.closing, closed]));
 				dispose?.();
 				if (!next || next === true) break;
 			}
