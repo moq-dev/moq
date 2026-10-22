@@ -24,7 +24,10 @@ build reference state; withholding presentation is not dropping their input.
 
 Review the H.264 recovery-point flags and count semantics and HEVC
 CRA/RADL/RASL separately. A timestamp-before-keyframe rule is a conservative
-leading-picture policy, not a complete codec dependency model. State which
+leading-picture policy, not a complete codec dependency model; the TS export
+already keeps HEVC RADL pictures, by NAL type, and
+`rs/moq-mux/src/container/ts/recovery_test.rs` grades actual group skips and
+recovered output for H.264 open GOP and HEVC RASL and RADL. State which
 profiles it supports without changing an existing wire contract by inference.
 
 Produce implementation and automated software-decode tests in the existing
@@ -35,4 +38,3 @@ reference-decode comparisons for continuous playback and each recovery case.
 
 - [H.264 import](/quest/m2/intra-refresh/h264-import.md) - publishes recovery information
 - [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - uses it to size the transcoder's decode history
-- [TS loss tests](/quest/m1/ts-reliability/recovery.md) - exercise actual group skips and recovered output

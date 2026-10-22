@@ -10,9 +10,8 @@ and the reason is written here.
 This epic's own work: once every child has landed, run the full main against
 release comparison again with `just bench origin/release`, and confirm nothing
 new regressed. Then add a release-baseline step to the recurring
-[performance audit](/quest/m0/audit-perf.md) (its m1 successor, once
-[moq-dev/moq#6112](https://github.com/moq-dev/moq/pull/6112) merges), so every
-later cut repeats this comparison.
+[performance audit](/quest/m1/audit-perf.md), so every later cut
+repeats this comparison.
 
 ## Plan
 
@@ -104,5 +103,5 @@ one.
 
 ## Related
 
-- [Performance audit](/quest/m0/audit-perf.md) - compares nightly to nightly; this epic compares main to release
+- [Performance audit](/quest/m1/audit-perf.md) - compares nightly to nightly; this epic compares main to release
 - [Benchmark regressions in CI](/quest/m2/bench-ci.md) - PR-time comparison against the base branch

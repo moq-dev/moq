@@ -9,7 +9,7 @@ epic.
 
 ## Plan
 
-Use the instruction-count method from the [performance audit](/quest/m0/audit-perf.md).
+Use the instruction-count method from the [performance audit](/quest/m1/audit-perf.md).
 Wall time on a shared host can't tell these apart. Build each bench at
 `origin/release` and at main, and compare instructions per iteration. A
 change that needs a maintainer decision, or is too large to review alongside
@@ -39,10 +39,11 @@ Leads from reading code on 2026-10-21, strongest first:
    into `first_frame`, merge `bounds` and `starts` under one lock, and skip
    `advance_largest`'s write and wake when nothing changed.
 4. `track_datagram_subscriber_join` (median 2.3x). `Cursor::new` scans the
-   datagram ring twice, and each join builds a placeholder `Published` that is
-   immediately rebuilt ([#5195](https://github.com/moq-dev/moq/pull/5195),
-   [#5929](https://github.com/moq-dev/moq/pull/5929)). Track the newest
-   datagram timestamp on push, and build `Published` once.
+   datagram ring twice ([#5195](https://github.com/moq-dev/moq/pull/5195)).
+   Track the newest datagram timestamp on push. The window's construction cost
+   from [#5929](https://github.com/moq-dev/moq/pull/5929) was cut in
+   [#6112](https://github.com/moq-dev/moq/pull/6112), and the rest belongs to
+   [Allocation-free single-range subscriber window](/quest/m1/window-alloc.md).
 5. `track_parallel_write`, `track_fanout_frame`, `track_empty_run`,
    `group_write_frames` (1.2 to 1.6x). This is constant per-group and
    per-frame cost from several features. Resolve `now` once per poll in

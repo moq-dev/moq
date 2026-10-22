@@ -24,6 +24,7 @@
 #   ./run.sh --leak                # 1080p video with no HRD, filling its level's 24 Mb/s leak
 #   ./run.sh --full                # the same with two audio PIDs, filling its multiplex with no nulls
 #   ./run.sh --fragment-pes        # split generated clear PES headers across packets
+#   ./run.sh --clockless sections # sections, pes, or audio-scte35 without video
 #   ./run.sh --klv                 # add KLV and DVB AC-3, carried as whole PES, and grade them
 #   ./run.sh --delay 2s            # pass the exporter's --delay
 #   ./run.sh --rate 7000000        # bufferbloat: 7 Mb/s to the subscriber behind a deep queue (moq-shaper)
@@ -84,6 +85,7 @@ HEADROOM=""     # the same plus four audio PIDs, in a multiplex faster than the 
 LEAK=""         # publish video with no HRD at its level's leak, as a full-rate feed does
 FULL=""         # the same with audio, in a multiplex the source fills with no nulls
 FRAGMENT_PES="" # use following null slots for fragmented PES headers
+CLOCKLESS=""    # generated programs clocked by audio or a dedicated PCR-only PID
 KLV=""          # inject asynchronous and synchronous KLV beside DVB AC-3, and grade every PES
 LOSS=""         # percent of relay -> subscriber datagrams dropped at random by moq-shaper
 RATE=""         # bits/s moq-shaper carries from the relay to the subscriber, behind QUEUE
@@ -173,6 +175,10 @@ while [[ $# -gt 0 ]]; do
         --fragment-pes)
             FRAGMENT_PES=1
             shift
+            ;;
+        --clockless)
+            CLOCKLESS="${2:?--clockless needs audio-scte35, sections, or pes}"
+            shift 2
             ;;
         --klv)
             KLV=1
@@ -279,6 +285,18 @@ fi
 if [[ -n "$KLV" && -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$PAIR$LIVE$PASSTHROUGH$MPTS" ]]; then
     echo "error: --klv generates its own clip and grades the demultiplexed export's PES" >&2
     exit 1
+fi
+
+if [[ -n "$CLOCKLESS" ]]; then
+    case "$CLOCKLESS" in audio-scte35 | sections | pes) ;; *)
+        echo "error: unsupported --clockless profile: $CLOCKLESS" >&2
+        exit 1
+        ;;
+    esac
+    if [[ -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$PAIR$LIVE$PASSTHROUGH$MPTS$KLV$RATE$LOSS" ]]; then
+        echo "error: --clockless generates and grades an unimpaired program without video" >&2
+        exit 1
+    fi
 fi
 
 # An impaired path to the subscriber, 25 ms each way through moq-shaper, so it needs no
@@ -505,6 +523,14 @@ elif [[ -n "$FULL" ]]; then
     python3 "$DIR/drop_nulls.py" "$PADDED_TS" "$DROPPED_TS" --pid 0x100
     tsp -I file "$DROPPED_TS" -P pcradjust --bitrate "$BITRATE" --ignore-pts --ignore-dts -O file "$SRC_TS"
     echo "  ${NULLS} null packets dropped of ${PACKETS}: ${BITRATE} b/s"
+elif [[ -n "$CLOCKLESS" ]]; then
+    AUDIO_ARGS=()
+    if [[ "$CLOCKLESS" == audio-scte35 ]]; then
+        ffmpeg -y -hide_banner -loglevel error -f lavfi -i "sine=frequency=1000:sample_rate=48000" \
+            -t "$DURATION" -ac 2 -c:a mp2 -b:a 128k -f mp2 "$HARNESS_RUN/audio.mp2"
+        AUDIO_ARGS=(--audio "$HARNESS_RUN/audio.mp2")
+    fi
+    python3 "$DIR/clockless.py" generate "$CLOCKLESS" "$SRC_TS" --duration "$DURATION" --bitrate "$BITRATE" "${AUDIO_ARGS[@]}"
 elif [[ -n "$KLV" ]]; then
     echo "### generating ~${DURATION}s clip with DVB AC-3 and KLV"
     # The importer decodes neither DVB AC-3 (system_b's private data with an AC-3 descriptor)
@@ -868,7 +894,7 @@ fi
 # pair. Other arms retain their specific structural/model oracles until their
 # acquisition and decoder-priming contracts are covered by fixtures. A path
 # narrower than the media sheds groups, which only holes.py grades.
-if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$KLV$RATE" ]]; then
+if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL$KLV$CLOCKLESS$RATE" ]]; then
     if ! python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode"; then
         # The exporter counts what it dropped (late), trimmed (before its output began),
         # and lost upstream (gaps), and logs each loss, so the failure says which it was.
@@ -930,6 +956,10 @@ if [[ -n "$OPEN_GOP" ]]; then
 fi
 
 # Each private PES is the source's, at the source's placement.
+if [[ -n "$CLOCKLESS" ]]; then
+    python3 "$DIR/clockless.py" grade "$CLOCKLESS" "$SRC_TS" "$SUB_TS"
+fi
+
 if [[ -n "$KLV" ]]; then
     echo
     if ! python3 "$DIR/klv.py" grade "$SRC_TS" "$SUB_TS" --report-json "$HARNESS_RUN/klv.json"; then
