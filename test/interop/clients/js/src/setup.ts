@@ -31,6 +31,19 @@ if (role === "publish") {
 	// Chromium's --use-fake-device-for-media-stream feeds getUserMedia fake
 	// camera and microphone input. Audio is encoded lazily when a player asks.
 	el.setAttribute("source", "camera");
+	// The microphone plays the driver's test tone. Keep Chromium's voice processing off it: that
+	// mixes stereo to mono and suppresses a steady tone as noise.
+	el.signals.run((effect) => {
+		const mic = effect.get(el.sources.audio);
+		if (mic && "constraints" in mic) {
+			mic.constraints.set({
+				channelCount: 2,
+				echoCancellation: false,
+				noiseSuppression: false,
+				autoGainControl: false,
+			});
+		}
+	});
 	document.body.appendChild(el);
 	// So the driver can wait for the session to close before closing the browser.
 	watchResources();
@@ -101,7 +114,9 @@ if (role === "publish") {
 	document.body.appendChild(player);
 
 	watchResources();
-	let stop = attach(el);
+	// The interop matrix names the tone each channel should carry; the media checks do not.
+	const tones = (params.get("tone") ?? "").split(",").filter(Boolean).map(Number);
+	let stop = attach(el, tones);
 
 	// Where the leaked-session control parks the player it refuses to tear down.
 	const leak = document.createElement("div");
@@ -132,7 +147,7 @@ if (role === "publish") {
 			const canvas = el.querySelector("canvas");
 			canvas?.getContext("2d")?.clearRect(0, 0, canvas.width, canvas.height);
 			player.appendChild(el);
-			stop = attach(el);
+			stop = attach(el, tones);
 		},
 	});
 } else if (role === "close") {

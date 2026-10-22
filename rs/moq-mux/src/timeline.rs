@@ -442,6 +442,8 @@ impl Producer {
 		moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_priority(hang::catalog::PRIORITY.catalog)
+			// A joiner asks for a fresh group once the ops outweigh eight headers.
+			.with_refresh(8)
 	}
 
 	/// Publish onto `track`, starting at record zero.
@@ -488,6 +490,7 @@ impl Producer {
 				actual: record.sequence,
 			});
 		}
+		self.refresh()?;
 		self.sink
 			.push(moq_net::Timed::from(record).at(moq_net::Timestamp::now()))
 			.map_err(json)
@@ -495,6 +498,7 @@ impl Producer {
 
 	/// Remove up to `count` oldest records from the window.
 	pub fn pop(&mut self, count: u64) -> crate::Result<()> {
+		self.refresh()?;
 		self.sink
 			.pop(moq_net::Timed::from(count).at(moq_net::Timestamp::now()))
 			.map_err(json)
@@ -511,6 +515,17 @@ impl Producer {
 	/// Finish the timeline track.
 	pub fn finish(&mut self) -> crate::Result<()> {
 		self.sink.finish().map_err(json)
+	}
+
+	/// Restate the window in a fresh group if a joiner wants one.
+	///
+	/// Checked on each edit rather than driven by a task, since nothing here owns a runtime. A
+	/// timeline gains a record every segment, so a joiner waits at most about one segment.
+	fn refresh(&mut self) -> crate::Result<()> {
+		match self.sink.poll_refresh(&kio::Waiter::noop()) {
+			std::task::Poll::Ready(Err(err)) => Err(json(err)),
+			_ => Ok(()),
+		}
 	}
 }
 
