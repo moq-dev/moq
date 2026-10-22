@@ -74,8 +74,8 @@ feature. kio is already in the driver-only tree through `moq-quic`'s
 moq-clock, which #6132 accepted (its decision 4), so no crate is added; B
 also makes it public API. Recommended: A.
 
-Lands after #6196, which rewrites the `stopped` waiter map. It blocks the
-driver half of [poll_acked](/quest/m2/quic-ack-hook.md).
+Builds on the `stopped` waiter map as #6196 left it, which already records a
+local reset. It blocks the driver half of [poll_acked](/quest/m2/quic-ack-hook.md).
 
 The acceptance test is the measured leak: 1000 waiters that poll once and are
 dropped unresolved leave no live registration behind, checked before the
