@@ -66,7 +66,8 @@ if (mode === "status") {
 		const status = await TrackStatusOk.decode(stream.reader, version);
 		if (legacy) assert.equal(status.requestId, requestId);
 		assert.deepEqual(status.largest, { groupId: 4n, objectId: 1n }, "wrong publisher location");
-		if (!legacy) assert.equal(status.properties.priority, 253, "wrong publisher priority");
+		// Rust publishes priority 2, which moq-transport carries as 127 - 2.
+		if (!legacy) assert.equal(status.properties.priority, 125, "wrong publisher priority");
 		stream.close();
 		console.error("wire track status answered");
 	} finally {
