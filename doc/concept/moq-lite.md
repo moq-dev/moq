@@ -297,7 +297,9 @@ JSON and not for media. Each group's frames become one DEFLATE stream
 compresses alone. Only the work-in-progress moq-lite 07 carries the compressed
 bytes. A relay forwards them as received and inflates each group once for every
 other subscriber, moq-transport included, so readers always see the original
-frames. Rust publishes and relays compressed tracks; js/net refuses them for now.
+frames. Rust and JavaScript publish compressed tracks by setting `compress: true`
+on the track's info. Application writes stay synchronous and readers receive plain
+payloads; compression is useful for repetitive data, not already compressed media.
 
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning

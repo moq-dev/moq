@@ -82,7 +82,6 @@ This README owns the end-to-end proof and the guide once every child lands:
 ## Required
 
 - [Mid-group subscriptions widen](/quest/m1/compress/app-range-widen.md) - an application range starting mid-group on a compressed track widens to frame 0 at the subscriber instead of failing with `Lagged`
-- [JavaScript](/quest/m1/compress/js.md) - js/net publishes and consumes compressed tracks on lite-07
 - [Migrate](/quest/m1/compress/migrate.md) - catalogs, stats, and timelines publish one compressed track; moq-flate, @moq/flate, and every `.z` name are gone
 
 ## Related

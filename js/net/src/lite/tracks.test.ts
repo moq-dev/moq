@@ -242,19 +242,6 @@ test("a listing past the announces cap is reset, and the session stays", async (
 	again.close();
 });
 
-test("a listing naming a compressed track is refused, and the session stays", async () => {
-	const { subscriber, listed, closing } = handPlayed();
-	const tracks = subscriber.consume(Path.from("room")).tracks();
-	const peer = await listed();
-	await peer.send({ kind: "added", name: "a", info });
-	await peer.send({ kind: "added", name: "z", info: new TrackInfo({ priority: 2, compress: true }) });
-	expect(await next(tracks)).toBe("synced");
-	expect(await next(tracks)).toBe("+a");
-	expect(await next(tracks)).toMatch(/^error: .*compressed tracks are not supported/);
-	await settle();
-	expect(closing).not.toHaveBeenCalled();
-});
-
 test("a flood of a peer's listing churn yields to the host's tasks", async () => {
 	const { subscriber, listed } = handPlayed();
 	const tracks = subscriber.consume(Path.from("room")).tracks();
@@ -440,14 +427,20 @@ test("a listing over a session carries each track's info, end to end", async () 
 	]);
 	const broadcast = origin.createBroadcast(Path.from("room"));
 	broadcast.announce();
-	broadcast.createTrack("a", { timescale: Timescale.MILLI, maxAge: Milli(3000), priority: 9, refresh: 4 });
+	broadcast.createTrack("a", {
+		timescale: Timescale.MILLI,
+		maxAge: Milli(3000),
+		priority: 9,
+		refresh: 4,
+		compress: true,
+	});
 
 	const tracks = wireOf(client).consume(Path.from("room")).tracks();
 	expect(await next(tracks)).toBe("synced");
 	expect(await tracks.next()).toEqual({
 		kind: "added",
 		name: "a",
-		info: { timescale: Timescale.MILLI, maxAge: Milli(3000), priority: 9, refresh: 4 },
+		info: { timescale: Timescale.MILLI, maxAge: Milli(3000), priority: 9, refresh: 4, compress: true },
 	});
 	broadcast.createTrack("b");
 	expect(await next(tracks)).toBe("+b");

@@ -94,7 +94,6 @@ is published; older versions are unchanged.
 - [Drop set](/quest/m1/drop-set.md) - lite-07's SUBSCRIBE_DROP carries `Max Age`, so a widening re-offers groups reported dropped
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
-- [Compressed tracks in js/net](/quest/m1/compress/js.md) - JS reads and writes compressed lite-07 tracks instead of refusing them
 - [lite-07 padding](/quest/m1/lite07-padding.md) - lite-07 reserves the padding stream type the browser probes with
 
 ## Related

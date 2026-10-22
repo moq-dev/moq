@@ -812,21 +812,25 @@ for (const fails of [true, false]) {
 	});
 }
 
-test("track info keeps one answer across routes", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	a.createTrack("seq", { priority: 1 });
-	b.createTrack("seq", { priority: 2 });
-	front.serve(a.consume());
-	expect((await front.consumer.track("seq").info()).priority).toBe(1);
-	front.serve(b.consume());
-	await expect(front.consumer.track("seq").info()).rejects.toThrow("changed its properties");
-
-	front.consumer.close();
-	a.close();
-	b.close();
-});
+for (const [field, first, second] of [
+	["priority", { priority: 1 }, { priority: 2 }],
+	["compression", { compress: true }, { compress: false }],
+] as const) {
+	test(`track info keeps one ${field} answer across routes`, async () => {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		a.createTrack("seq", first);
+		b.createTrack("seq", second);
+		front.serve(a.consume());
+		expect(await front.consumer.track("seq").info()).toMatchObject(first);
+		front.serve(b.consume());
+		await expect(front.consumer.track("seq").info()).rejects.toThrow("changed its properties");
+		front.consumer.close();
+		a.close();
+		b.close();
+	});
+}
 
 test("a datagram reader lets go of the copies a swap replaced", async () => {
 	const front = new Front();

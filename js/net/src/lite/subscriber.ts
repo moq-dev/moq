@@ -47,7 +47,7 @@ import {
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
-import { frameDecoder, type Group as GroupMessage, readFrames } from "./group.ts";
+import { frameDecoder, type Group as GroupMessage, readFrames, type WireFrame } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
@@ -120,6 +120,7 @@ interface SubscribeEntry {
 	// The write side: incoming GROUP streams are routed here. The application reads
 	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
 	track: track.Producer;
+	compress: boolean;
 	// Per-frame timestamp scale (0 = none). undefined until it's known (from TRACK_INFO
 	// on lite-05+, or implicit defaults on older drafts). A non-zero value means each
 	// frame on the group stream is prefixed with a zigzag-delta timestamp varint that
@@ -722,9 +723,6 @@ export class Subscriber {
 				}
 				if (event.kind === "added") {
 					if (listed.has(event.name)) throw new ProtocolViolation(`track listed twice: ${event.name}`);
-					// Until js/net inflates, a compressed track is refused, as its subscription is,
-					// rather than listed as a plain one.
-					if (event.info.compress) throw new Error("compressed tracks are not supported");
 					if (!this.#announces.tryAcquire()) {
 						throw new SessionError(SessionCode.TooManyRequests, { reason: "too many listed tracks" });
 					}
@@ -961,6 +959,7 @@ export class Subscriber {
 		state.cancel.signal.throwIfAborted();
 		let producer: track.Producer;
 		let drainOk = false;
+		let compress = false;
 
 		if (hasTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
@@ -976,6 +975,7 @@ export class Subscriber {
 			// register it again or send its SUBSCRIBE.
 			state.cancel.signal.throwIfAborted();
 			producer = request.accept(this.#toModelInfo(info));
+			compress = info.compress;
 			timescale.set(info.timescale ?? 0);
 		} else {
 			// Older drafts negotiate nothing per-track: verbatim frames with no timeline.
@@ -990,6 +990,7 @@ export class Subscriber {
 		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
 		const entry: SubscribeEntry = {
 			track: producer,
+			compress,
 			timescale,
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
@@ -1036,8 +1037,6 @@ export class Subscriber {
 				await stream.writer.u53(StreamId.Track);
 				await new TrackMessage(broadcast, track, epoch).encode(stream.writer, this.version);
 				const info = await TrackInfo.decode(stream.reader, this.version);
-				// Until js/net inflates, a compressed track is refused rather than read as garbage.
-				if (info.compress) throw new Error("compressed tracks are not supported");
 				return { info, stream };
 			},
 			signal,
@@ -1091,6 +1090,7 @@ export class Subscriber {
 			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
 			priority: info.priority,
 			refresh: info.refresh,
+			compress: info.compress,
 		};
 	}
 
@@ -1227,7 +1227,8 @@ export class Subscriber {
 				throw err;
 			}
 
-			void this.#runFetchResponse(accepted.stream, group, accepted.info.timescale ?? 0);
+			hooks.bindGroupCompression(group, accepted.info.compress);
+			void this.#runFetchResponse(accepted.stream, group, accepted.info);
 		} catch (err: unknown) {
 			group.close(error(err));
 			throw err;
@@ -1282,9 +1283,13 @@ export class Subscriber {
 	// Read the FETCH response (bare frames, zigzag-delta-timestamped unless `timescale` is 0)
 	// into the group, then FIN. A stream-level failure aborts the group so its reader observes
 	// the gap.
-	async #runFetchResponse(stream: Stream, group: netGroup.Producer, timescale: number): Promise<void> {
+	async #runFetchResponse(stream: Stream, group: netGroup.Producer, info: TrackInfo): Promise<void> {
 		try {
-			const decode = frameDecoder(timescale, hasMediaTime(this.version));
+			const decode = frameDecoder({
+				scale: info.timescale ?? 0,
+				timed: hasMediaTime(this.version),
+				compress: info.compress,
+			});
 
 			// Serve until the stream FINs, the group closes, or every reader leaves. A group can
 			// stay open indefinitely (a catalog or JSON stream), so an abandoned fetch is stopped by
@@ -1298,7 +1303,7 @@ export class Subscriber {
 				.then((): typeof idle => idle);
 			// A decode consumes its frame whenever it lands, so one outstanding across a re-arm is
 			// kept and awaited again rather than abandoned with its frame.
-			let pending: Promise<netGroup.Frame | undefined> | undefined;
+			let pending: Promise<WireFrame | undefined> | undefined;
 			for (;;) {
 				// Buffered frames are written without an await, as in a group stream.
 				let frame = pending === undefined ? stream.reader.tryDecode(decode) : undefined;
@@ -1323,7 +1328,7 @@ export class Subscriber {
 					if (!next) break;
 					frame = next;
 				}
-				group.writeFrame(frame);
+				hooks.writeGroupFrame(group, frame, frame.inflated);
 			}
 
 			group.close();
@@ -1576,7 +1581,10 @@ export class Subscriber {
 				scale = timescale.peek();
 			}
 
-			await readFrames(stream, producer, scale, hasMediaTime(this.version));
+			const compress = entry.compress;
+			if (compress && group.frameStart !== 0)
+				throw new StreamError(StreamCode.TooFarBehind, { message: "compressed group lacks its prefix" });
+			await readFrames(stream, producer, { scale, timed: hasMediaTime(this.version), compress });
 
 			producer.close();
 			stream.stop(StreamCode.Cancel);
@@ -1638,11 +1646,10 @@ export class Subscriber {
 	// datagram (best-effort) if the subscription is unknown/closed or its timescale isn't resolved.
 	async #routeDatagram(payload: Uint8Array): Promise<void> {
 		// An unknown or unresolved subscription's datagram is dropped below, however it parses.
-		const dg = await DatagramMessage.decode(
-			payload,
-			this.version,
-			(id) => !!this.#subscribes.get(id)?.timescale.peek(),
-		);
+		const dg = await DatagramMessage.decode(payload, this.version, (id) => ({
+			timed: !!this.#subscribes.get(id)?.timescale.peek(),
+			compressed: this.#subscribes.get(id)?.compress ?? false,
+		}));
 
 		const entry = this.#subscribes.get(dg.subscribe);
 		if (!entry) return; // Unknown or already-closed subscription.
@@ -1659,7 +1666,7 @@ export class Subscriber {
 				: new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
 		// A datagram's sequence is never owed a stream, so it never holds the tail open.
 		entry.tail.account(dg.sequence, dg.sequence + 1);
-		entry.track.insertDatagram(dg.sequence, timestamp, dg.payload);
+		hooks.writeDatagram(entry.track, { sequence: dg.sequence, timestamp, payload: dg.payload }, dg.inflated);
 	}
 
 	/**
