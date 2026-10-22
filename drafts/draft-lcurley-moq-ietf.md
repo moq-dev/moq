@@ -99,10 +99,6 @@ A stream that stops at an end frame carries no END_OF_GROUP record, even when th
 
 Only subgroup 0 of a {{moqt}} group is carried.
 
-When answering a whole-group FETCH on {{moqt}} drafts 14 through 19, a relay MUST name the fetched group with End Object 0 in FETCH_OK.
-A receiver MUST treat that End Location as covering the whole group; it MAY also accept a legacy answer naming the next group with End Object 0 for the group it requested.
-Draft 20 and later use an inclusive End Location instead.
-
 ## Object Record
 
 ~~~
@@ -263,7 +259,6 @@ A high, distinctive value is used to avoid collisions with the low values {{moql
 ## Since draft-lcurley-moq-ietf-00 (in progress)
 
 - Initial version.
-- Clarify whole-group FETCH_OK End Location mapping on MoQ Transport drafts 14 through 19.
 
 # Acknowledgments
 {:numbered="false"}

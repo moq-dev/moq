@@ -92,10 +92,7 @@ export class Fetch {
 			switch (fetchType) {
 				case 0x1: // Standalone: namespace, name, start and end Locations
 					trackNamespace = (await Namespace.decodeTrack(r)).namespace;
-					await r.u62(); // Start Group
-					await r.u62(); // Start Object
-					await r.u62(); // End Group, including its whole group when End Object is 0
-					await r.u62(); // End Object: do not widen the whole-group form before refusal
+					for (let i = 0; i < 4; i++) await r.u62();
 					break;
 				case 0x2: // Relative Joining: subscription, group offset
 				case 0x3: // Absolute Joining: subscription, group
