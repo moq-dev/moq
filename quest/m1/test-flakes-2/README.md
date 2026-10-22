@@ -1,4 +1,4 @@
-# [S] More tests hold up under load
+# More tests hold up under load
 
 ## Goal
 
@@ -32,10 +32,15 @@ times on a loaded machine, as the first round did.
 The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
 fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 
-Added 2026-10-21 (maintainer): small flakes from the m0/m1 merge run, kept
-in one child.
+Added 2026-10-22 (maintainer): two failures from the m0/m1 merge runs, one
+child each.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Union renewal](/quest/m1/test-flakes-2/auth-union-renewal.md) - the JS subscriber never leaves a torn REQUEST_UPDATE on the stream
+- [One process](/quest/m1/test-flakes-2/one-process.md) - no test writes process-wide env or unwraps the crypto provider install
 
 ## Related
 
