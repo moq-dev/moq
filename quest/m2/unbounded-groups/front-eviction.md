@@ -44,6 +44,14 @@ See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
   need one. The [m1 compression migration](/quest/m1/compress/migrate.md)
   deletes moq-flate; recheck the surviving JSON stream budget and track
   compression paths instead of retaining a deleted helper's cap.
+- Compressed groups keep the existing prefix-before-inflate contract
+  ([compressed tracks](/quest/m1/compress/README.md)). Today
+  `GroupState::inflate` refuses a nonzero cached offset. Front eviction must
+  refill the needed compressed prefix before inflation or retain equivalent
+  decoder state, with compressed storage, the shared inflated copy, and
+  codec state all bounded by the pool. Never pin a whole growing prefix to
+  make a late plain reader work. Test a long compressed group through a
+  small pool with a late plain reader and legacy-wire egress.
 - Benchmarks: keep `group.rs` flat. Add a case swept over frames held and
   runs evicted, and one over concurrent readers refilling a hole.
 
