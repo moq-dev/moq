@@ -38,7 +38,8 @@ pub struct KeepAlive {
 	pub interval: Duration,
 
 	/// Close the session if no frame is received from the peer within this window.
-	/// Should be a small multiple of `interval` to tolerate transient drops.
+	/// Should be a small multiple of `interval` to tolerate transient drops; a session
+	/// refuses one no longer than `interval` with [`Error::InvalidConfig`].
 	pub timeout: Duration,
 }
 
@@ -143,19 +144,19 @@ where
 	fn start(self, side: Side) -> Result<Session, Error> {
 		let (version, protocol) = alpn::parse(Some(&self.alpn))?;
 		let config = self.session.clone().with_negotiated(version, protocol);
-		let transport = self.into_transport(config.version, config.max_record_size);
+		let transport = self.into_transport(config.version, config.max_record_size)?;
 		Session::new(transport, side, config)
 	}
 
-	fn into_transport(self, version: Version, max_record_size: u64) -> WsTransport<T> {
+	fn into_transport(self, version: Version, max_record_size: u64) -> Result<WsTransport<T>, Error> {
 		let mut transport = WsTransport::new(self.ws, version, max_record_size, Binding::Uri);
 		if let Some(stats) = self.socket_stats {
 			transport = transport.with_socket_stats(stats);
 		}
-		match self.keep_alive {
-			Some(ka) => transport.with_keep_alive(ka),
+		Ok(match self.keep_alive {
+			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
-		}
+		})
 	}
 }
 
@@ -291,7 +292,7 @@ impl Client {
 		let config = self.session.clone().with_negotiated(version, protocol);
 		let transport = WsTransport::new(ws_stream, config.version, config.max_record_size, Binding::Uri);
 		let transport = match self.keep_alive {
-			Some(ka) => transport.with_keep_alive(ka),
+			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
 		};
 		// Protocol came from the negotiated subprotocol, so no in-band wait.
@@ -454,7 +455,7 @@ impl Server {
 		let config = self.session.clone().with_negotiated(version, protocol);
 		let transport = WsTransport::new(ws, config.version, config.max_record_size, Binding::Uri);
 		let transport = match self.keep_alive {
-			Some(ka) => transport.with_keep_alive(ka),
+			Some(ka) => transport.with_keep_alive(ka)?,
 			None => transport,
 		};
 		// Protocol came from the negotiated subprotocol, so no in-band wait.

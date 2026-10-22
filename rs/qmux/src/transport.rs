@@ -720,9 +720,17 @@ mod ws_transport {
 			}
 		}
 
-		pub fn with_keep_alive(mut self, keep_alive: KeepAlive) -> Self {
+		/// Refuses a keep-alive that would close a healthy idle peer: a zero interval, or a
+		/// timeout no longer than the interval, which expires before the first Pong.
+		pub fn with_keep_alive(mut self, keep_alive: KeepAlive) -> Result<Self, Error> {
+			if keep_alive.interval.is_zero() {
+				return Err(Error::InvalidConfig("zero keep-alive interval"));
+			}
+			if keep_alive.timeout <= keep_alive.interval {
+				return Err(Error::InvalidConfig("keep-alive timeout not above its interval"));
+			}
 			self.keep_alive = Some(keep_alive);
-			self
+			Ok(self)
 		}
 
 		pub fn with_socket_stats(mut self, stats: crate::SharedSocketStats) -> Self {
@@ -739,11 +747,8 @@ mod ws_transport {
 
 	impl PingState {
 		fn new(config: KeepAlive) -> Self {
-			// tokio::time::interval panics on a zero Duration; floor to 1ms so a
-			// misconfigured KeepAlive degrades into "very chatty" instead of crashing.
-			let interval_dur = config.interval.max(Duration::from_millis(1));
 			// Skip catch-up bursts after a long pause; we just want one Ping per tick.
-			let mut interval = tokio::time::interval(interval_dur);
+			let mut interval = tokio::time::interval(config.interval);
 			interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 			// First tick fires immediately by default; consume it so we don't ping on connect.
 			interval.reset();
@@ -760,9 +765,7 @@ mod ws_transport {
 
 	impl DeadlineState {
 		fn new(config: KeepAlive) -> Self {
-			let interval_dur = config.interval.max(Duration::from_millis(1));
-			// A deadline shorter than the interval would fire before the first ping.
-			let timeout = config.timeout.max(interval_dur);
+			let timeout = config.timeout;
 			Self {
 				deadline: Box::pin(tokio::time::sleep(timeout)),
 				timeout,

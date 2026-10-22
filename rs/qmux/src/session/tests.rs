@@ -275,6 +275,27 @@ async fn datagrams_need_records() {
 	));
 }
 
+/// A keep-alive that would expire before the first Pong could return is refused.
+#[cfg(feature = "ws")]
+#[tokio::test]
+async fn websocket_keep_alive_needs_room_for_a_pong() {
+	use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+
+	use crate::transport::WsTransport;
+	use crate::ws::KeepAlive;
+
+	for (interval, timeout) in [(0, 30), (5, 5), (5, 1)] {
+		let (socket, _peer) = tokio::io::duplex(PIPE);
+		let ws = WebSocketStream::from_raw_socket(socket, Role::Client, None).await;
+		let keep_alive = KeepAlive::new(Duration::from_secs(interval), Duration::from_secs(timeout));
+		let result = WsTransport::new(ws, Version::QMux02, 16382, Binding::Uri).with_keep_alive(keep_alive);
+		assert!(
+			matches!(result, Err(Error::InvalidConfig(_))),
+			"{interval}s / {timeout}s"
+		);
+	}
+}
+
 /// A sender that never runs out of output still sends its WebSocket keep-alive Pings, so
 /// a peer that has no keep-alive and sends nothing back does not let it time out.
 #[cfg(feature = "ws")]
@@ -308,7 +329,8 @@ async fn websocket_keep_alive_runs_during_continuous_output() {
 	config.rtt_interval = None;
 	config.max_idle_timeout = None;
 	let a = WsTransport::new(a, config.version, config.max_record_size, Binding::Uri)
-		.with_keep_alive(KeepAlive::new(Duration::from_millis(10), Duration::from_millis(500)));
+		.with_keep_alive(KeepAlive::new(Duration::from_millis(10), Duration::from_millis(500)))
+		.unwrap();
 	let b = WsTransport::new(b, config.version, config.max_record_size, Binding::Uri);
 	let mut sender = Session::new(a, Side::Client, config.clone()).unwrap();
 	let _receiver = Session::new(b, Side::Server, config).unwrap();
