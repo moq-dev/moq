@@ -11,6 +11,14 @@ How to update your code for each breaking change, newest first.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 Regenerate the bindings for the changed checksums.
 
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `Announced()` or `AnnouncedBroadcast()`, instead of under its whole scope at connect.
+`MoqOriginConsumer.RequestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
+Resolve the path with `AnnouncedBroadcast()`, or hold `Announced()` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+Regenerate the bindings for the changed `request_broadcast` checksum.
+
 ### Catalog references carry their epoch
 
 `MoqVideo` and `MoqAudio` gain `Epoch *string`, the publisher instance their `Broadcast` reference names.

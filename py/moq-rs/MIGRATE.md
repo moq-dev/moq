@@ -10,6 +10,13 @@ How to update your code for each breaking change, newest first.
 `TrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announced_broadcast()`, instead of under its whole scope at connect.
+`OriginConsumer.request_broadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
+Resolve the path with `announced_broadcast()`, or hold `announced()` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
 ### `ContainerFormat.FMP4` unwraps to Legacy (#6250)
 
 A container import with `ContainerFormat.FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.

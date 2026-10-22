@@ -194,7 +194,8 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				client: config.client,
 				withdrawal: Default::default(),
 				session: config.session,
-				origin: config.origin,
+				// Serving the peer is not a local reader asking to discover anything.
+				origin: config.origin.serving(),
 				self_origin,
 				peer_setup: config.peer_setup,
 				peer_hop: config.peer_hop,

@@ -451,6 +451,12 @@ match byte for byte and decode back to the same value.
 NOT\_SUPPORTED across Rust and JS in both directions, checking that the later
 refusal retains its meaning and both bindings emit the same bytes.
 
+`lite_tracks_interop` checks moq-lite-07's Tracks Stream both ways: `tracks.ts`
+answers a Rust TRACKS request with js/net's publisher, whose listing (each
+TRACKS\_ADD with its TRACK\_INFO, SYNCED, a TRACKS\_REMOVE, then the FIN when
+the broadcast ends) Rust decodes, and it re-encodes Rust's listing events byte for
+byte.
+
 `lite_varint_interop` runs next to it and does the same through moq-lite's
 version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07
 (leading-ones) varints, a SETUP carrying a 62-bit Hop ID, a datagram, and a
