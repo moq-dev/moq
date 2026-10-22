@@ -104,6 +104,8 @@ lite-07 stream type here.
 - [Interop finish](/quest/m1/interop-finish.md) - the interop matrix proves a clean broadcast finish across implementations
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
 - [Track live signal](/quest/m1/track-live.md) - a reader can wait for its track's feed to be live, so a player skips old cached groups while a fresh upstream subscription starts
+- [Producers drop the phantom catalog type](/quest/m1/catalog-phantom.md) - moq-video, moq-audio and moq-mux producers lose an `E: CatalogExt` parameter that only `PhantomData` holds
+- [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
 - [moq-net compiles once](/quest/m1/net-erase-transport.md) - the session drivers stop monomorphizing per transport and per crate, saving several MiB of the relay, FFI library, `libmoq` and CLI
 - [Audio devices on ARM](/quest/m1/audio-devices-arm.md) - `just rs audio-devices` passes on the hosted ARM runner
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
@@ -114,6 +116,9 @@ lite-07 stream type here.
 - [Subscribe update churn](/quest/m1/subscribe-update-churn.md) - a viewer sends SUBSCRIBE_UPDATE only on a meaningful change, measured after the publisher stall fix
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over the even drafts 14 to 22
 - [Runner nightly](/quest/m1/interop-runner-nightly.md) - a nightly job runs the upstream interop runner against our relay and clients, so newly registered implementations with a published image are tested without a change here
+- [One Annex-B exporter](/quest/m1/annexb-export.md) - H.264 and H.265 Annex-B export share one private lifecycle, which also follows a rebound rendition
+- [One CLI duration type](/quest/m1/cli-duration.md) - moq-cli, moq-bench and moq-relay reuse moq-tokio's public `cli::Duration` instead of their own copies
+- [Shared watch and publish UI](/quest/m1/js-ui.md) - a new `@moq/ui` package holds the graph, buttons, and support banner that watch and publish duplicate
 - [CI workflow audit](/quest/m1/audit-ci.md) - every workflow and job gives a signal someone sees, at a cost that signal justifies, or is fixed, moved, or deleted
 - [Artifact size audit](/quest/m1/audit-size.md) - binary, FFI, WASM, and bundle growth since the m0 run is explained, fixed, or planned
 - [Compile time audit](/quest/m1/audit-compile-time.md) - build-time hotspots are measured against the m0 baselines and the worst are fixed or planned
