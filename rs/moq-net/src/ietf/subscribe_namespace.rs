@@ -11,13 +11,6 @@ use super::publish_namespace::{AdvertParams, Negotiated};
 
 use super::Version;
 
-/// SUBSCRIBE_TRACKS message ID (0x51) introduced in draft-18 (#1542).
-///
-/// moq-lite does not implement PUBLISH replication through a CDN, which is the
-/// only thing that SUBSCRIBE_TRACKS enables (subscribing to all tracks under a
-/// prefix), so each one is refused with REQUEST_ERROR NOT_SUPPORTED.
-pub const SUBSCRIBE_TRACKS_ID: u64 = 0x51;
-
 /// True for the drafts that use the legacy 0x11 SUBSCRIBE_NAMESPACE message.
 /// Draft-18+ uses the renumbered 0x50 message instead.
 fn is_legacy_version(version: Version) -> bool {
@@ -313,37 +306,6 @@ impl Message for Namespace<'_> {
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		Self::decode_body(r, version, Negotiated::default())
-	}
-}
-
-/// PUBLISH_BLOCKED message (0x0F): draft-17 only
-/// Indicates a track within a namespace is blocked from publishing.
-// The session does not dispatch this draft-17 message; keep its codec for fuzz coverage.
-#[cfg(any(test, feature = "fuzz"))]
-#[derive(Clone, Debug)]
-pub struct PublishBlocked<'a> {
-	pub suffix: Path<'a>,
-	pub track_name: Cow<'a, str>,
-}
-
-#[cfg(any(test, feature = "fuzz"))]
-impl Message for PublishBlocked<'_> {
-	const ID: u64 = 0x0F;
-
-	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		assert!(version == Version::Draft17, "PublishBlocked is draft17 only");
-		encode_namespace(w, &self.suffix)?;
-		w.string(&self.track_name)?;
-		Ok(())
-	}
-
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		if version != Version::Draft17 {
-			return Err(DecodeError::Unsupported);
-		}
-		let suffix = decode_namespace(r)?;
-		let track_name = Cow::Owned(r.string()?);
-		Ok(Self { suffix, track_name })
 	}
 }
 
