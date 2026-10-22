@@ -4,14 +4,9 @@
 
 A creator adds any number of RTMP, RTMPS, and WHIP destinations alongside
 MoQ, each with its own codec and bitrate, and goes live to all of them at
-once.
-- **Encoders:** destinations with identical encode settings share one
-  encoder.
-- **Failure:** a destination that drops redials without disturbing the
-  others, and its error shows on that destination.
-- **RTMPS:** moq-rtmp's `Client` dials `rtmps://` itself. Today it connects
-  over plaintext TCP only, so TLS needs a caller-supplied stream through
-  `Client::with_stream`.
+once. Destinations with identical encode settings share one encoder. The
+fan-out runs on the [egress library](/quest/m3/studio/egress.md), and each
+destination's status and errors show in the UI.
 
 ## Plan
 
@@ -20,6 +15,11 @@ once.
   - AAC for RTMP ingests, which commonly require H.264 and AAC.
   - E-RTMP HEVC or AV1 only when the creator picks it for a destination that
     accepts it.
+- **AAC encoders**, decided 2026-10-22: platform encoders only, from the
+  AudioToolbox and Media Foundation quests. moq-audio has no software AAC
+  tier, and none is planned. On Linux, choosing AAC for a destination fails
+  loudly when no encoder is available. It never silently falls back to
+  another codec.
 - **Stream keys** go in the OS credential store, never in the scene file,
   which is meant to be shared and versioned. Prefer a maintained crate such
   as `keyring`.
@@ -30,3 +30,6 @@ once.
 ## Required
 
 - [The studio app](/quest/m3/studio/app.md) - the canvas and MoQ output these destinations join
+- [Broadcast egress library](/quest/m3/studio/egress.md) - subscribe once, remux to every destination
+- [AudioToolbox AAC encode](/quest/m2/audio-encode-audiotoolbox.md) - AAC on macOS
+- [Media Foundation AAC encode](/quest/m2/audio-encode-mediafoundation.md) - AAC on Windows

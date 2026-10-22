@@ -35,11 +35,12 @@ Decided 2026-10-22 with the maintainer (/quest-plan):
   (`rs/moq-audio/src/playback/mixer.rs`). Both grow slice by slice with the
   studio UI that consumes them, never ahead of it.
 - **Outputs:** the studio publishes to MoQ and pushes every RTMP(S) and WHIP
-  destination itself through moq-rtmp's and moq-rtc's dial clients. There is
-  no gateway and no moq-cli dependency, because a studio user does not run a
-  server. Destinations with identical encode settings share one encoder. The
-  studio picks codecs per destination: Opus by default, AAC where an ingest
-  requires it.
+  destination itself. It remuxes its own broadcast through a UI-free egress
+  library that a hosted service can also run server-side. There is no
+  gateway service and no moq-cli dependency, because a studio user does not
+  run a server. Destinations with identical encode settings share one
+  encoder. The studio picks codecs per destination: Opus by default, AAC
+  where an ingest requires it, from platform encoders only.
 - **Extensibility:** first-party features plus browser sources (CEF
   offscreen, desktop only). A plugin API is a large surface to maintain with
   no consumer.
@@ -62,6 +63,7 @@ repository.
 ## Required
 
 - [The studio app](/quest/m3/studio/app.md) - egui studio with a minimal moq-scene and program bus: one canvas, scenes of capture, image, and MoQ sources, published to MoQ
+- [Broadcast egress library](/quest/m3/studio/egress.md) - subscribe once to a broadcast and remux to N RTMP(S) and WHIP destinations, with no transcoding
 - [Destinations](/quest/m3/studio/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders
 - [Multiple canvases](/quest/m3/studio/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [Guests](/quest/m3/studio/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources
