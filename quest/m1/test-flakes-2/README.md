@@ -1,4 +1,4 @@
-# More tests hold up under load
+# [S] More tests hold up under load
 
 ## Goal
 
@@ -33,13 +33,9 @@ The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
 fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 
 Added 2026-10-21 (maintainer): small flakes from the m0/m1 merge run, kept
-in one child; only the OBS stop drain remains.
+in one child.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [OBS drain under load](/quest/m1/test-flakes-2/three-flakes.md) - verify the existing close-tail fix against the reproduced OBS stop-drain failure; the merged JS allocation replacement passed under load
 
 ## Related
 
