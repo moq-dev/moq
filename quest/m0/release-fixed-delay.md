@@ -11,6 +11,11 @@ ratchet up drags a "100 ms" viewer tens of seconds behind; a user reported a
 
 ## Plan
 
+The implementation is already open in
+[moq-dev/moq#6217](https://github.com/moq-dev/moq/pull/6217); continue that PR
+rather than creating another backport. The
+[focused backports](/quest/m0/release-backports/README.md) reuse this quest.
+
 `main` already behaves this way since
 [#4162](https://github.com/moq-dev/moq/pull/4162), but that change is a
 breaking `@moq/watch` rework that won't be backported. Port only the behavior:
