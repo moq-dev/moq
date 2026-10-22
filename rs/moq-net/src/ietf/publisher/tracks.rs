@@ -1033,7 +1033,10 @@ where
 	/// with them would be served, until it pauses again or ends. Answers the resuming update
 	/// with where the subscription now joins, when `answer` says one asked. `Err(())` when the
 	/// subscriber cancelled.
-	#[allow(clippy::too_many_arguments)]
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "private plumbing; a single-use argument struct would only rename the parameters"
+	)]
 	async fn resume_publish(
 		&self,
 		stream: &mut Stream<S, Version>,

@@ -1,6 +1,10 @@
 //! Encoded retention cost and peak memory, swept over delay and bitrate.
 //! Run with `cargo bench -p moq-cli --bench play_buffer`.
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "host time measures benchmark throughput"
+)]
 
 #[allow(
 	dead_code,

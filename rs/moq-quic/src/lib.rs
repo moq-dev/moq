@@ -17,17 +17,6 @@
     test,
     allow(dead_code, reason = "test builds compile helpers only some tests call")
 )]
-// quinn's workspace lints, kept so upstream code stays clean against them. They
-// live here because Cargo can't extend the workspace lint table per crate.
-#![warn(
-    elided_lifetimes_in_paths,
-    unnameable_types,
-    unreachable_pub,
-    unused_qualifications,
-    clippy::manual_let_else,
-    clippy::or_fun_call,
-    clippy::use_self
-)]
 
 use std::{
     fmt,
@@ -49,7 +38,10 @@ mod entropy;
 pub mod fuzz;
 mod range_set;
 #[cfg(all(test, any(feature = "rustls-aws-lc-rs", feature = "rustls-ring")))]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "tests read the host clock directly"
+)]
 mod tests;
 pub mod transport_parameters;
 mod varint;

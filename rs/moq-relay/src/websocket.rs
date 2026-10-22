@@ -255,7 +255,11 @@ fn tungstenite_text_to_axum(text: tungstenite::Utf8Bytes) -> axum::extract::ws::
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	use axum::{Router, extract::WebSocketUpgrade, routing::any};

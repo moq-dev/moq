@@ -158,7 +158,7 @@ impl<'a> Decoder<'a> {
 	/// After a [`DecodeError::Short`], how many bytes from the start the failed read
 	/// needed: at least one more than the buffer when it can't tell, and 0 if no read of
 	/// this decoder ran short.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn need(&self) -> usize {
 		self.need
 	}

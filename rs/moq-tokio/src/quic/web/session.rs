@@ -1044,7 +1044,7 @@ impl web_transport_trait::Session for Session {
 }
 
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::{
 		io::{self, IoSliceMut},

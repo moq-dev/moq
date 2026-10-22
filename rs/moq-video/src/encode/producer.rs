@@ -840,10 +840,13 @@ mod tests {
 		not(feature = "openh264"),
 		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
 	)]
-	#![expect(
-		clippy::disallowed_methods,
-		clippy::disallowed_types,
-		reason = "tests read the host clock directly"
+	#![cfg_attr(
+		all(feature = "capture", feature = "openh264"),
+		expect(
+			clippy::disallowed_methods,
+			clippy::disallowed_types,
+			reason = "the capture tests read the host clock directly"
+		)
 	)]
 
 	use moq_mux::catalog::Stream as _;

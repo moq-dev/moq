@@ -112,6 +112,11 @@ class TestModelMarkers(unittest.TestCase):
 		wrapped = '// private: test\n#[cfg_attr(\n\tnot(feature = "async"),\n\tallow(dead_code, reason = "why")\n)]\npub(crate) struct Open'
 		self.assertIsNone(run(**{"rs/moq-net/src/model/group.rs": ("// private: test\npub(crate) struct Open", wrapped)}))
 
+	def test_code_ending_like_an_attribute_does_not_lend_its_marker(self):
+		table = "// private: test\n#[cfg(test)]\npub(crate) const TABLE: [u8; 1] = [\n\tu8::pow(1, 1\n)];\npub(crate) struct Inner"
+		error = run(**{"rs/moq-net/src/model/group.rs": ("pub(super) struct Inner", table)})
+		self.assertIn("group.rs:6: `pub(crate)`", error)
+
 	def test_stale_rust_marker_fails(self):
 		error = run(**{"rs/moq-net/src/model/group.rs": ("pub(super) struct Inner", "// private: test\npub(super) struct Inner")})
 		self.assertIn("group.rs:1: marker is not on an item", error)

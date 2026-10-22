@@ -5145,7 +5145,7 @@ enum Inner {
 	/// Boxed: the plain cursor is the hot path.
 	Resume(
 		Box<super::resume::Subscriber>,
-		#[allow(dead_code)] kio::Consumer<TrackState>,
+		#[allow(dead_code, reason = "held so the logical track counts as a reader")] kio::Consumer<TrackState>,
 	),
 }
 
@@ -7444,7 +7444,7 @@ impl Request {
 use futures::FutureExt;
 
 #[cfg(test)]
-#[allow(missing_docs)] // test-only assertion helpers
+#[expect(missing_docs, reason = "test-only assertion helpers")]
 impl Subscriber {
 	pub fn assert_group(&mut self) -> group::Consumer {
 		kio::wait(|waiter| self.poll_recv_group(waiter))

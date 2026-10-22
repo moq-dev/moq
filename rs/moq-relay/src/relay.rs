@@ -839,7 +839,11 @@ async fn serve_listening(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	#[tokio::test]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {

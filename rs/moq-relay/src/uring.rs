@@ -907,7 +907,7 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -931,7 +931,6 @@ mod tests {
 
 	/// Incomplete messages hold connection credit, so the window has to fit the largest.
 	#[test]
-	#[allow(clippy::field_reassign_with_default)]
 	fn a_receive_window_below_the_largest_message_is_refused() {
 		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
 		let mut quic = moq_tokio::quic::Config::default();

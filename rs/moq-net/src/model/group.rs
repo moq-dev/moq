@@ -1672,8 +1672,10 @@ impl Producer {
 	/// Abort with `err` only while nothing consumes the group, returning whether it is
 	/// closed. Consumer creation and the check share a lock, so a reader arriving after
 	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
-	#[allow(dead_code)]
-	// The answering API retains these on the writer as well as the session observer.
+	#[allow(
+		dead_code,
+		reason = "the answering API retains these on the writer as well as the session observer"
+	)]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn abort_unused(&self, err: Error) -> bool {
 		self.handle.abort_unused(err)
@@ -1708,8 +1710,10 @@ impl Producer {
 	}
 
 	/// Poll for the group becoming unused (every consumer dropped).
-	#[allow(dead_code)]
-	// The answering API retains these on the writer as well as the session observer.
+	#[allow(
+		dead_code,
+		reason = "the answering API retains these on the writer as well as the session observer"
+	)]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.handle.poll_unused(waiter)

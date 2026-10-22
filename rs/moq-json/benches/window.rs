@@ -4,7 +4,11 @@
 //! frames are built outside the measured section.
 //!
 //! Run `cargo bench -p moq-json --bench window` and compare the table across revisions.
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "host time measures benchmark throughput"
+)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;

@@ -352,7 +352,7 @@ mod tests {
 
 	/// On a running clock, a converted instant is the same moment on std's clock.
 	#[test]
-	#[allow(clippy::disallowed_methods)]
+	#[expect(clippy::disallowed_methods, reason = "the test compares against std's clock")]
 	fn std_conversion_is_exact_on_a_running_clock() {
 		let before = std::time::Instant::now();
 		let now = crate::now();

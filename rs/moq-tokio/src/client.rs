@@ -779,7 +779,7 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 

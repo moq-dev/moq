@@ -1214,7 +1214,11 @@ fn frame(samples: &[f32], timestamp_us: u64) -> Result<Frame, Error> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use std::collections::VecDeque;
 	use std::future::Future;
