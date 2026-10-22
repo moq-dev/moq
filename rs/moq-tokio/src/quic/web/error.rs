@@ -230,6 +230,14 @@ pub enum ReadError {
 
 	#[error("stream already closed")]
 	ClosedStream,
+
+	/// The connection's receive window was stuck and this stream was discarded to free it.
+	#[error("evicted")]
+	Evicted,
+
+	/// A lease wanted more than the connection receive window can hold.
+	#[error("want exceeds the receive window")]
+	TooLarge,
 }
 
 impl From<crate::quic::driver::ReadError> for ReadError {
@@ -243,6 +251,8 @@ impl From<crate::quic::driver::ReadError> for ReadError {
 			}
 			crate::quic::driver::ReadError::ConnectionLost(e) => ReadError::SessionError(e.into()),
 			crate::quic::driver::ReadError::ClosedStream => ReadError::ClosedStream,
+			crate::quic::driver::ReadError::Evicted => ReadError::Evicted,
+			crate::quic::driver::ReadError::TooLarge => ReadError::TooLarge,
 			crate::quic::driver::ReadError::ZeroRttRejected => unreachable!("0-RTT not supported"),
 			crate::quic::driver::ReadError::IllegalOrderedRead => {
 				unreachable!("WebTransport streams are only read in order")

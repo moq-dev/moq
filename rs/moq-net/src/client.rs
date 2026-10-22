@@ -593,9 +593,9 @@ mod tests {
 		fn new(protocol: Option<&'static str>, server_control_bytes: Vec<u8>) -> Self {
 			let writes = Arc::new(Mutex::new(Vec::new()));
 			let send = FakeSendStream { writes: writes.clone() };
-			let recv = FakeRecvStream {
+			let recv = crate::transport::poll::Buffered::new(FakeChunks {
 				data: VecDeque::from(server_control_bytes),
-			};
+			});
 			let state = FakeSessionState {
 				protocol,
 				control_stream: Mutex::new(Some((send, recv))),
@@ -766,30 +766,25 @@ mod tests {
 		}
 	}
 
-	struct FakeRecvStream {
+	type FakeRecvStream = crate::transport::poll::Buffered<FakeChunks>;
+
+	struct FakeChunks {
 		data: VecDeque<u8>,
 	}
 
-	impl crate::transport::poll::RecvStream for FakeRecvStream {
+	impl crate::transport::poll::Chunks for FakeChunks {
 		type Error = FakeError;
 
-		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		fn poll_read_chunk(&mut self, _cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 			if self.data.is_empty() {
 				return Poll::Ready(Ok(None));
 			}
 
-			let size = dst.len().min(self.data.len());
-			for slot in dst.iter_mut().take(size) {
-				*slot = self.data.pop_front().unwrap();
-			}
-			Poll::Ready(Ok(Some(size)))
+			let size = max.min(self.data.len());
+			Poll::Ready(Ok(Some(self.data.drain(..size).collect())))
 		}
 
 		fn stop(&mut self, _code: u32) {}
-
-		fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
-		}
 	}
 
 	fn mock_server_setup(negotiated: Version) -> Vec<u8> {
@@ -1151,17 +1146,18 @@ mod tests {
 
 	impl crate::transport::poll::RecvStream for LocalRecv {
 		type Error = FakeError;
+		type Lease<'a> = crate::transport::poll::BufferedLease<'a>;
 
-		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-			self.inner.poll_read(cx, dst)
+		fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
+			self.inner.poll_lease(cx, want)
+		}
+
+		fn set_priority(&mut self, priority: i64) {
+			self.inner.set_priority(priority);
 		}
 
 		fn stop(&mut self, code: u32) {
-			self.inner.stop(code);
-		}
-
-		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			crate::transport::poll::RecvStream::poll_closed(&mut self.inner, cx)
+			crate::transport::poll::RecvStream::stop(&mut self.inner, code);
 		}
 	}
 
