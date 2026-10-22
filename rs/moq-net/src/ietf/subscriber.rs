@@ -2835,6 +2835,12 @@ where
 		// resume it rather than open a second one.
 		let key: tracks::TrackKey = (broadcast_path.to_owned(), track_name.into());
 		let mut adopting = self.want(&key);
+		enum Acquired<S: crate::transport::poll::Session> {
+			/// A Request ID for a SUBSCRIBE of our own.
+			Fresh(RequestId),
+			/// The paused subscription a listing held.
+			Held(tracks::Upstream<S>),
+		}
 
 		// Retirement and revocation cancel only the wait for an ID. On drafts 14-16 the peer
 		// grants MAX_REQUEST_ID credit back only for requests it receives, so an allocated ID
@@ -2847,12 +2853,14 @@ where
 			validity.check(waiter)?;
 			if let Some(handoff) = &adopting {
 				match Self::poll_handoff(handoff, waiter) {
-					Poll::Ready(Some(upstream)) => return Poll::Ready(Ok(Err(upstream))),
+					Poll::Ready(Some(upstream)) => return Poll::Ready(Ok(Acquired::Held(upstream))),
 					Poll::Ready(None) => adopting = None,
 					Poll::Pending => return Poll::Pending,
 				}
 			}
-			self.control.poll_credit(waiter, &mut timeout).map(|id| id.map(Ok))
+			self.control
+				.poll_credit(waiter, &mut timeout)
+				.map(|id| id.map(Acquired::Fresh))
 		})
 		.await;
 		let acquired = match acquired {
@@ -2869,7 +2877,7 @@ where
 		// The resumed subscription's alias, properties, and owed answers, when resuming one.
 		let mut held: Option<tracks::Resumed> = None;
 		let (request_id, mut stream, mut messages) = match acquired {
-			Ok(request_id) => {
+			Acquired::Fresh(request_id) => {
 				let stream = match Stream::open(&mut self.session.clone(), self.version).await {
 					Ok(s) => s,
 					Err(err) => {
@@ -2881,7 +2889,7 @@ where
 				let messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 				(request_id, stream, messages)
 			}
-			Err(upstream) => {
+			Acquired::Held(upstream) => {
 				self.adopted(&key, upstream.request_id);
 				let tracks::Upstream {
 					stream,
