@@ -91,9 +91,11 @@ observe(arrival, media):
     if media > newest:                  # a reordered frame never joins the history
         newest = media
         drop history entries with entry.media < media - WINDOW
+        if MAX_HISTORY entries are held: drop the oldest
         push (arrival, media) onto history
 
-    ref = entry in history with entry.media <= media, minimising (entry.arrival - entry.media)
+    ref = entry in history with entry.media <= media, minimising (entry.arrival - entry.media),
+          the oldest on a tie
     if there is none: return            # older than the whole window, not measured
     delay = max(0, (arrival - ref.arrival) - (media - ref.media))
 
@@ -138,6 +140,22 @@ special case, and neither does a group the relay dropped.
 `WINDOW` is also the horizon over which a build-up is visible. A queue that
 fills over ten seconds is measured as the part of it that happened in the last
 two.
+
+### Bounding the history
+
+The history holds at most `MAX_HISTORY` (8192) arrivals. The window is media
+time and the publisher chooses the timestamp rate, so without a cap a stream
+that advances a nanosecond per frame keeps every frame it sends. The cap stays
+far above the two-second window of any real track, including a 1000 fps one
+(2000 entries); a stream dense enough to reach it measures against a window
+shorter than `WINDOW` instead of growing without bound.
+
+The reference is a minimum over a prefix of the history, and the publisher
+chooses the prefix by reordering, so scanning for it lets every frame cost
+`MAX_HISTORY` comparisons. Keep the history in a structure that answers any
+prefix's minimum in logarithmic time, such as a segment tree over a ring.
+Keep the oldest entry on a tie: tied entries with a different `arrival` and
+`media` round `delay` differently.
 
 ### Reordered arrivals are measured against what came before them
 
@@ -473,6 +491,7 @@ The exceptions are marked.
 | `FRESH_MAX` | 0.1 | Ours, twice the quantile's tail. NetEq ramps the forget factor from a start weight of 2 instead; see [the histogram](#the-histogram) |
 | `PRIOR[i]` | `0.5^(i+1)` | NetEq's histogram seed |
 | `IDLE_MAX` | 1024 intervals | Ours. A work bound with no effect on output |
+| `MAX_HISTORY` | 8192 arrivals | Ours. Bounds a rate the publisher chooses; see [Bounding the history](#bounding-the-history) |
 | Out-of-range delays | clamped, not dropped | Ours. See [the histogram](#the-histogram) |
 
 ## Implementing from this page

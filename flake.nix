@@ -574,6 +574,8 @@
         legacyPackages = {
           inherit (pkgs) gst_all_1;
 
+          runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
+
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out
           # of the default shell because it pulls in ~3 GB (CEF, mostly) that

@@ -1,6 +1,6 @@
 //! Receive-side ownership: a cancelled handler explicitly aborts its unfinished group.
 //!
-//! Frames need no guard here: `frame::Raw`'s own `Drop` already aborts the group when a
+//! Frames need no guard here: `frame::Producer`'s own `Drop` already aborts the group when a
 //! frame dies before its declared size is written, so a partial frame is never silent.
 
 use std::ops::{Deref, DerefMut};
@@ -22,16 +22,12 @@ impl Group {
 	}
 
 	/// Move the writer and cancellation cleanup into its next frame.
-	pub fn create_frame_owned(
-		&mut self,
-		frame: impl Into<frame::Header>,
-		budget: &frame::Budget,
-	) -> Result<frame::ProducerOwned, Error> {
+	pub fn create_object(&mut self, frame: frame::Header) -> Result<frame::Producer, Error> {
 		self.writer
 			.take()
 			.expect("group writer is available between frames")
-			.create_frame_owned(frame, budget)
-			.map(frame::ProducerOwned::cancel_on_drop)
+			.create_object(frame)
+			.map(frame::Producer::cancel_on_drop)
 	}
 
 	/// Restore the writer returned by a completed frame.
@@ -103,12 +99,12 @@ mod tests {
 		let mut consumer = producer.consume();
 		let mut receiving = Group::new(producer);
 		let frame = receiving
-			.create_frame_owned(
+			.create_object(
 				crate::frame::Info {
 					size: 2,
 					timestamp: Some(crate::Timestamp::ZERO),
-				},
-				&crate::frame::Budget::default(),
+				}
+				.into(),
 			)
 			.unwrap();
 		drop(frame);
@@ -124,12 +120,12 @@ mod tests {
 		let mut consumer = producer.consume();
 		let mut receiving = Group::new(producer);
 		let frame = receiving
-			.create_frame_owned(
+			.create_object(
 				crate::frame::Info {
 					size: 2,
 					timestamp: Some(crate::Timestamp::ZERO),
-				},
-				&crate::frame::Budget::default(),
+				}
+				.into(),
 			)
 			.unwrap();
 		receiving.abort(Error::App(42)).unwrap();

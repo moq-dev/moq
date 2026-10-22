@@ -1431,7 +1431,7 @@ export class Subscriber {
 				// The publisher will never send these groups, so they are accounted for without a
 				// stream, and a reader of one still arriving ends with the drop's error now.
 				entry.tail.account(resp.drop.start, resp.drop.end + 1);
-				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1, resp.drop.cause(this.version));
+				entry.track.dropGroups(resp.drop.start, resp.drop.end + 1, resp.drop.cause(this.version));
 			}
 		}
 	}
@@ -1511,13 +1511,8 @@ export class Subscriber {
 					: undefined;
 			const current = track.subscription.peek();
 			if (current === undefined || (refresh === undefined && this.#sameSubscription(current, lastSent))) {
-				// Nothing new to send; wait for a change or termination.
-				const next = await race([
-					track.subscription.changed(),
-					demand.wanted.changed(),
-					edge.changed(),
-					stopped,
-				]);
+				// Each wake releases the quiet signals too, including when termination wins.
+				const next = await race([Signal.race(track.subscription, demand.wanted, edge), stopped]);
 				if (next === null) return;
 				continue;
 			}
