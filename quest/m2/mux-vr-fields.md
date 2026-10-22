@@ -49,7 +49,10 @@ with non-diegetic stereo, and a malformed one are refused.
 
 Public API: none beyond the catalog fields #5543 adds. Wire: none.
 
+## Required
+
+- [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) - the `dOps` mapping table an ambisonic fMP4 track needs
+
 ## Related
 
 - [WebXR playback](/quest/m3/watch-webxr.md) - `<moq-watch>` renders these fields
-- [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) - the `dOps` mapping table an ambisonic fMP4 track needs

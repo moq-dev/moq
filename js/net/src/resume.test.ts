@@ -511,7 +511,7 @@ test("a replacement delivers unseen datagrams below the newest sequence", async 
 	}
 });
 
-test.each([0, 100])("datagram identities stay within the reader's %p ms budget", (budget) => {
+test.each([0, 100])("datagram identities stay within the reader's %p ms budget", async (budget) => {
 	const clock = new Manual();
 	const restore = clock.install();
 	try {
@@ -524,16 +524,16 @@ test.each([0, 100])("datagram identities stay within the reader's %p ms budget",
 		const recv = () => hooks.tryRecvDatagram(sub);
 		send(10);
 		expect(recv().kind).toBe("datagram");
-		clock.advance(Nano(60_000_000_000));
+		await clock.advance(Nano(60_000_000_000));
 		send(10);
 		expect(recv().kind).toBe("idle");
 		send(5);
 		expect(recv().kind).toBe("datagram");
 		if (budget > 0) {
-			clock.advance(Nano(budget * 500_000));
+			await clock.advance(Nano(budget * 500_000));
 			send(10);
 			expect(recv().kind).toBe("idle");
-			clock.advance(Nano(budget * 500_000));
+			await clock.advance(Nano(budget * 500_000));
 		}
 		send(10);
 		expect(recv().kind).toBe("datagram");
@@ -1529,7 +1529,7 @@ test.each(["lands", "dropped", "expired"])(
 			expect(ta.producer.demand().wanted.peek()).toBeDefined();
 
 			if (outcome === "dropped") hooks.dropTrackGroups(ta.producer, 1, 2, new NotFound("group"));
-			if (outcome === "expired") await clock.advanceAsync(Nano.fromMilli(SECOND));
+			if (outcome === "expired") await clock.advance(Nano.fromMilli(SECOND));
 			if (outcome !== "lands") {
 				// The groups drained above are released once their close settles.
 				await settle();

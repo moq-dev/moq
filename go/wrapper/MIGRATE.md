@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `media.ContainerFormatFmp4` unwraps to Legacy (#6250)
+
+A container import with `media.ContainerFormatFmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `media.ContainerFormatCmaf` to keep publishing CMAF.
+
 ### Catalog references carry their epoch
 
 `ffi.MoqVideo` and `ffi.MoqAudio` gain `Epoch`, the publisher instance their `Broadcast` reference names.

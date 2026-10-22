@@ -898,13 +898,13 @@ test("finish serves finished tracks until stale", async () => {
 			done = true;
 		});
 
-		await clock.advanceAsync(Nano.fromMilli(Milli(4_000)));
+		await clock.advance(Nano.fromMilli(Milli(4_000)));
 		const late = consumer.track("audio").subscribe().ordered();
 		expect(await late.readString()).toBe("audio");
 		expect(done).toBe(false);
 		expect(broadcast.route).toBeDefined();
 
-		await clock.advanceAsync(Nano.fromMilli(Milli(1_000)));
+		await clock.advance(Nano.fromMilli(Milli(1_000)));
 		await wait;
 		expect(Number(clock.now())).toBe(Nano.fromMilli(Milli(5_000)));
 		expect(consumer.closed.peek()).toBeNull();
@@ -963,7 +963,7 @@ test("closing the broadcast elsewhere ends the linger", async () => {
 		finishedTrack(broadcast, "video", 30).close();
 		const finish = broadcast.finish();
 		const wait = finish.wait();
-		await clock.advanceAsync(Nano.fromMilli(Milli(1_000)));
+		await clock.advance(Nano.fromMilli(Milli(1_000)));
 		broadcast.close();
 		await wait;
 		expect(Number(clock.now())).toBe(Nano.fromMilli(Milli(1_000)));

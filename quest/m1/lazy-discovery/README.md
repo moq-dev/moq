@@ -30,8 +30,11 @@ Shared rules for the children:
 - A pattern watch requests its literal head (`room/*/chat` watches `room/`;
   `**` watches the root), the rule `interests()` uses today; the origin
   filters locally.
-- When the last watcher of a prefix leaves, its request lingers for the
-  connection's existing `linger` (default 2s) before closing. No new option.
+- When the last watcher of a prefix leaves, its request lingers for a fixed
+  2s before closing, matching `LINGER` in `js/net/src/connection/forward.ts`
+  and the Rust child's plan. This discovery linger is separate from the
+  configurable shared-connection linger; one-shot sessions have no such
+  option. No new option.
 - A plain JS `request(path)` stays blind: it opens no announce request and
   subscribes at once. Rust has no blind requests or answers (decided
   2026-10-20, recorded in [the Rust child](/quest/m1/lazy-discovery/rust.md)).

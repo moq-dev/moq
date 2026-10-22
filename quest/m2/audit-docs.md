@@ -62,8 +62,9 @@ freshest. Baselines:
   property `doc/bin/gstreamer.md` names.
 - Cross-Package Sync: walked from `9b90cdd569` through `7d2a91fe66`. Walk the
   next run from there. Go has no `Client` failure accessor because `Dial`
-  returns only once connected; the maintainer chose to leave that until a Go
-  caller needs it, so it is not a gap.
+  returns only once connected. The newer 2026-10-21 maintainer decision
+  plans that gap in [Go first-dial failure](/quest/m2/go-first-dial-failure.md);
+  verify its accessor and the Kotlin/Dart wording when that quest lands.
 
 ## Required
 

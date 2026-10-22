@@ -83,7 +83,7 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 				if (outcome === "timeout") {
 					// bun's `rejects` blocks on a pending promise, so catch first and advance.
 					const timedOut = closing.catch((err: unknown) => err);
-					await clock.advanceAsync(Nano.fromSecond(Second(1)));
+					await clock.advance(Nano.fromSecond(Second(1)));
 					expect(await timedOut).toHaveProperty("message", "session close timed out");
 				} else {
 					fin.release();
