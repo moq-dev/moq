@@ -30,11 +30,17 @@ so identity across them is a non-goal. Every byte a `--sync` leg
 renders from the objects it has (slot, PCR, table, PES header, continuity
 counter) is a function of those objects, that coordinate, the catalog, and
 the rate, never of what the leg has sent or when it joined. 2022-7 is a differentiator for primary distribution, not
-a requirement (t0ms's review of #4645), so this waits until the T-STD line
-settles.
+a requirement (t0ms's review of #4645). The T-STD line landed in #4645
+(2026-10-08). Decided 2026-10-22 (maintainer): land m1's
+[stream routes](/quest/m1/ts-reliability/stream-routes.md)
+([#6252](https://github.com/moq-dev/moq/pull/6252)) and
+[arrival stamps](/quest/m1/ts-reliability/arrival-stamps.md)
+([#6249](https://github.com/moq-dev/moq/pull/6249)) first, then rebase
+[#5949](https://github.com/moq-dev/moq/pull/5949). `--sync` lanes cover or
+refuse the new per-PID route kinds (`pesPacket`, `verbatim`).
 
-- Release is unchanged: measured acquisition and the fixed-delay release's
-  clock recovery. This supersedes the 2026-10-01 plan to release at
+- Release follows [arrival stamps](/quest/m1/ts-reliability/arrival-stamps.md)'
+  lateness rule. This supersedes the 2026-10-01 plan to release at
   `clock.wall + pts + delay`. The catalog's wall mapping is fixed for the
   epoch, so a wall-scheduled release spends its delay on the source's clock
   error (a 1 s delay lasts about 9 h at 30 ppm), and NTP on the hosts does
@@ -95,6 +101,11 @@ Do not loosen the threshold, and do not claim packet identity from table
 agreement alone.
 
 Public API: `moq export ts --sync`.
+
+## Required
+
+- [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID has a declared route the `--sync` lanes must cover or refuse
+- [Arrival stamps](/quest/m1/ts-reliability/arrival-stamps.md) - the lateness rule the release follows
 
 ## Closes
 
