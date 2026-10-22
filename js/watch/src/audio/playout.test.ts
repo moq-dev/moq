@@ -237,8 +237,8 @@ describe.each(RINGS)("%s ring replay", (_name, build) => {
 });
 
 describe("subscription budget", () => {
-	// A minute of evenly paced audio, long enough for the startup ramp to hand over to the steady
-	// forget factor and the target to settle at its floor, then six seconds of 100ms flushes.
+	// A minute of evenly paced audio, long enough to spend the prior and settle the target at its
+	// floor, then six seconds of 100ms flushes.
 	const PACED = 3000;
 	const t: Arrival[] = [];
 	for (let i = 0; i < PACED; i++) t.push({ media: i * CHUNK_MS, arrival: i * CHUNK_MS + 50 });

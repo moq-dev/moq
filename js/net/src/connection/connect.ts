@@ -365,12 +365,12 @@ async function connectTransport(
 
 	try {
 		return await Promise.race([terminal, negotiate(url, session, wiring, setup)]);
-	} catch (cause) {
+	} catch (failure) {
 		// We refused the peer's SETUP and already closed with the code that says why.
-		if (cause instanceof ProtocolViolation) throw cause;
+		if (failure instanceof ProtocolViolation) throw failure;
 		// A session failure already guarantees a terminal close; its authoritative code
 		// must not be overwritten by the reset-only fallback while the browser delivers it.
-		cause = await sessionCause(session, cause);
+		const cause = await sessionCause(session, failure);
 		// A session shutdown can reject its SETUP stream before `closed` publishes the
 		// peer's close code. Wait briefly without closing locally, since a local clean close
 		// could overwrite that code. A reset-only peer is cleaned up after the grace period.

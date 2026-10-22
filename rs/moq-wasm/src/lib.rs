@@ -20,6 +20,7 @@
 
 // Browser-only crate. Empty on native so `cargo check --workspace` stays green.
 #![cfg(target_arch = "wasm32")]
+#![warn(missing_docs)]
 
 use std::cell::RefCell;
 use std::pin::pin;
@@ -218,7 +219,7 @@ pub struct Track {
 
 #[wasm_bindgen]
 impl Track {
-	/// Receive the next group in arrival order, or `null` when the track ends.
+	/// Receive the next group in arrival order, or `undefined` when the track ends.
 	#[wasm_bindgen(js_name = recvGroup, unchecked_return_type = "Promise<Group | undefined>")]
 	pub fn recv_group(&self) -> Promise {
 		let cell = self.inner.clone();
@@ -254,12 +255,13 @@ pub struct Group {
 
 #[wasm_bindgen]
 impl Group {
+	/// The group's sequence number within its track.
 	#[wasm_bindgen(getter)]
 	pub fn sequence(&self) -> u64 {
 		self.sequence
 	}
 
-	/// Read the next frame in the group, or `null` at the end of the group.
+	/// Read the next frame in the group, or `undefined` at the end of the group.
 	#[wasm_bindgen(js_name = readFrame, unchecked_return_type = "Promise<Uint8Array | undefined>")]
 	pub fn read_frame(&self) -> Promise {
 		let cell = self.inner.clone();

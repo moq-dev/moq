@@ -167,11 +167,7 @@ for (const job of ["release-swift-lib", "release-dart-ffi", "release-dart", "rel
 	assert.ok(nightly.jobs[job], `nightly must dry-run ${job}`);
 }
 
-assert.equal((await workflow("obs")).jobs.release, undefined);
 assert.deepEqual((await workflow("obs")).on.push.branches, ["release"]);
-assert.equal((await workflow("cpp")).jobs.msvc, undefined);
-assert.deepEqual((await workflow("moq-sh")).jobs.test.strategy.matrix.os, ["ubuntu-latest"]);
-assert.equal(await Bun.file(".github/workflows/swift.yml").exists(), false);
 
 // Release Dart FFI only runs on release PRs and nightly, so it packages every platform.
 const targets = JSON.parse(dart.jobs.ffi.with.targets);

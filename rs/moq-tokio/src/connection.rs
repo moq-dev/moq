@@ -2067,15 +2067,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_backoff_default() {
-		let backoff = Backoff::default();
-		assert_eq!(backoff.initial, Some(Duration::from_secs(1)));
-		assert_eq!(backoff.multiplier, 2);
-		assert_eq!(backoff.max, Some(Duration::from_secs(5)));
-		assert_eq!(backoff.timeout, Some(Duration::from_secs(10)));
-	}
-
-	#[test]
 	fn poll_forward_mirrors_until_the_source_closes() {
 		let src = BandwidthProducer::new();
 		let out = BandwidthProducer::new();

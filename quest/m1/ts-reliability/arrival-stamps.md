@@ -40,7 +40,3 @@ Decided by the maintainer on 2026-10-20 (`/quest-plan`):
 - **Rust only**: the only consumer is the Rust TS export. `@moq/net` mirrors
   it when a JS consumer needs it.
 - The stamp reads the ambient `moq_clock`, so simulated tests control it.
-
-## Related
-
-- [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - the arms that found this, and the ignored arm it un-ignores
