@@ -9,9 +9,14 @@ it reads that far.
 
 ## Plan
 
-See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
+See the [unbounded groups epic](/quest/m2/unbounded-groups/README.md) for
+the decisions. Decided 2026-10-20 (maintainer): moved to m3, because group
+storage is chosen for hot-path performance
+([group storage benchmark](/quest/m2/group-storage-bench.md)), not for
+evicting the middle; if that picks a log or ring buffer, keeping a head
+apart from the tail is new storage work here.
 
-- This reuses the runs and refill from
+- This reuses the storage and refill from
   [Front eviction](/quest/m2/unbounded-groups/front-eviction.md). The new
   part is choosing what to keep.
 - Decide how much head to keep from what a join needs (e.g. the first frame,

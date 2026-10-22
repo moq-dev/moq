@@ -128,8 +128,10 @@ Single-axis fan-out benches to widen: `session_delivery_paced` (viewers only),
 `bench/workloads/fanout*.toml` (connections only).
 
 Fan-out paths need a sweep over both axes (AGENTS.md). JS perf is judged in a
-browser, not node or bun. PR-time gating belongs to
-[benchmark regressions in CI](/quest/m2/bench-ci.md); don't duplicate it.
+browser, not node or bun. Benchmarks never gate the merge queue (decided
+2026-10-20, maintainer): each Nightly compares them into the git.moq.dev
+report, which the [nightly benchmark regression report](/quest/m2/bench-ci.md)
+owns; don't duplicate it.
 
 ## Related
 

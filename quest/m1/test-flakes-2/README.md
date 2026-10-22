@@ -26,15 +26,10 @@ Rules every child keeps:
   (the draft-16 cancel race was a retry sweep jittered past a fixed settle
   budget). Wait out the jitter's whole window, not a count of small steps.
 
-Added 2026-10-15 (maintainer): three flakes seen while landing that day's
-merge batch, ranked by how likely each hides a product bug.
-
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did.
 
-Added 2026-10-19 (maintainer): three more, the redial pair first since CI
-hit it. The same day's test cost audit added the macOS QUIC connects and the
-redundant failover drift, which moved to m0 on 2026-10-20 (maintainer) and is
+The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
 fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 
 Added 2026-10-20 (maintainer): three more from that day's merge batch, the
@@ -52,7 +47,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Three flakes and fresh-worktree interop](/quest/m1/test-flakes-2/three-flakes.md) - OBS stop drain, the js/net RSS test, the audio harness RTT sample, and interop's bun install
+- [OBS drain and JS allocation flakes](/quest/m1/test-flakes-2/three-flakes.md) - reproduce the OBS stop-drain failure and verify the existing RSS replacement under load
 
 ## Related
 
