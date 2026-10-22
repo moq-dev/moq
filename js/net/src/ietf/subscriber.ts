@@ -740,13 +740,14 @@ export class Subscriber {
 
 	// The adapter is gone. If the transport has already closed, that close is the
 	// error. A still-open transport, such as a GOAWAY drain, has no peer code yet,
-	// so this does not wait for it.
+	// so this does not wait for it. Either way the route failed, so a resumed track moves on.
 	async #closedSession(): Promise<Error> {
+		const closed = () => new StreamError(StreamCode.SessionClosed, { message: "session closed" });
 		const quic = this.#quic;
-		if (!quic) return new Error("session closed");
+		if (!quic) return closed();
 		return Promise.race([
 			closeError(quic),
-			new Promise<Error>((resolve) => queueMicrotask(() => resolve(new Error("session closed")))),
+			new Promise<Error>((resolve) => queueMicrotask(() => resolve(closed()))),
 		]);
 	}
 
@@ -793,7 +794,6 @@ export class Subscriber {
 		// Keep the request pending until SUBSCRIBE_OK supplies immutable track metadata.
 		// Group streams already wait on the alias, so early data stays behind this response.
 		const producer = hooks.pendingTrackProducer(request);
-		hooks.receiveTrack(producer);
 		const subscription: Subscription = { track: producer, tail: new Tail() };
 
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
@@ -1200,6 +1200,8 @@ export class Subscriber {
 			timescale: ok.properties.timescale,
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
+			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
+			unchecked: ok.properties.timescale != null,
 		});
 		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
 			throw new RangeError("largest group exceeds safe integers");

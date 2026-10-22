@@ -31,7 +31,7 @@
         "@moq/watch": "workspace:*",
       },
       "devDependencies": {
-        "playwright": "^1.64.1",
+        "playwright": "1.64.1",
       },
     },
     "demo/boy": {
@@ -174,7 +174,6 @@
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
         "@svta/cml-iso-bmff": "^1.0.7",
-        "@svta/cml-utils": "^1.6.2",
         "@zod/mini": "^4.6.7",
         "zod": "^4.6.7",
       },
@@ -430,7 +429,7 @@
       },
       "devDependencies": {
         "@types/audioworklet": "^0.0.100",
-        "playwright": "^1.64.1",
+        "playwright": "1.64.1",
         "rolldown": "^1.2.13",
         "vite": "^8.3.4",
       },
@@ -453,7 +452,7 @@
         "@moq/watch": "workspace:*",
       },
       "devDependencies": {
-        "playwright": "^1.64.1",
+        "playwright": "1.64.1",
         "rolldown": "^1.2.13",
         "vite": "^8.3.4",
       },
@@ -482,7 +481,7 @@
       "devDependencies": {
         "@types/bun": "^1.4.3",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
-        "playwright": "^1.64.1",
+        "playwright": "1.64.1",
         "typescript": "7.0.2",
         "vite": "^8.3.4",
       },
@@ -512,7 +511,7 @@
       "devDependencies": {
         "@types/bun": "^1.4.3",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
-        "playwright": "^1.64.1",
+        "playwright": "1.64.1",
         "typescript": "7.0.2",
         "vite": "^8.3.4",
       },
@@ -527,7 +526,7 @@
       "devDependencies": {
         "@ubjs/core": "0.31.0-6",
         "@ubjs/wasm": "0.31.0-6",
-        "playwright": "^1.64.1",
+        "playwright": "1.64.1",
       },
     },
   },

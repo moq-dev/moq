@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { readFileSync } from "node:fs";
 import { Manual, Micro, Milli, Nano, now, type Second } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
@@ -269,7 +270,11 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 	});
 	const video = config({ codedWidth: 16, codedHeight: 16, description: "01640028ffe100046764002801000268ee" });
 	if (kind === "cmaf")
-		video.container = { kind, init: Buffer.from(Container.Cmaf.createVideoInitSegment(video)).toString("base64") };
+		video.container = {
+			kind,
+			init: JSON.parse(readFileSync(new URL("../../../hang/src/cmaf/fixtures.json", import.meta.url), "utf8"))
+				.videoInit,
+		};
 	// The catalog's own broadcast, and the one the rendition reads. They differ once only one of
 	// them is republished, as with a rendition's `broadcast` override.
 	let producer = new Moq.Broadcast.Producer();

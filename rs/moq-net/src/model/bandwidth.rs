@@ -6,8 +6,12 @@
 //! One estimate covers a whole connection, so senders sharing one divide it with
 //! an [Allocator] rather than each targeting the whole thing. How a sender then
 //! *follows* its share is shared media policy: see `moq_mux::rate`.
+//!
+//! The same reservations set the connection's probe target: their ceilings summed,
+//! which the session hands to its transport's [`Probe`](crate::transport::Probe) so
+//! the estimate can rise to fund them.
 
-use std::task::Poll;
+use std::{collections::BTreeMap, task::Poll};
 
 use crate::{Error, Result, track};
 
@@ -198,6 +202,13 @@ impl Weak {
 /// sheds the excess by dropping groups. Rate estimation isn't exact enough
 /// for the difference to be worth policing.
 ///
+/// The reservations also set the session's probe target: the sum of every live
+/// reservation's ceiling, demanded or not, so a sender that stopped for lack of
+/// bandwidth keeps asking the connection for its room. A session probes for its own
+/// allocator, so take it from [`Session::bandwidth`](crate::Session::bandwidth) rather
+/// than building one: an allocator from [`new`](Self::new) divides an estimate but
+/// probes for nothing.
+///
 /// Clones share one registry, so hand a clone to each sender.
 #[derive(Clone)]
 pub struct Allocator {
@@ -206,12 +217,51 @@ pub struct Allocator {
 }
 
 impl Allocator {
-	/// Divide `estimate`, normally a connection's
-	/// `Session::send_bandwidth`.
+	/// Divide `estimate`, with no session probing for the reservations.
+	///
+	/// For an estimate that is not a session's, such as a test's or another
+	/// reservation's slice. A session's own comes from
+	/// [`Session::bandwidth`](crate::Session::bandwidth).
 	pub fn new(estimate: Consumer) -> Self {
 		Self {
 			estimate,
 			registry: kio::Producer::default(),
+		}
+	}
+
+	/// The same registry dividing `estimate` instead, or nothing when it is `None`.
+	// private: capability gap
+	// Sessions follow their allocator's target; a custom session has no public way to yet.
+	pub(crate) fn with_estimate(&self, estimate: Option<Consumer>) -> Self {
+		Self {
+			estimate: estimate.unwrap_or(Consumer {
+				inner: Inner::Unavailable,
+				last: None,
+			}),
+			registry: self.registry.clone(),
+		}
+	}
+
+	/// Probe up to `target` instead of the sum of the reservations, or `None` to follow them again.
+	///
+	/// `Some(Rate::ZERO)` turns probing off. The override is the registry's, so it holds
+	/// for every clone and across the reconnects a persistent allocator spans.
+	pub fn set_target(&self, target: Option<Rate>) {
+		let Ok(mut registry) = self.registry.write() else {
+			unreachable!("the allocator holds its own registry producer")
+		};
+		if registry.target != target {
+			registry.target = target;
+		}
+	}
+
+	/// Follow the probe target, for the session that probes on the reservations' behalf.
+	// private: capability gap
+	// Sessions follow their allocator's target; a custom session has no public way to yet.
+	pub(crate) fn target(&self) -> Target {
+		Target {
+			registry: Some(self.registry.consume()),
+			last: None,
 		}
 	}
 
@@ -278,16 +328,20 @@ impl Allocator {
 			};
 			// Closed tracks can't be demanded again; drop them rather than walking
 			// them on every poll for the rest of the connection.
-			registry.entries.retain(|entry| !entry.demand.is_closed());
+			let closed: Vec<u64> = registry
+				.entries
+				.iter()
+				.filter(|(_, entry)| entry.demand.is_closed())
+				.map(|(id, _)| *id)
+				.collect();
+			for id in closed {
+				registry.remove(id);
+			}
 
 			let id = registry.next_id;
 			registry.next_id += 1;
-			registry.entries.push(Entry {
-				id,
-				demand,
-				priority,
-				max,
-			});
+			registry.reserved += u128::from(max.as_bps());
+			registry.entries.insert(id, Entry { demand, priority, max });
 			id
 		};
 
@@ -353,7 +407,9 @@ impl Reservation {
 		let Ok(mut registry) = registry.write() else {
 			return;
 		};
-		if let Some(entry) = registry.entries.iter_mut().find(|entry| entry.id == self.share.id) {
+		let registry = &mut *registry;
+		if let Some(entry) = registry.entries.get_mut(&self.share.id) {
+			registry.reserved = registry.reserved - u128::from(entry.max.as_bps()) + u128::from(max.as_bps());
 			entry.max = max;
 		}
 	}
@@ -367,7 +423,7 @@ impl Drop for Reservation {
 		let Ok(mut registry) = registry.write() else {
 			return;
 		};
-		registry.entries.retain(|entry| entry.id != self.share.id);
+		registry.remove(self.share.id);
 	}
 }
 
@@ -392,16 +448,77 @@ impl std::fmt::Debug for Allocator {
 /// Every track registered with one [`Allocator`].
 #[derive(Default)]
 struct Registry {
-	entries: Vec<Entry>,
+	/// Keyed by registration order, which [`allocate`] keeps as its tie-break.
+	entries: BTreeMap<u64, Entry>,
 	next_id: u64,
+	/// The entries' ceilings summed, kept as they change so following the target
+	/// never walks the table. Wide enough that no number of `u64` ceilings overflows.
+	reserved: u128,
+	/// The application's override of `reserved` as the probe target.
+	target: Option<Rate>,
+}
+
+impl Registry {
+	fn remove(&mut self, id: u64) {
+		if let Some(entry) = self.entries.remove(&id) {
+			self.reserved -= u128::from(entry.max.as_bps());
+		}
+	}
+
+	/// What the session probes up to.
+	fn target(&self) -> Rate {
+		self.target
+			.unwrap_or_else(|| Rate::from_bps(u64::try_from(self.reserved).unwrap_or(u64::MAX)))
+	}
 }
 
 /// One registered track's standing reservation.
 struct Entry {
-	id: u64,
 	demand: track::Demand,
 	priority: u8,
 	max: Rate,
+}
+
+/// An [`Allocator`]'s probe target, followed by the session that probes for it.
+// private: capability gap
+// Sessions follow their allocator's target; a custom session has no public way to yet.
+pub(crate) struct Target {
+	/// `None` once every allocator is gone.
+	registry: Option<kio::Consumer<Registry>>,
+	last: Option<Rate>,
+}
+
+impl Target {
+	/// The target once it differs from the last one returned, arming `waiter` otherwise.
+	///
+	/// Zero once every allocator is gone, since nothing is left reserving.
+	// private: capability gap
+	// Sessions follow their allocator's target; a custom session has no public way to yet.
+	pub(crate) fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Rate> {
+		let Some(registry) = &self.registry else {
+			return Poll::Pending;
+		};
+		let last = self.last;
+		let polled = registry
+			.poll(waiter, |registry| match registry.target() {
+				target if Some(target) == last => Poll::Pending,
+				target => Poll::Ready(target),
+			})
+			.map(|res| res.ok());
+		let target = match polled {
+			Poll::Ready(Some(target)) => target,
+			Poll::Ready(None) => {
+				self.registry = None;
+				Rate::ZERO
+			}
+			Poll::Pending => return Poll::Pending,
+		};
+		if Some(target) == last {
+			return Poll::Pending;
+		}
+		self.last = Some(target);
+		Poll::Ready(target)
+	}
 }
 
 /// A share's view of the estimate it divides.
@@ -487,10 +604,10 @@ impl Share {
 			.read()
 			.entries
 			.iter()
-			.map(|entry| {
+			.map(|(id, entry)| {
 				(
 					Want {
-						id: entry.id,
+						id: *id,
 						priority: entry.priority,
 						max: entry.max,
 					},
@@ -1075,5 +1192,65 @@ mod tests {
 		assert!(consumer.changed().await.is_err());
 		// And it stays terminal rather than flapping back to a value.
 		assert!(consumer.changed().await.is_err());
+	}
+
+	/// The target sums every reservation, demanded or not, and follows each one
+	/// being added, moved, released, or pruned with its track, waking the session
+	/// that follows it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_target_sums_every_reservation() {
+		let allocator = Allocator::unlimited();
+		let mut target = allocator.target();
+		let (woken, waiter) = Woken::new();
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(Rate::ZERO));
+		assert!(target.poll_changed(&waiter).is_pending());
+
+		let (_watched_broadcast, watched) = track(VIDEO);
+		let _sub = watched.subscribe(None);
+		let watched = allocator.reserve(&watched.demand(), bps(4_000_000));
+		assert!(woken.woken(), "a reservation must wake the session");
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(4_000_000)));
+
+		// Nobody watches this one, which is exactly the rung that must still be funded.
+		let (_idle_broadcast, idle_track) = track(VIDEO);
+		let idle = allocator.reserve(&idle_track.demand(), bps(1_000_000));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(5_000_000)));
+
+		idle.update(bps(2_000_000));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(6_000_000)));
+
+		drop(watched);
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(2_000_000)));
+
+		// A closed track's claim leaves with the next registration, even while its
+		// reservation is still held.
+		idle_track.abort(Error::Cancel).unwrap();
+		let (_other_broadcast, other) = track(VIDEO);
+		let _other = allocator.reserve(&other.demand(), bps(500_000));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(500_000)));
+		drop(idle);
+		assert!(
+			target.poll_changed(&waiter).is_pending(),
+			"a pruned claim is not released twice"
+		);
+	}
+
+	/// The override replaces the sum for every clone until it is cleared.
+	#[test]
+	fn an_override_replaces_the_sum() {
+		let allocator = Allocator::unlimited();
+		let mut target = allocator.target();
+		let waiter = kio::Waiter::noop();
+
+		let (_broadcast, producer) = track(VIDEO);
+		let _reserved = allocator.reserve(&producer.demand(), bps(4_000_000));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(4_000_000)));
+
+		allocator.clone().set_target(Some(Rate::ZERO));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(Rate::ZERO));
+
+		allocator.set_target(None);
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(4_000_000)));
 	}
 }

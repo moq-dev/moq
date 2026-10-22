@@ -221,9 +221,10 @@ struct Pending {
 	skip: u64,
 	/// How many of those jumps cut a group short ([`jitter::Arrival::cut`]).
 	cut: u64,
-	/// The earliest the frame could have arrived: when its source was last found empty.
+	/// When it landed in this node's cache ([`moq_net::frame::Frame::arrived`]), so a stall
+	/// that holds the export back too does not hide that it came late.
 	arrived: moq_clock::Instant,
-	/// When it was read: the latest it could have arrived.
+	/// When it was read.
 	read: moq_clock::Instant,
 }
 
@@ -250,10 +251,11 @@ struct Track {
 	source: ExportSource,
 	/// The first frame, held until the program tables are built.
 	pending: Option<Pending>,
-	/// When the source was last found empty. A frame read since arrived no earlier, and
-	/// no later than it is read; the jitter buffer judges it on the earlier bound, so a caller
-	/// that polls late (a sink sleeping to pace its writes) does not make it late.
-	empty: moq_clock::Instant,
+	/// When the source was subscribed. Nothing it delivers reached the export before then,
+	/// however long the cache held it.
+	subscribed: moq_clock::Instant,
+	/// The latest arrival read from the source, which settles the frames held for their DTS.
+	latest: moq_clock::Instant,
 	/// The marker count the decode clock runs under.
 	restart: u64,
 	/// The marker, skip and cut counts of the sources the track read before this one, so the
@@ -309,7 +311,8 @@ impl Track {
 		Self {
 			source,
 			pending: None,
-			empty: moq_clock::now(),
+			subscribed: moq_clock::now(),
+			latest: moq_clock::Instant::ZERO,
 			restart: 0,
 			base: (0, 0, 0),
 			finished: false,
@@ -380,7 +383,10 @@ impl Track {
 				break;
 			}
 			match self.source.poll_event(waiter)? {
-				Poll::Ready(Some(Event::Frame(frame))) => {
+				Poll::Ready(Some(Event::Frame { frame, arrived })) => {
+					let arrived = arrived.max(self.subscribed);
+					// The frame settles what its group's end left held, so they are ready as it lands.
+					self.latest = self.latest.max(arrived);
 					if std::mem::take(&mut self.settle) && !input.waiting_for_header {
 						self.release(name, input.jitter, true)?;
 					}
@@ -393,7 +399,7 @@ impl Track {
 						restart: self.base.0 + self.source.markers(),
 						skip: self.base.1 + self.source.skips(),
 						cut: self.base.2 + self.source.cuts(),
-						arrived: self.empty,
+						arrived,
 						read: moq_clock::now(),
 					};
 					// A new timeline must reach the reset before tune-in alignment can drop it.
@@ -420,7 +426,6 @@ impl Track {
 					if std::mem::take(&mut self.settle) && !input.waiting_for_header {
 						self.release(name, input.jitter, true)?;
 					}
-					self.empty = moq_clock::now();
 					break;
 				}
 			}
@@ -555,8 +560,8 @@ impl Track {
 
 	/// Queue every held video frame whose DTS is settled, or all of them when `flush`.
 	///
-	/// A held frame is ready no earlier than the frame read since the source was last found
-	/// empty, which settled it, so it is judged as arriving then. Frames held through a silence,
+	/// A held frame is ready no earlier than the latest frame the source delivered, which
+	/// settled it, so it is judged as arriving then. Frames held through a silence,
 	/// such as a dead publisher's last frames settled only by its replacement's, are late by the
 	/// silence: the jitter buffer drops them, where their own arrival would queue them behind a
 	/// schedule that has already gone past them. Nothing settles the frames still held when the
@@ -566,7 +571,7 @@ impl Track {
 		let lookahead = lookahead.max(self.timing.jitter);
 		while let Some(((mut pending, description), dts)) = self.clock.pop(lookahead, delay, flush) {
 			if !self.finished {
-				pending.arrived = pending.arrived.max(self.empty);
+				pending.arrived = pending.arrived.max(self.latest);
 			}
 			self.push(name, pending, Some(dts), description, jitter)?;
 		}
@@ -1684,8 +1689,8 @@ where
 			track.base.1 += track.source.skips() + 1;
 			track.base.2 += track.source.cuts() + 1;
 			track.source = source;
+			track.subscribed = moq_clock::now();
 			track.finished = false;
-			track.empty = moq_clock::now();
 		}
 		Ok(())
 	}
