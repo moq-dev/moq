@@ -124,6 +124,11 @@ program aboard, for what demultiplexing cannot carry, such as a scrambled
 service; `export ts --passthrough` writes it back out. FLV accepts the same
 legacy and enhanced-RTMP codecs as the [RTMP gateway](/bin/rtmp).
 
+fMP4 import splits each fragment into one frame per sample, so players need no
+MP4 parser. `import fmp4 --passthrough` publishes each fragment whole as
+[`cmaf`](/concept/hang#container) instead, keeping the source's exact sample
+timing.
+
 `import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
 re-encoding. RTP rides the RTSP connection, so run it on the camera's network
 and the camera needs no inbound port. Credentials go in the URL
@@ -412,7 +417,12 @@ and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
 may fall behind the live edge before *this* consumer skips it. Raising
 `--max-age` never delays playback.
 At stdin EOF, `import` keeps the finished broadcast up for its max-age, so a
-subscriber still catching up can drain it; Ctrl-C ends that early.
+subscriber still catching up can drain it; Ctrl-C ends that early. A gateway
+import does the same at a clean end: an RTMP unpublish (`deleteStream`) or
+completed play, the end of an SRT stream, a WHIP `DELETE`, or an HLS playlist
+ending with `EXT-X-ENDLIST`. A dropped connection or an error closes the
+broadcast at once, and a reconnect, which publishes a newer
+[epoch](/concept/moq-lite#publisher-epochs) at the same path, ends the wait.
 
 `export ts`, `export flv`, and `export mkv` take `--delay` instead, like an SRT
 receiver's latency, all tracks in decode order, so two exporters of one broadcast
@@ -438,6 +448,24 @@ bytes. A run that arrives after its deadline is dropped and counted, leaving a
 continuity error, and the rest carry on. It takes neither `--linger`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
+
+`export ts --sync` renders every packet from the broadcast alone, so two exports
+of it, joined at different moments and fed with different skew, emit identical
+TS for the content both receive, continuity counters included, as the legs of a
+1+1 pair must; an SMPTE ST 2022-7 pair also needs identical RTP framing around
+it, which this command does not write. Each PID gets a fixed lane of the constant rate, sized
+for its codec's most, with video taking the rest; content one leg lacks leaves
+its packets as stuffing there. The PCR rides a PID of its own, and each PID's
+continuity counter restarts at every group with the break flagged. It needs a
+constant rate, the same on every leg since the lanes follow from it
+(`--mux-rate`, or the catalog's), costing headroom over the
+source's (a 10 Mb/s channel needs about 12), and takes neither `--stitch` nor
+`--passthrough`. A group that starts behind the one before it, on a lane too
+narrow to absorb that one, is logged and counted in `overruns`: the legs can
+differ there. So can reordered video whose SPS declares no reorder depth
+(`max_num_reorder_frames`), which is logged, and SI while one leg holds an older
+revision than the other or around an SI table the catalog adds or drops, which
+each leg takes up when its catalog update arrives.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same

@@ -66,9 +66,10 @@ export class Encoder<T> {
 	// Bumped for each record handed out, so a commit that arrives after the encoder has moved on can
 	// tell that it is acknowledging a record that is no longer the outstanding one.
 	#generation = 0;
-	// Frames and payload bytes committed to the current group, checked against the group budget
-	// before each record is encoded. Replaced on reset, so a commit that lands after one charges the
-	// old group rather than the new.
+	// Frames and bytes committed to the current group, checked against the group budget before each
+	// record is encoded. A compressed record is charged its plaintext (or its slice, if larger), since
+	// a reader's DEFLATE window is held to the same budget. Replaced on reset, so a commit that lands
+	// after one charges the old group rather than the new.
 	#budget = { frames: 0, bytes: 0 };
 
 	constructor(config: Config<T> = {}) {
@@ -121,8 +122,7 @@ export class Encoder<T> {
 
 		// Check before compressing: encoding advances the window, so a record refused afterwards
 		// would leave the encoder ahead of every reader. The worst case is checked rather than the
-		// actual size for the same reason. The budget is also below `@moq/flate`'s per-frame decode
-		// cap, so any record that fits is one every consumer can inflate.
+		// actual size for the same reason; it also covers the plaintext a reader inflates.
 		const budget = this.#budget;
 		const bound = this.#compress ? Flate.bound(bytes.byteLength) : bytes.byteLength;
 		if (budget.frames >= Group.MAX_GROUP_FRAMES || budget.bytes + bound > Group.MAX_GROUP_CACHE_BYTES) {
@@ -142,7 +142,7 @@ export class Encoder<T> {
 				if (!charged) {
 					charged = true;
 					budget.frames++;
-					budget.bytes += payload.byteLength;
+					budget.bytes += Math.max(payload.byteLength, bytes.byteLength);
 				}
 				// A caller that starts the next encode before this record settles has already made the
 				// encoder account for it. Acknowledging it now would clear the flag belonging to the newer

@@ -221,6 +221,8 @@
           # JSR publishing. We call `deno publish` directly instead of `bunx jsr`
           # so the release doesn't race on a runtime binary download.
           deno
+          # One browser build for local and CI Playwright checks.
+          playwright-driver.browsers
         ];
 
         # Python dependencies
@@ -545,6 +547,9 @@
 
           inherit uniffi-bindgen-cpp uniffi-bindgen-dart;
 
+          # The @moq/libav npm package, which js/libav/build.ts copies into js/libav/dist.
+          moq-libav = pkgs.callPackage ./js/libav/package.nix { };
+
           # The quest CLI alone, so quest.yml can validate the tree without
           # realising the whole dev shell.
           quest = quest-cli;
@@ -568,6 +573,8 @@
         # are disallowed in the flake `packages` schema.
         legacyPackages = {
           inherit (pkgs) gst_all_1;
+
+          runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out
@@ -630,6 +637,10 @@
             # What sh/dispatch.sh checks before a scoped `just check` or `just
             # fix`. IN_NIX_SHELL would also pass inside another project's shell.
             MOQ_DEV_SHELL = "1";
+
+            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+            PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;
+            PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
 
             # Where `just obs compile` and `just obs test` look for libobs. Set
             # on every platform so the plugin type-checks against the pinned OBS

@@ -76,16 +76,22 @@ pub struct Server {
 
 struct Inner {
 	origin: moq_net::origin::Consumer,
+	/// Watches the whole scope while the server lives, so a lazily discovering client
+	/// session asks its peer once rather than once per requested path, which an HTTP
+	/// client could otherwise name without bound.
+	_watch: moq_net::announce::Consumer,
 	config: Config,
 	broadcasters: Mutex<HashMap<String, Arc<Broadcaster>>>,
 }
 
 impl Server {
-	/// Build a server reading broadcasts from `origin`. Every request is served;
-	/// gate access by layering middleware onto [`router`](Self::router).
+	/// Build a server reading broadcasts from `origin`, which it watches whole while it
+	/// lives. Every request is served; gate access by layering middleware onto
+	/// [`router`](Self::router).
 	pub fn new(origin: moq_net::origin::Consumer, config: Config) -> Self {
 		Self {
 			inner: Arc::new(Inner {
+				_watch: origin.clone().with_hidden(true).announced(),
 				origin,
 				config,
 				broadcasters: Mutex::new(HashMap::new()),
@@ -122,13 +128,13 @@ impl Server {
 			Poll::Ready(Some(_)) => Poll::Ready(true),
 			Poll::Pending => follow.poll_synced(waiter).map(|()| false),
 		});
-		if !tokio::time::timeout(RESOLVE_TIMEOUT, routed).await.unwrap_or(false) {
+		if !moq_clock::timeout(RESOLVE_TIMEOUT, routed).await.unwrap_or(false) {
 			return None;
 		}
 
 		let origin = self.inner.origin.consume();
 		// A covering dynamic route may never answer, so the request is bounded too.
-		let broadcast = tokio::time::timeout(RESOLVE_TIMEOUT, origin.request_broadcast(name, None))
+		let broadcast = moq_clock::timeout(RESOLVE_TIMEOUT, origin.request_broadcast(name, None))
 			.await
 			.map_err(|_| tracing::warn!(%name, "timed out resolving broadcast"))
 			.ok()?
@@ -269,7 +275,7 @@ mod tests {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
 
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		assert!(server.broadcaster("live").await.is_none());
 		assert_eq!(start.elapsed(), Duration::ZERO);
 	}

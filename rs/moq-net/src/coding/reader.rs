@@ -211,14 +211,14 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	/// hands over everything it has already buffered in one turn, and each wake pays a
 	/// group lock and a clock read, so the intermediate ones mostly publish bytes the
 	/// consumer is about to be handed anyway. Pairing the deferred
-	/// [`frame::ProducerOwned::write`] with its wake is this function's job precisely
+	/// [`frame::Producer::write_deferred`] with its wake is this function's job precisely
 	/// because it owns the only `Pending` it can return; the other two exits are woken
 	/// by the caller's `finish` (which stamps and publishes the frame) or `abort` (which
 	/// fails the group). [`WAKE_BUDGET`] bounds the wait in between.
 	pub(crate) fn poll_read_frame(
 		&mut self,
 		cx: &mut Context<'_>,
-		frame: &mut crate::frame::ProducerOwned,
+		frame: &mut crate::frame::Producer,
 	) -> Poll<Result<(), Error>> {
 		let mut owed = 0;
 
@@ -236,7 +236,7 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 				}
 				Poll::Ready(Ok(Some(chunk))) if !chunk.is_empty() => {
 					owed += chunk.len();
-					if let Err(err) = frame.write(chunk) {
+					if let Err(err) = frame.write_deferred(chunk) {
 						break Err(err);
 					}
 					if owed >= WAKE_BUDGET {
@@ -423,7 +423,7 @@ mod tests {
 	fn parked_frame(
 		size: usize,
 	) -> (
-		crate::frame::ProducerOwned,
+		crate::frame::Producer,
 		crate::frame::Consumer,
 		kio::Waiter,
 		Arc<CountWaker>,
@@ -431,13 +431,10 @@ mod tests {
 		let group = crate::group::Info { sequence: 0 }.produce();
 		let mut consumer = group.consume();
 		let frame = group
-			.create_frame_owned(
-				crate::frame::Info {
-					size: size as u64,
-					timestamp: Some(crate::Timestamp::ZERO),
-				},
-				&Default::default(),
-			)
+			.create_frame(crate::frame::Info {
+				size: size as u64,
+				timestamp: Some(crate::Timestamp::ZERO),
+			})
 			.unwrap();
 
 		let payload = consumer.next_frame().now_or_never().unwrap().unwrap().unwrap();

@@ -30,8 +30,6 @@ Retire obsolete runtime loaders, package paths, and CI only after JS-only
 parity and adoption. Preserve the Rust binding crate, WASM build tools, or
 WASM comparison baseline wherever generation or tests still need them;
 wasm2js may still require WASM at build time. Preserve shared browser tests.
-Review the linked older WASM issues against the delivered behavior and close
-only those actually resolved, rather than closing them merely on deletion.
 
 Public API: `@moq/net` remains; enumerate any approved changes and obsolete
 unpublished package removals. Wire: none.
@@ -39,7 +37,3 @@ unpublished package removals. Wire: none.
 ## Required
 
 - [WASM-to-JS evaluation](/quest/m2/rs2ts-wasm2js.md) - the selected route, evidence, and any additional prerequisites
-
-## Related
-
-- [#2907](https://github.com/moq-dev/moq/issues/2907) - reassess against the replacement before retiring WASM paths
