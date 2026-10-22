@@ -126,13 +126,12 @@ export class Fixture {
 		// then requires an audio catalog after the click, which covers the capture resuming its own
 		// suspended graph.
 		//
-		// No sampleRate or channelCount override: the graph already runs at SAMPLE_RATE, and asking
-		// the capture for one channel puts the AudioWorklet behind an explicit Web Audio downmix that
-		// made the player stall far more often in CI, with no capture loss found in isolation; see
-		// /quest/m1/publish-audio-channel-count.md. Publishing the destination node's own format
-		// costs nothing here, since the tone is the same in both channels.
+		// Forced to mono, so every media check also covers the explicit Web Audio downmix a requested
+		// channel count puts in front of the AudioWorklet, the path a macOS microphone takes. The tone
+		// is the same in both channels, so the downmix changes nothing a check reads.
 		const audioCapture = new Publish.Audio.Capture({
 			source: { track: audioTrack, kind: "music" },
+			channelCount: 1,
 		});
 		this.#signals.cleanup(() => audioCapture.close());
 

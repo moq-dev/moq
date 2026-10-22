@@ -344,7 +344,7 @@ function processName(command: string): string {
  */
 async function explainStalls(
 	player: Page,
-	samples: PlayerState[],
+	samples: Sample[],
 	label: string,
 	host: ReturnType<typeof watchHost>,
 ): Promise<void> {
