@@ -420,12 +420,6 @@ export const hooks: {
 	 * as the Rust `request_start`.
 	 */
 	startTrack: (producer: Producer, served: { start?: number; requested?: number }) => void;
-	// pending: /quest/m1/public-model/ingest.md
-	/**
-	 * Mark a track as a session's copy of a remote one: its groups are never checked for a
-	 * rewind, since a received timestamp may not be media time.
-	 */
-	receiveTrack: (producer: Producer) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	// pending: /quest/m1/public-model/ingest.md
@@ -576,9 +570,6 @@ export const hooks: {
 	/** Mark a broadcast handle served through a route claiming a shorter prefix: it lists nothing. */
 	stampUnlisted: (target: BroadcastConsumer) => void;
 } = {
-	receiveTrack: () => {
-		throw new Error("track.ts not loaded");
-	},
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
 	},

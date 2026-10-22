@@ -8,8 +8,8 @@
 //! the [`Stream`](super::Stream) drops, the device is released, and no
 //! blocking thread is left pinned.
 
+use moq_clock::Instant;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use tokio::sync::Notify;
 

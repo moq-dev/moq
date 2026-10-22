@@ -812,7 +812,6 @@ export class Subscriber {
 		// Keep the request pending until SUBSCRIBE_OK supplies immutable track metadata.
 		// Group streams already wait on the alias, so early data stays behind this response.
 		const producer = hooks.pendingTrackProducer(request);
-		hooks.receiveTrack(producer);
 		const subscription: Subscription = { track: producer, tail: new Tail() };
 
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
@@ -1219,6 +1218,8 @@ export class Subscriber {
 			timescale: ok.properties.timescale,
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
+			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
+			unchecked: ok.properties.timescale != null,
 		});
 		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
 			throw new RangeError("largest group exceeds safe integers");

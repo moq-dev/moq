@@ -14,7 +14,8 @@
 
 use std::{sync::Arc, time::Duration};
 
-use tokio::{sync::watch, time::Instant};
+use moq_clock::Instant;
+use tokio::sync::watch;
 
 /// Fires the relay-wide shutdown broadcast. Held by `Relay::run` for the OS
 /// signal path; an embedder clones one to stop the relay from its own task.
@@ -197,7 +198,7 @@ impl Observer {
 			Err(_) => None,
 		};
 		match deadline {
-			Some(deadline) => tokio::time::sleep_until(deadline).await,
+			Some(deadline) => moq_clock::sleep_until(deadline).await,
 			None => std::future::pending().await,
 		}
 	}
@@ -323,7 +324,7 @@ impl Observer {
 		tokio::select! {
 			biased;
 			_ = session.closed() => return,
-			() = tokio::time::sleep_until(deadline) => {}
+			() = moq_clock::sleep_until(deadline) => {}
 		}
 		tracing::debug!("peer did not leave before the drain deadline; closing");
 		session.abort(moq_net::Error::GoawayTimeout);
@@ -384,6 +385,7 @@ pub(crate) async fn raise(signal: libc::c_int) {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 

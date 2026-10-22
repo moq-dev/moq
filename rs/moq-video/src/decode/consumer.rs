@@ -5,8 +5,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
 use hang::catalog::VideoConfig;
+use moq_clock::Instant;
 use moq_mux::container::Read;
-use tokio::time::Instant;
 
 use super::decoder::Config;
 use super::select::{Lane, Next, Selector};
@@ -188,7 +188,7 @@ impl Consumer {
 	fn poll_read(
 		&mut self,
 		cx: &mut Context<'_>,
-		sleep: &mut Option<Pin<Box<tokio::time::Sleep>>>,
+		sleep: &mut Option<Pin<Box<moq_clock::Sleep>>>,
 	) -> Poll<Result<Option<Frame>, Error>> {
 		loop {
 			let deadline = match self.selector.next(Instant::now()) {
@@ -235,7 +235,7 @@ impl Consumer {
 			let Some(deadline) = deadline else {
 				return Poll::Pending;
 			};
-			let sleep = sleep.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
+			let sleep = sleep.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(deadline)));
 			sleep.as_mut().reset(deadline);
 			ready!(sleep.as_mut().poll(cx));
 		}
@@ -372,6 +372,7 @@ impl Reader {
 #[cfg(test)]
 mod tests {
 	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+	#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 	use bytes::Bytes;
 	use moq_net::Timestamp;

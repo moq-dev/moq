@@ -488,10 +488,10 @@ async fn spawn_moq(
 		// through `Client::publish` / `Client::consume`, which each attach a single
 		// direction and dial the same URL.
 		let reconnect = dialer.connect(url);
-		// Read before the handle moves into the task. This consumer is persistent: it
-		// survives reconnects, reading `None` while down, so it can be wired up before
-		// anything connects.
-		bandwidth = moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth());
+		// Read before the handle moves into the task. This allocator is persistent: it
+		// survives reconnects, granting `None` while down, so it can be wired up before
+		// anything connects, and every session probes for its reservations.
+		bandwidth = reconnect.bandwidth();
 		let closed = reconnect.clone();
 		tasks.spawn(async move { Ok(closed.closed().await?) });
 		connection = Some(reconnect);
@@ -986,6 +986,7 @@ fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Resu
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use std::future::Future;
