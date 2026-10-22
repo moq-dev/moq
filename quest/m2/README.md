@@ -69,7 +69,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Group storage benchmark](/quest/m2/group-storage-bench.md) - numbers pick the append-only log, a ring buffer, or sorted runs for `GroupState` before either lands
 - [Perf](/quest/m2/perf/README.md) - eliminate measured hot-path costs across moq-uring, kio, and the moq-net model
 - [Performance survey follow-ups](/quest/m2/performance-survey/README.md) - benchmark the source audit's transport, browser, media and serving risks before optimizing
-- [Nightly benchmark regressions](/quest/m2/bench-ci.md) - each nightly compares the Criterion benches against the previous nightly's commit, publishes it to the git.moq.dev report, and alerts on a regression
 - [Relay session bench](/quest/m2/bench-relay.md) - the same scenario through moq-relay's own connection handling
 - [Transport x version benches](/quest/m2/bench-transport-sweep.md) - the session benches sweep transports as well as versions
 - [Read-only lookup](/quest/m2/read-only-lookup.md) - a live track lookup stops waking the front and every demand watcher
