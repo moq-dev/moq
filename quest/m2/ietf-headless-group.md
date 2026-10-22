@@ -37,12 +37,14 @@ Cloudflare's moq-test-client reproduces both: it writes object 0 before
 SUBSCRIBE_OK and refuses the joining FETCH
 ([cloudflare/moq-rs#281](https://github.com/cloudflare/moq-rs/issues/281)).
 
-The model already holds such a group: `group::Producer::start_at` trims a
-group's front, and a reader positioned below it gets `Error::Lagged`. The
-ingest fix is to open a headless group trimmed to its first Object ID in
-both orders, rather than reuse today's unfilled path. Check that the
-moq-transport egress forwards a front-trimmed group as a subgroup stream
-starting at that Object ID.
+The ingest fix opens the same headless group in both orders, and the model
+must know its head is missing so `position_group` refuses it to moq-lite
+subscribers. `group::Producer::start_at` marks a missing front, but in
+frame ordinals: relayed Object IDs need not match them (`group::Wire`), so
+trimming to the first Object ID would invent frames and break FETCH and
+partial-reader positioning. Mark the missing head without equating the
+two, and check that the moq-transport egress forwards the group as a
+subgroup stream starting at its first Object ID.
 
 Open design points, with recommendations:
 
