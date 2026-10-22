@@ -21,4 +21,4 @@ Public API: breaking for moq-cli (features) and moq-net (`Version`), with a
 
 ## Related
 
-- [Dead code and API surface audit](/quest/m1/audit-dead-code.md) - the audit that found them
+- [Dead code and API surface audit](/quest/m2/audit-dead-code.md) - the next audit run, whose baselines record these findings
