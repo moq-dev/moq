@@ -998,9 +998,14 @@ impl TrackState {
 			.filter(|&latest| self.readable() && latest >= floor)
 	}
 
-	/// Where a relative start that waited on [`Self::latest_live`] counts back from.
+	/// Where a relative start that waited on [`Self::latest_live`] counts back from. An idle
+	/// copy that ended without going live counts from its newest group, which its cache now
+	/// holds the whole of, and not from where an earlier feed began.
 	fn first_live(&self) -> Option<u64> {
-		self.first_live.filter(|_| self.readable())
+		match self.feed {
+			Feed::Live => self.first_live,
+			_ => self.latest_live(),
+		}
 	}
 
 	/// The cache reflects the live feed again: a relative start that waited counts back
@@ -8117,6 +8122,19 @@ mod test {
 		framed(&producer, 4, 1).finish().unwrap();
 		assert_eq!(ready_groups(&mut live), vec![4]);
 		assert_eq!(ready_groups(&mut oldest), vec![0, 1, 2, 3, 4]);
+	}
+
+	/// An idle copy that ends without going live makes its cache the whole track, so a
+	/// relative start that waited counts back from its newest group, not from where the
+	/// earlier feed began.
+	#[test]
+	fn a_relative_start_on_an_idle_copy_that_ends_counts_from_its_newest_group() {
+		let producer = idle_copy();
+		let mut reader = producer.subscribe(replay().with_ranges([Range::live()]));
+		assert_eq!(ready_groups(&mut reader), Vec::<u64>::new(), "the copy is idle");
+
+		producer.finish().unwrap();
+		assert_eq!(ready_groups(&mut reader), vec![3]);
 	}
 
 	/// A datagram can show the route's answer before any group does, as it does when a
