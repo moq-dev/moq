@@ -2887,6 +2887,8 @@ where
 					alias,
 					properties,
 					owed,
+					// This subscription forwards into the copy itself from here.
+					copy: _,
 				} = upstream;
 				held = Some(tracks::Resumed {
 					alias,
@@ -3168,6 +3170,7 @@ where
 					alias: held.alias,
 					properties: held.properties,
 					owed: held.owed + 1,
+					copy: resumed.as_ref().map(|idle| idle.track.clone()),
 				};
 				self.pause(key, upstream).await;
 				return resumed;
@@ -3586,6 +3589,7 @@ where
 				alias,
 				properties: held_properties,
 				owed: unanswered.load(Ordering::Relaxed),
+				copy: Some(track.clone()),
 			};
 			self.pause(key, upstream).await;
 			return Some(Idle {

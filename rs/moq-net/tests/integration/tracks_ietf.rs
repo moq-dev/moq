@@ -28,6 +28,9 @@ const DRAFTS: [&str; 5] = [
 /// SUBSCRIBE (0x03), as the first byte of a request stream.
 const SUBSCRIBE: u8 = 0x03;
 
+/// SUBSCRIBE_TRACKS (0x51), as the first byte of a request stream.
+const SUBSCRIBE_TRACKS: u8 = 0x51;
+
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
 	support::harness::spawn(driver);
@@ -72,13 +75,18 @@ async fn resolve(origin: &moq_net::origin::Producer, path: &str) -> moq_net::bro
 		.expect("routed")
 }
 
-/// How many SUBSCRIBE request streams the client has opened.
-fn subscribes(pair: &MockPair) -> usize {
+/// How many request streams of `kind` the client has opened.
+fn opened(pair: &MockPair, kind: u8) -> usize {
 	pair.client_transport
 		.bidi_types()
 		.iter()
-		.filter(|first| **first == SUBSCRIBE)
+		.filter(|first| **first == kind)
 		.count()
+}
+
+/// How many SUBSCRIBE request streams the client has opened.
+fn subscribes(pair: &MockPair) -> usize {
+	opened(pair, SUBSCRIBE)
 }
 
 /// Read one frame of the next group, or `None` once the subscription ends.
@@ -115,6 +123,40 @@ async fn an_ietf_session_lists_its_peers_tracks() {
 	}
 }
 
+/// SUBSCRIBE_TRACKS goes out only for a listing, since many peers do not answer it yet:
+/// connecting, an announce, and a reader's SUBSCRIBE send none.
+#[moq_clock::test]
+async fn only_a_listing_sends_subscribe_tracks() {
+	for version in DRAFTS {
+		let publisher = produce_origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let video = broadcast.create_track("video", None).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+
+		let (subscriber, pair) = connect(&publisher, version).await;
+		let remote = resolve(&subscriber, "bcast").await;
+		let mut sub = moq_clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(None))
+			.await
+			.expect("subscribe timeout")
+			.expect("subscribe");
+		moq_clock::timeout(TIMEOUT, support::wanted(video.demand()))
+			.await
+			.expect("never subscribed")
+			.unwrap();
+		let mut group = video.append_group().unwrap();
+		group.write_frame(None, &b"frame"[..]).unwrap();
+		group.finish().unwrap();
+		assert_eq!(read(&mut sub).await, Some((0, b"frame".to_vec())), "{version}");
+		assert_eq!(subscribes(&pair), 1, "{version}");
+		assert_eq!(opened(&pair, SUBSCRIBE_TRACKS), 0, "{version}: listed unasked");
+
+		let mut tracks = remote.tracks().unwrap();
+		assert_eq!(next(&mut tracks).await, "synced", "{version}");
+		assert_eq!(next(&mut tracks).await, "+video", "{version}");
+		assert_eq!(opened(&pair, SUBSCRIBE_TRACKS), 1, "{version}");
+	}
+}
+
 /// A listed track carries the info its PUBLISH declared.
 #[moq_clock::test]
 async fn a_listing_carries_track_info() {
@@ -142,20 +184,34 @@ async fn a_listing_carries_track_info() {
 }
 
 /// Before draft-18 there is no SUBSCRIBE_TRACKS, so the listing is refused rather than
-/// answered empty.
+/// answered empty, and a reader still subscribes.
 #[moq_clock::test]
 async fn before_draft_18_the_listing_is_refused() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let _a = broadcast.create_track("a", None).unwrap();
+	let a = broadcast.create_track("a", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let (subscriber, _pair) = connect(&publisher, "moq-transport-17").await;
-	let mut tracks = resolve(&subscriber, "bcast").await.tracks().unwrap();
+	let remote = resolve(&subscriber, "bcast").await;
+	let mut tracks = remote.tracks().unwrap();
 	assert_eq!(
 		next(&mut tracks).await,
 		format!("error: {}", moq_net::Error::Unsupported)
 	);
+
+	let mut sub = moq_clock::timeout(TIMEOUT, remote.track("a").unwrap().subscribe(None))
+		.await
+		.expect("subscribe timeout")
+		.expect("subscribe");
+	moq_clock::timeout(TIMEOUT, support::wanted(a.demand()))
+		.await
+		.expect("never subscribed")
+		.unwrap();
+	let mut group = a.append_group().unwrap();
+	group.write_frame(None, &b"frame"[..]).unwrap();
+	group.finish().unwrap();
+	assert_eq!(read(&mut sub).await, Some((0, b"frame".to_vec())));
 }
 
 /// A reader of a listed track resumes its held PUBLISH, so its data arrives with no
