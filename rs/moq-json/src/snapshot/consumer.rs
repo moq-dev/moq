@@ -18,7 +18,8 @@ pub struct Config {
 	/// [`Config::compression`](super::Config::compression). Defaults to [`Compression::None`].
 	pub compression: Compression,
 
-	/// Maximum bytes in an inflated frame or the compact JSON of the reconstructed value.
+	/// Maximum bytes in an inflated frame or the reconstructed value, counted as the JSON of the
+	/// frames that built it until that passes the limit, then as the value's compact JSON.
 	/// Unset uses [`moq_flate::DEFAULT_MAX_FRAME_SIZE`], the largest snapshot a producer publishes.
 	pub max_size: Option<usize>,
 }

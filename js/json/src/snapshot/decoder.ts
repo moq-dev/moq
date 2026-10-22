@@ -26,8 +26,10 @@ export class Decoder<T> {
 	#flate?: Flate;
 	// The reconstructed value, `undefined` until the first snapshot.
 	#current?: unknown;
-	// Bounds the reconstructed value's size in JSON bytes: the snapshot plus every patch applied
-	// since, as a merge patch adds no more to a value than its own bytes.
+	// The reconstructed value's size in JSON bytes, counted as the snapshot plus every patch applied
+	// since: a merge patch adds no more nodes to a value than its own bytes can hold. Re-serializing
+	// can still print a number longer than its source (`9e9`), but the value's memory follows its
+	// nodes, so the source bytes bound it as well as the compact JSON would.
 	#size = 0;
 
 	constructor(config: Pick<Config<T>, "schema" | "compression"> = {}) {
