@@ -26,7 +26,9 @@ refusal. It also regressed ergonomics (`grant.publish` became
 - Update [publisher caps](/quest/m2/rate-grant.md),
   [QUIC rate](/quest/m2/rate-quic.md), and
   [WebSocket rate](/quest/m2/rate-websocket.md): whichever enforces first
-  re-adds the claim, using `moq_net::bandwidth::Rate`.
+  re-adds the claim with a rate type moq-auth owns (or a lower shared units
+  crate), converted at the relay boundary, so moq-auth never depends on
+  moq-net.
 
 Public API: moq-auth and `@moq/auth` breaking against main, closer to
 release. Wire: the token and grant lose the unenforced `rate` field.
