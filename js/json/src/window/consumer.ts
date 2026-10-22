@@ -26,6 +26,10 @@ const GAPS: Moq.StreamCode[] = [
  * window yields nothing for records already delivered, so this reads as one continuous stream of
  * {@link Event}s regardless of how the publisher framed them.
  *
+ * Each event carries the timestamp of the frame that produced it, absent on an untimed track. The
+ * wire has no per-record time, so a record a reader first learns of from a group header (one it
+ * joined after, or missed while behind) gets the header frame's time, not its original push time.
+ *
  * @public
  */
 export class Consumer<T> {
@@ -34,6 +38,8 @@ export class Consumer<T> {
 
 	#group?: Moq.Group.Consumer;
 	#codec?: Group;
+	// Timestamp of the frame whose events the decoder is draining.
+	#at?: Moq.Time.Timestamp;
 	#reading = false;
 
 	constructor(config: ConsumerConfig) {
@@ -46,8 +52,8 @@ export class Consumer<T> {
 		return this.#decoder.offset;
 	}
 
-	/** Get the next event, or `undefined` once the track ends. */
-	next(): Promise<Event<T> | undefined> {
+	/** Get the next event and its frame's timestamp, or `undefined` once the track ends. */
+	next(): Promise<Moq.Timed<Event<T>> | undefined> {
 		if (this.#reading) throw new Error("multiple calls to next not supported");
 		this.#reading = true;
 		return this.#read().finally(() => {
@@ -55,11 +61,12 @@ export class Consumer<T> {
 		});
 	}
 
-	async #read(): Promise<Event<T> | undefined> {
+	async #read(): Promise<Moq.Timed<Event<T>> | undefined> {
 		for (;;) {
-			// Drain what the frames already decoded produced before reading more.
+			// Drain what the last frame produced before reading more, so every queued event is that
+			// frame's and shares its timestamp.
 			const event = this.#decoder.next();
-			if (event) return event;
+			if (event) return { value: event, at: this.#at };
 
 			if (!this.#group) {
 				this.#group = await this.#track.nextGroup();
@@ -89,11 +96,12 @@ export class Consumer<T> {
 
 			if (!this.#codec) throw new Error("an open MoQ group has a window codec");
 			this.#codec.decode(frame.payload);
+			this.#at = frame.timestamp;
 		}
 	}
 
 	/** Iterate over events until the track ends. */
-	async *[Symbol.asyncIterator](): AsyncIterator<Event<T>> {
+	async *[Symbol.asyncIterator](): AsyncIterator<Moq.Timed<Event<T>>> {
 		for (;;) {
 			const event = await this.next();
 			if (event === undefined) return;
