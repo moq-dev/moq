@@ -52,11 +52,18 @@ That change owns its C tests and `MIGRATE.md` entries; other API reshaping stays
 
 Decided 2026-10-20 (maintainer): m1 quests that change the C API
 ([exact binding timestamps](/quest/m1/binding-timestamps.md),
-[scope track priority](/quest/m1/track-priority-scope.md),
-[reference epoch bindings](/quest/m1/reference-epoch-bindings.md),
-[Rust identity enforcement](/quest/m1/catalog-identity-rs.md), and
-[dynamic subscribe ranges](/quest/m1/subscribe-ranges/dynamic.md)) Require this
+[scope track priority](/quest/m1/track-priority-scope.md), and
+[Rust identity enforcement](/quest/m1/catalog-identity-rs.md)) Require this
 line and land their C half on the generated package, so C users break once.
+
+Decided 2026-10-22 (maintainer): three quests leave that list.
+[Dynamic subscribe ranges](/quest/m1/subscribe-ranges/dynamic.md) keeps the C
+ABI through the frozen crate
+([#6171](https://github.com/moq-dev/moq/pull/6171)),
+[reference epoch bindings](/quest/m1/reference-epoch-bindings.md) reaches C by
+inheriting from moq-ffi ([#6244](https://github.com/moq-dev/moq/pull/6244)),
+and the binding linger's C finish already merged in
+[#6157](https://github.com/moq-dev/moq/pull/6157).
 
 ## Required
 

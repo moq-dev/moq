@@ -36,3 +36,7 @@ Options weighed:
 
 Released peers still send wall-clock stamps, so whichever option lands must
 say which received tracks the check may trust.
+
+## Related
+
+- [lite-06 max sequence](/quest/m1/lite06-max-sequence.md) - the same fixture uses a sequence as its timestamp; both settle before lite-07 freezes

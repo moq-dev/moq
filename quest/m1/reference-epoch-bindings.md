@@ -25,13 +25,10 @@ field: the first instance resolved, without its guarantee.
 Test a matching, mismatched and epochless reference through `moq-ffi` and
 the C package, and run `just test interop --all`.
 
-Decided 2026-10-20 (maintainer): the C half lands on the
-[generated C package](/quest/m1/c/README.md), not the frozen hand-written
-ABI, so C users break once.
-
-## Required
-
-- [Generated C bindings](/quest/m1/c/README.md) - the reference `epoch` reaches C through the generated package, not the frozen hand-written ABI
+Decided 2026-10-22 (maintainer): this no longer waits on the
+[generated C package](/quest/m1/c/README.md); C inherits the reference
+`epoch` from moq-ffi
+([#6244](https://github.com/moq-dev/moq/pull/6244)).
 
 ## Related
 

@@ -86,6 +86,10 @@ identifier. This release adopts the new routing contract end to end.
 Public API: the lite-07 version constant and ALPN lose `-wip`. Wire: lite-07
 is published; older versions are unchanged.
 
+Decided 2026-10-22 (maintainer): lite-07 also waits for the timestamp
+provenance and lite-06 max-sequence quests, since either may change what the
+final wire carries.
+
 ## Required
 
 - [Token in band](/quest/m1/auth/token-in-band.md) - lite-07 carries the Auth Stream and UNAUTHORIZED (0x3B)
@@ -97,6 +101,8 @@ is published; older versions are unchanged.
 - [Compressed tracks in js/net](/quest/m1/compress/js.md) - JS reads and writes compressed lite-07 tracks instead of refusing them
 - [TRACKS in js/net](/quest/m1/archive/tracks-js.md) - JS speaks lite-07's Tracks Stream, which Rust already does
 - [lite-07 padding](/quest/m1/lite07-padding.md) - lite-07 reserves the padding stream type the browser probes with
+- [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - lite-07 says which received timestamps are media time, if its fix needs the wire
+- [lite-06 max sequence](/quest/m1/lite06-max-sequence.md) - the refusal boundary for an uncarriable sequence is settled before lite-07 freezes
 
 ## Related
 

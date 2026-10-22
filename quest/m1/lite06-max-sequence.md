@@ -47,3 +47,7 @@ it, but resetting its group stream leaves the live subscription waiting when tha
 group has not become visible. Decide the refusal boundary and recovery contract
 before changing it; do not reinterpret the published lite-05/06 framing or silently
 alter the independent SUBSCRIBE_DROP work.
+
+## Related
+
+- [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - also decides an uncarriable timestamp's fate; both settle before lite-07 freezes
