@@ -23,10 +23,10 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
-		"@kixelated/libav.js-variant-opus-aac-af": "^6.10.9",
 		"@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
 		"@moq/clock": "workspace:^",
 		"@moq/json": "workspace:^",
+		"@moq/libav": "workspace:^",
 		"@moq/loc": "workspace:^",
 		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^",

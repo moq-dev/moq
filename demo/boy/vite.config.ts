@@ -20,6 +20,6 @@ export default defineConfig({
 		hmr: false,
 	},
 	optimizeDeps: {
-		exclude: ["@kixelated/libav.js-variant-opus-aac-af"],
+		exclude: ["@moq/libav"],
 	},
 });

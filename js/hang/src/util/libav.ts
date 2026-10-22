@@ -13,17 +13,14 @@ export async function polyfill(): Promise<boolean> {
 	if (!loading) {
 		console.warn("using libav WebCodecs polyfill; performance may be degraded");
 
-		// No published libav.js variant decodes AAC, so this one is opus-af plus the AAC decoder.
+		// @moq/libav is libav.js's opus-af variant plus the AAC decoder, which no published variant has.
 		// I forked libavjs-webcodecs-polyfill to avoid Typescript errors; there's no changes otherwise.
 		loading = Promise.all([
-			import("@kixelated/libav.js-variant-opus-aac-af"),
+			import("@moq/libav"),
 			import("@kixelated/libavjs-webcodecs-polyfill"),
-		]).then(async ([variant, libav]) => {
+		]).then(async ([{ default: LibAV }, libav]) => {
 			const native = globalThis.AudioDecoder;
-			await libav.load({
-				LibAV: variant,
-				polyfill: true,
-			});
+			await libav.load({ LibAV, polyfill: true });
 			if (native) return true;
 
 			type Config = Parameters<InstanceType<typeof libav.AudioDecoder>["configure"]>[0];

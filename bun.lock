@@ -169,9 +169,9 @@
       "version": "0.5.2",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
-        "@libav.js/variant-opus-af": "^6.10.9",
         "@moq/clock": "workspace:^",
         "@moq/json": "workspace:^",
+        "@moq/libav": "workspace:^",
         "@moq/loc": "workspace:^",
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
@@ -205,6 +205,13 @@
       "peerDependencies": {
         "@zod/mini": "^4.5.0",
         "zod": "^4.5.0",
+      },
+    },
+    "js/libav": {
+      "name": "@moq/libav",
+      "version": "0.1.0",
+      "dependencies": {
+        "@libav.js/types": "^6.10.9",
       },
     },
     "js/loc": {
@@ -775,9 +782,7 @@
 
     "@kixelated/libavjs-webcodecs-polyfill": ["@kixelated/libavjs-webcodecs-polyfill@0.5.5", "", { "dependencies": { "@libav.js/types": "^6.7.7", "@ungap/global-this": "^0.4.4" } }, "sha512-Q1zgnTMMQ2F7IE9ylx3C1XzVbg5vYN18jiDINO5U3kNPBOHdYuUlJsMhtBoqr1M6ocLtoiqdHmLs7tHFgrw5KA=="],
 
-    "@libav.js/types": ["@libav.js/types@6.8.8", "", {}, "sha512-Lbik/0Q3x2R8cI7mOtRgt+nUWLqGXh7UinMndmpdXSDY4YEjYyVUDsq6fxkuriL78+LCYx8frZIN1r+oDsvYCQ=="],
-
-    "@libav.js/variant-opus-af": ["@libav.js/variant-opus-af@6.10.9", "", {}, "sha512-yULJUCQIHDtwDPbT38t9pP/7EGgqwynVcOau46hZjtCe8TWMp67DTi2X0Emr2M4Ci3nzxNPf25IzO+IXSmHDBg=="],
+    "@libav.js/types": ["@libav.js/types@6.10.9", "", {}, "sha512-AdngxD/VO8OI6/w7wlJC77kuFcsSvCUuo2RuC6gGeSW2DEvbzgBo2JtFLV6UWZp/tRNZhKm6jS0Tv8gwCKBHLg=="],
 
     "@moq/audio-quality": ["@moq/audio-quality@workspace:test/audio-quality/clients/js"],
 
@@ -808,6 +813,8 @@
     "@moq/interop-native": ["@moq/interop-native@workspace:test/interop/clients/js-native"],
 
     "@moq/json": ["@moq/json@workspace:js/json"],
+
+    "@moq/libav": ["@moq/libav@workspace:js/libav"],
 
     "@moq/loc": ["@moq/loc@workspace:js/loc"],
 
