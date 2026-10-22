@@ -53,6 +53,7 @@ const JOIN: u64 = 3 * GOP + 8;
 const VIDEO_PID: u16 = 0x1001;
 const AUDIO_PID: u16 = 0x1002;
 const TELETEXT_PID: u16 = 0x1010;
+const SECTION_PID: u16 = 0x1020;
 
 /// A teletext PES of media time `micros`: its PTS in the fixed header teletext takes, and a
 /// stuffing data unit (ETSI EN 300 472).
@@ -96,6 +97,9 @@ struct Live {
 	audio: Producer<HangContainer>,
 	/// A teletext track, and the video ticks its groups stall at: see [`Self::teletext`].
 	teletext: Option<(moq_net::track::Producer, std::ops::Range<u64>)>,
+	/// An SCTE-35 track, and the video ticks whose group opens with a malformed section: see
+	/// [`Self::sections`].
+	sections: Option<(moq_net::track::Producer, std::ops::Range<u64>)>,
 	source: crate::Source,
 	/// Media time per unit of the receivers' clock: above 1 the source runs fast.
 	scale: f64,
@@ -182,6 +186,7 @@ impl Live {
 			stalled: Vec::new(),
 			audio,
 			teletext: None,
+			sections: None,
 			scale,
 			rate: MUX_RATE,
 			sync: false,
@@ -228,6 +233,27 @@ impl Live {
 			.tracks
 			.insert(track.name().to_string(), entry);
 		self.teletext = Some((track, gap));
+	}
+
+	/// Send two SCTE-35 sections on their own PID at each keyframe tick, a group each, the
+	/// first of a group in `malformed` cut short, so the export drops it and holds the rest of
+	/// the group only in part.
+	fn sections(&mut self, malformed: std::ops::Range<u64>) {
+		let name = self.broadcast.unique_name(".ts");
+		let track = self
+			.broadcast
+			.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut entry = super::Track::new(SECTION_PID);
+		entry.verbatim = Some(super::Verbatim::new(0x86, super::Framing::Section));
+		self.catalog
+			.modify()
+			.unwrap()
+			.ext
+			.mpegts
+			.tracks
+			.insert(track.name().to_string(), entry);
+		self.sections = Some((track, malformed));
 	}
 
 	/// The receivers' instant at which the source's clock reads media time `micros`.
@@ -408,6 +434,30 @@ impl Live {
 						group.finish().unwrap();
 					}
 				}
+				if let Some((sections, malformed)) = &mut self.sections
+					&& keyframe
+				{
+					let mut group = sections.append_group().unwrap();
+					let frames = [0, 1].map(|n: u8| {
+						// A splice_null, which `n` marks apart.
+						let mut section = vec![
+							0xfc, 0x30, 0x11, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xf0, 0, 0, 0, n, 0, 0, 0, 0,
+						];
+						if n == 0 && malformed.contains(&tick) {
+							section.truncate(10);
+						}
+						Frame {
+							timestamp: Timestamp::from_micros(self.origin + video + u64::from(n) * VIDEO_US).unwrap(),
+							duration: None,
+							payload: Bytes::from(section),
+							keyframe: n == 0,
+						}
+					});
+					HangContainer::Legacy(crate::container::Kind::Data)
+						.write(&mut group, &frames)
+						.unwrap();
+					group.finish().unwrap();
+				}
 				self.tick += 1;
 			}
 			for leg in legs.iter_mut() {
@@ -453,6 +503,9 @@ impl Live {
 		self.audio.finish().unwrap();
 		if let Some((teletext, _)) = &mut self.teletext {
 			teletext.finish().unwrap();
+		}
+		if let Some((sections, _)) = &mut self.sections {
+			sections.finish().unwrap();
 		}
 		for leg in legs.iter_mut() {
 			leg.drain().await;
@@ -1559,6 +1612,37 @@ async fn a_stalled_teletext_lane_is_withheld() {
 		"the stalled leg sent a run the whole leg did not"
 	);
 	assert!(a.len() < c.len(), "the stalled leg withheld nothing");
+}
+
+/// A leg that holds a group of a sparse lane only in part, its first unit unplaced, is unsure
+/// of the lane from there until a group it holds whole: it withholds the runs the rest of the
+/// group takes on a leg that holds it, rather than send them as stuffing.
+#[tokio::test(start_paused = true)]
+async fn a_group_held_in_part_leaves_its_lane_unsure() {
+	let epoch = moq_net::Epoch::mint();
+	let mut paths = Vec::new();
+	for malformed in [0..0, 5 * GOP..6 * GOP] {
+		let mut live = Live::new(1.0, 0).await;
+		live.sections(malformed);
+		live.rtp(&epoch).await;
+		paths.push(live);
+	}
+	let [mut whole, mut partial] = <[Live; 2]>::try_from(paths).ok().unwrap();
+	let mut c = whole.join(Duration::ZERO).await;
+	let mut a = partial.join(Duration::ZERO).await;
+	for tick in 1..=12 * GOP {
+		whole.run(tick, &mut [&mut c], |_| false).await;
+		partial.run(tick, &mut [&mut a], |_| false).await;
+	}
+	whole.finish(&mut [&mut c]).await;
+	partial.finish(&mut [&mut a]).await;
+	let (a, c) = (datagrams(&a, 0), datagrams(&c, 0));
+	assert_eq!(
+		same_datagrams(&a, &c),
+		a.len(),
+		"the partial leg sent a run the whole leg did not"
+	);
+	assert!(a.len() < c.len(), "the partial leg withheld nothing");
 }
 
 /// An epochless route names no publisher instance for the SSRC to follow, so RTP refuses it.

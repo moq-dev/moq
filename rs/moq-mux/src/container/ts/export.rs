@@ -301,7 +301,8 @@ struct Synced {
 	/// The release slot of the last frame planned ([`Track::plan`]).
 	released: Option<u128>,
 	/// The first position of the group this leg has held every unit of the lane from, since
-	/// its playhead last jumped: `None` while it may lack some ([`lane::Known`]).
+	/// its playhead last jumped or it held a group only in part: `None` while it may lack some
+	/// ([`lane::Known`]).
 	sure: Option<u128>,
 	/// The playhead's jumps when the last frame was planned ([`Pending::skip`]).
 	skip: Option<u64>,
@@ -773,7 +774,11 @@ impl Track {
 					positions: placed.positions,
 				}))
 			}
-			Err(Unplaced::Partial) => Ok(None),
+			// What the group takes here is unknown, so is the lane, until a group held whole.
+			Err(Unplaced::Partial) => {
+				sync.sure = None;
+				Ok(None)
+			}
 			Err(Unplaced::Late) if matches!(self.kind, Kind::Verbatim { .. }) => {
 				tracing::warn!(track = %name, count, "verbatim unit its lane cannot carry by its deadline; dropped");
 				Ok(None)
@@ -2632,10 +2637,10 @@ where
 	/// Tell the grid, before it lays a slot, what each lane holds on this leg ([`Grid::know`]).
 	///
 	/// A lane of continuous media is known from the first group held whole since its playhead
-	/// last jumped, up to the last position planned: past it, this leg may be stalled. So is a
-	/// placed one a receiver buffer models (DVB AC-3, teletext), continuous as the jitter
-	/// buffer counts it. A sparse lane cannot tell a stall from its silence, so it is known on
-	/// from that group.
+	/// last jumped or a group was held only in part, up to the last position planned: past it,
+	/// this leg may be stalled. So is a placed one a receiver buffer models (DVB AC-3,
+	/// teletext), continuous as the jitter buffer counts it. A sparse lane cannot tell a stall
+	/// from its silence, so it is known on from that group.
 	fn know(&mut self) {
 		let Some(grid) = self.schedule.sync() else {
 			return;
