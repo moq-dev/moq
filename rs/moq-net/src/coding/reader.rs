@@ -126,6 +126,11 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 					return Poll::Ready(Err(DecodeError::Short.into()));
 				}
 				self.want = need;
+				// The lease keeps every byte for the retry, which copies them again, so a
+				// parked reader holds no more of its own than an idle one.
+				if self.scratch.capacity() > SCRATCH_KEEP {
+					self.scratch = Vec::new();
+				}
 				break;
 			}
 		}
@@ -607,6 +612,37 @@ mod tests {
 		));
 		assert_eq!(leased(&mut reader), 4, "what follows the message stays leased");
 		assert!(reader.scratch.is_empty() || reader.scratch.capacity() <= SCRATCH_KEEP);
+	}
+
+	/// A copy that spans chunks is freed when the reader parks for more: the lease still
+	/// holds those bytes, so keeping the copy would double what a peer can make it hold.
+	#[test]
+	fn a_parked_decode_frees_its_copy() {
+		const LEN: usize = 70_000;
+		let mut head = Vec::new();
+		Encoder::new(&mut head, crate::lite::Version::Lite05.into())
+			.varint(LEN as u64)
+			.unwrap();
+		head.extend_from_slice(&[0; 10]);
+		let head: &'static [u8] = head.leak();
+		let body: &'static [u8] = vec![0; LEN - 10].leak();
+
+		// Two length-prefixed fields: the first spans both chunks, the second never arrives.
+		let mut reader = queue(&[head, body], crate::lite::Version::Lite05);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		let res = reader.poll_with(&mut cx, true, |r| {
+			r.bytes()?;
+			r.bytes()?;
+			Ok(())
+		});
+		assert!(res.is_pending());
+		const { assert!(SCRATCH_KEEP < LEN) };
+		assert!(reader.scratch.capacity() <= SCRATCH_KEEP);
+		assert_eq!(
+			leased(&mut reader),
+			head.len() + body.len(),
+			"the lease keeps the bytes"
+		);
 	}
 
 	fn refuses_frame<T: Decode<V> + Debug, V: StreamCodes + Into<Form> + Copy>(
