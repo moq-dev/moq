@@ -928,9 +928,33 @@ impl Reader {
 				Some(_) => self.refused = true,
 			}
 		}
+		// A group or datagram at or past it, handed out or on any copy, claims other content.
+		if let Some(end) = self.declared.and_then(Position::final_sequence) {
+			let seen = |sequence: Option<u64>| sequence.is_some_and(|sequence| sequence >= end);
+			if seen(self.newest)
+				|| seen(self.datagram.map(|(sequence, _)| sequence))
+				|| self.copies.iter().any(|copy| seen(copy.track.latest_sequence()))
+			{
+				self.refused = true;
+			}
+		}
 		if self.refused {
 			self.peeked = None;
 		}
+	}
+
+	/// Whether `sequence` is past the declared end, which refuses the track: another copy
+	/// contradicts the copy that declared it.
+	fn past_end(&mut self, sequence: u64) -> bool {
+		if self
+			.declared
+			.and_then(Position::final_sequence)
+			.is_some_and(|end| sequence >= end)
+		{
+			self.refused = true;
+			self.peeked = None;
+		}
+		self.refused
 	}
 
 	/// Drop the replaced copies nothing needs any more; see [`Copy::retains`]. Whether one
@@ -1084,6 +1108,9 @@ impl Reader {
 				Poll::Pending => return Some(Poll::Pending),
 			},
 		};
+		if self.past_end(candidate.sequence) {
+			return Some(Poll::Ready(Err(Error::ProtocolViolation)));
+		}
 		let index = self
 			.copies
 			.iter()
@@ -1295,6 +1322,9 @@ impl Reader {
 						if copy.datagrams_seen.is_some_and(|seen| id <= seen) {
 							continue;
 						}
+						if self.past_end(datagram.sequence) {
+							return Some(Poll::Ready(Err(Error::ProtocolViolation)));
+						}
 						self.datagram = self.datagram.max(Some(id));
 						return Some(Poll::Ready(Ok(Some(datagram))));
 					}
@@ -1481,16 +1511,27 @@ impl Recover {
 	/// Too old and evicted judge a subscription's delivery, not whether the group exists,
 	/// so neither is a verdict on a fetch: one answered from a group still arriving over a
 	/// subscription asks the route again for the rest when that delivery gives up on it.
-	pub(super) fn wants(&self, err: Option<&Error>, waiter: &kio::Waiter) -> bool {
+	pub(super) fn wants(&mut self, err: Option<&Error>, waiter: &kio::Waiter) -> bool {
 		let verdict = err.is_some_and(|err| match StreamError::from(err) {
 			StreamError::Old | StreamError::Evicted => self.reader.is_some(),
 			StreamError::App(_) => true,
 			_ => false,
 		});
-		match err {
-			Some(_) if !verdict || copy_failed(&self.copy) => true,
-			_ => self.route.poll_changed(self.generation, waiter).is_ready(),
+		if err.is_some() && (!verdict || copy_failed(&self.copy)) {
+			return true;
 		}
+		while self.route.poll_changed(self.generation, waiter).is_ready() {
+			// A route that returned serves the copy being read again, which the reader reuses.
+			let route = self.route.state.read();
+			if route.end.is_some()
+				|| route.concluded
+				|| !route.copy.as_ref().is_some_and(|copy| copy.same_channel(&self.copy))
+			{
+				return true;
+			}
+			self.generation = route.generation;
+		}
+		false
 	}
 
 	/// Poll for the serving route's copy of the group, positioned at frame `index`.
@@ -1966,6 +2007,61 @@ mod test {
 			} else {
 				assert_eq!(result.map(Result::unwrap), Poll::Ready(next));
 			}
+		}
+	}
+
+	/// A copy that delivers past an end another copy declared contradicts it.
+	#[moq_clock::test]
+	async fn content_past_the_declared_end_refuses_the_track() {
+		for datagram in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let mut a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, HOUR);
+			a.finish_at(Position::group(5)).unwrap();
+			let mut b = copy();
+			routes.serve(b.consume());
+			write(&b, 4);
+			assert_eq!(recv(&mut sub).sequence, 4);
+			let res = match datagram {
+				false => {
+					write(&b, 5);
+					sub.poll_recv_group(&kio::Waiter::noop()).map_ok(|_| ())
+				}
+				true => {
+					b.insert_datagram(5, ts(5), b"d".as_ref()).unwrap();
+					sub.poll_recv_datagram(&kio::Waiter::noop()).map_ok(|_| ())
+				}
+			};
+			assert!(matches!(res, Poll::Ready(Err(Error::ProtocolViolation))), "{res:?}");
+			assert!(matches!(
+				sub.poll_finished(&kio::Waiter::noop()),
+				Poll::Ready(Err(Error::ProtocolViolation))
+			));
+		}
+	}
+
+	/// An end below a group a copy handed out or holds claims other content.
+	#[moq_clock::test]
+	async fn an_end_below_a_seen_group_refuses_the_track() {
+		for handed_out in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, HOUR);
+			write(&a, 5);
+			if handed_out {
+				assert_eq!(drain(&mut sub, false), [5]);
+			}
+			let mut b = copy();
+			routes.serve(b.consume());
+			b.finish_at(Position::group(3)).unwrap();
+			assert!(matches!(
+				sub.poll_finished(&kio::Waiter::noop()),
+				Poll::Ready(Err(Error::ProtocolViolation))
+			));
 		}
 	}
 
@@ -2873,7 +2969,7 @@ mod test {
 			let mut sub = subscribe(&logical, HOUR);
 			write(&a, 0);
 			assert_eq!(drain(&mut sub, ordered), [0]);
-			a.finish().unwrap();
+			a.clone().abort(Error::Dropped).unwrap();
 			let b = copy();
 			routes.serve(b.consume());
 			let c = copy();
@@ -3238,9 +3334,9 @@ mod test {
 		sub.start_at(0);
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
 
-		// The replaced copy finishes with the held group.
+		// The replaced copy ends with the held group, declaring no end: another route continues the track.
 		held.finish().unwrap();
-		a.finish().unwrap();
+		a.clone().abort(Error::Dropped).unwrap();
 		drop(reading);
 		assert_eq!(drain(&mut sub, false), Vec::<u64>::new());
 		write(&b, 4);
@@ -4129,6 +4225,58 @@ mod test {
 			reading.read_frame().now_or_never(),
 			Some(Err(Error::Unsupported))
 		));
+	}
+
+	/// A flap back to the route being read is no route change for an in-flight group, so
+	/// a sparse group the reader never polled across it keeps reading its own copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_unpolled_flap_back_keeps_reading_a_sparse_group() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let mut group = a.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.set_wire(group::Wire {
+				sparse: false,
+				first_object: true,
+				first_id: 6,
+				extensions: false,
+				has_end: true,
+				fetchable: false,
+				last: None,
+			})
+			.unwrap();
+		let object = |group: group::Producer, id: u64, payload: &'static [u8]| {
+			let header = crate::frame::Header {
+				info: crate::frame::Info {
+					size: payload.len() as u64,
+					timestamp: Some(ts(id)),
+				},
+				fields: Some(Arc::new(super::super::object::Fields {
+					id,
+					properties: Default::default(),
+				})),
+				inflated: None,
+			};
+			let mut frame = group
+				.create_frame_owned(header, &crate::frame::Budget::default())
+				.unwrap();
+			frame.write(bytes::Bytes::from_static(payload)).unwrap();
+			frame.finish().unwrap()
+		};
+		group = object(group, 6, b"a");
+		group = object(group, 8, b"b");
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::MAX);
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		routes.serve(copy().consume());
+		routes.serve(a.consume());
+		assert!(reading.read_frame().now_or_never().is_none());
+		let _group = object(group, 9, b"c");
+		assert_eq!(read(&mut reading), Some(b"c".to_vec()));
 	}
 
 	/// A replacement copy that joined past a gap, holding the group from Object 6.

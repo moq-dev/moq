@@ -2725,7 +2725,7 @@ impl Consumer {
 		// A front's reader may continue the group from another route's copy when it reads.
 		if self
 			.recover
-			.as_ref()
+			.as_mut()
 			.is_some_and(|recover| recover.wants(Some(&aborted), waiter))
 		{
 			return None;
