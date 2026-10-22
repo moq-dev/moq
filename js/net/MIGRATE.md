@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Stage a requested track before subscribers see it (#6111)
+
+`Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
+Disposing a `Staged` uncommitted (`using`, or `[Symbol.dispose]()`) rejects the request. `accept(info)` is unchanged and equals `stage(info).commit()`.
+
+### A frameless group is not a successor (#6111)
+
+A group followed by a frameless one is judged stale against the next group that has a frame, where the frameless group used to count.
+`Track.Producer.dropGroups(start, end, error)` marks groups `[start, end)` the peer said it skipped; a reader holding one of them rejects with `error`.
+
 ### Priorities are signed (#6142)
 
 `Track.Info.priority`, `Track.Subscription.priority`, and a fetch's `priority` take `-128..=127`, higher first, and 0 is the unset midpoint; anything outside throws a `RangeError`.
