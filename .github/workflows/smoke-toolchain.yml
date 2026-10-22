@@ -1,0 +1,73 @@
+name: Smoke toolchain update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smoke-toolchain-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/just
+      - name: Update the coupled pins
+        run: just --justfile test/smoke/justfile update-toolchain
+      - name: Check the updated browser toolchain
+        run: just --justfile test/smoke/justfile check-toolchain
+      # Use the existing app identity to publish the validated draft proposal.
+      # Mint it after evaluating nixpkgs so the update itself holds no write token.
+      - name: Generate moq-bot token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3
+        id: token
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: moq-dev
+          repositories: moq
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Propose the update
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.token.outputs.token }}
+          branch: smoke/toolchain-update
+          base: main
+          draft: always-true
+          add-paths: |
+            test/smoke/flake.lock
+            test/smoke/clients/js/package.json
+          commit-message: "chore(smoke): refresh the toolchain and matching Playwright pin"
+          title: "chore(smoke): refresh the toolchain and matching Playwright pin"
+          body: |
+            ## Problem
+
+            The published-package smoke clients need a current toolchain whose Chromium matches npm Playwright.
+
+            ## Approach
+
+            Refresh smoke's flake lock and derive its exact npm Playwright pin from PLAYWRIGHT_VERSION in the same change. The existing browser smoke lane consumes both pins and validates freshness.
+
+            ## Impact
+
+            - Public API and wire: none. Only the smoke test toolchain changes.
+
+            ## Alternatives
+
+            A lock-only update leaves the npm pin behind and fails freshness.
+
+            ## Follow-ups
+
+            The updater validated freshness and launched the updated browser. Dispatch Smoke on this branch to run the full published-package matrix before marking ready. This workflow does not enqueue or merge updates.

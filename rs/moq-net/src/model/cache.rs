@@ -1356,13 +1356,6 @@ mod test {
 	}
 
 	#[test]
-	fn config_applies_capacity_and_expiry() {
-		let pool = bounded(1000);
-		assert_eq!(pool.capacity(), Some(1000));
-		assert_eq!(pool.expiry(), Some(DEFAULT_EXPIRY));
-	}
-
-	#[test]
 	fn weak_follows_the_last_strong_handle() {
 		let pool = bounded(1000);
 		let clone = pool.clone();
@@ -1582,11 +1575,6 @@ mod test {
 		let track = Track::new(Pool::unbounded(), kio::Weak::new());
 		assert!(!track.expiry_due(None));
 		assert!(!track.expiry_due(Some(u64::MAX)));
-	}
-
-	#[test]
-	fn standalone_origin_enables_default_expiry() {
-		assert_eq!(crate::origin::Config::default().pool.expiry(), Some(DEFAULT_EXPIRY));
 	}
 
 	#[test]

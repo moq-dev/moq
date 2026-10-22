@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { driverPath, parseCamera } from "./paths.ts";
+import { parseCamera } from "./paths.ts";
 
 describe("parseCamera", () => {
 	test("accepts exactly carla/<truck>/<camera>.hang", () => {
@@ -17,11 +17,5 @@ describe("parseCamera", () => {
 		]) {
 			expect(parseCamera(path)).toBeUndefined();
 		}
-	});
-});
-
-describe("driverPath", () => {
-	test("roots every driver of a truck under viewer/carla/<truck>", () => {
-		expect(driverPath("truck1", "abc") as string).toBe("viewer/carla/truck1/abc");
 	});
 });

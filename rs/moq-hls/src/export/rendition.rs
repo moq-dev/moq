@@ -103,6 +103,8 @@ struct Run {
 }
 
 /// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
+// One per rendition, so the variant sizes never add up to an allocation's worth.
+#[allow(clippy::large_enum_variant)]
 enum Config {
 	Video(VideoConfig),
 	Audio(AudioConfig),
