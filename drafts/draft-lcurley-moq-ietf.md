@@ -143,7 +143,7 @@ The Version also gives each property its meaning: drafts 18 and 19 serialize a b
 Other properties are opaque to this extension.
 
 ## Timestamps {#timestamps}
-A relay MUST preserve a relayed track's Timescale and timestamps across a negotiated hop.
+A relay MUST preserve a relayed track's Timescale and timestamps across a negotiated hop, except in a listing ({{track}}).
 A nonzero Version identifies timestamps from MoQ Transport, which may be arrival times and need not rise with Group Sequence.
 The receiver MUST NOT apply moq-lite's group-start rewind check to such a track; a Version of zero retains that check.
 Without this extension, a relay MUST serve a MoQ Transport track untimed as {{moql}} requires.
@@ -199,6 +199,7 @@ The receiver parses the keys inside the Immutable Properties from its value, whi
 It SHOULD read them from the value when needed rather than hold them beside it, as a list of IDs can cost several times the value.
 
 A TRACKS_ADD ({{moql}} Tracks Stream) embeds TRACK_INFO without TRACK_PROPERTIES, so when the extension is negotiated a subscriber MUST NOT skip the Track Stream for a track it learned from a listing.
+Lacking the Version, a TRACKS_ADD cannot mark a {{moqt}} track's timestamps as unchecked ({{timestamps}}), so it lists that track untimed even when the extension is negotiated.
 
 
 # Datagrams {#datagrams}

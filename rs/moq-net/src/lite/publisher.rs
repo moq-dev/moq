@@ -2010,14 +2010,15 @@ impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
 		writer: &mut Writer<S::SendStream, Version>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
-		let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
 		// Pull an event only once the last is out, so a stalled requester's changes collapse
 		// in the listing's queue rather than pile up here.
 		ready!(writer.poll_flush(&mut waiter.context()))?;
 		let event = match ready!(self.tracks.poll_next(waiter))? {
 			Some(crate::broadcast::TracksEvent::Added { name, info }) => lite::TracksEvent::Added {
 				name: name.to_string().into(),
-				info: lite::TrackInfo::serve(&info, shared.version, ietf),
+				// Untimed even to an extension peer: TRACKS_ADD has no TRACK_PROPERTIES to
+				// carry the unchecked provenance, so a relay would re-list it as native lite.
+				info: lite::TrackInfo::serve(&info, shared.version, false),
 			},
 			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
 				name: name.to_string().into(),

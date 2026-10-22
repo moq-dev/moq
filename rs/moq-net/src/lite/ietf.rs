@@ -1475,7 +1475,8 @@ mod hop_tests {
 	}
 
 	/// Provenance keeps IETF times unchecked after a hop, while a peer declining the
-	/// extension gets no timeline. SUBSCRIBE, FETCH, and datagrams must agree with TRACK_INFO.
+	/// extension gets no timeline. SUBSCRIBE, FETCH, and datagrams must agree with TRACK_INFO,
+	/// while a listing stays untimed.
 	#[moq_clock::test]
 	async fn ietf_timestamps_keep_their_provenance_across_a_hop() {
 		for offer in [[true, true], [true, false], [false, true]] {
@@ -1492,6 +1493,17 @@ mod hop_tests {
 			head.finish().unwrap();
 			let (downstream, sessions) = test_hop(&upstream, "room", offer).await;
 			let broadcast = downstream.consume().request_broadcast("room", None).await.unwrap();
+			// A listing cannot carry the provenance, so it lists the track untimed even when
+			// negotiated: a relay re-listing it would otherwise advertise it as native lite.
+			let mut tracks = broadcast.tracks().unwrap();
+			let listed = loop {
+				match moq_clock::timeout(TIMEOUT, tracks.next()).await.unwrap().unwrap() {
+					Some(crate::broadcast::TracksEvent::Added { name, info }) if &*name == "video" => break info,
+					Some(_) => continue,
+					None => panic!("listing ended before the track"),
+				}
+			};
+			assert_eq!((listed.timescale, listed.ietf()), (None, None), "{offer:?}");
 			let copy = broadcast.track("video").unwrap();
 			let info = moq_clock::timeout(TIMEOUT, copy.query()).await.unwrap().unwrap();
 			assert_eq!(info.timescale, negotiated.then_some(Timescale::MILLI), "{offer:?}");
