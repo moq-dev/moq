@@ -795,6 +795,15 @@ where
 				}
 			} else if listings.entries.contains_key(&key) {
 				Offer::Refuse(duplicate, "already subscribed")
+			} else if msg.forward && !matches!(self.version, Version::Draft18 | Version::Draft19) {
+				// From draft-20 the PUBLISH sets its own Forward State, and PUBLISH_OK has no
+				// FORWARD to pause it: its objects would be refused unseen behind a healthy
+				// listing.
+				listings.fail(&key.0, Error::Unsupported);
+				Offer::Refuse(
+					request::to_code(&Error::Unsupported, request::Kind::Publish, self.version),
+					"PUBLISH forwards for a paused listing",
+				)
 			} else if let Some(err) = refused(&msg.properties, self.version, flate) {
 				// The peer sends nothing else for the track, so a listing left standing would
 				// silently miss it, as with a refused paused SUBSCRIBE.
@@ -1357,7 +1366,7 @@ mod tests {
 
 		/// PUBLISH `name` paused, returning the stream once the subscriber holds it.
 		async fn publish(&mut self, name: &str, request_id: u64) -> PeerStream {
-			let (stream, id, _) = self.offer("bcast", name, request_id, Default::default()).await;
+			let (stream, id, _) = self.offer(offered("bcast", name, request_id)).await;
 			assert!(
 				[ietf::RequestOk::ID, ietf::PublishOk::ID].contains(&id),
 				"PUBLISH refused: {id:#x}"
@@ -1429,27 +1438,9 @@ mod tests {
 			(track, serving)
 		}
 
-		/// PUBLISH `name` in `namespace` paused with `properties`, returning the answer.
-		async fn offer(
-			&mut self,
-			namespace: &str,
-			name: &str,
-			request_id: u64,
-			properties: ietf::Properties,
-		) -> (PeerStream, u64, ietf::Body) {
+		/// Send `publish`, returning the answer.
+		async fn offer(&mut self, publish: ietf::Publish<'_>) -> (PeerStream, u64, ietf::Body) {
 			let mut stream = Stream::open(&mut self.peer, self.version).await.unwrap();
-			let publish = ietf::Publish {
-				request_id: RequestId(request_id),
-				track_namespace: Path::new(namespace),
-				track_name: name.into(),
-				track_alias: request_id,
-				largest_location: None,
-				forward: false,
-				properties,
-				subscriber_priority: None,
-				group_order: None,
-				filter: None,
-			};
 			stream.writer.varint(ietf::Publish::ID).await.unwrap();
 			stream.writer.encode(&publish).await.unwrap();
 
@@ -1470,6 +1461,22 @@ mod tests {
 		}
 	}
 
+	/// A paused PUBLISH of `name` in `namespace`, aliased by its request ID.
+	fn offered<'a>(namespace: &'a str, name: &'a str, request_id: u64) -> ietf::Publish<'a> {
+		ietf::Publish {
+			request_id: RequestId(request_id),
+			track_namespace: Path::new(namespace),
+			track_name: name.into(),
+			track_alias: request_id,
+			largest_location: None,
+			forward: false,
+			properties: ietf::Properties::default(),
+			subscriber_priority: None,
+			group_order: None,
+			filter: None,
+		}
+	}
+
 	/// The error code a refused PUBLISH answered with.
 	fn refusal(id: u64, body: &ietf::Body, version: Version) -> u64 {
 		assert_eq!(id, ietf::RequestError::ID, "accepted");
@@ -1484,10 +1491,10 @@ mod tests {
 		for (version, duplicate) in [(Version::Draft18, 0x19), (Version::Draft19, 0x20)] {
 			let mut h = harness(version);
 			let _listing = h.establish().await;
-			let (_, id, body) = h.offer("other", "video", 1, Default::default()).await;
+			let (_, id, body) = h.offer(offered("other", "video", 1)).await;
 			assert_eq!(refusal(id, &body, version), 0x3, "{version}: unsolicited");
 			let _video = h.publish("video", 3).await;
-			let (_, id, body) = h.offer("bcast", "video", 5, Default::default()).await;
+			let (_, id, body) = h.offer(offered("bcast", "video", 5)).await;
 			assert_eq!(refusal(id, &body, version), duplicate, "{version}: redundant");
 		}
 	}
@@ -1644,16 +1651,87 @@ mod tests {
 		let version = Version::Draft22;
 		let mut h = harness(version);
 		let _listing = h.establish().await;
-		let compressed = ietf::Properties {
-			compress: true,
-			..Default::default()
+		let compressed = ietf::Publish {
+			properties: ietf::Properties {
+				compress: true,
+				..Default::default()
+			},
+			..offered("bcast", "video", 1)
 		};
-		let (_, id, _) = h.offer("bcast", "video", 1, compressed).await;
+		let (_, id, _) = h.offer(compressed).await;
 		assert_eq!(id, ietf::RequestError::ID, "accepted");
 		assert!(matches!(
 			h.listening.poll_failed(&kio::Waiter::noop()),
 			Poll::Ready(Error::UnsupportedExtension)
 		));
+	}
+
+	/// From draft-20 a PUBLISH that forwards contradicts the paused listing it answers, and
+	/// nothing we send can pause it: it is refused and the listing fails, rather than have its
+	/// objects refused unseen. Through draft-19 our PUBLISH_OK pauses it.
+	#[moq_clock::test]
+	async fn a_forwarding_publish_fails_the_listing_from_draft_20() {
+		for version in [Version::Draft19, Version::Draft20] {
+			let mut h = harness(version);
+			let _listing = h.establish().await;
+			let forwarding = ietf::Publish {
+				forward: true,
+				..offered("bcast", "video", 1)
+			};
+			let (_, id, _) = h.offer(forwarding).await;
+			let failed = h.listening.poll_failed(&kio::Waiter::noop());
+			match version {
+				Version::Draft19 => {
+					assert_ne!(id, ietf::RequestError::ID, "{version}: refused");
+					assert!(failed.is_pending(), "{version}: {failed:?}");
+				}
+				_ => {
+					assert_eq!(id, ietf::RequestError::ID, "{version}: accepted");
+					assert!(
+						matches!(failed, Poll::Ready(Error::Unsupported)),
+						"{version}: {failed:?}"
+					);
+				}
+			}
+		}
+	}
+
+	/// A listed track that finishes before its resume is answered goes back to lingering, and
+	/// its waiting reader SUBSCRIBEs: the idle copy cannot place the end, which the SUBSCRIBE
+	/// learns, rather than abort a clean finish.
+	#[moq_clock::test]
+	async fn a_track_ending_before_its_resume_resubscribes() {
+		let version = Version::Draft22;
+		let mut h = harness(version);
+		let _listing = h.establish().await;
+		let mut video = h.publish("video", 1).await;
+		let (track, _serving) = h.resume_and_pause(&mut video).await;
+
+		let _reader = track.subscribe(None);
+		let (id, body) = read(&mut video).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID, "not resumed");
+		assert_eq!(
+			body.message::<ietf::SubscribeUpdate>(version).unwrap().forward,
+			Some(true)
+		);
+		let done = ietf::PublishDone {
+			request_id: None,
+			status_code: ietf::PublishDoneStatus::TrackEnded.code(version),
+			stream_count: 0,
+			reason_phrase: "".into(),
+		};
+		write(&mut video, ietf::PublishDone::ID, &done).await;
+		assert!(
+			h.listening.poll_failed(&kio::Waiter::noop()).is_pending(),
+			"TRACK_ENDED failed the listing"
+		);
+
+		let mut stream = moq_clock::timeout(TIMEOUT, Stream::accept(&mut h.peer, version))
+			.await
+			.expect("the copy did not SUBSCRIBE")
+			.unwrap();
+		let (id, _) = read(&mut stream).await;
+		assert_eq!(id, ietf::Subscribe::ID);
 	}
 
 	/// A paused track's upstream failing aborts the copy a reader left lingering, rather

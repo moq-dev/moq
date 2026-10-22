@@ -3231,7 +3231,13 @@ where
 				// cancelled since its PUBLISH_DONE has yet to come.
 				let ended = held.as_mut().and_then(|held| held.ended.take());
 				let cancel = unanswered || (held.is_some() && ended.is_none());
+				let finished = matches!(ended, Some(Ok(())));
 				self.entry_ended(&key, request_id, ended.unwrap_or_else(|| Err(err.clone())));
+				// A resumed copy whose track finished before the resume was answered cannot
+				// place the end, so it lingers again and its reader's SUBSCRIBE learns it.
+				if finished && resumed.is_some() {
+					return resumed;
+				}
 				if let Some(idle) = resumed {
 					let _ = idle.track.abort(err);
 				}
