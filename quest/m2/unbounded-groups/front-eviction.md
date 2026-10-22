@@ -15,10 +15,15 @@ until [Byte holes](/quest/m2/unbounded-groups/byte-holes.md).
 
 See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
 
-- The group's state holds sorted runs of frames in place of one
-  `VecDeque` + `offset`. Readers keep one absolute cursor. A sequential
-  reader should hold its run so a lookup stays O(1). The common single-run
-  group must cost what it does today.
+- Storage comes from the
+  [group storage benchmark](/quest/m2/group-storage-bench.md) (decided
+  2026-10-20, maintainer): sorted runs of frames in place of one
+  `VecDeque` + `offset`, or the
+  [append-only log](/quest/m2/perf/kio-channel-contention/log.md) or a ring
+  buffer, which the maintainer leans toward because performance matters more
+  than middle eviction. Readers keep one absolute cursor. A sequential
+  reader should hold its position so a lookup stays O(1). The common
+  single-run group must cost what it does today.
 - Pool debt evicts whole cold groups first (`pay_debt` in
   `model/track.rs`, as today). Front frames are shed only from a group
   that is protected or being read.
@@ -46,5 +51,10 @@ groups. A reader that used to see `GroupTooLarge` now refills or sees
 
 ## Required
 
+- [Group storage benchmark](/quest/m2/group-storage-bench.md) - picks the group storage this builds on
 - [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md) - frame storage the cache can account for without whole-frame preallocation
 - [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - `track::Dynamic` receives frame-precise range requests for misses
+
+## Related
+
+- [Append-only log](/quest/m2/perf/kio-channel-contention/log.md) - the other proposal for `GroupState` storage, decided by the same benchmark

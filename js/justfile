@@ -116,6 +116,23 @@ json-stream-bench:
     bunx tsc --noEmit --project json/bench/tsconfig.json
     bun json/bench/stream.ts
 
+# Sweep snapshot codec cost over document size and changed keys.
+json-codec-bench:
+    bun install --frozen-lockfile
+    bunx tsc --noEmit --project json/bench/tsconfig.json
+    bun json/bench/codec.ts
+
+# Compare the duplicate-refusing JSON frame parse against bare JSON.parse.
+json-parse-bench:
+    bun install --frozen-lockfile
+    bunx tsc --noEmit --project json/bench/tsconfig.json
+    bun json/bench/parse.ts
+
+# Sweep a slow hang consumer's skipped groups against its warning traffic and catch-up time.
+slow-group-bench:
+    bun install --frozen-lockfile
+    bun hang/bench/slow-group.ts
+
 # Sweep decoder count against PCM callback size during audio warmup.
 audio-warmup-bench:
     bun install --frozen-lockfile

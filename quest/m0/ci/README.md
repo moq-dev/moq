@@ -50,7 +50,9 @@ Decisions (maintainer, 2026-10-13):
 - Self-hosted CI is dropped: hosted runners plus the R2 caches replace the
   spare-desktop runner, its cache server, and the cache release it waited on.
   Reopened 2026-10-19, conditionally: [faster runners](/quest/m0/ci/runners.md)
-  compares it again once the pipeline is optimized.
+  compares it again once the pipeline is optimized. Since 2026-10-20 the
+  queue runs on the persistent `nix/runner` VM; that quest records its
+  measurements.
 
 Decided 2026-10-15: local CPU admission, test-cost reductions, and setup
 reductions are all m0. `quest gate` owns generic command admission; repositories
@@ -74,10 +76,8 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Require the release gate](/quest/m0/ci/release-gates.md) - condition: the next cut carries `release-gate.yml`; then release PRs require it
-- [CI pipeline audit](/quest/m0/ci/audit.md) - every queue and nightly job earns its minutes, and the Rust cache reuses unchanged crates
-- [Pin Quest's gate](/quest/m0/ci/quest-gate-pin.md) - make shared command admission available
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - condition: the maintainer bootstrap; then measure hits, restore time, and expiry
-- [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - condition: the `nix.moq.dev` PR merges; then confirm CI and releases use it and retire Cachix
+- [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the first `moq-ffi-v*` tag that runs `Release FFI`, and a `Shipping sizes` run; verify the wrappers and size keys
 - [Faster runners](/quest/m0/ci/runners.md) - pick hosted, Blacksmith or the NixOS desktop from measurements of the optimized queue

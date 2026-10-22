@@ -80,6 +80,7 @@ This README owns the end-to-end proof and the guide once every child lands:
 
 ## Required
 
+- [Mid-group subscriptions widen](/quest/m1/compress/app-range-widen.md) - an application range starting mid-group on a compressed track widens to frame 0 at the subscriber instead of failing with `Lagged`
 - [IETF extension](/quest/m1/compress/ietf.md) - moq-transport draft-16+ peers that negotiate the extension exchange compressed tracks
 - [Migrate](/quest/m1/compress/migrate.md) - catalogs, stats, and timelines publish one compressed track; moq-flate, @moq/flate, and every `.z` name are gone
 

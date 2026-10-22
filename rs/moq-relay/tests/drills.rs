@@ -14,7 +14,8 @@
 //! the relay through a seeded [`moq_shaper`] that delays, jitters, drops,
 //! reorders, and rate-limits the path both ways (and, across a cluster, the
 //! peer link between relays too). A drill that only passes on loopback is a
-//! finding, not a flake.
+//! finding, not a flake. The impaired lane draws a fresh seed every run, a soak
+//! rather than a gate, so it is ignored here and runs nightly.
 //!
 //! `no_publisher_never_delivers` is the negative control: the same harness with
 //! nothing publishing must report failure, so a drill that passes because no
@@ -89,6 +90,7 @@ macro_rules! lanes {
 			}
 
 			#[tokio::test]
+			#[ignore = "a fresh shaper seed per run is a nightly soak: just test drill impaired"]
 			async fn impaired() {
 				super::$drill(super::Lane::Impaired).await
 			}
@@ -980,12 +982,17 @@ impl Flap {
 }
 
 async fn cross_cluster(lane: Lane, link: PeerLink) {
-	// The relays keep the default idle timeout. The drills' 2s one would also
-	// bound each relay's side of an impaired handshake, which can sit silent
-	// that long between the client's backed-off retransmits. So a cut peer link
-	// idles out only after `relay_idle`, which the flap's waits allow for.
+	// On the impaired path the relays keep the default idle timeout. The drills'
+	// 2s one would also bound each relay's side of an impaired handshake, which
+	// can sit silent that long between the client's backed-off retransmits.
+	// Loopback has no such silence, so its relays take the clients' tuning. A cut
+	// peer link idles out only after `relay_idle`, which the flap's waits allow for.
+	let relay_quic = || match lane {
+		Lane::Loopback => quic(),
+		Lane::Impaired => credit(lane, relay_config().quic),
+	};
 	let mut config = relay_config();
-	config.quic = credit(lane, config.quic);
+	config.quic = relay_quic();
 	let relay_idle = config.quic.resolve().idle_timeout;
 	let origin = RelayHost::start(config).await;
 	let seed = seed(lane);
@@ -1000,7 +1007,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let mut peer_url = peer.url.clone();
 	peer_url.set_path("/");
 	let mut config = relay_config();
-	config.quic = credit(lane, config.quic);
+	config.quic = relay_quic();
 	config.connect = dial();
 	// Retry forever: a give-up after a slow impaired handshake would look exactly
 	// like the never-redialed regression, and a stall still fails the drill.
@@ -1340,21 +1347,23 @@ async fn no_publisher_never_delivers(lane: Lane) {
 	.expect("subscriber connect failed");
 
 	// Short on purpose: this is the one wait that must expire, so it is the one
-	// wait that decides how long the suite spends proving a negative.
-	let quiet = Duration::from_secs(2);
+	// wait that decides how long the suite spends proving a negative. Still
+	// many round trips of either path.
+	let quiet = match lane {
+		Lane::Loopback => Duration::from_millis(300),
+		Lane::Impaired => Duration::from_secs(2),
+	};
 
 	let mut announced = subscribed.announced();
-	if let Ok(update) = tokio::time::timeout(quiet, next_update(&mut announced)).await {
+	let (update, resolved) = tokio::join!(
+		tokio::time::timeout(quiet, next_update(&mut announced)),
+		tokio::time::timeout(quiet, subscribed.routed_broadcast("live")),
+	);
+	if let Ok(update) = update {
 		let path = update.map(|(update, _)| update.prefix.to_string());
 		panic!("the announcement stream reported {path:?} with no publisher");
 	}
-
-	assert!(
-		tokio::time::timeout(quiet, subscribed.routed_broadcast("live"))
-			.await
-			.is_err(),
-		"a broadcast resolved with no publisher"
-	);
+	assert!(resolved.is_err(), "a broadcast resolved with no publisher");
 
 	drop(session);
 	drop(relay);
