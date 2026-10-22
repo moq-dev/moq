@@ -14,22 +14,28 @@ once `main` reaches `release`; check with
 The version is `cpp/moq/VERSION`; the plugin's is `cpp/obs/VERSION`. Delete
 this quest once the release exists.
 
-The OBS plugin now ships only with a C++ release, so `obs-moq` stays at its
-last moq-c build until this tag. Decided when the C++ line landed on `main`
+As of 2026-10-20 no `cpp-v*` release exists, and `obs-moq` still publishes
+from the release line's C build (`obs-moq-v0.6.17`, 2026-10-17); the first
+plugin built on the C++ package replaces it at this tag. Decided when the C++ line landed on `main`
 (#4079): the first plugin built on the C++ package must not drop the
 Advanced settings or the dock's protocol and reconnect reason that the moq-c
 build had, so those parity quests gate this release.
 
-The [nightly package proof](/quest/m1/cpp-package-check.md) owns pre-cut
-preparation. This quest owns tagging and verifying the published downloads.
+The nightly C++ and OBS release checks pass: the
+[2026-10-20 Nightly](https://github.com/moq-dev/moq/actions/runs/39421743227),
+which failed only in unrelated lanes, checked the installed consumers of all four packaged archives and built both
+OBS plugins against them. It packages this run's prebuilt moq-ffi input,
+while a tag with `cpp/moq/FFI_VERSION` unset builds moq-ffi from source, a
+path no nightly checks. So if the pin is still unset, first dispatch
+`release-cpp.yml` on the ref to be tagged without `prebuilt-test`: it runs
+the tag's source build and archive check on all four hosts, then both OBS
+builds, and publishes nothing. This quest owns that dry run, tagging, and verifying the
+published downloads.
 
 Decided in the 2026-10-10 audit: the tag also waits for Codecs and the epoch
 rename, so consumers take the binding breaks in one
-release. The nightly dry-run preparation can proceed independently.
+release.
 
 ## Required
 
 - [Breaking release cut](/quest/m2/release/cut.md) - prepared code reaches release before artifact publication and installed proof
-
-
-- [Nightly package proof](/quest/m1/cpp-package-check.md) - the release path is exercised before the tag

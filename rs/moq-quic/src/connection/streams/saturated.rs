@@ -560,7 +560,7 @@ fn stop_sending_drops_a_reliable_prefix_from_the_schedule() {
 
     assert_eq!(
         sender.state.received_stop_sending(reset, 0u32.into()),
-        Some(0)
+        Ok(Some(0))
     );
     assert!(!sender.state.can_send_stream_data());
     assert!(sender.drain(1).is_empty());

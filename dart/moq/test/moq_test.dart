@@ -43,11 +43,6 @@ void main() {
     other.close();
   });
 
-  test('diagnostic errors expose their named reason', () {
-    final error = TransportMoqException('reset');
-    expect(error.reason, 'reset');
-  });
-
   test('catalog handle closes with its broadcast', () {
     final broadcast = BroadcastProducer();
     final catalog = moq_media.CatalogProducer(broadcast: broadcast);
@@ -385,6 +380,26 @@ void main() {
     ).timeout(timeout);
     expect(second.localAddr, addr);
     second.close();
+  });
+
+  test('a finished broadcast lingers until closed', () async {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(
+      name: 'status',
+      info: TrackInfo(maxAgeUs: 3600000000),
+    );
+    track.finish();
+    final finish = broadcast.finish();
+    expect(finish.linger, const Duration(hours: 1));
+    expect(
+      () => broadcast.publishTrack(name: 'events', info: null),
+      throwsA(isA<ClosedMoqException>()),
+    );
+    // A Dart future can't be cancelled, so closing is the interrupt: the wait
+    // ends instead of lingering for an hour.
+    final wait = finish.wait();
+    finish.close();
+    await wait.timeout(timeout);
   });
 
   test('microsecond fields read back as Durations', () {

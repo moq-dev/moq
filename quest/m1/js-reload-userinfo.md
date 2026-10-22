@@ -14,7 +14,3 @@ userinfo; match it exactly, and test both a userinfo URL and a redirect loop
 that differs only in userinfo.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Rust redirect loops](/quest/m1/tokio-redirect-loop.md) - lands the Rust rule this mirrors
