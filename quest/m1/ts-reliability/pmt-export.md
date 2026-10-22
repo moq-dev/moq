@@ -12,8 +12,8 @@ around it. A track added no longer ends a synced export.
 Outside `--sync`, the export follows a PMT revision: it rebuilds the PMT at
 the next `version_number` when the track set or an entry changes, drops a
 retired track's PID once its track ends, and keeps the PCR PID unless its
-track retires. A `muxRate` change applies in the slot the revision's tables
-go out in.
+track retires. A `muxRate` change in the same catalog update applies from
+the slot after the one the revised PMT starts out in.
 
 What `--sync` does today:
 

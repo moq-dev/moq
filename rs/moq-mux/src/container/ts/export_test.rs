@@ -8333,6 +8333,80 @@ async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() 
 	drop((broadcast, catalog, track));
 }
 
+/// A same-instance return that drops a stream near the section limit for one on another PID
+/// lists the newcomer: the stream the return dropped gives way, as a draining one does, and
+/// the export runs on.
+#[tokio::test(start_paused = true)]
+async fn a_return_replacing_a_large_stream_on_another_pid_runs_on() {
+	let origin = crate::source::produce_origin();
+	let epoch = moq_net::Epoch::mint();
+	let route = || moq_net::origin::Route::default().with_epoch(epoch.clone());
+	// Two such streams are too many for a section beside each other.
+	let rendition = |broadcast: &mut moq_net::broadcast::Producer,
+	                 catalog: &mut crate::catalog::Producer<tscat::Ext>,
+	                 name: &str,
+	                 pid: u16,
+	                 large: bool| {
+		let track = aac_rendition(broadcast, catalog, name);
+		let mut entry = tscat::Track::new(pid);
+		if large {
+			entry.descriptors = (0x80..0x82)
+				.map(|tag| tscat::Descriptor {
+					tag,
+					data: Bytes::from(vec![tag; 250]),
+				})
+				.collect();
+		}
+		catalog
+			.modify()
+			.unwrap()
+			.ext
+			.mpegts
+			.tracks
+			.insert(name.to_string(), entry);
+		track
+	};
+
+	let (mut broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
+	let mut kept = rendition(&mut broadcast, &mut catalog, "a.aac", 0x101, false);
+	let mut dropped = rendition(&mut broadcast, &mut catalog, "c.aac", 0x102, true);
+	let source = crate::source::resolved(&origin, "live").await;
+	let mut export = open_ts(source, crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap()
+		.with_delay(Duration::from_secs(1))
+		.with_replay();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut kept, ms);
+		write_aac(&mut dropped, ms);
+	}
+	let mut frames = drain_frames(&mut export).await;
+	drop((broadcast, catalog, kept, dropped));
+	let (rest, _) = drain_to_end(&mut export).await;
+	frames.extend(rest);
+
+	tokio::time::sleep(Duration::from_secs(1)).await;
+	let (mut broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
+	let back = origin.consume().routed_broadcast("live").await.unwrap();
+	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
+	let mut export = export.follow(back, stream).unwrap();
+	let mut kept = rendition(&mut broadcast, &mut catalog, "a.aac", 0x101, false);
+	let mut added = rendition(&mut broadcast, &mut catalog, "d.aac", 0x103, true);
+	for ms in (1_400..3_400).step_by(20) {
+		write_aac(&mut kept, ms);
+		write_aac(&mut added, ms);
+		tokio::time::sleep(Duration::from_millis(20)).await;
+		frames.extend(poll_frames(&mut export));
+	}
+	kept.finish().unwrap();
+	added.finish().unwrap();
+	catalog.finish().unwrap();
+	let (rest, end) = drain_to_end(&mut export).await;
+	frames.extend(rest);
+	end.expect("each catalog's program fits a section");
+	assert!(count_pid(&frames, 0x103) > 0, "the stream added went out");
+}
+
 /// A PMT revision no slot laid before a switch reached no receiver: the replacement's PMT
 /// follows the last one out by one version.
 #[tokio::test(start_paused = true)]
@@ -8379,6 +8453,61 @@ async fn a_switch_follows_the_last_pmt_out() {
 	versions.dedup();
 	assert_eq!(versions, [0, 1]);
 	drop((old, old_catalog));
+}
+
+/// A switch onto an instance replaced after it built its tables but before a slot laid them
+/// numbers the next program's from the last PMT out, not from the one that never went.
+#[tokio::test(start_paused = true)]
+async fn a_switch_past_an_instance_that_laid_no_tables_follows_the_last_pmt_out() {
+	let origin = crate::source::produce_origin();
+	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let follow = async |export: Export<_>| {
+		let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
+		let stream = crate::catalog::Consumer::new(&replacement, Default::default())
+			.await
+			.unwrap();
+		export.follow(replacement, stream).unwrap()
+	};
+
+	let (mut first, mut first_catalog) = publish_live::<tscat::Ext>(&origin, route());
+	let mut audio = aac_rendition(&mut first, &mut first_catalog, "a.aac");
+	let source = crate::source::resolved(&origin, "live").await;
+	let mut export = open_ts(source, crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut audio, ms);
+	}
+	let mut frames = drain_frames(&mut export).await;
+
+	// Built from what it holds, and replaced before its first slot.
+	let (mut second, mut second_catalog) = publish_live::<tscat::Ext>(&origin, route());
+	let mut audio = aac_rendition(&mut second, &mut second_catalog, "b.aac");
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut audio, ms);
+	}
+	let mut export = follow(export).await;
+	assert!(poll_frames(&mut export).is_empty());
+
+	let (mut third, mut third_catalog) = publish_live::<tscat::Ext>(&origin, route());
+	let mut audio = aac_rendition(&mut third, &mut third_catalog, "c.aac");
+	let mut export = follow(export).await;
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut audio, ms);
+	}
+	frames.extend(drain_frames(&mut export).await);
+	audio.finish().unwrap();
+	third_catalog.finish().unwrap();
+	let (rest, end) = drain_to_end(&mut export).await;
+	frames.extend(rest);
+	end.unwrap();
+
+	let mut versions: Vec<u8> = pmts(&frames).iter().map(|(version, _)| *version).collect();
+	versions.dedup();
+	assert_eq!(versions, [0, 1]);
+	drop((first, first_catalog, second, second_catalog));
 }
 
 /// A returning route serves the same publisher's catalog and monotonically numbered groups.

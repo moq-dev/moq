@@ -839,6 +839,11 @@ impl Schedule {
 		self.units.iter().any(|unit| unit.pid == pid)
 	}
 
+	/// Drop every unit on `pid` still to go out, one partly out included: its stream ends there.
+	pub fn purge(&mut self, pid: u16) {
+		self.units.retain(|unit| unit.pid != pid);
+	}
+
 	/// Whether nothing is left to lay out: every unit sent, and the clock past its decode time.
 	pub fn is_empty(&self) -> bool {
 		if let Some(grid) = &self.sync {

@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bytes::Bytes;
-use hang::catalog::{AudioCodec, AudioConfig, Container, VideoCodec, VideoConfig};
+use hang::catalog::{AudioCodec, AudioConfig, Container, Reference, VideoCodec, VideoConfig};
 use mpeg2ts::es::StreamId;
 use mpeg2ts::es::StreamType;
 use mpeg2ts::time::Timestamp as TsTimestamp;
@@ -130,6 +130,11 @@ where
 	version: VersionNumber,
 	/// The PMT's, advanced by each switch too, and by each revision of the program ([`Self::revise`]).
 	pmt_version: VersionNumber,
+	/// The PMT version a slot last laid, whichever program laid it: a switch follows it.
+	pmt_laid: Option<VersionNumber>,
+	/// A catalog's multiplex rate, held until the slot after the one a PMT revision the same
+	/// update made starts out in: a revision is one change of everything the catalog configures.
+	rate_pending: Option<Option<u64>>,
 	/// After a switch to another instance, the PIDs whose first packet is queued flagging the
 	/// break. `None` for an export that never switched.
 	flagged: Option<HashSet<u16>>,
@@ -280,6 +285,47 @@ struct Synced {
 /// the media timeline, and its [`Track::psi_slot`].
 type PesStart = (u128, Option<u128>);
 
+/// What a rendition's [`ExportSource`] reads through, which it was built from: the track it
+/// references, its container, and the codec configuration its transform takes.
+#[derive(Clone, Debug, PartialEq)]
+struct Built {
+	reference: (Option<moq_net::path::RelativeOwned>, Option<moq_net::Epoch>, String),
+	container: Container,
+	codec: String,
+	description: Option<Bytes>,
+}
+
+impl Built {
+	/// What `name`'s rendition in `catalog` configures, `None` for an `mpegts` stream.
+	fn of<E>(catalog: &Catalog<E>, name: &str) -> Option<Self> {
+		let of = |config: &dyn Reference, container: &Container, codec: String, description: &Option<Bytes>| Self {
+			reference: (
+				config.broadcast().cloned(),
+				config.epoch().cloned(),
+				config.track(name).to_string(),
+			),
+			container: container.clone(),
+			codec,
+			description: description.clone(),
+		};
+		if let Some(config) = catalog.video.renditions.get(name) {
+			return Some(of(
+				config,
+				&config.container,
+				config.codec.to_string(),
+				&config.description,
+			));
+		}
+		let config = catalog.audio.renditions.get(name)?;
+		Some(of(
+			config,
+			&config.container,
+			config.codec.to_string(),
+			&config.description,
+		))
+	}
+}
+
 /// A track's key in the jitter buffer: its PID, then the order the export took it on in. A
 /// track taking over the PID of one still going out to its end is a track of its own there,
 /// and waits for that one to send everything ([`Export::take_over`]).
@@ -302,6 +348,8 @@ struct Track {
 	/// section: the PMT drops it, nothing more of it goes out, and it retires at once
 	/// ([`Export::table`]).
 	cut: bool,
+	/// What the rendition its source was built from configured, `None` for an `mpegts` stream.
+	built: Option<Built>,
 	/// The first frame, held until the program tables are built.
 	pending: Option<Pending>,
 	/// When the source was subscribed. Nothing it delivers reached the export before then,
@@ -372,6 +420,7 @@ impl Track {
 			cataloged: true,
 			left_under: Vec::new(),
 			cut: false,
+			built: None,
 			pending: None,
 			subscribed: moq_clock::now(),
 			latest: moq_clock::Instant::ZERO,
@@ -1098,9 +1147,12 @@ struct Psi {
 	laid: Option<(VersionNumber, super::psi::Pmt)>,
 	/// The PID each slot's PCR goes out on.
 	pcr_pid: u16,
-	/// The PID a revision moves the PCR to, until a slot lays a PMT naming it: the PCR stays on
-	/// `pcr_pid` until then, where the PMT a receiver holds places it.
+	/// The PID a revision moves the PCR to, until a slot lays the last packet of a PMT naming
+	/// it: the PCR stays on `pcr_pid` until then, where the PMT a receiver holds places it.
 	announced: Option<u16>,
+	/// The PMT copy a slot started laying and has not finished: its bytes still to go out, and
+	/// the PCR PID it names.
+	open: Option<(usize, u16)>,
 	/// PID the PMT rides on: the source's original (preserved from the service
 	/// record) or the synthesized [`PMT_PID`] for a media-only source.
 	pmt_pid: u16,
@@ -1392,6 +1444,8 @@ where
 			stale: HashSet::new(),
 			version: VersionNumber::default(),
 			pmt_version: VersionNumber::default(),
+			pmt_laid: None,
+			rate_pending: None,
 			flagged: None,
 			tables: Vec::new(),
 			delay: Duration::ZERO,
@@ -1830,8 +1884,19 @@ where
 				})
 			}),
 		};
-		self.mux_rate = mux_rate;
-		self.schedule.set_rate(mux_rate);
+		match (self.psi.is_some(), self.sync) {
+			_ if mux_rate == self.mux_rate => self.rate_pending = None,
+			(false, _) => {
+				self.mux_rate = mux_rate;
+				self.schedule.set_rate(mux_rate);
+			}
+			(true, true) => tracing::warn!(
+				?mux_rate,
+				laid = ?self.mux_rate,
+				"MPEG-TS --sync keeps the multiplex rate its grid was laid at"
+			),
+			(true, false) => self.rate_pending = Some(mux_rate),
+		}
 
 		// Reconcile the SI subscriptions with the catalog's map. Entries may appear
 		// after the PAT/PMT is built (a table acquired late): they ride standalone
@@ -1934,7 +1999,16 @@ where
 					track.timing.configure(config, name);
 				}
 			}
-			return self.revise();
+			let before = self.psi.as_ref().map(|psi| psi.pmt.clone());
+			self.revise()?;
+			// With the tables unrevised, the rate is all that changed: it applies at once.
+			if self.psi.as_ref().map(|psi| &psi.pmt) == before.as_ref()
+				&& let Some(rate) = self.rate_pending.take()
+			{
+				self.mux_rate = rate;
+				self.schedule.set_rate(rate);
+			}
+			return Ok(());
 		}
 
 		// Assign a PID to every desired track: prefer the original recorded in the
@@ -2036,6 +2110,7 @@ where
 		if track.serial == 0 {
 			self.serials += 1;
 			track.serial = self.serials;
+			track.built = Built::of(catalog, name);
 		}
 		track.descriptors = track_descriptors(mpegts, name);
 		Ok(Some(track))
@@ -2046,6 +2121,10 @@ where
 	/// and descriptors, which its packets went out under: a revised stream comes under a new
 	/// name, as the import publishes it, and takes the PID over. The PMT lists one from its
 	/// first frame out ([`Self::mux`]).
+	///
+	/// One whose rendition changes what its source was built from ([`Built`]) reads through a
+	/// new source, as a track taken on does, and what the old one delivered goes: none of it
+	/// went out.
 	fn admit<'a>(
 		&mut self,
 		catalog: &Catalog<S::Ext>,
@@ -2057,10 +2136,20 @@ where
 				Some(track) if track.listed => Some(track),
 				track => {
 					let current = track.as_ref().map(Track::key);
+					let track = track.filter(|track| track.built == Built::of(catalog, name));
+					let rebuilt = current.filter(|_| track.is_none());
+					if let Some(old) = rebuilt {
+						if let Some(ready) = self.held.take_if(|ready| ready.track == old) {
+							self.jitter.discard(&ready);
+						}
+						self.jitter.forget(&old);
+					}
 					match self.configure(name, track, catalog, mpegts)? {
 						Some(mut track) => {
 							track.pid = self.pid_for(mpegts.tracks.get(name).map(|entry| entry.pid), current)?;
-							if let Some(current) = current.filter(|&current| current != track.key()) {
+							if rebuilt.is_none()
+								&& let Some(current) = current.filter(|&current| current != track.key())
+							{
 								self.jitter.rekey(&current, track.key());
 								if let Some(held) = self.held.as_mut().filter(|held| held.track == current) {
 									held.track = track.key();
@@ -2336,12 +2425,13 @@ where
 			let emitted = self.psi.is_some();
 			if (!same && emitted) || self.flagged.is_some() {
 				next.version = self.version;
-				// A revision no slot laid reached no receiver: the next follows the last laid.
-				next.pmt_version = self
-					.psi
-					.as_ref()
-					.and_then(|psi| psi.laid.as_ref())
-					.map_or(self.pmt_version, |(version, _)| *version);
+				// A revision no slot laid reached no receiver, nor did a program that laid none:
+				// the next follows the last laid. One that never built its tables carries its own.
+				next.pmt_version = match emitted {
+					true => self.pmt_laid.unwrap_or(self.pmt_version),
+					false => self.pmt_version,
+				};
+				next.pmt_laid = self.pmt_laid;
 				next.flagged = Some(HashSet::new());
 				next.pcr_discontinuity = true;
 				next.epoch = self.epoch;
@@ -2573,6 +2663,7 @@ where
 			laid: None,
 			pcr_pid,
 			announced: None,
+			open: None,
 			pmt_pid,
 		};
 		if let Some(rate) = sync {
@@ -2608,7 +2699,8 @@ where
 	/// [`Self::listing`], unless what tracks draining since they left the catalog add outgrows
 	/// a section beside the rest. Then those tracks drain under the current program descriptors
 	/// for good, as they would once ended; and if their streams still do not fit, those end
-	/// there ([`Track::cut`]): the PMT lists the program the catalog does.
+	/// there ([`Track::cut`]), a stale one ([`Self::followed`]) the returned catalog does not
+	/// list among them: the PMT lists the program the catalog does.
 	fn table(&mut self, program_number: u16, pcr_pid: u16) -> anyhow::Result<super::psi::Pmt> {
 		let fits = |table: &super::psi::Pmt| super::psi::encode_pmt(table, VersionNumber::default()).is_ok();
 		let mut table = self.listing(program_number, pcr_pid)?;
@@ -2621,11 +2713,10 @@ where
 			}
 			table = self.listing(program_number, pcr_pid)?;
 		}
-		let stale = &self.stale;
 		let mut draining = self
 			.tracks
-			.iter_mut()
-			.filter(|(name, track)| track.listed && !track.cut && !track.cataloged && !stale.contains(*name))
+			.values_mut()
+			.filter(|track| track.listed && !track.cut && !track.cataloged)
 			.peekable();
 		if fits(&table) || draining.peek().is_none() {
 			return Ok(table);
@@ -2633,7 +2724,7 @@ where
 		tracing::warn!(
 			"TS export ends the streams of tracks that left the catalog: with them the PMT outgrows a section"
 		);
-		for (_, track) in draining {
+		for track in draining {
 			track.cut = true;
 		}
 		self.listing(program_number, pcr_pid)
@@ -2763,13 +2854,15 @@ where
 	/// [`Self::media_clock`] gives once a PMT naming that one is laid ([`Self::note_tables`]),
 	/// staying on a PID of its own without one.
 	///
-	/// One that left before the PMT listed it goes at once if it holds nothing, or, waiting to
-	/// take a PID over ([`Self::take_over`]) from a track that has not ended, with what it holds
-	/// when a later track takes its place there: such tracks would otherwise pile up behind
-	/// sources that never end. One whose stream the PMT dropped ([`Track::cut`]) goes at once.
+	/// One that left before the PMT listed it goes at once if it holds nothing, or with what it
+	/// holds while its source is open: a frame held far ahead would keep it, its source and its
+	/// PID for as long. One whose source ended sends what it holds, unless, waiting to take a
+	/// PID over ([`Self::take_over`]) from a track that has not ended, a later track takes its
+	/// place there. One whose stream the PMT dropped ([`Track::cut`]) goes at once, with what
+	/// it queued.
 	///
 	/// A stale track ([`Self::followed`]) is not dropped while its catalog may list it again on
-	/// its PID: only once a later track listed there holds it.
+	/// its PID: only once a later track listed there holds it, or its stream is cut.
 	fn retire(&mut self) -> anyhow::Result<()> {
 		if self.sync || self.psi.is_none() {
 			return Ok(());
@@ -2802,16 +2895,16 @@ where
 						&& (taken(track) || !self.schedule.holds(track.pid))
 				};
 				let superseded = || !track.listed && behind_unended(track) && replaced(track);
-				// Nothing of one never listed went out, and with nothing held none will.
-				let idle = || {
+				// Nothing of one never listed went out: with nothing held, or a source the
+				// publisher left open, nothing need.
+				let unsent = || {
 					!track.listed
-						&& track.pack.is_none()
-						&& held != Some(track.key())
-						&& !self.jitter.holds(&track.key())
+						&& (!track.finished
+							|| (track.pack.is_none() && held != Some(track.key()) && !self.jitter.holds(&track.key())))
 				};
 				!track.cataloged
-					&& (!self.stale.contains(*name) || taken(track))
-					&& (track.cut || sent() || superseded() || idle())
+					&& (!self.stale.contains(*name) || taken(track) || track.cut)
+					&& (track.cut || sent() || superseded() || unsent())
 			})
 			.map(|(name, _)| name.clone())
 			.collect();
@@ -2828,6 +2921,11 @@ where
 				self.jitter.discard(&ready);
 			}
 			self.jitter.forget(&track.key());
+			// Every unit queued on the PID is its own: a track taking it over waits for its tail
+			// ([`Self::take_over`]).
+			if track.cut {
+				self.schedule.purge(track.pid);
+			}
 			cleared |= track.pid == pcr_pid;
 			// A stream listed on the PID later counts its silence from its own listing.
 			if track.listed && !self.tracks.values().any(|other| other.listed && other.pid == track.pid) {
@@ -3473,17 +3571,40 @@ where
 	}
 
 	/// Note the PMT a slot lays, which is the current one: a revision rewrites every copy that
-	/// has not started out ([`Self::revise`]). The PCR moves to the PID it names from the next
-	/// slot on.
+	/// has not started out ([`Self::revise`]). A rate the revision held applies from the next
+	/// slot on, and so does a move of the PCR to the PID a PMT names, once its last packet is
+	/// out: a receiver takes a section only whole.
 	fn note_tables(&mut self, packets: &[u8], pmt_pid: u16) {
 		let Some(psi) = self.psi.as_mut() else {
 			return;
 		};
-		let starts = packets
-			.as_chunks::<{ TsPacket::SIZE }>()
-			.0
-			.iter()
-			.any(|packet| packet_pid(packet) == pmt_pid && packet[1] & 0x40 != 0);
+		let mut starts = false;
+		let mut closed = None;
+		for packet in packets.as_chunks::<{ TsPacket::SIZE }>().0 {
+			if packet_pid(packet) != pmt_pid || packet[3] & 0x10 == 0 {
+				continue;
+			}
+			let mut at = 4;
+			if packet[3] & 0x20 != 0 {
+				at += 1 + usize::from(packet[4]);
+			}
+			if packet[1] & 0x40 != 0 {
+				starts = true;
+				at += 1 + usize::from(packet[at]);
+				let section = &packet[at..];
+				let len = 3 + (usize::from(section[1] & 0x0f) << 8 | usize::from(section[2]));
+				psi.open = Some((len, u16::from(section[8] & 0x1f) << 8 | u16::from(section[9])));
+			}
+			let carried = TsPacket::SIZE - at;
+			match psi.open {
+				Some((left, pcr_pid)) if left <= carried => {
+					psi.open = None;
+					closed = Some(pcr_pid);
+				}
+				Some((ref mut left, _)) => *left -= carried,
+				None => {}
+			}
+		}
 		if starts
 			&& psi
 				.laid
@@ -3491,10 +3612,14 @@ where
 				.is_none_or(|(version, _)| *version != self.pmt_version)
 		{
 			psi.laid = Some((self.pmt_version, psi.table.clone()));
+			self.pmt_laid = Some(self.pmt_version);
 		}
-		if starts
-			&& let Some(pid) = psi.announced
-			&& psi.table.pcr_pid.is_some_and(|named| named.as_u16() == pid)
+		if starts && let Some(rate) = self.rate_pending.take() {
+			self.mux_rate = rate;
+			self.schedule.set_rate(rate);
+		}
+		if let Some(pid) = closed
+			&& psi.announced == Some(pid)
 		{
 			psi.pcr_pid = pid;
 			psi.announced = None;
