@@ -418,7 +418,12 @@ struct Shape {
 /// stopping it means it must never create one; after, it owns a pad and has to drop it. One
 /// compare-exchange settles which of the two happened, so a pad can't slip out between a
 /// teardown's check and the pump's creation.
-struct PumpState(AtomicU8);
+struct PumpState {
+	phase: AtomicU8,
+	/// The latest catalog still lists the rendition. A delisted pump drains the instance it reads
+	/// and follows no other.
+	listed: watch::Sender<bool>,
+}
 
 impl PumpState {
 	const SUBSCRIBING: u8 = 0;
@@ -426,12 +431,15 @@ impl PumpState {
 	const CANCELLED: u8 = 2;
 
 	fn new() -> Self {
-		Self(AtomicU8::new(Self::SUBSCRIBING))
+		Self {
+			phase: AtomicU8::new(Self::SUBSCRIBING),
+			listed: watch::Sender::new(true),
+		}
 	}
 
 	/// Claim the right to create a pad, false once a teardown got here first.
 	fn go_live(&self) -> bool {
-		self.0
+		self.phase
 			.compare_exchange(Self::SUBSCRIBING, Self::LIVE, Ordering::AcqRel, Ordering::Acquire)
 			.is_ok()
 	}
@@ -439,9 +447,18 @@ impl PumpState {
 	/// Stop a pump that hasn't taken a pad, false if it already has one and must be torn down
 	/// through its cancel watch instead.
 	fn cancel_before_live(&self) -> bool {
-		self.0
+		self.phase
 			.compare_exchange(Self::SUBSCRIBING, Self::CANCELLED, Ordering::AcqRel, Ordering::Acquire)
 			.is_ok()
+	}
+
+	fn set_listed(&self, listed: bool) {
+		self.listed
+			.send_if_modified(|current| std::mem::replace(current, listed) != listed);
+	}
+
+	fn is_listed(&self) -> bool {
+		*self.listed.borrow()
 	}
 }
 
@@ -931,6 +948,12 @@ fn reconcile(
 			.collect(),
 	);
 
+	// A delisted pump drains the instance it reads and follows no other; a relisted one follows
+	// again.
+	for (name, track) in active.iter() {
+		track.state.set_listed(desired.contains_key(name));
+	}
+
 	// Cancel anything that changed shape; each cancelled pump hands its pad back. Changed
 	// renditions also land in `plan.add`, so they respawn below on the same pad.
 	//
@@ -1186,7 +1209,8 @@ impl Pump {
 	/// run can end the pad of one the catalog retired.
 	///
 	/// A sibling's announcements drive the pump: its first start binds the rendition, an end
-	/// idles the pad, and another instance taking over restarts the stream on the same pad.
+	/// idles the pad, and another instance taking over restarts the stream on the same pad, until
+	/// the catalog delists the rendition.
 	async fn run(self) -> Option<Rendition> {
 		let Pump {
 			element,
@@ -1210,12 +1234,18 @@ impl Pump {
 		// The pad once this pump owns it, from the first instance on.
 		let mut owned: Option<(gst::Pad, tokio::sync::OwnedMutexGuard<()>)> = None;
 		let mut next: Option<moq_net::broadcast::Consumer> = None;
+		let mut listed = state.listed.subscribe();
 
 		loop {
+			// A delisted rendition drained the instance it read, and follows no other.
+			if owned.is_some() && !state.is_listed() {
+				return Some((kind, name));
+			}
 			let broadcast = match next.take() {
 				Some(broadcast) => broadcast,
 				None => tokio::select! {
 					_ = cancel.changed() => return None,
+					_ = listed.wait_for(|listed| !listed), if owned.is_some() => return Some((kind, name)),
 					followed = follow.next() => match followed {
 						Ok(moq_mux::follow::Event::Start(broadcast)) => broadcast,
 						Ok(moq_mux::follow::Event::End) => continue,
@@ -1409,10 +1439,10 @@ impl Pump {
 						// A sibling's track stopping with its instance is that instance's end, which
 						// idles the pad for the next one rather than ending the rendition.
 						Ok(None) | Err(_) if sibling && broadcast.is_closed() => break Stopped::Idle,
-						// A sibling's track finishing ends it for this instance only: the pad idles
-						// for the next instance, and the record keeps a reshape on this one from
-						// replaying it.
-						Ok(None) if sibling => {
+						// A listed sibling's track finishing ends it for this instance only: the pad
+						// idles for the next instance, and the record keeps a reshape on this one
+						// from replaying it.
+						Ok(None) if sibling && state.is_listed() => {
 							finished.lock().unwrap().insert(((kind, name.clone()), media.clone()));
 							break Stopped::Idle;
 						}
@@ -3273,6 +3303,48 @@ mod session_tests {
 		assert!(!recorder.seen().contains(&Seen::Eos(pad)), "the finish ended the pad");
 		recorder.assert_one_pad_held();
 		drop(first);
+	}
+
+	/// A rendition delisted while its sibling is offline ends its idle pad, and the sibling's next
+	/// instance plays nothing on it.
+	#[test]
+	fn a_delisted_sibling_rendition_follows_no_later_instance() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let mut room = referencing(&origin, None);
+		let session = follow(&element, &origin);
+
+		let mut first = Publisher::sibling(&origin, Default::default());
+		let pad = recorder.written(&mut first, 1);
+		let mut follow = origin.consume().follow("cam").unwrap();
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		drop(first);
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+
+		room.catalog.modify().unwrap().video.renditions.clear();
+		for _ in 0..200 {
+			if recorder.seen().contains(&Seen::Eos(pad.clone())) {
+				break;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		assert!(
+			recorder.seen().contains(&Seen::Eos(pad.clone())),
+			"the idle pad never ended"
+		);
+
+		let mut second = Publisher::sibling(&origin, Default::default());
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		for _ in 0..10 {
+			second.write(2);
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		stop(session);
+
+		let seen = recorder.seen();
+		assert!(!seen.iter().any(|seen| matches!(seen, Seen::Buffer(_, 2))), "{seen:?}");
 	}
 
 	/// A sibling replaced while the old one stays up restarts a reference that names no epoch, on
