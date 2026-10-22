@@ -102,7 +102,7 @@ describe("unsupported catalog", () => {
 			const track = published.createTrack(format === "hang" ? Catalog.TRACK : Catalog.TRACK_COMPRESSED);
 			const producer = new Json.Snapshot.Producer<Catalog.Root>({
 				track,
-				deltaRatio: 0,
+				deltas: false,
 				compression: format === "hangz" ? "deflate" : "none",
 			});
 			const enabled = new Signal(true);
@@ -144,7 +144,7 @@ it("keeps playing a finished catalog until the broadcast ends", async () => {
 	const published = publish(owner, name);
 	const producer = new Json.Snapshot.Producer<Catalog.Root>({
 		track: published.createTrack(Catalog.TRACK),
-		deltaRatio: 0,
+		deltas: false,
 	});
 	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
 	try {
@@ -175,7 +175,7 @@ it("reports a catalog that ends empty as offline", async () => {
 	const published = publish(owner, name);
 	const producer = new Json.Snapshot.Producer<Catalog.Root>({
 		track: published.createTrack(Catalog.TRACK),
-		deltaRatio: 0,
+		deltas: false,
 	});
 	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
 	try {

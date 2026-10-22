@@ -71,7 +71,7 @@ pub struct Archive {
 
 impl Archive {
 	/// The recording object format advertised in [`version`](Self::version).
-	pub const VERSION: u32 = 2;
+	pub const VERSION: u32 = 3;
 
 	/// The default timeline timescale, milliseconds.
 	pub const fn default_timescale() -> u32 {
@@ -129,7 +129,7 @@ mod test {
 		let json = serde_json::to_string(&archive).unwrap();
 		assert_eq!(
 			json,
-			r#"{"timelines":{"video":{"track":"video.timeline.z","duration":4000}},"timescale":1000,"replay":"recordings/clip","store":"https://objects.example/rec/","version":2}"#
+			r#"{"timelines":{"video":{"track":"video.timeline.z","duration":4000}},"timescale":1000,"replay":"recordings/clip","store":"https://objects.example/rec/","version":3}"#
 		);
 		assert_eq!(serde_json::from_str::<Archive>(&json).unwrap(), archive);
 	}

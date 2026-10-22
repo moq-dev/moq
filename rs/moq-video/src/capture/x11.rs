@@ -7,10 +7,11 @@
 //! memory. It is also the fallback when the `pipewire` feature is disabled
 //! on an X11 desktop.
 
+use moq_clock::Instant;
 use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::Event;
@@ -326,6 +327,8 @@ impl Capture {
 	fn read(&mut self) -> Result<pump::Read, Error> {
 		let now = Instant::now();
 		if self.next > now {
+			// The capture thread runs outside any runtime, so it blocks on the host clock.
+			#[allow(clippy::disallowed_methods)]
 			std::thread::sleep(self.next - now);
 		}
 		self.next = Instant::now() + self.interval;

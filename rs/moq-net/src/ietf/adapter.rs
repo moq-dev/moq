@@ -462,26 +462,61 @@ impl crate::transport::poll::SendStream for VirtualSendStream {
 
 // === Adapter Send/Recv Enums ===
 
+/// A failure on an adapter stream. A real stream keeps its transport's error, so the negotiated
+/// registry decodes a peer's reset rather than mistaking it for a lost connection.
+/// Virtual streams have only local errors.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum AdapterError<E: crate::transport::Error> {
+	#[error(transparent)]
+	Real(E),
+	#[error(transparent)]
+	Virtual(crate::Error),
+}
+
+impl<E: crate::transport::Error> crate::transport::Error for AdapterError<E> {
+	fn close_kind(&self) -> crate::transport::CloseKind {
+		match self {
+			Self::Real(err) => err.close_kind(),
+			Self::Virtual(err) => err.close_kind(),
+		}
+	}
+
+	fn session_error(&self) -> Option<(u32, String)> {
+		match self {
+			Self::Real(err) => err.session_error(),
+			Self::Virtual(err) => err.session_error(),
+		}
+	}
+
+	fn stream_error(&self) -> Option<u32> {
+		match self {
+			Self::Real(err) => err.stream_error(),
+			Self::Virtual(err) => err.stream_error(),
+		}
+	}
+}
+
 pub enum AdapterSend<S: crate::transport::poll::Session> {
 	Real(S::SendStream),
 	Virtual(VirtualSendStream),
 }
 
 impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for AdapterSend<S> {
-	type Error = crate::Error;
+	type Error = AdapterError<<S::SendStream as crate::transport::poll::SendStream>::Error>;
 	type Group = <S::SendStream as crate::transport::poll::SendStream>::Group;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_write(cx, buf).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_write(cx, buf),
+			Self::Real(s) => s.poll_write(cx, buf).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_write(cx, buf).map_err(AdapterError::Virtual),
 		}
 	}
 
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_write_buf(cx, buf).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_write_buf(cx, buf),
+			Self::Real(s) => s.poll_write_buf(cx, buf).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_write_buf(cx, buf).map_err(AdapterError::Virtual),
 		}
 	}
 
@@ -502,8 +537,8 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		match self {
-			Self::Real(s) => s.finish().map_err(|_| crate::Error::Closed),
-			Self::Virtual(s) => s.finish(),
+			Self::Real(s) => s.finish().map_err(AdapterError::Real),
+			Self::Virtual(s) => s.finish().map_err(AdapterError::Virtual),
 		}
 	}
 
@@ -516,8 +551,8 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_closed(cx).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_closed(cx),
+			Self::Real(s) => s.poll_closed(cx).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_closed(cx).map_err(AdapterError::Virtual),
 		}
 	}
 }
@@ -528,12 +563,12 @@ pub enum AdapterRecv<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for AdapterRecv<S> {
-	type Error = crate::Error;
+	type Error = AdapterError<<S::RecvStream as crate::transport::poll::RecvStream>::Error>;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_read(cx, dst).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_read(cx, dst),
+			Self::Real(s) => s.poll_read(cx, dst).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_read(cx, dst).map_err(AdapterError::Virtual),
 		}
 	}
 
@@ -543,15 +578,15 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 		buf: &mut B,
 	) -> Poll<Result<Option<usize>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_read_buf(cx, buf).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_read_buf(cx, buf),
+			Self::Real(s) => s.poll_read_buf(cx, buf).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_read_buf(cx, buf).map_err(AdapterError::Virtual),
 		}
 	}
 
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_read_chunk(cx, max).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_read_chunk(cx, max),
+			Self::Real(s) => s.poll_read_chunk(cx, max).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_read_chunk(cx, max).map_err(AdapterError::Virtual),
 		}
 	}
 
@@ -564,8 +599,8 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_closed(cx).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_closed(cx),
+			Self::Real(s) => s.poll_closed(cx).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_closed(cx).map_err(AdapterError::Virtual),
 		}
 	}
 }
@@ -1096,7 +1131,7 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 		// SUBSCRIBE_TRACKS (draft-18+, #1542): the half of the SUBSCRIBE_NAMESPACE split
 		// that subscribes to all tracks under a prefix. We don't implement PUBLISH
 		// replication, so this is impossible to honor. Reject loudly.
-		ietf::SUBSCRIBE_TRACKS_ID => {
+		ietf::SubscribeTracks::ID => {
 			tracing::error!(
 				version = ?version,
 				"received SUBSCRIBE_TRACKS (0x51); not supported in moq-lite (no PUBLISH replication)"
@@ -1600,6 +1635,7 @@ mod tests {
 		assert_eq!(shared.control.pop().await.unwrap(), first);
 
 		let ok = ietf::RequestOk {
+			largest: None,
 			request_id: Some(RequestId(6)),
 			active: None,
 		};

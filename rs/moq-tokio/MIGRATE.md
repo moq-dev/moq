@@ -11,6 +11,12 @@ Replace `moq_tokio::connection::auth::{Handle, Auth, Watch}` with `moq_net::auth
 A token it returns can now be named by a `Route`, and keeps riding that route's announcements on every reconnect.
 Its grant reads `None` while disconnected. A transiently refused token retries on a fixed backoff of 1s doubling to 30s rather than the reconnect `backoff`.
 
+### qmux sessions are qmux 0.7 (#6231)
+
+The WebSocket, TCP, TLS, and Unix socket transports run on [qmux 0.7](https://github.com/moq-dev/moq/blob/main/rs/qmux/MIGRATE.md), which implements moq-net's poll traits directly instead of going through `web_transport_trait`.
+Code that holds a `qmux::Session` from moq-tokio, such as one from the WebSocket listener's `accept`, follows qmux's migration guide.
+A WebSocket client must offer a QMux subprotocol: `websocket::accept` refuses an upgrade without one, and the legacy `webtransport` format is gone.
+
 ### MoQ sessions need the `net` feature (#6132)
 
 moq-net is optional, behind the default `net` feature that every transport feature (`quic`, `websocket`, `tcp`, `uds`, `iroh`, `webrtc`) turns on.

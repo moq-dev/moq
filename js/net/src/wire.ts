@@ -13,6 +13,7 @@ import type { Drain } from "./connection/goaway.ts";
 import type * as Epoch from "./epoch.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
+import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
 import type * as track from "./track.ts";
@@ -31,6 +32,13 @@ export interface Broadcast {
 	fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	// pending: /quest/m1/public-model/answer.md
 	requested(): Promise<track.Request | undefined>;
+	// private: capability gap
+	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
+	/** List the broadcast's tracks for `owner`, ending its older listing of this broadcast with CANCELLED. */
+	tracks(owner?: object): Tracks;
+	// pending: /quest/m1/public-model/answer.md
+	/** Answer the broadcast's listings, as a session does with its peer's; throws while another answers. */
+	lister(): Lister;
 	// pending: /quest/m1/public-model/answer.md
 	/**
 	 * A session delivered this broadcast. An originated route refuses to serve it:

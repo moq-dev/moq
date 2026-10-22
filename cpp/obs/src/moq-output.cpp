@@ -272,6 +272,11 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	auto ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
 	const int connects = static_cast<int>((*result)->connects());
 
+	// OBS and older dock paths treat connect_time_ms == 0 as "never connected".
+	// Clamp sub-millisecond connects to 1 so that sentinel stays honest. Set before
+	// the session reads as live, so nothing sees a live session that never connected.
+	connect_time_ms = ms > 0 ? ms : 1;
+
 	current->session = *result;
 	current->connected = true;
 	current->live = true;
@@ -290,9 +295,6 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
 	}
-	// OBS and older dock paths treat connect_time_ms == 0 as "never connected".
-	// Clamp sub-millisecond connects to 1 so that sentinel stays honest.
-	connect_time_ms = ms > 0 ? ms : 1;
 
 	LOG_INFO("MoQ session connected (%d ms, connect %d): %s", ms, connects, MoQRedactUrl(current->url).c_str());
 

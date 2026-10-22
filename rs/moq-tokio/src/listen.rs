@@ -558,7 +558,7 @@ impl Config {
 			.map(Into::into)
 			.or(self.timeout)
 			.unwrap_or(DEFAULT_TIMEOUT);
-		(!timeout.is_zero() && std::time::Instant::now().checked_add(timeout).is_some()).then_some(timeout)
+		(!timeout.is_zero() && moq_clock::now().checked_add(timeout).is_some()).then_some(timeout)
 	}
 
 	#[cfg(feature = "quic")]

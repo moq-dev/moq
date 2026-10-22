@@ -34,6 +34,14 @@ public final class Bandwidth: Sendable {
     public func reserve(demand: TrackDemand, maxBps: UInt64) -> Reservation {
         Reservation(ffi.reserve(demand: demand.ffi, maxBps: maxBps))
     }
+
+    /// Probe up to `targetBps` instead of the sum of the reservations.
+    ///
+    /// The session probes for what its reservations add up to by default, so the estimate can rise to fund them. `0` turns
+    /// probing off, and `nil` follows the reservations again.
+    public func setTarget(_ targetBps: UInt64?) {
+        ffi.setTarget(targetBps: targetBps)
+    }
 }
 
 /// One track's standing claim on a `Bandwidth`.

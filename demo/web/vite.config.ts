@@ -38,6 +38,6 @@ export default defineConfig({
 	},
 	optimizeDeps: {
 		// No idea why this needs to be done, but I don't want to figure it out.
-		exclude: ["@libav.js/variant-opus-af"],
+		exclude: ["@moq/libav"],
 	},
 });
