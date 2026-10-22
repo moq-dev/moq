@@ -76,6 +76,32 @@ pub struct TrackInfo {
 	pub compress: bool,
 }
 
+impl TrackInfo {
+	/// The TRACK_INFO a publisher serves for `info` on `version`.
+	pub(crate) fn serve(info: &crate::track::Info, version: Version) -> Self {
+		Self {
+			refresh: info.refresh,
+			priority: info.priority,
+			max_age: info.max_age,
+			// Unchecked timestamps never enter moq-lite, whose receivers check them.
+			timescale: info.lite_timescale(),
+			// An older peer is served the frames inflated.
+			compress: info.compress && version.has_compression(),
+		}
+	}
+}
+
+impl From<TrackInfo> for crate::track::Info {
+	fn from(info: TrackInfo) -> Self {
+		Self::default()
+			.with_timescale(info.timescale)
+			.with_max_age(info.max_age)
+			.with_priority(info.priority)
+			.with_refresh(info.refresh)
+			.with_compress(info.compress)
+	}
+}
+
 /// TRACK_INFO `Compression`: no codec.
 const COMPRESSION_NONE: u64 = 0;
 /// TRACK_INFO `Compression`: per-group DEFLATE (draft-lcurley-moq-flate).
@@ -85,7 +111,7 @@ const COMPRESSION_DEFLATE: u64 = 1;
 /// `ietf` extension, TRACK_PROPERTIES.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Framing {
-	/// The units of every frame Timestamp, or `None` on an untimed track.
+	/// The units of every frame Timestamp on the wire, or `None` when frames carry none.
 	pub timescale: Option<Timescale>,
 	/// The draft the track's moq-transport publisher spoke, which serialized its objects'
 	/// properties, or `None` for a moq-lite one, which carries no moq-transport state.
@@ -94,10 +120,12 @@ pub(crate) struct Framing {
 	pub compressed: bool,
 }
 
-impl From<&crate::track::Info> for Framing {
-	fn from(info: &crate::track::Info) -> Self {
+impl Framing {
+	/// How `version` frames a track accepted as `info`. Lite05/06 stamp every frame, so a
+	/// track received untimed there still has timestamps to read past.
+	pub fn new(info: &crate::track::Info, version: Version) -> Self {
 		Self {
-			timescale: info.timescale,
+			timescale: version.wire_timescale(info.timescale),
 			ietf: info.ietf(),
 			compressed: info.compress,
 		}
@@ -288,15 +316,8 @@ mod test {
 
 	#[test]
 	fn track_info_defaults_match_cross_language_wire_bytes() {
-		let info = crate::track::Info::default();
-		let info = TrackInfo {
-			refresh: None,
-			priority: info.priority,
-			max_age: info.max_age,
-			// The default track is untimed, which lite-05 declares as milliseconds.
-			timescale: info.timescale,
-			compress: false,
-		};
+		// The default track is untimed, which lite-05 declares as milliseconds.
+		let info = TrackInfo::serve(&crate::track::Info::default(), Version::Lite05);
 		let mut buf = Vec::new();
 		info.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();

@@ -262,6 +262,7 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 		config: MoqVideo {
 			label: None,
 			broadcast: None,
+			epoch: None,
 			track: None,
 			codec: "avc1.64001f".into(),
 			description: None,
@@ -283,6 +284,7 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	MoqAudio {
 		label: None,
 		broadcast: Some(reference.to_string()),
+		epoch: None,
 		track: None,
 		codec: "opus".to_string(),
 		description: None,
@@ -2662,7 +2664,7 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 
 	await_announced(&consumer, "a/source").await;
 
-	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into())))
+	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into()), None))
 		.await
 		.expect("timed out resolving the reference")
 		.unwrap();
@@ -2739,13 +2741,13 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 	// An absent or empty reference still names this broadcast, so it needs no origin. A reference
 	// made only of slashes normalizes to the empty one, so it must be treated the same rather than
 	// looking like a cross-broadcast reference.
-	consumer.resolve(None).await.unwrap();
-	consumer.resolve(Some(String::new())).await.unwrap();
-	consumer.resolve(Some("/".into())).await.unwrap();
+	consumer.resolve(None, None).await.unwrap();
+	consumer.resolve(Some(String::new()), None).await.unwrap();
+	consumer.resolve(Some("/".into()), None).await.unwrap();
 
 	// Reported in normalized form, matching `EscapingBroadcast` and moq-c: it names what the
 	// resolver actually tried to reach, not the caller's spelling of it.
-	match consumer.resolve(Some("./source".into())).await {
+	match consumer.resolve(Some("./source".into()), None).await {
 		Err(MoqError::UnresolvableBroadcast { reason: reference }) => assert_eq!(reference, "source"),
 		Err(err) => panic!("wrong error for an unresolvable reference: {err:?}"),
 		Ok(_) => panic!("a standalone broadcast cannot resolve a sibling"),
@@ -2765,7 +2767,7 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 	let broadcast = await_announced(&consumer, "a/pub").await;
 	await_announced(&consumer, "a/source").await;
 
-	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into())))
+	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into()), None))
 		.await
 		.expect("timed out resolving the reference")
 		.unwrap();
@@ -2778,7 +2780,7 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 		.unwrap();
 
 	// And it can follow a reference of its own, back to where we started.
-	let back = tokio::time::timeout(TIMEOUT, sibling.resolve(Some("./pub".into())))
+	let back = tokio::time::timeout(TIMEOUT, sibling.resolve(Some("./pub".into()), None))
 		.await
 		.expect("timed out resolving back")
 		.unwrap();
@@ -2786,6 +2788,85 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 
 	catalog.close().unwrap();
 	source.close().unwrap();
+}
+
+/// A reference's epoch names the instance it expects: a broadcast proven to serve another fails
+/// the rendition, while an epochless reference, or a route that cannot prove its instance, reads
+/// whichever instance resolves.
+#[tokio::test]
+async fn resolve_honors_the_reference_epoch() {
+	async fn resolve(
+		broadcast: &MoqBroadcastConsumer,
+		reference: &str,
+		epoch: Option<&str>,
+	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		tokio::time::timeout(
+			TIMEOUT,
+			broadcast.resolve(Some(reference.into()), epoch.map(Into::into)),
+		)
+		.await
+		.expect("timed out resolving the reference")
+	}
+
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let served = moq_mint_epoch();
+	let other = moq_mint_epoch();
+	let route = MoqRoute {
+		epoch: Some(served.clone()),
+		..Default::default()
+	};
+
+	let catalog = origin.create_broadcast("a/pub".into()).unwrap();
+	catalog.announce(route.clone()).unwrap();
+	let source = origin.create_broadcast("a/source".into()).unwrap();
+	source.announce(route).unwrap();
+	let _video = source.publish_track("video".into(), None).unwrap();
+	let plain = create_announced(&origin, "a/plain");
+
+	let broadcast = await_announced(&consumer, "a/pub").await;
+	await_announced(&consumer, "a/source").await;
+	await_announced(&consumer, "a/plain").await;
+
+	let matching = resolve(&broadcast, "./source", Some(&served)).await.unwrap();
+	assert_eq!(matching.inner().info().path.as_str(), "a/source");
+	resolve(&broadcast, "./source", None).await.unwrap();
+	resolve(&broadcast, "./plain", Some(&other)).await.unwrap();
+
+	assert!(matches!(
+		resolve(&broadcast, "./source", Some(&other)).await,
+		Err(MoqError::Mux { reason }) if reason.contains("serves epoch")
+	));
+	// Without a broadcast, the epoch names the catalog's own instance.
+	resolve(&broadcast, "", Some(&served)).await.unwrap();
+	assert!(matches!(
+		resolve(&broadcast, "", Some(&other)).await,
+		Err(MoqError::Mux { reason }) if reason.contains("serves epoch")
+	));
+	assert!(matches!(
+		resolve(&broadcast, "./source", Some("not-an-epoch")).await,
+		Err(MoqError::InvalidEpoch { .. })
+	));
+
+	// The rendition-based consumers read the epoch off the rendition.
+	let mut mismatched = rendition("video", MoqContainer::Legacy);
+	let MoqRendition::Video { config, .. } = &mut mismatched else {
+		unreachable!()
+	};
+	config.broadcast = Some("./source".into());
+	config.epoch = Some(other);
+	let config = MoqMediaTrackConfig {
+		rendition: mismatched,
+		subscription: None,
+	};
+	let subscribed = tokio::time::timeout(TIMEOUT, MoqMediaTrackConsumer::subscribe(&broadcast, config))
+		.await
+		.expect("timed out subscribing to the rendition");
+	assert!(matches!(subscribed, Err(MoqError::Mux { reason }) if reason.contains("serves epoch")));
+
+	catalog.close().unwrap();
+	source.close().unwrap();
+	plain.close().unwrap();
 }
 
 #[tokio::test]

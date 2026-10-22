@@ -17,6 +17,7 @@ import { Priority, sendOrder } from "../priority.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
+import { liteTimescale } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { nextTask } from "../util/yield.ts";
@@ -64,12 +65,26 @@ function zigzag(delta: bigint): bigint {
 	return delta >= 0n ? delta << 1n : (-delta << 1n) - 1n;
 }
 
-/**
- * A frame or datagram timestamp as its raw value at the wire `timescale`. Lite-05/06 cannot
- * encode an untimed track, so its payloads carry their send time instead.
- */
-function wireTime(timestamp: Timestamp | undefined, timescale: Timescale): number {
-	return Math.round((timestamp ?? Timestamp.now()).as(timescale));
+/** How a lite hop stamps a track's frames and datagrams. */
+interface Stamp {
+	/** The wire timescale TRACK_INFO declared (see `wireTimescale`). */
+	timescale: Timescale;
+	/**
+	 * Whether each frame's own timestamp goes out. Lite-05/06 cannot encode an untimed track, so
+	 * one served untimed carries its send time instead, unchecked ones included.
+	 */
+	timed: boolean;
+}
+
+/** How `version` stamps a track served at `timescale` (see `liteTimescale`), or undefined when it carries none. */
+function stamping(version: Version, timescale: Timescale | undefined): Stamp | undefined {
+	const wire = wireTimescale(version, timescale);
+	return wire === undefined ? undefined : { timescale: wire, timed: timescale !== undefined };
+}
+
+/** A frame or datagram's `timestamp` as its raw wire value, or its send time when the track goes out untimed. */
+function wireTime(timestamp: Timestamp | undefined, stamp: Stamp): number {
+	return Math.round(((stamp.timed ? timestamp : undefined) ?? Timestamp.now()).as(stamp.timescale));
 }
 
 /**
@@ -99,8 +114,8 @@ interface RunGroup {
 	/** The group to serve. */
 	group: group.Consumer;
 
-	/** The track's wire timescale, applied to every frame timestamp, or undefined to send none. */
-	timescale: Timescale | undefined;
+	/** How every frame is stamped, or undefined to send no timestamps. */
+	stamp: Stamp | undefined;
 
 	/** The subscription's ranking, which this stream joins for as long as it runs. */
 	priority: Priority;
@@ -155,8 +170,8 @@ function frameRange(bounds: FrameBounds, sequence: number): { start: number; end
 type ServeGroup = {
 	/** The Subscribe ID the GROUP message references. */
 	sub: bigint;
-	/** The track's wire timescale, which every frame timestamp is converted to, or undefined to send none. */
-	timescale: Timescale | undefined;
+	/** How every frame is stamped, or undefined to send no timestamps. */
+	stamp: Stamp | undefined;
 	/** First frame to send; anything below it was excluded by the subscription. */
 	start: number;
 	/** Last frame to send (inclusive), or undefined for the rest of the group. */
@@ -860,7 +875,7 @@ export class Publisher {
 			const info = await untilAborted(track.info(), left.signal);
 			const publisher = info.priority;
 			// Older drafts carry no timestamps.
-			let timescale: Timescale | undefined;
+			let stamp: Stamp | undefined;
 
 			if (hasTrackStream(this.version)) {
 				// Lite-05+ accepts implicitly: no SUBSCRIBE_OK (the immutable
@@ -870,7 +885,7 @@ export class Publisher {
 				// The timescale is an immutable property, so serving MUST use exactly
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so
 				// they always agree.
-				timescale = wireTimescale(this.version, info.timescale);
+				stamp = stamping(this.version, liteTimescale(info));
 			} else {
 				// Older drafts acknowledge with SUBSCRIBE_OK and stream frames verbatim.
 				const ok = new SubscribeOk({
@@ -887,7 +902,7 @@ export class Publisher {
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
 			if (this.#datagramWriter) {
-				datagrams = this.#runDatagrams(msg.id, track, timescale, served);
+				datagrams = this.#runDatagrams(msg.id, track, stamp, served);
 			}
 
 			controls = new SubscriptionControls({
@@ -916,7 +931,7 @@ export class Publisher {
 			const finished = await this.#runTrack(track, stream.writer, controls, {
 				sub: msg.id,
 				broadcast: msg.broadcast,
-				timescale,
+				stamp,
 				publisher,
 				served,
 				bounds: {
@@ -1046,7 +1061,7 @@ export class Publisher {
 					return;
 				}
 				await this.#runFetchGroup(group, stream.writer, {
-					timescale: wireTimescale(this.version, info.timescale),
+					stamp: stamping(this.version, info.timescale),
 					start: msg.startFrame,
 					end: msg.endFrame,
 				});
@@ -1085,14 +1100,14 @@ export class Publisher {
 		serving: {
 			sub: bigint;
 			broadcast: Path.Valid;
-			timescale: Timescale | undefined;
+			stamp: Stamp | undefined;
 			/** The track's publisher priority, breaking ties between subscriptions. */
 			publisher: number;
 			served: Run[] | undefined;
 			bounds: FrameBounds;
 		},
 	): Promise<boolean> {
-		const { sub, broadcast, timescale, publisher, served, bounds } = serving;
+		const { sub, broadcast, stamp, publisher, served, bounds } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = hasTrackStream(this.version);
@@ -1363,7 +1378,7 @@ export class Publisher {
 				const options: RunGroup = {
 					sub,
 					group,
-					timescale,
+					stamp,
 					priority,
 					unsubscribed,
 					start: range.start,
@@ -1479,8 +1494,9 @@ export class Publisher {
 					// Publisher Max Age: the publisher's retention bound, advertised so
 					// relays re-serve with the same window.
 					maxAge: info.maxAge,
-					// `#serveGroup` emits each frame converted to it.
-					timescale: info.timescale ?? undefined,
+					// `#serveGroup` emits each frame converted to it. Unchecked timestamps never
+					// enter moq-lite, whose receivers check them.
+					timescale: liteTimescale(info),
 				});
 			})();
 
@@ -1520,12 +1536,7 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runDatagrams(
-		sub: bigint,
-		track: track.Subscriber,
-		timescale: Timescale | undefined,
-		served: Run[] | undefined,
-	) {
+	async #runDatagrams(sub: bigint, track: track.Subscriber, stamp: Stamp | undefined, served: Run[] | undefined) {
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
 		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
@@ -1536,7 +1547,7 @@ export class Publisher {
 				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
-				const ts = timescale === undefined ? undefined : wireTime(datagram.timestamp, timescale);
+				const ts = stamp === undefined ? undefined : wireTime(datagram.timestamp, stamp);
 				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode(this.version);
 
 				// No group fallback: drop anything that doesn't fit a single datagram.
@@ -1561,7 +1572,7 @@ export class Publisher {
 	async #runFetchGroup(
 		group: group.Consumer,
 		stream: Writer,
-		{ timescale, start: startFrame, end: endFrame }: ServeFetch,
+		{ stamp, start: startFrame, end: endFrame }: ServeFetch,
 	) {
 		// The response carries no header, so the receiver numbers the first frame it gets
 		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
@@ -1577,8 +1588,8 @@ export class Publisher {
 			const frame = await race([group.readFrame(), stream.closed]);
 			if (!frame) break;
 
-			if (timescale !== undefined) {
-				const ts = BigInt(wireTime(frame.timestamp, timescale));
+			if (stamp !== undefined) {
+				const ts = BigInt(wireTime(frame.timestamp, stamp));
 				await stream.u62(zigzag(ts - prevTs));
 				prevTs = ts;
 			}
@@ -1643,7 +1654,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async #serveGroup(stream: Writer, options: RunGroup) {
-		const { sub, group, timescale, priority, start: startFrame, end: endFrame } = options;
+		const { sub, group, stamp, priority, start: startFrame, end: endFrame } = options;
 		// This model holds whole groups, so frame `startFrame` is always reachable unless
 		// the group ends first. Declaring it up front keeps the stream self-describing.
 		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
@@ -1683,9 +1694,9 @@ export class Publisher {
 					if (read.sequence < startFrame) continue;
 					if (endFrame !== undefined && read.sequence > endFrame) break;
 
-					if (timescale !== undefined) {
+					if (stamp !== undefined) {
 						// Convert each frame to the track's wire timescale.
-						const ts = BigInt(wireTime(read.frame.timestamp, timescale));
+						const ts = BigInt(wireTime(read.frame.timestamp, stamp));
 						await hooks.guardGroup(group, () => stream.u62(zigzag(ts - prevTs)));
 						prevTs = ts;
 					}

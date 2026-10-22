@@ -11,6 +11,13 @@ How to update your code for each breaking change, newest first.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 Regenerate the bindings for the changed checksums.
 
+### Catalog references carry their epoch
+
+`MoqVideo` and `MoqAudio` gain `Epoch *string`, the publisher instance their `Broadcast` reference names.
+`MoqBroadcastConsumer.Resolve` takes the rendition's `epoch` after `reference`; pass it alongside, or `nil` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
+Regenerate the bindings for the changed records and checksums.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer.Finish()` lets go, instead of unlisting when its producer finishes or is released.

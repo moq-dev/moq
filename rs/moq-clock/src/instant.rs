@@ -10,7 +10,8 @@ use std::{
 /// import change. Instants are only comparable within one clock: the simulator
 /// starts at [`Instant::ZERO`], and the runtime backends count from an origin they
 /// pick once, reading far past zero there so earlier moments stay representable.
-/// An instant has no conversion back to the host clock.
+/// On native, [`Instant::into_std`] and [`Instant::from_std`] convert at a third-party
+/// API that takes std's instants.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Instant(u64);
 
@@ -76,6 +77,29 @@ impl Instant {
 	/// The instant `nanos` past the origin.
 	pub(crate) const fn from_nanos(nanos: u64) -> Self {
 		Self(nanos)
+	}
+
+	/// This instant on std's clock, for a third-party API that takes one.
+	///
+	/// Maps through the runtime backend's origin, as its timers do. That is exact on
+	/// a running clock. On paused tokio or the simulator it keeps the time between
+	/// instants, but not their distance from [`std::time::Instant::now`].
+	///
+	/// # Panics
+	///
+	/// When std's clock cannot represent it, as with a simulated instant near zero
+	/// on a platform whose std clock starts at boot.
+	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+	pub fn into_std(self) -> std::time::Instant {
+		crate::runtime::into_std(self).expect("instant outside std's clock range")
+	}
+
+	/// The instant `at` names on std's clock, the inverse of [`Instant::into_std`].
+	///
+	/// Saturates at the clock's range, like a deadline past it.
+	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+	pub fn from_std(at: std::time::Instant) -> Self {
+		crate::runtime::from_std(at)
 	}
 }
 

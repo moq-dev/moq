@@ -49,7 +49,7 @@ const DEFAULT_PRIORITY: i8 = 0;
 /// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
 /// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog.
 /// The payload size limit also bounds the buffer's memory use.
-const MAX_DATAGRAMS: usize = 64;
+pub(super) const MAX_DATAGRAMS: usize = 64;
 
 /// Slack before the eviction order is rebuilt, so a track holding just a few groups
 /// doesn't rebuild on every write.
@@ -168,6 +168,14 @@ pub struct Info {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
 	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
+	/// Whether this timed track's timestamps arrived over moq-transport, whose peers may
+	/// stamp arrival times, so no group is checked for a rewind.
+	///
+	/// They stay on moq-transport: a moq-lite hop serves the track untimed, since its
+	/// receivers check every timestamp. Never set on an untimed track.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/ingest.md
+	pub(crate) unchecked: bool,
 }
 
 impl Default for Info {
@@ -179,6 +187,7 @@ impl Default for Info {
 			compress: false,
 			refresh: None,
 			properties: None,
+			unchecked: false,
 		}
 	}
 }
@@ -216,6 +225,14 @@ impl Info {
 	pub fn with_refresh(mut self, refresh: impl Into<Option<u32>>) -> Self {
 		self.refresh = refresh.into();
 		self
+	}
+
+	/// The timescale a moq-lite hop serves this track at: none for an
+	/// [unchecked](Self::unchecked) one.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) fn lite_timescale(&self) -> Option<Timescale> {
+		self.timescale.filter(|_| !self.unchecked)
 	}
 
 	/// The draft the track's moq-transport publisher spoke, `None` for a moq-lite one.
@@ -435,9 +452,6 @@ pub(crate) struct TrackState {
 	// [`Subscriber::poll_start`]) wait on it; everything else treats the floor as usual.
 	start_pending: bool,
 
-	// A session's copy of a remote track. Its groups skip the rewind check: a received
-	// timestamp may not be media time (a lite-05/06 untimed track carries send times).
-	received: bool,
 	// Sequences the upstream publisher gave up, with the error each was given up with: an
 	// incoming SUBSCRIBE_DROP or a producer cut. Kept apart from the cache so reclaiming a
 	// slot cannot erase a disposition a relay must forward, and as ranges so a wide DROP
@@ -832,9 +846,9 @@ impl TrackState {
 	/// so the watermark caps it instead.
 	///
 	/// Usually one group lookup each way; only unstarted or partial neighbors are skipped.
-	/// `None` on a received track, which only a local publisher's writes are checked on.
+	/// `None` on an [unchecked](Info::unchecked) track, whose timestamps may rewind.
 	pub(super) fn neighbors(&self, sequence: u64) -> Option<Neighbors> {
-		if self.received {
+		if self.info.as_ref().is_some_and(|info| info.unchecked) {
 			return None;
 		}
 		let bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2964,16 +2978,6 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Mark this track as a session's copy of a remote one: its groups are never checked
-	/// for a rewind, which only a local publisher's writes refuse.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/ingest.md
-	pub(crate) fn received(&self) {
-		if let Ok(mut state) = self.modify() {
-			state.received = true;
-		}
-	}
-
 	/// Record sequences the upstream publisher explicitly gave up with `err`, ending the
 	/// groups still arriving in them with it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
@@ -3725,12 +3729,13 @@ impl TrackWeak {
 		!self.state.is_closed() && self.state.is_used()
 	}
 
-	/// The readers' aggregate demand, or `None` while nobody subscribes.
-	pub(super) fn subscription(&self) -> Option<Subscription> {
+	/// The readers' aggregate demand and contribution count, or `None` without one.
+	pub(super) fn subscription(&self) -> Option<(Subscription, usize)> {
 		let state = self.state.read();
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
-		snapshot_subscription(&subs, bound)
+		let subs = subs.lock();
+		Some((clamp_combined(subs.combined(), bound)?, subs.len()))
 	}
 
 	/// End the track with `err` unless a reader holds it, atomically with lookups: a

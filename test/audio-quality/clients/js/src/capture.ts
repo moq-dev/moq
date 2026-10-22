@@ -2,6 +2,7 @@
 
 import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
+import * as Cmaf from "@moq/hang/cmaf";
 import * as Container from "@moq/hang/container";
 import { type Group, Error as NetError } from "@moq/net";
 import { Effect, type Getter } from "@moq/signals";
@@ -125,7 +126,7 @@ export function format(config: Catalog.AudioConfig): Container.Format {
 	if (container.kind === "loc") return new Container.Loc.Format("audio");
 	if (container.kind === "cmaf") {
 		const init = Uint8Array.from(atob(container.init), (c) => c.charCodeAt(0));
-		return new Container.Cmaf.Format(Container.Cmaf.decodeInitSegment(init));
+		return new Cmaf.Format(Cmaf.decodeInitSegment(init));
 	}
 	throw new Error(`unsupported container: ${JSON.stringify(container)}`);
 }
