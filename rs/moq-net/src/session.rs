@@ -825,7 +825,8 @@ impl Slots {
 
 	/// Take one slot until the returned guard drops, or [`Error::TooManyRequests`] at the cap.
 	///
-	/// The caller closes the session on that error: a peer past its limits loses the session.
+	/// A peer whose own request runs past its limits loses the session. A subscription we
+	/// would initiate, such as a listed track's PUBLISH, is skipped instead.
 	pub(crate) fn acquire(&self) -> Result<Slot, Error> {
 		use std::sync::atomic::Ordering;
 		let held = self
