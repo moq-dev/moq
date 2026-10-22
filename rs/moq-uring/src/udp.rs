@@ -485,10 +485,10 @@ impl SockShared {
 		rx.waiters.wake();
 	}
 
-	/// A send to `to` found no route. Unlike other send failures this says
-	/// nothing about the socket, so with a consumer only the connections
-	/// dialing `to` hear it. Without one there is no destination to route it
-	/// to, so it fails sends like any other error.
+	/// A send to `to` found no route, which says nothing about the socket, so
+	/// with a consumer only the connections dialing `to` hear it. Without one
+	/// there is no destination to route it to, so it fails the socket: a raw
+	/// socket has no other way to report it.
 	fn unreachable(&self, to: SocketAddr, code: i32) {
 		let mut rx = self.rx.borrow_mut();
 		let Some(reports) = rx.unreachable.as_mut() else {
@@ -906,8 +906,10 @@ pub struct TxBuf {
 impl TxBuf {
 	/// Send the buffer on the owning socket as datagrams of `segment` bytes
 	/// (the last may be short), marked with `ecn`. Fire-and-forget:
-	/// the buffer returns to the pool when the kernel completes, and a
-	/// failed send surfaces on the next pool acquire.
+	/// the buffer returns to the pool when the kernel completes. A send the
+	/// kernel fails or cuts short is lost, as UDP allows, and only logged.
+	/// The next pool acquire fails only once the socket itself is unusable
+	/// or a send finds no route to its destination.
 	///
 	/// This only stages an SQE, so the datagram reaches the kernel when the
 	/// worker next enters the ring. Dropping the worker makes a bounded attempt
@@ -1904,9 +1906,9 @@ mod tests {
 	}
 
 	/// With nothing routing unreachable reports, a send that finds no route
-	/// fails later sends like any other error instead of queueing a report
-	/// nobody will collect. Linux refuses a v4-mapped destination on an
-	/// IPv6-only socket with `ENETUNREACH`.
+	/// fails later sends instead of queueing a report nobody will collect.
+	/// Linux refuses a v4-mapped destination on an IPv6-only socket with
+	/// `ENETUNREACH`.
 	#[test]
 	fn a_raw_socket_sees_an_unreachable_send_fail() {
 		use nix::sys::socket::{AddressFamily, SockFlag, SockType, SockaddrIn6, bind, setsockopt, socket, sockopt};
