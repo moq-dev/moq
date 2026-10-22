@@ -52,9 +52,9 @@ const lite: Protocol = {
 	async subscribe() {
 		const open: Open = (stream) => {
 			const producer = new Producer(0);
-			const done = readFrames(new Reader(stream, undefined, LiteVersion.DRAFT_06), producer, 1_000_000).then(() =>
-				producer.close(),
-			);
+			const done = readFrames(new Reader(stream, undefined, LiteVersion.DRAFT_06), producer, {
+				scale: 1_000_000,
+			}).then(() => producer.close());
 			return { group: Promise.resolve(producer.consume()), done };
 		};
 		return { open, close: () => {} };

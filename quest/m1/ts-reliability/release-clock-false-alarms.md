@@ -24,11 +24,3 @@ in #6139, whose arms stayed at 1 s (`export ts --delay`'s default) to land:
 Reproduce each first, then make the arms assert both counters stay zero.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - lands the arms these alarms fire in
-
-## Related
-
-- [Arrival stamps](/quest/m1/ts-reliability/arrival-stamps.md) - also changes when the export releases a frame

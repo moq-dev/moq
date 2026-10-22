@@ -53,7 +53,7 @@ impl ConsumeCatalog {
 /// A catalog media section whose renditions are consumed by index.
 pub(crate) trait Media: hang::catalog::Reference + Clone {
 	/// The delivery priority its tracks subscribe with.
-	const PRIORITY: u8;
+	const PRIORITY: i8;
 
 	/// Its renditions, keyed by ID.
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self>;
@@ -63,7 +63,7 @@ pub(crate) trait Media: hang::catalog::Reference + Clone {
 }
 
 impl Media for hang::catalog::VideoConfig {
-	const PRIORITY: u8 = hang::catalog::PRIORITY.video;
+	const PRIORITY: i8 = hang::catalog::PRIORITY.video;
 
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.video.renditions
@@ -75,7 +75,7 @@ impl Media for hang::catalog::VideoConfig {
 }
 
 impl Media for hang::catalog::AudioConfig {
-	const PRIORITY: u8 = hang::catalog::PRIORITY.audio;
+	const PRIORITY: i8 = hang::catalog::PRIORITY.audio;
 
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.audio.renditions

@@ -34,34 +34,6 @@ permissions:
 
 on:
   workflow_call:
-  pull_request:
-    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
-    # retargeted to release. `closed` is here only so merging/closing a PR
-    # cancels its in-flight run via the concurrency group below; the job itself
-    # is skipped on close.
-    branches: [release]
-    types: [opened, synchronize, reopened, edited, closed]
-    paths:
-      - "rs/moq-wasm/**"
-      - "rs/moq-clock/**"
-      - "rs/moq-net/**"
-      - "rs/kio/**"
-      - "js/wasm/**"
-      - "test/wasm/**"
-      - "test/lib/**"
-      - "justfile"
-      - "js/justfile"
-      - "rs/justfile"
-      - "test/justfile"
-      - ".cargo/config.toml"
-      - "package.json"
-      - "bun.lock"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/workflows/wasm.yml"
 
 concurrency:
   group: wasm-${{ github.ref }}
@@ -70,7 +42,6 @@ concurrency:
 jobs:
   wasm:
     name: WASM
-    if: github.event.action != 'closed'
     # ARM64 like check.yml; the harness builds the relay natively, which the
     # merge queue's Check and Test publish.
     runs-on: ubuntu-24.04-arm
@@ -92,13 +63,6 @@ jobs:
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
-
-      # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
-      # runtime libs (`--with-deps` needs the host package manager); run.sh's own
-      # `playwright install` then no-ops.
-      - name: Playwright Chromium
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
-        shell: bash -leo pipefail {0}
 
       - name: Browser clock
         run: nix develop --command just rs wasm-test

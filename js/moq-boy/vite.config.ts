@@ -7,8 +7,8 @@ export default defineConfig({
 	build: {
 		lib: {
 			entry: {
-				index: resolve(__dirname, "src/index.ts"),
-				element: resolve(__dirname, "src/element.tsx"),
+				index: resolve(import.meta.dirname, "src/index.ts"),
+				element: resolve(import.meta.dirname, "src/element.tsx"),
 			},
 			formats: ["es"],
 		},

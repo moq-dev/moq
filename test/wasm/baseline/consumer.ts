@@ -36,6 +36,8 @@ async function run(config: Sample) {
 	let grew = false;
 	let received = 0;
 	const frames = config.publishers * config.subscribers * config.frames;
+	// Lite-02 carries no timestamps, and a lite-05/06 subscriber drops them.
+	const timed = !/^moq-lite-0[1-6]$/.test(config.version);
 	const check = (bytes: Uint8Array, frame: number) => {
 		first ??= performance.now() - start;
 		verify(bytes, config.size, frame);
@@ -90,12 +92,7 @@ async function run(config: Sample) {
 						try {
 							for (let frame = 0; frame < config.frames; frame++) {
 								const got = await group.readFrame();
-								if (
-									!got ||
-									(config.version === "moq-lite-02"
-										? got.timestamp !== undefined
-										: got.timestamp?.asMillis() !== frame)
-								)
+								if (!got || (timed ? got.timestamp?.asMillis() !== frame : got.timestamp !== undefined))
 									throw new Error(`incorrect JS frame timestamp ${frame}`);
 								check(got.payload, frame);
 							}
@@ -178,9 +175,7 @@ async function run(config: Sample) {
 								const got = await group.readFrame();
 								if (
 									!got ||
-									(config.version === "moq-lite-02"
-										? got.timestampUs !== undefined
-										: got.timestampUs !== BigInt(frame * 1000))
+									(timed ? got.timestampUs !== BigInt(frame * 1000) : got.timestampUs !== undefined)
 								)
 									throw new Error(`incorrect UniFFI frame timestamp ${frame}`);
 								check(new Uint8Array(got.payload), frame);
@@ -210,12 +205,11 @@ async function run(config: Sample) {
 			},
 			metadata: {
 				sequence: String(config.sequence),
-				timestamp:
-					config.version === "moq-lite-02"
-						? "verified absent: this wire version carries none"
-						: config.backend === "wasm"
-							? "unavailable: payload-only binding"
-							: "verified",
+				timestamp: !timed
+					? "verified absent: this version delivers none"
+					: config.backend === "wasm"
+						? "unavailable: payload-only binding"
+						: "verified",
 			},
 		};
 	} finally {

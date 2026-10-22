@@ -1786,8 +1786,26 @@ fn stream_id_limit() {
     assert_eq!(chunks.next(usize::MAX), Ok(None));
     let _ = chunks.finalize();
 
-    // Server will only send MAX_STREAM_ID now that the application's been notified
+    // Lose the stream-credit grant itself, after proving the sender exhausted its budget.
+    let grants = |pair: &mut Pair| {
+        pair.server_conn_mut(server_ch)
+            .stats()
+            .frame_tx
+            .max_streams_uni
+    };
+    let before = grants(&mut pair);
+    pair.to_client.loss = 1.0;
+    drive_until(&mut pair, |pair| grants(pair) > before);
+    let lost = grants(&mut pair);
+    assert_eq!(
+        pair.client_streams(client_ch)
+            .open(Dir::Uni, Default::default()),
+        None,
+        "the dropped grant did not reach the sender"
+    );
+    pair.to_client.loss = 0.0;
     pair.drive();
+    assert!(grants(&mut pair) > lost, "stream credit was retransmitted");
     assert_matches!(
         pair.client_conn_mut(client_ch).poll(),
         Some(Event::Stream(StreamEvent::Available { dir: Dir::Uni }))
@@ -2385,6 +2403,46 @@ fn draining_is_reported_once_before_drained() {
     assert_eq!(server, expected);
 }
 
+/// A handshake the peer never answered stops being active as soon as it closes, so a shutdown
+/// need not sit out the closing period for a close nobody will answer
+#[test]
+fn unanswered_handshake_drains_at_close() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let client_ch = pair.begin_connect(client_config());
+    pair.client.drive(pair.time, pair.server.addr);
+    pair.client.outbound.clear(); // The server never hears the Initial
+
+    let now = pair.time;
+    pair.client_conn_mut(client_ch)
+        .close(now, VarInt(0), Bytes::new());
+    pair.client.drive(now, pair.server.addr);
+
+    assert!(!pair.client.outbound.is_empty(), "the close is still sent");
+    // Drained waits for the close timer, which still answers a late reply
+    assert_eq!(pair.client.lifecycle, [(client_ch, Lifecycle::Draining)]);
+}
+
+/// Once the peer has answered, a close stays active until the peer's close comes back
+#[test]
+fn answered_handshake_waits_for_peer_close() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let client_ch = pair.begin_connect(client_config());
+    pair.drive_client();
+    pair.drive_server();
+    pair.client.drive(pair.time, pair.server.addr);
+
+    let now = pair.time;
+    pair.client_conn_mut(client_ch)
+        .close(now, VarInt(0), Bytes::new());
+    pair.client.drive(now, pair.server.addr);
+    assert!(pair.client.lifecycle.is_empty());
+
+    pair.drive();
+    assert_eq!(pair.client.lifecycle[0], (client_ch, Lifecycle::Draining));
+}
+
 #[test]
 fn instant_close_1() {
     let _guard = subscribe();
@@ -2694,6 +2752,7 @@ fn migration() {
 
 fn test_flow_control(config: TransportConfig, window_size: usize) {
     let _guard = subscribe();
+    let stream_limited = config.stream_receive_window.into_inner() == window_size as u64;
     let mut pair = Pair::new(
         Default::default(),
         ServerConfig {
@@ -2769,7 +2828,31 @@ fn test_flow_control(config: TransportConfig, window_size: usize) {
 
     info!("finished reading");
     assert_eq!(cursor, window_size);
+    // Lose the grant that releases the exhausted window. Count the frame, so a data loss or
+    // an unrelated ACK cannot satisfy the activation proof.
+    let grants = |pair: &mut Pair| {
+        let stats = pair.server_conn_mut(server_ch).stats().frame_tx;
+        if stream_limited {
+            stats.max_stream_data
+        } else {
+            stats.max_data
+        }
+    };
+    let before = grants(&mut pair);
+    pair.to_client.loss = 1.0;
+    drive_until(&mut pair, |pair| grants(pair) > before);
+    let lost = grants(&mut pair);
+    assert_eq!(
+        pair.client_send(client_ch, s).write(&msg),
+        Err(WriteError::Blocked),
+        "the dropped grant did not reach the sender"
+    );
+    pair.to_client.loss = 0.0;
     pair.drive();
+    assert!(
+        grants(&mut pair) > lost,
+        "flow-control credit was retransmitted"
+    );
     info!("writing");
     assert_eq!(pair.client_send(client_ch, s).write_limit(), window_size);
     assert_eq!(pair.client_send(client_ch, s).write(&msg), Ok(window_size));
@@ -3479,7 +3562,7 @@ fn datagram_recv_buffer_overflow() {
     assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
     assert_eq!(
         pair.client_conn_mut(client_ch).datagrams().max_size(),
-        Some(WINDOW - Datagram::SIZE_BOUND)
+        Datagram::max_payload(WINDOW as u64).map(|n| n as usize)
     );
 
     const DATA1: &[u8] = &[0xAB; (PAYLOAD_WINDOW / 3) + 1];
@@ -3532,7 +3615,10 @@ fn datagram_of_max_size_keeps_connection() {
         .datagrams()
         .max_size()
         .unwrap();
-    assert_eq!(max_size, WINDOW - Datagram::SIZE_BOUND);
+    assert_eq!(
+        max_size,
+        Datagram::max_payload(WINDOW as u64).unwrap() as usize
+    );
 
     pair.client_datagrams(client_ch)
         .send(vec![0xAB; max_size].into(), Default::default())
@@ -3551,6 +3637,30 @@ fn datagram_of_max_size_keeps_connection() {
         Some(Event::DatagramReceived)
     );
     assert_eq!(pair.server_datagrams(server_ch).recv().unwrap(), DATA);
+}
+
+/// RFC 9221's `max_datagram_frame_size` counts the frame type and length, so a 1200-byte limit
+/// (quicly's) carries a 1197-byte payload behind a 2-byte length
+#[test]
+fn datagram_max_size_fills_peer_frame_limit() {
+    let _guard = subscribe();
+    let server = ServerConfig {
+        transport: Arc::new(TransportConfig {
+            datagram_receive_buffer_size: Some(1200),
+            ..TransportConfig::default()
+        }),
+        ..server_config()
+    };
+    let mut transport = TransportConfig::default();
+    transport.initial_mtu(1452).mtu_discovery_config(None);
+    let mut client = client_config();
+    client.transport_config(Arc::new(transport));
+    let mut pair = Pair::new(Default::default(), server);
+    let (client_ch, _) = pair.connect_with(client);
+    assert_eq!(
+        pair.client_conn_mut(client_ch).datagrams().max_size(),
+        Some(1197)
+    );
 }
 
 #[test]
@@ -3598,6 +3708,29 @@ fn datagram_unsupported() {
         Err(e) => panic!("unexpected error: {e}"),
         Ok(_) => panic!("unexpected success"),
     }
+}
+
+/// RFC 9221 section 3: a `max_datagram_frame_size` of 0 means no DATAGRAM support, and no frame,
+/// not even an empty one, fits it
+#[test]
+fn datagram_zero_limit_unsupported() {
+    let _guard = subscribe();
+    let server = ServerConfig {
+        transport: Arc::new(TransportConfig {
+            datagram_receive_buffer_size: Some(0),
+            ..TransportConfig::default()
+        }),
+        ..server_config()
+    };
+    let mut pair = Pair::new(Default::default(), server);
+    let (client_ch, server_ch) = pair.connect();
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+    assert_matches!(pair.client_datagrams(client_ch).max_size(), None);
+    assert_matches!(
+        pair.client_datagrams(client_ch)
+            .send(Bytes::new(), Default::default()),
+        Err(SendDatagramError::UnsupportedByPeer)
+    );
 }
 
 #[test]
@@ -3829,6 +3962,308 @@ fn handshake_anti_deadlock_probe() {
     assert_matches!(
         pair.client_conn_mut(client_ch).poll(),
         Some(Event::Connected)
+    );
+}
+
+/// The ack-eliciting frames the client has sent, which its probes carry
+fn client_probes(pair: &mut Pair, ch: ConnectionHandle) -> u64 {
+    let stats = pair.client_conn_mut(ch).stats();
+    stats.frame_tx.stream + stats.frame_tx.ping + stats.frame_tx.immediate_ack
+}
+
+/// Drive the pair for `outage` with the client's packets lost, and the server's too unless
+/// `one_way`, the server pinging every `ping` if set. Returns when, from the outage's start, the
+/// client sent ack-eliciting frames.
+fn probe_through_outage(
+    pair: &mut Pair,
+    (client_ch, server_ch): (ConnectionHandle, ConnectionHandle),
+    outage: Duration,
+    one_way: bool,
+    ping: Option<Duration>,
+) -> Vec<Duration> {
+    pair.to_server.loss = 1.0;
+    pair.to_client.loss = if one_way { 0.0 } else { 1.0 };
+    let start = pair.time;
+    let end = start + outage;
+    let mut next_ping = ping.map(|_| start);
+    let mut sent = client_probes(pair, client_ch);
+    let mut probes = Vec::new();
+    loop {
+        if let (Some(at), Some(every)) = (next_ping, ping)
+            && at <= pair.time
+        {
+            pair.server_conn_mut(server_ch).ping();
+            next_ping = Some(at + every);
+        }
+        pair.drive_client();
+        pair.drive_server();
+        let now = client_probes(pair, client_ch);
+        if now > sent {
+            probes.push(pair.time - start);
+            sent = now;
+        }
+        let next = [
+            pair.client.next_wakeup(),
+            pair.server.next_wakeup(),
+            next_ping,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        match next {
+            Some(t) if t < end => pair.time = pair.time.max(t),
+            _ => break,
+        }
+    }
+    pair.time = end;
+    pair.to_server.loss = 0.0;
+    pair.to_client.loss = 0.0;
+    probes
+}
+
+/// Connect `pair` over a 20 ms RTT, the client's last packet a PING whose ACK it has, so no
+/// packet the server sends after it acknowledges anything new
+fn settled_pair(mut pair: Pair) -> (Pair, ConnectionHandle, ConnectionHandle) {
+    pair.latency = Duration::from_millis(10);
+    let (client_ch, server_ch) = pair.connect();
+    pair.time += Duration::from_millis(100);
+    pair.drive();
+    pair.client_conn_mut(client_ch).ping();
+    pair.drive();
+    (pair, client_ch, server_ch)
+}
+
+/// Drive the pair until `done` holds, returning when it first did
+fn drive_until(pair: &mut Pair, mut done: impl FnMut(&mut Pair) -> bool) -> Instant {
+    loop {
+        pair.drive_client();
+        pair.drive_server();
+        if done(pair) {
+            return pair.time;
+        }
+        let next = [pair.client.next_wakeup(), pair.server.next_wakeup()]
+            .into_iter()
+            .flatten()
+            .min()
+            .expect("the connection went idle");
+        pair.time = pair.time.max(next);
+    }
+}
+
+/// Assert that each gap between `probes` is about twice the one before
+fn assert_backs_off(probes: &[Duration]) {
+    assert!(probes.len() >= 5, "{probes:?}");
+    for sends in probes.windows(3) {
+        let (gap, next) = (sends[1] - sends[0], sends[2] - sends[1]);
+        assert!(next >= gap.mul_f32(1.9), "the client backs off: {probes:?}");
+    }
+}
+
+/// A path that drops everything for 5 s with the client's data in flight: the client's probes
+/// back off while it hears nothing, and once the server is heard again the next one goes out
+/// then, not at the backed-off timer.
+#[test]
+fn a_peer_heard_after_an_outage_brings_the_probe_forward() {
+    let _guard = subscribe();
+    let (mut pair, client_ch, server_ch) = settled_pair(Pair::default());
+    let rtt = pair.latency * 2;
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+    pair.client_send(client_ch, s).write(b"hello").unwrap();
+
+    let probes = probe_through_outage(
+        &mut pair,
+        (client_ch, server_ch),
+        Duration::from_secs(5),
+        false,
+        None,
+    );
+    assert_backs_off(&probes);
+
+    let end = pair.time;
+    let due = pair.client.next_wakeup().unwrap() - end;
+    assert!(
+        due > 3 * rtt,
+        "the backed-off probe is due {due:?} after the outage"
+    );
+    pair.server_conn_mut(server_ch).ping();
+    let sent = client_probes(&mut pair, client_ch);
+    let probed = drive_until(&mut pair, |pair| client_probes(pair, client_ch) > sent) - end;
+    assert!(
+        probed <= rtt,
+        "the client probed {probed:?} after the outage, not {due:?}"
+    );
+    // The probe is an IMMEDIATE_ACK, whose ACK declares the data lost.
+    let received = pair.server_conn_mut(server_ch).stats().frame_rx.stream;
+    let delivered = drive_until(&mut pair, |pair| {
+        pair.server_conn_mut(server_ch).stats().frame_rx.stream > received
+    }) - end;
+    assert!(
+        delivered <= 2 * rtt,
+        "the client's data arrived {delivered:?} after the outage"
+    );
+}
+
+/// While only the client's packets are lost, a server heard every 50 ms says nothing of the
+/// path the client's probes take, so they back off as if it were silent.
+#[test]
+fn a_peer_heard_through_a_one_way_outage_leaves_the_backoff() {
+    let _guard = subscribe();
+    let (mut pair, client_ch, server_ch) = settled_pair(Pair::default());
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+    pair.client_send(client_ch, s).write(b"hello").unwrap();
+
+    let probes = probe_through_outage(
+        &mut pair,
+        (client_ch, server_ch),
+        Duration::from_secs(5),
+        true,
+        Some(Duration::from_millis(50)),
+    );
+    assert_backs_off(&probes);
+}
+
+/// A packet the client handles in the instant its data goes out came before the data, so a probe
+/// timeout with nothing heard after it still brings the next probe forward.
+#[test]
+fn a_peer_heard_as_the_data_left_still_brings_the_probe_forward() {
+    let _guard = subscribe();
+    let (mut pair, client_ch, server_ch) = settled_pair(Pair::default());
+    let rtt = pair.latency * 2;
+    pair.server_conn_mut(server_ch).ping();
+    pair.drive_server();
+    pair.time += pair.latency;
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+    pair.client_send(client_ch, s).write(b"hello").unwrap();
+
+    // The PING arrives now and the data leaves in the same drive, into an outage that lasts until
+    // the client's first probe.
+    pair.to_server.loss = 1.0;
+    pair.to_client.loss = 1.0;
+    for _ in 0..2 {
+        let sent = client_probes(&mut pair, client_ch);
+        drive_until(&mut pair, |pair| client_probes(pair, client_ch) > sent);
+    }
+    pair.to_server.loss = 0.0;
+    pair.to_client.loss = 0.0;
+
+    let end = pair.time;
+    let due = pair.client.next_wakeup().unwrap() - end;
+    assert!(
+        due > 3 * rtt,
+        "the backed-off probe is due {due:?} after the outage"
+    );
+    pair.server_conn_mut(server_ch).ping();
+    let sent = client_probes(&mut pair, client_ch);
+    let probed = drive_until(&mut pair, |pair| client_probes(pair, client_ch) > sent) - end;
+    assert!(
+        probed <= rtt,
+        "the client probed {probed:?} after the outage, not {due:?}"
+    );
+}
+
+/// A peer heard from a new address moves the connection to a path with nothing in flight, so
+/// there is no probe to bring forward, even when a timer runs before anything is sent on it.
+#[test]
+fn a_peer_heard_on_a_new_path_brings_no_probe_forward() {
+    let _guard = subscribe();
+    let (mut pair, client_ch, server_ch) = settled_pair(Pair::default());
+    // The server's last packet is a PING whose ACK it has, so the client acknowledges nothing new.
+    pair.server_conn_mut(server_ch).ping();
+    pair.drive();
+    let s = pair
+        .server_streams(server_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+    pair.server_send(server_ch, s).write(b"hello").unwrap();
+
+    // The server's data and two probes go unheard.
+    pair.to_server.loss = 1.0;
+    pair.to_client.loss = 1.0;
+    let server_probes = |pair: &mut Pair| {
+        let stats = pair.server_conn_mut(server_ch).stats();
+        stats.frame_tx.stream + stats.frame_tx.ping + stats.frame_tx.immediate_ack
+    };
+    for _ in 0..3 {
+        let sent = server_probes(&mut pair);
+        drive_until(&mut pair, |pair| server_probes(pair) > sent);
+    }
+    pair.to_server.loss = 0.0;
+    pair.to_client.loss = 0.0;
+
+    let moved = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
+    pair.client.addr = moved;
+    pair.client_conn_mut(client_ch).ping();
+    pair.drive_client();
+    let (arrival, ecn, datagram) = pair.server.inbound.pop_front().unwrap();
+    pair.time = arrival;
+    let mut buf = Vec::new();
+    let Some(DatagramEvent::ConnectionEvent(ch, event)) = pair
+        .server
+        .endpoint
+        .handle(arrival, moved, None, ecn, datagram, &mut buf)
+    else {
+        panic!("the PING did not reach the connection");
+    };
+    // The timer runs before the PATH_CHALLENGE goes out, as when the socket is backpressured.
+    let conn = pair.server_conn_mut(ch);
+    conn.handle_event(event);
+    assert_eq!(conn.remote_address(), moved);
+    conn.handle_timeout(arrival);
+
+    pair.drive();
+    assert_eq!(pair.server_conn_mut(server_ch).remote_address(), moved);
+}
+
+/// A Version Negotiation packet carries no packet protection, so anyone on the path can send
+/// one: it is not the peer heard again, and brings no probe forward.
+#[test]
+fn an_unprotected_packet_does_not_bring_the_probe_forward() {
+    let _guard = subscribe();
+    // Without connection IDs, a forged packet reaches the connection by its address alone.
+    let cids: fn() -> Box<dyn ConnectionIdGenerator> =
+        || Box::new(RandomConnectionIdGenerator::new(0));
+    let (mut pair, client_ch, server_ch) = settled_pair(Pair::new(
+        Arc::new(EndpointConfig {
+            connection_id_generator_factory: Arc::new(cids),
+            ..EndpointConfig::default()
+        }),
+        server_config(),
+    ));
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+    pair.client_send(client_ch, s).write(b"hello").unwrap();
+    let probes = probe_through_outage(
+        &mut pair,
+        (client_ch, server_ch),
+        Duration::from_secs(5),
+        false,
+        None,
+    );
+    assert_backs_off(&probes);
+
+    // Version Negotiation for a reserved version, with empty connection IDs.
+    let forged = hex!("80 00000000 00 00 0a1a2a3a");
+    pair.client
+        .inbound
+        .push_back((pair.time, None, BytesMut::from(&forged[..])));
+    let sent = client_probes(&mut pair, client_ch);
+    pair.drive_client();
+    pair.drive_client();
+    assert_eq!(
+        client_probes(&mut pair, client_ch),
+        sent,
+        "a forged packet brought the probe forward"
     );
 }
 

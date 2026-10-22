@@ -79,6 +79,11 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
         self.expect(True, base="--all", rust=True)
 
+    def test_nixpkgs_updates_check_browser_pins(self):
+        # JS selection also builds wasm, which is reflected in the Rust cache query.
+        self.change("flake.lock")
+        self.expect(True, rust=True)
+
     def test_empty_diff_keeps_repository_lints(self):
         self.expect(True)
 
@@ -194,13 +199,6 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(sum(call.startswith("rs test-changed ") for call in calls), 1)
         self.assertLess(next(i for i, call in enumerate(calls) if call.startswith("rs lint-changed ")),
                         next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")))
-
-    def test_removed_halves_fail_before_running_anything(self):
-        for action in ("ci-check", "ci-test"):
-            result = subprocess.run(["bash", "sh/dispatch.sh", action, "origin/main"],
-                                    cwd=self.repo, env=self.env, text=True, capture_output=True)
-            self.assertEqual(result.returncode, 2)
-            self.assertEqual(result.stdout, "")
 
 
 def benchmark():

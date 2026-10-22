@@ -27,7 +27,17 @@ pub type Target = fn(&[u8]) -> bool;
 /// Build a cached group with optional private object fields for model benchmarks.
 pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Producer) {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
-	let track = broadcast.create_track("objects", None).unwrap();
+	// Object properties come from a moq-transport publisher, whose draft serialized them.
+	let info = track::Info {
+		properties: properties.then(|| {
+			std::sync::Arc::new(crate::model::object::TrackProperties {
+				version: ietf::Version::Draft22,
+				values: Vec::new(),
+			})
+		}),
+		..Default::default()
+	};
+	let track = broadcast.create_track("objects", info).unwrap();
 	let mut group = track.append_group().unwrap();
 	let payload = Bytes::from_static(&[0; 64]);
 	for id in 0..frames {
@@ -40,7 +50,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 							id: 0x80,
 							value: crate::model::object::Value::Int(96_000),
 						}],
-						crate::model::object::Encoding::Draft19,
+						ietf::Version::Draft22,
 					)
 					.unwrap(),
 					..Default::default()
@@ -55,18 +65,12 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 			fields,
 			inflated: None,
 		};
-		let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
+		let mut frame = group.create_object(header).unwrap();
 		frame.write(payload.clone()).unwrap();
 		group = frame.finish().unwrap();
 	}
 	group.finish().unwrap();
 	(broadcast, track, group)
-}
-
-/// Declare a received track's end while the wire may still owe groups below it, as a
-/// subscriber does on SUBSCRIBE_END, for the pending-tail benchmark.
-pub fn finish_at_pending(track: &mut track::Producer, end: track::Position) -> crate::Result<()> {
-	track.finish_at_pending(end)
 }
 
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
@@ -107,7 +111,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 const LITE_KINDS: u8 = 22;
 
 /// How many types [`ietf_wire`] dispatches over.
-const IETF_KINDS: u8 = 40;
+const IETF_KINDS: u8 = 41;
 
 /// Split the two selector bytes off the input: a version and a type.
 fn select(data: &[u8], versions: usize) -> Option<(usize, u8, &[u8])> {
@@ -151,30 +155,38 @@ where
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	// The body doesn't say whether it carries a timestamp or an inflated size, or whether
-	// the session negotiated the `ietf` extension, so try every reading.
-	let ietf: &[bool] = match version.has_ietf() {
+	// The body doesn't say whether it carries a timestamp or an inflated size, whether the
+	// session negotiated the `ietf` extension, or which draft its track came from, so try
+	// every reading.
+	let negotiated: &[bool] = match version.has_ietf() {
 		true => &[false, true],
 		false => &[false],
 	};
 	let mut any = false;
-	for &ietf in ietf {
+	for &negotiated in negotiated {
 		for timescale in [Some(crate::Timescale::MILLI), None] {
-			for compressed in [false, true] {
-				let format = lite::Format { timescale, compressed };
-				let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, ietf, |_| format)
-				else {
-					continue;
-				};
-				any = true;
+			for ietf in [None, Some(ietf::Version::Draft14), Some(ietf::Version::Draft22)] {
+				for compressed in [false, true] {
+					let framing = lite::Framing {
+						timescale,
+						ietf,
+						compressed,
+					};
+					let Ok(decoded) =
+						lite::Datagram::decode(Bytes::copy_from_slice(data), version, negotiated, |_| framing)
+					else {
+						continue;
+					};
+					any = true;
 
-				let Ok(first) = decoded.encode_bytes(version) else {
-					continue;
-				};
+					let Ok(first) = decoded.encode_bytes(version) else {
+						continue;
+					};
 
-				let echo = lite::Datagram::decode(first, version, ietf, |_| format)
-					.expect("could not decode our own encoding");
-				assert_eq!(echo, decoded, "datagram did not survive a round trip");
+					let echo = lite::Datagram::decode(first, version, negotiated, |_| framing)
+						.expect("could not decode our own encoding");
+					assert_eq!(echo, decoded, "datagram did not survive a round trip");
+				}
 			}
 		}
 	}
@@ -295,6 +307,26 @@ pub fn snapshot(origin: &crate::origin::Producer, prefix: &str) -> Snapshot {
 	Snapshot(origin.snapshot(prefix))
 }
 
+/// What a client session fed into an origin hears it should ask its peer about, for
+/// the interests bench.
+pub struct Interests(crate::model::Interests);
+
+/// Register as a client session fed into `origin` does.
+pub fn interests(origin: &crate::origin::Producer) -> Interests {
+	Interests(origin.interests())
+}
+
+impl Interests {
+	/// Take every change heard so far, returning how many there were.
+	pub fn drain(&self) -> usize {
+		let mut changes = 0;
+		while let std::task::Poll::Ready(Some(_)) = self.0.poll_next(&kio::Waiter::noop()) {
+			changes += 1;
+		}
+		changes
+	}
+}
+
 /// Add `n` publisher-side payload bytes on `(path, tier)`, creating the entry
 /// when the path is tracked. The stats producer bench marks a share of held
 /// paths changed this way, without a media frame. A later [`crate::stats::Registry::report`]
@@ -306,6 +338,24 @@ pub fn bump_publisher_bytes(
 	n: u64,
 ) {
 	registry.bump_publisher_bytes(path, tier, n);
+}
+
+/// An allocator's probe target as its session follows it, for the bandwidth bench.
+pub struct ProbeTarget(crate::bandwidth::Target);
+
+impl ProbeTarget {
+	/// Follow `allocator`'s target.
+	pub fn new(allocator: &crate::bandwidth::Allocator) -> Self {
+		Self(allocator.target())
+	}
+
+	/// The target in bits per second once it moved, without parking.
+	pub fn poll(&mut self) -> Option<u64> {
+		match self.0.poll_changed(&kio::Waiter::noop()) {
+			std::task::Poll::Ready(target) => Some(target.as_bps()),
+			std::task::Poll::Pending => None,
+		}
+	}
 }
 
 /// A payload-byte meter for the stats write-path benchmark.
@@ -484,8 +534,9 @@ impl LiteSample {
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
 			Self::Datagram => {
-				lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| lite::Format {
+				lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| lite::Framing {
 					timescale: Some(crate::Timescale::MILLI),
+					ietf: None,
 					compressed: false,
 				})
 				.map(|_| 1)
@@ -536,7 +587,7 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		14 => roundtrip::<ietf::PublishOk, _>(rest, version),
 		15 => roundtrip::<ietf::PublishError<'static>, _>(rest, version),
 		16 => roundtrip::<ietf::PublishDone<'static>, _>(rest, version),
-		17 => roundtrip::<ietf::PublishBlocked<'static>, _>(rest, version),
+		17 => roundtrip::<ietf::PublishSkipped<'static>, _>(rest, version),
 		18 => roundtrip::<ietf::Subscribe<'static>, _>(rest, version),
 		19 => roundtrip::<ietf::SubscribeOk, _>(rest, version),
 		20 => roundtrip::<ietf::SubscribeError<'static>, _>(rest, version),
@@ -559,6 +610,7 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		37 => roundtrip::<ietf::FetchObject, _>(rest, version),
 		38 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, version),
 		39 => roundtrip::<ietf::ObjectDatagram, _>(rest, version),
+		40 => roundtrip::<ietf::SubscribeTracks<'static>, _>(rest, version),
 		_ => unreachable!("kind is taken modulo IETF_KINDS"),
 	}
 }
@@ -1149,7 +1201,7 @@ pub fn seeds() -> Vec<Seed> {
 /// every declared size when the first byte lands and `Some(0)` grows every buffer with
 /// the bytes received.
 pub struct FrameRecv {
-	streams: Vec<Option<(coding::Reader<Chunks, lite::Version>, frame::ProducerOwned)>>,
+	streams: Vec<Option<(coding::Reader<Chunks, lite::Version>, frame::Producer)>>,
 	// Keeps the groups' track alive.
 	_track: track::Producer,
 	_broadcast: broadcast::Producer,
@@ -1162,6 +1214,7 @@ impl FrameRecv {
 		// Unbounded, so eviction never aborts a group mid-frame.
 		let mut info = broadcast::Info::new();
 		info.pool = cache::Pool::unbounded();
+		info.frames = budget.map(frame::Budget::new).unwrap_or_default();
 		let broadcast = info.produce();
 		let track = broadcast
 			.create_track(
@@ -1169,7 +1222,6 @@ impl FrameRecv {
 				crate::track::Info::default().with_timescale(crate::Timescale::MILLI),
 			)
 			.unwrap();
-		let budget = budget.map(frame::Budget::new).unwrap_or_default();
 		let payload = bytes::Bytes::from(vec![0u8; size]);
 
 		let streams = (0..streams)
@@ -1179,7 +1231,7 @@ impl FrameRecv {
 					size: size as u64,
 					timestamp: Some(crate::Timestamp::ZERO),
 				};
-				let frame = group.create_frame_owned(info, &budget).unwrap();
+				let frame = group.create_frame(info).unwrap();
 				let stream = Chunks {
 					payload: payload.clone(),
 					chunk,

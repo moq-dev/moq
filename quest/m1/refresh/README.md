@@ -16,8 +16,8 @@ Boundaries:
   themselves without a timer.
 - Joining is the only trigger. There is no explicit subscriber request; a
   decoder that lost sync rereads the cached group from its start.
-- Non-goals: flate modes, json stream mode, and importers that cannot force
-  a keyframe (CMAF, TS).
+- Non-goals: json stream mode and importers that cannot force a keyframe
+  (CMAF, TS).
 
 ## Plan
 
@@ -44,9 +44,10 @@ Decided with the maintainer on 2026-10-16.
   unit as moq-json's `delta_ratio`, which it replaces. `None` means joins
   never trigger groups. It is the only home of the ratio: producers that
   receive a created track read it from there.
-- **Order.** Relay requests for dynamic groups landed first (#5708) as
-  relay-internal IETF support. The core quest makes its private request
-  path public, so the work is promoted rather than redone.
+- **Order.** Relay requests for dynamic groups (#5708) were promoted to
+  the public `Demand::wanted` and `track::Info::refresh` in #5930, and
+  #6030 carries refresh demand through lite relays. The moq-json producers
+  remain.
 - **m1.** Replacing `Demand` is a breaking API change, and m1 finishes the
   planned breaking APIs before the cut.
 
@@ -67,4 +68,3 @@ Work owned by this README, after the children land:
 ## Related
 
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - its dynamic-groups child is the IETF half this epic promotes
-- [JSON window timestamps](/quest/m1/json-window-timestamps.md) - touches the same window consumers

@@ -5,6 +5,16 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### WebSocket clients must offer a QMux subprotocol (#6231)
+
+The relay answers a WebSocket upgrade with 400 when its `Sec-WebSocket-Protocol` offers none of the relay's QMux subprotocols, instead of falling back to the legacy `webtransport` format.
+Upgrade any client that still speaks only `webtransport` over WebSocket before the relay.
+
+### io\_uring workers start serving separately (#6245)
+
+`uring::Workers::serve(cluster, auth, shutdown, sessions)` is now `spawn` with the same arguments, which sets every worker up without accepting, followed by `serve()`, which starts them accepting.
+Install anything that must be in place before the first session (`Relay::run` installs its signal handlers) between the two.
+
 ### `supervise` takes a `Serving` guard (#6144)
 
 `moq_relay::supervise` takes the `shutdown::Serving` from `Observer::serve` in place of the `Observer`.

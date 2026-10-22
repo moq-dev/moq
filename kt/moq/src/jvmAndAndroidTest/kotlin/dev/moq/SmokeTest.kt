@@ -29,6 +29,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration
@@ -230,6 +231,23 @@ class SmokeTest {
     }
 
     @Test
+    fun `finishing a broadcast lingers until the wait is cancelled`() = runTest {
+        val broadcast = BroadcastProducer()
+        val track = broadcast.publishTrack("status", TrackInfo(maxAgeUs = 3_600_000_000uL))
+        track.finish()
+        broadcast.finish().use { finish ->
+            assertEquals(1.hours, finish.linger)
+            assertFailsWith<MoqException> { broadcast.consume() }
+            // Cancelling the wait is the interrupt: it ends instead of lingering for an hour.
+            val wait = async { finish.wait() }
+            yield()
+            wait.cancel()
+            wait.join()
+            finish.end()
+        }
+    }
+
+    @Test
     fun `broadcast updates shared video properties`() {
         BroadcastProducer().use { broadcast ->
             CatalogProducer(broadcast).setVideoProperties(VideoProperties(rotation = 315.0))
@@ -247,7 +265,7 @@ class SmokeTest {
             val fetched = broadcast.consume().fetchGroup(
                 "events",
                 0uL,
-                FetchGroupOptions(priority = 3u),
+                FetchGroupOptions(priority = 3),
             )
             assertEquals(0uL, fetched.sequence())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
@@ -354,7 +372,7 @@ class SmokeTest {
 
             // Fetch while the track is still published: finishing the media producer
             // unpublishes it, and the fetch would then miss with NotFound.
-            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(rendition = dev.moq.media.AudioRendition(name, audio), sequence = 0uL, options = FetchGroupOptions(priority = 3u)))
+            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(rendition = dev.moq.media.AudioRendition(name, audio), sequence = 0uL, options = FetchGroupOptions(priority = 3)))
 
             // Close the group so the fetched stream terminates instead of waiting for more.
             media.finish()

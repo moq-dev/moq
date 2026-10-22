@@ -249,13 +249,6 @@ fn publish_container(broadcast: u32, format: moq_container_format, init: &[u8]) 
 }
 
 #[test]
-fn origin_lifecycle() {
-	let origin = id(moq_origin_create());
-	assert_eq!(moq_origin_close(origin), 0, "moq_origin_close should succeed");
-	assert!(moq_origin_close(origin) < 0, "double-close should fail");
-}
-
-#[test]
 fn last_error_reports_reason() {
 	// A failed call records a retrievable reason string for moq_error().
 	assert!(moq_origin_close(9999) < 0);
@@ -406,26 +399,6 @@ fn last_error_protocol_captures_session_known_app_and_unknown() {
 		assert_eq!(protocol.code, code);
 		assert_eq!(protocol.kind, kind);
 	}
-}
-
-#[test]
-fn publish_media_lifecycle() {
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"publish-media-lifecycle");
-	let _guard = Guard(Some(|| {
-		moq_publish_close(broadcast);
-	}));
-
-	let init = opus_head();
-	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
-	let media = id(publish_audio(broadcast, format, &init, None));
-
-	let payload = b"opus frame";
-	let ret = unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 1000) };
-	assert_eq!(ret, 0, "moq_publish_media_frame should succeed");
-
-	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
 #[test]
@@ -659,12 +632,12 @@ fn publish_media_owns_its_rendition_before_the_first_keyframe() {
 		"and the no-op left the media track's rendition alone"
 	);
 
-	// Once the media handle is gone the name is free again.
+	// The broadcast keeps a finished media track, rendition and all, until it ends.
 	assert_eq!(moq_publish_media_finish(media), 0);
 	assert_eq!(
 		unsafe { moq_publish_video_config(broadcast, &video) },
-		0,
-		"finishing the media track releases its rendition name"
+		-18,
+		"the finished media track keeps its rendition name"
 	);
 
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -783,7 +756,7 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &disabled_video) }, 0);
 	{
 		let mut state = State::lock();
-		let (_, catalog) = state.publish.pair_mut(Id::try_from(broadcast).unwrap()).unwrap();
+		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
 		catalog
 			.modify()
 			.unwrap()
@@ -2237,6 +2210,98 @@ fn close_invalid_or_zero_ids() {
 	assert!(moq_publish_close(0) < 0);
 }
 
+/// A finished broadcast serves its finished tracks to a late subscriber, even after their
+/// handles were freed, and reports the longest max age among them as its linger.
+#[test]
+fn publish_finish_serves_finished_tracks_until_closed() {
+	let origin = id(moq_origin_create());
+	let path = b"finish/serve";
+	let broadcast = publish_broadcast(origin, path);
+
+	let name = b"data";
+	let info = moq_track_info {
+		priority: 0,
+		max_age_us: 5_000_000,
+		max_age_present: true,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: false,
+		compress: false,
+	};
+	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
+	let payload = b"tail";
+	assert_eq!(
+		unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), 1_000) },
+		0
+	);
+	assert_eq!(moq_publish_track_finish(track), 0);
+
+	let media = id(publish_audio(
+		broadcast,
+		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+		&opus_head(),
+		None,
+	));
+	let frame = b"opus frame";
+	assert_eq!(
+		unsafe { moq_publish_media_frame(media, frame.as_ptr(), frame.len(), 1_000) },
+		0
+	);
+	assert_eq!(moq_publish_media_finish(media), 0);
+
+	// A NULL out-pointer is refused before the broadcast is consumed.
+	assert!(unsafe { moq_publish_finish(broadcast, std::ptr::null_mut()) } < 0);
+	let mut linger_us = 0;
+	let finish = id(unsafe { moq_publish_finish(broadcast, &mut linger_us) });
+	// The media track's default max age outlasts the raw track's.
+	assert!(linger_us >= 5_000_000, "linger {linger_us}us");
+	assert!(
+		moq_publish_close(broadcast) < 0,
+		"a finished broadcast handle is released"
+	);
+
+	let consume = request_broadcast(origin, path);
+	let frame_cb = Callback::new();
+	let subscription = moq_subscription {
+		priority: 0,
+		max_delay_us: 0,
+		ranges: std::ptr::null(),
+		ranges_len: 0,
+		order: 0,
+	};
+	id(unsafe {
+		moq_consume_track(
+			consume,
+			name.as_ptr() as *const c_char,
+			name.len(),
+			&subscription,
+			Some(channel_callback),
+			frame_cb.ptr,
+		)
+	});
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp_us: 0,
+		timestamp_present: false,
+		keyframe: false,
+	};
+	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
+	assert_eq!(received, payload);
+	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	// The track finished, so the subscription ends cleanly on its own, racing any cancel.
+	assert_eq!(frame_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+
+	assert_eq!(moq_publish_finish_close(finish), 0);
+	assert!(moq_publish_finish_close(finish) < 0, "a closed finish is released");
+	assert!(request_once(origin, path) < 0, "a closed finish is unroutable");
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn publish_close_releases_the_handle() {
 	let origin = id(moq_origin_create());
@@ -2736,8 +2801,9 @@ fn track_demand_follows_subscribers() {
 	assert_eq!(late_cb.recv_terminal(), 0);
 	assert!(moq_publish_demand_cancel(late) < 0, "double-close should fail");
 
-	// Finishing the track ends the remaining watcher cleanly.
+	// The broadcast keeps a finished track until it ends, which ends the remaining watcher cleanly.
 	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(demand_cb.recv_terminal(), 0);
 	assert!(
 		moq_publish_demand_cancel(watcher) < 0,
@@ -2745,7 +2811,6 @@ fn track_demand_follows_subscribers() {
 	);
 
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2779,7 +2844,7 @@ fn track_demand_reports_the_wanted_group() {
 	let broadcast = publish_broadcast(origin, b"track-demand-wanted");
 	let name = b"data";
 	let info = moq_track_info {
-		priority: 127,
+		priority: 0,
 		max_age_us: 0,
 		max_age_present: false,
 		timescale: 0,
@@ -2823,6 +2888,7 @@ fn track_demand_reports_the_wanted_group() {
 	assert_eq!(demand_wanted(watcher), None);
 
 	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(demand_cb.recv_terminal(), 0);
 	let (mut group, mut present) = (0, false);
 	assert!(
@@ -2831,7 +2897,6 @@ fn track_demand_reports_the_wanted_group() {
 	);
 
 	assert_eq!(moq_consume_close(consume), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -2921,10 +2986,9 @@ fn media_demand_refuses_a_container() {
 	let _watcher = id(unsafe { moq_publish_media_demand(media, Some(channel_callback), cb.ptr) });
 	assert_eq!(cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
 	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(cb.recv_terminal(), 0);
-
 	assert_eq!(moq_publish_container_finish(container), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(cb.recv_terminal(), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3026,9 +3090,9 @@ fn dynamic_serves_track_requests() {
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
 	assert_eq!(moq_publish_track_finish(track), 0);
-	assert_eq!(demand_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(demand_cb.recv_terminal(), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
@@ -3071,8 +3135,31 @@ fn dynamic_track_request_publishes_media() {
 	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNUSED as i32);
 	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(demand_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(demand_cb.recv_terminal(), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A raw track request already delivered stays acceptable after its broadcast handle is closed.
+#[test]
+fn track_request_accepts_after_the_broadcast_closes() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"dynamic-closed");
+	let request_cb = Callback::new();
+	let _dynamic = id(unsafe { moq_publish_dynamic(broadcast, Some(channel_callback), request_cb.ptr) });
+
+	let consume = consume_local(broadcast);
+	let frame_cb = Callback::new();
+	consume_track(consume, b"raw", &frame_cb);
+
+	let request = id(request_cb.recv());
+	assert_eq!(moq_publish_close(broadcast), 0);
+	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
+	assert_eq!(moq_publish_track_finish(track), 0);
+	// The subscription ends with the finished track, before its callback's channel is freed.
+	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(request_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_origin_close(origin), 0);
@@ -3084,7 +3171,7 @@ fn fetch_group(
 	broadcast: u32,
 	name: &str,
 	sequence: u64,
-	priority: u8,
+	priority: i8,
 	frame_start: u64,
 ) -> mpsc::Receiver<Result<(u64, Vec<u8>), moq_net::Error>> {
 	let consumer = State::lock()
@@ -3125,7 +3212,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 	let fetch = fetch_group(broadcast, "data", 5, 11, 0);
 	let request = id(group_cb.recv());
 	let mut sequence = 0u64;
-	let mut priority = 0u8;
+	let mut priority = 0i8;
 	let mut frame_start = 1u64;
 	assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
 	assert_eq!(unsafe { moq_group_request_priority(request, &mut priority) }, 0);
@@ -3407,7 +3494,7 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	// The importer picks the track name, and the catalog rendition must key on the same one.
 	let name = {
 		let mut state = State::lock();
-		let (_, catalog) = state.publish.pair_mut(Id::try_from(source).unwrap()).unwrap();
+		let catalog = state.publish.target(Id::try_from(source).unwrap()).unwrap().catalog;
 		let catalog = catalog.modify().unwrap();
 		catalog
 			.audio
@@ -3438,7 +3525,7 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	// The C config struct has no broadcast field, so point the rendition at the sibling here.
 	{
 		let mut state = State::lock();
-		let (_, catalog) = state.publish.pair_mut(Id::try_from(broadcast).unwrap()).unwrap();
+		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
 		catalog
 			.modify()
 			.unwrap()
@@ -4501,10 +4588,13 @@ fn video_raw_publish_rejects_invalid_config() {
 	// A size no encoder can take, but whose arithmetic is fine, is the backend's
 	// call rather than the boundary's: it must not be swept up by the check above.
 	// Asserted on the reason, not just the code, since a backend refusing it looks
-	// the same from the outside as the boundary refusing it.
+	// the same from the outside as the boundary refusing it. Wide rather than
+	// huge: the probe fills a frame of this size before the backend refuses it, so
+	// 65534x65534 costs seconds here, and moq-video's `validate_encodable` test
+	// already pins that its arithmetic passes.
 	let merely_huge = moq_video_encoder_input {
 		width: 65534,
-		height: 65534,
+		height: 2,
 		..valid_input
 	};
 	let huge = unsafe { moq_encode_video(broadcast, &merely_huge, &valid_output, 0) };
@@ -5539,8 +5629,22 @@ fn server_accepts_a_session() {
 	let bandwidth = id(moq_session_bandwidth(session));
 	assert_eq!(moq_bandwidth_close(bandwidth), 0);
 
-	// The broadcast the server publishes reaches the client.
-	let consumed = request_broadcast(received, b"demo");
+	// The broadcast the server publishes reaches the client. A client only asks the
+	// server about what it watches, so wait on the path rather than request it once.
+	let path = b"demo";
+	let announced_cb = Callback::new();
+	let task = id(unsafe {
+		moq_origin_announced_broadcast(
+			received,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			announced_cb.ptr,
+		)
+	});
+	let consumed = id(announced_cb.recv());
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(announced_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consumed), 0);
 
 	// Closing the accepted session is a clean terminal close.

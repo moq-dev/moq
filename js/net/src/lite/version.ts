@@ -118,6 +118,40 @@ export function hasAuth(version: Version): boolean {
 	}
 }
 
+/**
+ * Whether a subscriber may open a Tracks Stream (0x8) to list a broadcast's tracks.
+ * Added in lite-07.
+ */
+export function hasTracks(version: Version): boolean {
+	// Explicitly list older versions so future versions default to having the stream.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/** Whether either endpoint may open a Padding Stream (0x2). Added in lite-07. */
+export function hasPadding(version: Version): boolean {
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin from each hop chain. */
 export function hasAnnounceOk(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-05+ announce behavior.
@@ -423,6 +457,24 @@ export function hasRefresh(version: Version): boolean {
 	}
 }
 
+/** Whether received frame timestamps are the publisher's media time. Lite-05/06 stamp an untimed
+ * track's payloads with their send time, which a receiver cannot tell from it, so it drops every
+ * timestamp received on them and the track arrives untimed. */
+export function hasMediaTime(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";
@@ -463,6 +515,26 @@ export function versionName(v: Version): string {
  * takes as where the live feed is. Added in lite-07; an earlier answer says nothing about it.
  */
 export function hasLargest(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/**
+ * Whether SUBSCRIBE_DROP's Error Code is a stream error code, ending a dropped group's reader
+ * as a reset keeping its header would. Added in lite-07; earlier versions carry an
+ * application-specific code there.
+ */
+export function hasDropCode(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.
 	switch (version) {
 		case Version.DRAFT_01:

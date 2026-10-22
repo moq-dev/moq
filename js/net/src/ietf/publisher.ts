@@ -723,7 +723,7 @@ export class Publisher {
 			const groups = new Set<Promise<void>>();
 			const streams: StreamCount = { opened: 0 };
 			// One ranking for the whole subscription, shared by every group and the fill.
-			const ranked = new Priority(track);
+			const ranked = new Priority(track, info.priority);
 			ranking = ranked;
 
 			// Serve groups until the track ends or the requester cancels.
@@ -904,14 +904,28 @@ export class Publisher {
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
 			// in the order we asked, not the subscription's order. Failing here drops the group
 			// and lets the next one compete for the next slot.
-			const stream = await Writer.tryOpen(this.#quic, {
-				cancel: unsubscribed,
-				version: this.#session.version,
-				sendOrder: ranking.rank(group.sequence, slice.skip),
-				waitUntilAvailable: false,
-			});
+			// Watch the group while the transport parks the open, and release that watch
+			// once the open settles. tryOpen owns resetting a slot that arrives too late.
+			const opened = Promise.withResolvers<void>();
+			let failure: Error | undefined;
+			const abandoned = hooks
+				.guardGroup(group, () => opened.promise)
+				.catch((err: unknown) => {
+					failure = error(err);
+				});
+			let stream: Writer | undefined;
+			try {
+				stream = await Writer.tryOpen(this.#quic, {
+					version: this.#session.version,
+					sendOrder: ranking.rank(group.sequence, slice.skip),
+					cancel: race([unsubscribed, abandoned]),
+					waitUntilAvailable: false,
+				});
+			} finally {
+				opened.resolve();
+			}
 			if (!stream) {
-				group.close(new Error("no stream slot"));
+				group.close(failure ?? new Error("no stream slot"));
 				return;
 			}
 			streams.opened += 1;
@@ -1010,6 +1024,9 @@ export class Publisher {
 				// competing at its rank until the stream settles.
 				void stream.closed.catch(() => {}).then(() => ranking.remove(stream));
 			}
+		} catch (err: unknown) {
+			// A failed open has no stream to reset, but still ends only this group.
+			group.close(error(err));
 		} finally {
 			group.close();
 		}

@@ -499,7 +499,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// `priority` should come from [`PRIORITY`](hang::catalog::PRIORITY) for the kind of media
 	/// the track carries. Chain [`with_timescale`](moq_net::track::Info::with_timescale) for a
 	/// container that carries the source's own scale (CMAF and Matroska both do).
-	pub fn track_info(&self, priority: u8) -> moq_net::track::Info {
+	pub fn track_info(&self, priority: i8) -> moq_net::track::Info {
 		let info = hang::container::track_info(priority);
 		match self.max_age {
 			Some(max_age) => info.with_max_age(max_age),

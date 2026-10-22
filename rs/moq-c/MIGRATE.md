@@ -4,6 +4,29 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Priorities are signed (#6142)
+
+`moq_track_info.priority` and `moq_subscription.priority` are `int8_t`, and `moq_group_request_priority` writes an `int8_t`, which changes the ABI.
+Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced` or `moq_origin_announced_broadcast`, instead of under its whole scope at connect.
+`moq_origin_request` watches nothing, so on a client it fails with a negative code for a path nothing watches, even when the relay announces it.
+Resolve the path with `moq_origin_announced_broadcast`, or hold `moq_origin_announced` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
+### `MOQ_CONTAINER_FORMAT_FMP4` unwraps to Legacy (#6250)
+
+A container import with `MOQ_CONTAINER_FORMAT_FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `MOQ_CONTAINER_FORMAT_CMAF` to keep publishing CMAF.
+
+### Finished tracks stay until the broadcast ends (#6157)
+
+`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.
+Publish a replacement under a new name, and expect a finished track's demand terminal callback when the broadcast closes rather than at the finish.
+
 ### A claim answers by publishing (#5678)
 
 `moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.

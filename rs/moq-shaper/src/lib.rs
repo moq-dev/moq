@@ -18,6 +18,8 @@
 //! model that keeps the order, one link shared by every client, batches, steps,
 //! and named profiles loaded as a [`Preset`]. The README says why each exists.
 
+#![warn(missing_docs)]
+
 use std::{
 	cmp::Reverse,
 	collections::{BTreeMap, BinaryHeap, HashMap, hash_map},
@@ -42,11 +44,12 @@ pub use preset::Preset;
 use anyhow::Context;
 #[cfg(test)]
 use mem::UdpSocket;
+use moq_clock::Instant;
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
 use serde::{Deserialize, Serialize};
 #[cfg(not(test))]
 use tokio::net::UdpSocket;
-use tokio::{sync::mpsc, task::JoinSet, time::Instant};
+use tokio::{sync::mpsc, task::JoinSet};
 
 /// How one direction of the path treats each datagram.
 ///
@@ -895,7 +898,7 @@ async fn deliver(
 					None => ready.push(parcel),
 				}
 			}
-			_ = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
+			_ = moq_clock::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
 				// The window closes a batch that never filled.
 				if let Some(closes) = held.closes.filter(|&closes| closes <= Instant::now()) {
 					held.release(closes, &mut ready, &tally[direction]);
@@ -1235,6 +1238,7 @@ fn gaussian(rng: &mut Xoshiro256PlusPlus) -> f64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 

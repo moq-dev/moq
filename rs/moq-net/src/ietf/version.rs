@@ -15,21 +15,6 @@ pub enum Version {
 	Draft22,
 }
 
-impl Version {
-	/// Every implemented draft, oldest first.
-	pub(crate) const ALL: [Self; 9] = [
-		Self::Draft14,
-		Self::Draft15,
-		Self::Draft16,
-		Self::Draft17,
-		Self::Draft18,
-		Self::Draft19,
-		Self::Draft20,
-		Self::Draft21,
-		Self::Draft22,
-	];
-}
-
 impl fmt::Display for Version {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
@@ -97,6 +82,7 @@ mod tests {
 		let properties = Properties {
 			unknown: Default::default(),
 			dynamic_groups: false,
+			compress: false,
 			max_cache_duration: None,
 			timescale: Some(Timescale::new(90_000).unwrap()),
 			priority: Some(64),
@@ -140,6 +126,9 @@ mod tests {
 			largest_location: Some(Location { group: 9, object: 0 }),
 			forward: true,
 			properties,
+			subscriber_priority: None,
+			group_order: None,
+			filter: None,
 		};
 
 		let fetch = Fetch {

@@ -148,7 +148,7 @@ pub enum moq_video_format {
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_container_format {
-	/// Fragmented MP4 / CMAF.
+	/// Fragmented MP4 / CMAF, split into one frame per sample.
 	MOQ_CONTAINER_FORMAT_FMP4 = 0,
 	/// Matroska / WebM.
 	MOQ_CONTAINER_FORMAT_MKV = 1,
@@ -156,6 +156,8 @@ pub enum moq_container_format {
 	MOQ_CONTAINER_FORMAT_TS = 2,
 	/// Flash Video, as used by RTMP.
 	MOQ_CONTAINER_FORMAT_FLV = 3,
+	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
+	MOQ_CONTAINER_FORMAT_CMAF = 4,
 }
 
 /// Configuration for [moq_publish_audio].
@@ -312,6 +314,7 @@ fn container_format_from_u32(value: u32) -> Result<moq_mux::import::ContainerFor
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_MKV as u32 => ContainerFormat::Mkv,
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_TS as u32 => ContainerFormat::Ts,
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_FLV as u32 => ContainerFormat::Flv,
+		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_CMAF as u32 => ContainerFormat::Cmaf,
 		_ => return Err(Error::InvalidCode),
 	})
 }
@@ -518,14 +521,14 @@ pub struct moq_datagram {
 
 /// Publisher-side raw track properties.
 ///
-/// A null [moq_publish_track] `info` pointer uses the moq-net defaults.
-/// A zero-initialized struct also uses those defaults, except `priority`, which
-/// has no presence flag: zero is the least urgent, and 127 is the moq-net default.
+/// A null [moq_publish_track] `info` pointer uses the moq-net defaults, and so does a
+/// zero-initialized struct.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_track_info {
 	/// Priority, used to break ties between subscriptions of equal subscriber priority.
-	pub priority: u8,
+	/// Higher is more urgent; the default 0 is the midpoint.
+	pub priority: i8,
 
 	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
 	/// The publisher-side half of `moq_subscription.max_delay_us`.
@@ -594,8 +597,9 @@ pub enum moq_demand {
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_subscription {
-	/// Delivery priority. Higher values preempt lower ones under contention.
-	pub priority: u8,
+	/// Delivery priority. Higher values preempt lower ones under contention; the default 0 is
+	/// the midpoint.
+	pub priority: i8,
 
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in microseconds.
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
@@ -605,8 +609,8 @@ pub struct moq_subscription {
 	/// The spans of the track to deliver, or NULL for everything `max_delay_us` still
 	/// considers fresh. A non-NULL pointer with `ranges_len` 0 asks for nothing.
 	///
-	/// A request to the publisher, aggregated across every subscriber. Reads start at the
-	/// lowest group a range starts at, and stop past the last absolute end.
+	/// A request to the publisher, aggregated across every subscriber, and this
+	/// subscription's read filter: it reads only the groups its own ranges cover.
 	pub ranges: *const moq_range,
 	/// The number of entries in `ranges`.
 	pub ranges_len: usize,
@@ -2097,7 +2101,9 @@ pub extern "C" fn moq_origin_announced_broadcast_cancel(task: u32) -> i32 {
 /// Resolves against what is announced *now*, where [moq_origin_announced_broadcast] waits
 /// indefinitely: it returns an announced broadcast at once, and fails when none is reachable,
 /// including a broadcast created but not announced. It does NOT wait for a later
-/// announcement. Serve on-demand paths with [moq_origin_dynamic].
+/// announcement. Serve on-demand paths with [moq_origin_dynamic]. A moq-lite client session
+/// only asks its peer about paths something watches, through [moq_origin_announced] or
+/// [moq_origin_announced_broadcast], so a path nothing watches is unreachable on it.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
 /// with a terminal code: `0` (finished, including after [moq_origin_request_cancel]) or a negative
@@ -2198,6 +2204,40 @@ pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		State::lock().publish.close(broadcast)
+	})
+}
+
+/// End a broadcast cleanly and release its handle, keeping it servable until its media is stale.
+///
+/// Finish every track first: the returned finish handle holds the tracks finished by now and
+/// keeps the broadcast announced, so a subscriber still catching up can drain them. A track still
+/// live is not held. `linger_us` receives how long to keep the handle, in microseconds: the
+/// longest max age among the held tracks, or zero. Keep it that long on your own clock, then
+/// [moq_publish_finish_close]; closing it sooner is how an interrupt ends the linger.
+///
+/// Returns a non-zero finish handle on success, or a negative code on failure.
+///
+/// # Safety
+/// - `linger_us` must be a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_finish(broadcast: u32, linger_us: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let linger_us = unsafe { linger_us.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let (finish, linger) = State::lock().publish.finish(broadcast)?;
+		*linger_us = u64::try_from(linger.as_micros()).unwrap_or(u64::MAX);
+		Ok(finish)
+	})
+}
+
+/// Close a finished broadcast and release its handle, ending its linger.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_finish_close(finish: u32) -> i32 {
+	ffi::enter(move || {
+		let finish = ffi::parse_id(finish)?;
+		State::lock().publish.finish_close(finish)
 	})
 }
 
@@ -2327,6 +2367,9 @@ pub extern "C" fn moq_publish_media_seek(media: u32, sequence: u64) -> i32 {
 
 /// Finish a media track, flushing any buffered frames. No more frames can be written.
 ///
+/// The broadcast keeps the finished track, catalog rendition included, until it closes or its
+/// [moq_publish_finish] linger ends, so a late subscriber can still drain it.
+///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
@@ -2450,6 +2493,9 @@ pub extern "C" fn moq_publish_container_seek(container: u32, sequence: u64) -> i
 }
 
 /// Finish every track the container publishes and release the handle.
+///
+/// The broadcast keeps the finished tracks, catalog renditions included, until it closes or its
+/// [moq_publish_finish] linger ends, so a late subscriber can still drain them.
 ///
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -2849,7 +2895,10 @@ pub unsafe extern "C" fn moq_publish_track_datagram(
 	})
 }
 
-/// Finish a raw track. No more groups or frames can be written.
+/// Finish a raw track and release its handle. No more groups or frames can be written.
+///
+/// The broadcast keeps the finished track until it closes or its [moq_publish_finish] linger
+/// ends, so a late subscriber can still drain it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -3108,9 +3157,9 @@ pub unsafe extern "C" fn moq_group_request_sequence(request: u32, dst: *mut u64)
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - `dst` must point at a writable `uint8_t`.
+/// - `dst` must point at a writable `int8_t`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_group_request_priority(request: u32, dst: *mut u8) -> i32 {
+pub unsafe extern "C" fn moq_group_request_priority(request: u32, dst: *mut i8) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;

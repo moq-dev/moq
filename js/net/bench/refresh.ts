@@ -32,14 +32,16 @@ for (const retained of [1, 64, 1024])
 				while ((await announcements.next())?.kind !== "start") {}
 				const request = destination.request(Path.from("room"));
 				while (!request.active.peek()) await request.active.changed();
-				const remote = request.active.peek()!;
+				const remote = request.active.peek();
+				if (!remote) throw new Error("broadcast missing");
 				const consumers = producers.map((_, i) => remote.track(`data${i}`));
 				const baseline = consumers.map((track) => track.subscribe());
 				for (let i = 0; i < tracks; i++) {
 					const group = producers[i].appendGroup();
 					group.writeFrame({ payload: new Uint8Array(3) });
 					group.close();
-					const received = (await baseline[i].recvGroup())!;
+					const received = await baseline[i].recvGroup();
+					if (!received) throw new Error("baseline group missing");
 					await received.readFrame();
 					received.close();
 				}
@@ -61,7 +63,8 @@ for (const retained of [1, 64, 1024])
 					group.writeFrame({ payload: new Uint8Array(3) });
 					group.writeFrame({ payload: new Uint8Array(4) });
 					group.close();
-					const received = (await baseline[0].recvGroup())!;
+					const received = await baseline[0].recvGroup();
+					if (!received) throw new Error("measured group missing");
 					await received.readFrame();
 					await received.readFrame();
 					received.close();
@@ -80,7 +83,7 @@ for (const retained of [1, 64, 1024])
 				destination.close();
 				source.close();
 				for (const peer of peers) peer.abort();
-				await clock.advanceAsync(Nano(0));
+				await clock.advance(Nano(0));
 				restore();
 			}
 		}
