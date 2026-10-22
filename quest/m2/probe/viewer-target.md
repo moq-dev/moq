@@ -67,8 +67,9 @@ Decided with the maintainer on 2026-10-17 (see the
 Notes for the implementer:
 
 - Rust sessions request PROBE today only while an owned `recv_bandwidth()`
-  consumer is held (`doc/concept/standard.md`); the viewer handle may subsume
-  that.
+  consumer is held (`doc/concept/standard.md`). If the viewer handle subsumes
+  that, migrate those callers in the same change; a held consumer never
+  silently stops requesting PROBE.
 - Wire: none. PROBE already carries a target and SETUP the `Increase` level
   (`drafts/draft-lcurley-moq-lite.md`, `drafts/draft-lcurley-moq-probe.md`).
   Report the public API in the PR, mirrored across Rust and JS, and carry it

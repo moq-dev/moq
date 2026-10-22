@@ -43,8 +43,9 @@ default so a single-tenant deployment keeps strict priority across the link.
 A tenant-keyed domain (one bucket per customer, however many broadcasts they
 run) needs the tenant identity from the auth line first and is a later
 refinement of the same tier, not a different design. Opening more
-subscriptions or broadcasts must never buy more bandwidth than the bucket
-allows.
+subscriptions must never buy a broadcast more than its bucket allows. Until
+tenant keying lands, a peer that opens more broadcasts does get more shares,
+on send and receive alike; tenant keying is what closes that.
 
 Decided 2026-10-08: the signed priority type lands here, so the priority API
 breaks once instead of twice. Subscribe ranges owns group order, so this quest
@@ -94,13 +95,18 @@ once, when its header decodes:
 
 - With fairness on, rank received groups within their broadcast's domain
   first, as sends are, so one broadcast's priorities never evict another's
-  partial groups.
+  partial groups. Received FETCH streams map to a domain through the same
+  carrier the send side settles, or fall out with it if the goal narrows to
+  subscription delivery.
 - Ranking inside domains still leaves the session-wide window to share, so
   a broadcast that fills it would block every other one. Add a fair domain
   tier ahead of the ranks, mirroring the byte-fair send tier: a stuck window
   evicts from the domain holding the most beyond an even share of the window
   across the domains with partial groups, then by rank within that domain.
   A broadcast that fills the window alone may keep it until another arrives.
+  A full window admits no newcomer's bytes, so settle what enters a broadcast
+  into the fair set first (its subscription, or the header of a stream the
+  stuck-window eviction made room for), and test that it gets in.
 - Re-rank a receive stream when its subscription's priority or group order
   changes, instead of keeping the rank from its header.
 

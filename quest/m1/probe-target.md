@@ -58,7 +58,8 @@ Notes for the implementer:
 
 Tests with mocked time, in Rust: the send target follows reservations
 being added, updated, and dropped, demanded or not; the session hands it to
-its sender; opting out probes nothing; SETUP still advertises `Report`.
+its sender; opting out probes nothing; SETUP still advertises `Report`; after
+a reconnect, reservation changes still move the new session's target.
 
 The sum fans out over reservations, so add a benchmark sweeping their count,
 wired into the benchmark CI, so an update that rescans every reservation
