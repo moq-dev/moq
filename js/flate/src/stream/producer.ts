@@ -25,8 +25,9 @@ export class Producer {
 	#flate?: Flate;
 	// The single group carrying the whole log, opened on the first append and never rolled.
 	#group?: Moq.Group.Producer;
-	// Frames and payload bytes written to the group, checked against the group budget before each
-	// payload is encoded.
+	// Frames and bytes charged to the group, checked against the group budget before each payload is
+	// encoded. A compressed payload is charged its inflated size (or its slice, if larger), the budget
+	// every consumer's `Decoder` holds its window to.
 	#frames = 0;
 	#bytes = 0;
 
@@ -60,9 +61,8 @@ export class Producer {
 
 		// Check before compressing: encoding advances the window, so a payload refused afterwards
 		// would leave the encoder ahead of every reader. The worst case is checked rather than the
-		// actual size for the same reason. Also checked before the group is opened, so a refused
-		// first payload publishes nothing. The budget is below the decoder's cap, so any payload that
-		// fits is one every consumer can inflate.
+		// actual size for the same reason, and it covers the inflated size too. Also checked before
+		// the group is opened, so a refused first payload publishes nothing.
 		const bound = this.#flate ? Flate.bound(payload.byteLength) : payload.byteLength;
 		if (this.#frames >= Group.MAX_GROUP_FRAMES || this.#bytes + bound > Group.MAX_GROUP_CACHE_BYTES) {
 			throw new NetError.GroupTooLarge();
@@ -95,7 +95,7 @@ export class Producer {
 		}
 
 		this.#frames++;
-		this.#bytes += encoded.byteLength;
+		this.#bytes += Math.max(payload.byteLength, encoded.byteLength);
 	}
 
 	/** Finish the track, closing the group. */

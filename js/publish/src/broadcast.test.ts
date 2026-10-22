@@ -268,7 +268,7 @@ test("stopping the announce with linger serves the finished broadcast until its 
 			(await new Json.Snapshot.Consumer<Catalog.Root>({ track: catalog }).latest())?.value.video,
 		).toBeDefined();
 
-		await clock.advanceAsync(Nano.fromMilli(Milli(30_000)));
+		await clock.advance(Nano.fromMilli(Milli(30_000)));
 		expect(net.closed.peek()).toBeNull();
 		expect(net.route).toBeUndefined();
 		// A fresh broadcast waits unannounced for the next announce.
@@ -588,7 +588,7 @@ test("keeps the current catalog snapshot for a reconnecting viewer", async () =>
 
 		// A reconnect past the idle cache window must still receive the live track's newest
 		// snapshot instead of waiting forever for an edit that may never come.
-		await clock.advanceAsync(Nano.fromMilli(Milli(60_000)));
+		await clock.advance(Nano.fromMilli(Milli(60_000)));
 		const second = net.track(Broadcast.CATALOG_TRACK).subscribe();
 		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: second }).latest())?.value.video).toBeDefined();
 		second.close();

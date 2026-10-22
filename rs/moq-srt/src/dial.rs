@@ -141,6 +141,9 @@ impl Client {
 	}
 
 	/// Pull a remote MPEG-TS stream into `origin` at `path` until the remote ends.
+	///
+	/// The finished broadcast then stays up until its media is stale, as
+	/// [`Publish::accept`](crate::Publish::accept) describes, and the future resolves after that.
 	pub async fn pull(&self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
 		let path = path.as_path();
 		let socket = self.call(Mode::Request).await?;
@@ -184,6 +187,7 @@ impl Mode {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {

@@ -57,7 +57,7 @@ test("an unchanged value encodes nothing", () => {
 });
 
 test("changes ride as deltas", () => {
-	const frames = encode({ deltaRatio: 100 }, [
+	const frames = encode({ deltas: true }, [
 		{ a: 1, b: 1 },
 		{ a: 1, b: 2 },
 		{ a: 1, b: 3 },
@@ -66,7 +66,7 @@ test("changes ride as deltas", () => {
 });
 
 test("deltas off forces a keyframe per change", () => {
-	const frames = encode({ deltaRatio: 0 }, [{ a: 1 }, { a: 2 }]);
+	const frames = encode({ deltas: false }, [{ a: 1 }, { a: 2 }]);
 	expect(frames.map((f) => f[0])).toEqual([true, true]);
 });
 
@@ -74,7 +74,7 @@ test("deltas off forces a keyframe per change", () => {
 // setting a field to JSON null reads as a key deletion. The encoder has to override the caller here,
 // which is why `keyframe` is a return value rather than a parameter.
 test("a null field forces a keyframe", () => {
-	const frames = encode({ deltaRatio: 100 }, [
+	const frames = encode({ deltas: true }, [
 		{ a: 1, b: 1 },
 		{ a: 1, b: null },
 	]);
@@ -85,13 +85,13 @@ test("a null field forces a keyframe", () => {
 // would drop the key instead of reconstructing the null.
 test("a null inside a new object forces a keyframe", () => {
 	const values = [{ items: {} }, { items: { a: { parent: null, n: 1 } } }];
-	expect(roundtrip({ deltaRatio: 100 }, values)).toEqual(values);
+	expect(roundtrip({ deltas: true }, values)).toEqual(values);
 });
 
 // A caller that closes the group behind the encoder's back has to say so, or the next value would be
 // a delta against a window and a baseline the new group never carried.
 test("reset forces the next update to be a keyframe", () => {
-	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
+	const encoder = new Encoder<Doc>({ deltas: true });
 	expect(commit(encoder, { a: 1 })?.keyframe).toBe(true);
 	expect(commit(encoder, { a: 2 })?.keyframe).toBe(false);
 
@@ -110,7 +110,7 @@ test("reset republishes an unchanged value", () => {
 });
 
 test("the encoder tracks the published baseline", () => {
-	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
+	const encoder = new Encoder<Doc>({ deltas: true });
 	expect(encoder.value).toBeUndefined();
 
 	commit(encoder, { a: 1, b: 1 });
@@ -141,9 +141,55 @@ test("compressed roundtrip", () => {
 // The window is per group, so a keyframe mid-stream has to restart it on both sides. A decoder that
 // kept the old window here would fail to inflate the new group's snapshot.
 test("compressed roundtrip across a group boundary", () => {
-	const values: Doc[] = Array.from({ length: 41 }, (_, n) => ({ n }));
-	const got = roundtrip({ deltaRatio: 2, compression: "deflate" }, values);
-	expect(got.at(-1)).toEqual({ n: 40 });
+	// Past the frame cap, so the group rolls mid-stream.
+	const values: Doc[] = Array.from({ length: 300 }, (_, n) => ({ n }));
+	const got = roundtrip({ compression: "deflate" }, values);
+	expect(got.at(-1)).toEqual({ n: 299 });
+});
+
+test("deltas off: every change is a keyframe", () => {
+	const frames = encode({ deltas: false }, [{ a: 1 }, { a: 2 }, { a: 3 }]);
+	expect(frames.map(([keyframe]) => keyframe)).toEqual([true, true, true]);
+});
+
+test("deltas never roll on their own", () => {
+	// Deltas far outweighing the snapshot still ride in its group: only a joiner or a cap rolls it.
+	const values: Doc[] = Array.from({ length: 100 }, (_, n) => ({ n, pad: "x".repeat(n) }));
+	const frames = encode({}, values);
+	expect(frames.filter(([keyframe]) => keyframe).length).toBe(1);
+});
+
+test("snapshot restates the last value", () => {
+	const encoder = new Encoder<Doc>({ compression: "deflate" });
+	expect(encoder.snapshot()).toBeUndefined();
+
+	commit(encoder, { a: 1, b: 1 });
+	commit(encoder, { a: 1, b: 2 });
+	const frame = encoder.snapshot();
+	if (!frame) throw new Error("expected a snapshot");
+	expect(frame.keyframe).toBe(true);
+	frame.commit();
+
+	// The restatement opens a fresh group (and DEFLATE window) a new decoder reads on its own, and
+	// the next change rides as a delta against it.
+	const decoder = new Decoder<Doc>({ compression: "deflate" });
+	decoder.snapshot(frame.payload);
+	expect(decoder.decode()).toEqual({ a: 1, b: 2 });
+	const delta = encoder.update({ a: 1, b: 3 });
+	if (!delta) throw new Error("expected a delta");
+	expect(delta.keyframe).toBe(false);
+	decoder.delta(delta.payload);
+	delta.commit();
+	expect(decoder.decode()).toEqual({ a: 1, b: 3 });
+});
+
+test("an uncommitted snapshot resynchronizes", () => {
+	const encoder = new Encoder<Doc>({});
+	commit(encoder, { a: 1 });
+	expect(encoder.snapshot()?.keyframe).toBe(true);
+
+	// The restatement never reached the wire, so the next change opens a group of its own.
+	expect(encoder.update({ a: 2 })?.keyframe).toBe(true);
 });
 
 test("no value before the first snapshot", () => {
@@ -159,7 +205,7 @@ test("a delta before a snapshot throws", () => {
 
 // A backlog is applied in full but materialized once: the intermediate reconstructions are stale.
 test("frames apply without materializing", () => {
-	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
+	const encoder = new Encoder<Doc>({ deltas: true });
 	const decoder = new Decoder<Doc>({});
 
 	for (let n = 0; n <= 20; n += 1) {
@@ -178,10 +224,7 @@ test("frames apply without materializing", () => {
 
 test("compressed deltas reuse the group window", () => {
 	const phrase = "Media over QUIC delivers real-time latency at massive scale";
-	const frames = encode({ deltaRatio: 100, compression: "deflate" }, [
-		{ note: phrase },
-		{ note: phrase, echo: phrase },
-	]);
+	const frames = encode({ deltas: true, compression: "deflate" }, [{ note: phrase }, { note: phrase, echo: phrase }]);
 
 	// The raw patch repeats the whole phrase; compressed against the window it's a fraction.
 	const raw = new TextEncoder().encode(JSON.stringify({ echo: phrase })).length;
@@ -194,7 +237,7 @@ test("compressed deltas reuse the group window", () => {
 // resynchronize on its own: a caller cannot be relied on to remember. (Rust does this at drop; JS
 // has no destructor, so it happens on the next update.)
 test("an uncommitted frame resynchronizes the encoder", () => {
-	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
+	const encoder = new Encoder<Doc>({ deltas: true });
 	commit(encoder, { a: 1 });
 	expect(commit(encoder, { a: 2 })?.keyframe).toBe(false);
 
@@ -220,7 +263,7 @@ test("an uncommitted first frame is re-encoded", () => {
 // The baseline is what the next delta is diffed against, so handing out the live object lets a
 // caller mutate it and make a real change look unchanged, silently starving consumers.
 test("the value getter does not expose the live baseline", () => {
-	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
+	const encoder = new Encoder<Doc>({ deltas: true });
 	commit(encoder, { a: 1 });
 
 	const leaked = encoder.value as { a: number };
@@ -240,7 +283,7 @@ test("a value JSON cannot represent is rejected", () => {
 // the newer frame, or a later loss of that one goes unnoticed. (Rust cannot express this: its
 // `Pending` borrows the encoder, so a second `update` while one is outstanding does not compile.)
 test("a stale commit does not clear a newer pending frame", () => {
-	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
+	const encoder = new Encoder<Doc>({ deltas: true });
 	const first = encoder.update({ a: 1 });
 
 	// The second update starts before the first frame settles, so the encoder resyncs around it.
@@ -256,17 +299,29 @@ test("a stale commit does not clear a newer pending frame", () => {
 // The baseline is also what `Producer.mutate` seeds an edit from, so a resync must not erase it:
 // the next edit would otherwise publish a document with every other field missing.
 test("a resync keeps the value for mutate", () => {
-	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
+	const encoder = new Encoder<Doc>({ deltas: true });
 	commit(encoder, { video: "v1", scte35: 1 });
 
 	encoder.reset();
 	expect(encoder.value).toEqual({ video: "v1", scte35: 1 });
 });
 
+// A frame that never reached the wire must not become the value a refresh restates or an edit
+// starts from. (Mirrors the Rust `value_tracks_the_baseline`.)
+test("an uncommitted frame leaves the value at the last committed", () => {
+	const encoder = new Encoder<Doc>({ deltas: true });
+	commit(encoder, { a: 1, b: 1 });
+	commit(encoder, { a: 1, b: 2 });
+
+	encoder.update({ a: 1, b: 3 });
+	expect(encoder.value).toEqual({ a: 1, b: 2 });
+	expect(encoder.snapshot()?.payload).toEqual(new TextEncoder().encode(JSON.stringify({ a: 1, b: 2 })));
+});
+
 // The reconstruction is the base every later delta merges into, so handing out the live object lets
 // a caller change fields that no frame ever carried.
 test("the decoder does not expose its live reconstruction", () => {
-	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
+	const encoder = new Encoder<Doc>({ deltas: true });
 	const decoder = new Decoder<Doc>({});
 
 	const snapshot = commit(encoder, { a: 1, b: 1 });
@@ -289,7 +344,7 @@ test("update after finish reports the closed track", async () => {
 	const { Producer } = await import("./producer.ts");
 
 	const track = new Track.Producer("test");
-	const producer = new Producer<Doc>({ track, deltaRatio: 100 });
+	const producer = new Producer<Doc>({ track, deltas: true });
 	producer.update({ value: { a: 1 } });
 	producer.update({ value: { a: 2 } }); // a delta, so a group is open
 	producer.finish();
@@ -301,7 +356,7 @@ test("update after finish reports the closed track", async () => {
 // the delta budget. Matches the Rust `a_non_object_root_forces_a_keyframe`.
 test("a non-object root forces a keyframe", () => {
 	// Typed as `unknown` because the root deliberately stops being an object partway through.
-	const encoder = new Encoder<unknown>({ deltaRatio: 100 });
+	const encoder = new Encoder<unknown>({ deltas: true });
 
 	const object = encoder.update({ a: 1 });
 	object?.commit();
@@ -314,13 +369,11 @@ test("a non-object root forces a keyframe", () => {
 // The per-group frame cap rolls a new snapshot even when the byte budget is nowhere near spent, so a
 // late joiner can always read frame 0. Matches the Rust `frame_cap_forces_a_keyframe`.
 test("the frame cap forces a keyframe", () => {
-	// Mirrors MAX_DELTA_FRAMES in the encoder; a ratio this large takes the byte budget out of play,
-	// so the cap is the only thing that can roll the group.
+	// Mirrors MAX_DELTA_FRAMES in the encoder.
 	const FRAME_CAP = 256;
-	const UNBOUNDED_RATIO = 1_000_000;
 
 	const values: Doc[] = Array.from({ length: FRAME_CAP + 1 }, (_, n) => ({ n }));
-	const frames = encode({ deltaRatio: UNBOUNDED_RATIO }, values);
+	const frames = encode({ deltas: true }, values);
 
 	// The snapshot plus FRAME_CAP - 1 deltas fill the group, then the cap rolls it.
 	expect(frames.length).toBe(FRAME_CAP + 1);

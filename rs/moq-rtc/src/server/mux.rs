@@ -208,6 +208,7 @@ fn local_ufrag(data: &[u8]) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 	use std::time::Duration;

@@ -598,6 +598,8 @@ pub struct SinkSession {
 	/// with no congestion controller exposed. Shared and mutable so a test can
 	/// change it mid-session, the way a real transport's figures move.
 	stats: Arc<Mutex<SinkStats>>,
+	/// Set by [`Self::with_probe`].
+	probe: Option<crate::transport::Probe>,
 }
 
 impl SinkSession {
@@ -624,6 +626,12 @@ impl SinkSession {
 	/// Accept datagrams up to `max_size` bytes, recording them in the log.
 	pub fn with_datagrams(mut self, max_size: usize) -> Self {
 		self.datagram_size = max_size;
+		self
+	}
+
+	/// Give the transport a sender for the session to hand its probe target.
+	pub fn with_probe(mut self) -> Self {
+		self.probe = Some(crate::transport::Probe::new());
 		self
 	}
 
@@ -788,6 +796,10 @@ impl poll::Session for SinkSession {
 	fn stats(&self) -> impl crate::transport::Stats {
 		*self.stats.lock().unwrap()
 	}
+
+	fn probe(&self) -> Option<crate::transport::Probe> {
+		self.probe.clone()
+	}
 }
 
 /// Connection statistics a test can dictate. Every metric defaults to unknown,
@@ -905,6 +917,8 @@ pub struct ScriptedSession {
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
 	datagram_size: usize,
+	/// Set by [`Self::with_groups`].
+	groups: bool,
 }
 
 impl ScriptedSession {
@@ -931,7 +945,14 @@ impl ScriptedSession {
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
 			datagram_size: 0,
+			groups: false,
 		}
+	}
+
+	/// Open send groups, as native QUIC does, recording them in the log.
+	pub fn with_groups(mut self) -> Self {
+		self.groups = true;
+		self
 	}
 
 	/// Never acknowledge an opened stream's FIN, like a peer that stopped reading.
@@ -1091,8 +1112,8 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
 	}
 
-	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
-		None
+	fn send_group(&mut self, priority: i64) -> Option<SinkGroup> {
+		self.groups.then(|| SinkGroup::open(self.log.clone(), priority))
 	}
 
 	fn send_datagram(
