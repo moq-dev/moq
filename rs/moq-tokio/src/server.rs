@@ -909,9 +909,7 @@ impl Listener {
 		if !server.versions.alpns().contains(&peer.protocol()) {
 			return Err(WebRtcError::Protocol(peer.protocol().to_string()).into());
 		}
-		let deadline = server
-			.timeout
-			.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
+		let deadline = server.timeout.and_then(|timeout| moq_clock::now().checked_add(timeout));
 
 		let handshake = async {
 			let opened = peer.channel().await?;
@@ -1034,8 +1032,8 @@ struct Setup {
 impl Setup {
 	/// When a connection accepted now must finish its handshake, or `None` to wait
 	/// forever, including past the clock's range.
-	fn deadline(&self) -> Option<tokio::time::Instant> {
-		tokio::time::Instant::now().checked_add(self.timeout?)
+	fn deadline(&self) -> Option<moq_clock::Instant> {
+		moq_clock::now().checked_add(self.timeout?)
 	}
 }
 
@@ -1054,7 +1052,7 @@ async fn accept_request<S>(
 	server: &moq_net::Server,
 	session: S,
 	binding: moq_net::transport::Binding,
-	deadline: Option<tokio::time::Instant>,
+	deadline: Option<moq_clock::Instant>,
 ) -> crate::Result<(moq_net::server::Handshake, Option<Deadline>)>
 where
 	S: crate::transport::Grouped,
@@ -1071,7 +1069,7 @@ where
 pub(crate) async fn accept_websocket(
 	session: qmux::Session,
 	options: crate::websocket::Options,
-	deadline: Option<tokio::time::Instant>,
+	deadline: Option<moq_clock::Instant>,
 ) -> crate::Result<Request> {
 	let (request, deadline) =
 		accept_request(&options.server, session, moq_net::transport::Binding::Uri, deadline).await?;
@@ -1093,7 +1091,7 @@ pub(crate) async fn accept_websocket(
 /// When an accepted connection's handshake must be done, and how to tell the peer
 /// it wasn't.
 struct Deadline {
-	at: tokio::time::Instant,
+	at: moq_clock::Instant,
 	/// Closes the session with the timeout code.
 	close: Box<dyn Fn() + Send + Sync>,
 }
@@ -1107,7 +1105,7 @@ impl Deadline {
 		all(feature = "uds", unix),
 		feature = "webrtc"
 	))]
-	fn new<S>(at: tokio::time::Instant, session: S) -> Self
+	fn new<S>(at: moq_clock::Instant, session: S) -> Self
 	where
 		S: web_transport_trait::poll::Session + Clone + Send + Sync + 'static,
 	{
@@ -1129,7 +1127,7 @@ impl Deadline {
 		let Some(deadline) = deadline else {
 			return handshake.await;
 		};
-		match tokio::time::timeout_at(deadline.at, handshake).await {
+		match moq_clock::timeout_at(deadline.at, handshake).await {
 			Ok(res) => res,
 			Err(_) => {
 				(deadline.close)();
@@ -1152,7 +1150,7 @@ impl Deadline {
 	feature = "webrtc"
 ))]
 async fn within<T, E>(
-	deadline: Option<tokio::time::Instant>,
+	deadline: Option<moq_clock::Instant>,
 	handshake: impl Future<Output = Result<T, E>>,
 ) -> crate::Result<T>
 where
@@ -1161,7 +1159,7 @@ where
 	let Some(deadline) = deadline else {
 		return Ok(handshake.await?);
 	};
-	match tokio::time::timeout_at(deadline, handshake).await {
+	match moq_clock::timeout_at(deadline, handshake).await {
 		Ok(res) => Ok(res?),
 		Err(_) => Err(moq_net::Error::Timeout.into()),
 	}
@@ -1547,7 +1545,7 @@ fn spawn_unix_loop(
 struct Incoming {
 	transport: Transport,
 	link: Link,
-	deadline: Option<tokio::time::Instant>,
+	deadline: Option<moq_clock::Instant>,
 	active: moq_net::server::Active,
 }
 
@@ -1876,6 +1874,7 @@ impl Request {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 

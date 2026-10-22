@@ -412,7 +412,12 @@ and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
 may fall behind the live edge before *this* consumer skips it. Raising
 `--max-age` never delays playback.
 At stdin EOF, `import` keeps the finished broadcast up for its max-age, so a
-subscriber still catching up can drain it; Ctrl-C ends that early.
+subscriber still catching up can drain it; Ctrl-C ends that early. A gateway
+import does the same at a clean end: an RTMP unpublish (`deleteStream`) or
+completed play, the end of an SRT stream, a WHIP `DELETE`, or an HLS playlist
+ending with `EXT-X-ENDLIST`. A dropped connection or an error closes the
+broadcast at once, and a reconnect, which publishes a newer
+[epoch](/concept/moq-lite#publisher-epochs) at the same path, ends the wait.
 
 `export ts`, `export flv`, and `export mkv` take `--delay` instead, like an SRT
 receiver's latency, all tracks in decode order, so two exporters of one broadcast

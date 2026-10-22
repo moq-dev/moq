@@ -28,6 +28,7 @@
 //!   storage.
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod archive_tests;
 mod history;
 pub mod master;
@@ -331,7 +332,7 @@ impl Broadcaster {
 		Ok(Some(mpd::render_manifest(
 			&mpd::Manifest {
 				availability_start,
-				publish: SystemTime::now(),
+				publish: SystemTime::from(moq_clock::wall()),
 				window: self.renditions.window(),
 				finished,
 				video,
@@ -409,7 +410,7 @@ async fn watch_catalog(
 				let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
 				delay = (delay * 2).min(CATALOG_RETRY_MAX);
 				tokio::select! {
-					_ = tokio::time::sleep(wait) => {}
+					_ = moq_clock::sleep(wait) => {}
 					_ = kio::wait(|waiter| broadcast.poll_closed(waiter)) => {
 						renditions.close();
 						return;
@@ -597,6 +598,7 @@ async fn watch(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {

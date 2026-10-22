@@ -415,20 +415,6 @@ pub fn start(config: Config<crate::driver::Transport>) -> Result<(Driver, crate:
 					control.clone(),
 				));
 
-				// Only the dialing side fails loud on a publication outside its grant: a
-				// server's publish origin is everything the peer may read, not what it
-				// intends to push.
-				let enforce = {
-					let auth = auth.clone();
-					let origin = publish.clone();
-					let session = session.clone();
-					async move {
-						match client {
-							true => enforce_grant(auth, origin, session).await,
-							false => std::future::pending().await,
-						}
-					}
-				};
 				let mut publisher = Publisher::new(
 					runtime.clone(),
 					session.clone(),
@@ -444,6 +430,21 @@ pub fn start(config: Config<crate::driver::Transport>) -> Result<(Driver, crate:
 				publisher.owed = serving.clone();
 				publisher.subscriptions = subscriptions;
 				publisher.fetches = crate::session::Slots::new(limits.fetches);
+
+				// Only the dialing side fails loud on a publication outside its grant: a
+				// server's publish origin is everything the peer may read, not what it
+				// intends to push.
+				let enforce = {
+					let auth = auth.clone();
+					let publisher = publisher.clone();
+					let session = session.clone();
+					async move {
+						match client {
+							true => enforce_grant(auth, publisher, session).await,
+							false => std::future::pending().await,
+						}
+					}
+				};
 
 				let mut subscriber = Subscriber::new(
 					runtime.clone(),
@@ -767,6 +768,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		auth: auth::from_setup(params, version) == Some(true),
 		active_count: active_count::from_setup(params, version),
 		epoch: epoch::from_setup(params, version),
+		flate: super::flate::from_setup(params, version)?,
 	})
 }
 
@@ -819,6 +821,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		epoch::into_setup(&mut parameters, version);
 	}
 	request_update::into_setup(&mut parameters, version);
+	super::flate::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer
@@ -1491,14 +1494,17 @@ impl Drop for AuthClose {
 	}
 }
 
-/// Close the session when our origin announces a broadcast our grant never covered,
-/// instead of leaving it to wait for a subscription that never comes. See
-/// [`crate::auth::Enforce`].
-async fn enforce_grant<S: crate::transport::poll::Session>(
+/// Close the session when we publish a broadcast our grant never covered, instead of
+/// leaving it to wait for a subscription that never comes. See [`crate::auth::Enforce`].
+///
+/// Judges the publisher's serving origin rather than the raw one: an origin that also
+/// consumes holds what the peer sent us, which is not ours to publish back.
+async fn enforce_grant<S: crate::transport::poll::Boxable>(
 	auth: crate::auth::Handle,
-	origin: origin::Consumer,
+	publisher: Publisher<S>,
 	mut session: S,
 ) -> Result<(), Error> {
+	let origin = publisher.serving_origin().await;
 	let mut announced = origin.announced();
 	let mut check = crate::auth::Enforce::default();
 	let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {

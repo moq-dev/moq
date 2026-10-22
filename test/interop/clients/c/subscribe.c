@@ -9,6 +9,8 @@
 // subscribe-only client.
 //
 //   c-interop subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20
+//
+// --version offers only that version, through moq_client_config.
 #include <moq.h>
 
 #include <pthread.h>
@@ -193,16 +195,17 @@ static void drain(ctx_t *c) {
 }
 
 int main(int argc, char **argv) {
-    const char *url = NULL, *broadcast = NULL;
+    const char *url = NULL, *broadcast = NULL, *version = NULL;
     double timeout_s = 20.0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--url") && i + 1 < argc) url = argv[++i];
         else if (!strcmp(argv[i], "--broadcast") && i + 1 < argc) broadcast = argv[++i];
         else if (!strcmp(argv[i], "--timeout") && i + 1 < argc) timeout_s = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--version") && i + 1 < argc) version = argv[++i];
         // a leading "subscribe" positional (and anything else) is ignored.
     }
     if (!url || !broadcast) {
-        fprintf(stderr, "usage: c-interop subscribe --url U --broadcast B [--timeout S]\n");
+        fprintf(stderr, "usage: c-interop subscribe --url U --broadcast B [--timeout S] [--version V]\n");
         return 2;
     }
 
@@ -217,8 +220,19 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // moq-c reads the config during the call alone.
+    moq_client_config config;
+    memset(&config, 0, sizeof(config));
+    moq_string versions[1];
+    if (version) {
+        versions[0].data = version;
+        versions[0].len = strlen(version);
+        config.versions = versions;
+        config.versions_len = 1;
+    }
+
     // origin_publish = 0 disables publishing; consume via our origin.
-    c.session = moq_session_connect(url, strlen(url), NULL, 0, (uint32_t)c.origin, on_status, &c);
+    c.session = moq_session_connect(url, strlen(url), version ? &config : NULL, 0, (uint32_t)c.origin, on_status, &c);
     if (c.session <= 0) {
         // A registration that fails never invokes its callback, so &c isn't held
         // yet and returning is still safe here.

@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 use bytes::{Buf, BufMut, Bytes};
 
 use super::poll::{self, SendOptions};
-use super::{Binding, CloseKind, MaybeSend, MaybeSync, Wire};
+use super::{Binding, CloseKind, MaybeSend, MaybeSync, Probe, Wire};
 
 /// A boxed [`poll::Boxable`] session.
 pub(crate) struct Session(Box<dyn ErasedSession>);
@@ -177,6 +177,7 @@ trait ErasedSession: MaybeSend + MaybeSync {
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error>;
 	fn stats(&self) -> Stats;
 	fn wire(&self) -> Option<Wire>;
+	fn probe(&self) -> Option<Probe>;
 }
 
 trait ErasedGroup: MaybeSend + MaybeSync {
@@ -292,6 +293,10 @@ impl<S: poll::Boxable> ErasedSession for S {
 
 	fn wire(&self) -> Option<Wire> {
 		poll::Session::wire(self)
+	}
+
+	fn probe(&self) -> Option<Probe> {
+		poll::Session::probe(self)
 	}
 }
 
@@ -434,6 +439,10 @@ impl poll::Session for Session {
 
 	fn wire(&self) -> Option<Wire> {
 		self.0.wire()
+	}
+
+	fn probe(&self) -> Option<Probe> {
+		self.0.probe()
 	}
 }
 

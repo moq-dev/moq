@@ -89,6 +89,7 @@ pub use crate::quic::driver::send_group::{SendGroup, SendOptions};
 pub use crate::quic::driver::send_stream::{SendStream, StoppedError, WriteError};
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests;
 
 #[derive(Debug)]

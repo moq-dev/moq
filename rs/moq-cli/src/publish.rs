@@ -605,7 +605,7 @@ async fn decode(
 	// diagnosed by the rate at which these climb, and stdin may never end, so
 	// they have to surface as they accumulate rather than at exit.
 	let mut log = ts::stats::Log::default();
-	let mut sampled = tokio::time::Instant::now();
+	let mut sampled = moq_clock::now();
 	let sections = report.as_ref().map(crate::report::Stats::sections);
 	let report_mpegts = |snapshot: &ts::stats::Snapshot| {
 		if let Some(sections) = &sections {
@@ -630,7 +630,7 @@ async fn decode(
 			}
 
 			if sampled.elapsed() >= ts::stats::Log::INTERVAL {
-				sampled = tokio::time::Instant::now();
+				sampled = moq_clock::now();
 				if let Some(stats) = decoder.stats() {
 					report_mpegts(&stats);
 					log.sample(stats);
@@ -787,6 +787,7 @@ impl CaptureArgs {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub(crate) mod tests {
 	use std::time::Duration;
 
