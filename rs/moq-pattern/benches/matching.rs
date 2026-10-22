@@ -45,9 +45,10 @@ fn matching(c: &mut Criterion) {
 ///
 /// The pairwise operations sweep the held union (indexed) and the queried union
 /// independently, so a cost that follows either one shows up as its own slope. The
-/// unions never contain each other's members, so no query ends early; `covers` queries
-/// a subset of the held union so every query succeeds, which needs no more queries than
-/// members.
+/// unions never contain each other's members, so no query ends early. `covers` must
+/// succeed on every query to visit them all: per kind it queries a subset of the held
+/// union, and `covers-subtree` holds `sNNNN/**` members that cover any number of
+/// literals beneath them, so it sweeps both sizes.
 fn algebra(c: &mut Criterion) {
 	let mut group = c.benchmark_group("pattern-algebra");
 	let union = |kind: &str, name: &str, count: usize| -> Patterns {
@@ -95,6 +96,23 @@ fn algebra(c: &mut Criterion) {
 				});
 			}
 		}
+	}
+	for (held, queried) in [(16, 16), (4096, 16), (16, 4096), (4096, 4096)] {
+		let subtrees: Patterns = (0..held)
+			.map(|index| format!("s{index:04}/**").parse::<Pattern>().unwrap())
+			.collect();
+		let literals: Patterns = (0..queried)
+			.map(|index| {
+				format!("s{:04}/room{index:04}", index % held)
+					.parse::<Pattern>()
+					.unwrap()
+			})
+			.collect();
+		assert!(subtrees.covers(&literals));
+		group.throughput(Throughput::Elements((held + queried) as u64));
+		group.bench_function(BenchmarkId::new("covers-subtree", format!("{held}x{queried}")), |b| {
+			b.iter(|| std::hint::black_box(subtrees.covers(&literals)));
+		});
 	}
 	group.finish();
 }
