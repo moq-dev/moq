@@ -14,8 +14,11 @@ feature, checks kernel support, and runs `io-uring-workers`; reuse that
 build and check rather than adding a second path. Select the runtime by
 argument, keep worker count and load identical across runtimes, keep
 the existing capture modes, and fail the run if the relay did not start on
-the selected runtime. Comparing revisions stays running the recipe at
-each one on the same host.
+the selected runtime. Also take a base revision the way `just bench BASE`
+does, building it in a worktree with the current harness, since a revision
+older than this quest has no runtime selector; a before/after such as the
+[clock profile](/quest/m2/perf/uring-clock-profile.md)'s then profiles the
+ring at both.
 
 Once it works, read these off a chat, audio, fanout, and mixed-traffic
 profile, and plan a quest only for one that shows up:

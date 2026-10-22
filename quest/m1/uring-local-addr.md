@@ -37,7 +37,11 @@ skips loudly without it, refusing under `MOQ_STRICT` like the ECN test.
 
 Decided 2026-10-22 from the io_uring audit: m1.
 
-Public API: none. Wire: none.
+Public API: breaking. The source address reaches the send encoder
+through `moq_uring::udp::Transmit`, which callers construct by literal, so
+it gains a `src_ip: Option<IpAddr>` field and `#[non_exhaustive]` with a
+constructor in the same change, with a `rs/moq-uring/MIGRATE.md` entry.
+Wire: none.
 
 ## Related
 
