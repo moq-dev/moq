@@ -283,6 +283,14 @@ untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
 
+A publisher refuses a group that starts before a lower one, and so does a
+moq-lite 07 receiver. Since moq-lite 05 and 06 send times look like media time,
+a receiver drops every timestamp it gets over them and the track arrives
+untimed.
+Timestamps received over moq-transport, whose peers may stamp arrival times,
+are not checked and are only passed on over moq-transport: a relay serves that
+track to moq-lite untimed.
+
 A publisher may compress a track, which pays off for repetitive data such as
 JSON and not for media. Each group's frames become one DEFLATE stream
 ([moq-flate](/draft/moq-flate)), and a datagram

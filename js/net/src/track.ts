@@ -28,6 +28,7 @@ import {
 	insertDrop,
 	insertRun,
 	type Land,
+	MAX_DATAGRAMS,
 	type Recv,
 	type RecvDatagram,
 	type ResumeSource,
@@ -54,9 +55,6 @@ const PRUNE_SLICES = 8;
 // The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
 // draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
 const DEFAULT_PRIORITY = 127;
-
-/** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
-const MAX_DATAGRAMS = 64;
 
 /**
  * Sanity cap on a datagram payload: the QUIC DATAGRAM frame ceiling. The real limit is
@@ -132,6 +130,15 @@ export interface Info {
 	 * snapshot or keyframe. `0` asks on any join after a delta. An integer in `0..2^32`.
 	 */
 	refresh?: number;
+	/**
+	 * Whether this timed track's timestamps arrived over moq-transport, whose peers may stamp
+	 * arrival times, so no group is checked for a rewind. A moq-lite hop serves the track
+	 * untimed, since its receivers check every timestamp. Mirrors the Rust
+	 * `track::Info::unchecked`.
+	 *
+	 * @internal
+	 */
+	unchecked?: boolean;
 }
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
@@ -158,16 +165,26 @@ function priorityByte(value: number): number {
 	return value;
 }
 
+// private: passthrough
+/** The timescale a moq-lite hop serves a track at: none for an {@link Info.unchecked} one. @internal */
+export function liteTimescale(info: Info): Timescale | undefined {
+	return info.unchecked ? undefined : (info.timescale ?? undefined);
+}
+
 /** Fill in any unset {@link Info} fields with their defaults. */
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	if (info.compress !== undefined && typeof info.compress !== "boolean")
 		throw new TypeError("compress must be a boolean");
+	const timescale = info.timescale == null ? undefined : Timescale(info.timescale);
+	// Only a timed track has timestamps to doubt.
+	if (info.unchecked && timescale === undefined) throw new RangeError("an untimed track can't be unchecked");
 	return {
 		compress: info.compress ?? false,
-		timescale: info.timescale == null ? undefined : Timescale(info.timescale),
+		timescale,
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
 		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
 		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
+		...(info.unchecked ? { unchecked: true } : {}),
 	};
 }
 
@@ -709,9 +726,6 @@ export class Producer {
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
 	#evicted?: Start;
-	// A session's copy of a remote track, whose groups are never checked for a rewind: a
-	// received timestamp may not be media time (a lite-05/06 untimed track carries send times).
-	#remote = false;
 	// When the cache was last scanned. See #prune.
 	#pruned = Number.NEGATIVE_INFINITY;
 	// When the track closed, which restarts the former newest group's idle window. See #prune.
@@ -768,9 +782,6 @@ export class Producer {
 			producer.#served = served;
 			producer.#owe();
 			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
-		};
-		hooks.receiveTrack = (producer) => {
-			producer.#remote = true;
 		};
 		// Anything written before binding still counts, so the namespace never goes backwards.
 		bindProducerSequence = (producer, sequence) => {
@@ -1296,8 +1307,8 @@ export class Producer {
 			this.#drop(group.sequence, group.sequence + 1, closed);
 		});
 		const sequence = group.sequence;
-		if (this.#remote) {
-			// Only a local publisher's writes are checked.
+		if (this.#unchecked()) {
+			// Its timestamps may rewind, so they are not checked.
 		} else if (start) {
 			this.#record(entry, start, late);
 		} else {
@@ -1433,10 +1444,15 @@ export class Producer {
 		}
 
 		// A group written before it joined is checked here, before it is cached or fanned out.
-		const start = this.#remote ? undefined : hooks.groupStart(group);
+		const start = this.#unchecked() ? undefined : hooks.groupStart(group);
 		const late = start !== undefined && this.#admit(group.sequence, start);
 
 		this.#publish(group, start, late);
+	}
+
+	// Whether this track's timestamps may rewind (see {@link Info.unchecked}).
+	#unchecked(): boolean {
+		return this.#state.info.peek()?.unchecked === true;
 	}
 
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.

@@ -86,7 +86,7 @@ const trackInfoBytes = await write((w) => trackInfo.encode(w, version));
 // A GROUP header, then frames until the stream ends.
 const g = reader(input.group);
 const group = await Group.decode(g, version);
-const decode = frameDecoder(1_000_000);
+const decode = frameDecoder({ scale: 1_000_000 });
 const frames: { timestamp: bigint; payload: Uint8Array }[] = [];
 for (;;) {
 	const frame = await g.decodeMaybe(decode);
@@ -113,7 +113,7 @@ if (untimed) {
 	const untimedGroup = await Group.decode(u, version);
 	const untimedFrames: Uint8Array[] = [];
 	for (;;) {
-		const frame = await u.decodeMaybe(frameDecoder(0));
+		const frame = await u.decodeMaybe(frameDecoder({ scale: 0 }));
 		if (!frame) break;
 		assert.equal(frame.timestamp, undefined);
 		untimedFrames.push(frame.payload);

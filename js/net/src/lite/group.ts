@@ -77,34 +77,38 @@ export interface WireFrame extends netGroup.Frame {
 	inflated?: number;
 }
 
+/** How {@link frameDecoder} reads each frame's optional fields. */
+export interface FrameFormat {
+	/** The wire timescale; non-zero means every frame carries a zigzag-delta timestamp. */
+	scale: number;
+	/** Whether a carried timestamp is kept; false drops it where it may be a send time. */
+	timed?: boolean;
+	/** Whether every frame declares its plain size ahead of a stored slice. */
+	compress?: boolean;
+}
+
 /** Decode one frame, with timestamp deltas when scaled and declared plain sizes when compressed. */
-export function frameDecoder(scale: number, compressed = false): (c: Cursor) => WireFrame {
+export function frameDecoder({ scale, timed = true, compress = false }: FrameFormat): (c: Cursor) => WireFrame {
 	const timescale = scale === 0 ? undefined : Time.Timescale(scale);
 	let prevTs = 0n;
 	return (c) => {
 		const delta = timescale === undefined ? 0n : unzigzag(c.u62());
-		const inflated = compressed ? c.u53() : undefined;
+		const inflated = compress ? c.u53() : undefined;
 		const size = c.u53();
 		if (size > netGroup.MAX_GROUP_CACHE_BYTES || (inflated ?? 0) > netGroup.MAX_GROUP_CACHE_BYTES)
 			throw new FrameTooLarge();
 		const payload = c.read(size);
 		// Commit the delta only after the last read: an incomplete decode gets retried.
 		prevTs += delta;
-		return {
-			payload,
-			inflated,
-			timestamp: timescale === undefined ? undefined : new Time.Timestamp(Number(prevTs), timescale),
-		};
+		// Read to stay in step, but dropped where it may be a send time.
+		const timestamp = timescale === undefined || !timed ? undefined : new Time.Timestamp(Number(prevTs), timescale);
+		return { payload, inflated, timestamp };
 	};
 }
 
 /** Write a group stream's frames into `producer` until the stream ends or the producer closes. */
-export async function readFrames(
-	stream: Reader,
-	producer: netGroup.Producer,
-	{ scale, compress = false }: { scale: number; compress?: boolean },
-): Promise<void> {
-	const decode = frameDecoder(scale, compress);
+export async function readFrames(stream: Reader, producer: netGroup.Producer, format: FrameFormat): Promise<void> {
+	const decode = frameDecoder(format);
 
 	for (;;) {
 		// Every frame already buffered is written without an await, so the reader wakes once

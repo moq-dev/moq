@@ -323,7 +323,7 @@ impl Client {
 
 		let session = match self.timeout.is_zero() {
 			true => attempt.await?,
-			false => tokio::time::timeout(self.timeout, attempt)
+			false => moq_clock::timeout(self.timeout, attempt)
 				.await
 				.map_err(|_| Error::ConnectTimeout(self.timeout))??,
 		};
@@ -370,7 +370,7 @@ impl Client {
 		// arm was still pending.
 		let dialed = match self.timeout.is_zero() {
 			true => attempt.await?,
-			false => match tokio::time::timeout(self.timeout, attempt).await {
+			false => match moq_clock::timeout(self.timeout, attempt).await {
 				Ok(res) => res?,
 				Err(_) => return Err(Error::ConnectTimeout(self.timeout)),
 			},
@@ -795,6 +795,7 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 

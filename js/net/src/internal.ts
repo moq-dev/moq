@@ -382,6 +382,9 @@ export interface TrackRequestOptions {
 	pending: Set<Request>;
 }
 
+/** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
+export const MAX_DATAGRAMS = 64;
+
 // pending: /quest/m1/public-model/serve.md
 /** The first group an exclusive track end excludes whole: one past the last group that may exist. */
 export function finalSequence(end: Location): number {
@@ -419,12 +422,6 @@ export const hooks: {
 	 * as the Rust `request_start`.
 	 */
 	startTrack: (producer: Producer, served: { start?: number; requested?: number }) => void;
-	// pending: /quest/m1/public-model/ingest.md
-	/**
-	 * Mark a track as a session's copy of a remote one: its groups are never checked for a
-	 * rewind, since a received timestamp may not be media time.
-	 */
-	receiveTrack: (producer: Producer) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	// pending: /quest/m1/public-model/ingest.md
@@ -584,9 +581,6 @@ export const hooks: {
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
 	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
 } = {
-	receiveTrack: () => {
-		throw new Error("track.ts not loaded");
-	},
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
