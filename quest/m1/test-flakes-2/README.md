@@ -29,9 +29,8 @@ Rules every child keeps:
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did.
 
-The [redundant failover drift](/quest/m0/redundant-failover-drift.md) moved
-to m0 on 2026-10-20 (maintainer), since it may hide a TS export bug and fails
-loaded `just check` runs.
+The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
+fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 
 Added 2026-10-20 (maintainer): three more from that day's merge batch, the
 draft-16 cancel race first since it fails on a mocked clock and so may hide

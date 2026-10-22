@@ -181,7 +181,6 @@ pub async fn accept(
 			registration: Some(registration),
 			cancel: Some(cancel),
 			role: "whep server",
-			broadcast: None,
 		},
 	})
 }

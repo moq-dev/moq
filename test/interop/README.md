@@ -119,20 +119,49 @@ After the matrix, each publisher whose refusal the harness can read (Rust,
 Python, Go, and C++, which log moq-net's error) runs once more with a token that
 excludes its broadcast. It must fail loud, logging
 Unauthorized and naming the path, and every subscriber must time out. The
-browser publisher enforces its grant too, but its elements cannot offer
-`moq-lite-07-wip` yet.
+browser publisher enforces its grant too, but its driver reports no session
+error to read.
 
 Tokens use patterns no prefix could carry, so every cell checks that AUTH\_OK
 delivers them as minted: a publisher is granted its exact broadcast, a subscriber
 `**/name` (a leading `**` matching zero segments), and the refused publisher
 `interop-allowed-*.hang`.
 
+## moq-transport
+
+`--versions` runs the matrix and the tails once per version, against the same
+relay. `auto`, the default, is everything above. Any other version pins every
+client in its pass to offer that version alone, and `ietf` expands to the even
+drafts `moq-transport-14` through `moq-transport-22`. A pinned pass keeps the
+media cells, the relay close check, the CLI FETCH of group 0, and the finite
+tails. The grant, refusal, close-code, and drop cases are moq-lite's and run in
+`auto` alone.
+
+The relay logs the version each connection negotiated, so every round in a
+pinned pass also fails its `negotiated version` case when any connection it
+opened landed on another one, such as a client silently falling back to
+moq-lite. The relay names no client, so a fallback fails the round rather than
+one cell. The tails check their own connections, so a fallback fails the lane.
+
+Some cases change shape on moq-transport:
+
+- moq-net subscribes there from the largest group, not from a requested range,
+  so a tail reader started before the publisher's groups may begin past group 0.
+  The tails take any contiguous run of groups through group 3, each verified
+  byte for byte, and still require the clean end at 4.
+- The AUTH extension (draft-17 on) carries prefixes alone, and a relay refuses a
+  grant narrower than a subtree, closing the session as Unauthorized. Pinned
+  passes mint `name/**` for both roles instead of the exact and `**/name`
+  patterns above.
+
+The browser pins through the `versions` attribute on `<moq-watch>` and
+`<moq-publish>`, and GStreamer through the `versions` property on `moqsrc`.
+
 ## Running locally
 
 You need the workspace toolchain on `PATH` (cargo, ffmpeg, bun, uv, go,
-uniffi-bindgen-go, cmake, uniffi-bindgen-cpp, a C/C++ compiler). `nix develop` provides all of it except
-Playwright's Chromium, which
-`interop.sh` fetches on first run (`bunx playwright install chromium`).
+uniffi-bindgen-go, cmake, uniffi-bindgen-cpp, a C/C++ compiler). `nix develop` provides
+all of it, including the Chromium build matching the workspace's exact npm Playwright pins.
 
 ```bash
 # Default: rust publishes, rust subscribes (a fast sanity check).
@@ -146,6 +175,12 @@ just test interop --publishers rust,python --subscribers rust,c,js-native-bun
 
 # CLI FETCH close and finite track tails only: Rust-to-Rust and Rust/Node/Bun in both directions.
 just test interop --tail
+
+# The full matrix once per even moq-transport draft (see moq-transport below).
+just test interop --all --versions ietf
+
+# Or pick the versions, `auto` being the default moq-lite run.
+just test interop --versions auto,moq-transport-14,moq-transport-22
 
 # Subscription termination: Rust/JS response bytes over in-memory transports.
 just test bare-fin
@@ -184,7 +219,8 @@ independent of a media decoder.
 
 The session lanes take the moq-lite drafts from each CLI's `--connect-version`
 choices. IETF drafts are left out on purpose: our clients and relays always
-prefer moq-lite with each other, and `just test interop` covers IETF. The relay
+prefer moq-lite with each other. `just test interop --versions ietf` covers
+moq-transport within this checkout (see [moq-transport](#moq-transport)). The relay
 offers only the cell's version, and JavaScript checks the negotiated version.
 The relay is anonymous here, since released binaries may predate AUTH; the
 default matrix covers tokens and grants.
@@ -233,9 +269,9 @@ The matrix asks "did bytes arrive and did a pixel light up". That passes on a
 frozen picture, on silence, and on audio a second out of step, so
 `just test media` measures the media itself, browser to browser.
 Use `just test media --media-engines chromium,firefox,webkit` to run each pinned
-Playwright player against a Chromium publisher. The harness installs the requested
-engines and runs the same lifecycle cases, content tolerances, and five negative
-controls per engine. A missing runtime or required API fails that engine by name.
+Playwright player against a Chromium publisher. Chromium comes from the root devShell;
+the dedicated Firefox CI job provides its other engines. The harness runs the same
+lifecycle cases, content tolerances, and five negative controls per engine. A missing runtime or required API fails that engine by name.
 Firefox and WebKit players explicitly use WebSocket; Chromium keeps normal
 transport selection. This does not measure Firefox's QUIC path.
 
@@ -370,8 +406,9 @@ clients/
 ## CI
 
 `.github/workflows/interop.yml` runs the full matrix nightly (and on demand, and on
-release PRs that touch `test/interop/`). A red cell means a real interop break in the
-current tree.
+release PRs that touch `test/interop/`), then again with `--versions ietf`. A
+release PR's moq-transport step runs only drafts 14 and 22 between Rust and native
+JS. A red cell means a real interop break in the current tree.
 
 The scheduled run on `main` publishes its report to <https://git.moq.dev/interop/>;
 every other run keeps it as the `interop-report` artifact. The report is a pass/fail
@@ -385,7 +422,7 @@ suite, case, publisher, subscriber, transport, version, outcome, seconds, detail
 log. A run first records every case it will reach as `not run`, before building
 anything, so a harness that dies in setup or mid-suite leaves red `not run` cells
 rather than missing ones. Transport and version are `auto` where each client negotiates
-its own; the drop lanes and wire-compat pin a version. `report.py` renders the page:
+its own; a pinned pass, the drop lanes, and wire-compat record their version. `report.py` renders the page:
 
 ```bash
 MOQ_TEST_RESULTS=/tmp/results.jsonl just test interop
