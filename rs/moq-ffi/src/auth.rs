@@ -35,10 +35,10 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 /// Present `token` on every session of `handle`, resolving once a peer accepts it.
 async fn add(handle: moq_net::auth::Handle, token: String) -> Result<moq_net::auth::Auth, MoqError> {
 	let auth = handle.add(token).await?;
-	// A token the peer accepted carries a grant until it ends. Without AUTH, moq-transport
-	// accepts one at once for the requests that name it, but nothing here can name one, so it
-	// would never be sent. One already revoked is left for `closed` to report.
-	if auth.grant().peek().is_none() && poll_now(auth.closed()).is_pending() {
+	// Without AUTH, moq-transport accepts a token at once for the requests that name it, but
+	// nothing here can name one, so it would never be sent. A grant in band is no such token,
+	// even once its session drops, and one already revoked is left for `closed` to report.
+	if !auth.in_band() && poll_now(auth.closed()).is_pending() {
 		return Err(MoqError::Unsupported);
 	}
 	Ok(auth)

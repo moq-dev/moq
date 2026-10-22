@@ -171,6 +171,9 @@ struct Token {
 	value: Bytes,
 	/// The first verdict any session's peer gave: `Ok` for a grant, or why it ended.
 	answered: Option<Result<()>>,
+	/// Whether a session's peer granted it on an AUTH stream, rather than only accepting it
+	/// for the requests that name it.
+	granted: bool,
 	/// Why the token ended for good: a peer's refusal or revocation, or the handle's end.
 	ended: Option<Error>,
 }
@@ -564,6 +567,7 @@ impl Handle {
 			Token {
 				value: token.clone(),
 				answered: None,
+				granted: false,
 				ended: None,
 			},
 		);
@@ -983,6 +987,9 @@ impl Link {
 			slot.retry = None;
 			link.replied = true;
 			link.recompute();
+			if let Some(token) = state.tokens.get_mut(&id) {
+				token.granted = true;
+			}
 			state.answer(id, Ok(()));
 		});
 	}
@@ -1347,6 +1354,15 @@ impl Auth {
 	/// the credential ends.
 	pub fn grant(&self) -> Watch {
 		Watch::new(self.presented.state.clone(), self.presented.selector())
+	}
+
+	/// Whether a peer has granted this credential in band, on its AUTH stream, rather than
+	/// only accepting it for the requests that name it (moq-transport without AUTH).
+	///
+	/// Unlike [`grant`](Self::grant), it stays true while no session is live.
+	pub fn in_band(&self) -> bool {
+		let state = self.presented.state.read();
+		state.tokens.get(&self.presented.id).is_some_and(|token| token.granted)
 	}
 
 	/// Wait for the credential to end for good: a peer's refusal or revocation as
@@ -2833,6 +2849,26 @@ mod tests {
 			third.poll_opening(&kio::Waiter::noop()).is_pending(),
 			"a refused token stays ended"
 		);
+	}
+
+	/// A token granted in band stays so while no session is live, unlike one only requests
+	/// carry, so a caller can tell the two apart after a disconnect.
+	#[test]
+	fn a_grant_in_band_outlives_its_session() {
+		let handle = Handle::new();
+		let session = Link::attach(&handle, true, false).unwrap();
+		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		assert!(!auth.in_band());
+		session.granted(opened(&session), Grant::all());
+		session.close(Error::Cancel);
+		assert_eq!(auth.grant().peek(), None);
+		assert!(auth.in_band());
+
+		let handle = Handle::new();
+		let _session = Link::attach(&handle, false, true).unwrap();
+		let auth = handle.present(Bytes::from_static(b"jwt")).unwrap();
+		assert!(matches!(auth.poll_answered(&kio::Waiter::noop()), Poll::Ready(Ok(()))));
+		assert!(!auth.in_band());
 	}
 
 	/// A session's own handle has no successor: a token added after its GOAWAY fails at once,
