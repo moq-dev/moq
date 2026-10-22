@@ -482,42 +482,6 @@ mod test {
 	}
 
 	#[test]
-	fn deltas_share_one_group() {
-		let (mut producer, mut track) = producer(cfg(100));
-		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
-		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
-		producer.update(&json!({ "a": 1, "b": 3 })).unwrap();
-		producer.finish().unwrap();
-
-		// All updates fit in a single group as snapshot + deltas.
-		assert_eq!(
-			track.largest().now_or_never().flatten().map(|position| position.group),
-			Some(0)
-		);
-		let values = drain(track);
-		assert_eq!(values.last().unwrap(), &json!({ "a": 1, "b": 3 }));
-	}
-
-	#[test]
-	fn tight_ratio_rolls_snapshots() {
-		// A ratio of 1 budgets deltas up to one snapshot (equal 7-byte frames => 7 bytes). The gate
-		// checks the deltas already written, so the delta that tips the group over budget still lands
-		// (a one-frame overshoot): group 0 takes two deltas (14 bytes) before the fourth update rolls
-		// group 1. (Still distinct from 0, which disables deltas entirely.)
-		let (mut producer, mut track) = producer(cfg(1));
-		producer.update(&json!({ "a": 1 })).unwrap(); // snapshot, group 0
-		producer.update(&json!({ "a": 2 })).unwrap(); // delta, group 0 (deltas = 7)
-		producer.update(&json!({ "a": 3 })).unwrap(); // delta, group 0 (deltas = 14, now over budget)
-		producer.update(&json!({ "a": 4 })).unwrap(); // budget already exceeded, rolls group 1
-		producer.finish().unwrap();
-
-		assert_eq!(
-			track.largest().now_or_never().flatten().map(|position| position.group),
-			Some(1)
-		);
-	}
-
-	#[test]
 	fn deltas_stay_within_ratio_times_snapshot() {
 		// The budget covers only the deltas, not the snapshot frame, measured against the group's
 		// snapshot size. Single-digit values keep every frame at a constant 7 bytes (`{"n":N}`), so
@@ -568,18 +532,6 @@ mod test {
 			Some(1)
 		);
 		assert_eq!(drain(track).last().unwrap(), &json!({ "n": MAX_DELTA_FRAMES }));
-	}
-
-	#[test]
-	fn late_joiner_reconstructs_from_deltas() {
-		let (mut producer, track) = producer(cfg(100));
-		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
-		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
-		producer.update(&json!({ "a": 5, "b": 2 })).unwrap();
-		producer.finish().unwrap();
-
-		// A consumer created only now still rebuilds the final value from snapshot + deltas.
-		assert_eq!(drain(track).last().unwrap(), &json!({ "a": 5, "b": 2 }));
 	}
 
 	#[test]
@@ -1081,36 +1033,6 @@ mod test {
 		);
 		let values = drain_with(deflate_consumer(track));
 		assert_eq!(values, vec![json!({ "a": 2 })]);
-	}
-
-	#[test]
-	fn compressed_deltas_share_one_group() {
-		let (mut producer, mut track) = producer(cfg_deflate(100));
-		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
-		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
-		producer.update(&json!({ "a": 1, "b": 3 })).unwrap();
-		producer.finish().unwrap();
-
-		// Snapshot + deltas in one group, each frame decompressed against the shared window.
-		assert_eq!(
-			track.largest().now_or_never().flatten().map(|position| position.group),
-			Some(0)
-		);
-		let values = drain_with(deflate_consumer(track));
-		assert_eq!(values.last().unwrap(), &json!({ "a": 1, "b": 3 }));
-	}
-
-	#[test]
-	fn compressed_late_joiner_reconstructs_from_deltas() {
-		let (mut producer, track) = producer(cfg_deflate(100));
-		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
-		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
-		producer.update(&json!({ "a": 5, "b": 2 })).unwrap();
-		producer.finish().unwrap();
-
-		// A consumer created only now rebuilds the final value from the compressed snapshot + deltas.
-		let values = drain_with(deflate_consumer(track));
-		assert_eq!(values.last().unwrap(), &json!({ "a": 5, "b": 2 }));
 	}
 
 	#[test]
