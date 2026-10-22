@@ -1356,7 +1356,7 @@ mod test {
 		let pool = Pool::unbounded();
 		let now = super::super::clock::wall();
 		pool.gc(now, &kio::Waiter::noop());
-		let track = Track::new(pool.clone(), kio::Weak::new());
+		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let (read, reading) = flag();
 		let (driver, driving) = flag();
 		assert_eq!(pool.gc(now, &driving), None);
@@ -1377,7 +1377,7 @@ mod test {
 		let now = moq_clock::now();
 		let waiter = kio::Waiter::noop();
 		pool.gc(now, &waiter);
-		let track = Track::new(pool.clone(), kio::Weak::new());
+		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let (read, reading) = flag();
 		let at = now + Duration::from_secs(1);
 		track.watch_wall(at, &reading);
