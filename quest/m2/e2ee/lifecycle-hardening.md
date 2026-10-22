@@ -7,7 +7,7 @@ The rules the [E2EE epic](/quest/m2/e2ee/README.md) already decided hold in ever
 - A producing generation can only be opened under an epoch it minted, so two producers can never share an epoch and repeat an AES-GCM nonce.
 - A grouped write that fails after encryption ends the group, because the transport's frame index can no longer line up with the nonce.
 - A datagram whose wire identity is out of range is dropped with the bad-datagram event, not thrown as a fatal error.
-- The AEAD operation and byte budgets are per key, or the per-subscription receiver reset is documented.
+- The AEAD operation and byte budgets are per key, shared by every consumer of that key.
 - The draft states what a relay can truncate inside a group, so an application never mistakes a short group for a complete one.
 
 The Rust core already keeps the epoch unrepresentable outside the crate. The TypeScript package exports the concrete `Generation.Producer` through `export * as Generation`, and `Producer.make` is a public static that ships in the types. An app that persists an epoch and calls it twice gets two producers with independent claims, both starting at group 0 and frame 0 under the same key. The Rust grouped writer also leaves a group open after a post-encryption `write_frame` error, while the TS twin aborts.
@@ -19,7 +19,7 @@ Decided 2026-10-22 from the security audit, with the maintainer:
 - Keep the typed generation shape in the runtime but stop exporting the concrete class: export a `Producer`/`Consumer` interface, or gate `make` behind a module-private capability from `internal.ts`. A test asserts the package surface cannot mint a producer for a fixed epoch.
 - Abort the Rust group on any `inner.write_frame` error, matching `js/e2ee/src/group.ts`, and add the Rust twin of the TS test.
 - Map an out-of-range sequence or an oversize payload to the dropped-datagram event in both languages, with a `2^53` sequence test in each suite.
-- Scope the AEAD counters to the `(generation, physical name, domain)` tuple in the owning consumer, or state the per-subscription receiver cap in the draft's limits.
+- Share the AEAD counters across every consumer of a `(generation, physical name, domain)` key, so resubscribing cannot reset a key's failed-open or byte budget. Documenting a per-subscription reset is not an alternative: the same key is derived again, so the bound must be too.
 - State the mid-group truncation limit in the draft's security considerations, or add an authenticated terminal object if group atomicity is meant to be a guarantee. The audit found no way for a receiver to tell a shorter group from a truncated one.
 - Point the vacuous `compile_fail` doctest at the real private constructor.
 

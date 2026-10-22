@@ -13,7 +13,7 @@ Today `admit_http` fills `server_name` from `request_host(uri, headers)`, and th
 
 Decided 2026-10-22 from the security audit, with the maintainer:
 
-- Add `server_name()` to the `HttpStream` trait and return `TlsStream::get_ref().1.server_name()`; use it in `admit_http` and in the WebSocket session's link. Fall back to `Host` only on the plain-HTTP listener, and say so in the doc.
+- Add `server_name()` to the `HttpStream` trait and return `TlsStream::get_ref().1.server_name()`; use it in `admit_http` and in the WebSocket session's link. On the plain-HTTP listener leave `server_name` absent rather than filling it from `Host`, since the auth request has no field that would tell an auth server the value is client-chosen; say so in the doc.
 - Derive hidden-route visibility from the grant's `peer` flag, not `request.tls.is_some()`. Until peers set it, document the exemption where operators read it.
 - Bound the `moq_auth::Client` reply body.
 - Update `doc/bin/relay/auth.md` so `server_name`, `peer`, and the certificate-is-a-fact rule match what the code does.
