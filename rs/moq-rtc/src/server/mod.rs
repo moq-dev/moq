@@ -80,8 +80,11 @@ impl AcceptedSession {
 			// Hold the mux registration while media flows; it unregisters on exit.
 			let _registration = registration;
 			tokio::select! {
-				res = session.run() => Some(res),
+				// A client may close its peer connection right after its DELETE; the DELETE
+				// still names the end as clean.
+				biased;
 				_ = cancel => None,
+				res = session.run() => Some(res),
 			}
 		};
 		if let Some(res) = ended {
