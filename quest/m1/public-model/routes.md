@@ -85,7 +85,4 @@ cover the behavior.
 ## Required
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - replaces the hop and cost model these items expose
-
-## Related
-
 - [Public answering](/quest/m1/public-model/answer.md) - the answer source the escape hatches' replacement builds on
