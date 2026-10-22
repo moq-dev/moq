@@ -300,18 +300,19 @@ async function measurePlayback(player: Page, playerErrors: BrowserErrors, label:
 }
 
 /**
- * Collect one window while the host is watched, so a failed {@link assertMedia} in `grade` also
- * prints what stalled the pages. Callers check their own transition first, then grade.
+ * Collect one window while the host is watched, so a window that fails `grade`, whether on a
+ * caller's own transition checks or on {@link assertMedia}, also prints what stalled the pages.
  */
 async function observe(
 	player: Page,
 	playerErrors: BrowserErrors,
 	label: string,
-): Promise<{ samples: Sample[]; grade: () => Promise<void> }> {
+): Promise<{ samples: Sample[]; grade: (checks?: () => void) => Promise<void> }> {
 	const host = watchHost(label);
 	const samples = await collect(player, playerErrors, WINDOW_MS);
-	const grade = async () => {
+	const grade = async (checks?: () => void) => {
 		try {
+			checks?.();
 			assertMedia(samples, label);
 		} catch (err) {
 			await explainStalls(player, samples, label, host);
@@ -370,8 +371,13 @@ async function explainStalls(
 	label: string,
 	host: ReturnType<typeof watchHost>,
 ): Promise<void> {
-	try {
-		const origin = await inspect(player, () => performance.timeOrigin, undefined);
+	// The window has already failed, so a plain evaluate's user activation can no longer skew it, and
+	// unlike `inspect` it reads a non-Chromium player too. Each page reports on its own, so one that
+	// cannot be read leaves the other's evidence intact.
+	const origin = await player.evaluate(() => performance.timeOrigin).catch(() => undefined);
+	if (origin === undefined) {
+		console.error(`  ${label}: long animation frames unavailable: the player cannot be read`);
+	} else {
 		const start = origin + (samples[0]?.at ?? 0);
 		const end = origin + (samples[samples.length - 1]?.at ?? 0);
 		for (const [name, page] of [
@@ -379,23 +385,24 @@ async function explainStalls(
 			["fixture", fixturePage],
 		] as const) {
 			if (!page) continue;
-			const frames = await inspect(
-				page,
-				({ key, from, to }) =>
-					((globalThis as unknown as Record<string, LongFrame[] | undefined>)[key] ?? []).filter(
-						(frame) => frame.at + frame.duration >= from && frame.at <= to,
-					),
-				{ key: LONG_FRAMES, from: start, to: end },
-			);
-			console.error(`  ${label}: ${name} long animation frames: ${frames.length}`);
-			for (const frame of frames) {
-				console.error(
-					`    +${((frame.at - start) / 1000).toFixed(2)}s ${frame.duration}ms (blocking ${frame.blocking}ms) ${frame.scripts}`,
+			try {
+				const frames = await page.evaluate(
+					({ key, from, to }) =>
+						((globalThis as unknown as Record<string, LongFrame[] | undefined>)[key] ?? []).filter(
+							(frame) => frame.at + frame.duration >= from && frame.at <= to,
+						),
+					{ key: LONG_FRAMES, from: start, to: end },
 				);
+				console.error(`  ${label}: ${name} long animation frames: ${frames.length}`);
+				for (const frame of frames) {
+					console.error(
+						`    +${((frame.at - start) / 1000).toFixed(2)}s ${frame.duration}ms (blocking ${frame.blocking}ms) ${frame.scripts}`,
+					);
+				}
+			} catch (err) {
+				console.error(`  ${label}: ${name} long animation frames unavailable: ${err}`);
 			}
 		}
-	} catch (err) {
-		console.error(`  ${label}: long animation frames unavailable: ${err}`);
 	}
 
 	if (!host) return;
@@ -803,13 +810,14 @@ try {
 				sample.videoCodec?.startsWith("vp8") &&
 				sample.videoTrack !== before.videoTrack,
 		);
-		check(first >= 0, "codec rename", () => `no renamed VP8 picture: ${JSON.stringify(changed.at(-1))}`);
-		check(
-			changed.slice(first).every((sample) => sample.frameId === undefined || sample.generation === 1),
-			"old track picture",
-			() => "a pre-switch picture appeared after the new codec's first picture",
-		);
-		await change.grade();
+		await change.grade(() => {
+			check(first >= 0, "codec rename", () => `no renamed VP8 picture: ${JSON.stringify(changed.at(-1))}`);
+			check(
+				changed.slice(first).every((sample) => sample.frameId === undefined || sample.generation === 1),
+				"old track picture",
+				() => "a pre-switch picture appeared after the new codec's first picture",
+			);
+		});
 		const renamed = changed[first].videoTrack;
 		await measurePlayback(player, playerErrors, "after codec rename");
 
@@ -824,18 +832,23 @@ try {
 				sample.videoCodedWidth === Pattern.WIDTH * 2 &&
 				sample.videoCodedHeight === Pattern.HEIGHT * 2,
 		);
-		check(grown >= 0, "coded-size growth", () => `no larger presented picture: ${JSON.stringify(resized.at(-1))}`);
-		check(
-			resized.every((sample) => sample.videoTrack === renamed && sample.videoCodec?.startsWith("vp8")),
-			"resize keeps identity",
-			() => `VP8 resize changed track: ${JSON.stringify(resized.at(-1))}`,
-		);
-		check(
-			resized.slice(grown).every((sample) => sample.frameId === undefined || sample.generation === 2),
-			"old track picture",
-			() => "a pre-resize picture appeared after the first larger picture",
-		);
-		await resize.grade();
+		await resize.grade(() => {
+			check(
+				grown >= 0,
+				"coded-size growth",
+				() => `no larger presented picture: ${JSON.stringify(resized.at(-1))}`,
+			);
+			check(
+				resized.every((sample) => sample.videoTrack === renamed && sample.videoCodec?.startsWith("vp8")),
+				"resize keeps identity",
+				() => `VP8 resize changed track: ${JSON.stringify(resized.at(-1))}`,
+			);
+			check(
+				resized.slice(grown).every((sample) => sample.frameId === undefined || sample.generation === 2),
+				"old track picture",
+				() => "a pre-resize picture appeared after the first larger picture",
+			);
+		});
 		await measurePlayback(player, playerErrors, "after coded-size growth");
 	}
 
