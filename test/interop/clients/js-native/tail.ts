@@ -1,4 +1,13 @@
-/** Finite raw-track interop: publish until the harness acknowledges, or read through clean EOF. @module */
+/**
+ * Finite raw-track interop: publish until the harness acknowledges, or read through clean EOF.
+ *
+ * `drop` cuts group 1. `join` reads from whichever group the subscription starts at: a
+ * moq-transport subscription starts at the largest group rather than at the range asked for, so
+ * it must read a contiguous run of groups through the last one. `compress` publishes a compressed
+ * track with several frames, one empty, in each group.
+ *
+ * @module
+ */
 import { strict as assert } from "node:assert";
 import { createInterface } from "node:readline";
 import { Milli } from "@moq/clock";
@@ -10,9 +19,15 @@ const GROUPS = 4;
 const BYTES = 256 * 1024;
 const [role, url, path, version, mode] = process.argv.slice(2);
 const drop = mode === "drop";
+const join = mode === "join";
 const compress = mode === "compress";
-if (!url || !path || !["publish", "subscribe"].includes(role)) {
-	throw new Error("usage: tail.ts publish|subscribe URL BROADCAST");
+if (
+	!url ||
+	!path ||
+	!["publish", "subscribe"].includes(role) ||
+	![undefined, "drop", "join", "compress"].includes(mode)
+) {
+	throw new Error("usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress]]");
 }
 
 const origin = new Moq.Origin.Producer();
@@ -85,16 +100,14 @@ try {
 						group.close();
 					}
 				}
-				assert.deepEqual(
-					seen.sort((a, b) => a - b),
-					drop ? [0, 2, 3] : [0, 1, 2, 3],
-				);
+				seen.sort((a, b) => a - b);
+				const first = join ? (seen[0] ?? 0) : 0;
+				const all = Array.from({ length: GROUPS - first }, (_, i) => first + i);
+				assert.deepEqual(seen, drop ? [0, 2, 3] : all);
 				assert.deepEqual(await track.finished(), { group: GROUPS, frame: 0 });
-				console.error(
-					drop
-						? "tail drop clean end=4 groups=0,2,3 bytes=786432"
-						: "tail clean end=4 groups=0,1,2,3 bytes=1048576",
-				);
+				if (join) console.error(`tail join clean end=4 groups=${seen.join(",")}`);
+				else if (drop) console.error("tail drop clean end=4 groups=0,2,3 bytes=786432");
+				else console.error("tail clean end=4 groups=0,1,2,3 bytes=1048576");
 			} finally {
 				track.close();
 			}
