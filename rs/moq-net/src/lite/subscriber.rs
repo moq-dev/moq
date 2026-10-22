@@ -1842,11 +1842,17 @@ struct TracksRecv<S: crate::transport::poll::Session> {
 	gate: crate::auth::Gate,
 	/// The gate let the listing through, and this hop synced its readers.
 	admitted: bool,
+	/// Until the request is out, the source must still be the selected instance: a TRACKS
+	/// request without an epoch would list its replacement.
+	validity: crate::model::broadcast::RequestValidity,
 }
 
 impl<S: crate::transport::poll::Session> TracksRecv<S> {
 	/// Apply the peer's events until it ends the listing, or the error that ends it.
 	fn poll(&mut self, source: &SourceServe<S>, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if self.stream.is_none() {
+			self.validity.check(waiter)?;
+		}
 		ready!(self.gate.poll_ready(waiter));
 		if self.gate.poll_denied(waiter).is_ready() {
 			return Poll::Ready(Err(Error::Unauthorized));
@@ -1952,6 +1958,7 @@ impl<S: crate::transport::poll::Session> SourceServe<S> {
 							crate::auth::Direction::Subscribe,
 						),
 						admitted: false,
+						validity: self.validity.start(),
 					});
 				}
 				Some(_) if self.lister.poll_unused(waiter).is_ready() => {
@@ -3635,6 +3642,7 @@ mod tests {
 	fn listed_source(
 		session: SinkSession,
 		auth: crate::auth::Handle,
+		validity: crate::model::broadcast::RequestValidity,
 	) -> (SourceServe<SinkSession>, crate::broadcast::Consumer, kio::Producer<()>) {
 		let subscriber = Subscriber::new(SubscriberConfig {
 			runtime: crate::time::sim(),
@@ -3655,7 +3663,7 @@ mod tests {
 		let serve = SourceServe::new(
 			subscriber,
 			MintedSource {
-				validity: Default::default(),
+				validity,
 				path: Path::new("room").to_owned(),
 				epoch: None,
 				source: crate::model::broadcast::SourceGuard::new(broadcast),
@@ -3674,7 +3682,7 @@ mod tests {
 		let token = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
 		let open = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(open.consume());
-		let (mut serve, consumer, _route) = listed_source(session.clone(), auth);
+		let (mut serve, consumer, _route) = listed_source(session.clone(), auth, Default::default());
 		let mut tracks = consumer.tracks().unwrap();
 
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
@@ -3693,6 +3701,27 @@ mod tests {
 		));
 	}
 
+	/// An instance retired while its listing waits for a token lists nothing: a TRACKS
+	/// request without an epoch would list its replacement.
+	#[moq_clock::test]
+	async fn a_listing_of_a_retired_instance_never_reaches_the_wire() {
+		let auth = crate::auth::Handle::new(true);
+		let token = auth.present(bytes::Bytes::from_static(b"new"), false).unwrap();
+		let open = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(open.consume());
+		let selected = kio::Producer::new(());
+		let validity = crate::model::broadcast::RequestValidity::Route(selected.consume());
+		let (mut serve, consumer, _route) = listed_source(session.clone(), auth, validity);
+		let mut tracks = consumer.tracks().unwrap();
+
+		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
+		drop(selected);
+		drop(token);
+		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
+		assert!(matches!(tracks.next().now_or_never(), Some(Err(Error::Unroutable))));
+		assert_eq!(session.log.bi_opens(), 0);
+	}
+
 	/// A listing outside the session's scope is refused before it reaches the wire.
 	#[moq_clock::test]
 	async fn a_listing_outside_the_scope_is_refused() {
@@ -3700,7 +3729,7 @@ mod tests {
 		auth.authorize(&crate::auth::Grant::default());
 		let open = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(open.consume());
-		let (mut serve, consumer, _route) = listed_source(session.clone(), auth);
+		let (mut serve, consumer, _route) = listed_source(session.clone(), auth, Default::default());
 		let mut tracks = consumer.tracks().unwrap();
 
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
@@ -3715,7 +3744,7 @@ mod tests {
 		let auth = crate::auth::Handle::new(false);
 		let open = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(open.consume());
-		let (mut serve, consumer, _route) = listed_source(session.clone(), auth.clone());
+		let (mut serve, consumer, _route) = listed_source(session.clone(), auth.clone(), Default::default());
 		let mut tracks = consumer.tracks().unwrap();
 
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());

@@ -2,6 +2,7 @@ import { expect, jest, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import type { AuthSession } from "../auth_session.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import * as Epoch from "../epoch.ts";
 import {
@@ -1447,6 +1448,69 @@ test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 		subscriber.close();
 	},
 );
+
+// A TRACKS request carries no epoch for an epochless route, so it would list the replacement.
+test("a listing of an epochless handle retired while its token waits never reaches the wire", async () => {
+	const { quic, streams, opened } = fakeSession();
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => (release = resolve));
+	const auth = {
+		ready: (_path: Path.Valid, _direction: string, opts?: { signal?: AbortSignal }) =>
+			new Promise<boolean>((resolve, reject) => {
+				void released.then(() => resolve(true));
+				opts?.signal?.addEventListener("abort", () => reject(opts.signal?.reason), { once: true });
+			}),
+	} as unknown as AuthSession;
+	const version = Version.DRAFT_07;
+	const subscriber = new Subscriber(
+		quic,
+		version,
+		HopSchema.parse(1n),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		auth,
+	);
+	const announced = subscriber.announced();
+	await opened(0);
+	const send = async (encode: (writer: Writer) => Promise<void>) => {
+		const writer = new Writer(
+			new WritableStream<Uint8Array>({
+				write: (chunk) => streams[0].inbound.enqueue(new Uint8Array(chunk)),
+			}),
+			version,
+		);
+		await encode(writer);
+	};
+	const path = Path.from("pool");
+	await send((writer) => new AnnounceOk(PEER, 0).encode(writer, version));
+	await send((writer) =>
+		encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_A] }, version),
+	);
+	await announced.next();
+	const held = subscriber.consume(Path.from("pool/job"));
+	const tracks = held.tracks();
+	const event = tracks.next().catch((err: unknown) => err);
+
+	await send((writer) => encodeAnnounceBroadcast(writer, { status: "endedId", id: 0n }, version));
+	await announced.next();
+	await send((writer) =>
+		encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_B] }, version),
+	);
+	await announced.next();
+	release();
+
+	const err = await event;
+	expect(err).toBeInstanceOf(StreamError);
+	expect((err as StreamError).code).toBe(StreamCode.Unroutable);
+	expect(streams.length).toBe(1);
+	tracks.close();
+	held.close();
+	announced.close();
+	subscriber.close();
+});
 
 test.each(["track", "fetch", "open"] as const)(
 	"retirement settles coalesced fetches during %s setup",

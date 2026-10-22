@@ -664,11 +664,6 @@ export class Subscriber {
 	// Answer listings of a consumed broadcast from the peer's TRACKS while anyone lists it, until
 	// the broadcast closes. Every listing of the broadcast shares one TRACKS stream.
 	async #runListing(broadcast: Path.Valid, consumed: Consumed, lister: Lister) {
-		const unlisted = async () => {
-			while (lister.used.peek() && lister.ended.peek() === undefined) {
-				await Signal.race(lister.used, lister.ended);
-			}
-		};
 		try {
 			for (;;) {
 				if (lister.ended.peek() !== undefined || this.#closed.signal.aborted) return;
@@ -683,12 +678,6 @@ export class Subscriber {
 					lister.abort(new Error("track listing requires moq-lite-07 or newer"));
 					continue;
 				}
-				// A listing is a subscribe: one opened before a token that covers it is answered
-				// would be refused by the peer.
-				const ready = await this.#auth
-					?.ready(broadcast, "subscribe", { signal: this.#closed.signal, until: unlisted })
-					.catch(() => false);
-				if (ready === false) continue;
 				await this.#listTracks(broadcast, consumed, lister);
 			}
 		} finally {
@@ -698,7 +687,30 @@ export class Subscriber {
 
 	// Forward the peer's TRACKS listing of `broadcast` into `lister` until the peer ends it, it
 	// fails, our grant stops covering the broadcast, or nobody lists the broadcast any more.
+	// Returns without answering when setup was cut short, for the caller to look again.
 	async #listTracks(broadcast: Path.Valid, consumed: Consumed, lister: Lister): Promise<void> {
+		// Until the request is out, the consumed instance must still be the selected one: a TRACKS
+		// request without an epoch would list its replacement.
+		const valid = consumed.valid;
+		if (valid?.aborted) {
+			lister.abort(error(valid.reason));
+			return;
+		}
+		const setup = valid ? AbortSignal.any([this.#closed.signal, valid]) : this.#closed.signal;
+		// A listing is a subscribe: one opened before a token that covers it is answered would be
+		// refused by the peer.
+		const ready = await this.#auth
+			?.ready(broadcast, "subscribe", {
+				signal: setup,
+				until: async () => {
+					while (lister.used.peek() && lister.ended.peek() === undefined) {
+						await Signal.race(lister.used, lister.ended);
+					}
+				},
+			})
+			.catch(() => false);
+		if (ready === false || setup.aborted) return;
+
 		// Armed before the first check and held to the end, so a shrink is never missed.
 		const refused = unauthorized(broadcast);
 		const revoked = new AbortController();
@@ -724,13 +736,14 @@ export class Subscriber {
 		let stream: Stream | undefined;
 		try {
 			const opening = Stream.open(this.#quic, { version: this.version, ...requestOptions });
+			const cut = valid ? AbortSignal.any([stop, valid]) : stop;
 			void opening.then(
 				(late) => {
-					if (stop.aborted) late.abort(error(stop.reason));
+					if (cut.aborted) late.abort(error(cut.reason));
 				},
 				() => {},
 			);
-			stream = await untilAborted(opening, stop);
+			stream = await untilAborted(opening, cut);
 			await stream.writer.u53(StreamId.Tracks);
 			await new TracksMessage(broadcast, consumed.epoch).encode(stream.writer, this.version);
 			let synced = false;
