@@ -330,7 +330,7 @@ compare_criterion() {
                 python3 "$ROOT/bench/compare.py" --criterion-baseline \
                     "$RUN/criterion-discovery/current/$manifest/$target" "$benchmark" "$home"
                 CRITERION_HOME=$home run_criterion_target "$current_checkout" "$manifest" "$target" \
-                    --baseline-lenient base "$benchmark" --exact
+                    --baseline base "$benchmark" --exact
             else
                 CRITERION_HOME=$home run_criterion_target "$current_checkout" "$manifest" "$target" \
                     --save-baseline current "$benchmark" --exact
@@ -339,19 +339,13 @@ compare_criterion() {
     done <"$keys"
 }
 
-collect_ids() {
-    local sample=$1
-    while IFS= read -r -d '' benchmark; do
-        jq -r .full_id "$benchmark"
-    done < <(find "$CRITERION_HOME" -type f -path "*/$sample/benchmark.json" -print0) |
-        sort -u
-}
-
 report_set_changes() {
     local base_ids=$RUN/criterion-base.ids
     local current_ids=$RUN/criterion-current.ids
-    collect_ids base >"$base_ids"
-    collect_ids new >"$current_ids"
+    # Baseline measurements also write new/, so saved sample directories cannot
+    # distinguish a removed case from a case measured on the current revision.
+    cut -f3- "$RUN/criterion-base.cases" | sort -u >"$base_ids"
+    cut -f3- "$RUN/criterion-current.cases" | sort -u >"$current_ids"
 
     local new removed
     new=$(comm -13 "$base_ids" "$current_ids")

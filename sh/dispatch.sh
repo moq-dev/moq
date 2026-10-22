@@ -280,7 +280,10 @@ for module in "${selected[@]}"; do
         # The preamble keeps docs and target-specific lints; the test build
         # below enforces default-feature clippy without a second compile.
         check:rs) just rs lint-changed "$rs_list" ;;
-        check:bench) cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring ;;
+        check:bench)
+            python3 bench/compare.test.py
+            cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
+            ;;
         check:quest) quest check ;;
         check:drill) just test drill-sensitivity --apply-only ;;
         check:obs_compile) just obs compile ;;
