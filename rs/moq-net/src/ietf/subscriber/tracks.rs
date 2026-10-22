@@ -1,0 +1,1186 @@
+//! Lists a moq-transport peer's tracks through the TRACKS hook (draft-18+).
+//!
+//! A listed broadcast sends SUBSCRIBE_TRACKS with FORWARD=0, and each track it lists is
+//! one paused subscription held for the session: the PUBLISH the peer answers with,
+//! accepted paused, or for a track the peer skips, a SUBSCRIBE we open paused. That
+//! subscription is both the listing entry, removed by its PUBLISH_DONE with TRACK_ENDED,
+//! and the track's upstream copy: a reader resumes it with REQUEST_UPDATE and pauses it
+//! again once the last one leaves, rather than opening a second subscription.
+//!
+//! One SUBSCRIBE_TRACKS covers each nesting chain of listed broadcasts, since the peer
+//! refuses an overlapping prefix: a nested listing reuses the broader request and filters
+//! locally, and a broader one replaces the nested requests once the peer has closed them,
+//! keeping the subscriptions they made. Any end of a held subscription other than
+//! TRACK_ENDED fails every listing its request serves, which then asks again, rather
+//! than hide a track that may still be live.
+
+use std::sync::Arc;
+
+use super::*;
+use crate::AsPath as _;
+use crate::ietf::request_stream::{self, Framed, Messages};
+
+/// A listed track, by its namespace and name.
+pub(super) type TrackKey = (PathOwned, Arc<str>);
+
+/// How a PUBLISH_DONE ending `end` leaves the listing: TRACK_ENDED removes the track, and
+/// so does INTERNAL_ERROR, which is what our own answerer sends once a track is no longer
+/// listed (PUBLISH_DONE registers no DOES_NOT_EXIST). Any other status fails the listing,
+/// so it asks again rather than hide a track that may still be live.
+pub(super) fn unlisted(end: Result<(), Error>) -> Result<(), Error> {
+	match end {
+		Err(Error::Remote(code)) if u64::from(code) == ietf::PublishDoneStatus::InternalError.code(Version::Draft18) => {
+			Ok(())
+		}
+		end => end,
+	}
+}
+
+/// A paused upstream subscription and the request stream that controls it.
+pub(super) struct Upstream<S: crate::transport::poll::Session> {
+	pub(super) stream: Stream<S, Version>,
+	pub(super) messages: Messages<S>,
+	pub(super) request_id: RequestId,
+	pub(super) alias: u64,
+	/// The Track Properties the PUBLISH or SUBSCRIBE_OK declared.
+	pub(super) properties: ietf::Properties,
+	/// REQUEST_UPDATE answers still owed, read before anything else.
+	pub(super) owed: u64,
+}
+
+/// Hands a paused subscription from the task watching it to a subscription resuming it.
+pub(super) struct Handoff<S: crate::transport::poll::Session> {
+	/// A subscription asked for it.
+	wanted: bool,
+	/// Handed over by the watcher.
+	upstream: Option<Upstream<S>>,
+	/// The entry was let go, so the watcher cancels the subscription.
+	gone: bool,
+}
+
+impl<S: crate::transport::poll::Session> Default for Handoff<S> {
+	fn default() -> Self {
+		Self {
+			wanted: false,
+			upstream: None,
+			gone: false,
+		}
+	}
+}
+
+/// One listed track and the upstream subscription that holds it.
+struct Entry<S: crate::transport::poll::Session> {
+	/// Its TRACK_INFO, once known: a paused SUBSCRIBE learns it from its SUBSCRIBE_OK.
+	info: Option<track::Info>,
+	/// The subscription holding it, once known.
+	request_id: Option<RequestId>,
+	/// Set while it is paused, or still opening, and a watcher owns it. `None` while a
+	/// subscription forwarding it owns it.
+	handoff: Option<kio::Shared<Handoff<S>>>,
+	/// Discovery state the peer makes us hold, as for a lite listed track.
+	_slot: crate::session::Slot,
+}
+
+impl<S: crate::transport::poll::Session> Drop for Entry<S> {
+	fn drop(&mut self) {
+		if let Some(handoff) = &self.handoff {
+			handoff.lock().gone = true;
+		}
+	}
+}
+
+/// A broadcast listed through this session.
+struct Listener {
+	path: PathOwned,
+	lister: Arc<broadcast::Lister>,
+	/// Set to the error that fails the listing.
+	failed: kio::Producer<Option<Error>>,
+}
+
+/// One SUBSCRIBE_TRACKS, from when it is wanted until the peer has closed it.
+struct Request {
+	prefix: PathOwned,
+	/// Dropped to cancel it; `None` once cancelled, while it leaves the wire.
+	live: Option<kio::Producer<()>>,
+	/// Closes once it is off the wire, so an overlapping one may go out.
+	gone: kio::Consumer<()>,
+}
+
+/// The session's listings of the peer's tracks.
+pub(super) struct Listings<S: crate::transport::poll::Session> {
+	listeners: HashMap<u64, Listener>,
+	requests: HashMap<u64, Request>,
+	entries: HashMap<TrackKey, Entry<S>>,
+	next: u64,
+}
+
+impl<S: crate::transport::poll::Session> Default for Listings<S> {
+	fn default() -> Self {
+		Self {
+			listeners: HashMap::new(),
+			requests: HashMap::new(),
+			entries: HashMap::new(),
+			next: 0,
+		}
+	}
+}
+
+/// A SUBSCRIBE_TRACKS for its task to send.
+struct Opening {
+	key: u64,
+	prefix: PathOwned,
+	/// The overlapping requests that must leave the wire first.
+	blockers: Vec<kio::Consumer<()>>,
+	live: kio::Consumer<()>,
+	gone: kio::Producer<()>,
+}
+
+impl<S: crate::transport::poll::Session> Listings<S> {
+	fn key(&mut self) -> u64 {
+		self.next += 1;
+		self.next
+	}
+
+	/// The standing request that covers `namespace`; at most one does.
+	fn covering(&self, namespace: &PathOwned) -> Option<u64> {
+		self.requests
+			.iter()
+			.find(|(_, request)| request.live.is_some() && namespace.has_prefix(&request.prefix))
+			.map(|(key, _)| *key)
+	}
+
+	fn listers<'a>(&'a self, namespace: &'a PathOwned) -> impl Iterator<Item = &'a broadcast::Lister> + 'a {
+		self.listeners
+			.values()
+			.filter(move |listener| &listener.path == namespace)
+			.map(|listener| &*listener.lister)
+	}
+
+	fn listen(&mut self, path: PathOwned, lister: Arc<broadcast::Lister>) -> (u64, kio::Consumer<Option<Error>>, Option<Opening>) {
+		// What a broader listing already holds is listed at once.
+		for ((namespace, name), entry) in &self.entries {
+			if namespace == &path
+				&& let Some(info) = &entry.info
+			{
+				let _ = lister.add(name.clone(), info.clone());
+			}
+		}
+		// This hop never waits on its upstream: later tracks follow as live adds.
+		lister.synced();
+		let failed = kio::Producer::new(None);
+		let consumer = failed.consume();
+		let key = self.key();
+		self.listeners.insert(
+			key,
+			Listener {
+				path: path.clone(),
+				lister,
+				failed,
+			},
+		);
+		if self.covering(&path).is_some() {
+			return (key, consumer, None);
+		}
+		// Nested requests give way to this broader one, which keeps what they hold.
+		for request in self.requests.values_mut() {
+			if request.prefix.has_prefix(&path) {
+				request.live = None;
+			}
+		}
+		let blockers = self
+			.requests
+			.values()
+			.filter(|request| request.prefix.has_prefix(&path) || path.has_prefix(&request.prefix))
+			.map(|request| request.gone.clone())
+			.collect();
+		let live = kio::Producer::new(());
+		let gone = kio::Producer::new(());
+		let request = self.key();
+		self.requests.insert(
+			request,
+			Request {
+				prefix: path.clone(),
+				gone: gone.consume(),
+				live: Some(live.clone()),
+			},
+		);
+		let opening = Opening {
+			key: request,
+			prefix: path,
+			blockers,
+			live: live.consume(),
+			gone,
+		};
+		(key, consumer, Some(opening))
+	}
+
+	fn unlisten(&mut self, key: u64) {
+		self.listeners.remove(&key);
+		self.release();
+	}
+
+	/// Cancel each standing request nobody lists under, and let go of each held track no
+	/// standing request covers.
+	fn release(&mut self) {
+		for request in self.requests.values_mut() {
+			if request.live.is_some()
+				&& !self
+					.listeners
+					.values()
+					.any(|listener| listener.path.has_prefix(&request.prefix))
+			{
+				request.live = None;
+			}
+		}
+		let standing: Vec<PathOwned> = self
+			.requests
+			.values()
+			.filter(|request| request.live.is_some())
+			.map(|request| request.prefix.clone())
+			.collect();
+		self.entries
+			.retain(|(namespace, _), _| standing.iter().any(|prefix| namespace.has_prefix(prefix)));
+	}
+
+	/// Fail every listing the request covering `namespace` serves with `err`, and cancel it:
+	/// they ask again rather than miss a track that may still be live.
+	fn fail(&mut self, namespace: &PathOwned, err: Error) {
+		let Some(key) = self.covering(namespace) else {
+			return;
+		};
+		let request = self.requests.get_mut(&key).expect("covering");
+		request.live = None;
+		let prefix = request.prefix.clone();
+		tracing::debug!(%prefix, %err, "track listing failed");
+		for listener in self.listeners.values() {
+			if listener.path.has_prefix(&prefix)
+				&& let Ok(mut failed) = listener.failed.write()
+			{
+				*failed = Some(err.clone());
+			}
+		}
+		self.release();
+	}
+
+	fn insert(&mut self, key: TrackKey, entry: Entry<S>) {
+		if let Some(info) = &entry.info {
+			for lister in self.listers(&key.0) {
+				let _ = lister.add(key.1.clone(), info.clone());
+			}
+		}
+		self.entries.insert(key, entry);
+	}
+
+	fn remove(&mut self, key: &TrackKey) {
+		let Some(entry) = self.entries.remove(key) else {
+			return;
+		};
+		if entry.info.is_some() {
+			for lister in self.listers(&key.0) {
+				let _ = lister.remove(&key.1);
+			}
+		}
+	}
+
+	/// The entry held by the subscription with `request_id`, if this is it.
+	fn held_by(&mut self, key: &TrackKey, request_id: RequestId) -> Option<&mut Entry<S>> {
+		self.entries
+			.get_mut(key)
+			.filter(|entry| entry.request_id == Some(request_id))
+	}
+
+	/// The entry `handoff` belongs to, if it still stands.
+	fn watched_by(&mut self, key: &TrackKey, handoff: &kio::Shared<Handoff<S>>) -> Option<&mut Entry<S>> {
+		self.entries.get_mut(key).filter(|entry| {
+			entry
+				.handoff
+				.as_ref()
+				.is_some_and(|held| held.same_channel(handoff))
+		})
+	}
+
+	/// End the entry held by the subscription with `request_id`: TRACK_ENDED unlists it,
+	/// and anything else fails its listings.
+	fn ended(&mut self, key: &TrackKey, request_id: RequestId, end: Result<(), Error>) {
+		if self.held_by(key, request_id).is_none() {
+			return;
+		}
+		match end {
+			Ok(()) => self.remove(key),
+			Err(err) => {
+				self.remove(key);
+				self.fail(&key.0, err);
+			}
+		}
+	}
+}
+
+/// A broadcast's listing through this session, until dropped.
+pub(super) struct Listening<S: crate::transport::poll::Session> {
+	listings: kio::Lock<Listings<S>>,
+	key: u64,
+	failed: kio::Consumer<Option<Error>>,
+}
+
+impl<S: crate::transport::poll::Session> Listening<S> {
+	/// Ready with the error that failed the listing.
+	pub(super) fn poll_failed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		match self.failed.poll(waiter, |failed| match &**failed {
+			Some(err) => Poll::Ready(err.clone()),
+			None => Poll::Pending,
+		}) {
+			Poll::Ready(Ok(err)) => Poll::Ready(err),
+			Poll::Ready(Err(_)) => Poll::Ready(Error::Cancel),
+			Poll::Pending => Poll::Pending,
+		}
+	}
+}
+
+impl<S: crate::transport::poll::Session> Drop for Listening<S> {
+	fn drop(&mut self) {
+		self.listings.lock().unlisten(self.key);
+	}
+}
+
+/// What to do with a PUBLISH.
+enum Offer<S: crate::transport::poll::Session> {
+	/// No listing asked for it.
+	Unsolicited,
+	/// Refused with this code and reason.
+	Refuse(u64, &'static str),
+	/// Accepted paused and held as the entry `handoff` watches.
+	Hold(kio::Shared<Handoff<S>>),
+}
+
+impl<S> Subscriber<S>
+where
+	S: crate::transport::poll::Boxable,
+{
+	/// List `path`'s tracks into `lister` until the returned guard drops, through a
+	/// SUBSCRIBE_TRACKS covering it.
+	pub(super) fn listen(&self, path: PathOwned, lister: Arc<broadcast::Lister>) -> Listening<S> {
+		let (key, failed, opening) = self.listings.lock().listen(path, lister);
+		if let Some(opening) = opening {
+			let this = self.clone();
+			self.tasks.push(this.run_subscribe_tracks(opening));
+		}
+		Listening {
+			listings: self.listings.clone(),
+			key,
+			failed,
+		}
+	}
+
+	/// Send one SUBSCRIBE_TRACKS and read its answers until it is cancelled and the peer
+	/// has closed it, or it fails.
+	async fn run_subscribe_tracks(self, opening: Opening) {
+		let Opening {
+			key,
+			prefix,
+			blockers,
+			live,
+			gone,
+		} = opening;
+		let result = self.subscribe_tracks(&prefix, blockers, &live).await;
+		let mut listings = self.listings.lock();
+		if let Err(err) = result
+			&& listings.requests.get(&key).is_some_and(|request| request.live.is_some())
+		{
+			listings.fail(&prefix, err);
+		}
+		listings.requests.remove(&key);
+		listings.release();
+		drop(listings);
+		// Off the wire: an overlapping request may go out.
+		drop(gone);
+	}
+
+	async fn subscribe_tracks(
+		&self,
+		prefix: &PathOwned,
+		blockers: Vec<kio::Consumer<()>>,
+		live: &kio::Consumer<()>,
+	) -> Result<(), Error> {
+		// The peer refuses a prefix overlapping one it still holds, so wait for each
+		// overlapping request to leave the wire.
+		let proceed = kio::wait(|waiter| {
+			if live.poll_closed(waiter).is_ready() {
+				return Poll::Ready(false);
+			}
+			for blocker in &blockers {
+				if blocker.poll_closed(waiter).is_pending() {
+					return Poll::Pending;
+				}
+			}
+			Poll::Ready(true)
+		})
+		.await;
+		if !proceed {
+			return Ok(());
+		}
+
+		let mut session = self.session.clone();
+		let opened = {
+			let mut opening = std::pin::pin!(Stream::open(&mut session, self.version));
+			kio::wait(|waiter| {
+				if live.poll_closed(waiter).is_ready() {
+					return Poll::Ready(None);
+				}
+				waiter.poll_future(opening.as_mut()).map(Some)
+			})
+			.await
+		};
+		let Some(stream) = opened else {
+			return Ok(());
+		};
+		let mut stream = stream?;
+		// No draft with SUBSCRIBE_TRACKS has MAX_REQUEST_ID, so this never waits on credit.
+		let request_id = kio::wait(|waiter| self.control.poll_next_request_id(waiter)).await;
+		stream.writer.buffer_varint(ietf::SubscribeTracks::ID)?;
+		stream.writer.buffer(&ietf::SubscribeTracks {
+			request_id,
+			prefix: prefix.as_path(),
+			forward: false,
+			subscriber_priority: None,
+			group_order: None,
+			filter: None,
+			fill: None,
+			properties_wanted: true,
+			new_group: None,
+			range_filters: false,
+			track_filter: false,
+			authorization_token: None,
+		})?;
+		tracing::debug!(prefix = %self.origin.absolute(prefix), id = %request_id, "subscribe_tracks started");
+
+		let mut messages = Messages::new(self.session.clone(), self.control.client());
+		let mut established = false;
+		enum Event {
+			Closed,
+			Cancelled,
+			Message(Option<Framed>),
+		}
+		loop {
+			let event = kio::wait(|waiter| {
+				let mut cx = waiter.context();
+				if session.poll_closed(&mut cx).is_ready() {
+					return Poll::Ready(Ok(Event::Closed));
+				}
+				if live.poll_closed(waiter).is_ready() {
+					return Poll::Ready(Ok(Event::Cancelled));
+				}
+				ready!(stream.writer.poll_flush(&mut cx))?;
+				messages
+					.poll_next(&mut stream.reader, &mut cx)
+					.map(|next| next.map(Event::Message))
+			})
+			.await?;
+			let Framed(id, body) = match event {
+				Event::Closed => return Ok(()),
+				Event::Cancelled => break,
+				// The peer ended the listing, which only a cancel of ours should do.
+				Event::Message(None) if established => return Err(Error::Closed),
+				Event::Message(None) => return Err(messages.failed(Error::ProtocolViolation)),
+				Event::Message(Some(framed)) => framed,
+			};
+			match id {
+				ietf::RequestOk::ID if !established => {
+					body.message::<ietf::RequestOk>(self.version)
+						.map_err(|err| messages.failed(err.into()))?;
+					established = true;
+				}
+				ietf::RequestError::ID if !established => {
+					let refused = body
+						.message::<ietf::RequestError>(self.version)
+						.map_err(|err| messages.failed(err.into()))?;
+					tracing::debug!(prefix = %prefix, code = refused.error_code, reason = %refused.reason_phrase, "subscribe_tracks refused");
+					return Err(request::from_code(
+						refused.error_code,
+						request::Kind::SubscribeNamespace,
+						self.version,
+					));
+				}
+				ietf::PublishSkipped::ID if established => {
+					let skipped = body
+						.message::<ietf::PublishSkipped>(self.version)
+						.map_err(|err| messages.failed(err.into()))?;
+					let namespace = prefix.join(&skipped.suffix);
+					self.skipped(namespace, skipped.track_name.as_ref().into());
+				}
+				_ => return Err(messages.failed(Error::UnexpectedMessage)),
+			}
+		}
+
+		// Cancelled: close our half (FIN on draft-18, RESET_STREAM from draft-19, where a
+		// FIN is not a cancel), then read until the peer closes its own. The PUBLISHes it
+		// made stay ours.
+		tracing::debug!(prefix = %self.origin.absolute(prefix), "subscribe_tracks cancelled");
+		let Stream { mut writer, mut reader } = stream;
+		match request_stream::fin_cancels(self.version) {
+			true => {
+				let _ = writer.finish();
+			}
+			false => writer.abort(&Error::Cancel),
+		}
+		kio::wait(|waiter| {
+			let mut cx = waiter.context();
+			if session.poll_closed(&mut cx).is_ready() {
+				return Poll::Ready(());
+			}
+			loop {
+				match ready!(messages.poll_next(&mut reader, &mut cx)) {
+					Ok(Some(_)) => continue,
+					Ok(None) | Err(_) => return Poll::Ready(()),
+				}
+			}
+		})
+		.await;
+		Ok(())
+	}
+
+	/// A fresh subscription of ours to `name` in `namespace`, and its info once accepted.
+	fn subscribed(&self, namespace: &PathOwned, name: &str) -> Option<(RequestId, Option<track::Info>)> {
+		let state = self.state.lock();
+		state
+			.subscribes
+			.iter()
+			.find(|(_, track)| track.broadcast == *namespace && track.name == name)
+			.map(|(id, track)| (*id, track.producer.as_ref().map(|producer| producer.info().clone())))
+	}
+
+	/// The peer skipped a listed track: list it through a subscription of ours, opening
+	/// one paused if we have none.
+	fn skipped(&self, namespace: PathOwned, name: Arc<str>) {
+		let key = (namespace, name);
+		let mut listings = self.listings.lock();
+		if listings.entries.contains_key(&key) || listings.covering(&key.0).is_none() {
+			return;
+		}
+		let slot = match self.announces.acquire() {
+			Ok(slot) => slot,
+			Err(err) => return listings.fail(&key.0, err),
+		};
+		if let Some((request_id, info)) = self.subscribed(&key.0, &key.1) {
+			let entry = Entry {
+				info,
+				request_id: Some(request_id),
+				handoff: None,
+				_slot: slot,
+			};
+			return listings.insert(key, entry);
+		}
+		let handoff = kio::Shared::<Handoff<S>>::default();
+		let entry = Entry {
+			info: None,
+			request_id: None,
+			handoff: Some(handoff.clone()),
+			_slot: slot,
+		};
+		listings.insert(key.clone(), entry);
+		drop(listings);
+		let this = self.clone();
+		self.tasks.push(async move {
+			match this.open_paused(&key, &handoff).await {
+				Ok(Some(upstream)) => this.watch(key, upstream, handoff).await,
+				Ok(None) => {}
+				Err(err) => {
+					tracing::debug!(broadcast = %key.0, track = %key.1, %err, "paused subscribe failed");
+					let mut listings = this.listings.lock();
+					if listings.watched_by(&key, &handoff).is_some() {
+						listings.remove(&key);
+						listings.fail(&key.0, err);
+					}
+				}
+			}
+		});
+	}
+
+	/// Open a paused SUBSCRIBE for a skipped track and list it once its SUBSCRIBE_OK
+	/// arrives. `None` once its entry was let go.
+	async fn open_paused(&self, key: &TrackKey, handoff: &kio::Shared<Handoff<S>>) -> Result<Option<Upstream<S>>, Error> {
+		let gone = |waiter: &kio::Waiter| {
+			handoff
+				.poll(waiter, |handoff| match handoff.gone {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				})
+				.is_ready()
+		};
+		let mut session = self.session.clone();
+		let opened = {
+			let mut opening = std::pin::pin!(Stream::open(&mut session, self.version));
+			kio::wait(|waiter| {
+				if gone(waiter) {
+					return Poll::Ready(None);
+				}
+				waiter.poll_future(opening.as_mut()).map(Some)
+			})
+			.await
+		};
+		let Some(stream) = opened else {
+			return Ok(None);
+		};
+		let mut stream = stream?;
+		let request_id = kio::wait(|waiter| self.control.poll_next_request_id(waiter)).await;
+		self.state.lock().subscribes.insert(
+			request_id,
+			TrackState {
+				epoch: self.epoch.clone(),
+				..TrackState::pending(key.1.to_string(), key.0.clone(), kio::Producer::new(Fill::Done), None)
+			},
+		);
+		let mut messages = Messages::new(self.session.clone(), self.control.client());
+		let accepted = async {
+			stream.writer.varint(ietf::Subscribe::ID).await?;
+			stream
+				.writer
+				.encode(&ietf::Subscribe {
+					max_age: None,
+					new_group: None,
+					request_id,
+					track_namespace: key.0.as_path(),
+					track_name: key.1.as_ref().into(),
+					subscriber_priority: super::super::priority::to_wire(0),
+					group_order: GroupOrder::Ascending,
+					filter: Filter::NextObject,
+					fill: None,
+					properties_wanted: true,
+					forward: false,
+					rendezvous: false,
+					range_filters: false,
+					authorization_token: None,
+					epoch: self.epoch.clone(),
+				})
+				.await?;
+			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream, &mut messages));
+			let answered = kio::wait(|waiter| {
+				if gone(waiter) {
+					return Poll::Ready(None);
+				}
+				waiter.poll_future(response.as_mut()).map(Some)
+			})
+			.await;
+			match answered {
+				Some(Ok(Some(accepted))) => Ok(Some(accepted)),
+				Some(Ok(None)) => Err(Error::UnexpectedMessage),
+				Some(Err(err)) => Err(err),
+				None => Ok(None),
+			}
+		}
+		.await;
+		let accepted = match accepted {
+			Ok(Some(accepted)) => accepted,
+			Ok(None) => {
+				self.remove_subscribe(request_id);
+				self.cancel_subscribe(stream, request_id).await;
+				return Ok(None);
+			}
+			Err(err) => {
+				self.remove_subscribe(request_id);
+				return Err(err);
+			}
+		};
+		if let Some(err) = refused(&accepted.properties, self.version) {
+			self.remove_subscribe(request_id);
+			self.cancel_subscribe(stream, request_id).await;
+			return Err(err);
+		}
+		if let Err(err) = self.bind_alias(request_id, accepted.alias) {
+			self.remove_subscribe(request_id);
+			self.cancel_subscribe(stream, request_id).await;
+			return Err(err);
+		}
+		let info = accepted_info(&accepted.properties, self.version);
+		let listed = {
+			let mut listings = self.listings.lock();
+			match listings.watched_by(key, handoff) {
+				Some(entry) => {
+					entry.request_id = Some(request_id);
+					entry.info = Some(info.clone());
+					for lister in listings.listers(&key.0) {
+						let _ = lister.add(key.1.clone(), info.clone());
+					}
+					true
+				}
+				None => false,
+			}
+		};
+		if !listed {
+			self.remove_subscribe(request_id);
+			self.cancel_subscribe(stream, request_id).await;
+			return Ok(None);
+		}
+		Ok(Some(Upstream {
+			stream,
+			messages,
+			request_id,
+			alias: accepted.alias,
+			properties: accepted.properties,
+			owed: 0,
+		}))
+	}
+
+	/// Bind the alias a held subscription's PUBLISH or SUBSCRIBE_OK chose, closing the
+	/// session if it names another track.
+	fn bind_alias(&self, request_id: RequestId, alias: u64) -> Result<(), Error> {
+		let err = match self.register_alias(request_id, alias) {
+			Ok(()) => return Ok(()),
+			Err(err) => err,
+		};
+		if matches!(err, Error::Duplicate) {
+			tracing::warn!(track_alias = %alias, "publisher reused a live track alias for another track");
+			self.session.clone().close(
+				super::super::error::to_session_code(&SessionError::from(&err)),
+				err.to_string().as_ref(),
+			);
+		}
+		Err(err)
+	}
+
+	/// Serve a PUBLISH: hold one answering our SUBSCRIBE_TRACKS paused as its track's entry,
+	/// refuse a redundant one, and decline one no listing asked for.
+	pub(super) async fn serve_publish(&mut self, mut stream: Stream<S, Version>, msg: ietf::Publish<'_>) -> Result<(), Error> {
+		let key: TrackKey = (msg.track_namespace.to_owned(), msg.track_name.as_ref().into());
+		let info = accepted_info(&msg.properties, self.version);
+		let offer = {
+			let mut listings = self.listings.lock();
+			// Draft-18 allows one subscription per track (section 5.1); later drafts allow
+			// more, but the one we hold already lists the track and carries its data.
+			let duplicate = match self.version {
+				Version::Draft18 => request::DUPLICATE_SUBSCRIPTION,
+				_ => request::to_code(&Error::Unroutable, request::Kind::Publish, self.version),
+			};
+			if listings.covering(&key.0).is_none() {
+				match listings.requests.values().any(|request| key.0.has_prefix(&request.prefix)) {
+					true => Offer::Refuse(
+						request::to_code(&Error::Unroutable, request::Kind::Publish, self.version),
+						"listing cancelled",
+					),
+					false => Offer::Unsolicited,
+				}
+			} else if listings.entries.contains_key(&key) {
+				Offer::Refuse(duplicate, "already subscribed")
+			} else if let Some(err) = refused(&msg.properties, self.version) {
+				Offer::Refuse(
+					request::to_code(&err, request::Kind::Publish, self.version),
+					"track properties not supported",
+				)
+			} else {
+				match self.announces.acquire() {
+					Err(err) => {
+						listings.fail(&key.0, err);
+						Offer::Refuse(request::EXCESSIVE_LOAD, "too many listed tracks")
+					}
+					Ok(slot) => match self.subscribed(&key.0, &key.1) {
+						// Our own SUBSCRIBE holds the track, so it is the entry.
+						Some((request_id, _)) => {
+							let entry = Entry {
+								info: Some(info),
+								request_id: Some(request_id),
+								handoff: None,
+								_slot: slot,
+							};
+							listings.insert(key.clone(), entry);
+							Offer::Refuse(duplicate, "already subscribed")
+						}
+						None => {
+							let handoff = kio::Shared::<Handoff<S>>::default();
+							let entry = Entry {
+								info: Some(info),
+								request_id: Some(msg.request_id),
+								handoff: Some(handoff.clone()),
+								_slot: slot,
+							};
+							listings.insert(key.clone(), entry);
+							Offer::Hold(handoff)
+						}
+					},
+				}
+			}
+		};
+		let handoff = match offer {
+			Offer::Unsolicited => return self.run_publish_stream(stream, msg).await,
+			Offer::Refuse(code, reason) => {
+				tracing::debug!(broadcast = %key.0, track = %key.1, reason, "refusing publish");
+				let error = ietf::RequestError {
+					request_id: None,
+					error_code: code,
+					reason_phrase: reason.into(),
+					retry_interval: 0,
+				};
+				return request_stream::reject(stream, error).await;
+			}
+			Offer::Hold(handoff) => handoff,
+		};
+
+		let request_id = msg.request_id;
+		self.state.lock().subscribes.insert(
+			request_id,
+			TrackState {
+				epoch: self.epoch.clone(),
+				..TrackState::pending(key.1.to_string(), key.0.clone(), kio::Producer::new(Fill::Done), None)
+			},
+		);
+		let ok = async {
+			self.bind_alias(request_id, msg.track_alias)?;
+			// PUBLISH_OK is a REQUEST_OK from draft-19. FORWARD=0 holds it paused through
+			// draft-19; from draft-20 the PUBLISH our FORWARD=0 asked for already is.
+			let id = match self.version {
+				Version::Draft18 => ietf::PublishOk::ID,
+				_ => ietf::RequestOk::ID,
+			};
+			stream.writer.varint(id).await?;
+			stream
+				.writer
+				.encode(&ietf::PublishOk {
+					request_id: None,
+					forward: false,
+					subscriber_priority: None,
+					group_order: None,
+					filter: None,
+					new_group: None,
+				})
+				.await
+		}
+		.await;
+		if let Err(err) = ok {
+			tracing::debug!(broadcast = %key.0, track = %key.1, %err, "failed to hold publish");
+			self.remove_subscribe(request_id);
+			let mut listings = self.listings.lock();
+			if listings.watched_by(&key, &handoff).is_some() {
+				listings.remove(&key);
+				listings.fail(&key.0, err);
+			}
+			return Ok(());
+		}
+		tracing::debug!(broadcast = %self.origin.absolute(&key.0), track = %key.1, id = %request_id, "holding publish");
+		let upstream = Upstream {
+			stream,
+			messages: Messages::new(self.session.clone(), self.control.client()),
+			request_id,
+			alias: msg.track_alias,
+			properties: msg.properties,
+			owed: 0,
+		};
+		self.watch(key, upstream, handoff).await;
+		Ok(())
+	}
+
+	/// Watch a paused subscription until it ends, its entry is let go, or a subscription
+	/// takes it to resume.
+	async fn watch(&self, key: TrackKey, mut upstream: Upstream<S>, handoff: kio::Shared<Handoff<S>>) {
+		let mut session = self.session.clone();
+		enum Step {
+			Closed,
+			Gone,
+			Wanted,
+			Message(Result<Option<Framed>, Error>),
+		}
+		let end = loop {
+			let step = kio::wait(|waiter| {
+				let mut cx = waiter.context();
+				if session.poll_closed(&mut cx).is_ready() {
+					return Poll::Ready(Step::Closed);
+				}
+				if let Poll::Ready(handoff) = handoff.poll(waiter, |handoff| match handoff.gone || handoff.wanted {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				}) {
+					return Poll::Ready(match handoff.gone {
+						true => Step::Gone,
+						false => Step::Wanted,
+					});
+				}
+				upstream
+					.messages
+					.poll_next(&mut upstream.stream.reader, &mut cx)
+					.map(Step::Message)
+			})
+			.await;
+			match step {
+				Step::Closed => return,
+				Step::Wanted => {
+					let upstream = {
+						let mut held = handoff.lock();
+						match held.gone {
+							true => upstream,
+							false => {
+								held.upstream = Some(upstream);
+								return;
+							}
+						}
+					};
+					self.remove_subscribe(upstream.request_id);
+					self.cancel_subscribe(upstream.stream, upstream.request_id).await;
+					return;
+				}
+				Step::Gone => {
+					self.remove_subscribe(upstream.request_id);
+					self.cancel_subscribe(upstream.stream, upstream.request_id).await;
+					return;
+				}
+				Step::Message(Ok(Some(Framed(id, body)))) => match id {
+					// The answer to a pause, or to a resume that paused again before it landed.
+					ietf::RequestOk::ID | ietf::RequestError::ID if upstream.owed > 0 => {
+						upstream.owed -= 1;
+					}
+					ietf::PublishDone::ID => {
+						break unlisted(
+							body.message::<ietf::PublishDone>(self.version)
+								.map_err(|err| upstream.messages.failed(err.into()))
+								.and_then(|done| done.end(self.version)),
+						);
+					}
+					_ => break Err(upstream.messages.failed(Error::UnexpectedMessage)),
+				},
+				// PUBLISH_DONE must come before the FIN (draft-19 section 3.3.2).
+				Step::Message(Ok(None)) => break Err(Error::ProtocolViolation),
+				Step::Message(Err(err)) => break Err(err),
+			}
+		};
+		tracing::debug!(broadcast = %key.0, track = %key.1, ?end, "held subscription ended");
+		self.remove_subscribe(upstream.request_id);
+		let _ = upstream.stream.writer.finish();
+		let mut listings = self.listings.lock();
+		if listings.watched_by(&key, &handoff).is_some() {
+			match end {
+				Ok(()) => listings.remove(&key),
+				Err(err) => {
+					listings.remove(&key);
+					listings.fail(&key.0, err);
+				}
+			}
+		}
+	}
+
+	/// Ask for the paused subscription a listing holds for this track, to resume it.
+	pub(super) fn want(&self, key: &TrackKey) -> Option<kio::Shared<Handoff<S>>> {
+		let listings = self.listings.lock();
+		let handoff = listings.entries.get(key)?.handoff.clone()?;
+		handoff.lock().wanted = true;
+		Some(handoff)
+	}
+
+	/// Ready with the subscription `handoff` hands over, or `None` once it ended instead.
+	pub(super) fn poll_handoff(handoff: &kio::Shared<Handoff<S>>, waiter: &kio::Waiter) -> Poll<Option<Upstream<S>>> {
+		let mut handoff = ready!(handoff.poll(waiter, |handoff| match handoff.gone || handoff.upstream.is_some() {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}));
+		Poll::Ready(handoff.upstream.take())
+	}
+
+	/// Give up wanting `handoff`, holding again what it already handed over.
+	pub(super) fn unwant(&self, key: TrackKey, handoff: &kio::Shared<Handoff<S>>) {
+		let upstream = {
+			let mut held = handoff.lock();
+			held.wanted = false;
+			held.upstream.take()
+		};
+		if let Some(upstream) = upstream {
+			self.hold(key, upstream);
+		}
+	}
+
+	/// The subscription with `request_id` took over the entry it resumes.
+	pub(super) fn adopted(&self, key: &TrackKey, request_id: RequestId) {
+		if let Some(entry) = self.listings.lock().held_by(key, request_id) {
+			entry.handoff = None;
+		}
+	}
+
+	/// Whether the subscription with `request_id` holds this track's listing entry, so
+	/// it pauses rather than ends once nobody reads it.
+	pub(super) fn is_entry(&self, key: &TrackKey, request_id: RequestId) -> bool {
+		self.listings
+			.lock()
+			.held_by(key, request_id)
+			.is_some_and(|entry| entry.handoff.is_none())
+	}
+
+	/// The subscription with `request_id` learned the info of the track it holds, which
+	/// lists it if a skip made it the entry before its SUBSCRIBE_OK.
+	pub(super) fn entry_info(&self, key: &TrackKey, request_id: RequestId, info: &track::Info) {
+		let mut listings = self.listings.lock();
+		let Some(entry) = listings.held_by(key, request_id) else {
+			return;
+		};
+		if entry.info.is_some() {
+			return;
+		}
+		entry.info = Some(info.clone());
+		for lister in listings.listers(&key.0) {
+			let _ = lister.add(key.1.clone(), info.clone());
+		}
+	}
+
+	/// The subscription with `request_id` ended: so does the entry it held.
+	pub(super) fn entry_ended(&self, key: &TrackKey, request_id: RequestId, end: Result<(), Error>) {
+		self.listings.lock().ended(key, request_id, end);
+	}
+
+	/// Hold a paused subscription again as its track's entry, watched until a reader
+	/// resumes it, or cancel it if the entry is gone.
+	pub(super) fn hold(&self, key: TrackKey, upstream: Upstream<S>) {
+		let handoff = kio::Shared::<Handoff<S>>::default();
+		let held = match self.listings.lock().held_by(&key, upstream.request_id) {
+			Some(entry) => {
+				entry.handoff = Some(handoff.clone());
+				true
+			}
+			None => false,
+		};
+		let this = self.clone();
+		self.tasks.push(async move {
+			match held {
+				true => this.watch(key, upstream, handoff).await,
+				false => {
+					this.remove_subscribe(upstream.request_id);
+					this.cancel_subscribe(upstream.stream, upstream.request_id).await;
+				}
+			}
+		});
+	}
+
+
+	/// Pause a subscription nobody reads that is its track's entry, and hold it again.
+	pub(super) async fn pause(&self, key: TrackKey, mut upstream: Upstream<S>) {
+		self.park_subscribe(upstream.request_id);
+		let pause = Forward {
+			forward: false,
+			..Default::default()
+		};
+		match self.write_forward(&mut upstream.stream.writer, &pause).await {
+			Ok(()) => {
+				upstream.owed += 1;
+				tracing::debug!(broadcast = %key.0, track = %key.1, "subscription paused");
+				self.hold(key, upstream);
+			}
+			Err(err) => {
+				tracing::debug!(%err, "failed to pause the subscription");
+				self.remove_subscribe(upstream.request_id);
+				self.entry_ended(&key, upstream.request_id, Err(err));
+			}
+		}
+	}
+
+	/// Reset a subscription's state to paused, keeping the alias it is bound to: objects
+	/// still arriving for it are refused rather than buffered.
+	fn park_subscribe(&self, request_id: RequestId) {
+		let mut state = self.state.lock();
+		let Some(held) = state.subscribes.get_mut(&request_id) else {
+			return;
+		};
+		if let Ok(mut fill) = held.fill.write() {
+			fill.cancel();
+		}
+		let parked = TrackState {
+			alias: held.alias,
+			epoch: held.epoch.clone(),
+			tail: std::mem::take(&mut held.tail),
+			..TrackState::pending(
+				std::mem::take(&mut held.name),
+				held.broadcast.clone(),
+				kio::Producer::new(Fill::Done),
+				None,
+			)
+		};
+		let fetch_id = std::mem::replace(held, parked).fetch_id;
+		if let Some(fetch_id) = fetch_id {
+			state.fetches.remove(&fetch_id);
+		}
+	}
+
+	/// Set a held subscription's Forward State with REQUEST_UPDATE.
+	pub(super) async fn write_forward(
+		&self,
+		writer: &mut Writer<S::SendStream, Version>,
+		forward: &Forward,
+	) -> Result<(), Error> {
+		let request_id = self.control.next_request_id(&self.runtime).await?;
+		writer.varint(ietf::SubscribeUpdate::ID).await?;
+		writer
+			.encode(&ietf::SubscribeUpdate {
+				max_age: forward.max_age,
+				request_id,
+				subscription_request_id: None,
+				start_location: ietf::Location { group: 0, object: 0 },
+				end_group: 0,
+				subscriber_priority: forward.priority.map(super::super::priority::to_wire),
+				forward: Some(forward.forward),
+				filter: forward.filter,
+				authorization_token: None,
+				new_group: forward.new_group,
+				fill: forward.fill,
+			})
+			.await
+	}
+
+	/// Read the answer to a SUBSCRIBE, or to the REQUEST_UPDATE resuming `held`.
+	pub(super) async fn read_answer(
+		&self,
+		stream: &mut Stream<S, Version>,
+		messages: &mut Messages<S>,
+		held: Option<&mut Resumed>,
+	) -> Result<Option<Accepted>, Error> {
+		let Some(held) = held else {
+			return self.read_subscribe_response(stream, messages).await;
+		};
+		loop {
+			let Framed(id, body) = messages.message(&mut stream.reader).await?;
+			match id {
+				// The answer to a pause that went out before this resume.
+				ietf::RequestOk::ID | ietf::RequestError::ID if held.owed > 0 => held.owed -= 1,
+				ietf::RequestOk::ID => {
+					let ok = body.message::<ietf::RequestOk>(self.version)?;
+					tracing::debug!(message = ?ok, "subscription resumed");
+					return Ok(Some(Accepted {
+						alias: held.alias,
+						properties: held.properties.clone(),
+						largest: ok.largest,
+					}));
+				}
+				ietf::RequestError::ID => {
+					let refused = body.message::<ietf::RequestError>(self.version)?;
+					tracing::debug!(message = ?refused, "resume refused");
+					return Err(request::from_code(
+						refused.error_code,
+						request::Kind::Subscribe,
+						self.version,
+					));
+				}
+				ietf::PublishDone::ID => {
+					let done = body.message::<ietf::PublishDone>(self.version)?;
+					let end = done.end(self.version);
+					held.ended = Some(unlisted(end.clone()));
+					return Err(end.err().unwrap_or(Error::NotFound));
+				}
+				_ => return Err(Error::UnexpectedMessage),
+			}
+		}
+	}
+}
+
+/// A REQUEST_UPDATE setting a held subscription's Forward State.
+#[derive(Default)]
+pub(super) struct Forward {
+	pub(super) forward: bool,
+	/// The Location Filter it resumes with.
+	pub(super) filter: Option<Filter>,
+	/// FILL_PARAMETERS (draft-20+), the backfill it resumes with.
+	pub(super) fill: Option<ietf::Fill>,
+	/// The aggregate priority, in the model's higher-first terms.
+	pub(super) priority: Option<u8>,
+	pub(super) max_age: Option<u64>,
+	pub(super) new_group: Option<u64>,
+}
+
+/// What a subscription resuming a held one keeps of it.
+pub(super) struct Resumed {
+	pub(super) alias: u64,
+	pub(super) properties: ietf::Properties,
+	/// REQUEST_UPDATE answers still owed.
+	pub(super) owed: u64,
+	/// How a PUBLISH_DONE ended it before the resume was answered.
+	pub(super) ended: Option<Result<(), Error>>,
+}

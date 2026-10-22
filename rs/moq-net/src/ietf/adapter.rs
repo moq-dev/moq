@@ -1565,6 +1565,7 @@ mod tests {
 				forward: Some(false),
 				filter: Some(ietf::Filter::NextObject),
 				authorization_token: None,
+				fill: None,
 			};
 			let body = encode_body(&update, version);
 			let raw = encode_raw(ietf::SubscribeUpdate::ID, &body, version);
@@ -2232,6 +2233,7 @@ mod tests {
 			forward: Some(true),
 			filter: Some(ietf::Filter::NextObject),
 			authorization_token: None,
+			fill: None,
 		};
 		let update = encode_raw(ietf::SubscribeUpdate::ID, &encode_body(&update, VERSION), VERSION);
 		// The target is in the window and the update's own ID is past it.

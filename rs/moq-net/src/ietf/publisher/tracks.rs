@@ -1375,6 +1375,7 @@ mod tests {
 			authorization_token: None,
 			new_group: None,
 			max_age: None,
+			fill: None,
 		}
 	}
 
@@ -1808,7 +1809,8 @@ mod tests {
 	}
 
 	async fn resume_asks_for_a_new_group(on_listing: bool) {
-		let version = Version::Draft22;
+		// Draft-22 sends no NEW_GROUP_REQUEST on SUBSCRIBE_TRACKS.
+		let version = Version::Draft21;
 		let mut h = harness(version);
 		let live = h
 			.broadcast
@@ -1993,11 +1995,12 @@ mod tests {
 		}
 	}
 
-	/// A paused listing's FILL_PARAMETERS (draft-20+) open no fill, even once a PUBLISH
-	/// resumes without its own (draft-22 section 3.4.1).
+	/// A paused listing's FILL_PARAMETERS (draft-20 and draft-21; draft-22 sends none on
+	/// SUBSCRIBE_TRACKS) open no fill, even once a PUBLISH resumes without its own
+	/// (draft-22 section 3.4.1).
 	#[moq_clock::test]
 	async fn a_listing_fill_opens_nothing() {
-		for version in [Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft20, Version::Draft21] {
 			let mut h = harness(version);
 			let video = h.tracks.remove("video").unwrap();
 			let mut group = video.append_group().unwrap();
@@ -2096,9 +2099,10 @@ mod tests {
 
 	/// From draft-20 each PUBLISH states the listing's subscription parameters, which the
 	/// subscriber otherwise takes as the defaults; earlier drafts carry them on PUBLISH_OK.
+	/// Draft-22 sends none of them on SUBSCRIBE_TRACKS.
 	#[moq_clock::test]
 	async fn a_listing_states_its_parameters_on_each_publish() {
-		for version in DRAFTS {
+		for version in DRAFTS.into_iter().filter(|version| *version != Version::Draft22) {
 			let mut h = harness(version);
 			let request = ietf::SubscribeTracks {
 				subscriber_priority: Some(7),
