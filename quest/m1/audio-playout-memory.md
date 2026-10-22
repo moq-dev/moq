@@ -48,4 +48,3 @@ any `js/watch` API change goes in its `MIGRATE.md`.
 
 - [Buffered backpressure timestamps](/quest/m1/audio-backpressure-timestamps.md) - the 32-bit truncation in the same `Backpressure`, landing first
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target this sizes memory for
-- [Jitter estimator density](/quest/m1/jitter-density.md) - the CPU side of the same hostile-publisher concern
