@@ -31,7 +31,8 @@ Decided with the maintainer on 2026-10-21:
   `cdn.moq.dev`, including third-party clients failing against our relay.
 - Sync new registry entries. Once the [runner nightly](/quest/m1/interop-runner-nightly.md)
   lands, it runs the runner's HEAD, so check that newly registered clients
-  and docker-only relays show up in its report. On the relays page, drop an `EXTRA_ENDPOINTS` entry
+  and docker-only relays show up in its report, and ask upstream for a
+  published image for any it lists as not run. On the relays page, drop an `EXTRA_ENDPOINTS` entry
   in `test/smoke/relays.sh` once upstream registers it, and give new relays
   the per-relay config they need (`publish_path`, `WEBSOCKET_KEYS`).
 - Standing approval to open PRs on englishm/moq-interop-runner that touch only
@@ -107,6 +108,6 @@ draft-16 (closes with "scope resolution failed"; check the URL in
 
 ## Related
 
-- [Runner nightly](/quest/m1/interop-runner-nightly.md) - runs every registered client and docker relay against us
+- [Runner nightly](/quest/m1/interop-runner-nightly.md) - runs every registered client and docker relay with a published image against us
 - [Runner teardown](/quest/m3/interop-runner-approval.md) - the runner's moq.dev clients move to the withdrawing `close()` once it ships
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - Moxygen's filter type, waiting upstream

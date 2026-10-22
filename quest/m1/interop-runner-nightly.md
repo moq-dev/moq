@@ -5,9 +5,10 @@
 A nightly job runs [englishm/moq-interop-runner](https://github.com/englishm/moq-interop-runner)
 in its docker mode at its default branch's HEAD, with a moq-relay image
 built from `main` standing in for the `moq-dev-rs` relay. Every client and docker-only
-relay registered upstream is exercised against our relay and our clients,
-so an implementation added to the registry is tested here without a change
-on our side. The runner's own HTML report publishes to
+relay registered upstream with a published image is exercised against our
+relay and our clients, so such an implementation added to the registry is
+tested here without a change on our side. Entries with only a local-build
+recipe are reported as not run. The runner's own HTML report publishes to
 <https://git.moq.dev/interop-runner/>. The job never fails the nightly.
 
 ## Plan
