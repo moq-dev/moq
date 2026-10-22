@@ -30,7 +30,8 @@ Decided with the maintainer on 2026-10-22:
 
 - Mirror hang's `ranked()` per section in OBS, with ties in name order.
   Video (`hang::catalog::Video::ranked`) sorts by enabled, then preference,
-  then coded area, then bitrate. Audio (`hang::catalog::Audio::ranked`) sorts
+  then coded area (width times height as 64-bit, as hang does, so a large
+  rendition never wraps), then bitrate. Audio (`hang::catalog::Audio::ranked`) sorts
   by enabled, then bitrate, then sample rate, then channel count. Skip
   disabled renditions and take the first one the source can decode. A
   section where every rendition is disabled is handled like an absent
@@ -52,6 +53,7 @@ Extend `cpp/obs/test/moq-source-test.cpp` with these cases:
 - a disabled first rendition
 - an all-disabled section
 - an epoch-only change
+- oversized dimensions (e.g. 65536x65536), whose coded area must not wrap
 
 Public API: none. Wire: none.
 
