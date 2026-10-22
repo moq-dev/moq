@@ -28,4 +28,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [In-band auth](/quest/m1/auth/README.md) - the `AUTH_OK` decoders this area started from
-- [Relay session limits](/quest/m0/README.md) - the existing per-session request caps these follow
+- [Session limits](/quest/m1/api-audit/session-limits.md) - keeps or drops the per-session request caps these sit beside
