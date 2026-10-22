@@ -5,6 +5,8 @@ import * as Epoch from "./epoch.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Route } from "./hop.ts";
+import type { Session as IetfSession } from "./ietf/adapter.ts";
+import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { hooks, MAX_DATAGRAMS } from "./internal.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -1855,5 +1857,25 @@ test("a verdict every route repeats moves to the newer route once, then ends the
 	sub.close();
 	front.consumer.close();
 	a.close();
+	b.close();
+});
+
+test("a route whose IETF session closed before subscribing moves the track to the next route", async () => {
+	// The session went away: it has no request ID left to spend.
+	const session = { nextRequestId: async () => undefined } as unknown as IetfSession;
+	const front = new Front();
+	const b = new BroadcastProducer();
+	const tb = copy(b);
+	front.serve(new IetfSubscriber({ session }).consume(path));
+	const sub = front.consumer.track("seq").subscribe();
+	await settle();
+
+	front.serve(b.consume());
+	await settle();
+	tb.write(0);
+	expect(drain(sub)).toEqual([0]);
+
+	sub.close();
+	front.consumer.close();
 	b.close();
 });
