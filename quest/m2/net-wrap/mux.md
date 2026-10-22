@@ -5,7 +5,7 @@
 moq-mux writes and reads through the
 [moq-net traits](/quest/m2/net-wrap/traits.md), defaulting to moq-net's
 types: the importers, catalog, container producers and consumers, timeline,
-json and binary tracks, `Source`, and TS export. The moq-video and moq-audio
+json tracks, `Source`, and TS export. The moq-video and moq-audio
 encode producers built on moq-mux take them too. Handed an encrypted
 broadcast, every importer and capture encoder publishes it, and every
 exporter reads one, without knowing.
@@ -14,9 +14,12 @@ exporter reads one, without knowing.
 
 - Entry points include `container::Producer::new(track::Producer)`, the
   importers' `broadcast::Producer` (`create_track` call sites throughout
-  `import/`), `catalog/`, `timeline.rs`, `json.rs`, `binary.rs`,
+  `import/`), `catalog/`, `timeline.rs`, `json.rs`,
   `source.rs`, and the TS exporter under `container/ts`. About 250 type
   references across these modules.
+- The [m1 compression migration](/quest/m1/compress/migrate.md) deletes
+  `moq-mux::binary`; opaque bytes use plain tracks, so there is no binary
+  helper to convert here.
 - Capture: `moq_video::encode::Producer::new` takes a concrete
   `moq_net::broadcast::Producer` and `moq_audio::encode::Producer::new` a
   `&mut` one (`rs/moq-video/src/encode/producer.rs`,

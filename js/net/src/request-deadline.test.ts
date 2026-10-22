@@ -65,11 +65,11 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 			const track = broadcast.track("video").subscribe();
 			try {
 				await transport.created;
-				await clock.advanceAsync(Nano.zero);
+				await clock.advance(Nano.zero);
 				if (mode === "refuse") expect(track.closed.peek()?.name).toBe("NoStreamCredit");
-				await clock.advanceAsync(Nano.fromMilli(Milli(9_999)));
+				await clock.advance(Nano.fromMilli(Milli(9_999)));
 				if (mode !== "refuse") expect(track.closed.peek()).toBeUndefined();
-				await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+				await clock.advance(Nano.fromMilli(Milli(1)));
 				const failure = await track.closed;
 				if (mode === "open") {
 					expect(failure).toBeInstanceOf(StreamError);
@@ -88,7 +88,7 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 					await transport.aborted;
 					await transport.cancelled;
 				}
-				await clock.advanceAsync(Nano.fromMilli(Milli(30_000)));
+				await clock.advance(Nano.fromMilli(Milli(30_000)));
 				expect(transport.options).toHaveLength(1);
 			} finally {
 				track.close();
@@ -128,13 +128,13 @@ for (const legacy of [false, true]) {
 				: publisher.runPublishNamespaces();
 			try {
 				await transport.created;
-				await clock.advanceAsync(Nano.fromMilli(Milli(9_999)));
+				await clock.advance(Nano.fromMilli(Milli(9_999)));
 				let aborted = false;
 				void transport.aborted.then(() => {
 					aborted = true;
 				});
 				expect(aborted).toBe(false);
-				await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+				await clock.advance(Nano.fromMilli(Milli(1)));
 				if (mode === "queue") transport.release();
 				if (mode !== "refuse") {
 					const reset = await transport.aborted;
@@ -142,10 +142,10 @@ for (const legacy of [false, true]) {
 					if (mode === "open") expect((reset as Error).message).toContain("request timed out after 10000ms");
 					else expect(transport.written).toEqual([]);
 				}
-				await clock.advanceAsync(Nano.fromMilli(Milli(30_000)));
+				await clock.advance(Nano.fromMilli(Milli(30_000)));
 				// An unrelated change wakes reconciliation, but cannot revive the failed offer.
 				origin.createBroadcast(Path.from("another")).announce();
-				await clock.advanceAsync(Nano.zero);
+				await clock.advance(Nano.zero);
 				expect(transport.options).toEqual([
 					{ sendOrder: undefined, waitUntilAvailable: false },
 					{ sendOrder: undefined, waitUntilAvailable: false },
@@ -178,9 +178,9 @@ for (const operation of ["info", "fetch"] as const) {
 			});
 			try {
 				await transport.created;
-				await clock.advanceAsync(Nano.zero);
+				await clock.advance(Nano.zero);
 				if (mode === "refuse") expect((failure as Error).name).toBe("NoStreamCredit");
-				await clock.advanceAsync(Nano.fromMilli(Milli(10_000)));
+				await clock.advance(Nano.fromMilli(Milli(10_000)));
 				await request;
 				if (mode === "open") expect((failure as StreamError).code).toBe(StreamCode.ControlTimeout);
 				else expect((failure as Error).name).toBe("NoStreamCredit");
@@ -212,8 +212,8 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 			const announced = subscriber.announced();
 			try {
 				await transport.created;
-				await clock.advanceAsync(Nano.zero);
-				await clock.advanceAsync(Nano.fromMilli(Milli(30_000)));
+				await clock.advance(Nano.zero);
+				await clock.advance(Nano.fromMilli(Milli(30_000)));
 				if (mode === "open") expect(announced.closed.peek()).toBeUndefined();
 				else {
 					expect((await announced.closed)?.name).toBe("NoStreamCredit");
@@ -247,9 +247,9 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 		const track = broadcast.track("video").subscribe();
 		try {
 			await transport.created;
-			clock.advance(Nano.fromMilli(Milli(10_000)));
+			clock.jump(Nano.fromMilli(Milli(10_000)));
 			transport.release();
-			await clock.advanceAsync(Nano.zero);
+			await clock.advance(Nano.zero);
 			expect((await track.closed)?.name).toBe("NoStreamCredit");
 			await transport.aborted;
 			expect(transport.written).toEqual([]);

@@ -298,7 +298,7 @@ test("a replay never starts below an earlier replay", async () => {
 	using input = frameSource();
 	const clock = new Manual();
 	const restore = clock.install();
-	const advance = (ms: number) => clock.advance(Nano.fromMilli(Milli(ms)));
+	const advance = (ms: number) => clock.jump(Nano.fromMilli(Milli(ms)));
 	const capture = new Capture({ source: input.source });
 	const watch = new Effect();
 	const first = new Effect();

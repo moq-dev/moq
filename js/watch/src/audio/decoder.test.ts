@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from "bun:test";
+import { readFileSync } from "node:fs";
 import { Manual, Micro, Milli, Nano, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
@@ -192,6 +193,8 @@ function feed() {
 }
 
 async function play(initial: Delay, buffered = false, cmaf = false) {
+	// These cases test timeline handover after the optional decoder has loaded.
+	if (cmaf) await import("@moq/hang/cmaf");
 	const push = feed();
 	const truncate = spyOn(SharedRingBuffer.prototype, "truncate");
 	const reset = spyOn(SharedRingBuffer.prototype, "reset");
@@ -211,7 +214,8 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 			...audio,
 			container: {
 				kind: "cmaf",
-				init: Buffer.from(Container.Cmaf.createAudioInitSegment(audio)).toString("base64"),
+				init: JSON.parse(readFileSync(new URL("../../../hang/src/cmaf/fixtures.json", import.meta.url), "utf8"))
+					.audioInit,
 			},
 		});
 	}
@@ -667,9 +671,9 @@ describe("fatal decoder errors", () => {
 // A manual clock installed at `ms`, so arrivals are stamped only as fast as a test advances it.
 function manualAt(ms: number) {
 	const clock = new Manual();
-	clock.advance(Nano.fromMilli(Milli(ms)));
+	clock.jump(Nano.fromMilli(Milli(ms)));
 	const restore = clock.install();
-	return { advance: (by: number) => clock.advanceAsync(Nano.fromMilli(Milli(by))), restore };
+	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), restore };
 }
 
 // A legacy container frame: the media timestamp, then one payload byte.

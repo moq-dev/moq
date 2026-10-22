@@ -27,8 +27,9 @@ SUBSCRIPTION_FILTER parameter whose Filter Type varint is 250.
 they accept any subscribe error, including that session close; once the
 client is fixed they must still pass on a real REQUEST_ERROR.
 
-Advance it by reporting the reproducer to facebookexperimental/moxygen once
-the maintainer approves posting there; the fix is a registered default
+Reported upstream as
+[facebookexperimental/moxygen#225](https://github.com/facebookexperimental/moxygen/issues/225),
+acknowledged 2026-10-16; check it and the Smoke job. The fix is a registered default
 (Largest Object or Next Group Start) for drafts that lack LargestGroup.
 Do not accept 0xFA in moq-relay.
 

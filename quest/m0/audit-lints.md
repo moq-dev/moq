@@ -25,7 +25,7 @@ Scope is every language (decided 2026-10-20): clippy and rustc overrides,
 `clippy.toml`, `biome-ignore`, `@ts-expect-error`, `noqa` and
 `type: ignore`, Kotlin `@Suppress`, and the equivalents in Go, Swift, Dart,
 and C/C++. `dead_code` and `unused` suppressions belong to the [dead code
-audit](/quest/m1/audit-dead-code.md); skip them here. Generated or vendored
+audit](/quest/m2/audit-dead-code.md); skip them here. Generated or vendored
 bindings (`moq-nvenc`, `moq-v4l/src/sys`, `moq-rtmp/src/rml`, and the
 untracked UniFFI output) keep their blanket allows unless the generator can
 emit clean code.

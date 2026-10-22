@@ -77,7 +77,9 @@ def rust(directory):
     return checked(entries)
 
 
-def timing_unit(column):
+def measurement_unit(column):
+    if column == 'size_bytes':
+        return 'bytes'
     for unit in ('ns', 'us', 'ms'):
         if column == unit or column.endswith(f'_{unit}') or column.startswith(f'{unit}_per_'):
             return unit
@@ -95,7 +97,7 @@ def javascript_file(path):
                             'unit': 'us', 'value': value(float(elapsed))})
             continue
         row = [field.strip() for field in next(csv.reader([line]))]
-        if len(row) > 1 and any(timing_unit(field) for field in row):
+        if len(row) > 1 and any(measurement_unit(field) for field in row):
             if len(set(row)) != len(row):
                 raise ValueError(f'duplicate CSV headers: {path}:{line_number}')
             headers = row
@@ -105,9 +107,9 @@ def javascript_file(path):
         if len(row) != len(headers):
             raise ValueError(f'malformed benchmark CSV: {path}:{line_number}')
         dimensions = '/'.join(f'{key}={quote(field, safe="-_.~")}' for key, field in zip(headers, row)
-                              if timing_unit(key) is None)
+                              if measurement_unit(key) is None)
         for key, field in zip(headers, row):
-            if unit := timing_unit(key):
+            if unit := measurement_unit(key):
                 entries.append({'name': f'js/{path.stem}/{dimensions}/{key}',
                                 'unit': unit, 'value': value(float(field))})
     if not entries:

@@ -69,7 +69,7 @@ above.
 - [moq-net traits](/quest/m2/net-wrap/traits.md) - moq-net exports producer and consumer traits at every level, implemented by its own types
 - [moq-e2ee implements the traits](/quest/m2/net-wrap/e2ee.md) - the e2ee broadcast, track, and group wrappers implement the traits, proving them before the adopters land
 - [moq-json, moq-stats, and hang take the traits](/quest/m2/net-wrap/json.md) - json snapshots, streams, windows, the stats producer, and hang's tracks write and read through the traits
-- [moq-mux takes the traits](/quest/m2/net-wrap/mux.md) - importers, catalog, container, timeline, json and binary tracks, `Source`, TS export, and the moq-video and moq-audio encoders are generic over the traits
+- [moq-mux takes the traits](/quest/m2/net-wrap/mux.md) - importers, catalog, container, timeline, json tracks, `Source`, TS export, and the moq-video and moq-audio encoders are generic over the traits
 - [CLI paths take the traits](/quest/m2/net-wrap/cli.md) - the CLI's publish and play paths hand moq-mux any broadcast that implements them
 - [JS mirror](/quest/m2/net-wrap/js.md) - `@moq/net` exports the same interfaces, taken by `@moq/hang`, `@moq/publish`, and `@moq/watch`, and implemented by `@moq/e2ee`
 
