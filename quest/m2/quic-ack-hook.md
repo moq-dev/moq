@@ -74,9 +74,9 @@ stream's waiter on it is the core of the work. Three traps:
 The moq-tokio and moq-uring adapters implement the trait method over the
 driver's. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
 unimplemented in shipping Chrome and its `bytesAcknowledged` is at risk in the
-W3C draft. qmux over a reliable transport may treat serialization as
-acknowledgment only if the qmux quest decides that is honest; until then it
-also reports unsupported.
+W3C draft. Decided 2026-10-22 (maintainer): qmux's `poll_acked` reports
+unsupported too, since writing into TCP is not delivery; over qmux the
+histogram stays at group granularity.
 
 Acceptance includes the first two traps, in each driver: a finished stream
 that `moq-quic` has freed (so it answers `ClosedStream`) resolves `poll_acked`
@@ -101,5 +101,3 @@ Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
 
 - [Starvation at frame granularity](/quest/m2/starvation-frames.md) - the
   moq-net consumer
-- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - decides
-  what acknowledgment means over a reliable transport

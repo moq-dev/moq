@@ -727,7 +727,7 @@ impl MoqSink {
 		});
 		let sample = super::wall::Sample {
 			running: reference_running_time,
-			wall: std::time::SystemTime::now(),
+			wall: moq_clock::wall().into(),
 		};
 		let map = buffer.map_readable().map_err(|_| {
 			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
@@ -1252,6 +1252,7 @@ fn observe_caps(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use std::sync::Arc;
 
@@ -2299,6 +2300,19 @@ mod tests {
 		assert_eq!(quic.idle_timeout, Duration::ZERO);
 		assert_eq!(quic.keep_alive, None);
 		assert!(quic.keylog);
+	}
+
+	/// The sink retries without a budget, so an outage of any length is ridden out
+	/// (the session tests' relay loss covers the redial itself).
+	#[test]
+	fn the_sink_retries_without_a_budget() {
+		gst::init().unwrap();
+		let sink = sink();
+		sink.set_property("url", "https://relay.example.com/anon");
+		sink.set_property("broadcast", "test");
+		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
+		let config = super::super::session::connect_config(&resolved);
+		assert_eq!(config.backoff.timeout, Some(Duration::ZERO), "zero is unlimited");
 	}
 
 	#[test]

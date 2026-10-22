@@ -29,6 +29,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.hours
 import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration
@@ -177,7 +178,7 @@ class SmokeTest {
             framerate = 60.0,
             optimizeForLatency = true,
         )
-        val snapshot: SnapshotConfig = SnapshotConfig(deltaRatio = 8u, compression = false)
+        val snapshot: SnapshotConfig = SnapshotConfig(deltas = true, compression = false)
         val stream: StreamConfig = StreamConfig(compression = false)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
         val backoff: Backoff = Backoff(
@@ -197,7 +198,7 @@ class SmokeTest {
         assertEquals(listOf("localhost"), server.tls.generate)
         val status: ConnectionStatus = ConnectionStatus.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
-        assertEquals(8u, snapshot.deltaRatio)
+        assertEquals(true, snapshot.deltas)
         assertEquals(false, stream.compression)
         assertNull(properties.display)
         assertNull(properties.flip)
@@ -230,6 +231,23 @@ class SmokeTest {
     }
 
     @Test
+    fun `finishing a broadcast lingers until the wait is cancelled`() = runTest {
+        val broadcast = BroadcastProducer()
+        val track = broadcast.publishTrack("status", TrackInfo(maxAgeUs = 3_600_000_000uL))
+        track.finish()
+        broadcast.finish().use { finish ->
+            assertEquals(1.hours, finish.linger)
+            assertFailsWith<MoqException> { broadcast.consume() }
+            // Cancelling the wait is the interrupt: it ends instead of lingering for an hour.
+            val wait = async { finish.wait() }
+            yield()
+            wait.cancel()
+            wait.join()
+            finish.end()
+        }
+    }
+
+    @Test
     fun `broadcast updates shared video properties`() {
         BroadcastProducer().use { broadcast ->
             CatalogProducer(broadcast).setVideoProperties(VideoProperties(rotation = 315.0))
@@ -247,7 +265,7 @@ class SmokeTest {
             val fetched = broadcast.consume().fetchGroup(
                 "events",
                 0uL,
-                FetchGroupOptions(priority = 3u),
+                FetchGroupOptions(priority = 3),
             )
             assertEquals(0uL, fetched.sequence())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
@@ -354,7 +372,7 @@ class SmokeTest {
 
             // Fetch while the track is still published: finishing the media producer
             // unpublishes it, and the fetch would then miss with NotFound.
-            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(rendition = dev.moq.media.AudioRendition(name, audio), sequence = 0uL, options = FetchGroupOptions(priority = 3u)))
+            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(rendition = dev.moq.media.AudioRendition(name, audio), sequence = 0uL, options = FetchGroupOptions(priority = 3)))
 
             // Close the group so the fetched stream terminates instead of waiting for more.
             media.finish()
@@ -411,7 +429,7 @@ class SmokeTest {
     @Test
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 8u, compression = false)
+            val config = SnapshotConfig(deltas = true, compression = false)
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
             val producer = SnapshotProducer(broadcast, track, config)
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null), config)
@@ -427,7 +445,7 @@ class SmokeTest {
     @Test
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val config = SnapshotConfig(deltas = false, compression = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             assertEquals("status", demand.name())
@@ -443,7 +461,7 @@ class SmokeTest {
     @Test
     fun `cancelling a flow collection cancels its native handle`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val config = SnapshotConfig(deltas = false, compression = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             producer.update(Status(state = "live"))
@@ -464,7 +482,7 @@ class SmokeTest {
     @Test
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val config = SnapshotConfig(deltaRatio = 0u, compression = false)
+            val config = SnapshotConfig(deltas = false, compression = false)
             val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             producer.update("""{"state":"raw"}""")
 

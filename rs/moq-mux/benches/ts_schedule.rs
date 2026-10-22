@@ -7,8 +7,12 @@ use std::time::Duration;
 
 mod export {
 	pub const PCR_INTERVAL: Duration = Duration::from_millis(25);
+	pub const PSI_INTERVAL: Duration = Duration::from_millis(500);
 	use std::time::Duration;
 }
+#[path = "../src/container/ts/lane.rs"]
+#[allow(dead_code)]
+mod lane;
 #[path = "../src/container/ts/schedule.rs"]
 #[allow(dead_code)]
 mod schedule;

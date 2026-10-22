@@ -8,14 +8,27 @@ import { Instant, Milli, Nano, now, sleepUntil } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Datagram } from "./datagram.ts";
 import { Delivered } from "./delivered.ts";
-import { GroupTooLarge, ProtocolViolation, TimestampMismatch, TooFarBehind } from "./error.ts";
+import {
+	GroupTooLarge,
+	ProtocolViolation,
+	StreamCode,
+	StreamError,
+	TimestampMismatch,
+	TooFarBehind,
+	toStreamCode,
+} from "./error.ts";
+import { Compression } from "./flate/group.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import {
+	type DropRun,
+	dropAt,
 	finalSequence,
 	groupBounds,
 	hooks,
+	insertDrop,
 	insertRun,
 	type Land,
+	MAX_DATAGRAMS,
 	type Recv,
 	type RecvDatagram,
 	type ResumeSource,
@@ -39,12 +52,9 @@ const CACHE_WINDOW = Nano.fromMilli(Milli(30_000));
 // The cache scans at most this many times per idle cache window.
 const PRUNE_SLICES = 8;
 
-// The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
-// draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
-const DEFAULT_PRIORITY = 127;
-
-/** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
-const MAX_DATAGRAMS = 64;
+// The unset priority, the midpoint of the signed range: moq-lite carries it as 128 and
+// moq-transport as 127, one urgency on both.
+const DEFAULT_PRIORITY = 0;
 
 /**
  * Sanity cap on a datagram payload: the QUIC DATAGRAM frame ceiling. The real limit is
@@ -52,6 +62,17 @@ const MAX_DATAGRAMS = 64;
  * datagrams are dropped there; a payload above this cap could never fit anywhere.
  */
 const MAX_DATAGRAM_BYTES = 65535;
+
+// A group ended with one of these is a deliberate hole, never a cut readers see: cache policy,
+// a reader that fell behind, or a cancel such as a relay's own unsubscribe. Mirrors Rust's
+// `group::Handle::commit_abort`.
+const HOLES: ReadonlySet<number> = new Set([
+	StreamCode.Cancel,
+	StreamCode.DeliveryTimeout,
+	StreamCode.TooFarBehind,
+	StreamCode.Old,
+	StreamCode.Evicted,
+]);
 
 /**
  * A position within a track: a group's sequence and a frame's index inside it.
@@ -75,6 +96,8 @@ export interface Location {
  * (resolved from the wire TRACK_INFO on lite-05+). They map 1:1 onto TRACK_INFO.
  */
 export interface Info {
+	/** Compress frame payloads per group on lite-07; other sessions receive plain frames. Defaults to false. */
+	compress?: boolean;
 	/**
 	 * Units per second for this track's frame timestamps, or omitted (`undefined` or `null`,
 	 * which mean the same) for an untimed track, whose frames and datagrams carry no timestamp.
@@ -97,16 +120,25 @@ export interface Info {
 	 * or non-finite value and a result past `Number.MAX_SAFE_INTEGER`.
 	 */
 	maxAge?: Milli;
-	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`, higher first). Defaults to `127`. */
+	/** Tie-break priority between subscriptions of equal subscriber priority (`-128..=127`, higher first). Defaults to `0`. */
 	priority: number;
 	/**
-	 * How many times its first frame a group's later bytes may grow before a joining
+	 * How many times its first frame a group's later stored bytes may grow before a joining
 	 * subscriber asks for a new group, or omitted to never ask. A join against a newest group
 	 * whose bytes after its first frame exceed this many times the first frame moves
 	 * {@link Demand.wanted} past it, so a late joiner never downloads much more than a
 	 * snapshot or keyframe. `0` asks on any join after a delta. An integer in `0..2^32`.
 	 */
 	refresh?: number;
+	/**
+	 * Whether this timed track's timestamps arrived over moq-transport, whose peers may stamp
+	 * arrival times, so no group is checked for a rewind. A moq-lite hop serves the track
+	 * untimed, since its receivers check every timestamp. Mirrors the Rust
+	 * `track::Info::unchecked`.
+	 *
+	 * @internal
+	 */
+	unchecked?: boolean;
 }
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
@@ -126,20 +158,33 @@ function wireMillis(field: string, value: Milli): Milli {
 	return Milli(millis);
 }
 
-function priorityByte(value: number): number {
-	if (!Number.isInteger(value) || value < 0 || value > 255) {
-		throw new RangeError(`priority must be an integer in 0..=255: ${value}`);
+function priorityValue(value: number): number {
+	if (!Number.isInteger(value) || value < -128 || value > 127) {
+		throw new RangeError(`priority must be an integer in -128..=127: ${value}`);
 	}
 	return value;
 }
 
+// private: passthrough
+/** The timescale a moq-lite hop serves a track at: none for an {@link Info.unchecked} one. @internal */
+export function liteTimescale(info: Info): Timescale | undefined {
+	return info.unchecked ? undefined : (info.timescale ?? undefined);
+}
+
 /** Fill in any unset {@link Info} fields with their defaults. */
 export function infoDefaults(info: Partial<Info> = {}): Info {
+	if (info.compress !== undefined && typeof info.compress !== "boolean")
+		throw new TypeError("compress must be a boolean");
+	const timescale = info.timescale == null ? undefined : Timescale(info.timescale);
+	// Only a timed track has timestamps to doubt.
+	if (info.unchecked && timescale === undefined) throw new RangeError("an untimed track can't be unchecked");
 	return {
-		timescale: info.timescale == null ? undefined : Timescale(info.timescale),
+		compress: info.compress ?? false,
+		timescale,
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
-		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
+		priority: priorityValue(info.priority ?? DEFAULT_PRIORITY),
 		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
+		...(info.unchecked ? { unchecked: true } : {}),
 	};
 }
 
@@ -167,7 +212,7 @@ export interface Groups {
  * The obsolete subscriber `maxAge` field is refused at runtime; use `maxDelay`.
  */
 export interface Subscription {
-	/** Delivery priority relative to this session's other subscriptions (`0..=255`). Defaults to `0`. */
+	/** Delivery priority relative to this session's other subscriptions (`-128..=127`, higher first). Defaults to `0`. */
 	priority?: number;
 	/**
 	 * How long (milliseconds) a non-latest group stays worth delivering, by the same two
@@ -216,7 +261,7 @@ function subscriptionDefaults(subscription: Subscription = {}): Subscription {
 	if ("maxAge" in subscription) throw new TypeError("Subscriber maxAge is unsupported; use maxDelay");
 	const bounds = groupBounds(subscription.groups ?? {});
 	return {
-		priority: priorityByte(subscription.priority ?? 0),
+		priority: priorityValue(subscription.priority ?? DEFAULT_PRIORITY),
 		maxDelay: wireMillis("maxDelay", subscription.maxDelay ?? Milli.zero),
 		order: orderOf(subscription.order),
 		groups: {
@@ -291,7 +336,6 @@ export class Request {
 
 	static {
 		hooks.makeRequest = (options) => new Request(options);
-		hooks.pendingTrackProducer = (request) => request.#producer;
 	}
 
 	/** Watch the subscribers waiting for this request. */
@@ -311,24 +355,77 @@ export class Request {
 
 	/**
 	 * Accept the request, committing the track's immutable {@link Info}. Throws, rejecting the
-	 * request, if `info` is invalid.
+	 * request, if `info` is invalid. The same as {@link stage} followed by {@link Staged.commit}.
 	 */
 	accept(info: Partial<Info> = {}): Producer {
+		return this.stage(info).commit();
+	}
+
+	/**
+	 * Take the track's {@link Producer} without resolving any subscriber yet, so content written
+	 * through {@link Staged.producer} is there when the first reader looks. For a relay that
+	 * already holds groups of the track: write them, then {@link Staged.commit}. Disposing the
+	 * {@link Staged} uncommitted rejects the request.
+	 */
+	stage(info: Partial<Info> = {}): Staged {
 		this.#pending.delete(this);
-		try {
-			bindProducerSequence(this.#producer, this.#sequences.get(this.name));
-			return this.#producer.accept(info);
-		} catch (err) {
-			// Refused, so its subscribers see the error instead of waiting on an open request.
-			this.#producer.close(err instanceof Error ? err : new Error(String(err)));
-			throw err;
-		}
+		bindProducerSequence(this.#producer, this.#sequences.get(this.name));
+		return new Staged(this.#producer, info);
 	}
 
 	/** Reject the request, closing the track optionally with an error. */
 	reject(err?: Error): void {
 		this.#pending.delete(this);
 		this.#producer.close(err);
+	}
+}
+
+/**
+ * A requested track being written before any subscriber sees it; see {@link Request.stage}.
+ *
+ * Write through {@link producer}. Subscribers waiting on the request resolve only at
+ * {@link commit}, with everything written by then. Disposing it uncommitted rejects the request,
+ * so hold it with `using` or commit it.
+ *
+ * @public
+ */
+export class Staged {
+	/** The track's writer. */
+	readonly producer: Producer;
+
+	#info: Partial<Info>;
+	#done = false;
+
+	/** @internal */
+	constructor(producer: Producer, info: Partial<Info>) {
+		this.producer = producer;
+		this.#info = info;
+	}
+
+	/**
+	 * Publish the track: every waiting subscriber resolves now, with what was written. Throws,
+	 * rejecting the request, if the info is invalid or something written does not match it.
+	 * Throws without publishing once committed or disposed.
+	 */
+	commit(): Producer {
+		// Rust's `commit(self)` consumes the handle; here a disposed one has already rejected
+		// its subscribers, and accepting a closed producer would silently do nothing.
+		if (this.#done) throw new Error("staged track already committed or dropped");
+		this.#done = true;
+		try {
+			return this.producer.accept(this.#info);
+		} catch (err) {
+			// Refused, so its subscribers see the error instead of waiting on an open request.
+			this.producer.close(err instanceof Error ? err : new Error(String(err)));
+			throw err;
+		}
+	}
+
+	/** Reject the request unless it was committed. */
+	[Symbol.dispose](): void {
+		if (this.#done) return;
+		this.#done = true;
+		this.producer.close(new Error("staged track dropped"));
 	}
 }
 
@@ -426,11 +523,12 @@ class TrackState {
 	/** The producer fanning into this sink, so a subscriber can mint a sibling of itself. */
 	producer?: Producer;
 	groups = new Signal<GroupConsumer[]>([]);
-	// Sequences the upstream publisher gave up: an incoming SUBSCRIBE_DROP or a producer
-	// cut. Kept apart from the cache so reclaim cannot erase a disposition a downstream
-	// publisher still has to forward, and as runs so a wide DROP costs one entry. Replaced
-	// rather than mutated, so a cursor can tell it changed by identity.
-	drops = new Signal<readonly Run[]>([]);
+	// Sequences the upstream publisher gave up, with the error each was given up with: an
+	// incoming SUBSCRIBE_DROP or a producer cut. Kept apart from the cache so reclaim cannot
+	// erase a disposition a downstream publisher still has to forward, and as runs so a wide
+	// DROP costs one entry. Replaced rather than mutated, so a cursor can tell it changed by
+	// identity.
+	drops = new Signal<readonly DropRun[]>([]);
 	// Every group still in the producer's replay cache, including groups this
 	// subscriber already consumed, sorted by sequence. Drift anchors have the same
 	// lifetime as content. Sorted so the latency guard, evaluated per group and per
@@ -439,6 +537,9 @@ class TrackState {
 	// First timestamps mutate group state rather than track state, so held groups
 	// watch this revision as well as arrivals when enforcing latency after handoff.
 	timelineChanged = new Signal(0);
+	// Bumped when a wire subscription declares or resolves where its live feed starts, so a
+	// publisher holding its first group for that answer wakes.
+	startChanged = new Signal(0);
 	/** Best-effort datagram channel, parallel to {@link groups}; a bounded send buffer per subscriber. */
 	datagrams = new Signal<Datagram[]>([]);
 	latest?: number;
@@ -532,27 +633,6 @@ type CachedGroup = {
 // A group's checked start, kept by sequence.
 type Start = { sequence: number; start: Timestamp };
 
-// Whether `a` presents before `b`, whatever their scales. Cross-scale products can pass
-// 2^53, so they are compared exactly in BigInt, as Rust does in u128.
-function earlier(a: Timestamp, b: Timestamp): boolean {
-	if (a.scale === b.scale) return a.value < b.value;
-	const [ma, ea] = binary(a.value);
-	const [mb, eb] = binary(b.value);
-	const e = Math.min(ea, eb);
-	return (ma * BigInt(b.scale)) << BigInt(ea - e) < (mb * BigInt(a.scale)) << BigInt(eb - e);
-}
-
-// A finite, non-negative `value` exactly as `mantissa * 2^exponent`. Doubling is exact, so
-// a fraction becomes an integer within its binary digits.
-function binary(value: number): [bigint, number] {
-	let exponent = 0;
-	while (!Number.isInteger(value)) {
-		value *= 2;
-		exponent--;
-	}
-	return [BigInt(value), exponent];
-}
-
 let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 // A fresh read handle on a group the producer still caches; assigned in its static block.
 let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | undefined;
@@ -560,6 +640,7 @@ let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | unde
 let cachedHolds: (producer: Producer, sequence: number) => boolean;
 // Whether a group may still land on the producer's live feed; assigned in its static block.
 let mayLand: (producer: Producer, land: Land) => boolean;
+let sourceStart: (producer: Producer) => number | "pending" | undefined;
 
 // The sequence-order cursor lives inside `Subscriber` (it shares the group buffer and the
 // drift anchor with the arrival cursor), so `Ordered` reaches it through this bridge,
@@ -624,9 +705,9 @@ export class Demand {
 		return this.#state.closed;
 	}
 
-	/** Publisher priority from the committed {@link Info}, or 0 before {@link Request.accept}. */
+	/** Publisher priority from the committed {@link Info}, or the default before {@link Request.accept}. */
 	get priority(): number {
-		return this.#state.info.peek()?.priority ?? 0;
+		return this.#state.info.peek()?.priority ?? DEFAULT_PRIORITY;
 	}
 }
 
@@ -676,9 +757,6 @@ export class Producer {
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
 	#evicted?: Start;
-	// A session's copy of a remote track, whose groups are never checked for a rewind: a
-	// received timestamp may not be media time (a lite-05/06 untimed track carries send times).
-	#remote = false;
 	// When the cache was last scanned. See #prune.
 	#pruned = Number.NEGATIVE_INFINITY;
 	// When the track closed, which restarts the former newest group's idle window. See #prune.
@@ -711,9 +789,9 @@ export class Producer {
 	// may deliver in any order: readers wait for a hole below it to fill, or for the track
 	// to close, rather than end at the boundary with groups still to arrive.
 	#tailPending = false;
-	// The first group the wire subscription's live feed serves (see `hooks.startTrack`), and
-	// the floor the SUBSCRIBE it answered requested.
-	#served?: { start: number; requested?: number };
+	// The first group the wire subscription's live feed serves (see `hooks.startTrack`), unset
+	// until its START resolves it, and the floor the SUBSCRIBE requested.
+	#served?: { start?: number; requested?: number };
 	// The sequences the live feed delivered, as a group or a datagram: what a pending tail is
 	// judged by. Eviction never touches it. A gap folds away a subscription's grace after a
 	// later arrival opened it, as the session's tail does, so this holds only the gaps still
@@ -726,15 +804,15 @@ export class Producer {
 	}
 
 	static {
+		hooks.writeDatagram = (producer, datagram, inflated) => producer.#insertDatagram(datagram, inflated);
+		sourceStart = (producer) => producer.#served && producer.#feedStart();
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
 		hooks.startTrack = (producer, served) => {
 			producer.#served = served;
 			producer.#owe();
-		};
-		hooks.receiveTrack = (producer) => {
-			producer.#remote = true;
+			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
 		};
 		// Anything written before binding still counts, so the namespace never goes backwards.
 		bindProducerSequence = (producer, sequence) => {
@@ -757,6 +835,11 @@ export class Producer {
 		};
 		hooks.bindSequence = bindProducerSequence;
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
+		hooks.linger = (producer) => {
+			const maxAge = producer.#state.info.peek()?.maxAge;
+			if (producer.#state.closed.peek() !== null || maxAge === undefined) return Milli.zero;
+			return Milli(Math.min(maxAge, Milli.fromNano(CACHE_WINDOW)));
+		};
 		hooks.reportedLargest = (producer, largest) => producer.#advanceLargest(largest);
 		cachedHolds = (producer, sequence) => {
 			const entry = producer.#cached.get(sequence);
@@ -769,8 +852,17 @@ export class Producer {
 			hooks.arriveGroup(mirror, entry.arrived);
 			return mirror;
 		};
-		hooks.dropTrackGroups = (producer, start, end) => producer.#drop(start, end);
 		mayLand = (producer, land) => producer.#mayLand(land);
+	}
+
+	/**
+	 * Record that the publisher gave up the groups `[start, end)` with `error`, mirroring the
+	 * Rust `drop_groups`: none will arrive, so a reader waiting on one moves past it, a group
+	 * still arriving in them ends with `error`, the declared end does not wait for them, and a
+	 * relay serving this track forwards the drop.
+	 */
+	dropGroups(start: number, end: number, error: Error): void {
+		this.#drop(start, end, error, true);
 	}
 
 	// Whether a group may still land from the live feed, by the rule a pending tail is judged
@@ -798,14 +890,20 @@ export class Producer {
 			);
 	}
 
-	#drop(start: number, end: number): void {
+	// Record `[start, end)` given up with `error`. An upstream drop (`open`) also ends the
+	// groups still arriving in it with that error, so their readers settle now rather than
+	// once the stream's reset lands; one that finished here stays whole.
+	#drop(start: number, end: number, error: Error, open = false): void {
 		if (start >= end) return;
 		for (const state of [this.#state, ...this.#sinks]) {
-			state.drops.update((drops) => {
-				const next = [...drops];
-				insertRun(next, start, end);
-				return next;
-			});
+			state.drops.update((drops) => insertDrop(drops, start, end, error));
+		}
+		if (open) {
+			for (const [sequence, entry] of this.#cached) {
+				if (sequence >= start && sequence < end && entry.group.closed.peek() === undefined) {
+					entry.group.close(error);
+				}
+			}
 		}
 		// A pending tail owes nothing the publisher gave up.
 		this.#arrive(start, end);
@@ -863,7 +961,10 @@ export class Producer {
 		// Anything written before accept() must match too. A mismatch closes the track, so
 		// nothing waiting on info() hangs on a half-bound cache.
 		try {
-			for (const { group } of this.#cache) hooks.bindGroupTimed(group, timed);
+			for (const { group } of this.#cache) {
+				hooks.bindGroupTimed(group, timed);
+				hooks.bindGroupCompression(group, resolved.compress ?? false);
+			}
 			for (const sink of this.#sinks) {
 				for (const datagram of sink.datagrams.peek()) {
 					if ((datagram.timestamp !== undefined) !== timed) throw new TimestampMismatch();
@@ -875,7 +976,25 @@ export class Producer {
 		}
 		this.#state.info.set(resolved);
 		// Propagate to any sink handed out before accept (the on-demand path).
-		for (const sink of this.#sinks) sink.info.set(resolved);
+		const compressed = new Map<Datagram, Datagram>();
+		for (const sink of this.#sinks) {
+			if (resolved.compress) {
+				sink.datagrams.mutate((datagrams) => {
+					for (let index = 0; index < datagrams.length; index++) {
+						const datagram = datagrams[index];
+						let stored = compressed.get(datagram);
+						if (!stored) {
+							const flate = new Compression();
+							stored = Object.assign(flate.push(datagram), { sequence: datagram.sequence });
+							flate.finish();
+							compressed.set(datagram, stored);
+						}
+						datagrams[index] = stored;
+					}
+				});
+			}
+			sink.info.set(resolved);
+		}
 		this.#updateSubscription();
 		return this;
 	}
@@ -1067,11 +1186,11 @@ export class Producer {
 		const evicted = this.#evicted;
 		const late = evicted !== undefined && sequence <= evicted.sequence;
 		if (evicted && late) {
-			if (ceiling === undefined || earlier(evicted.start, ceiling)) ceiling = evicted.start;
+			if (ceiling === undefined || evicted.start.isBefore(ceiling)) ceiling = evicted.start;
 		} else if (evicted) {
-			if (floor === undefined || earlier(floor, evicted.start)) floor = evicted.start;
+			if (floor === undefined || floor.isBefore(evicted.start)) floor = evicted.start;
 		}
-		if ((floor && earlier(start, floor)) || (ceiling && earlier(ceiling, start))) throw new TimestampMismatch();
+		if ((floor && start.isBefore(floor)) || ceiling?.isBefore(start)) throw new TimestampMismatch();
 		return late;
 	}
 
@@ -1221,15 +1340,15 @@ export class Producer {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: now() };
 		this.#undrop(group.sequence);
 		group.closed.then((closed) => {
-			if (!(closed instanceof Error) || closed instanceof TooFarBehind) return;
+			if (!(closed instanceof Error) || HOLES.has(toStreamCode(closed))) return;
 			// A re-created group already replaced this one.
 			const current = this.#cached.get(group.sequence);
 			if (current && current.group !== group) return;
-			this.#drop(group.sequence, group.sequence + 1);
+			this.#drop(group.sequence, group.sequence + 1, closed);
 		});
 		const sequence = group.sequence;
-		if (this.#remote) {
-			// Only a local publisher's writes are checked.
+		if (this.#unchecked()) {
+			// Its timestamps may rewind, so they are not checked.
 		} else if (start) {
 			this.#record(entry, start, late);
 		} else {
@@ -1293,7 +1412,10 @@ export class Producer {
 	// Hold a group to this track's timedness, once the track has committed it.
 	#bind(group: GroupProducer): void {
 		const info = this.#state.info.peek();
-		if (info) hooks.bindGroupTimed(group, info.timescale != null);
+		if (info) {
+			hooks.bindGroupTimed(group, info.timescale != null);
+			hooks.bindGroupCompression(group, info.compress ?? false);
+		}
 	}
 
 	// Refuse a datagram whose timedness disagrees with this track's.
@@ -1362,10 +1484,15 @@ export class Producer {
 		}
 
 		// A group written before it joined is checked here, before it is cached or fanned out.
-		const start = this.#remote ? undefined : hooks.groupStart(group);
+		const start = this.#unchecked() ? undefined : hooks.groupStart(group);
 		const late = start !== undefined && this.#admit(group.sequence, start);
 
 		this.#publish(group, start, late);
+	}
+
+	// Whether this track's timestamps may rewind (see {@link Info.unchecked}).
+	#unchecked(): boolean {
+		return this.#state.info.peek()?.unchecked === true;
 	}
 
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
@@ -1404,7 +1531,7 @@ export class Producer {
 		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
 		this.#checkDatagram(timestamp);
 
-		this.#publishDatagram({ sequence, timestamp, payload });
+		this.#insertDatagram({ sequence, timestamp, payload });
 		return sequence;
 	}
 
@@ -1416,11 +1543,29 @@ export class Producer {
 	 * {@link appendDatagram} apply. Most origin publishers want {@link appendDatagram} instead.
 	 */
 	insertDatagram(sequence: number, timestamp: Timestamp | undefined, payload: Uint8Array) {
-		this.#writable(sequence);
-		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
-		this.#checkDatagram(timestamp);
+		this.#insertDatagram({ sequence, timestamp, payload });
+	}
 
-		this.#publishDatagram({ sequence, timestamp, payload });
+	#insertDatagram(datagram: Datagram, inflated?: number): void {
+		const { sequence, timestamp, payload } = datagram;
+		this.#writable(sequence);
+		this.#checkDatagram(timestamp);
+		if (payload.length > MAX_DATAGRAM_BYTES || (inflated ?? 0) > MAX_DATAGRAM_BYTES)
+			throw new Error("datagram payload too large");
+		if (
+			inflated !== undefined &&
+			(!Number.isSafeInteger(inflated) || inflated < 0 || !this.#state.info.peek()?.compress)
+		)
+			throw new ProtocolViolation("unexpected inflated datagram size");
+		if (this.#state.info.peek()?.compress) {
+			const flate = new Compression();
+			const frame = flate.push(datagram, inflated);
+			// A bad best-effort datagram is dropped on arrival, before any reader receives it.
+			if (inflated !== undefined) void frame.payload;
+			flate.finish();
+			datagram = Object.assign(frame, { sequence });
+		}
+		this.#publishDatagram(datagram);
 	}
 
 	/**
@@ -1443,7 +1588,7 @@ export class Producer {
 	}
 
 	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
-	// boundary it falls just before. Mirrors the Rust `finish_at_pending`.
+	// boundary it falls just before. Mirrors the Rust `finish_at` on a `received()` copy.
 	#endPending(end: Location): void {
 		const declared = this.#state.end.peek();
 		if (declared === undefined) {
@@ -1487,12 +1632,21 @@ export class Producer {
 	// The feed starts at the declared start while the demand keeps the floor its SUBSCRIBE asked
 	// for, since an update gets no fresh START: a moved floor stands on its own, and moving
 	// back restores the START. Without either, the first arrival stands in for it.
-	#owes(final: number): boolean {
-		if (!this.#tailPending) return false;
+	// Until the START arrives, the feed start is pending; the requested floor still bounds it.
+	#feedStart(): number | "pending" | undefined {
 		const groups = this.#state.update.peek()?.groups;
 		const requested = groups?.start === undefined ? undefined : groupBounds(groups).start;
 		const served = this.#served;
-		const floor = served && served.requested === requested ? served.start : (requested ?? this.#arrivals.first());
+		if (!served || served.requested !== requested) return requested;
+		if (served.start !== undefined) return served.start;
+		// A closed track never gets its START.
+		return this.#state.closed.peek() === undefined ? "pending" : requested;
+	}
+
+	#owes(final: number): boolean {
+		if (!this.#tailPending) return false;
+		const feed = this.#feedStart();
+		const floor = (feed === "pending" ? this.#served?.requested : feed) ?? this.#arrivals.first();
 		if (floor === undefined) return final > 0;
 		return !this.#arrivals.covers(Math.min(floor, final), final);
 	}
@@ -1637,8 +1791,8 @@ export class Subscriber {
 	// What the lite publisher forwards as drops: sequences given up and not reported yet,
 	// the track's drops last folded in, and every sequence already reported. Drops are
 	// persistent track state, so they are tracked here rather than removed for everyone.
-	#pending: Run[] = [];
-	#dropsSeen?: { drops: readonly Run[]; start: number; end?: number };
+	#pending: DropRun[] = [];
+	#dropsSeen?: { drops: readonly DropRun[]; start: number; end?: number };
 	#reported: Run[] = [];
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
@@ -1675,21 +1829,37 @@ export class Subscriber {
 		};
 	}
 
-	// The group after `sequence` that bounds it: the first servable one below `end`,
-	// stamped or not, empty or not.
+	// The group after `sequence` that bounds it: the first servable one below `end` that
+	// counts as content (its first frame landed, or it ended), stamped or not.
 	//
 	// Its first timestamp is the furthest presentation time `sequence` could still reach.
 	// An upper bound, deliberately: a frame's duration is not on the wire, so a group's own
-	// last timestamp says where it starts presenting, not where it ends. The bound is the
-	// *immediate* successor's start, so an unstamped successor leaves the reach unbounded
-	// until it presents a frame.
+	// last timestamp says where it starts presenting, not where it ends. A group whose header
+	// landed without a frame is not content yet, so the next one is the bound; an unstamped
+	// successor leaves the reach unbounded.
 	#successor(sequence: number, end?: number): GroupConsumer | undefined {
+		return this.#after(sequence, end, hooks.groupStarted);
+	}
+
+	// The group after `sequence` that starts its wall clock: like {@link #successor}, but
+	// counting a group before its first frame. Its header arrived, so a relay ages the group
+	// before it as the origin does, even if its first frame never comes.
+	#arrival(sequence: number, end?: number): GroupConsumer | undefined {
+		return this.#after(sequence, end, () => true);
+	}
+
+	// The first servable group after `sequence` below `end` that `counts`.
+	#after(
+		sequence: number,
+		end: number | undefined,
+		counts: (group: GroupConsumer) => boolean,
+	): GroupConsumer | undefined {
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, sequence + 1); i < timeline.length; i++) {
 			const successor = timeline[i];
 			if (end !== undefined && successor.sequence >= end) break;
 			if (successor.closed.peek() instanceof Error) continue;
-			return successor;
+			if (counts(successor)) return successor;
 		}
 		return undefined;
 	}
@@ -1722,13 +1892,15 @@ export class Subscriber {
 
 	// The drift verdict for `sequence` by its successor alone, whether or not this track holds it.
 	#staleAt(sequence: number, drift: Drift, wake = false): boolean {
-		const successor = this.#successor(sequence, drift.end);
-		if (!successor) return false;
+		const arrival = this.#arrival(sequence, drift.end);
+		if (!arrival) return false;
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
-		const deadline = hooks.groupArrived(successor) + drift.budget * 1_000_000;
+		const deadline = hooks.groupArrived(arrival) + drift.budget * 1_000_000;
 		if (now() >= deadline) return true;
 		if (wake) this.#wakeAt(deadline);
 
+		const successor = this.#successor(sequence, drift.end);
+		if (!successor) return false;
 		const reach = hooks.groupTimestamp(successor)?.asMillis();
 		return (
 			drift.presentation !== undefined &&
@@ -1817,6 +1989,13 @@ export class Subscriber {
 			if (subscriber.#resume) subscriber.#resume.join();
 			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);
 		};
+		hooks.sourceStart = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.start();
+			const producer = subscriber.#state.producer;
+			const start = producer && sourceStart(producer);
+			if (start === undefined || start === "pending") return start;
+			return Math.max(start, subscriber.#cursor.peek().start);
+		};
 		hooks.tryRecvGroup = (subscriber, started) => subscriber.#tryRecvGroup(started);
 		hooks.tryNextGroup = (subscriber) => subscriber.#tryNextGroup();
 		hooks.peekGroup = (subscriber, ordered) => subscriber.#peekGroup(ordered);
@@ -1858,6 +2037,10 @@ export class Subscriber {
 		hooks.holdsGroup = (subscriber, sequence) => {
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && cachedHolds(producer, sequence);
+		};
+		hooks.givenUp = (subscriber, sequence) => {
+			const drops = subscriber.#state.drops;
+			return { error: dropAt(drops.peek(), sequence), changed: drops };
 		};
 		hooks.mayLand = (subscriber, land) => {
 			const producer = subscriber.#state.producer;
@@ -2164,20 +2347,21 @@ export class Subscriber {
 		if (this.#resume) return this.#tryResumed(false);
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
-		// The first part of `[from, to)` this cursor has not reported yet, now reported.
-		const report = (from: number, to: number): Recv | undefined => {
+		// The first part of `[from, to)` this cursor has not reported yet, now reported, with why.
+		const report = (from: number, to: number, error: Error): Recv | undefined => {
 			if (!dispositions) return undefined;
 			const [gap] = runGaps(this.#reported, Math.max(from, start), Math.min(to, end ?? to));
 			if (!gap) return undefined;
 			insertRun(this.#reported, gap.start, gap.end);
-			return { kind: "drop", ...gap };
+			return { kind: "drop", ...gap, error };
 		};
+		const old = () => new StreamError(StreamCode.Old, { message: "group is past the budget" });
 
 		while (groups.length > 0 && groups[0].sequence < start) {
 			const skipped = groups.shift();
 			if (!skipped) break;
 			skipped.close();
-			const dropped = report(skipped.sequence, skipped.sequence + 1);
+			const dropped = report(skipped.sequence, skipped.sequence + 1, old());
 			if (dropped) return dropped;
 		}
 		if (dispositions) {
@@ -2187,12 +2371,13 @@ export class Subscriber {
 			const seen = this.#dropsSeen;
 			if (!seen || seen.drops !== drops || seen.start !== start || seen.end !== end) {
 				this.#dropsSeen = { drops, start, end };
-				for (const run of drops) insertRun(this.#pending, run.start, run.end);
+				for (const run of drops) this.#pending = insertDrop(this.#pending, run.start, run.end, run.error);
 			}
 			for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
-				const dropped = report(run.start, run.end);
-				if (!dropped || dropped.kind !== "drop") continue;
-				if (dropped.end < run.end) this.#pending.unshift({ start: dropped.end, end: run.end });
+				const dropped = report(run.start, run.end, run.error);
+				if (dropped?.kind !== "drop") continue;
+				if (dropped.end < run.end)
+					this.#pending.unshift({ start: dropped.end, end: run.end, error: run.error });
 				return dropped;
 			}
 		}
@@ -2210,8 +2395,9 @@ export class Subscriber {
 				group.close();
 				continue;
 			}
-			if (dispositions && group.closed.peek() instanceof Error) {
-				const dropped = report(group.sequence, group.sequence + 1);
+			const failed = group.closed.peek();
+			if (dispositions && failed instanceof Error) {
+				const dropped = report(group.sequence, group.sequence + 1, failed);
 				if (dropped) return dropped;
 				continue;
 			}
@@ -2221,7 +2407,7 @@ export class Subscriber {
 			}
 			if (this.#isStale(group, drift)) {
 				group.close();
-				const dropped = report(group.sequence, group.sequence + 1);
+				const dropped = report(group.sequence, group.sequence + 1, old());
 				if (dropped) return dropped;
 				continue;
 			}
@@ -2270,6 +2456,7 @@ export class Subscriber {
 		const dispose = [
 			this.#state.groups.changed(fn),
 			this.#state.drops.changed(fn),
+			this.#state.startChanged.changed(fn),
 			this.#cursor.changed(fn),
 			this.#state.closed.changed(fn),
 			this.#state.end.changed(fn),

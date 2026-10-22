@@ -197,7 +197,7 @@ android *args:
 wasm *args:
     cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@" -- -D warnings
 
-# Run the browser clock backend on the Playwright Chromium installed by wasm.yml,
+# Run the browser clock backend on the root devShell's Playwright Chromium,
 # with the runtime and with reads alone.
 wasm-test:
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown
@@ -328,6 +328,11 @@ quic-sim:
 send-depth:
     bash sh/rs/send-depth.sh
 
+# Run moq-cli's `moq export` process tests, which feed a real relay and wait out lingers in real time.
+[positional-arguments]
+cli-export *args:
+    just rs test -p moq-cli --test integration --run-ignored only -E 'test(/^export::/)' "$@"
+
 # Exercise small connection and stream receive windows over real QUIC sockets.
 quic-stress:
     just rs test -p moq-tokio --lib --run-ignored only -E 'test(/^quic::driver::tests::stress_/)'
@@ -347,6 +352,10 @@ render-sw:
 multicast:
     just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::apps_partition_discovery) | test(/^mdns::tests::daemon_/)'
     just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
+
+# Run the long TS recovery arms; a failing arm keeps its export and ledgers under $MOQ_TEST_RUNS.
+ts-recovery:
+    just rs test -p moq-mux --lib --run-ignored only -E 'test(/^container::ts::recovery_test::long_/)'
 
 # Run moq-audio's ignored output-device tests against a private PulseAudio null sink.
 audio-devices:

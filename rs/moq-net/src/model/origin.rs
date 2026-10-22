@@ -6,7 +6,7 @@ use std::{
 	collections::{BTreeSet, HashMap, HashSet, VecDeque},
 	fmt,
 	sync::Arc,
-	sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+	sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 	task::{Context, Poll, Wake, Waker, ready},
 	time::Duration,
 };
@@ -1351,6 +1351,8 @@ struct TableCursor {
 	/// For a cursor reading through a mount: the mount and the handle's own
 	/// patterns, so a wildcard captures what the handle names rather than the target.
 	named: Option<(Mount, Patterns)>,
+	/// Whether the cursor counts an [`Interest`] at each of its heads.
+	interested: bool,
 	/// The last delivered best route per presented (relative) prefix, for change
 	/// detection. Servability is part of the dedupe key but never leaves the model.
 	current: HashMap<PathOwned, CursorRoute>,
@@ -1774,6 +1776,10 @@ pub struct Producer {
 
 	// The clock advanced by the origin driver.
 	timers: Deadlines,
+
+	// What the frames written through this handle may allocate up front, shared by every
+	// broadcast it creates.
+	frames: super::frame::Budget,
 }
 
 impl Producer {
@@ -1801,6 +1807,7 @@ impl Producer {
 			preference: Preference::default(),
 			tasks,
 			timers: timers.clone(),
+			frames: Default::default(),
 		};
 		let driver = Driver {
 			state: DriverState {
@@ -1812,6 +1819,15 @@ impl Producer {
 			pool,
 		};
 		(producer, driver)
+	}
+
+	/// Give this handle a frame budget of its own, so what one session allocates up front
+	/// never crowds out another's.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: tuning
+	pub(crate) fn with_own_frames(mut self) -> Self {
+		self.frames = Default::default();
+		self
 	}
 
 	/// The ingress stats context this handle was tagged with.
@@ -1910,6 +1926,7 @@ impl Producer {
 			preference: Preference::default(),
 			tasks,
 			timers: Deadlines::new(Instant::ZERO),
+			frames: Default::default(),
 		}
 	}
 
@@ -1988,6 +2005,7 @@ impl Producer {
 			cache_duration: self.cache_duration,
 			path: full,
 			epoch: None,
+			frames: self.frames.clone(),
 		};
 		let source = info.produce().with_stats(ingress.clone());
 		let entry = announcing.announce(
@@ -2029,6 +2047,7 @@ impl Producer {
 			cache_duration: self.cache_duration,
 			path: full,
 			epoch: None,
+			frames: self.frames.clone(),
 		}
 		.produce()
 		.with_stats(ingress)
@@ -2062,30 +2081,56 @@ impl Producer {
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn snapshot(&self, prefix: impl AsPath) -> Snapshot {
 		let prefix = self.root.join(prefix.as_path()).to_owned();
-		// A prefix past the depth limit can carry no route, so nothing waits on it.
-		let Ok(claim) = prefix_claim(&prefix) else {
-			return Snapshot::landed();
-		};
+		self.shared.lock().snapshot(&self.shared, prefix, self.link)
+	}
+
+	/// Hear what this handle's session should ask its peer about: the broadest
+	/// prefixes readers of the origin want discovered, mapped onto this handle's
+	/// scope, starting with the current ones.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
+	pub(crate) fn interests(&self) -> Interests {
+		let queue = kio::Queue::new();
 		let mut state = self.shared.lock();
-		if state.closed {
-			return Snapshot::landed();
-		}
-		let id = state.next_snapshot;
-		state.next_snapshot += 1;
-		state.add_snapshot(
-			&prefix,
-			SnapshotEntry {
-				id,
-				link: self.link,
-				claim,
-				prefix: prefix.clone(),
-			},
-		);
-		Snapshot {
-			shared: Some(self.shared.clone()),
-			prefix,
+		let id = state.next_listener;
+		state.next_listener += 1;
+		let listener = Listener {
 			id,
+			root: self.root.clone(),
+			heads: interest_prefixes(&self.allowed()),
+			allowed: self.scope.allowed.clone(),
+			link: self.link,
+			queue: queue.clone(),
+		};
+		match state.closed {
+			true => queue.close(),
+			false => {
+				for prefix in state.routes.interests_from(&Path::empty()) {
+					for relative in listener.asks(&prefix) {
+						let snapshot = state.snapshot(&self.shared, self.root.join(&relative), self.link);
+						let _ = queue.try_push(InterestChange {
+							prefix: relative,
+							wanted: true,
+							snapshot: Some(snapshot),
+						});
+					}
+				}
+				state.listeners.push(listener);
+			}
 		}
+		Interests {
+			shared: self.shared.clone(),
+			id,
+			queue,
+		}
+	}
+
+	/// Whether routes arrive here on a link between relays ([`Self::peer`] or
+	/// [`Self::upstream`]), whose sessions discover everything they may.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
+	pub(crate) fn relays(&self) -> bool {
+		self.link != Link::Local
 	}
 
 	/// Advertise a route over `prefix` and serve the requests beneath it.
@@ -2163,6 +2208,7 @@ impl Producer {
 			preference: self.preference,
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
+			frames: self.frames.clone(),
 		})
 	}
 
@@ -2317,6 +2363,7 @@ impl Announcing {
 		}
 
 		let mut entries = Vec::with_capacity(self.prefixes.len());
+		let mut superseded = Vec::new();
 		for (prefix, claim) in &self.prefixes {
 			shared.reannounced(prefix, &route.hops);
 			let id = shared.next_route;
@@ -2342,9 +2389,14 @@ impl Announcing {
 				claim: claim.clone(),
 			});
 			shared.sync_route(prefix, claim);
+			superseded.extend(shared.routes.superseded(prefix));
 			entries.push((prefix.clone(), id));
 		}
 		drop(shared);
+		// Outside the table lock, which never nests a broadcast's.
+		for broadcast in superseded {
+			broadcast.supersede();
+		}
 
 		// Ingress announce guard: held while the route is advertised.
 		let guard = serving
@@ -2409,6 +2461,11 @@ impl Announcer {
 	pub(super) fn route(&self) -> Option<Route> {
 		self.entry.route()
 	}
+
+	/// Whether a live route at the broadcast's path carries a newer epoch.
+	pub(super) fn superseded(&self) -> bool {
+		self.entry.superseded()
+	}
 }
 
 /// The write half of an advertisement: a live claim that paths under a
@@ -2459,6 +2516,8 @@ impl AnnounceProducer {
 		// The requests an epoch change released, refused once the table lock is gone: the
 		// refusal wakes their fronts, which read the table.
 		let mut released = Vec::new();
+		// The broadcasts a newer epoch now replaces, told outside the table lock too.
+		let mut superseded = Vec::new();
 		for (prefix, id) in &self.entries {
 			shared.reannounced(prefix, &route.hops);
 			let stale = shared.withdrawn_through(prefix, &route.hops);
@@ -2492,12 +2551,16 @@ impl AnnounceProducer {
 			}
 			shared.sync_route(prefix, &claim);
 			shared.prune_withdrawn(prefix);
+			superseded.extend(shared.routes.superseded(prefix));
 		}
 		drop(shared);
 		for producer in released {
 			if let Ok(mut request) = producer.write() {
 				request.resolved.get_or_insert(Err(Error::Unroutable));
 			}
+		}
+		for broadcast in superseded {
+			broadcast.supersede();
 		}
 		Ok(true)
 	}
@@ -2514,6 +2577,18 @@ impl AnnounceProducer {
 			auth: entry.auth.clone(),
 			via: entry.via,
 			source: entry.entered(),
+		})
+	}
+
+	/// Whether a live route at any of the entries' prefixes carries a newer epoch than theirs.
+	fn superseded(&self) -> bool {
+		let shared = self.shared.lock();
+		self.entries.iter().any(|(prefix, id)| {
+			shared
+				.routes
+				.entry(prefix, *id)
+				.and_then(|entry| entry.epoch.as_ref())
+				.is_some_and(|epoch| shared.routes.newest_epoch(prefix).is_some_and(|newest| epoch < newest))
 		})
 	}
 
@@ -2680,6 +2755,10 @@ impl DriverState {
 				.collect();
 			let cursors: Vec<_> = shared.cursors.values().map(|cursor| cursor.state.clone()).collect();
 			let fronts: Vec<_> = shared.fronts.values().map(|front| front.request.clone()).collect();
+			// Sessions stop hearing interests; their queued snapshots release as they drop.
+			for listener in &shared.listeners {
+				listener.queue.close();
+			}
 			(servers, cursors, fronts)
 		};
 
@@ -2759,29 +2838,11 @@ struct Asked {
 	sub: Option<kio::Pending<track::Subscribing>>,
 }
 
-/// Queues just the logical track whose watched resource changed.
-struct TrackReady {
-	name: Arc<str>,
-	queue: kio::Queue<Arc<str>>,
-	queued: AtomicBool,
-}
-
-impl Wake for TrackReady {
-	fn wake(self: Arc<Self>) {
-		self.wake_by_ref();
-	}
-
-	fn wake_by_ref(self: &Arc<Self>) {
-		if !self.queued.swap(true, Ordering::AcqRel) {
-			let _ = self.queue.try_push(self.name.clone());
-		}
-	}
-}
-
 /// The driver's side of one logical track: the handles behind the names the
 /// machine uses.
 struct TrackIo {
-	ready: Arc<TrackReady>,
+	/// Queues just this track when a resource it watches changes.
+	ready: Arc<crate::util::QueueWake<Arc<str>>>,
 	park: kio::Park,
 	/// The logical track, until the first copy says what it is.
 	request: Option<track::Request>,
@@ -3002,13 +3063,18 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 	// starting with the request that minted the front.
 	let mut held = true;
 	let mut events: VecDeque<Event> = VecDeque::new();
+	// Once the front picks a route a session received, it asks sessions to keep
+	// discovering its path for as long as it lives, so the route outlives whatever
+	// reader found it, such as a listing that has since closed.
+	let mut discovered: Option<Interest> = None;
 
 	// Read the table for the machine: the best route and whether
 	// the serving source is on its way out. Also what the watch wakes for.
 	let select = |front: &mut Front,
 	              sources: &HashMap<u64, broadcast::Consumer>,
 	              seen: &mut u64,
-	              resolved: &mut Option<Resolution>|
+	              resolved: &mut Option<Resolution>,
+	              discovered: &mut Option<Interest>|
 	 -> Event {
 		let table = shared.read();
 		if table.closed {
@@ -3018,7 +3084,10 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 		*seen = watch.seen();
 		front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
 		let instance = resolved.as_ref().map(|resolved| &resolved.instance);
-		let best = pick(&table, &path.as_path(), horizon, front, instance).map(|entry| Candidate {
+		let best = pick(&table, &path.as_path(), horizon, front, instance);
+		// Only a received route carries a hop chain: a local one needs no discovery.
+		let received = best.is_some_and(|entry| !entry.hops.is_empty());
+		let best = best.map(|entry| Candidate {
 			route: entry.id,
 			local: entry.local,
 			epoch: entry.epoch.is_some(),
@@ -3038,6 +3107,10 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			if !table.restarted_since(&prefix, joined) {
 				table.renew(&prefix);
 			}
+		}
+		if received && discovered.is_none() {
+			let mut table = shared.lock();
+			*discovered = Some(Interest::new(&mut table, &shared, path.clone()));
 		}
 		Event::Selected { best, serving_closing }
 	};
@@ -3070,7 +3143,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 		}
 	};
 
-	events.push_back(select(&mut front, &sources, &mut seen, &mut resolved));
+	events.push_back(select(&mut front, &sources, &mut seen, &mut resolved, &mut discovered));
 
 	loop {
 		while let Some(event) = events.pop_front() {
@@ -3080,7 +3153,9 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			};
 			for action in front.step(event) {
 				match action {
-					Action::Reselect => events.push_back(select(&mut front, &sources, &mut seen, &mut resolved)),
+					Action::Reselect => {
+						events.push_back(select(&mut front, &sources, &mut seen, &mut resolved, &mut discovered))
+					}
 					Action::Request { route } => {
 						// The entry and what it serves.
 						let found = {
@@ -3234,7 +3309,9 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							Some(Ok(lookup)) => {
 								// Subscribe before the query exposes upstream demand, and query
 								// that same instance even if the broadcast changes meanwhile.
-								let sub = io.weak.subscription().map(|demand| lookup.subscribe(demand));
+								let sub = io.weak.subscription().map(|(demand, subscribers)| {
+									lookup.subscribe(io.routes.subscription(demand, subscribers))
+								});
 								let query = match &sub {
 									Some(sub) => sub.query(),
 									None => lookup.query().into_inner(),
@@ -3439,7 +3516,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			}
 			while let Poll::Ready(Ok(name)) = ready.poll_pop(waiter) {
 				let Some(io) = tracks.get_mut(&name) else { continue };
-				io.ready.queued.store(false, Ordering::Release);
+				io.ready.popped();
 				let waker = Waker::from(io.ready.clone());
 				let waiter = io.park.hold(&Context::from_waker(&waker));
 				let step = (|| {
@@ -3453,11 +3530,11 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						&& let Some(accepted) = &mut io.accepted
 					{
 						while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
-						if let Some(subscription) = accepted.subscription() {
+						if let Some((subscription, subscribers)) = io.weak.subscription() {
 							// The query's hold must follow demand too, or its initial budget
 							// keeps a later, shorter aggregate from reaching the publisher.
 							if let Some(held) = &mut io.held {
-								let _ = held.update(subscription);
+								let _ = held.update(io.routes.subscription(subscription, subscribers));
 							}
 						} else {
 							io.held = None;
@@ -3520,11 +3597,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 		let event = match step {
 			Step::Assigned(request) => {
 				let name: Arc<str> = request.name().into();
-				let track_ready = Arc::new(TrackReady {
-					name: name.clone(),
-					queue: ready.clone(),
-					queued: AtomicBool::new(false),
-				});
+				let track_ready = crate::util::QueueWake::new(name.clone(), ready.clone());
 				track_ready.wake_by_ref();
 				tracks.insert(
 					name.clone(),
@@ -3683,7 +3756,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 				deadline.set(None);
 				Event::Deadline { now: timers.now() }
 			}
-			Step::Table => select(&mut front, &sources, &mut seen, &mut resolved),
+			Step::Table => select(&mut front, &sources, &mut seen, &mut resolved, &mut discovered),
 			Step::Listing => {
 				// A route claiming a prefix names no broadcast, so a path it serves on request
 				// has no inventory to list.
@@ -3796,6 +3869,12 @@ struct RouteNode {
 	/// Snapshots at this node or below, so a cursor registering walks only the
 	/// subtrees holding one.
 	snapshots_below: usize,
+	/// Readers asking sessions to discover routes at or beneath exactly this
+	/// prefix; see [`Interest`].
+	interests: usize,
+	/// Interests at this node or below, so finding the narrower ones a change
+	/// covers or uncovers walks only the subtrees holding one.
+	interests_below: usize,
 	children: HashMap<String, RouteNode>,
 }
 
@@ -3996,12 +4075,122 @@ impl Drop for Snapshot {
 	}
 }
 
+/// Counts an absolute prefix as one readers want discovered until dropped: a
+/// session fed into the origin asks its peer about the broadest such prefixes.
+/// Dropping it takes the table lock: never drop one while holding it.
+struct Interest {
+	shared: SendCell<kio::Shared<OriginState>>,
+	prefix: PathOwned,
+}
+
+impl Interest {
+	/// Count `prefix` under the held table lock.
+	fn new(state: &mut OriginState, shared: &SendCell<kio::Shared<OriginState>>, prefix: PathOwned) -> Self {
+		state.add_interest(shared, &prefix);
+		Self {
+			shared: shared.clone(),
+			prefix,
+		}
+	}
+}
+
+impl Drop for Interest {
+	fn drop(&mut self) {
+		self.shared.lock().remove_interest(&self.shared, &self.prefix);
+	}
+}
+
+/// A session registered for [`Interests`], as the table holds it.
+struct Listener {
+	id: u64,
+	/// The session's root, absolute: what it asks about is named relative to it.
+	root: PathOwned,
+	/// The broadest prefixes the session may ask about, relative to `root`.
+	heads: Vec<PathOwned>,
+	/// The absolute patterns the session may publish under.
+	allowed: Patterns,
+	/// The link the session's routes arrive on, which its snapshots wait for.
+	link: Link,
+	queue: kio::Queue<InterestChange>,
+}
+
+impl Listener {
+	/// What the session asks about, relative to its root, for an interest at the
+	/// absolute `prefix`: each head an interest above it covers, since the scope
+	/// may ask for no more, or the prefix itself inside a head.
+	fn asks(&self, prefix: &Path) -> Vec<PathOwned> {
+		let Some(relative) = prefix.strip_prefix(&self.root) else {
+			return match self.root.has_prefix(prefix) {
+				true => self.heads.clone(),
+				false => Vec::new(),
+			};
+		};
+		let mut out = Vec::new();
+		for head in &self.heads {
+			if head.has_prefix(&relative) {
+				out.push(head.clone());
+			} else if relative.has_prefix(head) {
+				let reaches = Pattern::subtree(prefix.as_str()).is_ok_and(|subtree| self.allowed.overlaps(&subtree));
+				return match reaches {
+					true => vec![relative.to_owned()],
+					false => Vec::new(),
+				};
+			}
+		}
+		out
+	}
+}
+
+/// What a session asks its peer about, as it changes: the broadest prefixes
+/// readers of the origin want discovered, mapped onto the session's scope.
+// pending: /quest/m1/public-model/answer.md
+pub(crate) struct Interests {
+	shared: SendCell<kio::Shared<OriginState>>,
+	id: u64,
+	queue: kio::Queue<InterestChange>,
+}
+
+impl Interests {
+	/// The next change, or `None` once the origin closed.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
+	pub(crate) fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<InterestChange>> {
+		Poll::Ready(ready!(self.queue.poll_pop(waiter)).ok())
+	}
+}
+
+impl Drop for Interests {
+	fn drop(&mut self) {
+		// Only the table's copy of the queue goes here; the changes still queued drop with
+		// this handle's, after the lock is released, since each may hold a snapshot.
+		self.shared.lock().listeners.retain(|listener| listener.id != self.id);
+	}
+}
+
+/// One change to what a session asks its peer about; see [`Interests`].
+#[cfg_attr(
+	not(feature = "async"),
+	expect(dead_code, reason = "only async sessions consume discovery changes")
+)]
+// pending: /quest/m1/public-model/answer.md
+pub(crate) struct InterestChange {
+	/// The prefix, relative to the session's root.
+	pub prefix: PathOwned,
+	/// Whether readers now want the prefix discovered, or no longer do.
+	pub wanted: bool,
+	/// Set when wanted: holds the readers under the prefix short of synced from
+	/// the moment they asked, until the request the session opens for it
+	/// delivers the peer's initial set, or the session drops it unasked.
+	pub snapshot: Option<Snapshot>,
+}
+
 /// What a registration adds to the subtree counts on its walk.
 #[derive(Clone, Copy)]
 struct Below {
 	cursors: usize,
 	watches: usize,
 	snapshots: usize,
+	interests: usize,
 }
 
 impl Below {
@@ -4009,21 +4198,23 @@ impl Below {
 		cursors: 0,
 		watches: 0,
 		snapshots: 0,
+		interests: 0,
 	};
 	const CURSOR: Self = Self {
 		cursors: 1,
-		watches: 0,
-		snapshots: 0,
+		..Self::NONE
 	};
 	const WATCH: Self = Self {
-		cursors: 0,
 		watches: 1,
-		snapshots: 0,
+		..Self::NONE
 	};
 	const SNAPSHOT: Self = Self {
-		cursors: 0,
-		watches: 0,
 		snapshots: 1,
+		..Self::NONE
+	};
+	const INTEREST: Self = Self {
+		interests: 1,
+		..Self::NONE
 	};
 }
 
@@ -4034,6 +4225,7 @@ impl RouteNode {
 			&& self.cursors.is_empty()
 			&& self.watches.is_empty()
 			&& self.snapshots.is_empty()
+			&& self.interests == 0
 			&& self.children.is_empty()
 	}
 
@@ -4051,6 +4243,7 @@ impl RouteNode {
 		self.cursors_below += below.cursors;
 		self.watches_below += below.watches;
 		self.snapshots_below += below.snapshots;
+		self.interests_below += below.interests;
 		match parts.next() {
 			None => self,
 			Some(part) => self.children.entry(part.to_string()).or_default().reach(parts, below),
@@ -4080,6 +4273,7 @@ impl RouteNode {
 		self.cursors_below -= below.cursors;
 		self.watches_below -= below.watches;
 		self.snapshots_below -= below.snapshots;
+		self.interests_below -= below.interests;
 		Some(result)
 	}
 
@@ -4158,6 +4352,21 @@ impl RouteNode {
 		out.extend(&self.cursors);
 		for child in self.children.values() {
 			child.collect_cursors(out);
+		}
+	}
+
+	/// Collect the broadest interests strictly beneath this node, which sits at
+	/// `at`: each one no other interest beneath this node covers.
+	fn collect_interests(&self, at: &Path, out: &mut Vec<PathOwned>) {
+		for (part, child) in &self.children {
+			if child.interests_below == 0 {
+				continue;
+			}
+			let path = at.join(part.as_str());
+			match child.interests > 0 {
+				true => out.push(path),
+				false => child.collect_interests(&path, out),
+			}
 		}
 	}
 }
@@ -4244,6 +4453,26 @@ impl RouteTable {
 		nodes.into_iter().flat_map(|node| node.entries.iter())
 	}
 
+	/// The newest epoch a live route at `prefix` carries.
+	fn newest_epoch(&self, prefix: &Path) -> Option<&Epoch> {
+		self.at(prefix)
+			.filter(|entry| entry.live())
+			.filter_map(|entry| entry.epoch.as_ref())
+			.max()
+	}
+
+	/// The broadcasts published exactly at `prefix` under an epoch older than the newest one
+	/// advertised there. See [`broadcast::Finish::poll_closed`].
+	fn superseded(&self, prefix: &Path) -> Vec<broadcast::Consumer> {
+		let Some(newest) = self.newest_epoch(prefix) else {
+			return Vec::new();
+		};
+		self.at(prefix)
+			.filter(|entry| entry.epoch.as_ref().is_some_and(|epoch| epoch < newest))
+			.filter_map(|entry| entry.source.clone())
+			.collect()
+	}
+
 	/// Add a route at its prefix, creating the nodes down to it.
 	fn insert(&mut self, entry: RouteEntry) {
 		let node = self.root.reach(entry.prefix.parts(), Below::NONE);
@@ -4308,6 +4537,35 @@ impl RouteTable {
 		self.root.edit(path.parts(), Below::WATCH, |node| {
 			node.watches.retain(|(watch, _)| *watch != id)
 		});
+	}
+
+	/// Whether an interest strictly above `path` covers it.
+	fn interest_above(&self, path: &Path) -> bool {
+		let mut node = &self.root;
+		for part in path.parts() {
+			if node.interests > 0 {
+				return true;
+			}
+			match node.children.get(part) {
+				Some(child) => node = child,
+				None => return false,
+			}
+		}
+		false
+	}
+
+	/// The interests at `path` or, failing that, the broadest beneath it: what a
+	/// session joining now asks about under `path`.
+	fn interests_from(&self, path: &Path) -> Vec<PathOwned> {
+		let Some(node) = self.root.find(path.parts()) else {
+			return Vec::new();
+		};
+		if node.interests > 0 {
+			return vec![path.to_owned()];
+		}
+		let mut out = Vec::new();
+		node.collect_interests(path, &mut out);
+		out
 	}
 
 	/// Wake the watches of every path a route at `prefix` covers.
@@ -4378,6 +4636,11 @@ struct OriginState {
 	// Set when the origin's driver dropped: new requests fail with `Closed`
 	// immediately and handlers observe the end instead of parking forever.
 	closed: bool,
+
+	// The sessions asking their peer about only what readers here want
+	// discovered; see [`Interests`].
+	listeners: Vec<Listener>,
+	next_listener: u64,
 }
 
 impl OriginState {
@@ -4393,6 +4656,8 @@ impl OriginState {
 			fronts: WeakCache::default(),
 			withdrawn: HashMap::new(),
 			closed: false,
+			listeners: Vec::new(),
+			next_listener: 0,
 		}
 	}
 
@@ -4521,6 +4786,102 @@ impl OriginState {
 		}
 	}
 
+	/// Start a [`Snapshot`] at the absolute `prefix` for the routes arriving on `link`.
+	fn snapshot(&mut self, shared: &SendCell<kio::Shared<OriginState>>, prefix: PathOwned, link: Link) -> Snapshot {
+		// A prefix past the depth limit can carry no route, so nothing waits on it.
+		let Ok(claim) = prefix_claim(&prefix) else {
+			return Snapshot::landed();
+		};
+		if self.closed {
+			return Snapshot::landed();
+		}
+		let id = self.next_snapshot;
+		self.next_snapshot += 1;
+		self.add_snapshot(
+			&prefix,
+			SnapshotEntry {
+				id,
+				link,
+				claim,
+				prefix: prefix.clone(),
+			},
+		);
+		Snapshot {
+			shared: Some(shared.clone()),
+			prefix,
+			id,
+		}
+	}
+
+	/// Count the absolute `head` as a prefix readers want discovered, telling the
+	/// listeners when that changes the covering set.
+	fn add_interest(&mut self, shared: &SendCell<kio::Shared<OriginState>>, head: &Path) {
+		let node = self.routes.root.reach(head.parts(), Below::INTEREST);
+		node.interests += 1;
+		if node.interests > 1 || self.listeners.is_empty() {
+			return;
+		}
+		let mut narrower = Vec::new();
+		node.collect_interests(head, &mut narrower);
+		if self.routes.interest_above(head) {
+			return;
+		}
+		// Asked for before the narrower ones it covers are let go, so nothing retracts.
+		self.emit(shared, head, true);
+		for prefix in narrower {
+			self.emit(shared, &prefix, false);
+		}
+	}
+
+	/// Undo one [`Self::add_interest`] of `head`.
+	fn remove_interest(&mut self, shared: &SendCell<kio::Shared<OriginState>>, head: &Path) {
+		let listening = !self.listeners.is_empty();
+		let narrower = self.routes.root.edit(head.parts(), Below::INTEREST, |node| {
+			node.interests -= 1;
+			(node.interests == 0 && listening).then(|| {
+				let mut narrower = Vec::new();
+				node.collect_interests(head, &mut narrower);
+				narrower
+			})
+		});
+		let Some(Some(narrower)) = narrower else {
+			return;
+		};
+		if self.routes.interest_above(head) {
+			return;
+		}
+		for prefix in narrower {
+			self.emit(shared, &prefix, true);
+		}
+		self.emit(shared, head, false);
+	}
+
+	/// Tell every listener the covering set of interests gained or lost the
+	/// absolute `prefix`.
+	fn emit(&mut self, shared: &SendCell<kio::Shared<OriginState>>, prefix: &Path, wanted: bool) {
+		let mut changes = Vec::new();
+		for listener in &self.listeners {
+			for relative in listener.asks(prefix) {
+				changes.push((
+					listener.queue.clone(),
+					listener.root.join(&relative),
+					relative,
+					listener.link,
+				));
+			}
+		}
+		for (queue, absolute, prefix, link) in changes {
+			let snapshot = wanted.then(|| self.snapshot(shared, absolute, link));
+			// A listener still registered has an open queue, except after the teardown,
+			// whose snapshots are landed: dropping a refused one never takes this lock.
+			let _ = queue.try_push(InterestChange {
+				prefix,
+				wanted,
+				snapshot,
+			});
+		}
+	}
+
 	/// Register a [`Watch`] on the routes covering `path`.
 	fn watch(&mut self, shared: &SendCell<kio::Shared<OriginState>>, path: &Path) -> Watch {
 		let id = self.next_watch;
@@ -4564,7 +4925,20 @@ impl OriginState {
 	}
 
 	/// Register a cursor and replay the current best route per presented prefix.
-	fn register_cursor(&mut self, id: ConsumerId, mut cursor: TableCursor) {
+	fn register_cursor(
+		&mut self,
+		shared: &SendCell<kio::Shared<OriginState>>,
+		id: ConsumerId,
+		mut cursor: TableCursor,
+	) {
+		// First, so the snapshots a session takes for these interests hold the cursor
+		// unsynced from the start, through the scan below.
+		if cursor.interested {
+			for head in &cursor.heads {
+				self.add_interest(shared, head);
+			}
+		}
+
 		// The routes a cursor can see sit on the walk down to one of its heads or
 		// somewhere beneath it, so only those subtrees are replayed.
 		let mut presented: BTreeSet<PathOwned> = BTreeSet::new();
@@ -5286,6 +5660,8 @@ impl kio::Task for Requesting {
 pub struct Routing {
 	consumer: Consumer,
 	path: PathOwned,
+	// Asks sessions to discover the path for as long as this waits on it.
+	interest: Option<Interest>,
 	// The covering routes, watched since the generation the last ask saw.
 	watch: Option<(Watch, u64)>,
 	// The ask in flight, dropped once it fails `Unroutable` until the routes move.
@@ -5328,6 +5704,10 @@ impl kio::Task for Routing {
 					};
 					let watch = table.watch(&self.consumer.shared, &resolved);
 					let seen = watch.seen();
+					if self.interest.is_none() && self.consumer.interested {
+						let resolved = resolved.to_owned();
+						self.interest = Some(Interest::new(&mut table, &self.consumer.shared, resolved));
+					}
 					drop(table);
 					self.watch = Some((watch, seen));
 					self.request = Some(
@@ -5432,6 +5812,11 @@ pub struct Consumer {
 	// Which routes beneath a hidden (`.`-prefixed) segment `announced` reports.
 	hidden: Hidden,
 
+	// Whether this handle's announcement streams and routed requests count as
+	// interests, so a session fed into the origin asks its peer about them. Off
+	// for a session serving its peer (see `Self::serving`).
+	interested: bool,
+
 	// The cache policy remote fronts inherit, mirroring what
 	// `create_broadcast` gives a local front.
 	pool: cache::Pool,
@@ -5460,6 +5845,7 @@ impl Consumer {
 				..Horizon::default()
 			},
 			hidden: Hidden::default(),
+			interested: true,
 			pool: producer.pool.clone(),
 			cache_duration: producer.cache_duration,
 			tasks: producer.tasks.downgrade(),
@@ -5494,6 +5880,15 @@ impl Consumer {
 	/// in-process producers, as opposed to what its cluster peers forward.
 	pub fn local(mut self) -> Self {
 		self.horizon.local = true;
+		self
+	}
+
+	/// A clone for a session serving its peer: its reads are the peer's, not a
+	/// local reader's, so they never make a session ask its own peer about them.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
+	pub(crate) fn serving(mut self) -> Self {
+		self.interested = false;
 		self
 	}
 
@@ -5583,6 +5978,8 @@ impl Consumer {
 	/// relative to this consumer's root; its patterns only filter visibility.
 	/// Routes with a segment starting with `.` below the literal head of those
 	/// patterns are hidden unless [`with_hidden`](Self::with_hidden) opted in.
+	/// The stream also watches its scope: a moq-lite client session fed by this
+	/// origin asks its peer about the scope while any stream watches it.
 	/// Drop the returned [`AnnounceConsumer`] to unregister.
 	pub fn announced(&self) -> AnnounceConsumer {
 		let state = kio::Producer::<OriginConsumerState>::default();
@@ -5601,6 +5998,7 @@ impl Consumer {
 			under,
 			holes,
 			named: mount.map(|mount| (mount.clone(), self.scope.allowed.clone())),
+			interested: self.interested,
 			current: HashMap::new(),
 		};
 
@@ -5787,6 +6185,7 @@ impl Consumer {
 		Routing {
 			consumer: self.clone(),
 			path,
+			interest: None,
 			watch: None,
 			request,
 			epoch,
@@ -5872,7 +6271,11 @@ impl Consumer {
 	///
 	/// The returned future fails with [`Error::Unroutable`] at once when no
 	/// announced route covers the path, including a broadcast created on this
-	/// origin but not announced.
+	/// origin but not announced. A moq-lite client session only discovers what this
+	/// origin's readers watch, so a path no [`Self::announced`],
+	/// [`Self::routed_broadcast`], or [`Self::announced_broadcast`] watches is
+	/// unroutable on it. A broadcast resolved through a discovered route keeps its
+	/// path watched until dropped.
 	/// A route claims capability, not inventory: resolving a covered path
 	/// succeeds optimistically, and a path that names nothing surfaces as
 	/// [`Error::NotFound`] on its tracks instead.
@@ -5967,6 +6370,8 @@ impl Consumer {
 			cache_duration: self.cache_duration,
 			path: absolute.clone(),
 			epoch: None,
+			// A front reads its routes' copies, so it writes no frames of its own.
+			frames: Default::default(),
 		});
 		let request = kio::Producer::<PendingFront>::default();
 		let consumer = request.consume();
@@ -6130,7 +6535,7 @@ impl AnnounceConsumer {
 			} else {
 				for cursor in cursors {
 					let id = ConsumerId::new();
-					table.register_cursor(id, cursor);
+					table.register_cursor(shared, id, cursor);
 					ids.push(id);
 				}
 			}
@@ -6460,11 +6865,14 @@ impl futures::Stream for AnnounceConsumer {
 
 impl Drop for AnnounceConsumer {
 	fn drop(&mut self) {
-		let mut shared = self.shared.lock();
+		let mut state = self.shared.lock();
 		for id in &self.ids {
-			if let Some(cursor) = shared.cursors.remove(id) {
+			if let Some(cursor) = state.cursors.remove(id) {
 				for head in &cursor.heads {
-					shared.routes.remove_cursor(head, *id);
+					state.routes.remove_cursor(head, *id);
+					if cursor.interested {
+						state.remove_interest(&self.shared, head);
+					}
 				}
 			}
 		}
@@ -6584,6 +6992,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	use crate::model::test_tracing::count_drop_warnings;
 	use futures::FutureExt;
+	use std::sync::atomic::AtomicBool;
 
 	fn origin(id: u64) -> Hop {
 		Hop::new(id).unwrap()
@@ -6630,11 +7039,7 @@ mod tests {
 			let weak = request.weak();
 			let accepted = request.routes(routes.consume()).accept(None);
 			let mut io = TrackIo {
-				ready: Arc::new(TrackReady {
-					name: "catalog.json".into(),
-					queue: kio::Queue::new(),
-					queued: AtomicBool::new(false),
-				}),
+				ready: crate::util::QueueWake::new("catalog.json".into(), kio::Queue::new()),
 				park: Default::default(),
 				request: None,
 				accepted: Some(accepted),
@@ -8418,7 +8823,7 @@ mod tests {
 			.await
 			.expect("the front asked the source")
 			.expect("request");
-		let source = request.resolving_start().accept(crate::track::Info::timed());
+		let source = request.request_start(None).accept(crate::track::Info::timed());
 		let mut group = source.create_group(0u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -8850,7 +9255,7 @@ mod tests {
 				serving.lock().unwrap().push(group);
 			}
 		});
-		let mut next = request.resolving_start().accept(crate::track::Info::timed());
+		let mut next = request.request_start(None).accept(crate::track::Info::timed());
 		next.start_at(0).unwrap();
 		let mut next_group = next.create_group(0u64.into()).unwrap();
 		next_group.start_at(2).unwrap();
@@ -9281,13 +9686,6 @@ mod tests {
 
 		drop(server);
 		announced.expect_next_ended("live").await;
-	}
-
-	#[moq_clock::test]
-	async fn charged_wildcard_cost_accumulates_across_hops() {
-		let first = Cost::new(4).charged(1);
-		let second = first.charged(2);
-		assert_eq!(second, Cost::new(7));
 	}
 
 	#[moq_clock::test]
@@ -10830,6 +11228,99 @@ mod tests {
 		assert!(!replaced.is_clone(&resolved), "rejoined the first instance's front");
 	}
 
+	/// A newer epoch at the path ends a finished broadcast's linger at once, so the finished
+	/// instance neither stands next to its replacement nor returns when the replacement ends.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_newer_epoch_ends_the_linger() {
+		let producer = origin(1).produce();
+		let old = producer
+			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
+			.unwrap();
+		let track = old
+			.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(30)))
+			.unwrap();
+		track.finish().unwrap();
+		let watch = old.consume();
+		let start = moq_clock::now();
+		let wait = moq_clock::sim::spawn(old.finish().wait());
+
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert!(!watch.is_closed());
+		let _new = producer
+			.publish("room/alice", Route::default().with_epoch(crate::Epoch::mint()))
+			.unwrap();
+		wait.await.unwrap();
+		assert_eq!(moq_clock::now() - start, Duration::from_secs(1));
+		assert!(watch.is_closed());
+	}
+
+	/// Only a newer epoch ends a linger: an older instance arriving late, or one at
+	/// another path, leaves it to run out.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn an_older_epoch_leaves_the_linger() {
+		let producer = origin(1).produce();
+		let (older, newer) = (crate::Epoch::mint(), crate::Epoch::mint());
+		let finished = producer
+			.publish("room/alice", Route::default().with_epoch(newer))
+			.unwrap();
+		let track = finished
+			.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(5)))
+			.unwrap();
+		track.finish().unwrap();
+		let start = moq_clock::now();
+		let wait = moq_clock::sim::spawn(finished.finish().wait());
+
+		let _late = producer
+			.publish("room/alice", Route::default().with_epoch(older))
+			.unwrap();
+		let _elsewhere = producer
+			.publish("room/bob", Route::default().with_epoch(crate::Epoch::mint()))
+			.unwrap();
+		wait.await.unwrap();
+		assert_eq!(moq_clock::now() - start, Duration::from_secs(5));
+	}
+
+	/// Supersession is decided when the broadcast finishes: a newer epoch that came and went
+	/// while it was live leaves its linger, and one still live cuts it at once.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_live_newer_epoch_at_finish_ends_the_linger() {
+		let producer = origin(1).produce();
+		let (older, newer) = (crate::Epoch::mint(), crate::Epoch::mint());
+		let publish = |epoch: &crate::Epoch| {
+			let broadcast = producer
+				.publish("room/alice", Route::default().with_epoch(epoch.clone()))
+				.unwrap();
+			let track = broadcast
+				.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(5)))
+				.unwrap();
+			track.finish().unwrap();
+			(broadcast, track)
+		};
+
+		let (restored, _track) = publish(&older);
+		drop(publish(&newer));
+		let start = moq_clock::now();
+		restored.finish().wait().await;
+		assert_eq!(
+			moq_clock::now() - start,
+			Duration::from_secs(5),
+			"the withdrawn epoch left it"
+		);
+
+		let (cut, _track) = publish(&older);
+		let _live = publish(&newer);
+		let start = moq_clock::now();
+		cut.finish().wait().await;
+		assert_eq!(
+			moq_clock::now() - start,
+			Duration::ZERO,
+			"the live epoch ends it at once"
+		);
+	}
+
 	/// Announce cursors follow the newest epoch over a cheaper one, and deliver a
 	/// change of epoch as a restart: a different broadcast.
 	#[moq_clock::test]
@@ -10978,6 +11469,34 @@ mod tests {
 
 			assert_resumes(&mut rig, &standby).await;
 		}
+	}
+
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_replacement_query_carries_the_readers_resume_floor() {
+		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
+		let mut group = rig
+			.incumbent_track
+			.create_group(crate::group::Info { sequence: 5 })
+			.unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"five".as_ref()).unwrap();
+		group.finish().unwrap();
+		assert_eq!(rig.subscription.recv_group().await.unwrap().unwrap().sequence, 5);
+		let standby = rig.standby(&[10, 20]);
+		drop(incumbent);
+		drop(source);
+		rig.incumbent_track.clone().abort(Error::Dropped).unwrap();
+		let replacement = broadcast::Info::new().produce();
+		let mut handler = replacement.dynamic();
+		queued(&standby).await.accept(&replacement);
+		let request = handler.requested_track().await.unwrap();
+		assert_eq!(request.subscription().unwrap().start(), Some(track::Position::group(5)));
+		let track = request.accept(crate::track::Info::timed());
+		let mut preferences = rig.subscription.subscription();
+		preferences.priority = 7;
+		rig.subscription.update(preferences).unwrap();
+		settle(|| track.subscription().is_some_and(|sub| sub.priority == 7)).await;
+		assert_eq!(track.subscription().unwrap().start(), Some(track::Position::group(5)));
 	}
 
 	/// A route updated in place to a new first hop still serves the same broadcast:

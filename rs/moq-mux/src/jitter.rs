@@ -11,8 +11,9 @@ use moq_net::Timestamp;
 
 /// A frame handed to [`Buffer::push`].
 pub(crate) struct Arrival<T> {
-	/// The earliest the frame could have arrived, which its deadline is judged on, so a
-	/// caller that reads late does not make it late.
+	/// When the frame reached the reader: when it landed in the cache, or when the reader
+	/// subscribed if that was later. Its deadline is judged on this, so a caller that reads late
+	/// does not make it late, and a stall that holds the caller back too does not hide that it is.
 	pub arrived: Instant,
 	/// When it was read: the latest it could have arrived, which its freshness is judged on,
 	/// so frames read together do not look fresher than they are.
@@ -781,9 +782,14 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		Ok(())
 	}
 
-	/// When a frame decoding at `decode` goes out on the current clock, once there is one.
-	pub fn at(&self, decode: Timestamp) -> Option<Instant> {
-		self.deadline(self.clock.as_ref()?, decode)
+	/// When a frame of `generation` decoding at `decode` goes out: on the current clock, or on the
+	/// previous one while that generation's tail is still going out.
+	pub fn at(&self, generation: u64, decode: Timestamp) -> Option<Instant> {
+		let clock = [self.clock, self.previous]
+			.into_iter()
+			.flatten()
+			.find(|clock| clock.generation == generation)?;
+		self.deadline(&clock, decode)
 	}
 
 	/// When a frame decoding at `decode` goes out on `clock`, if any instant holds it.
@@ -1132,7 +1138,7 @@ mod tests {
 				}
 			}
 			assert!(due(&mut buffer).is_empty());
-			assert_eq!(buffer.at(ms(800)), Some(start + Duration::from_millis(500)));
+			assert_eq!(buffer.at(0, ms(800)), Some(start + Duration::from_millis(500)));
 			tokio::time::advance(Duration::from_millis(500)).await;
 			let first = buffer.poll_next(&kio::Waiter::noop());
 			assert!(
@@ -1639,7 +1645,7 @@ mod tests {
 				item: "v",
 			};
 			let held = buffer
-				.at(frame.decode)
+				.at(0, frame.decode)
 				.map(|deadline| since(arrived, deadline) as f64 / 1e9);
 			match buffer.push(1, frame) {
 				Ok(push) => assert_eq!(push, Push::Queued, "{ppm} ppm: frame {k} was late"),
@@ -1651,7 +1657,7 @@ mod tests {
 			}
 			if hour >= settled
 				&& queued.is_zero()
-				&& let Some(deadline) = buffer.at(Timestamp::from_micros(decode.as_micros() as u64).unwrap())
+				&& let Some(deadline) = buffer.at(0, Timestamp::from_micros(decode.as_micros() as u64).unwrap())
 			{
 				let slack = since(arrived, deadline) as f64 / 1e9;
 				run.worst = run.worst.max((slack - delay.as_secs_f64()).abs());

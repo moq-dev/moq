@@ -20,7 +20,7 @@ use std::{
 	time::Duration,
 };
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, Bytes};
 use moq_net::{
 	time::Instant,
 	transport::{memory, poll},
@@ -49,6 +49,7 @@ struct Conn {
 	finishes: AtomicUsize,
 	blocked_writes: kio::Shared<usize>,
 	hold_fins: AtomicBool,
+	hold_writes: AtomicBool,
 	/// Acknowledge every FIN as soon as it is sent, before the peer reads it.
 	ack_fins: AtomicBool,
 	/// One-way delay for stream data and STOP_SENDING in each direction. Zero by default.
@@ -215,12 +216,20 @@ impl poll::SendStream for MockSendStream {
 	type Group = poll::Ungrouped;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		if self.conn.hold_writes.load(Ordering::Relaxed) {
+			let written = poll::Session::poll_closed(&mut self.session, cx).map(Err);
+			return self.wrote(buf.first().copied(), written);
+		}
 		let written = self.inner.poll_write(cx, buf);
 		self.wrote(buf.first().copied(), written)
 	}
 
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		let first = buf.chunk().first().copied();
+		if self.conn.hold_writes.load(Ordering::Relaxed) {
+			let written = poll::Session::poll_closed(&mut self.session, cx).map(Err);
+			return self.wrote(first, written);
+		}
 		let written = self.inner.poll_write_buf(cx, buf);
 		self.wrote(first, written)
 	}
@@ -286,7 +295,10 @@ impl Drop for MockSendStream {
 type Event = Result<Option<Bytes>, memory::Error>;
 
 /// A receive stream that delivers each event once its arrival has passed.
-pub struct MockRecvStream {
+pub type MockRecvStream = poll::Buffered<MockChunks>;
+
+/// The plain reads of a [`MockRecvStream`].
+pub struct MockChunks {
 	/// Taken once this side stops reading.
 	inner: Option<memory::RecvStream>,
 	line: Arc<Line>,
@@ -302,7 +314,7 @@ pub struct MockRecvStream {
 	park: kio::Park,
 }
 
-impl MockRecvStream {
+impl MockChunks {
 	fn new(inner: memory::RecvStream, line: Arc<Line>, conn: Arc<Conn>) -> Self {
 		Self {
 			inner: Some(inner),
@@ -334,7 +346,8 @@ impl MockRecvStream {
 			let Some(inner) = self.inner.as_mut() else {
 				return Poll::Ready(Err(memory::Error::Closed));
 			};
-			let event = ready!(poll::RecvStream::poll_read_chunk(inner, cx, usize::MAX));
+			// Below the buffering, so each event is one whole message the writer sent.
+			let event = ready!(poll::Chunks::poll_read_chunk(inner.get_mut(), cx, usize::MAX));
 			let arrival = match &event {
 				Err(memory::Error::Reset(_)) => self.line.reset.lock().unwrap().take(),
 				Ok(_) => self.line.arrivals.lock().unwrap().pop_front(),
@@ -381,30 +394,8 @@ impl MockRecvStream {
 	}
 }
 
-impl poll::RecvStream for MockRecvStream {
+impl poll::Chunks for MockChunks {
 	type Error = memory::Error;
-
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		let Some(chunk) = ready!(self.poll_read_chunk(cx, dst.len()))? else {
-			return Poll::Ready(Ok(None));
-		};
-		dst[..chunk.len()].copy_from_slice(&chunk);
-		Poll::Ready(Ok(Some(chunk.len())))
-	}
-
-	fn poll_read_buf<B: BufMut>(
-		&mut self,
-		cx: &mut Context<'_>,
-		buf: &mut B,
-	) -> Poll<Result<Option<usize>, Self::Error>> {
-		let max = buf.remaining_mut().min(64 * 1024);
-		let Some(chunk) = ready!(self.poll_read_chunk(cx, max))? else {
-			return Poll::Ready(Ok(None));
-		};
-		let size = chunk.len();
-		buf.put(chunk);
-		Poll::Ready(Ok(Some(size)))
-	}
 
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 		if max == 0 {
@@ -423,16 +414,9 @@ impl poll::RecvStream for MockRecvStream {
 	fn stop(&mut self, code: u32) {
 		self.stop_after_latency(code);
 	}
-
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		match self.inner.as_mut() {
-			Some(inner) => inner.poll_closed(cx),
-			None => Poll::Ready(Ok(())),
-		}
-	}
 }
 
-impl Drop for MockRecvStream {
+impl Drop for MockChunks {
 	fn drop(&mut self) {
 		self.stop_after_latency(0);
 	}
@@ -522,7 +506,7 @@ impl MockSession {
 	}
 
 	fn recv(&self, inner: memory::RecvStream, line: Arc<Line>) -> MockRecvStream {
-		MockRecvStream::new(inner, line, self.side.conn.clone())
+		poll::Buffered::new(MockChunks::new(inner, line, self.side.conn.clone()))
 	}
 }
 
@@ -714,6 +698,11 @@ impl MockSession {
 	/// Acknowledge every FIN as soon as it is sent, before the peer reads it, as QUIC does.
 	pub fn ack_fins(&self) {
 		self.side.conn.ack_fins.store(true, Ordering::Relaxed);
+	}
+
+	/// Hold every stream write until the session closes, as a peer with a full receive window.
+	pub fn hold_writes(&self) {
+		self.side.conn.hold_writes.store(true, Ordering::Relaxed);
 	}
 
 	/// Withhold FIN acknowledgements while continuing to deliver stream data.

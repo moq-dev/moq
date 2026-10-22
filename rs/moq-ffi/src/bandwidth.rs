@@ -6,7 +6,8 @@ use std::sync::Arc;
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 
-/// Divides one connection's send estimate among the tracks sharing it.
+/// Divides one connection's send estimate among the tracks sharing it, and sets
+/// what the session probes for.
 ///
 /// Minted by [`MoqSession::bandwidth`](crate::session::MoqSession::bandwidth).
 /// Clones share one reservation registry, so two handles from the same session
@@ -46,6 +47,16 @@ impl MoqBandwidth {
 	pub fn reserve(&self, demand: &MoqTrackDemand, max_bps: u64) -> Arc<MoqReservation> {
 		let _guard = crate::ffi::enter();
 		self.reserve_demand(demand.inner(), max_bps)
+	}
+
+	/// Probe up to `target_bps` instead of the sum of the reservations, or `None` to follow them again.
+	///
+	/// The session probes for what its reservations add up to by default, so the
+	/// estimate can rise to fund them. `Some(0)` turns probing off.
+	pub fn set_target(&self, target_bps: Option<u64>) {
+		let _guard = crate::ffi::enter();
+		self.allocator
+			.set_target(target_bps.map(moq_net::bandwidth::Rate::from_bps));
 	}
 }
 

@@ -5,16 +5,19 @@
 MoQ owns the QUIC features it needs in an in-tree stack, `moq-quic`, hard
 forked from quinn rather than noq, whose multipath, NAT traversal, and QAD
 MoQ never negotiates. One core serves the tokio backend, the thread-per-core
-`moq-uring` backend, and qmux; iroh stays on upstream noq. The features are
-BBR correctness, reliable stream resets, hierarchical stream scheduling with
-per-broadcast fairness, bounded incomplete-message memory, wider limits for
-relay peers, and endpoint sharding.
-qmux on the shared stream state machine is its own m1 quest,
-[quic-qmux](/quest/m1/quic-qmux.md), outside this epic.
+`moq-uring` backend, and qmux; iroh stays on upstream noq. BBR correctness,
+reliable stream resets (#5690), hierarchical send groups (#5711, #5770), one
+`Limits` type for relay peers (#5871), and endpoint sharding (#5688) are on
+`main`, and receive leases bound incomplete-message memory (#5878). What
+remains is clean exits for connection-blocked writers; per-broadcast
+fairness gives the crate-private send domains (#5872) their consumer in
+[Broadcast fairness](/quest/m2/broadcast-fairness.md).
+qmux already runs on the shared stream state machine, outside this epic.
 Per-stream acknowledgment progress, per-stream deadlines, and the experiments
 (the egress profile, ECN measurement, deadline keep-alive) live in
-[m2](/quest/m2/README.md); media
-probing is its own [m2 epic](/quest/m2/probe/README.md); receive timestamps
+[m2](/quest/m2/README.md); padding and the browser rung disable stay in the
+[m2 probe epic](/quest/m2/probe/README.md); native probing is
+[m1](/quest/m1/probe-native.md); receive timestamps
 and a delay-based uplink controller are the
 [m2 realtime epic](/quest/m2/quic-realtime/README.md); L4S and careful resume
 live in [m3](/quest/m3/README.md). None of them gate this line.
@@ -27,8 +30,8 @@ moq-dev/noq is frozen to security patches for `release` and archived once
 no released MoQ crate depends on it.
 
 The seven BBR correctness fixes shipped in moq-noq 1.3.1 (#4206) are in
-`moq-quic`'s BBR3. The remaining BBR quests here all edit
-`bbr3/mod.rs`, so one owner should work there at a time. Controller-level
+`moq-quic`'s BBR3. BBR quests all edit `bbr3/mod.rs`, so one owner should
+work there at a time. Controller-level
 regressions extend the shared test `Sim` in `bbr3/mod.rs` with only what each
 needs, rather than adding another simulation loop; a fix at the transport
 boundary still needs a transport test through the real callbacks. The
@@ -68,15 +71,13 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 ## Required
 
-- [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
+- [Connection-blocked writers end cleanly](/quest/m1/quic/connection-blocked.md) - an ended stream leaves the blocked-writer list, and STOP_SENDING surfaces under exhausted connection credit
 
 ## Related
 
-- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - the m1
-  qmux port onto `moq-quic`'s stream state
-- [Scope track priority](/quest/m1/track-priority-scope.md) - the
-  per-broadcast fairness policy on cluster sessions
-- [Native probing](/quest/m2/probe/native.md) - moq-quic retransmits in-flight data during ProbeBW_UP to probe up to a session's target
+- [Broadcast fairness](/quest/m2/broadcast-fairness.md) - the
+  per-broadcast fairness policy on cluster sessions, a consumer for send domains
+- [Native probing](/quest/m1/probe-native.md) - moq-quic retransmits in-flight data during ProbeBW_UP to probe up to a session's target
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a redial starts at the previous connection's rate
 - [Keep-alive from the idle timeout](/quest/m2/quic-keep-alive.md) - the keep-alive interval defaults to a fraction of the negotiated idle timeout; an explicit `quic.keep_alive` overrides

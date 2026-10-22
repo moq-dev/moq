@@ -255,7 +255,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	// The consumer stamps each arrival on the monotonic clock, which the estimator measures, so a
 	// manual clock reads the trace's time instead until the replay finishes.
 	const manual = new Manual();
-	const moveTo = (ms: number) => manual.advance(Nano(Nano.fromMilli(Milli(ms)) - manual.now()));
+	const moveTo = (ms: number) => manual.jump(Nano(Nano.fromMilli(Milli(ms)) - manual.now()));
 	let clock = first.at;
 	moveTo(clock);
 	const restore = manual.install();

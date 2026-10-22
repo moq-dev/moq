@@ -14,13 +14,6 @@ on:
   # JSR-only failures before they break a release on `release`. Only a push
   # publishes, so nightly.yml calls this on main in place of main PRs.
   workflow_call:
-  # `edited` catches a main PR retargeted to release.
-  pull_request:
-    branches: [release]
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - 'js/**'
-      - '.github/workflows/release-js.yml'
 
 # Only publishing runs share the serialized group. GitHub keeps a single pending
 # run per group and drops the older one, so a dry-run sharing it would cancel a
