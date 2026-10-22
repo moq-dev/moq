@@ -146,8 +146,9 @@ impl Decode<Version> for FollowUp {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let update = id == super::SubscribeUpdate::ID;
+		let start = r.position();
 		let body = super::Body::decode(r, version)?;
-		r.control = Some(super::message::control(id, version));
+		r.control = Some((super::message::control(id, version), start));
 		Ok(match update {
 			true => Self::Update(body),
 			false => Self::End,
@@ -163,8 +164,9 @@ pub(super) struct Framed(pub(super) u64, pub(super) super::Body);
 impl Decode<Version> for Framed {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
+		let start = r.position();
 		let body = super::Body::decode(r, version)?;
-		r.control = Some(super::message::control(id, version));
+		r.control = Some((super::message::control(id, version), start));
 		Ok(Self(id, body))
 	}
 }
@@ -490,11 +492,12 @@ impl Decode<Version> for Update {
 		if r.varint()? != super::SubscribeUpdate::ID {
 			return Err(DecodeError::InvalidValue);
 		}
+		let start = r.position();
 		let size = r.u16()? as usize;
 		let mut data = r.sub(size)?;
 		// The complete frame is present; a short field inside it is malformed.
 		let update = Self::decode_body(&mut data, version).map_err(DecodeError::complete)?;
-		r.control = Some(super::message::control(super::SubscribeUpdate::ID, version));
+		r.control = Some((super::message::control(super::SubscribeUpdate::ID, version), start));
 		Ok(update)
 	}
 }
@@ -526,6 +529,7 @@ impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
 		if r.varint()? != super::SubscribeUpdate::ID {
 			return Err(DecodeError::InvalidValue);
 		}
+		let start = r.position();
 		let size = r.u16()? as usize;
 		let mut data = r.sub(size)?;
 		let mut decode = || {
@@ -546,7 +550,7 @@ impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
 			})
 		};
 		let update = decode().map_err(DecodeError::complete)?;
-		r.control = Some(super::message::control(super::SubscribeUpdate::ID, version));
+		r.control = Some((super::message::control(super::SubscribeUpdate::ID, version), start));
 		Ok(update)
 	}
 }
@@ -571,6 +575,27 @@ mod tests {
 			));
 			assert_eq!(session.log.closes()[0].0, 0x03, "{version}");
 		}
+	}
+
+	/// A request-stream message counts as its sender counts it: the length and body, not the
+	/// type that selects it, including a GOAWAY read ahead of the response.
+	#[moq_clock::test]
+	async fn request_stream_messages_count_without_their_type() {
+		use crate::lite::test_transport::ScriptedSession;
+		use crate::stats::{Control, Registry, Tier};
+		let registry = Registry::new(Default::default());
+		let stats = registry.tier(Tier::default()).session("");
+		let version = Version::Draft22;
+		let mut session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0, 0x07, 0, 0]);
+		let mut stream = with_stats(Stream::open(&mut session, version).await.unwrap(), &stats, version);
+		let mut messages = Messages::new(session.clone(), true);
+		assert_eq!(messages.message(&mut stream.reader).await.unwrap().0, 0x07);
+		let rx = |class| {
+			let rows = registry.snapshot().control();
+			rows.into_iter().find(|row| row.1 == class).map(|row| row.2.rx)
+		};
+		assert_eq!(rx(Control::Goaway), Some(4));
+		assert_eq!(rx(Control::Other), Some(2));
 	}
 
 	#[moq_clock::test]

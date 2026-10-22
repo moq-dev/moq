@@ -85,7 +85,7 @@ impl Encode<Version> for TracksEvent<'_> {
 
 impl Decode<Version> for TracksEvent<'_> {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		r.control = Some(crate::stats::Control::TrackInfo);
+		r.control = Some((crate::stats::Control::TrackInfo, r.position()));
 		if !version.has_tracks() {
 			return Err(DecodeError::Version);
 		}

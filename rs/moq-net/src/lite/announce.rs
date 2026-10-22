@@ -333,7 +333,7 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 
 impl Decode<Version> for AnnounceBroadcast<'_> {
 	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		buf.control = Some(crate::stats::Control::Announce);
+		buf.control = Some((crate::stats::Control::Announce, buf.position()));
 		if version.has_announce_id() {
 			// Lite06+: outer type, then a size-prefixed body decoded within its bounds.
 			let typ = buf.varint()?;
@@ -502,7 +502,6 @@ enum AnnounceStatus {
 
 impl Decode<Version> for AnnounceStatus {
 	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
-		r.control = Some(crate::stats::Control::Announce);
 		let status = r.u8()?;
 		status.try_into().map_err(|_| DecodeError::InvalidValue)
 	}

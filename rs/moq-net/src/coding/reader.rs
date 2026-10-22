@@ -134,8 +134,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 						if consume {
 							// Counted only once the bytes are released, so a peek or a retry
 							// after a short read never counts the same message twice.
-							if let Some(class) = control {
-								self.stats.control(class, used, true);
+							if let Some((class, start)) = control {
+								self.stats.control(class, used - start, true);
 							}
 							lease.advance(used);
 							lease.release();
