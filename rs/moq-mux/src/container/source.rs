@@ -433,10 +433,18 @@ impl ExportSource {
 				};
 				let item = match consumer.poll_item(waiter) {
 					Poll::Ready(Ok(item)) => item,
-					// Only the transport ending with the instance is its end: media that fails to
-					// decode still fails the export. The field, not `instance_ended`, so the borrow
-					// stays off the consumer.
-					Poll::Ready(Err(crate::Error::Moq(_))) | Poll::Pending
+					// Only an orderly shutdown of the instance is its end: malformed media or a
+					// failed transport still fails the export. The field, not `instance_ended`, so
+					// the borrow stays off the consumer.
+					Poll::Ready(Err(crate::Error::Moq(
+						moq_net::Error::Dropped
+						| moq_net::Error::Cancel
+						| moq_net::Error::Closed
+						| moq_net::Error::GoingAway
+						| moq_net::Error::SessionClosed
+						| moq_net::Error::Session(moq_net::SessionError::Cancel),
+					)))
+					| Poll::Pending
 						if self
 							.instance
 							.as_ref()
@@ -777,47 +785,93 @@ mod tests {
 		drop((track, replacement, new));
 	}
 
-	/// Media that fails to decode still fails the export when its sibling instance goes: only
-	/// the transport ending with the instance is the rendition's end.
+	/// A sibling's failure still fails the export when its instance goes, whether its media is
+	/// malformed or its track is aborted with a protocol error: only an orderly shutdown of the
+	/// instance is the rendition's end.
 	#[tokio::test(start_paused = true)]
-	async fn a_sibling_decode_error_outlives_its_instance() {
+	async fn a_sibling_failure_outlives_its_instance() {
 		use std::time::Duration;
 
+		for malformed in [true, false] {
+			let origin = crate::source::produce_origin();
+			let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+			tokio::task::yield_now().await;
+			let source = crate::source::resolved(&origin, "a/pub").await;
+			let config = audio(Some("./source"));
+			let mut export = ExportSource::for_audio(&source, "audio", &config, Duration::from_secs(10))
+				.unwrap()
+				.unwrap();
+
+			let sibling = origin.publish("a/source", Default::default()).unwrap();
+			let track = sibling
+				.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+				.unwrap();
+			// Subscribe before anything is written, so the failure and the instance's end arrive
+			// together.
+			let settle = tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)));
+			assert!(settle.await.is_err(), "nothing is written yet");
+			let mut group = track.append_group().unwrap();
+			if malformed {
+				// An empty Legacy audio frame is malformed.
+				group
+					.write_frame(moq_net::Timestamp::from_micros(0).unwrap(), bytes::Bytes::new())
+					.unwrap();
+			} else {
+				track.clone().abort(moq_net::Error::ProtocolViolation).unwrap();
+			}
+			drop(sibling);
+			tokio::time::sleep(Duration::from_millis(10)).await;
+			assert!(export.instance_ended(&kio::Waiter::noop()), "the instance has gone");
+
+			let read = tokio::time::timeout(Duration::from_secs(1), kio::wait(|waiter| export.poll_read(waiter)))
+				.await
+				.expect("the read settles");
+			assert!(
+				read.is_err(),
+				"malformed: {malformed}: {:?}",
+				read.map(|frame| frame.map(|frame| frame.timestamp))
+			);
+			drop((group, track));
+		}
+	}
+
+	/// A sibling served over a session ends the rendition cleanly when its publisher goes, which
+	/// the session reports as its own cancellation.
+	#[tokio::test(start_paused = true)]
+	async fn a_remote_sibling_ends_with_its_instance() {
+		use std::time::Duration;
+
+		use crate::container::test_util::{Link, raw_frame};
+
+		let remote = crate::source::produce_origin();
 		let origin = crate::source::produce_origin();
 		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
 		tokio::task::yield_now().await;
 		let source = crate::source::resolved(&origin, "a/pub").await;
-		let config = audio(Some("./source"));
-		let mut export = ExportSource::for_audio(&source, "audio", &config, Duration::from_secs(10))
+		let _link = Link::new(&remote, &origin).await;
+		let sibling = remote.publish("a/source", Default::default()).unwrap();
+		let mut track = crate::container::Producer::new(
+			sibling
+				.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+				.unwrap(),
+			HangContainer::Legacy(crate::container::Kind::Audio),
+		);
+		track.write(raw_frame(0, b"x", true)).unwrap();
+		let mut export = ExportSource::for_audio(&source, "audio", &audio(Some("./source")), Duration::from_secs(10))
 			.unwrap()
 			.unwrap();
+		let mut read = async || {
+			tokio::time::timeout(Duration::from_secs(1), kio::wait(|waiter| export.poll_read(waiter)))
+				.await
+				.expect("the read settles")
+				.unwrap()
+				.map(|frame| frame.timestamp.as_micros())
+		};
+		assert_eq!(read().await, Some(0));
 
-		let sibling = origin.publish("a/source", Default::default()).unwrap();
-		let track = sibling
-			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
-			.unwrap();
-		// Subscribe before anything is written, so the malformed frame and the instance's end
-		// arrive together.
-		let settle = tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)));
-		assert!(settle.await.is_err(), "nothing is written yet");
-		// An empty Legacy audio frame is malformed.
-		let mut group = track.append_group().unwrap();
-		group
-			.write_frame(moq_net::Timestamp::from_micros(0).unwrap(), bytes::Bytes::new())
-			.unwrap();
 		drop(sibling);
-		tokio::time::sleep(Duration::from_millis(10)).await;
-		assert!(export.instance_ended(&kio::Waiter::noop()), "the instance has gone");
-
-		let read = tokio::time::timeout(Duration::from_secs(1), kio::wait(|waiter| export.poll_read(waiter)))
-			.await
-			.expect("the read settles");
-		assert!(
-			read.is_err(),
-			"{:?}",
-			read.map(|frame| frame.map(|frame| frame.timestamp))
-		);
-		drop((group, track));
+		assert_eq!(read().await, None, "its end ends the rendition");
+		drop(track);
 	}
 
 	/// The requested budget must be present on the first SUBSCRIBE, a live start's too. Updating
