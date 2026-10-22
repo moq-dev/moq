@@ -2693,6 +2693,7 @@ mod tests {
 		// check the line order.
 		let body_start = src.find("fn snapshot(&self) -> Traffic").expect("snapshot fn present");
 		let body = &src[body_start..];
+		let body = &body[..body.find("\n\t}\n").expect("snapshot fn end")];
 		let ended_pos = body.find("self.announces_ended.load").expect("announces_ended load");
 		let started_pos = body
 			.find("self.announces_started.load")
@@ -3091,9 +3092,10 @@ mod tests {
 		// `sessions_ended > sessions_started` leak into a readout.
 		let src = include_str!("stats.rs");
 		let body_start = src
-			.find("fn snapshot(&self) -> Presence")
+			.find("fn snapshot(&self) -> (Presence, bool)")
 			.expect("SessionCounters::snapshot fn present");
 		let body = &src[body_start..];
+		let body = &body[..body.find("\n\t}\n").expect("SessionCounters::snapshot fn end")];
 		let ended_pos = body.find("self.sessions_ended.load").expect("sessions_ended load");
 		let started_pos = body.find("self.sessions_started.load").expect("sessions_started load");
 		assert!(
