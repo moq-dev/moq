@@ -3,7 +3,8 @@
  *
  * `drop` cuts group 1. `join` reads from whichever group the subscription starts at: a
  * moq-transport subscription starts at the largest group rather than at the range asked for, so
- * it must read a contiguous run of groups through the last one.
+ * it must read a contiguous run of groups through the last one. `compress` publishes a compressed
+ * track with several frames, one empty, in each group.
  *
  * @module
  */
@@ -18,6 +19,7 @@ const GROUPS = 4;
 const BYTES = 256 * 1024;
 const [role, url, path, version, mode] = process.argv.slice(2);
 const drop = mode === "drop";
+const compress = mode === "compress";
 console.debug = console.error;
 console.info = console.error;
 const join = mode === "join" || mode === "status";
@@ -27,9 +29,9 @@ if (
 	!url ||
 	!path ||
 	!["publish", "subscribe"].includes(role) ||
-	![undefined, "drop", "join", "datagram", "status"].includes(mode)
+	![undefined, "drop", "join", "compress", "datagram", "status"].includes(mode)
 ) {
-	throw new Error("usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|datagram|status]]");
+	throw new Error("usage: tail.ts publish|subscribe URL BROADCAST [VERSION [drop|join|compress|datagram|status]]");
 }
 
 const origin = new Moq.Origin.Producer();
@@ -42,7 +44,7 @@ const connection = await Moq.Connection.connect({
 try {
 	if (role === "publish") {
 		const broadcast = origin.createBroadcast(Moq.Path.from(path));
-		const track = broadcast.createTrack("tail", status ? { priority: 2 } : undefined);
+		const track = broadcast.createTrack("tail", { compress, ...(status ? { priority: 2 } : {}) });
 		broadcast.announce();
 		const lines = createInterface({ input: process.stdin });
 		const commands = lines[Symbol.asyncIterator]();
@@ -63,7 +65,9 @@ try {
 						group.close(new Error("cut"));
 						continue;
 					}
-					group.writeFrame({ payload: new Uint8Array(BYTES).fill(sequence) });
+					for (const size of compress ? [BYTES / 2, 0, BYTES / 2] : [BYTES]) {
+					group.writeFrame({ payload: new Uint8Array(size).fill(sequence) });
+					}
 					group.close();
 				}
 				track.close();
@@ -88,6 +92,7 @@ try {
 			const track = broadcast
 				.track("tail")
 				.subscribe({ maxDelay: Milli(drop ? 60_000 : 5000), groups: { start: { included: 0 } } });
+			if (compress) assert.equal((await track.info()).compress, version === "moq-lite-07-wip");
 			const seen: number[] = [];
 			try {
 				if (datagram) {
@@ -112,13 +117,12 @@ try {
 						if (!group) break;
 						try {
 							assert(group.sequence < GROUPS, `unexpected group ${group.sequence}`);
+							for (const size of compress ? [BYTES / 2, 0, BYTES / 2] : [BYTES]) {
 							const frame = await group.readFrame();
 							assert(frame, "empty group");
-							assert.equal(frame.payload.byteLength, BYTES, "truncated group");
-							assert(
-								frame.payload.every((byte) => byte === group.sequence),
-								"corrupt group",
-							);
+							assert.equal(frame.payload.byteLength, size, "truncated group");
+							assert(frame.payload.every((byte) => byte === group.sequence), "corrupt group");
+							}
 							assert.equal(await group.readFrame(), undefined, "extra frame");
 							seen.push(group.sequence);
 						} finally {
