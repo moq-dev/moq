@@ -296,16 +296,31 @@ async function measurePlayback(player: Page, playerErrors: BrowserErrors, label:
 		description: `${label}: the audio buffer to fill to the player's delay and play`,
 		predicate: (state) => state.audioContext === "running" && !state.audioStalled,
 	});
-	const host = watchHost();
+	await (await observe(player, playerErrors, label)).grade();
+}
+
+/**
+ * Collect one window while the host is watched, so a failed {@link assertMedia} in `grade` also
+ * prints what stalled the pages. Callers check their own transition first, then grade.
+ */
+async function observe(
+	player: Page,
+	playerErrors: BrowserErrors,
+	label: string,
+): Promise<{ samples: Sample[]; grade: () => Promise<void> }> {
+	const host = watchHost(label);
 	const samples = await collect(player, playerErrors, WINDOW_MS);
-	try {
-		assertMedia(samples, label);
-	} catch (err) {
-		await explainStalls(player, samples, label, host);
-		throw err;
-	} finally {
-		host?.process.kill();
-	}
+	const grade = async () => {
+		try {
+			assertMedia(samples, label);
+		} catch (err) {
+			await explainStalls(player, samples, label, host);
+			throw err;
+		} finally {
+			host?.process.kill();
+		}
+	};
+	return { samples, grade };
 }
 
 /** How often the host's busiest processes are read during a window. */
@@ -316,15 +331,22 @@ const HOST_INTERVAL_S = 0.5;
  * mode. A page's main thread stopping for hundreds of milliseconds is either the page's own work or a
  * starved host, and only the host can say which.
  */
-function watchHost(): { process: Bun.Subprocess<"ignore", "pipe", "ignore">; output: Promise<string> } | undefined {
+function watchHost(
+	label: string,
+): { process: Bun.Subprocess<"ignore", "pipe", "ignore">; output: Promise<string> } | undefined {
 	if (process.platform !== "linux") return undefined;
 	const iterations = Math.ceil(WINDOW_MS / 1000 / HOST_INTERVAL_S) + 1;
-	const top = Bun.spawn(["top", "-b", "-c", "-w", "512", "-d", String(HOST_INTERVAL_S), "-n", String(iterations)], {
-		stdin: "ignore",
-		stdout: "pipe",
-		stderr: "ignore",
-	});
-	return { process: top, output: new Response(top.stdout).text() };
+	// Evidence only: a host without `top` loses this part of a failure's explanation, not the window.
+	try {
+		const top = Bun.spawn(
+			["top", "-b", "-c", "-w", "512", "-d", String(HOST_INTERVAL_S), "-n", String(iterations)],
+			{ stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+		);
+		return { process: top, output: new Response(top.stdout).text() };
+	} catch (err) {
+		console.error(`  ${label}: host processes unavailable: ${err}`);
+		return undefined;
+	}
 }
 
 // A process as `top -c` prints it, cut to what tells the processes apart: the binary, plus the type of
@@ -773,7 +795,8 @@ try {
 		console.error("=== codec identity and coded-size changes ===");
 		const before = await readPlayerState(player);
 		await command(publisher, "changeVideoCodec");
-		const changed = await collect(player, playerErrors, WINDOW_MS);
+		const change = await observe(player, playerErrors, "codec rename");
+		const changed = change.samples;
 		const first = changed.findIndex(
 			(sample) =>
 				sample.generation === 1 &&
@@ -786,12 +809,13 @@ try {
 			"old track picture",
 			() => "a pre-switch picture appeared after the new codec's first picture",
 		);
-		assertMedia(changed, "codec rename");
+		await change.grade();
 		const renamed = changed[first].videoTrack;
 		await measurePlayback(player, playerErrors, "after codec rename");
 
 		await command(publisher, "resizeVideo");
-		const resized = await collect(player, playerErrors, WINDOW_MS);
+		const resize = await observe(player, playerErrors, "coded-size growth");
+		const resized = resize.samples;
 		const grown = resized.findIndex(
 			(sample) =>
 				sample.generation === 2 &&
@@ -811,7 +835,7 @@ try {
 			"old track picture",
 			() => "a pre-resize picture appeared after the first larger picture",
 		);
-		assertMedia(resized, "coded-size growth");
+		await resize.grade();
 		await measurePlayback(player, playerErrors, "after coded-size growth");
 	}
 
