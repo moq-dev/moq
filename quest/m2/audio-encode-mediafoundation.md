@@ -20,8 +20,6 @@ behind the encode seam on Windows.
 
 ## Required
 
+- [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - changes `Encoder::encode` to a zero-or-more packet return with a flush, which this backend implements
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - the round-trip regression decodes through it
 
-## Related
-
-- [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - the macOS and iOS backend, which may already add `flush` to `Encoder::encode`

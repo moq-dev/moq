@@ -38,9 +38,11 @@ landed the fields.
   take mp4-atom 0.17.0 (kixelated/mp4-atom#247, not yet released), whose
   sample entries gain a `spatial` field. Importing Apple's `vexu`/`hfov`
   stays out of scope. `webm-iterable` already names the Matroska elements.
-- An fMP4 Opus track needs the `dOps` mapping table that
-  [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) adds, so ambisonic
-  fMP4 follows it; Matroska and raw Opus do not wait.
+- Ambisonic fMP4 needs the `dOps` mapping table, so it moved to
+  [fMP4 ambisonic layout](/quest/m2/mux-vr-ambisonic-fmp4.md) (2026-10-22,
+  maintainer); Matroska and raw Opus land here. Before taking 0.17.0,
+  settle with [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) whether
+  the release also carries kixelated/mp4-atom#246.
 - Exporters writing the fields back are out of scope.
 
 Tests: a fixture per source (MP4 360, a 180-degree equirectangular MP4 with
@@ -50,10 +52,6 @@ asymmetric bounds, a vertical crop, or a nonzero pose, an ambisonic stream
 with non-diegetic stereo, and a malformed one are refused.
 
 Public API: none beyond the catalog fields #5543 adds. Wire: none.
-
-## Required
-
-- [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) - the `dOps` mapping table an ambisonic fMP4 track needs
 
 ## Related
 

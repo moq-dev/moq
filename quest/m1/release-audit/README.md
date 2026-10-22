@@ -74,21 +74,21 @@ Targeted reproductions confirmed a finite HLS startup race, retained HLS
 server state after final drop, idle Dart stream cancellation, empty expiry
 indexes, JS IETF timestamp changes, JS datagram range violations, and OBS
 reordered-frame timestamps and missing EOF output. Each owning quest records
-the reproduction's limits. Existing range and OBS quests retain ownership
-of their findings. Go reservation disposal remains an investigation, and
+the reproduction's limits. Existing range quests retain ownership of their
+findings; the OBS defects moved to an m1 child (2026-10-22, maintainer). Go reservation disposal remains an investigation, and
 the security-sensitive HLS admission item is deliberately a public pointer.
 No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
 network-impairment performance result is implied by these checks.
 
 ## Required
 
-The 19 children comprise 15 reproduced or source-confirmed findings, three
+The children comprise reproduced or source-confirmed findings,
 contract/lifetime investigations, and one security-review pointer. Each
 child records whether its behavior is new on main or inherited from release.
 
 - [Review HLS admission](/quest/m1/release-audit/hls-admission.md) - resolve the security-sensitive resource-boundary review before the cut
 - [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
-- [Bound export reorder storage](/quest/m1/release-audit/export-reorder.md) - flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
+- [OBS decode timing](/quest/m1/release-audit/obs-decode-timing.md) - the shipping OBS source stamps each reordered picture with its own timestamp and drains at clean EOF
 - [Validate CMAF counts before allocation](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count
 - [Preserve fMP4 sample runs](/quest/m1/release-audit/fmp4-passthrough.md) - passthrough does not substitute gap or interleaved bytes for media samples
 - [Announce finite HLS imports](/quest/m1/release-audit/hls-startup.md) - a completed valid source cannot race its ready catalog and fail startup
@@ -108,8 +108,9 @@ child records whether its behavior is new on main or inherited from release.
 
 ## Related
 
+- [Decode order](/quest/m1/ts-reliability/decode-order.md) - owns the export reorder storage finding, folded in on 2026-10-22
 - [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - reproduced datagram bounds failures remain with the existing range implementation owner
-- [OBS video source](/quest/m2/obs-moq-video/source.md) - reproduced inherited timing and EOF defects remain with the decoder replacement owner
+- [OBS video source](/quest/m2/obs-moq-video/source.md) - the decoder replacement keeps the timing and EOF behavior fixed here
 - [Receive memory](/quest/m1/quic/receive-memory.md) - incomplete reliable input remains a separate connection-credit concern
 - [QPACK dependency fix](/quest/m0/web-transport-proto-0.6.3.md) - decoded header expansion is already tracked
 - [Compressed tracks](/quest/m1/compress/README.md) - mid-group widening and application migration have existing owners

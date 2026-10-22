@@ -30,3 +30,7 @@ Decided 2026-10-22 (API audit):
   it. Align `moq_client_defaults` wrapping across languages.
 
 Public API: moq-ffi, moq-c, wrappers breaking. Wire: none.
+
+## Required
+
+- [Generated C bindings](/quest/m1/c/README.md) - this changes the C API, so its C half lands on the generated package and C users break once (decided 2026-10-22, maintainer)

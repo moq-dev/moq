@@ -2,9 +2,8 @@
 
 ## Goal
 
-Each moq-stats track and reader has one name that says what it carries, an
-encoding is a type rather than a bool, and "stats" means one thing in the
-CLI.
+Each moq-stats track and reader has one name that says what it carries,
+and "stats" means one thing in the CLI.
 
 ## Plan
 
@@ -21,9 +20,10 @@ Decided 2026-10-22 (API audit):
   types while `aggregate::` calls the same readers `*Consumer`; pick one
   scheme. Fix the doc's "Sessions" heading versus `Presence` and
   `FrameTooLarge` versus `FRAME_TOO_LARGE`.
-- Five `*_track(.., compressed: bool)` functions plus `COMPRESSED_SUFFIX`:
-  take an `Encoding { Plain, Compressed }`, or nothing once
-  [compressed tracks](/quest/m1/compress/README.md) removes the suffix.
+- The five `*_track(.., compressed: bool)` functions and `COMPRESSED_SUFFIX`
+  are left to [one compressed track per name](/quest/m1/compress/migrate.md),
+  which deletes the `.z` siblings; no `Encoding` type (decided 2026-10-22,
+  maintainer). Rename on top of its single-track functions.
 - CLI: `import --stats` adds a media report, `export stats` prints it, and
   `--stats-*` publishes relay `.stats/`, which `export stats` cannot read.
   Rename the media surfaces `import --report` and `export report` (the code
@@ -35,6 +35,10 @@ frame types; note each change in MIGRATE.
 
 Public API: moq-stats and moq-cli breaking. Wire: the prefix track name
 changes.
+
+## Required
+
+- [One compressed track per name](/quest/m1/compress/migrate.md) - drops the stats `.z` siblings and `TrackPair`, so names change once
 
 ## Related
 

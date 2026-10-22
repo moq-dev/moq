@@ -36,3 +36,7 @@ passthrough, and `ts::Passthrough` is unreachable from `ContainerFormat`.
   `Result` like `Track`'s.
 
 Public API: breaking in moq-mux, moq-ffi, moq-c, and wrappers. Wire: none.
+
+## Required
+
+- [Generated C bindings](/quest/m1/c/README.md) - this changes the C API, so its C half lands on the generated package and C users break once (decided 2026-10-22, maintainer)

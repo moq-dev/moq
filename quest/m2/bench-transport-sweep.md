@@ -14,7 +14,10 @@ in-memory transport only. Add the transports a production session uses,
 moq-quic and qmux at least, keeping each run deterministic: drive QUIC over
 an in-memory datagram link rather than real sockets if the noise demands it.
 Keep existing bench IDs stable so their history carries over; new
-transports add series rather than renaming old ones.
+transports add series rather than renaming old ones. This bench owns the
+qmux series in the regression table; the
+[stream transport](/quest/m2/perf/stream/bench.md) micro-bench stays a local
+profiling tool (decided 2026-10-22, maintainer).
 
 Public API: none. Wire: none.
 

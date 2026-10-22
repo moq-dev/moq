@@ -2,8 +2,9 @@
 
 ## Goal
 
-Condition: the first `moq-ffi-v*` tag whose commit carries
-`.github/workflows/release-shared-ffi.yml` has run `Release FFI`, and a
+Backport `.github/workflows/release-shared-ffi.yml` to `release` now as
+release-line maintenance (decided 2026-10-22, maintainer), so the next
+`moq-ffi-v*` tag carries it. Condition: that tag has run `Release FFI`, and a
 Nightly's `Shipping sizes` job has run since
 [#5549](https://github.com/moq-dev/moq/pull/5549). Check the tag with
 `git ls-tree <tag> .github/workflows/` and its runs with

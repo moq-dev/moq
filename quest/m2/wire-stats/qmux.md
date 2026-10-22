@@ -28,6 +28,6 @@ beside the field.
 - Test: a loopback WebSocket session's `sent_bytes` covers at least the
   payload it wrote.
 
-## Related
+## Required
 
-- [qmux drives its own socket](/quest/m2/perf/stream/driver.md) - replaces qmux's reader and writer tasks and its constructors' return type
+- [qmux drives its own socket](/quest/m2/perf/stream/driver.md) - replaces qmux's read/write path, so the counters go on the new driver once (decided 2026-10-22, maintainer)

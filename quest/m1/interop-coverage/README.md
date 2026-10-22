@@ -12,10 +12,15 @@ existing cases for those features.
 
 Boundaries:
 
-- Only what moq-net can do. PUBLISH (push), subgroups other than 0,
-  outbound forward=0, rendezvous, and per-request authorization tokens are
-  not exposed, so they are out of scope, and runner cells that need them
-  stay red by design.
+- Only what moq-net can do. Subgroups other than 0, rendezvous, and
+  per-request authorization tokens are not exposed, so they are out of
+  scope, and runner cells that need them stay red by design. PUBLISH (push)
+  and outbound forward=0 join coverage once
+  [SUBSCRIBE_TRACKS outbound](/quest/m1/archive/subscribe-tracks-outbound.md)
+  ([#6280](https://github.com/moq-dev/moq/pull/6280)) and
+  [IETF subscribe pause](/quest/m1/ietf-subscribe-pause.md)
+  ([#6299](https://github.com/moq-dev/moq/pull/6299)) land (decided
+  2026-10-22, maintainer).
 - Media stays hang. No MSF catalog in our runner clients.
 - New cases live in-tree (`test/interop`), not in the runner's spec.
 - Not covered: mid-subscription updates (`Subscription::update` in Rust and

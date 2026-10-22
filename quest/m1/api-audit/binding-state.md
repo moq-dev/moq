@@ -25,6 +25,10 @@ and Go hide the `Client`, so the first-dial failure is unreachable there.
 
 Public API: moq-ffi, moq-c, every wrapper, OBS breaking. Wire: none.
 
+## Required
+
+- [Generated C bindings](/quest/m1/c/README.md) - this changes the C API, so its C half lands on the generated package and C users break once (decided 2026-10-22, maintainer)
+
 ## Related
 
 - [Go first-dial failure](/quest/m2/go-first-dial-failure.md) - becomes unnecessary once the state carries the first failure; delete it when this lands

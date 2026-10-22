@@ -91,7 +91,7 @@ No duplicate quest or workflow edit belongs here.
 - The [release audit](/quest/m1/release-audit/README.md) owns QMux copying
   ([qmux-copy](/quest/m1/release-audit/qmux-copy.md)), CMAF allocation abuse
   ([cmaf-counts](/quest/m1/release-audit/cmaf-counts.md)), media reorder queues
-  ([export-reorder](/quest/m1/release-audit/export-reorder.md)), watch teardown
+  ([decode-order](/quest/m1/ts-reliability/decode-order.md)), watch teardown
   ([watch-errors](/quest/m1/release-audit/watch-errors.md)), and the HLS
   contract quests. MKV fragmentation below concerns parser replay before those
   queues.

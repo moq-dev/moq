@@ -22,7 +22,9 @@ and the micro-bench isolates qmux.
   per message and per Gbps in the same machine-readable form
   `bench/compare.py` already reads. `just bench-profile` then gives the
   flamegraph per transport.
-- **qmux micro-bench.** A Criterion target in `rs/qmux/benches` over loopback
+- **qmux micro-bench.** A local profiling tool, not a regression series:
+  [transport sweep](/quest/m2/bench-transport-sweep.md) owns qmux's series
+  (decided 2026-10-22, maintainer). A Criterion target in `rs/qmux/benches` over loopback
   TCP, swept over sessions × record size (the fan-out rule in `AGENTS.md`),
   for tcp, tls, ws, and wss. Use the same CPU-time mode as moq-net's
   `session` bench, not wall clock.

@@ -19,6 +19,10 @@ the end while its docs call it a mirror of audio.
 
 Public API: moq-audio, moq-video, moq-c breaking. Wire: none.
 
+## Required
+
+- [Generated C bindings](/quest/m1/c/README.md) - this changes the C API, so its C half lands on the generated package and C users break once (decided 2026-10-22, maintainer)
+
 ## Related
 
 - [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - adjacent decode work

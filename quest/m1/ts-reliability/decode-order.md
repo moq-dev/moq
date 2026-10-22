@@ -2,13 +2,34 @@
 
 ## Goal
 
-An exporter that needs a decode time (TS, FLV) derives it only from the
-frames of the current group, in the decode order they arrive, and from
+An exporter that needs a decode time (TS, MKV, FLV) derives it only from
+the frames of the current group, in the decode order they arrive, and from
 constants fixed for the rendition's life. Two exporters that read the same
 group author the same DTS for it, whatever they joined at or lost before.
 Media frames stay presentation-time only: no decode time on the wire.
 
+MKV and TS export cannot retain unlimited frames or spend quadratic time
+draining them when timestamps stop advancing: all exporter-owned reorder
+storage is bounded by exporter capacity, with valid B-frame timing kept.
+
 ## Plan
+
+Open (2026-10-22, maintainer): the counted approach below is in question
+("counts instead of timestamps"). Re-plan it with `/quest-plan` before
+starting; the decisions below stand until then.
+
+Folded in 2026-10-22 (maintainer): the release audit's export reorder
+storage quest. `DecodeClock::pop` (`rs/moq-mux/src/container/decode.rs`)
+holds every frame in `held` and `slots` until the highest PTS passes the
+lookahead, so flat timestamps retain unbounded bytes: 100,000 1 KiB frames
+at one PTS released nothing until an explicit flush, and the flush scans
+slots and removes element zero each time. MKV export inserts into the clock
+before its jitter-queue backpressure (`mkv/export.rs`), and TS has the same
+open-group exposure for timestamp-driven clocks. MKV also uses `pop` and
+moves with TS. Add exporter-level open-group tests with flat and backward
+PTS and valid reordering, and sweep buffered items and payload sizes for
+retained memory and drain cost. It was introduced since release by
+[#5309](https://github.com/moq-dev/moq/pull/5309), so it gates the cut.
 
 Decided 2026-10-22 by the maintainer, after the TS root-cause audit:
 

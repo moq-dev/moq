@@ -2,8 +2,9 @@
 
 ## Goal
 
-Condition: the next cut carries `.github/workflows/release-gate.yml` to
-`release`. Check with `git show origin/release:.github/workflows/release-gate.yml`.
+`release` carries `.github/workflows/release-gate.yml`, backported now as
+release-line maintenance rather than waiting for the next cut (decided
+2026-10-22, maintainer). Check with `git show origin/release:.github/workflows/release-gate.yml`.
 
 Then the maintainer adds `Release gate` from the GitHub Actions integration
 (15368) to release ruleset 24392632, beside `Check`, so PRs into `release`

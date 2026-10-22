@@ -24,3 +24,7 @@ once it catches up. Playback of renditions without `warmup` is unchanged.
 - A CLI playback test over a synthetic `warmup` track: a cold join presents
   min-delay pictures and then max-delay ones, a skip recovers the same way,
   and pacing and A/V timing match single-decoder playback.
+
+## Required
+
+- [Draft warmup](/quest/m2/intra-refresh/draft-warmup.md) - the hang draft permits presenting min-delay pictures before `warmup` ends
