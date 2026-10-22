@@ -5,7 +5,7 @@ import * as Epoch from "./epoch.ts";
 import { NotFound, StreamCode, StreamError } from "./error.ts";
 import { Producer as GroupProducer } from "./group.ts";
 import { Route } from "./hop.ts";
-import { hooks } from "./internal.ts";
+import { hooks, MAX_DATAGRAMS } from "./internal.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front } from "./resume.ts";
@@ -154,10 +154,6 @@ test("a returning route resumes where a fresh copy would", async () => {
 	const mirrored = spyOn(open, "mirror");
 	front.serve(handles[0]);
 	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
-	const datagram = () => {
-		const recv = hooks.tryRecvDatagram(sub);
-		return recv.kind === "datagram" ? recv.datagram.sequence : recv.kind;
-	};
 	try {
 		await clock.advanceAsync(Nano.zero);
 		const held = sub.tryRecvGroup();
@@ -166,20 +162,14 @@ test("a returning route resumes where a fresh copy would", async () => {
 		await clock.advanceAsync(Nano.zero);
 		tb.write(10);
 		tb.write(20);
-		tb.producer.insertDatagram(25, undefined, enc.encode("d"));
 		expect(drain(sub)).toEqual([10, 20]);
-		expect(datagram()).toBe(25);
 		ta.write(15);
-		ta.producer.insertDatagram(22, undefined, enc.encode("d"));
 		front.serve(handles[0]);
 		await clock.advanceAsync(Nano.zero);
 		expect(mirrored.mock.calls.length).toBe(1);
 		expect(drain(sub)).toEqual([]);
-		expect(datagram()).toBe("idle");
 		ta.write(26);
-		ta.producer.insertDatagram(27, undefined, enc.encode("d"));
 		expect(drain(sub)).toEqual([26]);
-		expect(datagram()).toBe(27);
 		held.close();
 	} finally {
 		mirrored.mockRestore();
@@ -574,6 +564,86 @@ test("datagrams a new copy replays are handed out once", async () => {
 
 	sub.close();
 	close();
+});
+
+test("a replacement delivers unseen datagrams below the newest sequence", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	try {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const sub = active.track("seq").subscribe({ maxDelay: Milli(100) });
+		ta.producer.insertDatagram(10, undefined, enc.encode("10"));
+		expect((await sub.recvDatagram())?.sequence).toBe(10);
+		await swap();
+		tb.producer.insertDatagram(10, undefined, enc.encode("10"));
+		tb.producer.insertDatagram(5, undefined, enc.encode("5"));
+		const next = hooks.tryRecvDatagram(sub);
+		expect(next.kind).toBe("datagram");
+		if (next.kind === "datagram") expect(next.datagram.sequence).toBe(5);
+		expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
+		sub.close();
+		close();
+	} finally {
+		restore();
+	}
+});
+
+test.each([0, 100])("datagram identities stay within the reader's %p ms budget", (budget) => {
+	const clock = new Manual();
+	const restore = clock.install();
+	try {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const ta = copy(a);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(budget) });
+		const send = (sequence: number) => ta.producer.insertDatagram(sequence, undefined, enc.encode("d"));
+		const recv = () => hooks.tryRecvDatagram(sub);
+		send(10);
+		expect(recv().kind).toBe("datagram");
+		clock.advance(Nano(60_000_000_000));
+		send(10);
+		expect(recv().kind).toBe("idle");
+		send(5);
+		expect(recv().kind).toBe("datagram");
+		if (budget > 0) {
+			clock.advance(Nano(budget * 500_000));
+			send(10);
+			expect(recv().kind).toBe("idle");
+			clock.advance(Nano(budget * 500_000));
+		}
+		send(10);
+		expect(recv().kind).toBe("datagram");
+		sub.close();
+		front.consumer.close();
+		a.close();
+	} finally {
+		restore();
+	}
+});
+
+test("datagram identities are capped by the replay buffer", () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	// Superseded identities never expire within an hour, so only the cap bounds them.
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+	const send = (sequence: number) => ta.producer.insertDatagram(sequence, undefined, enc.encode("d"));
+	const recv = () => hooks.tryRecvDatagram(sub).kind;
+	for (let sequence = 0; sequence <= MAX_DATAGRAMS + 1; sequence++) {
+		send(sequence);
+		expect(recv()).toBe("datagram");
+	}
+	send(1);
+	expect(recv()).toBe("idle");
+	send(0);
+	expect(recv()).toBe("datagram");
+	sub.close();
+	front.consumer.close();
+	a.close();
 });
 
 test("a route that goes for good ends the track as its last copy does", async () => {

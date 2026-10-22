@@ -380,6 +380,9 @@ export interface TrackRequestOptions {
 	pending: Set<Request>;
 }
 
+/** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
+export const MAX_DATAGRAMS = 64;
+
 // pending: /quest/m1/public-model/serve.md
 /** The first group an exclusive track end excludes whole: one past the last group that may exist. */
 export function finalSequence(end: Location): number {

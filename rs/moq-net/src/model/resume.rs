@@ -27,6 +27,7 @@
 //! sequence its [`track::Subscriber`] already handed out, the same record that keeps a
 //! direct reader from taking a re-created group twice.
 
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Poll, ready};
 use std::time::Duration;
@@ -74,6 +75,46 @@ impl Producer {
 			state: kio::Producer::default(),
 			readers: Readers::default(),
 		}
+	}
+
+	/// The readers' demand on a new copy, with each reader resuming where it got to.
+	pub(super) fn subscription(&self, mut demand: Subscription, subscribers: usize) -> Subscription {
+		let readers: Vec<_> = self
+			.readers
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.iter()
+			.filter_map(Weak::upgrade)
+			.collect();
+		// A subscription not yet polled has demand but no reader. It still needs the
+		// original ranges, so never narrow the aggregate until every contribution is here.
+		if readers.len() != subscribers || readers.is_empty() {
+			return demand;
+		}
+		let mut ranges = Vec::new();
+		for reader in readers {
+			let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
+			let preferences = reader.subscription.read().clone();
+			let resolved = match reader.copies.last_mut() {
+				Some(Copy {
+					sub: Sub::Ready(sub),
+					from,
+					..
+				}) if *from == preferences.ranges => sub.resolved_ranges(),
+				Some(Copy {
+					sub: Sub::Ready(sub), ..
+				}) => sub.resolve_ranges(&preferences.ranges),
+				Some(copy) if copy.from == preferences.ranges => copy.resolved.clone(),
+				_ => Vec::new(),
+			};
+			ranges.extend(
+				preferences
+					.clamped(reader.newest.map(Position::group), None, &resolved)
+					.ranges,
+			);
+		}
+		demand.ranges = ranges;
+		demand
 	}
 
 	/// Serve the track from `copy` from now on, subscribing every reader to it.
@@ -196,7 +237,7 @@ impl Consumer {
 				copies: Vec::new(),
 				newest: None,
 				window,
-				datagram: None,
+				datagrams: Datagrams::default(),
 				groups: (floor, Cap::from(..)),
 				groups_read: false,
 				out: Vec::new(),
@@ -311,9 +352,6 @@ struct Copy {
 	done: Option<Result<()>>,
 	/// The datagram channel ran out.
 	datagrams_done: Option<Result<()>>,
-	/// The newest datagram handed out before this copy was subscribed: a copy that
-	/// buffers datagrams replays them, and those were already handed out.
-	datagrams_seen: Option<(u64, u64)>,
 	/// When a newer group superseded every group under the bound: the newer copy's first
 	/// group, or the track's end. What the reader still lacks from it is waited for from
 	/// here, for no longer than the reader's budget.
@@ -684,6 +722,50 @@ struct Candidate {
 	_lease: Arc<()>,
 }
 
+/// Exact identities within the reader's budget. The last delivery never ages until
+/// another supersedes it, as a group's budget starts at its immediate successor.
+/// A replacement copy replays at most its buffered datagrams, so no more than that many
+/// superseded identities are kept, whatever the budget: a publisher cannot grow it.
+#[derive(Default)]
+struct Datagrams {
+	latest: Option<(u64, u64)>,
+	seen: BTreeSet<(u64, u64)>,
+	superseded: VecDeque<(Instant, (u64, u64))>,
+}
+
+impl Datagrams {
+	fn expire(&mut self, at: Instant, budget: Duration) {
+		while let Some((since, id)) = self.superseded.front() {
+			if at.saturating_duration_since(*since) < budget {
+				break;
+			}
+			self.seen.remove(id);
+			self.superseded.pop_front();
+		}
+	}
+
+	/// The highest group sequence handed out within the budget.
+	fn newest(&self) -> Option<u64> {
+		self.latest.max(self.seen.last().copied()).map(|(sequence, _)| sequence)
+	}
+
+	fn insert(&mut self, id: (u64, u64), at: Instant) -> bool {
+		if self.latest == Some(id) || self.seen.contains(&id) {
+			return false;
+		}
+		if let Some(previous) = self.latest.replace(id) {
+			if self.superseded.len() == super::track::MAX_DATAGRAMS
+				&& let Some((_, oldest)) = self.superseded.pop_front()
+			{
+				self.seen.remove(&oldest);
+			}
+			self.seen.insert(previous);
+			self.superseded.push_back((at, previous));
+		}
+		true
+	}
+}
+
 /// A [`Subscriber`]'s state.
 struct Reader {
 	peeked: Option<Candidate>,
@@ -704,8 +786,8 @@ struct Reader {
 	newest: Option<u64>,
 	/// The reader's ranges resolved; see [`Reader::window`].
 	window: Window,
-	/// The newest datagram handed out, by Group and Object ID.
-	datagram: Option<(u64, u64)>,
+	/// Identities handed out within the reader's budget, by Group and Object ID.
+	datagrams: Datagrams,
 	/// The local group filter; see [`track::Subscriber::set_groups`].
 	groups: (u64, Cap),
 	/// Whether groups were ever asked for; until then the reader keeps no replaced copy.
@@ -861,10 +943,9 @@ impl Reader {
 			copy.since = None;
 			copy.done = None;
 			copy.datagrams_done = None;
-			// Resume where a fresh copy would: what it buffered while replaced, below what
-			// another route already handed out, is not handed out again.
+			// Resume where a fresh copy would: a group it buffered while replaced, below the
+			// newest another route handed out, is not handed out.
 			copy.floor = copy.floor.max(self.newest.map(Position::group));
-			copy.datagrams_seen = self.datagram;
 			if let (Sub::Ready(sub), Some(floor)) = (&mut copy.sub, copy.floor) {
 				sub.raise_start_to(floor.group);
 			}
@@ -887,7 +968,6 @@ impl Reader {
 			until: None,
 			done: None,
 			datagrams_done: None,
-			datagrams_seen: self.datagram,
 			since: None,
 			lease: Arc::new(()),
 		});
@@ -932,7 +1012,7 @@ impl Reader {
 		if let Some(end) = self.declared.and_then(Position::final_sequence) {
 			let seen = |sequence: Option<u64>| sequence.is_some_and(|sequence| sequence >= end);
 			if seen(self.newest)
-				|| seen(self.datagram.map(|(sequence, _)| sequence))
+				|| seen(self.datagrams.newest())
 				|| self.copies.iter().any(|copy| seen(copy.track.latest_sequence()))
 			{
 				self.refused = true;
@@ -1299,6 +1379,8 @@ impl Reader {
 			return Some(Poll::Ready(Err(Error::ProtocolViolation)));
 		}
 		self.let_go(delivered, waiter);
+		let at = Instant::now();
+		self.datagrams.expire(at, self.mirrored.max_delay);
 		let groups = self.groups;
 		for index in (0..self.copies.len()).rev() {
 			loop {
@@ -1322,7 +1404,7 @@ impl Reader {
 							datagram.sequence,
 							datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0),
 						);
-						if copy.datagrams_seen.is_some_and(|seen| id <= seen) {
+						if !self.datagrams.insert(id, at) {
 							continue;
 						}
 						if self.past_end(Position {
@@ -1331,7 +1413,6 @@ impl Reader {
 						}) {
 							return Some(Poll::Ready(Err(Error::ProtocolViolation)));
 						}
-						self.datagram = self.datagram.max(Some(id));
 						return Some(Poll::Ready(Ok(Some(datagram))));
 					}
 					Poll::Ready(Ok(None)) => {
@@ -2126,8 +2207,8 @@ mod test {
 	async fn a_returning_route_resumes_at_the_readers_newest() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
-		let mut a = copy();
-		let mut b = copy();
+		let a = copy();
+		let b = copy();
 		routes.serve(a.consume());
 		let mut sub = subscribe(&logical, HOUR);
 		write(&a, 0);
@@ -2135,23 +2216,13 @@ mod test {
 		routes.serve(b.consume());
 		write(&b, 10);
 		write(&b, 20);
-		b.insert_datagram(25, ts(25), b"d".as_ref()).unwrap();
 		assert_eq!(drain(&mut sub, false), [10, 20]);
-		let datagram = |sub: &mut track::Subscriber| match sub.poll_recv_datagram(&kio::Waiter::noop()) {
-			Poll::Ready(datagram) => Some(datagram.unwrap().unwrap().sequence),
-			Poll::Pending => None,
-		};
-		assert_eq!(datagram(&mut sub), Some(25));
 		write(&a, 15);
-		a.insert_datagram(22, ts(22), b"d".as_ref()).unwrap();
 		assert_eq!(copies(&routes), 2, "the held group keeps the first route");
 		routes.serve(a.consume());
 		assert_eq!(drain(&mut sub, false), [] as [u64; 0]);
-		assert_eq!(datagram(&mut sub), None);
 		write(&a, 21);
-		a.insert_datagram(26, ts(26), b"d".as_ref()).unwrap();
 		assert_eq!(drain(&mut sub, false), [21]);
-		assert_eq!(datagram(&mut sub), Some(26));
 		drop(held);
 	}
 
@@ -3808,8 +3879,96 @@ mod test {
 	}
 
 	#[test]
+	fn datagram_identities_expire_with_the_readers_budget() {
+		for budget in [Duration::ZERO, Duration::from_millis(10)] {
+			let mut delivered = Datagrams::default();
+			let initial = Instant::ZERO;
+			assert!(delivered.insert((10, 0), initial));
+			let at = initial + Duration::from_secs(60);
+			// An idle last delivery is never stale.
+			delivered.expire(at, budget);
+			assert!(!delivered.insert((10, 0), at));
+			assert!(delivered.insert((5, 0), at));
+			if !budget.is_zero() {
+				delivered.expire(at + budget / 2, budget);
+				assert!(!delivered.insert((10, 0), at));
+			}
+			delivered.expire(at + budget, budget);
+			assert!(delivered.seen.is_empty());
+			assert!(delivered.superseded.is_empty());
+			assert!(!delivered.insert((5, 0), at));
+			assert!(delivered.insert((10, 0), at + budget));
+		}
+	}
+
+	#[test]
+	fn datagram_identities_are_capped_by_the_replay_buffer() {
+		let mut delivered = Datagrams::default();
+		let max = super::super::track::MAX_DATAGRAMS as u64;
+		// Superseded identities never expire under the longest budget, so only the cap bounds them.
+		for sequence in 0..=max + 1 {
+			assert!(delivered.insert((sequence, 0), Instant::ZERO));
+		}
+		delivered.expire(Instant::ZERO + HOUR, Duration::MAX);
+		assert_eq!(delivered.seen.len(), max as usize);
+		assert_eq!(delivered.superseded.len(), max as usize);
+		assert!(!delivered.insert((1, 0), Instant::ZERO));
+		assert!(delivered.insert((0, 0), Instant::ZERO));
+	}
+
+	#[test]
+	fn the_fronts_subscription_resumes_from_each_readers_floor() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut first = subscribe(&front, HOUR);
+		let mut second = subscribe(&front, HOUR);
+		write(&a, 5);
+		assert_eq!(recv(&mut first).sequence, 5);
+		let demand = front.subscription().unwrap();
+		// One reader has not read anything yet, so it still needs the oldest range.
+		assert_eq!(routes.subscription(demand.clone(), 2).start(), None);
+		assert_eq!(recv(&mut second).sequence, 5);
+		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(Position::group(5)));
+		write(&a, 10);
+		assert_eq!(recv(&mut first).sequence, 10);
+		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(Position::group(5)));
+		let pending = front.consume().subscribe(Subscription::default().with_max_delay(HOUR));
+		assert_eq!(routes.subscription(front.subscription().unwrap(), 3).start(), None);
+		drop(pending);
+		drop(second);
+		assert_eq!(routes.subscription(demand, 1).start(), Some(Position::group(10)));
+	}
+
+	#[moq_clock::test]
+	async fn a_replacement_delivers_unseen_datagrams_below_the_newest_sequence() {
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let mut a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&front, Duration::from_secs(10));
+		a.insert_datagram(10, ts(10), b"10".as_ref()).unwrap();
+		assert_eq!(
+			sub.poll_recv_datagram(&kio::Waiter::noop())
+				.map(|d| d.unwrap().unwrap().sequence),
+			Poll::Ready(10)
+		);
+		let mut b = copy();
+		routes.serve(b.consume());
+		b.insert_datagram(10, ts(10), b"10".as_ref()).unwrap();
+		b.insert_datagram(5, ts(5), b"5".as_ref()).unwrap();
+		assert_eq!(
+			sub.poll_recv_datagram(&kio::Waiter::noop())
+				.map(|d| d.unwrap().unwrap().sequence),
+			Poll::Ready(5)
+		);
+		assert!(sub.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
+	}
+
+	#[test]
 	#[cfg(feature = "async")]
-	fn a_new_copy_hands_out_later_objects_of_a_seen_group() {
+	fn a_new_copy_hands_out_unseen_objects_of_a_seen_group() {
 		let object = |id: u64| super::super::datagram::Stored {
 			datagram: super::super::datagram::Datagram {
 				sequence: 1,
@@ -3833,6 +3992,7 @@ mod test {
 		let mut b = copy();
 		a.insert_wire_datagram(object(6)).unwrap();
 		b.insert_wire_datagram(object(6)).unwrap();
+		b.insert_wire_datagram(object(2)).unwrap();
 		b.insert_wire_datagram(object(8)).unwrap();
 
 		let mut recv = || {
@@ -3843,6 +4003,7 @@ mod test {
 		};
 		assert_eq!(recv(), Poll::Ready(6));
 		routes.serve(b.consume());
+		assert_eq!(recv(), Poll::Ready(2));
 		assert_eq!(recv(), Poll::Ready(8));
 		assert!(recv().is_pending());
 	}

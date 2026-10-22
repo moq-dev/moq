@@ -239,3 +239,42 @@ for (const replayed of [0, 1, 64, 1024]) {
 		console.log(`${readers},${replayed},${Math.min(...samples).toFixed(2)}`);
 	}
 }
+
+// Sweep audience and delivered history: a read must touch only the delivered identity,
+// whether the history is under, at, or past the replay-buffer cap on retained identities.
+async function measureDatagrams(readers: number, retained: number): Promise<number> {
+	const front = new Front();
+	const broadcast = new BroadcastProducer();
+	const producer = broadcast.createTrack("seq");
+	front.serve(broadcast.consume());
+	const subscribers = Array.from({ length: readers }, () =>
+		front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) }),
+	);
+	const deliver = (sequence: number) => {
+		producer.insertDatagram(sequence, undefined, payload);
+		for (const subscriber of subscribers) {
+			const recv = hooks.tryRecvDatagram(subscriber);
+			if (recv.kind !== "datagram") throw new Error("datagram was not delivered");
+			checksum += recv.datagram.sequence;
+		}
+	};
+	for (let sequence = 0; sequence < retained; sequence++) deliver(sequence);
+	const start = performance.now();
+	for (let index = 0; index < groups; index++) deliver(retained + index);
+	const elapsed = performance.now() - start;
+	for (const subscriber of subscribers) subscriber.close();
+	front.consumer.close();
+	broadcast.close();
+	await flush();
+	return (elapsed * 1000) / groups / readers;
+}
+
+await measureDatagrams(4, 64);
+console.log("datagram_readers,retained,us_per_datagram");
+for (const retained of [1, 64, 4096]) {
+	for (const readers of readerCounts) {
+		const runs: number[] = [];
+		for (let rep = 0; rep < reps; rep++) runs.push(await measureDatagrams(readers, retained));
+		console.log(`${readers},${retained},${Math.min(...runs).toFixed(2)}`);
+	}
+}
