@@ -2,6 +2,7 @@ import { Milli, Nano, sleep } from "@moq/clock";
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
 import { error, fromClose, ProtocolViolation, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
+import * as Message from "../ietf/message.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
@@ -422,7 +423,6 @@ async function negotiate(
 	}
 
 	const stream = await Stream.open(session, { version: setupVersion });
-	await stream.writer.u53(Lite.StreamId.ClientCompat);
 
 	const encoder = new TextEncoder();
 
@@ -443,7 +443,7 @@ async function negotiate(
 					: setup,
 		parameters: params,
 	});
-	await client.encode(stream.writer, setupVersion);
+	await Message.write(stream.writer, Lite.StreamId.ClientCompat, client, setupVersion);
 
 	const serverCompat = await stream.reader.u53();
 	if (serverCompat !== Lite.StreamId.ServerCompat) {

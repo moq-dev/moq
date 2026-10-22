@@ -1370,13 +1370,11 @@ export class Subscriber {
 				endGroup: inclusiveGroupEnd(bounds.end),
 			});
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
-			const encoded: Uint8Array[] = [];
-			const buffer = new WritableStream<Uint8Array>({ write: (chunk) => void encoded.push(chunk.slice()) });
-			await update.encode(new Writer(buffer, this.version), this.version);
+			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
 			// A failed write means the publisher stopped reading, as it does once it finishes the
 			// track. The responses decide how the track ends, cleanly at the FIN or with a reset's error.
 			try {
-				for (const chunk of encoded) await stream.writer.write(chunk);
+				await stream.writer.write(encoded);
 			} catch {
 				return;
 			}

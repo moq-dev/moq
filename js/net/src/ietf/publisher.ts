@@ -588,7 +588,6 @@ export class Publisher {
 					: undefined;
 
 			// Send SUBSCRIBE_OK
-			await request.writer.u53(SubscribeOk.id);
 			const ok = new SubscribeOk({
 				requestId:
 					version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
@@ -625,7 +624,7 @@ export class Publisher {
 						// the track opts out of timestamps for this subscriber.
 						{},
 			});
-			await ok.encode(request.writer, version);
+			await Message.write(request.writer, SubscribeOk.id, ok, version);
 			console.debug(`publish ok: broadcast=${name} track=${track.name}`);
 
 			// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
@@ -705,8 +704,8 @@ export class Publisher {
 					if (params.maxAge !== undefined)
 						track.update({ ...track.subscription.peek(), maxDelay: Milli(params.maxAge) });
 					if (version === Version.DRAFT_14) continue;
-					await request.writer.u53(RequestOk.id);
-					await new RequestOk({ requestId: ownRequestId }).encode(request.writer, version);
+					const ok = new RequestOk({ requestId: ownRequestId });
+					await Message.write(request.writer, RequestOk.id, ok, version);
 				}
 			})();
 			const requestEnded = race([updates, request.ended]);
@@ -847,7 +846,6 @@ export class Publisher {
 			// Draft 14 registers no UPDATE_FAILED, so a failed update ends there as any error does.
 			const updateFailed = publishError instanceof UpdateFailed && version !== Version.DRAFT_14;
 			try {
-				await request.writer.u53(PublishDone.id);
 				const done = new PublishDone({
 					requestId:
 						version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
@@ -869,7 +867,7 @@ export class Publisher {
 								? "internal error"
 								: "track ended",
 				});
-				await done.encode(request.writer, version);
+				await Message.write(request.writer, PublishDone.id, done, version);
 			} catch {
 				// Stream might already be closed by peer.
 			}
@@ -1278,19 +1276,17 @@ export class Publisher {
 		try {
 			const answer = async (activeCount?: number) => {
 				if (version === Version.DRAFT_14) {
-					await request.writer.u53(SubscribeNamespaceOk.id);
 					const ok = new SubscribeNamespaceOk({ requestId: msg.requestId });
-					await ok.encode(request.writer, version);
+					await Message.write(request.writer, SubscribeNamespaceOk.id, ok, version);
 					return;
 				}
 				const parameters = new Parameters();
 				parameters.activeCount = activeCount;
-				await request.writer.u53(RequestOk.id);
 				const ok = new RequestOk({
 					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
 					parameters,
 				});
-				await ok.encode(request.writer, version);
+				await Message.write(request.writer, RequestOk.id, ok, version);
 			};
 
 			// MoQ Active Count: the OK counts what the first pass below sends, so it waits for
@@ -1315,10 +1311,10 @@ export class Publisher {
 			// publisher included, as Rust does. Only a legacy PUBLISH_NAMESPACE request can
 			// be declined.
 			const namespace = async (suffix: Path.Valid, snap: Advertised): Promise<Answer> => {
-				await request.writer.u53(SubscribeNamespaceEntry.id);
 				// Either extension puts the Parameters field on NAMESPACE, even an empty one.
 				const params = this.#advert !== undefined || this.#epoch ? this.#params(snap.route) : undefined;
-				await new SubscribeNamespaceEntry({ suffix, params }).encode(request.writer, version);
+				const entry = new SubscribeNamespaceEntry({ suffix, params });
+				await Message.write(request.writer, SubscribeNamespaceEntry.id, entry, version);
 				return "held";
 			};
 			const target: Target = legacy
@@ -1338,8 +1334,8 @@ export class Publisher {
 						held: () => undefined,
 						carry: () => undefined,
 						withdraw: async (suffix) => {
-							await request.writer.u53(SubscribeNamespaceEntryDone.id);
-							await new SubscribeNamespaceEntryDone({ suffix }).encode(request.writer, version);
+							const done = new SubscribeNamespaceEntryDone({ suffix });
+							await Message.write(request.writer, SubscribeNamespaceEntryDone.id, done, version);
 						},
 					};
 
@@ -1424,8 +1420,7 @@ export class Publisher {
 						// A new cursor starts its backoff fresh, as in Rust.
 						retry = 0;
 					}
-					await request.writer.u53(RequestOk.id);
-					await new RequestOk({ requestId: undefined }).encode(request.writer, version);
+					await Message.write(request.writer, RequestOk.id, new RequestOk({ requestId: undefined }), version);
 					updating = readUpdate();
 				}
 			}
@@ -1781,8 +1776,7 @@ export class Publisher {
 					await deadline.send(
 						stream,
 						async () => {
-							await opened.writer.u53(PublishNamespace.id);
-							await msg.encode(opened.writer, version);
+							await Message.write(opened.writer, PublishNamespace.id, msg, version);
 						},
 						legacy ? () => this.#done(opened, path, requestId) : undefined,
 					);
@@ -1906,12 +1900,9 @@ export class Publisher {
 				(async (): Promise<Answer> => {
 					const writer = request.stream.writer;
 					request.updating = true;
-					await writer.u53(PublishNamespaceUpdate.id);
 					const namespaceRequestId = version === Version.DRAFT_16 ? request.requestId : undefined;
-					await new PublishNamespaceUpdate({ requestId, namespaceRequestId, update, token }).encode(
-						writer,
-						version,
-					);
+					const msg = new PublishNamespaceUpdate({ requestId, namespaceRequestId, update, token });
+					await Message.write(writer, PublishNamespaceUpdate.id, msg, version);
 
 					const response = await (request.reply ?? request.stream.next());
 					if (response === undefined) {
@@ -2008,9 +1999,8 @@ export class Publisher {
 	/** Write the PUBLISH_NAMESPACE_DONE that withdraws a draft-14-16 request. */
 	async #done(request: RequestStream, path: Path.Valid, requestId: bigint) {
 		try {
-			await request.writer.u53(PublishNamespaceDone.id);
 			const done = new PublishNamespaceDone({ trackNamespace: path, requestId });
-			await done.encode(request.writer, this.#session.version);
+			await Message.write(request.writer, PublishNamespaceDone.id, done, this.#session.version);
 		} catch {
 			// Stream might already be closed
 		}
@@ -2100,8 +2090,7 @@ export class Publisher {
 			}
 
 			answering = true;
-			await request.writer.u53(TrackStatusOk.id(version));
-			await answer.encode(request.writer, version);
+			await Message.write(request.writer, TrackStatusOk.id(version), answer, version);
 			// The answer is all this stream carries.
 			request.close();
 			await request.writer.closed.catch(() => undefined);
