@@ -150,9 +150,12 @@ judge quality, latency or throughput; those run on a congested path (see
 `test/ts/README.md`). Every drill here proves correctness: that a resource is
 released, a failure surfaces, a route or publisher comes back, or every group is
 recovered. The cluster drills' 10s bound on each group is a stall check, a third
-of the 30s stalls of #4349, not a latency target. So the impaired lane keeps its
-loss, which is what drops the `MAX_STREAMS` and `MAX_DATA` frames the cluster
-drills' senders wait on.
+of the 30s stalls of #4349, not a latency target. The lifecycle drills keep their random correctness faults. The cluster drills
+instead use a fixed delay and finite rate-limit queue, with no random loss,
+jitter, or reordering: the forced overflow drops datagrams, including the
+`MAX_STREAMS` and `MAX_DATA` frames their senders wait on. Their existing
+overflow, credit, and per-group completion assertions establish that congestion
+acted without requiring a random impairment to be drawn.
 
 The same shaper is a binary, for putting in front of a relay from another
 process. It applies one profile both ways, prints the seed at start and the
