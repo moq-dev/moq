@@ -5629,8 +5629,22 @@ fn server_accepts_a_session() {
 	let bandwidth = id(moq_session_bandwidth(session));
 	assert_eq!(moq_bandwidth_close(bandwidth), 0);
 
-	// The broadcast the server publishes reaches the client.
-	let consumed = request_broadcast(received, b"demo");
+	// The broadcast the server publishes reaches the client. A client only asks the
+	// server about what it watches, so wait on the path rather than request it once.
+	let path = b"demo";
+	let announced_cb = Callback::new();
+	let task = id(unsafe {
+		moq_origin_announced_broadcast(
+			received,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			announced_cb.ptr,
+		)
+	});
+	let consumed = id(announced_cb.recv());
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(announced_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consumed), 0);
 
 	// Closing the accepted session is a clean terminal close.

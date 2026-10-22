@@ -105,6 +105,12 @@ name = "synced"
 harness = false
 required-features = ["fuzz"]
 
+# Reaches the crate-private session interests through the hidden `fuzz` module.
+[[bench]]
+name = "interests"
+harness = false
+required-features = ["fuzz"]
+
 # Reaches the private message codecs through the hidden `fuzz` module.
 [[bench]]
 name = "codec"

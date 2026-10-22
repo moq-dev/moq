@@ -5,6 +5,13 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced` or `announced_broadcast`, instead of under its whole scope at connect.
+`MoqOriginConsumer::request_broadcast` watches nothing, so on a client it fails with `MoqError::Unroutable` for a path nothing watches, even when the relay announces it.
+Resolve the path with `announced_broadcast`, or hold `announced` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
 ### `MoqContainerFormat::Fmp4` unwraps to Legacy (#6250)
 
 A container import with `MoqContainerFormat::Fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
