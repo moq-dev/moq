@@ -34,7 +34,7 @@ import { Instant, Milli, now, sleepUntil } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import * as broadcast from "./broadcast.ts";
 import type { Delivered } from "./delivered.ts";
-import { NotFound, StreamCode, StreamError } from "./error.ts";
+import { NotFound, SessionError, StreamCode, StreamError, sessionClosed } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import {
 	finalSequence,
@@ -51,9 +51,8 @@ import { grace } from "./ledger.ts";
 import * as track from "./track.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
-// Stream codes that report the route failing rather than refusing: another route may still
-// deliver what it failed. Anything that is not a stream reset (a session or transport error) is
-// one too.
+// Stream codes that report the route failing to deliver rather than judging what it carried:
+// another copy may still deliver what it failed. Mirrors the Rust `route_failed`.
 const ROUTE_FAILURES: ReadonlySet<number> = new Set([
 	StreamCode.Internal,
 	StreamCode.Cancel,
@@ -70,21 +69,16 @@ class Incompatible extends Error {
 	}
 }
 
-/** Whether `err` is the route failing rather than refusing: another route may still deliver what it failed. */
-function routeFailed(err: Error): boolean {
-	if (err instanceof Incompatible) return false;
-	return !(err instanceof StreamError) || ROUTE_FAILURES.has(err.code);
-}
-
-/** Whether `err` is a route's verdict on a group it read: too old, evicted, or the application's. */
-function verdict(err: Error): boolean {
-	if (!(err instanceof StreamError)) return false;
-	return (
-		err.code === StreamCode.Old ||
-		err.code === StreamCode.Evicted ||
-		err.code === StreamCode.TooFarBehind ||
-		err.code >= 64
-	);
+/**
+ * Whether `err` is the route failing to deliver rather than judging what it carried, so a new copy
+ * may fix it: its session closed or failed underneath it, or a delivery code. Anything else would
+ * repeat on every copy.
+ *
+ * @internal
+ */
+export function routeFailed(err: Error): boolean {
+	if (err instanceof StreamError) return ROUTE_FAILURES.has(err.code);
+	return err instanceof SessionError || sessionClosed(err);
 }
 
 /** Two copies claiming the same content must agree on what it is. */
@@ -974,10 +968,18 @@ class Recover implements GroupRecover {
 	wants(failed: Error | undefined): boolean {
 		const copy = this.#copy;
 		if (!copy) return false;
-		// Only a route that serves can refuse a group on purpose.
-		if (failed && (!verdict(failed) || copy.sub.closed.peek() instanceof Error)) return true;
+		if (failed && this.#undelivered(failed, copy)) return true;
 		const route = this.#reader.route;
 		return route.generation !== copy.generation || route.concluded;
+	}
+
+	/**
+	 * Whether `copy` failed delivering the group rather than judging it, so its own route may be
+	 * asked again. Any other failure would repeat on every copy from that route, so only another
+	 * route is asked, which bounds a hostile route to one bad answer per route change.
+	 */
+	#undelivered(failed: Error, copy: Copy): boolean {
+		return routeFailed(failed) || copy.sub.closed.peek() instanceof Error;
 	}
 
 	async replace(_index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement> {
@@ -1024,6 +1026,8 @@ class Recover implements GroupRecover {
 				const held = reader.holding(this.sequence, current)[0];
 				const cached = held && hooks.cachedGroup(held.sub, this.sequence);
 				if (cached) return this.#replacement(cached, held);
+				// A verdict would repeat from the route that gave it.
+				if (generation === current.generation && !this.#undelivered(failed, current)) throw failed;
 			}
 			if (!serving) {
 				// Nothing serves: a failed copy waits for a route, unless none will come.
@@ -1316,19 +1320,25 @@ export class Front {
 	async fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
 		const fetched = await this.#fetch(name, sequence, options);
 		let current = fetched.source;
+		// Too old and evicted judge a subscription's delivery, not whether the group exists, so
+		// neither is a verdict on a fetch: one answered from a group still arriving over a
+		// subscription asks the route again for the rest when that delivery gives up on it.
+		const undelivered = (failed: Error) =>
+			routeFailed(failed) ||
+			(failed instanceof StreamError && (failed.code === StreamCode.Old || failed.code === StreamCode.Evicted));
 		// Carried across route changes like a subscribed group, but by fetching again: a fetch has
 		// no copy of its own to find the rest in.
 		hooks.recoverGroup(fetched.group, {
 			changed: this.#changed,
 			wants: (failed) => {
-				// Too old and evicted judge a subscription's delivery, not whether the group
-				// exists, so only the application's refusal is a verdict on a fetch.
-				if (failed) return !(failed instanceof StreamError && failed.code >= 64);
+				if (failed && undelivered(failed)) return true;
 				return this.#source !== undefined && this.#source !== current;
 			},
 			replace: async (_index, failed, signal) => {
-				// A stalled fetch only moves to another route; a failed one may ask its own again.
-				const next = await this.#fetch(name, sequence, { ...options, signal }, failed ? undefined : current);
+				// A fetch that failed delivering may ask its own route again; a stalled one, or one
+				// a verdict ended, only moves to another.
+				const avoid = failed && undelivered(failed) ? undefined : current;
+				const next = await this.#fetch(name, sequence, { ...options, signal }, avoid);
 				// The fetch's hold on its route passes to the group on adoption, or goes with the discard.
 				return {
 					group: next.group,
