@@ -780,6 +780,12 @@ impl Import {
 		let mut ok = 0;
 
 		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
+			// Nothing follows an ended rendition, so polling it again could only fail and evict
+			// a finished rendition while its siblings are still catching up.
+			if track.ended {
+				continue;
+			}
+
 			match track.ingest(&self.fetcher, &mut target_duration).await {
 				Ok(count) => {
 					track.failures = 0;
@@ -1494,6 +1500,35 @@ mod tests {
 
 		import.step(OnError::Warn).await.unwrap();
 		assert!(import.video[0].importer.is_none(), "the dead rendition is retired");
+	}
+
+	/// An ended rendition is never fetched again, so losing its playlist while its siblings
+	/// are still running cannot evict the finished rendition.
+	#[tokio::test]
+	async fn an_ended_rendition_is_not_evicted() {
+		let (init, fragments) = fmp4_parts(2);
+		let mut resource = init.clone();
+		resource.extend_from_slice(&fragments[0]);
+		resource.extend_from_slice(&fragments[1]);
+		let playlist = format!(
+			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}\nmedia.mp4\n#EXT-X-ENDLIST\n",
+			init.len(),
+			fragments[0].len(),
+			init.len(),
+			fragments[1].len()
+		);
+		let dir = temp_dir();
+		let (mut import, _catalog) = write_import(&dir, &resource, &playlist);
+
+		import.init().await.unwrap();
+		assert!(import.video[0].ended, "the rendition imported its last segment");
+
+		std::fs::remove_file(dir.join("media.m3u8")).unwrap();
+
+		for _ in 0..MAX_RENDITION_FAILURES {
+			assert!(import.step(OnError::Warn).await.unwrap().ended);
+		}
+		assert!(import.video[0].importer.is_some(), "the ended rendition is kept");
 	}
 
 	/// A live window longer than `ANCHOR_SEGMENTS` is joined mid-playlist, which means the
