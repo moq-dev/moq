@@ -52,7 +52,7 @@ enum Importer {
 		// media-only `()`, which would route those PIDs to `Stream::Ignored` and drop them.
 		import: Box<ts::Import<ts::Ext>>,
 		// Finished at a clean end, so the finished broadcast keeps serving the catalog.
-		catalog: moq_mux::catalog::Producer<ts::Ext>,
+		catalog: Box<moq_mux::catalog::Producer<ts::Ext>>,
 		// A clone of the importer's producer, so an end can finish or close the broadcast
 		// even though the importer owns it.
 		broadcast: moq_net::broadcast::Producer,
@@ -92,7 +92,7 @@ impl Publisher {
 				}
 				Importer::One {
 					import: Box::new(import),
-					catalog,
+					catalog: Box::new(catalog),
 					broadcast,
 				}
 			}
