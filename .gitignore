@@ -43,6 +43,7 @@ node_modules
 
 # Except these test fixtures, which are committed.
 !rs/moq-mux/src/container/fmp4/test_data/*.mp4
+!rs/moq-audio/src/decode/test_data/*.mp4
 
 # Cloudflare Wrangler
 .wrangler/

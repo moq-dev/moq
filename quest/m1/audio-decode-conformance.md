@@ -9,49 +9,33 @@ frequency, level, channel order, sample count, and timestamps, and the
 backends agree. The C and FFI audio decode surfaces are exercised by tests,
 not only by applications.
 
-Today `rs/moq-audio/src/decode/backend/symphonia.rs` (AAC) has no tests, the
-Opus round trip asserts only frame count and energy above 0.01, and
-`moq_decode_audio`, `moq_decode_audio_frame`, and their free function in
-`rs/moq-c` are never called by a test.
-
 ## Plan
 
-Decided in planning (2026-10-20): both synthesized tones and real clips.
+The implementation is checkpointed in [moq-dev/moq#6261](https://github.com/moq-dev/moq/pull/6261).
+Finish validation before retiring this quest:
 
-- Tones test our wrapping logic: a distinct frequency per channel (catches
-  channel order and remix), a stepped sweep (catches dropped or duplicated
-  frames), and timestamp continuity across pre-skip, resampling (48 kHz and
-  44.1 kHz), and surround layouts. Backends return samples only; the
-  consumer assigns timestamps, so continuity is checked at the consumer.
-  libopus has its own test vectors; this suite tests what moq-audio does
-  around it.
-- Real clips catch what tones miss: the AAC in `rs/moq-mux`'s `bbb.mp4`
-  fixture, plus a new small Opus fMP4/CMAF fixture (the repo has none; Opus
-  fMP4 tests synthesize their input today). Opus and AAC decoders are not
-  bit-exact across implementations, so compare against a reference decode
-  from a decoder independent of every backend under test (so a shared bug
-  cannot make them agree), with a tolerance derived from measured backend
-  differences, and say how it was measured. Commit each encoded fixture
-  with the command that produced it.
-- Folded in from the same gap analysis:
-  - moq-ffi gains audio counterparts of the video raw-publish tests (publish
-    from many threads, reject bad frames), and its decode-delay test feeds a
-    tone instead of silence and checks it.
-  - `rs/moq-c` gains a C fixture for the audio decoder-output contract,
-    alongside `c-tests/decode-output.c`.
-  - `cpp/moq` gains an audio publish and consume test.
+- Run the final partition/drain/reset/overflow properties and default/no-default
+  audio test suites through `quest gate`. The prior native suite passed all 171
+  tests after the duration and fractional-phase timestamp fixes; the expanded
+  property and final fixture-loader changes still need a fresh run.
+- Run `just ci`, `just test interop --all`, and `just rs bench-playback` through
+  the gate. Host load prevented admission at checkpoint time. Do not bypass it.
+- Re-run the C ABI and installed C++ consumers on the final source. The earlier
+  external C fixture, C++ build/consumer matrix, and targeted FFI audio tests
+  passed before the final resampler changes.
+- Check reference regeneration against the committed inputs using the documented
+  FFmpeg version and source hash, then address any substantive review findings.
+- Delete this quest and every link once those checks pass.
 
-Recommendations:
+The suite uses stepped stereo tones, NASA public-domain speech in AAC/Opus
+CMAF, and family-one 5.1 Opus through the supported MPEG-TS importer. The existing
+`bbb.mp4` contains silence followed by an invalid AAC sample, so its consumers
+remain unchanged and a licensed recording supplies the real reference instead.
+`test_data/README.md` records provenance, commands, measured error bounds,
+pre-skip/warmup alignment and why AAC PNS noise is not compared across reset.
 
-- Reuse the Goertzel check `rs/moq-audio/src/decode/backend/libopus.rs`
-  already uses for surround channel order, rather than adding an FFT
-  dependency.
-- Upgrade `tests/integration/roundtrip.rs` in place instead of adding a second
-  round trip.
-- A tolerance or threshold needs a stated reason; avoid round numbers picked
-  to pass.
-
-Public API: none expected. Wire: none.
+No public API or wire changes. Keep the conformance hooks private and preserve
+source timestamps across jumps while repaying the exact rounded stream duration.
 
 ## Related
 
