@@ -340,3 +340,51 @@ test("session shutdown releases listing tasks while the local origin stays open"
 	await Promise.all(fx.tasks);
 	expect(broadcast.createTrack("still-local").name).toBe("still-local");
 });
+
+for (const version of [Version.DRAFT_20, Version.DRAFT_22]) {
+	test(`a paused filter applies on resume, but an active pause/filter update is refused atomically (${version})`, async () => {
+		const fx = fixture(version);
+		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
+		broadcast.announce();
+		const track = broadcast.createTrack("video");
+		for (let i = 0; i < 2; i++) {
+			const group = track.appendGroup();
+			group.writeFrame({ payload: new Uint8Array([i]) });
+			group.close();
+		}
+		await ok(await fx.list(), version);
+		const { stream } = await fx.offered();
+		const filter = async (id: bigint, startGroup: bigint) => {
+			await stream.writer.u53(0x02);
+			await Message.encode(stream.writer, async (body) => {
+				await body.u62(id);
+				const params = new Parameters();
+				params.forward = false;
+				params.subscriptionFilter = { kind: "absolute", startGroup, startObject: 0n };
+				await params.encode(body, version);
+			});
+		};
+		await filter(2n, 2n);
+		await ok(stream, version);
+		await update(stream, version, 4n, true);
+		const fresh = track.appendGroup();
+		fresh.writeFrame({ payload: new Uint8Array([2]) });
+		fresh.close();
+		const uni = fx.pair.client.incomingUnidirectionalStreams.getReader();
+		const next = await uni.read();
+		if (!next.value) throw new Error("missing filtered group");
+		const reader = new Reader(next.value, undefined, version);
+		expect((await Group.decode(reader, version)).groupId).toBe(2);
+		await reader.readAll();
+
+		// The bundled pause never receives REQUEST_OK or leaves a paused publication.
+		await filter(6n, 3n);
+		expect(await stream.reader.u53()).toBe(RequestError.id);
+		expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(0x03);
+		expect(await stream.reader.u53()).toBe(PublishDone.id);
+		const done = await PublishDone.decode(stream.reader, version);
+		expect(done.statusCode).toBe(PublishDoneStatus.UPDATE_FAILED);
+		expect(done.streamCount).toBe(1n);
+		uni.releaseLock();
+	});
+}
