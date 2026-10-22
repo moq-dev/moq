@@ -23,6 +23,12 @@ contracts just to improve a number; bring a necessary contract change to the
 maintainer with the measurement first. No new user guide is needed for this
 planning change; implementations update documentation they make stale.
 
+The follow-up audit on main
+[`d44813cb703b`](https://github.com/moq-dev/moq/commit/d44813cb703bf0d5366266ae8206f794856c69f8)
+adds memory lifetime, idle/churn scaling, kernel mechanisms and settings.
+These additional findings are source-supported; no new memory or kernel
+benchmark result is claimed.
+
 ### Benchmark contract for every child
 
 - Reproduce the suspected cost in the production path before changing it.
@@ -37,6 +43,16 @@ planning change; implementations update documentation they make stale.
   allocations, copied bytes, retained memory, and tail latency where relevant.
   Instruction counts do not measure blocking or prove end-to-end throughput.
   Setup and teardown boundaries must match between variants.
+- For memory, include cold start, burst, quiet, repeat burst and teardown.
+  Separate logical cache/flow-control charges, live allocations, allocator
+  active/resident pages, virtual retained mappings and kernel socket memory.
+  RSS alone cannot establish a leak or identify its owner. Record allocator,
+  profiling mode and cgroup memory pressure. Only investigate allocator decay,
+  arenas or background purging after application-owned retention is attributed;
+  compare reclaim latency and CPU/fault cost on reuse. Reuse the phases in
+  [heap profiling](/bench/profile.py). The
+  [jemalloc statistics definitions](https://jemalloc.net/jemalloc.3.html)
+  distinguish allocated, active, resident and retained memory.
 - Measure JS changes in a real browser with the existing browser harness.
   Bun operation counts can demonstrate an algorithmic slope but cannot stand
   in for browser latency, GC, native copies, or hardware behavior.
@@ -51,6 +67,20 @@ planning change; implementations update documentation they make stale.
 - Land an optimization only when the measured consumer benefit justifies its
   complexity and memory tradeoffs. Otherwise retain the useful benchmark and
   record why the implementation was left alone.
+
+For settings sweeps, record effective values, not only requested ones.
+[Resolved client defaults](/rs/moq-tokio/src/quic.rs) currently allow 10,000
+streams per direction, 64 MiB connection receive credit, 4 MiB per-stream
+credit and 16 MiB send credit. [Relay peer overrides](/rs/moq-relay/src/limits.rs)
+allow 100,000 streams and 640 MiB each of connection receive and send credit.
+Standalone backend defaults differ again; benchmark the effective settings
+of the actual consumer. These are limits, not per-connection allocations.
+Include idle connections and stalled
+readers as well as high-bandwidth, high-RTT relay links before recommending
+smaller windows. [Receive memory](/quest/m1/quic/receive-memory.md) owns budget
+correctness; settings must preserve useful bandwidth-delay product and
+failover behavior. [Keepalive](/quest/m2/quic-keep-alive.md) already owns timer
+policy. Do not add a generic tuning surface without a measured consumer.
 
 Reuse [the benchmark harness](/bench/README.md). Criterion's
 [timing-loop guidance](https://bheisler.github.io/criterion.rs/book/user_guide/timing_loops.html)
@@ -80,6 +110,36 @@ complete allocator and Rust consumers, before selecting a fix.
 reproduced the missing `moq-archive/producer` selection. The existing
 [CI audit PR](https://github.com/moq-dev/moq/pull/6266) already fixes it.
 No duplicate quest or workflow edit belongs here.
+
+### Kernel and placement assessment
+
+- Already implemented in [moq-uring](/rs/moq-uring/README.md): multishot
+  receive, provided buffers, GRO/GSO, deferred/cooperative task running,
+  coalesced futex wakes and per-worker CID-steered sockets. Measure these
+  with existing ablations before adding another mechanism.
+- [Ring submission setup](/quest/m2/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md)
+  and [completion batching](/quest/m2/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md)
+  already own the small ring experiments. Batching must preserve deadlines
+  and latency tails, not merely reduce syscalls.
+- [Zero-copy sends](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md)
+  need physical-NIC evidence: the previous loopback prototype lost 6-9%
+  while exercising copy fallback. Deferred completion ownership, pinned
+  memory and CQ pressure are costs to measure, not free benefits.
+  [QUIC I/O ownership](/quest/m2/quic-io-boundary.md) owns the buffer seam.
+- Extend [worker defaults](/quest/m2/perf/shard-default.md) with NUMA, SMT,
+  NIC queues and CPU quotas. Application CID steering does not establish
+  matching NIC/softirq locality; see the Linux
+  [network scaling guide](https://docs.kernel.org/networking/scaling.html).
+- Linux [io_uring zero-copy receive](https://docs.kernel.org/networking/iou-zcrx.html)
+  describes a TCP receive path with hardware header/data split and dedicated
+  queues. It is not evidence of a drop-in optimization for this UDP path.
+  Confirm transport, hardware and minimum-kernel support before a future trial.
+- NAPI busy polling and registered wait arguments were explicitly dropped in
+  [Perf](/quest/m2/perf/README.md). Do not reopen them without new profiling
+  evidence. SQPOLL, huge pages and blanket page locking likewise have no
+  demonstrated need here; they can exchange CPU or reclaimable memory for
+  lower latency. Incremental provided-buffer consumption is deliberately
+  unsuitable for the current multishot `recvmsg` tail behavior.
 
 ### Existing ownership and deliberately deferred work
 
@@ -114,6 +174,10 @@ No duplicate quest or workflow edit belongs here.
 
 - [Fragmented QUIC sends](/quest/m2/performance-survey/quic-send-fragments.md) - packetization cost under a retained fragmented flight
 - [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - polling and memory after peak task occupancy subsides
+- [QUIC receive-state reuse](/quest/m2/performance-survey/quic-receive-reuse.md) - reassembly metadata retained by recycled completed streams
+- [UDP pool recovery](/quest/m2/performance-survey/uring-pools.md) - pool growth latency and memory after burst concurrency
+- [Cache metadata](/quest/m2/performance-survey/cache-metadata.md) - bookkeeping capacity after cached groups expire
+- [Cache backing amplification](/quest/m2/performance-survey/cache-backing.md) - small retained samples pinning large shared fragments
 - [Bandwidth grants](/quest/m2/performance-survey/bandwidth-grants.md) - repeated full allocation in Rust and JS
 - [Cached JS group joins](/quest/m2/performance-survey/js-cached-groups.md) - repeated sorting while replaying retained groups
 - [PCM batch processing](/quest/m2/performance-survey/audio-batches.md) - repeated tail movement during encoding and resampling
@@ -121,6 +185,10 @@ No duplicate quest or workflow edit belongs here.
 - [QUIC scheduling churn](/quest/m2/performance-survey/quic-schedule-churn.md) - priority and retirement work across unrelated groups
 - [HLS request fan-out](/quest/m2/performance-survey/hls-serving.md) - repeated fetch, remux and playlist construction per viewer
 - [Buffered browser groups](/quest/m2/performance-survey/hang-buffered.md) - per-frame scans and bulk skip work
+- [Idle browser stats](/quest/m2/performance-survey/browser-idle-stats.md) - local transport polling without active publishing demand
+- [Transport preference history](/quest/m2/performance-survey/transport-history.md) - full URL retention across retired sessions
+- [Resume identity history](/quest/m2/performance-survey/resume-history.md) - historical source graphs held by first-seen track metadata
+- [UDP socket queues](/quest/m2/performance-survey/socket-queues.md) - drop attribution and queue-size tradeoffs across workers and load
 - [Session datagrams](/quest/m2/performance-survey/datagram-delivery.md) - complete per-object delivery across publishers and viewers
 - [JWT verification](/quest/m2/performance-survey/jwt-verification.md) - key loading, lookup, parsing and crypto attribution
 - [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md) - HTTP polling cost versus result size and unrelated routes
