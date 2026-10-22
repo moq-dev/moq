@@ -141,9 +141,10 @@ pub struct Info {
 	/// earlier ones in the same group. Defaults to `false`.
 	///
 	/// Writers and readers see plain frames either way: the producer compresses each
-	/// frame as it is written and the cache stores the compressed form. A moq-lite-07 peer
-	/// receives the compressed bytes and the flag; every other session receives the
-	/// frames inflated, from one inflated copy per group shared by every plain reader.
+	/// frame as it is written and the cache stores the compressed form. A moq-lite-07 peer or a
+	/// moq-transport draft-17+ peer negotiating the Flate extension receives the compressed
+	/// bytes and the flag. Other sessions receive one shared inflated copy per group,
+	/// unless a sealed compression declaration makes that fallback unsupported.
 	/// Worth it for small, repetitive payloads like JSON; wasted on media.
 	pub compress: bool,
 	/// The ratio of a group's bytes after its first frame to the first frame past which a
@@ -2372,6 +2373,15 @@ impl TrackState {
 		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
+	/// Observe a shared track's terminal cause without extending its publisher lifetime.
+	// private: capability gap
+	// Sessions retain shared state while a FETCH owns its group writer.
+	pub(crate) fn poll_closed(producer: &kio::Producer<Self>, waiter: &kio::Waiter) -> Poll<Error> {
+		producer
+			.poll_closed(waiter)
+			.map(|()| producer.read().abort.clone().unwrap_or(Error::Dropped))
+	}
+
 	/// Abort shared track state without extending its publisher lifetime.
 	// pending: /quest/m1/public-model/deferred.md
 	pub(crate) fn abort(producer: &kio::Producer<Self>, err: Error) -> Result<()> {
@@ -3149,12 +3159,7 @@ impl Producer {
 
 	/// Poll until the track is closed or aborted; ready with the cause.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		self.state.poll_closed(waiter).map(|()| self.abort_reason())
-	}
-
-	/// The recorded abort reason, or [`Error::Dropped`] if the track closed without one.
-	fn abort_reason(&self) -> Error {
-		self.state.read().abort.clone().unwrap_or(Error::Dropped)
+		TrackState::poll_closed(&self.state, waiter)
 	}
 
 	/// Return true if the track has been closed.
@@ -11774,10 +11779,7 @@ mod test {
 			let mut frames = frame::Buffer::<1>::new();
 			assert!(
 				frames
-					.push(frame::Frame {
-						timestamp: Some(Timestamp::ZERO),
-						payload: bytes::Bytes::from_static(b"x"),
-					})
+					.push(frame::Frame::new(Timestamp::ZERO, bytes::Bytes::from_static(b"x")))
 					.is_ok()
 			);
 			assert!(matches!(group.write_frames(&mut frames), Err(Error::Closed)));
@@ -15819,10 +15821,7 @@ mod test {
 		let mut batched = producer.append_group().unwrap();
 		let mut frames = frame::Buffer::<4>::new();
 		frames
-			.push(frame::Frame {
-				timestamp: Some(rewound),
-				payload: bytes::Bytes::from_static(b"x"),
-			})
+			.push(frame::Frame::new(rewound, bytes::Bytes::from_static(b"x")))
 			.unwrap();
 		assert!(matches!(
 			batched.write_frames(&mut frames),

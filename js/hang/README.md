@@ -13,7 +13,7 @@ Core media library for [Media over QUIC](https://moq.dev/) (MoQ). Provides share
 
 - **Catalog** — JSON track describing other tracks and their codec properties (audio, video, chat, location, etc.)
 - **Container** — Media framing in two formats: CMAF (fMP4) and Legacy (varint-timestamp + raw codec bitstream)
-- **Utilities** — Hex encoding, Opus audio polyfill (libav), latency computation, browser detection workarounds
+- **Utilities** — Hex encoding, Opus and AAC audio polyfill ([`@moq/libav`](../libav)), latency computation, browser detection workarounds
 
 Browser support detection is provided by [`<moq-watch-support>`](../watch) and [`<moq-publish-support>`](../publish).
 

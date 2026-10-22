@@ -7,8 +7,10 @@
  * so this driver tolerates a slow announcement with one reload. `media.ts` is the strict path: it
  * waits on an explicit publisher-ready state and never reloads.
  *
- *     bun driver.ts publish   --url http://127.0.0.1:4443 --broadcast b.hang
- *     bun driver.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20 [--expect-audio]
+ *     bun driver.ts publish   --url http://127.0.0.1:4443 --broadcast b.hang [--version V]
+ *     bun driver.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20 [--version V] [--expect-audio]
+ *
+ * `--version` makes the element offer that protocol version alone.
  *
  * @module
  */
@@ -54,6 +56,7 @@ const { positionals, values } = parseArgs({
 	options: {
 		url: { type: "string" },
 		broadcast: { type: "string" },
+		version: { type: "string" },
 		timeout: { type: "string", default: "20" },
 		"expect-audio": { type: "boolean", default: false },
 	},
@@ -72,7 +75,9 @@ if (
 	timeoutMs <= 0 ||
 	(expectAudio && role !== "subscribe")
 ) {
-	console.error("usage: driver.ts publish|subscribe --url U --broadcast B [--timeout S>0] [--expect-audio]");
+	console.error(
+		"usage: driver.ts publish|subscribe --url U --broadcast B [--version V] [--timeout S>0] [--expect-audio]",
+	);
 	process.exit(2);
 }
 
@@ -108,7 +113,7 @@ let code = 1;
 try {
 	const [page, errors] = await open(
 		browser,
-		pageUrl(server.origin, role, { url, broadcast }),
+		pageUrl(server.origin, role, { url, broadcast, ...(values.version ? { versions: values.version } : {}) }),
 		role,
 		role === "subscribe",
 	);

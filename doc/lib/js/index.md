@@ -15,6 +15,7 @@ and WebAudio. `@moq/net` also runs in Node, Bun, and Deno.
 | [@moq/net](/lib/js/net) | The pub/sub layer: connections, broadcasts, tracks, groups, frames, discovery. |
 | [@moq/pattern](https://www.npmjs.com/package/@moq/pattern) | Exact path patterns: grammar, matching, and set algebra. Re-exported by `@moq/net` and `@moq/auth`. |
 | [@moq/hang](/lib/js/hang) | The media layer: catalog types and containers. |
+| [@moq/libav](https://github.com/moq-dev/moq/tree/main/js/libav) | libav.js decoding Opus and AAC, which `@moq/hang` loads as its WebCodecs fallback in Node, Bun, and browsers without `AudioDecoder`. LGPL-2.1-or-later. |
 | [@moq/watch](/lib/js/watch) | Subscribe, decode, and render. `<moq-watch>` plus an optional UI overlay. |
 | [@moq/video](/lib/js/video) | Draw video frames into a canvas through WebGPU or Canvas2D. Used by `@moq/watch` and `@moq/publish`. |
 | [@moq/publish](/lib/js/publish) | Capture, encode, and publish. `<moq-publish>` plus an optional UI overlay. |
