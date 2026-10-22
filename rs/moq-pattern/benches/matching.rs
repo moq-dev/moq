@@ -40,14 +40,17 @@ fn matching(c: &mut Criterion) {
 ///
 /// `AUTH_OK` carries a count the peer chooses, so the cost of `collect` must not grow
 /// quadratically with it. Literals share one specificity tier (no containment checks);
-/// partials of one width share another.
+/// partials of one width share another; two-tier alternates one- and two-segment
+/// literals, so every upper-tier member is checked against every lower-tier one.
 fn reduction(c: &mut Criterion) {
 	let mut group = c.benchmark_group("pattern-reduction");
 	for count in [16, 256, 4096] {
-		for kind in ["literal", "partial"] {
+		for kind in ["literal", "partial", "two-tier"] {
 			let inputs: Vec<Pattern> = (0..count)
 				.map(|index| match kind {
 					"literal" => format!("room{index:04}").parse().unwrap(),
+					"two-tier" if index % 2 == 0 => format!("room{index:04}").parse().unwrap(),
+					"two-tier" => format!("room{index:04}/x").parse().unwrap(),
 					_ => format!("room{index:04}*tail").parse().unwrap(),
 				})
 				.collect();
