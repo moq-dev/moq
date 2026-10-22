@@ -683,11 +683,11 @@ test("lite-07 presents a transiently refused token again after a backoff", async
 			presented = true;
 			return request;
 		});
-		clock.advance(Nano.fromMilli(Milli(backoff - 1)));
+		await clock.advance(Nano.fromMilli(Milli(backoff - 1)));
 		for (let i = 0; i < 10; i++) await nextTask();
 		expect(presented).toBe(false);
 		expect(added).toBe(false);
-		clock.advance(Nano.fromMilli(Milli(1)));
+		await clock.advance(Nano.fromMilli(Milli(1)));
 		return await next;
 	};
 
@@ -888,7 +888,7 @@ test("lite-07 ignores a draining session's late refusal while its successor retr
 		expect(ended).toBe(false);
 
 		const retried = successorRequests.next();
-		clock.advance(Nano.fromMilli(Milli(1000)));
+		await clock.advance(Nano.fromMilli(Milli(1000)));
 		const again = await retried;
 		if (!again) throw new Error("the successor did not present the token again");
 		issued.push(again.accept(grant(["third"], [])));

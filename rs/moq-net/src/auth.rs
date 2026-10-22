@@ -1315,7 +1315,7 @@ pub struct Auth {
 	presented: std::sync::Arc<Presented>,
 }
 
-#[cfg(all(test, feature = "async"))]
+#[cfg(test)]
 impl Auth {
 	/// The id the session presents this credential under.
 	pub(crate) fn id(&self) -> u64 {

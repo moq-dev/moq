@@ -298,7 +298,7 @@ test("the connection's tokens ride every session across a GOAWAY", async () => {
 	const until = async (done: () => boolean) => {
 		for (let i = 0; i < 100 && !done(); i++) {
 			await nextTask();
-			clock.advance(Nano.fromMilli(Milli(1)));
+			await clock.advance(Nano.fromMilli(Milli(1)));
 		}
 		expect(done()).toBe(true);
 	};
