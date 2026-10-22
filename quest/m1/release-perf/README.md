@@ -63,7 +63,7 @@ usually pays for a feature.
 | `track_gap_flush/4096` | 5.7 us | 551 us | 96x | [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) |
 | `track_gap_flush/512` | 1.8 us | 48 us | 27x | same |
 | `track_gap_flush/64` | 1.5 us | 6.2 us | 4.1x | same |
-| `stats/session-report/1000x10` | 11.0 us | 86.8 us | 7.9x | [Stats report](/quest/m1/release-perf/stats-report.md) |
+| `stats/session-report/1000x10` | 11.0 us | 86.8 us | 7.9x | accepted (above) |
 | `track_gc/idle/16384` | 11.6 ns | 73.7 ns | 6.3x | [Idle GC](/quest/m1/release-perf/gc-idle.md) |
 | `origin/resume_overlap/sequence/1r_64g_32c` | 93 us | 426 us | 4.6x | [Resume duplicates](/quest/m1/release-perf/resume-duplicates.md) |
 | `session_delivery_group_cost/moq-transport-22/.../viewers=64/.../fetch` | 1.19 ms | 3.86 ms | 3.2x | accepted (above) |
@@ -100,7 +100,6 @@ one.
 - [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) - an arrival and a gap flush cost O(log gaps), not O(gaps)
 - [Resume duplicates](/quest/m1/release-perf/resume-duplicates.md) - an ordered resume skips copies of an already-delivered group without consuming them
 - [Idle GC](/quest/m1/release-perf/gc-idle.md) - an idle track GC skips the wall-clock pass when nothing is due
-- [Stats report](/quest/m1/release-perf/stats-report.md) - the stats drain locks each row once and its bench counts the wire walk; per-label bytes stay, at an accepted O(live sessions)
 - [Re-check](/quest/m1/release-perf/recheck.md) - the screen-only moves are re-measured with instruction counts, and the ones that hold are fixed or accepted
 - [JS frames](/quest/m1/release-perf/js-frames.md) - the js/net frame path is no slower than release in a browser, or the gap is accepted
 - [Comparison harness](/quest/m1/release-perf/compare-harness.md) - `just bench <base>` pairs full Criterion IDs and keeps its report
