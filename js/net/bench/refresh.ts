@@ -83,7 +83,7 @@ for (const retained of [1, 64, 1024])
 				destination.close();
 				source.close();
 				for (const peer of peers) peer.abort();
-				await clock.advanceAsync(Nano(0));
+				await clock.advance(Nano(0));
 				restore();
 			}
 		}

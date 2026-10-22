@@ -570,4 +570,5 @@ impl Slot {
 
 #[cfg(test)]
 #[path = "cuda_test.rs"]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests;

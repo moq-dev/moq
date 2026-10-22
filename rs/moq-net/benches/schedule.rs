@@ -49,7 +49,7 @@ const PACKET: usize = 1200;
 /// `cadence` ticks, numbered from `first` in steps of `step`.
 #[derive(Clone, Copy)]
 struct Track {
-	priority: u8,
+	priority: i8,
 	rate: usize,
 	cadence: u64,
 	first: u64,
@@ -57,7 +57,7 @@ struct Track {
 }
 
 impl Track {
-	const fn new(priority: u8, rate: usize, cadence: u64) -> Self {
+	const fn new(priority: i8, rate: usize, cadence: u64) -> Self {
 		Self {
 			priority,
 			rate,
@@ -349,7 +349,7 @@ impl Sim {
 	}
 
 	fn report(&self, workload: &str) {
-		let priorities: Vec<u8> = {
+		let priorities: Vec<i8> = {
 			let mut p: Vec<_> = self.tracks.iter().map(|t| t.priority).collect();
 			p.sort();
 			p.dedup();

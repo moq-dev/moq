@@ -15,6 +15,16 @@ to milliseconds and raises the global value after observing a longer sweep.
 rounded value can leave the history short of the recovery picture, and a later catalog update cannot
 recall pictures a subscriber has already displayed using the old value.
 
+Decided 2026-10-22 (maintainer): precision is settled; the hang draft rounds a
+fractional-millisecond `warmup` up
+([#5212](https://github.com/moq-dev/moq/pull/5212)). The draft's `warmup` rule
+is amended so a consumer running a parallel max-delay decoder MAY present
+min-delay pictures before the group start plus `warmup`, which keeps the
+merged dual decoder in `decode::Consumer`
+([#5842](https://github.com/moq-dev/moq/pull/5842)); that amendment moved to
+[its own m1 quest](/quest/m1/warmup-draft.md) so it ships with the decoder. Publication ordering for
+a later, longer sweep remains to settle.
+
 Ask the maintainer to choose between an exact per-group boundary and a safe
 bound known and published before the affected content, including the latency
 and catalog/container consequences. Test timestamp precision, reordered

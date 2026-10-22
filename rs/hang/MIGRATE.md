@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Priorities are signed (#6142)
+
+`catalog::Priorities` fields and `container::track_info`'s priority are `i8`, higher first, with 0 unset.
+`PRIORITY` keeps its values (100, 90, 80, 60), which now sit above the unset default instead of below it, so their moq-lite bytes move from 100..60 to 228..188.
+
 ### `catalog::Reference` names its epoch (#5699)
 
 Every rendition and data track config gains an optional `epoch` beside `broadcast`, and `Archive` gains `replay_epoch` beside `replay`.

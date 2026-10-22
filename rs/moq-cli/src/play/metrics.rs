@@ -98,7 +98,7 @@ pub(super) struct Metrics {
 	/// What closed engines counted, added to the current one's totals.
 	base: Totals,
 	start: Instant,
-	interval: tokio::time::Interval,
+	interval: moq_clock::Interval,
 }
 
 impl Metrics {
@@ -109,8 +109,8 @@ impl Metrics {
 	) -> anyhow::Result<(Self, mpsc::UnboundedSender<Observer>)> {
 		let file = File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
 		let (observe, observers) = mpsc::unbounded_channel();
-		let mut interval = tokio::time::interval(INTERVAL);
-		interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+		let mut interval = moq_clock::interval(INTERVAL);
+		interval.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
 		let metrics = Self {
 			file: BufWriter::new(file),
 			presentation,

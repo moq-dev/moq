@@ -34,10 +34,10 @@ pub const TIMESCALE: Timescale = Timescale::MICRO;
 /// [`PRIORITY`](crate::catalog::PRIORITY) so every publisher orders its kinds the
 /// same way (`PRIORITY.video` for a video track, and so on). It's a parameter
 /// rather than a default because there is no correct value for "some media
-/// track": leaving it at zero is what puts audio and video in one undifferentiated
+/// track": leaving it at the unset 0 is what puts audio and video in one undifferentiated
 /// tier, both on the wire and in
 /// [`bandwidth::Allocator`](moq_net::bandwidth::Allocator).
-pub fn track_info(priority: u8) -> moq_net::track::Info {
+pub fn track_info(priority: i8) -> moq_net::track::Info {
 	moq_net::track::Info::default()
 		.with_timescale(TIMESCALE)
 		.with_max_age(MAX_AGE)
@@ -92,28 +92,19 @@ impl Frame {
 
 	/// Write the frame to `group` as a single moq-lite frame, in the [`Self::encode`] format.
 	///
-	/// Prefer this over [`Self::encode`] when writing to a group: it streams the header and
-	/// payload as separate chunks rather than copying the payload into one buffer, and stamps
-	/// the moq-net frame timestamp so moq-lite-05 and later can delta-encode it on the wire
-	/// independently of the container-level prefix.
+	/// Prefer this over [`Self::encode`] when writing to a group: it stamps the moq-net frame
+	/// timestamp so moq-lite-05 and later can delta-encode it on the wire independently of the
+	/// container-level prefix.
 	pub fn write_to(&self, group: &mut moq_net::group::Producer) -> Result<(), Error> {
-		let mut header = BytesMut::new();
-		self.encode_header(&mut header)?;
-		let header = header.freeze();
+		// The header and payload share one buffer: a frame written in chunks is copied into
+		// one anyway, so building it here costs the same copy.
+		let mut buf = BytesMut::with_capacity(8 + self.payload.len());
+		self.encode_header(&mut buf)?;
+		buf.extend_from_slice(&self.payload);
 
-		let size = (header.len() + self.payload.len()) as u64;
-
-		// `create_frame` converts the timestamp into the track's timescale; older drafts
+		// `write_frame` converts the timestamp into the track's timescale; older drafts
 		// simply don't put it on the wire.
-		let info = moq_net::frame::Info {
-			size,
-			timestamp: Some(self.timestamp),
-		};
-		let mut chunked = group.create_frame(info)?;
-		chunked.write(header)?;
-		chunked.write(self.payload.clone())?;
-		chunked.finish()?;
-
+		group.write_frame(self.timestamp, buf.freeze())?;
 		Ok(())
 	}
 
