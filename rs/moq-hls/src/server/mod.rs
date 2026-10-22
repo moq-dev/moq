@@ -82,9 +82,9 @@ struct Inner {
 	_watch: moq_net::announce::Consumer,
 	config: Config,
 	broadcasters: Mutex<HashMap<String, Arc<Broadcaster>>>,
-	/// Never sent: dropping it with the last server clone ends every eviction task, which
-	/// would otherwise keep its broadcaster for as long as the publisher stays live.
-	dropped: tokio::sync::watch::Sender<()>,
+	/// Closes with the last server clone, ending every eviction task, which would otherwise keep
+	/// its broadcaster for as long as the publisher stays live.
+	alive: kio::Producer<()>,
 }
 
 impl Server {
@@ -98,7 +98,7 @@ impl Server {
 				origin,
 				config,
 				broadcasters: Mutex::new(HashMap::new()),
-				dropped: tokio::sync::watch::Sender::new(()),
+				alive: kio::Producer::new(()),
 			}),
 		}
 	}
@@ -156,10 +156,10 @@ impl Server {
 
 		let name = name.to_string();
 		broadcasters.insert(name.clone(), broadcaster.clone());
-		let dropped = self.inner.dropped.subscribe();
+		let alive = self.inner.alive.consume();
 		tokio::spawn(evict_closed(
 			Arc::downgrade(&self.inner),
-			dropped,
+			alive,
 			name,
 			broadcaster.clone(),
 		));
@@ -169,18 +169,15 @@ impl Server {
 
 /// Forget `broadcaster` once its source closes, unless the server is dropped first. The task
 /// holds the server weakly, so it never keeps the server's state alive.
-async fn evict_closed(
-	inner: Weak<Inner>,
-	mut dropped: tokio::sync::watch::Receiver<()>,
-	name: String,
-	broadcaster: Arc<Broadcaster>,
-) {
-	tokio::select! {
-		_ = broadcaster.closed() => {}
-		// Only fails, once the sender drops with the server.
-		_ = dropped.changed() => return,
-	}
-	let Some(inner) = inner.upgrade() else {
+async fn evict_closed(inner: Weak<Inner>, alive: kio::Consumer<()>, name: String, broadcaster: Arc<Broadcaster>) {
+	let source_closed = kio::wait(|waiter| {
+		if broadcaster.poll_closed(waiter).is_ready() {
+			return Poll::Ready(true);
+		}
+		alive.poll_closed(waiter).map(|()| false)
+	})
+	.await;
+	let Some(inner) = inner.upgrade().filter(|_| source_closed) else {
 		return;
 	};
 
@@ -384,8 +381,8 @@ mod tests {
 			.unwrap()
 			.insert("live".to_string(), new.clone());
 
-		let dropped = server.inner.dropped.subscribe();
-		evict_closed(Arc::downgrade(&server.inner), dropped, "live".to_string(), old).await;
+		let alive = server.inner.alive.consume();
+		evict_closed(Arc::downgrade(&server.inner), alive, "live".to_string(), old).await;
 
 		let cached = server.inner.broadcasters.lock().unwrap().get("live").cloned();
 		assert!(cached.is_some_and(|cached| Arc::ptr_eq(&cached, &new)));
