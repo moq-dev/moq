@@ -30,4 +30,4 @@ and the answerer sends TRACK_ENDED only for a track that really finished.
 ## Related
 
 - [Broadcast archives](/quest/m1/archive/README.md) - lists an IETF peer's tracks through SUBSCRIBE_TRACKS
-- [The IETF answerer pauses any subscription](/quest/m1/ietf-pause-subscribe.md) - the other gap in a clean Rust-to-Rust IETF listing
+- [Pause an IETF SUBSCRIBE](/quest/m1/ietf-subscribe-pause.md) - the other gap in a clean Rust-to-Rust IETF listing
