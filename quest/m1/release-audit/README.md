@@ -83,7 +83,7 @@ network-impairment performance result is implied by these checks.
 
 ## Required
 
-The 21 children comprise 17 reproduced or source-confirmed findings, three
+The children comprise reproduced or source-confirmed findings,
 contract/lifetime investigations, and one security-review pointer. Each
 child records whether its behavior is new on main or inherited from release.
 
