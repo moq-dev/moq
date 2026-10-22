@@ -1,4 +1,4 @@
-# More tests hold up under load
+# [S] More tests hold up under load
 
 ## Goal
 
@@ -40,15 +40,10 @@ which #6032 had already finished, so it reuses #6032's reserved-port fix as
 its own child. moq-uring's `host_tracks_moq_clock` was seen the same day
 but #6056 had already fixed it by measuring the calibration gap.
 
-Added 2026-10-21 (maintainer): three small flakes and a fresh-worktree
-interop failure from the m0/m1 merge run, kept in one child since each is
-small.
+Added 2026-10-21 (maintainer): two flakes (OBS drain, js/net RSS) from the
+m0/m1 merge run, kept in one child since each is small.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [OBS drain and JS allocation flakes](/quest/m1/test-flakes-2/three-flakes.md) - reproduce the OBS stop-drain failure and verify the existing RSS replacement under load
 
 ## Related
 
