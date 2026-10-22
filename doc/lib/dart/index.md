@@ -30,6 +30,7 @@ Share `media.Timebase(broadcast: ...)` through `ContainerInit` when several impo
 one source timeline; omitting it keeps an independent offset. A timebase belongs to its
 broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
 so a raw byte stream needs no other importer.
+`ContainerFormat.fmp4` splits each fragment into one frame per sample; `ContainerFormat.cmaf` republishes it whole.
 `media.CatalogConsumer.subscribe`, `media.TrackConsumer.subscribe`, and `media.GroupConsumer.fetch`
 construct the read side from a broadcast; the last two take a catalog `media.Rendition` and
 follow its broadcast and track themselves. For arrival-order reads, decode each group from
@@ -65,7 +66,8 @@ moq
     default:
   }
 });
-final broadcast = await moq.requestBroadcast('live/camera');
+// Wait for a publisher at one path; call available() again for the next one.
+final broadcast = await moq.announcedBroadcast('live/camera').available();
 final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast);
 print(await catalog.next());
 ```
@@ -98,7 +100,7 @@ encoder.finish();
 // Decode a subscribed rendition. Dispose each frame promptly.
 import 'package:moq/video.dart' as video;
 
-final remote = await moq.requestBroadcast('live/camera');
+final remote = await moq.announcedBroadcast('live/camera').available();
 final renditions = await media.CatalogConsumer.subscribe(broadcast: remote);
 final decoder = await video.Consumer.subscribe(
   broadcast: remote,

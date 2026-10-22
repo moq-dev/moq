@@ -19,8 +19,9 @@ Decided with the maintainer, 2026-10-13:
 - A route that dies without a close counts as such a stall until the QUIC
   idle timeout fires (decided 2026-10-20, from
   [#6062](https://github.com/moq-dev/moq/issues/6062)): a killed relay
-  starves a same-epoch subscription for the whole timeout, and a subscriber
-  max age below it sheds that backlog even though resume asks for it.
+  starves a same-epoch subscription until the QUIC idle timeout fires; since
+  [#6183](https://github.com/moq-dev/moq/pull/6183) resume recovers only what
+  max age still holds, so a max age below the timeout still loses media.
 
 - Application-assigned connection priority remains ahead of additive cost.
   Deterministic hashing still chooses distinct equal routes; a new connection

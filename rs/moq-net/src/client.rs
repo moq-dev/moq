@@ -20,6 +20,7 @@ pub struct Client {
 	peer_hop: Option<crate::Hop>,
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
+	bandwidth: Option<crate::bandwidth::Allocator>,
 }
 
 impl Client {
@@ -64,6 +65,22 @@ impl Client {
 	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
 		self.limits = limits;
 		self
+	}
+
+	/// Share `bandwidth`'s reservations with every session this client dials.
+	///
+	/// Each session probes for what they add up to, and its
+	/// [`Session::bandwidth`](crate::Session::bandwidth) reserves into the same registry,
+	/// so a reservation taken on one session still counts after a reconnect. Without
+	/// one, each session starts an empty registry of its own.
+	pub fn with_bandwidth(mut self, bandwidth: crate::bandwidth::Allocator) -> Self {
+		self.bandwidth = Some(bandwidth);
+		self
+	}
+
+	/// The registry the next session probes for.
+	fn bandwidth(&self) -> crate::bandwidth::Allocator {
+		self.bandwidth.clone().unwrap_or_default()
 	}
 
 	/// Restrict which protocol versions to offer, in preference order.
@@ -233,6 +250,7 @@ impl Client {
 				goaway: start.goaway,
 				auth: start.auth,
 				estimate: Some(start.estimate),
+				bandwidth: self.bandwidth(),
 			},
 		))
 	}
@@ -327,6 +345,7 @@ impl Client {
 						goaway,
 						auth,
 						estimate: None,
+						bandwidth: self.bandwidth(),
 					},
 				));
 			}
@@ -404,6 +423,7 @@ impl Client {
 		ietf::hidden::into_setup(&mut parameters, ietf_encoding);
 		ietf::max_age::into_setup(&mut parameters, ietf_encoding);
 		ietf::active_count::into_setup(&mut parameters, ietf_encoding);
+		ietf::flate::into_setup(&mut parameters, ietf_encoding);
 		let parameters = parameters.encode_bytes(ietf_encoding)?;
 
 		let client = setup::Client {
@@ -462,6 +482,7 @@ impl Client {
 					hidden: ietf::hidden::from_setup(&parameters, v),
 					max_age: ietf::max_age::from_setup(&parameters, v),
 					active_count: ietf::active_count::from_setup(&parameters, v),
+					flate: ietf::flate::from_setup(&parameters, v)?,
 					..Default::default()
 				};
 
@@ -504,6 +525,7 @@ impl Client {
 				goaway,
 				auth,
 				estimate,
+				bandwidth: self.bandwidth(),
 			},
 		))
 	}
@@ -546,6 +568,8 @@ mod tests {
 		state: Arc<FakeSessionState>,
 		// Per-clone, so each pending poll_closed keeps its own registration live.
 		park: kio::Park,
+		/// The sender, set by [`Self::with_probe`].
+		probe: Option<crate::transport::Probe>,
 	}
 
 	#[derive(Default)]
@@ -569,9 +593,9 @@ mod tests {
 		fn new(protocol: Option<&'static str>, server_control_bytes: Vec<u8>) -> Self {
 			let writes = Arc::new(Mutex::new(Vec::new()));
 			let send = FakeSendStream { writes: writes.clone() };
-			let recv = FakeRecvStream {
+			let recv = crate::transport::poll::Buffered::new(FakeChunks {
 				data: VecDeque::from(server_control_bytes),
-			};
+			});
 			let state = FakeSessionState {
 				protocol,
 				control_stream: Mutex::new(Some((send, recv))),
@@ -583,11 +607,23 @@ mod tests {
 			Self {
 				state: Arc::new(state),
 				park: kio::Park::default(),
+				probe: None,
 			}
 		}
 
 		fn set_send_rate(&self, rate: Option<u64>) {
 			*self.state.send_rate.lock().unwrap() = rate;
+		}
+
+		/// Give the transport a sender, so the session hands it a target.
+		fn with_probe(mut self) -> Self {
+			self.probe = Some(crate::transport::Probe::new());
+			self
+		}
+
+		/// What the session last handed the sender, in bits per second.
+		fn probe_target(&self) -> u64 {
+			self.probe.as_ref().expect("built with_probe").target().as_bps()
 		}
 
 		fn set_bytes_sent(&self, bytes: Option<u64>) {
@@ -678,6 +714,10 @@ mod tests {
 				bytes_sent: *self.state.bytes_sent.lock().unwrap(),
 			}
 		}
+
+		fn probe(&self) -> Option<crate::transport::Probe> {
+			self.probe.clone()
+		}
 	}
 
 	struct FakeStats {
@@ -726,30 +766,25 @@ mod tests {
 		}
 	}
 
-	struct FakeRecvStream {
+	type FakeRecvStream = crate::transport::poll::Buffered<FakeChunks>;
+
+	struct FakeChunks {
 		data: VecDeque<u8>,
 	}
 
-	impl crate::transport::poll::RecvStream for FakeRecvStream {
+	impl crate::transport::poll::Chunks for FakeChunks {
 		type Error = FakeError;
 
-		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		fn poll_read_chunk(&mut self, _cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 			if self.data.is_empty() {
 				return Poll::Ready(Ok(None));
 			}
 
-			let size = dst.len().min(self.data.len());
-			for slot in dst.iter_mut().take(size) {
-				*slot = self.data.pop_front().unwrap();
-			}
-			Poll::Ready(Ok(Some(size)))
+			let size = max.min(self.data.len());
+			Poll::Ready(Ok(Some(self.data.drain(..size).collect())))
 		}
 
 		fn stop(&mut self, _code: u32) {}
-
-		fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
-		}
 	}
 
 	fn mock_server_setup(negotiated: Version) -> Vec<u8> {
@@ -1111,17 +1146,18 @@ mod tests {
 
 	impl crate::transport::poll::RecvStream for LocalRecv {
 		type Error = FakeError;
+		type Lease<'a> = crate::transport::poll::BufferedLease<'a>;
 
-		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-			self.inner.poll_read(cx, dst)
+		fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
+			self.inner.poll_lease(cx, want)
+		}
+
+		fn set_priority(&mut self, priority: i64) {
+			self.inner.set_priority(priority);
 		}
 
 		fn stop(&mut self, code: u32) {
-			self.inner.stop(code);
-		}
-
-		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			crate::transport::poll::RecvStream::poll_closed(&mut self.inner, cx)
+			crate::transport::poll::RecvStream::stop(&mut self.inner, code);
 		}
 	}
 
@@ -1268,6 +1304,108 @@ mod tests {
 		assert_eq!(
 			bandwidth.changed().await.unwrap(),
 			Some(crate::bandwidth::Rate::from_bps(2_000_000))
+		);
+	}
+
+	/// A track to reserve against, with the broadcast keeping it alive.
+	fn reservable() -> (crate::broadcast::Producer, crate::track::Producer) {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let track = broadcast.create_track("t", crate::track::Info::timed()).unwrap();
+		(broadcast, track)
+	}
+
+	/// Run the driver until the sender's target reads `bps`.
+	async fn probes_to(fake: &FakeSession, bps: u64) {
+		while fake.probe_target() != bps {
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+		}
+	}
+
+	// The session probes for every reservation on its allocator, demanded or not: a
+	// stopped rendition loses its viewers, and still has to be funded to resume.
+	#[moq_clock::test]
+	async fn the_sender_probes_to_the_reservations() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
+		fake.set_send_rate(Some(1_000_000));
+
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
+		let bandwidth = session.bandwidth();
+
+		let (_watched_broadcast, watched) = reservable();
+		let _sub = watched.subscribe(None);
+		let watched = bandwidth.reserve(&watched.demand(), crate::bandwidth::Rate::from_bps(4_000_000));
+		probes_to(&fake, 4_000_000).await;
+
+		let (_idle_broadcast, idle) = reservable();
+		let idle = bandwidth.reserve(&idle.demand(), crate::bandwidth::Rate::from_bps(1_000_000));
+		probes_to(&fake, 5_000_000).await;
+
+		idle.update(crate::bandwidth::Rate::from_bps(2_000_000));
+		probes_to(&fake, 6_000_000).await;
+
+		drop(watched);
+		probes_to(&fake, 2_000_000).await;
+		drop(idle);
+		probes_to(&fake, 0).await;
+	}
+
+	// An override replaces the sum, zero turns probing off, and clearing it follows the
+	// reservations again.
+	#[moq_clock::test]
+	async fn an_override_replaces_the_reservations() {
+		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
+		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let (session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
+		let bandwidth = session.bandwidth();
+
+		let (_broadcast, track) = reservable();
+		let _reserved = bandwidth.reserve(&track.demand(), crate::bandwidth::Rate::from_bps(4_000_000));
+		probes_to(&fake, 4_000_000).await;
+
+		bandwidth.set_target(Some(crate::bandwidth::Rate::ZERO));
+		probes_to(&fake, 0).await;
+
+		bandwidth.set_target(Some(crate::bandwidth::Rate::from_bps(10_000_000)));
+		probes_to(&fake, 10_000_000).await;
+
+		bandwidth.set_target(None);
+		probes_to(&fake, 4_000_000).await;
+	}
+
+	// A reconnecting caller dials every session with one allocator, so a reservation
+	// taken before the reconnect still moves the next session's target.
+	#[moq_clock::test]
+	async fn a_reconnect_keeps_following_the_reservations() {
+		let bandwidth = crate::bandwidth::Allocator::default();
+		let client = Client::new()
+			.with_versions(Version::Lite(lite::Version::Lite04).into())
+			.with_bandwidth(bandwidth.clone());
+
+		let (_broadcast, track) = reservable();
+		let reserved = bandwidth.reserve(&track.demand(), crate::bandwidth::Rate::from_bps(4_000_000));
+
+		let first = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
+		let (session, driver) = client.connect(moq_clock::now(), first.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
+		probes_to(&first, 4_000_000).await;
+		session.abort(Error::Cancel);
+		session.closed().await;
+		drop(session);
+
+		let second = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
+		let (_session, driver) = client.connect(moq_clock::now(), second.clone()).await.unwrap();
+		moq_clock::sim::spawn(crate::time::run(driver));
+		probes_to(&second, 4_000_000).await;
+
+		reserved.update(crate::bandwidth::Rate::from_bps(3_000_000));
+		probes_to(&second, 3_000_000).await;
+		assert_eq!(
+			first.probe_target(),
+			4_000_000,
+			"a closed session's sender is left alone"
 		);
 	}
 }

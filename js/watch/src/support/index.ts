@@ -20,7 +20,7 @@ export type Codec = {
 
 /** Which audio codecs decode. */
 export type Audio = {
-	aac: boolean;
+	aac: Level;
 	opus: Level;
 };
 
@@ -97,7 +97,8 @@ export async function isSupported(): Promise<Full> {
 		webtransport: Connection.isWebTransportSupported() ? "full" : "partial",
 		audio: {
 			decoding: {
-				aac: await audioDecoderSupported("aac"),
+				// The libav fallback decodes AAC only where it installs, which is wherever AudioDecoder is missing.
+				aac: (await audioDecoderSupported("aac")) ? "full" : globalThis.AudioDecoder ? "none" : "partial",
 				opus: (await audioDecoderSupported("opus")) ? "full" : "partial",
 			},
 			render: typeof AudioContext !== "undefined" && typeof AudioBufferSourceNode !== "undefined",

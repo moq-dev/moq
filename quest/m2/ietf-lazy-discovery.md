@@ -22,11 +22,6 @@ unsolicited PUBLISH_NAMESPACE.
 
 Public API: none expected. Wire: no new messages.
 
-## Required
-
-- [Lazy discovery in Rust](/quest/m1/lazy-discovery/rust.md) - the lite path this mirrors
-
 ## Related
 
-- [Lazy discovery](/quest/m1/lazy-discovery/README.md) - the moq-lite epic
 - [Keyed prefix polling](/quest/m2/keyed-prefix-polling.md) - the per-wake cost of many open prefixes

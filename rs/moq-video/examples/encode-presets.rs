@@ -19,6 +19,7 @@
 //! times the input's size on disk.
 //!
 //! Hardware on another machine needs its own run; nothing here extrapolates.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use std::time::{Duration, Instant};
 
