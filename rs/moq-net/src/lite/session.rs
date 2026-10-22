@@ -345,6 +345,7 @@ where
 			.then(|| SendSetup::new(session.clone(), our_setup, version)),
 		goaway: Some(SendGoaway::new(session.clone(), goaway, version)),
 		session_stream: setup_stream,
+		ending: None,
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber, early),
 		session,
@@ -373,6 +374,8 @@ pub(crate) struct Driver<S: crate::transport::poll::Session> {
 	/// The legacy session stream (pre-lite-03). Only its *error* ends the race, so
 	/// the publisher and subscriber keep running while it sits idle.
 	session_stream: Option<Stream<S, Version>>,
+	/// The first terminal outcome, retained while received streams drain.
+	ending: Option<Result<(), Error>>,
 	publisher: Publisher<S>,
 	subscriber: SubscriberDriver<S>,
 	/// For the terminal close: the machine's last act reports the outcome to
@@ -385,33 +388,44 @@ where
 	S: crate::transport::poll::Session,
 {
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let res = std::task::ready!(self.poll_protocol(waiter));
-		self.auth.handle.close(match &res {
-			Ok(()) => Error::Cancel,
-			Err(err) => err.clone(),
-		});
-		if self.local_close.load(std::sync::atomic::Ordering::Relaxed) {
-			self.subscriber.close();
-		} else if let Err(err) = &res {
-			// Every track this session was receiving ends with its error.
-			self.subscriber.abort(err);
+		if self.ending.is_none() {
+			let res = std::task::ready!(self.poll_protocol(waiter));
+			self.auth.handle.close(match &res {
+				Ok(()) => Error::Cancel,
+				Err(err) => err.clone(),
+			});
+			match &res {
+				Err(Error::Transport(_) | Error::IdleTimeout) => {
+					tracing::info!("session terminated");
+					self.session.close(SessionError::Internal.to_code(), "");
+				}
+				Err(err) => {
+					tracing::warn!(%err, "session error");
+					self.session.close(
+						crate::lite::error::to_session_code(&SessionError::from(err)),
+						err.to_string().as_ref(),
+					);
+				}
+				_ => {
+					tracing::info!("session closed");
+					self.session.close(SessionError::Cancel.to_code(), "");
+				}
+			}
+			if self.local_close.load(std::sync::atomic::Ordering::Relaxed) {
+				self.subscriber.close();
+				return Poll::Ready(res);
+			}
+			self.ending = Some(res);
 		}
-		match &res {
-			Err(Error::Transport(_) | Error::IdleTimeout) => {
-				tracing::info!("session terminated");
-				self.session.close(SessionError::Internal.to_code(), "");
-			}
-			Err(err) => {
-				tracing::warn!(%err, "session error");
-				self.session.close(
-					crate::lite::error::to_session_code(&SessionError::from(err)),
-					err.to_string().as_ref(),
-				);
-			}
-			_ => {
-				tracing::info!("session closed");
-				self.session.close(SessionError::Cancel.to_code(), "");
-			}
+		// Closing the transport first bounds every read, including when a control
+		// stream ended the protocol while the connection itself was still live.
+		// Keep control machines and their subscription entries until data drains.
+		std::task::ready!(self.subscriber.poll_drain(waiter));
+		let res = self.ending.take().expect("draining a terminal session");
+		if let Err(err) = &res {
+			self.subscriber.abort(err);
+		} else {
+			self.subscriber.close();
 		}
 		Poll::Ready(res)
 	}
@@ -858,6 +872,43 @@ mod tests {
 		}
 	}
 
+	/// A protocol error on a live connection must end partial receive reads before
+	/// waiting for them, otherwise receive draining could wait for new peer data.
+	#[moq_clock::test]
+	async fn malformed_auth_closes_before_draining_a_partial_group_header() {
+		assert_session_closes(
+			ScriptedSession::per_stream(vec![vec![99]]).with_incoming_unis(vec![vec![0]]),
+			Setup::default(),
+		)
+		.await;
+	}
+
+	/// After close, no stream can deliver the peer SETUP a GROUP stream waits on to read
+	/// its header, whether the SETUP stream was truncated or never opened.
+	#[moq_clock::test]
+	async fn drain_ends_when_groups_wait_on_an_undeliverable_setup() {
+		let version = Version::Lite07;
+		let mut group = Vec::new();
+		DataType::Group
+			.encode(&mut crate::coding::Encoder::new(&mut group, version.into()), version)
+			.unwrap();
+		let mut setup = Vec::new();
+		DataType::Setup
+			.encode(&mut crate::coding::Encoder::new(&mut setup, version.into()), version)
+			.unwrap();
+		let ietf = Setup {
+			ietf: true,
+			..Default::default()
+		};
+		for unis in [vec![group.clone(), setup], vec![group]] {
+			assert_session_closes(
+				ScriptedSession::per_stream(vec![vec![99]]).with_incoming_unis(unis),
+				ietf.clone(),
+			)
+			.await;
+		}
+	}
+
 	async fn malformed_auth_reply(script: Vec<u8>) {
 		// The setup token's AUTH stream is the first one the session opens.
 		let transport = ScriptedSession::per_stream(vec![script]);
@@ -958,7 +1009,7 @@ mod tests {
 		w.varint(0).unwrap();
 		w.varint(4).unwrap();
 		w.varint(0).unwrap();
-		assert_session_closes(ScriptedSession::per_stream_eof(vec![script])).await;
+		assert_session_closes(ScriptedSession::per_stream_eof(vec![script]), Setup::default()).await;
 	}
 
 	#[moq_clock::test]
@@ -976,10 +1027,10 @@ mod tests {
 	}
 
 	async fn assert_malformed_reply_closes(script: Vec<u8>) {
-		assert_session_closes(ScriptedSession::per_stream(vec![script])).await;
+		assert_session_closes(ScriptedSession::per_stream(vec![script]), Setup::default()).await;
 	}
 
-	async fn assert_session_closes(transport: ScriptedSession) {
+	async fn assert_session_closes(transport: ScriptedSession, our_setup: Setup) {
 		let log = transport.log.clone();
 		let start = start(Config {
 			runtime: crate::time::sim(),
@@ -991,7 +1042,7 @@ mod tests {
 			subscribe: None,
 			peer_hop: None,
 			version: Version::Lite07,
-			our_setup: Setup::default(),
+			our_setup,
 			peer_setup: None,
 			auth: crate::auth::Handle::new(true),
 		})

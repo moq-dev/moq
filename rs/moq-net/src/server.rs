@@ -200,6 +200,7 @@ impl Server {
 				goaway: start.goaway,
 				auth: start.auth,
 				estimate: Some(start.estimate),
+				bandwidth: crate::bandwidth::Allocator::default(),
 			},
 		))
 	}
@@ -657,6 +658,7 @@ where
 					goaway,
 					auth,
 					estimate: None,
+					bandwidth: crate::bandwidth::Allocator::default(),
 				},
 			))
 		}
@@ -795,6 +797,7 @@ where
 					goaway,
 					auth,
 					estimate,
+					bandwidth: crate::bandwidth::Allocator::default(),
 				},
 			))
 		}

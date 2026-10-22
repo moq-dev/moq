@@ -44,8 +44,8 @@ use tracing::{error_span, info};
 use tracing_subscriber::EnvFilter;
 
 use super::{
-    ClientConfig, Endpoint, EndpointConfig, ReadError, ReadToEndError, RecvStream, SendStream,
-    TransportConfig, VarInt,
+    ClientConfig, Connection, Endpoint, EndpointConfig, ReadError, ReadToEndError, RecvStream,
+    SendStream, TransportConfig, VarInt,
 };
 
 #[test]
@@ -1787,6 +1787,169 @@ async fn finished_send_stream_survives_drop() {
     let mut recv_stream = server_conn.accept_uni().await.unwrap();
     let data = recv_stream.read_to_end(usize::MAX).await.unwrap();
     assert_eq!(data, b"complete");
+}
+
+/// Connects `endpoint` to itself, returning the client and server sides
+async fn connect_self(endpoint: &Endpoint) -> (Connection, Connection) {
+    tokio::try_join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    )
+    .unwrap()
+}
+
+/// Wait until the peer's STOP_SENDING has been processed
+async fn stop_sending_received(conn: &Connection) {
+    timeout(Duration::from_secs(10), async {
+        while conn.stats().frame_rx.stop_sending == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("no STOP_SENDING arrived");
+}
+
+/// A peer's stop code that arrived before a local reset still wins
+#[tokio::test]
+async fn stream_stop_before_reset_wins() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    let mut recv = server.accept_uni().await.unwrap();
+    recv.stop(5u32.into()).unwrap();
+    stop_sending_received(&conn).await;
+
+    send.reset(7u32.into()).unwrap();
+    let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+    assert_eq!(stopped, Ok(Ok(Some(5u32.into()))));
+}
+
+/// A STOP_SENDING that arrives after a local reset no longer counts
+#[tokio::test]
+async fn stream_stop_after_reset_is_ignored() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    let mut recv = server.accept_uni().await.unwrap();
+    // Neither side runs in between, so the peer stops a stream it hasn't seen reset yet.
+    send.reset(7u32.into()).unwrap();
+    recv.stop(5u32.into()).unwrap();
+    stop_sending_received(&conn).await;
+
+    let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+    assert_eq!(stopped, Ok(Ok(None)));
+}
+
+/// A stop code that arrived first still wins once the reset stream is freed before the waiter polls
+#[tokio::test]
+async fn stream_stop_survives_freed_reset() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    let stopped = send.stopped();
+    let mut recv = server.accept_uni().await.unwrap();
+    recv.stop(5u32.into()).unwrap();
+    stop_sending_received(&conn).await;
+
+    send.reset(7u32.into()).unwrap();
+    let id = send.id();
+    timeout(Duration::from_secs(10), async {
+        while !conn.send_stream_freed(id) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the reset stream was never freed");
+    let stopped = timeout(Duration::from_secs(10), stopped).await;
+    assert_eq!(stopped, Ok(Ok(Some(5u32.into()))));
+}
+
+/// A local reset resolves `stopped`, though no stream event reports it
+#[tokio::test]
+async fn stream_reset_resolves_stopped() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, _server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    send.reset(7u32.into()).unwrap();
+    let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+    assert_eq!(stopped, Ok(Ok(None)));
+}
+
+#[tokio::test]
+async fn stream_reset_at_resolves_stopped() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, _server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    send.reset_at(2, 7u32.into()).unwrap();
+    let stopped = timeout(Duration::from_secs(10), send.stopped()).await;
+    assert_eq!(stopped, Ok(Ok(None)));
+}
+
+/// `stopped` futures made before a reset resolve on it, whether or not they were polled yet
+#[tokio::test]
+async fn stream_stopped_pending_across_reset() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, _server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    let unpolled = send.stopped();
+    let polled = tokio::spawn(send.stopped());
+    tokio::task::yield_now().await;
+    assert!(!polled.is_finished());
+    send.reset(7u32.into()).unwrap();
+    let polled = timeout(Duration::from_secs(10), polled).await;
+    assert_eq!(polled.expect("polled never resolved").unwrap(), Ok(None));
+    let unpolled = timeout(Duration::from_secs(10), unpolled).await;
+    assert_eq!(unpolled, Ok(Ok(None)));
+}
+
+/// A `stopped` future outliving its stream resolves on the drop reset
+#[tokio::test]
+async fn dropped_stream_resolves_stopped() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, _server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"truncated").await.unwrap();
+    let stopped = send.stopped();
+    drop(send);
+    let stopped = timeout(Duration::from_secs(10), stopped).await;
+    assert_eq!(stopped, Ok(Ok(None)));
+    assert_eq!(conn.stopped_waiters(), 0);
+}
+
+/// A reset releases the stream's `stopped` waiters, even one dropped while pending
+#[tokio::test]
+async fn stream_reset_releases_stopped() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, _server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    {
+        let mut stopped = pin!(send.stopped());
+        let poll = std::future::poll_fn(|cx| Poll::Ready(stopped.as_mut().poll(cx))).await;
+        assert!(poll.is_pending());
+    }
+    assert_eq!(conn.stopped_waiters(), 1);
+    send.reset(7u32.into()).unwrap();
+    assert_eq!(conn.stopped_waiters(), 0);
+    // Answered at once, without registering a waiter for a stream that will never report
+    drop(send.stopped());
+    assert_eq!(conn.stopped_waiters(), 0);
 }
 
 #[tokio::test]

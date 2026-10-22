@@ -468,22 +468,48 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 	}
 }
 
+/// Preserve the real receive stream's registries through the shared-control adapter.
+/// Virtual streams have only local errors, while data streams still carry raw codes.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RecvError<E: crate::transport::Error> {
+	#[error(transparent)]
+	Real(E),
+	#[error(transparent)]
+	Virtual(crate::Error),
+}
+
+impl<E: crate::transport::Error> crate::transport::Error for RecvError<E> {
+	fn close_kind(&self) -> crate::transport::CloseKind {
+		match self {
+			Self::Real(err) => err.close_kind(),
+			Self::Virtual(err) => err.close_kind(),
+		}
+	}
+
+	fn session_error(&self) -> Option<(u32, String)> {
+		match self {
+			Self::Real(err) => err.session_error(),
+			Self::Virtual(err) => err.session_error(),
+		}
+	}
+
+	fn stream_error(&self) -> Option<u32> {
+		match self {
+			Self::Real(err) => err.stream_error(),
+			Self::Virtual(err) => err.stream_error(),
+		}
+	}
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum AdapterRecv<S: crate::transport::poll::Session> {
 	Real(S::RecvStream),
 	Virtual(crate::transport::poll::Buffered<VirtualRecvStream>),
 }
 
-/// A real stream's failure: an eviction keeps its meaning, anything else closed the stream.
-fn real_error(err: impl crate::transport::Error) -> crate::Error {
-	match err.close_kind() {
-		crate::transport::CloseKind::Evicted => crate::Error::Evicted,
-		_ => crate::Error::Closed,
-	}
-}
-
 impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for AdapterRecv<S> {
-	type Error = crate::Error;
+	type Error = RecvError<<S::RecvStream as crate::transport::poll::RecvStream>::Error>;
 	type Lease<'a>
 		= AdapterLease<'a, S>
 	where
@@ -493,8 +519,10 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 		match self {
 			Self::Real(s) => s
 				.poll_lease(cx, want)
-				.map(|r| r.map(AdapterLease::Real).map_err(real_error)),
-			Self::Virtual(s) => s.poll_lease(cx, want).map_ok(AdapterLease::Virtual),
+				.map(|r| r.map(AdapterLease::Real).map_err(RecvError::Real)),
+			Self::Virtual(s) => s
+				.poll_lease(cx, want)
+				.map(|r| r.map(AdapterLease::Virtual).map_err(RecvError::Virtual)),
 		}
 	}
 

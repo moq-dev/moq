@@ -25,6 +25,7 @@
 //! drill fails when its recovery behavior is removed, and the loom/fuzz cases
 //! covering the primitives underneath.
 #![cfg(all(feature = "quic", feature = "websocket"))]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use std::time::Duration;
 

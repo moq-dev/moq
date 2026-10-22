@@ -221,7 +221,7 @@ percent-encoding = "2"
 pollster = "1.0"
 # default-features off to skip the fork and timeout machinery; crates opt into what they use.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
-qmux = { version = "0.6.3", default-features = false }
+qmux = { version = "0.6.5", default-features = false }
 rand = "0.10.1"
 rangemap = "1.8"
 # default-features off so each consumer picks its crypto provider.

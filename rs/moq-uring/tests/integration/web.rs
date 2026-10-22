@@ -210,6 +210,41 @@ fn webtransport_echo_end_to_end() {
 	client.join().expect("client thread");
 }
 
+#[test]
+fn webtransport_accepts_a_buffered_uni_after_the_peer_close() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let client = tokio_client(format!("https://{}/tail", endpoint.local_addr()), |session| {
+		Box::pin(async move {
+			let mut send = session.open_uni(Default::default()).await.expect("open uni");
+			send.write_all(PAYLOAD).await.expect("write");
+			send.finish().expect("finish");
+			assert!(send.stopped().await.expect("FIN delivered").is_none());
+			session.close(0, b"done");
+			session.closed().await;
+		})
+	});
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
+			let mut session = request
+				.respond(quic::web::Response::default().with_protocol(PROTO))
+				.await
+				.expect("respond");
+			std::future::poll_fn(|cx| session.poll_closed(cx)).await;
+			let mut recv = std::future::poll_fn(|cx| session.poll_accept_uni(cx))
+				.await
+				.expect("buffered uni precedes the close");
+			assert_eq!(drain(&mut recv).await, PAYLOAD);
+			assert!(std::future::poll_fn(|cx| session.poll_accept_uni(cx)).await.is_err());
+		})
+		.expect("worker");
+	client.join().expect("client thread");
+}
+
 /// A whole moq-lite session over WebTransport: subprotocol negotiation, SETUP
 /// on the bidirectional stream, announce, subscribe, and a group on a
 /// unidirectional stream, with the tokio stack as the subscriber. This is the

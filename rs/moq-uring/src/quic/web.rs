@@ -621,15 +621,22 @@ impl web_transport_trait::poll::Session for Session {
 			// Adopt every new arrival, then try to classify the pending set.
 			// Each mid-header stream parks the caller in its own stream's
 			// waiters, so progress on any of them re-polls us.
-			loop {
+			let ended = loop {
 				match web_transport_trait::poll::Session::poll_accept_uni(&mut self.conn, cx) {
 					Poll::Ready(Ok(recv)) => web.state.borrow_mut().pending_uni.push(PendingUni::new(recv)),
-					Poll::Ready(Err(err)) => return Poll::Ready(Err(unmap_err(err))),
-					Poll::Pending => break,
+					Poll::Ready(Err(err)) => break Some(err),
+					Poll::Pending => break None,
 				}
-			}
+			};
 
 			if !classify_uni(&web, cx) {
+				// Buffered headers can finish after the connection error. Hand those
+				// streams out before reporting that no more can arrive.
+				if web.state.borrow().pending_uni.is_empty()
+					&& let Some(err) = ended
+				{
+					return Poll::Ready(Err(unmap_err(err)));
+				}
 				return Poll::Pending;
 			}
 		}
