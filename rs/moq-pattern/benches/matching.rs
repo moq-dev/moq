@@ -36,35 +36,54 @@ fn matching(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Reducing a peer-supplied union, swept over member count and member kind.
+/// Whole-union operations, swept over member count and member kind.
 ///
-/// `AUTH_OK` carries a count the peer chooses, so the cost of `collect` must not grow
-/// quadratically with it. Literals share one specificity tier (no containment checks);
-/// partials of one width share another; two-tier alternates one- and two-segment
-/// literals, so every upper-tier member is checked against every lower-tier one.
-fn reduction(c: &mut Criterion) {
-	let mut group = c.benchmark_group("pattern-reduction");
+/// `AUTH_OK` carries as many patterns as the peer chooses, so none of these may grow
+/// with the product of two unions' sizes. Literals share one specificity tier; partials
+/// share another; two-tier alternates one- and two-segment literals, so every member of
+/// the upper tier meets every member of the lower one. Each operation pairs unions that
+/// never contain each other's members, so no query ends early.
+fn algebra(c: &mut Criterion) {
+	let mut group = c.benchmark_group("pattern-algebra");
+	let union = |kind: &str, name: &str, count: usize| -> Vec<Pattern> {
+		(0..count)
+			.map(|index| match kind {
+				"literal" => format!("{name}{index:04}"),
+				"partial" => format!("{name}{index:04}*tail"),
+				_ if index % 2 == 0 => format!("{name}{index:04}"),
+				_ => format!("{name}{index:04}/x"),
+			})
+			.map(|text| text.parse().unwrap())
+			.collect()
+	};
 	for count in [16, 256, 4096] {
 		for kind in ["literal", "partial", "two-tier"] {
-			let inputs: Vec<Pattern> = (0..count)
-				.map(|index| match kind {
-					"literal" => format!("room{index:04}").parse().unwrap(),
-					"two-tier" if index % 2 == 0 => format!("room{index:04}").parse().unwrap(),
-					"two-tier" => format!("room{index:04}/x").parse().unwrap(),
-					_ => format!("room{index:04}*tail").parse().unwrap(),
-				})
-				.collect();
+			let inputs = union(kind, "room", count);
+			let ours: Patterns = inputs.iter().cloned().collect();
+			let theirs: Patterns = union(kind, "other", count).into_iter().collect();
+			assert_eq!(ours.len(), count);
 			group.throughput(Throughput::Elements(count as u64));
-			group.bench_function(BenchmarkId::new(kind, count), |b| {
+
+			group.bench_function(BenchmarkId::new(format!("collect-{kind}"), count), |b| {
+				b.iter(|| std::hint::black_box(inputs.iter().cloned().collect::<Patterns>().len()));
+			});
+			group.bench_function(BenchmarkId::new(format!("extend-{kind}"), count), |b| {
 				b.iter(|| {
-					let patterns: Patterns = inputs.iter().cloned().collect();
-					std::hint::black_box(patterns.len())
+					let mut union = ours.clone();
+					union.extend(theirs.iter().cloned());
+					std::hint::black_box(union.len())
 				});
+			});
+			group.bench_function(BenchmarkId::new(format!("covers-{kind}"), count), |b| {
+				b.iter(|| std::hint::black_box(ours.covers(&ours)));
+			});
+			group.bench_function(BenchmarkId::new(format!("intersect-{kind}"), count), |b| {
+				b.iter(|| std::hint::black_box(ours.intersect(&theirs).unwrap().len()));
 			});
 		}
 	}
 	group.finish();
 }
 
-criterion_group!(benches, matching, reduction);
+criterion_group!(benches, matching, algebra);
 criterion_main!(benches);

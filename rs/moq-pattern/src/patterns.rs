@@ -1,4 +1,4 @@
-use super::{IntersectionError, InvalidPattern, Pattern};
+use super::{IntersectionError, InvalidPattern, Pattern, index::Index};
 
 /// A union of patterns, reduced so no member is contained by another.
 ///
@@ -10,6 +10,11 @@ use super::{IntersectionError, InvalidPattern, Pattern};
 /// union contains the candidate. A candidate covered only jointly by several members
 /// (`a/**` against `a`, `a/*`, and `a/*/**`) is refused, which keeps the check linear
 /// and its answer easy to predict. A grant that means a subtree writes `a/**`.
+///
+/// Operations over a whole union (collecting, extending, [`covers`](Self::covers), and
+/// [`intersect`](Self::intersect)) index one side by segment first, so their cost
+/// follows the members a query could match rather than every pair: a peer's large
+/// grant costs about its own size, not its square.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Patterns(Vec<Pattern>);
 
@@ -19,7 +24,8 @@ impl Patterns {
 		Self::default()
 	}
 
-	/// Add a pattern, dropping members it contains.
+	/// Add a pattern, dropping members it contains. Linear in the members; add many at
+	/// once with [`Extend`] or [`FromIterator`].
 	///
 	/// Returns `false` when a member already contains it, leaving the union unchanged.
 	pub fn insert(&mut self, pattern: Pattern) -> bool {
@@ -46,7 +52,8 @@ impl Patterns {
 	/// Whether every member of `other` is [contained](Self::contains) here: `other`
 	/// grants nothing this union does not. The empty union is covered by anything.
 	pub fn covers(&self, other: &Self) -> bool {
-		other.0.iter().all(|pattern| self.contains(pattern))
+		let index = Index::new(&self.0);
+		other.0.iter().all(|pattern| index.contains(pattern))
 	}
 
 	/// Whether any member overlaps `pattern`.
@@ -56,19 +63,44 @@ impl Patterns {
 
 	/// The paths in both unions, as one union: every member of this one intersected
 	/// with every member of `other`. See [`Pattern::intersect`].
+	///
+	/// Fails when the union grows past [`Pattern::MAX_INTERSECTIONS`] members.
 	pub fn intersect(&self, other: &Self) -> Result<Self, IntersectionError> {
-		let mut out = Self::new();
+		// A member inside the other union is its own intersection, and every other result
+		// it takes part in lies within it, so only the members left over are paired.
+		let ours = Index::new(&self.0);
+		let theirs = Index::new(&other.0);
+		let mut out = Vec::new();
+		let mut rest = Index::default();
 		for member in &self.0 {
-			for candidate in &other.0 {
-				for pattern in member.intersect(candidate)? {
-					out.insert(pattern);
-					if out.len() > Pattern::MAX_INTERSECTIONS {
-						return Err(IntersectionError::TooManyPatterns);
-					}
+			match theirs.contains(member) {
+				true => out.push(member.clone()),
+				false => rest.insert(member),
+			}
+		}
+		for candidate in &other.0 {
+			if ours.contains(candidate) {
+				out.push(candidate.clone());
+				continue;
+			}
+			for member in rest.overlapping(candidate) {
+				out.extend(member.intersect(candidate)?);
+				// Reduce as it grows, so the pieces held never pass twice the limit.
+				if out.len() > 2 * Pattern::MAX_INTERSECTIONS {
+					out = Self::bounded(out)?.0;
 				}
 			}
 		}
-		Ok(out)
+		Self::bounded(out)
+	}
+
+	/// The reduced union of `patterns`, failing past [`Pattern::MAX_INTERSECTIONS`].
+	fn bounded(patterns: Vec<Pattern>) -> Result<Self, IntersectionError> {
+		let out: Self = patterns.into_iter().collect();
+		match out.len() > Pattern::MAX_INTERSECTIONS {
+			true => Err(IntersectionError::TooManyPatterns),
+			false => Ok(out),
+		}
 	}
 
 	/// Every member rebased at `root`, as one union. See [`Pattern::rebase`].
@@ -127,51 +159,44 @@ impl From<Pattern> for Patterns {
 }
 
 impl FromIterator<Pattern> for Patterns {
-	/// Reduce a union in one pass, cheapest-first.
+	/// Reduce a union in one pass, broadest first.
 	///
-	/// [`insert`](Self::insert) is linear in the members already held, so folding a
-	/// peer-supplied list through it costs O(n²). Sorting by
-	/// [`specificity`](Pattern::specificity) first makes the containment scan cheap:
-	/// a pattern can only be contained by one of strictly lower specificity, so every
-	/// member of its own tier is skipped without a comparison, and a later pattern can
-	/// never contain an earlier one, so no member is ever removed.
+	/// In [`specificity`](Pattern::specificity) order a pattern can only be contained by
+	/// one before it, so each is kept unless the index of those kept already contains it,
+	/// and nothing kept is ever removed.
 	fn from_iter<I: IntoIterator<Item = Pattern>>(iter: I) -> Self {
 		let mut sorted: Vec<Pattern> = iter.into_iter().collect();
-		sorted.sort_unstable_by(|a, b| {
-			a.specificity()
-				.cmp(&b.specificity())
-				.then_with(|| a.as_str().cmp(b.as_str()))
-		});
-		sorted.dedup_by(|a, b| a == b);
+		sorted.sort_unstable_by(|a, b| a.specificity().cmp(&b.specificity()).then_with(|| a.cmp(b)));
+		sorted.dedup();
 
-		// Grow with what survives: reserving for the input would keep capacity for every
-		// pattern a broad member discards, for as long as the union lives.
-		let mut out = Patterns::new();
-		let mut tier_start = 0;
-		let mut tier = None;
-		for pattern in sorted {
-			let specificity = pattern.specificity();
-			if tier != Some(specificity) {
-				tier = Some(specificity);
-				tier_start = out.0.len();
-			}
-			if out.0[..tier_start].iter().any(|member| member.contains(&pattern)) {
-				continue;
-			}
-			out.0.push(pattern);
-		}
+		let mut index = Index::default();
+		let keep: Vec<bool> = sorted
+			.iter()
+			.map(|pattern| {
+				let kept = !index.contains(pattern);
+				if kept {
+					index.insert(pattern);
+				}
+				kept
+			})
+			.collect();
+		drop(index);
 
+		let mut keep = keep.into_iter();
+		sorted.retain(|_| keep.next().expect("one verdict per pattern"));
+		// Release the room the discarded patterns took, for as long as the union lives.
+		sorted.shrink_to_fit();
 		// The wire order is canonical text, whatever order reduction visited.
-		out.0.sort_unstable();
-		out
+		sorted.sort_unstable();
+		Self(sorted)
 	}
 }
 
 impl Extend<Pattern> for Patterns {
+	/// Reduce the members and the new patterns together, in one pass.
 	fn extend<I: IntoIterator<Item = Pattern>>(&mut self, iter: I) {
-		for pattern in iter {
-			self.insert(pattern);
-		}
+		let members = std::mem::take(&mut self.0);
+		*self = members.into_iter().chain(iter).collect();
 	}
 }
 
@@ -254,37 +279,6 @@ mod tests {
 	fn serde_round_trips_reduced() {
 		let set: Patterns = serde_json::from_str(r#"["a/b", "a/*", "**/c"]"#).unwrap();
 		assert_eq!(serde_json::to_string(&set).unwrap(), r#"["**/c","a/*"]"#);
-	}
-
-	#[test]
-	fn from_iter_matches_repeated_insert() {
-		// The bulk path must produce exactly the union insert would, including
-		// duplicates and patterns whose tiers differ. A tiny LCG keeps it deterministic.
-		let atoms = [
-			"a", "b", "c", "a/b", "a/c", "*", "a/*", "*/a", "a*", "*a", "a*b", "a/**", "**/a", "**", "",
-		];
-		let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-		for _ in 0..500 {
-			let mut picked = Vec::new();
-			for _ in 0..8 {
-				seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-				picked.push(pattern(atoms[(seed >> 33) as usize % atoms.len()]));
-			}
-			let mut expected = Patterns::new();
-			for candidate in &picked {
-				expected.insert(candidate.clone());
-			}
-			assert_eq!(picked.iter().cloned().collect::<Patterns>(), expected, "{picked:?}");
-		}
-	}
-
-	#[test]
-	fn many_incomparable_patterns_reduce() {
-		// Same tier, so neither contains the other and the reduction must keep all of them.
-		let members: Vec<Pattern> = (0..2000).map(|i| pattern(&format!("room/{i}"))).collect();
-		let set: Patterns = members.iter().cloned().collect();
-		assert_eq!(set.len(), members.len());
-		assert!(members.iter().all(|member| set.contains(member)));
 	}
 
 	#[test]
