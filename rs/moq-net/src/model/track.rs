@@ -14254,7 +14254,11 @@ mod test {
 	#[test]
 	fn a_requested_prefix_survives_eviction() {
 		let (producer, pool) = pooled_producer(u64::MAX);
-		let producer = Producer::new(producer.broadcast.clone(), "compressed", Info::timed().with_compress(true));
+		let producer = Producer::new(
+			producer.broadcast.clone(),
+			"compressed",
+			Info::timed().with_compress(true),
+		);
 		let consumer = producer.consume();
 		// Incompressible, so each group caches about its payload.
 		let mut seed = 1u32;
