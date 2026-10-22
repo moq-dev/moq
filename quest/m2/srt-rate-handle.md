@@ -14,10 +14,7 @@ inflate it. On a publish, it is the MPEG-TS payload the SRT socket yields,
 TS headers, adaptation fields, and padding included, because the publisher
 picks the muxing and could otherwise pad without limit. SRT and UDP
 headers stay outside both. This backs
-moq.pro's
-[ingest](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/rate-ingest.md)
-and [egress](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/rate-egress.md)
-caps.
+moq.pro's ingest and egress caps.
 
 ## Plan
 

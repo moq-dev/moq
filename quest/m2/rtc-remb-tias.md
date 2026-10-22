@@ -6,8 +6,7 @@ An embedder can give a `moq-rtc` WHIP session a bitrate cap, and moq-rtc
 steers the browser's encoder under it: a `b=TIAS` and `b=AS` line in the SDP
 answer, and REMB where the publisher negotiates it. Media past the cap plus a
 burst anyway (a client ignoring both) closes the session with a typed error.
-This backs moq.pro's
-[ingest caps](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/rate-ingest.md).
+This backs moq.pro's ingest caps.
 
 ## Plan
 

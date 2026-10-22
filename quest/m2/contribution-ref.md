@@ -6,8 +6,7 @@ A Hang root catalog can name a whole contribution broadcast, relative to its
 own path, without opening it: each guest feed in a composed room, for
 example. Rust and JavaScript catalogs carry the entry, and `@moq/watch`
 resolves one only when a consumer selects one of its renditions. This backs
-moq.pro's
-[overlay contribution reference](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/overlay/contribution-ref.md),
+moq.pro's overlay contribution reference,
 whose composer never reads a contribution's catalog because subscribing is
 the demand that starts the encoder.
 
