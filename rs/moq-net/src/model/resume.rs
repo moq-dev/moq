@@ -744,9 +744,9 @@ impl Datagrams {
 		}
 	}
 
-	/// The highest group sequence handed out within the budget.
-	fn newest(&self) -> Option<u64> {
-		self.latest.max(self.seen.last().copied()).map(|(sequence, _)| sequence)
+	/// The highest identity handed out within the budget.
+	fn newest(&self) -> Option<(u64, u64)> {
+		self.latest.max(self.seen.last().copied())
 	}
 
 	fn insert(&mut self, id: (u64, u64), at: Instant) -> bool {
@@ -1008,12 +1008,27 @@ impl Reader {
 				Some(_) => self.refused = true,
 			}
 		}
-		// A group or datagram at or past it, handed out or on any copy, claims other content.
-		if let Some(end) = self.declared.and_then(Position::final_sequence) {
-			let seen = |sequence: Option<u64>| sequence.is_some_and(|sequence| sequence >= end);
+		// A group, frame, or datagram at or past it, handed out or on any copy, claims
+		// other content.
+		if let Some(declared) = self.declared {
+			let end = declared.final_sequence();
+			let seen = |sequence: Option<u64>| sequence.zip(end).is_some_and(|(sequence, end)| sequence >= end);
+			let cut = |copy: &Copy| {
+				declared.frame != 0
+					&& copy
+						.track
+						.peek_group(declared.group)
+						.is_some_and(|group| group.frame_count() as u64 > declared.frame)
+			};
 			if seen(self.newest)
-				|| seen(self.datagrams.newest())
-				|| self.copies.iter().any(|copy| seen(copy.track.latest_sequence()))
+				|| self
+					.datagrams
+					.newest()
+					.is_some_and(|(group, frame)| Position { group, frame } >= declared)
+				|| self
+					.copies
+					.iter()
+					.any(|copy| seen(copy.track.latest_sequence()) || cut(copy))
 			{
 				self.refused = true;
 			}
@@ -2121,7 +2136,10 @@ mod test {
 					sub.poll_recv_datagram(&kio::Waiter::noop()).map_ok(|_| ())
 				}
 			};
-			assert!(matches!(res, Poll::Ready(Err(Error::ProtocolViolation))), "{res:?}");
+			assert!(
+				matches!(res, Poll::Ready(Err(Error::ProtocolViolation))),
+				"datagram={datagram} {res:?}"
+			);
 			assert!(matches!(
 				sub.poll_finished(&kio::Waiter::noop()),
 				Poll::Ready(Err(Error::ProtocolViolation))
@@ -2129,7 +2147,8 @@ mod test {
 		}
 	}
 
-	/// A mid-group end another copy declared caps the group it falls in.
+	/// A mid-group end another copy declared caps the group it falls in, even for frames
+	/// that arrive after the group was handed out.
 	#[moq_clock::test]
 	async fn a_mid_group_end_caps_another_copys_group() {
 		let routes = Producer::new();
@@ -2141,14 +2160,21 @@ mod test {
 		let b = copy();
 		routes.serve(b.consume());
 		let mut group = b.create_group(group::Info { sequence: 4 }).unwrap();
-		for frame in 0..4 {
+		group.write_frame(ts(0), b"x".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		// Frames past the end arrive only once the group is handed out.
+		for frame in 1..4 {
 			group.write_frame(ts(frame), b"x".as_ref()).unwrap();
 		}
 		group.finish().unwrap();
-		let mut reading = recv(&mut sub);
 		assert_eq!(read(&mut reading), Some(b"x".to_vec()));
 		assert_eq!(read(&mut reading), Some(b"x".to_vec()));
 		assert_eq!(read(&mut reading), None);
+		// The copy holding them contradicts the end.
+		assert!(matches!(
+			sub.poll_finished(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::ProtocolViolation))
+		));
 	}
 
 	/// An end below a group a copy handed out or holds claims other content.
@@ -2171,6 +2197,56 @@ mod test {
 				sub.poll_finished(&kio::Waiter::noop()),
 				Poll::Ready(Err(Error::ProtocolViolation))
 			));
+		}
+	}
+
+	/// A mid-group end learned late, below a frame or datagram object already seen, claims
+	/// other content.
+	#[moq_clock::test]
+	async fn a_late_mid_group_end_below_a_seen_object_refuses_the_track() {
+		for datagram in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let mut a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, HOUR);
+			let _held = match datagram {
+				false => {
+					let mut group = a.create_group(group::Info { sequence: 4 }).unwrap();
+					for frame in 0..4 {
+						group.write_frame(ts(frame), b"x".as_ref()).unwrap();
+					}
+					Some((group, recv(&mut sub)))
+				}
+				true => {
+					a.insert_wire_datagram(super::super::datagram::Stored {
+						datagram: super::super::datagram::Datagram {
+							sequence: 4,
+							timestamp: Some(ts(4)),
+							payload: bytes::Bytes::from_static(b"d"),
+						},
+						wire: Some(Arc::new(super::super::datagram::Wire {
+							object_id: Some(4),
+							priority: None,
+							end_of_group: false,
+							status: None,
+							properties: Default::default(),
+						})),
+						deflated: None,
+					})
+					.unwrap();
+					assert!(sub.poll_recv_datagram(&kio::Waiter::noop()).is_ready());
+					None
+				}
+			};
+			let mut b = copy();
+			routes.serve(b.consume());
+			b.finish_at(Position { group: 4, frame: 2 }).unwrap();
+			let res = sub.poll_finished(&kio::Waiter::noop());
+			assert!(
+				matches!(res, Poll::Ready(Err(Error::ProtocolViolation))),
+				"datagram={datagram}: {res:?}"
+			);
 		}
 	}
 
