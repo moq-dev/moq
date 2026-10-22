@@ -495,7 +495,9 @@ async fn spawn_moq(
 			dialer = dialer.with_publisher(origin.consume());
 		}
 		if directions.consume {
-			let scoped = origin.scope("", consumed).context("failed to scope the origin to the consumed broadcasts")?;
+			let scoped = origin
+				.scope("", consumed)
+				.context("failed to scope the origin to the consumed broadcasts")?;
 			dialer = dialer.with_subscriber(scoped);
 		}
 
