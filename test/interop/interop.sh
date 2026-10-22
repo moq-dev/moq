@@ -1146,11 +1146,11 @@ run_tail_publisher() {
 
 run_tail_pair() {
     local pub="$1" sub="$2" mode="${3:-}" version="${4:-}" pid subscriber_pid started=$SECONDS
-    local name="tail-$1-$2-${mode:-plain}-${version:-default}"
+    local name="tail-$1-$2-${mode:-plain}-${version:-default}" label="${mode:-tail}${version:+ $version}"
     local fifo="$HARNESS_RUN/tail-ack" broadcast="tail-$1-$2-$$-$RANDOM"
     local cell=(case="${mode:-tail}${version:+-$version}" publisher="$pub" subscriber="$sub" log="$HARNESS_RUN/$name-sub.log")
     if is_broken "$pub" || is_broken "$sub"; then
-        echo "  FAIL  tail $pub -> $sub (client unavailable)"
+        echo "  FAIL  $label $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
         return
@@ -1169,16 +1169,16 @@ run_tail_pair() {
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
         if grep -qx 'tail acknowledged' "$HARNESS_RUN/$name-pub.log"; then
-            echo "  PASS  tail $pub -> $sub (groups 0,1,2,3; clean end 4)"
+            echo "  PASS  $label $pub -> $sub (groups 0,1,2,3; clean end 4)"
             record pass "${cell[@]}" seconds=$((SECONDS - started))
         else
-            echo "  FAIL  tail $pub -> $sub (publisher did not acknowledge)"
+            echo "  FAIL  $label $pub -> $sub (publisher did not acknowledge)"
             record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="publisher did not acknowledge"
             overall=1
             cat "$HARNESS_RUN/$name-pub.log"
         fi
     else
-        echo "  FAIL  tail $pub -> $sub (missing groups or clean end)"
+        echo "  FAIL  $label $pub -> $sub (missing groups or clean end)"
         record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="missing groups or clean end"
         overall=1
         cat "$HARNESS_RUN/$name-pub.log" "$HARNESS_RUN/$name-sub.log"
