@@ -35,12 +35,13 @@ import * as Hang from "@moq/hang";
 // Catalog — describes tracks and their codec properties
 import * as Catalog from "@moq/hang/catalog";
 
-// Container — media framing (CMAF and Legacy formats)
+// Container — Legacy and LOC framing
 import * as Container from "@moq/hang/container";
 
-// CMAF (fMP4) and Legacy (varint-timestamp + raw bitstream) are both available:
-// Container.Cmaf — createVideoInitSegment, createAudioInitSegment, encodeDataSegment, decodeDataSegment, etc.
-// Container.Legacy — Producer / Consumer classes
+// CMAF decoding is a separate synchronous module, loaded only when needed.
+import * as Cmaf from "@moq/hang/cmaf";
+// Cmaf.decodeInitSegment, Cmaf.decodeDataSegment, Cmaf.Format
+// Container.Legacy.Producer writes frames; Container.Consumer reads a Format.
 ```
 
 For watching and publishing, use the dedicated packages:

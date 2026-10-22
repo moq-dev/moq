@@ -61,6 +61,5 @@ Decided with the maintainer on 2026-10-20:
 
 ## Related
 
-- [Load CMAF decode on demand](/quest/m1/hang-cmaf-lazy.md) - the player side; this quest is what makes CMAF rare
 - [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the unwrap path is where edit lists would apply to frame timestamps
 - [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) - touches the same fMP4 import

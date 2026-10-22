@@ -10,7 +10,7 @@ path no longer lets held frames out past their deadline: the ignored arm
 `#[ignore]`.
 
 Non-goals: wall-clock or cross-hop provenance
-([received timestamps are media time](/quest/m1/lite-time-provenance.md)),
+([received timestamps are media time](https://github.com/moq-dev/moq/pull/6150)),
 and any wire change.
 
 ## Plan

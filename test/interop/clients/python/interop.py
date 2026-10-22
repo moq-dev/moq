@@ -7,8 +7,8 @@ publish:   read raw Annex-B H.264 from stdin (e.g. piped from ffmpeg) and feed
 subscribe: connect, find the video track in the catalog, and exit 0 as soon as
            any non-empty frame arrives (exit 1 on timeout / no data).
 
---auth-version offers only that version, one that carries AUTH: the client waits for
-the grant the relay sends and prints it as an `auth granted` line before it starts.
+--version offers only that version. --grant waits for the grant the relay sends over
+AUTH and prints it as an `auth granted` line before the client starts.
 
     ffmpeg ... -f h264 - | python interop.py publish --url http://localhost:4443 --broadcast b.hang
     python interop.py subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
@@ -59,14 +59,12 @@ async def _publish_tone(audio: moq.audio.Producer) -> None:
         await asyncio.sleep(max(0.0, started + timestamp_us / 1_000_000 - loop.time()))
 
 
-def _client(url: str, auth_version: str | None) -> moq.Client:
-    return moq.Client(url, tls_verify=False, versions=[] if auth_version is None else [auth_version])
+def _client(url: str, version: str | None) -> moq.Client:
+    return moq.Client(url, tls_verify=False, versions=[] if version is None else [version])
 
 
-async def _print_grant(client: moq.Client, auth_version: str | None, timeout: float) -> None:
+async def _print_grant(client: moq.Client, timeout: float) -> None:
     """Wait for the relay's grant and print it, in the Rust client's `auth granted` shape."""
-    if auth_version is None:
-        return
     session = client.session
     assert session is not None
     auth = session.auth()
@@ -83,9 +81,10 @@ async def _print_grant(client: moq.Client, auth_version: str | None, timeout: fl
     )
 
 
-async def publish(url: str, broadcast: str, auth_version: str | None, timeout: float) -> None:
-    async with _client(url, auth_version) as client:
-        await _print_grant(client, auth_version, timeout)
+async def publish(url: str, broadcast: str, version: str | None, grant: bool, timeout: float) -> None:
+    async with _client(url, version) as client:
+        if grant:
+            await _print_grant(client, timeout)
         # Hold the producer for the lifetime of the publish loop; finish() unpublishes.
         producer = client.create_broadcast(broadcast)
         catalog = moq.media.CatalogProducer(producer)
@@ -137,9 +136,10 @@ async def _catalog_with_video(consumer: moq.BroadcastConsumer) -> moq.media.Cata
     raise RuntimeError("catalog stream ended without a video track")
 
 
-async def subscribe(url: str, broadcast: str, auth_version: str | None, timeout: float) -> None:
-    async with _client(url, auth_version) as client:
-        await _print_grant(client, auth_version, timeout)
+async def subscribe(url: str, broadcast: str, version: str | None, grant: bool, timeout: float) -> None:
+    async with _client(url, version) as client:
+        if grant:
+            await _print_grant(client, timeout)
         consumer = await asyncio.wait_for(client.announced_broadcast(broadcast), timeout)
         catalog = await asyncio.wait_for(_catalog_with_video(consumer), timeout)
 
@@ -171,16 +171,17 @@ def main() -> None:
     parser.add_argument("--url", required=True)
     parser.add_argument("--broadcast", required=True)
     parser.add_argument("--timeout", type=float, default=20.0)
-    parser.add_argument("--auth-version")
+    parser.add_argument("--version")
+    parser.add_argument("--grant", action="store_true")
     args = parser.parse_args()
 
     # Warnings and errors from the Rust layer, such as a publication outside the grant.
     moq.log_level("warn")
     try:
         if args.role == "publish":
-            asyncio.run(publish(args.url, args.broadcast, args.auth_version, args.timeout))
+            asyncio.run(publish(args.url, args.broadcast, args.version, args.grant, args.timeout))
         else:
-            asyncio.run(subscribe(args.url, args.broadcast, args.auth_version, args.timeout))
+            asyncio.run(subscribe(args.url, args.broadcast, args.version, args.grant, args.timeout))
     except KeyboardInterrupt:
         pass
     except (TimeoutError, asyncio.TimeoutError):
