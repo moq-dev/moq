@@ -6,7 +6,6 @@ use tracing::debug;
 
 use super::state::get_or_insert_recv;
 use super::{ClosedStream, Retransmits, ShouldTransmit, StreamId, StreamsState};
-use crate::connection::ConnectionTag;
 use crate::connection::assembler::{Assembler, Chunk, IllegalOrderedRead};
 use crate::connection::streams::state::StreamRecv;
 use crate::{TransportError, VarInt, frame};
@@ -18,6 +17,10 @@ pub(super) struct Recv {
     pub(super) assembler: Assembler,
     sent_max_stream_data: u64,
     pub(super) end: u64,
+    /// The end of the data STREAM frames carried, which on an ordered transport is where the
+    /// next one starts. Unlike `end`, a reset's final size does not raise it.
+    #[cfg(feature = "mux")]
+    pub(super) data_end: u64,
     pub(super) stopped: bool,
 }
 
@@ -28,6 +31,8 @@ impl Recv {
             assembler: Assembler::new(),
             sent_max_stream_data: initial_max_data,
             end: 0,
+            #[cfg(feature = "mux")]
+            data_end: 0,
             stopped: false,
         })
     }
@@ -38,6 +43,10 @@ impl Recv {
         self.assembler.reinit();
         self.sent_max_stream_data = initial_max_data;
         self.end = 0;
+        #[cfg(feature = "mux")]
+        {
+            self.data_end = 0;
+        }
         self.stopped = false;
     }
 
@@ -83,6 +92,10 @@ impl Recv {
         }
 
         self.end = self.end.max(end);
+        #[cfg(feature = "mux")]
+        {
+            self.data_end = self.data_end.max(end);
+        }
         // A reset stream only still delivers the data below its Reliable Size
         if let RecvState::ResetRecvd { reliable_size, .. } = self.state {
             let len = reliable_size
@@ -391,25 +404,21 @@ impl<'a> Chunks<'a> {
         }
     }
 
-    /// Keep the connection flow control credit for the bytes read so far.
+    /// Keep the connection flow control credit for the bytes read so far, returning how many.
     ///
-    /// Stream credit still advances on [`Self::finalize()`], but the connection credit for these
-    /// bytes is withheld from the peer until the returned [`Credit`] is passed to
-    /// [`Connection::release()`][crate::Connection::release].
-    pub fn hold(&mut self) -> Credit {
+    /// Stream credit still advances on [`Self::finalize()`], but these bytes stay counted in
+    /// [`StreamsState::held`] until a lease releases or drops them.
+    pub(super) fn withhold(&mut self) -> u64 {
         let bytes = mem::take(&mut self.read);
         self.streams.held += bytes;
-        Credit {
-            bytes,
-            tag: self.streams.tag,
-        }
+        bytes
     }
 
     /// Mark the read data as consumed from the stream.
     ///
     /// The number of read bytes will be released from the congestion window,
     /// allowing the remote peer to send more data if it was previously blocked.
-    /// Bytes taken by [`Self::hold()`] keep their connection credit.
+    /// Bytes a receive lease holds keep their connection credit until it releases them.
     ///
     /// If [`ShouldTransmit::should_transmit()`] returns `true`,
     /// a packet needs to be sent to the peer informing them that the stream is unblocked.
@@ -455,69 +464,6 @@ impl<'a> Chunks<'a> {
 impl Drop for Chunks<'_> {
     fn drop(&mut self) {
         let _ = self.finalize_inner();
-    }
-}
-
-/// Connection flow control credit for bytes read with [`Chunks::hold()`].
-///
-/// The peer cannot reuse this credit until it is passed to
-/// [`Connection::release()`][crate::Connection::release] on the connection it came from, so
-/// dropping it leaks receive window. A default `Credit` is empty and belongs to no connection
-/// until it merges one that does.
-#[must_use = "dropping Credit leaks connection flow control credit"]
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Credit {
-    bytes: u64,
-    pub(super) tag: ConnectionTag,
-}
-
-impl Credit {
-    /// The number of bytes this credit covers.
-    pub fn len(&self) -> u64 {
-        self.bytes
-    }
-
-    /// Whether this credit covers no bytes.
-    pub fn is_empty(&self) -> bool {
-        self.bytes == 0
-    }
-
-    /// Split off the credit for the first `bytes`, keeping the rest.
-    ///
-    /// # Panics
-    /// If `bytes` exceeds [`Self::len()`].
-    pub fn split(&mut self, bytes: u64) -> Self {
-        assert!(
-            bytes <= self.bytes,
-            "split {bytes} of {} held bytes",
-            self.bytes
-        );
-        self.bytes -= bytes;
-        Self {
-            bytes,
-            tag: self.tag,
-        }
-    }
-
-    /// Take over the bytes covered by `other`.
-    ///
-    /// # Panics
-    /// If `other` came from another connection.
-    pub fn merge(&mut self, other: Self) {
-        if other.tag != self.tag {
-            assert!(
-                self.tag == ConnectionTag::NONE || other.tag == ConnectionTag::NONE,
-                "merged credit from another connection"
-            );
-            if self.tag == ConnectionTag::NONE {
-                self.tag = other.tag;
-            }
-        }
-        self.bytes += other.bytes;
-    }
-
-    pub(super) fn into_bytes(self) -> u64 {
-        self.bytes
     }
 }
 

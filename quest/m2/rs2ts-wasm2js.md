@@ -64,8 +64,8 @@ Preserve earlier source-translation evidence:
 - [#5337](https://github.com/moq-dev/moq/issues/5337) reports closure-body
   retention and control-flow duplication fixes in Charon
   [#1513](https://github.com/AeneasVerif/charon/pull/1513) and
-  [#1514](https://github.com/AeneasVerif/charon/pull/1514). Verify their status
-  and pin before relying on them; its emitter benchmark does not establish
+  [#1514](https://github.com/AeneasVerif/charon/pull/1514). Both merged
+  upstream; pin a Charon revision carrying them before relying on them; its emitter benchmark does not establish
   the performance of a future emitter.
 - Source translation must establish precise Drop/Arc/Weak behavior, kio
   wakers and guards, unsafe storage, nested Option states, trait objects,

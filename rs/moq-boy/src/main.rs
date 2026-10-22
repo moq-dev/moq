@@ -25,11 +25,12 @@
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use moq_clock::Instant;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -425,6 +426,8 @@ fn run_emulator(
 		// Wait for next frame.
 		let now = Instant::now();
 		if now < next_frame {
+			// The emulator thread runs outside any runtime, so it blocks on the host clock.
+			#[allow(clippy::disallowed_methods)]
 			std::thread::sleep(next_frame - now);
 		}
 		next_frame += frame_duration;

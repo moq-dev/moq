@@ -25,7 +25,28 @@ function parseUrl(value: string | null): URL | undefined {
 	}
 }
 
-const OBSERVED = ["url", "name", "muted", "invisible", "source", "preview", "backend", "announce", "linger"] as const;
+// Parse the `versions` attribute: a comma-separated list, or the defaults when absent or empty.
+// The connection checks the names and reports an unsupported one on `connection.error`.
+function parseVersions(value: string | null): string[] | undefined {
+	const versions = value
+		?.split(",")
+		.map((version) => version.trim())
+		.filter((version) => version !== "");
+	return versions?.length ? versions : undefined;
+}
+
+const OBSERVED = [
+	"url",
+	"versions",
+	"name",
+	"muted",
+	"invisible",
+	"source",
+	"preview",
+	"backend",
+	"announce",
+	"linger",
+] as const;
 type Observed = (typeof OBSERVED)[number];
 
 /** The built-in capture sources selectable via the `source` attribute. */
@@ -330,6 +351,8 @@ export default class MoqPublish extends HTMLElement {
 
 		if (name === "url") {
 			this.connection.url.set(parseUrl(newValue));
+		} else if (name === "versions") {
+			this.connection.versions.set(parseVersions(newValue));
 		} else if (name === "name") {
 			this.#name.set(Moq.Path.from(newValue ?? ""));
 		} else if (name === "source") {
@@ -446,6 +469,15 @@ export default class MoqPublish extends HTMLElement {
 
 	set url(value: string | URL | undefined) {
 		this.connection.url.set(value ? new URL(value) : undefined);
+	}
+
+	/** The protocol versions to offer, most preferred first; undefined offers the defaults. */
+	get versions(): readonly string[] | undefined {
+		return this.connection.versions.peek();
+	}
+
+	set versions(value: readonly string[] | undefined) {
+		this.connection.versions.set(value);
 	}
 
 	/** The broadcast name, mirrored by the `name` attribute. */
