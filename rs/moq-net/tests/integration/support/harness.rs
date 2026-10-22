@@ -11,6 +11,7 @@ use std::sync::{
 	Arc,
 	atomic::{AtomicUsize, Ordering},
 };
+use std::task::Poll;
 
 use moq_net::{Client, Server, Session, Version, origin};
 
@@ -32,18 +33,28 @@ pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(mut driver: D) {
 	}
 }
 
-struct Counted<D> {
+struct Controlled<D> {
 	driver: D,
-	polls: Arc<AtomicUsize>,
+	polls: Option<Arc<AtomicUsize>>,
+	gate: Option<kio::Consumer<bool>>,
 }
 
-impl<D: moq_net::time::Driver> moq_net::time::Driver for Counted<D> {
+impl<D: moq_net::time::Driver> moq_net::time::Driver for Controlled<D> {
 	fn poll(
 		&mut self,
 		now: moq_net::time::Instant,
 		waiter: &kio::Waiter,
 	) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
-		self.polls.fetch_add(1, Ordering::Relaxed);
+		if let Some(gate) = &self.gate
+			&& gate
+				.poll(waiter, |open| if **open { Poll::Ready(()) } else { Poll::Pending })
+				.is_pending()
+		{
+			return Ok(None);
+		}
+		if let Some(polls) = &self.polls {
+			polls.fetch_add(1, Ordering::Relaxed);
+		}
 		self.driver.poll(now, waiter)
 	}
 }
@@ -90,6 +101,8 @@ pub struct MockConnectOptions {
 	/// the way a reader listing everything would. Clear it to test discovery
 	/// following the readers.
 	pub client_discovers_all: bool,
+	/// Pause the receiving driver while its transport keeps delivering data.
+	pub server_gate: Option<kio::Consumer<bool>>,
 }
 
 impl MockConnectOptions {
@@ -111,6 +124,7 @@ impl MockConnectOptions {
 			server_stats: Default::default(),
 			server_polls: None,
 			client_discovers_all: true,
+			server_gate: None,
 		}
 	}
 }
@@ -196,10 +210,11 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 			.accept(now(), server_transport)
 			.await
 			.expect("server handshake failed");
-		match opts.server_polls {
-			Some(polls) => spawn(Counted { driver, polls }),
-			None => spawn(driver),
-		}
+		spawn(Controlled {
+			driver,
+			polls: opts.server_polls,
+			gate: opts.server_gate,
+		});
 		session
 	};
 	let (client_session, server_session) = futures::join!(client_fut, server_fut);

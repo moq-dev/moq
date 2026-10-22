@@ -65,6 +65,11 @@ moq-dev/web-transport; `moq-quic` powers qmux and WebTransport. The iroh
 (`web-transport-iroh`) and wasm (`web-transport-wasm`) backends stay crates
 from that repo as accepted exceptions, and web-transport-proto may stay.
 
+Decided 2026-10-21 (maintainer): web-transport-proto stays upstream, with no
+migration quest. web-transport-iroh decodes CONNECT with it, so an in-tree
+copy would duplicate the crate whenever iroh is on. Its QPACK bound ships as
+an upstream patch ([web-transport-proto 0.6.3](/quest/m0/web-transport-proto-0.6.3.md)).
+
 ## Related
 
 - [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - the in-tree qmux implements the moq-net traits directly
