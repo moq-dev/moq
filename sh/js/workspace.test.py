@@ -89,6 +89,11 @@ class SelectionTest(unittest.TestCase):
         self.assertFalse(plan["all"])
         self.assertFalse(plan["wasm"])
 
+    def test_a_bench_selects_only_its_workspace(self):
+        self.assertEqual(list(self.plan(["js/core/bench/frames.ts"])["packages"]), ["@example/core"])
+        self.assertEqual(set(self.plan(["js/core/bench/frames.ts", "js/core/src/index.ts"])["packages"]),
+                         {"@example/core", "@example/view", "docs"})
+
     def test_leaf_does_not_select_its_dependencies(self):
         self.assertEqual(list(self.plan(["doc/index.md"])["packages"]), ["docs"])
 
