@@ -10,15 +10,6 @@ name: OSS Scanner
 # disk the ~20 GB scanner image needs, and the image brings its own toolchain.
 on:
   workflow_call:
-  pull_request:
-    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
-    # retargeted to release.
-    branches: [release]
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - ".oss-scanner/**"
-      - "sh/oss-scanner.sh"
-      - ".github/workflows/oss-scanner.yml"
 
 permissions:
   contents: read

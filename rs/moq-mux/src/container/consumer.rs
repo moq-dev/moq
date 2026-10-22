@@ -5,7 +5,7 @@ use moq_net::Timestamp;
 
 use super::{Container, Frame, Read, TimestampRewind};
 
-/// Media and clean group boundaries in delivery order.
+/// Media and group boundaries in delivery order.
 pub(crate) enum Event {
 	Frame(Frame),
 	/// An endpoint marker. `opens` when no media precedes it in its group: a declared stop
@@ -14,7 +14,11 @@ pub(crate) enum Event {
 		end: Timestamp,
 		opens: bool,
 	},
+	/// The group finished cleanly.
 	GroupEnd,
+	/// The group was lost upstream partway, so nothing more of it arrives. The gap it leaves is
+	/// read once the next group resumes the track.
+	Cut,
 }
 
 /// Read items and exporter-only boundaries in delivery order.
@@ -22,6 +26,7 @@ pub(crate) enum Item {
 	Read(Read),
 	FrameEnd(Timestamp),
 	GroupEnd,
+	Cut,
 }
 
 /// Decode a moq-lite track into a stream of media [`Frame`]s in age-bounded
@@ -253,7 +258,7 @@ impl<F: Container> Consumer<F> {
 		loop {
 			match ready!(self.poll_item(waiter))? {
 				Some(Item::Read(read)) => return Poll::Ready(Ok(Some(read))),
-				Some(Item::FrameEnd(_) | Item::GroupEnd) => continue,
+				Some(Item::FrameEnd(_) | Item::GroupEnd | Item::Cut) => continue,
 				None => return Poll::Ready(Ok(None)),
 			}
 		}
@@ -274,6 +279,7 @@ impl<F: Container> Consumer<F> {
 			Some(Event::FrameEnd { end, opens: true }) => Read::End { group: self.group, end },
 			Some(Event::FrameEnd { end, opens: false }) => return Poll::Ready(Ok(Some(Item::FrameEnd(end)))),
 			Some(Event::GroupEnd) => return Poll::Ready(Ok(Some(Item::GroupEnd))),
+			Some(Event::Cut) => return Poll::Ready(Ok(Some(Item::Cut))),
 			None => return Poll::Ready(Ok(None)),
 		};
 		let resume = match &read {
@@ -369,7 +375,7 @@ impl<F: Container> Consumer<F> {
 			group.sequence > current && group.buffered.is_empty() && group.fault.is_none() && group.poll_aborted(waiter)
 		})?;
 
-		'read: loop {
+		loop {
 			if self.pending.front().is_none_or(|group| group.sequence <= self.current) {
 				self.hole = None;
 				self.hole_timer = None;
@@ -434,7 +440,9 @@ impl<F: Container> Consumer<F> {
 						let current = self.current;
 						self.discard(|group| group.sequence <= current)?;
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
-						continue 'read;
+						// Said now rather than with the gap, which waits for the next group: what
+						// the caller holds of this one need not wait for a successor.
+						return Poll::Ready(Ok(Some(Event::Cut)));
 					}
 					// Cleanly finished group: advance to the next sequence.
 					Poll::Ready(Ok(None)) => {
@@ -2410,8 +2418,12 @@ mod tests {
 
 		let waiter = kio::Waiter::noop();
 
-		// The aborted group 0 skips straight to its successor; a short clean group emits
-		// GroupEnd.
+		// The aborted group 0 says it was cut, then skips straight to its successor; a short
+		// clean group emits GroupEnd.
+		assert!(
+			matches!(consumer.poll_event(&waiter), Poll::Ready(Ok(Some(Event::Cut)))),
+			"the cut is said before the successor"
+		);
 		let event = consumer.poll_event(&waiter);
 		let Poll::Ready(Ok(Some(Event::Frame(frame)))) = event else {
 			panic!(

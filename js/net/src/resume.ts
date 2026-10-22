@@ -1029,6 +1029,14 @@ class Recover implements GroupRecover {
 				// Nothing serves: a failed copy waits for a route, unless none will come.
 				if (failed && route.concluded) throw failed;
 			} else if (generation !== current.generation || failed) {
+				// The serving route gave the group up, which ends it with that route's error however
+				// a fetch of the rest would answer. A copy that failed dropped its open groups with
+				// it, and a group the route failed is no verdict either.
+				const given = hooks.givenUp(serving.sub, this.sequence);
+				if (given.error && !routeFailed(given.error) && !(serving.sub.closed.peek() instanceof Error)) {
+					throw given.error;
+				}
+				waits.push(given.changed);
 				// A newer copy's track caches it: continue from there.
 				if (!failed && generation !== current.generation) {
 					const cached = hooks.cachedGroup(serving.sub, this.sequence);

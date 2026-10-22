@@ -25,9 +25,9 @@ Decided with the maintainer on 2026-10-21.
   gates.
 - Publish the runner's generated report as is, under its own Pages
   directory, with the per-directory publisher
-  (`test/smoke/report/publish.sh`). It is another `gh-pages` writer: join the
-  `benchmark-pages` concurrency group with `queue: max`, as the
-  [interop report](/quest/m1/interop-report.md) does. The Pages root lists it.
+  (`sh/gh/pages-publish.sh`). It is another `gh-pages` writer: join the
+  `benchmark-pages` concurrency group with `queue: max`, as the in-tree
+  interop report (`interop.yml`) does. The Pages root lists it.
 - Report only. Third-party pairs fail for reasons outside this repo, and the
   interop audit owns the follow-up, so no cell gates the run.
 - Recommendation: run it from `smoke.yml` next to the public relays lane,
@@ -41,4 +41,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Interop audit](/quest/m0/audit-interop.md) - audits this job's moq.dev cells each run
-- [Interop report](/quest/m1/interop-report.md) - the in-tree interop matrix's own Pages report

@@ -3,23 +3,6 @@ use bytes::Bytes;
 
 use crate::Timestamp;
 
-/// The moq-transport drafts a list of properties came from, which share its key and
-/// integer encoding and what each property means.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-// private: passthrough
-pub(crate) enum Encoding {
-	/// Drafts 14 and 15: absolute keys and QUIC varints.
-	Draft14,
-	/// Draft 16: delta keys and QUIC varints.
-	Draft16,
-	/// Draft 17: delta keys and leading-ones varints without the seven-byte form.
-	Draft17,
-	/// Draft 18: delta keys and leading-ones varints.
-	Draft18,
-	/// Draft 19 and later: as draft 18, with property 0x06 as SUBGROUP_DELIVERY_TIMEOUT.
-	Draft19,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 // private: passthrough
 pub(crate) enum Value {
@@ -55,11 +38,10 @@ pub(crate) struct Properties {
 #[derive(Clone, Debug, PartialEq, Eq)]
 // private: passthrough
 pub(crate) struct Block {
-	/// The properties in ascending ID order, serialized as `encoding` does. Never empty.
+	/// The properties in ascending ID order, serialized as the track's
+	/// [`TrackProperties::version`] does. Never empty.
 	pub bytes: Bytes,
-	/// How `bytes` is serialized: its key and integer encoding.
-	pub encoding: Encoding,
-	/// `bytes` holds Immutable Properties (0x0b), serialized as `encoding` does.
+	/// `bytes` holds Immutable Properties (0x0b).
 	pub immutable: bool,
 }
 
@@ -74,16 +56,17 @@ impl Properties {
 	}
 }
 
-/// The Track Properties moq-net does not interpret, which a relay forwards unchanged.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The moq-transport state of a track a moq-transport publisher published, which a relay
+/// forwards unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
 // private: passthrough
 pub(crate) struct TrackProperties {
-	/// In arrival order, which is ascending, with Immutable Properties (0x0b) as its
-	/// serialized bytes.
+	/// The draft the publisher spoke, which serialized these and every object's [`Block`]
+	/// and gives each property its meaning. A publisher on another draft is a new instance.
+	pub version: crate::ietf::Version,
+	/// The Track Properties moq-net does not interpret, in arrival order, which is
+	/// ascending, with Immutable Properties (0x0b) as its serialized bytes.
 	pub values: Vec<Property>,
-	/// How the publisher serialized the list and the keys inside Immutable Properties.
-	/// Set beside any values, and never [`Encoding::Draft14`], which predates the list.
-	pub encoding: Option<Encoding>,
 }
 
 /// Object numbering is separate from the public frame's ordinal in its group.

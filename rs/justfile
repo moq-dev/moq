@@ -348,6 +348,10 @@ multicast:
     just rs test -p moq-tokio --features mdns --lib --run-ignored only -E 'test(=mdns::tests::apps_partition_discovery) | test(/^mdns::tests::daemon_/)'
     just rs test -p moq-relay --features cluster-lan --run-ignored only -E 'test(/^lan_mesh::/)'
 
+# Run the long TS recovery arms; a failing arm keeps its export and ledgers under $MOQ_TEST_RUNS.
+ts-recovery:
+    just rs test -p moq-mux --lib --run-ignored only -E 'test(/^container::ts::recovery_test::long_/)'
+
 # Run moq-audio's ignored output-device tests against a private PulseAudio null sink.
 audio-devices:
     #!/usr/bin/env bash

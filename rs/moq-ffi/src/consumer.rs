@@ -238,7 +238,9 @@ impl MoqBroadcastConsumer {
 				})?;
 
 				let source = moq_mux::Source::new(origin, self.inner.clone());
-				Ok(source.resolve(Some(&reference)).await?)
+				// The bindings do not expose a reference's epoch yet, so they read like an older
+				// reader: the first instance resolved, without the epoch's guarantee.
+				Ok(source.resolve(Some(&reference), None).await?)
 			})
 			.await
 	}

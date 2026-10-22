@@ -22,11 +22,8 @@ media, no MSF.
   run draft 14 and draft 22 for Rust and JS only; the full even-draft matrix
   is nightly.
 - Fix the test/interop README's claim that it covers IETF today.
-- Report cells through the [interop report](/quest/m1/interop-report.md)'s
-  structured records, with the draft as the version field.
+- Report cells through the interop report's structured records
+  (`test/lib/harness.sh`, rendered by `test/interop/report.py`), with the
+  draft as the version field.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Interop report](/quest/m1/interop-report.md) - where these cells show up

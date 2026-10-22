@@ -73,8 +73,9 @@ pub struct Properties {
 	/// Whether the track takes NEW_GROUP_REQUEST (DYNAMIC_GROUPS = 1), mutable or sealed.
 	pub dynamic_groups: bool,
 
-	/// Everything else, Immutable Properties included, forwarded as the publisher sent it.
-	pub(crate) unknown: TrackProperties,
+	/// Everything else, Immutable Properties included, forwarded as the publisher sent it,
+	/// serialized as the message's draft serializes them.
+	pub(crate) unknown: Vec<Property>,
 }
 
 impl Properties {
@@ -99,7 +100,7 @@ impl Properties {
 			group_order: Some(GroupOrder::Descending),
 			// A track opted in to refresh answers a NEW_GROUP_REQUEST as a join.
 			dynamic_groups: info.refresh.is_some(),
-			unknown: TrackProperties::default(),
+			unknown: Vec::new(),
 		}
 	}
 
@@ -147,8 +148,8 @@ impl Properties {
 
 		let mut properties: Vec<_> = known
 			.iter()
-			.filter(|property| !self.unknown.sealed().any(|id| id == property.id))
-			.chain(&self.unknown.values)
+			.filter(|property| !sealed_keys(&self.unknown, version).any(|id| id == property.id))
+			.chain(&self.unknown)
 			.collect();
 		// Delta types require ascending order. Equal types keep the publisher's order.
 		properties.sort_by_key(|property| property.id);
@@ -208,7 +209,7 @@ impl Properties {
 				// Even type: single varint value
 				let value = r.varint()?;
 				if !properties.known(abs, value, &mut seen)? {
-					properties.unknown.values.push(Property {
+					properties.unknown.push(Property {
 						id: abs,
 						value: Value::Int(value),
 					});
@@ -222,22 +223,19 @@ impl Properties {
 				let value = r.slice(len)?;
 				if abs == IMMUTABLE {
 					// A second block would leave the sealed list ambiguous.
-					if properties.unknown.immutable().is_some() {
+					if immutable(&properties.unknown).is_some() {
 						return Err(DecodeError::InvalidValue);
 					}
 					sealed(&mut Decoder::new(value, version.into()), &mut properties, &mut seen)?;
 				}
 				// A small kept property must not pin the message's larger buffer.
-				properties.unknown.values.push(Property {
+				properties.unknown.push(Property {
 					id: abs,
 					value: Value::Bytes(Bytes::copy_from_slice(value)),
 				});
 			}
 		}
 
-		// Recorded only beside a value they describe, so a set with nothing to forward stays empty.
-		let forwarded = !properties.unknown.values.is_empty();
-		properties.unknown.encoding = forwarded.then(|| super::object::encoding(version));
 		Ok(properties)
 	}
 
@@ -294,14 +292,13 @@ pub(crate) fn understood(id: u64) -> bool {
 /// within the [`MAX_PROPERTIES`] a message may carry.
 pub(crate) const MAX_FORWARDED: usize = MAX_PROPERTIES as usize - UNDERSTOOD.len();
 
-/// Check a Track Properties' Immutable Properties `block`, serialized in the `encoding`
-/// family, as [`Properties::decode`] does.
-pub(crate) fn check_immutable(block: &[u8], encoding: crate::model::object::Encoding) -> Result<(), DecodeError> {
-	// Track Properties start at draft-16, whose families all delta-encode their keys.
-	if encoding == crate::model::object::Encoding::Draft14 {
+/// Check a Track Properties' Immutable Properties `block` from a `version` publisher, as
+/// [`Properties::decode`] does.
+pub(crate) fn check_immutable(block: &[u8], version: Version) -> Result<(), DecodeError> {
+	// Track Properties start at draft-16.
+	if matches!(version, Version::Draft14 | Version::Draft15) {
 		return Err(DecodeError::InvalidValue);
 	}
-	let version = super::object::family(encoding);
 	sealed(
 		&mut Decoder::new(block, version.into()),
 		&mut Properties::default(),
@@ -309,36 +306,41 @@ pub(crate) fn check_immutable(block: &[u8], encoding: crate::model::object::Enco
 	)
 }
 
+/// The Immutable Properties block among `values`.
+fn immutable(values: &[Property]) -> Option<&Bytes> {
+	values.iter().find_map(|property| match (property.id, &property.value) {
+		(IMMUTABLE, Value::Bytes(block)) => Some(block),
+		_ => None,
+	})
+}
+
+/// The keys inside the Immutable Properties among `values`, serialized as `version` does.
+///
+/// Read from the block each time rather than held as a list, which could be many times its
+/// size. Ingress checked the block, so a malformed key cannot occur and ends it.
+fn sealed_keys(values: &[Property], version: Version) -> impl Iterator<Item = u64> + '_ {
+	let mut r = immutable(values).map(|block| Decoder::new(block, version.into()));
+	let mut id: u64 = 0;
+	std::iter::from_fn(move || {
+		let r = r.as_mut().filter(|r| !r.is_empty())?;
+		id = id.checked_add(r.varint().ok()?)?;
+		match id.is_multiple_of(2) {
+			true => r.varint().ok().map(drop)?,
+			false => r.bytes().ok().map(drop)?,
+		}
+		Some(id)
+	})
+}
+
 impl TrackProperties {
-	/// The Immutable Properties block, serialized as [`Self::encoding`] says.
+	/// The Immutable Properties block, serialized as [`Self::version`] does.
 	pub(crate) fn immutable(&self) -> Option<&Bytes> {
-		self.values
-			.iter()
-			.find_map(|property| match (property.id, &property.value) {
-				(IMMUTABLE, Value::Bytes(block)) => Some(block),
-				_ => None,
-			})
+		immutable(&self.values)
 	}
 
 	/// The keys inside Immutable Properties, which egress must not restate as mutable.
-	///
-	/// Read from the block each time rather than held as a list, which could be many times
-	/// its size. Ingress checked the block, so a malformed key cannot occur and ends it.
 	pub(crate) fn sealed(&self) -> impl Iterator<Item = u64> + '_ {
-		let mut r = self
-			.immutable()
-			.zip(self.encoding)
-			.map(|(block, encoding)| Decoder::new(block, super::object::family(encoding).into()));
-		let mut id: u64 = 0;
-		std::iter::from_fn(move || {
-			let r = r.as_mut().filter(|r| !r.is_empty())?;
-			id = id.checked_add(r.varint().ok()?)?;
-			match id.is_multiple_of(2) {
-				true => r.varint().ok().map(drop)?,
-				false => r.bytes().ok().map(drop)?,
-			}
-			Some(id)
-		})
+		sealed_keys(&self.values, self.version)
 	}
 
 	/// Why a track carrying these beside `info` is neither processed nor forwarded, if it
@@ -365,12 +367,12 @@ impl TrackProperties {
 	/// Whether Immutable Properties seal a property we understand at another value than
 	/// the `restated` one the relay acts on.
 	fn contradicts(&self, restated: &Properties) -> bool {
-		let Some((block, encoding)) = self.immutable().zip(self.encoding) else {
+		let Some(block) = self.immutable() else {
 			return false;
 		};
 		let mut sealed = Properties::default();
 		let mut seen = Vec::new();
-		let r = &mut Decoder::new(block, super::object::family(encoding).into());
+		let r = &mut Decoder::new(block, self.version.into());
 		// Ingress checked the block, so a malformed one cannot occur and is refused.
 		if self::sealed(r, &mut sealed, &mut seen).is_err() {
 			return true;
@@ -693,14 +695,10 @@ mod tests {
 
 			let (properties, written) = round_trip(version, &block);
 			assert_eq!(written, block, "{version}");
-			assert_eq!(properties.unknown.values.len(), 3, "{version}");
-			assert!(properties.unknown.sealed().eq([0x02]), "{version}");
-			assert_eq!(
-				properties.unknown.encoding,
-				Some(super::super::object::encoding(version)),
-				"{version}"
-			);
-			assert!(!properties.unknown.mandatory(), "{version}");
+			assert_eq!(properties.unknown.len(), 3, "{version}");
+			let track = forwarded(&properties, version);
+			assert!(track.sealed().eq([0x02]), "{version}");
+			assert!(!track.mandatory(), "{version}");
 
 			// Ours interleave by type.
 			let mut ours = properties.clone();
@@ -757,18 +755,26 @@ mod tests {
 		));
 	}
 
+	/// What a relay keeps of `properties`, which arrived on `version`.
+	fn forwarded(properties: &Properties, version: Version) -> TrackProperties {
+		TrackProperties {
+			version,
+			values: properties.unknown.clone(),
+		}
+	}
+
 	/// A relay forwards only as many properties as leave room for every one it restates, so
 	/// what it sends always decodes. One more is refused at ingress.
 	#[test]
 	fn forwarded_properties_leave_room_for_the_restated() {
 		let unknown = |count: usize| TrackProperties {
+			version: Version::Draft22,
 			values: (0..count as u64)
 				.map(|i| Property {
 					id: 0x40 + 2 * i,
 					value: Value::Int(1),
 				})
 				.collect(),
-			encoding: Some(crate::model::object::Encoding::Draft19),
 		};
 		let properties = Properties {
 			max_cache_duration: Some(Duration::from_secs(1)),
@@ -776,9 +782,13 @@ mod tests {
 			priority: Some(1),
 			group_order: Some(GroupOrder::Descending),
 			dynamic_groups: true,
-			unknown: unknown(MAX_FORWARDED),
+			unknown: unknown(MAX_FORWARDED).values,
 		};
-		assert!(properties.unknown.refused(&crate::track::Info::default()).is_none());
+		assert!(
+			forwarded(&properties, Version::Draft22)
+				.refused(&crate::track::Info::default())
+				.is_none()
+		);
 		let mut buf = Vec::new();
 		properties
 			.encode(&mut Encoder::new(&mut buf, Version::Draft22.into()), Version::Draft22)
@@ -801,11 +811,11 @@ mod tests {
 		w.varint(id).unwrap();
 		w.varint(value).unwrap();
 		let unknown = TrackProperties {
+			version,
 			values: vec![Property {
 				id: IMMUTABLE,
 				value: Value::Bytes(block.into()),
 			}],
-			encoding: Some(super::super::object::encoding(version)),
 		};
 		let info = crate::track::Info::default()
 			.with_max_age(Duration::from_secs(7))
@@ -857,13 +867,10 @@ mod tests {
 		let w = &mut Encoder::new(&mut sealed, version.into());
 		w.varint(DEFAULT_PUBLISHER_GROUP_ORDER).unwrap();
 		w.varint(1).unwrap();
-		let unknown = TrackProperties {
-			values: vec![Property {
-				id: IMMUTABLE,
-				value: Value::Bytes(sealed.clone().into()),
-			}],
-			encoding: Some(super::super::object::encoding(version)),
-		};
+		let unknown = vec![Property {
+			id: IMMUTABLE,
+			value: Value::Bytes(sealed.clone().into()),
+		}];
 		let egress = Properties {
 			unknown: unknown.clone(),
 			..Properties::restated(&crate::track::Info::default())
@@ -905,16 +912,17 @@ mod tests {
 		let mut w = Encoder::new(&mut mandatory, Version::Draft22.into());
 		w.varint(0x4000).unwrap();
 		w.varint(1).unwrap();
-		assert!(decode_draft22(&mandatory).unwrap().unknown.mandatory());
+		let mandatory_in = |list: &[u8]| forwarded(&decode_draft22(list).unwrap(), Version::Draft22).mandatory();
+		assert!(mandatory_in(&mandatory));
 
 		let mut sealed = vec![0x0b, mandatory.len() as u8];
 		sealed.extend(&mandatory);
-		assert!(decode_draft22(&sealed).unwrap().unknown.mandatory());
+		assert!(mandatory_in(&sealed));
 
 		let mut below = Vec::new();
 		let mut w = Encoder::new(&mut below, Version::Draft22.into());
 		w.varint(0x3ffe).unwrap();
 		w.varint(1).unwrap();
-		assert!(!decode_draft22(&below).unwrap().unknown.mandatory());
+		assert!(!mandatory_in(&below));
 	}
 }

@@ -126,7 +126,7 @@ describe.each(["shared", "post"] as const)("%s ring at auto", (ring) => {
 		return delay;
 	}
 
-	// A minute, so the estimator's startup ramp hands over to its steady forget factor.
+	// A minute, so the estimator has long since spent its prior and settled.
 	it("sizes the target from the arrival spread, not a round trip", async () => {
 		// Evenly paced, the target is the estimator's 20 ms floor plus one frame.
 		expect(await settled(60, () => 30)).toBe(40);

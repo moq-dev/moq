@@ -7,10 +7,16 @@ retransmits in-flight STREAM data (sent, unacknowledged, and not yet expired)
 to fill BBR3's ProbeBW_UP phase, so that phase's sample isn't app-limited and
 the estimate rises when the path has room. Media frames keep their deadlines,
 redundant bytes stay within budget, and unique goodput is counted once.
-Sessions on moq-tokio and moq-uring then advertise PROBE `Increase`. A
-measured no-go is a valid outcome.
+Sessions on moq-tokio and moq-uring then have a sender, so
+[viewer targets](/quest/m2/probe/viewer-target.md) can advertise PROBE
+`Increase` for them. A measured no-go is a valid outcome.
 
 ## Plan
+
+Decided with the maintainer on 2026-10-20: this moved to m1 with the
+[target](/quest/m1/probe-target.md), since the native
+[rung disable](/quest/m1/simulcast-rung-disable.md) requires it to resume a
+stopped rendition.
 
 Decided with the maintainer on 2026-10-17 (see the
 [epic](/quest/m2/probe/README.md)), replacing the old plan's "measure which
@@ -29,19 +35,33 @@ mechanism wins first" step:
   replace capacity with the encoder rate because the source plateaus. Keep
   current goodput, historical capacity and its age, and the desired rate
   distinct; preserving an old estimate does not discover capacity.
+- **Expired means reset.** Both moq-net publishers reset a stale group's
+  stream as `Old`, even after its FIN while bytes await acknowledgment
+  (`poll_expired_while_pending`), and moq-quic never resends a reset stream's
+  bytes, so probing never sends past a group's expiry. A group the cache
+  evicted is only judged once [evicted-group staleness](/quest/m1/evicted-group-stale.md)
+  lands, so it is required, with a test that evicts a group mid-probe. Rejected: requiring
+  [per-stream deadlines](/quest/m2/quic-deadline.md) first. They predict
+  whether bytes can still arrive before the deadline, which tightens loss
+  recovery too, but expiry itself already reaches moq-quic as a reset.
 - Evaluate the IMMEDIATE_ACK extension so ACK delay doesn't obscure a short
   sample.
-- Implement the [target](/quest/m2/probe/target.md) quest's sender hook in
+- Implement the [target](/quest/m1/probe-target.md) quest's sender hook in
   moq-quic's recovery and pacing layer and the moq-tokio and moq-uring
-  adapters. A controller with no ProbeBW_UP phase can't, so its sessions
-  fall back to [padding](/quest/m2/probe/padding.md).
+  adapters. A controller with no ProbeBW_UP phase (such as the
+  [realtime controller](/quest/m2/quic-realtime/README.md)) can't, so its
+  sessions keep `Report`: [padding](/quest/m2/probe/padding.md) is
+  browser-only. Nor can a session with no media in flight; the native rung
+  disable keeps its lowest rung encoding for that reason.
 
 Acceptance, in moq-quic's seeded simulation (`rs/moq-quic/src/tests/`,
 extending `Bottleneck` to step its rate) and wired into CI at least nightly:
 an illustrative 2 Mbit/s source seeking 4 Mbit/s while the path steps 3 to 12
 to 3 Mbit/s, on identical media traces and wire budgets. Cover keyframes, idle
-restart, stale high estimates, receiver credit limits, compressed ACKs, and
-competing CUBIC and BBR flows. Add a congested arm below the media bitrate
+restart, stale high estimates, receiver credit limits, compressed ACKs,
+competing CUBIC and BBR flows, a group that expires mid-probe (no probe
+bytes for its stream after the reset), and a peer target far above the path, whose
+redundant bytes stay within the overhead budget. Add a congested arm below the media bitrate
 behind a deep but finite queue for impairment acceptance and performance.
 Verify actual overflow drops, adding competing loss-based traffic if BBR
 alone will not fill it. Sweep queue depth separately. Random or scripted burst loss may
@@ -51,14 +71,16 @@ upward adaptation, downward reaction, estimate age, frame deadlines, queue
 delay, unique goodput, and redundant bytes, against a no-probing baseline. A
 successful small burst is not proof of full path capacity.
 
-On a no-go, keep the baseline, record why, and leave padding as moq-quic's
-sender; the [viewer up-switch](/quest/m2/probe/viewer-upswitch.md) then
-requires padding instead of this. Padding can't reach moq-transport drafts 14
-to 17, so sessions on those drafts would keep `Report`.
+On a no-go, keep the baseline, record why, and native sessions keep `Report`.
+Padding is browser-only, so the native
+[rung disable](/quest/m1/simulcast-rung-disable.md) and the
+[viewer up-switch](/quest/m2/probe/viewer-upswitch.md) then go back to the
+maintainer instead of falling back to it.
 
 ## Required
 
-- [Session probe target](/quest/m2/probe/target.md) - the target this probes to and the sender hook it implements
+- [Session send target](/quest/m1/probe-target.md) - the target this probes to and the sender hook it implements
+- [An evicted group is judged stale](/quest/m1/evicted-group-stale.md) - an evicted group's stream resets once stale, so probing never retransmits it
 
 ## Related
 
