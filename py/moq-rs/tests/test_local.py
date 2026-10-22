@@ -484,7 +484,7 @@ async def test_publish_track_info_and_subscription():
 
 
 def test_track_info_keeps_native_default_priority():
-    """A partially configured TrackInfo keeps moq-ffi's default priority of 127."""
+    """A partially configured TrackInfo keeps moq-ffi's default priority of 0."""
     native = moq_ffi.MoqTrackInfo().priority
     assert moq.TrackInfo()._ffi().priority == native
     assert moq.TrackInfo(max_age=timedelta(seconds=2))._ffi().priority == native

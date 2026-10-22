@@ -917,6 +917,8 @@ pub struct ScriptedSession {
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
 	datagram_size: usize,
+	/// Set by [`Self::with_groups`].
+	groups: bool,
 }
 
 impl ScriptedSession {
@@ -943,7 +945,14 @@ impl ScriptedSession {
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
 			datagram_size: 0,
+			groups: false,
 		}
+	}
+
+	/// Open send groups, as native QUIC does, recording them in the log.
+	pub fn with_groups(mut self) -> Self {
+		self.groups = true;
+		self
 	}
 
 	/// Never acknowledge an opened stream's FIN, like a peer that stopped reading.
@@ -1103,8 +1112,8 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
 	}
 
-	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
-		None
+	fn send_group(&mut self, priority: i64) -> Option<SinkGroup> {
+		self.groups.then(|| SinkGroup::open(self.log.clone(), priority))
 	}
 
 	fn send_datagram(

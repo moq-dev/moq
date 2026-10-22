@@ -2844,7 +2844,7 @@ fn track_demand_reports_the_wanted_group() {
 	let broadcast = publish_broadcast(origin, b"track-demand-wanted");
 	let name = b"data";
 	let info = moq_track_info {
-		priority: 127,
+		priority: 0,
 		max_age_us: 0,
 		max_age_present: false,
 		timescale: 0,
@@ -3171,7 +3171,7 @@ fn fetch_group(
 	broadcast: u32,
 	name: &str,
 	sequence: u64,
-	priority: u8,
+	priority: i8,
 	frame_start: u64,
 ) -> mpsc::Receiver<Result<(u64, Vec<u8>), moq_net::Error>> {
 	let consumer = State::lock()
@@ -3212,7 +3212,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 	let fetch = fetch_group(broadcast, "data", 5, 11, 0);
 	let request = id(group_cb.recv());
 	let mut sequence = 0u64;
-	let mut priority = 0u8;
+	let mut priority = 0i8;
 	let mut frame_start = 1u64;
 	assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
 	assert_eq!(unsafe { moq_group_request_priority(request, &mut priority) }, 0);

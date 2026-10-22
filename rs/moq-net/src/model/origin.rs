@@ -4172,6 +4172,10 @@ impl Drop for Interests {
 }
 
 /// One change to what a session asks its peer about; see [`Interests`].
+#[cfg_attr(
+	not(feature = "async"),
+	expect(dead_code, reason = "only async sessions consume discovery changes")
+)]
 // pending: /quest/m1/public-model/answer.md
 pub(crate) struct InterestChange {
 	/// The prefix, relative to the session's root.

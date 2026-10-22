@@ -31,7 +31,7 @@ fn timed() -> moq_net::track::Info {
 /// An explicitly timed raw track, whose frame API accepts microsecond timestamps.
 fn timed_info() -> MoqTrackInfo {
 	MoqTrackInfo {
-		priority: 127,
+		priority: 0,
 		max_age_us: None,
 		refresh: None,
 		timescale: Some(1_000_000),
@@ -944,7 +944,7 @@ async fn data_writes_preserve_optional_timestamps() {
 				.publish_track(
 					"data".into(),
 					Some(MoqTrackInfo {
-						priority: 127,
+						priority: 0,
 						max_age_us: None,
 						refresh: None,
 						timescale: timestamp_us.map(|_| 1_000_000),
@@ -1086,7 +1086,7 @@ async fn json_snapshot_roundtrip() {
 		compression: true,
 	};
 	let info = MoqTrackInfo {
-		priority: 127,
+		priority: 0,
 		max_age_us: None,
 		timescale: Some(1_000_000),
 		refresh: None,

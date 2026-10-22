@@ -103,27 +103,37 @@ large to review alongside the rest; those become `/quest-plan` follow-ups:
 Each needs a bench, swept over both axes where it fans out, or its own
 follow-up quest:
 
-1. HLS/DASH serving (`rs/moq-hls/src/export/rendition.rs` `segment()`,
-   `media_playlist()`, `mpd.rs`): every request refetches and remuxes; sweep
-   viewers x renditions x window segments.
-2. Session-level datagram delivery (`lite/publisher.rs` `serve_datagram`,
-   `ietf/datagram.rs`): per object per subscriber; add a
-   `session_delivery_datagram` group sweeping publishers x viewers.
+1. [HLS request fan-out](/quest/m2/performance-survey/hls-serving.md) owns
+   repeated segment fetch/remux and playlist rendering, swept over viewers,
+   renditions and window segments.
+2. [Session datagrams](/quest/m2/performance-survey/datagram-delivery.md) owns
+   complete adapter delivery across publishers and viewers.
 3. LOC and CMAF wire containers in moq-mux: `containers` and `export` only use
    `Container::Legacy`; sweep container x frame size x frames.
-4. JS hang container `Consumer` walks every buffered group per frame
-   (`consumer.ts` `#updateBuffered`, `#checkMaxDelay`); browser bench.
-5. JS per-sample copies in CMAF decode and LOC encode; `js/loc`, `js/msf`,
-   `js/flate` have no benches.
+4. [Buffered browser groups](/quest/m2/performance-survey/hang-buffered.md)
+   owns per-frame scans and bulk skip work in the Hang consumer.
+5. [Browser media copies](/quest/m2/performance-survey/browser-media-copies.md)
+   owns CMAF sample copies and LOC encode allocation. Generic `js/msf` and
+   `js/flate` benchmark coverage remains here.
 6. moq-quic loss recovery and real congestion controllers: every bench pins
    `Unlimited`; sweep controller x flight x loss x streams.
-7. Relay `/announced` copies the route table per request (`web.rs`); sweep
-   routes x pollers.
-8. JWT verification per connect and fetch (`moq-auth`, no benches); sweep
-   algorithm x key-set size.
+7. [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md)
+   owns HTTP snapshot/rendering costs across routes and pollers.
+8. [JWT verification](/quest/m2/performance-survey/jwt-verification.md) owns
+   key-source I/O, import, lookup, parsing and crypto attribution.
 9. MPEG-TS import with real repeated media (the CLI bench mostly skips null
    padding), and MKV, FLV, H.265, AV1 importers.
-10. JS watch audio ring buffer and publish `Fanout` (lower impact).
+10. JS watch audio ring buffer and publish `Fanout` (lower impact). Include
+    capture-to-encoder staging: `audio/framer.ts` copies planes before
+    `audio/encoder.ts` joins them. AudioData already uses a transfer list;
+    do not count that transfer as another mandatory copy. Sweep publishers
+    x renditions, channels and frame duration in a browser.
+
+The [2026-10-22 source survey](/quest/m2/performance-survey/README.md) owns
+the extracted items above and additional algorithmic hypotheses, with paired
+benchmarks required before optimization. This audit still owns nightly
+regression attribution and the remaining coverage; the source survey does not
+complete this run. Its fragmented-MKV child specializes item 9's MKV work.
 
 Single-axis fan-out benches to widen: `session_delivery_paced` (viewers only),
 `track_fanout_*` (subscribers only), `memory` (lite-06 only), and

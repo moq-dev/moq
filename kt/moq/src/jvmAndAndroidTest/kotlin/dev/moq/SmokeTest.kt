@@ -265,7 +265,7 @@ class SmokeTest {
             val fetched = broadcast.consume().fetchGroup(
                 "events",
                 0uL,
-                FetchGroupOptions(priority = 3u),
+                FetchGroupOptions(priority = 3),
             )
             assertEquals(0uL, fetched.sequence())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
@@ -372,7 +372,7 @@ class SmokeTest {
 
             // Fetch while the track is still published: finishing the media producer
             // unpublishes it, and the fetch would then miss with NotFound.
-            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(rendition = dev.moq.media.AudioRendition(name, audio), sequence = 0uL, options = FetchGroupOptions(priority = 3u)))
+            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(rendition = dev.moq.media.AudioRendition(name, audio), sequence = 0uL, options = FetchGroupOptions(priority = 3)))
 
             // Close the group so the fetched stream terminates instead of waiting for more.
             media.finish()

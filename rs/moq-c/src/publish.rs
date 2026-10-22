@@ -824,7 +824,7 @@ impl Publish {
 	}
 
 	/// The sequence, priority, and first frame of a requested group.
-	pub fn group_request_info(&self, request: Id) -> Result<(u64, u8, u64), Error> {
+	pub fn group_request_info(&self, request: Id) -> Result<(u64, i8, u64), Error> {
 		let request = self.group_request.get(request).ok_or(Error::NotFound)?;
 		Ok((request.sequence(), request.priority(), request.frame_start()))
 	}

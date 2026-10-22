@@ -38,7 +38,7 @@ const MAX_REPORT: usize = 1024 * 1024;
 const DRAIN: Duration = Duration::from_secs(5);
 
 /// Below every media track, so a report never delays the media it describes.
-const PRIORITY: u8 = 0;
+const PRIORITY: i8 = i8::MIN;
 
 /// A snapshot track and its compressed `.z` sibling, written together. Either is `None` once a
 /// write failed and closed it.

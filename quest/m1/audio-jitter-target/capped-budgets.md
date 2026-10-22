@@ -24,6 +24,16 @@ here, so one pass over the same seven nightlies covers both. The cap
 after the build flush, so post-cap nightlies are also post-flush; none had run
 yet.
 
+The first post-cap scheduled run, [2026-10-22 nightly](https://github.com/moq-dev/moq/actions/runs/39779729461),
+failed only the browser Opus `wide` target ceilings: `isolated` p95 was
+380 ms against 270 ms, and `plain` was 400 ms against 300 ms. In the
+`audio-quality-run` artifact, both `chromium-opus-48000-wide-*.ndjson`
+series hold their startup target until about 21 s, then settle at 200 to
+220 ms; both matching `.longtasks.json` arrays are empty. The isolated
+row has zero underruns, stalls, and silence; plain has 2.2 underruns a
+minute, 0 stalls, and 0 silence. This supplies one of the seven required
+scheduled runs, not a reason to change the estimator or recalibrate early.
+
 The near-zero stall was never the isolated ring. That row is simply the
 matrix's first, and a cold `cargo build` left about 800 MB dirty when it
 started. On the ARM runner each periodic writeback burst froze the page's main
