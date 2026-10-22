@@ -159,7 +159,7 @@ mod stream_transport {
 			let reader_task = tokio::spawn(reader_loop(
 				BufReader::new(read),
 				version,
-				our_max_record_size as usize,
+				usize::try_from(our_max_record_size).unwrap_or(usize::MAX),
 				tx,
 			));
 			Self {
@@ -335,10 +335,16 @@ mod stream_transport {
 		Ok(())
 	}
 
+	/// A peer-sent length as `usize`, saturating where it does not fit so the size checks
+	/// still refuse it on 32-bit targets
+	fn saturating_len(value: VarInt) -> usize {
+		usize::try_from(value.into_inner()).unwrap_or(usize::MAX)
+	}
+
 	/// Read one QMux Record from the byte stream (draft-01).
 	/// Returns the record payload (frames concatenated).
 	async fn recv_record<R: AsyncRead + Unpin>(reader: &mut R, our_max_record_size: usize) -> Result<Bytes, Error> {
-		let size = read_varint(reader).await?.into_inner() as usize;
+		let size = saturating_len(read_varint(reader).await?);
 		if size > our_max_record_size {
 			return Err(Error::FrameTooLarge);
 		}
@@ -364,12 +370,12 @@ mod stream_transport {
 			}
 
 			if has_len {
-				let len = read_varint_into(reader, &mut buf).await?.into_inner() as usize;
+				let len = saturating_len(read_varint_into(reader, &mut buf).await?);
 				// draft-00 §5.2: `max_frame_size` bounds the whole frame, so the
 				// header bytes read so far count against it. A byte stream cannot
 				// resynchronize past an oversized frame, so this stays fatal — as
 				// the draft requires (FRAME_ENCODING_ERROR).
-				if buf.len() + len > MAX_FRAME_SIZE {
+				if buf.len().saturating_add(len) > MAX_FRAME_SIZE {
 					return Err(Error::FrameTooLarge);
 				}
 				read_bytes(reader, len, &mut buf).await?;
@@ -402,8 +408,8 @@ mod stream_transport {
 				if frame_type == 0x1c {
 					read_varint_into(reader, &mut buf).await?; // frame_type
 				}
-				let reason_len = read_varint_into(reader, &mut buf).await?.into_inner() as usize;
-				if buf.len() + reason_len > MAX_FRAME_SIZE {
+				let reason_len = saturating_len(read_varint_into(reader, &mut buf).await?);
+				if buf.len().saturating_add(reason_len) > MAX_FRAME_SIZE {
 					return Err(Error::FrameTooLarge);
 				}
 				read_bytes(reader, reason_len, &mut buf).await?;
@@ -436,8 +442,8 @@ mod stream_transport {
 			}
 			// QX_TRANSPORT_PARAMETERS
 			0x3f5153300d0a0d0a => {
-				let len = read_varint_into(reader, &mut buf).await?.into_inner() as usize;
-				if buf.len() + len > MAX_FRAME_SIZE {
+				let len = saturating_len(read_varint_into(reader, &mut buf).await?);
+				if buf.len().saturating_add(len) > MAX_FRAME_SIZE {
 					return Err(Error::FrameTooLarge);
 				}
 				read_bytes(reader, len, &mut buf).await?;
