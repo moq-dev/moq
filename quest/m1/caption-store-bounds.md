@@ -17,7 +17,7 @@ Decided 2026-10-22 from the security audit, with the maintainer:
 
 - Clamp a cue's end to its start plus a maximum cue duration, and drop cues behind the existing `PRUNE_BEHIND` horizon.
 - Prune regions that no retained cue references in the same sweep, and cap both maps, evicting oldest first. Neither cap refuses a payload; they bound what the viewer retains.
-- Insert by binary search, or sort once per payload, instead of the backward walk plus splice.
+- Sort each payload once and merge it into the store, instead of the backward walk plus splice. A per-cue binary search still splices, so it stays quadratic.
 - Keep the double-escaped `sanitizeCue` and its renderer-version test unchanged: the audit confirmed the pinned `media-captions` builds only double-quoted attributes, so the current escape set is sufficient.
 
 Tests cover a future-dated cue stream, a fresh region per frame, and a descending 100k-cue payload, each asserting the bounded store and the same rendered text.
