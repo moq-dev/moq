@@ -10,7 +10,8 @@ Valid inputs retain the published behavior and API.
 
 Decided 2026-10-22 (maintainer): port the JS input-hardening portion of
 [moq-dev/moq#6084](https://github.com/moq-dev/moq/pull/6084) as a focused
-backport; its publishing changes have a separate owner.
+backport. Its publishing changes already protect workflow-run events from
+main and need no release backport.
 
 Release 36f392f492 still uses a lazy certificate-armor regex and calls
 parts(path).length before rejecting excess path components. Repeated BEGIN

@@ -9,8 +9,7 @@ compatibility. These patch backports can ship before the next breaking cut.
 ## Plan
 
 Decided 2026-10-22 (maintainer): focused backports, rather than a broader
-stabilization audit. The four children are independently landable; splitting
-the parser and workflow changes keeps each implementation PR to one problem.
+stabilization audit. The three children are independently landable.
 The existing fixed-delay quest retains ownership of its release deploy.
 
 The comparison used main
@@ -26,6 +25,12 @@ The fixed-delay backport
 [moq-dev/moq#6217](https://github.com/moq-dev/moq/pull/6217) merged into release
 as [fd26b8ffec](https://github.com/moq-dev/moq/commit/fd26b8ffec) during planning;
 it needs no additional implementation quest.
+
+The publishing-workflow changes in
+[moq-dev/moq#6084](https://github.com/moq-dev/moq/pull/6084) need no backport:
+GitHub runs workflow_run from the default branch, where the fix already
+landed. Release-branch push/dispatch paths use their own github.sha, so
+changing the release copy adds no protection for a workflow-run checkout.
 
 This epic's remaining work is to reconcile the landed backports on the
 release candidate, confirm their checks, and hand the commit inventory to
@@ -43,7 +48,6 @@ findings; expanding this shortlist needs a separate scope decision.
 ## Required
 
 - [TLS dependencies](/quest/m0/release-backports/tls.md) - release takes the targeted WebPKI fixes already on main
-- [Publishing workflows](/quest/m0/release-backports/publishing.md) - privileged wrapper publication validates the triggering repository
 - [JS input parsing](/quest/m0/release-backports/parsing.md) - malformed certificates and paths cannot trigger disproportionate parsing work
 - [FFI cancellation](/quest/m0/release-backports/ffi-cancellation.md) - cancelled reads and accepts leave the next event for the next caller
 
