@@ -112,6 +112,7 @@ pub(crate) struct Stats {
 	packets_lost: Option<u64>,
 	rtt: Option<std::time::Duration>,
 	estimated_send_rate: Option<u64>,
+	streams_evicted: Option<u64>,
 }
 
 impl Stats {
@@ -125,6 +126,7 @@ impl Stats {
 			packets_lost: stats.packets_lost(),
 			rtt: stats.rtt(),
 			estimated_send_rate: stats.estimated_send_rate(),
+			streams_evicted: stats.streams_evicted(),
 		}
 	}
 }
@@ -153,6 +155,9 @@ impl super::Stats for Stats {
 	}
 	fn estimated_send_rate(&self) -> Option<u64> {
 		self.estimated_send_rate
+	}
+	fn streams_evicted(&self) -> Option<u64> {
+		self.streams_evicted
 	}
 }
 
