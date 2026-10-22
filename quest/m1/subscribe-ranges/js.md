@@ -30,8 +30,10 @@ IETF FETCH dispatch. Resized from [M] to [L] for it.
 
 The 2026-10-22 release audit reproduced a P2 defect in already accepted
 datagram filters at main 1d43c096e0. For an inclusive request from
-(group 0, object 1) through (group 1, object 0), publishing single-object
-datagrams 0, 1, and 2 should deliver only 1. The real JS publisher with paired
+(group 0, object 1) through (group 1, object 0), publishing datagrams at
+(0, 0), (1, 0), and (2, 0) should deliver only (1, 0). Each datagram is object
+0 of its group; the observed lists below contain group sequences.
+The real JS publisher with paired
 mock transports delivered [0, 1, 2] on IETF drafts 20/22 and [0, 1] on Lite
 06/07. IETF's datagram task receives no resolved range, losing both bounds;
 Lite installs the group cap but does not pass frame bounds to its datagram
