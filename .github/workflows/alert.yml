@@ -40,6 +40,7 @@ on:
       - release-winget
       - rpm-repo
       - Smoke
+      - Smoke toolchain update
       - TS
       - Video
     types:
@@ -65,7 +66,7 @@ jobs:
       github.event.workflow_run.event != 'pull_request_target' &&
       github.event.workflow_run.event != 'merge_group' &&
       (github.event.workflow_run.event == 'schedule' ||
-      !contains(fromJSON('["Interop", "Nightly", "Smoke", "TS", "Video"]'), github.event.workflow_run.name))
+      !contains(fromJSON('["Interop", "Nightly", "Smoke", "Smoke toolchain update", "TS", "Video"]'), github.event.workflow_run.name))
     runs-on: ubuntu-latest
 
     steps:

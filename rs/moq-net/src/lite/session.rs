@@ -281,7 +281,7 @@ where
 	// GOAWAY wiring: the public Session holds one half (send trigger, received
 	// signal), the protocol tasks below hold the other. Only the server may
 	// name a redirect URI.
-	let (goaway_handle, goaway) = crate::goaway::Handle::new(&runtime, !client);
+	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
 
 	// Read out before the setup machine takes ownership below.
 	let our_cost = our_setup.cost;
@@ -800,9 +800,7 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 					if !self.version.has_goaway() {
 						return Poll::Ready(());
 					}
-					self.state = SendGoawayState::Open {
-						payload: payload.goaway,
-					};
+					self.state = SendGoawayState::Open { payload };
 				}
 				SendGoawayState::Open { payload } => {
 					let mut stream = match ready!(Stream::poll_open(&mut self.session, self.version, &mut cx)) {
