@@ -48,7 +48,7 @@ pub struct Frame {
 	pub timestamp: Option<Timestamp>,
 	/// The full frame payload.
 	pub payload: Bytes,
-	// Restamped as the frame enters a group's cache; see [`Self::arrived`].
+	// Stamped as the frame enters a group's cache; see [`Self::arrived`].
 	pub(super) arrived: Instant,
 }
 
@@ -58,7 +58,8 @@ impl Frame {
 		Self {
 			timestamp: timestamp.into(),
 			payload: payload.into_bytes(),
-			arrived: super::clock::now(),
+			// Stamped when written to a group, so building one never reads the clock.
+			arrived: Instant::ZERO,
 		}
 	}
 
@@ -66,7 +67,7 @@ impl Frame {
 	///
 	/// A frame read from a group carries the instant it was written, received, or fetched
 	/// into it, so a reader judges lateness on that rather than on when it got around to
-	/// reading. A frame not yet written to a group carries when it was built.
+	/// reading. A frame not yet written to a group carries the clock's origin.
 	pub fn arrived(&self) -> Instant {
 		self.arrived
 	}

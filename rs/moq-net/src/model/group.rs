@@ -1241,7 +1241,11 @@ impl Producer {
 		state.cache += size;
 		let slots = state.reserve_frame();
 		let now = state.charge.add(size + slots);
-		state.frames.push_back(Frame::new(timestamp, payload));
+		state.frames.push_back(Frame {
+			timestamp,
+			payload,
+			arrived: super::clock::now(),
+		});
 		if let Some(flate) = &mut state.flate {
 			flate.push(inflated);
 		}
@@ -1559,8 +1563,6 @@ impl Producer {
 			let inflated = frame.payload.len() as u64;
 			frame.payload = flate.deflate(&frame.payload);
 			flate.push(inflated);
-			// Readable only once compressed, so a slow DEFLATE counts against its lateness.
-			frame.arrived = super::clock::now();
 			let size = frame.payload.len() as u64;
 			// The frame already counts against the group's frames.
 			if state.would_overflow(0, size) {
@@ -1580,6 +1582,8 @@ impl Producer {
 			objects.resize(len, None);
 			objects.push_back(Some(fields));
 		}
+		// Stamped once readable, so a slow DEFLATE above counts against its lateness.
+		frame.arrived = super::clock::now();
 		state.frames.push_back(frame);
 		state.committed = state.next_index;
 		self.advance_largest(&state);
