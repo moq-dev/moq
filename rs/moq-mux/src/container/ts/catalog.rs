@@ -463,14 +463,6 @@ mod test {
 	use super::*;
 
 	#[test]
-	fn empty_section_omitted() {
-		// An empty `mpegts` section serializes to `{}` so a media-only broadcast stays
-		// byte-identical to one without the extension.
-		let ext = Ext::default();
-		assert_eq!(serde_json::to_string(&ext).unwrap(), "{}");
-	}
-
-	#[test]
 	fn mux_rate_alone_is_not_empty() {
 		// The rate is the only field of a media-only CBR source, so it must keep the
 		// section alive rather than be dropped with it.

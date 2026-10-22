@@ -31,4 +31,3 @@ Public API: behavior only. Wire: none.
 ## Related
 
 - [Resumed close](/quest/m1/resume-closed.md) - the JS half of a declared end across copies
-- [Resumed datagrams](/quest/m1/resume-datagrams.md) - the other resume reader fix in the same file

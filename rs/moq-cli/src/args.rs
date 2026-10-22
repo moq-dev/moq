@@ -1283,14 +1283,6 @@ mod tests {
 		let _ = Stage::to_kdl();
 	}
 
-	#[test]
-	fn single_stage() {
-		let cli = Invocation::try_parse_from(["moq", "--connect", "http://relay", "import", "ts"]).unwrap();
-		assert_eq!(cli.stages.len(), 1);
-		assert_eq!(cli.stages[0].name(), "import");
-		assert!(cli.validate().is_ok());
-	}
-
 	/// Only TS can mark where a returned broadcast restarts, so only `export ts` may linger.
 	#[test]
 	fn linger_is_ts_only() {

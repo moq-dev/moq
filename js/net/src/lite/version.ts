@@ -423,6 +423,24 @@ export function hasRefresh(version: Version): boolean {
 	}
 }
 
+/** Whether received frame timestamps are the publisher's media time. Lite-05/06 stamp an untimed
+ * track's payloads with their send time, which a receiver cannot tell from it, so it drops every
+ * timestamp received on them and the track arrives untimed. */
+export function hasMediaTime(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /// The WebTransport subprotocol identifier for moq-lite.
 /// Version negotiation still happens via SETUP when this is used.
 export const ALPN = "moql";

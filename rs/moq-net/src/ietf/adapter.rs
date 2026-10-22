@@ -462,50 +462,36 @@ impl crate::transport::poll::SendStream for VirtualSendStream {
 
 // === Adapter Send/Recv Enums ===
 
-/// A failure on an adapter stream. A real stream keeps the codes its transport read, so the
-/// negotiated registry decodes a peer's reset rather than mistaking it for a lost connection.
+/// A failure on an adapter stream. A real stream keeps its transport's error, so the negotiated
+/// registry decodes a peer's reset rather than mistaking it for a lost connection.
+/// Virtual streams have only local errors.
 #[derive(Debug, thiserror::Error)]
-pub enum StreamFailure {
-	#[error("{message}")]
-	Real {
-		message: String,
-		kind: crate::transport::CloseKind,
-		session: Option<(u32, String)>,
-		stream: Option<u32>,
-	},
+#[non_exhaustive]
+pub enum AdapterError<E: crate::transport::Error> {
 	#[error(transparent)]
-	Virtual(Error),
+	Real(E),
+	#[error(transparent)]
+	Virtual(crate::Error),
 }
 
-impl StreamFailure {
-	fn real(err: impl crate::transport::Error) -> Self {
-		Self::Real {
-			message: err.to_string(),
-			kind: err.close_kind(),
-			session: err.session_error(),
-			stream: err.stream_error(),
-		}
-	}
-}
-
-impl crate::transport::Error for StreamFailure {
+impl<E: crate::transport::Error> crate::transport::Error for AdapterError<E> {
 	fn close_kind(&self) -> crate::transport::CloseKind {
 		match self {
-			Self::Real { kind, .. } => *kind,
+			Self::Real(err) => err.close_kind(),
 			Self::Virtual(err) => err.close_kind(),
 		}
 	}
 
 	fn session_error(&self) -> Option<(u32, String)> {
 		match self {
-			Self::Real { session, .. } => session.clone(),
+			Self::Real(err) => err.session_error(),
 			Self::Virtual(err) => err.session_error(),
 		}
 	}
 
 	fn stream_error(&self) -> Option<u32> {
 		match self {
-			Self::Real { stream, .. } => *stream,
+			Self::Real(err) => err.stream_error(),
 			Self::Virtual(err) => err.stream_error(),
 		}
 	}
@@ -517,20 +503,20 @@ pub enum AdapterSend<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for AdapterSend<S> {
-	type Error = StreamFailure;
+	type Error = AdapterError<<S::SendStream as crate::transport::poll::SendStream>::Error>;
 	type Group = <S::SendStream as crate::transport::poll::SendStream>::Group;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_write(cx, buf).map(|r| r.map_err(StreamFailure::real)),
-			Self::Virtual(s) => s.poll_write(cx, buf).map(|r| r.map_err(StreamFailure::Virtual)),
+			Self::Real(s) => s.poll_write(cx, buf).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_write(cx, buf).map_err(AdapterError::Virtual),
 		}
 	}
 
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_write_buf(cx, buf).map(|r| r.map_err(StreamFailure::real)),
-			Self::Virtual(s) => s.poll_write_buf(cx, buf).map(|r| r.map_err(StreamFailure::Virtual)),
+			Self::Real(s) => s.poll_write_buf(cx, buf).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_write_buf(cx, buf).map_err(AdapterError::Virtual),
 		}
 	}
 
@@ -551,8 +537,8 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		match self {
-			Self::Real(s) => s.finish().map_err(StreamFailure::real),
-			Self::Virtual(s) => s.finish().map_err(StreamFailure::Virtual),
+			Self::Real(s) => s.finish().map_err(AdapterError::Real),
+			Self::Virtual(s) => s.finish().map_err(AdapterError::Virtual),
 		}
 	}
 
@@ -565,8 +551,8 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_closed(cx).map(|r| r.map_err(StreamFailure::real)),
-			Self::Virtual(s) => s.poll_closed(cx).map(|r| r.map_err(StreamFailure::Virtual)),
+			Self::Real(s) => s.poll_closed(cx).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_closed(cx).map_err(AdapterError::Virtual),
 		}
 	}
 }
@@ -577,12 +563,12 @@ pub enum AdapterRecv<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for AdapterRecv<S> {
-	type Error = StreamFailure;
+	type Error = AdapterError<<S::RecvStream as crate::transport::poll::RecvStream>::Error>;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_read(cx, dst).map(|r| r.map_err(StreamFailure::real)),
-			Self::Virtual(s) => s.poll_read(cx, dst).map(|r| r.map_err(StreamFailure::Virtual)),
+			Self::Real(s) => s.poll_read(cx, dst).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_read(cx, dst).map_err(AdapterError::Virtual),
 		}
 	}
 
@@ -592,15 +578,15 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 		buf: &mut B,
 	) -> Poll<Result<Option<usize>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_read_buf(cx, buf).map(|r| r.map_err(StreamFailure::real)),
-			Self::Virtual(s) => s.poll_read_buf(cx, buf).map(|r| r.map_err(StreamFailure::Virtual)),
+			Self::Real(s) => s.poll_read_buf(cx, buf).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_read_buf(cx, buf).map_err(AdapterError::Virtual),
 		}
 	}
 
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_read_chunk(cx, max).map(|r| r.map_err(StreamFailure::real)),
-			Self::Virtual(s) => s.poll_read_chunk(cx, max).map(|r| r.map_err(StreamFailure::Virtual)),
+			Self::Real(s) => s.poll_read_chunk(cx, max).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_read_chunk(cx, max).map_err(AdapterError::Virtual),
 		}
 	}
 
@@ -613,8 +599,8 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_closed(cx).map(|r| r.map_err(StreamFailure::real)),
-			Self::Virtual(s) => s.poll_closed(cx).map(|r| r.map_err(StreamFailure::Virtual)),
+			Self::Real(s) => s.poll_closed(cx).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_closed(cx).map_err(AdapterError::Virtual),
 		}
 	}
 }
@@ -1145,7 +1131,7 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 		// SUBSCRIBE_TRACKS (draft-18+, #1542): the half of the SUBSCRIBE_NAMESPACE split
 		// that subscribes to all tracks under a prefix. We don't implement PUBLISH
 		// replication, so this is impossible to honor. Reject loudly.
-		ietf::SUBSCRIBE_TRACKS_ID => {
+		ietf::SubscribeTracks::ID => {
 			tracing::error!(
 				version = ?version,
 				"received SUBSCRIBE_TRACKS (0x51); not supported in moq-lite (no PUBLISH replication)"
@@ -1649,6 +1635,7 @@ mod tests {
 		assert_eq!(shared.control.pop().await.unwrap(), first);
 
 		let ok = ietf::RequestOk {
+			largest: None,
 			request_id: Some(RequestId(6)),
 			active: None,
 		};
@@ -2190,16 +2177,14 @@ mod tests {
 			let mut session = ScriptedSession::eof(Vec::new());
 			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
 			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
-			let (_handle, protocol) =
-				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
 
 			let mut session = DeadStreamSession::bis(0);
 			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
 			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
-			let (_handle, protocol) =
-				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
 		}
@@ -2216,8 +2201,7 @@ mod tests {
 			let mut remote = crate::coding::Stream::accept(&mut peer, version).await.unwrap();
 			remote.reader.abort(&Error::Cancel);
 			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
-			let (_handle, protocol) =
-				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let res = moq_clock::timeout(
 				std::time::Duration::from_secs(10),
 				adapter.run(stream.reader, stream.writer, protocol),
@@ -2233,7 +2217,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_request_past_the_window_closes_the_session() {
 		let (adapter, reader, writer, _) = windowed(1, &[0, 2], &[]).await;
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 		let err = adapter.run(reader, writer, goaway).await.unwrap_err();
 		assert!(
 			matches!(err, Error::Session(crate::SessionError::TooManyRequests)),
@@ -2260,7 +2244,7 @@ mod tests {
 		let update = encode_raw(ietf::SubscribeUpdate::ID, &encode_body(&update, VERSION), VERSION);
 		// The target is in the window and the update's own ID is past it.
 		let (adapter, reader, writer, _) = windowed(2, &[0], &update).await;
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 		let err = adapter.run(reader, writer, goaway).await.unwrap_err();
 		assert!(
 			matches!(err, Error::Session(crate::SessionError::TooManyRequests)),
@@ -2289,8 +2273,7 @@ mod tests {
 			let adapter = ControlStreamAdapter::new(session, Control::new(None, false), version);
 			let log = Log::default();
 			let writer = Writer::new(SinkSend::new(log.clone()), version);
-			let (_, goaway) =
-				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+			let (_, goaway) = crate::goaway::Handle::new(true);
 			let mut run = std::pin::pin!(adapter.run(Reader::new(recv, version), writer, goaway));
 			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}");
 
@@ -2314,7 +2297,7 @@ mod tests {
 
 		const VERSION: Version = Version::Draft14;
 		let (mut adapter, reader, writer, log) = windowed(2, &[0, 2], &[]).await;
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 		let runner = adapter.clone();
 		let mut run = std::pin::pin!(runner.run(reader, writer, goaway));
 		assert!(futures::poll!(run.as_mut()).is_pending());
