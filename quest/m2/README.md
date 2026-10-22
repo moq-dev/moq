@@ -37,6 +37,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Binding durations](/quest/m2/ffi-durations.md) - moq-ffi takes and returns durations as a typed duration instead of `_us` integers, so wrappers stop converting by hand
 - [QoS](/quest/m2/qos/README.md) - the relay's egress `lag` histogram and `dropped` counters on the stats totals and prefix tracks
 - [Broadcast fairness](/quest/m2/broadcast-fairness.md) - broadcasts share a cluster link fairly, so one tenant's priority never starves another's
+- [Peer grant bound](/quest/m2/peer-grant-bound.md) - a peer's AUTH_OK costs near-linear time in its bytes on every input shape, in Rust and in a browser
 - [Plan: watch worker](/quest/m2/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m2/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
 - [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - H.264 and H.265 from an external Vulkan image on RADV, hand-rolled on ash, proven on an RX 9070
