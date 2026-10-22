@@ -22,8 +22,9 @@ export interface Drain {
  *
  * - `same-host` (the default) follows it only onto the host already dialed, so a peer can move
  *   the connection between ports or schemes but not to another host.
- * - `follow` also lets the peer name the host. The name is dialed as written, so only use it
- *   with a relay trusted not to point the connection into the local network.
+ * - `follow` also lets the peer name the host. The name is dialed as written, and the new host
+ *   is presented every token on the connection's `auth` handle, so only use it with a relay
+ *   trusted not to point the connection into the local network or at an untrusted host.
  * - `ignore` reconnects to the current URL whatever the peer names.
  *
  * A malformed or refused URI ends the connection with {@link RefusedRedirect}.

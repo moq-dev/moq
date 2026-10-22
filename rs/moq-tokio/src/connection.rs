@@ -204,7 +204,8 @@ pub enum Redirect {
 	/// range, or the metadata service, and nothing here resolves it to find out. A
 	/// *literal* loopback, private, link-local, or IPC target is still refused, but
 	/// that catches a misconfigured peer, not a hostile one. Use it only with an
-	/// upstream trusted with the local network.
+	/// upstream trusted with the local network and with the tokens on
+	/// [`Connection::auth`], which every session presents, on any host.
 	Follow,
 	/// Follow only when the host matches the configured URL, so a peer can move us
 	/// between ports or schemes but not to another host. The default.
