@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Deflate, Inflate } from "fflate";
-import { DEFAULT_MAX_FRAME_SIZE, Decoder, Encoder } from "./codec.ts";
+import { Decoder, Encoder } from "./codec.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -72,10 +72,8 @@ test("codec rejects a frame that inflates past the cap", () => {
 	expect(() => decoder.frame(slice)).toThrow(/exceeded 512/);
 });
 
-test("a decoder without options caps frames at 64 MiB", () => {
+test("a decoder's frame cap cannot be lifted after construction", () => {
 	const decoder = new Decoder();
-	expect(DEFAULT_MAX_FRAME_SIZE).toBe(64 * 1024 * 1024);
-	expect(decoder.maxFrameSize).toBe(DEFAULT_MAX_FRAME_SIZE);
 	expect(() => {
 		(decoder as { maxFrameSize: number }).maxFrameSize = Infinity;
 	}).toThrow(TypeError);

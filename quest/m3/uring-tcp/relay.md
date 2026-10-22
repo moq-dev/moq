@@ -2,18 +2,22 @@
 
 ## Goal
 
-The relay serves its WebSocket sessions, and its HTTP routes, from the
-io_uring workers rather than the shared tokio runtime. A qmux media session is
-then pinned to one thread for its whole life, exactly like a QUIC one.
+The relay serves its TCP listeners (WebSocket sessions, qmux over TCP, and
+the HTTP routes) from the io_uring workers rather than the shared tokio
+runtime. A qmux media session over TCP is then pinned to one thread for its
+whole life, exactly like a QUIC one. A `unix` listener stays on the shared
+tokio runtime.
 
 ## Plan
 
-`uring::Workers::bind` (`rs/moq-relay/src/uring.rs`) ignores `listen`'s
-`tcp`/`unix` listeners and points the operator at a separate `init_streams`
-tokio server; it refuses only settings a worker cannot serve
-(`tls.generate`, `lb_id`, several certificates). Replace the silent skip with real support: each
-worker binds its own listener in the reuseport group and runs the router from
-[stream](/quest/m3/uring-tcp/stream.md) on it.
+`uring::Workers::bind` (`rs/moq-relay/src/uring.rs`) serves QUIC only. The
+relay serves `listen`'s `tcp`/`unix` listeners beside it from the shared tokio
+runtime, through `init_streams` (`rs/moq-relay/src/relay.rs`). Move the TCP
+listeners onto the workers: each worker binds its own listener in the
+reuseport group and runs the router from
+[stream](/quest/m3/uring-tcp/stream.md) on it. A Unix socket has no reuseport
+group, so a `unix` listener keeps its one shared acceptor; the integration
+test covers it too.
 
 The split of work stays what the `uring.rs` module docs already describe: the worker
 owns everything transport-shaped, while authentication and session

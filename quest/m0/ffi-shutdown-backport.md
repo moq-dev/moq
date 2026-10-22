@@ -51,8 +51,3 @@ none.
 ## Required
 
 - [qmux 0.5.3](/quest/m0/qmux-0.5.3.md) - crates.io publishes qmux 0.5.3 with the builder session config #5609 needs
-
-## Related
-
-- [Release builds link](/quest/m0/release-link.md) - the release binaries
-  must link for the cut that publishes this

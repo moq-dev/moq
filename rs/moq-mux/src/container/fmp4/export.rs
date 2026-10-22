@@ -153,6 +153,8 @@ pub struct Fragment {
 }
 
 /// A rendition's latest catalog entry.
+// One per rendition, so the variant sizes never add up to an allocation's worth.
+#[allow(clippy::large_enum_variant)]
 enum Rendition {
 	Video(VideoConfig),
 	Audio(AudioConfig),
@@ -580,6 +582,8 @@ impl<S: Stream> Export<S> {
 								}
 							}
 						}
+						// The fragment ends at the gap the next group reads.
+						Poll::Ready(Some(Event::Cut)) => {}
 						Poll::Ready(Some(Event::GroupEnd)) => {
 							if track.buffer.is_empty() {
 								continue;
@@ -1282,6 +1286,8 @@ mod tests {
 		);
 	}
 
+	/// The duration cap splits a GOP across fragments, so the successor is a delta frame
+	/// in the SAME group. That one is a real bound and is still used.
 	#[test]
 	fn infer_trailing_duration_from_successor_frame() {
 		let successor = frame(83_334, None);
@@ -1351,23 +1357,6 @@ mod tests {
 		assert_eq!(frames[0].duration, Some(ts(21_333)), "same group, real delta");
 		assert_eq!(duration_micros(&frames[1]), 21_000, "bounded by the next group");
 		assert_eq!(duration_micros(&frames[2]), 21_000, "nothing after it at all");
-	}
-
-	/// The duration cap splits a GOP across fragments, so the successor is a delta frame
-	/// in the SAME group. That one is a real bound and is still used.
-	#[test]
-	fn infer_crosses_a_mid_group_fragment_boundary() {
-		let successor = frame(83_334, None);
-		let mut frames = vec![frame(41_667, None)];
-		infer_missing_durations(
-			&mut frames,
-			Some(&successor),
-			Duration::from_millis(33),
-			moq_net::Timescale::MICRO,
-		)
-		.unwrap();
-
-		assert_eq!(frames[0].duration, Some(ts(41_667)));
 	}
 
 	/// The HLS fetch origin concatenates a segment's groups, and for audio those are often

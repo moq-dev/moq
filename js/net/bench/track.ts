@@ -2,13 +2,19 @@
 
 import { Milli } from "@moq/clock";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "../src/group.ts";
+import { hooks } from "../src/internal.ts";
 import { Timescale, Timestamp } from "../src/time.ts";
 import { Producer, type Subscriber } from "../src/track.ts";
 
 const retainedCounts = [25, 100, 400, 1500];
 const subscriberCounts = [1, 4, 16];
-// Open groups each subscriber is still reading, so their latency guards re-evaluate on every arrival.
-const heldCounts = [0, 16];
+// Held reads and stream opens keep latency guards watching every arrival.
+const holds = [
+	{ count: 0, operation: "read" },
+	{ count: 16, operation: "read" },
+	{ count: 16, operation: "open" },
+] as const;
+type Hold = (typeof holds)[number];
 const groups = 100;
 // Matches the private idle window and Rust cache::DEFAULT_EXPIRY.
 const CACHE_WINDOW_MS = 30_000;
@@ -45,9 +51,10 @@ function receive(subscribers: Subscriber[]): GroupConsumer[] {
 async function measure(
 	retained: number,
 	subscriberCount: number,
-	held: number,
+	hold: Hold,
 ): Promise<{ publish: number; end: number; idle: number }> {
 	// Held rows stay within the idle window while the media budget keeps their frames usable.
+	const held = hold.count;
 	const window = Milli(held > 0 ? 3_600_000 : retained);
 	const producer = new Producer("bench").accept({ timescale: Timescale.MILLI, maxAge: window });
 	const subscribers = Array.from({ length: subscriberCount }, () => producer.subscribe({ maxDelay: window }));
@@ -62,16 +69,25 @@ async function measure(
 		return group;
 	};
 
-	// The held groups stay open, each with a reader parked on its next frame.
+	// Hold each group at its next read or stream open while newer groups arrive.
 	const open: GroupProducer[] = [];
 	const reads: Promise<unknown>[] = [];
+	const opened: (() => void)[] = [];
 	for (let index = 0; index < retained; index++) {
 		const isHeld = index < held;
 		const group = publish(!isHeld);
 		const received = receive(subscribers);
 		if (isHeld) {
 			open.push(group);
-			for (const consumer of received) reads.push(consumer.readFrame());
+			for (const consumer of received) {
+				if (hold.operation === "read") reads.push(consumer.readFrame());
+				else {
+					// The guard a publisher holds while a group stream waits for credit.
+					const opening = Promise.withResolvers<void>();
+					opened.push(opening.resolve);
+					reads.push(hooks.guardGroup(consumer, () => opening.promise));
+				}
+			}
 		}
 	}
 	await flush();
@@ -84,6 +100,7 @@ async function measure(
 	}
 	const elapsed = now() - start;
 
+	for (const done of opened) done();
 	for (const group of open) group.close();
 	await Promise.all(reads);
 	// Completion wakes every subscriber independently of producer closure.
@@ -106,20 +123,22 @@ async function measure(
 }
 
 // Warm the JIT so the first row isn't the slowest.
-await measure(100, 1, 0);
+await measure(100, 1, holds[0]);
 
-console.log("retained,subscribers,held,publish_us,end_us,idle_us");
-for (const held of heldCounts) {
+console.log("retained,subscribers,held,operation,publish_us,end_us,idle_us");
+for (const hold of holds) {
 	for (const subscriberCount of subscriberCounts) {
 		let baseline: number | undefined;
 		for (const retained of retainedCounts) {
 			const samples: { publish: number; end: number; idle: number }[] = [];
-			for (let rep = 0; rep < reps; rep++) samples.push(await measure(retained, subscriberCount, held));
+			for (let rep = 0; rep < reps; rep++) samples.push(await measure(retained, subscriberCount, hold));
 			// The fastest run is the one least disturbed by the rest of the machine.
 			const us = Math.min(...samples.map((sample) => sample.publish));
 			const end = Math.min(...samples.map((sample) => sample.end));
 			const idle = Math.min(...samples.map((sample) => sample.idle));
-			console.log(`${retained},${subscriberCount},${held},${us.toFixed(1)},${end.toFixed(1)},${idle.toFixed(1)}`);
+			console.log(
+				`${retained},${subscriberCount},${hold.count},${hold.operation},${us.toFixed(1)},${end.toFixed(1)},${idle.toFixed(1)}`,
+			);
 
 			baseline ??= us;
 			if (us > baseline * maxSlope) {

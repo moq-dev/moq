@@ -5,9 +5,10 @@
 `archive::Consumer` serves one broadcast's stored key prefix as an ordinary
 broadcast: every stored track, the archived catalog included, with its
 original groups, frames, timescale, and priority. A host publishes it at a path of its choosing;
-moq-relay never uses it. `moq export archive` records through
-`archive::Producer` and `moq import archive` serves through
-`archive::Consumer`. It replaces `moq_archive::Reader`.
+moq-relay never uses it. `moq export archive` already records through
+`archive::Producer`; `moq import archive` serves through
+`archive::Consumer`. It replaces `moq_archive::Reader`, and with it goes
+`.info`'s tolerance of the `epoch` an older `Writer` stored.
 
 ## Plan
 
@@ -20,8 +21,8 @@ Decided by the maintainer on 2026-10-17 (see the
   track with its own cursor, a LIST of that track's key prefix StartAfter its
   newest known key, since one prefix-wide cursor skips a new key under a
   lexically earlier track. A delimiter LIST of the broadcast prefix finds
-  tracks added since. It also re-reads a track's newest object, which the
-  producer may rewrite in place while an untimed group is open.
+  tracks added since. Every object is written once, an open group continuing
+  in the next object (decided 2026-10-21).
 - Each served track advertises no Publisher Max Age limit (TRACK_INFO's
   encoded `0`), not the source's: the store's retention bounds what it holds,
   and DVR pruning is the publisher dropping a group early, which TRACK_INFO
@@ -81,7 +82,3 @@ and re-added under its name replaying both runs in sequence, a growing archive
 with no markers staying open, and an empty or unrecognized prefix refused loudly.
 
 Public API: `archive::Consumer` replaces `Reader`. Wire: none.
-
-## Required
-
-- [Archive producer](/quest/m1/archive/producer.md) - the layout this serves

@@ -97,7 +97,7 @@ fn acquisition(c: &mut Criterion) {
 									.unwrap();
 							}
 						}
-						std::hint::black_box(buffer.poll_next(&kio::Waiter::noop()));
+						let _ = std::hint::black_box(buffer.poll_next(&kio::Waiter::noop()));
 					})
 				});
 			});
