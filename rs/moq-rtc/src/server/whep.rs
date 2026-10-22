@@ -277,7 +277,7 @@ mod tests {
 			.with_subscriber(sub_origin.clone())
 			.with_reconnect(false);
 		let url: url::Url = format!("tcp://{addr}/").parse().expect("url");
-		let connection = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+		let connection = moq_clock::timeout(TIMEOUT, client.connect(url).established())
 			.await
 			.expect("connect timed out")
 			.expect("connect");
@@ -327,7 +327,7 @@ mod tests {
 
 		let _router = super::router(crate::server::Server::new(Default::default()), sub_origin.consume());
 		let missing = sub_origin.consume().follow("missing").expect("follow");
-		tokio::time::timeout(TIMEOUT, missing.synced())
+		moq_clock::timeout(TIMEOUT, missing.synced())
 			.await
 			.expect("sync timed out");
 
