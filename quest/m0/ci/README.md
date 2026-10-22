@@ -73,7 +73,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 ## Required
 
-- [Require the release gates](/quest/m0/ci/release-gates.md) - release PRs require platform and the optional workflows; main requires only the Linux gate
+- [Require the release gate](/quest/m0/ci/release-gates.md) - condition: the next cut carries `release-gate.yml`; then release PRs require it
 - [CI pipeline audit](/quest/m0/ci/audit.md) - every queue and nightly job earns its minutes, and the Rust cache reuses unchanged crates
 - [Pin Quest's gate](/quest/m0/ci/quest-gate-pin.md) - make shared command admission available
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout

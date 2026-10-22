@@ -18,4 +18,4 @@ Public API: none. Wire: none, only the value JS sends.
 ## Related
 
 - [lite-05/06 gap judgement](/quest/m2/lite-legacy-gap.md) - the same misjudgement on versions whose START cannot say it
-- [Resume through an outage](/quest/m1/resume-outage.md) - the resume work that found it
+- [Resume through an outage](https://github.com/moq-dev/moq/pull/6183) - the resume work that found it

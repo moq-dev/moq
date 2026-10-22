@@ -7,28 +7,13 @@ name: Release Go FFI
 
 on:
   # The tag coordinator supplies shared default-feature artifacts. Manual
-  # calls and Go PR dry-runs still build their own target subset.
+  # calls and release PR dry-runs still build their own target subset.
   workflow_call:
     inputs:
       reuse-native:
         type: boolean
         default: false
   workflow_dispatch:
-  # Main PRs skip it; nightly.yml runs it on main through release-shared-ffi.yml.
-  # `edited` catches a main PR retargeted to release.
-  pull_request:
-    branches: [release]
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - ".github/workflows/release-go-ffi.yml"
-      - ".github/workflows/release-ffi.yml"
-      - ".github/workflows/release-shared-ffi.yml"
-      - "sh/gh/ffi*"
-      - "sh/gh/release.sh"
-      - "go/ffi/**"
-      - "sh/go/package-ffi.sh"
-      - "sh/go/publish-ffi.sh"
-      - "rs/moq-ffi/build.sh"
 
 permissions:
   contents: read

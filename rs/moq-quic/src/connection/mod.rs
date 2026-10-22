@@ -3225,19 +3225,8 @@ impl Connection {
                     );
                 }
                 Frame::StopSending(frame::StopSending { id, error_code }) => {
-                    if id.initiator() != self.side.side() {
-                        if id.dir() == Dir::Uni {
-                            debug!("got STOP_SENDING on recv-only {}", id);
-                            return Err(TransportError::STREAM_STATE_ERROR(
-                                "STOP_SENDING on recv-only stream",
-                            ));
-                        }
-                    } else if self.streams.is_local_unopened(id) {
-                        return Err(TransportError::STREAM_STATE_ERROR(
-                            "STOP_SENDING on unopened stream",
-                        ));
-                    }
-                    if let Some(reliable_size) = self.streams.received_stop_sending(id, error_code)
+                    if let Some(reliable_size) =
+                        self.streams.received_stop_sending(id, error_code)?
                     {
                         self.spaces[SpaceId::Data]
                             .pending

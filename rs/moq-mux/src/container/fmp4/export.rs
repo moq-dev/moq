@@ -580,6 +580,8 @@ impl<S: Stream> Export<S> {
 								}
 							}
 						}
+						// The fragment ends at the gap the next group reads.
+						Poll::Ready(Some(Event::Cut)) => {}
 						Poll::Ready(Some(Event::GroupEnd)) => {
 							if track.buffer.is_empty() {
 								continue;
