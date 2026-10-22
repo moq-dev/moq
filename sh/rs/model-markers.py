@@ -55,33 +55,26 @@ def marker(path, index, line, private):
 	return True
 
 
-# Strings and comments, whose delimiters don't nest with the attribute's.
-OPAQUE = re.compile(r'"(?:[^"\\]|\\.)*"|//[^\n]*|/\*.*?\*/', re.S)
+def indent(line):
+	return len(line) - len(line.lstrip())
 
 
 def wrapped(lines, end):
 	"""The opening line of the attribute rustfmt wrapped to close on `lines[end]`, or None.
 
-	The attribute's own bracket must close exactly at the end, so code that merely ends
-	in `)]`, like `)];`, never borrows an earlier attribute and its marker. Strings and
-	comments are masked first, since their delimiters don't count.
+	rustfmt puts a wrapped attribute's `)]` alone at the `#[` line's indent, with every
+	line between indented deeper. Matching that shape rather than balancing brackets
+	leaves strings and comments alone, and code that merely ends in `)]`, like `)];`,
+	never borrows an earlier attribute and its marker.
 	"""
 	if lines[end].strip() != ")]":
 		return None
 	for start in range(end - 1, -1, -1):
-		if lines[start].lstrip().startswith(("#[", "#!")):
-			break
-	else:
-		return None
-	text = OPAQUE.sub(" ", "\n".join(lines[start : end + 1])).strip()
-	depth = 0
-	for i, c in enumerate(text):
-		if c in "([{":
-			depth += 1
-		elif c in ")]}":
-			depth -= 1
-			if depth == 0:
-				return start if i == len(text) - 1 else None
+		line = lines[start]
+		if line.strip() and indent(line) <= indent(lines[end]):
+			if indent(line) == indent(lines[end]) and line.lstrip().startswith(("#[", "#!")):
+				return start
+			return None
 	return None
 
 
