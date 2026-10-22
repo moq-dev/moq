@@ -404,6 +404,11 @@ impl Publish {
 	/// relay's shared origin, optionally scoped per the authenticated token). This
 	/// future resolves when the connection ends, so callers usually run it on its
 	/// own task.
+	///
+	/// Once the stream ends, the finished broadcast stays up until its media is stale, so
+	/// subscribers still catching up drain the tail, and the future resolves after that.
+	/// Dropping the future ends the linger early, as does a newer publish at `path`. A
+	/// socket or demux error closes the broadcast at once.
 	pub async fn accept(self, origin: &origin::Producer, path: impl moq_net::AsPath) -> Result<()> {
 		let path = path.as_path();
 		let socket = self.0.request.accept(None).await?;
@@ -526,13 +531,26 @@ pub(crate) async fn serve_publish(
 	}
 	.await;
 
-	match &result {
-		// Clean end (the caller closed): flush the final groups.
-		Ok(()) => publisher.finish()?,
+	match result {
+		// The stream ended: serve the finished broadcasts until their media is stale, so
+		// subscribers still catching up drain the tail. srt-tokio ends the stream the same
+		// way for a shutdown and a peer gone silent, so both count as clean here; the
+		// media up to that point is complete either way, and a reconnect cuts the linger.
+		Ok(()) => {
+			drop(socket);
+			let finished = publisher.finish()?;
+			let linger = finished.iter().map(moq_net::broadcast::Finish::linger).max();
+			tracing::info!(%path, ?linger, "SRT ingest ended, serving the finished broadcast until its media is stale");
+			// Polled together, so each program closes at its own expiry.
+			futures::future::join_all(finished.into_iter().map(moq_net::broadcast::Finish::wait)).await;
+			Ok(())
+		}
 		// The socket or demux failed: abort with the real cause so subscribers see it.
-		Err(err) => publisher.abort(moq_net::Error::Transport(err.to_string())),
+		Err(err) => {
+			publisher.abort(moq_net::Error::Transport(err.to_string()));
+			Err(err)
+		}
 	}
-	result
 }
 
 /// Mux the requested broadcast back to MPEG-TS and stream it to the SRT caller

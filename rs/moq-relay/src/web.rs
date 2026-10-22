@@ -2167,17 +2167,14 @@ mod tests {
 				None,
 			)
 			.await;
-			let transport = qmux::ws::Upgraded::new(socket)
-				.with_alpn("qmux-01.moq-lite-06")
-				.connect();
+			let transport = qmux::ws::Upgraded::new(socket, "qmux-01.moq-lite-06")
+				.connect()
+				.unwrap();
 			let origin = moq_tokio::origin::spawn();
 			let (session, driver) = moq_net::Client::new()
 				.with_versions("moq-lite-06".parse::<moq_net::Version>().unwrap().into())
 				.with_publisher(origin.consume())
-				.connect(
-					moq_net::time::now(),
-					moq_tokio::transport::Session::new(transport, moq_net::transport::Binding::Uri),
-				)
+				.connect(moq_net::time::now(), transport)
 				.await
 				.unwrap();
 			tokio::spawn(moq_net::time::run(driver));

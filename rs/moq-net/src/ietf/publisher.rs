@@ -51,7 +51,17 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 /// Fails with [`Error::Unsupported`] for Immutable Properties the draft cannot carry:
 /// rewriting them for its encoding would break them, and forwarding them unchanged would
 /// change their meaning.
-fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Result<ietf::Properties, Error> {
+fn track_properties(
+	info: &track::Info,
+	wanted: bool,
+	version: Version,
+	negotiated: bool,
+) -> Result<ietf::Properties, Error> {
+	let compressed = info.compress && negotiated && super::flate::supported(version);
+	super::flate::egress(info, compressed)?;
+	let mut plain = info.clone();
+	plain.compress = compressed;
+	let info = &plain;
 	if !wanted {
 		return Ok(ietf::Properties::default());
 	}
@@ -125,6 +135,7 @@ struct FetchObjectInfo<'a> {
 	object: u64,
 	prior: FetchPrior,
 	timestamp: Option<Timestamp>,
+	inflated: Option<u64>,
 	timescale: Option<Timescale>,
 	version: Version,
 	fields: Option<&'a crate::model::object::Fields>,
@@ -173,7 +184,8 @@ async fn read_fetch(
 	sequence: u64,
 	skip: u64,
 	until: Option<u64>,
-	priority: u8,
+	priority: i8,
+	compression: bool,
 ) -> Result<FetchedGroup, Error> {
 	let info = track.query().await?;
 	let cached = track.peek_group(sequence);
@@ -200,6 +212,9 @@ async fn read_fetch(
 			},
 		)
 		.await?;
+	if compression {
+		group = group.compressed();
+	}
 	let mut first = skip;
 	let mut frames = Vec::new();
 	// Reading an object past the range proves the range missed the group's end.
@@ -768,7 +783,8 @@ where
 			runtime,
 			session,
 			self_origin: origin.hop(),
-			origin,
+			// Serving the peer is not a local reader asking to discover anything.
+			origin: origin.serving(),
 			control,
 			peer_hop,
 			peer_setup,
@@ -1312,7 +1328,12 @@ where
 						};
 						forwarding.ended = track.serving().unwrap_or_else(|| track.clone());
 						forwarding.dynamic = info.refresh.is_some();
-						let mut properties = match track_properties(&info, msg.properties_wanted, self.version) {
+						let mut properties = match track_properties(
+							&info,
+							msg.properties_wanted,
+							self.version,
+							self.peer_setup.get().await.flate,
+						) {
 							Ok(properties) => properties,
 							Err(err) => return Ok(Subscribed::Refused(err.to_string(), err)),
 						};
@@ -1392,7 +1413,12 @@ where
 						.info()
 						.timescale
 						.filter(|_| ietf::Properties::sends_timescale(self.version));
-					let mut properties = match track_properties(track.info(), msg.properties_wanted, self.version) {
+					let mut properties = match track_properties(
+						track.info(),
+						msg.properties_wanted,
+						self.version,
+						self.peer_setup.get().await.flate,
+					) {
 						Ok(properties) => properties,
 						Err(err) => return Ok(Subscribed::Refused(err.to_string(), err)),
 					};
@@ -1407,6 +1433,7 @@ where
 					// it carries.
 					let mut track_serve =
 						TrackServe::new(self.session.clone(), track, request_id, self.version, range, timescale)
+							.compression(self.peer_setup.get().await.flate)
 							.ranked(self.priority.clone());
 					forwarding.dynamic = track_serve.dynamic;
 					forwarding.ended = cache.serving().unwrap_or_else(|| cache.clone());
@@ -2105,6 +2132,11 @@ where
 					},
 				)
 				.await?;
+			let group = if self.peer_setup.get().await.flate {
+				group.compressed()
+			} else {
+				group
+			};
 			Self::write_fetch_group(&mut stream, group, sequence, skip, until, timescale, self.version).await
 		}
 		.await;
@@ -2196,6 +2228,7 @@ where
 									object: index,
 									prior: fetch_prior(version, prior, index)?,
 									timestamp: frame.timestamp,
+									inflated: frame.inflated,
 									timescale,
 									version,
 									fields: frame.fields.as_deref(),
@@ -2243,6 +2276,7 @@ where
 							object: index,
 							prior: fetch_prior(version, prior, index)?,
 							timestamp: frame.timestamp,
+							inflated: frame.inflated,
 							timescale,
 							version,
 							fields: frame.fields.as_deref(),
@@ -2296,6 +2330,7 @@ where
 			object,
 			prior,
 			timestamp,
+			inflated,
 			timescale,
 			version,
 			fields,
@@ -2325,6 +2360,8 @@ where
 			}
 		};
 
+		let properties = super::object::compression(properties.unwrap_or_default(), version, inflated)?;
+		let properties = (!properties.is_empty()).then_some(properties);
 		if version == Version::Draft14 {
 			let properties = properties.unwrap_or_default();
 			stream.buffer_varint(sequence)?;
@@ -2564,12 +2601,14 @@ where
 
 				// Its own entry in the queue, or its own send group, so it competes with group
 				// streams by its priority alone, its request id breaking ties in the queue.
-				// Nothing updates a FETCH's priority.
+				// Nothing updates a FETCH's priority, and it ranks before the track's info
+				// resolves, so the publisher's priority is the unset default.
 				let ranking = Ranking {
 					queue: self.priority.clone(),
-					group: self.session.clone().send_group(priority.into()),
+					group: self.session.clone().send_group(crate::priority::group(priority, 0)),
 					request_id: msg.request_id,
 					priority: kio::Producer::new(priority).consume(),
+					publisher: 0,
 					order: Order::Descending,
 				};
 				(track, start, end, false, ranking, gate)
@@ -2661,7 +2700,14 @@ where
 		// The subscriber cancelling is the only other way this ends early, and is owed
 		// nothing.
 		let group = {
-			let mut read = std::pin::pin!(read_fetch(&track, start.group, start.object, until, priority));
+			let mut read = std::pin::pin!(read_fetch(
+				&track,
+				start.group,
+				start.object,
+				until,
+				priority,
+				self.peer_setup.get().await.flate
+			));
 			let mut finished = false;
 			let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 			kio::wait(|waiter| {
@@ -2706,7 +2752,12 @@ where
 				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
 			}
 		}
-		let properties = match track_properties(&group.info, msg.properties_wanted, self.version) {
+		let properties = match track_properties(
+			&group.info,
+			msg.properties_wanted,
+			self.version,
+			self.peer_setup.get().await.flate,
+		) {
 			Ok(properties) => properties,
 			Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 		};
@@ -2839,6 +2890,7 @@ where
 						object,
 						prior: position,
 						timestamp: frame.timestamp,
+						inflated: frame.inflated,
 						timescale,
 						version: self.version,
 						fields: frame.fields.as_deref(),
@@ -2856,6 +2908,7 @@ where
 						object: end.id,
 						prior: fetch_prior(self.version, prior, end.id)?,
 						timestamp: None,
+						inflated: None,
 						timescale,
 						version: self.version,
 						fields: Some(end),
@@ -3049,11 +3102,13 @@ where
 			})
 			.await
 		};
-		let properties = match info.map(|info| track_properties(&info?, msg.properties_wanted, self.version)) {
-			Some(Ok(properties)) => properties,
-			Some(Err(err)) => return self.reject_track_status(stream, request_id, &err).await,
-			None => return Ok(()),
-		};
+		let negotiated = self.peer_setup.get().await.flate;
+		let properties =
+			match info.map(|info| track_properties(&info?, msg.properties_wanted, self.version, negotiated)) {
+				Some(Ok(properties)) => properties,
+				Some(Err(err)) => return self.reject_track_status(stream, request_id, &err).await,
+				None => return Ok(()),
+			};
 
 		// The answer stays gated until the transport takes it: one parked on stream credit
 		// when the grant narrows is reset rather than delivered.
@@ -4419,7 +4474,7 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	/// The groups with a stream, serving or awaiting the acknowledgement of their FIN.
 	children: kio::Tasks<GroupServe<S>>,
 	/// The subscriber priority, which every group stream follows while it is open.
-	priority: kio::Producer<u8>,
+	priority: kio::Producer<i8>,
 	/// Where the group streams are ranked: the subscription's send group, or the session's
 	/// queue once [`Self::ranked`] on a transport without groups.
 	ranking: Ranking<GroupOf<S>>,
@@ -4433,6 +4488,7 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	/// Serve the track's datagrams too, as OBJECT_DATAGRAMs. Off when the transport has no
 	/// datagrams; there is no stream fallback.
 	datagrams: bool,
+	compression: bool,
 	/// A track that always has another group ready still lets the session's other tasks run.
 	budget: kio::coop::Budget,
 	/// Whether the track advertised DYNAMIC_GROUPS, which an update's NEW_GROUP_REQUEST
@@ -4465,17 +4521,20 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		let timescale = timescale.filter(|_| ietf::Properties::sends_timescale(version));
 		let dynamic = track.info().refresh.is_some();
 		let priority = kio::Producer::new(track.subscription().priority);
+		let publisher = track.info().priority;
 		let mut session = session;
 		let ranking = Ranking {
 			queue: PriorityQueue::default(),
-			group: session.send_group(track.subscription().priority.into()),
+			group: session.send_group(crate::priority::group(track.subscription().priority, publisher)),
 			request_id,
 			priority: priority.consume(),
+			publisher,
 			order: track.subscription().order,
 		};
 
 		Self {
 			datagrams,
+			compression: false,
 			session,
 			track,
 			request_id,
@@ -4495,6 +4554,11 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		}
 	}
 
+	fn compression(mut self, negotiated: bool) -> Self {
+		self.compression = negotiated && super::flate::supported(self.version) && self.track.info().compress;
+		self
+	}
+
 	/// Rank this subscription's group streams in `queue`, shared with the session's other
 	/// subscriptions. Without it they are only ranked against each other.
 	fn ranked(mut self, queue: PriorityQueue) -> Self {
@@ -4503,7 +4567,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	}
 
 	/// Move the subscriber priority, for the group streams already open as well as later ones.
-	fn set_priority(&mut self, priority: u8) -> Result<(), Error> {
+	fn set_priority(&mut self, priority: i8) -> Result<(), Error> {
 		let mut subscription = self.track.subscription();
 		subscription.priority = priority;
 		self.track.update(subscription)?;
@@ -4513,7 +4577,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		}
 		// One move for the whole subscription; its streams keep their place within it.
 		if let Some(group) = &mut self.ranking.group {
-			group.set_priority(priority.into());
+			group.set_priority(crate::priority::group(priority, self.ranking.publisher));
 		}
 		Ok(())
 	}
@@ -4620,6 +4684,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			}
 			match self.track.poll_recv_group(waiter) {
 				Poll::Ready(Ok(Some(group))) => {
+					let group = if self.compression { group.compressed() } else { group };
 					let sequence = group.sequence;
 					tracing::debug!(subscribe = %self.request_id, track = %self.track.name(), sequence, "serving group");
 
@@ -4650,7 +4715,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						// Object Property) only when TIMESCALE was declared for this version.
 						// Drafts 14-16 cannot, so the flag stays clear.
 						flags: ietf::GroupFlags {
-							has_extensions: self.timescale.is_some()
+							has_extensions: self.compression
+								|| self.timescale.is_some()
 								|| wire.as_ref().is_some_and(|wire| wire.extensions),
 							first_object: wire
 								.as_ref()
@@ -4794,6 +4860,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 					)
 				}
 			};
+			let (payload, inflated) = datagram.sent(self.compression);
+			let properties = super::object::compression(properties.unwrap_or_default(), self.version, inflated)?;
+			let properties = (!properties.is_empty()).then_some(properties);
 			let body = ietf::ObjectDatagram {
 				track_alias: self.request_id.0,
 				group_id: sequence,
@@ -4803,7 +4872,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				properties,
 				body: match status {
 					Some(status) => ietf::DatagramBody::Status(status),
-					None => ietf::DatagramBody::Payload(datagram.datagram.payload),
+					None => ietf::DatagramBody::Payload(payload.clone()),
 				},
 			};
 			let body = match body.encode_bytes(self.version) {
@@ -4843,7 +4912,10 @@ struct Ranking<G> {
 	/// The request's send group, which replaces the queue on a transport that has them.
 	group: Option<G>,
 	request_id: RequestId,
-	priority: kio::Consumer<u8>,
+	priority: kio::Consumer<i8>,
+	/// The publisher's priority for the track, breaking ties between requests at one
+	/// subscriber priority.
+	publisher: i8,
 	/// The request's GROUP_ORDER, fixed for its life: no update carries it.
 	order: Order,
 }
@@ -4861,6 +4933,7 @@ impl<G: Clone> Ranking<G> {
 		Rank::Queue(Queued {
 			handle: self.queue.insert(
 				Priority::new(applied, self.request_id.0, start.group)
+					.with_publisher(self.publisher)
 					.with_order(self.order)
 					.with_start(start.object),
 			),
@@ -4966,7 +5039,7 @@ enum Rank<G> {
 impl<G> Rank<G> {
 	/// A group ranked only against itself, for driving one group machine alone.
 	#[cfg(test)]
-	fn solo(priority: kio::Consumer<u8>) -> Self {
+	fn solo(priority: kio::Consumer<i8>) -> Self {
 		Self::Queue(Queued::solo(priority))
 	}
 
@@ -4997,9 +5070,9 @@ impl<G> Rank<G> {
 struct Queued {
 	handle: PriorityHandle,
 	/// The subscription's priority, followed while the stream is open.
-	priority: kio::Consumer<u8>,
+	priority: kio::Consumer<i8>,
 	/// The priority last applied to [`Self::handle`].
-	applied: u8,
+	applied: i8,
 	/// The subscription's GROUP_ORDER, fixed for its life: no update carries it.
 	order: Order,
 }
@@ -5007,7 +5080,7 @@ struct Queued {
 impl Queued {
 	/// A group ranked only against itself, for driving one group machine alone.
 	#[cfg(test)]
-	fn solo(priority: kio::Consumer<u8>) -> Self {
+	fn solo(priority: kio::Consumer<i8>) -> Self {
 		let applied = *priority.read();
 		Self {
 			handle: PriorityQueue::default().insert(Priority::new(applied, 0, 0)),
@@ -5270,6 +5343,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										delta,
 										timestamp: batched.timestamp,
 										size: batched.payload.len() as u64,
+										inflated: batched.inflated,
 										status: 0,
 										fields: batched.fields.as_deref(),
 									},
@@ -5317,6 +5391,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 												delta: object_delta(self.prior_object, id)?,
 												timestamp: next.timestamp,
 												size: next.size,
+												inflated: next.inflated,
 												status: 0,
 												fields: next.fields.as_deref(),
 											},
@@ -5348,6 +5423,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 													delta: object_delta(self.prior_object, end.id)?,
 													timestamp: None,
 													size: 0,
+													inflated: None,
 													status: 3,
 													fields: Some(&end),
 												},
@@ -5445,6 +5521,7 @@ struct Object<'a> {
 	delta: u64,
 	timestamp: Option<Timestamp>,
 	size: u64,
+	inflated: Option<u64>,
 	status: u64,
 	fields: Option<&'a crate::model::object::Fields>,
 }
@@ -5510,6 +5587,7 @@ fn buffer_object<W: crate::transport::poll::SendStream>(
 				ext
 			}
 		};
+		let ext = super::object::compression(ext, encoding.version, object.inflated)?;
 		writer.buffer_varint(ext.len() as u64)?;
 		writer.buffer_raw(&ext);
 	}
@@ -5592,7 +5670,7 @@ mod group_priority_test {
 			None,
 		)
 		.ranked(queue.clone());
-		let _higher = queue.insert(Priority::new(u8::MAX, 0, 0));
+		let _higher = queue.insert(Priority::new(i8::MAX, 0, 0));
 		serve.write_end_of_track(track::Position::group(0)).await.unwrap();
 		assert_eq!(log.priorities(), [254], "second, behind the higher priority");
 	}
@@ -5776,7 +5854,7 @@ mod group_priority_test {
 	}
 
 	/// A group of `subscribe` ranked in `queue` at `priority`'s current value.
-	fn rank_in<G>(queue: &PriorityQueue, priority: &kio::Producer<u8>, subscribe: u64) -> Rank<G> {
+	fn rank_in<G>(queue: &PriorityQueue, priority: &kio::Producer<i8>, subscribe: u64) -> Rank<G> {
 		let applied = *priority.read();
 		Rank::Queue(Queued {
 			handle: queue.insert(Priority::new(applied, subscribe, 0)),
@@ -5815,8 +5893,8 @@ mod group_priority_test {
 		};
 
 		// Queue both before either opens, so each stream is handed its final rank.
-		let high = kio::Producer::new(200);
-		let low = kio::Producer::new(100);
+		let high = kio::Producer::new(72);
+		let low = kio::Producer::new(-28);
 		let mut serves = [(&low, 1), (&high, 0)].map(|(priority, subscribe)| {
 			GroupServe::new(
 				SinkSession::new(log.clone()),
@@ -5857,12 +5935,13 @@ mod group_priority_test {
 		);
 	}
 
-	/// A track that never set a priority is the draft's usual publisher priority, 128,
-	/// not 255, the least urgent value a peer like moxygen would deprioritize.
+	/// A track that never set a priority goes out at the midpoint, 127, one step off the
+	/// draft's usual 128 so it mirrors moq-lite's 128, and not 255, the least urgent value a
+	/// peer like moxygen would deprioritize.
 	#[moq_clock::test]
 	async fn group_header_defaults_to_the_midpoint() {
 		let header = serve_group_header(track::Info::timed()).await;
-		assert_eq!(header.publisher_priority, 128);
+		assert_eq!(header.publisher_priority, 127);
 	}
 
 	/// Drafts 14-16 cannot send TIMESCALE, so a group served with a track timescale still
@@ -6039,7 +6118,7 @@ mod group_priority_test {
 
 		let waiter = kio::Waiter::noop();
 		assert!(serve.poll(&waiter).is_pending());
-		assert_eq!(log.groups(), [(0, 3)]);
+		assert_eq!(log.groups(), [(0, crate::priority::group(3, 0))]);
 		assert_eq!(
 			log.joins(),
 			[(0, 0), (1, 0)],
@@ -6050,7 +6129,11 @@ mod group_priority_test {
 
 		serve.set_priority(9).unwrap();
 		assert!(serve.poll(&waiter).is_pending());
-		assert_eq!(log.groups(), [(0, 3), (0, 9)], "one move for the subscription");
+		assert_eq!(
+			log.groups(),
+			[(0, crate::priority::group(3, 0)), (0, crate::priority::group(9, 0))],
+			"one move for the subscription"
+		);
 		assert_eq!(log.orders().len(), 2, "the streams keep their place in the group");
 	}
 
@@ -6205,11 +6288,11 @@ mod group_priority_test {
 
 	/// `hang::catalog::PRIORITY` isn't reachable from `moq-net` (hang depends on it, not the
 	/// other way round), so the two ranks it publishes audio and video at are spelled here.
-	fn hang_audio_priority() -> u8 {
+	fn hang_audio_priority() -> i8 {
 		80
 	}
 
-	fn hang_video_priority() -> u8 {
+	fn hang_video_priority() -> i8 {
 		60
 	}
 
@@ -6425,11 +6508,11 @@ mod group_priority_test {
 		let consumer = group.consume();
 		group.finish().unwrap();
 
-		// Another subscription's group at 150 sits in the same queue, so each update
+		// Another subscription's group at 22 sits in the same queue, so each update
 		// moves this stream across it.
 		let queue = PriorityQueue::default();
-		let _other = queue.insert(Priority::new(150, 1, 0));
-		let priority = kio::Producer::new(200);
+		let _other = queue.insert(Priority::new(22, 1, 0));
+		let priority = kio::Producer::new(72);
 		let mut serve = GroupServe::new(
 			session,
 			ietf::GroupHeader {
@@ -6452,11 +6535,11 @@ mod group_priority_test {
 		);
 		assert_eq!(log.priorities(), vec![255]);
 
-		*priority.write().ok().unwrap() = 100;
+		*priority.write().ok().unwrap() = -28;
 		assert!(futures::poll!(serving.as_mut()).is_pending());
 		assert_eq!(log.priorities(), vec![255, 254]);
 
-		*priority.write().ok().unwrap() = 175;
+		*priority.write().ok().unwrap() = 47;
 		assert!(futures::poll!(serving.as_mut()).is_pending());
 		assert_eq!(log.priorities(), vec![255, 254, 255]);
 	}
@@ -6472,7 +6555,7 @@ mod group_priority_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut old = track.append_group().unwrap();
+		let old = track.append_group().unwrap();
 		let mut frame = old
 			.create_frame(frame::Info {
 				timestamp: Some(crate::Timestamp::ZERO),
@@ -6506,8 +6589,7 @@ mod group_priority_test {
 		*open = false;
 		drop(open);
 		frame.write(b"b".as_slice()).unwrap();
-		frame.finish().unwrap();
-		old.finish().unwrap();
+		frame.finish().unwrap().finish().unwrap();
 		assert!(
 			futures::poll!(serving.as_mut()).is_pending(),
 			"the final byte is transport-blocked"
@@ -6541,7 +6623,7 @@ mod subscribe_cursor_test {
 		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();
 
 		let consumer = track.consume();
-		let read = moq_clock::sim::spawn(async move { read_fetch(&consumer, 0, 0, None, 0).await.map(|_| ()) });
+		let read = moq_clock::sim::spawn(async move { read_fetch(&consumer, 0, 0, None, 0, false).await.map(|_| ()) });
 		moq_clock::sim::yield_now().await;
 		// The track runs a full second past the group's successor.
 		for ms in [1000, 2000] {
@@ -6972,7 +7054,7 @@ mod serve_tests {
 			None,
 		));
 		assert!(futures::poll!(run.as_mut()).is_pending());
-		assert_eq!(h.track.subscription().unwrap().priority, 245);
+		assert_eq!(h.track.subscription().unwrap().priority, 117);
 		assert_eq!(occurrences(&session.log, &[0x07, 0, 1, 0]), 2);
 	}
 
@@ -7020,7 +7102,7 @@ mod serve_tests {
 		for _ in 0..4 {
 			assert!(futures::poll!(run.as_mut()).is_pending());
 		}
-		assert_eq!(h.track.subscription().unwrap().priority, 245);
+		assert_eq!(h.track.subscription().unwrap().priority, 117);
 		let after = h.log.priorities();
 		assert_eq!(after.last(), Some(&255), "above the other subscription: {after:?}");
 	}
@@ -7337,7 +7419,7 @@ mod serve_tests {
 	/// inside it and the group stream waits for object 1.
 	async fn fail_update_mid_flight(version: Version) -> Wire {
 		let h = serve(version);
-		let mut group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
+		let group = h.track.create_group(group::Info { sequence: 0 }).unwrap();
 		let mut frame = group
 			.create_frame(frame::Info {
 				timestamp: Some(timestamp()),
@@ -7369,7 +7451,6 @@ mod serve_tests {
 			.expect("the failed update ends the subscription")
 			.ok();
 		drop(frame);
-		drop(group);
 
 		let wire = Wire::read(&h.log, version);
 		let error = wire
@@ -7466,7 +7547,7 @@ mod serve_tests {
 				None,
 			));
 			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
-			assert_eq!(h.track.subscription().unwrap().priority, 245, "{version}");
+			assert_eq!(h.track.subscription().unwrap().priority, 117, "{version}");
 
 			// Drafts 15 and 16 answer with REQUEST_OK naming the update; draft 14 answers nothing.
 			let answered = occurrences(&session.log, &[ietf::RequestOk::ID as u8, 0, 2, 10, 0]);
@@ -8512,7 +8593,7 @@ mod serve_tests {
 					Version::Draft16 | Version::Draft17 => ietf::Properties::default(),
 					// Only draft-20 can carry the opt-out.
 					_ if !wanted && Filter::is_draft20(version) => ietf::Properties::default(),
-					_ => track_properties(&track::Info::timed(), true, version).unwrap(),
+					_ => track_properties(&track::Info::timed(), true, version, true).unwrap(),
 				};
 				assert_eq!(
 					ok,
@@ -9390,16 +9471,16 @@ mod serve_tests {
 	}
 
 	/// Subscriber priority 128 on the wire, which every request in these tests carries.
-	const PRIORITY: u8 = 127;
+	const PRIORITY: i8 = super::super::priority::from_wire(128);
 
 	/// The streams a FETCH or fill competes with: one at a higher priority and one at a lower
 	/// one, plus two at its own priority on either side of `request_id`.
 	fn rival_streams(queue: &PriorityQueue, request_id: RequestId) -> [PriorityHandle; 4] {
 		[
-			queue.insert(Priority::new(200, 1, 0)),
+			queue.insert(Priority::new(72, 1, 0)),
 			queue.insert(Priority::new(PRIORITY, request_id.0 - 1, 0)),
 			queue.insert(Priority::new(PRIORITY, request_id.0 + 1, 0)),
-			queue.insert(Priority::new(50, 2, 0)),
+			queue.insert(Priority::new(-78, 2, 0)),
 		]
 	}
 
@@ -9418,6 +9499,7 @@ mod serve_tests {
 			group: None,
 			request_id: RequestId(REQUEST_ID),
 			priority: priority.consume(),
+			publisher: 0,
 			order: Order::Descending,
 		};
 		let [higher, _older, _later, _lower] = rival_streams(&queue, ranking.request_id);
@@ -9445,7 +9527,7 @@ mod serve_tests {
 		let Ok(mut current) = priority.write() else {
 			unreachable!("this test holds the producer")
 		};
-		*current = 255;
+		*current = i8::MAX;
 		drop(current);
 		assert!(futures::poll!(fill.as_mut()).is_pending());
 		assert_eq!(
@@ -9473,6 +9555,7 @@ mod serve_tests {
 			group: None,
 			request_id: RequestId(REQUEST_ID),
 			priority: kio::Producer::new(PRIORITY).consume(),
+			publisher: 0,
 			order: Order::Descending,
 		};
 		// The live stream, from object 1 on, queued first so the slab id alone would favor it.
@@ -9703,7 +9786,7 @@ mod serve_tests {
 			}
 			let properties = match ietf::Properties::sends_timescale(version) {
 				false => ietf::Properties::default(),
-				true => track_properties(&track::Info::timed(), true, version).unwrap(),
+				true => track_properties(&track::Info::timed(), true, version, true).unwrap(),
 			};
 			assert_eq!(ok.properties, properties, "{version}: wrong properties");
 			assert_eq!(
@@ -10279,7 +10362,7 @@ mod serve_tests {
 	async fn fetch_ok_carries_the_track_properties() {
 		let info = track::Info {
 			max_age: Some(Duration::from_secs(5)),
-			priority: 200,
+			priority: 72,
 			timescale: Some(crate::Timescale::MILLI),
 			..Default::default()
 		};
@@ -10308,7 +10391,7 @@ mod serve_tests {
 				let expected = match ietf::Properties::sends_timescale(version) {
 					// Drafts 14-16 write no properties, as their SUBSCRIBE_OK does not.
 					false => ietf::Properties::default(),
-					true => track_properties(&info, wanted, version).unwrap(),
+					true => track_properties(&info, wanted, version, true).unwrap(),
 				};
 				assert_eq!(ok.properties, expected, "{version} wanted={wanted}");
 
@@ -10507,20 +10590,23 @@ mod serve_tests {
 			};
 			assert_eq!(mutable.ietf(), Some(Version::Draft18), "hop={hop}");
 			assert_eq!(
-				ids(track_properties(&mutable, true, Version::Draft18).unwrap()),
+				ids(track_properties(&mutable, true, Version::Draft18, true).unwrap()),
 				[0x06, 0x3801],
 				"hop={hop}"
 			);
 			assert_eq!(
-				ids(track_properties(&mutable, true, Version::Draft19).unwrap()),
+				ids(track_properties(&mutable, true, Version::Draft19, true).unwrap()),
 				[0x3801],
 				"hop={hop}"
 			);
 
-			assert!(track_properties(&sealed, true, Version::Draft18).is_ok(), "hop={hop}");
+			assert!(
+				track_properties(&sealed, true, Version::Draft18, true).is_ok(),
+				"hop={hop}"
+			);
 			assert!(
 				matches!(
-					track_properties(&sealed, true, Version::Draft19),
+					track_properties(&sealed, true, Version::Draft19, true),
 					Err(Error::Unsupported)
 				),
 				"hop={hop}"
@@ -14821,6 +14907,7 @@ mod tests {
 			auth: false,
 			active_count: false,
 			epoch: false,
+			flate: false,
 		});
 		slot
 	}
@@ -16737,6 +16824,37 @@ mod range_tests {
 		);
 	}
 
+	/// A relay holding groups of a requested track stages them before committing, so the
+	/// Largest Location that SUBSCRIBE_OK snapshots as soon as the subscribe resolves always
+	/// names the replayed group (#5862). Raced on real threads, many times.
+	#[test]
+	fn subscribe_ok_reports_a_staged_replay() {
+		for _ in 0..500 {
+			let broadcast = crate::broadcast::Info::new().produce();
+			let request = broadcast.reserve_track("video").unwrap();
+			let cache = broadcast.consume().track("video").unwrap();
+			let snapshot = std::thread::spawn(move || {
+				futures::executor::block_on(async {
+					let mut track = cache.subscribe(None).await.unwrap();
+					kio::wait(|waiter| track.poll_live(waiter)).await;
+					live_edge(&cache).largest
+				})
+			});
+			let staged = request.stage(crate::track::Info::timed());
+			for sequence in 0..3 {
+				let mut group = staged.create_group(group::Info { sequence }).unwrap();
+				for _ in 0..2 {
+					group
+						.write_frame(crate::Timestamp::from_millis(sequence).unwrap(), b"frame".as_slice())
+						.unwrap();
+				}
+				group.finish().unwrap();
+			}
+			let _track = staged.commit();
+			assert_eq!(snapshot.join().unwrap(), Some(Location { group: 2, object: 1 }));
+		}
+	}
+
 	/// Group numbering may legally skip sequences, so the walk follows the cache's own
 	/// order rather than decrementing by one.
 	#[test]
@@ -16994,5 +17112,117 @@ mod fill_range_tests {
 				until: Some(10),
 			}
 		);
+	}
+}
+
+#[cfg(test)]
+mod compression_tests {
+	use super::*;
+	#[test]
+	fn sealed_compression_refuses_incompatible_egress() {
+		for version in [Version::Draft17, Version::Draft18, Version::Draft22] {
+			let mut sealed = Vec::new();
+			let mut encoder = Encoder::new(&mut sealed, version.into());
+			encoder.varint(super::super::flate::COMPRESSION).unwrap();
+			encoder.varint(1).unwrap();
+			let info = track::Info {
+				compress: true,
+				properties: Some(Arc::new(crate::model::object::TrackProperties {
+					version,
+					values: vec![crate::model::object::Property {
+						id: 0x0b,
+						value: crate::model::object::Value::Bytes(sealed.into()),
+					}],
+				})),
+				..Default::default()
+			};
+			let outgoing = track_properties(&info, true, version, true).unwrap();
+			assert!(outgoing.compress);
+			let mut bytes = Vec::new();
+			outgoing
+				.encode(&mut Encoder::new(&mut bytes, version.into()), version)
+				.unwrap();
+			let decoded =
+				ietf::Properties::decode(&mut crate::coding::Decoder::new(&bytes, version.into()), version).unwrap();
+			assert!(decoded.compress);
+			assert_eq!(decoded.unknown, outgoing.unknown);
+			let mut contradiction = info.clone();
+			contradiction.compress = false;
+			assert!(
+				contradiction
+					.properties
+					.as_ref()
+					.unwrap()
+					.refused(&contradiction)
+					.is_some()
+			);
+			for wanted in [false, true] {
+				assert!(matches!(
+					track_properties(&info, wanted, version, false),
+					Err(Error::Unsupported)
+				));
+				assert!(matches!(
+					track_properties(&info, wanted, Version::Draft16, true),
+					Err(Error::Unsupported)
+				));
+			}
+			let plain = track::Info::default().with_compress(true);
+			assert!(!track_properties(&plain, true, version, false).unwrap().compress);
+			assert!(!track_properties(&plain, true, Version::Draft15, true).unwrap().compress);
+		}
+	}
+
+	/// The actual JS SETUP offer selects the plain egress of a compressed Rust track.
+	#[moq_clock::test]
+	#[ignore = "requires Bun; run by just test interop"]
+	async fn ietf_compression_fallback_interop() {
+		use crate::coding::Decode;
+		use crate::lite::test_transport::{Log, SinkSession};
+		for (version, draft) in [(Version::Draft17, 17), (Version::Draft22, 22)] {
+			let input = serde_json::json!({"draft": draft});
+			let bytes: Vec<u8> =
+				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+			let (parameters, consumed) = ietf::Parameters::decode_slice(&bytes, version).unwrap();
+			assert_eq!(consumed, bytes.len());
+			let negotiated = super::super::flate::from_setup(&parameters, version).unwrap();
+			assert!(!negotiated, "JS offered an unsupported codec");
+			let track = track::Producer::new(
+				Arc::new(crate::broadcast::Info::default()),
+				"data",
+				track::Info::timed().with_compress(true),
+			);
+			let subscriber = track.subscribe(None);
+			let frames = [vec![b'a'; 1024], vec![b'b'; 1024], Vec::new()];
+			let mut group = track.append_group().unwrap();
+			for payload in &frames {
+				group.write_frame(crate::Timestamp::ZERO, payload.clone()).unwrap();
+			}
+			group.finish().unwrap();
+			track.finish().unwrap();
+			let response = ietf::SubscribeOk {
+				request_id: None,
+				track_alias: 0,
+				largest: None,
+				properties: track_properties(track.info(), true, version, negotiated).unwrap(),
+			}
+			.encode_bytes(version)
+			.unwrap();
+			let log = Log::default();
+			let mut serve = TrackServe::new(
+				SinkSession::new(log.clone()),
+				subscriber,
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				Some(Timescale::MILLI),
+			)
+			.compression(negotiated);
+			kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
+			let written = log.writes.lock().unwrap().clone();
+			let input = serde_json::json!({"draft": draft, "response": response.to_vec(), "group": written});
+			let received: Vec<Vec<u8>> =
+				serde_json::from_slice(&crate::test_interop::bun("ietf-compression.ts", input)).unwrap();
+			assert_eq!(received, frames, "draft{draft}: plain JS fallback");
+		}
 	}
 }

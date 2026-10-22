@@ -25,11 +25,13 @@ the quests below. The run finishes after
 before the breaking cut sees its result and the rest of m1.
 
 What to check first: whether the nightly `sizes` job (`sh/size/`) has run.
-It needs the Linux release builds, which still fail to link
-([moq-dev/moq#6090](https://github.com/moq-dev/moq/pull/6090) was open on
-2026-10-21). If it has, its history replaces the local method below. Then
+The Linux release-link fix
+[moq-dev/moq#6090](https://github.com/moq-dev/moq/pull/6090) merged on
+2026-10-22 UTC; verify the first scheduled Nightly after it before treating
+the sizes history as available. Once it runs, its history replaces the local
+method below. Then
 re-attribute the native rows for the erasure quest, and measure `@moq/net`
-once [compressed tracks in js/net](/quest/m1/compress/js.md) moves `pako` in.
+with the track compression codec in `js/net`.
 
 ### Baselines
 
@@ -90,7 +92,7 @@ Leads:
 - `pako` costs `watch` and `publish` 12.8 KB gzip through `@moq/json`. A player
   only inflates: `Inflate` alone is 9.9 KB, and the browser's
   `DecompressionStream("deflate-raw")` would be free if it yields each
-  sync-flushed frame. Carried into [compressed tracks in js/net](/quest/m1/compress/js.md).
+  sync-flushed frame. Synchronous track writes retain the static encoder; the maintainer accepted its measured 3 KB gzip cost.
 - `zod/mini` is 9 KB raw of `@moq/net`'s first load for one branded bigint
   (`HopSchema`), and `@moq/hang` imports it as both `zod/mini` and
   `@zod/mini`. Not worth a quest alone.

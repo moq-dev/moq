@@ -760,6 +760,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		auth: auth::from_setup(params, version) == Some(true),
 		active_count: active_count::from_setup(params, version),
 		epoch: epoch::from_setup(params, version),
+		flate: super::flate::from_setup(params, version)?,
 	})
 }
 
@@ -812,6 +813,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		epoch::into_setup(&mut parameters, version);
 	}
 	request_update::into_setup(&mut parameters, version);
+	super::flate::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer
@@ -1495,7 +1497,8 @@ async fn enforce_grant<S: crate::transport::poll::Boxable>(
 	mut session: S,
 ) -> Result<(), Error> {
 	let origin = publisher.serving_origin().await;
-	let mut announced = origin.announced();
+	// Checking what we publish is not a local reader asking to discover anything.
+	let mut announced = origin.clone().serving().announced();
 	let mut check = crate::auth::Enforce::default();
 	let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
 		return Ok(());
