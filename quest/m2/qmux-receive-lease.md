@@ -5,7 +5,7 @@
 qmux sessions (WebSocket, `tcp://`, `tls://`, `unix://`, and WebRTC) bound
 what a peer's incomplete messages hold by the session's receive window, and
 evict the lowest-priority holder when that window is stuck, as native QUIC
-does after [Bound message assembly](/quest/m1/quic/receive-memory.md). The
+does after [moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878). The
 per-session memory a peer can make us hold is a deliberate, documented number,
 chosen after weighing its cost against today's.
 
@@ -61,10 +61,6 @@ the chosen window.
 Public API: qmux's `RecvStream` leases natively instead of through
 `Buffered`, and its window defaults or validation change (MIGRATE.md). Wire:
 QMux MAX_DATA and STOP_SENDING only, no MoQ format change.
-
-## Required
-
-- [Bound message assembly](/quest/m1/quic/receive-memory.md) - native leasing and `MIN_RECEIVE_WINDOW`, in #5878
 
 ## Related
 
