@@ -122,6 +122,14 @@ struct BroadcastState {
 	// Set once the broadcast ends: `Producer::close()` or the last producer-side
 	// handle dropping. Every lookup after it answers `Unroutable`.
 	closing: bool,
+
+	// Set by `Producer::finish`: only a finished broadcast can be superseded, since a live
+	// one serves again once the newer route at its path withdraws.
+	finished: bool,
+
+	// Set once a finished broadcast's origin advertises a newer epoch at its path, which
+	// ends its `Finish` at once.
+	superseded: bool,
 }
 
 impl BroadcastState {
@@ -482,8 +490,17 @@ impl Producer {
 	/// drop. A held track takes no more groups, not even one below its end, so nothing lands
 	/// after the linger is fixed. Keep it for its [`linger`](Finish::linger), then drop it to [close](Self::close)
 	/// the broadcast; `Finish::wait` does both on a runtime. Dropping it early is how an
-	/// interrupt ends the linger.
+	/// interrupt ends the linger, and a newer epoch at its path ends it too; see
+	/// [`Finish::poll_closed`].
 	pub fn finish(self) -> Finish {
+		// Marked before asking the origin, so a newer epoch announced meanwhile either
+		// supersedes the finished broadcast or is in the table by the time it is asked.
+		self.state.lock().finished = true;
+		let superseded = self.alive.announcer.lock().as_ref().is_some_and(Announcer::superseded);
+		if superseded {
+			self.state.lock().superseded = true;
+		}
+
 		let tracks: Vec<track::TrackWeak> = self.state.read().tracks.values().cloned().collect();
 		// Held outside the lock: a track whose last producer drops meanwhile unlists itself
 		// under it.
@@ -546,13 +563,26 @@ impl Finish {
 		self.linger
 	}
 
-	/// `Ready` once the broadcast closed elsewhere, so the linger is over early.
+	/// `Ready` once the broadcast closed elsewhere, or its origin advertises a newer
+	/// [epoch](crate::origin::Route::epoch) at its path, so the linger is over early.
+	///
+	/// A request for the path resolves to the newer instance, so this one has nothing left
+	/// to serve, and keeping it announced would bring it back if the newer one ends.
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.producer.alive.token.poll_closed(waiter)
+		if self.producer.alive.token.poll_closed(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		self.producer
+			.state
+			.poll(waiter, |state| match state.superseded {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			})
+			.map(|_| ())
 	}
 
-	/// Keep the broadcast up for [`Self::linger`] on the ambient runtime's clock, or until it
-	/// closes elsewhere, then close it. The linger counts from the first poll.
+	/// Keep the broadcast up for [`Self::linger`] on the ambient runtime's clock, or until
+	/// [`Self::poll_closed`] ends it early, then close it. The linger counts from the first poll.
 	#[cfg(feature = "async")]
 	pub async fn wait(self) {
 		let linger = Linger {
@@ -1275,6 +1305,18 @@ impl Demand {
 		match ready {
 			Poll::Ready(_) => Poll::Ready(Ok(())),
 			Poll::Pending => Poll::Pending,
+		}
+	}
+}
+
+impl Consumer {
+	/// End the broadcast's [`Finish`] early, if it has one: its origin now advertises a
+	/// newer epoch at its path.
+	pub(super) fn supersede(&self) {
+		let state = self.state.read();
+		if state.finished && !state.superseded {
+			drop(state);
+			self.state.lock().superseded = true;
 		}
 	}
 }

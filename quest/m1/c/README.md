@@ -54,7 +54,6 @@ Decided 2026-10-20 (maintainer): m1 quests that change the C API
 ([exact binding timestamps](/quest/m1/binding-timestamps.md),
 [scope track priority](/quest/m1/track-priority-scope.md),
 [binding linger](/quest/m1/linger-ffi.md),
-[reference epoch bindings](/quest/m1/reference-epoch-bindings.md),
 [Rust identity enforcement](/quest/m1/catalog-identity-rs.md), and
 [dynamic subscribe ranges](/quest/m1/subscribe-ranges/dynamic.md)) Require this
 line and land their C half on the generated package, so C users break once.
