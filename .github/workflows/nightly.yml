@@ -375,7 +375,10 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Install publisher and player engines
-        run: nix develop --command env PLAYWRIGHT_BROWSERS_PATH="${{ runner.temp }}/playwright" bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium firefox"
+        # Firefox loads libpulse at runtime; Playwright's engine dependencies omit it.
+        run: |
+          nix develop --command env PLAYWRIGHT_BROWSERS_PATH="${{ runner.temp }}/playwright" bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium firefox"
+          sudo apt-get install -y libpulse0
       - name: Media and negative controls
         run: nix develop --command env PLAYWRIGHT_BROWSERS_PATH="${{ runner.temp }}/playwright" just test media --media-engines firefox
         env:
