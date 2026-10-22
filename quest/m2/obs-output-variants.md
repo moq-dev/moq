@@ -16,6 +16,7 @@ begins. Nothing in-tree creates either variant: the service's
 `get_output_type` and the dock both use `moq_output`.
 
 Decided with the maintainer on 2026-10-22: delete both variants instead of
-validating encoders per variant. They have no consumer, and the audio-only
-one has never worked. Mention the removal in the PR so obs-websocket or
-script users who name an output id see it.
+validating encoders per variant. Neither has an in-tree consumer, and the
+audio-only one has never worked. An obs-websocket or script user could name
+`moq_output_video` by id. That removal is breaking for them, so call it out
+in the PR and the plugin's release notes, and point them to `moq_output`.

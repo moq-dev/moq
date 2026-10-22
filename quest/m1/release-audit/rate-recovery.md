@@ -31,9 +31,16 @@ Decided with the maintainer on 2026-10-22:
 - Keep `Control` pure. Add a method like `deadline() -> Option<Instant>`
   that returns when the ramp next allows a raise toward the last desired
   target, and `None` once the target settles. Each caller adds a
-  `moq_clock::sleep_until` arm and calls `update` again with the last
+  `sleep_until` arm on the clock it already passes to `update`
+  (`moq_net::time` or `moq_clock`) and calls `update` again with the last
   estimate. A shared async follower in moq-mux was rejected because it would
   move timers into the policy.
+- `Control` stores only `target`, `policy`, and `applied` today, so it must
+  also remember the last clamped `desired` from `update`. `deadline()` is
+  the earliest time the ramp allowance clears the hysteresis threshold
+  toward it, or reaches `policy.max` for the exempt final step. It returns
+  `None` when `target` equals `desired` or the last estimate was a drop, so
+  a settled controller never wakes.
 - Fix all three callers in the same PR.
 
 The new method is an additive change to the public `moq_mux::rate` API;
