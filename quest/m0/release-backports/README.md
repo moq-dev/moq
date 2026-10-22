@@ -48,7 +48,6 @@ findings; expanding this shortlist needs a separate scope decision.
 ## Required
 
 - [JS input parsing](/quest/m0/release-backports/parsing.md) - malformed certificates and paths cannot trigger disproportionate parsing work
-- [FFI cancellation](/quest/m0/release-backports/ffi-cancellation.md) - cancelled reads and accepts leave the next event for the next caller
 
 ## Related
 
