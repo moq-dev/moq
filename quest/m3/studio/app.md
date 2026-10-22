@@ -8,8 +8,9 @@
 - device pickers
 - an audio bus panel with gain and mute
 
-Sources are a camera, display or window capture, a microphone or system
-audio, an image, a solid color, and a subscribed MoQ broadcast. One canvas
+Sources are a camera, display or window capture, a microphone, system audio
+where moq-audio captures it (macOS today; the Linux and Windows capture quests
+add the rest), an image, a solid color, and a subscribed MoQ broadcast. One canvas
 publishes to a MoQ relay. A scene collection saves to a diffable file and
 reloads.
 

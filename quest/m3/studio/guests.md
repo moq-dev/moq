@@ -17,7 +17,9 @@ remove a participant from the scene.
     is rooted at its room prefix, and refuses an unscoped relay-wide key. A
     stolen workstation key then cannot sign for other tenants. A hosted
     issuer brings its own API.
-  - Tokens are short-lived and scoped to the room prefix.
+  - Each guest token is short-lived and minted with `moq_room::claims(room,
+    identity)`, so it publishes only under that guest's own `<identity>/`.
+    A guest cannot impersonate another participant.
 - **Join link:** carry the token in the URL fragment, so it never reaches a
   server log.
 - **Relay required:** guests join through a relay. Peer-to-peer WHIP ingress

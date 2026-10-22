@@ -8,8 +8,9 @@ The full studio runs in a browser from a `/studio` page in demo/web:
 - encode and decode through WebCodecs
 - publishing over WebTransport through moq-net
 
-Browser sources are absent. So are RTMP destinations, because a page cannot
-open raw TCP; MoQ and WHIP outputs remain. Each missing feature is hidden,
+Browser sources are absent. So are RTMP and WHIP destinations. A page cannot
+open raw TCP, and moq-rtc's WHIP client binds native UDP sockets, so only MoQ
+output remains. Each missing feature is hidden,
 not shown broken.
 
 The children land the page as vertical slices: video first, then audio. This
