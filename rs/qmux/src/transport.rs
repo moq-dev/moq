@@ -140,7 +140,7 @@ mod stream_transport {
 		writer: BufWriter<tokio::io::WriteHalf<T>>,
 		version: Version,
 		reader_task: Option<JoinHandle<()>>,
-		_reader_lifetime: Arc<ReaderTask>,
+		reader_lifetime: Arc<ReaderTask>,
 	}
 
 	/// The receive half of a byte-stream [`Stream`].
@@ -179,7 +179,7 @@ mod stream_transport {
 					writer: BufWriter::new(write),
 					version,
 					reader_task: Some(reader_task),
-					_reader_lifetime: reader_lifetime.clone(),
+					reader_lifetime: reader_lifetime.clone(),
 				},
 				reader: StreamReader {
 					rx,
@@ -242,6 +242,11 @@ mod stream_transport {
 
 		async fn close(&mut self) -> Result<(), Error> {
 			self.writer.shutdown().await?;
+			// A retained receive half owns frame delivery and can leave the channel full.
+			// Closing only the send half must neither wait for it nor discard its frames.
+			if Arc::strong_count(&self.reader_lifetime) > 1 {
+				return Ok(());
+			}
 			// Closing a TCP socket with unread peer data can reset it and discard our close.
 			if let Some(task) = self.reader_task.as_mut() {
 				let result = task.await;
@@ -499,6 +504,38 @@ mod stream_transport {
 				close.as_mut().await.expect("graceful close");
 				drop(close);
 				writer.close().await.expect("already closed");
+			}
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn closing_the_send_half_preserves_a_full_receive_channel() {
+			for &version in Version::ALL {
+				let (stream, mut peer) = tokio::io::duplex(1);
+				let (mut writer, mut reader) = Stream::new(stream, version, 16 * 1024).split();
+				let (frame, payload): (&[u8], &[u8]) = if version.uses_records() {
+					(&[1, 42], &[42])
+				} else {
+					(&[0], &[0]) // PADDING
+				};
+				// The one-byte pipe cannot accept the last frame until all preceding
+				// frames have filled the channel. The receive half stays unpolled.
+				for _ in 0..=RECV_CHANNEL_CAPACITY {
+					peer.write_all(frame).await.expect("peer frame");
+				}
+				peer.shutdown().await.expect("peer FIN");
+				assert_eq!(reader.rx.len(), RECV_CHANNEL_CAPACITY);
+
+				tokio::select! {
+					biased;
+					result = writer.close() => result.expect("send half closed"),
+					_ = std::future::ready(()) => panic!("{version:?}: send close waited for the retained receive half"),
+				}
+				let mut extra = [0];
+				assert_eq!(peer.read(&mut extra).await.unwrap(), 0);
+				drop(writer);
+				for _ in 0..=RECV_CHANNEL_CAPACITY {
+					assert_eq!(reader.recv().await.expect("preserved peer frame"), payload);
+				}
 			}
 		}
 
