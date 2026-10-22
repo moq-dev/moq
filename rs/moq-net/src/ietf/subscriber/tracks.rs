@@ -647,7 +647,7 @@ where
 			request_id,
 			TrackState {
 				epoch: self.epoch.clone(),
-				..TrackState::pending(key.1.to_string(), key.0.clone(), kio::Producer::new(Fill::Done), None)
+				..TrackState::pending(key.1.to_string(), key.0.clone(), kio::Producer::new(Fill::Done))
 			},
 		);
 		let mut messages = Messages::new(self.session.clone(), self.control.client());
@@ -863,7 +863,7 @@ where
 			request_id,
 			TrackState {
 				epoch: self.epoch.clone(),
-				..TrackState::pending(key.1.to_string(), key.0.clone(), kio::Producer::new(Fill::Done), None)
+				..TrackState::pending(key.1.to_string(), key.0.clone(), kio::Producer::new(Fill::Done))
 			},
 		);
 		let ok = async {
@@ -1139,7 +1139,6 @@ where
 				std::mem::take(&mut held.name),
 				held.broadcast.clone(),
 				kio::Producer::new(Fill::Done),
-				None,
 			)
 		};
 		let fetch_id = std::mem::replace(held, parked).fetch_id;

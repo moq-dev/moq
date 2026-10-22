@@ -19,6 +19,33 @@ each night, not the merge queue, because the queue runs only what gates a
 merge, and main PRs skip cloud CI since #6038. This drops the per-PR sticky
 comment design and its `workflow_run` follow-up.
 
+Decided 2026-10-22 (maintainer): the paired run stays on the hosted ARM
+runners. Moved from m2 to m1 so the m1 [performance audit](/quest/m1/audit-perf.md)
+reads paired flags instead of raw history. Rejected hosts:
+
+- The merge queue runner (`nixos-moq-ci`) is an nspawn container on a
+  desktop with `CPUWeight=10`, a floating 8-core quota, and the `powersave`
+  governor beside unrelated GUI, simulation, and agent load. A benchmark
+  there is the first workload starved, and nightly's benchmark jobs would
+  serialize on the one queue runner and hold merges for hours.
+- moq.pro's two load nodes are shared 4-vCore, 8 GB OVH VPSes with measured
+  steal, and moq.pro decided they run nothing but the load generator.
+- A dedicated bare-metal bench host would be the most stable but costs money
+  and adds a persistent exec surface for a public repository. Revisit it only
+  if A/A runs show the hosted noise floor hides regressions worth catching.
+
+The paired run removes runner-to-runner variance; what remains is noise
+within one VM, which alternating rounds and A/A-derived thresholds handle.
+The first three nights of hosted history (2026-10-20 to 22, 95-129 commits
+apart) put the median night-to-night swing at about 4%, with 13% of Rust
+series moving more than 10%, many up about 50% and back the next night.
+Those nights mix code changes with noise, so they bound it rather than
+measure it; the A/A run measures it.
+
+Rust Criterion only (decided 2026-10-22): `bench-ffi` stays history-only,
+since its JVM and Dart rows are the noisiest (Kotlin about 18% a night),
+and JS on bun only stands in for the browser.
+
 Researched 2026-09: CodSpeed's instruction counting skips every
 `iter_custom` bench (all of `moq-uring`, plus `moq-net` origin and track) and
 can't see syscall time. Bencher compares against history recorded on other

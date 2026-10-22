@@ -23,6 +23,17 @@ Run `/quest-audit` after the release cut. Read every outstanding quest with
 parallel auditors, then verify source claims, active PR ownership, Required
 ordering, and the latest maintainer decisions before changing plans.
 
+Also reconcile merged follow-ups (decided 2026-10-22 from the release audit):
+read the Follow-ups of every PR merged since the last release, and plan each
+concrete remainder that has no quest, open PR, or recorded decline. The
+release audit found seven such remainders across
+[moq-dev/moq#6124](https://github.com/moq-dev/moq/pull/6124),
+[moq-dev/moq#6153](https://github.com/moq-dev/moq/pull/6153),
+[moq-dev/moq#6251](https://github.com/moq-dev/moq/pull/6251),
+[moq-dev/moq#6243](https://github.com/moq-dev/moq/pull/6243),
+[moq-dev/moq#4991](https://github.com/moq-dev/moq/pull/4991), and
+[moq-dev/moq#5758](https://github.com/moq-dev/moq/pull/5758).
+
 Baseline from the m1 run, 2026-10-22 UTC, against `main` at `bce217e063`:
 
 - Read all 463 quest documents across m0-m3 and the root with parallel

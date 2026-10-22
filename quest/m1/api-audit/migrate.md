@@ -20,6 +20,9 @@ Decided 2026-10-22 (API audit). Known gaps, verify each against
 - Bindings: merge the contradictory `finish` entries ("removed (#4152)" and
   "the new `finish` lets go (#6157)") into one: `finish()` now returns a
   linger handle; call `close()` for the old behavior.
+- Bindings: `rs/moq-ffi/MIGRATE.md` says a raw track is timed by default,
+  but `MoqTrackInfo.timescale` defaults to `None` (untimed) while release
+  defaulted to microseconds; the net change is timed to untimed by default.
 - Bindings: `MoqAudioInit.track` and `MoqVideoInit.track` moved to
   `MoqMediaTarget::Named`, with no entry.
 - `cpp/moq/MIGRATE.md`: about 130 lines for a package never released; empty
