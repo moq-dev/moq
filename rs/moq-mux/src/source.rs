@@ -551,7 +551,7 @@ mod tests {
 
 	/// A sibling resolves through the session that announces it, even while another lazily
 	/// discovering session on the origin never answers its announce request.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn a_stalled_session_does_not_hold_up_a_sibling() {
 		use crate::container::test_util::Link;
 
