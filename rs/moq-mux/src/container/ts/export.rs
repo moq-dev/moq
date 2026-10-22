@@ -156,6 +156,9 @@ where
 	counters: HashMap<u16, u8>,
 	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
 	program_descriptors: Vec<catalog::Descriptor>,
+	/// Those of the revisions before, which the PMT carries beside them while a track listed
+	/// under them drains ([`Self::draining`]).
+	retiring_descriptors: Vec<catalog::Descriptor>,
 	/// Transport/service identity captured on import, used to rebuild a consistent
 	/// PAT/PMT. `None` for a media-only source, so a minimal identity is synthesized.
 	program: Option<catalog::Program>,
@@ -1395,6 +1398,7 @@ where
 			serials: 0,
 			counters: HashMap::new(),
 			program_descriptors: Vec::new(),
+			retiring_descriptors: Vec::new(),
 			program: None,
 			si: BTreeMap::new(),
 			last_timestamp: None,
@@ -1810,7 +1814,7 @@ where
 		reject_ambiguous_tracks(&catalog, &mpegts)?;
 		self.source.retain_selectable(&mut catalog);
 
-		self.program_descriptors = mpegts.program_descriptors.clone();
+		let descriptors = std::mem::replace(&mut self.program_descriptors, mpegts.program_descriptors.clone());
 		self.program = mpegts.program.clone();
 		// An explicit override wins even when it is refused (leaving the output
 		// unpadded), so a bad flag cannot silently fall back to the catalog rate.
@@ -1898,6 +1902,16 @@ where
 		if self.psi.is_some() {
 			for (name, track) in self.tracks.iter_mut() {
 				track.cataloged = active.contains_key(name);
+			}
+			match self.draining() {
+				true => {
+					for descriptor in descriptors {
+						if !self.retiring_descriptors.contains(&descriptor) {
+							self.retiring_descriptors.push(descriptor);
+						}
+					}
+				}
+				false => self.retiring_descriptors.clear(),
 			}
 			if self.sync {
 				for name in active.keys() {
@@ -2211,6 +2225,12 @@ where
 	#[cfg(test)]
 	pub(super) fn buffered(&self) -> usize {
 		self.jitter.len()
+	}
+
+	/// How many tracks the export carries, listed or not.
+	#[cfg(test)]
+	pub(super) fn tracks(&self) -> usize {
+		self.tracks.len()
 	}
 
 	/// `pid`'s access units and how long it has been quiet, as [`Self::stats`] reads them.
@@ -2614,10 +2634,17 @@ where
 			})
 			.collect::<anyhow::Result<Vec<_>>>()?;
 
-		// Re-emit the captured program-level descriptors. With none (a non-TS source),
-		// derive the SCTE-35 'CUEI' registration when a 0x86 verbatim stream is present.
-		let program_info = if !self.program_descriptors.is_empty() {
-			self.program_descriptors.clone()
+		// Re-emit the captured program-level descriptors, and while a track drains those it was
+		// listed under: the streams of both revisions are listed until it ends, so are theirs.
+		// With none (a non-TS source), derive the SCTE-35 'CUEI' registration when a 0x86
+		// verbatim stream is present.
+		let retiring = self
+			.retiring_descriptors
+			.iter()
+			.filter(|descriptor| !self.program_descriptors.contains(descriptor));
+		let program_info: Vec<_> = self.program_descriptors.iter().chain(retiring).cloned().collect();
+		let program_info = if !program_info.is_empty() {
+			program_info
 		} else if listed.values().any(|t| {
 			// Only derive CUEI for section-framed 0x86 (SCTE-35); a whole-PES 0x86
 			// (e.g. DTS audio) must not advertise SCTE-35 section signaling.
@@ -2666,6 +2693,11 @@ where
 	/// PID unless the track it rode on is dropped with the PID, when it moves to the PID
 	/// [`Self::media_clock`] gives, staying on a PID of its own without one.
 	///
+	/// One that left before the PMT listed it, waiting to take a PID over ([`Self::take_over`])
+	/// from a track that has not ended, goes at once with what it holds when a later track
+	/// takes its place there: such tracks would otherwise pile up behind a stream that never
+	/// ends.
+	///
 	/// A stale track ([`Self::followed`]) is not dropped: its catalog may list it again.
 	fn retire(&mut self) -> anyhow::Result<()> {
 		if self.sync || self.psi.is_none() {
@@ -2677,17 +2709,29 @@ where
 				.values()
 				.any(|other| other.listed && other.pid == track.pid && other.serial > track.serial)
 		};
+		let replaced = |track: &Track| {
+			self.tracks
+				.values()
+				.any(|other| other.pid == track.pid && other.serial > track.serial)
+		};
+		let behind_unended = |track: &Track| {
+			self.tracks
+				.values()
+				.any(|other| other.pid == track.pid && other.serial < track.serial && !other.finished)
+		};
 		let done: Vec<String> = self
 			.tracks
 			.iter()
 			.filter(|(name, track)| {
-				track.finished
-					&& !track.cataloged
-					&& track.pack.is_none()
-					&& held != Some(track.key())
-					&& !self.stale.contains(*name)
-					&& !self.jitter.holds(&track.key())
-					&& (taken(track) || !self.schedule.holds(track.pid))
+				let sent = || {
+					track.finished
+						&& track.pack.is_none()
+						&& held != Some(track.key())
+						&& !self.jitter.holds(&track.key())
+						&& (taken(track) || !self.schedule.holds(track.pid))
+				};
+				let superseded = || !track.listed && behind_unended(track) && replaced(track);
+				!track.cataloged && !self.stale.contains(*name) && (sent() || superseded())
 			})
 			.map(|(name, _)| name.clone())
 			.collect();
@@ -2698,12 +2742,18 @@ where
 		let mut cleared = false;
 		for name in done {
 			let track = self.tracks.remove(&name).expect("a track retiring");
+			if let Some(ready) = self.held.take_if(|ready| ready.track == track.key()) {
+				self.jitter.discard(&ready);
+			}
 			self.jitter.forget(&track.key());
 			cleared |= track.pid == pcr_pid;
 			// A stream listed on the PID later counts its silence from its own listing.
-			if !self.tracks.values().any(|other| other.listed && other.pid == track.pid) {
+			if track.listed && !self.tracks.values().any(|other| other.listed && other.pid == track.pid) {
 				self.liveness.retire(track.pid);
 			}
+		}
+		if !self.draining() {
+			self.retiring_descriptors.clear();
 		}
 		if cleared
 			&& !self.tracks.values().any(|track| track.pid == pcr_pid)
@@ -2716,10 +2766,17 @@ where
 		self.revise()
 	}
 
+	/// Whether a track the PMT lists has left the catalog and is still sending its tail.
+	fn draining(&self) -> bool {
+		self.tracks.values().any(|track| track.listed && !track.cataloged)
+	}
+
 	/// Hold each track taking over a PID in the jitter buffer until every track before it
 	/// there has ended and its last packet has gone out, so none of theirs goes out under the
 	/// PMT revised for it. Release times alone would interleave them: the new track's first
-	/// frame can be due before the tail of the one it replaces.
+	/// frame can be due before the tail of the one it replaces. A frame of one already out of
+	/// the jitter buffer, held at a generation boundary as [`Self::admit`] moved its track onto
+	/// the PID, drops: held on, it would keep that tail from going out.
 	fn take_over(&mut self) {
 		let held = self.held.as_ref().map(|ready| ready.track);
 		let sending = |track: &Track| {
@@ -2732,16 +2789,20 @@ where
 		let waits: Vec<(Key, bool)> = self
 			.tracks
 			.values()
-			.filter(|track| !track.listed)
 			.map(|track| {
-				let behind = self
-					.tracks
-					.values()
-					.any(|other| other.pid == track.pid && other.serial < track.serial && sending(other));
+				let behind = !track.listed
+					&& self
+						.tracks
+						.values()
+						.any(|other| other.pid == track.pid && other.serial < track.serial && sending(other));
 				(track.key(), behind)
 			})
 			.collect();
 		for (key, wait) in waits {
+			if wait && held == Some(key) {
+				let ready = self.held.take().expect("the held frame");
+				self.jitter.discard(&ready);
+			}
 			self.jitter.wait(&key, wait);
 		}
 	}

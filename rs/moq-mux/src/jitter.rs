@@ -810,25 +810,50 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// queued either side of a steering step can be due nanoseconds apart, which would make
 	/// the order depend on when each was read rather than on the media.
 	///
-	/// A waiting track ([`Self::wait`]) is passed over, unless it holds a generation older than
-	/// every other track's: the generations still go out in turn.
+	/// A waiting track ([`Self::wait`]) is passed over.
 	fn front(&self) -> Option<(Instant, &K)> {
-		let front = |waiting: bool| {
-			self.tracks
-				.iter()
-				.filter(|(key, _)| self.waiting.contains(*key) == waiting)
-				.filter_map(|(key, track)| {
-					let (generation, decode, deadline, _) = track.queue.front()?;
-					Some(((*generation, decode.as_nanos(), key), *deadline))
-				})
-				.min_by(|a, b| a.0.cmp(&b.0))
+		self.tracks
+			.iter()
+			.filter(|(key, _)| !self.waiting.contains(*key))
+			.filter_map(|(key, track)| {
+				let (generation, decode, deadline, _) = track.queue.front()?;
+				Some(((*generation, decode.as_nanos(), key), *deadline))
+			})
+			.min_by(|a, b| a.0.cmp(&b.0))
+			.map(|((_, _, key), deadline)| (deadline, key))
+	}
+
+	/// Drop what each waiting track ([`Self::wait`]) holds of a generation older than every
+	/// other track's next frame. The generations go out in turn, so it would go out ahead of
+	/// the frames the track waits behind: it is late. As for any loss before a track's first
+	/// frame out, a track that has sent nothing loses all it holds and starts at its next sync
+	/// frame.
+	fn lapse(&mut self) {
+		let Some(next) = self
+			.tracks
+			.iter()
+			.filter(|(key, _)| !self.waiting.contains(*key))
+			.filter_map(|(_, track)| track.queue.front().map(|(generation, ..)| *generation))
+			.min()
+		else {
+			return;
 		};
-		let next = match (front(false), front(true)) {
-			(Some(next), Some(waiting)) if waiting.0.0 < next.0.0 => waiting,
-			(next, _) => next?,
-		};
-		let ((_, _, key), deadline) = next;
-		Some((deadline, key))
+		let older = |track: &Track<T>| track.queue.front().is_some_and(|(generation, ..)| *generation < next);
+		for key in &self.waiting {
+			let Some(track) = self.tracks.get_mut(key).filter(|track| older(track)) else {
+				continue;
+			};
+			if !track.started {
+				self.trimmed += track.queue.len() as u64;
+				track.queue.clear();
+				track.waiting = true;
+				continue;
+			}
+			while older(track) {
+				track.queue.pop_front();
+				self.dropped += 1;
+			}
+		}
 	}
 
 	/// When the acquisition under way ends, unless a track starts a new group first.
@@ -894,6 +919,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				self.acquired();
 				continue;
 			}
+			self.lapse();
 			let front = self.front().map(|(deadline, key)| (deadline, key.clone()));
 			if let Some((deadline, key)) = &front
 				&& (self.delay.is_zero() || now >= *deadline)
@@ -964,10 +990,22 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				.is_some_and(|acquire| acquire.tracks.contains_key(key))
 	}
 
-	/// Drop what is kept of `key`, a track that has ended and will send nothing more: an ended
-	/// track's lead would otherwise place every later floor, and its keys would pile up.
+	/// Drop what is kept of `key`, a track that will send nothing more: an ended track's lead
+	/// would otherwise place every later floor, and its keys would pile up. The frames it still
+	/// holds, of a track leaving before its first went out, are trimmed.
 	pub fn forget(&mut self, key: &K) {
-		self.tracks.remove(key);
+		if let Some(track) = self.tracks.remove(key) {
+			self.trimmed += track.queue.len() as u64;
+		}
+		if let Some(acquire) = &mut self.acquire {
+			acquire.tracks.remove(key);
+			let held = acquire.frames.len();
+			acquire.frames.retain(|(track, _)| track != key);
+			self.trimmed += (held - acquire.frames.len()) as u64;
+			if acquire.frames.is_empty() {
+				self.acquire = None;
+			}
+		}
 		self.waiting.remove(key);
 		self.leads.remove(key);
 		self.steer.tracks.remove(key);
@@ -1005,7 +1043,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	}
 
 	/// Keep `key`'s frames queued past their deadlines while `wait`: a track that must go out
-	/// behind another's frames, whatever their release times.
+	/// behind another's frames, whatever their release times. What it holds of a generation
+	/// the others have left drops ([`Self::lapse`]).
 	pub fn wait(&mut self, key: &K, wait: bool) {
 		match wait {
 			true => self.waiting.insert(key.clone()),
@@ -1648,6 +1687,37 @@ mod tests {
 			released(&mut buffer),
 			[("a20", 0), ("v40", 0), ("a4900", 1), ("v5000", 1), ("a5020", 1)]
 		);
+	}
+
+	/// A waiting track never goes out ahead of the others, not even with a generation they have
+	/// left: what it holds of that drops.
+	#[tokio::test(start_paused = true)]
+	async fn a_waiting_track_drops_what_it_holds_of_a_generation_left() {
+		let start = moq_clock::now();
+		let mut buffer = Buffer::new(DELAY).replay();
+		buffer.push(1, arrival(start, 0, "v0")).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(due(&mut buffer), ["v0"]);
+
+		buffer.wait(&2, true);
+		let now = moq_clock::now();
+		buffer.push(2, arrival(now, 20, "w20")).unwrap();
+		buffer.push(2, arrival(now, 40, "w40")).unwrap();
+		tokio::time::advance(Duration::from_secs(1)).await;
+		assert!(due(&mut buffer).is_empty(), "a waiting track is passed over");
+
+		// The other track crosses a restart onto a new generation.
+		let now = moq_clock::now();
+		buffer.push(1, after(1, arrival(now, 5_000, "v5000"))).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(released(&mut buffer), [("v5000", 1)]);
+		assert_eq!(buffer.trimmed(), 2);
+
+		buffer.wait(&2, false);
+		let now = moq_clock::now();
+		buffer.push(2, arrival(now, 5_020, "w5020")).unwrap();
+		tokio::time::advance(Duration::from_millis(20)).await;
+		assert_eq!(released(&mut buffer), [("w5020", 1)]);
 	}
 
 	/// What a run against a drifting source saw.
