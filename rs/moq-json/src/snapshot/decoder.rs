@@ -68,12 +68,8 @@ impl<T> Decoder<T> {
 	/// only the first.
 	pub fn snapshot(&mut self, payload: &[u8]) -> Result<()> {
 		self.current = None;
-		// Every group starts a new DEFLATE window; enforce the budget while inflating.
-		self.flate = self.compression.then(|| {
-			moq_flate::Decoder::with_max_frame_size(self.max_size.map_or(moq_flate::DEFAULT_MAX_FRAME_SIZE, |size| {
-				(size as u64).min(moq_flate::DEFAULT_MAX_FRAME_SIZE)
-			}))
-		});
+		// Every group starts a new DEFLATE window, which holds the whole group to the group budget.
+		self.flate = self.compression.then(moq_flate::Decoder::new);
 		let inflated = self.flate.as_mut().map(|flate| flate.frame(payload)).transpose()?;
 		let plain = inflated.as_deref().unwrap_or(payload);
 		if let Some(limit) = self.max_size
@@ -272,7 +268,7 @@ mod test {
 			} else {
 				decoder.delta(&payload)
 			};
-			assert!(matches!(result, Err(Error::Flate(moq_flate::Error::TooLarge(1024)))));
+			assert!(matches!(result, Err(Error::TooLarge(1024))));
 			assert!(decoder.value().is_none());
 		}
 	}
