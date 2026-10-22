@@ -978,9 +978,10 @@ impl TrackState {
 	/// The cached producer rather than a consumer: `consume` reads the clock and can
 	/// take the group's own lock, which the caller does once the track guard is gone.
 	/// Whether readers may take from the cache: it reflects the live feed, or the track
-	/// ended, which makes the cache the whole of it.
+	/// reached its end, which makes the cache the whole of it. An end declared but not
+	/// reached does not: the groups before it are still to come from the feed.
 	fn readable(&self) -> bool {
-		self.feed == Feed::Live || self.sealed || self.end.is_some() || self.abort.is_some()
+		self.feed == Feed::Live || self.sealed || self.abort.is_some() || self.is_complete()
 	}
 
 	/// Where relative starts count back from: the newest group the live feed produced.
@@ -8092,6 +8093,24 @@ mod test {
 		framed(&producer, 7, 1).finish().unwrap();
 		assert_eq!(ready_groups(&mut reader), vec![7]);
 		assert_eq!(reader.floor(), Some(7));
+	}
+
+	/// An end the idle copy has not reached does not make its cache the whole track: until
+	/// the route answers, it serves nothing and anchors no relative start.
+	#[test]
+	fn an_idle_copy_with_a_future_end_waits_for_the_live_feed() {
+		let mut producer = idle_copy();
+		producer.finish_at(Position::group(10)).unwrap();
+		let mut live = producer.subscribe(replay().with_ranges([Range::live()]));
+		let mut oldest = producer.subscribe(replay());
+		assert_eq!(ready_groups(&mut live), Vec::<u64>::new(), "the copy is idle");
+		assert_eq!(live.floor(), None, "the start waits for the live feed");
+		assert_eq!(ready_groups(&mut oldest), Vec::<u64>::new(), "the copy is idle");
+
+		producer.set_live(Some(Position::group(4)), None);
+		framed(&producer, 4, 1).finish().unwrap();
+		assert_eq!(ready_groups(&mut live), vec![4]);
+		assert_eq!(ready_groups(&mut oldest), vec![0, 1, 2, 3, 4]);
 	}
 
 	#[test]
