@@ -12,6 +12,13 @@ Resolve the path with `announcedBroadcast()`, or hold `announced()` over its pre
 moq-transport and moq-lite-03/04 sessions are unchanged.
 Regenerate the bindings for the changed `request_broadcast` checksum.
 
+### Catalog references carry their epoch
+
+`MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names; the memberwise initializer defaults it to `nil`.
+`MoqBroadcastConsumer.resolve(reference:)` requires `epoch:` too; pass the rendition's `epoch` alongside, or `nil` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, throw `MoqError.Mux` for a rendition whose broadcast is proven to serve another epoch.
+Regenerate the Swift sources and rebuild the matching XCFramework, then rebuild callers.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer.finish()` lets go, instead of unlisting when its producer finishes or is released.

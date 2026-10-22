@@ -12,6 +12,12 @@ On moq-lite, a client session asks its relay for announcements only under paths 
 Resolve the path with `announced_broadcast`, or hold `announced` over its prefix while requesting.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
+### Catalog references carry their epoch
+
+`MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `epoch: None`.
+`MoqBroadcastConsumer::resolve` takes the rendition's `epoch` after `reference`; pass it alongside, or `None` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer::finish` lets go, instead of unlisting when its producer finishes or is released.

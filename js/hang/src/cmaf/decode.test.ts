@@ -8,7 +8,7 @@ import { decodeDataSegment, decodeInitSegment } from "./decode.ts";
 // duration, and keyframe bit the same way.
 const FIXTURES = join(
 	dirname(fileURLToPath(import.meta.url)),
-	"../../../../../rs/moq-mux/src/container/fmp4/test_data/sample-defaults.json",
+	"../../../../rs/moq-mux/src/container/fmp4/test_data/sample-defaults.json",
 );
 
 interface Fixture {

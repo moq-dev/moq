@@ -11,6 +11,12 @@ On moq-lite, a client session asks its relay for announcements only under paths 
 Resolve the path with `AnnouncedBroadcast()`, or hold `Announced()` over its prefix while requesting.
 moq-transport and moq-lite-03/04 sessions are unchanged.
 
+### Catalog references carry their epoch
+
+`ffi.MoqVideo` and `ffi.MoqAudio` gain `Epoch`, the publisher instance their `Broadcast` reference names.
+`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, reference, epoch)`; pass the rendition's `Epoch` alongside its `Broadcast`, or `nil` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another epoch.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.Finish()` lets go.
