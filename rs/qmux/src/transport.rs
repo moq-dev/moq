@@ -335,16 +335,15 @@ mod stream_transport {
 		Ok(())
 	}
 
-	/// A peer-sent length as `usize`, saturating where it does not fit so the size checks
-	/// still refuse it on 32-bit targets
-	fn saturating_len(value: VarInt) -> usize {
-		usize::try_from(value.into_inner()).unwrap_or(usize::MAX)
+	/// A peer-sent length as `usize`, refused where it does not fit (32-bit targets)
+	fn peer_len(value: VarInt) -> Result<usize, Error> {
+		usize::try_from(value.into_inner()).map_err(|_| Error::FrameTooLarge)
 	}
 
 	/// Read one QMux Record from the byte stream (draft-01).
 	/// Returns the record payload (frames concatenated).
 	async fn recv_record<R: AsyncRead + Unpin>(reader: &mut R, our_max_record_size: usize) -> Result<Bytes, Error> {
-		let size = saturating_len(read_varint(reader).await?);
+		let size = peer_len(read_varint(reader).await?)?;
 		if size > our_max_record_size {
 			return Err(Error::FrameTooLarge);
 		}
@@ -370,7 +369,7 @@ mod stream_transport {
 			}
 
 			if has_len {
-				let len = saturating_len(read_varint_into(reader, &mut buf).await?);
+				let len = peer_len(read_varint_into(reader, &mut buf).await?)?;
 				// draft-00 §5.2: `max_frame_size` bounds the whole frame, so the
 				// header bytes read so far count against it. A byte stream cannot
 				// resynchronize past an oversized frame, so this stays fatal — as
@@ -408,7 +407,7 @@ mod stream_transport {
 				if frame_type == 0x1c {
 					read_varint_into(reader, &mut buf).await?; // frame_type
 				}
-				let reason_len = saturating_len(read_varint_into(reader, &mut buf).await?);
+				let reason_len = peer_len(read_varint_into(reader, &mut buf).await?)?;
 				if buf.len().saturating_add(reason_len) > MAX_FRAME_SIZE {
 					return Err(Error::FrameTooLarge);
 				}
@@ -442,7 +441,7 @@ mod stream_transport {
 			}
 			// QX_TRANSPORT_PARAMETERS
 			0x3f5153300d0a0d0a => {
-				let len = saturating_len(read_varint_into(reader, &mut buf).await?);
+				let len = peer_len(read_varint_into(reader, &mut buf).await?)?;
 				if buf.len().saturating_add(len) > MAX_FRAME_SIZE {
 					return Err(Error::FrameTooLarge);
 				}
