@@ -84,8 +84,7 @@ fi
 
 cd "$WORKSPACE"
 bun install --frozen-lockfile
-# BROWSER_BIN runs an identified local browser instead of Playwright's Chromium.
-[[ -n "${BROWSER_BIN:-}" ]] || bunx playwright install chromium
+# BROWSER_BIN overrides the Chromium provided by the root devShell.
 
 cd "$HERE"
 bun test ./fixture.test.ts ./summary.test.ts

@@ -505,11 +505,7 @@ prepare_js() {
         return
     fi
     if needs js; then
-        # Nix provides Chromium via PLAYWRIGHT_BROWSERS_PATH; otherwise fetch it.
-        if [[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]] && ! (cd "$CLIENTS/js" && bunx playwright install chromium "${MEDIA_ENGINE_LIST[@]}") >"$HARNESS_RUN/js-chromium.log" 2>&1; then
-            mark_broken js "requested Playwright engine install failed"
-            sed 's/^/        /' "$HARNESS_RUN/js-chromium.log" >&2 || true
-        elif ! (cd "$CLIENTS/js" && bun run check) >"$HARNESS_RUN/js-check.log" 2>&1; then
+        if ! (cd "$CLIENTS/js" && bun run check) >"$HARNESS_RUN/js-check.log" 2>&1; then
             mark_broken js "type check failed"
             sed 's/^/        /' "$HARNESS_RUN/js-check.log" >&2 || true
         # Into the run directory, where harness.ts serves it from: vite empties its output

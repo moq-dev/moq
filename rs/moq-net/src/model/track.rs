@@ -11779,10 +11779,7 @@ mod test {
 			let mut frames = frame::Buffer::<1>::new();
 			assert!(
 				frames
-					.push(frame::Frame {
-						timestamp: Some(Timestamp::ZERO),
-						payload: bytes::Bytes::from_static(b"x"),
-					})
+					.push(frame::Frame::new(Timestamp::ZERO, bytes::Bytes::from_static(b"x")))
 					.is_ok()
 			);
 			assert!(matches!(group.write_frames(&mut frames), Err(Error::Closed)));
@@ -15824,10 +15821,7 @@ mod test {
 		let mut batched = producer.append_group().unwrap();
 		let mut frames = frame::Buffer::<4>::new();
 		frames
-			.push(frame::Frame {
-				timestamp: Some(rewound),
-				payload: bytes::Bytes::from_static(b"x"),
-			})
+			.push(frame::Frame::new(rewound, bytes::Bytes::from_static(b"x")))
 			.unwrap();
 		assert!(matches!(
 			batched.write_frames(&mut frames),

@@ -30,11 +30,6 @@ viewers). #4741 can merge to main, but no release ships until first-party
 publishers mint epochs. Backport patches cut from `release` don't carry
 #4741 and aren't gated (decided 2026-10-08).
 
-Flakes (2026-10-20, maintainer): the redundant failover drift moved here from
-the m1 [load round](/quest/m1/test-flakes-2/README.md). It fails loaded
-`just check` runs, the local gate every merge waits on, and may hide a TS
-export bug.
-
 Hygiene (decided 2026-10-19): the audits sit at the end of this list.
 Each recurs once per major release: its PR adds the next run to the following
 milestone, gated from m2 onward on the [release cut](/quest/m2/release/cut.md).
@@ -43,7 +38,6 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 ## Required
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
-- [Redundant failover drift](/quest/m0/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
 - [web-transport-proto 0.6.3](/quest/m0/web-transport-proto-0.6.3.md) - `main` and `release` lock the upstream release that bounds decoded CONNECT headers, so a peer can't make a relay hold megabytes per session before auth
 - [qmux 0.5.3](/quest/m0/qmux-0.5.3.md) - crates.io publishes qmux 0.5.3 with the builder session config the release backport of #5609 needs
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit

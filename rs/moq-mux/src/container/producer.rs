@@ -1029,11 +1029,7 @@ mod tests {
 			}
 		}
 
-		fn poll_read(
-			&self,
-			_group: &mut moq_net::group::Consumer,
-			_waiter: &kio::Waiter,
-		) -> std::task::Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		fn decode(&self, _frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 			unreachable!("RejectAt is write-only")
 		}
 	}
@@ -1414,11 +1410,7 @@ mod tests {
 			Ok(())
 		}
 
-		fn poll_read(
-			&self,
-			_group: &mut moq_net::group::Consumer,
-			_waiter: &kio::Waiter,
-		) -> std::task::Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		fn decode(&self, _frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 			unreachable!("Recording is write-only")
 		}
 	}

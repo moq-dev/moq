@@ -759,13 +759,14 @@ export class Subscriber {
 
 	// The adapter is gone. If the transport has already closed, that close is the
 	// error. A still-open transport, such as a GOAWAY drain, has no peer code yet,
-	// so this does not wait for it.
+	// so this does not wait for it. Either way the route failed, so a resumed track moves on.
 	async #closedSession(): Promise<Error> {
+		const closed = () => new StreamError(StreamCode.SessionClosed, { message: "session closed" });
 		const quic = this.#quic;
-		if (!quic) return new Error("session closed");
+		if (!quic) return closed();
 		return Promise.race([
 			closeError(quic),
-			new Promise<Error>((resolve) => queueMicrotask(() => resolve(new Error("session closed")))),
+			new Promise<Error>((resolve) => queueMicrotask(() => resolve(closed()))),
 		]);
 	}
 

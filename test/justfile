@@ -13,23 +13,22 @@
 set fallback
 set working-directory := '.'
 
-# Where `just test qmux` installs the Rust qmux release it interoperates with.
-qmux_root := env("CARGO_TARGET_DIR", justfile_directory() / "target") / "qmux-0.6.3"
+# Where cargo puts the in-tree qmux interop examples `just test qmux` runs.
+qmux_examples := absolute_path(env("CARGO_TARGET_DIR", source_directory() / ".." / "target")) / "debug" / "examples"
 
 # List the cross-language suites.
 default:
     @just --justfile {{ quote(justfile()) }} --list test
 
 # Port isolation across private temp roots, plus Chromium checks of the watch and publish controls.
-# The browser check is not `*.test.ts`: plain `bun test` runs lack Playwright Chromium,
-# which this recipe installs, as the interop and wasm harnesses do.
+# The root devShell provides Chromium for the browser checks, which stay separate
+# from plain `bun test` so unit tests do not launch a browser.
 harness:
     ./lib/harness.test.sh
     ./interop/relay-log.test.sh
     python3 interop/report.test.py
     cd .. && bun test test/interop/compat/resolve.test.ts test/interop/compat/claims.test.ts
     cd .. && bun install --frozen-lockfile
-    cd interop/clients/js && bunx playwright install chromium
     cd interop/clients/js && bun test ./harness.browser.ts ./signals-dom.browser.ts ./publish-ui.browser.ts ./capture-channel-count.browser.ts ./open-gop.browser.ts ./src/contract.test.ts ./src/resume.test.ts
 
 # Cross-language media interop test, built from this checkout. Stands up a
@@ -215,8 +214,8 @@ wasm *args:
 # The @moq/video renderer in headless Chromium: WebGPU, a lost device, and the Canvas2D fallback.
 video:
     cd .. && bun install --frozen-lockfile
-    cd video && bunx playwright install chromium
-    cd video && bun test ./renderer.browser.ts
+    # A desktop display makes software Vulkan request unsupported window surfaces.
+    cd video && env -u DISPLAY -u WAYLAND_DISPLAY bun test ./renderer.browser.ts
 
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:
@@ -230,20 +229,19 @@ bare-fin:
 json-properties:
     bash json-properties.sh
 
-# The TypeScript qmux peer as client and server against qmux 0.6.3's Rust
-# interop examples, per draft. `cargo install` keeps that release out of the
-# workspace's dependency graph and skips the build once installed.
+# The TypeScript qmux peer as client and server against the in-tree Rust qmux
+# interop examples, per draft. The manifest path names the in-tree crate, which
+# shares its package name with the 0.6 release its tests interoperate with.
 
 # TypeScript-to-Rust qmux interop.
 qmux:
-    cargo install --locked --quiet qmux@0.6.3 --features ws --example interop-server --example interop-client --root {{ quote(qmux_root) }}
+    cargo build --locked --quiet --manifest-path ../rs/qmux/Cargo.toml --example interop-server --example interop-client
     cd .. && bun install --frozen-lockfile
-    cd .. && QMUX_INTEROP_BIN={{ quote(qmux_root / "bin") }} bun test test/qmux/interop.test.ts
+    cd .. && QMUX_INTEROP_BIN={{ quote(qmux_examples) }} bun test test/qmux/interop.test.ts
 
 # Complete MoQ SETUP and transfer a frame over a real browser data-channel pair.
 p2p:
     cd .. && bun install --frozen-lockfile
-    cd p2p && bunx playwright install chromium
     cd p2p && bun test ./transport.browser.ts
 
 # Retain complete backend assets, parity, and raw alternating browser samples.
