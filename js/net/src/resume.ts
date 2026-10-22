@@ -859,6 +859,12 @@ class Reader implements ResumeSource {
 		}
 	}
 
+	start(): number | "pending" | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.sourceStart(serving.sub);
+	}
+
 	end(): track.Location | undefined {
 		this.sync();
 		return this.#learnEnd();

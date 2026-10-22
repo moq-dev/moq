@@ -1096,7 +1096,7 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 		// SUBSCRIBE_TRACKS (draft-18+, #1542): the half of the SUBSCRIBE_NAMESPACE split
 		// that subscribes to all tracks under a prefix. We don't implement PUBLISH
 		// replication, so this is impossible to honor. Reject loudly.
-		ietf::SUBSCRIBE_TRACKS_ID => {
+		ietf::SubscribeTracks::ID => {
 			tracing::error!(
 				version = ?version,
 				"received SUBSCRIBE_TRACKS (0x51); not supported in moq-lite (no PUBLISH replication)"
@@ -1600,6 +1600,7 @@ mod tests {
 		assert_eq!(shared.control.pop().await.unwrap(), first);
 
 		let ok = ietf::RequestOk {
+			largest: None,
 			request_id: Some(RequestId(6)),
 			active: None,
 		};

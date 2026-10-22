@@ -49,8 +49,10 @@ impl EndpointEvent {
     /// Determine whether the connection has stopped being active
     ///
     /// Emitted once per connection, before [`Self::is_drained`]'s event: when the peer's close
-    /// arrives, or at the drain if it never does. Past it the peer has our close or never will,
-    /// so a shutdown can stop waiting without sitting out the closing period.
+    /// arrives, at a local close if the peer never answered the handshake, or at the drain
+    /// otherwise. Past it the peer has our close or never will, so a shutdown can stop waiting
+    /// without sitting out the closing period. A local close queues its CONNECTION_CLOSE, so
+    /// drive `poll_transmit` before forwarding this event.
     pub fn is_draining(&self) -> bool {
         self.0 == EndpointEventInner::Draining
     }
