@@ -471,6 +471,30 @@ describe("Patterns", () => {
 		expect(a.covers(new Patterns())).toBe(true);
 		expect(JSON.stringify(a)).toBe('["a","b"]');
 	});
+
+	test("the constructor matches repeated insert", () => {
+		// The bulk path must produce exactly the union insert would, tier skips included.
+		const atoms = ["a", "b", "c", "a/b", "a/c", "*", "a/*", "*/a", "a*", "*a", "a*b", "a/**", "**/a", "**", ""];
+		let seed = 0x9e3779b9;
+		const next = () => {
+			seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+			return seed;
+		};
+		for (let round = 0; round < 500; round++) {
+			const picked = Array.from({ length: 8 }, () => Pattern.parse(atoms[next() % atoms.length]));
+			const expected = new Patterns();
+			for (const candidate of picked) expected.insert(candidate);
+			expect(texts(new Patterns(picked))).toEqual(texts(expected));
+			expect(new Patterns(picked).equals(expected)).toBe(true);
+		}
+	});
+
+	test("many incomparable patterns reduce", () => {
+		const members = Array.from({ length: 2000 }, (_, i) => Pattern.parse(`room/${i}`));
+		const set = new Patterns(members);
+		expect(set.size).toBe(members.length);
+		for (const member of members) expect(set.contains(member)).toBe(true);
+	});
 });
 
 test("patterns own immutable segment records", () => {

@@ -127,10 +127,41 @@ impl From<Pattern> for Patterns {
 }
 
 impl FromIterator<Pattern> for Patterns {
+	/// Reduce a union in one pass, cheapest-first.
+	///
+	/// [`insert`](Self::insert) is linear in the members already held, so folding a
+	/// peer-supplied list through it costs O(n²). Sorting by
+	/// [`specificity`](Pattern::specificity) first makes the containment scan cheap:
+	/// a pattern can only be contained by one of strictly lower specificity, so every
+	/// member of its own tier is skipped without a comparison, and a later pattern can
+	/// never contain an earlier one, so no member is ever removed.
 	fn from_iter<I: IntoIterator<Item = Pattern>>(iter: I) -> Self {
-		let mut set = Self::new();
-		set.extend(iter);
-		set
+		let mut sorted: Vec<Pattern> = iter.into_iter().collect();
+		sorted.sort_unstable_by(|a, b| {
+			a.specificity()
+				.cmp(&b.specificity())
+				.then_with(|| a.as_str().cmp(b.as_str()))
+		});
+		sorted.dedup_by(|a, b| a == b);
+
+		let mut out = Patterns(Vec::with_capacity(sorted.len()));
+		let mut tier_start = 0;
+		let mut tier = None;
+		for pattern in sorted {
+			let specificity = pattern.specificity();
+			if tier != Some(specificity) {
+				tier = Some(specificity);
+				tier_start = out.0.len();
+			}
+			if out.0[..tier_start].iter().any(|member| member.contains(&pattern)) {
+				continue;
+			}
+			out.0.push(pattern);
+		}
+
+		// The wire order is canonical text, whatever order reduction visited.
+		out.0.sort_unstable();
+		out
 	}
 }
 
@@ -221,6 +252,37 @@ mod tests {
 	fn serde_round_trips_reduced() {
 		let set: Patterns = serde_json::from_str(r#"["a/b", "a/*", "**/c"]"#).unwrap();
 		assert_eq!(serde_json::to_string(&set).unwrap(), r#"["**/c","a/*"]"#);
+	}
+
+	#[test]
+	fn from_iter_matches_repeated_insert() {
+		// The bulk path must produce exactly the union insert would, including
+		// duplicates and patterns whose tiers differ. A tiny LCG keeps it deterministic.
+		let atoms = [
+			"a", "b", "c", "a/b", "a/c", "*", "a/*", "*/a", "a*", "*a", "a*b", "a/**", "**/a", "**", "",
+		];
+		let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+		for _ in 0..500 {
+			let mut picked = Vec::new();
+			for _ in 0..8 {
+				seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+				picked.push(pattern(atoms[(seed >> 33) as usize % atoms.len()]));
+			}
+			let mut expected = Patterns::new();
+			for candidate in &picked {
+				expected.insert(candidate.clone());
+			}
+			assert_eq!(picked.iter().cloned().collect::<Patterns>(), expected, "{picked:?}");
+		}
+	}
+
+	#[test]
+	fn many_incomparable_patterns_reduce() {
+		// Same tier, so neither contains the other and the reduction must keep all of them.
+		let members: Vec<Pattern> = (0..2000).map(|i| pattern(&format!("room/{i}"))).collect();
+		let set: Patterns = members.iter().cloned().collect();
+		assert_eq!(set.len(), members.len());
+		assert!(members.iter().all(|member| set.contains(member)));
 	}
 
 	#[test]

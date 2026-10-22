@@ -36,5 +36,32 @@ fn matching(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, matching);
+/// Reducing a peer-supplied union, swept over member count and member kind.
+///
+/// `AUTH_OK` carries a count the peer chooses, so the cost of `collect` must not grow
+/// quadratically with it. Literals share one specificity tier (no containment checks);
+/// partials of one width share another.
+fn reduction(c: &mut Criterion) {
+	let mut group = c.benchmark_group("pattern-reduction");
+	for count in [16, 256, 4096] {
+		for kind in ["literal", "partial"] {
+			let inputs: Vec<Pattern> = (0..count)
+				.map(|index| match kind {
+					"literal" => format!("room{index:04}").parse().unwrap(),
+					_ => format!("room{index:04}*tail").parse().unwrap(),
+				})
+				.collect();
+			group.throughput(Throughput::Elements(count as u64));
+			group.bench_function(BenchmarkId::new(kind, count), |b| {
+				b.iter(|| {
+					let patterns: Patterns = inputs.iter().cloned().collect();
+					std::hint::black_box(patterns.len())
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, matching, reduction);
 criterion_main!(benches);

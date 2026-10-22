@@ -770,6 +770,46 @@ export class Pattern {
 }
 
 /**
+ * Reduce a union in one pass, cheapest-first.
+ *
+ * `insert` is linear in the members already held, so folding a peer-supplied list
+ * through it costs O(n²). Sorting by specificity first makes the containment scan
+ * cheap: a pattern can only be contained by one of strictly lower specificity, so
+ * every member of its own tier is skipped, and a later pattern can never contain an
+ * earlier one, so no member is ever removed.
+ */
+function reduce(patterns: Pattern[]): Pattern[] {
+	patterns.sort((a, b) => compareSpecificity(a.specificity(), b.specificity()) || Pattern.compare(a, b));
+
+	const unique: Pattern[] = [];
+	for (const pattern of patterns) {
+		if (unique.length === 0 || unique[unique.length - 1].text !== pattern.text) unique.push(pattern);
+	}
+
+	const out: Pattern[] = [];
+	let tierStart = 0;
+	let tier: Specificity | undefined;
+	for (const pattern of unique) {
+		const specificity = pattern.specificity();
+		if (!tier || compareSpecificity(tier, specificity) !== 0) {
+			tier = specificity;
+			tierStart = out.length;
+		}
+		let contained = false;
+		for (let i = 0; i < tierStart; i++) {
+			if (out[i].contains(pattern)) {
+				contained = true;
+				break;
+			}
+		}
+		if (!contained) out.push(pattern);
+	}
+
+	out.sort(Pattern.compare);
+	return out;
+}
+
+/**
  * A union of patterns, reduced so no member is contained by another.
  *
  * This is the shape of a grant (the paths a token may publish) and of a rebased pattern
@@ -788,7 +828,7 @@ export class Patterns implements Iterable<Pattern> {
 
 	/** A union of the given patterns, reduced. Empty when none are given. */
 	constructor(patterns?: Iterable<Pattern>) {
-		if (patterns) for (const pattern of patterns) this.insert(pattern);
+		if (patterns) this.#members = reduce([...patterns]);
 	}
 
 	/**
