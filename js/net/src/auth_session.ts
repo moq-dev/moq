@@ -661,6 +661,7 @@ export async function enforceGrant({
 					try {
 						await auth?.ready(path, "publish", { signal: ended.signal });
 					} catch (err) {
+						dispose();
 						if (ended.signal.aborted) return;
 						throw err;
 					}

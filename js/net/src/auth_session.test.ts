@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Signal } from "@moq/signals";
+import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "./auth.ts";
 import { type AuthSession, enforceGrant } from "./auth_session.ts";
 import * as Path from "./path.ts";
@@ -48,7 +48,20 @@ test("a session that closes during an authorization wait ends enforcement withou
 	const quic = { closed, close: () => closes++ } as unknown as WebTransport;
 	// Nothing granted yet, and an authorization that is never answered.
 	const grant = new Signal<Grant | undefined>({ publish: new Path.Patterns(), subscribe: new Path.Patterns() });
-	const advertised = new Signal<ReadonlyMap<Path.Valid, unknown> | undefined>(new Map([[Path.from("live"), 0]]));
+	const table = new Signal<ReadonlyMap<Path.Valid, unknown> | undefined>(new Map([[Path.from("live"), 0]]));
+	// Counts the change callbacks the enforcer holds on the table, which must go with it.
+	let registered = 0;
+	const advertised = {
+		peek: () => table.peek(),
+		changed: (fn: (value: ReadonlyMap<Path.Valid, unknown> | undefined) => void) => {
+			registered++;
+			const dispose = table.changed(fn);
+			return () => {
+				registered--;
+				dispose();
+			};
+		},
+	} as unknown as Getter<ReadonlyMap<Path.Valid, unknown> | undefined>;
 	let waiting = 0;
 	const auth = {
 		ready: (_path: Path.Valid, _direction: string, { signal }: { signal?: AbortSignal } = {}) =>
@@ -70,4 +83,5 @@ test("a session that closes during an authorization wait ends enforcement withou
 	expect(done).toBe(true);
 	expect(closes).toBe(0);
 	await enforcing;
+	expect(registered).toBe(0);
 });
