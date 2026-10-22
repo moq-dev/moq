@@ -99,12 +99,16 @@ For a source already in MPEG-TS, `ffmpeg -c copy -f mpegts` re-muxes and drops P
 or use [`import srt`](/bin/srt).
 
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3/Opus, and passes
-SCTE-35 and every other stream it does not decode (KLV, subtitles, DVB AC-3)
-through as tracks. Each such PES goes through whole, at its place on the program clock
+SCTE-35, DSM-CC sections, and every other stream it does not decode (MPEG-2
+video, LATM AAC, KLV, subtitles, DVB AC-3) through as tracks. MPEG-2 video still
+paces the program by its timestamps. Each such PES goes through whole, at its place on the program clock
 (PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
 is refused with a warning: any in a program with no PCR, and one whose PES carry
 an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
-or have a malformed header.
+or have a malformed header, as is `0x86` without a SCTE-35 registration, which
+may be DTS audio. A PID no table claims, such as conditional access or ATSC
+PSIP, is dropped with one warning and counted in the
+[stats](/concept/stats#mpeg-ts-sections); `--passthrough` keeps them.
 SCTE-35 cues and private PES share the media clock, or anchor on the first PCR
 when the PMT declares only data. Audio-only and data-only programs round-trip
 without video; a data-only program still requires PCR. A program declaring
