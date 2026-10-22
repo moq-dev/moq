@@ -31,6 +31,26 @@ shutdown. No sleep stands in for drain completion. A missing group, error, or
 stall fails the lane; the timeout only bounds failure. QUIC on localhost rarely
 reorders, so the ordering race remains covered by transport unit tests.
 
+The in-tree matrix also has a `finish` case. `just test interop --finish --all`
+runs it alone. Readers establish their sessions first, then wait on a private
+stdin barrier without subscribing to media. Each publisher imports ten nonempty
+H.264 frames in one GOP (the browser encodes the same finite fixture), finishes
+all media and its catalog, and obtains the normal broadcast finish handle. Only
+then does the runner release readers. They require all ten frames, natural media
+and catalog EOF, and the exact broadcast's announcement END. After the finish
+handle's real linger expires, the publisher announces a separate untimed health
+track. Reading its payload and clean EOF on the original session proves that
+withdrawal was not a transport shutdown. The final FIFO acknowledgement permits
+teardown only; it never ends the linger. These cells use the existing nightly
+report records.
+
+GStreamer's persistent-watch policy keeps pads when a whole broadcast finishes.
+Its external client currently cannot distinguish clean media/catalog EOF from a
+track error, observe withdrawal, or read health through the same session. The
+finish row reports that subscriber as a failure with an explicit diagnostic;
+it does not substitute cancellation, a second connection, or artificial EOS.
+The lifecycle observability decision remains in `quest/m1/interop-finish.md`.
+
 Every client closes its session on the way out: publishers stop when their input
 ends (the browser on SIGTERM), and subscribers close once they have their frame.
 After each publisher's round, the harness waits for the relay to log the close of

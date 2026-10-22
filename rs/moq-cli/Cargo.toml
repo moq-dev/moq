@@ -176,3 +176,7 @@ harness = false
 [[example]]
 name = "interop-tail"
 path = "../../test/interop/clients/rust/tail.rs"
+
+[[example]]
+name = "interop-finish"
+path = "../../test/interop/clients/rust/finish.rs"

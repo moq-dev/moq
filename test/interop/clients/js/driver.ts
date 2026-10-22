@@ -14,6 +14,8 @@
  *
  * @module
  */
+import { createReadStream } from "node:fs";
+import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import type { Page } from "playwright";
 import {
@@ -57,6 +59,9 @@ const { positionals, values } = parseArgs({
 		url: { type: "string" },
 		broadcast: { type: "string" },
 		version: { type: "string" },
+		finish: { type: "boolean", default: false },
+		"finish-ack": { type: "string" },
+		frames: { type: "string", default: "10" },
 		timeout: { type: "string", default: "20" },
 		"expect-audio": { type: "boolean", default: false },
 	},
@@ -66,6 +71,7 @@ const role = positionals[0];
 const url = values.url;
 const broadcast = values.broadcast;
 const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
+const finishing = values.finish || values["finish-ack"] !== undefined;
 const expectAudio = values["expect-audio"] ?? false;
 if (
 	(role !== "publish" && role !== "subscribe") ||
@@ -113,13 +119,61 @@ let code = 1;
 try {
 	const [page, errors] = await open(
 		browser,
-		pageUrl(server.origin, role, { url, broadcast, ...(values.version ? { versions: values.version } : {}) }),
+		pageUrl(server.origin, finishing ? `finish-${role}` : role, {
+			url,
+			broadcast,
+			frames: values.frames ?? "10",
+			timeout: String(timeoutMs),
+			...(values.version ? { versions: values.version } : {}),
+		}),
 		role,
 		role === "subscribe",
 	);
-	if (role === "subscribe") await waitForWatch(page);
+	if (!finishing && role === "subscribe") await waitForWatch(page);
 
-	if (role === "publish") {
+	if (finishing) {
+		const wait = async (field: "ready" | "ended" | "result") => {
+			const deadline = Date.now() + timeoutMs;
+			while (Date.now() < deadline) {
+				throwPageErrors(errors);
+				const state = await page.evaluate(() => {
+					const s = window.interopFinish;
+					return (
+						s && { ready: s.ready, ended: s.ended, result: s.result, error: s.error, lingerUs: s.lingerUs }
+					);
+				});
+				if (state?.error) throw new Error(state.error);
+				if (state?.[field]) return state;
+				await sleep(POLL_INTERVAL_MS);
+			}
+			throw new Error(`finish ${field} timed out`);
+		};
+		const ready = await wait("ready");
+		if (role === "subscribe") {
+			console.error("finish reader ready");
+			const input = createInterface({ input: process.stdin });
+			try {
+				if ((await input.question("")) !== "read") throw new Error("expected finish read release");
+			} finally {
+				input.close();
+			}
+			await page.evaluate(() => window.interopFinish?.read());
+		} else {
+			console.error(`finish ready linger_us=${ready.lingerUs}`);
+			await wait("ended");
+			console.error("finish ended");
+			const input = createInterface({ input: createReadStream(values["finish-ack"] as string) });
+			try {
+				if ((await input[Symbol.asyncIterator]().next()).value !== "complete")
+					throw new Error("expected finish acknowledgement");
+			} finally {
+				input.close();
+			}
+			await page.evaluate(() => window.interopFinish?.acknowledge());
+		}
+		console.error((await wait("result")).result);
+		code = 0;
+	} else if (role === "publish") {
 		console.error(`publishing ${broadcast} (fake camera + microphone) to ${url}`);
 		// Stream until the orchestrator stops us.
 		await new Promise((resolve) => process.once("SIGTERM", resolve));
@@ -197,6 +251,7 @@ try {
 	// Close every session before the browser: closing it, or even the page, can end them without
 	// a close, leaving the relay to time them out.
 	for (const page of browser.contexts().flatMap((context) => context.pages())) {
+		await page.evaluate(() => window.interopFinish?.close()).catch(() => {});
 		await closeSessions(page);
 		await page.close().catch(() => {});
 	}
