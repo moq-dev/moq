@@ -48,5 +48,4 @@ epoch, and concurrent old/new consumers, in the moq-mux unit tests and the
 ## Related
 
 - [Sink restart follow](/quest/m1/sink-restart-follow.md) - exporters and sinks that follow an epochless Restart of their own broadcast
-- [Export rendition rebind](/quest/m1/export-rendition-rebind.md) - exporters rebuild a rendition whose reference changes
 - [Hang contribution references](/quest/m2/contribution-ref.md) - builds its lazy contribution entries on these reference rules

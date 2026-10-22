@@ -97,6 +97,110 @@ impl Live {
 	}
 }
 
+/// A catalog broadcast `live` whose H.264 rendition [`Moving::RENDITION`] the catalog can
+/// move between tracks: `a` and `b` in `live`, and `a` in the sibling broadcast `other`.
+/// Every frame carries a mark byte, so an export shows which track it read ([`marks`]).
+pub(crate) struct Moving {
+	pub(crate) catalog: crate::catalog::Producer,
+	/// `live`'s track `a`, the one the rendition starts on.
+	pub(crate) a: crate::container::Producer<crate::catalog::hang::Container>,
+	/// `live`'s track `b`.
+	pub(crate) b: crate::container::Producer<crate::catalog::hang::Container>,
+	/// `other`'s track `a`.
+	pub(crate) other: crate::container::Producer<crate::catalog::hang::Container>,
+	origin: moq_net::origin::Producer,
+	_broadcasts: [moq_net::broadcast::Producer; 2],
+}
+
+impl Moving {
+	pub(crate) const RENDITION: &str = "main";
+	/// A second SPS, a Main profile one, whose avcC differs from [`SPS`]'s.
+	pub(crate) const MAIN_SPS: &[u8] = &[0x67, 0x4d, 0x40, 0x1f, 0xde, 0xad, 0xbe, 0xef];
+
+	pub(crate) fn new() -> Self {
+		let origin = crate::source::produce_origin();
+		let mut live = origin.publish("live", Default::default()).unwrap();
+		let mut other = origin.publish("other", Default::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut live, crate::catalog::Config::default()).unwrap();
+		let track = |broadcast: &mut moq_net::broadcast::Producer, name: &str| {
+			let info = hang::container::track_info(hang::catalog::PRIORITY.video);
+			let track = broadcast.create_track(name, info).unwrap();
+			let wire = crate::catalog::hang::Container::Legacy(crate::container::Kind::Video);
+			crate::container::Producer::new(track, wire)
+		};
+		let mut moving = Self {
+			a: track(&mut live, "a"),
+			b: track(&mut live, "b"),
+			other: track(&mut other, "a"),
+			catalog,
+			origin,
+			_broadcasts: [live, other],
+		};
+		moving.point("a", None, SPS);
+		moving
+	}
+
+	pub(crate) async fn source(&self) -> crate::Source {
+		crate::source::resolved(&self.origin, "live").await
+	}
+
+	pub(crate) async fn catalog_stream(&self) -> crate::catalog::Consumer {
+		let source = self.source().await;
+		source.catalog::<()>(crate::catalog::CatalogFormat::Hang).await.unwrap()
+	}
+
+	/// Point the rendition at `track` in `broadcast` (`live` when `None`), described by `sps`.
+	pub(crate) fn point(&mut self, track: &str, broadcast: Option<&str>, sps: &'static [u8]) {
+		let config = Self::config(track, broadcast, sps);
+		let mut catalog = self.catalog.modify().unwrap();
+		catalog.video.renditions.insert(Self::RENDITION.to_string(), config);
+	}
+
+	/// The rendition's catalog entry reading `track` in `broadcast`, described by `sps`.
+	pub(crate) fn config(track: &str, broadcast: Option<&str>, sps: &'static [u8]) -> VideoConfig {
+		let mut config = VideoConfig::new(H264 {
+			profile: sps[1],
+			constraints: sps[2],
+			level: sps[3],
+			inline: false,
+		});
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.framerate = Some(30.0);
+		config.container = Container::Legacy;
+		config.description =
+			Some(crate::codec::h264::build_avcc(&[Bytes::from_static(sps)], &[Bytes::from_static(PPS)]).unwrap());
+		config.track = Some(track.to_string());
+		config.broadcast = broadcast.map(|broadcast| moq_net::path::Relative::new(broadcast).into_owned());
+		config
+	}
+}
+
+/// One 30 fps length-prefixed H.264 frame `index` frames in, a keyframe opening each second,
+/// whose slice carries `mark`.
+pub(crate) fn marked_frame(index: u64, mark: u8) -> crate::container::Frame {
+	let keyframe = index.is_multiple_of(30);
+	let nal = [if keyframe { 0x65 } else { 0x41 }, 0x88, mark, mark, mark, mark, 0x80];
+	let mut payload = BytesMut::new();
+	payload.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+	payload.extend_from_slice(&nal);
+	crate::container::Frame {
+		timestamp: Timestamp::from_micros(index * 1_000_000 / 30).unwrap(),
+		payload: payload.freeze(),
+		keyframe,
+		duration: None,
+	}
+}
+
+/// The mark of each [`marked_frame`] slice in `bytes`, in order.
+pub(crate) fn marks(bytes: &[u8]) -> Vec<u8> {
+	bytes
+		.windows(6)
+		.filter(|w| matches!(w[0], 0x65 | 0x41) && w[1] == 0x88 && w[2] != 0 && w[2..].iter().all(|b| *b == w[2]))
+		.map(|w| w[2])
+		.collect()
+}
+
 /// H.264 NALs used by [`video_frame`], exposed for tests that assert on them.
 pub(crate) const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef];
 pub(crate) const PPS: &[u8] = &[0x68, 0xce, 0x3c, 0x80];

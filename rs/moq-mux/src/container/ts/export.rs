@@ -103,6 +103,10 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 /// leading PAT/PMT rides on the first frame (so it inherits a real timestamp), and
 /// is re-emitted at video keyframes and periodically for mid-stream tune-in.
 /// Returns `None` when the broadcast ends.
+///
+/// A rendition the catalog moves to another track (a new `track` or `broadcast`) goes on out
+/// of its PID from the new track's first sync frame past what was read, when the PMT can
+/// announce it unchanged; one that goes back in time fails the export.
 pub struct Export<S: Stream>
 where
 	S::Ext: catalog::Catalog,
@@ -750,6 +754,37 @@ enum Kind {
 }
 
 impl Kind {
+	/// The `stream_type` the PMT announces it as.
+	fn stream_type(&self) -> u8 {
+		match self {
+			Kind::Video(stream_type) => *stream_type as u8,
+			Kind::Aac { .. } => StreamType::AdtsAac as u8,
+			// Opus rides private-data PES; the registration + extension descriptors tell the
+			// demuxer it's Opus.
+			Kind::Opus { .. } => 0x06,
+			// Half-rate MPEG-2 BC audio (< 32 kHz) re-announces as 0x04; the full rates are
+			// MPEG-1 (0x03). The catalog sample rate came from the frame header, so the mapping
+			// is faithful.
+			Kind::Mp2 { sample_rate } if *sample_rate < 32000 => StreamType::Mpeg2HalvedSampleRateAudio as u8,
+			Kind::Mp2 { .. } => StreamType::Mpeg1Audio as u8,
+			Kind::Ac3 => StreamType::DolbyDigitalUpToSixChannelAudio as u8,
+			Kind::Eac3 => StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc as u8,
+			Kind::Verbatim { stream_type, .. } | Kind::PesPacket { stream_type } => *stream_type,
+		}
+	}
+
+	/// The PMT ES descriptors announcing it when import captured none: the ATSC Dolby
+	/// registration, so a fresh (non-TS) AC-3/E-AC-3 track is announced the way the import
+	/// path expects, and Opus's registration and channel configuration.
+	fn descriptors(&self) -> Vec<catalog::Descriptor> {
+		match self {
+			Kind::Ac3 => vec![registration(b"AC-3")],
+			Kind::Eac3 => vec![registration(b"EAC3")],
+			Kind::Opus { channel_config_code } => opus_descriptors(*channel_config_code),
+			_ => Vec::new(),
+		}
+	}
+
 	/// Its timestamp is arrival on the program clock, rather than a decode deadline.
 	fn placed(&self) -> bool {
 		matches!(self, Self::PesPacket { .. } | Self::Verbatim { .. })
@@ -1535,6 +1570,7 @@ where
 			if !self.stale.is_empty() {
 				self.resubscribe(&catalog, &mpegts)?;
 			}
+			self.rebind(&catalog)?;
 			let mut es_pids: Vec<u16> = self.tracks.values().map(|t| t.pid).collect();
 			es_pids.push(self.psi.as_ref().unwrap().pcr_pid);
 			reject_colliding_si_pids(&mpegts, self.pmt_pid(), &es_pids)?;
@@ -1577,11 +1613,15 @@ where
 		reject_colliding_si_pids(&mpegts, self.pmt_pid(), &es_pids)?;
 
 		// Reuse each track's existing source (and any pending frame) by name; refresh
-		// its PID, kind, and descriptors from this snapshot. Drop tracks no longer present.
+		// its PID, kind, and descriptors from this snapshot. Drop tracks no longer present,
+		// and start over on one the catalog moved to another track.
 		let mut old = std::mem::take(&mut self.tracks);
 		for (name, config) in catalog.video.renditions.iter() {
 			let kind = video_kind(config, name)?;
-			let mut track = match old.remove(name) {
+			let reused = old
+				.remove(name)
+				.filter(|track| track.source.reads(&self.source, name, config));
+			let mut track = match reused {
 				Some(track) => track,
 				None => match ExportSource::for_video(&self.source, name, config, self.budget())?
 					.map(|s| at_edge(s, self.replay))
@@ -1596,7 +1636,10 @@ where
 		}
 		for (name, config) in catalog.audio.renditions.iter() {
 			let kind = audio_kind(config, name)?;
-			let mut track = match old.remove(name) {
+			let reused = old
+				.remove(name)
+				.filter(|track| track.source.reads(&self.source, name, config));
+			let mut track = match reused {
 				Some(track) => track,
 				None => match ExportSource::for_audio(&self.source, name, config, self.budget())?
 					.map(|s| at_edge(s, self.replay))
@@ -1684,6 +1727,53 @@ where
 			track.base.1 += track.source.skips() + 1;
 			track.base.2 += track.source.cuts() + 1;
 			track.source = source;
+			track.finished = false;
+			track.empty = moq_clock::now();
+		}
+		Ok(())
+	}
+
+	/// Move each track whose rendition the catalog moved to another track or broadcast onto it.
+	///
+	/// The PID and PMT stay as announced, so the new track must announce the same way; the codec
+	/// configuration rides in-band (parameter sets, ADTS headers) and may change. The new
+	/// source continues the old one ([`ExportSource::continuing`]), and the frames the old one
+	/// left held for their DTS go out first.
+	fn rebind(&mut self, catalog: &Catalog<S::Ext>) -> anyhow::Result<()> {
+		let budget = self.budget();
+		for (name, track) in self.tracks.iter_mut() {
+			let (source, kind, buffer) = if let Some(config) = catalog.video.renditions.get(name) {
+				if track.source.reads(&self.source, name, config) {
+					continue;
+				}
+				let source = ExportSource::for_video(&self.source, name, config, budget)?;
+				(source, video_kind(config, name)?, track.buffer)
+			} else if let Some(config) = catalog.audio.renditions.get(name) {
+				if track.source.reads(&self.source, name, config) {
+					continue;
+				}
+				let kind = audio_kind(config, name)?;
+				let buffer = Some(audio_buffer(config, &kind));
+				(
+					ExportSource::for_audio(&self.source, name, config, budget)?,
+					kind,
+					buffer,
+				)
+			} else {
+				continue;
+			};
+			let Some(source) = source else {
+				continue;
+			};
+			anyhow::ensure!(
+				kind.stream_type() == track.kind.stream_type() && kind.descriptors() == track.kind.descriptors(),
+				"TS track layout changed after PAT/PMT was emitted: '{name}' moved to a track announced differently"
+			);
+			track.release(name, &mut self.jitter, true)?;
+			track.clock = DecodeClock::default();
+			track.source = source.continuing(&track.source);
+			track.kind = kind;
+			track.buffer = buffer;
 			track.finished = false;
 			track.empty = moq_clock::now();
 		}
@@ -1998,36 +2088,13 @@ where
 		let streams = tracks
 			.iter()
 			.map(|t| {
-				let stream_type = match &t.kind {
-					Kind::Video(stream_type) => *stream_type as u8,
-					Kind::Aac { .. } => StreamType::AdtsAac as u8,
-					// Opus rides private-data PES; the registration + extension descriptors
-					// below tell the demuxer it's Opus.
-					Kind::Opus { .. } => 0x06,
-					// Half-rate MPEG-2 BC audio (< 32 kHz) re-announces as 0x04; the full
-					// rates are MPEG-1 (0x03). The catalog sample rate came from the frame
-					// header, so the mapping is faithful.
-					Kind::Mp2 { sample_rate } if *sample_rate < 32000 => StreamType::Mpeg2HalvedSampleRateAudio as u8,
-					Kind::Mp2 { .. } => StreamType::Mpeg1Audio as u8,
-					Kind::Ac3 => StreamType::DolbyDigitalUpToSixChannelAudio as u8,
-					Kind::Eac3 => StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc as u8,
-					Kind::Verbatim { stream_type, .. } | Kind::PesPacket { stream_type } => *stream_type,
-				};
-				// Prefer the descriptors captured verbatim on import; otherwise synthesize
-				// the ATSC Dolby registration so a fresh (non-TS) AC-3/E-AC-3 track is
-				// still announced the way the import path expects.
-				let descriptors = if !t.descriptors.is_empty() {
-					t.descriptors.clone()
-				} else {
-					match &t.kind {
-						Kind::Ac3 => vec![registration(b"AC-3")],
-						Kind::Eac3 => vec![registration(b"EAC3")],
-						Kind::Opus { channel_config_code } => opus_descriptors(*channel_config_code),
-						_ => Vec::new(),
-					}
+				// Prefer the descriptors captured verbatim on import.
+				let descriptors = match t.descriptors.is_empty() {
+					true => t.kind.descriptors(),
+					false => t.descriptors.clone(),
 				};
 				Ok(super::psi::Es {
-					stream_type,
+					stream_type: t.kind.stream_type(),
 					pid: Pid::new(t.pid)?,
 					descriptors,
 				})
