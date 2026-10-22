@@ -1307,7 +1307,7 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 					| ietf::Fetch::ID
 					| ietf::SubscribeNamespace::ID
 					| ietf::SubscribeNamespaceLegacy::ID
-					| ietf::SUBSCRIBE_TRACKS_ID
+					| ietf::SubscribeTracks::ID
 					| ietf::TrackStatus::ID
 					| ietf::Publish::ID
 					| ietf::PublishNamespace::ID
@@ -1338,7 +1338,7 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 			| ietf::Fetch::ID
 			| ietf::SubscribeNamespace::ID
 			| ietf::SubscribeNamespaceLegacy::ID
-			| ietf::SUBSCRIBE_TRACKS_ID
+			| ietf::SubscribeTracks::ID
 			| ietf::TrackStatus::ID => {
 				publisher.handle_stream(id, data, stream, epoch)?.await;
 			}
@@ -1716,6 +1716,7 @@ mod tests {
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
+				largest: None,
 				request_id: None,
 				active: None,
 			})
@@ -3520,7 +3521,7 @@ mod tests {
 					"a 4097 byte full track name",
 				),
 				(
-					frame(version, ietf::SUBSCRIBE_TRACKS_ID, &oversized_prefix),
+					frame(version, ietf::SubscribeTracks::ID, &oversized_prefix),
 					SessionError::ProtocolViolation,
 					"a 4097 byte SUBSCRIBE_TRACKS prefix",
 				),
