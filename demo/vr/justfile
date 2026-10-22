@@ -1,0 +1,4 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+serve url = "http://localhost:4443":
+	bun install
+	VITE_RELAY_URL="{{url}}" bun --bun vite

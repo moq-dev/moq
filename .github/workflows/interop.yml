@@ -23,6 +23,8 @@ on:
       - "test/interop/**"
       - "test/max-age/**"
       - "test/portrait/**"
+      - "test/vr/**"
+      - "demo/vr/**"
       - "rs/moq-tokio/tests/integration/max_age.rs"
       # The interop job also depends on the recipe that invokes it and the
       # workspace membership that links the JS clients to source.
@@ -119,6 +121,13 @@ jobs:
       - name: Portrait transcode
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test portrait
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      - name: VR projection
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test vr
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
