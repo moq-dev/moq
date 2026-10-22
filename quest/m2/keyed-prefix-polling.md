@@ -20,10 +20,6 @@ Decided 2026-10-21 with the maintainer: gated on a measurement.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [Lazy discovery in Rust](/quest/m1/lazy-discovery/rust.md) - lands the per-prefix requests this polls
-
 ## Related
 
 - [IETF lazy discovery](/quest/m2/ietf-lazy-discovery.md) - more prefixes per session once IETF is lazy too
