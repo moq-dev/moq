@@ -149,7 +149,7 @@ func TestBroadcastFinishLingersUntilCancelled(t *testing.T) {
 		t.Fatal(err)
 	}
 	maxAge := time.Hour
-	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Priority: 127, MaxAge: &maxAge})
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{MaxAge: &maxAge})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestBroadcastFinishWaitOnDoneContextCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	maxAge := time.Hour
-	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Priority: 127, MaxAge: &maxAge})
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{MaxAge: &maxAge})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1691,7 +1691,7 @@ func ts(d time.Duration) *time.Duration { return &d }
 // timedInfo declares the microsecond timeline used by timed raw fixtures.
 func timedInfo() *moq.TrackInfo {
 	scale := uint64(1_000_000)
-	return &moq.TrackInfo{Priority: 127, Timescale: &scale}
+	return &moq.TrackInfo{Timescale: &scale}
 }
 
 // untilWanted blocks until some subscriber wants the track, or none does.

@@ -60,6 +60,5 @@ Public API: removals listed above. Wire: the hang catalog loses
 
 ## Required
 
-- [JavaScript](/quest/m1/compress/js.md) - js/publish and js/watch need the JS side before they drop `.z`
 - [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - renames the timeline to `<track>.hls`, which this compresses
 - [Archive consumer](/quest/m1/archive/consumer.md) - replaces the CLI archive reader that reads `.z` timelines

@@ -64,7 +64,7 @@ if (version === Version.DRAFT_07) {
 const setup = await Setup.decode(reader(input.setup), version);
 const setupBytes = await write((w) => setup.encode(w, version));
 
-const datagram = await Datagram.decode(Uint8Array.from(input.datagram), version, () => true);
+const datagram = await Datagram.decode(Uint8Array.from(input.datagram), version, () => ({ timed: true }));
 const datagramBytes = [...datagram.encode(version)];
 
 // Only lite-07 can carry an untimed track; lite-06 stamps it, so it has no untimed bytes.
@@ -72,7 +72,7 @@ const untimed = version === Version.DRAFT_07;
 
 let untimedDatagramBytes: number[] = [];
 if (untimed) {
-	const datagram = await Datagram.decode(Uint8Array.from(input.untimedDatagram), version, () => false);
+	const datagram = await Datagram.decode(Uint8Array.from(input.untimedDatagram), version, () => ({ timed: false }));
 	assert.equal(datagram.timestamp, undefined);
 	untimedDatagramBytes = [...datagram.encode(version)];
 } else {
@@ -86,7 +86,7 @@ const trackInfoBytes = await write((w) => trackInfo.encode(w, version));
 // A GROUP header, then frames until the stream ends.
 const g = reader(input.group);
 const group = await Group.decode(g, version);
-const decode = frameDecoder(1_000_000);
+const decode = frameDecoder({ scale: 1_000_000 });
 const frames: { timestamp: bigint; payload: Uint8Array }[] = [];
 for (;;) {
 	const frame = await g.decodeMaybe(decode);
@@ -113,7 +113,7 @@ if (untimed) {
 	const untimedGroup = await Group.decode(u, version);
 	const untimedFrames: Uint8Array[] = [];
 	for (;;) {
-		const frame = await u.decodeMaybe(frameDecoder(0));
+		const frame = await u.decodeMaybe(frameDecoder({ scale: 0 }));
 		if (!frame) break;
 		assert.equal(frame.timestamp, undefined);
 		untimedFrames.push(frame.payload);

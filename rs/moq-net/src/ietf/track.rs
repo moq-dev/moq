@@ -392,6 +392,7 @@ mod tests {
 		let properties = Properties {
 			unknown: Default::default(),
 			dynamic_groups: false,
+			compress: false,
 			max_cache_duration: Some(std::time::Duration::from_secs(30)),
 			timescale: Some(crate::Timescale::MILLI),
 			priority: Some(7),

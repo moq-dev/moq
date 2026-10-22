@@ -4,6 +4,23 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Stage a requested track before subscribers see it (#6111)
+
+`Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
+Disposing a `Staged` uncommitted (`using`, or `[Symbol.dispose]()`) rejects the request. `accept(info)` is unchanged and equals `stage(info).commit()`.
+
+### A frameless group is not a successor (#6111)
+
+A group followed by a frameless one is judged stale against the next group that has a frame, where the frameless group used to count.
+`Track.Producer.dropGroups(start, end, error)` marks groups `[start, end)` the peer said it skipped; a reader holding one of them rejects with `error`.
+
+### Priorities are signed (#6142)
+
+`Track.Info.priority`, `Track.Subscription.priority`, and a fetch's `priority` take `-128..=127`, higher first, and 0 is the unset midpoint; anything outside throws a `RangeError`.
+The track's default was 127, the midpoint, and the subscription's was 0, the least urgent; both are 0 now.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+The wire messages (`Lite.Subscribe`, `Lite.TrackInfo`, `Ietf.Subscribe`, ...) hold the same signed priority, mapped to the wire byte when encoded.
+
 ### A dropped or cut group ends its reader with an error (#6143)
 
 A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `Track.Subscriber` saw it is now handed out, and its reads reject with the publisher's `StreamError`; before, it was skipped or ended cleanly.

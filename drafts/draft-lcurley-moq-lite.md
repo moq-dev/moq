@@ -667,6 +667,7 @@ A publisher SHOULD order a [datagram](#datagrams) among the subscription's strea
 ### Priority
 The `Subscriber Priority` is scoped to the connection and MAY change over the life of the subscription via SUBSCRIBE_UPDATE.
 The `Publisher Priority` is fixed for the lifetime of the Track (see [TRACK_INFO](#track-info)) and SHOULD be used only to resolve conflicts or ties.
+Both are a byte where higher is more urgent, and 128 is the midpoint an endpoint SHOULD use for a priority it was never given.
 
 A conflict can occur when a relay tries to serve multiple downstream subscriptions from a single upstream subscription.
 The relay cannot pick any one subscriber's priority, so the upstream subscription SHOULD use the publisher priority instead of some combination of different subscriber priorities.
@@ -758,6 +759,8 @@ Unidirectional streams are used for data transmission.
 | ------ | -------- | ----------- |
 |    0x1 | Setup    | Either      |
 | ------ | -------- | ----------- |
+|    0x2 | Padding  | Either      |
+| ------ | -------- | ----------- |
 
 ### Setup {#setup-stream}
 Each endpoint MUST open a Setup Stream (0x1) at the start of the session to advertise the optional capabilities and extensions it supports.
@@ -767,6 +770,13 @@ There is exactly one Setup Stream per direction; an endpoint that receives a sec
 An endpoint with no optional capabilities sends a SETUP with an empty parameter list rather than omitting the stream, giving the peer a deterministic signal that no capabilities are forthcoming.
 
 See the [Session](#session) section for how an endpoint avoids waiting on the peer's SETUP before exchanging other streams.
+
+### Padding {#padding-stream}
+Either endpoint MAY open a Padding Stream (0x2), followed by arbitrary bytes until FIN.
+The receiver MUST read and discard those bytes incrementally, returning stream and connection flow-control credit as they arrive without retaining the body.
+Receiving padding does not change session or subscription state.
+This allows bandwidth probes to measure delivery without requiring a media subscription.
+Versions before lite-07 do not define this stream type and reset only the stream, as required for unknown stream types.
 
 ### Group
 A publisher creates Group Streams in response to a Subscribe Stream.
@@ -1208,7 +1218,7 @@ A unique identifier chosen by the subscriber.
 A Subscribe ID MUST NOT be reused within the same session, even if the prior subscription has been closed.
 
 **Subscriber Priority**:
-The priority of the subscription within the session, represented as a u8.
+The priority of the subscription within the session, represented as a u8 with 128 as the midpoint.
 The publisher SHOULD transmit *higher* values first during congestion.
 See the [Prioritization](#prioritization) section for more information.
 
@@ -1330,7 +1340,7 @@ This is what lets the properties live on their own stream, fetched once and cach
 Publisher properties fan *out* at a relay (one upstream subscription serving many downstreams), so a change would have to propagate everywhere; subscriber properties fan *in*, which the relay already merges, so they MAY change freely via SUBSCRIBE_UPDATE.
 
 **Publisher Priority**:
-The publisher's priority for this Track, represented as a u8, used only to resolve ties between subscriptions of equal subscriber priority.
+The publisher's priority for this Track, represented as a u8 with 128 as the midpoint, used only to resolve ties between subscriptions of equal subscriber priority.
 See the [Prioritization](#prioritization) section for more information.
 
 **Publisher Max Age**:
@@ -1756,6 +1766,9 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Added Padding Stream (0x2), read and discarded incrementally by either endpoint.
+
+- Named 128 the midpoint priority for an unset Subscriber or Publisher Priority.
 - Added the Tracks Stream (0x8) with TRACKS, TRACKS_ADD, TRACKS_REMOVE, and SYNCED: a subscriber lists one Broadcast's Tracks, each with its TRACK_INFO, then SUBSCRIBEs to those it wants. A relay answers at once with what it holds. Older versions reset the stream type.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 

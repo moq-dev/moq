@@ -360,7 +360,7 @@ mod tests {
 		);
 
 		// A cursor sitting on the separator is typing `--`, not inside a stage.
-		assert!(complete("moq import fmp4 --").await.is_empty());
+		assert!(complete("moq import flv --").await.is_empty());
 	}
 
 	/// Every overlay is scoped to a command that declares the value it answers for.

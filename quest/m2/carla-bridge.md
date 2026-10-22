@@ -59,4 +59,4 @@ probe opens the camera's own backend with a CPU picture.
 
 ## Related
 
-- [GPU CI](/quest/m2/gpu-ci.md) - runs the NVIDIA half nightly
+- [GPU CI](/quest/m2/gpu-ci.md) - gates NVIDIA correctness on hardware in the merge queue

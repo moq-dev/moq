@@ -1,7 +1,7 @@
 import type { Time, Timed } from "@moq/net";
 import * as Moq from "@moq/net";
 
-import { type Config as CodecConfig, DEFAULT_DELTA_RATIO, type Encoded, Encoder } from "./encoder.ts";
+import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts";
 
 /**
  * Publishes a JSON value over a track, choosing snapshots and deltas automatically.
@@ -9,6 +9,11 @@ import { type Config as CodecConfig, DEFAULT_DELTA_RATIO, type Encoded, Encoder 
  * An {@link Encoder} that owns its track: it writes each encoded frame and rolls a group whenever
  * the encoder emits a snapshot. When something else already owns the track, use the {@link Encoder}
  * directly.
+ *
+ * A group of deltas runs until a joiner wants a fresh one: once the deltas outweigh the track's
+ * `refresh` ratio times the snapshot, a join asks for a group past the largest, and the producer
+ * restates the value there at the newest timestamp written. Set the ratio when creating the
+ * track, or joins never ask.
  */
 export class Producer<T> {
 	#track: Moq.Track.Producer;
@@ -21,11 +26,38 @@ export class Producer<T> {
 	// is closed the moment it's written and never held open.
 	#deltas: boolean;
 
+	// The sequence of the newest group written, which a joiner's wanted group has to pass.
+	#largest?: number;
+	// The newest timestamp written, which a refresh restates the value at. An update may carry an
+	// older timestamp than its group's first frame, and a new group may not start before that one.
+	#at?: Time.Timestamp;
+	// Stops watching the track's demand.
+	#unwatch?: () => void;
+
 	constructor(config: Producer.Config<T>) {
 		this.#track = config.track;
 		this.#encoder = new Encoder(config);
 		this.#initial = config.initial;
-		this.#deltas = (config.deltaRatio ?? DEFAULT_DELTA_RATIO) !== 0;
+		this.#deltas = config.deltas !== false;
+
+		// With deltas off every group holds one frame, so no join ever asks for a fresh one.
+		if (this.#deltas) this.#unwatch = this.#track.demand().wanted.subscribe((wanted) => this.#refresh(wanted));
+	}
+
+	// Restate the value in a new group once a joiner wants one past the largest written.
+	#refresh(wanted: number | undefined): void {
+		if (wanted === undefined || this.#largest === undefined || wanted <= this.#largest) return;
+		const frame = this.#encoder.snapshot();
+		if (!frame) return;
+
+		// Nobody awaits a refresh, so a failed write has no caller to report to. Abort the track rather
+		// than leave its newest group without the value, where a latest-value subscriber would wait.
+		try {
+			this.#write(frame, this.#at);
+			frame.commit();
+		} catch (err) {
+			this.#close(err instanceof Error ? err : new Error(String(err)));
+		}
 	}
 
 	/**
@@ -62,9 +94,11 @@ export class Producer<T> {
 		if (!frame) return;
 
 		// A throw here leaves the frame uncommitted, so the next update resynchronizes with a fresh
-		// snapshot. A delta against a snapshot no consumer ever saw would be unreadable.
+		// snapshot. A delta against a snapshot no consumer ever saw would be unreadable. The value
+		// stays the last one written, so a refresh restates that rather than the rejection.
 		this.#write(frame, at);
 		frame.commit();
+		if (at && !at.isBefore(this.#at ?? at)) this.#at = at;
 	}
 
 	#write(encoded: Encoded, at: Time.Timestamp | undefined): void {
@@ -81,6 +115,7 @@ export class Producer<T> {
 			this.#group = undefined;
 
 			const group = this.#track.appendGroup();
+			this.#largest = group.sequence;
 			try {
 				group.writeFrame({ payload: encoded.payload, timestamp: at });
 			} catch (err) {
@@ -125,11 +160,10 @@ export class Producer<T> {
 	 * starts from the latest value, so sections compose instead of clobbering one another. Use
 	 * {@link update} to replace the whole value instead.
 	 *
-	 * After a rejected write the current value is what the producer last *tried* to publish, which
-	 * consumers never received. That is deliberate: dropping a rejected owner's field would clobber it
-	 * for whoever edits next, which is the failure this API exists to prevent. The owner whose write
-	 * failed sees the error, and the next successful publish is a full snapshot carrying the composed
-	 * value, so consumers converge on it either way.
+	 * A rejected edit never reached the wire, so the current value stays the last one that did. The
+	 * owner whose write failed sees the error and can retry; carrying the rejected edit forward would
+	 * instead fail every later owner's publish the same way, or publish a value its owner was told
+	 * failed.
 	 */
 	mutate(fn: (value: T) => void, at?: Time.Timestamp): void {
 		// Start from the last-published value, falling back to the configured initial value. We
@@ -146,14 +180,20 @@ export class Producer<T> {
 
 	/** Finish the track, closing any open group. */
 	finish(): void {
-		this.#group?.close();
+		this.#close();
+	}
+
+	#close(abort?: Error): void {
+		this.#unwatch?.();
+		this.#unwatch = undefined;
+		this.#group?.close(abort);
 		this.#group = undefined;
 
 		// The open group goes with the track, so the encoder must not keep emitting deltas into it.
 		// Any further update fails on the closed track, but it has to fail as a track error rather
 		// than as a delta with nowhere to put it.
 		this.#encoder.reset();
-		this.#track.close();
+		this.#track.close(abort);
 	}
 }
 

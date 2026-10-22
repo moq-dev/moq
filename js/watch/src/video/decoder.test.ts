@@ -181,9 +181,9 @@ type Read = Container.Read;
 // A manual clock installed at `ms`, so parked sleeps only wake when a test advances it.
 function manualAt(ms: number) {
 	const clock = new Manual();
-	clock.advance(Nano.fromMilli(Milli(ms)));
+	clock.jump(Nano.fromMilli(Milli(ms)));
 	const restore = clock.install();
-	return { advance: (by: number) => clock.advanceAsync(Nano.fromMilli(Milli(by))), restore };
+	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), restore };
 }
 function sample(group: number, timestamp: number, keyframe = true): Read {
 	return {
@@ -202,6 +202,8 @@ const gap: Read = { kind: "gap", timestamp: Micro(0), duration: Micro(0) };
 // `reads` stands in for the container consumer, unless `live`, which reads what tests publish into
 // `producer` through real consumers instead.
 async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: readonly number[] = [], live = false) {
+	// Load the optional container before the fixture drains only reactive microtasks.
+	if (kind === "cmaf") await import("@moq/hang/cmaf");
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
 	const originalChunk = Object.getOwnPropertyDescriptor(globalThis, "EncodedVideoChunk");
 	const submitted: number[] = [];
