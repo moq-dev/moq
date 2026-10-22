@@ -82,7 +82,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
-- [A failed send never fails the io_uring socket](/quest/m1/uring-send-errors.md) - a send error costs one packet or destination, never every connection on the worker
 - [io_uring MTU matches tokio](/quest/m1/uring-mtu.md) - a 1200-byte floor and `quic.mtu_discovery` honored, so the ring stops black-holing smaller paths
 - [io_uring replies from the address it was reached on](/quest/m1/uring-local-addr.md) - packet info in and out, so multihomed wildcard binds work
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
