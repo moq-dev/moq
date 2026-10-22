@@ -988,7 +988,8 @@ impl TrackState {
 	/// is only what an ended feed left: a start taken then waits, as on an empty track.
 	fn latest_live(&self) -> Option<u64> {
 		let floor = self.live_floor.unwrap_or(0);
-		self.newest_produced.filter(|&newest| self.readable() && newest >= floor)
+		self.newest_produced
+			.filter(|&newest| self.readable() && newest >= floor)
 	}
 
 	/// Where a relative start that waited on [`Self::latest_live`] counts back from.
