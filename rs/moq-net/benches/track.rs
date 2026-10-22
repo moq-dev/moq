@@ -724,13 +724,13 @@ fn bench_subscriber_preferences(c: &mut Criterion) {
 	let held = |i: usize| {
 		let i = i as u64;
 		track::Subscription::default()
-			.with_priority((i % 255) as u8)
+			.with_priority(((i % 255) as i16 - 128) as i8)
 			.with_max_delay(Duration::from_micros(i))
 			.with_groups(100 + i..200 + i)
 			.with_order(track::Order::Ascending)
 	};
 	let extreme = track::Subscription::default()
-		.with_priority(255)
+		.with_priority(i8::MAX)
 		.with_max_delay(Duration::from_secs(10));
 	let mut group = c.benchmark_group("track_subscriber_preferences");
 	for steady in STEADY {

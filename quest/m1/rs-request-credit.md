@@ -27,22 +27,16 @@ session trait. Also note that
 `moq-tokio`'s `poll_open_bi` parks an abandoned open in the session's slot
 rather than dropping it, so the next request inherits it; the non-waiting open
 should avoid that. `quic::web` is in-tree and can ask `moq-quic` directly,
-but the backends `moq-tokio` wraps through `web-transport-trait` (qmux,
-iroh) have no credit query there. Decided 2026-10-20 (maintainer): no new
-work in moq-dev/web-transport, so qmux gets its query when it moves in-tree
-([qmux on moq-quic](/quest/m1/quic-qmux.md)), and iroh, an accepted
-exception, keeps waiting. Whichever of this quest and quic-qmux lands second
-gives the in-tree qmux session the non-waiting open, so this quest does not
-wait on the port. Say in the PR which backends fail fast.
+and the in-tree qmux (`rs/qmux`) drives `moq-quic`'s stream state too, so
+its session can ask the same way. iroh, wrapped through
+`web-transport-trait`, has no credit query and, as an accepted exception,
+keeps waiting. This quest gives the qmux session the non-waiting open. Say in the PR which backends fail fast.
 
 Propose the error variant's name in the PR. Public API: one new `Error`
 variant, and possibly a `transport::poll` session method. Wire: none.
 
 Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
-order, [receive memory](/quest/m1/quic/receive-memory.md) first, then this
-quest, then [Scope track priority](/quest/m1/track-priority-scope.md), so
+order, this quest on the receive-lease shape from
+[moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878), then the send
+domain in [broadcast fairness](/quest/m2/broadcast-fairness.md), so
 implementers rebase on one shape at a time.
-
-## Required
-
-- [Bound message assembly](/quest/m1/quic/receive-memory.md) - lands its `transport::poll` change first; this quest builds its non-waiting open on that shape
