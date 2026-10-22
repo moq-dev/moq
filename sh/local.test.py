@@ -93,6 +93,26 @@ signal.pause()
                 process.kill()
                 process.wait()
 
+    @unittest.skipUnless(sys.platform == "linux", "adopting orphans requires Linux")
+    def test_exit_reaches_descendants_orphaned_by_their_parent(self):
+        # The child exits first, so its grandchild reparents before the supervisor exits.
+        script = """import subprocess, sys
+subprocess.Popen([sys.executable, "-c", "import signal; signal.pause()"])
+print("ready", flush=True)
+sys.exit(5)
+"""
+        process = subprocess.Popen([BUN, "--no-orphans", str(SUPERVISOR), sys.executable, "-c", script],
+                                   env=self.env(QUEST_GATE_ADMITTED="1"),
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            output, error = process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 5, error)
+            self.assertEqual(output.strip(), "ready")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+
 
 if __name__ == "__main__":
     unittest.main()
