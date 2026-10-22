@@ -15,11 +15,13 @@ whatever the ablation showed actually pays (multishot accept and receive,
 provided buffers, registered fixed files), with the same borrow-the-pool
 receive backpressure the UDP path uses.
 
-Then `hyper::rt::{Read, Write, Executor}` implementations over those streams.
-hyper is runtime-agnostic by design, so this is the whole adapter: axum's
-routers, extractors, CORS, and its WebSocket upgrade keep working, and
-`qmux`'s `ws` feature stays intact. The `Executor` spawns onto the worker's
-local task set, so a connection never leaves the thread that accepted it.
+Then `hyper::rt::{Read, Write, Executor}` implementations over those streams,
+and `tokio::io::{AsyncRead, AsyncWrite}` for the qmux
+[driver](/quest/m2/perf/stream/driver.md). hyper is runtime-agnostic by
+design, so axum's routers, extractors, and CORS keep working. The relay's
+WebSocket upgrade reclaims the ring stream through `Upgraded::downcast` and
+hands it to a qmux `Driver` spawned on the worker's local task set, so a
+connection never leaves the thread that accepted it.
 
 hyper becomes a first direct dependency. Today it reaches the workspace only
 through `axum` and `axum-server`; add it to `[workspace.dependencies]` at the
@@ -32,4 +34,5 @@ existing suite does.
 
 ## Required
 
-- [Ring TCP ablation](/quest/m3/uring-tcp/ablation.md) - a positive verdict selects the mechanisms before the worker implementation starts
+- [Driver](/quest/m2/perf/stream/driver.md) - qmux spawns nothing and polls a socket it owns, so a session can run on the worker
+- [Ring TCP ablation](/quest/m2/perf/stream/ablation.md) - picks the mechanisms before the worker implementation starts

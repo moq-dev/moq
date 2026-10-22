@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON snapshot `delta_ratio` is `deltas`
+
+`SnapshotProducer(delta_ratio=...)` is replaced by `deltas: bool = True`.
+Pass `deltas=False` where you passed `delta_ratio=0`, and drop the argument otherwise.
+Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
+
 ### Priorities are signed (#6142)
 
 `TrackInfo.priority`, `Subscription.priority`, and `FetchGroupOptions.priority` take `-128..=127`, higher first, and 0 is the unset midpoint.

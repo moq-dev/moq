@@ -930,9 +930,9 @@ class FfiConverterMoqFlateConfig {
 }
 
 class MoqJsonSnapshotConfig {
-  final int deltaRatio;
+  final bool deltas;
   final bool compression;
-  MoqJsonSnapshotConfig({this.deltaRatio = 8, this.compression = false});
+  MoqJsonSnapshotConfig({this.deltas = true, this.compression = false});
 }
 
 class FfiConverterMoqJsonSnapshotConfig {
@@ -942,25 +942,25 @@ class FfiConverterMoqJsonSnapshotConfig {
 
   static LiftRetVal<MoqJsonSnapshotConfig> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final deltaRatio_lifted = FfiConverterUInt32.read(
+    final deltas_lifted = FfiConverterBool.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final deltaRatio = deltaRatio_lifted.value;
-    new_offset += deltaRatio_lifted.bytesRead;
+    final deltas = deltas_lifted.value;
+    new_offset += deltas_lifted.bytesRead;
     final compression_lifted = FfiConverterBool.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final compression = compression_lifted.value;
     new_offset += compression_lifted.bytesRead;
     return LiftRetVal(
-      MoqJsonSnapshotConfig(deltaRatio: deltaRatio, compression: compression),
+      MoqJsonSnapshotConfig(deltas: deltas, compression: compression),
       new_offset - buf.offsetInBytes,
     );
   }
 
   static RustBuffer lower(MoqJsonSnapshotConfig value) {
     final total_length =
-        FfiConverterUInt32.allocationSize(value.deltaRatio) +
+        FfiConverterBool.allocationSize(value.deltas) +
         FfiConverterBool.allocationSize(value.compression) +
         0;
     final buf = Uint8List(total_length);
@@ -970,8 +970,8 @@ class FfiConverterMoqJsonSnapshotConfig {
 
   static int write(MoqJsonSnapshotConfig value, Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    new_offset += FfiConverterUInt32.write(
-      value.deltaRatio,
+    new_offset += FfiConverterBool.write(
+      value.deltas,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterBool.write(
@@ -982,7 +982,7 @@ class FfiConverterMoqJsonSnapshotConfig {
   }
 
   static int allocationSize(MoqJsonSnapshotConfig value) {
-    return FfiConverterUInt32.allocationSize(value.deltaRatio) +
+    return FfiConverterBool.allocationSize(value.deltas) +
         FfiConverterBool.allocationSize(value.compression) +
         0;
   }

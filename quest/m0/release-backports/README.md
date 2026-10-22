@@ -47,7 +47,6 @@ findings; expanding this shortlist needs a separate scope decision.
 
 ## Required
 
-- [TLS dependencies](/quest/m0/release-backports/tls.md) - release takes the targeted WebPKI fixes already on main
 - [JS input parsing](/quest/m0/release-backports/parsing.md) - malformed certificates and paths cannot trigger disproportionate parsing work
 
 ## Related

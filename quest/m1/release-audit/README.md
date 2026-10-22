@@ -89,7 +89,7 @@ child records whether its behavior is new on main or inherited from release.
 - [Review HLS admission](/quest/m1/release-audit/hls-admission.md) - resolve the security-sensitive resource-boundary review before the cut
 - [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
 - [Bound export reorder storage](/quest/m1/release-audit/export-reorder.md) - flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
-- [Validate CMAF counts before allocation](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count
+- [Validate CMAF header fields](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count, and a zero timescale is refused
 - [Preserve fMP4 sample runs](/quest/m1/release-audit/fmp4-passthrough.md) - passthrough does not substitute gap or interleaved bytes for media samples
 - [Announce finite HLS imports](/quest/m1/release-audit/hls-startup.md) - a completed valid source cannot race its ready catalog and fail startup
 - [Cancel Dart stream reads](/quest/m1/release-audit/dart-cancellation.md) - listener cancellation releases pending native operations without an unrelated event
