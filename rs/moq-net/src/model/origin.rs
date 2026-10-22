@@ -6,7 +6,7 @@ use std::{
 	collections::{BTreeSet, HashMap, HashSet, VecDeque},
 	fmt,
 	sync::Arc,
-	sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+	sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 	task::{Context, Poll, Wake, Waker, ready},
 	time::Duration,
 };
@@ -2838,29 +2838,11 @@ struct Asked {
 	sub: Option<kio::Pending<track::Subscribing>>,
 }
 
-/// Queues just the logical track whose watched resource changed.
-struct TrackReady {
-	name: Arc<str>,
-	queue: kio::Queue<Arc<str>>,
-	queued: AtomicBool,
-}
-
-impl Wake for TrackReady {
-	fn wake(self: Arc<Self>) {
-		self.wake_by_ref();
-	}
-
-	fn wake_by_ref(self: &Arc<Self>) {
-		if !self.queued.swap(true, Ordering::AcqRel) {
-			let _ = self.queue.try_push(self.name.clone());
-		}
-	}
-}
-
 /// The driver's side of one logical track: the handles behind the names the
 /// machine uses.
 struct TrackIo {
-	ready: Arc<TrackReady>,
+	/// Queues just this track when a resource it watches changes.
+	ready: Arc<crate::util::QueueWake<Arc<str>>>,
 	park: kio::Park,
 	/// The logical track, until the first copy says what it is.
 	request: Option<track::Request>,
@@ -3534,7 +3516,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			}
 			while let Poll::Ready(Ok(name)) = ready.poll_pop(waiter) {
 				let Some(io) = tracks.get_mut(&name) else { continue };
-				io.ready.queued.store(false, Ordering::Release);
+				io.ready.popped();
 				let waker = Waker::from(io.ready.clone());
 				let waiter = io.park.hold(&Context::from_waker(&waker));
 				let step = (|| {
@@ -3615,11 +3597,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 		let event = match step {
 			Step::Assigned(request) => {
 				let name: Arc<str> = request.name().into();
-				let track_ready = Arc::new(TrackReady {
-					name: name.clone(),
-					queue: ready.clone(),
-					queued: AtomicBool::new(false),
-				});
+				let track_ready = crate::util::QueueWake::new(name.clone(), ready.clone());
 				track_ready.wake_by_ref();
 				tracks.insert(
 					name.clone(),
@@ -7014,6 +6992,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	use crate::model::test_tracing::count_drop_warnings;
 	use futures::FutureExt;
+	use std::sync::atomic::AtomicBool;
 
 	fn origin(id: u64) -> Hop {
 		Hop::new(id).unwrap()
@@ -7060,11 +7039,7 @@ mod tests {
 			let weak = request.weak();
 			let accepted = request.routes(routes.consume()).accept(None);
 			let mut io = TrackIo {
-				ready: Arc::new(TrackReady {
-					name: "catalog.json".into(),
-					queue: kio::Queue::new(),
-					queued: AtomicBool::new(false),
-				}),
+				ready: crate::util::QueueWake::new("catalog.json".into(), kio::Queue::new()),
 				park: Default::default(),
 				request: None,
 				accepted: Some(accepted),

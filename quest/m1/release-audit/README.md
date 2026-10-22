@@ -74,23 +74,26 @@ Targeted reproductions confirmed a finite HLS startup race, retained HLS
 server state after final drop, idle Dart stream cancellation, empty expiry
 indexes, JS IETF timestamp changes, JS datagram range violations, and OBS
 reordered-frame timestamps and missing EOF output. Each owning quest records
-the reproduction's limits. Existing range and OBS quests retain ownership
-of their findings. Go reservation disposal remains an investigation, and
+the reproduction's limits. The JS datagram range defect moved from the JS
+ranges quest into [JS subscription bounds](/quest/m1/release-audit/js-subscription-bounds.md)
+on 2026-10-22; the OBS quest retains ownership of its findings. Go reservation disposal remains an investigation, and
 the security-sensitive HLS admission item is deliberately a public pointer.
 No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
 network-impairment performance result is implied by these checks.
 
 ## Required
 
-The 19 children comprise 15 reproduced or source-confirmed findings, three
+The 21 children comprise 17 reproduced or source-confirmed findings, three
 contract/lifetime investigations, and one security-review pointer. Each
 child records whether its behavior is new on main or inherited from release.
 
 - [Review HLS admission](/quest/m1/release-audit/hls-admission.md) - resolve the security-sensitive resource-boundary review before the cut
 - [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
 - [Bound export reorder storage](/quest/m1/release-audit/export-reorder.md) - flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
-- [Validate CMAF counts before allocation](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count
+- [Validate CMAF header fields](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count, and a zero timescale is refused
 - [Preserve fMP4 sample runs](/quest/m1/release-audit/fmp4-passthrough.md) - passthrough does not substitute gap or interleaved bytes for media samples
+- [JS honors subscription bounds](/quest/m1/release-audit/js-subscription-bounds.md) - each reader and each datagram stays inside its own subscription's group bounds, not the aggregate's
+- [Refuse partial lite groups in JS](/quest/m1/release-audit/js-partial-group.md) - a nonzero `frameStart` closes the session as a protocol violation, not a renumbered complete group
 - [Announce finite HLS imports](/quest/m1/release-audit/hls-startup.md) - a completed valid source cannot race its ready catalog and fail startup
 - [Cancel Dart stream reads](/quest/m1/release-audit/dart-cancellation.md) - listener cancellation releases pending native operations without an unrelated event
 - [Parse QMux records without copying suffixes](/quest/m1/release-audit/qmux-copy.md) - many small frames do not cause quadratic copying
@@ -108,7 +111,7 @@ child records whether its behavior is new on main or inherited from release.
 
 ## Related
 
-- [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - reproduced datagram bounds failures remain with the existing range implementation owner
+- [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - range lists and frame offsets build on the bounds fixed here
 - [OBS video source](/quest/m2/obs-moq-video/source.md) - reproduced inherited timing and EOF defects remain with the decoder replacement owner
 - [QPACK dependency fix](/quest/m0/web-transport-proto-0.6.3.md) - decoded header expansion is already tracked
 - [Compressed tracks](/quest/m1/compress/README.md) - mid-group widening and application migration have existing owners
