@@ -55,12 +55,13 @@ impl Packetizer {
 		}
 	}
 
-	/// The datagrams slot `index`'s `payload` completes and this leg can vouch for. `unsure`
-	/// lists the slot's positions, its clock at 0, another leg may fill otherwise.
+	/// The datagrams slot `index`'s `payload` completes and this leg can vouch for, each with
+	/// the position in the slot of its run's last packet. `unsure` lists the slot's positions,
+	/// its clock at 0, another leg may fill otherwise.
 	///
 	/// A run is sent only whole: one the leg joined in the middle of, or that a jump in the
 	/// slots cut short, is never sent, and neither is any stuffed out to a datagram's length.
-	pub fn push(&mut self, index: u128, payload: &[u8], unsure: &[usize]) -> Vec<Bytes> {
+	pub fn push(&mut self, index: u128, payload: &[u8], unsure: &[usize]) -> Vec<(usize, Bytes)> {
 		if self.next != Some(index) {
 			self.run = None;
 		}
@@ -91,7 +92,7 @@ impl Packetizer {
 				&& let Some(run) = self.run.take()
 				&& run.sure
 			{
-				out.push(self.datagram(run));
+				out.push((position, self.datagram(run)));
 			}
 		}
 		out
@@ -169,11 +170,16 @@ mod test {
 		let mut rtp = Packetizer::new(layout.clone(), 0x1234_5678);
 		let mut sent = Vec::new();
 		for index in 0..3 {
-			sent.extend(rtp.push(index, &slot(&layout, index), &[]));
+			let first = layout.first(index);
+			sent.extend(
+				rtp.push(index, &slot(&layout, index), &[])
+					.into_iter()
+					.map(|(last, datagram)| (first + last as u128, datagram)),
+			);
 		}
 		// 102 packets: fourteen whole runs, and a fifteenth the next slot completes.
 		assert_eq!(sent.len(), 14);
-		for (n, datagram) in sent.iter().enumerate() {
+		for (n, (last, datagram)) in sent.iter().enumerate() {
 			assert_eq!(datagram.len(), HEADER + PACKETS * TsPacket::SIZE);
 			assert_eq!(&datagram[..2], [0x80, 33]);
 			assert_eq!(seq(datagram), n as u16);
@@ -183,6 +189,7 @@ mod test {
 				positions(datagram),
 				(first..first + PACKETS as u128).collect::<Vec<_>>()
 			);
+			assert_eq!(*last, first + PACKETS as u128 - 1);
 			let at = u32::from_be_bytes(datagram[4..8].try_into().unwrap());
 			assert_eq!(u128::from(at), layout.time(first) * 9 / 100_000);
 		}
@@ -194,7 +201,7 @@ mod test {
 		let mut rtp = Packetizer::new(layout.clone(), 1);
 		// Slot 1 opens at position 34, inside run 4.
 		let sent = rtp.push(1, &slot(&layout, 1), &[]);
-		assert_eq!(sent.iter().map(|d| seq(d)).collect::<Vec<_>>(), [5, 6, 7, 8]);
+		assert_eq!(sent.iter().map(|(_, d)| seq(d)).collect::<Vec<_>>(), [5, 6, 7, 8]);
 	}
 
 	#[test]
@@ -204,7 +211,7 @@ mod test {
 		rtp.push(0, &slot(&layout, 0), &[]);
 		// Run 4 holds positions 28 to 34; slot 1, which carries position 34, never comes.
 		let sent = rtp.push(2, &slot(&layout, 2), &[]);
-		assert_eq!(sent.iter().map(|d| seq(d)).collect::<Vec<_>>(), [10, 11, 12, 13]);
+		assert_eq!(sent.iter().map(|(_, d)| seq(d)).collect::<Vec<_>>(), [10, 11, 12, 13]);
 	}
 
 	#[test]
@@ -212,10 +219,10 @@ mod test {
 		let layout = layout();
 		let mut rtp = Packetizer::new(layout.clone(), 1);
 		let sent = rtp.push(0, &slot(&layout, 0), &[0, 15]);
-		assert_eq!(sent.iter().map(|d| seq(d)).collect::<Vec<_>>(), [1, 3]);
+		assert_eq!(sent.iter().map(|(_, d)| seq(d)).collect::<Vec<_>>(), [1, 3]);
 		// Position 34 opens slot 1, so its doubt reaches back into run 4.
 		let sent = rtp.push(1, &slot(&layout, 1), &[0]);
-		assert_eq!(sent.iter().map(|d| seq(d)).collect::<Vec<_>>(), [5, 6, 7, 8]);
+		assert_eq!(sent.iter().map(|(_, d)| seq(d)).collect::<Vec<_>>(), [5, 6, 7, 8]);
 	}
 
 	#[test]
@@ -225,7 +232,7 @@ mod test {
 		// A slot whose runs cross a sequence wrap, and one whose time crosses a timestamp wrap.
 		let seq_wrap = layout.slot_of(65_536 * PACKETS as u128);
 		let sent = rtp.push(seq_wrap, &slot(&layout, seq_wrap), &[]);
-		let seqs: Vec<u16> = sent.iter().map(|d| seq(d)).collect();
+		let seqs: Vec<u16> = sent.iter().map(|(_, d)| seq(d)).collect();
 		assert!(seqs.windows(2).all(|w| w[1] == w[0].wrapping_add(1)), "{seqs:?}");
 		assert!(seqs.contains(&0) && seqs.contains(&u16::MAX), "{seqs:?}");
 		// 2^32 ticks at 90 kHz, in slots of 25 ms, which the PCR reaches a slot later.
@@ -233,7 +240,10 @@ mod test {
 		let mut stamps = Vec::new();
 		for index in ts_wrap - 1..ts_wrap + 3 {
 			let sent = rtp.push(index, &slot(&layout, index), &[]);
-			stamps.extend(sent.iter().map(|d| u32::from_be_bytes(d[4..8].try_into().unwrap())));
+			stamps.extend(
+				sent.iter()
+					.map(|(_, d)| u32::from_be_bytes(d[4..8].try_into().unwrap())),
+			);
 		}
 		let steps: Vec<u32> = stamps.windows(2).map(|w| w[1].wrapping_sub(w[0])).collect();
 		// Seven packets at the rate take 5.15 ms.

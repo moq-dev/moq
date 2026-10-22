@@ -281,8 +281,12 @@ fn log_release(release: &moq_mux::container::ts::stats::Release, message: &'stat
 
 /// The host and port of an `--rtp` destination, which must be `udp://HOST:PORT`.
 pub fn rtp_destination(url: &url::Url) -> anyhow::Result<(String, u16)> {
-	anyhow::ensure!(url.scheme() == "udp", "--rtp takes udp://HOST:PORT: {url}");
 	// Unechoed: credentials would land in the log.
+	anyhow::ensure!(
+		url.scheme() == "udp",
+		"--rtp takes udp://HOST:PORT, not {}://",
+		url.scheme()
+	);
 	anyhow::ensure!(
 		url.username().is_empty()
 			&& url.password().is_none()

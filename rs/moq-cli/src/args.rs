@@ -1403,8 +1403,8 @@ mod tests {
 	}
 
 	/// `export ts --rtp` sends what `--sync` renders, so it needs it and refuses what it
-	/// refuses, takes only `udp://HOST:PORT`, refused before anything dials, and leaves stdout
-	/// to another stage.
+	/// refuses, takes only `udp://HOST:PORT`, refused before anything dials and echoing no
+	/// credential, and leaves stdout to another stage.
 	#[test]
 	fn export_ts_rtp_needs_sync_and_leaves_stdout() {
 		let parse = |args: &[&str]| {
@@ -1441,10 +1441,13 @@ mod tests {
 			"udp://user@127.0.0.1:5004",
 			"udp://127.0.0.1:5004?ttl=4",
 			"udp://127.0.0.1:5004#5005",
+			"http://user:secret@127.0.0.1:5004",
+			"tcp://127.0.0.1:5004?jwt=secret",
 		] {
 			let argv = ["moq", "export", "--broadcast", "b", "ts", "--sync", "--rtp", url];
 			let err = Invocation::try_parse_from(argv).unwrap().validate().unwrap_err();
 			assert!(err.to_string().contains("udp://HOST:PORT"), "{url}: {err}");
+			assert!(!format!("{err:#}").contains("secret"), "{url} echoed: {err:#}");
 		}
 	}
 

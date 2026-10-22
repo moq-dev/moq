@@ -1645,6 +1645,78 @@ async fn a_group_held_in_part_leaves_its_lane_unsure() {
 	assert!(a.len() < c.len(), "the partial leg withheld nothing");
 }
 
+/// A lane whose source ends while the broadcast goes on carries nothing more on any leg, so a
+/// leg goes on sending the runs that cross it.
+#[tokio::test(start_paused = true)]
+async fn a_lane_whose_source_ended_is_sent_on() {
+	let epoch = moq_net::Epoch::mint();
+	let mut live = Live::new(1.0, 0).await;
+	// Room for the keyframe beside teletext's lane.
+	live.rate = 2 * MUX_RATE;
+	live.teletext(0..0);
+	live.rtp(&epoch).await;
+	let mut leg = live.join(Duration::ZERO).await;
+	live.run(6 * GOP, &mut [&mut leg], |_| false).await;
+	let (teletext, _) = live.teletext.take().unwrap();
+	teletext.finish().unwrap();
+	live.run(12 * GOP, &mut [&mut leg], |_| false).await;
+	let seqs: Vec<u16> = datagrams(&leg, 8 * GOP * VIDEO_US)
+		.into_keys()
+		.map(|(_, seq)| seq)
+		.collect();
+	assert!(seqs.len() > 300, "{} datagrams", seqs.len());
+	let withheld = seqs.windows(2).filter(|w| w[1] != w[0].wrapping_add(1)).count();
+	assert_eq!(withheld, 0, "the leg withheld runs past the lane's end");
+}
+
+/// A leg that withholds some of a slot's runs sends the rest when a leg sending them all does,
+/// each at its place in the slot, so a receiver merging the legs finds both copies of a run
+/// together.
+#[tokio::test(start_paused = true)]
+async fn a_withholding_leg_sends_each_run_when_a_whole_leg_does() {
+	let epoch = moq_net::Epoch::mint();
+	let lost = |tick: u64| (5 * GOP + 8..6 * GOP).contains(&tick);
+	let mut paths = Vec::new();
+	for _ in 0..2 {
+		let mut live = Live::new(1.0, 0).await;
+		live.rtp(&epoch).await;
+		paths.push(live);
+	}
+	let [mut whole, mut lossy] = <[Live; 2]>::try_from(paths).ok().unwrap();
+	assert!(whole.start == lossy.start);
+	let mut c = whole.join(Duration::ZERO).await;
+	let mut a = lossy.join(Duration::ZERO).await;
+	for tick in 1..=8 * GOP {
+		// Both legs read at each instant either would, so each sends as it falls due.
+		whole.run(tick, &mut [&mut c, &mut a], |_| false).await;
+		lossy.run(tick, &mut [&mut a], lost).await;
+	}
+	let sent = |leg: &Leg| -> std::collections::BTreeMap<(u64, u16), Instant> {
+		leg.out
+			.iter()
+			.map(|(at, frame)| {
+				let seq = u16::from_be_bytes([frame.payload[2], frame.payload[3]]);
+				((frame.timestamp.as_micros() as u64, seq), *at)
+			})
+			.collect()
+	};
+	let (a, c) = (sent(&a), sent(&c));
+	assert!(a.len() < c.len(), "the lossy leg withheld nothing");
+	let apart: Vec<_> = a
+		.iter()
+		.filter_map(|(key, at)| {
+			let other = c.get(key)?;
+			(at != other).then(|| (*key, at.max(other).duration_since(*at.min(other))))
+		})
+		.collect();
+	assert!(
+		apart.is_empty(),
+		"{} runs went out apart: {:?}",
+		apart.len(),
+		&apart[..apart.len().min(5)]
+	);
+}
+
 /// An epochless route names no publisher instance for the SSRC to follow, so RTP refuses it.
 #[tokio::test(start_paused = true)]
 #[should_panic(expected = "needs a route with an epoch")]

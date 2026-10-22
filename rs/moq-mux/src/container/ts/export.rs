@@ -2640,19 +2640,21 @@ where
 	/// last jumped or a group was held only in part, up to the last position planned: past it,
 	/// this leg may be stalled. So is a placed one a receiver buffer models (DVB AC-3,
 	/// teletext), continuous as the jitter buffer counts it. A sparse lane cannot tell a stall
-	/// from its silence, so it is known on from that group.
+	/// from its silence, so it is known on from that group, and so is a lane whose source
+	/// ended rather than went stale: nothing more comes for it on any leg.
 	fn know(&mut self) {
 		let Some(grid) = self.schedule.sync() else {
 			return;
 		};
-		for track in self.tracks.values_mut() {
+		for (name, track) in self.tracks.iter_mut() {
 			let Some(sync) = &mut track.sync else {
 				continue;
 			};
 			grid.expect(&sync.expected);
 			sync.expected.clear();
 			let from = sync.sure.unwrap_or(u128::MAX);
-			let to = (!track.kind.placed() || track.buffer.is_some()).then(|| sync.lane.end());
+			let ended = track.finished && !self.stale.contains(name);
+			let to = (!ended && (!track.kind.placed() || track.buffer.is_some())).then(|| sync.lane.end());
 			grid.know(sync.lane.index(), lane::Known { from, to });
 		}
 	}
@@ -3165,10 +3167,9 @@ where
 				if discontinuity {
 					unsure.push(0);
 				}
-				let datagrams = rtp.push(slot.index, &payload, &unsure);
-				let count = datagrams.len() as u32;
+				let positions = (payload.len() / TsPacket::SIZE) as u32;
 				let mut tally = Some(tally);
-				for (n, datagram) in (0..).zip(datagrams) {
+				for (last, datagram) in rtp.push(slot.index, &payload, &unsure) {
 					let frame = Frame {
 						timestamp,
 						duration: None,
@@ -3176,7 +3177,9 @@ where
 						keyframe: false,
 					};
 					let tally = tally.take().unwrap_or(Tally::new((slot.pcr, false), []));
-					let due = pace.map(|(at, span)| at + span * n / count);
+					// At its last packet's place in the slot, whichever runs beside it this leg
+					// withholds.
+					let due = pace.map(|(at, span)| at + span * last as u32 / positions);
 					self.queue.push_back((frame, tally, due));
 				}
 				// A slot no datagram carries tells the stats behind the last one queued, or at once.
