@@ -26,6 +26,10 @@ behind a new optional audio `mediacodec` feature and the decode seam, on `target
 - The binding ships in the moq-ffi Android slice, which is how Kotlin and Dart
   reach it.
 
+## Required
+
+- [MediaCodec on an emulator](/quest/m2/android-mediacodec-ci.md) - the emulator lane this runtime proof runs in
+
 ## Related
 
 - [Android capture](/quest/m2/mobile-capture-android.md) - the video MediaCodec family this sits beside
