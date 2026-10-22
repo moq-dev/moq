@@ -137,12 +137,11 @@ drops below 10%, rather than letting a job that fills memory thrash the disk.
 For MoQ, set `MOQ_QUEUE_RUNNER` to the runner label after a representative CI run
 passes; release pull requests use hosted runners and main pull requests skip cloud CI.
 
-On Ubuntu hosts with AppArmor user namespace restrictions,
-`just gh runner-vm-setup` loads a profile allowing the exact pinned Nix-store
-`unshare` used by systemd-repart to create a rootless image. Rerun the recipe
-when the nixpkgs pin changes. The host-wide restriction stays
-enabled. This requires administrator approval and lasts until reboot; the
-hosted test workflow loads it only on its disposable runner.
+The hosted workflow uses `just gh runner-vm-ci` to load a temporary AppArmor
+profile for the exact pinned `unshare` while building the image. The recipe
+refuses local and self-hosted runners, and unloads the profile on exit,
+including build failure. `just gh runner-vm` does not change host policy;
+its build host must already support rootless user namespaces.
 
 `just gh runner-vm` builds a guest image and runs NixOS integration tests for
 startup without carrier, public egress for multiple guests, private-network and

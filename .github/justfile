@@ -1,8 +1,17 @@
 set working-directory := '..'
 
-# Allow the image builder to create a user namespace on Ubuntu hosts.
-runner-vm-setup:
-    sudo apparmor_parser --replace "$(nix build --no-link --print-out-paths .#runner-userns-profile)"
+# Build the runner image with a temporary policy on a disposable hosted runner.
+runner-vm-ci:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_ENVIRONMENT:-}" != github-hosted ]]; then
+        echo "runner-vm-ci requires a disposable GitHub-hosted runner" >&2
+        exit 1
+    fi
+    profile="$(nix build --no-link --print-out-paths .#runner-userns-profile)"
+    sudo apparmor_parser --add "$profile"
+    trap 'sudo apparmor_parser --remove "$profile"' EXIT
+    just gh runner-vm
 
 # Build and test the persistent NixOS runner VM on x86_64 Linux.
 runner-vm:
