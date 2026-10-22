@@ -53,4 +53,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [io_uring MTU parity](/quest/m1/uring-mtu.md) - same socket; PMTU probing lands there
-- [io_uring local address](/quest/m1/uring-local-addr.md) - same socket's control messages

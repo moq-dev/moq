@@ -17,7 +17,11 @@
 //! message explicitly; the socket default is never relied on. The ECN mark
 //! rides beside it as `IP_TOS` or `IPV6_TCLASS`, and receives read the mark
 //! back through `IP_RECVTOS` and `IPV6_RECVTCLASS`, so a QUIC stack's ECN
-//! validation sees what the network did to its packets.
+//! validation sees what the network did to its packets. Packet info rides
+//! the same way: each receive reads the local address it arrived on
+//! (`IP_PKTINFO` or `IPV6_RECVPKTINFO`), and a send can name its source with
+//! `IP_PKTINFO` or `IPV6_PKTINFO`, so a wildcard bind on a multihomed host
+//! answers from the address the peer reached.
 //!
 //! Both pools are queues of concurrent operations, not byte budgets: one send
 //! buffer holds one GSO train and one receive buffer holds one completion,
@@ -48,9 +52,26 @@ use crate::metrics::Counters;
 use crate::shared::{Cqe, Op, Shared};
 use crate::worker::Owner;
 
-/// Space reserved for received control messages: `UDP_GRO` plus the packet's
-/// `IP_TOS` or `IPV6_TCLASS` (the kernel emits one or the other), two ints.
-const CONTROL_LEN: usize = 64;
+/// `CMSG_SPACE` of a `len`-byte payload.
+const fn cmsg_space(len: usize) -> usize {
+	// SAFETY: a pure size computation.
+	unsafe { libc::CMSG_SPACE(len as _) as usize }
+}
+
+/// Space for the control messages of one receive or send: the segment size
+/// (`UDP_GRO`, or a send's u16 `UDP_SEGMENT`), then the family's packet info
+/// and ECN mark. A v4-mapped datagram on a v6 socket carries `IPV6_PKTINFO`
+/// with `IP_TOS`, which the IPv6 set already covers.
+const CONTROL_LEN: usize = {
+	let int = std::mem::size_of::<libc::c_int>();
+	let v4 = cmsg_space(std::mem::size_of::<libc::in_pktinfo>()) + cmsg_space(int);
+	let v6 = cmsg_space(std::mem::size_of::<libc::in6_pktinfo>()) + cmsg_space(int);
+	cmsg_space(int) + if v4 > v6 { v4 } else { v6 }
+};
+// Linux on 64-bit: the IPv6 set needs 88 bytes and the IPv4 one 80, and an
+// undersized buffer would truncate every receive into a drop.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(CONTROL_LEN == 88);
 /// Space reserved for the source address of each received datagram.
 const NAME_LEN: usize = std::mem::size_of::<libc::sockaddr_storage>();
 /// Fixed per-completion overhead of the multishot recvmsg layout.
@@ -144,6 +165,7 @@ struct Queued {
 	start: usize,
 	len: usize,
 	from: SocketAddr,
+	dst_ip: Option<IpAddr>,
 	stride: usize,
 	ecn: Option<Ecn>,
 }
@@ -174,6 +196,7 @@ impl Ecn {
 
 /// What one [`TxBuf::send`] puts on the wire.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Transmit {
 	/// The destination.
 	pub to: SocketAddr,
@@ -182,6 +205,21 @@ pub struct Transmit {
 	pub segment: usize,
 	/// The ECN codepoint every datagram carries, if any.
 	pub ecn: Option<Ecn>,
+	/// The local address every datagram leaves from, or the kernel's choice.
+	/// Pass a [`Packet::dst_ip`] to answer from the address a peer reached.
+	pub src_ip: Option<IpAddr>,
+}
+
+impl Transmit {
+	/// Datagrams of `segment` bytes to `to`, unmarked, from the kernel's choice of source.
+	pub fn new(to: SocketAddr, segment: usize) -> Self {
+		Self {
+			to,
+			segment,
+			ecn: None,
+			src_ip: None,
+		}
+	}
 }
 
 /// Free `bid` back to its pool if nothing borrows it any more. Returns whether
@@ -570,8 +608,13 @@ impl Socket {
 		}
 		// Receive the ECN codepoint with each datagram. A v6 socket takes
 		// both: Linux reports a v4-mapped datagram's mark as `IP_TOS`.
+		// The local address a datagram arrived on comes as `IPV6_PKTINFO` on a
+		// v6 socket, v4-mapped for an IPv4 datagram, and `IP_PKTINFO` on a v4 one.
 		if io.local_addr()?.is_ipv6() {
 			set_option(&io, libc::IPPROTO_IPV6, libc::IPV6_RECVTCLASS)?;
+			set_option(&io, libc::IPPROTO_IPV6, libc::IPV6_RECVPKTINFO)?;
+		} else {
+			set_option(&io, libc::IPPROTO_IP, libc::IP_PKTINFO)?;
 		}
 		set_option(&io, libc::IPPROTO_IP, libc::IP_RECVTOS)?;
 
@@ -696,6 +739,7 @@ impl Socket {
 				len: queued.len,
 				stride: queued.stride,
 				from: queued.from,
+				dst_ip: queued.dst_ip,
 				ecn: queued.ecn,
 			}));
 		}
@@ -809,6 +853,7 @@ pub struct Packet {
 	len: usize,
 	stride: usize,
 	from: SocketAddr,
+	dst_ip: Option<IpAddr>,
 	ecn: Option<Ecn>,
 }
 
@@ -816,6 +861,11 @@ impl Packet {
 	/// The datagrams' source address.
 	pub fn from(&self) -> SocketAddr {
 		self.from
+	}
+
+	/// The local address the datagrams arrived on, v4-mapped on a v6 socket.
+	pub fn dst_ip(&self) -> Option<IpAddr> {
+		self.dst_ip
 	}
 
 	/// The ECN codepoint the datagrams arrived with; GRO only coalesces
@@ -847,6 +897,7 @@ impl std::fmt::Debug for Packet {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("Packet")
 			.field("from", &self.from)
+			.field("dst_ip", &self.dst_ip)
 			.field("len", &self.len)
 			.field("stride", &self.stride)
 			.field("ecn", &self.ecn)
@@ -877,7 +928,12 @@ impl TxBuf {
 	/// to submit staged datagrams and drain their completions, but does not
 	/// guarantee kernel completion or delivery.
 	pub fn send(mut self, transmit: Transmit) -> io::Result<()> {
-		let Transmit { to, segment, ecn } = transmit;
+		let Transmit {
+			to,
+			segment,
+			ecn,
+			src_ip,
+		} = transmit;
 		let len = self.data.len();
 		let cap = self.sock.config.tx_buffer_len;
 		// `UDP_SEGMENT` is a u16, so an oversized segment would silently
@@ -939,6 +995,7 @@ impl TxBuf {
 		let one = SendOne {
 			to,
 			ecn,
+			src_ip,
 			segment: sock.gso.get().then_some(segment as u16),
 		};
 		if sock.gso.get() {
@@ -1034,6 +1091,7 @@ impl Drop for SendOp {
 struct SendOne {
 	to: SocketAddr,
 	ecn: Option<Ecn>,
+	src_ip: Option<IpAddr>,
 	/// The `UDP_SEGMENT` size, when the call is one GSO train.
 	segment: Option<u16>,
 }
@@ -1046,7 +1104,12 @@ fn send_one(
 	len: usize,
 	one: &SendOne,
 ) -> io::Result<()> {
-	let SendOne { to, ecn, segment } = *one;
+	let SendOne {
+		to,
+		ecn,
+		src_ip,
+		segment,
+	} = *one;
 	// SAFETY: `index` is within the headers `TxBuf::send` reserved, and every
 	// operation gets its own.
 	let hdr = unsafe { &mut *staging.headers.as_ptr().add(index) };
@@ -1061,17 +1124,23 @@ fn send_one(
 	hdr.hdr.msg_iov = &raw mut hdr.iov;
 	hdr.hdr.msg_iovlen = 1;
 
-	// SAFETY: the control buffer is zeroed, aligned, and holds both messages
-	// (`CMSG_SPACE` of a u16 and of an int fit twice over in `CONTROL_LEN`);
+	// SAFETY: the control buffer is zeroed, aligned, and `CONTROL_LEN` holds
+	// every message at once (a u16 fits where `CONTROL_LEN` budgets an int);
 	// `msg_controllen` is set to the total first so `CMSG_NXTHDR` walks it.
 	unsafe {
 		let mut space = 0;
 		if segment.is_some() {
-			space += libc::CMSG_SPACE(std::mem::size_of::<u16>() as _) as usize;
+			space += cmsg_space(std::mem::size_of::<u16>());
 		}
 		if ecn.is_some() {
-			space += libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) as usize;
+			space += cmsg_space(std::mem::size_of::<libc::c_int>());
 		}
+		space += match src_ip {
+			Some(IpAddr::V4(_)) => cmsg_space(std::mem::size_of::<libc::in_pktinfo>()),
+			Some(IpAddr::V6(_)) => cmsg_space(std::mem::size_of::<libc::in6_pktinfo>()),
+			None => 0,
+		};
+		debug_assert!(space <= CONTROL_LEN);
 		if space > 0 {
 			hdr.hdr.msg_control = hdr.control.0.as_mut_ptr().cast();
 			hdr.hdr.msg_controllen = space;
@@ -1099,6 +1168,36 @@ fn send_one(
 			(*cmsg).cmsg_type = kind;
 			(*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) as usize;
 			std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<libc::c_int>(), ecn as libc::c_int);
+			cmsg = libc::CMSG_NXTHDR(&hdr.hdr, cmsg);
+		}
+		// The variant follows the socket's family: a v6 socket answers a
+		// v4-mapped peer from a v4-mapped source, which Linux accepts as
+		// `IPV6_PKTINFO` and sends as IPv4.
+		match src_ip {
+			Some(IpAddr::V4(ip)) => {
+				let info = libc::in_pktinfo {
+					ipi_ifindex: 0,
+					ipi_spec_dst: libc::in_addr {
+						s_addr: u32::from_ne_bytes(ip.octets()),
+					},
+					ipi_addr: libc::in_addr { s_addr: 0 },
+				};
+				(*cmsg).cmsg_level = libc::IPPROTO_IP;
+				(*cmsg).cmsg_type = libc::IP_PKTINFO;
+				(*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(&info) as _) as usize;
+				std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast(), info);
+			}
+			Some(IpAddr::V6(ip)) => {
+				let info = libc::in6_pktinfo {
+					ipi6_addr: libc::in6_addr { s6_addr: ip.octets() },
+					ipi6_ifindex: 0,
+				};
+				(*cmsg).cmsg_level = libc::IPPROTO_IPV6;
+				(*cmsg).cmsg_type = libc::IPV6_PKTINFO;
+				(*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(&info) as _) as usize;
+				std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast(), info);
+			}
+			None => {}
 		}
 	}
 	let hdr_ptr = &raw const hdr.hdr;
@@ -1326,6 +1425,7 @@ fn on_recv_multi(sock: &Rc<SockShared>, cqe: Cqe) -> Result<(u16, Option<Queued>
 			start: payload_start,
 			len: payload.len(),
 			from,
+			dst_ip: meta.dst_ip,
 			stride: meta.stride.unwrap_or(payload.len()),
 			ecn: meta.ecn,
 		}),
@@ -1365,6 +1465,7 @@ fn on_recv_oneshot(one: OneshotRecv, cqe: Cqe) -> Result<(u16, Option<Queued>), 
 			start: 0,
 			len,
 			from,
+			dst_ip: meta.dst_ip,
 			stride: meta.stride.unwrap_or(len),
 			ecn: meta.ecn,
 		}),
@@ -1456,6 +1557,8 @@ struct RecvMeta {
 	stride: Option<usize>,
 	/// The ECN codepoint from `IP_TOS` or `IPV6_TCLASS`, if marked.
 	ecn: Option<Ecn>,
+	/// The local address from `IP_PKTINFO` or `IPV6_PKTINFO`.
+	dst_ip: Option<IpAddr>,
 }
 
 impl RecvMeta {
@@ -1487,6 +1590,15 @@ impl RecvMeta {
 				(libc::IPPROTO_IPV6, libc::IPV6_TCLASS) => {
 					meta.ecn = read_int(data).and_then(|value| Ecn::from_bits(value as u8));
 				}
+				// `ipi_addr` is the header's destination; `ipi_spec_dst` is the
+				// route's preferred source, which may differ.
+				(libc::IPPROTO_IP, libc::IP_PKTINFO) => {
+					meta.dst_ip =
+						read::<libc::in_pktinfo>(data).map(|info| IpAddr::from(info.ipi_addr.s_addr.to_ne_bytes()));
+				}
+				(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO) => {
+					meta.dst_ip = read::<libc::in6_pktinfo>(data).map(|info| IpAddr::from(info.ipi6_addr.s6_addr));
+				}
 				_ => {}
 			}
 			// SAFETY: CMSG_SPACE is a pure size computation.
@@ -1500,8 +1612,16 @@ impl RecvMeta {
 
 /// A control message's payload as the int the kernel wrote, if it is one.
 fn read_int(data: &[u8]) -> Option<libc::c_int> {
-	let bytes = data.get(..std::mem::size_of::<libc::c_int>())?;
-	Some(libc::c_int::from_ne_bytes(bytes.try_into().ok()?))
+	read(data)
+}
+
+/// A control message's payload as the plain C struct `T`, if it holds one.
+fn read<T: Copy>(data: &[u8]) -> Option<T> {
+	if data.len() < std::mem::size_of::<T>() {
+		return None;
+	}
+	// SAFETY: length-checked unaligned read of a plain C type the kernel wrote.
+	Some(unsafe { data.as_ptr().cast::<T>().read_unaligned() })
 }
 
 /// Turn a boolean socket option on.
@@ -1615,6 +1735,80 @@ mod tests {
 		control
 	}
 
+	/// One control message of `level`/`kind` carrying `value`.
+	fn cmsg<T>(level: libc::c_int, kind: libc::c_int, value: T) -> Vec<u8> {
+		let mut control = vec![0u8; cmsg_space(std::mem::size_of::<T>())];
+		let header = libc::cmsghdr {
+			cmsg_len: unsafe { libc::CMSG_LEN(std::mem::size_of::<T>() as _) } as _,
+			cmsg_level: level,
+			cmsg_type: kind,
+		};
+		let header_len = unsafe { libc::CMSG_LEN(0) } as usize;
+		// SAFETY: `control` holds a header plus a `T`.
+		unsafe {
+			control.as_mut_ptr().cast::<libc::cmsghdr>().write_unaligned(header);
+			control.as_mut_ptr().add(header_len).cast::<T>().write_unaligned(value);
+		}
+		control
+	}
+
+	/// The most a receive carries for each family, including a v4-mapped
+	/// datagram on a v6 socket, fits the buffer and parses whole.
+	#[test]
+	fn the_full_receive_control_set_fits_and_parses() {
+		let v4 = Ipv4Addr::new(127, 0, 0, 2);
+		let v6 = Ipv6Addr::new(0xfd6d, 0x6f71, 0, 0, 0, 0, 0, 2);
+		let in_pktinfo = libc::in_pktinfo {
+			ipi_ifindex: 1,
+			// The route's preferred source, which must not be read as the destination.
+			ipi_spec_dst: libc::in_addr {
+				s_addr: u32::from_ne_bytes([127, 0, 0, 1]),
+			},
+			ipi_addr: libc::in_addr {
+				s_addr: u32::from_ne_bytes(v4.octets()),
+			},
+		};
+		let in6_pktinfo = |ip: Ipv6Addr| libc::in6_pktinfo {
+			ipi6_addr: libc::in6_addr { s6_addr: ip.octets() },
+			ipi6_ifindex: 1,
+		};
+		let ect0 = Ecn::Ect0 as u8;
+		let cases: [(Vec<Vec<u8>>, IpAddr); 3] = [
+			(
+				vec![
+					gro(1200),
+					cmsg(libc::IPPROTO_IP, libc::IP_PKTINFO, in_pktinfo),
+					cmsg(libc::IPPROTO_IP, libc::IP_TOS, ect0),
+				],
+				v4.into(),
+			),
+			(
+				vec![
+					gro(1200),
+					cmsg(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO, in6_pktinfo(v6)),
+					cmsg(libc::IPPROTO_IPV6, libc::IPV6_TCLASS, libc::c_int::from(ect0)),
+				],
+				v6.into(),
+			),
+			(
+				vec![
+					gro(1200),
+					cmsg(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO, in6_pktinfo(v4.to_ipv6_mapped())),
+					cmsg(libc::IPPROTO_IP, libc::IP_TOS, ect0),
+				],
+				v4.to_ipv6_mapped().into(),
+			),
+		];
+		for (messages, dst_ip) in cases {
+			let control = messages.concat();
+			assert!(control.len() <= CONTROL_LEN, "{} > {CONTROL_LEN}", control.len());
+			let meta = RecvMeta::parse(&control);
+			assert_eq!(meta.stride, Some(1200));
+			assert_eq!(meta.ecn, Some(Ecn::Ect0));
+			assert_eq!(meta.dst_ip, Some(dst_ip));
+		}
+	}
+
 	#[test]
 	fn a_zero_gro_size_is_no_stride() {
 		assert_eq!(RecvMeta::parse(&gro(1200)).stride, Some(1200));
@@ -1723,11 +1917,10 @@ mod tests {
 			.block_on(async {
 				let mut tx = sock.acquire().await.expect("send buffer");
 				tx.extend_from_slice(b"lost");
-				tx.send(Transmit {
-					to: SocketAddr::new(Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), 1),
-					segment: 4,
-					ecn: None,
-				})
+				tx.send(Transmit::new(
+					SocketAddr::new(Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), 1),
+					4,
+				))
 				.expect("staged");
 				// The failure lands with the send's completion, a worker turn later.
 				for _ in 0..1000 {
