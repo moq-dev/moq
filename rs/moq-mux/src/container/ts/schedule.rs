@@ -1064,13 +1064,9 @@ impl Schedule {
 				continue;
 			}
 			let pid = self.units[j].pid;
-			for k in 0..j {
-				if self.units[k]
-					.tables
-					.as_ref()
-					.is_some_and(|program| program.holds.contains(&pid))
-				{
-					forced[k] = true;
+			for (unit, forced) in self.units.iter().zip(forced.iter_mut()).take(j) {
+				if unit.tables.as_ref().is_some_and(|program| program.holds.contains(&pid)) {
+					*forced = true;
 				}
 			}
 		}

@@ -2205,6 +2205,15 @@ where
 		self.liveness.stream(pid)
 	}
 
+	/// The track the PMT lists on `pid`.
+	#[cfg(test)]
+	pub(super) fn listed_on(&self, pid: u16) -> Option<&str> {
+		self.tracks
+			.iter()
+			.find(|(_, track)| track.listed && track.pid == pid)
+			.map(|(name, _)| name.as_str())
+	}
+
 	/// Take the next frame due out of the jitter buffer and hold it, as a generation boundary
 	/// holds the new generation's first frame behind the old one's tail. Returns its PID.
 	#[cfg(test)]
@@ -2290,17 +2299,19 @@ where
 				next = next.with_mux_rate(rate);
 			}
 			// A switch away from a program that went out, or one still pending because this
-			// program never built its tables, carries to the next: its tables must read as new,
-			// every PID flags the break, and a pacing caller re-anchors on the new clock. Only a
-			// program that went out advances them again.
-			let emitted = self.psi.is_some();
+			// program sent no tables, carries to the next: its tables must read as new, every PID
+			// flags the break, and a pacing caller re-anchors on the new clock. Only a program
+			// that went out advances them again.
+			let out = self
+				.psi
+				.as_ref()
+				.and_then(|psi| psi.out.as_ref())
+				.map(|(version, _)| *version);
+			let emitted = out.is_some();
 			if (!same && emitted) || self.flagged.is_some() {
-				// The last PMT version handed out, which a revision may have advanced.
-				next.version = self
-					.psi
-					.as_ref()
-					.and_then(|psi| psi.pushed.as_ref())
-					.map_or(self.version, |(version, _)| *version);
+				// The last PMT version out, which a revision may have advanced. Versions still
+				// queued never reach a receiver.
+				next.version = out.unwrap_or(self.version);
 				next.flagged = Some(HashSet::new());
 				next.pcr_discontinuity = true;
 				next.epoch = self.epoch;
@@ -2671,6 +2682,8 @@ where
 				track.release(holder, &mut self.jitter, true)?;
 				track.finished = true;
 			}
+			// A same-instance return that put another track on its PID replaced it.
+			self.stale.remove(holder.as_str());
 			return Ok(false);
 		}
 		self.tracks.get_mut(name).expect("checked above").listed = true;
@@ -3347,7 +3360,11 @@ where
 				keyframe: slot.keyframe,
 			};
 			let psi = self.psi.as_mut().expect("checked above");
-			let tables = (0..slot.tables).filter_map(|_| psi.queued.pop_front()).last();
+			// Under sync the grid lays the one version the tables were built at.
+			let tables = match self.sync {
+				true => psi.out.is_none().then(|| (self.version, psi.pmt.clone())),
+				false => (0..slot.tables).filter_map(|_| psi.queued.pop_front()).last(),
+			};
 			let tally = Tally {
 				pcr: (slot.pcr, discontinuity),
 				units: slot.units,
