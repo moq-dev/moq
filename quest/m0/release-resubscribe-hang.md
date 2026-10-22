@@ -16,10 +16,11 @@ subscription never reaches the relay. The same bench passes on main.
 
 1. Reproduce it on `origin/release` as a session test (one subscriber; open,
    close, and reopen the same track through a relay). Mock time, not sleeps.
-2. If it hangs, find the cause, and check whether main fixed it on purpose.
-   Bisect main for the fix and backport it to `release` with the test.
-   Otherwise, fix it on `release` directly. Either way, keep the test on main
-   too.
+2. If it hangs, find the cause. Land the test on main first, per the
+   main-first backport rule in `CONTRIBUTING.md`, then port it to `release`
+   in a separate PR. If main fixed the bug, bisect for that fix and port it
+   with the test. If main never had it (the code diverged), the `release` PR
+   carries the minimal fix for code that no longer exists on main.
 3. If the test passes on `release`, the bench harness's backport is at fault
    (release's `tests/support` mock differs from main's). Record that in the PR
    and delete this quest.
