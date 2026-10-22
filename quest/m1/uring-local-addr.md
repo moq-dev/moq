@@ -29,8 +29,11 @@ would overflow. Size `CONTROL_LEN` (and so `RECV_OVERHEAD`) from the
 the full combination for both families.
 
 Cover IPv4 and IPv6 wildcard binds and a dual-stack socket with an
-IPv4-mapped peer, on a host with two addresses (a dummy interface in the
-test namespace).
+IPv4-mapped peer, each reached on a second local address. IPv4 needs no
+privilege: all of 127/8 is local, so 127.0.0.2 works. IPv6 has only `::1`,
+so the `uring.yml` and nightly `rs uring` lanes add a second loopback
+address (`sudo ip -6 addr add ... dev lo`) before the suite, and the test
+skips loudly without it, refusing under `MOQ_STRICT` like the ECN test.
 
 Decided 2026-10-22 from the io_uring audit: m1.
 

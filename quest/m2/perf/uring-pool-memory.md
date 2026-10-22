@@ -18,7 +18,9 @@ The worker-turn benches use 2 KiB buffers, so none measures this.
 
 Add pool capacity and occupancy to the worker metrics as gauges, then run the relay at
 production sizing on the fanout and chat shapes, sweeping connections and
-workers, and record RSS and pool capacity during and after a burst. A
+workers, and record RSS and pool capacity during and after a burst.
+RSS is process-wide, so attribute it with a control run whose pools are
+pinned at their starting size. A
 no-cost result is recorded and closes the quest.
 
 Decided 2026-10-22 from the io_uring audit.

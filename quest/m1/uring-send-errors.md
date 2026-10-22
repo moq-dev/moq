@@ -4,9 +4,10 @@
 
 A send error on one io_uring worker's shared UDP socket costs at most that
 packet or that destination, as on the tokio backend, so one peer can never
-take down every connection on the worker. A test injects each error class
-beside a healthy connection on the same socket and proves the healthy one
-survives.
+take down every connection on the worker. Only an error meaning the socket
+itself is gone (EBADF and the like) still fails it. A test injects each
+recoverable error class beside a healthy connection on the same socket and
+proves the healthy one survives.
 
 ## Plan
 

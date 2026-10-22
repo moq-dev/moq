@@ -19,8 +19,11 @@ both are reachable by an embedder that opens a socket per dial.
   churn past the id space, and reuse.
 - `Socket::drop` discards a failed cancel (`let _ = shared.cancel(key)`),
   leaving an idle multishot receive holding the fd and pool until worker
-  teardown. Only an `io_uring_enter` error reaches it; surface it rather
-  than drop it.
+  teardown. Only an `io_uring_enter` error reaches it, which means the
+  ring itself is broken. `drop` cannot return it, so record it on `Shared`
+  and fail the worker's next turn with it, the same as any other ring
+  failure, so every handle on the worker fails. Test by injecting the push
+  failure.
 
 Decided 2026-10-22 from the io_uring audit, split from
 [handle lifecycle](/quest/m2/uring-lifecycle.md) in review since neither is

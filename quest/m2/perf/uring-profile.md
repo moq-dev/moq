@@ -12,8 +12,9 @@ from the same recipe instead of working around it.
 always runs `tokio-workers`. `just bench-runtime` already builds with the
 feature, checks kernel support, and runs `io-uring-workers`; reuse that
 build and check rather than adding a second path. Select the runtime by
-argument, keep worker count and load identical across runtimes, and keep
-the existing capture modes. Comparing revisions stays running the recipe at
+argument, keep worker count and load identical across runtimes, keep
+the existing capture modes, and fail the run if the relay did not start on
+the selected runtime. Comparing revisions stays running the recipe at
 each one on the same host.
 
 Once it works, read these off a chat, audio, fanout, and mixed-traffic
