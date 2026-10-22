@@ -167,7 +167,6 @@ impl Subscriptions {
 		}
 	}
 
-	#[cfg(test)]
 	pub(super) fn len(&self) -> usize {
 		self.count
 	}

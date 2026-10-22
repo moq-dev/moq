@@ -352,6 +352,9 @@ export interface TrackRequestOptions {
 	pending: Set<Request>;
 }
 
+/** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
+export const MAX_DATAGRAMS = 64;
+
 // private: plumbing
 /** Hooks assigned in static blocks by the owning class. */
 export const hooks: {
