@@ -3,7 +3,8 @@
 ## Goal
 
 The relay's stream transports have a measured baseline. `just bench` runs
-its relay workloads over `ws://`, `wss://`, and `tls://` qmux as well as QUIC.
+its relay workloads over `ws://`, `wss://`, `tcp://`, and `tls://` qmux as well
+as QUIC.
 A qmux micro-bench attributes CPU to the layers the
 [epic](/quest/m2/perf/stream/README.md) names, so each later quest is judged
 against a number rather than intuition.
@@ -15,8 +16,9 @@ and the micro-bench isolates qmux.
 
 - **Relay workloads.** `bench/relay.sh` dials `https://` only today. Add a
   transport axis to the existing `chat` (F=0, per-message cost) and `fanout`
-  (per-byte cost) workloads in `bench/workloads/`, through moq-bench's
-  existing `ws://`, `wss://`, and `--connect-websocket-*` options. Report CPU
+  (per-byte cost) workloads in `bench/workloads/`: `ws://` and `wss://`
+  through moq-bench's existing WebSocket options, and `tcp://` and `tls://`
+  qmux against the relay's stream listeners. Report CPU
   per message and per Gbps in the same machine-readable form
   `bench/compare.py` already reads. `just bench-profile` then gives the
   flamegraph per transport.

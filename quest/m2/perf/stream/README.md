@@ -58,7 +58,11 @@ Decisions (2026-10-22), each with its reason:
   the codec is not on the ring's critical path.
 - **The ring line moved in from m3.** io_uring pays far more for TCP than for
   UDP, so it no longer waits on fleet demand. Its ablation picks mechanisms;
-  it no longer gates the line.
+  it no longer gates the line. This is a deliberate exemption from the perf
+  line's "a measured no-win abandons the quest" rule (reaffirmed in review):
+  the ring is where the relay's media path is heading, and putting stream
+  sessions on the same pinned thread as QUIC ones is the goal in its own
+  right. The before/after is still recorded.
 - **The ablation reuses the bench harness** rather than building a second
   one.
 - **Ranked second in m2/perf**, after kio channel contention, which is the
