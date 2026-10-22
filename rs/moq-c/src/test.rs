@@ -2065,7 +2065,7 @@ fn json_snapshot_publish_consume() {
 
 	let track_name = b"meta";
 	let config = moq_json_snapshot_config {
-		delta_ratio: 8,
+		deltas: true,
 		compression: true,
 	};
 	let producer = id(unsafe {
@@ -5818,7 +5818,7 @@ fn json_tracks_are_advertised_in_the_catalog() {
 			status.as_ptr() as *const c_char,
 			status.len(),
 			&moq_json_snapshot_config {
-				delta_ratio: 4,
+				deltas: true,
 				compression: true,
 			},
 		)
@@ -5963,7 +5963,7 @@ fn data_track_names_cannot_collide() {
 			name.as_ptr() as *const c_char,
 			name.len(),
 			&moq_json_snapshot_config {
-				delta_ratio: 0,
+				deltas: false,
 				compression: false,
 			},
 		)

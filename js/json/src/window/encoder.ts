@@ -4,23 +4,20 @@ import { Group } from "@moq/net";
 /** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. Kept well below the net per-group cap so a roll always precedes GroupTooLarge. */
 const MAX_GROUP_FRAMES = 1024;
 
-/** Op ratio used when {@link Config.opRatio} is left unset. */
-const DEFAULT_OP_RATIO = 8;
-
-type Edit = { push: string } | { pop: number };
+// A restatement changes nothing on commit; it only opens a group.
+type Edit = { push: string } | { pop: number } | { restate: true };
 
 /** Options for an {@link Encoder}. */
 export interface Config {
 	/**
-	 * How much the ops in a group may cost before a fresh group is emitted.
+	 * Encode edits as ops appended to the group's header. `false` restates the window in a new
+	 * single-frame group for every edit.
 	 *
-	 * A new group opens once the pushes and pops *already written* exceed `opRatio` times the size of
-	 * the group's header frame. The pending op is excluded, so the one that tips the group over budget
-	 * still lands. `0` disables ops entirely, so every edit is its own single-frame group.
-	 *
-	 * The window's counterpart to Snapshot's `deltaRatio`. Defaults to `8`.
+	 * A group of ops runs until a joiner wants a fresh one, judged by the track's `refresh` ratio
+	 * (see {@link Encoder.snapshot}), or until it reaches the frame or byte cap. The window's
+	 * counterpart to Snapshot's `deltas`. Defaults to `true`.
 	 */
-	opRatio?: number;
+	ops?: boolean;
 
 	/**
 	 * Compress each group as one sync-flushed `deflate-raw` stream, so every op reuses the header and
@@ -47,7 +44,7 @@ export interface Encoded {
 	/**
 	 * Whether this frame is a group header, which must open a new group.
 	 *
-	 * The encoder decides this, never the caller: the op budget and the frame cap force a new group
+	 * The encoder decides this, never the caller: the frame and byte caps force a new group
 	 * independently of which edit was requested.
 	 */
 	keyframe: boolean;
@@ -74,7 +71,7 @@ export interface Pending extends Encoded {
  * @public
  */
 export class Encoder<T> {
-	#opRatio: number;
+	#ops: boolean;
 	#compress: boolean;
 	#checkpointRecords?: number;
 
@@ -86,10 +83,8 @@ export class Encoder<T> {
 	#start = 0;
 
 	#flate?: Flate;
-	// Bytes of pushes and pops in this group, excluding its header frame.
-	#opBytes = 0;
-	// Reference size the op budget is measured against: this group's header frame.
-	#headerLen = 0;
+	// Bytes in this group, header included.
+	#groupBytes = 0;
 	#groupFrames = 0;
 	// Whether the next frame must be a header after a lost frame.
 	#resync = true;
@@ -100,10 +95,7 @@ export class Encoder<T> {
 	#generation = 0;
 
 	constructor(config: Config = {}) {
-		this.#opRatio = config.opRatio ?? DEFAULT_OP_RATIO;
-		if (!Number.isSafeInteger(this.#opRatio) || this.#opRatio < 0 || this.#opRatio > 0xffffffff) {
-			throw new Error("opRatio must be an unsigned 32-bit integer");
-		}
+		this.#ops = config.ops ?? true;
 		this.#compress = config.compression ?? false;
 		this.#checkpointRecords = config.checkpointRecords;
 		if (
@@ -141,8 +133,7 @@ export class Encoder<T> {
 	/** Discard group-local state after an encoded frame did not reach the wire. */
 	#resyncGroup(): void {
 		this.#flate = undefined;
-		this.#opBytes = 0;
-		this.#headerLen = 0;
+		this.#groupBytes = 0;
 		this.#groupFrames = 0;
 		this.#resync = true;
 		this.#pending = false;
@@ -197,14 +188,20 @@ export class Encoder<T> {
 		return this.#emitPopHeader(offset, edit);
 	}
 
-	/** Whether the pending edit may ride as an op in the open group. */
+	/**
+	 * Restate the retained window in a header, which must open a new group.
+	 *
+	 * For a caller that opens groups itself: call it when a joiner wants a fresh group, such as when
+	 * the track's `demand().wanted` passes the largest group written, so the joiner reads the window
+	 * without the ops before it. The frame is a {@link Pending} like any other.
+	 */
+	snapshot(): Pending {
+		return this.#emitHeader(this.#offset, this.#start, this.#window, { restate: true });
+	}
+
+	/** Whether the pending edit may ride as an op in the open group, which is under its frame cap. */
 	#opAllowed(): boolean {
-		return (
-			this.#opRatio !== 0 &&
-			this.#groupFrames > 0 &&
-			this.#groupFrames < MAX_GROUP_FRAMES &&
-			this.#opBytes <= this.#opRatio * this.#headerLen
-		);
+		return this.#ops && this.#groupFrames > 0 && this.#groupFrames < MAX_GROUP_FRAMES;
 	}
 
 	/** Compress an already-serialized op into the open group, if its header remains cached. */
@@ -215,9 +212,9 @@ export class Encoder<T> {
 		}
 		const payload = this.#flate ? this.#flate.frame(bytes) : bytes;
 
-		this.#opBytes += payload.length;
+		this.#groupBytes += payload.length;
 		this.#groupFrames += 1;
-		if (this.#headerLen + this.#opBytes > Group.MAX_GROUP_CACHE_BYTES) {
+		if (this.#groupBytes > Group.MAX_GROUP_CACHE_BYTES) {
 			this.#resyncGroup();
 			return undefined;
 		}
@@ -255,8 +252,7 @@ export class Encoder<T> {
 		}
 
 		this.#flate = flate;
-		this.#headerLen = payload.length;
-		this.#opBytes = 0;
+		this.#groupBytes = payload.length;
 		this.#groupFrames = 1;
 		this.#resync = false;
 
@@ -288,7 +284,7 @@ export class Encoder<T> {
 				this.#window.splice(0, dropped);
 				this.#start += dropped;
 			}
-		} else {
+		} else if ("pop" in edit) {
 			const offset = this.#offset + edit.pop;
 			const stored = Math.min(Math.max(offset - this.#start, 0), this.#window.length);
 			this.#window.splice(0, stored);
