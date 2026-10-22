@@ -28,8 +28,9 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
+	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
-	pub priority: u8,
+	pub priority: i8,
 	/// Maximum age of a non-latest group before it is skipped, in microseconds.
 	/// `0` skips immediately; a larger value tolerates that much reordering.
 	///
@@ -132,8 +133,9 @@ impl From<MoqOrder> for moq_net::track::Order {
 #[derive(Clone, uniffi::Record)]
 pub struct MoqFetchGroupOptions {
 	/// Delivery priority for the fetch stream; higher values preempt lower ones.
+	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
-	pub priority: u8,
+	pub priority: i8,
 	/// Maximum age behind the live edge in microseconds; null uses publisher retention alone.
 	#[uniffi(default = None)]
 	pub max_delay_us: Option<u64>,

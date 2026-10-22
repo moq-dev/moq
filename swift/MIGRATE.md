@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON snapshot `deltaRatio` is `deltas`
+
+`Json.SnapshotProducer(deltaRatio:)` and `MoqJsonSnapshotConfig.deltaRatio` are replaced by `deltas: Bool` (default `true`).
+Pass `deltas: false` where you passed `deltaRatio: 0`, and drop the argument otherwise.
+Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
+
+### Priorities are signed (#6142)
+
+`TrackInfo.priority`, `Subscription.priority`, `FetchGroupOptions.priority`, and `GroupRequest.priority` are `Int8`, higher first, and 0 is the unset midpoint.
+`TrackInfo.priority` defaulted to 127 and now defaults to 0.
+To keep a value's moq-lite byte, subtract 128 from it, widening first so it doesn't trap (`Int8(Int16(old) - 128)`): 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
 ### A client asks only about what it watches (#6165)
 
 On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announcedBroadcast()`, instead of under its whole scope at connect.

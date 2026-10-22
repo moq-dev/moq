@@ -29,9 +29,9 @@ test("track-owning wrappers take one options object", () => {
 });
 
 test("consumer options omit producer-only knobs", () => {
-	const delta: Has<"deltaRatio", SnapshotConsumerInit> = false;
+	const delta: Has<"deltas", SnapshotConsumerInit> = false;
 	const initial: Has<"initial", SnapshotConsumerInit> = false;
-	const op: Has<"opRatio", WindowConsumerInit> = false;
+	const op: Has<"ops", WindowConsumerInit> = false;
 	const checkpoint: Has<"checkpointRecords", WindowConsumerInit> = false;
 	expect([delta, initial, op, checkpoint]).toEqual([false, false, false, false]);
 
@@ -40,8 +40,8 @@ test("consumer options omit producer-only knobs", () => {
 	const schema: Has<"schema", SnapshotConsumerInit> = true;
 	expect([track, compression, schema]).toEqual([true, true, true]);
 
-	const producerDelta: Has<"deltaRatio", SnapshotProducerInit> = true;
-	const producerOp: Has<"opRatio", WindowProducerInit> = true;
+	const producerDelta: Has<"deltas", SnapshotProducerInit> = true;
+	const producerOp: Has<"ops", WindowProducerInit> = true;
 	const streamCompression: Has<"compression", StreamProducerInit> = true;
 	expect([producerDelta, producerOp, streamCompression]).toEqual([true, true, true]);
 });
@@ -49,16 +49,16 @@ test("consumer options omit producer-only knobs", () => {
 test("object literals reject producer knobs and positional tracks", () => {
 	const track = new Track.Producer("test").subscribe();
 	const reject = () => {
-		// @ts-expect-error deltaRatio is producer-only
-		new Snapshot.Consumer({ track, deltaRatio: 8 });
+		// @ts-expect-error deltas is producer-only
+		new Snapshot.Consumer({ track, deltas: true });
 		// @ts-expect-error initial is producer-only
 		new Snapshot.Consumer({ track, initial: {} });
 		// @ts-expect-error a positional track is not an options object
 		new Snapshot.Consumer(track);
 		// @ts-expect-error a producer track is not a subscriber
 		new Snapshot.Consumer({ track: new Track.Producer("test") });
-		// @ts-expect-error opRatio is producer-only
-		new Window.Consumer({ track, opRatio: 8 });
+		// @ts-expect-error ops is producer-only
+		new Window.Consumer({ track, ops: true });
 		// @ts-expect-error checkpointRecords is producer-only
 		new Window.Consumer({ track, checkpointRecords: 4 });
 		// @ts-expect-error a positional track is not an options object

@@ -35,7 +35,9 @@ Rules every child follows:
     that change cost, never behavior a third party can observe.
   - "capability gap": a built-in behavior a third party can observe but
     not reproduce yet, kept private by a recorded decision that names what
-    would close it (the idle copy in [ingest](/quest/m1/public-model/ingest.md)).
+    would close it (the idle copy, `track::Producer::set_idle` and `set_live`:
+    a custom subscriber ends its track when its upstream subscription ends
+    instead of keeping a lingering copy).
   - "plumbing" (JS only): session or wire plumbing hosted beside the model,
     such as `wire.ts` `Established`, `wireOf`, `tail.ts`, `consume.ts`, and
     `priority.ts`.
@@ -60,9 +62,9 @@ Inventory on `main` at b4eab0db1:
 - Rust has 347 `pub(crate)` items in `model/` and no `#[doc(hidden)]` model
   item. 106 are reached by session code, 16 only by session tests, and 225
   only inside `model/`.
-- The 106 split into [ingest](/quest/m1/public-model/ingest.md),
+- The 106 split into ingest (landed in [moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111)),
   [serving](/quest/m1/public-model/serve.md),
-  [routes and answering](/quest/m1/public-model/answer.md), and the
+  [answering](/quest/m1/public-model/answer.md) (with [routes](/quest/m1/public-model/routes.md) split out later), and the
   passthrough carve-out (listed in each child where it shares a type).
 - The 16 test-only items (`group::Info::produce`, `group::Producer::is_aborted`
   and `is_finished`, `track::Info::timed`, `track::Producer::new`,
@@ -101,9 +103,9 @@ Work owned by this README, after the children land:
 ## Required
 
 - [Claim request type](/quest/m1/public-model/claim-request-type.md) - accepting an application claim's request fails to compile instead of panicking
-- [Public ingest](/quest/m1/public-model/ingest.md) - a custom subscriber writes received groups, frames, starts, and ends into a track through public calls
 - [Public serving](/quest/m1/public-model/serve.md) - a custom publisher reads a track's start, cursor, and group expiry for its wire through public calls
-- [Public routes and answering](/quest/m1/public-model/answer.md) - a custom relay ingests routes, answers broadcast and track requests on demand, and advertises without echoing a peer's routes back
+- [Public answering](/quest/m1/public-model/answer.md) - a custom relay answers broadcast and track requests on demand and closes them once unused
+- [Public routes](/quest/m1/public-model/routes.md) - a custom relay ingests routes under a peer's identity and advertises without echoing them back, once cluster routing lands
 - [Public model after ranges, handover, and the JS tail](/quest/m1/public-model/deferred.md) - fetch and track-info answering, the cache peeks, JS `fork`/`mirror`, and JS `endTrack`, once the quests that reshape them land
 
 ## Related

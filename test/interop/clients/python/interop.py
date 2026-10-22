@@ -2,10 +2,11 @@
 
 publish:   read raw Annex-B H.264 from stdin (e.g. piped from ffmpeg) and feed
            it to a streaming importer, which infers frame boundaries. Alongside
-           it, encode a synthetic tone through libopus so the matrix exercises
-           the FFI audio path, not only the video one.
-subscribe: connect, find the video track in the catalog, and exit 0 as soon as
-           any non-empty frame arrives (exit 1 on timeout / no data).
+           it, encode a tone per channel (--tone) through libopus so the matrix
+           exercises the FFI audio path, not only the video one.
+subscribe: connect, wait for a catalog with video and audio, and exit 0 once a
+           non-empty video frame has arrived and --audio-ms of audio has been
+           decoded to --audio-out for tone.py to judge (exit 1 on timeout / no data).
 
 --finish verifies a finite tail, natural media/catalog EOF, announcement END, and
 same-session health; --frames sets its exact size. --finish-ack selects publisher
@@ -13,8 +14,9 @@ finish mode and names the FIFO releasing teardown after the real linger.
 --version offers only that version. --grant waits for the grant the relay sends over
 AUTH and prints it as an `auth granted` line before the client starts.
 
-    ffmpeg ... -f h264 - | python interop.py publish --url http://localhost:4443 --broadcast b.hang
-    python interop.py subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
+    ffmpeg ... -f h264 - | python interop.py publish --url http://localhost:4443 --broadcast b.hang --tone 440
+    python interop.py subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20 \
+        --audio-out /tmp/audio --audio-ms 600
 """
 
 import argparse
@@ -32,10 +34,10 @@ import moq
 READ_CHUNK = 64 * 1024
 MAX_DELAY = timedelta(seconds=1)  # container consumer congestion-control / lookahead window
 
-# Synthetic audio: a 48 kHz mono tone, encoded as Opus.
+# Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
 AUDIO_TRACK = "tone"
 AUDIO_RATE = 48_000
-AUDIO_TONE_HZ = 440.0
+AUDIO_AMPLITUDE = 0.5
 # A non-default frame duration, and the shortest Opus offers. 20 ms would pass
 # even if the microsecond field were truncated to milliseconds somewhere.
 AUDIO_FRAME_DURATION_US = 2_500
@@ -44,14 +46,18 @@ AUDIO_BATCH_US = 20_000
 AUDIO_BATCH_SAMPLES = AUDIO_RATE * AUDIO_BATCH_US // 1_000_000
 
 
-async def _publish_tone(audio: moq.audio.Producer) -> None:
-    """Feed the encoder a real-time tone until the task is cancelled."""
+async def _publish_tone(audio: moq.audio.Producer, tones: list[int]) -> None:
+    """Feed the encoder a real-time tone per channel, interleaved, until the task is cancelled."""
     timestamp_us = 0
     phase = 0
     loop = asyncio.get_running_loop()
     started = loop.time()
     while True:
-        samples = [math.sin(2 * math.pi * AUDIO_TONE_HZ * (phase + i) / AUDIO_RATE) for i in range(AUDIO_BATCH_SAMPLES)]
+        samples = [
+            AUDIO_AMPLITUDE * math.sin(2 * math.pi * hz * (phase + i) / AUDIO_RATE)
+            for i in range(AUDIO_BATCH_SAMPLES)
+            for hz in tones
+        ]
         audio.write(
             moq.audio.Frame(
                 timestamp=timedelta(microseconds=timestamp_us), data=struct.pack(f"<{len(samples)}f", *samples)
@@ -86,7 +92,13 @@ async def _print_grant(client: moq.Client, timeout: float) -> None:
 
 
 async def publish(
-    url: str, broadcast: str, version: str | None, grant: bool, timeout: float, finish_ack: str | None
+    url: str,
+    broadcast: str,
+    version: str | None,
+    grant: bool,
+    timeout: float,
+    tones: list[int],
+    finish_ack: str | None,
 ) -> None:
     async with _client(url, version) as client:
         if grant:
@@ -99,7 +111,7 @@ async def publish(
         )
         audio = moq.audio.Producer(
             catalog,
-            moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=AUDIO_RATE, channels=1),
+            moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=AUDIO_RATE, channels=len(tones)),
             moq.audio.EncoderOutput(
                 codec=moq.audio.Codec.opus(),
                 track=AUDIO_TRACK,
@@ -107,9 +119,9 @@ async def publish(
             ),
         )
         producer.announce()
-        print(f"publishing {broadcast!r} (Annex-B H.264 from stdin + a {AUDIO_TONE_HZ:.0f} Hz tone) to {url}")
+        print(f"publishing {broadcast!r} (Annex-B H.264 from stdin + a {tones} Hz tone) to {url}")
 
-        tone = asyncio.create_task(_publish_tone(audio))
+        tone = asyncio.create_task(_publish_tone(audio, tones))
         loop = asyncio.get_running_loop()
         stdin = sys.stdin.buffer
         # read1 returns as soon as any bytes are available (read() would block
@@ -157,15 +169,15 @@ async def publish(
             print("finish acknowledged", flush=True)
 
 
-async def _catalog_with_video(consumer: moq.BroadcastConsumer) -> moq.media.Catalog:
+async def _catalog_with_media(consumer: moq.BroadcastConsumer) -> moq.media.Catalog:
     # The catalog is a live track. A lazy publisher (e.g. the browser, which only
-    # encodes on demand) may announce video in a *later* update, not the first
-    # snapshot, so wait for a catalog that actually has a video track.
+    # encodes on demand) may announce a rendition in a *later* update, not the first
+    # snapshot, so wait for a catalog that has both video and audio.
     catalog_consumer = await moq.media.CatalogConsumer.subscribe(consumer)
     async for catalog in catalog_consumer:
-        if catalog.video:
+        if catalog.video and catalog.audio:
             return catalog
-    raise RuntimeError("catalog stream ended without a video track")
+    raise RuntimeError("catalog stream ended without a video and an audio track")
 
 
 async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> None:
@@ -227,8 +239,38 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
     print(f"finish clean frames={frames} catalog=eof announce=end health=ok", flush=True)
 
 
+async def _decode_audio(
+    consumer: moq.BroadcastConsumer, id: str, audio: moq.media.Audio, out: str, audio_ms: int
+) -> None:
+    """Decode the first `audio_ms` of the rendition to `out`.{txt,pcm}, the layout tone.py reads."""
+    decoder = await moq.audio.Consumer.subscribe(
+        consumer, id, audio, moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, max_delay=MAX_DELAY)
+    )
+    frame_bytes = 4 * audio.channel_count
+    decoded = 0
+    with open(f"{out}.txt", "w") as log, open(f"{out}.pcm", "wb") as pcm:
+        log.write(f"{audio.sample_rate} {audio.channel_count}\n")
+        async for frame in decoder:
+            samples = len(frame.data) // frame_bytes
+            log.write(f"{frame.timestamp // timedelta(microseconds=1)} {samples}\n")
+            pcm.write(frame.data)
+            decoded += samples
+            if decoded * 1000 >= audio_ms * audio.sample_rate:
+                decoder.cancel()
+                return
+    raise RuntimeError("audio track ended early")
+
+
 async def subscribe(
-    url: str, broadcast: str, version: str | None, grant: bool, timeout: float, finish: bool, frames: int
+    url: str,
+    broadcast: str,
+    version: str | None,
+    grant: bool,
+    timeout: float,
+    audio_out: str | None,
+    audio_ms: int | None,
+    finish: bool,
+    frames: int,
 ) -> None:
     async with _client(url, version) as client:
         if grant:
@@ -240,8 +282,9 @@ async def subscribe(
                 raise RuntimeError("expected finish read command")
             await asyncio.wait_for(_finish_subscribe(client, broadcast, frames), timeout)
             return
+        assert audio_out is not None and audio_ms is not None
         consumer = await asyncio.wait_for(client.announced_broadcast(broadcast), timeout)
-        catalog = await asyncio.wait_for(_catalog_with_video(consumer), timeout)
+        catalog = await asyncio.wait_for(_catalog_with_media(consumer), timeout)
 
         id, video = next(iter(catalog.video.items()))
 
@@ -258,7 +301,10 @@ async def subscribe(
                 if total > 0:
                     return
 
-        await asyncio.wait_for(drain(), timeout)
+        audio_id, audio = next(iter(catalog.audio.items()))
+        await asyncio.wait_for(
+            asyncio.gather(drain(), _decode_audio(consumer, audio_id, audio, audio_out, audio_ms)), timeout
+        )
 
     if total <= 0:
         raise RuntimeError("no frame data received")
@@ -273,21 +319,41 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--version")
     parser.add_argument("--grant", action="store_true")
+    parser.add_argument("--tone", help="publish: comma-separated frequency of each channel, in Hz")
+    parser.add_argument("--audio-out", help="subscribe: decode audio to this prefix's .txt and .pcm")
+    parser.add_argument("--audio-ms", type=int, help="subscribe: how much audio to decode")
     parser.add_argument("--finish-ack", help="publisher completion FIFO; enables clean finish")
     parser.add_argument("--finish", action="store_true", help="verify a late tail and clean broadcast end")
     parser.add_argument("--frames", type=int, default=10, help="expected finish video frame count")
     args = parser.parse_args()
     if args.frames <= 0 or (args.finish and args.role != "subscribe") or (args.finish_ack and args.role != "publish"):
         parser.error("finish requires a subscriber, finish-ack a publisher, and frames must be positive")
+    if args.role == "publish" and not args.tone:
+        parser.error("publish needs --tone")
+    if args.role == "subscribe" and not args.finish and (not args.audio_out or not args.audio_ms):
+        parser.error("subscribe needs --audio-out and --audio-ms")
 
     # Warnings and errors from the Rust layer, such as a publication outside the grant.
     moq.log_level("warn")
     try:
         if args.role == "publish":
-            asyncio.run(publish(args.url, args.broadcast, args.version, args.grant, args.timeout, args.finish_ack))
+            tones = [int(hz) for hz in args.tone.split(",")]
+            asyncio.run(
+                publish(args.url, args.broadcast, args.version, args.grant, args.timeout, tones, args.finish_ack)
+            )
         else:
             asyncio.run(
-                subscribe(args.url, args.broadcast, args.version, args.grant, args.timeout, args.finish, args.frames)
+                subscribe(
+                    args.url,
+                    args.broadcast,
+                    args.version,
+                    args.grant,
+                    args.timeout,
+                    args.audio_out,
+                    args.audio_ms,
+                    args.finish,
+                    args.frames,
+                )
             )
     except KeyboardInterrupt:
         pass

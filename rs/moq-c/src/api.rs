@@ -423,14 +423,14 @@ pub struct moq_audio_config {
 /// Options for a JSON snapshot track (lossy latest-value mode).
 ///
 /// The same config is passed to a producer and its consumers, but the consumer reads only
-/// `compression`; `delta_ratio` is producer-only.
+/// `compression`; `deltas` is producer-only.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_json_snapshot_config {
-	/// How aggressively the producer emits deltas instead of full snapshots. `0` disables deltas
-	/// (one snapshot per group); a positive value allows roughly that many snapshots' worth of
-	/// deltas before rolling. Ignored by the consumer.
-	pub delta_ratio: u32,
+	/// Encode updates as deltas against the group's snapshot. When off, each update opens a new
+	/// group with a full snapshot. When on, a joiner that would download more than eight
+	/// snapshots' worth of deltas gets the value restated in a fresh group. Ignored by the consumer.
+	pub deltas: bool,
 
 	/// DEFLATE-compress each group. Must match on the producer and consumer.
 	pub compression: bool,
@@ -521,14 +521,14 @@ pub struct moq_datagram {
 
 /// Publisher-side raw track properties.
 ///
-/// A null [moq_publish_track] `info` pointer uses the moq-net defaults.
-/// A zero-initialized struct also uses those defaults, except `priority`, which
-/// has no presence flag: zero is the least urgent, and 127 is the moq-net default.
+/// A null [moq_publish_track] `info` pointer uses the moq-net defaults, and so does a
+/// zero-initialized struct.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_track_info {
 	/// Priority, used to break ties between subscriptions of equal subscriber priority.
-	pub priority: u8,
+	/// Higher is more urgent; the default 0 is the midpoint.
+	pub priority: i8,
 
 	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
 	/// The publisher-side half of `moq_subscription.max_delay_us`.
@@ -597,8 +597,9 @@ pub enum moq_demand {
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_subscription {
-	/// Delivery priority. Higher values preempt lower ones under contention.
-	pub priority: u8,
+	/// Delivery priority. Higher values preempt lower ones under contention; the default 0 is
+	/// the midpoint.
+	pub priority: i8,
 
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in microseconds.
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
@@ -3156,9 +3157,9 @@ pub unsafe extern "C" fn moq_group_request_sequence(request: u32, dst: *mut u64)
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - `dst` must point at a writable `uint8_t`.
+/// - `dst` must point at a writable `int8_t`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_group_request_priority(request: u32, dst: *mut u8) -> i32 {
+pub unsafe extern "C" fn moq_group_request_priority(request: u32, dst: *mut i8) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
@@ -3292,7 +3293,7 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let producer = moq_mux::json::Config::default()
 			.with_compression(config.compression)
-			.with_delta_ratio(config.delta_ratio);
+			.with_deltas(config.deltas);
 		State::lock().publish.json_snapshot(broadcast, name, producer)
 	})
 }

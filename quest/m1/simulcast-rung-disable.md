@@ -57,8 +57,8 @@ with padding.
   has a sender when its transport's `poll::Session::probe` returns one, which
   moq-net keeps private until this quest exposes it to the publishers.
 - Assign descending track priority down the renditions so the allocator
-  fills lower rungs first; [Scope track priority](/quest/m1/track-priority-scope.md)
-  settles how that number also orders sends.
+  fills lower rungs first; the same number breaks ties in send order
+  between subscriptions at one subscriber priority.
 - OBS: each OBS video encoder is its own rendition
   (`video_tracks` in `cpp/obs/src/moq-output.cpp`), so apply the rule per
   encoder through the generated C++ package, on top of the per-encoder
@@ -85,3 +85,4 @@ publishers expose for it. Wire: none; `enabled` already exists.
 - [Ladder controller](/quest/m3/ladder/controller.md) - the same rung disable for generated transcode ladders
 - [OBS multitrack](/quest/m2/obs-multitrack.md) - OBS's native multitrack encoders as the renditions this disables
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - the viewer side of moving between renditions as capacity changes
+- [Closed rung disable](https://github.com/moq-dev/moq/pull/5850) - reference code from before the 2026-10-20 split, closed as superseded

@@ -1,14 +1,15 @@
 /**
  * Drives a headless Chromium against the vite-built page (see `serve`) for the interop matrix. publish
- * streams fake camera/microphone input until killed; subscribe verifies rendered playback,
- * pause/resume, and optionally browser-to-browser audio.
+ * streams a fake camera and a microphone playing `--audio-file` until killed; subscribe verifies
+ * rendered playback, that each audio channel the player outputs carries its `--tone`, and
+ * pause/resume.
  *
  * The publishers on the other side of the matrix are separate processes with no readiness signal,
  * so this driver tolerates a slow announcement with one reload. `media.ts` is the strict path: it
  * waits on an explicit publisher-ready state and never reloads.
  *
- *     bun driver.ts publish   --url http://127.0.0.1:4443 --broadcast b.hang [--version V]
- *     bun driver.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20 [--version V] [--expect-audio]
+ *     bun driver.ts publish   --url http://127.0.0.1:4443 --broadcast b.hang --audio-file tone.wav [--version V]
+ *     bun driver.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20 --tone 440,660 [--version V]
  *
  * `--version` makes the element offer that protocol version alone.
  *
@@ -20,6 +21,7 @@ import { parseArgs } from "node:util";
 import type { Page } from "playwright";
 import {
 	type BrowserErrors,
+	Failure,
 	finishTraces,
 	launch,
 	open,
@@ -35,7 +37,7 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import type { Sample } from "./src/contract";
+import { type Sample, TONE_CHECK } from "./src/contract";
 
 /** Remove the page's players, which closes their sessions, and wait until every transport has. */
 async function closeSessions(page: Page): Promise<void> {
@@ -63,7 +65,8 @@ const { positionals, values } = parseArgs({
 		"finish-ack": { type: "string" },
 		frames: { type: "string", default: "10" },
 		timeout: { type: "string", default: "20" },
-		"expect-audio": { type: "boolean", default: false },
+		"audio-file": { type: "string" },
+		tone: { type: "string" },
 	},
 });
 
@@ -72,22 +75,37 @@ const url = values.url;
 const broadcast = values.broadcast;
 const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
 const finishing = values.finish || values["finish-ack"] !== undefined;
-const expectAudio = values["expect-audio"] ?? false;
+const audioFile = values["audio-file"];
+const tones = (values.tone ?? "").split(",").filter(Boolean).map(Number);
 if (
 	(role !== "publish" && role !== "subscribe") ||
 	!url ||
 	!broadcast ||
 	!Number.isFinite(timeoutMs) ||
 	timeoutMs <= 0 ||
-	(expectAudio && role !== "subscribe")
+	(!finishing && role === "publish" && !audioFile) ||
+	(!finishing && role === "subscribe" && (!tones.length || tones.some((hz) => !(hz > 0))))
 ) {
 	console.error(
-		"usage: driver.ts publish|subscribe --url U --broadcast B [--version V] [--timeout S>0] [--expect-audio]",
+		"usage: driver.ts publish --url U --broadcast B (--audio-file WAV | --finish-ack FIFO) | subscribe --url U --broadcast B (--tone HZ,... | --finish [--frames N]) [--version V] [--timeout S>0]",
 	);
 	process.exit(2);
 }
 
+/** Whether every channel the player outputs carries its own tone, judged as tone.py judges a native subscriber. */
+function toneHeard(state: Sample): boolean {
+	return (
+		state.audioContext === "running" &&
+		state.audioChannels === tones.length &&
+		state.tones?.length === tones.length &&
+		state.tones.every(({ rms, share }) => rms >= TONE_CHECK.minRms && share >= TONE_CHECK.minShare)
+	);
+}
+
 const PAUSE_STABILITY_MS = 750;
+
+/** How long audible audio may play before it has to carry the tone: the analyser's window, several times over. */
+const TONE_GRACE_MS = 3000;
 
 async function waitForStablePause(page: Page, errors: BrowserErrors, deadline: number): Promise<Sample> {
 	let previous = await readPlayerState(page);
@@ -99,7 +117,7 @@ async function waitForStablePause(page: Page, errors: BrowserErrors, deadline: n
 		const stable =
 			current.videoFrames === previous.videoFrames &&
 			current.videoTimestamp === previous.videoTimestamp &&
-			(!expectAudio || current.audioBytes === previous.audioBytes);
+			current.audioBytes === previous.audioBytes;
 		if (!stable) stableSince = Date.now();
 		if (stable && Date.now() - stableSince >= PAUSE_STABILITY_MS) return current;
 		previous = current;
@@ -113,6 +131,8 @@ const browser = await launch([
 	"--use-fake-device-for-media-stream",
 	"--use-fake-ui-for-media-stream",
 	"--autoplay-policy=no-user-gesture-required",
+	// The fake microphone loops this file instead of its default beeps.
+	...(audioFile ? [`--use-file-for-fake-audio-capture=${audioFile}`] : []),
 ]);
 
 let code = 1;
@@ -122,9 +142,9 @@ try {
 		pageUrl(server.origin, finishing ? `finish-${role}` : role, {
 			url,
 			broadcast,
-			frames: values.frames ?? "10",
-			timeout: String(timeoutMs),
+			...(finishing ? { frames: values.frames ?? "10", timeout: String(timeoutMs) } : {}),
 			...(values.version ? { versions: values.version } : {}),
+			...(!finishing && role === "subscribe" ? { tone: tones.join(",") } : {}),
 		}),
 		role,
 		role === "subscribe",
@@ -174,7 +194,7 @@ try {
 		console.error((await wait("result")).result);
 		code = 0;
 	} else if (role === "publish") {
-		console.error(`publishing ${broadcast} (fake camera + microphone) to ${url}`);
+		console.error(`publishing ${broadcast} (fake camera + ${audioFile} as the microphone) to ${url}`);
 		// Stream until the orchestrator stops us.
 		await new Promise((resolve) => process.once("SIGTERM", resolve));
 		code = 0;
@@ -205,12 +225,35 @@ try {
 		}
 
 		const interactionDeadline = Date.now() + timeoutMs;
-		if (expectAudio) {
-			playing = await waitForState(page, errors, {
+		try {
+			// Once audio plays, the tone gets a bounded grace rather than the whole timeout, so a
+			// wrong tone fails as fast as it does in the native subscribers.
+			await waitForState(page, errors, {
 				deadline: interactionDeadline,
-				description: "browser audio",
-				predicate: (state) => state.hasAudio && state.audioBytes > 0 && state.audioContext === "running",
+				description: "audible audio",
+				predicate: (state) => state.audioContext === "running" && (state.rms ?? 0) >= TONE_CHECK.minRms,
 			});
+			playing = await waitForState(page, errors, {
+				deadline: Math.min(interactionDeadline, Date.now() + TONE_GRACE_MS),
+				description: "the audio tone",
+				predicate: toneHeard,
+			});
+		} catch (err) {
+			// Only a tone wait that ran out is an audio check failure; a page error reports as itself.
+			if (!(err instanceof Failure)) throw err;
+			// `wrong tone` is the marker the harness's control requires: audible audio in the publisher's
+			// layout that does not carry its tones. Anything else failing is a plain audio failure.
+			const state = await readPlayerState(page);
+			const wrongTone =
+				state.audioContext === "running" &&
+				state.audioChannels === tones.length &&
+				state.tones?.length === tones.length &&
+				state.tones.every(({ rms }) => rms >= TONE_CHECK.minRms);
+			console.error(
+				`audio check failed: ${wrongTone ? "wrong tone: " : ""}${state.audioChannels} catalog channels, ` +
+					`per channel ${JSON.stringify(state.tones)}, want ${tones} Hz, loudest ${state.toneHz?.toFixed(0)} Hz`,
+			);
+			throw err;
 		}
 
 		await pause(page);
@@ -235,13 +278,13 @@ try {
 				state.videoFrames > paused.videoFrames &&
 				state.videoTimestamp !== undefined &&
 				state.videoTimestamp > (paused.videoTimestamp ?? -1) &&
-				(!expectAudio || state.audioBytes > paused.audioBytes),
+				state.audioBytes > paused.audioBytes,
 		});
 
 		throwPageErrors(errors);
+		const heard = playing.tones?.map(({ share }, channel) => `${tones[channel]} Hz ${share.toFixed(2)}`).join(", ");
 		console.error(
-			`rendered, paused, and resumed ${broadcast}: video=${resumed.videoFrames} frames` +
-				(expectAudio ? ` audio=${resumed.audioBytes} bytes` : ""),
+			`rendered, paused, and resumed ${broadcast}: video=${resumed.videoFrames} frames audio=${resumed.audioBytes} bytes (${heard})`,
 		);
 		code = 0;
 	}

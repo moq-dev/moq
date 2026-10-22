@@ -3,13 +3,14 @@
 //
 // publish reads raw Annex-B H.264 from stdin (e.g. piped from ffmpeg) and feeds
 // it to a streaming importer, which infers frame boundaries. Alongside it, a
-// synthetic tone is encoded through libopus so the matrix exercises the FFI
-// audio path, not only the video one. subscribe connects, finds the video track
-// in the catalog, and exits 0 as soon as any non-empty frame arrives (exit 1 on
-// timeout or no data).
+// tone per channel (--tone) is encoded through libopus so the matrix exercises
+// the FFI audio path, not only the video one. subscribe connects, waits for a
+// catalog with video and audio, and exits 0 once a non-empty video frame has
+// arrived and --audio-ms of audio has been decoded to --audio-out for tone.py to
+// judge (exit 1 on timeout or no data).
 //
-//	ffmpeg ... -f h264 - | go-interop publish --url http://localhost:4443 --broadcast b.hang
-//	go-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
+//	ffmpeg ... -f h264 - | go-interop publish --url http://localhost:4443 --broadcast b.hang --tone 440,660
+//	go-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20 --audio-out /tmp/audio --audio-ms 600
 //
 // --finish verifies a finite tail, natural media/catalog EOF, announcement END, and
 // same-session health; --frames sets its exact size. --finish-ack selects publisher
@@ -29,6 +30,8 @@ import (
 	"io"
 	"math"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"moq.dev/moq"
@@ -41,11 +44,11 @@ const readChunk = 64 * 1024
 // media.TrackConsumer max delay: how much reordering the jitter buffer tolerates.
 const maxDelay = time.Second
 
-// Synthetic audio: a 48 kHz mono tone, encoded as Opus.
+// Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
 const (
-	audioTrack  = "tone"
-	audioRate   = 48_000
-	audioToneHz = 440.0
+	audioTrack     = "tone"
+	audioRate      = 48_000
+	audioAmplitude = 0.5
 	// A non-default frame duration, and the shortest Opus offers. 20 ms would
 	// pass even if the microsecond field were truncated to milliseconds
 	// somewhere.
@@ -55,12 +58,12 @@ const (
 	audioBatchSamples = audioRate * audioBatchUs / 1_000_000
 )
 
-// publishTone feeds the encoder a real-time tone until ctx is cancelled.
-func publishTone(ctx context.Context, audio *moqaudio.Producer) {
+// publishTone feeds the encoder a real-time tone per channel, interleaved, until ctx is cancelled.
+func publishTone(ctx context.Context, audio *moqaudio.Producer, tones []float64) {
 	ticker := time.NewTicker(audioBatchUs * time.Microsecond)
 	defer ticker.Stop()
 
-	data := make([]byte, audioBatchSamples*4)
+	data := make([]byte, audioBatchSamples*len(tones)*4)
 	timestampUs := uint64(0)
 	phase := 0
 	for {
@@ -70,8 +73,10 @@ func publishTone(ctx context.Context, audio *moqaudio.Producer) {
 		case <-ticker.C:
 		}
 		for i := 0; i < audioBatchSamples; i++ {
-			sample := math.Sin(2 * math.Pi * audioToneHz * float64(phase+i) / audioRate)
-			binary.LittleEndian.PutUint32(data[i*4:], math.Float32bits(float32(sample)))
+			for c, hz := range tones {
+				sample := audioAmplitude * math.Sin(2*math.Pi*hz*float64(phase+i)/audioRate)
+				binary.LittleEndian.PutUint32(data[(i*len(tones)+c)*4:], math.Float32bits(float32(sample)))
+			}
 		}
 		if err := audio.Write(moqaudio.Frame{Timestamp: time.Duration(timestampUs) * time.Microsecond, Data: data}); err != nil {
 			fmt.Fprintf(os.Stderr, "tone: %v\n", err)
@@ -125,7 +130,7 @@ func patterns(list []string) string {
 	return string(out)
 }
 
-func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeout time.Duration, finishAck string) error {
+func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeout time.Duration, tones []float64, finishAck string) error {
 	client, err := dial(ctx, url, opts, timeout)
 	if err != nil {
 		return err
@@ -150,7 +155,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	audio, err := moqaudio.NewProducer(catalog, moqaudio.EncoderInput{
 		Format:     moq.AudioSampleFormatF32,
 		SampleRate: audioRate,
-		Channels:   1,
+		Channels:   uint32(len(tones)),
 	}, moqaudio.EncoderOutput{
 		Codec:         moq.OpusAudioCodec(),
 		Track:         func() *string { track := audioTrack; return &track }(),
@@ -162,13 +167,13 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := producer.Announce(moq.Route{}); err != nil {
 		return err
 	}
-	fmt.Printf("publishing %q (Annex-B H.264 from stdin + a %.0f Hz tone) to %s\n", broadcast, audioToneHz, url)
+	fmt.Printf("publishing %q (Annex-B H.264 from stdin + a %v Hz tone) to %s\n", broadcast, tones, url)
 
 	toneCtx, stopTone := context.WithCancel(ctx)
 	toneDone := make(chan struct{})
 	go func() {
 		defer close(toneDone)
-		publishTone(toneCtx, audio)
+		publishTone(toneCtx, audio, tones)
 	}()
 	// Let the tone unwind before any Finish, so no write races a finished
 	// producer. Runs before the deferred producer.Close, and is a no-op once
@@ -262,9 +267,9 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 }
 
 // The catalog is a live track. A lazy publisher (e.g. the browser, which only
-// encodes on demand) may announce video in a later update rather than the first
-// snapshot, so wait for a catalog that actually has a video track.
-func catalogWithVideo(ctx context.Context, consumer *moq.BroadcastConsumer) (*moqmedia.Catalog, error) {
+// encodes on demand) may announce a rendition in a later update rather than the
+// first snapshot, so wait for a catalog that has both video and audio.
+func catalogWithMedia(ctx context.Context, consumer *moq.BroadcastConsumer) (*moqmedia.Catalog, error) {
 	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer)
 	if err != nil {
 		return nil, err
@@ -277,9 +282,9 @@ func catalogWithVideo(ctx context.Context, consumer *moq.BroadcastConsumer) (*mo
 			return nil, err
 		}
 		if catalog == nil {
-			return nil, errors.New("catalog stream ended without a video track")
+			return nil, errors.New("catalog stream ended without a video and an audio track")
 		}
-		if len(catalog.Video) > 0 {
+		if len(catalog.Video) > 0 && len(catalog.Audio) > 0 {
 			return catalog, nil
 		}
 	}
@@ -432,7 +437,50 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	return nil
 }
 
-func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, timeout time.Duration, finish bool, frames int) error {
+// decodeAudio decodes the first audioMs of the rendition to out.{txt,pcm}, the layout tone.py reads.
+func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string, rendition moqmedia.Audio, out string, audioMs int) error {
+	decoder, err := moqaudio.Subscribe(ctx, consumer, id, rendition, moqaudio.DecoderOutput{
+		Format:   moq.AudioSampleFormatF32,
+		MaxDelay: func() *time.Duration { d := maxDelay; return &d }(),
+	})
+	if err != nil {
+		return err
+	}
+	defer decoder.Cancel()
+
+	log, err := os.Create(out + ".txt")
+	if err != nil {
+		return err
+	}
+	defer log.Close()
+	pcm, err := os.Create(out + ".pcm")
+	if err != nil {
+		return err
+	}
+	defer pcm.Close()
+
+	fmt.Fprintf(log, "%d %d\n", rendition.SampleRate, rendition.ChannelCount)
+	frameBytes := 4 * int(rendition.ChannelCount)
+	decoded := 0
+	for decoded*1000 < audioMs*int(rendition.SampleRate) {
+		frame, err := decoder.Next(ctx)
+		if err != nil {
+			return err
+		}
+		if frame == nil {
+			return errors.New("audio track ended early")
+		}
+		samples := len(frame.Data) / frameBytes
+		fmt.Fprintf(log, "%d %d\n", frame.Timestamp.Microseconds(), samples)
+		if _, err := pcm.Write(frame.Data); err != nil {
+			return err
+		}
+		decoded += samples
+	}
+	return nil
+}
+
+func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, timeout time.Duration, audioOut string, audioMs int, finish bool, frames int) error {
 	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -468,10 +516,18 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 		return err
 	}
 
-	catalog, err := catalogWithVideo(ctx, consumer)
+	catalog, err := catalogWithMedia(ctx, consumer)
 	if err != nil {
 		return err
 	}
+
+	var audioID string
+	var audio moqmedia.Audio
+	for audioID, audio = range catalog.Audio {
+		break
+	}
+	audioDone := make(chan error, 1)
+	go func() { audioDone <- decodeAudio(ctx, consumer, audioID, audio, audioOut, audioMs) }()
 
 	var id string
 	var video moqmedia.Video
@@ -499,13 +555,16 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 	if total == 0 {
 		return errors.New("no frame data received")
 	}
+	if err := <-audioDone; err != nil {
+		return fmt.Errorf("audio: %w", err)
+	}
 	fmt.Printf("received %d bytes from %q\n", total, broadcast)
 	return nil
 }
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: go-interop publish|subscribe --url URL --broadcast PATH [--timeout SECONDS] [--version V] [--grant]")
+		return errors.New("usage: go-interop publish|subscribe --url URL --broadcast PATH [--timeout SECONDS] [--version V] [--grant] [--tone HZ,...] [--audio-out PREFIX --audio-ms MS]")
 	}
 	role := os.Args[1]
 
@@ -518,6 +577,9 @@ func run() error {
 	finishAck := flags.String("finish-ack", "", "publisher completion FIFO; enables clean finish")
 	finish := flags.Bool("finish", false, "verify a late tail and clean broadcast end")
 	frames := flags.Int("frames", 10, "expected finish video frame count")
+	tone := flags.String("tone", "", "publish: comma-separated frequency of each channel, in Hz")
+	audioOut := flags.String("audio-out", "", "subscribe: decode audio to this prefix's .txt and .pcm")
+	audioMs := flags.Int("audio-ms", 0, "subscribe: how much audio to decode, in milliseconds")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		return err
 	}
@@ -538,9 +600,20 @@ func run() error {
 	opts := dialOptions{version: *version, grant: *grant}
 	switch role {
 	case "publish":
-		return publish(ctx, *url, *broadcast, opts, wait, *finishAck)
+		var tones []float64
+		for _, field := range strings.Split(*tone, ",") {
+			hz, err := strconv.ParseFloat(field, 64)
+			if err != nil {
+				return fmt.Errorf("--tone: %w", err)
+			}
+			tones = append(tones, hz)
+		}
+		return publish(ctx, *url, *broadcast, opts, wait, tones, *finishAck)
 	case "subscribe":
-		return subscribe(ctx, *url, *broadcast, opts, wait, *finish, *frames)
+		if !*finish && (*audioOut == "" || *audioMs <= 0) {
+			return errors.New("subscribe needs --audio-out and --audio-ms")
+		}
+		return subscribe(ctx, *url, *broadcast, opts, wait, *audioOut, *audioMs, *finish, *frames)
 	default:
 		return fmt.Errorf("unknown role %q", role)
 	}

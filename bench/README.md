@@ -381,7 +381,8 @@ The table includes these measurements:
   and Criterion's quick mode. Per-group benchmark settings can override the default warmup. Quick estimates
   trade precision for nightly runtime; use full paired runs to assess a change.
 - JS benchmark CSV time columns (`ns`, `us`, `ms`, and their per-operation
-  variants), retaining every workload dimension in each series name.
+  variants) and `size_bytes` columns, retaining every other column as a workload
+  dimension in each series name.
 
 Hosted runners vary across nights, so a flag prompts a paired local run rather
 than proving a regression. Binding ratios compare languages within one run.
