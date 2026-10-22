@@ -12,7 +12,10 @@ types already drop `Moq` (`strip_type_prefix` in `cpp/moq/uniffi.toml`), so
 ## Plan
 
 Decided with the maintainer on 2026-10-17: the goal as drafted, the follow-up
-#5727 deferred.
+#5727 deferred. Moved to m1 on 2026-10-22 (maintainer, from an external API
+audit): the C++ package is unpublished, so stripping the prefix before its
+first publication avoids shipping both the `moq::moq_*` names and their
+wrappers.
 
 The option belongs in the uniffi-bindgen-cpp fork, released and pinned the
 way #5727 pinned `strip_type_prefix` (every place that PR moved the pin).

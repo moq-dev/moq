@@ -42,7 +42,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - H.264 and H.265 from an external Vulkan image on RADV, hand-rolled on ash, proven on an RX 9070
 - [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - an explicit-sync DMA-BUF reaches Intel's encoder, proven on Arrow Lake
 - [C++ FFI reuse](/quest/m2/cpp-ffi-reuse.md) - C++ packages link the shared default-feature FFI build once it is proven compatible
-- [Unprefixed C++ free functions](/quest/m2/cpp-free-function-prefix.md) - generated free functions drop `moq_`, and `moq.hpp` deletes its five pass-through wrappers
 
 - [Native compression flush](/quest/m2/native-compression-flush.md) - report the per-frame nonfinal flush requirement in existing browser discussions
 - [Native synchronous codecs](/quest/m2/native-compression-sync.md) - report the stateful small-frame synchronous API requirement
@@ -65,6 +64,7 @@ ranked just below deterministic TS legs, which it requires.
 - [V4L2 virtual camera](/quest/m2/v4l2-virtual-camera.md) - V4L2 capture runs nightly against the `vivid` virtual driver instead of only on a developer's camera
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; the browser pads where native sessions retransmit
 - [Failed groups reach the publisher](/quest/m2/group-failed.md) - Rust and both JS publishers surface a group whose delivery a subscriber's stream gave up on, with one shape
+- [Headless moq-transport groups](/quest/m2/ietf-headless-group.md) - a group whose head no fill or joining FETCH supplies keeps its tail instead of being dropped, and a relay forwards it to moq-transport subscribers
 - [A finished PROBE stops reporting](/quest/m2/probe-end-stale.md) - the Rust receive estimate reads unknown once its PROBE stream ends
 - [Wire stats](/quest/m2/wire-stats/README.md) - `Presence` counts each root's transport bytes on the wire, `wire_tx` and `wire_rx`, from QUIC, WebSocket, and embedder gateway sources
 - [Media stats](/quest/m2/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and one model turns both into a health verdict and a preflight report
@@ -105,6 +105,11 @@ ranked just below deterministic TS legs, which it requires.
 - [Mobile completion](/quest/m2/mobile-completion.md) - verify the Swift and Kotlin bindings over Rust-owned capture
 - [Bindings in the interop matrix](/quest/m2/interop-bindings.md) - Kotlin, Swift, and Dart publish and subscribe against every other interop client
 - [WebGPU HDR](/quest/m2/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
+- [MSF duplicate init](/quest/m2/msf-duplicate-init.md) - an MSF catalog refuses a repeated `initDataList` id instead of resolving it last-wins
+- [AMF0 exact reads](/quest/m2/rtmp-amf0-exact-reads.md) - a truncated RTMP string fails with `UnexpectedEof` instead of parsing NUL padding
+- [HLS variant area](/quest/m2/hls-variant-area.md) - a hostile `RESOLUTION` cannot panic or misorder variant ranking
+- [Image hardening](/quest/m2/image-hardening.md) - the relay image runs unprivileged and its builder stage is pinned
+- [Wire fuzz coverage](/quest/m2/wire-fuzz-coverage.md) - the audited moq-net decoders have targets that assert an invariant, and the unsafe peer input reaches runs under Miri
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
 - [qmux receive leases](/quest/m2/qmux-receive-lease.md) - WebSocket, TCP, and WebRTC sessions bound incomplete messages by their receive window, at a per-session cost the maintainer picks
 - [QUIC caps](/quest/m2/rate-quic.md) - paced MAX_DATA credit in and a capped pacer out hold a QUIC session to its token's bitrate
@@ -200,9 +205,6 @@ ranked just below deterministic TS legs, which it requires.
 - [IETF request order](/quest/m2/ietf-request-order.md) - d14/15 requests take their ID after opening, legacy `control.sending()` races are gone, and SUBSCRIBE_NAMESPACE never closes over its own close
 - [JS IETF request streams](/quest/m2/js-request-stream.md) - `RequestStream` owns deadlines and cancellation, and TRACK trailing bytes close the session like Rust
 - [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - a pre-draft-20 joining FETCH that arrives after its subscription finished is still answered, within a bound the peer already negotiates
-- [Error cleanups](/quest/m2/error-cleanups.md) - delete the unused `Error::SessionClosed`; raw transport failures already map to `Unroutable`
-- [FromStr parsers](/quest/m2/from-str-trait.md) - hang, moq-auth, and moq-msf implement `FromStr` instead of inherent `from_str`
-- [Drop dead items](/quest/m2/drop-dead-items.md) - the audit's uncalled public items and test helpers are removed
 - [ashpd uses maintained D-Bus crates](/quest/m2/ashpd-maintained.md) - wait for a stable zbus 6 port, then remove the portal dependency exceptions
 - [Askama uses a maintained TOML parser](/quest/m2/askama-maintained.md) - wait for a stable parser migration, then remove the generator dependency exception
 - [Dependency and alternatives audit](/quest/m2/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
