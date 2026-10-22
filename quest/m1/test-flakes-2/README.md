@@ -33,16 +33,8 @@ The [redundant failover drift](/quest/m0/redundant-failover-drift.md) moved
 to m0 on 2026-10-20 (maintainer), since it may hide a TS export bug and fails
 loaded `just check` runs.
 
-Added 2026-10-20 (maintainer): three more from that day's merge batch, the
-draft-16 cancel race first since it fails on a mocked clock and so may hide
-an ordering bug. The failed-listen test was meant to join the redial quest,
-which #6032 had already finished, so it reuses #6032's reserved-port fix as
-its own child. moq-uring's `host_tracks_moq_clock` was seen the same day
-but #6056 had already fixed it by measuring the calibration gap.
-
-Added 2026-10-21 (maintainer): three small flakes and a fresh-worktree
-interop failure from the m0/m1 merge run, kept in one child since each is
-small.
+Added 2026-10-21 (maintainer): two flakes (OBS drain, js/net RSS) from the
+m0/m1 merge run, kept in one child since each is small.
 
 Public API: none. Wire: none.
 

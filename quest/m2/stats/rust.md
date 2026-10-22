@@ -7,7 +7,7 @@
 - `moq play`, given `--echo <name>`, publishes an `.echo` broadcast under each
   watched catalog's echo path and fills its feedback track with what it
   received, decoded, and played.
-- The gateway imports (`hls`, `rtmp`, `srt`, `rtc`) and `archive` take
+- The gateway imports (`hls`, `rtmp`, `srt`, `rtsp`, `rtc`) and `archive` take
   `--stats`.
 
 ## Plan

@@ -33,7 +33,9 @@ Then confirm it, and record the numbers in the PR that closes this:
   schedule to `cache.yml` (and alert on its scheduled failures) or switch to
   a closure-aware collector (niks3).
 - Delete the `CACHIX_AUTH_TOKEN` secret and the `kixelated` Cachix cache once
-  the maintainer decides downstream flakes have had long enough to switch.
+  the maintainer decides downstream flakes have had long enough to switch,
+  along with `smoke.yml`'s Cachix substituter and its push step for the nix
+  channel.
 
 ## Related
 

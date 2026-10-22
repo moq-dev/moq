@@ -16,7 +16,7 @@ cap what a peer returns.
 ## Plan
 
 Decided 2026-10-10 in a `/quest-plan` interview (paper trail in the PR that
-added this line). Motivated by a customer on `@moq/net` 0.4.2 who wants a
+added this line). Motivated by an app on `@moq/net` 0.4.2 that watches a
 changing set of topics and today sets `discovery: false` (meant for relays
 that cannot do discovery) to suppress the root ANNOUNCE_REQUEST, then opens
 per-topic `session.announced(...)` streams by hand, bypassing the origin.
@@ -37,7 +37,7 @@ Shared rules for the children:
   2026-10-20, recorded in [the Rust child](/quest/m1/lazy-discovery/rust.md)).
 - Docs and examples that a change makes stale are updated in that change.
 
-End to end, once all children land: the customer's flow (one connection,
+End to end, once all children land: that flow (one connection,
 topics added and removed later) works through `origin` alone, with only
 per-topic requests on the wire.
 

@@ -175,7 +175,7 @@ three bindings. moq-wasm's column is the existing suite in [`src/main.ts`](src/m
 
 | case | moq-wasm | moq-ffi, UniFFI | slice, UniFFI and BoltFFI |
 |---|---|---|---|
-| negotiates each relay's version | yes, via `version()` | yes, by offering only that version: no negotiated-version accessor | same as moq-ffi |
+| negotiates each relay's version | yes, via `version()` | yes, by offering only that version (the spike predates `MoqConnectionStats.version`, [#5723](https://github.com/moq-dev/moq/pull/5723)) | same as moq-ffi |
 | reads a published broadcast, every byte, 128 KiB frames | yes | yes | yes |
 | refuses a missing track | yes | yes: rejects with `NotFound` (transport-19) or `Protocol` (lite) | yes: rejects with the slice's `Net { reason: "not found" }` |
 | publishes | no: consume only | yes | yes |

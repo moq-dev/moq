@@ -47,9 +47,8 @@ before those quests).
 The moq-transport passthrough fields remain crate-private, the existing
 explicit exception to the public model audit.
 
-Added 2026-10-16: refresh, ranked after moq-transport passthrough, whose
-dynamic-groups path it promotes. It is a breaking `Demand` change, so it
-lands before the cut.
+Added 2026-10-16: refresh, a breaking `Demand` change, so it lands before
+the cut.
 
 Added 2026-10-20 (maintainer): the probe target, native probing, and the
 native rung disable moved up from the [m2 probe epic](/quest/m2/probe/README.md),
@@ -71,6 +70,7 @@ lite-07 stream type here.
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
+- [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
 - [Refresh](/quest/m1/refresh/README.md) - a join asks for a fresh group once the current group's deltas exceed a publisher-advertised byte ratio, at every hop; replaces `Demand::used`/`unused` and moq-json's `delta_ratio`
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
@@ -112,11 +112,9 @@ lite-07 stream type here.
 - [Resumed datagrams](/quest/m1/resume-datagrams.md) - a resumed track skips only datagrams it already delivered, not every lower sequence
 - [Recovery verdicts](/quest/m1/recovery-verdicts.md) - group recovery refetches only on errors a new copy can fix, so a repeating error ends the group instead of looping
 - [Rust resume holds a declared end](/quest/m1/resume-rust-end.md) - a resumed Rust track keeps a declared end across copies, dedupes flapping copies, and judges retention inside the reader's window
-- [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [Close tail drain](/quest/m1/close-tail-drain.md) - after a peer close, subscribers read the group streams their transport already delivered instead of aborting them, so a finished tail arrives on every version
 - [Silent-peer close](/quest/m1/quic-silent-peer-drain.md) - moq-quic closes a connection that never heard its peer without the 3 s drain
-- [Binding linger](/quest/m1/linger-ffi.md) - `moq-ffi` and every binding finish a broadcast cleanly, so subscribers drain it until its media is stale
 - [Gateway linger](/quest/m1/linger-gateways.md) - HLS, RTMP, SRT and RTC imports linger at a clean end, cut short by a newer epoch at the same path
 - [Interop finish](/quest/m1/interop-finish.md) - the interop matrix proves a clean broadcast finish across implementations
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
@@ -143,7 +141,3 @@ lite-07 stream type here.
 - [Compile time audit](/quest/m1/audit-compile-time.md) - build-time hotspots are measured against the m0 baselines and the worst are fixed or planned
 - [Performance audit](/quest/m1/audit-perf.md) - benchmarks that regressed since the m0 run are explained, fixed, or planned, and unbenched hot paths get coverage
 - [Quest tree audit](/quest/m1/audit-quests.md) - the tree agrees with itself and with main
-
-## Related
-
-- [A busy js/net serve yields](https://github.com/moq-dev/moq/pull/5289) - js/net's serve loop leaves the browser its event loop under a fast publisher, if it does not already

@@ -11,9 +11,15 @@ The recipe first ran nightly on 2026-10-20 and failed all five playback
 tests on ARM; nothing owned it
 ([moq-dev/moq#6155](https://github.com/moq-dev/moq/pull/6155)).
 [moq-dev/moq#6175](https://github.com/moq-dev/moq/pull/6175) then fixed
-PulseAudio's 20 ms playback period for these tests. Check a nightly after
-#6175 first: if ARM passes, delete this quest. Otherwise reproduce on ARM
-and fix the cause, not the timing.
+PulseAudio's 20 ms playback period for these tests.
+
+But Nightly
+[39600361153](https://github.com/moq-dev/moq/actions/runs/39600361153)
+(2026-10-21, before #6175 merged) already passed all five on
+`ubuntu-24.04-arm`, after the 2026-10-20 failure, with no moq-audio change
+between. So a green nightly alone does not prove #6175 fixed it: the failure
+may be intermittent. Reproduce on ARM and fix the cause, not the timing,
+before deleting this quest.
 
 Public API: none. Wire: none.
 

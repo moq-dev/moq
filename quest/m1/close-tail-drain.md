@@ -76,10 +76,6 @@ moq-tokio's `quic::web` path) for the same ordering.
 
 Public API: none. Wire: none.
 
-## Required
-
-- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - an unfinished qmux read ends after its buffered data once the session closes, which the drain relies on over qmux
-
 ## Related
 
 - [QUIC ack hook](/quest/m2/quic-ack-hook.md) - a FIN/ack hook in the QUIC layer

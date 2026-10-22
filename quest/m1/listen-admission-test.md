@@ -5,8 +5,8 @@
 An in-process test proves that `moq --listen` bounds auth admission by
 `listen.timeout`: an admission that never answers closes at the deadline, one
 answered just inside it is admitted, and `"0"` waits. Today
-`rs/moq-cli/tests/listen.rs` drives the binary with `--auth-public`, where
-admission never waits, so nothing covers `serve_client`
+`rs/moq-cli/tests/integration/listen.rs` drives the binary with
+`--auth-public`, where admission never waits, so nothing covers `serve_client`
 (`rs/moq-cli/src/main.rs`) running admission under the handshake deadline.
 
 ## Plan

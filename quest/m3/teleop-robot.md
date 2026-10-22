@@ -42,7 +42,9 @@ losslessness. A group holds at most `MAX_CACHE_BYTES` and `MAX_GROUP_FRAMES`
 (`rs/moq-net/src/model/group.rs`), and a write past either aborts it with
 `Error::GroupTooLarge`; `moq_json::stream` never rolls its one group, so that
 bound ends the track, and a link drop or reconnect loses what was in flight.
-So the contract is ordered, gap-free delivery for a live reader within one
+Those caps hold until [Unbounded groups](/quest/m2/unbounded-groups/README.md)
+lands; after it, a lagging reader refills a shed part of the group or sees
+`Evicted`. So the contract is ordered, gap-free delivery for a live reader within one
 bounded log, and recovery after a reconnect belongs to the application
 protocol. That is an acceptable division for MAVLink, whose mission, parameter
 and file-transfer services already carry their own stop-and-wait
@@ -115,4 +117,5 @@ control then it is the wrong abstraction.
 
 ## Related
 
+- [Unbounded groups](/quest/m2/unbounded-groups/README.md) - removes the group caps that bound the reliable class's one log
 - [arbitration](/quest/m3/teleop-arbitration.md) - which controller is obeyed

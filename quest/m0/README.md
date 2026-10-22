@@ -2,11 +2,14 @@
 
 ## Goal
 
-The work in flight now, in two independent tracks. Relay hardening: legal
-moq-transport input never fails a session in current interop coverage, every resource a peer can make the relay hold is bounded by what
-it sent or by a budget, and no peer input panics the process. Identity: nothing treats who published a route as what it carries; a path and
-the epoch on its route are the only content identity, and every first-party
-publisher that can restart mints a fresh epoch, so #4741 stalls nobody.
+The work in flight now. Relay hardening: legal moq-transport input never fails
+a session in current interop coverage, every resource a peer can make the
+relay hold is bounded by what it sent or by a budget, and no peer input panics
+the process. Identity: nothing treats who published a route as what it
+carries; a path and the epoch on its route are the only content identity, and
+every first-party publisher that can restart mints a fresh epoch, so #4741
+stalls nobody. Alongside them: fixes for the `release` line, the publisher
+stall estimate, CI cost, and the recurring audits.
 
 ## Plan
 
@@ -26,7 +29,7 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 Identity: the [broadcast epoch](/quest/m0/broadcast-epoch/README.md) line
 gates the next release (decided 2026-10-03:
 #4741 resumes an un-epoched republish into the old broadcast and stalls its
-viewers). #4741 can merge to main, but no release ships until first-party
+viewers). #4741 is on main, but no release ships until first-party
 publishers mint epochs. Backport patches cut from `release` don't carry
 #4741 and aren't gated (decided 2026-10-08).
 

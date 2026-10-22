@@ -10,14 +10,11 @@ in any implementation's linger shows up as a red cell.
 ## Plan
 
 From [moq-dev/moq#6151](https://github.com/moq-dev/moq/pull/6151), which
-gave js/net `Broadcast.Producer.finish()`. Rust, JS, and the bindings each
-have a finish once their linger quests land. Drive it from the existing
+gave js/net `Broadcast.Producer.finish()`. Rust has
+`broadcast::Producer::finish` and the bindings gained theirs in
+[moq-dev/moq#6157](https://github.com/moq-dev/moq/pull/6157). Drive it from the existing
 interop clients rather than adding a new harness, and assert both halves:
 the late tail arrives and the end is clean. The new case's cells show up
 in the nightly report at <https://git.moq.dev/interop/>.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Binding linger](/quest/m1/linger-ffi.md) - bindings finish a broadcast, so the binding interop clients can
