@@ -437,7 +437,12 @@ struct Shape {
 /// stopping it means it must never create one; after, it owns a pad and has to drop it. One
 /// compare-exchange settles which of the two happened, so a pad can't slip out between a
 /// teardown's check and the pump's creation.
-struct PumpState(AtomicU8);
+struct PumpState {
+	phase: AtomicU8,
+	/// The latest catalog still lists the rendition. A delisted pump drains the instance it reads
+	/// and follows no other.
+	listed: watch::Sender<bool>,
+}
 
 impl PumpState {
 	const SUBSCRIBING: u8 = 0;
@@ -445,12 +450,15 @@ impl PumpState {
 	const CANCELLED: u8 = 2;
 
 	fn new() -> Self {
-		Self(AtomicU8::new(Self::SUBSCRIBING))
+		Self {
+			phase: AtomicU8::new(Self::SUBSCRIBING),
+			listed: watch::Sender::new(true),
+		}
 	}
 
 	/// Claim the right to create a pad, false once a teardown got here first.
 	fn go_live(&self) -> bool {
-		self.0
+		self.phase
 			.compare_exchange(Self::SUBSCRIBING, Self::LIVE, Ordering::AcqRel, Ordering::Acquire)
 			.is_ok()
 	}
@@ -458,9 +466,18 @@ impl PumpState {
 	/// Stop a pump that hasn't taken a pad, false if it already has one and must be torn down
 	/// through its cancel watch instead.
 	fn cancel_before_live(&self) -> bool {
-		self.0
+		self.phase
 			.compare_exchange(Self::SUBSCRIBING, Self::CANCELLED, Ordering::AcqRel, Ordering::Acquire)
 			.is_ok()
+	}
+
+	fn set_listed(&self, listed: bool) {
+		self.listed
+			.send_if_modified(|current| std::mem::replace(current, listed) != listed);
+	}
+
+	fn is_listed(&self) -> bool {
+		*self.listed.borrow()
 	}
 }
 
@@ -786,7 +803,8 @@ async fn follow_catalog(
 	let playback = Playback {
 		pads: pads.clone(),
 		timeline: Arc::default(),
-		finished: Arc::default(),
+		siblings: Siblings::default(),
+		finished: Finished::default(),
 	};
 	let mut active: HashMap<String, ActiveTrack> = HashMap::new();
 	let mut pumps: tokio::task::JoinSet<Option<Rendition>> = tokio::task::JoinSet::new();
@@ -949,6 +967,12 @@ fn reconcile(
 			.collect(),
 	);
 
+	// A delisted pump drains the instance it reads and follows no other; a relisted one follows
+	// again.
+	for (name, track) in active.iter() {
+		track.state.set_listed(desired.contains_key(name));
+	}
+
 	// Cancel anything that changed shape; each cancelled pump hands its pad back. Changed
 	// renditions also land in `plan.add`, so they respawn below on the same pad.
 	//
@@ -989,10 +1013,6 @@ fn reconcile(
 			broadcast: source.resolve_reference(d.shape.broadcast.as_ref()),
 			name: d.shape.track.clone(),
 		};
-		let played = ((d.kind, name.clone()), track.clone());
-		if playback.finished.lock().unwrap().contains(&played) {
-			continue;
-		}
 		let container = match moq_mux::catalog::hang::Container::new(
 			&d.shape.container,
 			match d.kind {
@@ -1007,15 +1027,16 @@ fn reconcile(
 			}
 		};
 
-		// Bind without waiting: an unavailable sibling or track must not park the catalog loop
+		// Follow without waiting: an unavailable sibling or track must not park the catalog loop
 		// and hold up every other rendition. The pump resolves both under its cancellation scope.
-		let binding = match source.bind(d.shape.broadcast.as_ref(), d.shape.epoch.as_ref()) {
-			Ok(binding) => binding,
+		let follow = match source.follow(d.shape.broadcast.as_ref(), d.shape.epoch.as_ref()) {
+			Ok(follow) => follow,
 			Err(err) => {
 				gst::warning!(CAT, "ignoring rendition {name}: {err:?}");
 				continue;
 			}
 		};
+		let sibling = track.broadcast != source.resolve_reference(None);
 
 		let (cancel_tx, cancel_rx) = watch::channel(false);
 		let state = Arc::new(PumpState::new());
@@ -1027,11 +1048,14 @@ fn reconcile(
 					kind: d.kind,
 					name: name.clone(),
 					caps: d.shape.caps.clone(),
-					binding,
+					follow,
+					sibling,
 					track,
 					container,
+					descriptor: d.shape.container.clone(),
 					pads: pads.clone(),
 					timeline: playback.timeline.clone(),
+					siblings: playback.siblings.clone(),
 					finished: playback.finished.clone(),
 					state: state.clone(),
 					cancel: cancel_rx,
@@ -1087,15 +1111,74 @@ fn plan_reconcile<S: PartialEq>(desired: &HashMap<String, S>, active: &HashMap<S
 struct Playback {
 	pads: Pads,
 	timeline: Arc<Timeline>,
+	siblings: Siblings,
 	finished: Finished,
 }
 
-/// Each pad's rendition with a track it played to the end. A new subscription to a finished
-/// track replays its last group, so a catalog update that still lists the rendition (a
-/// publisher's final snapshot lands after its tracks end) must not start it on that pad again. A
-/// pad that never played the track joins it like any late subscriber. Shared with the pumps,
-/// since a pump that replaces another on its pad learns this only once the other lets go.
-type Finished = Arc<Mutex<HashSet<(Rendition, Track)>>>;
+/// The timeline of each sibling instance, shared by every rendition reading that instance so
+/// their first frames fix one mapping for all of them.
+#[derive(Clone, Default)]
+struct Siblings(Arc<Mutex<SiblingTimelines>>);
+
+#[derive(Default)]
+struct SiblingTimelines {
+	/// Each sibling path some instance served this run.
+	seen: HashSet<moq_net::PathOwned>,
+	/// Each instance still serving, and the timeline its renditions share while any reads it.
+	live: Vec<(moq_net::broadcast::Consumer, std::sync::Weak<Timeline>)>,
+}
+
+impl Siblings {
+	/// The timeline of `instance`: the run's for the first instance at its path, which the
+	/// catalog's own renditions share, and one of its own for any later instance, whose
+	/// timestamps share no origin with the run's.
+	fn timeline(&self, instance: &moq_net::broadcast::Consumer, run: &Arc<Timeline>) -> Arc<Timeline> {
+		let mut siblings = self.0.lock().unwrap();
+		// Forget an instance that ended or that no rendition reads any more, releasing its handle.
+		siblings
+			.live
+			.retain(|(known, timeline)| !known.is_closed() && timeline.strong_count() > 0);
+		if let Some(timeline) = siblings
+			.live
+			.iter()
+			.find(|(known, _)| known.is_clone(instance))
+			.and_then(|(_, timeline)| timeline.upgrade())
+		{
+			return timeline;
+		}
+		let timeline = match siblings.seen.insert(instance.info().path.clone()) {
+			true => run.clone(),
+			false => Arc::default(),
+		};
+		siblings.live.push((instance.clone(), Arc::downgrade(&timeline)));
+		timeline
+	}
+}
+
+/// Each pad's rendition with a track it played to the end, and the instance that served it. A new
+/// subscription to a finished track replays its last group, so a catalog update that still lists
+/// the rendition (a publisher's final snapshot lands after its tracks end) must not start it on
+/// that pad again. A later instance carries a new track, and a pad that never played the track
+/// joins it like any late subscriber. Shared with the pumps, since a pump that replaces another on
+/// its pad learns this only once the other lets go.
+#[derive(Clone, Default)]
+struct Finished(Arc<Mutex<HashMap<(Rendition, Track), moq_net::broadcast::Consumer>>>);
+
+impl Finished {
+	/// Record that `instance` served `played` to its end, replacing any earlier instance's record.
+	fn insert(&self, played: &(Rendition, Track), instance: &moq_net::broadcast::Consumer) {
+		self.0.lock().unwrap().insert(played.clone(), instance.clone());
+	}
+
+	/// Whether `instance` already served `played` to its end on this pad.
+	fn contains(&self, played: &(Rendition, Track), instance: &moq_net::broadcast::Consumer) -> bool {
+		self.0
+			.lock()
+			.unwrap()
+			.get(played)
+			.is_some_and(|finished| finished.is_clone(instance))
+	}
+}
 
 /// The first decoded frame fixes one mapping for every rendition of this broadcast run.
 #[derive(Default)]
@@ -1121,11 +1204,20 @@ struct Pump {
 	/// per-kind counter instead, and isn't known until the subscription resolves.
 	name: String,
 	caps: gst::Caps,
-	binding: moq_mux::Binding,
+	/// Each instance of the broadcast the rendition references.
+	follow: moq_mux::follow::Instances,
+	/// The rendition references another broadcast than its catalog's, whose instances come and
+	/// go on their own announcements.
+	sibling: bool,
 	track: Track,
+	/// The wire format of the first instance.
 	container: moq_mux::catalog::hang::Container,
+	/// What builds it again for a later instance.
+	descriptor: hang::catalog::Container,
 	pads: Pads,
 	timeline: Arc<Timeline>,
+	/// The run's [`Playback::siblings`].
+	siblings: Siblings,
 	/// The run's [`Playback::finished`].
 	finished: Finished,
 	/// Shared with this rendition's [`ActiveTrack::state`].
@@ -1135,155 +1227,293 @@ struct Pump {
 	shutdown: watch::Receiver<bool>,
 }
 
+/// Why a pump stopped reading one instance without ending.
+enum Stopped {
+	/// Another instance took over: restart on it.
+	Restart(moq_net::broadcast::Consumer),
+	/// The instance stopped serving: idle until the next one.
+	Idle,
+}
+
 impl Pump {
 	/// Subscribe to the track, then stream its frames to the rendition's pad, owning it until the
 	/// track ends, errors, or `cancel` fires. The pad goes back to the session without an EOS
 	/// either way. Returns the rendition if its track ended rather than being cancelled, so the
 	/// run can end the pad of one the catalog retired.
+	///
+	/// A sibling's announcements drive the pump: its first start binds the rendition, an end
+	/// idles the pad, and another instance taking over restarts the stream on the same pad, until
+	/// the catalog delists the rendition.
 	async fn run(self) -> Option<Rendition> {
 		let Pump {
 			element,
 			kind,
 			name,
 			caps,
-			binding,
+			mut follow,
+			sibling,
 			track: media,
 			container,
+			descriptor,
 			pads,
-			timeline,
+			timeline: run,
+			siblings,
 			finished,
 			state,
 			mut cancel,
 			shutdown,
 		} = self;
-		// Resolves once the publisher answers, with the track info or with an error (which is
-		// what ending a broadcast produces for a name nobody served). A publisher that answers
-		// neither leaves this waiting, so racing `cancel` keeps such a pump reapable, and
-		// holding the wait here rather than in `reconcile` keeps it off every other
-		// rendition.
-		let subscriber = tokio::select! {
-			_ = cancel.changed() => return None,
-			subscriber = async {
-				let broadcast = binding.broadcast().await?;
-				let track = broadcast.track(&media.name)?;
-				Ok::<_, moq_mux::Error>(track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1))).await?)
-			} => match subscriber {
-				Ok(subscriber) => subscriber,
-				Err(err) => {
-					gst::warning!(CAT, "track {name} failed to subscribe: {err:?}");
-					return Some((kind, name));
-				}
-			}
-		};
-		let mut track = moq_mux::container::Consumer::new(subscriber, container);
+		let played = ((kind, name.clone()), media.clone());
+		let mut container = Some(container);
+		// The pad once this pump owns it, from the first instance on.
+		let mut owned: Option<(gst::Pad, tokio::sync::OwnedMutexGuard<()>)> = None;
+		let mut next: Option<moq_net::broadcast::Consumer> = None;
+		let mut listed = state.listed.subscribe();
 
-		// Winning this is what earns a pad. Losing means a teardown got here while the
-		// subscription was still resolving (this rendition was removed, reshaped, or outlived by
-		// a closing catalog), and it must not publish a pad at all: the watch alone can't say
-		// that, since a cancel landing just after we read it would leave a pad exposed and then
-		// yanked without an EOS.
-		if !state.go_live() {
-			return None;
-		}
-
-		// A pad appears only once its track is live, so a pad downstream can link to is a promise
-		// that the rendition is actually flowing, and only a rendition that gets this far claims a
-		// pad id. A kept pad starts a new stream on it, with caps pushed even when they differ, so
-		// a format downstream can't take fails loudly as not-negotiated rather than going quiet.
-		let (pad, _owned) = match pads.claim(&element, (kind, name.clone()), &cancel)? {
-			Claim::New(pad, owned) => {
-				let obj = element.upgrade()?;
-				pad.set_active(true).ok()?;
-				begin(&pad, &name, &caps);
-				obj.add_pad(&pad).ok()?;
-				(pad, owned)
-			}
-			Claim::Kept(pad, owner) => {
-				let owned = tokio::select! {
-					biased;
-					_ = cancel.changed() => return None,
-					owned = owner.lock_owned() => owned,
-				};
-				// The pump this one replaces records its track as finished before letting go, so a
-				// replacement started while it was reading the end (a reshape) can't replay it.
-				if finished
-					.lock()
-					.unwrap()
-					.contains(&((kind, name.clone()), media.clone()))
-				{
-					return Some((kind, name));
-				}
-				tokio::task::block_in_place(|| begin(&pad, &name, &caps));
-				(pad, owned)
-			}
-		};
-		// Stop flushes only the pads it finds, and this one may have been added just after, while
-		// this pump's cancel is still on its way. Flushing it here keeps a push from blocking stop.
-		if *shutdown.borrow() {
-			let _ = pad.set_active(false);
-		}
-
-		let mut sent_segment = false;
 		loop {
-			tokio::select! {
-				// This rendition is being torn down (its run ended, or a catalog update replaced it). An
-				// end that arrived alongside still finishes the track, or the replacement waiting for
-				// this pad would replay it.
-				_ = cancel.changed() => {
-					if ended(&mut track) {
-						finished.lock().unwrap().insert(((kind, name.clone()), media));
-					}
-					return None;
+			// A delisted rendition drained the instance it read, and follows no other.
+			if owned.is_some() && !state.is_listed() {
+				return Some((kind, name));
+			}
+			let broadcast = match next.take() {
+				Some(broadcast) => broadcast,
+				None => tokio::select! {
+					_ = cancel.changed() => return None,
+					_ = listed.wait_for(|listed| !listed), if owned.is_some() => return Some((kind, name)),
+					followed = follow.next() => match followed {
+						Ok(moq_mux::follow::Event::Start(broadcast)) => broadcast,
+						Ok(moq_mux::follow::Event::End) => continue,
+						Err(err) => {
+							gst::warning!(CAT, "rendition {name} lost its broadcast: {err:?}");
+							return Some((kind, name));
+						}
+					},
+				},
+			};
+
+			// An instance that already played this track to its end on the pad would replay its
+			// last group. A sibling waits for the next instance; the catalog's own has no other.
+			if finished.contains(&played, &broadcast) {
+				match sibling {
+					true => continue,
+					false => return None,
 				}
-				frame = track.read() => match frame {
-					Ok(Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. })) => {}
-					Ok(Some(moq_mux::container::Read::Frame { frame, .. })) => {
-						let buffer = match build_buffer(frame, kind) {
-							Ok(buffer) => buffer,
-							Err(err) => {
-								if let Some(obj) = element.upgrade() {
-									gst::element_error!(obj, gst::StreamError::Format, ("track {name} has an invalid timestamp"), ["{err:#}"]);
+			}
+
+			// Resolves once the publisher answers, with the track info or with an error (which is
+			// what ending a broadcast produces for a name nobody served). A publisher that answers
+			// neither leaves this waiting, so racing `cancel` keeps such a pump reapable, and
+			// holding the wait here rather than in `reconcile` keeps it off every other
+			// rendition.
+			let subscribed = tokio::select! {
+				_ = cancel.changed() => return None,
+				followed = follow.next() => match followed {
+					Ok(moq_mux::follow::Event::Start(broadcast)) => Err(Stopped::Restart(broadcast)),
+					Ok(moq_mux::follow::Event::End) => Err(Stopped::Idle),
+					Err(err) => {
+						gst::warning!(CAT, "rendition {name} lost its broadcast: {err:?}");
+						return Some((kind, name));
+					}
+				},
+				subscriber = async {
+					broadcast
+						.track(&media.name)?
+						.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+						.await
+				} => match subscriber {
+					Ok(subscriber) => Ok(subscriber),
+					// The instance went while subscribing: that is its end, not this rendition's.
+					Err(_) if sibling && broadcast.is_closed() => Err(Stopped::Idle),
+					Err(err) => {
+						gst::warning!(CAT, "track {name} failed to subscribe: {err:?}");
+						return Some((kind, name));
+					}
+				}
+			};
+			let subscriber = match subscribed {
+				Ok(subscriber) => subscriber,
+				Err(stopped) => {
+					next = stopped.restart();
+					continue;
+				}
+			};
+			let container = match container.take() {
+				Some(container) => container,
+				None => match moq_mux::catalog::hang::Container::new(
+					&descriptor,
+					match kind {
+						TrackKind::Video => moq_mux::container::Kind::Video,
+						TrackKind::Audio => moq_mux::container::Kind::Audio,
+					},
+				) {
+					Ok(container) => container,
+					Err(err) => {
+						gst::warning!(CAT, "rendition {name} has an unsupported container: {err:?}");
+						return Some((kind, name));
+					}
+				},
+			};
+			let mut track = moq_mux::container::Consumer::new(subscriber, container);
+			let timeline = match sibling {
+				true => siblings.timeline(&broadcast, &run),
+				false => run.clone(),
+			};
+
+			let pad = match &owned {
+				// Another instance on the pad this pump owns: a new stream.
+				Some((pad, _)) => {
+					tokio::task::block_in_place(|| begin(pad, &name, &caps));
+					pad.clone()
+				}
+				None => {
+					// Winning this is what earns a pad. Losing means a teardown got here while the
+					// subscription was still resolving (this rendition was removed, reshaped, or
+					// outlived by a closing catalog), and it must not publish a pad at all: the
+					// watch alone can't say that, since a cancel landing just after we read it
+					// would leave a pad exposed and then yanked without an EOS.
+					if !state.go_live() {
+						return None;
+					}
+
+					// A pad appears only once its track is live, so a pad downstream can link to is a
+					// promise that the rendition is actually flowing, and only a rendition that gets
+					// this far claims a pad id. A kept pad starts a new stream on it, with caps pushed
+					// even when they differ, so a format downstream can't take fails loudly as
+					// not-negotiated rather than going quiet.
+					let (pad, guard) = match pads.claim(&element, (kind, name.clone()), &cancel)? {
+						Claim::New(pad, owned) => {
+							let obj = element.upgrade()?;
+							pad.set_active(true).ok()?;
+							begin(&pad, &name, &caps);
+							obj.add_pad(&pad).ok()?;
+							(pad, owned)
+						}
+						Claim::Kept(pad, owner) => {
+							let guard = tokio::select! {
+								biased;
+								_ = cancel.changed() => return None,
+								guard = owner.lock_owned() => guard,
+							};
+							// The pump this one replaces records its track as finished before letting
+							// go, so a replacement started while it was reading the end (a reshape)
+							// can't replay it. A sibling holds the pad for its next instance.
+							if finished.contains(&played, &broadcast) {
+								if !sibling {
+									return Some((kind, name));
 								}
-								return Some((kind, name));
+								owned = Some((pad, guard));
+								continue;
 							}
-						};
-						let segment = (!sent_segment).then(|| {
-							let base = element.upgrade().and_then(|obj| obj.current_running_time()).unwrap_or(gst::ClockTime::ZERO);
-							sent_segment = true;
-							gst::event::Segment::new(timeline.segment(buffer.pts().unwrap(), base))
-						});
-						// pad.push() blocks until downstream accepts the buffer (full queues, a
-						// clock-synced sink). block_in_place hands our sibling tasks to another
-						// worker so a stalled downstream can't pin a runtime thread and starve
-						// the session loop or other pumps.
-						let pushed = tokio::task::block_in_place(|| {
-							if let Some(segment) = segment {
-								pad.push_event(segment);
-							}
-							pad.push(buffer)
-						});
-						match pushed {
-							Ok(_) => {}
-							Err(gst::FlowError::NotNegotiated) => {
-								if let Some(obj) = element.upgrade() {
-									gst::element_error!(obj, gst::StreamError::Format, ("track {name} was not negotiated"), ["caps {caps}"]);
+							tokio::task::block_in_place(|| begin(&pad, &name, &caps));
+							(pad, guard)
+						}
+					};
+					// Stop flushes only the pads it finds, and this one may have been added just
+					// after, while this pump's cancel is still on its way. Flushing it here keeps a
+					// push from blocking stop.
+					if *shutdown.borrow() {
+						let _ = pad.set_active(false);
+					}
+					owned = Some((pad.clone(), guard));
+					pad
+				}
+			};
+
+			let mut sent_segment = false;
+			let stopped = loop {
+				tokio::select! {
+					// This rendition is being torn down (its run ended, or a catalog update replaced
+					// it). An end that arrived alongside still finishes the track, or the replacement
+					// waiting for this pad would replay it.
+					_ = cancel.changed() => {
+						if ended(&mut track) {
+							finished.insert(&played, &broadcast);
+						}
+						return None;
+					}
+					followed = follow.next() => match followed {
+						Ok(moq_mux::follow::Event::Start(broadcast)) => break Stopped::Restart(broadcast),
+						Ok(moq_mux::follow::Event::End) => break Stopped::Idle,
+						Err(err) => {
+							gst::warning!(CAT, "rendition {name} lost its broadcast: {err:?}");
+							return Some((kind, name));
+						}
+					},
+					frame = track.read() => match frame {
+						Ok(Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. })) => {}
+						Ok(Some(moq_mux::container::Read::Frame { frame, .. })) => {
+							let buffer = match build_buffer(frame, kind) {
+								Ok(buffer) => buffer,
+								Err(err) => {
+									if let Some(obj) = element.upgrade() {
+										gst::element_error!(obj, gst::StreamError::Format, ("track {name} has an invalid timestamp"), ["{err:#}"]);
+									}
+									return Some((kind, name));
 								}
-								return Some((kind, name));
+							};
+							let segment = (!sent_segment).then(|| {
+								let base = element.upgrade().and_then(|obj| obj.current_running_time()).unwrap_or(gst::ClockTime::ZERO);
+								sent_segment = true;
+								gst::event::Segment::new(timeline.segment(buffer.pts().unwrap(), base))
+							});
+							// pad.push() blocks until downstream accepts the buffer (full queues, a
+							// clock-synced sink). block_in_place hands our sibling tasks to another
+							// worker so a stalled downstream can't pin a runtime thread and starve
+							// the session loop or other pumps.
+							let pushed = tokio::task::block_in_place(|| {
+								if let Some(segment) = segment {
+									pad.push_event(segment);
+								}
+								pad.push(buffer)
+							});
+							match pushed {
+								Ok(_) => {}
+								Err(gst::FlowError::NotNegotiated) => {
+									if let Some(obj) = element.upgrade() {
+										gst::element_error!(obj, gst::StreamError::Format, ("track {name} was not negotiated"), ["caps {caps}"]);
+									}
+									return Some((kind, name));
+								}
+								Err(_) => return Some((kind, name)),
 							}
-							Err(_) => return Some((kind, name)),
+						}
+						// A sibling's track stopping with its instance is that instance's end, which
+						// idles the pad for the next one rather than ending the rendition.
+						Ok(None) | Err(_) if sibling && broadcast.is_closed() => break Stopped::Idle,
+						// A listed sibling's track finishing ends it for this instance only: the pad
+						// idles for the next instance, and the record keeps a reshape on this one
+						// from replaying it.
+						Ok(None) if sibling && state.is_listed() => {
+							finished.insert(&played, &broadcast);
+							break Stopped::Idle;
+						}
+						Ok(None) => {
+							// Recorded while this pump still owns the pad, before any replacement can claim it.
+							finished.insert(&played, &broadcast);
+							return Some((kind, name));
+						}
+						Err(err) => {
+							gst::warning!(CAT, "track {name} failed: {err:?}");
+							return Some((kind, name));
 						}
 					}
-					Ok(None) => {
-						// Recorded while this pump still owns the pad, before any replacement can claim it.
-						finished.lock().unwrap().insert(((kind, name.clone()), media));
-						return Some((kind, name));
-					}
-					Err(err) => {
-						gst::warning!(CAT, "track {name} failed: {err:?}");
-						return Some((kind, name));
-					}
 				}
+			};
+			match &stopped {
+				Stopped::Restart(_) => gst::info!(CAT, "rendition {name} restarts on a new instance"),
+				Stopped::Idle => gst::info!(CAT, "rendition {name} is offline, holding its pad"),
 			}
+			next = stopped.restart();
+		}
+	}
+}
+
+impl Stopped {
+	/// The instance to restart on, if any.
+	fn restart(self) -> Option<moq_net::broadcast::Consumer> {
+		match self {
+			Stopped::Restart(broadcast) => Some(broadcast),
+			Stopped::Idle => None,
 		}
 	}
 }
@@ -1470,9 +1700,10 @@ fn opus_caps(config: &hang::catalog::AudioConfig, rate: i32, channels: i32) -> R
 
 #[cfg(test)]
 mod tests {
-	use super::{PumpState, Timeline, ended, plan_reconcile};
+	use super::{PumpState, Siblings, Timeline, ended, plan_reconcile};
 	use moq_net::Timestamp;
 	use std::collections::HashMap;
+	use std::sync::Arc;
 
 	/// A pump cancelled as its track ends records the end only when no media is left to read,
 	/// passing over the markers a publisher closes with.
@@ -1602,6 +1833,33 @@ mod tests {
 		let plan = plan_reconcile(&desired, &HashMap::new());
 		assert!(plan.remove.is_empty());
 		assert_eq!(sorted(plan.add), vec!["a", "b"]);
+	}
+
+	/// Renditions on the same sibling instance share its timeline, whenever each starts on it:
+	/// the first instance shares the run's, and the next one starts another.
+	#[tokio::test(start_paused = true)]
+	async fn renditions_on_one_sibling_instance_share_its_timeline() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let consumer = origin.consume();
+		let mut audio = moq_mux::follow::Instances::new(&consumer, "source", None).unwrap();
+		let started = async |follow: &mut moq_mux::follow::Instances| match follow.next().await.unwrap() {
+			moq_mux::follow::Event::Start(broadcast) => broadcast,
+			moq_mux::follow::Event::End => panic!("expected a start"),
+		};
+		let (siblings, run) = (Siblings::default(), Arc::<Timeline>::default());
+
+		let _first = origin.publish("source", Default::default()).unwrap();
+		let first = started(&mut audio).await;
+		assert!(Arc::ptr_eq(&run, &siblings.timeline(&first, &run)));
+
+		// A video rendition that first starts on the replacement, as one still subscribing when it
+		// took over does, shares its timeline with the audio rendition restarting onto it.
+		let _second = origin.publish("source", Default::default()).unwrap();
+		let mut video = moq_mux::follow::Instances::new(&consumer, "source", None).unwrap();
+		let next = siblings.timeline(&started(&mut video).await, &run);
+		assert!(!Arc::ptr_eq(&run, &next), "another instance has its own timeline");
+		assert!(Arc::ptr_eq(&next, &siblings.timeline(&started(&mut audio).await, &run)));
 	}
 
 	#[test]
@@ -2708,6 +2966,13 @@ mod session_tests {
 			publisher
 		}
 
+		/// The `cam` broadcast a rendition of `room` references as `./cam`, under `route`.
+		fn sibling(origin: &moq_net::origin::Producer, route: moq_net::origin::Route) -> Self {
+			let publisher = Self::build(origin.create_broadcast("cam").unwrap(), video_rendition());
+			publisher.broadcast.announce(route).unwrap();
+			publisher
+		}
+
 		/// A broadcast at no path, for a covering route to serve.
 		fn standalone(config: VideoConfig) -> Self {
 			Self::build(moq_net::broadcast::Info::new().produce(), config)
@@ -2857,15 +3122,20 @@ mod session_tests {
 			kind: super::TrackKind::Video,
 			name: "video".into(),
 			caps: gst::Caps::new_empty_simple("video/x-h264"),
-			binding: moq_mux::Binding::new(publisher.broadcast.consume()),
+			follow: moq_mux::Source::new(origin().consume(), publisher.broadcast.consume())
+				.follow(None, None)
+				.unwrap(),
+			sibling: false,
 			track: super::Track {
 				broadcast: None,
 				name: "video".into(),
 			},
 			container: moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+			descriptor: Container::Legacy,
 			pads: Pads::default(),
 			timeline: std::sync::Arc::default(),
-			finished: std::sync::Arc::default(),
+			siblings: super::Siblings::default(),
+			finished: super::Finished::default(),
 			state: std::sync::Arc::new(super::PumpState::new()),
 			cancel,
 			shutdown,
@@ -3114,6 +3384,301 @@ mod session_tests {
 
 		stop(session);
 		handler.abort();
+		recorder.assert_one_pad_held();
+	}
+
+	/// A `room` whose video rendition references the `cam` sibling, naming `epoch` when given.
+	fn referencing(origin: &moq_net::origin::Producer, epoch: Option<moq_net::Epoch>) -> Publisher {
+		let mut config = video_rendition();
+		config.broadcast = Some("./cam".into());
+		config.epoch = epoch;
+		Publisher::new(origin, Default::default(), config)
+	}
+
+	/// A sibling announced after the catalog starts its rendition, its end holds the pad, and its
+	/// return starts a new stream on that pad.
+	#[test]
+	fn a_late_sibling_starts_its_rendition_and_returns_after_an_end() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let _room = referencing(&origin, None);
+		let session = follow(&element, &origin);
+
+		let mut first = Publisher::sibling(&origin, Default::default());
+		let pad = recorder.written(&mut first, 1);
+		let mut follow = origin.consume().follow("cam").unwrap();
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		drop(first);
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+
+		let mut second = Publisher::sibling(&origin, Default::default());
+		assert_eq!(recorder.written(&mut second, 2), pad, "the return moved to another pad");
+		stop(session);
+
+		assert!(
+			recorder.seen().contains(&Seen::Start(pad)),
+			"no new stream on the kept pad"
+		);
+		recorder.assert_one_pad_held();
+	}
+
+	/// A sibling track finishing while its instance stays up idles the pad, and the instance that
+	/// replaces it starts a new stream there.
+	#[test]
+	fn a_finished_sibling_track_returns_on_the_next_instance() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let _room = referencing(&origin, None);
+		let session = follow(&element, &origin);
+
+		let mut first = Publisher::sibling(&origin, Default::default());
+		let pad = recorder.written(&mut first, 1);
+		first.video.finish().unwrap();
+		let mut second = Publisher::sibling(&origin, Default::default());
+		assert_eq!(
+			recorder.written(&mut second, 2),
+			pad,
+			"the next instance moved to another pad"
+		);
+		stop(session);
+
+		assert!(!recorder.seen().contains(&Seen::Eos(pad)), "the finish ended the pad");
+		recorder.assert_one_pad_held();
+		drop(first);
+	}
+
+	/// Block until `publisher`'s video track reads to its end, as a pump reading it does.
+	fn await_finished(publisher: &Publisher) {
+		let broadcast = publisher.broadcast.consume();
+		super::RUNTIME.block_on(async {
+			let finished = async {
+				let subscriber = broadcast
+					.track("video")
+					.unwrap()
+					.subscribe(moq_net::track::Subscription::default())
+					.await
+					.unwrap();
+				let mut track = moq_mux::container::Consumer::new(
+					subscriber,
+					moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+				);
+				while track.read().await.unwrap().is_some() {}
+			};
+			tokio::time::timeout(Duration::from_secs(10), finished)
+				.await
+				.expect("the track never finished");
+		});
+	}
+
+	/// A sibling track that finished stays finished for its instance only: a catalog update that
+	/// replaces the idle pump, here a disable and an enable, still plays the next instance.
+	#[test]
+	fn a_reenabled_sibling_rendition_plays_the_next_instance_after_a_finish() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let mut room = referencing(&origin, None);
+		let _audio = room
+			.broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let session = follow(&element, &origin);
+
+		let mut first = Publisher::sibling(&origin, Default::default());
+		let pad = recorder.written(&mut first, 1);
+		first.video.finish().unwrap();
+		await_finished(&first);
+
+		// The catalog consumer only yields the newest snapshot, so the same update lists an audio
+		// rendition: its pad appearing proves the run acted on the disable.
+		{
+			let mut guard = room.catalog.modify().unwrap();
+			guard.video.renditions.get_mut("video").unwrap().enabled = false;
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+		await_pad(&element, "audio_");
+		room.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.get_mut("video")
+			.unwrap()
+			.enabled = true;
+
+		let mut second = Publisher::sibling(&origin, Default::default());
+		assert_eq!(
+			recorder.written(&mut second, 2),
+			pad,
+			"the next instance moved to another pad"
+		);
+		stop(session);
+
+		recorder.assert_one_pad_held();
+		drop(first);
+	}
+
+	/// A publisher handoff after a sibling track finished, the catalog naming the new instance's
+	/// epoch, plays that instance on the same pad.
+	#[test]
+	fn an_epoch_handoff_after_a_sibling_finish_plays_the_new_instance() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let (old, new) = (moq_net::Epoch::mint(), moq_net::Epoch::mint());
+		let mut room = referencing(&origin, Some(old.clone()));
+		let session = follow(&element, &origin);
+
+		let mut first = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(old));
+		let pad = recorder.written(&mut first, 1);
+		first.video.finish().unwrap();
+		await_finished(&first);
+
+		let mut second = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(new.clone()));
+		room.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.get_mut("video")
+			.unwrap()
+			.epoch = Some(new);
+		assert_eq!(
+			recorder.written(&mut second, 2),
+			pad,
+			"the new instance moved to another pad"
+		);
+		stop(session);
+
+		recorder.assert_one_pad_held();
+		drop(first);
+	}
+
+	/// A rendition delisted while its sibling is offline ends its idle pad, and the sibling's next
+	/// instance plays nothing on it.
+	#[test]
+	fn a_delisted_sibling_rendition_follows_no_later_instance() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let mut room = referencing(&origin, None);
+		let session = follow(&element, &origin);
+
+		let mut first = Publisher::sibling(&origin, Default::default());
+		let pad = recorder.written(&mut first, 1);
+		let mut follow = origin.consume().follow("cam").unwrap();
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		drop(first);
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+
+		room.catalog.modify().unwrap().video.renditions.clear();
+		for _ in 0..200 {
+			if recorder.seen().contains(&Seen::Eos(pad.clone())) {
+				break;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		assert!(
+			recorder.seen().contains(&Seen::Eos(pad.clone())),
+			"the idle pad never ended"
+		);
+
+		let mut second = Publisher::sibling(&origin, Default::default());
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		for _ in 0..10 {
+			second.write(2);
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		stop(session);
+
+		let seen = recorder.seen();
+		assert!(!seen.iter().any(|seen| matches!(seen, Seen::Buffer(_, 2))), "{seen:?}");
+	}
+
+	/// A sibling replaced while the old one stays up restarts a reference that names no epoch, on
+	/// the same pad, and nothing more from the old instance gets through.
+	fn sibling_restart(route: impl Fn() -> moq_net::origin::Route) {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let _room = referencing(&origin, None);
+		let mut old = Publisher::sibling(&origin, route());
+		let session = follow(&element, &origin);
+		let pad = recorder.written(&mut old, 1);
+
+		let mut new = Publisher::sibling(&origin, route());
+		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
+		old.write(1);
+		recorder.written(&mut new, 3);
+		stop(session);
+
+		let seen = recorder.seen();
+		let switched = seen
+			.iter()
+			.position(|seen| *seen == Seen::Buffer(pad.clone(), 2))
+			.unwrap();
+		assert!(
+			!seen[switched..].contains(&Seen::Buffer(pad.clone(), 1)),
+			"the replaced sibling kept playing: {seen:?}"
+		);
+		recorder.assert_one_pad_held();
+	}
+
+	#[test]
+	fn a_sibling_restart_switches_on_the_same_pad() {
+		sibling_restart(epoch);
+	}
+
+	#[test]
+	fn an_epochless_sibling_restart_switches_on_the_same_pad() {
+		sibling_restart(moq_net::origin::Route::default);
+	}
+
+	/// A reference naming its sibling's epoch never reads the instance replacing it: the pad
+	/// idles, and plays again once the named instance serves the path again.
+	#[test]
+	fn a_sibling_restart_idles_a_reference_naming_the_old_epoch() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let named = moq_net::Epoch::mint();
+		let _room = referencing(&origin, Some(named.clone()));
+		let mut old = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(named));
+		let session = follow(&element, &origin);
+		let pad = recorder.written(&mut old, 1);
+
+		let mut follow = origin.consume().follow("cam").unwrap();
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		let mut new = Publisher::sibling(&origin, epoch());
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::announce::Event::Restart(_))
+		});
+		new.write(2);
+		drop(new);
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::announce::Event::Restart(_))
+		});
+
+		assert_eq!(
+			recorder.written(&mut old, 3),
+			pad,
+			"the named instance moved to another pad"
+		);
+		stop(session);
+		assert!(
+			!recorder.seen().contains(&Seen::Buffer(pad, 2)),
+			"another epoch played: {:?}",
+			recorder.seen()
+		);
 		recorder.assert_one_pad_held();
 	}
 
