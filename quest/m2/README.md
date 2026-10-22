@@ -222,3 +222,4 @@ ranked just below deterministic TS legs, which it requires.
 - [Test cost audit](/quest/m2/audit-test-cost.md) - the slowest, flakiest, and least valuable tests are fixed, deleted, or planned once the release ships
 
 - [Quest tree audit](/quest/m2/audit-quests.md) - repeat the whole-tree audit after the release ships, against the m1 baseline
+- [CI workflow audit](/quest/m2/audit-ci.md) - repeat the per-workflow and per-job review after the release ships, against the m1 baselines
