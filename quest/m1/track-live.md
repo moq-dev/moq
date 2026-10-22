@@ -1,31 +1,31 @@
-# [M] A reader can tell when its track is live
+# [XS] Mark the publishers' live edge as passthrough
 
 ## Goal
 
-A track reader in moq-net and `@moq/net` can wait for, and check, whether its
-track's feed is live: a local producer from the start, a relay's copy once its
-upstream subscription answers. A player uses it to skip the old cached groups
-a warm copy serves while it waits for a fresh upstream subscription, instead
-of rendering them.
+The built-in publishers' live-edge reads stay private and carry
+`// private: passthrough` instead of a `pending` marker naming this quest:
+`track::Subscriber::poll_live` and `latest_sequence` on
+`track::{Producer,Consumer,Subscriber}` in Rust, and `wire.ts`
+`Broadcast.largest`, `hooks.latestSequence`, and `hooks.bufferedLargest` in JS.
+`sh/rs/model-markers.py` passes with no marker naming this quest.
 
 ## Plan
 
-`largest()` already waits for live internally (#5924), so it never reports
-what an ended feed left; this quest makes the signal itself public.
+Settled by the maintainer on 2026-10-22 (moq-dev/moq#6278):
 
-- Rust has the state: `TrackState::feed` (`Live`, `Idle`, `Answered`) and
-  `readable()` in `rs/moq-net/src/model/track.rs`, the crate-private
-  `resume` `poll_live`, and the crate-private `Producer::is_live`. Expose one
-  reader-side `poll_live`/`live()` (or `is_live`) on `track::Subscriber` and
-  `track::Ordered`, and decide whether the publishers' crate-private
-  `poll_live` folds into it (see
-  [Public serving](/quest/m1/public-model/serve.md)).
-- JS has no equivalent: a track never goes idle, so its reader is live from
-  the start. Mirror the name, and the idle state if JS gains warm copies.
-- Decide what a reader does with groups served before live: keep serving
-  them (today) and let the caller skip by the signal, or offer a mode that
-  starts at the live edge.
+- ✅ No public live signal. A reader gets nothing from an idle copy's cache
+  until the route's answer shows, `Range::live()` and other relative starts
+  resolve against the live feed rather than what an ended feed left (#6278),
+  and `largest()` waits out an idle copy (#5924).
+- ✅ The publishers' buffered edge stays private as passthrough: it is a
+  wire-answer detail (SUBSCRIBE_OK, TRACK_STATUS Largest), and a custom
+  publisher answers with `largest()`.
+- ✅ Groups cached before live are never served while idle; once live, a
+  reader gets what its ranges and max delay hold, as on a cold relay.
 
-## Related
+Public serving re-marks these items as pending on this quest, so apply the
+markers once it lands.
 
-- [Public serving](/quest/m1/public-model/serve.md) - the publishers' `poll_live` and the `largest()` decision
+## Required
+
+- [Public serving](/quest/m1/public-model/serve.md) - moves the publishers' live-edge markers onto this quest
