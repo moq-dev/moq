@@ -8,7 +8,7 @@ recorded in the [epic](/quest/m1/release-perf/README.md).
 
 ## Plan
 
-[PR #6296](https://github.com/moq-dev/moq/pull/6296) removes an accidental
+[PR #6296](https://github.com/moq-dev/moq/pull/6296) removed an accidental
 retained-history scan on accepted untimed tracks. Unknown metadata still checks
 buffered timestamps, and timed and wall-clock expiry keep their behavior. A
 retained-groups x publishers x readers benchmark runs in Chromium and nightly.
@@ -29,9 +29,10 @@ main that release lacks, but that does not establish every remaining gap as
 intended cost. Lite and some batched IETF rows remain above release, with noisy
 A/A controls. Do not call parity complete or accept those gaps implicitly.
 
-Remaining work, pending the draft PR's decision:
+Decided 2026-10-22: land the scoped scan fix and its browser sweep in
+[PR #6296](https://github.com/moq-dev/moq/pull/6296), without accepting the
+remaining gap, which is unattributed and noisy. This quest stays open for:
 
-- Land the independently useful untimed scan fix and permanent browser sweep.
 - Attribute the remaining stable release gaps, then fix accidental cost or ask
   the maintainer to accept the intended feature cost with a reason in the epic.
 - Re-run the browser comparison after the other release-perf children land.
