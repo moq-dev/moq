@@ -125,16 +125,15 @@ impl Drop for Subscribed {
 	}
 }
 
-/// The subscription parameters a PUBLISH subscription has, starting from those of the
-/// SUBSCRIBE_TRACKS that made it (draft-19 section 10.19.1) and moved by each update.
+/// Subscription parameters retained across pauses and moved by each accepted update.
 #[derive(Clone, Copy)]
-struct Params {
-	priority: u8,
-	order: Option<GroupOrder>,
-	filter: Filter,
-	max_age: Option<u64>,
+pub(super) struct Params {
+	pub(super) priority: u8,
+	pub(super) order: Option<GroupOrder>,
+	pub(super) filter: Filter,
+	pub(super) max_age: Option<u64>,
 	/// NEW_GROUP_REQUEST, applied on the first resume.
-	new_group: Option<u64>,
+	pub(super) new_group: Option<u64>,
 }
 
 /// The listed tracks a request answers with PUBLISH_SKIPPED and has not sent yet, keyed by
@@ -176,28 +175,28 @@ struct Listed {
 	params: Params,
 }
 
-/// How a paused PUBLISH subscription resumes forwarding.
-struct Resume {
+/// How a paused subscription resumes forwarding.
+pub(super) struct Resume {
 	/// FILL_PARAMETERS (draft-20+) for the objects before the join.
 	fill: Option<ietf::Fill>,
 	/// NEW_GROUP_REQUEST, counted as a join as on a SUBSCRIBE.
 	new_group: Option<u64>,
 	/// Whether a REQUEST_UPDATE asked for it, which the join's REQUEST_OK answers.
-	answer: bool,
+	answer: Option<RequestId>,
 }
 
-/// What ended a paused PUBLISH subscription's wait.
+/// What ended a paused subscription's wait.
 enum Wait {
 	/// The subscriber's REQUEST_UPDATE.
 	Update(super::super::request_stream::Update),
-	/// The track is no longer listed.
-	Removed,
-	/// Our grant stopped covering the track.
-	Revoked,
 	/// The subscriber cancelled, or the session ended.
 	Cancelled,
 	/// The request stream failed.
 	Failed(Error),
+	/// A pending request-token renewal resolved.
+	Renewal(request_update::Verdict),
+	/// A paused SUBSCRIBE observed the track ending without demanding it.
+	Ended(Result<(), Error>),
 }
 
 impl<S> Publisher<S>
@@ -853,7 +852,7 @@ where
 					(ok.forward && !Filter::is_draft20(self.version)).then(|| Resume {
 						fill: None,
 						new_group: new_group.take(),
-						answer: false,
+						answer: None,
 					})
 				}
 				_ => return Err(goaways.failed(Error::UnexpectedMessage)),
@@ -865,91 +864,133 @@ where
 			return self.write_publish_done(stream, request_id, done, 0).await;
 		}
 
-		// Group streams opened over every time the subscription forwarded, which
-		// PUBLISH_DONE counts.
-		let mut opened = 0;
-		// What to resume with, and whether an update asked for it: a forwarding PUBLISH_OK
-		// resumes at once, with no update to answer.
-		let mut resume: Option<Resume> = resume;
-		let done = loop {
+		params.new_group = new_group;
+		let mut state = Forwarding {
+			ended: track.clone(),
+			track,
+			namespace,
+			params,
+			dynamic,
+			join: join.as_ref(),
+			grant: None,
+			published: true,
+			opened: Default::default(),
+			renewal: Renewal::default(),
+		};
+		let running = self.run_pausable(&mut stream, request_id, &mut state, resume, &mut finished, &mut goaways);
+		let done = crate::auth::until(running, |waiter| {
+			if gate.poll_denied(waiter).is_ready() {
+				return Poll::Ready(Error::Unauthorized.into());
+			}
+			listed.poll_closed(waiter).map(|()| Error::Cancel.into())
+		})
+		.await;
+		let done = match done {
+			Ok(Some(done)) => done,
+			Ok(None) => return Ok(()),
+			Err(refusal) if matches!(refusal.error, Error::Cancel) => unlisted(),
+			Err(refusal) => Served::Track(Err(refusal.error)),
+		};
+		let opened = state.opened.load(Ordering::Relaxed);
+		drop(state);
+		drop(join);
+		self.write_publish_done(stream, request_id, done, opened).await
+	}
+
+	/// Forward and pause either kind of subscription without holding demand while idle.
+	pub(super) async fn run_pausable(
+		&self,
+		stream: &mut Stream<S, Version>,
+		request_id: RequestId,
+		state: &mut Forwarding<'_, S>,
+		mut resume: Option<Resume>,
+		finished: &mut bool,
+		goaways: &mut super::super::request_stream::Messages<S>,
+	) -> Option<Served> {
+		let mut session = self.session.clone();
+		loop {
 			if let Some(how) = resume.take() {
 				match self
-					.resume_publish(
-						&mut stream,
-						&track,
-						&namespace,
-						request_id,
-						&mut params,
-						how,
-						dynamic,
-						join.as_ref(),
-						&listed,
-						&mut gate,
-						&mut finished,
-						&mut goaways,
-						&mut opened,
-					)
+					.resume_subscription(stream, request_id, state, how, finished, goaways)
 					.await
 				{
-					Ok(Served::Paused) => {
-						self.pause_join(join.as_ref());
-						self.write_request_ok(&mut stream.writer, request_id, None).await?;
-						// Unlisted while it forwarded: it ends now that it is idle.
-						if listed.is_closed() {
-							break unlisted();
+					Ok(Served::Paused(rid)) => {
+						if let Err(err) = self.answer_pause(&mut stream.writer, state, rid).await {
+							return Some(Served::Track(Err(err)));
 						}
 						continue;
 					}
-					Ok(served) => break served,
+					Ok(served) => return Some(served),
 					// Cancelled by the subscriber, or the session ended.
-					Err(()) => return Ok(()),
+					Err(()) => return None,
 				}
 			}
 
-			let wait = kio::wait(|waiter| {
-				let mut cx = waiter.context();
-				if session.poll_closed(&mut cx).is_ready() || stream.writer.poll_closed(&mut cx).is_ready() {
-					return Poll::Ready(Wait::Cancelled);
-				}
-				if gate.poll_denied(waiter).is_ready() {
-					return Poll::Ready(Wait::Revoked);
-				}
-				if listed.poll_closed(waiter).is_ready() {
-					return Poll::Ready(Wait::Removed);
-				}
-				match ready!(self.poll_update(&mut stream, &mut finished, &mut goaways, &mut cx)) {
-					UpdateRead::Update(update) => Poll::Ready(Wait::Update(update)),
-					UpdateRead::Cancelled => Poll::Ready(Wait::Cancelled),
-					UpdateRead::Malformed(err) => {
-						if super::super::subscriber::is_protocol_violation(&err) {
-							self.session.clone().close(
-								super::super::error::to_session_code(&crate::SessionError::from(&err)),
-								&err.to_string(),
-							);
-						}
-						Poll::Ready(Wait::Failed(err))
+			let wait = if let Some(update) = state.renewal.next() {
+				Wait::Update(update)
+			} else {
+				kio::wait(|waiter| {
+					let mut cx = waiter.context();
+					if session.poll_closed(&mut cx).is_ready() || stream.writer.poll_closed(&mut cx).is_ready() {
+						return Poll::Ready(Wait::Cancelled);
 					}
-					UpdateRead::Failed(err) => Poll::Ready(Wait::Failed(err)),
-				}
-			})
-			.await;
+					if !state.published
+						&& let Poll::Ready(ended) = state.ended.poll_complete(waiter)
+					{
+						return Poll::Ready(Wait::Ended(ended));
+					}
+					if let Poll::Ready(verdict) = state.renewal.poll(waiter) {
+						return Poll::Ready(Wait::Renewal(verdict));
+					}
+					match ready!(self.poll_subscription_update(stream, finished, goaways, &mut cx)) {
+						UpdateRead::Update(update) => Poll::Ready(Wait::Update(update)),
+						UpdateRead::Cancelled => Poll::Ready(Wait::Cancelled),
+						UpdateRead::Malformed(err) => {
+							if super::super::subscriber::is_protocol_violation(&err) {
+								self.session.clone().close(
+									super::super::error::to_session_code(&crate::SessionError::from(&err)),
+									&err.to_string(),
+								);
+							}
+							Poll::Ready(Wait::Failed(err))
+						}
+						UpdateRead::Failed(err) => Poll::Ready(Wait::Failed(err)),
+					}
+				})
+				.await
+			};
 
 			let update = match wait {
 				Wait::Update(update) => update,
-				Wait::Removed => break unlisted(),
-				Wait::Revoked => {
-					tracing::info!(broadcast = %absolute, track = %name, "publish no longer authorized");
-					break Served::Track(Err(Error::Unauthorized));
+				Wait::Ended(ended) => return Some(Served::Track(ended)),
+				Wait::Renewal(verdict) => {
+					if let Err(done) = self
+						.answer_renewal(stream, state.grant.as_ref().expect("renewal grant"), verdict)
+						.await
+					{
+						return Some(done);
+					}
+					continue;
 				}
-				Wait::Cancelled => return Ok(()),
-				Wait::Failed(err) => break Served::Track(Err(err)),
+				Wait::Cancelled => return None,
+				Wait::Failed(err) => return Some(Served::Track(Err(err))),
 			};
+			if state.renewal.pending() {
+				if let Err(err) = state.renewal.queue(update, self.version) {
+					return Some(Served::Track(Err(match err {
+						request_update::Overflow::Session => request_update::too_many(&mut self.session.clone()),
+						request_update::Overflow::Request => Error::ProtocolViolation,
+					})));
+				}
+				continue;
+			}
 			// Refused like an update to any subscription: it fails, ending this one.
 			let refusal = match update.refused {
 				Some(Error::Decode(err)) => Some((super::super::token::reason(&err), Error::Decode(err))),
 				Some(Error::GoingAway) => Some(("going away", Error::GoingAway)),
 				Some(err) => Some(("REQUEST_UPDATE parameters not supported", err)),
 				None if update.authorization_token.is_some()
+					&& state.grant.is_none()
 					&& self.auth.token_decides(crate::auth::Direction::Publish) =>
 				{
 					Some((
@@ -957,7 +998,10 @@ where
 						Error::Unsupported,
 					))
 				}
-				None if update.new_group.is_some() && !dynamic => Some((
+				None if !state.published && (update.filter.is_some() || update.fill.is_some()) => {
+					Some(("REQUEST_UPDATE parameters not supported", Error::Unsupported))
+				}
+				None if update.new_group.is_some() && !state.dynamic => Some((
 					"NEW_GROUP_REQUEST on a track without DYNAMIC_GROUPS",
 					Error::Unsupported,
 				)),
@@ -973,37 +1017,47 @@ where
 			};
 			if let Some((reason, err)) = refusal {
 				self.write_subscribe_error(&mut stream.writer, update.request_id, &err, reason)
-					.await?;
-				break Served::UpdateFailed(Error::Unsupported);
+					.await
+					.ok()?;
+				return Some(Served::UpdateFailed(Error::Unsupported));
 			}
 			if let Some(priority) = update.priority {
-				params.priority = priority;
+				state.params.priority = priority;
 			}
 			if let Some(filter) = update.filter {
-				params.filter = filter;
+				state.params.filter = filter;
 			}
 			if let Some(max_age) = update.max_age {
-				params.max_age = Some(max_age);
+				state.params.max_age = Some(max_age);
 			}
+			let renewing = if let (Some(token), Some(grant)) = (update.authorization_token, &state.grant) {
+				state
+					.renewal
+					.verify(grant.verify_renewal(&self.auth, token.0), update.request_id);
+				true
+			} else {
+				false
+			};
 			match update.forward {
 				Some(true) => {
 					resume = Some(Resume {
 						fill: update.fill,
-						new_group: update.new_group.or(new_group.take()),
-						answer: true,
+						new_group: update.new_group.or(state.params.new_group.take()),
+						answer: (!renewing && self.version != Version::Draft14).then_some(update.request_id),
 					})
 				}
-				_ => self.write_request_ok(&mut stream.writer, request_id, None).await?,
+				_ if !renewing && self.version != Version::Draft14 => self
+					.write_request_ok(&mut stream.writer, update.request_id, None)
+					.await
+					.ok()?,
+				_ => {}
 			}
-		};
-
-		drop(join);
-		self.write_publish_done(stream, request_id, done, opened).await
+		}
 	}
 
 	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
 	/// unless the subscription forwards.
-	fn pause_join(&self, join: Option<&Join<GroupOf<S>>>) {
+	pub(super) fn pause_join(&self, join: Option<&Join<GroupOf<S>>>) {
 		if let Some(join) = join {
 			join.joins.lock().insert(join.request_id, Some(Joined::Empty));
 		}
@@ -1015,40 +1069,30 @@ where
 	async fn resume_failed(
 		&self,
 		stream: &mut Stream<S, Version>,
-		request_id: RequestId,
-		answer: bool,
+		answer: Option<RequestId>,
 		err: Error,
 	) -> Result<Served, ()> {
-		if !answer {
+		let Some(request_id) = answer else {
 			return Ok(Served::Track(Err(err)));
-		}
+		};
 		self.write_subscribe_error(&mut stream.writer, request_id, &err, "resume failed")
 			.await
 			.map_err(|_| ())?;
 		Ok(Served::UpdateFailed(err))
 	}
 
-	/// Forward a paused PUBLISH subscription from the cache with `params`, as a SUBSCRIBE
-	/// with them would be served, until it pauses again or ends. Answers the resuming update
-	/// with where the subscription now joins, when `answer` says one asked. `Err(())` when the
-	/// subscriber cancelled.
-	#[allow(clippy::too_many_arguments)]
-	async fn resume_publish(
+	/// Resume at the current live edge, answering the update that asked when present.
+	async fn resume_subscription(
 		&self,
 		stream: &mut Stream<S, Version>,
-		track: &track::Consumer,
-		namespace: &crate::PathOwned,
 		request_id: RequestId,
-		params: &mut Params,
+		state: &mut Forwarding<'_, S>,
 		how: Resume,
-		dynamic: bool,
-		join: Option<&Join<GroupOf<S>>>,
-		listed: &kio::Consumer<()>,
-		gate: &mut crate::auth::Gate,
 		finished: &mut bool,
 		goaways: &mut super::super::request_stream::Messages<S>,
-		opened: &mut u64,
 	) -> Result<Served, ()> {
+		let track = &state.track;
+		let params = &mut state.params;
 		let mut subscription = serving_subscription(params.priority);
 		if let Some(order) = params.order {
 			subscription = subscription.with_order(order.to_order());
@@ -1065,47 +1109,30 @@ where
 			}
 			.apply(&mut subscription);
 		}
-		// Setting up lasts only while the track is listed and the subscriber stays: a cold
-		// route may take a while to say where its live edge is.
+		// A cold route may take a while to resolve its live edge. The caller guards its
+		// authority and listing; the peer cancelling also releases the setup demand.
 		let mut subscribing = std::pin::pin!(track.subscribe(subscription.clone()));
 		let subscribed = kio::wait(|waiter| {
 			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
 				return Poll::Ready(Err(()));
 			}
-			if listed.poll_closed(waiter).is_ready() {
-				return Poll::Ready(Ok(None));
-			}
-			waiter
-				.poll_future(subscribing.as_mut())
-				.map(|subscribed| Ok(Some(subscribed)))
+			waiter.poll_future(subscribing.as_mut()).map(Ok)
 		})
 		.await?;
 		let mut subscriber = match subscribed {
-			Some(Ok(subscriber)) => subscriber,
-			Some(Err(err)) => return self.resume_failed(stream, request_id, how.answer, err).await,
-			None => {
-				return self
-					.resume_failed(stream, request_id, how.answer, Error::NotFound)
-					.await;
-			}
+			Ok(subscriber) => subscriber,
+			Err(err) => return self.resume_failed(stream, how.answer, err).await,
 		};
-		let live = kio::wait(|waiter| {
+		kio::wait(|waiter| {
 			if stream.writer.poll_closed(&mut waiter.context()).is_ready() {
 				return Poll::Ready(Err(()));
 			}
-			if listed.poll_closed(waiter).is_ready() {
-				return Poll::Ready(Ok(false));
-			}
-			subscriber.poll_live(waiter).map(|_| Ok(true))
+			subscriber.poll_live(waiter).map(|_| Ok(()))
 		})
 		.await?;
-		if !live {
-			return self
-				.resume_failed(stream, request_id, how.answer, Error::NotFound)
-				.await;
-		}
 
 		let edge = live_edge(track);
+		state.ended = track.serving().unwrap_or_else(|| track.clone());
 		let range = subscribe_range(params.filter, edge, self.version);
 		range.apply(&mut subscription);
 		let _ = subscriber.update(subscription);
@@ -1122,13 +1149,13 @@ where
 			timescale,
 		)
 		.ranked(self.priority.clone());
-		serve.pausable = true;
-		serve.dynamic = dynamic;
+		serve.opened = state.opened.clone();
+		serve.dynamic = state.dynamic;
 		if let Some(value) = how.new_group {
 			serve.request_new_group(value);
 		}
 
-		if let Some(join) = join {
+		if let Some(join) = state.join {
 			let joined = match (params.filter, edge.largest) {
 				(Filter::NextObject, Some(largest)) => Joined::Group {
 					end: Location {
@@ -1136,8 +1163,8 @@ where
 						object: largest.object + 1,
 					},
 					cache: track.clone(),
-					namespace: namespace.clone(),
-					token: false,
+					namespace: state.namespace.clone(),
+					token: state.grant.is_some(),
 					ranking: serve.ranking.clone(),
 				},
 				(Filter::NextObject, None) => Joined::Empty,
@@ -1150,9 +1177,9 @@ where
 			.filter(|_| Filter::is_draft20(self.version))
 			.map(|fill| fill_range(fill, params.filter, edge.largest));
 
-		if how.answer
+		if let Some(rid) = how.answer
 			&& self
-				.write_request_ok(&mut stream.writer, request_id, edge.largest)
+				.write_request_ok(&mut stream.writer, rid, edge.largest)
 				.await
 				.is_err()
 		{
@@ -1167,18 +1194,15 @@ where
 					self.run_fill(fill, &ranking, track.clone(), timescale, &streams).await;
 				}
 			};
-			let serving = self.run_subscription(stream, &mut serve, finished, goaways, fill, None);
-			// A track no longer listed ends its PUBLISH even while the track itself goes on,
-			// as when its broadcast's route is withdrawn.
-			crate::auth::until(serving, |waiter| {
-				if gate.poll_denied(waiter).is_ready() {
-					return Poll::Ready(Error::Unauthorized.into());
-				}
-				match listed.poll_closed(waiter) {
-					Poll::Ready(()) => Poll::Ready(Error::Cancel.into()),
-					Poll::Pending => Poll::Pending,
-				}
-			})
+			self.run_subscription_updates(
+				stream,
+				&mut serve,
+				finished,
+				goaways,
+				fill,
+				state.grant.clone(),
+				&mut state.renewal,
+			)
 			.await
 		};
 		// What an update changed while forwarding outlives a pause.
@@ -1186,25 +1210,21 @@ where
 		params.priority = crate::ietf::priority::to_wire(applied.priority);
 		params.max_age = applied.max_delay.as_millis().try_into().ok();
 		let served = match served {
-			Ok(Some(Served::Paused)) => Served::Paused,
-			Ok(Some(served)) => {
+			Some(Served::Paused(rid)) => Served::Paused(rid),
+			Some(served) => {
 				if matches!(served, Served::Track(Ok(()))) {
 					self.write_end_of_track(stream, &mut serve, finished, goaways).await;
 				}
 				served
 			}
-			Ok(None) => {
+			None => {
 				serve.close_groups();
-				*opened += serve.opened();
 				return Err(());
 			}
-			Err(refusal) if matches!(refusal.error, Error::Cancel) => unlisted(),
-			Err(refusal) => Served::Track(Err(refusal.error)),
 		};
 		// Forwarding stops here: PUBLISH_DONE, or the answer to the pause, follows the close
 		// of every data stream.
 		serve.close_groups();
-		*opened += serve.opened();
 		Ok(served)
 	}
 }

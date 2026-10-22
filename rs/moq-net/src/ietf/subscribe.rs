@@ -1672,8 +1672,7 @@ mod tests {
 		assert_eq!(encode_message(&msg, Version::Draft22), body);
 	}
 
-	/// FORWARD=0 is legal on every draft. It decodes so the request can be refused,
-	/// rather than closing the session.
+	/// FORWARD=0 is a valid paused request on every draft, never a session error.
 	#[test]
 	fn subscribe_decodes_forward_zero() {
 		for version in [
