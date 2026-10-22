@@ -485,7 +485,8 @@ impl<V: Serialize> Snapshot<V> {
 	///
 	/// A frame over the cache limit aborts the track with
 	/// [`moq_net::Error::FrameTooLarge`]: skipping it would leave readers on the
-	/// previous snapshot with no sign it stopped tracking.
+	/// previous snapshot with no sign it stopped tracking. A compressed frame
+	/// meets the same limit by its uncompressed size, which the encoder refuses.
 	fn update(&mut self, value: &Frame<V>) -> moq_json::Result<Option<usize>> {
 		if self.track.is_closed() {
 			return Ok(None);
@@ -498,18 +499,20 @@ impl<V: Serialize> Snapshot<V> {
 		{
 			self.encoder.reset();
 		}
-		let Some(frame) = self.encoder.update(value)? else {
-			return Ok(None);
+		let frame = match self.encoder.update(value) {
+			Ok(Some(frame)) if frame.payload.len() as u64 <= moq_net::group::MAX_CACHE_BYTES => frame,
+			Ok(None) => return Ok(None),
+			Ok(Some(_)) | Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge)) => {
+				let err = moq_net::Error::FrameTooLarge;
+				if let Some(group) = self.group.take() {
+					let _ = group.abort(err.clone());
+				}
+				let _ = self.track.clone().abort(err.clone());
+				return Err(err.into());
+			}
+			Err(err) => return Err(err),
 		};
 		let len = frame.payload.len();
-		if len as u64 > moq_net::group::MAX_CACHE_BYTES {
-			let err = moq_net::Error::FrameTooLarge;
-			if let Some(group) = self.group.take() {
-				let _ = group.abort(err.clone());
-			}
-			let _ = self.track.clone().abort(err.clone());
-			return Err(err.into());
-		}
 		if frame.keyframe {
 			if let Some(mut group) = self.group.take() {
 				group.finish()?;
@@ -1854,11 +1857,12 @@ mod tests {
 		}
 	}
 
-	/// A flavor whose frame outgrows the cache ends with `FrameTooLarge` instead
-	/// of leaving readers on its last snapshot, while its sibling, which DEFLATE
-	/// shrinks under the limit, keeps updating.
+	/// A frame that outgrows the cache ends both flavors with `FrameTooLarge`
+	/// instead of leaving readers on their last snapshot. DEFLATE shrinks the
+	/// `.z` frame under the limit, but a reader inflates it whole, so the
+	/// encoder holds it to the same budget by its uncompressed size.
 	#[tokio::test]
-	async fn oversized_frame_aborts_only_its_flavor() {
+	async fn oversized_frame_ends_both_flavors() {
 		use futures::FutureExt;
 		type Value = BTreeMap<String, u64>;
 
@@ -1898,17 +1902,12 @@ mod tests {
 
 		let huge = "a".repeat(moq_net::group::MAX_CACHE_BYTES as usize);
 		publish(&huge, 2);
-		assert!(matches!(
-			next(&mut plain),
-			Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge))
-		));
-		assert_eq!(next(&mut compressed).unwrap(), Some(Value::from([(huge, 2)])));
-
-		publish("small", 3);
-		assert_eq!(
-			next(&mut compressed).unwrap(),
-			Some(Value::from([("small".to_string(), 3)]))
-		);
+		for reader in [&mut plain, &mut compressed] {
+			assert!(matches!(
+				next(reader),
+				Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge))
+			));
+		}
 	}
 
 	/// Build an origin producer, spawning its driver on the ambient runtime.

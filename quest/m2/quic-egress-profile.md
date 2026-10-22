@@ -45,12 +45,18 @@ Then, only where the profile shows a cost:
   per-connection pacing. Measure on a real NIC as well as loopback, since
   `etf` needs hardware offload to be exact.
 
-Report CPU per Gbps, RSS, loss, and p99 latency via `just bench BASE` on
-Linux. The verdict names which levers ship and which qdisc, if any, relay
+Report CPU per Gbps, RSS, loss, and p99 latency on Linux: `just bench BASE`
+for tokio, and `just bench-runtime` at both revisions for the ring, since
+`just bench BASE` runs only tokio. The verdict names which levers ship and which qdisc, if any, relay
 hosts need.
+
+## Required
+
+- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the ring half of the profile
 
 ## Related
 
+- [Fragmented QUIC sends](/quest/m1/quic-send-fragments.md) - owns `SendBuffer::get`'s per-packet segment scan
 - [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - redesigns the transmit buffers the pool lever would feed
 - [#3201](/quest/m3/3201-moq-uring-use-sendmsg-zc-for-large-udp-gso-trains.md) -
   zero-copy on the same trains
