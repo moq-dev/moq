@@ -165,6 +165,7 @@ ts *args:
     python3 ./ts/holes.test.py
     python3 ./ts/passthrough.test.py
     python3 ./ts/klv.test.py
+    python3 ./ts/revision.test.py
     python3 ./ts/clockless.test.py
     ./ts/run.sh "$@"
 
