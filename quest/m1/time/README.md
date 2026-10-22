@@ -105,7 +105,6 @@ cleanup and the global lint ratchet belong to
 
 ## Required
 
-- [JS timers fire at their own deadlines](/quest/m1/time/js-deadlines.md) - `Manual.advance` (renamed from `advanceAsync`) steps to each deadline, sync `advance` becomes `jump`, and `Effect.interval` arms its first period synchronously
 - [Public wall times on moq_clock::Wall](/quest/m1/time/wall.md) - public `SystemTime`s become `moq_clock::Wall`, and the ratchets ban the type
 
 ## Related

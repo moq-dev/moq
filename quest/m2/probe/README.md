@@ -57,7 +57,7 @@ Decided with the maintainer on 2026-10-20:
   the only native backend with a probing hook; other native backends (iroh
   on noq, moq-quic under CUBIC) have no sender, keep `Report`, and never
   disable a rung. lite-07 reserves its stream
-  type before the cut ([lite-07 padding](/quest/m1/lite07-padding.md)), and
+  type before the cut (Padding Stream 0x2), and
   the sender stays here.
 - The JS publisher's rung disable split into its own quest here, since it
   probes with padding.

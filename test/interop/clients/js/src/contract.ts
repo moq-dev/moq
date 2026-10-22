@@ -77,6 +77,12 @@ export const TONE_FLOOR_DB = 15;
  */
 export const AUDIBLE_RMS = 0.02;
 
+/**
+ * The interop matrix's tone check, the in-page twin of `test/interop/tone.py`: each channel must
+ * carry at least this level and this share of its energy at its own tone. Keep the two in step.
+ */
+export const TONE_CHECK = { minRms: 0.05, minShare: 0.8 };
+
 /** Live instances of each resource the page's wrappers count. */
 export type Resources = {
 	/** Open `WebTransport` sessions, i.e. connections to the relay. */
@@ -156,6 +162,13 @@ export type Sample = {
 	noiseDb?: number;
 	/** Root mean square of the graph root's output over the analyser window. */
 	rms?: number;
+	/** The catalog's audio channel count. */
+	audioChannels?: number;
+	/**
+	 * Per channel of the graph root, when the page was given the expected tones: the channel's RMS
+	 * and the share of its energy at its own tone, over the last ~170ms it played.
+	 */
+	tones?: { rms: number; share: number }[];
 
 	/** `aria-label` of the primary control button: "Pause" while playing, "Play" while paused. */
 	controlLabel?: string;

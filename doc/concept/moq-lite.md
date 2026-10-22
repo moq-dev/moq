@@ -56,8 +56,8 @@ always a prefix. A service that serves only some of the paths beneath it
 refuses the rest as they are requested. Announcements are hints; the request is
 what decides.
 
-Inside a broadcast, a reader can list its tracks (moq-lite-07, Rust only so
-far): each track with its fixed properties, a synced mark, then tracks as they
+Inside a broadcast, a reader can list its tracks (moq-lite-07): each track
+with its fixed properties, a synced mark, then tracks as they
 come and go. Listing is discovery, not delivery: subscribe to each track you
 want, and its groups still cached upstream reach you late. A broadcast lists
 the tracks its publisher creates, never one served only on request, and a path
@@ -236,7 +236,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |
 | --- | --- |
-| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
+| **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 | **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |

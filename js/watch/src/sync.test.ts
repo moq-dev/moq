@@ -126,7 +126,7 @@ describe("wait", () => {
 	let restore: () => void;
 	beforeEach(() => {
 		const clock = new Manual();
-		clock.advance(Nano.fromMilli(Milli(1000)));
+		clock.jump(Nano.fromMilli(Milli(1000)));
 		restore = clock.install();
 	});
 	afterEach(() => restore());
@@ -213,7 +213,7 @@ describe("wait", () => {
 describe("recorded ingress", () => {
 	it("anchors and classifies using arrival rather than delayed delivery", async () => {
 		const clock = new Manual();
-		clock.advance(Nano.fromMilli(Milli(10_000)));
+		clock.jump(Nano.fromMilli(Milli(10_000)));
 		const restore = clock.install();
 		const sync = new Sync({ delay: Milli(100) });
 		try {
@@ -235,7 +235,7 @@ describe("skip floor", () => {
 	let restore: () => void;
 	beforeEach(() => {
 		clock = new Manual();
-		clock.advance(Nano.fromMilli(Milli(5000)));
+		clock.jump(Nano.fromMilli(Milli(5000)));
 		restore = clock.install();
 	});
 	afterEach(() => restore());
@@ -284,7 +284,7 @@ describe("skip floor", () => {
 		sync.received(Milli(0), "video", Milli(5000));
 
 		// Reordering held this audio for 200ms, so the new reference puts the playhead at 10.1s now.
-		clock.advance(Nano.fromMilli(Milli(200)));
+		clock.jump(Nano.fromMilli(Milli(200)));
 		sync.received(Milli(10_000), "audio", Milli(5000));
 		expect(sync.skipped(Milli(10_050))).toBe(true);
 		expect(sync.skipped(Milli(10_100))).toBe(false);

@@ -1050,10 +1050,10 @@ mod tests {
 			_cx: &mut std::task::Context<'_>,
 		) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
 			match self.uni.lock().unwrap().pop_front() {
-				Some(data) => std::task::Poll::Ready(Ok(FakeRecv {
+				Some(data) => std::task::Poll::Ready(Ok(crate::transport::poll::Buffered::new(FakeChunks {
 					data: data.into(),
 					stops: self.stops.clone(),
-				})),
+				}))),
 				None if self.close_code().is_some() => std::task::Poll::Ready(Err(FakeError)),
 				None => std::task::Poll::Pending,
 			}
@@ -1065,10 +1065,10 @@ mod tests {
 			match self.bi.lock().unwrap().pop_front() {
 				Some(data) => std::task::Poll::Ready(Ok((
 					FakeSend,
-					FakeRecv {
+					crate::transport::poll::Buffered::new(FakeChunks {
 						data: data.into(),
 						stops: self.stops.clone(),
-					},
+					}),
 				))),
 				None => std::task::Poll::Pending,
 			}
@@ -1150,31 +1150,27 @@ mod tests {
 		}
 	}
 
-	struct FakeRecv {
+	type FakeRecv = crate::transport::poll::Buffered<FakeChunks>;
+
+	struct FakeChunks {
 		data: VecDeque<u8>,
 		stops: Arc<Mutex<Vec<u32>>>,
 	}
-	impl crate::transport::poll::RecvStream for FakeRecv {
+	impl crate::transport::poll::Chunks for FakeChunks {
 		type Error = FakeError;
-		fn poll_read(
+		fn poll_read_chunk(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
-			dst: &mut [u8],
-		) -> std::task::Poll<Result<Option<usize>, Self::Error>> {
+			max: usize,
+		) -> std::task::Poll<Result<Option<Bytes>, Self::Error>> {
 			if self.data.is_empty() {
 				return std::task::Poll::Ready(Ok(None));
 			}
-			let size = dst.len().min(self.data.len());
-			for slot in dst.iter_mut().take(size) {
-				*slot = self.data.pop_front().unwrap();
-			}
-			std::task::Poll::Ready(Ok(Some(size)))
+			let size = max.min(self.data.len());
+			std::task::Poll::Ready(Ok(Some(self.data.drain(..size).collect())))
 		}
 		fn stop(&mut self, code: u32) {
 			self.stops.lock().unwrap().push(code);
-		}
-		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
-			std::task::Poll::Ready(Ok(()))
 		}
 	}
 

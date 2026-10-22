@@ -326,9 +326,11 @@ where
 								Version::Draft16 => {
 									let mut sub_ns_adapter = sub_ns_adapter;
 									let (send, recv) = sub_ns_adapter.open_native_bi().await?;
+									let mut reader = crate::coding::Reader::new(recv, version);
+									reader.set_priority(crate::priority::RECV_CONTROL);
 									Stream {
 										writer: crate::coding::Writer::new(send, version),
-										reader: crate::coding::Reader::new(recv, version),
+										reader,
 									}
 								}
 								_ => Stream::open(&mut sub_ns_adapter.clone(), version).await?,
@@ -709,6 +711,7 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 			continue;
 		}
 
+		reader.set_priority(crate::priority::RECV_CONTROL);
 		let setup: setup::Setup = reader.decode().await?;
 		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, version)?;
 		let path = match params.get_bytes(ietf::ParameterBytes::Path) {
@@ -1089,6 +1092,7 @@ impl<S: crate::transport::poll::Boxable> Uni<S> {
 				// The negotiation gates the announce and dispatch loops, so a SETUP we
 				// cannot read must end the session rather than leave them parked on a
 				// slot nothing will ever fill.
+				reader.set_priority(crate::priority::RECV_CONTROL);
 				let msg = reader.decode::<setup::Setup>().await?;
 				if let Some(peer_setup) = peer_setup {
 					peer_setup.set(decode_peer_setup(msg.parameters, version, client)?);
@@ -1497,7 +1501,8 @@ async fn enforce_grant<S: crate::transport::poll::Boxable>(
 	mut session: S,
 ) -> Result<(), Error> {
 	let origin = publisher.serving_origin().await;
-	let mut announced = origin.announced();
+	// Checking what we publish is not a local reader asking to discover anything.
+	let mut announced = origin.clone().serving().announced();
 	let mut check = crate::auth::Enforce::default();
 	let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
 		return Ok(());

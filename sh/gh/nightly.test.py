@@ -73,11 +73,15 @@ class NightlyTest(unittest.TestCase):
                     continue
                 packages = [args[i + 1] for i, arg in enumerate(args) if arg == "-p"]
                 targets = [args[i + 1] for i, arg in enumerate(args) if arg == "--bench"]
+                names = set()
                 for package in packages:
                     manifest = ROOT / "rs" / package / "Cargo.toml"
                     for bench in tomllib.loads(manifest.read_text()).get("bench", []):
+                        names.add(bench["name"])
                         if "*" in targets or bench["name"] in targets:
                             covered.add((package, bench["name"]))
+                # Cargo rejects the whole invocation when any named target is missing.
+                self.assertEqual(set(targets) - names - {"*"}, set(), call)
         declared = {(manifest.parent.name, bench["name"])
                     for manifest in (ROOT / "rs").glob("*/Cargo.toml")
                     for bench in tomllib.loads(manifest.read_text()).get("bench", [])}

@@ -124,6 +124,11 @@ program aboard, for what demultiplexing cannot carry, such as a scrambled
 service; `export ts --passthrough` writes it back out. FLV accepts the same
 legacy and enhanced-RTMP codecs as the [RTMP gateway](/bin/rtmp).
 
+fMP4 import splits each fragment into one frame per sample, so players need no
+MP4 parser. `import fmp4 --passthrough` publishes each fragment whole as
+[`cmaf`](/concept/hang#container) instead, keeping the source's exact sample
+timing.
+
 `import rtsp` pulls an IP camera's H.264 or H.265 video and AAC audio without
 re-encoding. RTP rides the RTSP connection, so run it on the camera's network
 and the camera needs no inbound port. Credentials go in the URL

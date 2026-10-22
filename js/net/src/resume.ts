@@ -49,6 +49,7 @@ import {
 	type ResumeSource,
 } from "./internal.ts";
 import { grace } from "./ledger.ts";
+import type { Lister, Tracks, TracksEvent } from "./listing.ts";
 import * as track from "./track.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
@@ -1138,6 +1139,120 @@ export class Front {
 	constructor() {
 		this.consumer = makeFrontConsumer(this);
 		void this.consumer.closed.then(() => this.conclude());
+		void this.#list(wireOf(this.consumer).lister());
+	}
+
+	/**
+	 * Answer listings of the front's broadcast with its serving source's listing, while anyone
+	 * lists it. A source of the same instance lists the same tracks, so a takeover shows readers
+	 * only what differs, once the new source's listing synced.
+	 */
+	async #list(lister: Lister): Promise<void> {
+		const closed = this.consumer.closed;
+		// What the front lists, the source being read, and its pending next event.
+		let listing:
+			| {
+					listed: Set<string>;
+					/** Names an earlier source listed that the current one has yet to list. */
+					stale: Set<string>;
+					source?: Source;
+					reader?: Tracks;
+					next?: Promise<{ event?: TracksEvent; err?: Error }>;
+			  }
+			| undefined;
+		const wait = () => race([Signal.race(lister.used, this.#changed), closed]);
+		const stop = () => {
+			listing?.reader?.close();
+			listing = undefined;
+		};
+		try {
+			for (;;) {
+				if (closed.peek() !== undefined) return;
+				if (!lister.used.peek()) {
+					if (listing) {
+						stop();
+						lister.clear();
+					}
+					await wait();
+					continue;
+				}
+				if (this.#concluded) {
+					// No route will serve it again, so nothing more will be listed.
+					stop();
+					lister.finish();
+					continue;
+				}
+				listing ??= { listed: new Set(), stale: new Set() };
+				if (listing.source !== this.#source) {
+					listing.reader?.close();
+					listing.source = this.#source;
+					listing.stale = new Set(listing.listed);
+					listing.next = undefined;
+					try {
+						listing.reader = this.#source?.wire.tracks();
+					} catch (err) {
+						// A closing source lists nothing more; the front moves off it soon.
+						listing.reader = undefined;
+						// A live one refuses: served through a route claiming a prefix, it names
+						// nothing to list. A later reader asks again.
+						if (listing.source && listing.source.from.closed.peek() === undefined) {
+							stop();
+							lister.abort(err instanceof Error ? err : new Error(String(err)));
+							continue;
+						}
+					}
+				}
+				const reader = listing.reader;
+				if (!reader) {
+					await wait();
+					continue;
+				}
+				listing.next ??= reader.next().then(
+					(event) => ({ event }),
+					(err: unknown) => ({ err: err instanceof Error ? err : new Error(String(err)) }),
+				);
+				const result = await race([listing.next, wait().then(() => undefined)]);
+				if (!result) continue;
+				listing.next = undefined;
+				// The source was replaced as its answer arrived: the new source's listing supersedes it.
+				if (listing.source !== this.#source) continue;
+				const { event, err } = result;
+				if (err) {
+					// Its readers fail, and a later reader asks again.
+					stop();
+					lister.abort(err);
+				} else if (!event) {
+					// A closing source ended its listing: the front moves to another source, or ends
+					// with it. A live one's handler ended it, as a session does once the peer's
+					// broadcast ended, so the front's listing ends too.
+					if (listing.source?.from.closed.peek() !== undefined) {
+						listing.reader = undefined;
+					} else {
+						stop();
+						lister.finish();
+					}
+				} else if (event.kind === "added") {
+					if (!listing.stale.delete(event.name) && !listing.listed.has(event.name)) {
+						listing.listed.add(event.name);
+						lister.add(event.name, event.info);
+					}
+				} else if (event.kind === "removed") {
+					listing.stale.delete(event.name);
+					if (listing.listed.delete(event.name)) lister.remove(event.name);
+				} else {
+					// What the new source still lacks at its SYNCED is gone.
+					for (const name of listing.stale) {
+						listing.listed.delete(name);
+						lister.remove(name);
+					}
+					listing.stale.clear();
+					lister.synced();
+				}
+			}
+		} finally {
+			stop();
+			lister.close();
+		}
 	}
 
 	/** Serve every track from `from` from now on, once each copy proves compatible. */
@@ -1443,6 +1558,8 @@ class FrontConsumer extends broadcast.Consumer {
 		const view = wireOf(this);
 		registerWire(this, {
 			requested: view.requested,
+			tracks: view.tracks,
+			lister: view.lister,
 			subscribe: (name, options) => front.subscribe(name, options),
 			resolveTrackInfo: (name, hold) => front.resolveTrackInfo(name, hold),
 			largest: (name) => front.largest(name),
