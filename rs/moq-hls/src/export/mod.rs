@@ -3865,8 +3865,8 @@ mod tests {
 		drop((track, catalog, live));
 	}
 
-	// A sibling not yet announced when the rendition binds it fails that first lookup. The
-	// catalog's rows are still listed, and the bind is issued again until the sibling resolves.
+	// A sibling not yet announced when the rendition binds it is waited for. The catalog's rows
+	// are still listed, and the binding resolves on the sibling's first announcement.
 	#[tokio::test]
 	async fn a_sibling_announced_after_export_start_is_bound() {
 		tokio::time::pause();

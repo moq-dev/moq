@@ -72,7 +72,7 @@ Decided:
   for the catalog instance's lifetime. Optional reference epochs constrain
   resolution on epoch-aware transports and remain best effort on epochless
   transports. Following never turns a replacement into seamless resume. The
-  schemas, shared resolution, compatibility documentation, and `moq_mux::Follow`
+  schemas, shared resolution, compatibility documentation, and `moq_mux::follow`
   (which `moqsrc` follows siblings with) landed.
 - Every first-party publisher that can restart mints its own: the apps,
   moq-boy, the ingest gateways, moqsink, OBS, and the bindings. Players

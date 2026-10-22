@@ -28,6 +28,8 @@
 //!   record per aligned segment, mapping a span of content time to the group
 //!   ranges that carry it on each track, so consumers can seek or build
 //!   HLS/DASH playlists without downloading media.
+//! - [`follow`] follows a broadcast across the publisher instances that
+//!   serve it, for a reader that restarts on each one.
 
 pub mod binary;
 pub mod catalog;
@@ -35,6 +37,7 @@ mod clock;
 pub mod codec;
 pub mod container;
 mod error;
+pub mod follow;
 pub mod import;
 mod jitter;
 pub mod json;
@@ -48,7 +51,7 @@ pub mod timeline;
 pub use clock::Clock;
 pub use error::*;
 pub use pace::Pacer;
-pub use source::{Binding, Follow, Followed, Source};
+pub use source::{Binding, Source};
 
 /// Translate a catalog entry's declared compression into the flag the codecs take.
 ///

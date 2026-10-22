@@ -1106,7 +1106,7 @@ struct Pump {
 	name: String,
 	caps: gst::Caps,
 	/// Each instance of the broadcast the rendition references.
-	follow: moq_mux::Follow,
+	follow: moq_mux::follow::Instances,
 	/// The rendition references another broadcast than its catalog's, whose instances come and
 	/// go on their own announcements.
 	sibling: bool,
@@ -1171,8 +1171,8 @@ impl Pump {
 				None => tokio::select! {
 					_ = cancel.changed() => return None,
 					followed = follow.next() => match followed {
-						Ok(moq_mux::Followed::Start(broadcast)) => broadcast,
-						Ok(moq_mux::Followed::End) => continue,
+						Ok(moq_mux::follow::Event::Start(broadcast)) => broadcast,
+						Ok(moq_mux::follow::Event::End) => continue,
 						Err(err) => {
 							gst::warning!(CAT, "rendition {name} lost its broadcast: {err:?}");
 							return Some((kind, name));
@@ -1189,8 +1189,8 @@ impl Pump {
 			let subscribed = tokio::select! {
 				_ = cancel.changed() => return None,
 				followed = follow.next() => match followed {
-					Ok(moq_mux::Followed::Start(broadcast)) => Err(Stopped::Restart(broadcast)),
-					Ok(moq_mux::Followed::End) => Err(Stopped::Idle),
+					Ok(moq_mux::follow::Event::Start(broadcast)) => Err(Stopped::Restart(broadcast)),
+					Ok(moq_mux::follow::Event::End) => Err(Stopped::Idle),
 					Err(err) => {
 						gst::warning!(CAT, "rendition {name} lost its broadcast: {err:?}");
 						return Some((kind, name));
@@ -1311,8 +1311,8 @@ impl Pump {
 						return None;
 					}
 					followed = follow.next() => match followed {
-						Ok(moq_mux::Followed::Start(broadcast)) => break Stopped::Restart(broadcast),
-						Ok(moq_mux::Followed::End) => break Stopped::Idle,
+						Ok(moq_mux::follow::Event::Start(broadcast)) => break Stopped::Restart(broadcast),
+						Ok(moq_mux::follow::Event::End) => break Stopped::Idle,
 						Err(err) => {
 							gst::warning!(CAT, "rendition {name} lost its broadcast: {err:?}");
 							return Some((kind, name));

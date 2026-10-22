@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Source` waits for a sibling's first announcement (#6254)
+
+`Source::bind`, `resolve`, and `subscribe_track` now wait for a sibling nothing announces yet instead of failing with `Unroutable`, and keep the first instance they resolve: once it goes, they answer that ended broadcast rather than waiting for the next.
+Where you skipped a rendition on that error, bound the call yourself (`tokio::time::timeout`, or drop it), or follow the sibling's instances with `Source::follow`.
+
 ### `Source` resolution takes the reference's epoch (#5699)
 
 `Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional epoch after `rel`.

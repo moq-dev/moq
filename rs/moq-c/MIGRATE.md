@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+`moq_consume_video` and `moq_consume_audio` on a rendition whose catalog `broadcast` field names a sibling now wait for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, give up on it yourself with `moq_consume_video_cancel` or `moq_consume_audio_cancel`.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 `moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.

@@ -260,9 +260,8 @@ impl MoqBroadcastConsumer {
 	/// `MoqVideoConsumer::subscribe`, `MoqAudioConsumer::subscribe`) resolve it themselves.
 	///
 	/// Errors if this broadcast came from a local producer rather than an origin, since a
-	/// standalone broadcast has no sibling to name, and reports a sibling that exists but is not
-	/// announced yet as unroutable rather than waiting for it (see
-	/// [`MoqOriginConsumer::request_broadcast`](crate::origin::MoqOriginConsumer::request_broadcast)).
+	/// standalone broadcast has no sibling to name. A sibling nothing announces yet is waited for,
+	/// so a late one resolves once it is announced; cancel the call to give up on it.
 	pub async fn resolve(&self, reference: Option<String>) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self.resolve_inner(reference.as_deref()).await?;
 		Ok(Arc::new(match self.origin.clone() {

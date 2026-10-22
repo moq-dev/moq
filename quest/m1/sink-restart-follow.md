@@ -17,7 +17,8 @@ route dies, since its subscriptions then end with an error.
 Decided with the maintainer on 2026-10-20: widened from the server and push
 sinks to every moq-cli and moq-gst reader. Following a catalog's references
 to other broadcasts landed for `moqsrc` through `moq_mux::Source::follow`;
-`moq play` resolves a reference once with `Source::resolve`.
+`moq play` resolves a reference once with `Source::resolve`, which waits for
+a sibling's first announcement and keeps it.
 
 Readers with their own follow loop today move onto `announced_broadcast`:
 
@@ -47,12 +48,13 @@ Audit and fix the rest the same way:
 - `transcode`: its source broadcast; following means restarting the ladder
   on the new instance.
 
-Share `moq_mux::Follow::new(origin, path, None)` (decided 2026-10-20,
+Share `moq_mux::follow::Instances::new(origin, path, None)` (decided 2026-10-20,
 maintainer: no reader hand-rolls its own follow loop) rather than one rule per
-reader: it yields `Followed::Start` for each instance serving the path and
-`Followed::End` once the one handed out stops serving. Build a
+reader: it yields `follow::Event::Start` for each instance serving the path and
+`follow::Event::End` once the one handed out stops serving. Build a
 `moq_mux::Source` from each started instance, so its siblings follow through
-`Source::follow` and its exporters pin through `Source::bind`. Each fix lands
+`Source::follow` and its exporters pin through `Source::bind`, which waits for
+a sibling's first announcement. Each fix lands
 with a test that replaces the publisher while the reader runs.
 
 Public API: none. Wire: none.

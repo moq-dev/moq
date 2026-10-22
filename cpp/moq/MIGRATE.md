@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `BroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel it.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer::finish` lets go.
