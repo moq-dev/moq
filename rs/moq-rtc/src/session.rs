@@ -214,7 +214,7 @@ impl Session {
 			}
 			Event::SenderFeedback(feedback) => {
 				if matches!(&self.role, MediaRole::Ingest(_)) {
-					self.ingest_clock.observe(feedback.mid, feedback.sender_info)?;
+					self.ingest_clock.observe(feedback.mid, feedback.sender_info);
 				}
 			}
 			Event::KeyframeRequest(req) => {
@@ -317,10 +317,16 @@ pub(crate) struct IngestClock {
 
 impl IngestClock {
 	/// Record the newest RTP-to-NTP correlation for a track.
-	fn observe(&mut self, mid: str0m::media::Mid, sender: str0m::rtp::rtcp::SenderInfo) -> Result<()> {
-		self.tracks.entry(mid).or_default().sender = Some(SenderAnchor::new(sender)?);
+	///
+	/// A report outside the wall range is ignored, keeping the track on arrival
+	/// time: RFC 3550 lets a sender without a wall clock report NTP time zero.
+	fn observe(&mut self, mid: str0m::media::Mid, sender: str0m::rtp::rtcp::SenderInfo) {
+		let Ok(anchor) = SenderAnchor::new(sender) else {
+			tracing::debug!(?mid, "ignoring a sender report outside the wall range");
+			return;
+		};
+		self.tracks.entry(mid).or_default().sender = Some(anchor);
 		self.establish_ntp_epoch();
-		Ok(())
 	}
 
 	/// Map a raw RTP-derived microsecond timestamp onto the session timeline.
@@ -403,8 +409,8 @@ struct SenderAnchor {
 }
 
 impl SenderAnchor {
-	fn new(sender: str0m::rtp::rtcp::SenderInfo) -> Result<Self> {
-		let wall = moq_clock::Wall::try_from(sender.ntp_time).map_err(Error::rtc)?;
+	fn new(sender: str0m::rtp::rtcp::SenderInfo) -> std::result::Result<Self, moq_clock::OutOfRange> {
+		let wall = moq_clock::Wall::try_from(sender.ntp_time)?;
 		Ok(Self {
 			ntp_us: wall.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH).as_micros() as i128,
 			rtp_us: media_time_to_micros(&sender.rtp_time) as i128,
@@ -583,13 +589,32 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn sender_report_refuses_times_outside_wall_range() {
-		for time in [
-			UNIX_EPOCH - Duration::from_nanos(1),
-			UNIX_EPOCH + Duration::from_secs(18_446_744_074),
-		] {
-			assert!(SenderAnchor::new(sender_info(1, time, 0)).is_err());
-		}
+	fn sender_reports_outside_the_wall_range_are_ignored() {
+		let mut clock = IngestClock::default();
+		let audio = Mid::from("0");
+		let video = Mid::from("1");
+		let t0 = Instant::now();
+		assert_eq!(clock.normalize(audio, t0, 0), 0);
+		assert_eq!(clock.normalize(video, t0 + Duration::from_millis(50), 0), 50_000);
+
+		// NTP time zero (1900), which a sender without a wall clock may report, and past 2554.
+		let ntp_zero = UNIX_EPOCH - Duration::from_secs(2_208_988_800);
+		clock.observe(audio, sender_info(1, ntp_zero, 0));
+		clock.observe(
+			video,
+			sender_info(2, UNIX_EPOCH + Duration::from_secs(18_446_744_074), 0),
+		);
+		assert!(clock.tracks.values().all(|track| track.sender.is_none()));
+
+		// Both tracks stay on arrival time.
+		assert_eq!(
+			clock.normalize(audio, t0 + Duration::from_secs(1), 1_000_000),
+			1_000_000
+		);
+		assert_eq!(
+			clock.normalize(video, t0 + Duration::from_millis(1_050), 1_000_000),
+			1_050_000
+		);
 		assert!(SenderAnchor::new(sender_info(1, UNIX_EPOCH, 0)).is_ok());
 	}
 
@@ -722,12 +747,8 @@ mod tests {
 		// Both reports identify the same capture instant despite unrelated RTP
 		// bases. The 50 ms first-packet arrival skew must disappear permanently.
 		let report_time = UNIX_EPOCH + Duration::from_secs(1_700_000_001);
-		clock
-			.observe(audio, sender_info(1, report_time, audio_base + 1_000_000))
-			.unwrap();
-		clock
-			.observe(video, sender_info(2, report_time, video_base + 1_000_000))
-			.unwrap();
+		clock.observe(audio, sender_info(1, report_time, audio_base + 1_000_000));
+		clock.observe(video, sender_info(2, report_time, video_base + 1_000_000));
 
 		let audio_time = clock.normalize(audio, t0 + Duration::from_millis(1_020), audio_base + 1_020_000);
 		let video_time = clock.normalize(video, t0 + Duration::from_millis(1_070), video_base + 1_020_000);
