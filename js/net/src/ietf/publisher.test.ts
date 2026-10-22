@@ -4050,7 +4050,11 @@ test("an initially paused SUBSCRIBE holds no demand until it resumes", async () 
 			if (!request) throw new Error("no track was requested");
 			return request.accept({ timescale: Timescale.MILLI });
 		};
-		const first = answer();
+		// Content the released lookup took with it, which SUBSCRIBE_OK still names.
+		const first = answer().then((track) => {
+			writeGroup(track, 1);
+			return track;
+		});
 		const { client, ok } = await runSubscribe(
 			fx,
 			new Subscribe({
@@ -4062,7 +4066,7 @@ test("an initially paused SUBSCRIBE holds no demand until it resumes", async () 
 			}),
 		);
 		try {
-			expect(ok.largest).toBeUndefined();
+			expect(ok.largest).toEqual({ groupId: 0n, objectId: 0n });
 			await (await first).closed;
 			const second = answer();
 			const resumed = await forwardUpdate(client, version, 2n, true);

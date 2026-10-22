@@ -1905,6 +1905,7 @@ where
 					verdict,
 					grant: res,
 					request_id: rid,
+					..
 				}) => {
 					// Only a token-authorized announce starts a renewal.
 					let rg = token_grant.as_ref().expect("a renewal without a request grant");

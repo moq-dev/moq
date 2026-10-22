@@ -18,7 +18,7 @@
 
 use std::{collections::VecDeque, task::Poll};
 
-use super::{RequestId, Version};
+use super::{Location, RequestId, Version};
 use crate::{Error, SessionError, auth};
 
 /// MAX_REQUEST_UPDATES Setup Option (Option Type 0x08). Even, so the value is a bare varint.
@@ -54,6 +54,8 @@ pub fn supported(version: Version) -> bool {
 /// bounded by MAX_REQUEST_UPDATES, counting the one being verified.
 pub(super) struct Renewal<T> {
 	pending: Option<(auth::RequestVerdict, RequestId)>,
+	/// The Largest Location the pending renewal's answer names, set when its update resumed.
+	largest: Option<Location>,
 	queued: VecDeque<T>,
 }
 
@@ -61,6 +63,7 @@ impl<T> Default for Renewal<T> {
 	fn default() -> Self {
 		Self {
 			pending: None,
+			largest: None,
 			queued: VecDeque::new(),
 		}
 	}
@@ -84,6 +87,15 @@ impl<T> Renewal<T> {
 	pub fn verify(&mut self, verdict: auth::RequestVerdict, request_id: RequestId) {
 		debug_assert!(self.pending.is_none(), "one renewal is verified at a time");
 		self.pending = Some((verdict, request_id));
+		self.largest = None;
+	}
+
+	/// Name `largest` in the pending renewal's answer, once the update carrying it resumed at
+	/// that live edge. Updates queue behind a pending renewal, so it is that update's own.
+	pub fn resumed(&mut self, largest: Option<Location>) {
+		if self.pending.is_some() {
+			self.largest = largest;
+		}
 	}
 
 	/// Queue `update` behind the pending verdict, counting it against the bound.
@@ -120,6 +132,7 @@ impl<T> Renewal<T> {
 			verdict,
 			grant,
 			request_id,
+			largest: self.largest.take(),
 		})
 	}
 }
@@ -132,6 +145,8 @@ pub(super) struct Verdict {
 	pub grant: Result<auth::Grant, auth::Refusal>,
 	/// The update that carried the renewal, which the answer names before draft 17.
 	pub request_id: RequestId,
+	/// The live edge the update resumed at, which the answer names.
+	pub largest: Option<Location>,
 }
 
 /// Close `session` for a peer past the MAX_REQUEST_UPDATES we advertised, returning the error

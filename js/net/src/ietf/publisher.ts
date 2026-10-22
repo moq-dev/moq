@@ -585,8 +585,12 @@ export class Publisher {
 			const leave = () => lookup.abort(left.signal.reason);
 			left.signal.addEventListener("abort", leave, { once: true });
 			let info: Info;
+			let largest: TrackLocation | undefined;
 			try {
 				info = await wireOf(broadcast).resolveTrackInfo(msg.trackName, lookup.signal);
+				// Read from the cache as TRACK_STATUS reads it, before releasing the lookup can
+				// close a requested track and evict it.
+				largest = wireOf(broadcast).largest(msg.trackName);
 			} catch (err) {
 				await missing(err);
 				return;
@@ -594,8 +598,6 @@ export class Publisher {
 				left.signal.removeEventListener("abort", leave);
 				lookup.abort();
 			}
-			// Read from the cache as TRACK_STATUS reads it, without subscribing.
-			const largest = wireOf(broadcast).largest(msg.trackName);
 			await this.#subscribeOk(
 				request,
 				msg,

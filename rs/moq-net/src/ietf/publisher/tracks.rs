@@ -1207,13 +1207,18 @@ where
 			.filter(|_| Filter::is_draft20(self.version))
 			.map(|fill| fill_range(fill, params.filter, edge.largest));
 
-		if let Some(rid) = how.answer
-			&& self
-				.write_request_ok(&mut stream.writer, rid, edge.largest)
-				.await
-				.is_err()
-		{
-			return Err(());
+		match how.answer {
+			Some(rid) => {
+				if self
+					.write_request_ok(&mut stream.writer, rid, edge.largest)
+					.await
+					.is_err()
+				{
+					return Err(());
+				}
+			}
+			// A resume that renewed a token is answered with its verdict.
+			None => state.renewal.resumed(edge.largest),
 		}
 
 		let served = {

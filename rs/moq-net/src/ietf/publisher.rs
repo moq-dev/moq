@@ -1854,11 +1854,12 @@ where
 			verdict,
 			grant: res,
 			request_id,
+			largest,
 		} = renewed;
 		let result = grant.renew(verdict, res);
 		if self.version != Version::Draft14 {
 			match &result {
-				Ok(()) => self.write_request_ok(&mut stream.writer, request_id, None).await,
+				Ok(()) => self.write_request_ok(&mut stream.writer, request_id, largest).await,
 				Err(refusal) => {
 					self.write_subscribe_error(&mut stream.writer, request_id, &refusal.error, &refusal.reason)
 						.await
@@ -7176,6 +7177,8 @@ mod serve_tests {
 		messages: Vec<(u64, std::ops::RangeInclusive<usize>)>,
 		/// PUBLISH_DONE's Status Code and Stream Count.
 		publish_done: Option<(u64, u64)>,
+		/// Each REQUEST_OK's Largest Location.
+		request_oks: Vec<Option<Location>>,
 		/// Each data stream and the position where it was closed, if it was.
 		data: std::collections::BTreeMap<usize, Option<usize>>,
 	}
@@ -7203,6 +7206,7 @@ mod serve_tests {
 
 			let mut messages = Vec::new();
 			let mut publish_done = None;
+			let mut request_oks = Vec::new();
 			let mut offset = 0;
 			while offset < bytes.len() {
 				let mut rest = &bytes[offset..];
@@ -7214,12 +7218,18 @@ mod serve_tests {
 						.unwrap();
 					publish_done = Some((done.status_code, done.stream_count));
 				}
+				if id == ietf::RequestOk::ID {
+					let ok =
+						ietf::RequestOk::decode(&mut Decoder::new(&bytes[body..end], version.into()), version).unwrap();
+					request_oks.push(ok.largest);
+				}
 				messages.push((id, written_at[offset]..=written_at[end - 1]));
 				offset = end;
 			}
 			Self {
 				messages,
 				publish_done,
+				request_oks,
 				data,
 			}
 		}
@@ -12226,14 +12236,18 @@ mod serve_tests {
 		msg
 	}
 
-	/// A pause and its pending verification outlive the forwarding subscriber together.
+	/// A pause and its pending verification outlive the forwarding subscriber together. A
+	/// resume carrying a token answers once verified, naming the live edge it resumed at.
 	#[moq_clock::test]
 	async fn paused_subscriptions_renew_without_retaining_delivery_demand() {
-		for initially_paused in [false, true] {
+		for (initially_paused, resume) in [(false, false), (true, false), (true, true)] {
 			let version = Version::Draft22;
 			let (auth, mut requests, _cred) = auth_covering_other();
 			let mut update = subscription_update(0x40);
-			update.forward = (!initially_paused).then_some(false);
+			update.forward = match (initially_paused, resume) {
+				(true, false) => None,
+				_ => Some(resume),
+			};
 			update.authorization_token = Some(request_token());
 			let h = serve_with_auth(version, auth, encode_update(version, &update).await);
 			let rt = h.publisher.runtime.clone();
@@ -12267,7 +12281,7 @@ mod serve_tests {
 				settle().await;
 			}
 			assert_eq!(answered.load(Ordering::Relaxed), 1);
-			assert!(h.track.subscription().is_none());
+			assert_eq!(h.track.subscription().is_some(), resume);
 			assert!(
 				Wire::read(&h.log, version).sent(ietf::RequestOk::ID).is_none(),
 				"answer waits for token verdict"
@@ -12280,19 +12294,15 @@ mod serve_tests {
 			}
 			assert_eq!(answered.load(Ordering::Relaxed), 2);
 			assert_eq!(
-				Wire::read(&h.log, version)
-					.messages
-					.iter()
-					.filter(|(id, _)| *id == ietf::RequestOk::ID)
-					.count(),
-				1
+				Wire::read(&h.log, version).request_oks,
+				vec![resume.then_some(Location { group: 0, object: 0 })]
 			);
 			moq_clock::sim::advance(Duration::from_secs(120)).await;
 			assert!(
 				futures::poll!(running.as_mut()).is_pending(),
-				"renewed while paused past the original expiry"
+				"renewed past the original expiry"
 			);
-			assert!(h.track.subscription().is_none());
+			assert_eq!(h.track.subscription().is_some(), resume);
 		}
 	}
 
