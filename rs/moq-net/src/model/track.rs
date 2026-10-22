@@ -5852,31 +5852,28 @@ impl Cursor {
 		let state = self.state.read();
 		let budget = clamp_max_delay(max_delay, state.max_age_bound());
 		let edge = state.drift_edge(&self.servable);
-		// Every group below the last successor found shares it, so a run of cached groups
-		// that cannot serve is walked once per pass, not once per gap.
-		let mut arrival: Option<&Slot> = None;
-		let mut successor: Option<&Slot> = None;
+		let now = state.cache.pool().now_wall();
 		while let Some(oldest) = delivered.above_gap() {
-			if arrival.is_none_or(|slot| slot.group.sequence <= oldest) {
-				arrival = state.arrival(oldest, &edge.servable);
-			}
 			// Either clock, as `drifted` judges a group: without a successor, neither.
-			let Some(first) = arrival else {
+			let Some(arrival) = state.arrival(oldest, &edge.servable) else {
 				break;
 			};
-			if successor.is_none_or(|slot| slot.group.sequence <= oldest) {
-				successor = state.successor(oldest, &edge.servable);
-			}
-			let past = state.aged(first, budget)
-				|| successor.is_some_and(|slot| {
-					state
-						.live_above(oldest, &edge)
-						.is_some_and(|live| live.behind(slot.group.timestamp(), budget))
-				});
-			if !past {
+			let shared = if now.saturating_duration_since(arrival.arrived) >= budget {
+				arrival.group.sequence
+			} else if let Some(successor) = state.successor(oldest, &edge.servable)
+				&& let Some(live) = state.live_above(oldest, &edge)
+				&& live.behind(successor.group.timestamp(), budget)
+			{
+				successor.group.sequence.min(live.sequence)
+			} else {
 				break;
-			}
-			delivered.forget_below(oldest);
+			};
+			// Every delivered run below this successor shares its verdict. Retire
+			// them in one split, including the highest run, rather than once per gap.
+			let last = delivered
+				.last_before(shared)
+				.expect("the oldest run is below its successor");
+			delivered.forget_below(last);
 		}
 	}
 
@@ -15541,6 +15538,39 @@ mod test {
 			subscriber.delivered_runs(),
 			7,
 			"the floor at 8, then 10 to 18 and 1010 apart"
+		);
+	}
+
+	/// A common wall-clock successor retires the gaps below an aborted prefix, but a
+	/// later arrival keeps the next gap within its budget.
+	#[test]
+	fn wall_time_batches_aborted_gaps_without_forgetting_a_fresh_successor() {
+		let budget = Duration::from_secs(1);
+		let producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_delay(budget));
+		let mut open = Vec::new();
+		for sequence in (0..=10).step_by(2) {
+			let mut group = producer.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(None, &b"x"[..]).unwrap();
+			open.push(group);
+		}
+		assert_eq!(drain_groups(&mut subscriber), [0, 2, 4, 6, 8, 10]);
+		for group in open.drain(..5) {
+			group.abort(Error::Cancel).unwrap();
+		}
+		elapse(&producer, budget / 2);
+		write_untimed_group(&producer, 12);
+		assert_eq!(drain_groups(&mut subscriber), [12]);
+		elapse(&producer, budget / 2);
+		write_untimed_group(&producer, 14);
+		assert_eq!(drain_groups(&mut subscriber), [14]);
+		assert_eq!(subscriber.delivered_runs(), 4, "floor through 8, then 10, 12 and 14");
+		assert!(!subscriber.delivered.contains(9), "the next gap is still remembered");
+		write_untimed_group(&producer, 11);
+		assert_eq!(
+			drain_groups(&mut subscriber),
+			[11],
+			"the gap below fresh group 12 remains"
 		);
 	}
 
