@@ -160,9 +160,8 @@ The browser pins through the `versions` attribute on `<moq-watch>` and
 ## Running locally
 
 You need the workspace toolchain on `PATH` (cargo, ffmpeg, bun, uv, go,
-uniffi-bindgen-go, cmake, uniffi-bindgen-cpp, a C/C++ compiler). `nix develop` provides all of it except
-Playwright's Chromium, which
-`interop.sh` fetches on first run (`bunx playwright install chromium`).
+uniffi-bindgen-go, cmake, uniffi-bindgen-cpp, a C/C++ compiler). `nix develop` provides
+all of it, including the Chromium build matching the workspace's exact npm Playwright pins.
 
 ```bash
 # Default: rust publishes, rust subscribes (a fast sanity check).
@@ -270,9 +269,9 @@ The matrix asks "did bytes arrive and did a pixel light up". That passes on a
 frozen picture, on silence, and on audio a second out of step, so
 `just test media` measures the media itself, browser to browser.
 Use `just test media --media-engines chromium,firefox,webkit` to run each pinned
-Playwright player against a Chromium publisher. The harness installs the requested
-engines and runs the same lifecycle cases, content tolerances, and five negative
-controls per engine. A missing runtime or required API fails that engine by name.
+Playwright player against a Chromium publisher. Chromium comes from the root devShell;
+the dedicated Firefox CI job provides its other engines. The harness runs the same
+lifecycle cases, content tolerances, and five negative controls per engine. A missing runtime or required API fails that engine by name.
 Firefox and WebKit players explicitly use WebSocket; Chromium keeps normal
 transport selection. This does not measure Firefox's QUIC path.
 
@@ -468,3 +467,7 @@ JS publisher sends.
 drafts 14 through 22 through `track-status.ts`, and Rust decodes each
 `TRACK_STATUS_OK` and the refusal for a missing broadcast the way its
 subscriber reads them.
+
+The finite-tail matrix also publishes compressed tracks from Rust and native JS through
+the relay, in both directions on lite-07 and lite-06. It checks multiple frames in each
+DEFLATE window, empty frames, the plain fallback and the received track's codec flag.

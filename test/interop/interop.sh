@@ -301,6 +301,8 @@ SUITE=interop
 
 # The lite drafts the finite-track drop lanes cross between Rust and Node.
 DROP_VERSIONS=(moq-lite-05 moq-lite-06 moq-lite-07-wip)
+# The lite drafts the compressed-track lanes cross: lite-07 carries the flag, lite-06 gets inflated bytes.
+COMPRESS_VERSIONS=(moq-lite-07-wip moq-lite-06)
 
 # Record a case for the CI report: `record <outcome> case=C [field=value...]` (see
 # harness_result). Every session in a case dials the same relay with each client's own
@@ -371,7 +373,15 @@ plan_pass() {
         record "not run" case=tail publisher=rust subscriber="$runtime"
         record "not run" case=tail publisher="$runtime" subscriber=rust
     done
-    [[ "$VERSION" == auto ]] && needs js-native-node || return 0
+    [[ "$VERSION" == auto ]] || return 0
+    for runtime in js-native-node js-native-bun; do
+        needs "$runtime" || continue
+        for version in "${COMPRESS_VERSIONS[@]}"; do
+            record "not run" case=compress publisher=rust subscriber="$runtime" version="$version"
+            record "not run" case=compress publisher="$runtime" subscriber=rust version="$version"
+        done
+    done
+    needs js-native-node || return 0
     for version in "${DROP_VERSIONS[@]}"; do
         record "not run" case=drop publisher=rust subscriber=js-native-node version="$version"
         record "not run" case=drop publisher=js-native-node subscriber=rust version="$version"
@@ -505,11 +515,7 @@ prepare_js() {
         return
     fi
     if needs js; then
-        # Nix provides Chromium via PLAYWRIGHT_BROWSERS_PATH; otherwise fetch it.
-        if [[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]] && ! (cd "$CLIENTS/js" && bunx playwright install chromium "${MEDIA_ENGINE_LIST[@]}") >"$HARNESS_RUN/js-chromium.log" 2>&1; then
-            mark_broken js "requested Playwright engine install failed"
-            sed 's/^/        /' "$HARNESS_RUN/js-chromium.log" >&2 || true
-        elif ! (cd "$CLIENTS/js" && bun run check) >"$HARNESS_RUN/js-check.log" 2>&1; then
+        if ! (cd "$CLIENTS/js" && bun run check) >"$HARNESS_RUN/js-check.log" 2>&1; then
             mark_broken js "type check failed"
             sed 's/^/        /' "$HARNESS_RUN/js-check.log" >&2 || true
         # Into the run directory, where harness.ts serves it from: vite empties its output
@@ -1240,18 +1246,24 @@ run_tail_publisher() {
 }
 
 run_tail_pair() {
-    local pub="$1" sub="$2" name="tail-$1-$2" pid subscriber_pid started=$SECONDS from version read
-    local fifo="$LOGS/tail-ack" broadcast="tail-$1-$2-$$-$RANDOM" mode="" want='tail clean end=4 groups=0,1,2,3 bytes=1048576'
-    version=$(pinned_version)
-    # moq-net subscribes over moq-transport from the largest group, which can be past group 0 by
-    # the time the relay answers, so the reader takes any contiguous run through the last group.
-    if [[ "$version" == moq-transport-* ]]; then
-        mode="join"
-        want='tail join clean end=4 groups=[0-3](,[0-3])*'
+    # run_tail_pair <pub> <sub> [<mode> <version>]: a mode pins its own version, like a drop lane.
+    local pub="$1" sub="$2" mode="${3:-}" version="${4:-}" pid subscriber_pid started=$SECONDS from read
+    local name="tail-$1-$2${mode:+-$mode-$version}" label="${mode:-tail}${version:+ $version}"
+    local fifo="$LOGS/tail-ack" broadcast="tail-$1-$2-$$-$RANDOM" want='tail clean end=4 groups=0,1,2,3 bytes=1048576'
+    local cell=(case="${mode:-tail}" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
+    if [[ -n "$mode" ]]; then
+        cell+=(version="$version")
+    else
+        version=$(pinned_version)
+        # moq-net subscribes over moq-transport from the largest group, which can be past group 0 by
+        # the time the relay answers, so the reader takes any contiguous run through the last group.
+        if [[ "$version" == moq-transport-* ]]; then
+            mode="join"
+            want='tail join clean end=4 groups=[0-3](,[0-3])*'
+        fi
     fi
-    local cell=(case=tail publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
     if is_broken "$pub" || is_broken "$sub"; then
-        echo "  FAIL  tail $pub -> $sub (client unavailable)"
+        echo "  FAIL  $label $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
         return
@@ -1270,20 +1282,20 @@ run_tail_pair() {
     if read=$(grep -xE "$want" "$LOGS/$name-sub.log"); then
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
-        if [[ -n "$version" ]] && ! check_versions "tail $pub -> $sub" "$from" "$version"; then
+        if [[ -n "$version" ]] && ! check_versions "$label $pub -> $sub" "$from" "$version"; then
             record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="a relay connection negotiated another version"
             overall=1
         elif grep -qx 'tail acknowledged' "$LOGS/$name-pub.log"; then
-            echo "  PASS  tail $pub -> $sub (${read#tail })"
+            echo "  PASS  $label $pub -> $sub (${read#tail })"
             record pass "${cell[@]}" seconds=$((SECONDS - started))
         else
-            echo "  FAIL  tail $pub -> $sub (publisher did not acknowledge)"
+            echo "  FAIL  $label $pub -> $sub (publisher did not acknowledge)"
             record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="publisher did not acknowledge"
             overall=1
             cat "$LOGS/$name-pub.log"
         fi
     else
-        echo "  FAIL  tail $pub -> $sub (missing groups or clean end)"
+        echo "  FAIL  $label $pub -> $sub (missing groups or clean end)"
         record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="missing groups or clean end"
         overall=1
         cat "$LOGS/$name-pub.log" "$LOGS/$name-sub.log"
@@ -1462,9 +1474,9 @@ run_matrix() {
     fi
 }
 
-# This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
+# This checkout's CLI FETCH and finite track tails in this pass, then the lite compress and drop lanes.
 run_tails() {
-    local runtime
+    local runtime version
     echo "=== CLI FETCH close ==="
     run_fetch_round
     echo "=== finite track tails ==="
@@ -1475,9 +1487,16 @@ run_tails() {
             run_tail_pair "$runtime" rust
         fi
     done
-    # The drop lanes pin their own lite versions.
-    if [[ "$VERSION" == auto ]] && needs js-native-node; then
-        local version
+    # The compress and drop lanes pin their own lite versions.
+    [[ "$VERSION" == auto ]] || return 0
+    for runtime in js-native-node js-native-bun; do
+        needs "$runtime" || continue
+        for version in "${COMPRESS_VERSIONS[@]}"; do
+            run_tail_pair rust "$runtime" compress "$version"
+            run_tail_pair "$runtime" rust compress "$version"
+        done
+    done
+    if needs js-native-node; then
         for version in "${DROP_VERSIONS[@]}"; do
             run_drop_pair rust js-native-node "$version"
             run_drop_pair js-native-node rust "$version"

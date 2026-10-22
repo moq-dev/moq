@@ -79,6 +79,11 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
         self.expect(True, base="--all", rust=True)
 
+    def test_nixpkgs_updates_check_browser_pins(self):
+        # JS selection also builds wasm, which is reflected in the Rust cache query.
+        self.change("flake.lock")
+        self.expect(True, rust=True)
+
     def test_empty_diff_keeps_repository_lints(self):
         self.expect(True)
 

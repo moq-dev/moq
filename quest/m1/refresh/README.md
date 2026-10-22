@@ -68,4 +68,3 @@ Work owned by this README, after the children land:
 ## Related
 
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - its dynamic-groups child is the IETF half this epic promotes
-- [JSON window timestamps](/quest/m1/json-window-timestamps.md) - touches the same window consumers

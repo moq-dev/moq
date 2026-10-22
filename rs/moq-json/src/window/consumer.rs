@@ -17,11 +17,17 @@ use crate::Result;
 /// Group rolls never surface. A publisher rolls for compression's sake, and a header restating the
 /// window yields nothing for records already delivered, so this reads as one continuous stream of
 /// [`Event`]s regardless of how the publisher framed them.
+///
+/// Each event carries the timestamp of the frame that produced it, `None` on an untimed track. The
+/// wire has no per-record time, so a record a reader first learns of from a group header (one it
+/// joined after, or missed while behind) gets the header frame's time, not its original push time.
 pub struct Consumer<T> {
 	track: moq_net::track::Ordered,
 	group: Option<moq_net::group::Consumer>,
 	codec: Option<Codec>,
 	decoder: Decoder<T>,
+	/// Timestamp of the frame whose events the decoder is draining.
+	at: Option<moq_net::Timestamp>,
 }
 
 impl<T: DeserializeOwned> Consumer<T> {
@@ -32,6 +38,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 			group: None,
 			codec: None,
 			decoder: Decoder::new(config),
+			at: None,
 		}
 	}
 
@@ -40,8 +47,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 		self.decoder.range()
 	}
 
-	/// Get the next event, or `None` once the track ends.
-	pub async fn next(&mut self) -> Result<Option<Event<T>>>
+	/// Get the next event and its frame's timestamp, or `None` once the track ends.
+	pub async fn next(&mut self) -> Result<Option<moq_net::Timed<Event<T>>>>
 	where
 		T: Unpin,
 	{
@@ -49,11 +56,12 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	/// Poll for the next event, without blocking.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event<T>>>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<Event<T>>>>> {
 		loop {
-			// Drain what the frames already decoded produced before reading more.
-			if let Some(event) = self.decoder.next_event() {
-				return Poll::Ready(Ok(Some(event)));
+			// Drain what the last frame produced before reading more, so every queued event is that
+			// frame's and shares its timestamp.
+			if let Some(value) = self.decoder.next_event() {
+				return Poll::Ready(Ok(Some(moq_net::Timed { value, at: self.at })));
 			}
 
 			let Some(group) = &mut self.group else {
@@ -89,6 +97,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 				Poll::Ready(Ok(Some(frame))) => {
 					let codec = self.codec.as_mut().expect("an open MoQ group has a window codec");
 					self.decoder.decode(codec, &frame.payload)?;
+					self.at = frame.timestamp;
 				}
 				Poll::Ready(Ok(None)) => {
 					// This group is exhausted. Clear it and poll for a later one, which restates the
