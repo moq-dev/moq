@@ -470,6 +470,9 @@ pub(crate) struct TrackState {
 	// Readers start at this group: the route's live feed starts past a gap after
 	// everything cached, so nothing bounds how old the cache below it is.
 	live_floor: Option<u64>,
+	// The group the route last answered with, which its datagrams can show before any
+	// group reaches it: relative starts count back from it until a newer group arrives.
+	live_edge: Option<u64>,
 	// The newest group cached when the track went idle: what the route's answer is
 	// judged against, whatever lands before it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
@@ -984,13 +987,15 @@ impl TrackState {
 		self.feed == Feed::Live || self.sealed || self.abort.is_some() || self.is_complete()
 	}
 
-	/// Where relative starts count back from: the newest group the live feed produced.
-	/// `None` while the cache does not reflect the feed, since an idle copy's newest group
-	/// is only what an ended feed left: a start taken then waits, as on an empty track.
+	/// Where relative starts count back from: the live feed's newest group, produced or
+	/// answered. `None` while the cache does not reflect the feed, since an idle copy's
+	/// newest group is only what an ended feed left: a start taken then waits, as on an
+	/// empty track.
 	fn latest_live(&self) -> Option<u64> {
 		let floor = self.live_floor.unwrap_or(0);
 		self.newest_produced
-			.filter(|&newest| self.readable() && newest >= floor)
+			.max(self.live_edge)
+			.filter(|&latest| self.readable() && latest >= floor)
 	}
 
 	/// Where a relative start that waited on [`Self::latest_live`] counts back from.
@@ -2347,6 +2352,7 @@ impl TrackState {
 			(None, Some(cached)) => Some(cached.saturating_add(1)),
 			_ => self.live_floor,
 		};
+		self.live_edge = largest.map(|largest| largest.group);
 		match largest {
 			Some(largest) if !self.shows(largest.group) => self.feed = Feed::Answered { from: largest.group },
 			_ => self.go_live(),
@@ -8111,6 +8117,29 @@ mod test {
 		framed(&producer, 4, 1).finish().unwrap();
 		assert_eq!(ready_groups(&mut live), vec![4]);
 		assert_eq!(ready_groups(&mut oldest), vec![0, 1, 2, 3, 4]);
+	}
+
+	/// A datagram can show the route's answer before any group does, as it does when a
+	/// datagram is the first thing the resumed feed sends. A relative start counts back
+	/// from that answer, not from the older groups cached below it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_relative_start_on_an_idle_copy_counts_from_a_datagram_edge() {
+		let mut producer = idle_copy();
+		let mut reader = producer.subscribe(replay().with_ranges([Range::live()]));
+		producer
+			.insert_datagram(4, None, bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		producer.set_live(Some(Position::group(4)), None);
+		assert_eq!(
+			ready_groups(&mut reader),
+			Vec::<u64>::new(),
+			"no group reached the edge"
+		);
+		assert_eq!(reader.floor(), Some(4), "the answer anchors the start");
+
+		framed(&producer, 5, 1).finish().unwrap();
+		assert_eq!(ready_groups(&mut reader), vec![5]);
 	}
 
 	#[test]
