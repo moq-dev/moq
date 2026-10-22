@@ -12,9 +12,11 @@ remove a participant from the scene.
 - **Rooms:** reuse moq-room's conventions (`{identity}/camera.hang`,
   `{identity}/screen.hang`). Do not invent a guest protocol.
 - **Tokens:**
-  - Minting a moq-auth token needs the relay's signing key or an issuer API.
-    Support a configured key for a self-hosted relay. A hosted issuer brings
-    its own API.
+  - Minting a moq-auth token needs a signing key or an issuer API. For a
+    self-hosted relay, the studio accepts only a key whose moq-auth `Scope`
+    is rooted at its room prefix, and refuses an unscoped relay-wide key. A
+    stolen workstation key then cannot sign for other tenants. A hosted
+    issuer brings its own API.
   - Tokens are short-lived and scoped to the room prefix.
 - **Join link:** carry the token in the URL fragment, so it never reaches a
   server log.

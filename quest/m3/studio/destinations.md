@@ -24,6 +24,10 @@ destination's status and errors show in the UI.
 - **Stream keys** go in the OS credential store, never in the scene file,
   which is meant to be shared and versioned. Prefer a maintained crate such
   as `keyring`.
+- **Benchmark:** sweep distinct encoder-sharing keys (canvas, mix, and
+  settings) against destinations per key. Finding a destination's encoder
+  must not scan every encoder group, and identical keys must never spawn a
+  duplicate encoder.
 - **Defaults:** offer presets (resolution, frame rate, keyframe interval,
   CBR) for common ingest constraints without naming platforms. The creator
   can override every field.
