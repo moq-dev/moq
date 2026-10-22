@@ -269,7 +269,7 @@ mod tests {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
 
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		assert!(server.broadcaster("live").await.is_none());
 		assert_eq!(start.elapsed(), Duration::ZERO);
 	}
