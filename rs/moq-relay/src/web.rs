@@ -345,7 +345,7 @@ impl Web {
 		let state = Arc::get_mut(&mut self.state).expect("with_timeout called after routes were built");
 		// hyper adds the header timeout to the clock unchecked, so an unreachable
 		// one would panic on every connection.
-		state.timeout = timeout.filter(|timeout| std::time::Instant::now().checked_add(*timeout).is_some());
+		state.timeout = timeout.filter(|timeout| moq_clock::now().checked_add(*timeout).is_some());
 		self
 	}
 
@@ -1070,11 +1070,11 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+	let deadline = moq_clock::now() + tokio::time::Duration::from_secs(30);
 
 	// The lease outlives this handler: the body streams after it returns, so the
 	// response holds the lease and ends it when the last frame is served.
-	let result = tokio::time::timeout_at(deadline, async {
+	let result = moq_clock::timeout_at(deadline, async {
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before the announce arrives.
@@ -1125,7 +1125,7 @@ async fn serve_fetch(
 /// `end` event carries the outcome.
 struct ServeGroup {
 	group: moq_net::group::Consumer,
-	deadline: tokio::time::Instant,
+	deadline: moq_clock::Instant,
 	/// Taken when the body ends, so the reason is reported once.
 	lease: Option<auth::Lease>,
 }
@@ -1136,7 +1136,7 @@ impl ServeGroup {
 			return Ok(None);
 		};
 		tokio::select! {
-			res = tokio::time::timeout_at(self.deadline, self.group.read_frame()) => match res {
+			res = moq_clock::timeout_at(self.deadline, self.group.read_frame()) => match res {
 				Ok(res) => Ok(res?.map(|frame| frame.payload)),
 				Err(_) => Err(moq_net::Error::Timeout),
 			},
@@ -1178,6 +1178,7 @@ impl IntoResponse for ServeGroup {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use rcgen::{CertificateParams, KeyPair};
@@ -2166,17 +2167,14 @@ mod tests {
 				None,
 			)
 			.await;
-			let transport = qmux::ws::Upgraded::new(socket)
-				.with_alpn("qmux-01.moq-lite-06")
-				.connect();
+			let transport = qmux::ws::Upgraded::new(socket, "qmux-01.moq-lite-06")
+				.connect()
+				.unwrap();
 			let origin = moq_tokio::origin::spawn();
 			let (session, driver) = moq_net::Client::new()
 				.with_versions("moq-lite-06".parse::<moq_net::Version>().unwrap().into())
 				.with_publisher(origin.consume())
-				.connect(
-					moq_net::time::now(),
-					moq_tokio::transport::Session::new(transport, moq_net::transport::Binding::Uri),
-				)
+				.connect(moq_net::time::now(), transport)
 				.await
 				.unwrap();
 			tokio::spawn(moq_net::time::run(driver));

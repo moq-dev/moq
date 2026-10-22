@@ -864,6 +864,7 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 

@@ -201,6 +201,7 @@ impl Server {
 				goaway: start.goaway,
 				auth: start.auth,
 				estimate: Some(start.estimate),
+				bandwidth: crate::bandwidth::Allocator::default(),
 			},
 		))
 	}
@@ -448,6 +449,7 @@ impl Server {
 					hidden: ietf::hidden::from_setup(&params, v),
 					max_age: ietf::max_age::from_setup(&params, v),
 					active_count: ietf::active_count::from_setup(&params, v),
+					flate: ietf::flate::from_setup(&params, v)?,
 					..Default::default()
 				};
 				(path, token, request_id_max, peer_declared)
@@ -662,6 +664,7 @@ where
 					goaway,
 					auth,
 					estimate: None,
+					bandwidth: crate::bandwidth::Allocator::default(),
 				},
 			))
 		}
@@ -730,6 +733,7 @@ where
 					ietf::hidden::into_setup(&mut parameters, v);
 					ietf::max_age::into_setup(&mut parameters, v);
 					ietf::active_count::into_setup(&mut parameters, v);
+					ietf::flate::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
 				}
 				Version::Lite(v) => lite::Parameters::default().encode_bytes(v)?,
@@ -807,6 +811,7 @@ where
 					goaway,
 					auth,
 					estimate,
+					bandwidth: crate::bandwidth::Allocator::default(),
 				},
 			))
 		}

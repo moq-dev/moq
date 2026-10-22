@@ -460,6 +460,18 @@ mod tests {
 		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::Report);
 	}
 
+	/// Probing to a local target never reaches the wire, so a sender alone promises the
+	/// peer nothing more than a report.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_sender_still_reports() {
+		use crate::lite::test_transport::{SinkSession, SinkStats};
+
+		let stats = SinkStats::default().with_send_rate(1_000_000);
+		let session = SinkSession::new(Default::default()).with_stats(stats).with_probe();
+		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::Report);
+	}
+
 	#[test]
 	fn probe_levels_round_trip() {
 		for probe in [ProbeLevel::None, ProbeLevel::Report, ProbeLevel::Increase] {

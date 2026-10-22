@@ -420,15 +420,18 @@ export class Decoder {
 			// A config the probe accepted can still fail to parse (a malformed init segment or Opus
 			// header). Report it like a decode failure, which also retires the outgoing estimate.
 			const props = { config, failure, path: active.path };
-			try {
-				if (config.container.kind === "cmaf") {
-					this.#runCmafDecoder(run, sub, props);
-				} else {
-					this.#runLegacyDecoder(run, sub, props);
+			run.spawn(async () => {
+				try {
+					if (config.container.kind === "cmaf") {
+						await this.#runCmafDecoder(run, sub, props);
+					} else {
+						this.#runLegacyDecoder(run, sub, props);
+					}
+				} catch (error) {
+					if (run.abort.aborted) return;
+					failure.set(error instanceof Error ? error : new Error(String(error)));
 				}
-			} catch (error) {
-				failure.set(error instanceof Error ? error : new Error(String(error)));
-			}
+			});
 		});
 	}
 
@@ -519,15 +522,19 @@ export class Decoder {
 		});
 	}
 
-	#runCmafDecoder(
+	async #runCmafDecoder(
 		effect: Effect,
 		sub: Moq.Track.Subscriber,
 		{ config, failure, path }: { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid },
-	): void {
+	): Promise<void> {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
+		const abort = effect.abort;
+		const Cmaf = await import("@moq/hang/cmaf");
+		if (abort.aborted) return;
+
 		const initSegment = base64ToBytes(config.container.init);
-		const init = Container.Cmaf.decodeInitSegment(initSegment);
+		const init = Cmaf.decodeInitSegment(initSegment);
 		const opusDescription = config.description ? Util.Hex.toBytes(config.description) : init.description;
 		const preSkip = config.codec === "opus" && opusDescription ? Util.Opus.preSkip(opusDescription) : 0;
 		this.#terminal.clear(preSkip, Micro.fromMilli(Milli(config.warmup ?? 0)));
@@ -540,7 +547,7 @@ export class Decoder {
 					? Util.Hex.toBytes(config.description)
 					: init.description;
 
-		const consumer = this.#consume(effect, sub, new Container.Cmaf.Format(init), { config, path });
+		const consumer = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
 
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -821,7 +828,8 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 			description = Util.Hex.toBytes(config.description);
 		} else if (config.container.kind === "cmaf") {
 			try {
-				description = Container.Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
+				const Cmaf = await import("@moq/hang/cmaf");
+				description = Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
 			} catch (err) {
 				// A malformed init segment means we can't extract the codec
 				// description, so we can't probe support reliably. Reject the
@@ -832,6 +840,9 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 			}
 		}
 	}
+	// Install the WebCodecs polyfill before probing, since playback would decode through it where
+	// AudioDecoder is missing (Node, Bun, older browsers). Loads nothing where WebCodecs audio is native.
+	await Util.Libav.polyfill();
 	const res = await AudioDecoder.isConfigSupported({
 		...config,
 		description,

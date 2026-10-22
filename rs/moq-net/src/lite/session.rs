@@ -358,7 +358,7 @@ where
 		session_stream: setup_stream.map(|stream| stream.with_stats(&stats)),
 		ending: None,
 		publisher,
-		subscriber: SubscriberDriver::new(subscriber, early),
+		subscriber: SubscriberDriver::new(subscriber, early, client),
 		session,
 	};
 

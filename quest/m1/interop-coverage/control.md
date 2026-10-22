@@ -2,7 +2,7 @@
 
 ## Goal
 
-On the [IETF matrix](/quest/m1/interop-coverage/ietf-matrix.md), across
+On the IETF matrix (`just test interop --versions ietf`), across
 Rust and JS: a GOAWAY with a new URI moves the session and its
 subscriptions resume there; TRACK_STATUS gets a real answer from the other
 implementation; datagram objects cross moq-relay intact; and a subscriber
@@ -18,7 +18,3 @@ datagrams; fix that comment, and add a datagram round to its moq-dev
 section if it is cheaper than a matrix case.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [IETF matrix](/quest/m1/interop-coverage/ietf-matrix.md) - the matrix these cases run on

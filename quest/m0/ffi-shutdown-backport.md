@@ -42,8 +42,8 @@ one has none. Wrapper workflows skip versions already published, so bump
 each changed wrapper's human-owned version (CONTRIBUTING's Versions). Leave
 `go/wrapper/VERSION` alone: CI derives Go's patch, and `drain()` is
 additive. Run each binding's tests and `just test interop --all`. The
-qmux credit fix is out of scope: it arrives with
-[qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md).
+qmux credit fix is out of scope: main has it from the in-tree qmux
+([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)).
 
 Public API: additive (`MoqSession.drain()` and its binding wrappers). Wire:
 none.

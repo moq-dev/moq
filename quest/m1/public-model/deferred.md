@@ -10,7 +10,7 @@ info, and declares a received end in JS, through public calls only.
 
 ## Plan
 
-Split from the [ingest](/quest/m1/public-model/ingest.md),
+Split from the ingest ([moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111)),
 [serving](/quest/m1/public-model/serve.md), and
 [answering](/quest/m1/public-model/answer.md) quests in review of #5717,
 so those three do not wait on the large quests that replace these items.
@@ -37,8 +37,9 @@ the prerequisites will have deleted or renamed most of these.
   requests that Model ranges defines, completing the answering quest's
   `Broadcast.requested` decision.
 - JS `hooks.endTrack` and `hooks.startTrack` (the JS `finish_at_pending` and
-  `start_at`): public under the received-end shape the ingest quest settles in
-  Rust.
+  `start_at`): public under the received-end shape Rust settled in
+  [moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111): `finish_at`
+  on a `received()` copy, and `start_at` after `track::Request::request_start`.
 
 Tests: as in the other children, mock time in each language, with the
 built-in sessions moved onto the public calls.
@@ -46,6 +47,5 @@ built-in sessions moved onto the public calls.
 ## Required
 
 - [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - replaces per-group fetch requests, the peeks, and `fork`
-- [Public ingest](/quest/m1/public-model/ingest.md) - settles the received-end shape JS mirrors
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - the JS `Track.Request`/`Track.Dynamic` range requests that answer track info and fetches
-- [Public routes and answering](/quest/m1/public-model/answer.md) - the public `Broadcast.requested` handout this completes
+- [Public answering](/quest/m1/public-model/answer.md) - the public `Broadcast.requested` handout this completes
