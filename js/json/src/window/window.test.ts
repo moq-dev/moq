@@ -267,7 +267,9 @@ test("a window refresh reuses the newest timestamp", async () => {
 		[1, 30],
 	]);
 	const consumer = new Consumer<Rec>({ track: track.subscribe() });
-	expect(await consumer.next()).toEqual({ push: { index: 1, value: { n: 1 } } });
+	const event = await consumer.next();
+	expect(event?.value).toEqual({ push: { index: 1, value: { n: 1 } } });
+	expect(event?.at?.as(Time.Timescale.MILLI)).toBe(30);
 });
 
 test("a window refresh after an older edit starts at the newest timestamp", async () => {
