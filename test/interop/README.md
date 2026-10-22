@@ -467,3 +467,7 @@ JS publisher sends.
 drafts 14 through 22 through `track-status.ts`, and Rust decodes each
 `TRACK_STATUS_OK` and the refusal for a missing broadcast the way its
 subscriber reads them.
+
+The finite-tail matrix also publishes compressed tracks from Rust and native JS through
+the relay, in both directions on lite-07 and lite-06. It checks multiple frames in each
+DEFLATE window, empty frames, the plain fallback and the received track's codec flag.

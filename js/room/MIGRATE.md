@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Chat events carry their send time
+
+`Chat.Subscriber.recv()` returns `{ value, at }`: `value` is the event `recv()` used to return, and `at` is its frame's timestamp.
+Read `(await subscriber.recv())?.value` where you used the event directly.
+
 ### `HISTORY` is a `Nano` (#5706)
 
 `HISTORY` is a `Nano` from `@moq/clock` instead of milliseconds.

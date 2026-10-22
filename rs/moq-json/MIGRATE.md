@@ -6,7 +6,8 @@ How to update your code for each breaking change, newest first.
 
 ### Consumers return `Timed<T>` (#5677)
 
-Snapshot and stream `next` / `poll_next` return `moq_net::Timed<T>`: read `.value` for the value and `.at` for the frame's exact timestamp, `None` when untimed.
+Snapshot, stream, and window `next` / `poll_next` return `moq_net::Timed<T>`: read `.value` for the value and `.at` for the frame's exact timestamp, `None` when untimed.
+A window event's `.value` is the `Event` that `next` used to return; a record restated by a group header carries the header frame's time.
 Snapshot `next` now yields every state in order inside the subscription's `max_delay`; call `latest` / `poll_latest` for the old collapse-to-newest read.
 
 ### Duplicate keys are refused
