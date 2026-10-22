@@ -459,25 +459,18 @@ narrow to absorb that one, is logged and counted in `overruns`: the legs can
 differ there. So can reordered video whose SPS declares no reorder depth
 (`max_num_reorder_frames`), which is logged, and SI while one leg holds an older
 revision than the other or around an SI table the catalog adds or drops, which
-each leg takes up when its catalog update arrives.
-
-`export ts --sync --rtp udp://HOST:PORT` sends that multiplex as RTP (RFC 2250)
-instead of writing it to stdout, for an SMPTE ST 2022-7 pair. Each datagram
-carries seven TS packets, a fixed run of the multiplex; its sequence number and
-90 kHz timestamp follow from where that run sits, and its SSRC from the
-broadcast path and publisher [epoch](/concept/moq-lite#publisher-epochs). So two
-legs send the same datagram, headers included, wherever both hold its packets,
-and a receiver merging them takes each from either. A leg withholds a datagram
-it cannot vouch for: one where it leaves stuffing that another leg may fill, one
-that opens its timeline or follows a jump, and one it joined midway. Legs that
-lose different groups therefore send, between them, every datagram a clean leg
-sends. Two gaps remain: SI one leg missed, and a unit of a sparse track (such as
-SCTE-35) lost with no later jump in that track, go out as stuffing where the
-other leg has them. `--rtp` needs `--sync` and a route carrying the publisher's
-epoch, since the SSRC must change when the publisher does, so every hop must
-speak moq-transport draft 17 or later, or the opt-in moq-lite 07 (see
-[Publisher runs](#publisher-runs)). It takes neither `--stitch` nor
-`--passthrough`. A multicast destination gets the system's default TTL.
+each leg takes up when its catalog update arrives. With `--rtp udp://HOST:PORT`
+it sends the multiplex as RTP (RFC 2250) instead of to stdout, for an SMPTE ST
+2022-7 pair: two legs send the same datagram, headers included, wherever both
+hold its packets, and each withholds one it cannot vouch for, so legs that lose
+different groups send between them every datagram a clean leg sends (the
+framing is `Export::with_rtp`'s, in [`moq-mux`](https://docs.rs/moq-mux)). SI
+one leg missed, and a unit of a sparse track (such as SCTE-35) lost with no
+later jump in it, still go out as stuffing where the other leg has them. The
+SSRC follows the publisher [epoch](/concept/moq-lite#publisher-epochs), so
+every hop must carry it: moq-transport draft 17 or later, or the opt-in
+moq-lite 07 (see [Publisher runs](#publisher-runs)). A multicast destination
+gets the system's default TTL.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same

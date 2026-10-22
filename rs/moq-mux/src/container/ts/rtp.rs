@@ -66,8 +66,13 @@ impl Packetizer {
 		}
 		self.next = Some(index + 1);
 		let first = self.layout.first(index);
+		let packets = payload.as_chunks::<{ TsPacket::SIZE }>().0;
+		let mut sure = vec![true; packets.len()];
+		for &position in unsure.iter().filter(|&&position| position < packets.len()) {
+			sure[position] = false;
+		}
 		let mut out = Vec::new();
-		for (position, packet) in payload.as_chunks::<{ TsPacket::SIZE }>().0.iter().enumerate() {
+		for (position, packet) in packets.iter().enumerate() {
 			let at = first + position as u128;
 			let (index, offset) = (at / PACKETS as u128, at % PACKETS as u128);
 			if offset == 0 {
@@ -81,7 +86,7 @@ impl Packetizer {
 				continue;
 			};
 			run.packets.extend_from_slice(packet);
-			run.sure &= !unsure.contains(&position);
+			run.sure &= sure[position];
 			if offset + 1 == PACKETS as u128
 				&& let Some(run) = self.run.take()
 				&& run.sure

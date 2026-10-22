@@ -279,6 +279,49 @@ fn log_release(release: &moq_mux::container::ts::stats::Release, message: &'stat
 	);
 }
 
+/// The host and port of an `--rtp` destination, which must be `udp://HOST:PORT`.
+pub fn rtp_destination(url: &url::Url) -> anyhow::Result<(String, u16)> {
+	anyhow::ensure!(url.scheme() == "udp", "--rtp takes udp://HOST:PORT: {url}");
+	let host = match url.host().with_context(|| format!("--rtp url missing a host: {url}"))? {
+		url::Host::Domain(domain) => domain.to_string(),
+		url::Host::Ipv4(ip) => ip.to_string(),
+		url::Host::Ipv6(ip) => ip.to_string(),
+	};
+	let port = url.port().context("--rtp url must include a port: udp://HOST:PORT")?;
+	Ok((host, port))
+}
+
+/// The datagrams `--rtp` could not send since it last reported them, and why the last one could
+/// not.
+#[derive(Default)]
+struct Unsent {
+	count: u64,
+	last: Option<std::io::Error>,
+}
+
+impl Unsent {
+	/// Send `datagram`, or count it lost: a full send queue or a route briefly down loses that
+	/// datagram, as the network would, not the stream. A receiver not listening yet answers with
+	/// ICMP, which a connected socket reports on a later send, and is not counted.
+	async fn send(&mut self, socket: &tokio::net::UdpSocket, datagram: &[u8]) {
+		match socket.send(datagram).await {
+			Err(err) if err.kind() != std::io::ErrorKind::ConnectionRefused => {
+				self.count += 1;
+				self.last = Some(err);
+			}
+			_ => {}
+		}
+	}
+
+	/// Log the datagrams lost since the last report, if any.
+	fn report(&mut self) {
+		if let Some(err) = self.last.take() {
+			let count = std::mem::take(&mut self.count);
+			tracing::warn!(count, %err, "--rtp dropped datagrams it could not send");
+		}
+	}
+}
+
 impl Subscribe {
 	/// Resolve the broadcast at `path` on `origin` to export it with the resolved settings;
 	/// [`run`](Self::run) drives it.
@@ -445,6 +488,7 @@ impl Subscribe {
 		// the way `publish` reports one that stops arriving.
 		let mut log = moq_mux::container::ts::stats::Log::default();
 		let mut sampled = moq_clock::now();
+		let mut unsent = Unsent::default();
 		// The export's drop, gap, out-of-tolerance and `--sync` counts, as last logged.
 		let mut reported = (0, 0, 0, 0, 0, 0);
 		let sections = self.sections;
@@ -463,12 +507,7 @@ impl Subscribe {
 				Err(err) => break Err(err),
 			};
 			match &rtp {
-				// A receiver not listening yet answers with ICMP, which a connected socket
-				// reports on a later send; the datagrams go out regardless.
-				Some(socket) => match socket.send(&frame.payload).await {
-					Err(err) if err.kind() != std::io::ErrorKind::ConnectionRefused => return Err(err.into()),
-					_ => {}
-				},
+				Some(socket) => unsent.send(socket, &frame.payload).await,
 				None => {
 					stdout.write_all(&frame.payload).await?;
 					stdout.flush().await?;
@@ -477,6 +516,7 @@ impl Subscribe {
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
 				sampled = moq_clock::now();
+				unsent.report();
 				let stats = ts.export().stats();
 				report(&stats);
 				let release = &stats.release;
@@ -495,6 +535,7 @@ impl Subscribe {
 				log.sample(stats.into());
 			}
 		};
+		unsent.report();
 		let stats = ts.export().stats();
 		report(&stats);
 		log_release(&stats.release, "TS export release clock");
@@ -508,13 +549,7 @@ impl Subscribe {
 
 	/// A UDP socket bound to an ephemeral port and connected to `url`, `udp://HOST:PORT`.
 	async fn rtp_socket(url: &url::Url) -> anyhow::Result<tokio::net::UdpSocket> {
-		anyhow::ensure!(url.scheme() == "udp", "--rtp takes udp://HOST:PORT: {url}");
-		let host = match url.host().with_context(|| format!("--rtp url missing a host: {url}"))? {
-			url::Host::Domain(domain) => domain.to_string(),
-			url::Host::Ipv4(ip) => ip.to_string(),
-			url::Host::Ipv6(ip) => ip.to_string(),
-		};
-		let port = url.port().context("--rtp url must include a port: udp://HOST:PORT")?;
+		let (host, port) = rtp_destination(url)?;
 		let addr = tokio::net::lookup_host((host.as_str(), port))
 			.await?
 			.next()
@@ -579,5 +614,24 @@ impl Subscribe {
 		}
 
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A datagram the socket refuses is counted and dropped, and the export sends on.
+	#[tokio::test]
+	async fn an_rtp_datagram_the_socket_refuses_is_counted_not_fatal() {
+		let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		socket.connect("127.0.0.1:9").await.unwrap();
+		let mut unsent = Unsent::default();
+		// Longer than any UDP datagram over IPv4 can be.
+		unsent.send(&socket, &[0; 70_000]).await;
+		unsent.send(&socket, &[0; 1_328]).await;
+		assert_eq!(unsent.count, 1);
+		unsent.report();
+		assert_eq!((unsent.count, unsent.last.is_none()), (0, true));
 	}
 }

@@ -413,7 +413,8 @@ pub(super) struct Laid {
 	/// It does not follow the slot laid before it.
 	pub jump: bool,
 	/// The positions another leg may fill otherwise: stuffing where it may carry a packet, the
-	/// tables a timeline's start or a jump lays outside their repetitions, and a jump's clock.
+	/// tables a timeline's start lays outside their repetitions, a jump's tables, which flag
+	/// the break, and its clock.
 	pub unsure: Vec<usize>,
 }
 
@@ -626,7 +627,7 @@ impl Grid {
 					if packet[1] & 0x40 != 0 && packet[3] & 0x20 != 0 && packet[4] > 0 {
 						packet[5] = (packet[5] & !0x80) | u8::from(jump) << 7;
 					}
-					if !repeats {
+					if !repeats || jump {
 						out.unsure.push(position);
 					}
 					packet
@@ -736,6 +737,32 @@ mod test {
 			assert!(flagged(grid.lay(index)).is_empty(), "slot {index} repeats nothing");
 		}
 		assert_eq!(flagged(grid.lay(6 * PSI_SLOTS)), [false, false], "a repetition");
+	}
+
+	/// Tables a jump lays on a repetition flag the break, where a leg laying that slot in turn
+	/// does not, so they are unsure there as at any jump; a repetition laid in turn is sure.
+	#[test]
+	fn a_jump_onto_a_repetition_leaves_its_tables_unsure() {
+		let layout = Arc::new(layout());
+		let positions = [layout.tables[0], layout.tables[1]];
+		let mut grid = Grid::new(layout, tables());
+		grid.lay(PSI_SLOTS + 3);
+		let laid = grid.lay(5 * PSI_SLOTS);
+		assert!(laid.jump);
+		assert!(
+			positions.iter().all(|position| laid.unsure.contains(position)),
+			"{:?}",
+			laid.unsure
+		);
+		for index in 5 * PSI_SLOTS + 1..6 * PSI_SLOTS {
+			grid.lay(index);
+		}
+		let laid = grid.lay(6 * PSI_SLOTS);
+		assert!(
+			positions.iter().all(|position| !laid.unsure.contains(position)),
+			"{:?}",
+			laid.unsure
+		);
 	}
 
 	#[test]

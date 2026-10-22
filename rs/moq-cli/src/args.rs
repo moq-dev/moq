@@ -370,6 +370,9 @@ impl Invocation {
 					stdout.rtp.is_none() || stdout.sync,
 					"--rtp needs --sync: only a synced multiplex lays each packet where every leg does"
 				);
+				if let Some(url) = &stdout.rtp {
+					crate::subscribe::rtp_destination(url)?;
+				}
 				if matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265) {
 					anyhow::ensure!(
 						!export.select.no_video,
@@ -1400,7 +1403,8 @@ mod tests {
 	}
 
 	/// `export ts --rtp` sends what `--sync` renders, so it needs it and refuses what it
-	/// refuses, and it leaves stdout to another stage.
+	/// refuses, takes only `udp://HOST:PORT`, refused before anything dials, and leaves stdout
+	/// to another stage.
 	#[test]
 	fn export_ts_rtp_needs_sync_and_leaves_stdout() {
 		let parse = |args: &[&str]| {
@@ -1428,6 +1432,11 @@ mod tests {
 		assert!(err.to_string().contains("--rtp needs --sync"), "{err}");
 		for flags in [&["--sync", "--stitch"][..], &["--passthrough"]] {
 			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
+		}
+		for url in ["http://127.0.0.1:5004", "udp://127.0.0.1"] {
+			let argv = ["moq", "export", "--broadcast", "b", "ts", "--sync", "--rtp", url];
+			let err = Invocation::try_parse_from(argv).unwrap().validate().unwrap_err();
+			assert!(err.to_string().contains("udp://HOST:PORT"), "{url}: {err}");
 		}
 	}
 
