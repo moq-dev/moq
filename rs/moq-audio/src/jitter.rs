@@ -36,6 +36,15 @@ const FRESH_MAX: f64 = 0.1;
 /// Idle intervals folded at once, purely to bound the work.
 const IDLE_MAX: f64 = 1024.0;
 
+/// Arrivals kept in the reference window.
+///
+/// The window is media time, and a publisher chooses the timestamp rate, so an
+/// uncapped history can hold millions of entries from a stream that advances a
+/// microsecond per frame. This bounds both memory and a reordered frame's scan,
+/// and stays far above the 2 s window of any real track (a 1000 fps track holds
+/// 2000).
+const MAX_HISTORY: usize = 8192;
+
 /// The playout target, fixed or estimated.
 pub(crate) enum Target {
 	/// An explicit delay, taken literally: no floor, no frame term, no estimate.
@@ -89,6 +98,16 @@ fn prior(i: usize) -> f64 {
 
 /// One arrival still inside the reference window.
 struct Entry {
+	/// Position in the arrival sequence, so the minimum deque can drop retired entries.
+	seq: u64,
+	arrival: f64,
+	media: f64,
+}
+
+/// A candidate reference: the smallest delay seen at or before its arrival.
+struct MinKey {
+	seq: u64,
+	key: f64,
 	arrival: f64,
 	media: f64,
 }
@@ -102,6 +121,14 @@ pub(crate) struct Estimator {
 
 	/// Arrivals still inside the reference window, in media order.
 	history: VecDeque<Entry>,
+	/// The prefix minimum of `arrival - media` over `history`, front first.
+	///
+	/// Keys increase from front to back, so the front is the smallest, and a retired
+	/// entry is dropped by its sequence number. This makes an in-order frame's reference
+	/// O(1) instead of a scan over a count the publisher chose.
+	minima: VecDeque<MinKey>,
+	/// The next entry's position in the arrival sequence.
+	next_seq: u64,
 	/// The largest media timestamp observed, so a reordered frame is recognized.
 	newest: f64,
 
@@ -123,6 +150,8 @@ impl Estimator {
 			frame: 0.0,
 			advertised,
 			history: VecDeque::new(),
+			minima: VecDeque::new(),
+			next_seq: 0,
 			newest: f64::NEG_INFINITY,
 			origin: None,
 			interval: 0.0,
@@ -143,7 +172,24 @@ impl Estimator {
 			while self.history.front().is_some_and(|entry| entry.media < media - WINDOW) {
 				self.history.pop_front();
 			}
-			self.history.push_back(Entry { arrival, media });
+			while self.history.len() >= MAX_HISTORY {
+				self.history.pop_front();
+			}
+
+			let seq = self.next_seq;
+			self.next_seq += 1;
+			let key = arrival - media;
+			self.history.push_back(Entry { seq, arrival, media });
+			while self.minima.back().is_some_and(|min| min.key >= key) {
+				self.minima.pop_back();
+			}
+			self.minima.push_back(MinKey {
+				seq,
+				key,
+				arrival,
+				media,
+			});
+			self.trim_minima();
 		}
 
 		// The fastest frame in the window at or before this one, so delay is measured
@@ -151,17 +197,13 @@ impl Estimator {
 		// frame held behind newer ones reads as the wait playing it in order costs. A
 		// frame older than the whole window, such as a subscription's backlog behind its
 		// live edge, has nothing to be measured against.
-		let mut reference: Option<&Entry> = None;
-		for entry in self.history.iter().take_while(|entry| entry.media <= media) {
-			if reference.is_none_or(|best| entry.arrival - entry.media < best.arrival - best.media) {
-				reference = Some(entry);
-			}
-		}
-		let Some(reference) = reference else {
+		let Some((reference, reference_media)) = self.reference(media) else {
 			return;
 		};
 
-		let delay = f64::max(0.0, arrival - reference.arrival - (media - reference.media));
+		// Written in this order on purpose: the document requires bit-identical
+		// arithmetic, so the difference is not reassociated.
+		let delay = f64::max(0.0, arrival - reference - (media - reference_media));
 
 		let Some(origin) = self.origin else {
 			self.origin = Some(arrival);
@@ -184,6 +226,34 @@ impl Estimator {
 
 		self.interval = interval;
 		self.peak = delay;
+	}
+
+	/// The fastest arrival at or before `media`, as its `(arrival, media)`.
+	fn reference(&self, media: f64) -> Option<(f64, f64)> {
+		if media >= self.newest {
+			// Every entry is at or before a frame in media order, and the deque's front
+			// is their minimum.
+			return self.minima.front().map(|min| (min.arrival, min.media));
+		}
+
+		// A reordered frame sees only a prefix, which the minimum deque cannot answer.
+		// The history cap bounds the scan.
+		self.history
+			.iter()
+			.take_while(|entry| entry.media <= media)
+			.min_by(|a, b| (a.arrival - a.media).total_cmp(&(b.arrival - b.media)))
+			.map(|entry| (entry.arrival, entry.media))
+	}
+
+	/// Drop minimums whose arrivals left the history.
+	fn trim_minima(&mut self) {
+		let Some(front) = self.history.front().map(|entry| entry.seq) else {
+			self.minima.clear();
+			return;
+		};
+		while self.minima.front().is_some_and(|min| min.seq < front) {
+			self.minima.pop_front();
+		}
 	}
 
 	fn target(&self) -> f64 {
@@ -339,5 +409,49 @@ pub(crate) mod tests {
 			target.observe(i as f64 * 1000.0, i as f64 * 20.0);
 		}
 		assert_eq!(target.millis(), BUCKETS as f64 * BUCKET + 20.0);
+	}
+
+	/// The minimum deque must answer exactly what the documented scan would.
+	#[test]
+	fn reference_matches_a_naive_prefix_scan() {
+		let mut estimator = Estimator::new(0.0);
+		let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+		for index in 0..400 {
+			seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+			// Mostly in order, with an occasional reordered frame and a timestamp jump.
+			let media = if index % 37 == 0 {
+				(index as f64) * 20.0 - 900.0
+			} else if index % 89 == 0 {
+				(index as f64) * 20.0 + 3000.0
+			} else {
+				(index as f64) * 20.0
+			};
+			let arrival = (index as f64) * 20.0 + (seed >> 40) as f64 / 1024.0;
+			estimator.observe(arrival, media);
+
+			for query in [media - 10.0, media, media + 10.0, media + 1.0e6] {
+				let expected = estimator
+					.history
+					.iter()
+					.take_while(|entry| entry.media <= query)
+					.map(|entry| entry.arrival - entry.media)
+					.min_by(f64::total_cmp);
+				let actual = estimator.reference(query).map(|(arrival, media)| arrival - media);
+				assert_eq!(actual, expected, "frame {index}, query {query}");
+			}
+		}
+	}
+
+	/// A peer choosing a microsecond per frame cannot grow the history without bound.
+	#[test]
+	fn the_history_is_capped() {
+		let mut estimator = Estimator::new(0.0);
+		// One frame per microsecond of media, for well past the cap.
+		for index in 0..(MAX_HISTORY + 5000) {
+			estimator.observe(index as f64, index as f64 / 1000.0);
+		}
+		assert_eq!(estimator.history.len(), MAX_HISTORY);
+		assert!(estimator.minima.len() <= MAX_HISTORY);
+		assert!(estimator.target().is_finite());
 	}
 }

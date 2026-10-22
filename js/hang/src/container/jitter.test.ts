@@ -114,4 +114,12 @@ describe("Jitter", () => {
 		expect(fork.measured).toBeLessThanOrEqual(learned);
 		expect(warm.measured).toBe(learned);
 	});
+
+	it("caps the retained history against a timestamp rate the peer chooses", () => {
+		const jitter = new Jitter();
+		// One frame per microsecond of media, for well past any real window.
+		for (let i = 0; i < 20_000; i++) jitter.observe(i as Milli, (i / 1000) as Milli);
+		expect(jitter.retained).toBeLessThanOrEqual(8192);
+		expect(Number.isFinite(jitter.measured)).toBe(true);
+	});
 });

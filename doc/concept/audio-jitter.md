@@ -91,9 +91,14 @@ observe(arrival, media):
     if media > newest:                  # a reordered frame never joins the history
         newest = media
         drop history entries with entry.media < media - WINDOW
+        drop history entries from the front while MAX_HISTORY are held
         push (arrival, media) onto history
+        keep the prefix minimum of (arrival - media) beside it
 
-    ref = entry in history with entry.media <= media, minimising (entry.arrival - entry.media)
+    if media >= newest:                 # in media order, every entry is the prefix
+        ref = the prefix minimum          # stored as the entry itself, not a reassociated value
+    else:                               # reordered, a shorter prefix
+        ref = entry in history with entry.media <= media, minimising (entry.arrival - entry.media)
     if there is none: return            # older than the whole window, not measured
     delay = max(0, (arrival - ref.arrival) - (media - ref.media))
 
@@ -138,6 +143,22 @@ special case, and neither does a group the relay dropped.
 `WINDOW` is also the horizon over which a build-up is visible. A queue that
 fills over ten seconds is measured as the part of it that happened in the last
 two.
+
+### Bounding the history
+
+The history holds at most `MAX_HISTORY` (8192) arrivals. The window is media
+time and the publisher chooses the timestamp rate, so without a cap a stream
+that advances a microsecond per frame holds millions of entries inside two
+seconds, and every frame's reference search scans them. The cap stays far above
+the two-second window of any real track, including a 1000 fps one (2000
+entries); a stream dense enough to reach it measures against a window shorter
+than `WINDOW` instead of growing without bound.
+
+The reference is a prefix minimum, so an in-order frame reads it from a deque
+kept beside the history in O(1) amortized. A reordered frame sees only a prefix
+the deque cannot answer, and scans the capped history. Both produce exactly the
+minimum the definition above names; the structure is an implementation detail,
+and the cap is the only place where this page deliberately narrows the window.
 
 ### Reordered arrivals are measured against what came before them
 
@@ -473,6 +494,7 @@ The exceptions are marked.
 | `FRESH_MAX` | 0.1 | Ours, twice the quantile's tail. NetEq ramps the forget factor from a start weight of 2 instead; see [the histogram](#the-histogram) |
 | `PRIOR[i]` | `0.5^(i+1)` | NetEq's histogram seed |
 | `IDLE_MAX` | 1024 intervals | Ours. A work bound with no effect on output |
+| `MAX_HISTORY` | 8192 arrivals | Ours. Bounds a rate the publisher chooses; see [Bounding the history](#bounding-the-history) |
 | Out-of-range delays | clamped, not dropped | Ours. See [the histogram](#the-histogram) |
 
 ## Implementing from this page
