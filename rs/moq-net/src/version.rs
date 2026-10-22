@@ -331,25 +331,6 @@ impl Versions {
 		alpns
 	}
 
-	/// Compute the unique WebTransport subprotocols to offer for these versions.
-	///
-	/// Draft-14 predates WebTransport subprotocols: `moq-00` is only its QUIC ALPN, and a
-	/// peer that accepts it over WebTransport picks draft-14 over a newer draft both support.
-	/// It rides `moql` and negotiates in SETUP instead, as `js/net` does.
-	pub fn web_protocols(&self) -> Vec<&'static str> {
-		let mut protocols = Vec::new();
-		for v in &self.0 {
-			let protocol = match v {
-				Version::Ietf(ietf::Version::Draft14) => ALPN_LITE,
-				v => v.alpn(),
-			};
-			if !protocols.contains(&protocol) {
-				protocols.push(protocol);
-			}
-		}
-		protocols
-	}
-
 	/// Return only versions present in both self and other, or `None` if the intersection is empty.
 	pub fn filter(&self, other: &Versions) -> Option<Versions> {
 		let filtered: Vec<Version> = self.0.iter().filter(|v| other.0.contains(v)).copied().collect();
@@ -420,14 +401,6 @@ mod tests {
 		assert_eq!(Versions::all().iter().next(), Some(&newest));
 		assert_eq!(Versions::all().alpns().first(), Some(&newest.alpn()));
 		assert_eq!(ALPNS.first(), Some(&newest.alpn()));
-	}
-
-	#[test]
-	fn web_protocols_never_offer_moq_00() {
-		let draft14 = Version::Ietf(ietf::Version::Draft14);
-		assert!(!Versions::all().web_protocols().contains(&ALPN_14));
-		assert_eq!(Versions::from(draft14).web_protocols(), [ALPN_LITE]);
-		assert_eq!(Versions::all().web_protocols().len(), Versions::all().alpns().len() - 1);
 	}
 
 	#[test]
