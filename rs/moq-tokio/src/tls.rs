@@ -2338,7 +2338,11 @@ mod tests {
 	fn peer_expiry_saturates_to_the_wall_range() {
 		let last = moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
 		// rcgen's default notAfter is in 4096.
-		for (seconds, expected) in [(-1, moq_clock::Wall::UNIX_EPOCH), (18_446_744_074, last), (67_090_118_400, last)] {
+		for (seconds, expected) in [
+			(-1, moq_clock::Wall::UNIX_EPOCH),
+			(18_446_744_074, last),
+			(67_090_118_400, last),
+		] {
 			let key = rcgen::KeyPair::generate().unwrap();
 			let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
 			params.not_after = ::time::OffsetDateTime::from_unix_timestamp(seconds).unwrap();

@@ -125,7 +125,10 @@ mod tests {
 		let last = Wall::UNIX_EPOCH.saturating_add(Duration::MAX);
 		assert_eq!(last, Wall::UNIX_EPOCH + Duration::from_nanos(u64::MAX));
 		assert_eq!(last.saturating_add(Duration::from_nanos(1)), last);
-		assert_eq!(wall.saturating_add(Duration::from_secs(1)), wall + Duration::from_secs(1));
+		assert_eq!(
+			wall.saturating_add(Duration::from_secs(1)),
+			wall + Duration::from_secs(1)
+		);
 	}
 
 	#[test]
