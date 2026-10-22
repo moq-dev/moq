@@ -4,7 +4,8 @@
 
 A creator adds any number of RTMP, RTMPS, and WHIP destinations alongside
 MoQ, each with its own codec and bitrate, and goes live to all of them at
-once. Destinations with identical encode settings share one encoder. The
+once. Destinations that take the same canvas and audio mix with identical
+encode settings share one encoder. The
 fan-out runs on the [egress library](/quest/m3/studio/egress.md), and each
 destination's status and errors show in the UI.
 

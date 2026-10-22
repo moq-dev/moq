@@ -26,6 +26,9 @@ Decided 2026-10-22 with the maintainer:
 - **Untrusted destination URLs:** a server-side host must be able to refuse
   private and loopback addresses, so dialing goes through a caller-supplied
   policy rather than resolving any URL it is handed.
+- **Benchmark:** sweep concurrent broadcasts against destinations per
+  broadcast, so any cost that grows with the whole table, rather than the
+  touched destination, shows up as a slope.
 
 ## Required
 

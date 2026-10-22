@@ -38,8 +38,8 @@ Decided 2026-10-22 with the maintainer (/quest-plan):
   destination itself. It remuxes its own broadcast through a UI-free egress
   library that a hosted service can also run server-side. There is no
   gateway service and no moq-cli dependency, because a studio user does not
-  run a server. Destinations with identical encode settings share one
-  encoder. The studio picks codecs per destination: Opus by default, AAC
+  run a server. Destinations that take the same canvas and audio mix with
+  identical encode settings share one encoder. The studio picks codecs per destination: Opus by default, AAC
   where an ingest requires it, from platform encoders only.
 - **Extensibility:** first-party features plus browser sources (CEF
   offscreen, desktop only). A plugin API is a large surface to maintain with

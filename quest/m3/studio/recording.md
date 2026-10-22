@@ -8,8 +8,10 @@ starts and stops on its own without touching live outputs.
 
 ## Plan
 
-Write fMP4 through moq-mux. A recording whose encode settings match a live
-destination shares that destination's encoder.
+Write fMP4 through moq-mux. A recording shares a live destination's encoder
+only when both have the same input (the same canvas or source, and the same
+audio mix) and identical encode settings. An isolated source track never
+shares the program's encoder.
 
 ## Required
 
