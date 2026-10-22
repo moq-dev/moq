@@ -169,7 +169,7 @@ elif [[ -n "${PLAYWRIGHT_VERSION:-}" ]]; then
     if [[ "$pin" == "$PLAYWRIGHT_VERSION" ]]; then
         note ok "playwright $pin == toolchain $PLAYWRIGHT_VERSION"
     else
-        note FAIL "playwright pinned to $pin but the toolchain ships $PLAYWRIGHT_VERSION; bump $PKG"
+        note FAIL "playwright pinned to $pin but the toolchain ships $PLAYWRIGHT_VERSION; run just update-toolchain, then re-enter the smoke shell"
         fail=1
     fi
 else

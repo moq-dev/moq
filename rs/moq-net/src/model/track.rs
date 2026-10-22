@@ -49,7 +49,7 @@ const DEFAULT_PRIORITY: u8 = 127;
 /// Datagrams are a best-effort send buffer, not a replay cache (unlike groups): only the last
 /// 64 datagrams are kept, so a stalled consumer cannot retain an unbounded backlog.
 /// The payload size limit also bounds the buffer's memory use.
-const MAX_DATAGRAMS: usize = 64;
+pub(super) const MAX_DATAGRAMS: usize = 64;
 
 /// Slack before the eviction order is rebuilt, so a track holding just a few groups
 /// doesn't rebuild on every write.
@@ -3755,12 +3755,13 @@ impl TrackWeak {
 		!self.state.is_closed() && self.state.is_used()
 	}
 
-	/// The readers' aggregate demand, or `None` while nobody subscribes.
-	pub(super) fn subscription(&self) -> Option<Subscription> {
+	/// The readers' aggregate demand and contribution count, or `None` without one.
+	pub(super) fn subscription(&self) -> Option<(Subscription, usize)> {
 		let state = self.state.read();
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
-		snapshot_subscription(&subs, bound)
+		let subs = subs.lock();
+		Some((clamp_combined(subs.combined(), bound)?, subs.len()))
 	}
 
 	/// End the track with `err` unless a reader holds it, atomically with lookups: a

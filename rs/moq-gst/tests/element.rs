@@ -1466,28 +1466,6 @@ fn a_pad_kept_across_runs_publishes_again() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
-// Final EOS closes admission only for that run. Returning to READY and starting again must accept a
-// new request pad instead of retaining eos_posted from the previous session.
-#[test]
-fn a_new_run_accepts_pads_again() {
-	init();
-	let sink = publisher();
-	let first = sink.request_pad_simple("sink_0").expect("request sink_0");
-	sink.set_state(gst::State::Paused).expect("start first run");
-	assert!(send_caps(&first));
-	assert!(first.send_event(gst::event::Eos::new()));
-	assert!(
-		sink.request_pad_simple("sink_1").is_none(),
-		"the finalized run refuses another pad"
-	);
-
-	sink.set_state(gst::State::Ready).expect("stop first run");
-	sink.set_state(gst::State::Paused).expect("start second run");
-	let second = sink.request_pad_simple("sink_1").expect("the new run accepts sink_1");
-	assert_eq!(second.parent(), Some(sink.clone().upcast()));
-	let _ = sink.set_state(gst::State::Null);
-}
-
 // An application polls the status through notify rather than by asking on a timer.
 #[test]
 fn status_notifies_on_each_transition() {

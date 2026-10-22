@@ -58,7 +58,7 @@ declare -A scope=(
     # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
     [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
     # Workers with lockfiles outside the Bun workspace.
-    [workers]='^(infra/apt/|infra/rpm/|infra/moq-sh/|demo/pub/|sh/js/workers\.sh$)'
+    [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
     [rs]='^(rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
