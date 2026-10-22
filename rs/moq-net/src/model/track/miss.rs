@@ -118,8 +118,9 @@ impl Misses {
 		self.filled.remove(&sequence);
 	}
 
-	/// Forget what the reader no longer reads: below `from`, or outside `admitted`. A fill
-	/// nobody waits on is withdrawn once its last join goes.
+	/// Forget what the reader no longer reads: below `from`, or outside `admitted`. Its fills
+	/// no longer owe it those groups, and one nobody waits on is withdrawn once its last join
+	/// goes.
 	pub fn retain(&mut self, from: u64, admitted: &RangeInclusiveSet<u64>) {
 		if self.wanted.is_empty() && self.filled.is_empty() {
 			return;
@@ -132,9 +133,13 @@ impl Misses {
 				kept.insert(inside);
 			}
 		}
+		let lost: RangeSet<u64> = self.wanted.iter().flat_map(|run| kept.gaps(run)).collect();
 		self.wanted = kept;
 		let wanted = &self.wanted;
-		self.joins.retain(|join| wanted.overlaps(&join.groups));
+		self.joins.retain_mut(|join| {
+			join.release(&lost);
+			wanted.overlaps(&join.groups)
+		});
 	}
 
 	/// Take in what the joined fills answered, parking `waiter` on the rest. Returns the

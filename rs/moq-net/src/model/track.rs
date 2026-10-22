@@ -15995,6 +15995,41 @@ mod test {
 		}
 	}
 
+	/// A reader narrowing its ranges leaves the part of its fill it no longer reads: the
+	/// handler is not asked for it, and dropping the fill names none of it dropped.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_narrowed_reader_leaves_the_rest_of_its_fill() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let ascending = |groups| replay().with_groups(groups).with_order(Order::Ascending);
+		let mut subscriber = producer.subscribe(ascending(0..));
+		producer.start_at(10).unwrap();
+		write_group(&producer, 10);
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		assert_eq!(fill.next(), Some(0));
+
+		subscriber.update(ascending(8..)).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		assert_eq!(fill.next(), Some(8), "nobody reads below 8 any more");
+		write_filled(fill.accept(8, None), 8);
+		assert_eq!(fill.next(), Some(9));
+		// Over, so what the dropped fill left is a drop rather than a group still to come.
+		producer.finish().unwrap();
+		drop(fill);
+
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the filled group is read");
+		};
+		assert_eq!(group.sequence, 8);
+		assert_eq!(drained_drops(&mut subscriber), [(9, 10)], "only what it still read");
+		assert!(producer.state.read().drops.overlapping(&(0..8)).next().is_none());
+	}
+
 	/// A group the handler refused that still arrives live is delivered.
 	#[test]
 	#[cfg(feature = "async")]

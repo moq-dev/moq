@@ -41,9 +41,49 @@ struct Pending {
 	max_delay: Option<Duration>,
 	order: Order,
 	queued: bool,
+	// How many joins still read each sequence: one a reader narrowed away is no longer owed.
+	wants: RangeMap<u64, u32>,
 	// Readers hold consumers, so it counts the fill's demand; the handler's copy says what
 	// became of each sequence.
 	result: kio::Producer<Outcome>,
+}
+
+impl Pending {
+	/// Count one more join reading `groups`.
+	fn want(&mut self, groups: ops::Range<u64>) {
+		let mut counts: Vec<(ops::Range<u64>, u32)> = self
+			.wants
+			.overlapping(&groups)
+			.map(|(run, count)| (run.start.max(groups.start)..run.end.min(groups.end), count + 1))
+			.collect();
+		counts.extend(self.wants.gaps(&groups).map(|gap| (gap, 1)));
+		for (run, count) in counts {
+			self.wants.insert(run, count);
+		}
+	}
+
+	/// Count one join out of reading `groups`, which it counted in.
+	fn unwant(&mut self, groups: ops::Range<u64>) {
+		let counts: Vec<(ops::Range<u64>, u32)> = self
+			.wants
+			.overlapping(&groups)
+			.map(|(run, count)| (run.start.max(groups.start)..run.end.min(groups.end), count - 1))
+			.collect();
+		for (run, count) in counts {
+			match count {
+				0 => self.wants.remove(run),
+				count => self.wants.insert(run, count),
+			}
+		}
+	}
+
+	/// The runs of `span` a join still reads.
+	fn wanted(&self, span: &ops::Range<u64>) -> RangeSet<u64> {
+		self.wants
+			.overlapping(span)
+			.map(|(run, _)| run.start.max(span.start)..run.end.min(span.end))
+			.collect()
+	}
 }
 
 /// What became of a fill's sequences, shared with every reader that joined it.
@@ -144,6 +184,8 @@ pub(super) struct Join {
 	id: u64,
 	/// The sequences of the fill this reader asked for.
 	pub groups: ops::Range<u64>,
+	// The part of `groups` it still reads, counted in the fill's wants.
+	held: RangeSet<u64>,
 	// Counts this reader in the fill's demand; `None` only while dropping.
 	outcome: Option<kio::Consumer<Outcome>>,
 	attempt: kio::ProducerWeak<Outcome>,
@@ -162,7 +204,13 @@ impl Drop for Join {
 		// its handler is about to drop.
 		let mut fills = self.fills.lock();
 		drop(self.outcome.take());
-		if !self.attempt.is_used() && fills.pending.get(&self.id).is_some_and(|pending| self.is_ours(pending)) {
+		let Some(pending) = fills.pending.get_mut(&self.id).filter(|pending| self.is_ours(pending)) else {
+			return;
+		};
+		for run in std::mem::take(&mut self.held).iter() {
+			pending.unwant(run.clone());
+		}
+		if !self.attempt.is_used() {
 			fills.withdraw(self.id);
 		}
 	}
@@ -171,6 +219,31 @@ impl Drop for Join {
 impl Join {
 	fn is_ours(&self, pending: &Pending) -> bool {
 		pending.result.weak().same_channel(&self.attempt)
+	}
+
+	/// Stop reading `lost`, so the fill no longer owes this reader any of it.
+	pub(super) fn release(&mut self, lost: &RangeSet<u64>) {
+		let released: Vec<ops::Range<u64>> = lost
+			.overlapping(&self.groups)
+			.flat_map(|run| {
+				self.held
+					.overlapping(run)
+					.map(move |held| held.start.max(run.start)..held.end.min(run.end))
+			})
+			.collect();
+		if released.is_empty() {
+			return;
+		}
+		let mut fills = self.fills.lock();
+		let pending = fills.pending.get_mut(&self.id).filter(|pending| self.is_ours(pending));
+		for run in &released {
+			self.held.remove(run.clone());
+		}
+		if let Some(pending) = pending {
+			for run in released {
+				pending.unwant(run);
+			}
+		}
 	}
 }
 
@@ -242,9 +315,11 @@ impl FillState {
 					pending.start.frame = pending.start.frame.min(frame);
 				}
 			}
+			pending.want(groups.clone());
 			joins.push(Join {
 				fills: shared.clone(),
 				id,
+				held: RangeSet::from_iter([groups.clone()]),
 				groups,
 				outcome: Some(pending.result.consume()),
 				attempt: pending.result.weak(),
@@ -266,6 +341,7 @@ impl FillState {
 				fills: shared.clone(),
 				id,
 				groups: groups.clone(),
+				held: RangeSet::from_iter([groups.clone()]),
 				outcome: Some(result.consume()),
 				attempt: result.weak(),
 			});
@@ -279,6 +355,7 @@ impl FillState {
 					max_delay: ask.max_delay,
 					order: ask.order,
 					queued: true,
+					wants: RangeMap::from_iter([(groups.clone(), 1)]),
 					result,
 				},
 			);
@@ -484,14 +561,14 @@ impl Fill {
 		self.inner.result.poll_unused(waiter).map(|_| ())
 	}
 
-	/// The next group still owed in the fill's order: neither answered nor delivered live
-	/// since it was asked. `None` once every group is answered.
+	/// The next group still owed in the fill's order: a reader still reads it, and it was
+	/// neither answered nor delivered live since it was asked. `None` once none is owed.
 	pub fn next(&self) -> Option<u64> {
 		loop {
-			let span = self.inner.start.group..self.inner.end;
+			let wanted = self.inner.wanted();
 			let sequence = {
 				let outcome = self.inner.result.read();
-				let mut gaps = outcome.resolved.gaps(&span);
+				let mut gaps = wanted.iter().flat_map(|run| outcome.resolved.gaps(run));
 				match self.inner.order {
 					Order::Ascending => gaps.next().map(|gap| gap.start),
 					Order::Descending => gaps.last().map(|gap| gap.end - 1),
@@ -543,6 +620,16 @@ impl Fill {
 impl Inner {
 	fn contains(&self, sequence: u64) -> bool {
 		(self.start.group..self.end).contains(&sequence)
+	}
+
+	/// The runs of the fill a reader still reads, read before any other lock.
+	fn wanted(&self) -> RangeSet<u64> {
+		let span = self.start.group..self.end;
+		let fills = self.fills.lock();
+		fills
+			.pending
+			.get(&self.id)
+			.map_or_else(RangeSet::new, |pending| pending.wanted(&span))
 	}
 
 	fn frame_start(&self, sequence: u64) -> u64 {
@@ -655,9 +742,13 @@ impl Inner {
 impl Drop for Inner {
 	fn drop(&mut self) {
 		// Whatever the handler left unanswered is named dropped, but only while a reader still
-		// waits: once demand left, the fill was withdrawn and records nothing. A group cached
+		// reads it: once demand left, the fill was withdrawn and records nothing. A group cached
 		// since (the live feed delivered it) is no drop at all.
-		let left = self.unresolved(self.start.group..self.end);
+		let wanted = self.wanted();
+		let left: RangeSet<u64> = {
+			let outcome = self.result.read();
+			wanted.iter().flat_map(|run| outcome.resolved.gaps(run)).collect()
+		};
 		if !left.is_empty() && self.result.is_used() {
 			if let Ok(mut state) = TrackState::modify(&self.state) {
 				// Unanswered is a miss downstream, as an explicit `drop_groups` would say.
