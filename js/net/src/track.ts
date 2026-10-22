@@ -27,6 +27,7 @@ import {
 	insertDrop,
 	insertRun,
 	type Land,
+	MAX_DATAGRAMS,
 	type Recv,
 	type RecvDatagram,
 	type ResumeSource,
@@ -53,9 +54,6 @@ const PRUNE_SLICES = 8;
 // The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
 // draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
 const DEFAULT_PRIORITY = 127;
-
-/** Maximum buffered datagrams per subscriber; mirrors Rust's bounded send buffer. */
-const MAX_DATAGRAMS = 64;
 
 /**
  * Sanity cap on a datagram payload: the QUIC DATAGRAM frame ceiling. The real limit is
