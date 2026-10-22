@@ -39,8 +39,12 @@ Cloudflare's moq-test-client (draft-18):
   allows (§11.2.1.1). The runner's data-plane conventions leave status
   objects out of verification.
 
-Reporting the last two upstream needs maintainer approval, which this run
-did not have.
+Both are reported upstream, in
+[cloudflare/moq-rs#281](https://github.com/cloudflare/moq-rs/issues/281)
+and [cloudflare/moq-rs#282](https://github.com/cloudflare/moq-rs/issues/282).
+moq-relay keeps its END_OF_TRACK (decided 2026-10-22). The group that
+moq-relay drops when the joining FETCH is refused is
+[headless moq-transport groups](/quest/m2/ietf-headless-group.md).
 
 The moq-dev-rs `subscribe-namespace-lifecycle` timeouts in the report come
 from the stale client image. Rebuilt from the runner's current source, it
