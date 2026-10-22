@@ -30,8 +30,8 @@ archive (per-track `.timeline.z` records named by the catalog's root
   lists each broadcast's tracks as they appear, and the archive SUBSCRIBEs per
   track, gating the lite-07 cut (`broadcast::Consumer::tracks` in Rust,
   `broadcast.Consumer.tracks()` in JS).
-  moq-transport answers SUBSCRIBE_TRACKS through the same hook (Rust now,
-  [js/net](/quest/m1/archive/subscribe-tracks-js.md) next) and learns an
+  moq-transport answers SUBSCRIBE_TRACKS through the same hook in Rust and
+  JavaScript, and learns an
   IETF peer's tracks with a FORWARD=0 SUBSCRIBE_TRACKS
   ([outbound SUBSCRIBE_TRACKS](/quest/m1/archive/subscribe-tracks-outbound.md)). Rejected:
   SUBSCRIBE_ALL, whose relay had to merge pushed feeds into pulled copies
