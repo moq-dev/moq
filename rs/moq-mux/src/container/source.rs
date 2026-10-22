@@ -433,8 +433,10 @@ impl ExportSource {
 				};
 				let item = match consumer.poll_item(waiter) {
 					Poll::Ready(Ok(item)) => item,
-					// The field, not `instance_ended`, so the borrow stays off the consumer.
-					Poll::Ready(Err(_)) | Poll::Pending
+					// Only the transport ending with the instance is its end: media that fails to
+					// decode still fails the export. The field, not `instance_ended`, so the borrow
+					// stays off the consumer.
+					Poll::Ready(Err(crate::Error::Moq(_))) | Poll::Pending
 						if self
 							.instance
 							.as_ref()
@@ -773,6 +775,49 @@ mod tests {
 			ended.map(|read| read.map(|_| ()))
 		);
 		drop((track, replacement, new));
+	}
+
+	/// Media that fails to decode still fails the export when its sibling instance goes: only
+	/// the transport ending with the instance is the rendition's end.
+	#[tokio::test(start_paused = true)]
+	async fn a_sibling_decode_error_outlives_its_instance() {
+		use std::time::Duration;
+
+		let origin = crate::source::produce_origin();
+		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+		tokio::task::yield_now().await;
+		let source = crate::source::resolved(&origin, "a/pub").await;
+		let config = audio(Some("./source"));
+		let mut export = ExportSource::for_audio(&source, "audio", &config, Duration::from_secs(10))
+			.unwrap()
+			.unwrap();
+
+		let sibling = origin.publish("a/source", Default::default()).unwrap();
+		let track = sibling
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		// Subscribe before anything is written, so the malformed frame and the instance's end
+		// arrive together.
+		let settle = tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)));
+		assert!(settle.await.is_err(), "nothing is written yet");
+		// An empty Legacy audio frame is malformed.
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_micros(0).unwrap(), bytes::Bytes::new())
+			.unwrap();
+		drop(sibling);
+		tokio::time::sleep(Duration::from_millis(10)).await;
+		assert!(export.instance_ended(&kio::Waiter::noop()), "the instance has gone");
+
+		let read = tokio::time::timeout(Duration::from_secs(1), kio::wait(|waiter| export.poll_read(waiter)))
+			.await
+			.expect("the read settles");
+		assert!(
+			read.is_err(),
+			"{:?}",
+			read.map(|frame| frame.map(|frame| frame.timestamp))
+		);
+		drop((group, track));
 	}
 
 	/// The requested budget must be present on the first SUBSCRIBE, a live start's too. Updating
