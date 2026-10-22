@@ -767,7 +767,7 @@ async fn follow_catalog(
 	let playback = Playback {
 		pads: pads.clone(),
 		timeline: Arc::default(),
-		restarts: Restarts::default(),
+		siblings: Siblings::default(),
 		finished: Arc::default(),
 	};
 	let mut active: HashMap<String, ActiveTrack> = HashMap::new();
@@ -1017,7 +1017,7 @@ fn reconcile(
 					descriptor: d.shape.container.clone(),
 					pads: pads.clone(),
 					timeline: playback.timeline.clone(),
-					restarts: playback.restarts.clone(),
+					siblings: playback.siblings.clone(),
 					finished: playback.finished.clone(),
 					state: state.clone(),
 					cancel: cancel_rx,
@@ -1073,33 +1073,46 @@ fn plan_reconcile<S: PartialEq>(desired: &HashMap<String, S>, active: &HashMap<S
 struct Playback {
 	pads: Pads,
 	timeline: Arc<Timeline>,
-	restarts: Restarts,
+	siblings: Siblings,
 	finished: Finished,
 }
 
-/// The timeline of each sibling instance a rendition restarted on, shared by every rendition
-/// reading that instance so their first frames fix one mapping for all of them.
+/// The timeline of each sibling instance, shared by every rendition reading that instance so
+/// their first frames fix one mapping for all of them.
 #[derive(Clone, Default)]
-struct Restarts(Arc<Mutex<Vec<Restart>>>);
+struct Siblings(Arc<Mutex<SiblingTimelines>>);
 
-/// An instance some rendition restarted on, and the timeline its renditions share while any reads it.
-type Restart = (moq_net::broadcast::Consumer, std::sync::Weak<Timeline>);
+#[derive(Default)]
+struct SiblingTimelines {
+	/// Each sibling path some instance served this run.
+	seen: HashSet<moq_net::PathOwned>,
+	/// Each instance still serving, and the timeline its renditions share while any reads it.
+	live: Vec<(moq_net::broadcast::Consumer, std::sync::Weak<Timeline>)>,
+}
 
-impl Restarts {
-	/// The timeline of `instance`, new unless another rendition already restarted on it.
-	fn timeline(&self, instance: &moq_net::broadcast::Consumer) -> Arc<Timeline> {
-		let mut restarts = self.0.lock().unwrap();
-		// Forget an instance no rendition reads any more, releasing its handle.
-		restarts.retain(|(_, timeline)| timeline.strong_count() > 0);
-		if let Some(timeline) = restarts
+impl Siblings {
+	/// The timeline of `instance`: the run's for the first instance at its path, which the
+	/// catalog's own renditions share, and one of its own for any later instance, whose
+	/// timestamps share no origin with the run's.
+	fn timeline(&self, instance: &moq_net::broadcast::Consumer, run: &Arc<Timeline>) -> Arc<Timeline> {
+		let mut siblings = self.0.lock().unwrap();
+		// Forget an instance that ended or that no rendition reads any more, releasing its handle.
+		siblings
+			.live
+			.retain(|(known, timeline)| !known.is_closed() && timeline.strong_count() > 0);
+		if let Some(timeline) = siblings
+			.live
 			.iter()
 			.find(|(known, _)| known.is_clone(instance))
 			.and_then(|(_, timeline)| timeline.upgrade())
 		{
 			return timeline;
 		}
-		let timeline = Arc::default();
-		restarts.push((instance.clone(), Arc::downgrade(&timeline)));
+		let timeline = match siblings.seen.insert(instance.info().path.clone()) {
+			true => run.clone(),
+			false => Arc::default(),
+		};
+		siblings.live.push((instance.clone(), Arc::downgrade(&timeline)));
 		timeline
 	}
 }
@@ -1147,8 +1160,8 @@ struct Pump {
 	descriptor: hang::catalog::Container,
 	pads: Pads,
 	timeline: Arc<Timeline>,
-	/// The run's [`Playback::restarts`].
-	restarts: Restarts,
+	/// The run's [`Playback::siblings`].
+	siblings: Siblings,
 	/// The run's [`Playback::finished`].
 	finished: Finished,
 	/// Shared with this rendition's [`ActiveTrack::state`].
@@ -1186,8 +1199,8 @@ impl Pump {
 			container,
 			descriptor,
 			pads,
-			mut timeline,
-			restarts,
+			timeline: run,
+			siblings,
 			finished,
 			state,
 			mut cancel,
@@ -1268,12 +1281,16 @@ impl Pump {
 				},
 			};
 			let mut track = moq_mux::container::Consumer::new(subscriber, container);
+			let timeline = match sibling {
+				true => siblings.timeline(&broadcast, &run),
+				false => run.clone(),
+			};
 
 			let pad = match &owned {
-				// Another instance on the pad this pump owns: a new stream, on that instance's own
-				// timeline, since its timestamps share no origin with the run's.
+				// Another instance on the pad this pump owns: a new stream, and a track that
+				// finished on the old instance is not finished on this one.
 				Some((pad, _)) => {
-					timeline = restarts.timeline(&broadcast);
+					finished.lock().unwrap().remove(&((kind, name.clone()), media.clone()));
 					tokio::task::block_in_place(|| begin(pad, &name, &caps));
 					pad.clone()
 				}
@@ -1392,6 +1409,13 @@ impl Pump {
 						// A sibling's track stopping with its instance is that instance's end, which
 						// idles the pad for the next one rather than ending the rendition.
 						Ok(None) | Err(_) if sibling && broadcast.is_closed() => break Stopped::Idle,
+						// A sibling's track finishing ends it for this instance only: the pad idles
+						// for the next instance, and the record keeps a reshape on this one from
+						// replaying it.
+						Ok(None) if sibling => {
+							finished.lock().unwrap().insert(((kind, name.clone()), media.clone()));
+							break Stopped::Idle;
+						}
 						Ok(None) => {
 							// Recorded while this pump still owns the pad, before any replacement can claim it.
 							finished.lock().unwrap().insert(((kind, name.clone()), media));
@@ -1557,7 +1581,7 @@ fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
 
 #[cfg(test)]
 mod tests {
-	use super::{PumpState, Restarts, Timeline, ended, plan_reconcile};
+	use super::{PumpState, Siblings, Timeline, ended, plan_reconcile};
 	use moq_net::Timestamp;
 	use std::collections::HashMap;
 	use std::sync::Arc;
@@ -1658,29 +1682,31 @@ mod tests {
 		assert_eq!(sorted(plan.add), vec!["a", "b"]);
 	}
 
-	/// Renditions restarting on the same sibling instance share its timeline, and the next
-	/// instance starts another.
+	/// Renditions on the same sibling instance share its timeline, whenever each starts on it:
+	/// the first instance shares the run's, and the next one starts another.
 	#[tokio::test(start_paused = true)]
-	async fn renditions_restarting_on_one_instance_share_its_timeline() {
+	async fn renditions_on_one_sibling_instance_share_its_timeline() {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		tokio::spawn(moq_net::time::run(driver));
 		let consumer = origin.consume();
 		let mut audio = moq_mux::follow::Instances::new(&consumer, "source", None).unwrap();
-		let mut video = moq_mux::follow::Instances::new(&consumer, "source", None).unwrap();
 		let started = async |follow: &mut moq_mux::follow::Instances| match follow.next().await.unwrap() {
 			moq_mux::follow::Event::Start(broadcast) => broadcast,
 			moq_mux::follow::Event::End => panic!("expected a start"),
 		};
-		let restarts = Restarts::default();
+		let (siblings, run) = (Siblings::default(), Arc::<Timeline>::default());
 
 		let _first = origin.publish("source", Default::default()).unwrap();
-		let shared = restarts.timeline(&started(&mut audio).await);
-		assert!(Arc::ptr_eq(&shared, &restarts.timeline(&started(&mut video).await)));
+		let first = started(&mut audio).await;
+		assert!(Arc::ptr_eq(&run, &siblings.timeline(&first, &run)));
 
+		// A video rendition that first starts on the replacement, as one still subscribing when it
+		// took over does, shares its timeline with the audio rendition restarting onto it.
 		let _second = origin.publish("source", Default::default()).unwrap();
-		let next = restarts.timeline(&started(&mut audio).await);
-		assert!(!Arc::ptr_eq(&shared, &next), "another instance has its own timeline");
-		assert!(Arc::ptr_eq(&next, &restarts.timeline(&started(&mut video).await)));
+		let mut video = moq_mux::follow::Instances::new(&consumer, "source", None).unwrap();
+		let next = siblings.timeline(&started(&mut video).await, &run);
+		assert!(!Arc::ptr_eq(&run, &next), "another instance has its own timeline");
+		assert!(Arc::ptr_eq(&next, &siblings.timeline(&started(&mut audio).await, &run)));
 	}
 
 	#[test]
@@ -2932,7 +2958,7 @@ mod session_tests {
 			descriptor: Container::Legacy,
 			pads: Pads::default(),
 			timeline: std::sync::Arc::default(),
-			restarts: super::Restarts::default(),
+			siblings: super::Siblings::default(),
 			finished: std::sync::Arc::default(),
 			state: std::sync::Arc::new(super::PumpState::new()),
 			cancel,
@@ -3220,6 +3246,33 @@ mod session_tests {
 			"no new stream on the kept pad"
 		);
 		recorder.assert_one_pad_held();
+	}
+
+	/// A sibling track finishing while its instance stays up idles the pad, and the instance that
+	/// replaces it starts a new stream there.
+	#[test]
+	fn a_finished_sibling_track_returns_on_the_next_instance() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let _room = referencing(&origin, None);
+		let session = follow(&element, &origin);
+
+		let mut first = Publisher::sibling(&origin, Default::default());
+		let pad = recorder.written(&mut first, 1);
+		first.video.finish().unwrap();
+		let mut second = Publisher::sibling(&origin, Default::default());
+		assert_eq!(
+			recorder.written(&mut second, 2),
+			pad,
+			"the next instance moved to another pad"
+		);
+		stop(session);
+
+		assert!(!recorder.seen().contains(&Seen::Eos(pad)), "the finish ended the pad");
+		recorder.assert_one_pad_held();
+		drop(first);
 	}
 
 	/// A sibling replaced while the old one stays up restarts a reference that names no epoch, on
