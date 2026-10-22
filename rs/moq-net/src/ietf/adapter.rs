@@ -522,18 +522,45 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 	}
 }
 
+/// Preserve the real receive stream's registries through the shared-control adapter.
+/// Virtual streams have only local errors, while data streams still carry raw codes.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RecvError<E: crate::transport::Error> {
+	#[error(transparent)]
+	Real(E),
+	#[error(transparent)]
+	Virtual(crate::Error),
+}
+
+impl<E: crate::transport::Error> crate::transport::Error for RecvError<E> {
+	fn session_error(&self) -> Option<(u32, String)> {
+		match self {
+			Self::Real(err) => err.session_error(),
+			Self::Virtual(err) => err.session_error(),
+		}
+	}
+
+	fn stream_error(&self) -> Option<u32> {
+		match self {
+			Self::Real(err) => err.stream_error(),
+			Self::Virtual(err) => err.stream_error(),
+		}
+	}
+}
+
 pub enum AdapterRecv<S: crate::transport::poll::Session> {
 	Real(S::RecvStream),
 	Virtual(VirtualRecvStream),
 }
 
 impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for AdapterRecv<S> {
-	type Error = crate::Error;
+	type Error = RecvError<<S::RecvStream as crate::transport::poll::RecvStream>::Error>;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_read(cx, dst).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_read(cx, dst),
+			Self::Real(s) => s.poll_read(cx, dst).map(|r| r.map_err(RecvError::Real)),
+			Self::Virtual(s) => s.poll_read(cx, dst).map_err(RecvError::Virtual),
 		}
 	}
 
@@ -543,15 +570,15 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 		buf: &mut B,
 	) -> Poll<Result<Option<usize>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_read_buf(cx, buf).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_read_buf(cx, buf),
+			Self::Real(s) => s.poll_read_buf(cx, buf).map(|r| r.map_err(RecvError::Real)),
+			Self::Virtual(s) => s.poll_read_buf(cx, buf).map_err(RecvError::Virtual),
 		}
 	}
 
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_read_chunk(cx, max).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_read_chunk(cx, max),
+			Self::Real(s) => s.poll_read_chunk(cx, max).map(|r| r.map_err(RecvError::Real)),
+			Self::Virtual(s) => s.poll_read_chunk(cx, max).map_err(RecvError::Virtual),
 		}
 	}
 
@@ -564,8 +591,8 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_closed(cx).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_closed(cx),
+			Self::Real(s) => s.poll_closed(cx).map(|r| r.map_err(RecvError::Real)),
+			Self::Virtual(s) => s.poll_closed(cx).map_err(RecvError::Virtual),
 		}
 	}
 }
