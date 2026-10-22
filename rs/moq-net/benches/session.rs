@@ -16,6 +16,9 @@
 //! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
 //! `session_delivery_group_cost` sweeps publishers and viewers independently for SUBSCRIBE
 //! and FETCH; its constrained cases release held streams only after a real blocked write.
+//! `session_delivery_fetch_demand` pairs the same FETCH sweep with a held metadata
+//! query, separating payload delivery from idle/query/splice demand transitions.
+//! A one-relay lite FETCH fixture asserts one upstream FETCH per group during setup.
 //! `session_delivery_credit` grants a viewer one uni stream at a time, swept over its
 //! subscriptions and the backlog each holds, so every group waits for a stream grant. A
 //! publisher that parks state per backlogged group pays for it on each grant, which shows
@@ -119,6 +122,9 @@ struct Shape {
 	credit: Option<usize>,
 	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
+	/// Hold each viewer's resolved metadata query between FETCHes, isolating
+	/// payload delivery from the logical track's demand transitions.
+	query: bool,
 }
 
 impl Shape {
@@ -138,6 +144,7 @@ impl Shape {
 		window: 1024 * 1024,
 		credit: None,
 		fetch: false,
+		query: false,
 	};
 
 	/// What each viewer subscribes with: a burst is a backlog, which the default
@@ -167,7 +174,7 @@ impl Shape {
 			return format!("{version}/watch={}/burst={}/credit={credit}", self.watch, self.burst);
 		}
 		format!(
-			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}{}{}",
+			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}{}{}{}",
 			self.relays,
 			self.publishers,
 			self.broadcasts,
@@ -195,6 +202,7 @@ impl Shape {
 				String::new()
 			},
 			if self.fetch { "/fetch" } else { "" },
+			if self.query { "/query" } else { "" },
 			if self.history > 1 {
 				format!("/history={}", self.history)
 			} else {
@@ -418,6 +426,7 @@ impl Cluster {
 		Viewer {
 			subscribers: Vec::new(),
 			fetches: Vec::new(),
+			queries: Vec::new(),
 			blocked: 0,
 			_pair: pair,
 			origin,
@@ -429,6 +438,7 @@ impl Cluster {
 struct Viewer {
 	subscribers: Vec<track::Subscriber>,
 	fetches: Vec<(usize, track::Consumer)>,
+	queries: Vec<kio::Pending<track::Querying>>,
 	blocked: usize,
 	_pair: MockPair,
 	origin: origin::Producer,
@@ -502,7 +512,13 @@ impl Room {
 			for broadcast in broadcasts {
 				if shape.fetch {
 					let source = viewer.origin.consume().routed_broadcast(path(broadcast)).await.unwrap();
-					viewer.fetches.push((broadcast, source.track(TRACK).unwrap()));
+					let track = source.track(TRACK).unwrap();
+					if shape.query {
+						let mut query = track.query();
+						(&mut query).await.unwrap();
+						viewer.queries.push(query);
+					}
+					viewer.fetches.push((broadcast, track));
 				} else {
 					viewer.watch(&path(broadcast), &[TRACK], shape.subscription()).await;
 				}
@@ -569,6 +585,23 @@ impl Room {
 				"the constrained fixture must exercise flow control"
 			);
 		}
+		if shape.fetch && shape.relays == 1 && room.cluster.version.is_lite() {
+			let upstream_fetches = room
+				.cluster
+				._pairs
+				.iter()
+				.map(|pair| {
+					// Lite FETCH's stream type is 3, encoded in one byte.
+					pair.server_transport
+						.bidi_types()
+						.into_iter()
+						.filter(|kind| *kind == 3)
+						.count()
+				})
+				.sum::<usize>();
+			assert_eq!(upstream_fetches, room.groups, "one upstream FETCH per written group");
+		}
+
 		room
 	}
 
@@ -744,6 +777,25 @@ fn group_cost(c: &mut Criterion) {
 		})
 	});
 	delivery(c, "group_cost", shapes);
+}
+
+/// A paired control for per-FETCH track demand versus a caller that keeps metadata held.
+fn fetch_demand(c: &mut Criterion) {
+	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+		return;
+	}
+	let shapes = [1, 16].into_iter().flat_map(|publishers| {
+		[1, 16, 64].into_iter().flat_map(move |viewers| {
+			[false, true].map(move |query| Shape {
+				publishers,
+				viewers,
+				fetch: true,
+				query,
+				..Shape::BASE
+			})
+		})
+	});
+	delivery(c, "fetch_demand", shapes);
 }
 
 /// Cached FETCH write cost across independent publishers, viewers, and group lengths.
@@ -1371,5 +1423,13 @@ fn session(c: &mut Criterion) {
 	);
 }
 
-criterion_group!(benches, session, group_cost, fetch_frames, withdrawal, idle);
+criterion_group!(
+	benches,
+	session,
+	group_cost,
+	fetch_demand,
+	fetch_frames,
+	withdrawal,
+	idle
+);
 criterion_main!(benches);
