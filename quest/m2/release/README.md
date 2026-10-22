@@ -27,7 +27,7 @@ production stability proven merely because upstream artifacts published.
 
 ## Required
 
-- [API-diff check](/quest/m2/release/migrate-audit.md) - PRs into release diff the public API; backports refuse breaks, the cut confirms MIGRATE.md coverage
+- [Migration audit](/quest/m2/release/migrate-audit.md) - the cut confirms every break has a MIGRATE.md entry stating the net published-to-final change
 - [API shape review](/quest/m2/release/api-review.md) - every new or changed public API reviewed for a better shape before the cut
 - [Feature review](/quest/m2/release/feature-review.md) - every major work line since the last release judged end to end before the cut
 - [Cut and publish](/quest/m2/release/cut.md) - independently executable after m1; release-triggered publication

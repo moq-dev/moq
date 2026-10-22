@@ -7,6 +7,10 @@ deleted.
 
 ## Plan
 
+Moved to m1 on 2026-10-22 (maintainer, from an external API audit): the
+cut is breaking anyway, so this break ships with it instead of forcing
+another breaking release later.
+
 Decided with the maintainer on 2026-10-17: the goal as drafted, from the
 follow-ups of [#5729](https://github.com/moq-dev/moq/pull/5729), widened the
 same day to Rust after review found Rust sends `Internal` too.
