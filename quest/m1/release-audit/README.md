@@ -46,28 +46,66 @@ Validation at these pins:
 Run focused regression checks and relevant benchmark sweeps after the fixes,
 then carry the candidate through the existing compatibility, package, draft,
 and all-language interop checks. This audit did not run the full platform
-matrix, real-browser WebCodecs/capture/GPU tests, installed registry artifacts,
+matrix, real-browser WebCodecs/capture/GPU coverage, installed registry artifacts,
 or a complete public-API diff against published packages. Those proofs retain
 their existing owners. Reconcile release-only versions, changelogs, and
 backports through the documented merge sequence before the cut.
 
+The deeper pass advanced main to
+[1d43c096e0](https://github.com/moq-dev/moq/commit/1d43c096e04431bfc87d807ce47a546df8017475),
+with the same release pin. It reviewed valid-input protocol differences,
+subscription bounds, JSON/model expiry ownership, HLS/archive lifecycle,
+FFI/C cancellation, and the handwritten Python/Swift/Kotlin/Go/Dart/C++
+wrappers. Native FFI/C checks added 371 passes and two skips. The repeated
+309-test archive/HLS run passed with two skips; it is not additional distinct
+coverage over the first pass.
+
+`TMPDIR=/tmp just test interop --all` passed at the deeper pin: seven native
+interop tests and the complete configured integration harness. The harness
+covered Rust/Python/Go/C++/browser publishers against Rust, Python, Go, C++,
+Chromium, Node, Bun, C, and GStreamer consumers, permitted and denied AUTH,
+browser session refusal, CLI FETCH close, finite tails, compression, and
+partial-group drops. The initial run failed because nested temporary paths
+exceeded Unix socket limits in Go tooling and Chromium; the short-path rerun
+completed with no skips or failures. This is Linux workspace-artifact proof,
+not installed-registry or mobile/macOS/Windows validation.
+
+Targeted reproductions confirmed a finite HLS startup race, retained HLS
+server state after final drop, idle Dart stream cancellation, empty expiry
+indexes, JS IETF timestamp changes, JS datagram range violations, and OBS
+reordered-frame timestamps and missing EOF output. Each owning quest records
+the reproduction's limits. Existing range and OBS quests retain ownership
+of their findings. Go reservation disposal remains an investigation, and
+the security-sensitive HLS admission item is deliberately a public pointer.
+No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
+network-impairment performance result is implied by these checks.
+
 ## Required
 
+- [Review HLS admission](/quest/m1/release-audit/hls-admission.md) - resolve the security-sensitive resource-boundary review before the cut
 - [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
 - [Bound export reorder storage](/quest/m1/release-audit/export-reorder.md) - flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
 - [Validate CMAF counts before allocation](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count
 - [Preserve fMP4 sample runs](/quest/m1/release-audit/fmp4-passthrough.md) - passthrough does not substitute gap or interleaved bytes for media samples
+- [Announce finite HLS imports](/quest/m1/release-audit/hls-startup.md) - a completed valid source cannot race its ready catalog and fail startup
+- [Cancel Dart stream reads](/quest/m1/release-audit/dart-cancellation.md) - listener cancellation releases pending native operations without an unrelated event
 - [Parse QMux records without copying suffixes](/quest/m1/release-audit/qmux-copy.md) - many small frames do not cause quadratic copying
 - [Release AUTH wake listeners](/quest/m1/release-audit/auth-listeners.md) - session churn does not retain one terminal promise reaction per change
 - [Report fatal watch ingestion failures](/quest/m1/release-audit/watch-errors.md) - failed audio/video reads reach the existing error output and tear down their resources
 - [Accept reordered HTTP/3 streams](/quest/m1/release-audit/webtransport-streams.md) - QPACK or a stalled header before SETTINGS does not reject or block a valid handshake
 - [Constrain auth credential redirects](/quest/m1/release-audit/auth-redirects.md) - JSON credentials cannot silently follow redirects to another origin
 - [Release finished FFI codecs](/quest/m1/release-audit/ffi-finished.md) - preserving finished tracks does not preserve drained encoders and scratch buffers
+- [Release HLS server state](/quest/m1/release-audit/hls-shutdown.md) - final server drop retires its watchers while publishers remain live
+- [Retire expiry metadata](/quest/m1/release-audit/expiry-index.md) - empty deadline entries do not accumulate with historical read budgets
+- [Preserve IETF timestamps](/quest/m1/release-audit/ietf-timestamps.md) - JS encoding uses exact same-scale conversion and rejects unsupported values before sending
+- [Settle Go reservation release](/quest/m1/release-audit/go-reservation.md) - investigate prompt allocation release through the public wrapper
 - [Settle finite HLS import](/quest/m1/release-audit/hls-finite.md) - initially ended playlists have an explicit and tested start position
 - [Settle HLS timestamp resets](/quest/m1/release-audit/hls-discontinuity.md) - unchanged-map discontinuities preserve timeline identity or are explicitly refused
 
 ## Related
 
+- [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - reproduced datagram bounds failures remain with the existing range implementation owner
+- [OBS video source](/quest/m2/obs-moq-video/source.md) - reproduced inherited timing and EOF defects remain with the decoder replacement owner
 - [Receive memory](/quest/m1/quic/receive-memory.md) - incomplete reliable input remains a separate connection-credit concern
 - [QPACK dependency fix](/quest/m0/web-transport-proto-0.6.3.md) - decoded header expansion is already tracked
 - [Compressed tracks](/quest/m1/compress/README.md) - mid-group widening and application migration have existing owners
