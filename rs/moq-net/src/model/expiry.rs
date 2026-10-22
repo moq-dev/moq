@@ -46,6 +46,9 @@ struct Parked {
 	/// Reads by deadline, in floored micros: never later than the exact deadline, so a
 	/// write that crosses one is never skipped.
 	deadlines: BTreeMap<u64, kio::WaiterList>,
+	/// The `deadlines` size that sweeps out the lists every reader has left. A read that
+	/// returns or is dropped leaves its deadline behind, and distinct budgets never share one.
+	deadlines_sweep: usize,
 	/// Reads by their group's sequence, woken when a group lands above them.
 	landings: BTreeMap<u64, kio::WaiterList>,
 	/// `landings` for groups held from another copy, also woken by their own group
@@ -62,12 +65,13 @@ struct Parked {
 	starts_sweep: usize,
 	/// Reads by wall-clock deadline, released by the pool's driver.
 	wall: BTreeMap<crate::time::Instant, kio::WaiterList>,
+	wall_sweep: usize,
 	/// The earliest `wall` deadline the pool was asked to release, so arming a later one
 	/// skips the pool's lock.
 	wall_armed: Option<crate::time::Instant>,
 }
 
-/// The smallest `held` size worth sweeping.
+/// The smallest index size worth sweeping.
 const HELD_SWEEP_MIN: usize = 16;
 
 impl Default for Wakes {
@@ -109,6 +113,12 @@ impl Wakes {
 			return;
 		}
 		let mut parked = self.parked.lock();
+		if parked.deadlines.len() >= parked.deadlines_sweep {
+			parked.deadlines.retain(|_, list| !list.is_empty());
+			// `earliest` may now be below every deadline left, which only costs the next write
+			// the lock: `presented` recomputes it.
+			parked.deadlines_sweep = (parked.deadlines.len() * 2).max(HELD_SWEEP_MIN);
+		}
 		parked.deadlines.entry(deadline).or_default().register(waiter);
 		self.earliest.fetch_min(deadline, Ordering::Relaxed);
 	}
@@ -122,6 +132,11 @@ impl Wakes {
 		waiter: &kio::Waiter,
 	) -> Option<Option<crate::time::Instant>> {
 		let mut parked = self.parked.lock();
+		// A swept deadline may stay armed with the pool, which then releases nothing.
+		if parked.wall.len() >= parked.wall_sweep {
+			parked.wall.retain(|_, list| !list.is_empty());
+			parked.wall_sweep = (parked.wall.len() * 2).max(HELD_SWEEP_MIN);
+		}
 		parked.wall.entry(at).or_default().register(waiter);
 		if parked.wall_armed.is_some_and(|armed| armed <= at) {
 			return None;
@@ -281,6 +296,15 @@ fn micros(value: u128) -> u64 {
 }
 
 #[cfg(test)]
+impl Wakes {
+	/// How many media and wall-clock deadlines are indexed, live or not.
+	pub(super) fn deadlines_indexed(&self) -> (usize, usize) {
+		let parked = self.parked.lock();
+		(parked.deadlines.len(), parked.wall.len())
+	}
+}
+
+#[cfg(test)]
 mod test {
 	use super::*;
 
@@ -300,6 +324,25 @@ mod test {
 		assert!(
 			wakes.parked.lock().held.len() <= HELD_SWEEP_MIN,
 			"the readers that left are swept"
+		);
+	}
+
+	/// Reads parked on distinct deadlines that leave before either clock reaches them do
+	/// not stay indexed until it does.
+	#[test]
+	fn departed_deadlines_are_swept() {
+		let wakes = Wakes::default();
+		let now = crate::time::Instant::now();
+		for i in 0..1_000u64 {
+			let waiter = kio::Waiter::noop();
+			let budget = Duration::from_secs(1) + Duration::from_micros(i);
+			wakes.watch_deadline(Timestamp::from_secs(10).unwrap(), budget, &waiter);
+			wakes.watch_wall(now + budget, &waiter);
+		}
+		let (media, wall) = wakes.deadlines_indexed();
+		assert!(
+			media <= HELD_SWEEP_MIN && wall <= HELD_SWEEP_MIN,
+			"{media} media and {wall} wall"
 		);
 	}
 }
