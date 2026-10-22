@@ -50,9 +50,12 @@ async fn assert_owner_stopped(quic: SocketAddr, http: SocketAddr) {
 		tokio::net::TcpStream::connect(http).await.is_err(),
 		"HTTP still accepted after the owner stopped"
 	);
+	// A closed UDP port never answers, so this only ends at the timeout. A live
+	// listener answers a loopback handshake well inside it, and on Linux the
+	// socket check before this is what proves the port closed.
 	let url: url::Url = format!("https://{quic}/").parse().expect("parse url");
 	let after = tokio::time::timeout(
-		Duration::from_secs(2),
+		Duration::from_millis(500),
 		client().with_reconnect(false).connect(url).established(),
 	)
 	.await;

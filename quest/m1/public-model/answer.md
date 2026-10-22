@@ -115,12 +115,13 @@ JS items (`js/net/src/`):
 - **Blind answers** (the same loop, raised in review of #5717). Every JS
   session answers each request no route covers by subscribing on its peer:
   always, and as the only path after a peer refuses or resets discovery.
-  [Lazy discovery](/quest/m1/lazy-discovery/README.md) keeps a plain
-  `request(path)` blind, and its Rust child adds the same downgrade, so
-  blind answering stays and needs a public shape before the loop goes.
-  **Decision** (settled 2026-10-16):
-  - ✅ A fallback answerer, `origin::Producer::fallback()` in Rust and
-    `Origin.Producer.fallback()` in JS. The name is still open: propose
+  [Lazy discovery](/quest/m1/lazy-discovery/README.md) keeps a plain JS
+  `request(path)` blind, so blind answering stays in JS and needs a public
+  shape before the loop goes. Rust has no blind answers (decided 2026-10-20,
+  maintainer, recorded in [Rust lazy discovery](/quest/m1/lazy-discovery/rust.md)),
+  so no Rust session needs this shape.
+  **Decision** (settled 2026-10-16, narrowed to JS 2026-10-20):
+  - ✅ A fallback answerer, `Origin.Producer.fallback()` in JS. The name is still open: propose
     alternatives in this quest's PR before shipping it. It returns the same
     `Dynamic` request stream, scoped to the handle's allowed paths. It
     receives only requests that no announced or served route covers. Once
@@ -138,9 +139,8 @@ JS items (`js/net/src/`):
     announced route. This reuses one call but puts an unadvertised,
     claim-free entry in the route table, where selection and split-horizon
     must special-case it.
-  Land the Rust side with or after Rust lazy discovery (Required below),
-  which brings blind answers to Rust. Delete the JS loop only once the
-  fallback answers the same requests, including after a downgrade.
+  Delete the JS loop only once the fallback answers the same requests,
+  including after a downgrade.
 - `wire.ts` `OriginProducer.expect` (`connection/reload.ts`, keeps requests
   pending while a reconnect is in flight): public if Rust has the same need
   across a reconnect, else private to the connection.

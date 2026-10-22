@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `BroadcastInput` has a `linger` input
+
+Code that builds a complete `BroadcastInput` adds `linger`, such as `new Signal(false)` to keep turning `announce` off unannouncing at once.
+`new Broadcast({ ... })` defaults it to `false`, so constructor calls need no change.
+
 ### `Encoder.cut()` is not rate limited, and video tracks advertise refresh (#6048)
 
 `Encoder.cut()` no longer spaces keyframes 500 ms apart: every call forces one on the next frame, so frequent calls produce all-keyframe video.

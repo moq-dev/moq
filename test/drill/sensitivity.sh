@@ -134,7 +134,7 @@ run_drill() {
     local status=0
     (
         cd "$dir"
-        "$CARGO" nextest run --locked -p moq-relay --test drills -E "test(=$drill)" --test-threads 1
+        "$CARGO" nextest run --locked -p moq-relay --test drills --run-ignored all -E "test(=$drill)" --test-threads 1
     ) >"$log" 2>&1 || status=$?
     echo "$status"
 }

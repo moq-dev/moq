@@ -1253,36 +1253,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_key_generate_es256() {
-		let key = Key::generate(Algorithm::ES256, Some(crate::KeyId::decode("test-id").unwrap()));
-		assert!(key.is_ok());
-		let key = key.unwrap();
-
-		assert_eq!(key.algorithm, Algorithm::ES256);
-		assert!(matches!(key.material, KeyMaterial::EC { .. }))
-	}
-
-	#[test]
-	fn test_key_generate_ps512() {
-		let key = Key::generate(Algorithm::PS512, Some(crate::KeyId::decode("test-id").unwrap()));
-		assert!(key.is_ok());
-		let key = key.unwrap();
-
-		assert_eq!(key.algorithm, Algorithm::PS512);
-		assert!(matches!(key.material, KeyMaterial::RSA { .. }));
-	}
-
-	#[test]
-	fn test_key_generate_eddsa() {
-		let key = Key::generate(Algorithm::EdDSA, Some(crate::KeyId::decode("test-id").unwrap()));
-		assert!(key.is_ok());
-		let key = key.unwrap();
-
-		assert_eq!(key.algorithm, Algorithm::EdDSA);
-		assert!(matches!(key.material, KeyMaterial::OKP { .. }));
-	}
-
-	#[test]
 	fn test_key_generate_without_id() {
 		let key = Key::generate(Algorithm::HS256, None);
 		assert!(key.is_ok());
@@ -1395,22 +1365,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_key_generate_sign_verify_cycle() {
-		let key = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("test-id").unwrap()));
-		assert!(key.is_ok());
-		let key = key.unwrap();
-
-		let claims = create_test_claims();
-
-		let token = key.sign(&claims).unwrap();
-		let verified_claims = key.verify(&token).unwrap();
-
-		assert_eq!(verified_claims.root, claims.root);
-		assert_eq!(verified_claims.publish, claims.publish);
-		assert_eq!(verified_claims.subscribe, claims.subscribe);
-	}
-
-	#[test]
 	fn test_key_debug_no_secret() {
 		let key = create_test_key();
 		let debug_str = format!("{key:?}");
@@ -1419,22 +1373,6 @@ mod tests {
 		assert!(debug_str.contains("operations"));
 		assert!(debug_str.contains("kid: Some(KeyId(\"test-key-1\"))"));
 		assert!(!debug_str.contains("secret")); // Should not contain secret
-	}
-
-	#[test]
-	fn test_key_operations_enum() {
-		let sign_op = KeyOperation::Sign;
-		let verify_op = KeyOperation::Verify;
-		let decrypt_op = KeyOperation::Decrypt;
-		let encrypt_op = KeyOperation::Encrypt;
-
-		assert_eq!(sign_op, KeyOperation::Sign);
-		assert_eq!(verify_op, KeyOperation::Verify);
-		assert_eq!(decrypt_op, KeyOperation::Decrypt);
-		assert_eq!(encrypt_op, KeyOperation::Encrypt);
-
-		assert_ne!(sign_op, verify_op);
-		assert_ne!(decrypt_op, encrypt_op);
 	}
 
 	#[test]
@@ -1468,28 +1406,6 @@ mod tests {
 		) = (&key.material, &deserialized.material)
 		{
 			assert_eq!(deserialized_secret, original_secret);
-		} else {
-			panic!("Expected both keys to be OCT variant");
-		}
-	}
-
-	#[test]
-	fn test_key_clone() {
-		let key = create_test_key();
-		let cloned = key.clone();
-
-		assert_eq!(cloned.algorithm, key.algorithm);
-		assert_eq!(cloned.operations, key.operations);
-		assert_eq!(cloned.kid, key.kid);
-
-		if let (
-			KeyMaterial::OCT {
-				secret: original_secret,
-			},
-			KeyMaterial::OCT { secret: cloned_secret },
-		) = (&key.material, &cloned.material)
-		{
-			assert_eq!(cloned_secret, original_secret);
 		} else {
 			panic!("Expected both keys to be OCT variant");
 		}

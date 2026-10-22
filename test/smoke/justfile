@@ -95,6 +95,7 @@ negative *args:
 # Assert we pin nothing stale: no committed lock files, and any version we are
 # forced to pin (npm playwright) matches what the toolchain provides.
 freshness:
+    python3 update.test.py
     ./freshness.sh
 
 # moq's root `just check` lints these scripts too. shfmt discovers every shell
@@ -122,3 +123,13 @@ playwright-deps:
 cloudflare-check:
     cargo update --manifest-path clients/cloudflare/Cargo.toml
     cargo test --manifest-path clients/cloudflare/Cargo.toml
+
+# Refresh the toolchain lock and the exact npm Playwright pin in the same change.
+update-toolchain:
+    python3 update.py
+
+# Verify a proposed toolchain with its own version and a real browser launch.
+check-toolchain:
+    nix develop --command just freshness
+    cd clients/js && nix develop --command bun install
+    cd clients/js && nix develop --command bun -e 'import {chromium} from "playwright"; const browser = await chromium.launch({channel: "chromium", headless: true}); await browser.close();'
