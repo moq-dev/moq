@@ -3986,6 +3986,8 @@ where
 
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let group: ietf::GroupHeader = stream.decode().await?;
+		// Ranked as the least urgent subscription until its alias resolves.
+		stream.set_priority(crate::priority::recv_group(i8::MIN, group.group_id, Default::default()));
 
 		if group.sub_group_id != 0 {
 			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, dropping stream");
@@ -4028,6 +4030,10 @@ where
 				Reading::open(&track.tail, Some(group.group_id), self.runtime.now()),
 			)
 		};
+		let (priority, order) = track
+			.subscription()
+			.map_or((0, Default::default()), |sub| (sub.priority, sub.order));
+		stream.set_priority(crate::priority::recv_group(priority, group.group_id, order));
 
 		// Peek before creating a group: a standalone END_OF_TRACK has no payload
 		// group, and a fill or resume may already own the prefix.
