@@ -2230,8 +2230,15 @@ impl TrackState {
 		// arrivals count. Without a declared start, the first one stands in for it.
 		let floor = match self.start_sequence {
 			Some(start) => start,
-			// Where the feed starts is still unknown, so all of it is owed.
-			None if self.start_pending => return active.checked_add(grace),
+			// Where the feed starts is still unknown, so everything below the end not yet
+			// delivered or dropped is owed.
+			None if self.start_pending => {
+				let missing = self
+					.arrivals
+					.gaps(0..fin)
+					.any(|(gap, _)| self.drops.gaps(&gap).next().is_some());
+				return missing.then(|| active.checked_add(grace)).flatten();
+			}
 			None => self.arrivals.first().unwrap_or(0),
 		};
 		let owed = floor.min(fin)..fin;
@@ -12332,6 +12339,51 @@ mod test {
 		assert_eq!(arrival.assert_group().sequence, 2);
 		assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
 		producer.drop_groups(0..2, StreamError::NotFound);
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// While the start is pending, everything below the end is owed, but only what has
+	/// not arrived or been dropped: an end with nothing missing below it ends readers at once.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_pending_start_owes_nothing_already_accounted_for() {
+		// An end before the first group owes nothing.
+		let mut producer = track_producer("test", None);
+		producer.received();
+		producer.request_start(None).unwrap();
+		let mut arrival = producer.subscribe(replay());
+		producer.finish_at(Position::group(0)).unwrap();
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+
+		// Nor does one whose groups below it all arrived or were dropped.
+		let mut producer = track_producer("test", None);
+		producer.received();
+		producer.request_start(None).unwrap();
+		let mut arrival = producer.subscribe(replay());
+		producer
+			.create_group(group::Info { sequence: 0 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		assert_eq!(arrival.assert_group().sequence, 0);
+		producer.drop_groups(1..2, StreamError::NotFound);
+		producer.finish_at(Position::group(2)).unwrap();
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+
+		// A hole is still owed until the grace passes.
+		let mut producer = track_producer("test", None);
+		producer.received();
+		producer.request_start(None).unwrap();
+		let mut arrival = producer.subscribe(replay());
+		producer
+			.create_group(group::Info { sequence: 1 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		assert_eq!(arrival.assert_group().sequence, 1);
+		producer.finish_at(Position::group(2)).unwrap();
+		assert!(arrival.recv_group().now_or_never().is_none(), "group 0 is owed");
+		elapse(&producer, replay().max_delay);
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
 	}
 
