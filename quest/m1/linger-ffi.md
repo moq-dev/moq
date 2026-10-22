@@ -35,3 +35,11 @@ whether `cpp/obs` should finish on a clean stop.
 Test in `moq-ffi` with a mocked clock: a late subscriber within max-age gets
 the media, the broadcast closes once it passes, and cancelling closes early.
 Each binding needs at least a smoke test that the call exists and returns.
+
+Decided 2026-10-20 (maintainer): the moq-c half lands on the
+[generated C package](/quest/m1/c/README.md), not the frozen hand-written
+ABI, so C users break once.
+
+## Required
+
+- [Generated C bindings](/quest/m1/c/README.md) - the finish handle reaches C through the generated package, not the frozen hand-written ABI

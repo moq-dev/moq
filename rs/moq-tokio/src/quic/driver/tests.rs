@@ -476,6 +476,14 @@ fn blocking_server_pair(
     let mut server_config = crate::quic::driver::ServerConfig::with_crypto(Arc::new(
         QuicServerConfig::try_from(server_crypto).unwrap(),
     ));
+    // Loopback answers in microseconds. The default 333 ms initial RTT would hold every
+    // connection closed before its handshake in draining for three seconds.
+    let transport = Arc::new({
+        let mut transport = TransportConfig::default();
+        transport.initial_rtt(Duration::from_millis(10));
+        transport
+    });
+    server_config.transport_config(transport.clone());
     let blocker = Arc::new(HandshakeBlocker::default());
     server_config.crypto = Arc::new(BlockingServerConfig {
         inner: server_config.crypto.clone(),
@@ -505,9 +513,10 @@ fn blocking_server_pair(
         .with_root_certificates(roots)
         .with_no_client_auth();
     client_crypto.alpn_protocols = vec![client_alpn.to_vec()];
-    client.set_default_client_config(ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(client_crypto).unwrap(),
-    )));
+    let mut client_config =
+        ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto).unwrap()));
+    client_config.transport_config(transport);
+    client.set_default_client_config(client_config);
 
     (client, server, blocker)
 }

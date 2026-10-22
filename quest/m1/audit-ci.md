@@ -5,7 +5,7 @@
 Every CI workflow and job earns its place: its results reach someone (a gate,
 a Discord alert, or a published report) at a cost proportional to that signal.
 Each one that doesn't is fixed, moved, or deleted. Individual tests stay with
-the [test cost audit](/quest/m1/audit-test-cost.md), and runner and cache
+the [test cost audit](/quest/m2/audit-test-cost.md), and runner and cache
 infrastructure with [CI cost and latency](/quest/m0/ci/README.md).
 
 ## Plan
