@@ -5,7 +5,7 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
-### `MoqContainerFormat::Fmp4` unwraps to Legacy (#PR)
+### `MoqContainerFormat::Fmp4` unwraps to Legacy (#6250)
 
 A container import with `MoqContainerFormat::Fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `MoqContainerFormat::Cmaf` to keep publishing CMAF.

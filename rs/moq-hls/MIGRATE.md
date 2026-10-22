@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### HLS import unwraps fMP4 to Legacy (#PR)
+### HLS import unwraps fMP4 to Legacy (#6250)
 
 `import::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.
 Set `import::Config::passthrough` to keep publishing CMAF.

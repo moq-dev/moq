@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### fMP4 import unwraps to Legacy (#PR)
+### fMP4 import unwraps to Legacy (#6250)
 
 `container::fmp4::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.
 Call `.with_passthrough(true)` to keep publishing CMAF.

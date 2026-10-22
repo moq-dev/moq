@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `ContainerFormat.FMP4` unwraps to Legacy (#PR)
+### `ContainerFormat.FMP4` unwraps to Legacy (#6250)
 
 A container import with `ContainerFormat.FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `ContainerFormat.CMAF` to keep publishing CMAF.

@@ -4,7 +4,7 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
-### `import fmp4` and `import hls` unwrap to Legacy (#PR)
+### `import fmp4` and `import hls` unwrap to Legacy (#6250)
 
 Both now publish one `legacy` frame per sample instead of one `cmaf` frame per fragment.
 Add `--passthrough` to keep publishing CMAF.
