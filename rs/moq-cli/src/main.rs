@@ -832,6 +832,7 @@ fn spawn_export(
 			mux_rate: stdout.mux_rate,
 			passthrough: stdout.passthrough,
 			sync: stdout.sync,
+			rtp: stdout.rtp,
 			catalog: export.catalog_format,
 			select: export.select,
 		};

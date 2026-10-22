@@ -395,6 +395,9 @@ pub(super) struct Slot {
 	pub clocked: bool,
 	/// The slot does not follow the one laid before it, so its PCR flags the break.
 	pub jump: bool,
+	/// Under sync, the positions, counting the opening clock, another leg may fill otherwise
+	/// ([`Laid::unsure`](super::lane::Laid::unsure)).
+	pub unsure: Vec<usize>,
 }
 
 impl Slot {
@@ -919,6 +922,7 @@ impl Schedule {
 				positions: Some(laid.positions),
 				clocked: false,
 				jump: laid.jump,
+				unsure: laid.unsure,
 			}));
 		}
 		let Some(index) = self.index(known) else {
@@ -976,6 +980,7 @@ impl Schedule {
 			positions: None,
 			clocked: false,
 			jump: false,
+			unsure: Vec::new(),
 		}))
 	}
 
@@ -998,6 +1003,7 @@ impl Schedule {
 			positions: Some(Vec::new()),
 			clocked: false,
 			jump: false,
+			unsure: Vec::new(),
 		};
 		let clock = self.clock.filter(|pid| self.buffers.contains_key(pid));
 		// A new multiplex rate changes Rsys from this slot on, and Bsys keeps the bytes it holds.
@@ -2665,6 +2671,7 @@ mod tests {
 			positions: None,
 			clocked: false,
 			jump: false,
+			unsure: Vec::new(),
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);
@@ -2704,6 +2711,7 @@ mod tests {
 			positions: None,
 			clocked: false,
 			jump: false,
+			unsure: Vec::new(),
 		};
 		let mut null = unit(0, 1);
 		(null[1], null[2]) = (0x1f, 0xff);

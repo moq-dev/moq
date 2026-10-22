@@ -17,7 +17,7 @@
 //! opens an H.264 buffering period: the export then releases it late enough for its HRD to rule
 //! that out.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use mpeg2ts::ts::TsPacket;
@@ -313,6 +313,11 @@ impl Lane {
 		self.overruns
 	}
 
+	/// One past the last position any group took.
+	pub fn end(&self) -> u128 {
+		self.end
+	}
+
 	/// Forget every group, for a timeline that starts again.
 	pub fn reset(&mut self) {
 		self.group = None;
@@ -407,6 +412,27 @@ pub(super) struct Laid {
 	pub units: Vec<u16>,
 	/// It does not follow the slot laid before it.
 	pub jump: bool,
+	/// The positions another leg may fill otherwise: stuffing where it may carry a packet, the
+	/// tables a timeline's start or a jump lays outside their repetitions, and a jump's clock.
+	pub unsure: Vec<usize>,
+}
+
+/// The positions of a lane where this leg holds every unit the lane carries, so a position it
+/// leaves empty there is empty on every leg: from `from`, up to `to` when the lane may still
+/// carry units this leg has not read.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Known {
+	pub from: u128,
+	pub to: Option<u128>,
+}
+
+impl Known {
+	/// Every position, until the export says otherwise.
+	pub const ALL: Self = Self { from: 0, to: None };
+
+	fn covers(&self, at: u128) -> bool {
+		at >= self.from && self.to.is_none_or(|to| at < to)
+	}
 }
 
 /// The packets placed on a [`Layout`], laid out slot by slot.
@@ -429,10 +455,15 @@ pub(super) struct Grid {
 	last: Option<u128>,
 	/// Packets that reached the grid after their position went out.
 	late: u64,
+	/// What this leg knows of each lane's positions ([`Self::know`]).
+	known: Vec<Known>,
+	/// Positions planned for a unit that has not reached them yet ([`Self::expect`]).
+	expected: BTreeSet<u128>,
 }
 
 impl Grid {
 	pub fn new(layout: Arc<Layout>, tables: Vec<[u8; TsPacket::SIZE]>) -> Self {
+		let known = vec![Known::ALL; layout.lanes.len()];
 		Self {
 			layout,
 			placed: BTreeMap::new(),
@@ -443,7 +474,21 @@ impl Grid {
 			next: None,
 			last: None,
 			late: 0,
+			known,
+			expected: BTreeSet::new(),
 		}
+	}
+
+	/// What this leg knows of lane `lane`'s positions, until told otherwise.
+	pub fn know(&mut self, lane: usize, known: Known) {
+		self.known[lane] = known;
+	}
+
+	/// Expect a planned unit's packets at `positions`. A unit that never reaches them (dropped as
+	/// late or leading) leaves them empty here and full on every leg holding it.
+	pub fn expect(&mut self, positions: &[u128]) {
+		let gone = self.next.map_or(0, |next| self.layout.first(next));
+		self.expected.extend(positions.iter().filter(|&&at| at >= gone));
 	}
 
 	pub fn layout(&self) -> &Arc<Layout> {
@@ -519,6 +564,7 @@ impl Grid {
 		self.placed.clear();
 		self.starts.clear();
 		self.si.clear();
+		self.expected.clear();
 	}
 
 	/// Start the grid afresh at the next slot holding a packet, for a timeline that restarted.
@@ -535,10 +581,14 @@ impl Grid {
 	/// Tables that start a timeline number as the last repetition before them did, so a
 	/// receiver tuning in on them counts on into the next; after a jump they flag the break
 	/// from the repetition the stream carried last.
+	///
+	/// A lane position left empty is [unsure](Laid::unsure) where it was planned for a unit
+	/// that never reached it, or lies outside what this leg [knows](Self::know) of the lane.
 	pub fn lay(&mut self, index: u128) -> Laid {
 		self.next = Some(index + 1);
 		let jump = self.last.is_some_and(|last| index != last + 1);
-		let tables = Layout::repeats_tables(index) || jump || self.last.is_none();
+		let repeats = Layout::repeats_tables(index);
+		let tables = repeats || jump || self.last.is_none();
 		self.last = Some(index);
 		let first = self.layout.first(index);
 		// What a restarted grid holds behind the slot it runs on from went out as stuffing.
@@ -553,7 +603,11 @@ impl Grid {
 			keyframe: false,
 			units: Vec::new(),
 			jump,
+			unsure: Vec::new(),
 		};
+		if jump {
+			out.unsure.push(0);
+		}
 		let emission = index / PSI_SLOTS;
 		let spacing = self.layout.spacing as u128;
 		for (position, owner) in owners.into_iter().enumerate() {
@@ -572,9 +626,19 @@ impl Grid {
 					if packet[1] & 0x40 != 0 && packet[3] & 0x20 != 0 && packet[4] > 0 {
 						packet[5] = (packet[5] & !0x80) | u8::from(jump) << 7;
 					}
+					if !repeats {
+						out.unsure.push(position);
+					}
 					packet
 				}),
-				Owner::Lane(_) => self.placed.remove(&at),
+				Owner::Lane(lane) => {
+					let packet = self.placed.remove(&at);
+					let expected = self.expected.remove(&at);
+					if packet.is_none() && (expected || !self.known[lane].covers(at)) {
+						out.unsure.push(position);
+					}
+					packet
+				}
 				Owner::Free => {
 					let ready = self.si.front().is_some_and(|(from, packet)| {
 						*from <= at && self.si_last.get(&pid(packet)).is_none_or(|last| *last + spacing <= at)
@@ -600,6 +664,7 @@ impl Grid {
 		let end = first + count as u128;
 		self.placed = self.placed.split_off(&end);
 		self.starts = self.starts.split_off(&end);
+		self.expected = self.expected.split_off(&end);
 		out
 	}
 }

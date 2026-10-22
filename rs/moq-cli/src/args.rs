@@ -366,6 +366,10 @@ impl Invocation {
 					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
 					"--linger needs an output that can mark a restart, and only `export ts` can"
 				);
+				anyhow::ensure!(
+					stdout.rtp.is_none() || stdout.sync,
+					"--rtp needs --sync: only a synced multiplex lays each packet where every leg does"
+				);
 				if matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265) {
 					anyhow::ensure!(
 						!export.select.no_video,
@@ -1040,9 +1044,10 @@ impl ExportSink {
 		}
 	}
 
-	/// Whether this sink writes to stdout (the container formats and the report sinks).
+	/// Whether this sink writes to stdout (the container formats but `ts --rtp`, and the report
+	/// sinks).
 	pub fn is_stdout(&self) -> bool {
-		self.stdout().is_some() || self.report().is_some()
+		self.stdout().is_some_and(|stdout| stdout.rtp.is_none()) || self.report().is_some()
 	}
 
 	/// The stdout container format and its options, when this sink writes to
@@ -1057,6 +1062,7 @@ impl ExportSink {
 			mux_rate: None,
 			passthrough: false,
 			sync: false,
+			rtp: None,
 		};
 		let buffered = |format, args: &Buffered| Stdout {
 			format,
@@ -1067,6 +1073,7 @@ impl ExportSink {
 			mux_rate: None,
 			passthrough: false,
 			sync: false,
+			rtp: None,
 		};
 		Some(match self {
 			Self::Fmp4(args) => Stdout {
@@ -1086,6 +1093,7 @@ impl ExportSink {
 				mux_rate: args.mux_rate,
 				passthrough: args.passthrough,
 				sync: args.sync,
+				rtp: args.rtp.clone(),
 			},
 			Self::Flv(args) => buffered(SubscribeFormat::Flv, args),
 			Self::H264(args) => container(SubscribeFormat::H264, args),
@@ -1110,6 +1118,8 @@ pub struct Stdout {
 	pub passthrough: bool,
 	/// Render identical packets to every other `--sync` export of the broadcast (`ts` only).
 	pub sync: bool,
+	/// Send RTP to this address rather than write to stdout (`ts` only).
+	pub rtp: Option<url::Url>,
 }
 
 /// Staleness options for stdout sinks without a fixed release delay.
@@ -1238,6 +1248,14 @@ pub struct Transport {
 	/// (`--mux-rate`, or the catalog's).
 	#[usage(long, conflicts("--stitch", "--passthrough"))]
 	pub sync: bool,
+
+	/// Send the output as RTP (RFC 2250) to `udp://HOST:PORT` instead of stdout, seven TS
+	/// packets a datagram, with headers that follow from the packets' place on the multiplex
+	/// and from the broadcast, so the legs of a 1+1 pair send the same datagrams for an SMPTE
+	/// ST 2022-7 receiver to merge. Needs `--sync`, and a route carrying the publisher's epoch:
+	/// moq-transport draft 17 or later, or moq-lite 07, on every hop.
+	#[usage(long, value_name = "URL", conflicts("--stitch", "--passthrough"))]
+	pub rtp: Option<url::Url>,
 
 	/// The released spelling of [`Self::delay`].
 	#[usage(long = "max-age", hide = true)]
@@ -1377,6 +1395,38 @@ mod tests {
 		assert!(stdout.sync);
 		assert_eq!(stdout.mux_rate, Some(12_000_000));
 		for flags in [&["--stitch"][..], &["--passthrough"]] {
+			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
+		}
+	}
+
+	/// `export ts --rtp` sends what `--sync` renders, so it needs it and refuses what it
+	/// refuses, and it leaves stdout to another stage.
+	#[test]
+	fn export_ts_rtp_needs_sync_and_leaves_stdout() {
+		let parse = |args: &[&str]| {
+			let mut argv = vec![
+				"moq",
+				"export",
+				"--broadcast",
+				"b",
+				"ts",
+				"--rtp",
+				"udp://127.0.0.1:5004",
+			];
+			argv.extend_from_slice(args);
+			Invocation::try_parse_from(argv)
+		};
+		let cli = parse(&["--sync"]).unwrap();
+		cli.validate().unwrap();
+		let Command::Export(export) = &cli.stages[0] else {
+			panic!("not an export");
+		};
+		let rtp = export.sink.stdout().unwrap().rtp.unwrap();
+		assert_eq!(rtp.as_str(), "udp://127.0.0.1:5004");
+		assert!(!export.sink.is_stdout());
+		let err = parse(&[]).unwrap().validate().unwrap_err();
+		assert!(err.to_string().contains("--rtp needs --sync"), "{err}");
+		for flags in [&["--sync", "--stitch"][..], &["--passthrough"]] {
 			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
 		}
 	}

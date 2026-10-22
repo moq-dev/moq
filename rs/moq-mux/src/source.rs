@@ -392,8 +392,14 @@ pub(crate) async fn resolved(origin: &moq_net::origin::Producer, path: &str) -> 
 /// broadcast stays reachable for the source's lifetime (harmless in a test binary).
 #[cfg(test)]
 pub(crate) async fn announced(broadcast: &moq_net::broadcast::Consumer) -> Source {
+	announced_on(broadcast, Default::default()).await
+}
+
+/// Test helper: as [`announced`], served on `route`.
+#[cfg(test)]
+pub(crate) async fn announced_on(broadcast: &moq_net::broadcast::Consumer, route: moq_net::origin::Route) -> Source {
 	let origin = produce_origin();
-	let dynamic = origin.dynamic_route("", Default::default()).unwrap();
+	let dynamic = origin.dynamic_route("", route).unwrap();
 	let served = broadcast.clone();
 	tokio::spawn(async move {
 		while let Ok(request) = dynamic.requested_broadcast().await {

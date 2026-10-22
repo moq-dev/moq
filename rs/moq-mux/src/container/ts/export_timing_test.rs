@@ -64,7 +64,7 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 
 /// A live H.264 + AAC broadcast whose frames are written on the source's clock.
 struct Live {
-	_broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer,
 	/// Written group by group, so a group can be left open: see [`Self::run`].
 	video: moq_net::track::Producer,
@@ -80,6 +80,8 @@ struct Live {
 	rate: u64,
 	/// The receivers render with [`Export::with_sync`].
 	sync: bool,
+	/// The receivers send RTP ([`Export::with_rtp`]).
+	rtp: bool,
 	/// Video is a B-pyramid: see [`Self::reorder`].
 	reorder: bool,
 	/// The `initial_cpb_removal_delay` each group's first picture opens a buffering period with:
@@ -145,7 +147,7 @@ impl Live {
 
 		Self {
 			source: crate::source::announced(&consumer).await,
-			_broadcast: broadcast,
+			broadcast,
 			catalog,
 			video,
 			group: None,
@@ -155,6 +157,7 @@ impl Live {
 			scale,
 			rate: MUX_RATE,
 			sync: false,
+			rtp: false,
 			reorder: false,
 			periods: None,
 			burst: None,
@@ -164,6 +167,15 @@ impl Live {
 			tick: 0,
 			audio_index: 0,
 		}
+	}
+
+	/// Have the receivers send RTP of the broadcast served on a route of publisher instance
+	/// `epoch`, as a relay serves it.
+	async fn rtp(&mut self, epoch: &moq_net::Epoch) {
+		let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
+		self.source = crate::source::announced_on(&self.broadcast.consume(), route).await;
+		self.sync = true;
+		self.rtp = true;
 	}
 
 	/// The receivers' instant at which the source's clock reads media time `micros`.
@@ -249,6 +261,9 @@ impl Live {
 			.with_mux_rate(self.rate);
 		if self.sync {
 			export = export.with_sync();
+		}
+		if self.rtp {
+			export = export.with_rtp();
 		}
 		Leg {
 			export,
@@ -1121,52 +1136,8 @@ async fn legs_stopped_in_turn_stay_complementary() {
 /// for over a second while the relay evicts its group, else by the source stalling a group
 /// for that leg alone.
 async fn complementary_losses(reorder: bool, stop: bool) {
-	let lost_a = |tick: u64| (5 * GOP + 8..6 * GOP).contains(&tick);
-	let lost_b = |tick: u64| (7 * GOP + 5..8 * GOP).contains(&tick);
-	let stopped_a = |tick: u64| (5 * GOP + 8..7 * GOP).contains(&tick);
-	let stopped_b = |tick: u64| (8 * GOP + 5..10 * GOP).contains(&tick);
 	for lag in LAGS {
-		let mut paths = Vec::new();
-		for _ in 0..3 {
-			let mut live = Live::new(1.0, lag).await;
-			live.sync = true;
-			if reorder {
-				live.reorder();
-			}
-			paths.push(live);
-		}
-		let [mut clean, mut path_a, mut path_b] = <[Live; 3]>::try_from(paths).ok().unwrap();
-		assert!(clean.start == path_a.start && clean.start == path_b.start);
-		let mut c = clean.join(Duration::ZERO).await;
-		let mut a = path_a.join(Duration::ZERO).await;
-		let mut b = path_b.join(Duration::from_millis(100)).await;
-		for tick in 1..=12 * GOP {
-			clean.run(tick, &mut [&mut c], |_| false).await;
-			match (stop, stopped_a(tick)) {
-				(false, _) => path_a.run(tick, &mut [&mut a], lost_a).await,
-				(true, false) => path_a.run(tick, &mut [&mut a], |_| false).await,
-				(true, true) => {
-					if !stopped_a(tick - 1) {
-						path_a.evict();
-					}
-					path_a.run(tick, &mut [], |_| false).await
-				}
-			}
-			match (stop, stopped_b(tick)) {
-				(false, _) => path_b.run(tick, &mut [&mut b], lost_b).await,
-				(true, false) => path_b.run(tick, &mut [&mut b], |_| false).await,
-				(true, true) => {
-					if !stopped_b(tick - 1) {
-						path_b.evict();
-					}
-					path_b.run(tick, &mut [], |_| false).await
-				}
-			}
-		}
-		clean.finish(&mut [&mut c]).await;
-		path_a.finish(&mut [&mut a]).await;
-		path_b.finish(&mut [&mut b]).await;
-
+		let [a, b, c] = lose_in_turn(lag, reorder, stop, None).await;
 		let from = 2 * GOP * VIDEO_US;
 		// A stopped leg may resume behind the slots it laid, and drop what it reads for them.
 		for (leg, stopped) in [(&a, stop), (&b, stop), (&c, false)] {
@@ -1195,6 +1166,253 @@ async fn complementary_losses(reorder: bool, stop: bool) {
 			);
 		}
 	}
+}
+
+/// Three legs of a broadcast on `lag`, each on a path of its own: A and B each lose part of
+/// it the other receives, as [`complementary_losses`] describes, and C loses nothing. With
+/// `epoch`, each path serves it on a route of that publisher instance, and the legs send RTP.
+async fn lose_in_turn(lag: i64, reorder: bool, stop: bool, epoch: Option<&moq_net::Epoch>) -> [Leg; 3] {
+	let lost_a = |tick: u64| (5 * GOP + 8..6 * GOP).contains(&tick);
+	let lost_b = |tick: u64| (7 * GOP + 5..8 * GOP).contains(&tick);
+	let stopped_a = |tick: u64| (5 * GOP + 8..7 * GOP).contains(&tick);
+	let stopped_b = |tick: u64| (8 * GOP + 5..10 * GOP).contains(&tick);
+	let mut paths = Vec::new();
+	for _ in 0..3 {
+		let mut live = Live::new(1.0, lag).await;
+		live.sync = true;
+		if reorder {
+			live.reorder();
+		}
+		if let Some(epoch) = epoch {
+			live.rtp(epoch).await;
+		}
+		paths.push(live);
+	}
+	let [mut clean, mut path_a, mut path_b] = <[Live; 3]>::try_from(paths).ok().unwrap();
+	assert!(clean.start == path_a.start && clean.start == path_b.start);
+	let mut c = clean.join(Duration::ZERO).await;
+	let mut a = path_a.join(Duration::ZERO).await;
+	let mut b = path_b.join(Duration::from_millis(100)).await;
+	for tick in 1..=12 * GOP {
+		clean.run(tick, &mut [&mut c], |_| false).await;
+		match (stop, stopped_a(tick)) {
+			(false, _) => path_a.run(tick, &mut [&mut a], lost_a).await,
+			(true, false) => path_a.run(tick, &mut [&mut a], |_| false).await,
+			(true, true) => {
+				if !stopped_a(tick - 1) {
+					path_a.evict();
+				}
+				path_a.run(tick, &mut [], |_| false).await
+			}
+		}
+		match (stop, stopped_b(tick)) {
+			(false, _) => path_b.run(tick, &mut [&mut b], lost_b).await,
+			(true, false) => path_b.run(tick, &mut [&mut b], |_| false).await,
+			(true, true) => {
+				if !stopped_b(tick - 1) {
+					path_b.evict();
+				}
+				path_b.run(tick, &mut [], |_| false).await
+			}
+		}
+	}
+	clean.finish(&mut [&mut c]).await;
+	path_a.finish(&mut [&mut a]).await;
+	path_b.finish(&mut [&mut b]).await;
+	[a, b, c]
+}
+
+/// The RTP datagrams a leg sent from media time `from` (µs), keyed by the slot that completed
+/// each and its sequence number.
+fn datagrams(leg: &Leg, from: u64) -> std::collections::BTreeMap<(u64, u16), Bytes> {
+	leg.out
+		.iter()
+		.map(|(_, frame)| {
+			let seq = u16::from_be_bytes([frame.payload[2], frame.payload[3]]);
+			((frame.timestamp.as_micros() as u64, seq), frame.payload.clone())
+		})
+		.filter(|((at, _), _)| *at >= from)
+		.collect()
+}
+
+/// Assert that every datagram `a` sent that `b` sent too is the same, headers included, and
+/// return how many there are.
+fn same_datagrams(
+	a: &std::collections::BTreeMap<(u64, u16), Bytes>,
+	b: &std::collections::BTreeMap<(u64, u16), Bytes>,
+) -> usize {
+	let mut both = 0;
+	for (key, datagram) in a {
+		if let Some(other) = b.get(key) {
+			assert_eq!(datagram, other, "the datagram at {key:?} differs");
+			both += 1;
+		}
+	}
+	both
+}
+
+/// RTP legs of one broadcast, joined at different points, read on different cadences and with
+/// each track lagging in turn, send the same datagrams, headers included, for every run of the
+/// timeline both send. Each is one RTP packet of seven TS packets, under the SSRC the path and
+/// epoch give, and once the joiner holds every track whole both send the same runs.
+#[tokio::test(start_paused = true)]
+async fn rtp_legs_send_the_same_datagrams() {
+	let epoch = moq_net::Epoch::mint();
+	let ssrc = super::rtp::ssrc("test", &epoch).to_be_bytes();
+	for lag in LAGS {
+		for join in [JOIN, JOIN + GOP] {
+			let mut live = Live::new(1.0, lag).await;
+			live.rtp(&epoch).await;
+			let (a, b, from) = synced_with(live, join, 12 * GOP, |_| false).await;
+			let (x, y) = (datagrams(&a, 0), datagrams(&b, 0));
+			for datagram in x.values().chain(y.values()) {
+				assert_eq!(datagram.len(), 12 + 7 * 188);
+				assert_eq!(&datagram[..2], [0x80, 33]);
+				assert_eq!(&datagram[8..12], ssrc);
+			}
+			let both = same_datagrams(&x, &y);
+			let (x, y) = (datagrams(&a, from), datagrams(&b, from));
+			assert!(x.len() > 300, "lag {lag}, join {join}: {} datagrams", x.len());
+			assert_eq!(
+				x.keys().collect::<Vec<_>>(),
+				y.keys().collect::<Vec<_>>(),
+				"lag {lag}, join {join}: clean legs send different runs ({both} in common)"
+			);
+		}
+	}
+}
+
+/// RTP legs that each lose part of the broadcast the other receives send only datagrams a
+/// clean leg sends too, headers included, and between them every one it sends: a receiver
+/// merging them (SMPTE ST 2022-7) reproduces the clean leg. Each withholds the runs it lost.
+#[tokio::test(start_paused = true)]
+async fn rtp_legs_that_lose_in_turn_merge_into_a_clean_leg() {
+	let epoch = moq_net::Epoch::mint();
+	for stop in [false, true] {
+		for lag in LAGS {
+			let [a, b, c] = lose_in_turn(lag, true, stop, Some(&epoch)).await;
+			let from = 2 * GOP * VIDEO_US;
+			let (a, b, c) = (datagrams(&a, from), datagrams(&b, from), datagrams(&c, from));
+			for (name, leg) in [("A", &a), ("B", &b)] {
+				assert_eq!(
+					same_datagrams(leg, &c),
+					leg.len(),
+					"stop {stop}, lag {lag}: {name} sent a run the clean leg did not"
+				);
+				assert!(leg.len() < c.len(), "stop {stop}, lag {lag}: {name} withheld nothing");
+			}
+			let missing: Vec<_> = c
+				.keys()
+				.filter(|key| !a.contains_key(key) && !b.contains_key(key))
+				.collect();
+			assert!(
+				missing.is_empty(),
+				"stop {stop}, lag {lag}: neither leg sent {missing:?}"
+			);
+		}
+	}
+}
+
+/// Two legs that lose the same group's tail, on paths of their own, send only datagrams a leg
+/// holding it sends too, so the runs neither can fill are absent from both.
+#[tokio::test(start_paused = true)]
+async fn a_run_no_leg_can_fill_is_sent_by_neither() {
+	let epoch = moq_net::Epoch::mint();
+	let lost = |tick: u64| (8 * GOP + 5..9 * GOP).contains(&tick);
+	for lag in LAGS {
+		let mut paths = Vec::new();
+		for _ in 0..3 {
+			let mut live = Live::new(1.0, lag).await;
+			live.rtp(&epoch).await;
+			paths.push(live);
+		}
+		let [mut whole, mut path_a, mut path_b] = <[Live; 3]>::try_from(paths).ok().unwrap();
+		let mut c = whole.join(Duration::ZERO).await;
+		let mut a = path_a.join(Duration::ZERO).await;
+		let mut b = path_b.join(Duration::from_millis(100)).await;
+		for tick in 1..=12 * GOP {
+			whole.run(tick, &mut [&mut c], |_| false).await;
+			path_a.run(tick, &mut [&mut a], lost).await;
+			path_b.run(tick, &mut [&mut b], lost).await;
+		}
+		whole.finish(&mut [&mut c]).await;
+		path_a.finish(&mut [&mut a]).await;
+		path_b.finish(&mut [&mut b]).await;
+		let from = 2 * GOP * VIDEO_US;
+		let (a, b, c) = (datagrams(&a, from), datagrams(&b, from), datagrams(&c, from));
+		for (name, leg) in [("A", &a), ("B", &b)] {
+			assert_eq!(
+				same_datagrams(leg, &c),
+				leg.len(),
+				"lag {lag}: {name} sent a run the whole leg did not"
+			);
+		}
+		let neither = c
+			.keys()
+			.filter(|key| !a.contains_key(key) && !b.contains_key(key))
+			.count();
+		assert!(neither > 0, "lag {lag}: the legs sent every run between them");
+	}
+}
+
+/// RTP legs across the 33-bit PTS and PCR wrap, where the 32-bit RTP timestamp wraps too,
+/// send the same datagrams, and their timestamps run on through it.
+#[tokio::test(start_paused = true)]
+async fn rtp_legs_send_the_same_datagrams_across_the_wrap() {
+	let wrap = (1u64 << 33) * 100 / 9;
+	let origin = (wrap - 3_700_000) / VIDEO_US * VIDEO_US;
+	let join = (wrap - origin).div_ceil(VIDEO_US * GOP) * GOP + 1;
+	let epoch = moq_net::Epoch::mint();
+	for lag in LAGS {
+		let mut live = Live::new(1.0, lag).await;
+		live.origin = origin;
+		live.rtp(&epoch).await;
+		let (a, b, _) = synced_with(live, join, join + 12 * GOP, |_| false).await;
+		let (x, y) = (datagrams(&a, 0), datagrams(&b, 0));
+		assert!(same_datagrams(&x, &y) > 1_000, "lag {lag}");
+		let stamps: Vec<u32> = a
+			.out
+			.iter()
+			.map(|(_, frame)| u32::from_be_bytes(frame.payload[4..8].try_into().unwrap()))
+			.collect();
+		let steps: Vec<u32> = stamps.windows(2).map(|w| w[1].wrapping_sub(w[0])).collect();
+		assert!(
+			stamps.windows(2).any(|w| w[1] < w[0]),
+			"lag {lag}: no wrap in {} datagrams",
+			stamps.len()
+		);
+		assert!(
+			steps.iter().all(|step| *step < 90_000),
+			"lag {lag}: the timestamp stepped back"
+		);
+	}
+}
+
+/// An epochless route names no publisher instance for the SSRC to follow, so RTP refuses it.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "needs a route with an epoch")]
+async fn rtp_refuses_an_epochless_route() {
+	let mut live = Live::new(1.0, 0).await;
+	live.sync = true;
+	live.rtp = true;
+	let mut leg = live.join(Duration::ZERO).await;
+	live.run(2 * GOP, &mut [&mut leg], |_| false).await;
+}
+
+/// A replacement publisher, another epoch on the same path, is sent under another SSRC.
+#[tokio::test(start_paused = true)]
+async fn a_replacement_publisher_is_sent_under_another_ssrc() {
+	let ssrc = |leg: &Leg| leg.out.first().expect("the leg sent").1.payload[8..12].to_vec();
+	let mut sent = Vec::new();
+	for epoch in [moq_net::Epoch::mint(), moq_net::Epoch::mint()] {
+		let mut live = Live::new(1.0, 0).await;
+		live.rtp(&epoch).await;
+		let mut leg = live.join(Duration::ZERO).await;
+		live.run(4 * GOP, &mut [&mut leg], |_| false).await;
+		sent.push(ssrc(&leg));
+		assert_eq!(ssrc(&leg), super::rtp::ssrc("test", &epoch).to_be_bytes());
+	}
+	assert_ne!(sent[0], sent[1]);
 }
 
 /// A group ending in a burst still fills its lane at the next group's release, so a leg holding

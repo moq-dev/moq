@@ -200,6 +200,9 @@ pub struct SubscribeArgs {
 	/// Render identical packets to every other synced export of the broadcast (TS only).
 	pub sync: bool,
 
+	/// Send the synced multiplex as RTP to this `udp://` address instead of stdout (TS only).
+	pub rtp: Option<url::Url>,
+
 	/// Catalog format for track discovery (default: detect from the broadcast suffix).
 	pub catalog: Option<CatalogFormatArg>,
 
@@ -422,6 +425,13 @@ impl Subscribe {
 		if self.args.sync {
 			ts = ts.with_sync();
 		}
+		let rtp = match &self.args.rtp {
+			Some(url) => {
+				ts = ts.with_rtp();
+				Some(Self::rtp_socket(url).await?)
+			}
+			None => None,
+		};
 
 		// A TS byte stream carries no per-frame timing, so delivery time is the only
 		// carrier of each frame's spacing (#2984). The export lays each slice of the PCR
@@ -452,8 +462,18 @@ impl Subscribe {
 				Ok(None) => break Ok(()),
 				Err(err) => break Err(err),
 			};
-			stdout.write_all(&frame.payload).await?;
-			stdout.flush().await?;
+			match &rtp {
+				// A receiver not listening yet answers with ICMP, which a connected socket
+				// reports on a later send; the datagrams go out regardless.
+				Some(socket) => match socket.send(&frame.payload).await {
+					Err(err) if err.kind() != std::io::ErrorKind::ConnectionRefused => return Err(err.into()),
+					_ => {}
+				},
+				None => {
+					stdout.write_all(&frame.payload).await?;
+					stdout.flush().await?;
+				}
+			}
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
 				sampled = moq_clock::now();
@@ -484,6 +504,28 @@ impl Subscribe {
 			}
 			end => Ok(end?),
 		}
+	}
+
+	/// A UDP socket bound to an ephemeral port and connected to `url`, `udp://HOST:PORT`.
+	async fn rtp_socket(url: &url::Url) -> anyhow::Result<tokio::net::UdpSocket> {
+		anyhow::ensure!(url.scheme() == "udp", "--rtp takes udp://HOST:PORT: {url}");
+		let host = match url.host().with_context(|| format!("--rtp url missing a host: {url}"))? {
+			url::Host::Domain(domain) => domain.to_string(),
+			url::Host::Ipv4(ip) => ip.to_string(),
+			url::Host::Ipv6(ip) => ip.to_string(),
+		};
+		let port = url.port().context("--rtp url must include a port: udp://HOST:PORT")?;
+		let addr = tokio::net::lookup_host((host.as_str(), port))
+			.await?
+			.next()
+			.with_context(|| format!("could not resolve {host}:{port}"))?;
+		let local: std::net::SocketAddr = match addr {
+			std::net::SocketAddr::V4(_) => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
+			std::net::SocketAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
+		};
+		let socket = tokio::net::UdpSocket::bind(local).await?;
+		socket.connect(addr).await?;
+		Ok(socket)
 	}
 
 	/// Write the multiplex the broadcast's `m2ts` track carries, each run of packets as its

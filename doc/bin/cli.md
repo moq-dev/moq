@@ -447,8 +447,7 @@ continuity error, and the rest carry on. It takes neither `--linger`,
 `export ts --sync` renders every packet from the broadcast alone, so two exports
 of it, joined at different moments and fed with different skew, emit identical
 TS for the content both receive, continuity counters included, as the legs of a
-1+1 pair must; an SMPTE ST 2022-7 pair also needs identical RTP framing around
-it, which this command does not write. Each PID gets a fixed lane of the constant rate, sized
+1+1 pair must. Each PID gets a fixed lane of the constant rate, sized
 for its codec's most, with video taking the rest; content one leg lacks leaves
 its packets as stuffing there. The PCR rides a PID of its own, and each PID's
 continuity counter restarts at every group with the break flagged. It needs a
@@ -461,6 +460,24 @@ differ there. So can reordered video whose SPS declares no reorder depth
 (`max_num_reorder_frames`), which is logged, and SI while one leg holds an older
 revision than the other or around an SI table the catalog adds or drops, which
 each leg takes up when its catalog update arrives.
+
+`export ts --sync --rtp udp://HOST:PORT` sends that multiplex as RTP (RFC 2250)
+instead of writing it to stdout, for an SMPTE ST 2022-7 pair. Each datagram
+carries seven TS packets, a fixed run of the multiplex; its sequence number and
+90 kHz timestamp follow from where that run sits, and its SSRC from the
+broadcast path and publisher [epoch](/concept/moq-lite#publisher-epochs). So two
+legs send the same datagram, headers included, wherever both hold its packets,
+and a receiver merging them takes each from either. A leg withholds a datagram
+it cannot vouch for: one where it leaves stuffing that another leg may fill, one
+that opens its timeline or follows a jump, and one it joined midway. Legs that
+lose different groups therefore send, between them, every datagram a clean leg
+sends. Two gaps remain: SI one leg missed, and a unit of a sparse track (such as
+SCTE-35) lost with no later jump in that track, go out as stuffing where the
+other leg has them. `--rtp` needs `--sync` and a route carrying the publisher's
+epoch, since the SSRC must change when the publisher does, so every hop must
+speak moq-transport draft 17 or later, or the opt-in moq-lite 07 (see
+[Publisher runs](#publisher-runs)). It takes neither `--stitch` nor
+`--passthrough`. A multicast destination gets the system's default TTL.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same

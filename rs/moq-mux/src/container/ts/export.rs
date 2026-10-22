@@ -211,6 +211,12 @@ where
 	sync: bool,
 	/// Under [`Self::with_sync`], the slot whose SI has been queued ([`Self::queue_si`]).
 	si_slot: Option<u128>,
+	/// Hand out RTP datagrams rather than slots ([`Self::with_rtp`]).
+	rtp: bool,
+	/// Cuts the slots into datagrams, once the lanes are laid out.
+	packetizer: Option<super::rtp::Packetizer>,
+	/// What slots no datagram carried tell [`Self::stats`], left for the next datagram.
+	unsent: Option<Tally>,
 }
 
 /// What a queued output frame tells [`Export::stats`], applied only once the frame is
@@ -220,6 +226,15 @@ struct Tally {
 	pcr: (u64, bool),
 	/// The PID of each access unit whose packets begin in the frame.
 	units: Vec<u16>,
+}
+
+impl Tally {
+	/// This tally followed by `later`'s, for a frame that carries both.
+	fn then(mut self, later: Tally) -> Tally {
+		self.pcr = (later.pcr.0, self.pcr.1 || later.pcr.1);
+		self.units.extend(later.units);
+		self
+	}
 }
 
 /// A frame read from its source.
@@ -270,6 +285,13 @@ struct Synced {
 	lane: Lane,
 	/// The release slot of the last frame planned ([`Track::plan`]).
 	released: Option<u128>,
+	/// The first position of the group this leg has held every unit of the lane from, since
+	/// its playhead last jumped: `None` while it may lack some ([`lane::Known`]).
+	sure: Option<u128>,
+	/// The playhead's jumps when the last frame was planned ([`Pending::skip`]).
+	skip: Option<u64>,
+	/// Positions planned since the grid was last told ([`Grid::expect`]).
+	expected: Vec<u128>,
 }
 
 /// The PES an audio frame may share ([`Track::pack_start`]): the place of its first frame on
@@ -381,6 +403,7 @@ impl Track {
 			if let Some(sync) = &mut self.sync {
 				sync.lane.reset();
 				sync.released = None;
+				sync.sure = None;
 			}
 		}
 		let Kind::Video(stream_type) = self.kind else {
@@ -726,6 +749,10 @@ impl Track {
 		match plan {
 			Ok(placed) => {
 				lane::number(&mut packets, placed.counter);
+				if opening && sync.sure.is_none() {
+					sync.sure = placed.positions.first().copied();
+				}
+				sync.expected.extend(&placed.positions);
 				Ok(Some(Planned {
 					packets,
 					positions: placed.positions,
@@ -833,6 +860,12 @@ impl Track {
 			.and_then(|ticks| Timestamp::from_scale(ticks, 90_000).ok())
 			.unwrap_or(frame.timestamp);
 		let (key, pes) = self.release_key(decode, jitter.delay(), &frame)?;
+		// A jump may have skipped units of the lane, until a group this leg holds whole.
+		if let Some(sync) = &mut self.sync
+			&& sync.skip.replace(skip) != Some(skip)
+		{
+			sync.sure = None;
+		}
 		// Planned as it is read, so a frame the jitter buffer drops still moves its group on.
 		let planned = match self.sync.is_some() {
 			true => match self.plan(name, &frame, (decode, dts), description.as_ref(), group, jitter.delay())? {
@@ -1379,6 +1412,9 @@ where
 			mux_rate_override: None,
 			sync: false,
 			si_slot: None,
+			rtp: false,
+			packetizer: None,
+			unsent: None,
 		}
 	}
 
@@ -1398,6 +1434,26 @@ where
 	/// take a worst case per codec, and the video lane needs headroom over the video's rate.
 	pub fn with_sync(mut self) -> Self {
 		self.sync = true;
+		self
+	}
+
+	/// Hand out MPEG-TS over RTP (RFC 2250) rather than slots: each frame is one datagram of
+	/// seven TS packets, its sequence number, timestamp and SSRC a function of where those
+	/// packets sit on the multiplex's timeline and of the broadcast's path and epoch. Two legs
+	/// of a broadcast then send the same datagram, headers included, wherever both render the
+	/// same packets, so a receiver merging them (SMPTE ST 2022-7) can take each from either.
+	///
+	/// A leg sends a datagram only when it is sure of every packet: one where it leaves
+	/// stuffing another leg may fill, or opens its timeline or a jump, is withheld, and so is
+	/// one it joined in the middle of. Two limits remain: SI a leg missed, and a unit of a sparse
+	/// track lost with no later jump in its track, go out as stuffing where another leg has
+	/// them.
+	///
+	/// Needs [`Self::with_sync`], and a route with an epoch: the SSRC must change with the
+	/// publisher instance, and an epochless route names none. Each fails at the program tables.
+	/// Only moq-transport draft 17 and later, and moq-lite 07, carry the epoch across a hop.
+	pub fn with_rtp(mut self) -> Self {
+		self.rtp = true;
 		self
 	}
 
@@ -2144,6 +2200,7 @@ where
 			let mut next = Self::new(self.source.clone(), catalog);
 			next.replay = self.replay;
 			next.sync = self.sync;
+			next.rtp = self.rtp;
 			next = next.with_delay(self.delay);
 			if let Some(rate) = self.mux_rate_override {
 				next = next.with_mux_rate(rate);
@@ -2245,6 +2302,7 @@ where
 			flagged.clear();
 		}
 		self.queue.clear();
+		self.unsent = None;
 		self.last_psi = None;
 		for si in self.si.values_mut() {
 			si.last_emit = None;
@@ -2310,6 +2368,10 @@ where
 
 	/// Build the PAT/PMT once every track's PID and codec is known.
 	fn build_psi(&mut self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			self.sync || !self.rtp,
+			"MPEG-TS over RTP needs --sync: only a synced multiplex lays each packet where every leg does"
+		);
 		// A measured rate would give each leg a grid of its own.
 		let sync = match self.sync {
 			true => Some(self.mux_rate.context(
@@ -2494,16 +2556,48 @@ where
 			.collect();
 		needs.sort_unstable_by_key(|(pid, _)| *pid);
 		let layout = Arc::new(Layout::new(rate, tables.len(), SI_LANE, &needs)?);
+		if self.rtp {
+			let epoch = self.instance.as_ref().context(
+				"MPEG-TS over RTP needs a route with an epoch, so the SSRC changes with the publisher instance: \
+				 connect every hop on moq-transport draft 17 or later, or moq-lite 07",
+			)?;
+			let ssrc = super::rtp::ssrc(self.source.path().as_str(), epoch);
+			self.packetizer = Some(super::rtp::Packetizer::new(layout.clone(), ssrc));
+		}
 		for track in self.tracks.values_mut() {
 			let lane = layout.lane(track.pid).context("a track without a lane")?;
 			track.sync = Some(Synced {
 				layout: layout.clone(),
 				lane: Lane::new(lane),
 				released: None,
+				sure: None,
+				skip: None,
+				expected: Vec::new(),
 			});
 		}
 		self.schedule.set_sync(Grid::new(layout, tables));
 		Ok(())
+	}
+
+	/// Tell the grid, before it lays a slot, what each lane holds on this leg ([`Grid::know`]).
+	///
+	/// A lane of continuous media is known from the first group held whole since its playhead
+	/// last jumped, up to the last position planned: past it, this leg may be stalled. A sparse
+	/// lane cannot tell a stall from its silence, so it is known on from that group.
+	fn know(&mut self) {
+		let Some(grid) = self.schedule.sync() else {
+			return;
+		};
+		for track in self.tracks.values_mut() {
+			let Some(sync) = &mut track.sync else {
+				continue;
+			};
+			grid.expect(&sync.expected);
+			sync.expected.clear();
+			let from = sync.sure.unwrap_or(u128::MAX);
+			let to = (!track.kind.placed()).then(|| sync.lane.end());
+			grid.know(sync.lane.index(), lane::Known { from, to });
+		}
 	}
 
 	/// Packetize one media frame and queue it on the [`Schedule`], re-emitting PAT/PMT
@@ -2990,6 +3084,7 @@ where
 			{
 				self.queue_si(index)?;
 			}
+			self.know();
 			let Some(slot) = self.schedule.next(known)? else {
 				break;
 			};
@@ -3005,15 +3100,41 @@ where
 			if !self.sync {
 				self.number(&mut payload);
 			}
-			let frame = Frame {
-				timestamp: slot_stamp(slot.index)?,
-				duration: None,
-				payload: Bytes::from(payload),
-				keyframe: slot.keyframe,
-			};
+			let timestamp = slot_stamp(slot.index)?;
 			let tally = Tally {
 				pcr: (slot.pcr, discontinuity),
 				units: slot.units,
+			};
+			if let Some(rtp) = &mut self.packetizer {
+				let mut unsure = slot.unsure;
+				if discontinuity {
+					unsure.push(0);
+				}
+				let mut tally = Some(match self.unsent.take() {
+					Some(unsent) => unsent.then(tally),
+					None => tally,
+				});
+				for datagram in rtp.push(slot.index, &payload, &unsure) {
+					let frame = Frame {
+						timestamp,
+						duration: None,
+						payload: datagram,
+						keyframe: false,
+					};
+					let tally = tally.take().unwrap_or(Tally {
+						pcr: (slot.pcr, false),
+						units: Vec::new(),
+					});
+					self.queue.push_back((frame, tally));
+				}
+				self.unsent = tally;
+				continue;
+			}
+			let frame = Frame {
+				timestamp,
+				duration: None,
+				payload: Bytes::from(payload),
+				keyframe: slot.keyframe,
 			};
 			self.queue.push_back((frame, tally));
 		}
