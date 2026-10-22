@@ -1,0 +1,8 @@
+# Repart's rootless image builder uses the Nix-store unshare, which Ubuntu's
+# packaged profiles do not cover. Keep the host-wide user namespace restriction.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile nix-repart-unshare /nix/store/*-util-linux-*/bin/unshare flags=(unconfined) {
+  userns,
+}
