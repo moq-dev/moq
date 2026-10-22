@@ -24,3 +24,21 @@ subscription never reaches the relay. The same bench passes on main.
 3. If the test passes on `release`, the bench harness's backport is at fault
    (release's `tests/support` mock differs from main's). Record that in the PR
    and delete this quest.
+
+Verification, 2026-10-22: release `36f392f492` passes a paused-time session
+reproducer that opens, closes, and reopens the track three times and checks a
+fresh frame each time. The no-read benchmark pattern times out waiting for
+demand even on its first iteration. `track::Consumer::subscribe` in release
+registers a spliced subscription per segment only when its reader is polled;
+awaiting it only resolves track info. Cached info makes a later open return
+without any new TRACK request, so it never asks the publisher for data.
+
+The benchmark now drives the reader until the publisher reports a registered
+subscription, on both main and release for a comparable workload. It produces
+no groups, so polling starts the reader without consuming content. A generic
+used edge can also mean a TRACK query; the registered subscription proves the
+SUBSCRIBE itself arrived.
+No production fix or wire/API change is needed. Remaining work is to remove
+this completed quest and its links; automatic approval review refused that
+action under the no-abandonment restriction, including after the completion
+requirement above was supplied.
