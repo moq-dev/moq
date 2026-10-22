@@ -31,5 +31,4 @@ if affected.
 
 ## Related
 
-- [Receive memory](/quest/m1/quic/receive-memory.md) - classification must preserve connection-credit ownership
 - [QPACK dependency fix](/quest/m0/web-transport-proto-0.6.3.md) - separate decoded-header expansion problem

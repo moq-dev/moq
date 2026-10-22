@@ -428,6 +428,15 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 		"qlog capture requires a build with the 'qlog' feature; drop quic.qlog"
 	);
 
+	// Mirrors `moq_tokio::Error::ReceiveWindowTooSmall`: incomplete messages hold
+	// connection credit, so a window that cannot fit the largest one stalls.
+	anyhow::ensure!(
+		quic.receive_window >= moq_net::transport::MIN_RECEIVE_WINDOW,
+		"quic.receive_window {} cannot fit the largest message, {} bytes",
+		quic.receive_window,
+		moq_net::transport::MIN_RECEIVE_WINDOW
+	);
+
 	let mut transport = moq_uring::quic::Transport::default();
 	#[cfg(feature = "qlog")]
 	if let Some(dir) = quic.qlog.as_deref() {
@@ -911,14 +920,31 @@ mod tests {
 	#[allow(clippy::field_reassign_with_default)]
 	fn windows_are_applied() {
 		let mut quic = moq_tokio::quic::Config::default();
-		quic.receive_window = Some(64 << 20);
+		quic.receive_window = Some(128 << 20);
 		quic.stream_receive_window = Some(8 << 20);
 		quic.send_window = Some(32 << 20);
 
 		let transport = transport(&quic.resolve()).expect("windows must be accepted");
-		assert_eq!(transport.receive_window, Some(64 << 20));
+		assert_eq!(transport.receive_window, Some(128 << 20));
 		assert_eq!(transport.stream_receive_window, Some(8 << 20));
 		assert_eq!(transport.send_window, Some(32 << 20));
+	}
+
+	/// Incomplete messages hold connection credit, so the window has to fit the largest.
+	#[test]
+	#[allow(clippy::field_reassign_with_default)]
+	fn a_receive_window_below_the_largest_message_is_refused() {
+		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.receive_window = Some(min - 1);
+		let err = transport(&quic.resolve()).expect_err("below the largest message");
+		assert!(err.to_string().contains("largest message"), "{err}");
+
+		quic.receive_window = Some(min);
+		assert_eq!(
+			transport(&quic.resolve()).expect("the minimum").receive_window,
+			Some(min)
+		);
 	}
 
 	/// The same `[quic]` section runs the same windows on both runtimes, set or
@@ -928,13 +954,13 @@ mod tests {
 	#[allow(clippy::field_reassign_with_default)]
 	fn windows_match_the_tokio_runtime() {
 		let mut set = moq_tokio::quic::Config::default();
-		set.receive_window = Some(128 << 20);
+		set.receive_window = Some(256 << 20);
 		set.stream_receive_window = Some(8 << 20);
 		set.send_window = Some(32 << 20);
 
 		for (quic, expected) in [
-			(moq_tokio::quic::Config::default(), (64 << 20, 4 << 20, 16 << 20)),
-			(set, (128 << 20, 8 << 20, 32 << 20)),
+			(moq_tokio::quic::Config::default(), (128 << 20, 4 << 20, 16 << 20)),
+			(set, (256 << 20, 8 << 20, 32 << 20)),
 		] {
 			let resolved = quic.resolve();
 			let tokio = (
