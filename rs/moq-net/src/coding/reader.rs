@@ -63,18 +63,31 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 	where
 		V: Into<Form> + Copy,
 	{
+		self.poll_with_sized(cx, consume, decode).map_ok(|(value, _)| value)
+	}
+
+	/// [`Self::poll_with`], also returning how many bytes the value took.
+	fn poll_with_sized<T>(
+		&mut self,
+		cx: &mut Context<'_>,
+		consume: bool,
+		decode: impl Fn(&mut Decoder<'_>) -> Result<T, DecodeError>,
+	) -> Poll<Result<(T, usize), Error>>
+	where
+		V: Into<Form> + Copy,
+	{
 		loop {
 			let mut r = Decoder::new(&self.buffer, self.version.into());
 			match decode(&mut r) {
 				Ok(value) => {
+					let used = self.buffer.len() - r.remaining();
 					if consume {
-						let used = self.buffer.len() - r.remaining();
 						if let Some(class) = r.control {
 							self.stats.control(class, used, true);
 						}
 						self.buffer.advance(used);
 					}
-					return Poll::Ready(Ok(value));
+					return Poll::Ready(Ok((value, used)));
 				}
 				// Stream closed while we still need more data.
 				Err(DecodeError::Short) if !ready!(self.poll_read_more(cx))? => {
@@ -118,6 +131,27 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		V: Into<Form> + Copy,
 	{
 		std::future::poll_fn(|cx| self.poll_decode(cx)).await
+	}
+
+	/// [`Self::poll_decode`], also returning the bytes it consumed, for a handshake to
+	/// count once the session's stats are known.
+	pub(crate) fn poll_decode_sized<T: Decode<V> + Debug>(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<(T, usize), Error>>
+	where
+		V: Into<Form> + Copy,
+	{
+		let version = self.version;
+		self.poll_with_sized(cx, true, |r| T::decode(r, version))
+	}
+
+	/// [`Self::decode`], also returning the bytes it consumed.
+	pub(crate) async fn decode_sized<T: Decode<V> + Debug>(&mut self) -> Result<(T, usize), Error>
+	where
+		V: Into<Form> + Copy,
+	{
+		std::future::poll_fn(|cx| self.poll_decode_sized(cx)).await
 	}
 
 	/// Poll for the next message unless the stream is closed cleanly first.

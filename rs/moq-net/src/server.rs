@@ -252,7 +252,7 @@ impl Server {
 				// caller can scope by the advertised path. Seeded back into
 				// `start` on `ok()` so PROBE gating resolves without
 				// re-reading the (consumed) Setup Stream.
-				let client_setup = lite::accept_setup(&mut session, version, &self.stats).await?;
+				let client_setup = lite::accept_setup(&mut session, version).await?;
 				(
 					client_setup.setup.path.clone(),
 					client_setup.setup.role,
@@ -414,8 +414,9 @@ impl Server {
 
 		// Legacy bidi SETUP exchange (IETF 14-16, lite 01/02). Read the client's
 		// SETUP to choose the version; `ok()` sends the server SETUP and starts.
-		let mut stream = Stream::accept(&mut session, encoding).await?.with_stats(&self.stats);
-		let client: setup::Client = stream.reader.decode().await?;
+		// Stats attach in `ok()`: a caller may still replace them on the handshake.
+		let mut stream = Stream::accept(&mut session, encoding).await?;
+		let (client, client_setup_size) = stream.reader.decode_sized::<setup::Client>().await?;
 
 		let version = client
 			.versions
@@ -475,6 +476,7 @@ impl Server {
 					version,
 					request_id_max,
 					peer_declared,
+					client_setup_size,
 				})),
 			}),
 		})
@@ -493,7 +495,7 @@ impl Server {
 		S::SendStream: MaybeSync,
 		S::RecvStream: MaybeSync,
 	{
-		let peer_setup = ietf::accept_setup(&mut session, version, &self.stats).await?;
+		let peer_setup = ietf::accept_setup(&mut session, version).await?;
 		Ok(Handshake {
 			path: peer_setup.path.clone(),
 			role: None,
@@ -621,6 +623,7 @@ where
 				version,
 				peer_setup,
 			} = *self;
+			server.stats.control(stats::Control::Session, peer_setup.size, true);
 			let (publish, subscribe) = server.stat_tagged_origins();
 
 			// The client's SETUP was read at the pause; hand the stream back
@@ -680,6 +683,8 @@ struct PausedLegacy<S: crate::transport::poll::Session> {
 	request_id_max: Option<ietf::RequestId>,
 	/// What the client's SETUP declared, for the options `ok` acts on.
 	peer_declared: ietf::peer::Peer,
+	/// The client SETUP's encoded size, counted under the final stats.
+	client_setup_size: usize,
 }
 
 impl<S> Paused<S> for PausedLegacy<S>
@@ -699,11 +704,14 @@ where
 		async move {
 			let Self {
 				session,
-				mut stream,
+				stream,
 				version,
 				request_id_max,
 				peer_declared,
+				client_setup_size,
 			} = *self;
+			let mut stream = stream.with_stats(&server.stats);
+			server.stats.control(stats::Control::Session, client_setup_size, true);
 			let (publish, subscribe) = server.stat_tagged_origins();
 
 			// Encode parameters using the version-appropriate type.
@@ -931,7 +939,10 @@ where
 				session,
 				version,
 				client_setup,
-			} => server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth),
+			} => {
+				server.stats.control(stats::Control::Session, client_setup.size, true);
+				server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
+			}
 			PausedHandshake::Boxed(paused) => paused.ok(server, runtime, peer_hop, auth).await,
 		}
 	}
@@ -1528,6 +1539,7 @@ mod tests {
 							crate::lite::test_transport::PendingRecv,
 							Version::Ietf(version),
 						),
+						size: 0,
 						path: None,
 						token: None,
 						declared: ietf::peer::Peer::default(),

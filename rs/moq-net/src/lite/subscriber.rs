@@ -2646,9 +2646,7 @@ mod tests {
 				let log = session.log.clone();
 				let peer_setup = lite::PeerSetup::new(false, crate::transport::Binding::InBand);
 				let early = if pre_read {
-					let accepted = lite::accept_setup(&mut session, version, &Default::default())
-						.await
-						.unwrap();
+					let accepted = lite::accept_setup(&mut session, version).await.unwrap();
 					assert_eq!(accepted.early.len(), 2);
 					assert!(log.stops().is_empty());
 					peer_setup.set(accepted.setup);

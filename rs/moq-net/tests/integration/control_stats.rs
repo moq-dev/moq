@@ -2,7 +2,10 @@
 
 //! Control-body counters cross real protocol drivers, including legacy multiplexing.
 
-use crate::support::harness::{MockConnectOptions, connect_mock, spawn, subscribed};
+use crate::support::{
+	harness::{MockConnectOptions, connect_mock, now, spawn, subscribed},
+	mock::create_mock_session_pair,
+};
 use moq_net::{
 	Timescale, Timestamp, origin,
 	stats::{Control, Registry, Tier},
@@ -69,16 +72,32 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 	}
 }
 
-/// A session with neither origin still counts its SETUP exchange under its context,
-/// including the client SETUP the server reads before it starts the session.
+/// The SETUP a server reads before admission counts under the stats the handshake is
+/// admitted with, even for a session with neither origin.
 #[moq_clock::test]
-async fn control_counts_without_origins() {
-	for version in ["moq-lite-07-wip", "moq-transport-22"] {
+async fn setup_counts_under_the_admitted_stats() {
+	for version in ["moq-lite-07-wip", "moq-transport-14", "moq-transport-22"] {
+		let version: moq_net::Version = version.parse().unwrap();
 		let registry = Registry::new(Default::default());
 		let tier = Tier::new("internal");
-		let mut options = MockConnectOptions::new(version.parse().unwrap());
-		options.server_stats = registry.tier(tier.clone()).session("");
-		let _pair = connect_mock(options).await;
+		let mut transport = moq_net::transport::memory::Config::default();
+		transport.protocol = Some(version.alpn().to_string());
+		let (client_transport, server_transport) = create_mock_session_pair(transport);
+		let client = moq_net::Client::new().with_versions(version.into());
+		let server = moq_net::Server::new().with_versions(version.into());
+		let stats = registry.tier(tier.clone()).session("");
+		let client = async {
+			let (session, driver) = client.connect(now(), client_transport).await.unwrap();
+			spawn(driver);
+			session
+		};
+		let server = async {
+			let request = server.accept_request(now(), server_transport).await.unwrap();
+			let (session, driver) = request.with_stats(stats).ok().await.unwrap();
+			spawn(driver);
+			session
+		};
+		let _sessions = futures::join!(client, server);
 		moq_clock::sleep(std::time::Duration::from_millis(100)).await;
 		let rows = registry.snapshot().control();
 		assert!(

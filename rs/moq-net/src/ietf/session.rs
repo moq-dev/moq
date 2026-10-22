@@ -663,6 +663,9 @@ pub struct PeerSetup<S: crate::transport::poll::Session> {
 	/// The SETUP stream, which becomes the GOAWAY channel.
 	pub stream: Reader<S::RecvStream, crate::Version>,
 
+	/// The SETUP's encoded size, counted once the session's stats are known.
+	pub size: usize,
+
 	/// The request path the peer advertised, for URL-less transports.
 	pub path: Option<String>,
 
@@ -701,14 +704,13 @@ fn self_origin(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Pr
 pub async fn accept_setup<S: crate::transport::poll::Session>(
 	session: &mut S,
 	version: Version,
-	stats: &crate::stats::Session,
 ) -> Result<PeerSetup<S>, Error> {
 	let outer_version = crate::Version::Ietf(version);
 	let mut early = Vec::new();
 
 	loop {
 		let recv = session.accept_uni().await.map_err(Error::from_transport)?;
-		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version).with_stats(stats);
+		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version);
 
 		let kind = match reader.varint_peek().await {
 			Ok(kind) => kind,
@@ -723,7 +725,7 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 			continue;
 		}
 
-		let setup: setup::Setup = reader.decode().await?;
+		let (setup, size) = reader.decode_sized::<setup::Setup>().await?;
 		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, version)?;
 		let path = match params.get_bytes(ietf::ParameterBytes::Path) {
 			Some(bytes) => Some(
@@ -738,6 +740,7 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 
 		return Ok(PeerSetup {
 			stream: reader,
+			size,
 			path,
 			token,
 			declared,
@@ -2794,9 +2797,7 @@ mod tests {
 			subgroup_header(VERSION, 7, 0).await,
 			setup,
 		]);
-		let accepted = accept_setup(&mut session, VERSION, &Default::default())
-			.await
-			.expect("accept the SETUP");
+		let accepted = accept_setup(&mut session, VERSION).await.expect("accept the SETUP");
 		assert_eq!(accepted.early.len(), 2, "both early streams are held");
 		assert!(session.log.stops().is_empty(), "stopped {:?}", session.log.stops());
 

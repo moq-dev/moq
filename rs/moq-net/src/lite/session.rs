@@ -36,10 +36,8 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 pub async fn accept_setup<S: crate::transport::poll::Session>(
 	session: &mut S,
 	version: Version,
-	stats: &crate::stats::Session,
 ) -> Result<AcceptedSetup<S>, Error> {
 	let mut accept = SetupAccept::<S> {
-		stats: stats.clone(),
 		version,
 		pending: Vec::new(),
 		early: Vec::new(),
@@ -49,7 +47,6 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 }
 
 struct SetupAccept<S: crate::transport::poll::Session> {
-	stats: crate::stats::Session,
 	version: Version,
 	pending: Vec<Reader<S::RecvStream, Version>>,
 	early: Vec<Reader<S::RecvStream, Version>>,
@@ -59,7 +56,6 @@ struct SetupAccept<S: crate::transport::poll::Session> {
 impl<S: crate::transport::poll::Session> SetupAccept<S> {
 	fn poll(&mut self, session: &mut S, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup<S>, Error>> {
 		let Self {
-			stats,
 			version,
 			pending,
 			early,
@@ -71,7 +67,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		let mut accept_error = None;
 		while let Poll::Ready(stream) = session.poll_accept_uni(&mut cx) {
 			match stream {
-				Ok(stream) => pending.push(Reader::new(stream, version).with_stats(stats)),
+				Ok(stream) => pending.push(Reader::new(stream, version)),
 				Err(err) => {
 					accept_error = Some(crate::lite::error::from_transport(err));
 					break;
@@ -114,9 +110,9 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		// before reporting the terminal error from accepting the next stream.
 		let result = setup
 			.as_mut()
-			.map(|reader| reader.poll_decode::<Setup>(&mut cx))
+			.map(|reader| reader.poll_decode_sized::<Setup>(&mut cx))
 			.unwrap_or(Poll::Pending);
-		let setup = match result {
+		let (setup, size) = match result {
 			Poll::Ready(result) => result?,
 			Poll::Pending => match accept_error {
 				Some(err) => return Poll::Ready(Err(err)),
@@ -131,6 +127,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		early.append(pending);
 		Poll::Ready(Ok(AcceptedSetup {
 			setup,
+			size,
 			early: std::mem::take(early),
 		}))
 	}
@@ -140,6 +137,8 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 pub struct AcceptedSetup<S: crate::transport::poll::Session> {
 	/// The SETUP decoded before origin binding.
 	pub setup: Setup,
+	/// The SETUP's encoded size, counted once the session's stats are known.
+	pub size: usize,
 	/// Streams with their type still buffered for the session classifier.
 	pub early: Vec<Reader<S::RecvStream, Version>>,
 }
@@ -1094,7 +1093,7 @@ mod tests {
 			.unwrap();
 		let mut session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), setup]);
-		let accepted = accept_setup(&mut session, version, &Default::default()).await.unwrap();
+		let accepted = accept_setup(&mut session, version).await.unwrap();
 		assert_eq!(accepted.early.len(), 1);
 	}
 
@@ -1104,7 +1103,7 @@ mod tests {
 		let mut session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1], vec![1]]);
 		assert!(matches!(
-			accept_setup(&mut session, Version::Lite05, &Default::default()).now_or_never(),
+			accept_setup(&mut session, Version::Lite05).now_or_never(),
 			Some(Err(Error::ProtocolViolation))
 		));
 	}
@@ -1255,9 +1254,7 @@ mod tests {
 	async fn unknown_client_role_remains_bidirectional() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1, 4, 1, 3, 1, 3]]);
-			let setup = accept_setup(&mut transport, version, &Default::default())
-				.await
-				.unwrap();
+			let setup = accept_setup(&mut transport, version).await.unwrap();
 			assert_eq!(setup.setup.role, None);
 			let log = transport.log.clone();
 			let mut started = raw_session(transport, version, false, Some(setup));
@@ -1285,6 +1282,7 @@ mod tests {
 					probe: super::super::ProbeLevel::Report,
 					..Default::default()
 				},
+				size: 0,
 				early: Vec::new(),
 			};
 			let mut started = raw_session(transport, version, true, Some(peer_setup));
