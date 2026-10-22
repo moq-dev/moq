@@ -13,7 +13,10 @@ in the dev shell) exchanges the GitHub OIDC token itself, so no separate
 authentication Action is needed.
 
 - Grant the publishing job `id-token: write` and drop `CARGO_REGISTRY_TOKEN`
-  from its environment. Keep the existing release guards.
+  from its environment. Keep the existing release guards. A job-level
+  `permissions` block replaces the workflow's `contents: write` and
+  `pull-requests: write`, which release-plz needs for tags, releases, and
+  PRs, so add `id-token: write` beside them or repeat all three.
 - Verify on the next approved release that every crate published, then delete
   the repository secret and revoke the token on crates.io.
 - This removes a reusable credential; it does not protect against a
