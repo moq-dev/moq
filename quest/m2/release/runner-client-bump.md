@@ -3,7 +3,8 @@
 ## Goal
 
 Condition: a moq-tokio release carries
-[moq-dev/moq#5083](https://github.com/moq-dev/moq/pull/5083). Check with
+[moq-dev/moq#5083](https://github.com/moq-dev/moq/pull/5083), a breaking
+change on `main` that publishes only with the next cut. Check with
 `cargo info moq-tokio` and that release's changelog.
 
 Then bump the moq-dev-rs client in

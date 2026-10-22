@@ -42,11 +42,11 @@ coverage on `main` at `3ab6cbf81d`.
 
 - [Runner cases](/quest/m1/interop-coverage/runner-cases.md) - our runner clients run data-subgroup-basic and subscribe-namespace-lifecycle
 - [JS namespace withdrawal in one process](/quest/m1/interop-coverage/js-namespace-withdraw.md) - moq-dev-js sees NAMESPACE_DONE when publisher and subscriber share a process
-- [Runner client bump](/quest/m1/interop-coverage/runner-client-bump.md) - waiting on a moq-tokio release with #5083, then the runner's Rust client stops stamping every object
 - [Late join and FETCH](/quest/m1/interop-coverage/late-join.md) - a late subscriber gets the current group from object 0, and a standalone FETCH returns a past group exactly
 - [Control cases](/quest/m1/interop-coverage/control.md) - GOAWAY redirect, TRACK_STATUS, datagrams, and request-ID limits pass across implementations
 
 ## Related
 
+- [Runner client bump](/quest/m2/release/runner-client-bump.md) - after the cut publishes #5083, the runner's Rust client stops stamping every object
 - [Interop audit](/quest/m0/audit-interop.md) - classifies the red cells these cases produce
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - Moxygen's moq-test conformance through moq-relay
