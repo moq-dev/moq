@@ -4392,6 +4392,29 @@ impl Consumer {
 		})
 	}
 
+	/// The group a front's parked copy would serve for `sequence` from `frame_start`, when it
+	/// is whole: finished from frame 0 on a copy still open. Anything less (open, headless,
+	/// aborted, or on a failed copy) needs the route. The fetch joins the copy's demand, so
+	/// a copy kept busy only by fetches stays cached at its session.
+	fn parked_whole(&self, sequence: u64, frame_start: u64) -> Option<(kio::Consumer<TrackState>, group::Consumer)> {
+		let copy = self.with_state(|state| state?.read().routes.as_ref()?.parked())?;
+		copy.with_state(|state| {
+			let state = state?;
+			let group = {
+				let track = state.read();
+				let group = track.covering_group(sequence, frame_start)?;
+				let whole = !track.is_closed()
+					&& track.abort.is_none()
+					&& group.live_first_frame() == Some(0)
+					&& group.is_finished();
+				let consumer = group.try_consume().filter(|_| whole)?;
+				group.cache_refresh();
+				consumer
+			};
+			Some((state.consume(), group))
+		})
+	}
+
 	/// The serving route's copy, for a front's logical track; see [`super::resume`].
 	fn serving(&self) -> Option<Consumer> {
 		let routes = self.with_state(|state| state?.read().routes.clone())?;
@@ -4443,14 +4466,32 @@ impl Consumer {
 	/// handler request.
 	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetching> {
 		let options = options.into().unwrap_or_default();
-		let state = self.resolve(None).0;
-		let resume = state.read().routes.clone();
 
 		// One fetch per calling context, counted here (coalesced upstream work is
 		// still one request served). Independent of `subscriptions` and the viewer
 		// refcount.
 		self.stats.fetch();
 
+		// Nothing more feeds a whole group, so no route needs to stay up for it: the copy a
+		// front parked serves it without reviving the logical track for one read.
+		if let Some((state, group)) = self.parked_whole(sequence, options.frame_start) {
+			let fetch = state.read().fetch.clone();
+			return kio::Pending::new(Fetching {
+				state,
+				fetch,
+				sequence,
+				frame_start: options.frame_start,
+				priority: options.priority,
+				max_delay: options.max_delay,
+				result: None,
+				hit: Some(Box::new(group)),
+				stats: self.stats.clone(),
+				resume: None,
+			});
+		}
+
+		let state = self.resolve(None).0;
+		let resume = state.read().routes.clone();
 		let mut result = None;
 
 		// A front's logical track caches nothing: the serving route answers.
