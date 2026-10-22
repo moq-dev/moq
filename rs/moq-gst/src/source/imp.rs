@@ -1382,13 +1382,17 @@ fn video_caps(config: &hang::catalog::VideoConfig) -> Result<gst::Caps> {
 	Ok(caps)
 }
 
+// GStreamer's audio caps carry rate and channels as `int`: an unsigned field never intersects a
+// decoder's template, so decodebin finds no decoder.
 fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
+	let rate = i32::try_from(config.sample_rate).context("sample rate out of range")?;
+	let channels = i32::try_from(config.channel_count).context("channel count out of range")?;
 	let caps = match &config.codec {
 		hang::catalog::AudioCodec::AAC(_) => {
 			let mut builder = gst::Caps::builder("audio/mpeg")
 				.field("mpegversion", 4)
-				.field("rate", config.sample_rate)
-				.field("channels", config.channel_count);
+				.field("rate", rate)
+				.field("channels", channels);
 			if let Some(description) = &config.description {
 				builder = builder
 					.field("codec_data", gst::Buffer::from_slice(description.clone()))
@@ -1398,26 +1402,64 @@ fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
 			}
 			builder.build()
 		}
-		hang::catalog::AudioCodec::Opus => {
-			let mut builder = gst::Caps::builder("audio/x-opus")
-				.field("rate", config.sample_rate)
-				.field("channels", config.channel_count);
-			if let Some(description) = &config.description {
-				builder = builder
-					.field("codec_data", gst::Buffer::from_slice(description.clone()))
-					.field("stream-format", "ogg");
-			}
-			builder.build()
-		}
+		hang::catalog::AudioCodec::Opus => opus_caps(config, rate, channels)?,
 		hang::catalog::AudioCodec::Mp3 => gst::Caps::builder("audio/mpeg")
 			.field("mpegversion", 1)
 			.field("layer", 3)
-			.field("rate", config.sample_rate)
-			.field("channels", config.channel_count)
+			.field("rate", rate)
+			.field("channels", channels)
 			.build(),
 		other => bail!("unsupported audio codec: {other:?}"),
 	};
 	Ok(caps)
+}
+
+/// The `audio/x-opus` caps opusdec and moqsink negotiate on: the stream layout as mapping fields,
+/// which decodebin needs to pick a decoder, plus the catalog's OpusHead (pre-skip and gain) as the
+/// streamheader.
+fn opus_caps(config: &hang::catalog::AudioConfig, rate: i32, channels: i32) -> Result<gst::Caps> {
+	let head = match &config.description {
+		Some(description) => moq_mux::codec::opus::Config::parse(&mut description.as_ref())
+			.context("Opus description is not an OpusHead")?,
+		None => moq_mux::codec::opus::Config::new(config.sample_rate, config.channel_count),
+	};
+	anyhow::ensure!(
+		head.channel_count == config.channel_count,
+		"the catalog's {} Opus channels contradict its OpusHead's {}",
+		config.channel_count,
+		head.channel_count
+	);
+	let mut builder = gst::Caps::builder("audio/x-opus")
+		.field("rate", rate)
+		.field("channels", channels);
+	builder = match &head.mapping {
+		Some(mapping) => builder
+			.field("channel-mapping-family", i32::from(mapping.family()))
+			.field("stream-count", i32::from(mapping.streams()))
+			.field("coupled-count", i32::from(mapping.coupled()))
+			.field(
+				"channel-mapping",
+				gst::Array::new(mapping.table().iter().map(|&c| i32::from(c))),
+			),
+		// Family 0 is mono or stereo: one stream, coupled when stereo.
+		None => {
+			anyhow::ensure!(
+				(1..=2).contains(&channels),
+				"Opus family 0 carries 1 or 2 channels, not {channels}"
+			);
+			builder
+				.field("channel-mapping-family", 0i32)
+				.field("stream-count", 1i32)
+				.field("coupled-count", channels - 1)
+		}
+	};
+	if let Some(description) = &config.description {
+		builder = builder.field(
+			"streamheader",
+			gst::Array::new([gst::Buffer::from_slice(description.clone())]),
+		);
+	}
+	Ok(builder.build())
 }
 
 #[cfg(test)]
@@ -1471,6 +1513,27 @@ mod tests {
 					if description.is_some() { format } else { "byte-stream" }
 				);
 				assert_eq!(structure.has_field("codec_data"), description.is_some());
+			}
+		}
+	}
+
+	/// opusdec's templates require the mapping fields as ints, so decodebin finds no decoder without them.
+	#[test]
+	fn opus_caps_carry_the_stream_layout() {
+		gst::init().unwrap();
+		for channels in [1, 2] {
+			let head = moq_mux::codec::opus::Config::new(48_000, channels).with_pre_skip(312);
+			for description in [None, Some(head.encode().unwrap())] {
+				let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, channels);
+				config.description = description.clone();
+				let caps = super::audio_caps(&config).unwrap();
+				let structure = caps.structure(0).unwrap();
+				assert_eq!(structure.get::<i32>("rate").unwrap(), 48_000);
+				assert_eq!(structure.get::<i32>("channels").unwrap(), channels as i32);
+				assert_eq!(structure.get::<i32>("channel-mapping-family").unwrap(), 0);
+				assert_eq!(structure.get::<i32>("stream-count").unwrap(), 1);
+				assert_eq!(structure.get::<i32>("coupled-count").unwrap(), channels as i32 - 1);
+				assert_eq!(structure.has_field("streamheader"), description.is_some());
 			}
 		}
 	}
