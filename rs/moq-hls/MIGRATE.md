@@ -10,6 +10,16 @@ Program date times, MPD availability and publish times, and `export::Renditions:
 Pass `moq_clock::wall()` for now, convert third-party timestamps with `Wall::try_from`, and pass `wall.into()` to formatters that take `SystemTime`.
 HLS and DASH text encodings are unchanged.
 
+### An ended playlist ends the import
+
+`import::Import::run` returns `Ok(())` once every rendition's playlist carries `EXT-X-ENDLIST` and its last segment is imported, instead of polling forever.
+Call `Import::finish` then, and keep the returned `broadcast::Finish` (or await `Finish::wait`) so subscribers still catching up drain the tail.
+
+```rust
+import.run().await?;
+import.finish()?.wait().await;
+```
+
 ### A failed timeline fails its listings
 
 `export::Broadcaster::manifest` and `export::Rendition::media_playlist` return `Result<Option<String>>`.
