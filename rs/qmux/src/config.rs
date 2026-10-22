@@ -20,9 +20,11 @@ pub enum Protocol {
 	/// `application_protocols` transport parameter (preference order).
 	///
 	/// For transports without ALPN (TCP, Unix sockets). Both peers must opt in:
-	/// receiving the parameter while *not* in this mode is a protocol error. The agreed
-	/// protocol is resolved by the time [`Session::connect`](crate::Session::connect) /
-	/// [`accept`](crate::Session::accept) returns.
+	/// receiving the parameter while *not* in this mode is a protocol error, and so is
+	/// agreeing on none ([`Error::TransportParameter`](crate::Error::TransportParameter)).
+	/// The agreed protocol is resolved by the time
+	/// [`Session::connect`](crate::Session::connect) / [`accept`](crate::Session::accept)
+	/// returns.
 	Negotiate(Vec<String>),
 
 	/// Already negotiated out of band (TLS / WebSocket ALPN). Reported as-is;

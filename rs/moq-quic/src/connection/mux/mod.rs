@@ -91,7 +91,8 @@ pub struct Config {
     pub rtt_interval: Option<Duration>,
     /// Application protocols to negotiate in-band, in preference order, for transports
     /// without ALPN; `None` when it was negotiated out of band or not at all, which makes a
-    /// peer's offer a protocol error
+    /// peer's offer a protocol error; a peer that offers none of them fails the
+    /// handshake
     pub protocols: Option<Vec<String>>,
 }
 
@@ -762,7 +763,14 @@ impl Connection {
                     Side::Server => (ours.as_slice(), theirs),
                     Side::Client => (theirs, ours.as_slice()),
                 };
-                server.iter().find(|p| client.contains(p)).cloned()
+                let agreed = server.iter().find(|p| client.contains(p)).cloned();
+                // As with ALPN, asking for a protocol and agreeing on none fails the handshake
+                if agreed.is_none() {
+                    return Err(TransportError::TRANSPORT_PARAMETER_ERROR(
+                        "no common application protocol",
+                    ));
+                }
+                agreed
             }
             (None, Some(_)) => {
                 return Err(TransportError::TRANSPORT_PARAMETER_ERROR(

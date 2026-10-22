@@ -338,12 +338,14 @@ async fn run_writer<W: Writer>(inner: Arc<Inner>, mut writer: W) {
 		loop {
 			let batch = tokio::select! {
 				biased;
-				batch = kio::wait(|waiter| inner.poll_batch(waiter, &mut timer)) => batch,
-				// Transport-level maintenance, like a WebSocket keep-alive Ping.
+				// Transport-level maintenance, like a WebSocket keep-alive Ping. First, since a
+				// writer that always has a batch ready would otherwise never send one; it is
+				// ready only once per keep-alive interval.
 				result = writer.maintain() => {
 					result?;
 					continue;
 				}
+				batch = kio::wait(|waiter| inner.poll_batch(waiter, &mut timer)) => batch,
 			};
 			let Some(batch) = batch else {
 				return Ok(());

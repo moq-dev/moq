@@ -275,6 +275,58 @@ async fn datagrams_need_records() {
 	));
 }
 
+/// A sender that never runs out of output still sends its WebSocket keep-alive Pings, so
+/// a peer that has no keep-alive and sends nothing back does not let it time out.
+#[cfg(feature = "ws")]
+#[tokio::test(start_paused = true)]
+async fn websocket_keep_alive_runs_during_continuous_output() {
+	use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+
+	use crate::transport::WsTransport;
+	use crate::ws::KeepAlive;
+
+	// The sender's direction drains at 4 KiB per millisecond, far below what it queues
+	let (a, a_relay) = tokio::io::duplex(PIPE);
+	let (b_relay, b) = tokio::io::duplex(PIPE);
+	let (mut a_read, mut a_write) = tokio::io::split(a_relay);
+	let (mut b_read, mut b_write) = tokio::io::split(b_relay);
+	tokio::spawn(async move {
+		let mut buf = vec![0; 4096];
+		while let Ok(n @ 1..) = a_read.read(&mut buf).await {
+			if b_write.write_all(&buf[..n]).await.is_err() {
+				return;
+			}
+			tokio::time::sleep(Duration::from_millis(1)).await;
+		}
+	});
+	tokio::spawn(async move { tokio::io::copy(&mut b_read, &mut a_write).await });
+
+	let a = WebSocketStream::from_raw_socket(a, Role::Client, None).await;
+	let b = WebSocketStream::from_raw_socket(b, Role::Server, None).await;
+	// No QX_PING from either side, so only the WebSocket Pings keep the sender alive
+	let mut config = config(Version::QMux02);
+	config.rtt_interval = None;
+	config.max_idle_timeout = None;
+	let a = WsTransport::new(a, config.version, config.max_record_size, Binding::Uri)
+		.with_keep_alive(KeepAlive::new(Duration::from_millis(10), Duration::from_millis(500)));
+	let b = WsTransport::new(b, config.version, config.max_record_size, Binding::Uri);
+	let mut sender = Session::new(a, Side::Client, config.clone()).unwrap();
+	let _receiver = Session::new(b, Side::Server, config).unwrap();
+	while sender.max_datagram_size() == 0 {
+		tokio::time::sleep(Duration::from_millis(1)).await;
+	}
+
+	// Far past the 500ms deadline, queueing more each tick than one batch carries
+	for _ in 0..2000 {
+		for seed in 0..100 {
+			sender
+				.send_datagram(payload(1000, seed), SendOptions::default())
+				.expect("the sender's keep-alive kept it open");
+		}
+		tokio::time::advance(Duration::from_millis(1)).await;
+	}
+}
+
 /// An application close reaches the peer with its code and reason, and the closing side
 /// reports it once the close is out.
 #[tokio::test(start_paused = true)]

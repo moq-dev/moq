@@ -516,7 +516,16 @@ fn negotiates_the_servers_preference() {
     assert_eq!(pair.server.protocol(), Some("c"));
 
     // An offer the other side did not ask for is an error
-    let mut pair = Pair::with(client, config(Version::QMux01));
+    let mut pair = Pair::with(client.clone(), config(Version::QMux01));
+    assert_eq!(
+        transport_error(&mut pair.server).code,
+        TransportErrorCode::TRANSPORT_PARAMETER_ERROR
+    );
+
+    // So is agreeing on nothing
+    let mut server = config(Version::QMux01);
+    server.protocols = Some(vec!["d".into()]);
+    let mut pair = Pair::with(client, server);
     assert_eq!(
         transport_error(&mut pair.server).code,
         TransportErrorCode::TRANSPORT_PARAMETER_ERROR

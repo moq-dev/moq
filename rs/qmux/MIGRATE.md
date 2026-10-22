@@ -34,6 +34,11 @@ Every peer must speak QMux draft-00, 01, or 02; a WebSocket client must offer on
 `InvalidFrameType`, `InvalidStreamId`, `DuplicateParam`, `Short`, and `UnexpectedProtocols` are removed: malformed input surfaces as `FrameEncoding`, `ProtocolViolation`, or `TransportParameter`.
 `DatagramTooLarge` is new, and `InvalidConfig` reports a `Config` the session cannot run with, such as a zero timer.
 
+### In-band negotiation without a common protocol fails (#6231)
+
+With `Protocol::Negotiate`, a peer that offers none of your protocols now fails the handshake with `Error::TransportParameter` instead of connecting with `protocol() == None`.
+Use `Protocol::None` on a session that must connect without an application protocol.
+
 ### `StreamId` and `StreamDir` are no longer exported (#6231)
 
 Stream identity is internal to moq-quic's state machine; nothing in the public API takes one.
