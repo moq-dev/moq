@@ -20,6 +20,55 @@ Only a change that needs a maintainer decision (public API, scope) or is
 independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
 
+### Current run (2026-10-22)
+
+The export consumer now reaps later aborted groups only when delivery blocks,
+rather than once per delivered frame or boundary. Cleanup still precedes the
+hole/latency decisions and registers wakeups for later aborts. The existing
+frameless-abort, buffered-frame, and deferred-fault tests cover those cases.
+`annexb-export-queued-groups` in the existing nightly `containers` target varies
+1/16/64 queued groups independently of 1/16 frames per group, validates full
+output outside timing, and exposes `export_queued_groups` for instruction counts
+without fixture setup.
+
+Callgrind 3.27.1, Rust 1.98.1, optimized with symbols and line tables, on
+`2e3ea8484e` plus this fix (one `--test --exact` iteration, collecting only
+`*export_queued_groups*`):
+
+| Queued groups | Frames per group | Before instructions | After instructions |
+|---|---|---|---|
+| 1 | 1 | 170,170 | 171,565 |
+| 1 | 16 | 218,291 | 216,117 |
+| 16 | 1 | 513,847 | 433,750 |
+| 16 | 16 | 1,711,603 | 1,228,339 |
+| 64 | 1 | 2,654,611 | 1,337,394 |
+| 64 | 16 | 12,355,428 | 4,471,762 |
+
+The largest case uses 64% fewer instructions. The one-group cases stay within
+1%; the saved work grows with queued groups and frames. The complete moq-mux
+suite passes (1,584 tests, five ignored nightly tests). A repeat of the largest
+case collected 4,476,627 instructions (0.11% from the first measurement).
+
+Broader validation: 3,568 affected tests pass; the CLI integration test
+`stats::a_late_sink_reads_the_final_stats` fails with "the import exited before
+its input ended", also reproduced with the unchanged base consumer restored.
+`just ci` passes its Rust lint/docs, quest, and drill stages, then stops building
+the unchanged Nix runner image because this host denies writing
+`/proc/self/uid_map`. Markdown, shell, TOML, and GitHub workflow checks pass
+separately. These validation limits remain open alongside the unfinished audit.
+
+Integration: [redundant failover fix](https://github.com/moq-dev/moq/pull/6113)
+also edits this consumer's hole timing. Its current consumer patch applies
+cleanly over the reap move; neither change replaces the other.
+
+Published `gh-pages` costs/rates history checked on 2026-10-22 contains only two
+distinct commits: `f13283b302` (Oct 20) and `bc64b9c525` (Oct 21). Three points
+for the first commit are reruns. There is still no published JS series. Keep the
+five-night comparison open rather than treating reruns as new evidence.
+
+The remaining attributed regressions and missing benchmarks below are unfinished;
+this PR does not finish the audit or create its recurring successor yet.
+
 ### What to check first
 
 - History: Nightly stores every series on `gh-pages` (`bench/costs`,
@@ -71,29 +120,20 @@ The m0 run attributed these, but none has a fix yet. Fix each in this run's PR
 with its own regression bench, unless it needs a maintainer decision or is too
 large to review alongside the rest; those become `/quest-plan` follow-ups:
 
-1. Export reap goes quadratic,
-   [#5942](https://github.com/moq-dev/moq/pull/5942) (`49448d2ef`), +42k on
-   Annex B export. The lookahead no longer decodes groups ahead of the cursor,
-   so on every `poll_event` the reap of aborted groups in
-   `rs/moq-mux/src/container/consumer.rs` now calls `group::Consumer::poll_finished`
-   on every unbuffered pending group: about 1,070 calls per 16-frame export, so
-   frames x pending groups. Recommendation: reap only where an abort can block
-   delivery (a hole at the cursor, or before parking), and add an export bench
-   swept over buffered groups so the slope shows.
-2. [#6019](https://github.com/moq-dev/moq/pull/6019) (`9f1fc92fe`), reading lower
+1. [#6019](https://github.com/moq-dev/moq/pull/6019) (`9f1fc92fe`), reading lower
    buffered groups across route copies, adds +27k to Annex B export, of which
    +12k is `memcpy`: larger values move through the resume read path.
    Recommendation: profile `resume::Reader` and `track::Subscriber::poll_group`
    for by-value moves of the cursor state.
-3. `catalog_estimate_fanout` +5% at [#5677](https://github.com/moq-dev/moq/pull/5677)
+2. `catalog_estimate_fanout` +5% at [#5677](https://github.com/moq-dev/moq/pull/5677)
    (`ad54a9721`, data consumers return timestamps, which reworked the moq-flate
    snapshot consumer), and +4% across `fc0df978c` and `4327505086`
    ([#6074](https://github.com/moq-dev/moq/pull/6074) time anchors,
    [#5543](https://github.com/moq-dev/moq/pull/5543) VR catalog metadata).
    Bisect the second pair first, and treat a larger catalog as intended.
-4. `annexb` export also gained +9k in `c389bd051`..`eb6ac57cb` and +10k in
+3. `annexb` export also gained +9k in `c389bd051`..`eb6ac57cb` and +10k in
    `75d9bf1c0`..`dcd7d2cbb`, and +27k at `fe722cec9` (#5929), of which the m0 PR recovered 8.5k; attribute the rest only if it persists.
-5. The subscribe path's remaining ~1,260 instructions over pre-#5929 belong to
+4. The subscribe path's remaining ~1,260 instructions over pre-#5929 belong to
    [Allocation-free single-range subscriber window](/quest/m1/window-alloc.md).
 
 ### Unbenchmarked hot and fan-out paths, ranked
