@@ -183,6 +183,8 @@ pub(super) struct Resume {
 	new_group: Option<u64>,
 	/// Whether a REQUEST_UPDATE asked for it, which the join's REQUEST_OK answers.
 	answer: Option<RequestId>,
+	/// The resume carries its own filter, which replaces the frozen cursor.
+	refilter: bool,
 }
 
 /// What ended a paused subscription's wait.
@@ -765,13 +767,17 @@ where
 		self.pause_join(join.as_ref());
 
 		tracing::debug!(id = %request_id, broadcast = %absolute, track = %name, "publish started");
+		// The listing's filter resolves against the edge the PUBLISH names, so its first resume
+		// serves from there.
+		let edge = live_edge(&track);
+		let cursor = Cursor::serving(&subscribe_range(params.filter, edge, self.version), &edge);
 		stream.writer.buffer_varint(ietf::Publish::ID)?;
 		let publish = ietf::Publish {
 			request_id,
 			track_namespace: namespace.clone(),
 			track_name: name.as_ref().into(),
 			track_alias: request_id.0,
-			largest_location: live_edge(&track).largest,
+			largest_location: edge.largest,
 			forward: false,
 			properties,
 			// Draft-20 and later state the listing's subscription parameters on each PUBLISH;
@@ -854,6 +860,7 @@ where
 						fill: None,
 						new_group: new_group.take(),
 						answer: None,
+						refilter: ok.filter.is_some(),
 					})
 				}
 				_ => return Err(goaways.failed(Error::UnexpectedMessage)),
@@ -877,6 +884,7 @@ where
 			grant: None,
 			published: true,
 			opened: Default::default(),
+			cursor: Arc::new(std::sync::Mutex::new(cursor)),
 			renewal: Renewal::default(),
 		};
 		let running = self.run_pausable(&mut stream, request_id, &mut state, resume, &mut finished, &mut goaways);
@@ -1073,6 +1081,7 @@ where
 						fill: update.fill,
 						new_group: update.new_group.or(state.params.new_group.take()),
 						answer: (!renewing && self.version != Version::Draft14).then_some(update.request_id),
+						refilter: update.filter.is_some(),
 					})
 				}
 				_ if !renewing && self.version != Version::Draft14 => self
@@ -1129,8 +1138,14 @@ where
 		if let Some(max_age) = params.max_age {
 			subscription.max_delay = Duration::from_millis(max_age);
 		}
-		// A start the live edge does not decide is no join; see `serve_subscribe_stream`.
-		let fixed = subscribe_range(params.filter, LiveEdge::default(), self.version);
+		// A resume continues right after where the request paused; only a filter the resume
+		// carries starts afresh. A start the live edge does not decide is no join; see
+		// `serve_subscribe_stream`.
+		let cursor = *state.cursor.lock().unwrap();
+		let fixed = match how.refilter {
+			true => subscribe_range(params.filter, LiveEdge::default(), self.version),
+			false => cursor.range(params.filter, self.version),
+		};
 		if let Some(start) = fixed.start {
 			ServeRange {
 				start: Some(Location { object: 0, ..start }),
@@ -1160,9 +1175,16 @@ where
 		})
 		.await?;
 
-		let edge = live_edge(track);
 		state.ended = Some(track.serving().unwrap_or_else(|| track.clone()));
-		let range = subscribe_range(params.filter, edge, self.version);
+		let (range, largest) = match how.refilter {
+			true => {
+				let edge = live_edge(track);
+				let range = subscribe_range(params.filter, edge, self.version);
+				*state.cursor.lock().unwrap() = Cursor::serving(&range, &edge);
+				(range, edge.largest)
+			}
+			false => (fixed, cursor.largest),
+		};
 		range.apply(&mut subscription);
 		let _ = subscriber.update(subscription);
 		let timescale = subscriber
@@ -1178,7 +1200,8 @@ where
 			timescale,
 		)
 		.compression(self.peer_setup.get().await.flate)
-		.ranked(self.priority.clone());
+		.ranked(self.priority.clone())
+		.resumable(state.cursor.clone());
 		serve.opened = state.opened.clone();
 		serve.dynamic = state.dynamic;
 		if let Some(value) = how.new_group {
@@ -1186,7 +1209,7 @@ where
 		}
 
 		if let Some(join) = state.join {
-			let joined = match (params.filter, edge.largest) {
+			let joined = match (params.filter, largest) {
 				(Filter::NextObject, Some(largest)) => Joined::Group {
 					end: Location {
 						group: largest.group,
@@ -1205,20 +1228,16 @@ where
 		let fill = how
 			.fill
 			.filter(|_| Filter::is_draft20(self.version))
-			.map(|fill| fill_range(fill, params.filter, edge.largest));
+			.map(|fill| fill_range(fill, params.filter, largest));
 
 		match how.answer {
 			Some(rid) => {
-				if self
-					.write_request_ok(&mut stream.writer, rid, edge.largest)
-					.await
-					.is_err()
-				{
+				if self.write_request_ok(&mut stream.writer, rid, largest).await.is_err() {
 					return Err(());
 				}
 			}
 			// A resume that renewed a token is answered with its verdict.
-			None => state.renewal.resumed(edge.largest),
+			None => state.renewal.resumed(largest),
 		}
 
 		let served = {
@@ -2105,7 +2124,8 @@ mod tests {
 
 	/// A paused listing's FILL_PARAMETERS (draft-20 and draft-21; draft-22 sends none on
 	/// SUBSCRIBE_TRACKS) open no fill, even once a PUBLISH resumes without its own
-	/// (draft-22 section 3.4.1).
+	/// (draft-22 section 3.4.1). The resume serves the cached group on its own stream, from
+	/// where the PUBLISH stood, so the fill would be a second one.
 	#[moq_clock::test]
 	async fn a_listing_fill_opens_nothing() {
 		for version in [Version::Draft20, Version::Draft21] {
@@ -2138,24 +2158,14 @@ mod tests {
 			send(&mut stream, &resume).await;
 			assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID, "{version}");
 
-			// The joined group's own stream carries only what follows the join; a fill would
-			// carry the cached object.
 			group.finish().unwrap();
 			moq_clock::sleep(Duration::from_millis(10)).await;
+			let mut streams = 0;
 			while let Poll::Ready(recv) = futures::poll!(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx))) {
-				let mut reader = crate::coding::Reader::new(recv.unwrap(), version);
-				let mut bytes = Vec::new();
-				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
-					.await
-					.unwrap()
-				{
-					bytes.extend_from_slice(&chunk);
-				}
-				assert!(
-					!bytes.windows(6).any(|w| w == b"cached"),
-					"{version}: the listing's fill opened"
-				);
+				recv.unwrap();
+				streams += 1;
 			}
+			assert_eq!(streams, 1, "{version}: the listing's fill opened");
 		}
 	}
 
