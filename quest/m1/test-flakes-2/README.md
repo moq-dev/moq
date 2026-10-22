@@ -32,22 +32,17 @@ times on a loaded machine, as the first round did.
 The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
 fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 
-Added 2026-10-20 (maintainer): three more from that day's merge batch, the
-draft-16 cancel race first since it fails on a mocked clock and so may hide
-an ordering bug. The failed-listen test was meant to join the redial quest,
-which #6032 had already finished, so it reuses #6032's reserved-port fix as
-its own child. moq-uring's `host_tracks_moq_clock` was seen the same day
-but #6056 had already fixed it by measuring the calibration gap.
-
-Added 2026-10-21 (maintainer): three small flakes and a fresh-worktree
-interop failure from the m0/m1 merge run, kept in one child since each is
-small.
+Added 2026-10-21 and 2026-10-22 (maintainer): failures from the m0/m1
+merge runs, one child each.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [OBS drain and JS allocation flakes](/quest/m1/test-flakes-2/three-flakes.md) - reproduce the OBS stop-drain failure and verify the existing RSS replacement under load
+- [Union renewal](/quest/m1/test-flakes-2/auth-union-renewal.md) - the JS subscriber never leaves a torn REQUEST_UPDATE on the stream
+- [One process](/quest/m1/test-flakes-2/one-process.md) - no test writes process-wide env or unwraps the crypto provider install
+- [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
+- [Interop cpp to js budget](/quest/m1/test-flakes-2/interop-cpp-js.md) - the cpp -> js cell finishes inside its 30 s budget, fixed at its cause
 
 ## Related
 

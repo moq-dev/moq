@@ -27,6 +27,7 @@ harness:
     ./lib/harness.test.sh
     ./interop/relay-log.test.sh
     python3 interop/report.test.py
+    python3 interop/tone.test.py
     cd .. && bun test test/interop/compat/resolve.test.ts test/interop/compat/claims.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bun test ./harness.browser.ts ./signals-dom.browser.ts ./publish-ui.browser.ts ./capture-channel-count.browser.ts ./open-gop.browser.ts ./src/contract.test.ts ./src/resume.test.ts
@@ -42,11 +43,12 @@ harness:
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
 # and on lite-06/07 messages (the filter also matches `lite_varint_interop`), then
 # moq-transport OBJECT_DATAGRAMs both ways and the JS answer to TRACK_STATUS on every
-# draft, and Lite AUTH_ERROR NOT_SUPPORTED after a grant in both directions.
+# draft, Lite AUTH_ERROR NOT_SUPPORTED after a grant, Lite padding, and lite-07 TRACKS
+# listings, each in both directions.
 [positional-arguments]
 interop *args:
     cd .. && bun install --frozen-lockfile
-    just rs test -p moq-net --lib varint_interop ietf_datagram_interop ietf_track_status_interop ietf_compression_fallback_interop auth_unsupported_interop --run-ignored all
+    just rs test -p moq-net --lib varint_interop ietf_datagram_interop ietf_track_status_interop ietf_compression_fallback_interop auth_unsupported_interop padding_interop tracks_interop --run-ignored all
     ./interop/interop.sh "$@"
 
 # The harnesses append one record per case to MOQ_TEST_RESULTS; flags link the page to its
@@ -219,6 +221,11 @@ video:
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:
     cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
+
+# A JavaScript sender exhausts each native receiver's connection credit, which recovers.
+receive-credit:
+    cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^receive_credit::javascript_/)' --run-ignored only
+    cargo nextest run --locked -p moq-uring --test integration -E 'test(/^receive_credit::javascript_/)' --run-ignored only
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:

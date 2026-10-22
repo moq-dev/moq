@@ -14,7 +14,7 @@ use std::{
 /// Name of the track carrying the chat window.
 pub const TRACK: &str = "chat";
 /// Delivery priority, below audio and video.
-pub const PRIORITY: u8 = 10;
+pub const PRIORITY: i8 = 10;
 /// How long a published message stays in the window.
 pub const HISTORY: Duration = Duration::from_secs(10);
 /// A message entering, leaving, or missed from the window.
@@ -77,7 +77,7 @@ impl Publisher {
 		Self {
 			producer: moq_json::window::Producer::new(
 				track,
-				moq_json::window::ProducerConfig::default().with_op_ratio(0),
+				moq_json::window::ProducerConfig::default().with_ops(false),
 			),
 			expires: VecDeque::new(),
 			deadline: Deadline::new(),
@@ -285,7 +285,7 @@ mod tests {
 		let mut demand = track.demand();
 		let mut chat = moq_json::window::Producer::<String>::new(
 			track,
-			moq_json::window::ProducerConfig::default().with_op_ratio(0),
+			moq_json::window::ProducerConfig::default().with_ops(false),
 		);
 		let at = |millis| moq_net::Timestamp::from_millis(millis).unwrap();
 		chat.push(moq_net::Timed::from(&"first".to_owned()).at(at(0))).unwrap();

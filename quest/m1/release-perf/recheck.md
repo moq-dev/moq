@@ -42,8 +42,9 @@ Leads from reading code on 2026-10-21, strongest first:
    datagram ring twice ([#5195](https://github.com/moq-dev/moq/pull/5195)).
    Track the newest datagram timestamp on push. The window's construction cost
    from [#5929](https://github.com/moq-dev/moq/pull/5929) was cut in
-   [#6112](https://github.com/moq-dev/moq/pull/6112), and the rest belongs to
-   [Allocation-free single-range subscriber window](/quest/m1/window-alloc.md).
+   [#6112](https://github.com/moq-dev/moq/pull/6112); an inline single-range
+   window ([#6241](https://github.com/moq-dev/moq/pull/6241)) regressed join
+   time, so the rest stays.
 5. `track_parallel_write`, `track_fanout_frame`, `track_empty_run`,
    `group_write_frames` (1.2 to 1.6x). This is constant per-group and
    per-frame cost from several features. Resolve `now` once per poll in

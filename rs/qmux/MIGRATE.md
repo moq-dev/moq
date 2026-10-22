@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `RecvStream` reads through moq-net leases (#5878)
+
+`RecvStream` implements moq-net's lease-based `poll::RecvStream`: read with `read_chunk` or `poll_lease`, since `poll_read`, `read`, and `closed` are gone.
+It still returns connection credit as it reads, so nothing is evicted.
+
 ### Sessions implement moq-net's poll traits (#6231)
 
 qmux moved into the moq repository and runs on moq-quic's stream state machine.

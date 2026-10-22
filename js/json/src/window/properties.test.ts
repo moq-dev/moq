@@ -4,7 +4,8 @@ import { Decoder, type Event } from "./decoder.ts";
 import { type Config, Encoder, type Pending } from "./encoder.ts";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-type Step = { edit: { push: Json } | { pop: number }; reset: boolean; drop: boolean };
+// `restate` stands for `Encoder.snapshot`, as a refresh does.
+type Step = { edit: { push: Json } | { pop: number } | { restate: true }; reset: boolean; drop: boolean };
 type Frame = { payload: Uint8Array; offset: number; records: Json[] };
 
 // Mirror the Rust generator, including nulls and keys that are special to JS objects.
@@ -29,8 +30,9 @@ const value: fc.Arbitrary<Json> = fc.letrec<{ value: Json }>((tie) => ({
 const steps = fc.array(
 	fc.record({
 		edit: fc.oneof(
-			value.map((push) => ({ push })),
-			fc.integer({ min: 0, max: 8 }).map((pop) => ({ pop })),
+			{ arbitrary: value.map((push) => ({ push })), weight: 4 },
+			{ arbitrary: fc.integer({ min: 0, max: 8 }).map((pop) => ({ pop })), weight: 4 },
+			{ arbitrary: fc.constant({ restate: true as const }), weight: 1 },
 		),
 		reset: fc.integer({ min: 0, max: 15 }).map((n) => n === 0),
 		drop: fc.boolean(),
@@ -60,6 +62,9 @@ function check(config: Config, steps: Step[], join: number): void {
 		if ("push" in step.edit) {
 			frame = encoder.push(step.edit.push);
 			records = [...records, step.edit.push];
+		} else if ("restate" in step.edit) {
+			frame = encoder.snapshot();
+			expect(frame.keyframe).toBe(true);
 		} else {
 			frame = encoder.pop(step.edit.pop);
 			const count = Math.min(step.edit.pop, records.length);
@@ -158,7 +163,7 @@ test("window codec property matches every reader's logical window", () => {
 	fc.assert(
 		fc.property(
 			fc.record({
-				opRatio: fc.constantFrom(0, 1, 2, 8, 100),
+				ops: fc.boolean(),
 				compression: fc.boolean(),
 				checkpointRecords: fc.option(fc.integer({ min: 1, max: 8 }), { nil: undefined }),
 			}),

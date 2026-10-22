@@ -37,6 +37,8 @@ pub struct Config {
 pub struct Pending<'a, T> {
 	encoder: &'a mut Encoder<T>,
 	payload: Bytes,
+	/// What the record costs the group's budget: its plaintext or its slice, whichever is larger.
+	charge: u64,
 	committed: bool,
 }
 
@@ -52,7 +54,7 @@ impl<T> Pending<'_, T> {
 	pub fn commit(mut self) {
 		self.committed = true;
 		self.encoder.frames += 1;
-		self.encoder.bytes += self.payload.len() as u64;
+		self.encoder.bytes += self.charge;
 	}
 }
 
@@ -82,8 +84,9 @@ pub struct Encoder<T> {
 	/// consumer for the rest of the group, so encoding stops until the caller rolls a new one.
 	desynced: bool,
 
-	/// Frames and payload bytes committed to the current group, checked against moq-net's group
-	/// budget before each record is encoded.
+	/// Frames and bytes committed to the current group, checked against moq-net's group budget
+	/// before each record is encoded. A compressed record is charged its plaintext (or its slice, if
+	/// larger), since a reader's DEFLATE window is held to the same budget.
 	frames: usize,
 	bytes: u64,
 
@@ -143,8 +146,7 @@ impl<T: Serialize> Encoder<T> {
 
 		// Check before compressing: encoding advances the window, so a record refused afterwards
 		// would leave the encoder ahead of every reader. The worst case is checked rather than the
-		// actual size for the same reason. The budget is also below moq-flate's per-frame decode cap,
-		// so any record that fits is one every consumer can inflate.
+		// actual size for the same reason; it also covers the plaintext a reader inflates.
 		let size = bytes.len() as u64;
 		let bound = if self.compression {
 			moq_flate::Encoder::bound(size)
@@ -164,6 +166,7 @@ impl<T: Serialize> Encoder<T> {
 
 		Ok(Pending {
 			encoder: self,
+			charge: size.max(payload.len() as u64),
 			payload,
 			committed: false,
 		})

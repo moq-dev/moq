@@ -141,7 +141,7 @@ impl Source {
 			// Unpinned even with an epoch: an epochless route still answers, best effort, and
 			// the read refuses a route that proves another instance.
 			None => Bound::Requested {
-				request: self.origin.request_broadcast(path, None).into_inner(),
+				lookup: Box::new(Mutex::new(Lookup::new(&self.origin, path))),
 				pins: self.pins.clone(),
 				path: path.clone(),
 			},
@@ -248,7 +248,9 @@ impl Source {
 	/// Start one broadcast request now and retain its result for repeated reads.
 	///
 	/// Unlike [`resolve`](Self::resolve), this issues the request without awaiting or polling.
-	/// A remote or dynamic handler may answer later. The binding never retries a failed request
+	/// A remote or dynamic handler may answer later. A client session that only discovers
+	/// what is watched is asked about the path first, and the request goes out once it
+	/// answers. The binding never retries a failed request
 	/// or resolves the path again after a publisher is replaced.
 	///
 	/// A path this source already resolved binds to that broadcast; otherwise the origin is
@@ -306,9 +308,9 @@ pub struct Binding {
 enum Bound {
 	/// A broadcast the caller already holds.
 	Ready(moq_net::broadcast::Consumer),
-	/// A request issued when the binding was made.
+	/// A lookup started when the binding was made.
 	Requested {
-		request: moq_net::origin::Requesting,
+		lookup: Box<Mutex<Lookup>>,
 		/// Where the answer is pinned, the first for its path winning.
 		pins: Pins,
 		path: moq_net::PathOwned,
@@ -330,8 +332,8 @@ impl Binding {
 	pub fn poll_broadcast(&self, waiter: &kio::Waiter) -> Poll<crate::Result<moq_net::broadcast::Consumer>> {
 		let broadcast = match &self.bound {
 			Bound::Ready(broadcast) => broadcast.clone(),
-			Bound::Requested { request, pins, path } => {
-				let broadcast = ready!(request.poll_ok(waiter))?;
+			Bound::Requested { lookup, pins, path } => {
+				let broadcast = ready!(lookup.lock().expect("lookup poisoned").poll(waiter))?;
 				// A request that raced another for the path takes the one pinned first. The path's
 				// first answer is pinned even when it fails this binding's epoch, so no later
 				// reference resolves the path independently.
@@ -358,6 +360,76 @@ impl Binding {
 	/// Concurrent reads and cancelled waits retain the same request and result.
 	pub async fn broadcast(&self) -> crate::Result<moq_net::broadcast::Consumer> {
 		kio::wait(|waiter| self.poll_broadcast(waiter)).await
+	}
+}
+
+/// One request for a path, made once the origin has heard whether anything serves it.
+///
+/// A client session only asks its peer about paths something watches, so a sibling no
+/// listing covers would be unroutable when asked at once. Following the path first and
+/// asking once a route serves it, or once every session has synced without one, answers
+/// from what the peers announce. An origin that already knows its routes answers at once,
+/// so the request still goes out on binding.
+struct Lookup {
+	origin: moq_net::origin::Consumer,
+	path: moq_net::PathOwned,
+	/// Dropped once the request settles: a broadcast resolved through a discovered route
+	/// keeps its own path watched.
+	watch: Option<moq_net::announce::Follow>,
+	request: Option<moq_net::origin::Requesting>,
+}
+
+impl Lookup {
+	fn new(origin: &moq_net::origin::Consumer, path: &moq_net::PathOwned) -> Self {
+		// A path no pattern can spell, or one outside the scope, fails on the request instead.
+		let watch = origin.follow(path).ok();
+		let mut lookup = Self {
+			origin: origin.clone(),
+			path: path.clone(),
+			watch,
+			request: None,
+		};
+		// Ask now when the origin already knows, so a dynamic handler hears it on binding.
+		let _ = lookup.poll(&kio::Waiter::noop());
+		lookup
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<moq_net::broadcast::Consumer, moq_net::Error>> {
+		loop {
+			if self.request.is_none() {
+				if let Some(watch) = &mut self.watch {
+					// The follower reduces the covering routes to the one serving the path, so its
+					// latest event is whether a route serves it now. Ask as soon as one does:
+					// waiting for every session to sync would let one that never answers hold the
+					// lookup up. Without a route, only sync concludes that none will.
+					let mut routed = false;
+					loop {
+						match watch.poll_next(waiter) {
+							Poll::Ready(Some(moq_net::announce::Event::End(_))) => routed = false,
+							Poll::Ready(Some(_)) => routed = true,
+							Poll::Ready(None) | Poll::Pending => break,
+						}
+					}
+					if !routed {
+						ready!(watch.poll_synced(waiter));
+					}
+				}
+				self.request = Some(self.origin.request_broadcast(&self.path, None).into_inner());
+			}
+			let result = ready!(self.request.as_ref().expect("requested above").poll_ok(waiter));
+			// The route can retract between the follower reporting it and the request reading
+			// the table. Until every session has synced, keep following for another.
+			let unsynced = self
+				.watch
+				.as_ref()
+				.is_some_and(|watch| watch.poll_synced(&kio::Waiter::noop()).is_pending());
+			if matches!(result, Err(moq_net::Error::Unroutable)) && unsynced {
+				self.request = None;
+				continue;
+			}
+			self.watch = None;
+			return Poll::Ready(result);
+		}
 	}
 }
 
@@ -494,6 +566,46 @@ mod tests {
 			source.subscribe_track(None, None, "late").await.is_err(),
 			"the replacement's track is never read"
 		);
+	}
+
+	/// A sibling resolves through the session that announces it, even while another lazily
+	/// discovering session on the origin never answers its announce request.
+	#[tokio::test(start_paused = true)]
+	async fn a_stalled_session_does_not_hold_up_a_sibling() {
+		use crate::container::test_util::Link;
+
+		let healthy = produce_origin();
+		let _catalog = healthy.publish("a/pub", Default::default()).unwrap();
+		let _sibling = healthy.publish("a/source", Default::default()).unwrap();
+		let stalled = produce_origin();
+		let subscriber = produce_origin();
+		let _healthy = Link::lazy(&healthy, &subscriber, true).await;
+		let _stalled = Link::lazy(&stalled, &subscriber, false).await;
+
+		let timeout = std::time::Duration::from_secs(5);
+		let consumer = subscriber.consume();
+		let catalog = tokio::time::timeout(timeout, consumer.routed_broadcast("a/pub"))
+			.await
+			.expect("the catalog resolves")
+			.unwrap();
+		let source = Source::new(consumer, catalog);
+		let sibling = tokio::time::timeout(timeout, source.resolve(Some(&Relative::new("./source")), None))
+			.await
+			.expect("the sibling resolves without the stalled session")
+			.unwrap();
+		assert!(!sibling.is_closed());
+
+		// Nothing serves a later sibling yet and the stalled session never syncs, so its
+		// lookup keeps waiting rather than failing, and resolves once it is published.
+		let binding = source.bind(Some(&Relative::new("./late")), None).unwrap();
+		settle().await;
+		assert!(binding.poll_broadcast(&kio::Waiter::noop()).is_pending());
+		let _late = healthy.publish("a/late", Default::default()).unwrap();
+		let late = tokio::time::timeout(timeout, binding.broadcast())
+			.await
+			.expect("the later sibling resolves")
+			.unwrap();
+		assert!(!late.is_closed());
 	}
 
 	/// A sibling reference stays on the broadcast it first resolved too.

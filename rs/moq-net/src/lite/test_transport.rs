@@ -374,16 +374,16 @@ pub struct PendingRecv;
 
 impl poll::RecvStream for PendingRecv {
 	type Error = SinkError;
+	// Never handed out.
+	type Lease<'a> = poll::BufferedLease<'a>;
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_lease(&mut self, _cx: &mut Context<'_>, _want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
 		Poll::Pending
 	}
+
+	fn set_priority(&mut self, _priority: i64) {}
 
 	fn stop(&mut self, _code: u32) {}
-
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Pending
-	}
 }
 
 /// A RESET_STREAM as the transport reports it. `Some(code)` decodes as
@@ -421,16 +421,16 @@ pub struct DeadRecv(ResetError);
 
 impl poll::RecvStream for DeadRecv {
 	type Error = ResetError;
+	// Never handed out.
+	type Lease<'a> = poll::BufferedLease<'a>;
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_lease(&mut self, _cx: &mut Context<'_>, _want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
 		Poll::Ready(Err(self.0))
 	}
+
+	fn set_priority(&mut self, _priority: i64) {}
 
 	fn stop(&mut self, _code: u32) {}
-
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Err(self.0))
-	}
 }
 
 /// Incoming streams that die before their first byte: `accept_uni` / `accept_bi`
@@ -839,7 +839,10 @@ impl crate::transport::Stats for SinkStats {
 ///
 /// Parks once the script is exhausted rather than reporting EOF: a read loop that saw
 /// EOF would exit, and a test usually wants to assert against the loop still running.
-pub struct ScriptedRecv {
+pub type ScriptedRecv = poll::Buffered<Script>;
+
+/// The plain reads of a [`ScriptedRecv`].
+pub struct Script {
 	park: kio::Park,
 	script: Arc<Mutex<Vec<u8>>>,
 	/// How the peer's send side ends once the script runs out; `None` parks.
@@ -854,38 +857,30 @@ pub enum Close {
 	Reset,
 }
 
-impl poll::RecvStream for ScriptedRecv {
+impl poll::Chunks for Script {
 	type Error = SinkError;
 
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		let take = {
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+		let chunk: bytes::Bytes = {
 			let mut script = self.script.lock().unwrap();
-			if script.is_empty() {
-				0
-			} else {
-				let take = dst.len().min(script.len());
-				dst[..take].copy_from_slice(&script[..take]);
-				script.drain(..take);
-				take
-			}
+			// A real transport hands over what each packet carried, so a body that is all
+			// ready at once still takes many reads.
+			let take = max.min(script.len()).min(8 * 1024);
+			script.drain(..take).collect()
 		};
 
-		match take {
-			0 => match *self.close.lock().unwrap() {
+		match chunk.is_empty() {
+			true => match *self.close.lock().unwrap() {
 				Some(Close::Fin) => Poll::Ready(Ok(None)),
 				Some(Close::Reset) => Poll::Ready(Err(SinkError::default())),
 				None => self.log.poll_closed(self.park.hold(cx)).map(Err),
 			},
-			take => Poll::Ready(Ok(Some(take))),
+			false => Poll::Ready(Ok(Some(chunk))),
 		}
 	}
 
 	fn stop(&mut self, code: u32) {
 		self.log.stops.lock().unwrap().push(code);
-	}
-
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Pending
 	}
 }
 
@@ -917,6 +912,8 @@ pub struct ScriptedSession {
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
 	datagram_size: usize,
+	/// Set by [`Self::with_groups`].
+	groups: bool,
 }
 
 impl ScriptedSession {
@@ -943,7 +940,14 @@ impl ScriptedSession {
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
 			datagram_size: 0,
+			groups: false,
 		}
+	}
+
+	/// Open send groups, as native QUIC does, recording them in the log.
+	pub fn with_groups(mut self) -> Self {
+		self.groups = true;
+		self
 	}
 
 	/// Never acknowledge an opened stream's FIN, like a peer that stopped reading.
@@ -1037,12 +1041,12 @@ impl poll::Session for ScriptedSession {
 		let Some(script) = self.incoming_unis.lock().unwrap().pop_front() else {
 			return self.log.poll_closed(self.park.hold(cx)).map(Err);
 		};
-		Poll::Ready(Ok(ScriptedRecv {
+		Poll::Ready(Ok(poll::Buffered::new(Script {
 			park: Default::default(),
 			script: Arc::new(Mutex::new(script)),
 			close: self.close.clone(),
 			log: self.log.clone(),
-		}))
+		})))
 	}
 
 	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
@@ -1051,12 +1055,12 @@ impl poll::Session for ScriptedSession {
 		};
 		Poll::Ready(Ok((
 			SinkSend::new(self.log.clone()),
-			ScriptedRecv {
+			poll::Buffered::new(Script {
 				park: Default::default(),
 				script: Arc::new(Mutex::new(script)),
 				close: self.close.clone(),
 				log: self.log.clone(),
-			},
+			}),
 		)))
 	}
 
@@ -1086,12 +1090,12 @@ impl poll::Session for ScriptedSession {
 		send.unacked_fin = self.unacked_fin;
 		Poll::Ready(Ok((
 			send,
-			ScriptedRecv {
+			poll::Buffered::new(Script {
 				park: Default::default(),
 				script,
 				close: self.close.clone(),
 				log: self.log.clone(),
-			},
+			}),
 		)))
 	}
 
@@ -1103,8 +1107,8 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
 	}
 
-	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
-		None
+	fn send_group(&mut self, priority: i64) -> Option<SinkGroup> {
+		self.groups.then(|| SinkGroup::open(self.log.clone(), priority))
 	}
 
 	fn send_datagram(
@@ -1158,10 +1162,11 @@ fn a_local_close_preserves_scripted_uni_bytes_and_ends_accepts() {
 		let Poll::Ready(Ok(mut recv)) = session.poll_accept_uni(&mut cx) else {
 			panic!("buffered uni lost")
 		};
-		let mut bytes = [0; 4];
-		assert!(matches!(recv.poll_read(&mut cx, &mut bytes), Poll::Ready(Ok(Some(4)))));
-		assert_eq!(&bytes, b"last");
-		let end = recv.poll_read(&mut cx, &mut bytes);
+		let Poll::Ready(Ok(Some(bytes))) = recv.poll_read_chunk(&mut cx, 4) else {
+			panic!("buffered bytes lost")
+		};
+		assert_eq!(&bytes[..], b"last");
+		let end = recv.poll_read_chunk(&mut cx, 4);
 		assert!(if fin {
 			matches!(end, Poll::Ready(Ok(None)))
 		} else {
