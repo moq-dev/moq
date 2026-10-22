@@ -137,9 +137,7 @@ impl Recording {
 				.put_info(&timeline(track), &Info::new(0, Some(1000)).unwrap())
 				.await
 				.unwrap();
-			let config = window::ProducerConfig::default()
-				.with_compression(true)
-				.with_op_ratio(0);
+			let config = window::ProducerConfig::default().with_compression(true).with_ops(false);
 			let encoder = Encoder {
 				encoder: window::Encoder::new(config),
 				group: 0,
@@ -307,7 +305,7 @@ impl Replay {
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.unwrap();
 		let mut json = moq_json::snapshot::Config::default();
-		json.delta_ratio = 0;
+		json.deltas = false;
 		let mut catalog = moq_json::snapshot::Producer::new(track, json);
 		catalog
 			.update(moq_net::Timed::from(&self::catalog(archive)).at(moq_net::Timestamp::now()))
@@ -408,7 +406,7 @@ async fn segments_with(count: u64, checkpoint: Option<usize>) -> Recording {
 				window::ProducerConfig::default()
 					.with_compression(true)
 					.with_checkpoint_records(limit)
-					.with_op_ratio(0),
+					.with_ops(false),
 			);
 		}
 	}

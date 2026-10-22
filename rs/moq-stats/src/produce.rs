@@ -451,11 +451,16 @@ impl<V: Serialize> Serialize for Frame<V> {
 /// resumes past any group a subscriber has cached, without retaining a
 /// tombstone per requested name. A new group broadcast is a new epoch, so its
 /// allocator starts over.
+///
+/// The shared allocator is why this wraps the encoder rather than a
+/// `moq_json::snapshot::Producer`, which numbers its own groups.
 struct Snapshot<V> {
 	track: track::Producer,
 	encoder: moq_json::snapshot::Encoder<Frame<V>>,
 	group: Option<moq_net::group::Producer>,
 	sequence: Arc<AtomicU64>,
+	/// The sequence of the newest group written, which a refresh has to pass.
+	largest: Option<u64>,
 	deltas: bool,
 }
 
@@ -463,10 +468,11 @@ impl<V: Serialize> Snapshot<V> {
 	fn new(track: track::Producer, config: moq_json::snapshot::Config, sequence: Arc<AtomicU64>) -> Self {
 		Self {
 			track,
-			deltas: config.delta_ratio != 0,
+			deltas: config.deltas,
 			encoder: moq_json::snapshot::Encoder::new(config),
 			group: None,
 			sequence,
+			largest: None,
 		}
 	}
 
@@ -479,30 +485,41 @@ impl<V: Serialize> Snapshot<V> {
 	///
 	/// A frame over the cache limit aborts the track with
 	/// [`moq_net::Error::FrameTooLarge`]: skipping it would leave readers on the
-	/// previous snapshot with no sign it stopped tracking.
+	/// previous snapshot with no sign it stopped tracking. A compressed frame
+	/// meets the same limit by its uncompressed size, which the encoder refuses.
 	fn update(&mut self, value: &Frame<V>) -> moq_json::Result<Option<usize>> {
 		if self.track.is_closed() {
 			return Ok(None);
 		}
-		let Some(frame) = self.encoder.update(value)? else {
-			return Ok(None);
+		// A joiner wants a group past the newest, so open this tick's with a snapshot, even of an
+		// unchanged value. Answered once per tick rather than at once: a joiner waits at most one
+		// interval, the same as for any change.
+		if let (Some(wanted), Some(largest)) = (self.track.demand().wanted(), self.largest)
+			&& wanted > largest
+		{
+			self.encoder.reset();
+		}
+		let frame = match self.encoder.update(value) {
+			Ok(Some(frame)) if frame.payload.len() as u64 <= moq_net::group::MAX_CACHE_BYTES => frame,
+			Ok(None) => return Ok(None),
+			Ok(Some(_)) | Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge)) => {
+				let err = moq_net::Error::FrameTooLarge;
+				if let Some(group) = self.group.take() {
+					let _ = group.abort(err.clone());
+				}
+				let _ = self.track.clone().abort(err.clone());
+				return Err(err.into());
+			}
+			Err(err) => return Err(err),
 		};
 		let len = frame.payload.len();
-		if len as u64 > moq_net::group::MAX_CACHE_BYTES {
-			let err = moq_net::Error::FrameTooLarge;
-			if let Some(group) = self.group.take() {
-				let _ = group.abort(err.clone());
-			}
-			let _ = self.track.clone().abort(err.clone());
-			return Err(err.into());
-		}
 		if frame.keyframe {
 			if let Some(mut group) = self.group.take() {
 				group.finish()?;
 			}
-			self.group = Some(self.track.create_group(moq_net::group::Info {
-				sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
-			})?);
+			let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+			self.group = Some(self.track.create_group(moq_net::group::Info { sequence })?);
+			self.largest = Some(sequence);
 		}
 		let group = self.group.as_mut().expect("a delta follows a snapshot");
 		if let Err(err) = group.write_frame(moq_net::Timestamp::now(), frame.payload.clone()) {
@@ -550,15 +567,22 @@ fn info() -> track::Info {
 	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
 
+/// The compressed flavor keeps deltas, so a joiner asks for a fresh group once they outweigh
+/// eight snapshots.
+fn compressed_info() -> track::Info {
+	info().with_refresh(8)
+}
+
 impl<V: Serialize> TrackPair<V> {
 	fn create(broadcast: &broadcast::Producer, name: &str, sequence: Arc<AtomicU64>) -> Result<Self, moq_net::Error> {
 		let plain_track = broadcast.create_track(name, info())?;
-		let compressed_track = broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), info())?;
+		let compressed_track =
+			broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), compressed_info())?;
 		Ok(Self::from_tracks(plain_track, compressed_track, sequence))
 	}
 
 	fn from_tracks(plain_track: track::Producer, compressed_track: track::Producer, sequence: Arc<AtomicU64>) -> Self {
-		let plain_config = moq_json::snapshot::Config::default().with_delta_ratio(0);
+		let plain_config = moq_json::snapshot::Config::default().with_deltas(false);
 		let mut compressed_config = moq_json::snapshot::Config::default();
 		compressed_config.compression = moq_json::Compression::Deflate;
 
@@ -653,8 +677,8 @@ impl PendingPair {
 			None => broadcast.create_track(name, info())?,
 		};
 		let compressed_track = match compressed {
-			Some(request) => request.accept(info()),
-			None => broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), info())?,
+			Some(request) => request.accept(compressed_info()),
+			None => broadcast.create_track(format!("{name}{COMPRESSED_SUFFIX}").as_str(), compressed_info())?,
 		};
 		Ok(TrackPair::from_tracks(plain_track, compressed_track, sequence))
 	}
@@ -1584,6 +1608,39 @@ mod tests {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
+	/// A joiner once the deltas outweigh the compressed track's ratio gets a fresh snapshot group on
+	/// the next tick, even of an unchanged value, and deltas resume in it.
+	#[test]
+	fn a_joiner_over_the_ratio_gets_a_snapshot_next_tick() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("t.json.z", compressed_info()).unwrap();
+		let mut snapshot = Snapshot::<u64>::new(
+			track.clone(),
+			moq_json::snapshot::Config::default(),
+			Arc::new(AtomicU64::new(0)),
+		);
+		let frame = |n| Frame {
+			entries: vec![(PathOwned::from("a"), n)],
+		};
+		let wanted = |track: &track::Producer| track.demand().wanted();
+
+		// A 7 byte snapshot and nine 7 byte deltas: past eight snapshots.
+		for n in 0..10 {
+			snapshot.update(&frame(n)).unwrap();
+		}
+		assert_eq!(snapshot.largest, Some(0));
+		let _late = track.subscribe(None);
+		assert_eq!(wanted(&track), Some(1), "the join asks for a fresh group");
+
+		assert!(
+			snapshot.update(&frame(9)).unwrap().is_some(),
+			"restated though unchanged"
+		);
+		assert_eq!(snapshot.largest, Some(1));
+		assert!(snapshot.update(&frame(10)).unwrap().is_some());
+		assert_eq!(snapshot.largest, Some(1), "the next change is a delta");
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn reclaimed_requested_tracks_resume_after_the_last_group() {
 		use futures::FutureExt;
@@ -1800,11 +1857,12 @@ mod tests {
 		}
 	}
 
-	/// A flavor whose frame outgrows the cache ends with `FrameTooLarge` instead
-	/// of leaving readers on its last snapshot, while its sibling, which DEFLATE
-	/// shrinks under the limit, keeps updating.
+	/// A frame that outgrows the cache ends both flavors with `FrameTooLarge`
+	/// instead of leaving readers on their last snapshot. DEFLATE shrinks the
+	/// `.z` frame under the limit, but a reader inflates it whole, so the
+	/// encoder holds it to the same budget by its uncompressed size.
 	#[tokio::test]
-	async fn oversized_frame_aborts_only_its_flavor() {
+	async fn oversized_frame_ends_both_flavors() {
 		use futures::FutureExt;
 		type Value = BTreeMap<String, u64>;
 
@@ -1844,17 +1902,12 @@ mod tests {
 
 		let huge = "a".repeat(moq_net::group::MAX_CACHE_BYTES as usize);
 		publish(&huge, 2);
-		assert!(matches!(
-			next(&mut plain),
-			Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge))
-		));
-		assert_eq!(next(&mut compressed).unwrap(), Some(Value::from([(huge, 2)])));
-
-		publish("small", 3);
-		assert_eq!(
-			next(&mut compressed).unwrap(),
-			Some(Value::from([("small".to_string(), 3)]))
-		);
+		for reader in [&mut plain, &mut compressed] {
+			assert!(matches!(
+				next(reader),
+				Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge))
+			));
+		}
 	}
 
 	/// Build an origin producer, spawning its driver on the ambient runtime.

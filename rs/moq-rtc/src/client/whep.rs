@@ -6,8 +6,6 @@
 //! returned answer, then hands the resulting `str0m::Rtc` to the internal
 //! session driver in ingest mode (the same sink the WHIP server uses).
 
-use std::time::Instant;
-
 use str0m::{
 	Candidate, Rtc,
 	change::SdpAnswer,
@@ -28,7 +26,7 @@ pub(crate) async fn dial(
 	let sink = Box::new(IngestSink::new(broadcast, config)?);
 
 	let socket = session::bind_udp(&client.config().ice_candidates).await?;
-	let mut rtc = Rtc::new(Instant::now());
+	let mut rtc = Rtc::new(moq_clock::now().into_std());
 	for addr in &socket.locals {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);

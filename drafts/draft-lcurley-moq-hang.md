@@ -992,7 +992,7 @@ The `store` field, if present, is the object-store URL the recording objects liv
 Authorization for `replay` and `store` is external.
 
 The `version` field is the version of that recording object format.
-It is 2 for this specification.
+It is 3 for this specification.
 A publisher that exposes a store MUST set it; a publisher that does not MUST omit it.
 
 A catalog that composes another broadcast's renditions MUST preserve that child's `archive` entry instead of synthesizing one.
@@ -1189,6 +1189,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- The archive `version` is 3: the recording format stores a track's `priority` signed, -128 through 127 with 0 unset, instead of its moq-lite byte.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.

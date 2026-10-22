@@ -2,8 +2,9 @@
 
 use std::collections::VecDeque;
 
+use moq_clock::Instant;
 use moq_mux::container::Read as Encoded;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 

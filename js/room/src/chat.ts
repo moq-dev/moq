@@ -6,7 +6,7 @@
 
 import { Instant, Nano, now, Second } from "@moq/clock";
 import * as Json from "@moq/json";
-import { type Broadcast, Time, type Track } from "@moq/net";
+import { type Broadcast, Time, type Timed, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 
 /** Name of the track carrying the chat window. */
@@ -37,7 +37,7 @@ export class Publisher {
 	/** Publish a chat window over an existing track. */
 	constructor(track: Track.Producer) {
 		// Every edit restates the retained window, so a late reader never replays expired records.
-		this.#producer = new Json.Window.Producer({ track, opRatio: 0 });
+		this.#producer = new Json.Window.Producer({ track, ops: false });
 		this.#signals.run((effect) => {
 			const next = effect.get(this.#expires)[0];
 			if (next === undefined) return;
@@ -92,16 +92,20 @@ export class Subscriber {
 		});
 	}
 
-	/** Return the next window change, or undefined on clean completion; failures throw. */
-	async recv(): Promise<Event | undefined> {
+	/**
+	 * Return the next window change and when its frame was sent, or undefined on clean completion;
+	 * failures throw. A message first seen in a later window's header carries that header's time.
+	 */
+	async recv(): Promise<Timed<Event> | undefined> {
 		await this.#positioned;
-		const event = await this.#consumer.next();
-		if (!event) return undefined;
+		const next = await this.#consumer.next();
+		if (!next) return undefined;
+		const { value: event, at } = next;
 		if ("push" in event) {
 			if (typeof event.push.value !== "string") throw new Error("chat record must be a string");
-			return { push: { index: event.push.index, value: event.push.value } };
+			return { value: { push: { index: event.push.index, value: event.push.value } }, at };
 		}
-		return event;
+		return { value: event, at };
 	}
 
 	/** Cancel the subscription and release buffered records. */

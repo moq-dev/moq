@@ -5,7 +5,7 @@ The public model (`quest/m1/public-model/`) shrinks what the built-in sessions r
 past the public API to a marked set. Each item they reach is either pending, naming
 the quest that makes it public, or deliberately private with its reason:
 
-    // pending: /quest/m1/public-model/ingest.md
+    // pending: /quest/m1/public-model/serve.md
     // private: passthrough | tuning | capability gap | test | plumbing (JS only)
 
 The marker sits in the comment and attribute lines directly above the item. A marker

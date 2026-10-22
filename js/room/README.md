@@ -74,7 +74,7 @@ const publisher = Chat.Publisher.create(broadcast);
 publisher.send("hello");
 
 const subscriber = Chat.Subscriber.subscribe(broadcast.consume());
-const event = await subscriber.recv(); // push, pop, or skip
+const event = await subscriber.recv(); // { value: push, pop, or skip, at: when it was sent }
 // Call publisher.finish() and subscriber.close() when done.
 ```
 

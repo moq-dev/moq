@@ -12,7 +12,7 @@ import type { Datagram } from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import type * as Epoch from "./epoch.ts";
 import { toStreamCode } from "./error.ts";
-import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
+import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
@@ -174,6 +174,16 @@ export function runGaps(runs: readonly Run[], start: number, end: number): Run[]
 	return gaps;
 }
 
+/** A package-internal frame read as the group stores it. */
+export interface ReadGroupFrame {
+	/** Frame sequence within the group. */
+	sequence: number;
+	/** The frame, holding its DEFLATE slice on a compressed read. */
+	frame: Frame;
+	/** The stored slice's declared plain size, on compressed reads. */
+	inflated?: number;
+}
+
 /** One past the highest sequence written under a broadcast track's name, by any of its producers. */
 export interface TrackSequence {
 	next: number;
@@ -321,7 +331,7 @@ export interface ResumeSource {
 	latest(): number | undefined;
 	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
 	start(): number | "pending" | undefined;
-	/** The serving copy's declared exclusive end. */
+	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Location | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
 	finished(): Promise<Location>;
@@ -364,7 +374,7 @@ export const hooks: {
 	 * end may refine the group boundary it falls just before. Throws `ProtocolViolation` on
 	 * any other second end. Readers then hold at a hole below it until the hole fills, folds
 	 * past the grace, or the track closes, since QUIC may deliver a lower group's stream after
-	 * a higher one. Mirrors the Rust `finish_at_pending`; assigned by `track.ts`.
+	 * a higher one. Mirrors the Rust `finish_at` on a `received()` copy; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
 	// private: capability gap
@@ -386,17 +396,8 @@ export const hooks: {
 	 * as the Rust `request_start`.
 	 */
 	startTrack: (producer: Producer, served: { start?: number; requested?: number }) => void;
-	// pending: /quest/m1/public-model/ingest.md
-	/**
-	 * Mark a track as a session's copy of a remote one: its groups are never checked for a
-	 * rewind, since a received timestamp may not be media time.
-	 */
-	receiveTrack: (producer: Producer) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
-	// pending: /quest/m1/public-model/ingest.md
-	/** Access the existing producer while a request awaits immutable wire metadata. */
-	pendingTrackProducer: (request: Request) => Producer;
 	/** Have a producer write through a broadcast's sequence namespace for its name. */
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
@@ -423,12 +424,6 @@ export const hooks: {
 	bufferedLargest: (subscriber: Subscriber) => Location | undefined;
 	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
 	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
-	// pending: /quest/m1/public-model/ingest.md
-	/**
-	 * Record sequences `[start, end)` an upstream publisher explicitly gave up with `error`,
-	 * ending the groups still arriving in them with it.
-	 */
-	dropTrackGroups: (producer: Producer, start: number, end: number, error: Error) => void;
 	/** The sequence {@link tryNextGroup} (`ordered`) or `tryRecvGroup` would take next, without taking it. */
 	peekGroup: (subscriber: Subscriber, ordered: boolean) => number | undefined;
 	/** Take the next group in sequence order without waiting, as `tryRecvGroup` does in arrival order. */
@@ -439,6 +434,11 @@ export const hooks: {
 	tryRecvDatagram: (subscriber: Subscriber) => RecvDatagram;
 	/** Whether a buffered group in `[start, end)` that `delivered` lacks still waits to be read. */
 	hasUnreadGroup: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
+	/**
+	 * Whether a subscriber's track ended and it holds nothing left to read: no datagram within its
+	 * cursor, and no group in `[start, end)` that `delivered` lacks.
+	 */
+	spent: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */
 	deliveredRuns: (subscriber: Subscriber) => number;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
@@ -471,6 +471,17 @@ export const hooks: {
 	 * Throws `TimestampMismatch` if a buffered frame already disagrees.
 	 */
 	bindGroupTimed: (group: GroupProducer, timed: boolean) => void;
+	/** Admit a datagram in its stored wire form. */
+	// private: passthrough
+	writeDatagram: (producer: Producer, datagram: Datagram, inflated?: number) => void;
+	/** Bind the group to its immutable track codec. */
+	// private: passthrough
+	bindGroupCompression: (group: GroupProducer, compressed: boolean) => void;
+	/** Admit a received stored slice without recompressing it. */
+	// private: passthrough
+	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
+	/** Payload footprint including a shared inflated copy, for measurements. */
+	groupCacheBytes: (group: GroupProducer) => number;
 	/**
 	 * Cap a group at `frames` for a track end inside it, so later writes past it throw.
 	 * Throws `ProtocolViolation` if a frame at or past the cap already exists.
@@ -493,12 +504,17 @@ export const hooks: {
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
 	/** Return when a group joined its track at this hop, on the installed clock. */
 	groupArrived: (group: GroupConsumer) => Instant;
+	/** Whether a group counts as content: its first frame landed, or it ended. */
+	groupStarted: (group: GroupConsumer) => boolean;
 	/** Record when a track's mirror of a group joined that track at this hop. */
 	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
 	/** Carry a handed-out group across its logical track's route changes. */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
+	// private: passthrough
+	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
+	readGroupFrame: (group: GroupConsumer, compressed: boolean) => Promise<ReadGroupFrame | undefined>;
 	/** Make an evicted mirror terminal while its track timeline still contains it. */
 	evictGroup: (group: GroupConsumer) => void;
 	/** Attach the origin advertisement of a created broadcast. */
@@ -514,10 +530,9 @@ export const hooks: {
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
 	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
+	/** Mark a broadcast handle served through a route claiming a shorter prefix: it lists nothing. */
+	stampUnlisted: (target: BroadcastConsumer) => void;
 } = {
-	receiveTrack: () => {
-		throw new Error("track.ts not loaded");
-	},
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -534,9 +549,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {
-		throw new Error("track.ts not loaded");
-	},
-	pendingTrackProducer: () => {
 		throw new Error("track.ts not loaded");
 	},
 	bindSequence: () => {
@@ -563,9 +575,6 @@ export const hooks: {
 	groupProgress: () => {
 		throw new Error("group.ts not loaded");
 	},
-	dropTrackGroups: () => {
-		throw new Error("track.ts not loaded");
-	},
 	tryNextGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -585,6 +594,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	hasUnreadGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	spent: () => {
 		throw new Error("track.ts not loaded");
 	},
 	staleAt: () => {
@@ -613,6 +625,18 @@ export const hooks: {
 	},
 	fetchBudget: () => {
 		throw new Error("track.ts not loaded");
+	},
+	writeDatagram: () => {
+		throw new Error("track.ts not loaded");
+	},
+	bindGroupCompression: () => {
+		throw new Error("group.ts not loaded");
+	},
+	writeGroupFrame: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupCacheBytes: () => {
+		throw new Error("group.ts not loaded");
 	},
 	bindGroupTimed: () => {
 		throw new Error("group.ts not loaded");
@@ -644,10 +668,16 @@ export const hooks: {
 	groupArrived: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupStarted: () => {
+		throw new Error("group.ts not loaded");
+	},
 	expireGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	readGroupFrame: () => {
 		throw new Error("group.ts not loaded");
 	},
 	evictGroup: () => {
@@ -663,6 +693,9 @@ export const hooks: {
 		throw new Error("broadcast.ts not loaded");
 	},
 	stampEpoch: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	stampUnlisted: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 };

@@ -34,11 +34,10 @@ failing page, and CI uploads it; a passing run deletes its own. See
 ## Rust clock
 
 `moq-clock`'s browser backend also runs here, using `wasm-bindgen-test` and the
-same Playwright Chromium installation:
+same Chromium supplied by the root devShell:
 
 ```bash
 bun install --frozen-lockfile
-bunx playwright install chromium
 just rs wasm-test
 ```
 
