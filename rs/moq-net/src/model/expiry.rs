@@ -75,11 +75,16 @@ struct Parked {
 const HELD_SWEEP_MIN: usize = 16;
 
 /// The size at which an index of `len` lists next sweeps out the ones every reader has left:
-/// twice what it holds, so each sweep is paid for by the keys added before it. Reset whenever
-/// the index sweeps or drains, so what it can hold of departed readers follows what it holds
-/// now, never its peak.
+/// twice what it holds, so each sweep is paid for by the keys added before it.
 fn sweep_at(len: usize) -> usize {
 	(len * 2).max(HELD_SWEEP_MIN)
+}
+
+/// An index drained to `len` lists: bring its next sweep down to match, so what it can hold of
+/// departed readers follows what it holds now rather than its peak. Only ever down: a drain
+/// that raised it could keep pace with the departed keys and never sweep them.
+fn lower(sweep: usize, len: usize) -> usize {
+	sweep.min(sweep_at(len))
 }
 
 impl Default for Wakes {
@@ -126,7 +131,7 @@ impl Wakes {
 			parked.deadlines.retain(|_, list| !list.is_empty());
 			// `earliest` may now be below every deadline left, which only costs the next write
 			// the lock: `presented` recomputes it.
-			parked.deadlines_sweep = sweep_at(parked.deadlines.len());
+			parked.deadlines_sweep = lower(parked.deadlines_sweep, parked.deadlines.len());
 		}
 		parked.deadlines.entry(deadline).or_default().register(waiter);
 		self.earliest.fetch_min(deadline, Ordering::Relaxed);
@@ -170,7 +175,7 @@ impl Wakes {
 				woken.push(entry.remove());
 			}
 			parked.wall_armed = parked.wall.first_key_value().map(|(at, _)| *at);
-			parked.wall_sweep = sweep_at(parked.wall.len());
+			parked.wall_sweep = lower(parked.wall_sweep, parked.wall.len());
 			parked.wall_armed
 		};
 		woken.iter_mut().for_each(kio::WaiterList::wake);
@@ -238,7 +243,7 @@ impl Wakes {
 			}
 			let from = parked.starts.first_key_value().map_or(u64::MAX, |(from, _)| *from);
 			self.starts_from.store(from, Ordering::Relaxed);
-			parked.starts_sweep = sweep_at(parked.starts.len());
+			parked.starts_sweep = lower(parked.starts_sweep, parked.starts.len());
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
 	}
@@ -252,7 +257,7 @@ impl Wakes {
 			while let Some(at) = parked.arrivals.range(groups).next().map(|(at, _)| *at) {
 				woken.extend(parked.arrivals.remove(&at));
 			}
-			parked.arrival_sweep = sweep_at(parked.arrivals.len());
+			parked.arrival_sweep = lower(parked.arrival_sweep, parked.arrivals.len());
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
 	}
@@ -278,7 +283,7 @@ impl Wakes {
 			while let Some(at) = parked.held.range(from..=sequence).next().map(|(at, _)| *at) {
 				woken.extend(parked.held.remove(&at));
 			}
-			parked.held_sweep = sweep_at(parked.held.len());
+			parked.held_sweep = lower(parked.held_sweep, parked.held.len());
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
 	}
@@ -338,6 +343,31 @@ mod test {
 			wakes.parked.lock().held.len() <= HELD_SWEEP_MIN,
 			"the readers that left are swept"
 		);
+	}
+
+	/// Writes that cross one deadline at a time between bursts of departed reads must not
+	/// keep the next sweep out of reach. Each burst stops just short of the threshold a drain
+	/// that raised it would set, which then doubles the index every round.
+	#[test]
+	fn partial_drains_still_sweep() {
+		let wakes = Wakes::default();
+		let mut next = 0u64;
+		let mut park = |count: usize| {
+			for _ in 0..count {
+				let waiter = kio::Waiter::noop();
+				wakes.watch_deadline(Timestamp::from_micros(next).unwrap(), Duration::ZERO, &waiter);
+				next += 1;
+			}
+		};
+		park(HELD_SWEEP_MIN - 1);
+		for round in 0..12u64 {
+			// Crosses only the earliest deadline still indexed.
+			wakes.presented(Timestamp::from_micros(round).unwrap());
+			let (len, _) = wakes.deadlines_indexed();
+			park(len.saturating_sub(2).max(1));
+		}
+		let (media, _) = wakes.deadlines_indexed();
+		assert!(media <= 4 * HELD_SWEEP_MIN, "{media} media deadlines indexed");
 	}
 
 	/// Reads parked on distinct deadlines that leave before either clock reaches them do
