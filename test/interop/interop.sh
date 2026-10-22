@@ -1286,7 +1286,7 @@ run_tail_pair() {
         mode=status
         want="track status answered"
     elif [[ "$kind" == compress ]]; then
-        mode=compress
+        mode="compress"
     fi
     local cell=(case="$kind" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
     [[ -z "${4:-}" ]] || cell+=(version="$version")
