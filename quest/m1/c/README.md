@@ -66,3 +66,4 @@ requests internally and keeps its ABI, so that quest does not wait here.
 
 - [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m1/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
+- [ABI version](/quest/m1/c/abi-version.md) - a C caller cannot be laid out against a newer library, and an early failure is documented as having no handle and no callback

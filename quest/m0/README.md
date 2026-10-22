@@ -51,3 +51,4 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [Simplification audit](/quest/m0/audit-simplify.md) - overbuilt code and APIs are collapsed, merged, or narrowed into a net simpler whole
 - [Lint override and deprecation audit](/quest/m0/audit-lints.md) - every lint suppression is still needed and says why, nothing calls a deprecated API, and stale Rust overrides fail the build
 - [Interop audit](/quest/m0/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down
+- [HLS import origin](/quest/m0/hls-import-origin.md) - a playlist cannot make the importer read a local file or reach another origin, on `main` or the current release
