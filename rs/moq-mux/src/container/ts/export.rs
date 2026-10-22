@@ -2318,7 +2318,12 @@ where
 			let emitted = self.psi.is_some();
 			if (!same && emitted) || self.flagged.is_some() {
 				next.version = self.version;
-				next.pmt_version = self.pmt_version;
+				// A revision no slot laid reached no receiver: the next follows the last laid.
+				next.pmt_version = self
+					.psi
+					.as_ref()
+					.and_then(|psi| psi.laid.as_ref())
+					.map_or(self.pmt_version, |(version, _)| *version);
 				next.flagged = Some(HashSet::new());
 				next.pcr_discontinuity = true;
 				next.epoch = self.epoch;
@@ -2577,9 +2582,28 @@ where
 			.map(|t| t.pid)
 	}
 
+	/// [`Self::listing`], unless the program descriptors draining tracks left the catalog under
+	/// outgrow a section beside the rest: those tracks then drain under the current set for
+	/// good, as they would once ended.
+	fn table(&mut self, program_number: u16, pcr_pid: u16) -> anyhow::Result<super::psi::Pmt> {
+		let table = self.listing(program_number, pcr_pid)?;
+		if super::psi::encode_pmt(&table, VersionNumber::default()).is_ok()
+			|| self.tracks.values().all(|track| track.left_under.is_empty())
+		{
+			return Ok(table);
+		}
+		tracing::warn!(
+			"TS export drops the program descriptors draining tracks left under: with them the PMT outgrows a section"
+		);
+		for track in self.tracks.values_mut() {
+			track.left_under.clear();
+		}
+		self.listing(program_number, pcr_pid)
+	}
+
 	/// The PMT of `program_number` with the clock on `pcr_pid`, listing each listed track in
 	/// PID order: on a PID taken over, the track taken on last.
-	fn table(&self, program_number: u16, pcr_pid: u16) -> anyhow::Result<super::psi::Pmt> {
+	fn listing(&self, program_number: u16, pcr_pid: u16) -> anyhow::Result<super::psi::Pmt> {
 		let mut listed: BTreeMap<u16, &Track> = BTreeMap::new();
 		for track in self.tracks.values().filter(|track| track.listed) {
 			let entry = listed.entry(track.pid).or_insert(track);
@@ -2626,22 +2650,24 @@ where
 			})
 			.collect::<anyhow::Result<Vec<_>>>()?;
 
-		// Re-emit the captured program-level descriptors, and while a track drains those it left
-		// the catalog under: the streams of both revisions are listed until it ends, so are
-		// theirs. A stale track ([`Self::followed`]) sends no tail. With none (a non-TS source),
-		// derive the SCTE-35 'CUEI' registration when a 0x86 verbatim stream is present.
-		let mut program_info = self.program_descriptors.clone();
-		let draining = self
+		// Re-emit the captured program-level descriptors, and while tracks drain those each left
+		// the catalog under, in the order they were taken on: the streams of both revisions are
+		// listed until they end, so are theirs. A stale track ([`Self::followed`]) sends no tail.
+		let mut draining: Vec<&Track> = self
 			.tracks
 			.iter()
-			.filter(|(name, track)| track.listed && !track.cataloged && !self.stale.contains(*name));
-		for (_, track) in draining {
-			for descriptor in &track.left_under {
-				if !program_info.contains(descriptor) {
-					program_info.push(descriptor.clone());
-				}
+			.filter(|(name, track)| track.listed && !track.cataloged && !self.stale.contains(*name))
+			.map(|(_, track)| track)
+			.collect();
+		draining.sort_by_key(|track| track.serial);
+		let mut program_info = self.program_descriptors.clone();
+		for descriptor in draining.iter().flat_map(|track| &track.left_under) {
+			if !program_info.contains(descriptor) {
+				program_info.push(descriptor.clone());
 			}
 		}
+		// With none (a non-TS source), derive the SCTE-35 'CUEI' registration when a 0x86
+		// verbatim stream is present.
 		let program_info = if !program_info.is_empty() {
 			program_info
 		} else if listed.values().any(|t| {
@@ -2674,7 +2700,8 @@ where
 		let Some(psi) = self.psi.as_ref().filter(|_| !self.sync) else {
 			return Ok(());
 		};
-		let table = self.table(psi.table.program_number, psi.pcr_pid)?;
+		let (program_number, pcr_pid) = (psi.table.program_number, psi.pcr_pid);
+		let table = self.table(program_number, pcr_pid)?;
 		let psi = self.psi.as_mut().expect("the tables are built");
 		if table == psi.table {
 			return Ok(());
@@ -2702,7 +2729,8 @@ where
 	/// takes its place there: such tracks would otherwise pile up behind a stream that never
 	/// ends.
 	///
-	/// A stale track ([`Self::followed`]) is not dropped: its catalog may list it again.
+	/// A stale track ([`Self::followed`]) is not dropped while its catalog may list it again on
+	/// its PID: only once a later track listed there holds it.
 	fn retire(&mut self) -> anyhow::Result<()> {
 		if self.sync || self.psi.is_none() {
 			return Ok(());
@@ -2735,7 +2763,7 @@ where
 						&& (taken(track) || !self.schedule.holds(track.pid))
 				};
 				let superseded = || !track.listed && behind_unended(track) && replaced(track);
-				!track.cataloged && !self.stale.contains(*name) && (sent() || superseded())
+				!track.cataloged && (!self.stale.contains(*name) || taken(track)) && (sent() || superseded())
 			})
 			.map(|(name, _)| name.clone())
 			.collect();
@@ -2746,6 +2774,7 @@ where
 		let mut cleared = false;
 		for name in done {
 			let track = self.tracks.remove(&name).expect("a track retiring");
+			self.stale.remove(&name);
 			if let Some(ready) = self.held.take_if(|ready| ready.track == track.key()) {
 				self.jitter.discard(&ready);
 			}
@@ -3031,8 +3060,9 @@ where
 				1
 			}
 		};
-		if let Some(buffer) = buffer {
-			self.schedule.set_buffer(pid, buffer);
+		match buffer {
+			Some(buffer) => self.schedule.set_buffer(pid, buffer),
+			None => self.schedule.clear_buffer(pid),
 		}
 		self.schedule.push_placed(
 			pid,
@@ -3201,8 +3231,9 @@ where
 			}
 		};
 		let track = self.tracks.get(name).context("missing track")?;
-		if let Some(buffer) = track.buffer() {
-			self.schedule.set_buffer(pid, buffer);
+		match track.buffer() {
+			Some(buffer) => self.schedule.set_buffer(pid, buffer),
+			None => self.schedule.clear_buffer(pid),
 		}
 		// A padded output cannot burst a picture late, so a CPB that the source may fill to
 		// its declared buffer delay needs that much send-ahead, all of it out of the delay.

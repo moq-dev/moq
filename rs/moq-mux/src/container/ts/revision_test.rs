@@ -178,16 +178,28 @@ fn pid(packet: &[u8; 188]) -> u16 {
 /// Every PMT on `pmt_pid` in `frames`, each run of repeats once.
 fn tables(frames: &[Frame], pmt_pid: u16) -> Vec<Table> {
 	let mut out: Vec<Table> = Vec::new();
+	let mut section = Vec::new();
 	for packet in packets(frames) {
-		if pid(packet) != pmt_pid || packet[1] & 0x40 == 0 {
+		if pid(packet) != pmt_pid {
 			continue;
 		}
 		let mut at = 4;
 		if packet[3] & 0x20 != 0 {
 			at += 1 + usize::from(packet[4]);
 		}
-		let section = &packet[at + 1 + usize::from(packet[at])..];
-		let section = &section[..3 + (usize::from(section[1] & 0x0f) << 8 | usize::from(section[2]))];
+		if packet[1] & 0x40 != 0 {
+			section = packet[at + 1 + usize::from(packet[at])..].to_vec();
+		} else if !section.is_empty() {
+			section.extend_from_slice(&packet[at..]);
+		} else {
+			continue;
+		}
+		let len = 3 + (usize::from(section[1] & 0x0f) << 8 | usize::from(section[2]));
+		if section.len() < len {
+			continue;
+		}
+		let whole = std::mem::take(&mut section);
+		let section = &whole[..len];
 		let pmt = super::psi::Pmt::parse(section).expect("a whole PMT");
 		let bytes = |descriptors: &[super::catalog::Descriptor]| {
 			descriptors
@@ -1199,6 +1211,149 @@ async fn a_revision_out_before_the_one_it_follows_takes_its_version() {
 	}
 	let pids: Vec<u16> = tables.last().unwrap().streams.iter().map(|es| es.1).collect();
 	assert_eq!(pids, [AUDIO_PID, DATA_PID, OTHER_AUDIO_PID], "{tables:?}");
+}
+
+/// A stream taking a PID over from a buffered one goes out on its own model, not the one
+/// before it: a private section larger than the AAC buffer before it still goes out.
+#[tokio::test(start_paused = true)]
+async fn a_stream_taking_a_pid_over_leaves_the_buffer_before_it() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	let (_, mut first) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let (name, mut before) = aac_track(&mut broadcast, &mut catalog, Some(DATA_PID));
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	live(
+		&mut export,
+		&mut frames,
+		start,
+		&mut [(&mut first, 0x21), (&mut before, 0x21)],
+		0,
+		3_000,
+	)
+	.await;
+	remove(&mut catalog, &name);
+	before.finish().unwrap();
+	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 3_000, 6_000).await;
+
+	let track = broadcast
+		.unique_track(".private", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	let entry = super::catalog::Track {
+		pid: DATA_PID,
+		descriptors: Vec::new(),
+		verbatim: Some(super::catalog::Verbatim::new(0x05, super::catalog::Framing::Section)),
+		pes_packet: None,
+	};
+	catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.tracks
+		.insert(track.name().to_string(), entry);
+	let mut private = Writer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	settle(&mut export, &mut frames).await;
+	tokio::time::sleep_until(start + Duration::from_millis(6_000)).await;
+	let mut section = vec![0x80, 0x7f, 0xfd];
+	section.resize(4_096, 0xab);
+	private
+		.write(Frame {
+			timestamp: moq_net::Timestamp::from_millis(6_000).unwrap(),
+			duration: None,
+			payload: bytes::Bytes::from(section),
+			keyframe: true,
+		})
+		.unwrap();
+	private.cut(None).unwrap();
+	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 6_000, 9_000).await;
+	for track in [&mut first, &mut private] {
+		track.finish().unwrap();
+	}
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	let layout = layouts(&tables(&frames, OWN_PMT_PID));
+	assert_eq!(layout.last().unwrap().1, [(AUDIO, AUDIO_PID), (0x05, DATA_PID)]);
+	let sent = packets(&frames).filter(|packet| pid(packet) == DATA_PID && packet[4..].iter().all(|&b| b == 0xab));
+	assert_eq!(sent.count(), 4_096 / 184 - 1, "the section went out whole");
+}
+
+/// Tracks leaving one after another each drain under the program descriptors they left
+/// under, until those outgrow a section beside the rest: then all drain under the current
+/// set, and none comes back.
+#[tokio::test(start_paused = true)]
+async fn draining_descriptor_sets_that_outgrow_a_section_give_way_to_the_current_one() {
+	let descriptor = |tag: u8| super::catalog::Descriptor {
+		tag,
+		data: bytes::Bytes::from(vec![tag; 250]),
+	};
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	catalog.modify().unwrap().ext.mpegts.program_descriptors = vec![descriptor(0x80)];
+	let (_, mut first) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let (names, mut leaving): (Vec<String>, Vec<Writer>) = (0x103..=0x105)
+		.map(|pid| aac_track(&mut broadcast, &mut catalog, Some(pid)))
+		.unzip();
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	let mut at = 0;
+	for (index, tag) in (0..=names.len()).zip(0x81..) {
+		let until = if index == 0 { 3_000 } else { at + 1_000 };
+		let mut tracks: Vec<(&mut Writer, u8)> = vec![(&mut first, 0x21)];
+		tracks.extend(leaving.iter_mut().map(|track| (track, 0x21)));
+		live(&mut export, &mut frames, start, &mut tracks, at, until).await;
+		at = until;
+		if let Some(name) = names.get(index) {
+			remove(&mut catalog, name);
+			catalog.modify().unwrap().ext.mpegts.program_descriptors = vec![descriptor(tag)];
+		}
+	}
+	for track in &mut leaving {
+		track.finish().unwrap();
+	}
+	live(
+		&mut export,
+		&mut frames,
+		start,
+		&mut [(&mut first, 0x21)],
+		at,
+		at + 3_000,
+	)
+	.await;
+	first.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	let tags = |info: &[u8]| {
+		let mut tags = Vec::new();
+		let mut at = 0;
+		while at < info.len() {
+			tags.push(info[at]);
+			at += 2 + usize::from(info[at + 1]);
+		}
+		tags
+	};
+	let tables = tables(&frames, OWN_PMT_PID);
+	let infos: Vec<Vec<u8>> = tables.iter().map(|table| tags(&table.info)).collect();
+	let mut runs = infos.clone();
+	runs.dedup();
+	assert_eq!(runs, [vec![0x80], vec![0x81, 0x80], vec![0x82, 0x80, 0x81], vec![0x83]]);
 }
 
 /// Write a frame stamped `millis`, filled with its mark, to each of `tracks` for each 20 ms
