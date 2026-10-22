@@ -60,6 +60,10 @@ Decided 2026-10-20 in planning:
   moq.dev's [hosted worklet adoption](https://github.com/moq-dev/moq.dev/blob/main/quest/m0/dogfood-assets.md)
   can fold back into it. Rank the voice demo quests in
   m2 on their own, not under this epic, so they do not hold it open.
+  Decided 2026-10-22 (maintainer): moq.dev's m0/biome-local and
+  m0/lean-agents-md are made moot by the move (the monorepo's Biome and
+  `AGENTS.md` govern) and are not ported; m0/astro-typecheck is ported as
+  the Astro type check in the `site` CI module.
 - **Port the open draft posts** by re-applying their MDX under `site/` as draft
   PRs here: moq-dev/moq.dev#148 (Update 02), #145 (Web Datagrams), #132 (AI
   Influencer outline), and #124 (More Hops, Lower Latency). Close the stale #16

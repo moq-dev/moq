@@ -36,13 +36,6 @@ jobs:
 
       - uses: ./.github/actions/nix
 
-      # Playwright's Chromium isn't in the nix devShell. Install it plus its apt
-      # runtime libs (`--with-deps` needs the host package manager); the recipe's
-      # own `playwright install` then no-ops.
-      - name: Playwright Chromium
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
-        shell: bash -leo pipefail {0}
-
       - name: Video
         run: nix develop --command just test video
         shell: bash -leo pipefail {0}

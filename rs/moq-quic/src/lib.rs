@@ -54,11 +54,13 @@ pub use bloom_token_log::BloomTokenLog;
 
 mod connection;
 pub use crate::connection::{
-    Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, Credit, CreditStats,
-    Datagrams, Event, FinishError, FrameStats, PathStats, ReadError, ReadableError, RecvStream,
-    RttEstimator, SendDatagramError, SendGroup, SendGroups, SendOptions, SendStream,
-    ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
+    Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, CreditStats,
+    Datagrams, Event, FinishError, FrameStats, LeaseError, Leased, PathStats, ReadError,
+    ReadableError, RecvStream, RttEstimator, SendDatagramError, SendGroup, SendGroups, SendOptions,
+    SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
+#[cfg(feature = "mux")]
+pub use connection::mux;
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;
 

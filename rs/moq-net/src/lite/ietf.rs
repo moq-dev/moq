@@ -1105,17 +1105,14 @@ mod hop_tests {
 		payload: &[u8],
 	) -> group::Producer {
 		let mut frame = group
-			.create_frame_owned(
-				frame::Header {
-					info: frame::Info {
-						size: payload.len() as u64,
-						timestamp: Some(ts(millis)),
-					},
-					fields: fields.map(Arc::new),
-					inflated: None,
+			.create_object(frame::Header {
+				info: frame::Info {
+					size: payload.len() as u64,
+					timestamp: Some(ts(millis)),
 				},
-				&frame::Budget::default(),
-			)
+				fields: fields.map(Arc::new),
+				inflated: None,
+			})
 			.unwrap();
 		frame.write(Bytes::copy_from_slice(payload)).unwrap();
 		frame.finish().unwrap()

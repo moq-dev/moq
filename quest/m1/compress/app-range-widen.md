@@ -25,7 +25,7 @@ widens, never the server.
 
 Regression test on mock time, in Rust: a mid-group application subscribe on a
 compressed track returns the requested frames instead of `Lagged`, and the
-wire request starts at frame 0. Mirror it in `js/net` if
-[JavaScript](/quest/m1/compress/js.md) has landed compressed tracks by then.
+wire request starts at frame 0. Mirror it in `js/net`, which carries
+compressed tracks too.
 
 Public API: none. Wire: none.
