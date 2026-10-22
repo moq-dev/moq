@@ -210,8 +210,8 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
             async for group in live:
                 async with group:
                     async for frame in group:
-                        if seen or frame.payload != b"session-alive":
-                            raise RuntimeError("unexpected session health payload")
+                        if seen or frame.payload != b"session-alive" or frame.timestamp is not None:
+                            raise RuntimeError("unexpected session health payload or timestamp")
                         seen = True
             if not seen:
                 raise RuntimeError("missing session health payload")
