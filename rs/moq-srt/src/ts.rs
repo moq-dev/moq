@@ -41,7 +41,7 @@ pub struct Publisher {
 	// The importer's per-stream counters, logged as `moq import ts` logs them, under a
 	// span naming the path, since one server carries many ingests.
 	log: ts::stats::Log,
-	sampled: tokio::time::Instant,
+	sampled: moq_net::time::Instant,
 	span: tracing::Span,
 }
 
@@ -99,7 +99,7 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			log: ts::stats::Log::default(),
-			sampled: tokio::time::Instant::now(),
+			sampled: moq_net::time::now(),
 			span: tracing::info_span!("srt", %path),
 		})
 	}
@@ -117,7 +117,7 @@ impl Publisher {
 		}
 		.map_err(moq_mux::Error::from)?;
 		if self.sampled.elapsed() >= ts::stats::Log::INTERVAL {
-			self.sampled = tokio::time::Instant::now();
+			self.sampled = moq_net::time::now();
 			let _span = self.span.enter();
 			self.log.sample(self.stats());
 		}
@@ -242,6 +242,7 @@ impl Subscriber {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use moq_mux::catalog::hang::Container;
 	use moq_mux::catalog::{CatalogFormat, Stream};

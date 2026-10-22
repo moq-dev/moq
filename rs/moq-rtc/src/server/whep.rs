@@ -151,7 +151,7 @@ pub async fn accept(
 	let (creds, inbound, registration) = mux.register();
 	let mut rtc = session::rtc_config_with_codecs(&codecs)
 		.set_local_ice_credentials(creds)
-		.build(std::time::Instant::now());
+		.build(moq_clock::now().into_std());
 	for addr in mux.candidates() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);
@@ -206,11 +206,11 @@ fn is_sdp(headers: &HeaderMap) -> bool {
 /// one, would park the handler forever. No route by the deadline is
 /// [`moq_net::Error::Unroutable`], so the WHEP client sees a 404 and retries (typical).
 async fn resolve(subscriber: &moq_net::origin::Consumer, path: moq_net::Path<'_>) -> Result<EgressSource> {
-	let deadline = tokio::time::Instant::now() + CATALOG_TIMEOUT;
-	let broadcast = tokio::time::timeout_at(deadline, subscriber.routed_broadcast(path))
+	let deadline = moq_clock::now() + CATALOG_TIMEOUT;
+	let broadcast = moq_clock::timeout_at(deadline, subscriber.routed_broadcast(path))
 		.await
 		.map_err(|_| Error::Moq(moq_net::Error::Unroutable))??;
-	tokio::time::timeout_at(
+	moq_clock::timeout_at(
 		deadline,
 		EgressSource::new(moq_mux::Source::new(subscriber.clone(), broadcast)),
 	)

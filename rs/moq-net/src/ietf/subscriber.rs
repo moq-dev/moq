@@ -482,6 +482,8 @@ fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info
 		version,
 		values: properties.unknown.clone(),
 	}));
+	// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
+	info.unchecked = info.timescale.is_some();
 	info
 }
 
@@ -3057,7 +3059,6 @@ where
 				(request.accept(info), dynamic)
 			}
 		};
-		track.received();
 		// A live join starts at the publisher's edge; an absolute one where it asked. With
 		// no Largest the join skips nothing, so every group is owed: a lower one's stream
 		// may still arrive after a higher one's.
@@ -3919,7 +3920,6 @@ where
 		tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status known");
 		let dynamic = request.dynamic();
 		let mut track = request.accept(accepted_info(&ok.properties, self.version));
-		track.received();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 		track.set_idle();
 		Some(Idle {
@@ -12210,12 +12210,14 @@ mod stitch_tests {
 			);
 
 			// The subscriber accepts a timed track at microseconds, matching `run_subscribe`.
-			let track = track::Producer::new(
-				std::sync::Arc::new(crate::broadcast::Info::default()),
-				"video",
-				track::Info::default().with_timescale(timescale.map(|_| Timescale::MICRO)),
+			let info = accepted_info(
+				&ietf::Properties {
+					timescale: timescale.map(|_| Timescale::MICRO),
+					..Default::default()
+				},
+				VERSION,
 			);
-			track.received();
+			let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
 			let fill = kio::Producer::new(fill);
 
 			{
@@ -12379,30 +12381,19 @@ mod stitch_tests {
 		settled.await;
 	}
 
-	/// Object numbering is relay metadata; plain readers still see consecutive frames.
+	/// Relay `script` through an untimed track.
+	///
+	/// Also relays it through a second relay behind a moq-lite hop with the `ietf`
+	/// extension, which must not change a byte. Object numbering is relay metadata; plain
+	/// readers still see consecutive frames.
 	async fn relay_passthrough(
 		script: Vec<u8>,
 		ingress: Version,
 		egress: Version,
 		fetch: Option<(u64, u64)>,
 	) -> (Vec<u8>, crate::lite::test_transport::Log) {
-		relay_passthrough_timed(script, ingress, egress, fetch, None).await
-	}
-
-	/// Relay `script` through a track the ingress times in `timescale`, which the cache
-	/// normalizes to microseconds like [`accepted_info`].
-	///
-	/// Also relays it through a second relay behind a moq-lite hop with the `ietf`
-	/// extension, which must not change a byte.
-	async fn relay_passthrough_timed(
-		script: Vec<u8>,
-		ingress: Version,
-		egress: Version,
-		fetch: Option<(u64, u64)>,
-		timescale: Option<Timescale>,
-	) -> (Vec<u8>, crate::lite::test_transport::Log) {
-		let direct = relay_passthrough_via(script.clone(), ingress, egress, fetch, timescale, false).await;
-		let hopped = relay_passthrough_via(script, ingress, egress, fetch, timescale, true).await;
+		let direct = relay_passthrough_via(script.clone(), ingress, egress, fetch, None, false).await;
+		let hopped = relay_passthrough_via(script, ingress, egress, fetch, None, true).await;
 		let fetch_ok = |bytes: &[u8]| {
 			let mut decoder = Decoder::new(bytes, egress.into());
 			(decoder.varint().ok()? == ietf::FetchOk::ID).then_some(())?;
@@ -12444,7 +12435,9 @@ mod stitch_tests {
 		direct
 	}
 
-	/// [`relay_passthrough_timed`] through one relay, or two joined by a moq-lite `hop`.
+	/// Relay `script` through a track the ingress times in `timescale`, which the cache
+	/// normalizes to microseconds like [`accepted_info`], via one relay or two joined by a
+	/// moq-lite `hop`.
 	async fn relay_passthrough_via(
 		script: Vec<u8>,
 		ingress: Version,
@@ -12631,22 +12624,30 @@ mod stitch_tests {
 
 	/// A relayed Timestamp leaves in the units the publisher declared: the cache holds the
 	/// track on the publisher's grid, so a copy of the same instance over another route
-	/// matches it.
+	/// matches it. A moq-lite hop serves the unchecked track untimed, so the Timestamp
+	/// stops there and the other property survives.
 	#[moq_clock::test]
 	async fn passthrough_keeps_the_publishers_timestamp_units() {
 		let version = Version::Draft22;
 		// Timestamp 42 (ms), then an unknown property that must survive beside it.
 		let properties = [0x10, 42, 0x70, 7];
 		let script = object_stream(version, true, &[(0, &properties, None)]);
-		let (bytes, log) = relay_passthrough_timed(script, version, version, None, Some(Timescale::MILLI)).await;
-		assert!(log.resets().is_empty());
-		let mut decoder = Decoder::new(&bytes, version.into());
-		ietf::GroupHeader::decode(&mut decoder, version).unwrap();
-		assert_eq!(decoder.varint().unwrap(), 0);
-		let relayed = bytes::Bytes::copy_from_slice(decoder.bytes().unwrap());
-		let decoded = super::super::object::read(&relayed, version, Some(Timescale::MILLI)).unwrap();
-		assert_eq!(decoded.timestamp, Some(Timestamp::new(42, Timescale::MILLI).unwrap()));
-		assert_eq!(super::super::object::listed(&decoded.properties, version).len(), 1);
+		for (hop, timestamp) in [(false, Timestamp::new(42, Timescale::MILLI).ok()), (true, None)] {
+			let (bytes, log) =
+				relay_passthrough_via(script.clone(), version, version, None, Some(Timescale::MILLI), hop).await;
+			assert!(log.resets().is_empty(), "hop: {hop}");
+			let mut decoder = Decoder::new(&bytes, version.into());
+			ietf::GroupHeader::decode(&mut decoder, version).unwrap();
+			assert_eq!(decoder.varint().unwrap(), 0);
+			let relayed = bytes::Bytes::copy_from_slice(decoder.bytes().unwrap());
+			let decoded = super::super::object::read(&relayed, version, timestamp.map(|_| Timescale::MILLI)).unwrap();
+			assert_eq!(decoded.timestamp, timestamp, "hop: {hop}");
+			assert_eq!(
+				super::super::object::listed(&decoded.properties, version).len(),
+				1,
+				"hop: {hop}"
+			);
+		}
 	}
 
 	fn object_stream(version: Version, first: bool, objects: &[(u64, &[u8], Option<u64>)]) -> Vec<u8> {
@@ -14285,8 +14286,8 @@ mod stitch_tests {
 		assert!(h.session.log.closes().is_empty());
 	}
 
-	/// A received group whose first object rewinds past the group before it is accepted:
-	/// only a local publisher's writes refuse a rewind.
+	/// A received group whose first object rewinds past the group before it is accepted: a
+	/// moq-transport peer may stamp arrival times, so its timed tracks are unchecked.
 	#[moq_clock::test]
 	async fn a_received_rewind_is_accepted() {
 		use futures::FutureExt;

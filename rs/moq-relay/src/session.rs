@@ -98,7 +98,7 @@ impl Registry {
 			id.clone(),
 			Entry {
 				request,
-				started: SystemTime::now(),
+				started: SystemTime::from(moq_clock::wall()),
 				handle: handle.clone(),
 			},
 		);
@@ -476,6 +476,7 @@ pub struct Nudged {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use std::time::Duration;

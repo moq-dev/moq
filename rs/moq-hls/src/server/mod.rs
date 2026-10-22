@@ -128,13 +128,13 @@ impl Server {
 			Poll::Ready(Some(_)) => Poll::Ready(true),
 			Poll::Pending => follow.poll_synced(waiter).map(|()| false),
 		});
-		if !tokio::time::timeout(RESOLVE_TIMEOUT, routed).await.unwrap_or(false) {
+		if !moq_clock::timeout(RESOLVE_TIMEOUT, routed).await.unwrap_or(false) {
 			return None;
 		}
 
 		let origin = self.inner.origin.consume();
 		// A covering dynamic route may never answer, so the request is bounded too.
-		let broadcast = tokio::time::timeout(RESOLVE_TIMEOUT, origin.request_broadcast(name, None))
+		let broadcast = moq_clock::timeout(RESOLVE_TIMEOUT, origin.request_broadcast(name, None))
 			.await
 			.map_err(|_| tracing::warn!(%name, "timed out resolving broadcast"))
 			.ok()?
@@ -275,7 +275,7 @@ mod tests {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
 
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		assert!(server.broadcaster("live").await.is_none());
 		assert_eq!(start.elapsed(), Duration::ZERO);
 	}

@@ -16,6 +16,7 @@ pub mod vp8;
 pub mod vp9;
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod bitstream_test;
 
 use bytes::Bytes;
