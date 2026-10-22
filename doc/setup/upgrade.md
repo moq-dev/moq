@@ -65,8 +65,10 @@ These land with the next breaking release.
 - **A track is timed or untimed, and nothing fills in a timestamp on
   receive.** Tracks from moq-lite before 05, and moq-transport tracks without
   `TIMESCALE` (every track on drafts 14 to 16), arrive untimed instead of
-  stamped with their arrival time. moq-lite 05 and later can't encode absence
-  yet and carry a send time instead; see
+  stamped with their arrival time. moq-lite 05 and 06 can't encode absence and
+  carry a send time instead, so their receivers drop every timestamp and those
+  tracks arrive untimed too: read media time from the payload. moq-transport
+  timestamps are served to moq-lite untimed; see
   [untimed tracks](/concept/moq-lite#subscriptions). A new subscriber with no
   start on an untimed track starts at the latest group.
 - **Max age and max delay count wall-clock time too.** A superseded group is

@@ -3252,7 +3252,9 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							Some(Ok(lookup)) => {
 								// Subscribe before the query exposes upstream demand, and query
 								// that same instance even if the broadcast changes meanwhile.
-								let sub = io.weak.subscription().map(|demand| lookup.subscribe(demand));
+								let sub = io.weak.subscription().map(|(demand, subscribers)| {
+									lookup.subscribe(io.routes.subscription(demand, subscribers))
+								});
 								let query = match &sub {
 									Some(sub) => sub.query(),
 									None => lookup.query().into_inner(),
@@ -3471,11 +3473,11 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						&& let Some(accepted) = &mut io.accepted
 					{
 						while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
-						if let Some(subscription) = accepted.subscription() {
+						if let Some((subscription, subscribers)) = io.weak.subscription() {
 							// The query's hold must follow demand too, or its initial budget
 							// keeps a later, shorter aggregate from reaching the publisher.
 							if let Some(held) = &mut io.held {
-								let _ = held.update(subscription);
+								let _ = held.update(io.routes.subscription(subscription, subscribers));
 							}
 						} else {
 							io.held = None;
@@ -10991,6 +10993,34 @@ mod tests {
 
 			assert_resumes(&mut rig, &standby).await;
 		}
+	}
+
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_replacement_query_carries_the_readers_resume_floor() {
+		let (mut rig, incumbent, source) = ResumeRig::new(&[10]).await;
+		let mut group = rig
+			.incumbent_track
+			.create_group(crate::group::Info { sequence: 5 })
+			.unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"five".as_ref()).unwrap();
+		group.finish().unwrap();
+		assert_eq!(rig.subscription.recv_group().await.unwrap().unwrap().sequence, 5);
+		let standby = rig.standby(&[10, 20]);
+		drop(incumbent);
+		drop(source);
+		rig.incumbent_track.clone().abort(Error::Dropped).unwrap();
+		let replacement = broadcast::Info::new().produce();
+		let mut handler = replacement.dynamic();
+		queued(&standby).await.accept(&replacement);
+		let request = handler.requested_track().await.unwrap();
+		assert_eq!(request.subscription().unwrap().start(), Some(track::Position::group(5)));
+		let track = request.accept(crate::track::Info::timed());
+		let mut preferences = rig.subscription.subscription();
+		preferences.priority = 7;
+		rig.subscription.update(preferences).unwrap();
+		settle(|| track.subscription().is_some_and(|sub| sub.priority == 7)).await;
+		assert_eq!(track.subscription().unwrap().start(), Some(track::Position::group(5)));
 	}
 
 	/// A route updated in place to a new first hop still serves the same broadcast:

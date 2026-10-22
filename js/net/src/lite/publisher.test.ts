@@ -534,6 +534,41 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	}
 });
 
+// An unchecked track goes out untimed, so lite-06 carries its send time, never the frame's own
+// timestamp, which may be a moq-transport arrival time.
+test("lite draft-06: an unchecked track's fetched frames carry their send time", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
+
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, unchecked: true });
+
+	const group = new GroupProducer(0);
+	group.writeFrame(textFrame("hello", Timestamp.fromMillis(36_000_000)));
+	group.close();
+	track.writeGroup(group);
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_06);
+	if (!server) throw new Error("publisher never saw the fetch stream");
+
+	const msg = new Fetch({ broadcast: Path.from("test"), track: "video", priority: 0, group: 0 });
+	try {
+		const before = Math.floor(Timestamp.now().value);
+		await publisher.runFetch(msg, server);
+		const after = Math.ceil(Timestamp.now().value);
+
+		// The first frame's zigzag delta is against 0, in the milliseconds TRACK_INFO declares.
+		const sent = Number((await client.reader.u62()) >> 1n);
+		expect(sent).toBeGreaterThanOrEqual(before);
+		expect(sent).toBeLessThanOrEqual(after);
+	} finally {
+		publisher.close();
+		client.close();
+	}
+});
+
 // How long a served-subscription test waits for the next group stream before calling the
 // publisher idle. Nothing waits this out: it only bounds the read when a group never comes.
 const IDLE_MS = 500;

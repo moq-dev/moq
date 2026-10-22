@@ -1957,14 +1957,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 		let info = ready!(self.querying.poll_ok(waiter))?;
 
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise).
-		writer.buffer(&lite::TrackInfo {
-			refresh: info.refresh,
-			priority: info.priority,
-			max_age: info.max_age,
-			timescale: info.timescale,
-			// An older peer is served the frames inflated.
-			compress: info.compress && shared.version.has_compression(),
-		})?;
+		writer.buffer(&lite::TrackInfo::serve(&info, shared.version))?;
 		if ietf {
 			writer.buffer(&lite::ietf::TrackProperties(info.properties.clone()))?;
 		}
@@ -2021,14 +2014,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
 		let event = match ready!(self.tracks.poll_next(waiter))? {
 			Some(crate::broadcast::TracksEvent::Added { name, info }) => lite::TracksEvent::Added {
 				name: name.to_string().into(),
-				info: lite::TrackInfo {
-					refresh: info.refresh,
-					priority: info.priority,
-					max_age: info.max_age,
-					timescale: info.timescale,
-					// An older peer is served the frames inflated.
-					compress: info.compress && shared.version.has_compression(),
-				},
+				info: lite::TrackInfo::serve(&info, shared.version),
 			},
 			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
 				name: name.to_string().into(),
@@ -2141,7 +2127,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					// `None` omits the per-frame timestamp prefix: an untimed track on
 					// Lite07+, or any track before Lite05 (whose frames still carry
 					// timestamps in the model, just not on this wire).
-					let timescale = shared.version.wire_timescale(track.info().timescale);
+					let stamp = Stamp::new(shared.version, track.info().lite_timescale());
 
 					// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties
 					// live in TRACK_INFO, and the resolved range arrives as
@@ -2178,7 +2164,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 						steer: steer_tx.consume(),
 						steer_seen: steer,
 						version: shared.version,
-						timescale,
+						stamp,
 						runtime: shared.runtime.clone(),
 						outcomes: Default::default(),
 						ietf,
@@ -2238,7 +2224,7 @@ enum FetchServe {
 	/// (the subscriber decodes against the same baseline).
 	Serve {
 		group: group::Consumer,
-		timescale: Option<crate::Timescale>,
+		stamp: Option<Stamp>,
 		prev_ts: u64,
 		frame: Option<frame::Consumer>,
 		chunk: Option<bytes::Bytes>,
@@ -2315,17 +2301,18 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					group.end_at(msg.end_frame.map_or(Bound::Unbounded, Bound::Included));
 
 					// Matches the timescale TRACK_INFO declared for the track.
-					let timescale = shared.version.wire_timescale(group.timescale());
+					let stamp = Stamp::new(shared.version, group.lite_timescale());
 					// And its compression, which a lite-07 peer receives as stored.
 					if shared.version.has_compression() {
 						group = group.compressed();
 					}
 					let capped = msg.end_frame.is_some();
+					let timescale = stamp.map(|stamp| stamp.timescale);
 					let records = lite::ietf::Records::start(writer, ietf, &group, capped, timescale)?;
 
 					*self = Self::Serve {
 						group,
-						timescale,
+						stamp,
 						prev_ts: 0,
 						frame: None,
 						chunk: None,
@@ -2336,7 +2323,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 				}
 				Self::Serve {
 					group,
-					timescale,
+					stamp,
 					prev_ts,
 					frame,
 					chunk,
@@ -2368,7 +2355,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 								batched.frame.timestamp,
 								batched.inflated,
 								batched.frame.payload.len() as u64,
-								*timescale,
+								*stamp,
 								prev_ts,
 								&shared.runtime,
 							)?;
@@ -2403,7 +2390,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 										next.timestamp,
 										next.inflated,
 										next.size,
-										*timescale,
+										*stamp,
 										prev_ts,
 										&shared.runtime,
 									)?;
@@ -3361,12 +3348,12 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	timestamp: Option<crate::Timestamp>,
 	inflated: Option<u64>,
 	size: u64,
-	timescale: Option<crate::Timescale>,
+	stamp: Option<Stamp>,
 	prev_ts: &mut u64,
 	runtime: &crate::time::Deadlines,
 ) -> Result<(), Error> {
-	if let Some(timescale) = timescale {
-		buffer_zigzag_delta(writer, wire_timestamp(timestamp, timescale, runtime)?, prev_ts)?;
+	if let Some(stamp) = stamp {
+		buffer_zigzag_delta(writer, stamp.wire(timestamp, runtime)?, prev_ts)?;
 	}
 	// Only a compressed group read in its stored form has one, and only on lite-07.
 	if let Some(inflated) = inflated {
@@ -3376,22 +3363,35 @@ fn buffer_frame_info<W: crate::transport::poll::SendStream>(
 	Ok(())
 }
 
-/// A frame or datagram timestamp as its raw value at the wire `timescale`.
-///
-/// Lite05/06 cannot encode an untimed track, so its payloads carry their send time on
-/// `runtime` instead, at the millisecond scale its TRACK_INFO declares. A timed payload
-/// is already at the track's timescale.
-fn wire_timestamp(
-	timestamp: Option<crate::Timestamp>,
+/// How a lite hop stamps a track's frames and datagrams.
+#[derive(Clone, Copy, Debug)]
+struct Stamp {
+	/// The wire timescale TRACK_INFO declared (see [`Version::wire_timescale`]).
 	timescale: crate::Timescale,
-	runtime: &crate::time::Deadlines,
-) -> Result<u64, Error> {
-	match timestamp {
-		Some(timestamp) => Ok(timestamp.value()),
-		None => crate::Timestamp::from(runtime.now())
-			.convert(timescale)
-			.map(|now| now.value())
-			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded)),
+	/// Whether each frame's own timestamp goes out. Lite05/06 cannot encode an untimed
+	/// track, so one served untimed carries its send time instead, unchecked ones included.
+	timed: bool,
+}
+
+impl Stamp {
+	/// How `version` stamps a track served at `timescale` (see
+	/// [`track::Info::lite_timescale`]), or `None` when it carries no timestamps.
+	fn new(version: Version, timescale: Option<crate::Timescale>) -> Option<Self> {
+		Some(Self {
+			timescale: version.wire_timescale(timescale)?,
+			timed: timescale.is_some(),
+		})
+	}
+
+	/// A frame or datagram's `timestamp` as its raw wire value, or its send time on
+	/// `runtime` when the track goes out untimed.
+	fn wire(self, timestamp: Option<crate::Timestamp>, runtime: &crate::time::Deadlines) -> Result<u64, Error> {
+		timestamp
+			.filter(|_| self.timed)
+			.unwrap_or_else(|| crate::Timestamp::from(runtime.now()))
+			.convert(self.timescale)
+			.map(|time| time.value())
+			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))
 	}
 }
 
@@ -3615,9 +3615,8 @@ struct Subscription<S: crate::transport::poll::Session> {
 	/// Last steer observed by this clone, so a change only fires once.
 	steer_seen: Steer,
 	version: Version,
-	/// The track's wire timescale, or `None` when its frames and datagrams carry no
-	/// timestamp (see [`Version::wire_timescale`]).
-	timescale: Option<crate::Timescale>,
+	/// How frames and datagrams are stamped, or `None` when they carry no timestamp.
+	stamp: Option<Stamp>,
 	/// The clock an untimed track's Lite05/06 send times are read from.
 	runtime: crate::time::Deadlines,
 	/// Outcomes shared by the subscription and every group it serves.
@@ -3653,9 +3652,9 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 			return false;
 		}
 		let Ok(timestamp) = self
-			.timescale
+			.stamp
 			.filter(|_| !status)
-			.map(|timescale| wire_timestamp(datagram.timestamp, timescale, &self.runtime))
+			.map(|stamp| stamp.wire(datagram.timestamp, &self.runtime))
 			.transpose()
 		else {
 			return false;
@@ -3668,7 +3667,7 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 				if wire
 					.properties
 					.sealed_time
-					.is_some_and(|sealed| self.timescale != Some(sealed.scale())) =>
+					.is_some_and(|sealed| self.stamp.map(|stamp| stamp.timescale) != Some(sealed.scale())) =>
 			{
 				return false;
 			}
@@ -3685,7 +3684,7 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 			payload: payload.clone(),
 			ietf,
 		};
-		// has_datagrams is checked before this runs, and the timescale is set wherever the
+		// has_datagrams is checked before this runs, and the stamp is set wherever the
 		// version needs a timestamp, so encoding never hits a version guard.
 		let Ok(body) = body.encode_bytes(self.version) else {
 			return false;
@@ -4377,7 +4376,13 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
 		let records = header.and_then(|()| {
-			lite::ietf::Records::start(&mut writer, self.ctx.ietf, &self.group, self.capped, self.ctx.timescale)
+			lite::ietf::Records::start(
+				&mut writer,
+				self.ctx.ietf,
+				&self.group,
+				self.capped,
+				self.ctx.stamp.map(|stamp| stamp.timescale),
+			)
 		});
 		let records = match records {
 			Ok(records) => records,
@@ -4514,7 +4519,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 											batched.frame.timestamp,
 											batched.inflated,
 											batched.frame.payload.len() as u64,
-											self.ctx.timescale,
+											self.ctx.stamp,
 											&mut self.prev_ts,
 											&self.ctx.runtime,
 										)
@@ -4560,7 +4565,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 													next.timestamp,
 													next.inflated,
 													next.size,
-													self.ctx.timescale,
+													self.ctx.stamp,
 													&mut self.prev_ts,
 													&self.ctx.runtime,
 												)
@@ -4784,6 +4789,26 @@ mod serve_group_test {
 		}
 	}
 
+	/// A track served untimed to lite-05/06 carries its send time, never its frames' own
+	/// timestamps: those of an unchecked track may be moq-transport arrival times.
+	#[moq_clock::test]
+	async fn an_unchecked_track_goes_out_with_send_times() {
+		let runtime = crate::time::sim();
+		let stamped = Timestamp::from_millis(36_000_000).unwrap();
+		let sent = Timestamp::from(runtime.now()).value();
+		let checked = track::Info::timed();
+		let unchecked = track::Info {
+			unchecked: true,
+			..track::Info::timed()
+		};
+
+		let stamp = Stamp::new(Version::Lite06, checked.lite_timescale()).unwrap();
+		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), stamped.value());
+		let stamp = Stamp::new(Version::Lite06, unchecked.lite_timescale()).unwrap();
+		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), sent);
+		assert!(Stamp::new(Version::Lite07, unchecked.lite_timescale()).is_none());
+	}
+
 	#[moq_clock::test]
 	async fn resets_with_the_abort_code() {
 		let log = Log::default();
@@ -4799,7 +4824,7 @@ mod serve_group_test {
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::MILLI),
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
@@ -4845,7 +4870,7 @@ mod serve_group_test {
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::MILLI),
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
@@ -4895,7 +4920,7 @@ mod serve_group_test {
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::MILLI),
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
@@ -4945,7 +4970,7 @@ mod serve_group_test {
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::MILLI),
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
@@ -5012,7 +5037,7 @@ mod serve_group_test {
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::MILLI),
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
@@ -5185,7 +5210,7 @@ mod serve_group_test {
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::MILLI),
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
@@ -5260,7 +5285,7 @@ mod serve_group_test {
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::MILLI),
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
@@ -5309,7 +5334,7 @@ mod serve_group_test {
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::MILLI),
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
@@ -5357,7 +5382,7 @@ mod serve_group_test {
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
-			timescale: Some(crate::Timescale::MILLI),
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
@@ -5417,7 +5442,7 @@ mod serve_group_test {
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version,
-			timescale: Some(crate::Timescale::MILLI),
+			stamp: Stamp::new(Version::Lite06, Some(crate::Timescale::MILLI)),
 			runtime: crate::time::sim(),
 			outcomes: Default::default(),
 			ietf: false,
@@ -6549,7 +6574,7 @@ mod serve_group_test {
 				steer: steer.consume(),
 				steer_seen: Steer::default(),
 				version: Version::Lite07,
-				timescale: Some(crate::Timescale::MILLI),
+				stamp: Stamp::new(Version::Lite07, Some(crate::Timescale::MILLI)),
 				runtime: crate::time::sim(),
 				outcomes: outcomes.clone(),
 				ietf: false,

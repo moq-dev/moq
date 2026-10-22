@@ -12,7 +12,7 @@ Disposing a `Staged` uncommitted (`using`, or `[Symbol.dispose]()`) rejects the 
 ### A frameless group is not a successor (#6111)
 
 A group followed by a frameless one is judged stale against the next group that has a frame, where the frameless group used to count.
-`Track.Producer.received()` marks a track as written from a peer, and `Track.Producer.dropGroups(start, end, error)` marks groups `[start, end)` the peer said it skipped; a reader holding one of them rejects with `error`.
+`Track.Producer.dropGroups(start, end, error)` marks groups `[start, end)` the peer said it skipped; a reader holding one of them rejects with `error`.
 
 ### A dropped or cut group ends its reader with an error (#6143)
 
@@ -72,6 +72,9 @@ A new group or datagram raises it at frame 0 before any frame lands, and it can 
 ### A timed track refuses a group that rewinds (#5803)
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, throws `TimestampMismatch`.
+A group received over moq-lite-07 is checked the same way.
+A track received over moq-lite-05/06 arrives untimed, since its timestamps may be send times: read times from the payload, such as the hang container's, instead of the frame's `timestamp`.
+One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
 A publisher whose timeline restarts publishes a new broadcast instead.
 
 ### `Auth.Auth` is `Auth.Handle`, and `Auth.Token` is `Auth.Auth` (#5695)

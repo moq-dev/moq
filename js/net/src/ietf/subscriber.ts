@@ -1215,9 +1215,10 @@ export class Subscriber {
 			timescale: ok.properties.timescale,
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
+			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
+			unchecked: ok.properties.timescale != null,
 		});
 		const producer = staged.producer;
-		producer.received();
 		const subscription: Subscription = { track: producer, tail: new Tail() };
 		state.subscription = subscription;
 		if (ok.largest) {

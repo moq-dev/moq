@@ -77,6 +77,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	version: Version,
 	/// The peer's advertised SETUP (lite-05+), set when its Setup stream is read.
 	peer_setup: super::PeerSetup,
+	/// GROUP streams parked until the peer's SETUP says how to read their header.
+	setup_waits: Arc<atomic::AtomicUsize>,
 	/// Local policy overriding the peer's declared egress price. See `poll_link_cost`.
 	cost: Option<u64>,
 	/// Sources minted by the announce half, drained by the driver into
@@ -118,6 +120,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			next_id: Default::default(),
 			version: config.version,
 			peer_setup: config.peer_setup,
+			setup_waits: Default::default(),
 			cost: config.cost,
 			sources: kio::Queue::new(),
 			going_away: config.going_away,
@@ -522,7 +525,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			.zip(entry.framing.timescale)
 			.map(|(value, scale)| Timestamp::new(value, scale))
 			.transpose()
-			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+			.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?
+			// Dropped where it may be a send time, like a frame's.
+			.filter(|_| self.version.has_media_time());
 
 		// A datagram is never owed a stream, so it never holds the subscription's end open.
 		if let Ok(mut tail) = entry.tail.write() {
@@ -634,6 +639,22 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 	pub fn close(&self) {
 		self.subscriber.note_end(&Error::Cancel);
 		self.cleanup.close();
+	}
+
+	/// Read only the closed transport's buffered uni streams. Control machines
+	/// stay owned, so their cancellation guards cannot remove subscription state.
+	pub fn poll_drain(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let closed = self.uni.poll(waiter).is_ready();
+		let _ = self.uni.children.poll(waiter);
+		// Once every remaining stream waits on a SETUP that never arrived, none of
+		// them can deliver it: the peer can open no more.
+		let stuck = self.subscriber.peer_setup.ietf().is_none()
+			&& self.uni.children.len() == self.subscriber.setup_waits.load(atomic::Ordering::Relaxed);
+		if closed && (self.uni.children.is_empty() || stuck) {
+			Poll::Ready(())
+		} else {
+			Poll::Pending
+		}
 	}
 
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -846,6 +867,24 @@ struct GroupRecv<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	reader: Reader<S::RecvStream, Version>,
 	state: GroupRecvState,
+	/// Held while parked on the peer's SETUP, so a drain can tell it never arrives.
+	setup_wait: Option<SetupWait>,
+}
+
+/// Counts one GROUP stream parked on the peer's SETUP for as long as it lives.
+struct SetupWait(Arc<atomic::AtomicUsize>);
+
+impl SetupWait {
+	fn new(waits: &Arc<atomic::AtomicUsize>) -> Self {
+		waits.fetch_add(1, atomic::Ordering::Relaxed);
+		Self(waits.clone())
+	}
+}
+
+impl Drop for SetupWait {
+	fn drop(&mut self) {
+		self.0.fetch_sub(1, atomic::Ordering::Relaxed);
+	}
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -871,6 +910,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 			subscriber,
 			reader,
 			state: GroupRecvState::Header,
+			setup_wait: None,
 		}
 	}
 
@@ -879,7 +919,12 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 			match &mut self.state {
 				GroupRecvState::Header => {
 					// Before the header, which a wait after it would lose.
-					let ietf = ready!(self.subscriber.peer_setup.poll_ietf(waiter));
+					let Poll::Ready(ietf) = self.subscriber.peer_setup.poll_ietf(waiter) else {
+						let waits = &self.subscriber.setup_waits;
+						self.setup_wait.get_or_insert_with(|| SetupWait::new(waits));
+						return Poll::Pending;
+					};
+					self.setup_wait = None;
 					let mut cx = waiter.context();
 					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
 
@@ -945,7 +990,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					self.state = GroupRecvState::Serve {
 						group: crate::recv::Group::new(group),
 						track,
-						ingest: FrameIngest::new(framing, ietf, hdr.frame_start),
+						ingest: FrameIngest::new(framing, self.subscriber.version, ietf, hdr.frame_start),
 						_reading: reading,
 					};
 				}
@@ -1016,6 +1061,9 @@ struct FrameIngest {
 	/// `Some` once the Group State of the `ietf` extension arrived: every frame follows an
 	/// object record.
 	records: Option<RecordIngest>,
+	/// Whether the session's timestamps are media time. Lite-05/06 ones may be send times,
+	/// so they are read to stay in step and dropped.
+	media_time: bool,
 }
 
 /// A group's object records on ingest, under the `ietf` extension.
@@ -1061,7 +1109,7 @@ enum IngestPhase {
 
 impl FrameIngest {
 	/// `ietf` when the session negotiated the extension, so the stream starts with a Group State.
-	fn new(framing: lite::Framing, ietf: bool, frame_start: u64) -> Self {
+	fn new(framing: lite::Framing, version: Version, ietf: bool, frame_start: u64) -> Self {
 		Self {
 			framing,
 			prev_ts: 0,
@@ -1071,6 +1119,7 @@ impl FrameIngest {
 			},
 			frame_start,
 			records: None,
+			media_time: version.has_media_time(),
 		}
 	}
 
@@ -1192,8 +1241,9 @@ impl FrameIngest {
 					self.prev_ts = next;
 					let timestamp = Timestamp::new(next, scale)
 						.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+					// Read to stay in step, but dropped where it may be a send time.
 					self.phase = IngestPhase::Inflated {
-						timestamp: Some(timestamp),
+						timestamp: self.media_time.then_some(timestamp),
 					};
 				}
 				IngestPhase::Inflated { timestamp } => {
@@ -1787,13 +1837,7 @@ impl<S: crate::transport::poll::Session> TracksRecv<S> {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
 					let slot = source.subscriber.announces.acquire()?;
-					let info = track::Info::default()
-						.with_timescale(info.timescale)
-						.with_max_age(info.max_age)
-						.with_priority(info.priority)
-						.with_refresh(info.refresh)
-						.with_compress(info.compress);
-					source.lister.add(name.clone(), info)?;
+					source.lister.add(name.clone(), info.into())?;
 					self.listed.insert(name, slot);
 				}
 				lite::TracksEvent::Removed { name } => {
@@ -2584,10 +2628,11 @@ mod tests {
 					going_away: Default::default(),
 					auth: crate::auth::Handle::new(false),
 				});
+				// The track is untimed where the subscriber drops received timestamps.
 				let track = track::Producer::new(
 					std::sync::Arc::new(crate::broadcast::Info::default()),
 					"video",
-					crate::track::Info::timed(),
+					crate::track::Info::default().with_timescale(version.has_media_time().then_some(Timescale::MILLI)),
 				);
 				let mut consumer = track.consume().subscribe(None).await.unwrap();
 				subscriber.subscribes.lock().insert(
@@ -2881,8 +2926,8 @@ mod tests {
 		);
 	}
 
-	/// Receive group 5 starting at 500ms over `version`, on a received timed track whose
-	/// group 4 starts at 1000ms, returning the stream's result and the track.
+	/// Receive group 5 stamped 500ms over `version` into the copy a subscriber makes there,
+	/// whose group 4 started at 1000ms, returning the stream's result and the track.
 	async fn receive_rewind(version: Version) -> (Result<(), Error>, track::Producer) {
 		use crate::transport::poll::Session as _;
 
@@ -2912,15 +2957,16 @@ mod tests {
 			auth: crate::auth::Handle::new(false),
 		});
 
-		let track = track::Producer::new(
-			std::sync::Arc::new(crate::broadcast::Info::default()),
-			"video",
-			crate::track::Info::timed(),
-		);
-		track.received();
+		// The copy is untimed where the wire's timestamps may be send times.
+		let timed = version.has_media_time();
+		let info = match timed {
+			true => crate::track::Info::timed(),
+			false => crate::track::Info::default(),
+		};
+		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "video", info);
 		let mut before = track.create_group(4u64.into()).unwrap();
 		before
-			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"before"[..])
+			.write_frame(timed.then(|| Timestamp::from_millis(1000).unwrap()), &b"before"[..])
 			.unwrap();
 		before.finish().unwrap();
 		subscriber.subscribes.lock().insert(
@@ -2942,16 +2988,29 @@ mod tests {
 		(res, track)
 	}
 
-	/// A received timestamp may not be media time (lite-05/06 untimed tracks carry send
-	/// times), so a received group that rewinds is accepted at every version and the track
-	/// stays open. Only a local publisher's writes refuse a rewind.
+	/// Lite-05/06 timestamps may be send times, so a received frame is read past its
+	/// timestamp and lands untimed: nothing rewinds, and the track stays open.
 	#[moq_clock::test]
-	async fn a_received_rewind_is_accepted_at_every_version() {
-		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+	async fn lite06_timestamps_are_dropped() {
+		for version in [Version::Lite05, Version::Lite06] {
 			let (res, track) = receive_rewind(version).await;
 			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
 			assert!(track.closed().now_or_never().is_none(), "{version}");
+			let mut consumer = track.subscribe(None);
+			let mut group = consumer.recv_group().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(group.sequence, 5, "{version}");
+			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(frame.payload.as_ref(), b"rewound", "{version}");
+			assert_eq!(frame.timestamp, None, "{version}");
 		}
+	}
+
+	/// Lite-07 timestamps are media time, so a received group is checked like a local
+	/// write and one that rewinds is refused.
+	#[moq_clock::test]
+	async fn a_lite07_rewind_is_refused() {
+		let (res, _track) = receive_rewind(Version::Lite07).await;
+		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
 	}
 
 	/// An idle copy that resubscribes gets its newest cached group again. That stream only
@@ -3357,8 +3416,9 @@ mod tests {
 		let broadcast = crate::broadcast::Info::new().produce();
 		// The broadcast keeps only a weak handle, so the map below owns the only strong
 		// `track::Producer`: dropping it is what ends the track.
+		// Untimed, as the subscriber drops lite-05 timestamps.
 		let producer = broadcast
-			.create_track("datagrams", crate::track::Info::timed())
+			.create_track("datagrams", crate::track::Info::default())
 			.unwrap();
 		let mut received = producer.subscribe(None);
 		subscriber.subscribes.lock().insert(
@@ -5969,7 +6029,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			id,
 			TrackEntry {
 				producer: producer.clone(),
-				framing: producer.info().into(),
+				framing: lite::Framing::new(producer.info(), self.subscriber.version),
 				tail: tail.clone(),
 			},
 		);
@@ -6299,7 +6359,12 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 					let res = ready!(info.poll_fetch(&self.serve, waiter));
 					let request = request.take().expect("request pending");
 					match res {
-						Ok((info, held)) => {
+						Ok((mut info, held)) => {
+							// Lite05/06 timestamps may be send times, so the copy is untimed
+							// and the ingest reads past them (see `lite::Framing::new`).
+							if !self.serve.subscriber.version.has_media_time() {
+								info.timescale = None;
+							}
 							let mut serve_loop = ServeLoop::new(&self.serve, request, info);
 							serve_loop.held = Some(held);
 							self.state = TrackRunState::Serve(serve_loop);
@@ -6467,12 +6532,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					// window matches what the upstream advertises (relays re-serve with
 					// the same bound). `broadcast` is left at its default here;
 					// `track::Request::accept` stamps the track's real broadcast.
-					let model = track::Info::default()
-						.with_timescale(info.timescale)
-						.with_max_age(info.max_age)
-						.with_priority(info.priority)
-						.with_refresh(info.refresh)
-						.with_compress(info.compress);
+					let model = track::Info::from(info);
 					if !ietf {
 						return Poll::Ready(Ok((model, HeldTrack(stream))));
 					}
@@ -7346,7 +7406,12 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						stream,
 						producer: crate::recv::Group::new(producer),
 						joined,
-						ingest: Box::new(FrameIngest::new((&self.info).into(), ietf, frame_start)),
+						ingest: Box::new(FrameIngest::new(
+							lite::Framing::new(&self.info, self.serve.subscriber.version),
+							self.serve.subscriber.version,
+							ietf,
+							frame_start,
+						)),
 					};
 				}
 				FetchRunState::Ingest {

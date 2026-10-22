@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 #[cfg(apple)]
 use std::io::{self, IoSlice};
 #[cfg(not(any(
