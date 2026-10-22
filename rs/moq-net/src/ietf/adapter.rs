@@ -871,11 +871,10 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 	/// Open a real (non-virtual) bidi stream, bypassing control stream multiplexing.
 	/// Used for v16 SubscribeNamespace which moved to its own bidi stream.
 	pub async fn open_native_bi(&mut self) -> Result<(AdapterSend<S>, AdapterRecv<S>), crate::Error> {
-		let (send, recv) = self
-			.inner
-			.open_bi(Default::default())
+		let (send, recv) = kio::wait(|waiter| self.inner.poll_open_request(&mut waiter.context(), Default::default()))
 			.await
-			.map_err(|_| crate::Error::Closed)?;
+			.map_err(crate::Error::from_transport)?
+			.ok_or(crate::Error::NoStreamCredit)?;
 		Ok((AdapterSend::Real(send), AdapterRecv::Real(recv)))
 	}
 
@@ -1350,6 +1349,17 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 			AdapterSend::Virtual(send),
 			AdapterRecv::Virtual(crate::transport::poll::Buffered::new(recv)),
 		)))
+	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut std::task::Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+		self.poll_open_bi(cx, options).map_ok(Some)
 	}
 
 	fn poll_open_uni(

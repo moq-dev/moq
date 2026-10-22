@@ -32,11 +32,34 @@ its session can ask the same way. iroh, wrapped through
 `web-transport-trait`, has no credit query and, as an accepted exception,
 keeps waiting. This quest gives the qmux session the non-waiting open. Say in the PR which backends fail fast.
 
-Propose the error variant's name in the PR. Public API: one new `Error`
-variant, and possibly a `transport::poll` session method. Wire: none.
+Native implementation in this PR: `Error::NoStreamCredit` and required
+`transport::poll::Session::poll_open_request`, returning `None` when admission
+has no credit and `Pending` while an admitted WebTransport header waits for send
+capacity. QUIC/WebTransport on tokio and io_uring, and qmux, fail fast; iroh waits.
+No answer timer is added to the covered requests; outgoing namespace
+advertisements retain their independent existing timer/reoffer policy, except
+that missing stream credit refuses one terminally without retrying or closing
+the session. Public API naming remains
+for the maintainer to settle. Wire: none.
+
+Browser-backed Rust remains unresolved: pinned `web-transport-wasm` 0.8.5 sets
+`waitUntilAvailable = true` privately, exposing neither a nonwaiting open nor
+the underlying browser session. Current engines usually ignore the option,
+but that cannot guarantee the contract when they implement it. Decide whether
+to narrow this quest to native backends and plan upstream browser support
+separately, or add the upstream API/release/pin work here before completion.
 
 Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
 order, this quest on the receive-lease shape from
 [moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878), then the send
 domain in [broadcast fairness](/quest/m2/broadcast-fairness.md), so
 implementers rebase on one shape at a time.
+
+
+Announcement-interest errors also need a model decision. The existing announce
+consumer returns only events and a unit-valued sync signal, with no per-source
+failure channel. Refusal currently logs `NoStreamCredit`, settles the snapshot,
+and leaves unrelated session work running; callers see a synced empty feed
+rather than an error. Choose an explicit per-interest/source result API that
+preserves merged unrelated sources, or accept that discovery limitation. Do not
+mark this quest complete before settling it.

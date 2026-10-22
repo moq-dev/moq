@@ -43,7 +43,8 @@ JS (`js/net/src/`):
   (no JS consumer), `Broadcast.Producer.demand()` and `Broadcast.Demand`,
   `Auth.None`, `Auth.grantsEqual`, `Auth.Handle.requests()` with `Request`,
   `Issued`, `Requests` (P2P is m2), `Epoch.toBytes`/`fromBytes` (wire only),
-  `Error.NoStreamCredit` (no Rust twin), and the runtime `Track.liteTimescale`.
+  and the runtime `Track.liteTimescale`. Keep `Error.NoStreamCredit`, which
+  mirrors Rust request admission refusal.
 - `Track.Demand.priority` is the publisher priority while
   `Track.Request.priority` is the subscriber's; Rust `Demand` has none.
   Remove it from `Demand` and have `Bandwidth.Allocator` read it from `Info`.

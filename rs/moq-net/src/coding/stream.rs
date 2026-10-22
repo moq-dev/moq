@@ -31,8 +31,9 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		let (send, recv) =
-			ready!(session.poll_open_bi(cx, Default::default())).map_err(|err| version.transport_error(err))?;
+		let (send, recv) = ready!(session.poll_open_request(cx, Default::default()))
+			.map_err(|err| version.transport_error(err))?
+			.ok_or(Error::NoStreamCredit)?;
 		Poll::Ready(Ok(Self::build(send, recv, version)))
 	}
 
@@ -41,11 +42,7 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		let (send, recv) = session
-			.open_bi(Default::default())
-			.await
-			.map_err(|err| version.transport_error(err))?;
-		Ok(Self::build(send, recv, version))
+		kio::wait(|waiter| Self::poll_open(session, version.clone(), &mut waiter.context())).await
 	}
 
 	/// Poll accepting a new stream with the given version.
@@ -66,7 +63,7 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 		Ok(Self::build(send, recv, version))
 	}
 
-	fn build(send: S::SendStream, recv: S::RecvStream, version: V) -> Self
+	pub(crate) fn build(send: S::SendStream, recv: S::RecvStream, version: V) -> Self
 	where
 		V: Clone,
 	{
@@ -90,6 +87,53 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 mod tests {
 	use super::*;
 	use crate::lite::{Version, test_transport::SinkSession};
+
+	#[test]
+	fn request_refusal_is_local_and_does_not_open_a_stream() {
+		use crate::lite::test_transport::ScriptedSession;
+		for version in [
+			crate::Version::Lite(Version::Lite07),
+			crate::Version::Ietf(crate::ietf::Version::Draft19),
+		] {
+			let mut session = ScriptedSession::new(Vec::new()).without_credit();
+			let mut cx = Context::from_waker(std::task::Waker::noop());
+			for _ in 0..2 {
+				assert!(matches!(
+					Stream::poll_open(&mut session, version, &mut cx),
+					Poll::Ready(Err(Error::NoStreamCredit))
+				));
+			}
+			assert_eq!(session.log.bi_opens(), 0);
+		}
+		assert_eq!(
+			crate::StreamError::from(&Error::NoStreamCredit),
+			crate::StreamError::Internal
+		);
+		assert_eq!(
+			crate::SessionError::from(&Error::NoStreamCredit),
+			crate::SessionError::Internal
+		);
+	}
+
+	#[test]
+	fn request_header_backpressure_is_not_credit_refusal() {
+		use crate::lite::test_transport::ScriptedSession;
+		let gate = kio::Producer::new(false);
+		let mut session = ScriptedSession::gated_open(Vec::new(), gate.consume());
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		assert!(Stream::poll_open(&mut session, Version::Lite07, &mut cx).is_pending());
+		{
+			let Ok(mut open) = gate.write() else {
+				panic!("gate is still live");
+			};
+			*open = true;
+		}
+		assert!(matches!(
+			Stream::poll_open(&mut session, Version::Lite07, &mut cx),
+			Poll::Ready(Ok(_))
+		));
+		assert_eq!(session.log.bi_opens(), 1);
+	}
 
 	/// Opening a control stream must set its send order, or a saturated link
 	/// starves it: quinn schedules strictly by priority and round-robins only

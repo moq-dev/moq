@@ -398,7 +398,11 @@ impl Client {
 			Some(p) => return Err(Error::UnknownAlpn(p.to_string())),
 		};
 
-		let mut stream = Stream::open(&mut session, encoding).await?;
+		let (send, recv) = session
+			.open_bi(Default::default())
+			.await
+			.map_err(Error::from_transport)?;
+		let mut stream = Stream::build(send, recv, encoding);
 
 		// The encoding is always an IETF version for SETUP negotiation.
 		let ietf_encoding = ietf::Version::try_from(encoding).map_err(|_| Error::Version)?;
@@ -662,6 +666,17 @@ mod tests {
 			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			Poll::Ready(self.state.control_stream.lock().unwrap().take().ok_or(FakeError))
+		}
+
+		fn poll_open_request(
+			&mut self,
+			cx: &mut std::task::Context<'_>,
+			options: crate::transport::poll::SendOptions<
+				'_,
+				<Self::SendStream as crate::transport::poll::SendStream>::Group,
+			>,
+		) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+			self.poll_open_bi(cx, options).map_ok(Some)
 		}
 
 		fn poll_open_uni(
@@ -1061,6 +1076,30 @@ mod tests {
 						_local: self._local.clone(),
 					},
 				)
+			})
+		}
+
+		fn poll_open_request(
+			&mut self,
+			cx: &mut std::task::Context<'_>,
+			options: crate::transport::poll::SendOptions<
+				'_,
+				<Self::SendStream as crate::transport::poll::SendStream>::Group,
+			>,
+		) -> std::task::Poll<Result<Option<crate::transport::poll::BiStreams<Self>>, Self::Error>> {
+			self.inner.poll_open_request(cx, options).map_ok(|streams| {
+				streams.map(|(send, recv)| {
+					(
+						LocalSend {
+							inner: send,
+							_local: self._local.clone(),
+						},
+						LocalRecv {
+							inner: recv,
+							_local: self._local.clone(),
+						},
+					)
+				})
 			})
 		}
 

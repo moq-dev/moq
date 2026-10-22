@@ -3244,16 +3244,23 @@ where
 		params: ietf::AdvertParams,
 		auth: Option<crate::auth::Auth>,
 	) -> Result<Refused, Error> {
-		let request_id = self.control.next_request_id(&self.runtime).await?;
-
 		// Bounded, because an advertisement holds its stream for as long as the namespace
 		// lives: a peer whose concurrent-stream limit we have filled makes this open block,
 		// and the withdrawals queued behind it are the only thing that would free a slot.
 		// Giving up records nothing, so the namespace is simply retried later.
-		let Some(mut request) = self.open_request().await? else {
-			tracing::debug!(broadcast = %self.origin.absolute(path), "no stream for the advertisement");
-			return Ok(Refused::No);
+		let mut request = match self.open_request().await {
+			Ok(Some(request)) => request,
+			Ok(None) => {
+				tracing::debug!(broadcast = %self.origin.absolute(path), "no stream for the advertisement");
+				return Ok(Refused::No);
+			}
+			Err(Error::NoStreamCredit) => {
+				tracing::debug!(broadcast = %self.origin.absolute(path), "advertisement refused without stream credit");
+				return Ok(Refused::Never);
+			}
+			Err(err) => return Err(err),
 		};
+		let request_id = self.control.next_request_id(&self.runtime).await?;
 
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
 		let sent = async {
@@ -14304,9 +14311,8 @@ mod tests {
 		}
 	}
 
-	/// A peer out of stream credit parks the open. That must not wedge the loop, because
-	/// the withdrawals queued behind it are the only thing that frees a slot: an open that
-	/// never gives up is a deadlock, not a delay.
+	/// Send capacity can park an admitted stream's header. That must not wedge the loop:
+	/// withdrawals queued behind it still need to progress.
 	///
 	/// Draft-14 so the withdrawal names its namespace on the wire, which is what makes the
 	/// loop's progress visible while every open is blocked.
@@ -14318,7 +14324,7 @@ mod tests {
 		let first = origin.announce("first-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
-		// Open: the peer still has credit for the first advertisement, and answers it.
+		// The first advertisement has send capacity, and the peer answers it.
 		let gate = kio::Producer::new(true);
 		let ok = publish_namespace_ok(VERSION).await;
 		let session = crate::lite::test_transport::ScriptedSession::gated_open(vec![ok.clone(), ok], gate.consume());
@@ -14348,12 +14354,12 @@ mod tests {
 			"the first advertisement never went out"
 		);
 
-		// Credit runs out, and a second namespace wants a stream we cannot get.
+		// Send capacity runs out before the second advertisement can send its header.
 		set_gate(&gate, false);
 		let _second = origin.announce("second-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
-		// Retiring the first frees a slot and needs no new stream, so the loop has to reach
+		// Retiring the first needs no new stream, so the loop has to reach
 		// it despite the open above.
 		drop(first);
 
@@ -14370,7 +14376,7 @@ mod tests {
 			"PUBLISH_NAMESPACE_DONE never sent: the open wedged the loop"
 		);
 
-		// Credit returns, and nothing else about the origin changes.
+		// Send capacity returns, and nothing else about the origin changes.
 		set_gate(&gate, true);
 
 		for _ in 0..100 {
@@ -15725,18 +15731,73 @@ mod tests {
 		}
 	}
 
-	/// Credit returning raises no signal of its own: no announce, no route change, nothing
+	#[moq_clock::test]
+	async fn an_advertisement_without_credit_is_terminal_and_spends_no_id() {
+		use std::sync::atomic::Ordering;
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft19,
+		] {
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let _first = origin.announce("refused", crate::origin::Route::default()).unwrap();
+			settle().await;
+			let session =
+				crate::lite::test_transport::ScriptedSession::new(publish_namespace_ok(version).await).without_credit();
+			let log = session.log.clone();
+			let control = Control::new(None, false);
+			let publisher = Publisher::new(
+				crate::time::sim(),
+				session.clone(),
+				origin.consume(),
+				control.clone(),
+				None,
+				declared(Some(false)),
+				version,
+			);
+			let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			assert_eq!(log.request_attempts.load(Ordering::Relaxed), 1, "{version}");
+			session.grant_credit();
+			for _ in 0..30 {
+				tick().await;
+				assert!(futures::poll!(run.as_mut()).is_pending());
+			}
+			assert_eq!(
+				log.request_attempts.load(Ordering::Relaxed),
+				1,
+				"{version}: refusal is not retried"
+			);
+			assert!(log.closes().is_empty());
+			let _second = origin.announce("admitted", crate::origin::Route::default()).unwrap();
+			settle().await;
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			assert_eq!(log.bi_opens(), 1, "{version}: unrelated advertisement still runs");
+			assert_eq!(occurrences(&log, b"refused"), 0);
+			assert_eq!(occurrences(&log, b"admitted"), 1);
+			assert!(log.closes().is_empty());
+			assert_eq!(
+				control.poll_next_request_id(&kio::Waiter::noop()),
+				Poll::Ready(RequestId(3)),
+				"{version}: only the admitted request spends an ID"
+			);
+		}
+	}
+
+	/// Send capacity returning raises no signal of its own: no announce, no route change, nothing
 	/// the loop is watching. Only a retry brings the namespace back, and without one it
 	/// stays undiscoverable for the life of the session.
 	#[moq_clock::test]
-	async fn a_namespace_refused_a_stream_is_retried_on_its_own() {
+	async fn an_advertisement_waiting_for_send_capacity_is_retried_on_its_own() {
 		const VERSION: Version = Version::Draft14;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let _cam = origin.announce("lonely-cam", crate::origin::Route::default()).unwrap();
 		settle().await;
 
-		// Closed from the start: the peer has granted nothing.
+		// No send capacity from the start: an admitted header cannot finish.
 		let gate = kio::Producer::new(false);
 		let ok = publish_namespace_ok(VERSION).await;
 		let session = crate::lite::test_transport::ScriptedSession::gated_open(vec![ok], gate.consume());
@@ -15761,7 +15822,7 @@ mod tests {
 		}
 		assert_eq!(occurrences(&log, b"lonely-cam"), 0, "advertised without a stream");
 
-		// Credit returns. Nothing else changes: no publish, no unannounce, no route move.
+		// Send capacity returns. Nothing else changes: no publish, no unannounce, no route move.
 		set_gate(&gate, true);
 
 		for _ in 0..100 {

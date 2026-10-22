@@ -111,6 +111,7 @@ pub struct Session<S: web_transport_trait::Session> {
 	accept_bi: OpSlot<BiResult<S>>,
 	open_uni: OpSlot<Result<S::SendStream, S::Error>>,
 	open_bi: OpSlot<BiResult<S>>,
+	request_bi: OpSlot<RequestResult<S>>,
 	recv_datagram: OpSlot<Result<Bytes, S::Error>>,
 	closed: OpSlot<S::Error>,
 }
@@ -121,6 +122,15 @@ type BiResult<S> = Result<
 		<S as web_transport_trait::Session>::SendStream,
 		<S as web_transport_trait::Session>::RecvStream,
 	),
+	<S as web_transport_trait::Session>::Error,
+>;
+
+/// A request's stream pair, or a refusal before consuming stream credit.
+type RequestResult<S> = Result<
+	Option<(
+		<S as web_transport_trait::Session>::SendStream,
+		<S as web_transport_trait::Session>::RecvStream,
+	)>,
 	<S as web_transport_trait::Session>::Error,
 >;
 
@@ -150,6 +160,7 @@ impl<S: web_transport_trait::Session> Session<S> {
 			accept_bi: OpSlot::default(),
 			open_uni: OpSlot::default(),
 			open_bi: OpSlot::default(),
+			request_bi: OpSlot::default(),
 			recv_datagram: OpSlot::default(),
 			closed: OpSlot::default(),
 		}
@@ -883,6 +894,9 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 
 #[cfg(feature = "quic")]
 impl Grouped for crate::quic::web::Session {
+	fn open_request(&self) -> impl std::future::Future<Output = RequestResult<Self>> + Send {
+		Self::open_request(self)
+	}
 	// Leased in the QUIC stack, so the receive window bounds what an incomplete message holds.
 	type Recv = crate::quic::web::RecvStream;
 

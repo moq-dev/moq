@@ -662,6 +662,28 @@ impl poll::Session for Session {
 		})
 	}
 
+	fn poll_open_request(
+		&mut self,
+		_cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SendGroup>,
+	) -> Poll<Result<Option<poll::BiStreams<Self>>, Error>> {
+		let mut state = self.inner.lock();
+		if let Some(err) = &state.closed {
+			return Poll::Ready(Err(err.clone()));
+		}
+		let id = state.conn.streams().open(Dir::Bi, to_quic(options));
+		if id.is_some() {
+			state.driver.wake();
+		}
+		drop(state);
+		Poll::Ready(Ok(id.map(|id| {
+			(
+				SendStream::new(self.inner.clone(), id),
+				RecvStream::new(self.inner.clone(), id),
+			)
+		})))
+	}
+
 	fn send_group(&mut self, priority: i64) -> Option<SendGroup> {
 		Some(Session::send_group(self, priority))
 	}

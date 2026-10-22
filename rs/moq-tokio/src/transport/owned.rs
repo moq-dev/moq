@@ -91,6 +91,26 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 			})
 			.map_err(Error)
 	}
+
+	fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, <S::SendStream as super::GroupedSend>::Group>,
+	) -> Poll<Result<Option<poll::BiStreams<Self>>, Self::Error>> {
+		let session = &self.session;
+		super::poll_op(&mut self.request_bi, cx, || {
+			let session = session.clone();
+			Box::pin(async move { session.open_request().await })
+		})
+		.map_ok(|streams| {
+			streams.map(|(send, recv)| {
+				let mut send = super::SendStream::new(send);
+				send.schedule(options);
+				(send, S::recv(super::RecvStream::new(recv)))
+			})
+		})
+		.map_err(Error)
+	}
 	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as super::GroupedSend>::Group> {
 		self.session.send_group(priority)
 	}

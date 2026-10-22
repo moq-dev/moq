@@ -602,6 +602,23 @@ impl std::fmt::Debug for Session {
 	}
 }
 
+impl Session {
+	pub(crate) fn poll_open_request(
+		&mut self,
+		cx: &mut Context<'_>,
+	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
+		if self.opening_bi.is_none() {
+			let Some((send, recv)) = self.conn.open_request().map_err(|err| self.map_err(err))? else {
+				return Poll::Ready(Ok(None));
+			};
+			let web = self.web.is_some();
+			let header = self.web.as_ref().map(|web| web.header_bi.clone()).unwrap_or_default();
+			self.opening_bi = Some((SendStream::new(send, web), RecvStream { inner: recv, web }, header));
+		}
+		web_transport_trait::poll::Session::poll_open_bi(self, cx).map_ok(Some)
+	}
+}
+
 impl web_transport_trait::poll::Session for Session {
 	type SendStream = SendStream;
 	type RecvStream = RecvStream;

@@ -374,6 +374,23 @@ impl Connection {
         }
     }
 
+    /// Open a request stream using only the credit already granted by the peer.
+    pub(crate) fn open_request(&self) -> Result<Option<(SendStream, RecvStream)>, ConnectionError> {
+        let mut state = self.0.state.lock("open_request");
+        if let Some(err) = &state.error {
+            return Err(err.clone());
+        }
+        let Some(id) = state.inner.streams().open(Dir::Bi, Default::default()) else {
+            return Ok(None);
+        };
+        let is_0rtt = state.inner.side().is_client() && state.inner.is_handshaking();
+        drop(state);
+        Ok(Some((
+            SendStream::new(self.0.clone(), id, is_0rtt),
+            RecvStream::new(self.0.clone(), id, is_0rtt),
+        )))
+    }
+
     /// Accept the next incoming uni-directional stream
     ///
     /// # Cancel safety

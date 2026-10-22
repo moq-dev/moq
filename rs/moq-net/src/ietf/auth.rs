@@ -333,12 +333,12 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 	/// Send the token, then track its grant until either side ends it, resolving with why.
 	#[cfg(feature = "async")]
 	async fn run(&self, token: Bytes) -> Error {
-		let request_id = match self.control.next_request_id(&self.runtime).await {
-			Ok(id) => id,
-			Err(err) => return err,
-		};
 		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
 			Ok(stream) => stream,
+			Err(err) => return err,
+		};
+		let request_id = match self.control.next_request_id(&self.runtime).await {
+			Ok(id) => id,
 			Err(err) => return err,
 		};
 		if let Err(err) = stream.writer.encode_message(&Auth { request_id, token }).await {
@@ -609,6 +609,30 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[cfg(feature = "async")]
+	#[moq_clock::test]
+	async fn auth_refused_without_credit_spends_no_request_id() {
+		for version in [Version::Draft17, Version::Draft19] {
+			for client in [false, true] {
+				let first = if client { 0 } else { 1 };
+				let control = Control::new(Some(RequestId(first + 1)), client);
+				let present = Present {
+					runtime: crate::time::sim(),
+					session: crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit(),
+					control: control.clone(),
+					handle: Handle::new(false),
+					version,
+					id: 0,
+				};
+				assert!(matches!(present.run(Bytes::new()).await, Error::NoStreamCredit));
+				assert_eq!(
+					control.poll_next_request_id(&kio::Waiter::noop()),
+					Poll::Ready(RequestId(first))
+				);
+			}
+		}
+	}
 
 	const VERSION: Version = Version::Draft17;
 

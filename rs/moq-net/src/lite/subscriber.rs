@@ -675,6 +675,10 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 			for (prefix, machine) in &mut self.prefixes {
 				match machine.poll(waiter) {
 					Poll::Ready(Ok(())) => ended.push(prefix.clone()),
+					Poll::Ready(Err(Error::NoStreamCredit)) => {
+						tracing::warn!(%prefix, "announce interest refused without stream credit");
+						ended.push(prefix.clone());
+					}
 					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 					Poll::Pending => {}
 				}
@@ -3689,8 +3693,43 @@ mod tests {
 		);
 	}
 
+	#[moq_clock::test]
+	async fn announce_interest_without_credit_keeps_the_session_alive() {
+		use std::sync::atomic::Ordering;
+		for version in [Version::Lite04, Version::Lite07] {
+			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let interest = origin.consume().announced();
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).without_credit();
+			let log = session.log.clone();
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session,
+				origin,
+				recv_bandwidth: None,
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+				cost: Some(1),
+				peer_hop: None,
+				going_away: Default::default(),
+				auth: crate::auth::Handle::new(false),
+			});
+			let mut driver = SubscriberDriver::new(subscriber, Vec::new(), false);
+			assert!(driver.poll(&kio::Waiter::noop()).is_pending());
+			assert_eq!(log.request_attempts.load(Ordering::Relaxed), 1, "{version}");
+			moq_clock::sleep(std::time::Duration::from_secs(20)).await;
+			assert!(driver.poll(&kio::Waiter::noop()).is_pending());
+			assert_eq!(
+				log.request_attempts.load(Ordering::Relaxed),
+				1,
+				"{version}: interest was not retried"
+			);
+			assert!(log.closes().is_empty());
+			assert!(interest.is_synced(), "a refused interest releases its snapshot");
+		}
+	}
+
 	/// A track still waiting on TRACK_INFO ends once nobody wants it, whether its TRACK
-	/// stream never opened (the peer's stream credit is spent), its request is stuck in
+	/// transport header never finished, its request is stuck in
 	/// send, or its peer never answers.
 	/// Otherwise every request a relay's front abandons (a failover, a reader leaving)
 	/// holds a task, a stream, and the track until the peer answers, which may be never.
@@ -7569,7 +7608,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						}
 					};
 
-					// Only once the stream opens: the open parks on stream credit and
+					// Only once the stream opens: its header can wait for send capacity and
 					// re-polls this state, so logging before it repeats per poll.
 					tracing::info!(broadcast = %self.serve.subscriber.log_path(&self.serve.path), track = %self.serve.name, group = self.group, "fetch started");
 
