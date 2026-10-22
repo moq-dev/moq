@@ -1096,7 +1096,7 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 		// SUBSCRIBE_TRACKS (draft-18+, #1542): the half of the SUBSCRIBE_NAMESPACE split
 		// that subscribes to all tracks under a prefix. We don't implement PUBLISH
 		// replication, so this is impossible to honor. Reject loudly.
-		ietf::SUBSCRIBE_TRACKS_ID => {
+		ietf::SubscribeTracks::ID => {
 			tracing::error!(
 				version = ?version,
 				"received SUBSCRIBE_TRACKS (0x51); not supported in moq-lite (no PUBLISH replication)"
@@ -1600,6 +1600,7 @@ mod tests {
 		assert_eq!(shared.control.pop().await.unwrap(), first);
 
 		let ok = ietf::RequestOk {
+			largest: None,
 			request_id: Some(RequestId(6)),
 			active: None,
 		};
@@ -2141,16 +2142,14 @@ mod tests {
 			let mut session = ScriptedSession::eof(Vec::new());
 			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
 			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
-			let (_handle, protocol) =
-				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
 
 			let mut session = DeadStreamSession::bis(0);
 			let stream = crate::coding::Stream::open(&mut session, version).await.unwrap();
 			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
-			let (_handle, protocol) =
-				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let err = adapter.run(stream.reader, stream.writer, protocol).await.unwrap_err();
 			assert!(matches!(err, Error::ProtocolViolation), "{version:?}: {err:?}");
 		}
@@ -2167,8 +2166,7 @@ mod tests {
 			let mut remote = crate::coding::Stream::accept(&mut peer, version).await.unwrap();
 			remote.reader.abort(&Error::Cancel);
 			let adapter = ControlStreamAdapter::new(session, Control::new(None, true), version);
-			let (_handle, protocol) =
-				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
+			let (_handle, protocol) = crate::goaway::Handle::new(false);
 			let res = moq_clock::timeout(
 				std::time::Duration::from_secs(10),
 				adapter.run(stream.reader, stream.writer, protocol),
@@ -2184,7 +2182,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn a_request_past_the_window_closes_the_session() {
 		let (adapter, reader, writer, _) = windowed(1, &[0, 2], &[]).await;
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 		let err = adapter.run(reader, writer, goaway).await.unwrap_err();
 		assert!(
 			matches!(err, Error::Session(crate::SessionError::TooManyRequests)),
@@ -2211,7 +2209,7 @@ mod tests {
 		let update = encode_raw(ietf::SubscribeUpdate::ID, &encode_body(&update, VERSION), VERSION);
 		// The target is in the window and the update's own ID is past it.
 		let (adapter, reader, writer, _) = windowed(2, &[0], &update).await;
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 		let err = adapter.run(reader, writer, goaway).await.unwrap_err();
 		assert!(
 			matches!(err, Error::Session(crate::SessionError::TooManyRequests)),
@@ -2240,8 +2238,7 @@ mod tests {
 			let adapter = ControlStreamAdapter::new(session, Control::new(None, false), version);
 			let log = Log::default();
 			let writer = Writer::new(SinkSend::new(log.clone()), version);
-			let (_, goaway) =
-				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+			let (_, goaway) = crate::goaway::Handle::new(true);
 			let mut run = std::pin::pin!(adapter.run(Reader::new(recv, version), writer, goaway));
 			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}");
 
@@ -2265,7 +2262,7 @@ mod tests {
 
 		const VERSION: Version = Version::Draft14;
 		let (mut adapter, reader, writer, log) = windowed(2, &[0, 2], &[]).await;
-		let (_, goaway) = crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_, goaway) = crate::goaway::Handle::new(true);
 		let runner = adapter.clone();
 		let mut run = std::pin::pin!(runner.run(reader, writer, goaway));
 		assert!(futures::poll!(run.as_mut()).is_pending());

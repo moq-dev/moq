@@ -10,7 +10,7 @@ replacement.
 
 Recurs once per major release (decided 2026-10-19). The PR that finishes
 this run also adds the next one with the same file name at the end of the next
-milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal
+milestone's `Required` (m0 to m1, m1 to m2, m2 to m3). The successor keeps the Goal
 and this paragraph; the rest of its Plan is rewritten with what this run
 learned: baselines, results, and what to check first. A successor placed in m2
 also lists the [release cut](/quest/m2/release/cut.md) under `Required`, so it
@@ -22,43 +22,70 @@ follow-up through `/quest-plan`.
 
 Research the state of the art for each candidate: compare maintenance,
 performance, and API fit before planning a swap. Respect Dependabot's 7-day
-cooldown for manual bumps too.
+cooldown for manual bumps too; security fixes bypass it.
 
 ### Check first
 
-Dependabot's grouped weekly PRs only took semver-compatible updates in the m0
-run: tikv-jemallocator 0.7 sat unproposed for five months. List majors (0.x
-minors included) for every direct dependency with `--all-features` metadata
-against the crates.io index, and every `package.json` range against npm.
-Also confirm each Bun lockfile is in `.github/dependabot.yml` (infra/moq-sh
-was missing) and that every Dependabot `ignore` still blocks something.
+Dependabot misses three kinds of update, so list them by hand:
 
-Majors still open at the end of m0:
+- Majors and 0.x minors. `cargo upgrade --dry-run --incompatible allow
+  --pinned allow --ignore-rust-version` lists them for every manifest;
+  without `--ignore-rust-version` it hides any release above a crate's MSRV.
+  `bun outdated -r` covers the workspace; run `bun outdated` in each
+  standalone Bun project too.
+- `0.0.x` ranges and `npm:` aliases. `npm:@types/web@^0.0.350` sat for four
+  months with no proposal.
+- Lockfiles Dependabot doesn't know about. Compare `git ls-files '*.lock'
+  '*flake.lock'` against `.github/dependabot.yml`. The m1 run found infra/mbx,
+  infra/nix, and test/smoke/flake.lock missing, all added that week.
+  Bun's coverage is now a `/infra/*` glob, and `just js audit` and
+  `just js workers` walk every tracked `bun.lock`.
 
-- gstreamer 0.25 needs Rust 1.92; moq-gst is on 0.24 under the 1.91 MSRV.
-- vt100 0.17 and 0.18 (moq-cli dev-dependency) were inside the cooldown.
-- http-cache-reqwest stays on its 1.0 prerelease until 1.0 ships stable.
+Deliberately uncovered: `dart/moq` (see the comment in
+`.github/dependabot.yml`), `bench/ffi-gen/Cargo.lock` (a one-off BoltFFI
+comparison), and `nix/uniffi-dart-Cargo.lock` (pinned with the generator).
+The uniffi `>=0.33` ignore blocks nothing until 0.33 ships; keep it, since it
+ties uniffi to the Go generator.
+
+Open at the end of the m1 run:
+
+- vt100 0.17 and 0.18 (moq-cli dev-dependency) were still inside the
+  cooldown (published 2026-10-18 and 19).
+- web-transport-iroh 0.8.4 takes kio 0.6, removing the kio 0.5 duplicate.
+  It shipped the day of the run, so Dependabot's cargo group should land it;
+  confirm.
+- `test/smoke/flake.lock` lands through the Smoke toolchain update workflow,
+  which bumps the npm `playwright` pin with it; Dependabot auto-merge refuses
+  a lock-only smoke PR. Confirm those coupled PRs land.
+- http-cache-reqwest stays on its 1.0 prerelease (alpha.9) until 1.0 ships.
 
 Advisories waiting on upstream, with no exceptions or overrides added:
 
 - ashpd 0.13 pulls zbus 5 and the unmaintained zvariant, zvariant_derive, and
   zbus_names (RUSTSEC-2026-0370, 0371, 0372). Upstream's
   [zbus 6 port](https://github.com/bilelmoussaoui/ashpd/pull/491) is open.
-- The root Bun audit has six findings in four packages: VitePress 1.6.4 pins
+- basic-toml (RUSTSEC-2026-0374) comes through askama_derive's default
+  `config` feature in uniffi_bindgen 0.32, which reads its `askama.toml`.
+  It only reaches the generator-only uniffi fork and never ships.
+- The root Bun audit has nine findings in four packages: VitePress 1.6.4 pins
   Vite 5 and its vulnerable esbuild (VitePress 2 is still alpha),
   `@tailwindcss/typography` 0.5.20 pins postcss-selector-parser 6, and braces
   3.0.3 has no fix for
   [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm).
-  The four Worker lockfiles audit clean.
+  The Worker lockfiles audit clean.
 - paste (RUSTSEC-2024-0436) remains through tikv-jemalloc-ctl and iroh's
   netlink-packet-core 0.8. tikv-jemallocator's unreleased main drops it.
 
-### Baselines (2026-10-19, end of m0)
+### Baselines (2026-10-20, m1 run)
 
-Cargo.lock: 1,079 packages, 91 names with several versions (110 extra).
-Root bun.lock: 660 package names, 72 with several versions (81 extra),
-counted per name in its `packages` table; the Worker locks have none. Most
-duplicates are ecosystem transitions owned upstream:
+Count registry packages only: moq-auth and moq-pattern deliberately depend on
+their own published versions for compatibility tests, and the uniffi fork is
+a git source.
+
+Cargo.lock: 1,081 packages, 91 registry names with several versions (109
+extra). Root bun.lock: 660 non-workspace package names, 72 with several
+versions (81 extra), counted per name in its `packages` table; the Worker
+locks have none. Most duplicates are ecosystem transitions owned upstream:
 
 - RustCrypto's previous generation (digest 0.10, sha2 0.10, hmac 0.12, der
   0.7, pkcs8 0.10): rsa, stun-types, http-auth, srt-protocol, jsonwebtoken.
@@ -71,13 +98,14 @@ duplicates are ecosystem transitions owned upstream:
 - rustls-acme holds rcgen 0.13, pem 3, and async-web-client (thiserror 1,
   webpki-roots 0.26). winit 0.30 holds rustix 0.38, x11rb 0.13, and objc2 0.5
   until 0.31 leaves beta.
-- Our own crates: web-transport-iroh 0.8.3 holds kio 0.5 (main already takes
-  0.6; iroh is an accepted exception to moq taking no new work in
-  moq-dev/web-transport, so this lasts until that crate is released on its own), moq-vaapi holds bindgen
-  0.70, libloading 0.8, and thiserror 1, and mp4-atom holds thiserror 1.
+- gstreamer 0.25 moved to system-deps 9; libspa (PipeWire) still holds 7.
+- Our own crates: web-transport-iroh 0.8.3 holds kio 0.5 (see above),
+  moq-vaapi holds bindgen 0.70, libloading 0.8, and thiserror 1, and mp4-atom
+  holds thiserror 1.
 - Bun has no dedupe, so same-major duplicates (`@babel/types`,
   `@vue/shared`, `minimatch`, `picomatch`, `yaml`) persist until a parent
-  re-resolves.
+  re-resolves. A transitive-only security bump means editing the lock entry
+  (version and integrity) and verifying with `bun install --frozen-lockfile`.
 
 ### Kept on purpose
 
@@ -89,6 +117,8 @@ duplicates are ecosystem transitions owned upstream:
 - assert_matches, cpu-time, stats_alloc: moq-quic stays close to quinn.
 - unsafe-libopus: the [Opus backend](/quest/m2/audio-opus-backend.md) quest
   owns the comparison.
+- moq-gst declares `rust-version = "1.92"` for gstreamer 0.25, above the
+  1.91 workspace floor, the same way moq-relay and moq-cli carry their own.
 
 ### Hand-rolled code
 
@@ -101,3 +131,9 @@ hex formatting in moq-auth and moq-hls, the STUN token bucket, the JS
 deep-equal pair, and duplicated WebVTT stamps and `jwt=` lookups.
 `js/publish` and `js/watch` carry byte-identical UI helpers (`graph.ts` and
 near copies), which is duplication rather than a dependency question.
+The m1 run came a day after m0's and did not re-review it; check code
+added since.
+
+## Required
+
+- [Release cut](/quest/m2/release/cut.md) - the breaking release ships before the next run

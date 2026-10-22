@@ -21,4 +21,3 @@ Public API: none. Wire: none.
 ## Required
 
 - [Binding linger](/quest/m1/linger-ffi.md) - bindings finish a broadcast, so the binding interop clients can
-- [JS linger](/quest/m1/linger-js.md) - js/net finishes a broadcast, so the JS interop client can
