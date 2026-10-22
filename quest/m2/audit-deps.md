@@ -64,13 +64,9 @@ Advisories waiting on upstream:
 - ashpd 0.13 pulls zbus 5 and the unmaintained zvariant, zvariant_derive, and
   zbus_names (RUSTSEC-2026-0370, 0371, 0372). Upstream's
   [zbus 6 port](https://github.com/bilelmoussaoui/ashpd/pull/491) is open.
-  Exact unmaintained exceptions in `deny.toml` remain until the
-  [stable ashpd upgrade](/quest/m2/ashpd-maintained.md).
 - basic-toml (RUSTSEC-2026-0374) comes through askama_derive's default
   `config` feature in uniffi_bindgen 0.32, which reads its `askama.toml`.
-  It only reaches the generator-only uniffi fork and never ships. The exact
-  unmaintained exception in `deny.toml` remains until the
-  [stable Askama upgrade](/quest/m2/askama-maintained.md).
+  It only reaches the generator-only uniffi fork and never ships.
 - The root Bun audit has nine findings in four packages: VitePress 1.6.4 pins
   Vite 5 and its vulnerable esbuild (VitePress 2 is still alpha),
   `@tailwindcss/typography` 0.5.20 pins postcss-selector-parser 6, and braces
