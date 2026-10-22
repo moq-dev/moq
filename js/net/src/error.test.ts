@@ -94,7 +94,6 @@ test("the error type names the registry the code came from", () => {
 });
 
 test("invalid request IDs keep their session registry code", () => {
-	expect(Number(SessionCode.InvalidRequestId)).toBe(0x4);
 	expect(fromClose({ closeCode: 0x4 })?.code).toBe(SessionCode.InvalidRequestId);
 });
 
@@ -207,23 +206,52 @@ test("fromClose: a clean close is null, a coded close keeps its code", () => {
 	expect(fromClose({ closeCode: SessionCode.GoawayTimeout })?.message).toBe("remote error: 16");
 });
 
-// The two registries are wire contracts (draft-lcurley-moq-lite, Error Codes) and must match
-// the Rust tables, since the two implementations talk to each other.
-test("the code tables match the spec", () => {
-	// moq-transport's, reused unchanged.
-	expect(Number(SessionCode.Cancel)).toBe(0x0);
-	expect(Number(SessionCode.Unauthorized)).toBe(0x2);
-	expect(Number(SessionCode.GoawayTimeout)).toBe(0x10);
-	expect(Number(SessionCode.AuthTokenCacheOverflow)).toBe(0x13);
-	expect(Number(SessionCode.Version)).toBe(0x15);
-	expect(Number(SessionCode.UnknownAuthTokenAlias)).toBe(0x17);
-	expect(Number(SessionCode.InvalidPath)).toBe(0x8);
-	expect(Number(SessionCode.InvalidAuthority)).toBe(0x19);
-	expect(Number(SessionCode.TooManyRequestUpdates)).toBe(0x1b);
-	expect(Number(StreamCode.Cancel)).toBe(0x1);
-	expect(Number(StreamCode.SessionClosed)).toBe(0x3);
-	expect(Number(StreamCode.TooFarBehind)).toBe(0x5);
+// The two registries are wire contracts (draft-lcurley-moq-lite, Error Codes). Encoder and
+// decoder share these constants, so only a spec table catches a renumbering.
+test("session codes match the draft's Session Error Codes table", () => {
+	expect({ ...SessionCode } as Record<string, number>).toEqual({
+		Cancel: 0x0,
+		Internal: 0x1,
+		Unauthorized: 0x2,
+		ProtocolViolation: 0x3,
+		InvalidRequestId: 0x4,
+		KeyValueFormatting: 0x6,
+		TooManyRequests: 0x7,
+		InvalidPath: 0x8,
+		GoawayTimeout: 0x10,
+		Timeout: 0x11,
+		AuthTokenCacheOverflow: 0x13,
+		Version: 0x15,
+		UnknownAuthTokenAlias: 0x17,
+		Expired: 0x18,
+		InvalidAuthority: 0x19,
+		TooManyRequestUpdates: 0x1b,
+		Unsupported: 0x30,
+	});
+});
 
+test("stream codes match the draft's Stream Error Codes table", () => {
+	expect({ ...StreamCode } as Record<string, number>).toEqual({
+		Internal: 0x0,
+		Cancel: 0x1,
+		DeliveryTimeout: 0x2,
+		SessionClosed: 0x3,
+		GoingAway: 0x4,
+		TooFarBehind: 0x5,
+		MalformedTrack: 0x12,
+		ControlTimeout: 0x31,
+		GroupTooLarge: 0x32,
+		NotFound: 0x33,
+		Old: 0x34,
+		Evicted: 0x35,
+		Unroutable: 0x36,
+		FrameTooLarge: 0x38,
+		TimestampMismatch: 0x39,
+		Unauthorized: 0x3b,
+	});
+});
+
+test("the code tables keep their registry ranges", () => {
 	// Session codes retain moq-transport assignments below 32; Lite owns 48-63.
 	for (const code of Object.values(SessionCode)) {
 		if (code === SessionCode.Unsupported) {
@@ -233,7 +261,6 @@ test("the code tables match the spec", () => {
 			expect(code).toBeLessThan(32);
 		}
 	}
-	expect(Number(SessionCode.Unsupported)).toBe(0x30);
 
 	// The stream table adds moq-lite's own 48-63 assignments. 32-47 is reserved and
 	// carries nothing, so no code sits there.
@@ -256,20 +283,8 @@ test("the code tables match the spec", () => {
 			expect(code).toBeLessThan(32);
 		}
 	}
-	// The values the Rust `StreamError` sends for the same conditions.
-	expect(Number(StreamCode.ControlTimeout)).toBe(0x31);
-	expect(Number(StreamCode.GroupTooLarge)).toBe(0x32);
-	expect(Number(StreamCode.NotFound)).toBe(0x33);
-	expect(Number(StreamCode.Old)).toBe(0x34);
-	expect(Number(StreamCode.Evicted)).toBe(0x35);
-	expect(Number(StreamCode.Unroutable)).toBe(0x36);
-	expect(Number(StreamCode.FrameTooLarge)).toBe(0x38);
-	expect(Number(StreamCode.TimestampMismatch)).toBe(0x39);
-	expect(Number(StreamCode.Unauthorized)).toBe(0x3b);
-
 	// The spaces are disjoint: 0 ends a session cleanly but fails a stream.
 	expect(Number(SessionCode.Cancel)).not.toBe(Number(StreamCode.Cancel));
-	expect(Number(StreamCode.Internal)).toBe(0x0);
 });
 
 test("fromTransport: decodes a real qmux stream reset", () => {

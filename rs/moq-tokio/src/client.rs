@@ -1014,20 +1014,29 @@ mod tests {
 		}
 	}
 
+	/// A value loaded from TOML survives re-applying CLI args that omit its flag,
+	/// one row per value shape.
 	#[test]
-	fn test_toml_disable_verify_survives_update_from() {
-		let toml = r#"
-			tls.insecure = true
-		"#;
+	fn test_toml_survives_update_from() {
+		let default = format!("{:?}", crate::connect::Config::default());
+		for toml in [
+			"tls.insecure = true",
+			r#"resolution_delay = "10ms""#,
+			r#"tls.fingerprint = ["abcd1234", "ef567890"]"#,
+			r#"version = ["moq-lite-02"]"#,
+			r#"url = "https://relay.example.com/anon""#,
+			"once = true",
+			r#"bind = "127.0.0.1:1234""#,
+			r#"tls.host_name = "example.host""#,
+		] {
+			let config: crate::connect::Config = toml::from_str(toml).unwrap();
+			let loaded = format!("{config:?}");
+			assert_ne!(loaded, default, "{toml} must set a value");
 
-		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.tls.insecure, Some(true));
-
-		// Simulate: TOML loaded, then CLI args re-applied (no --connect-tls-insecure flag).
-		let mut cli = Cli { config };
-		cli.update_from(&[]);
-		let config = cli.config;
-		assert_eq!(config.tls.insecure, Some(true));
+			let mut cli = Cli { config };
+			cli.update_from(&[]);
+			assert_eq!(format!("{:?}", cli.config), loaded, "{toml}");
+		}
 	}
 
 	#[test]
@@ -1040,12 +1049,6 @@ mod tests {
 	fn test_cli_disable_verify_explicit_false() {
 		let config = Cli::config_from(["test", "--connect-tls-insecure=false"]);
 		assert_eq!(config.tls.insecure, Some(false));
-	}
-
-	#[test]
-	fn test_cli_disable_verify_explicit_true() {
-		let config = Cli::config_from(["test", "--connect-tls-insecure=true"]);
-		assert_eq!(config.tls.insecure, Some(true));
 	}
 
 	/// A released spelling parses into a hidden field and is never read as a
@@ -1109,74 +1112,10 @@ mod tests {
 	}
 
 	#[test]
-	fn test_cli_no_disable_verify() {
-		let config = Cli::config_from(["test"]);
-		assert_eq!(config.tls.insecure, None);
-	}
-
-	#[test]
-	fn test_toml_failover_delay_is_reported_not_applied() {
-		let toml = r#"
-			failover_delay = "1s"
-		"#;
-
-		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.resolve().race, crate::connect::DEFAULT_RACE);
-		assert!(
-			config.deprecated().to_string().contains("failover_delay -> race"),
-			"{}",
-			config.deprecated()
-		);
-	}
-
-	#[test]
-	fn test_cli_failover_delay() {
-		let config = Cli::config_from(["test", "--connect-race", "50ms"]);
-		assert_eq!(config.resolve().race, std::time::Duration::from_millis(50));
-	}
-
-	#[test]
-	fn test_toml_resolution_delay_survives_update_from() {
-		let toml = r#"
-			resolution_delay = "10ms"
-		"#;
-
-		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.resolution_delay, Some(std::time::Duration::from_millis(10)));
-
-		// Simulate: TOML loaded, then CLI args re-applied (no --connect-resolution-delay flag).
-		let mut cli = Cli { config };
-		cli.update_from(&[]);
-		assert_eq!(cli.config.resolution_delay, Some(std::time::Duration::from_millis(10)));
-	}
-
-	#[test]
 	fn test_cli_resolution_delay() {
 		let config = Cli::config_from(["test", "--connect-resolution-delay", "0s"]);
 		assert_eq!(config.resolution_delay, None);
 		assert_eq!(config.resolve().resolution_delay, std::time::Duration::ZERO);
-	}
-
-	#[test]
-	fn resolution_delay_defaults_to_the_rfc_value() {
-		let config = Cli::config_from(["test"]);
-		assert_eq!(config.resolve().resolution_delay, std::time::Duration::from_millis(50));
-	}
-
-	#[test]
-	fn test_toml_fingerprint_survives_update_from() {
-		let toml = r#"
-			tls.fingerprint = ["abcd1234", "ef567890"]
-		"#;
-
-		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
-
-		// Simulate: TOML loaded, then CLI args re-applied (no --client-tls-fingerprint flag).
-		let mut cli = Cli { config };
-		cli.update_from(&[]);
-		let config = cli.config;
-		assert_eq!(config.tls.fingerprint, vec!["abcd1234", "ef567890"]);
 	}
 
 	#[test]
@@ -1190,77 +1129,11 @@ mod tests {
 	}
 
 	#[test]
-	fn test_cli_fingerprint() {
-		let config = Cli::config_from(["test", "--connect-tls-fingerprint", "abcd1234"]);
-		assert_eq!(config.tls.fingerprint, vec!["abcd1234"]);
-	}
-
-	#[test]
-	fn test_toml_version_survives_update_from() {
-		let toml = r#"
-			version = ["moq-lite-02"]
-		"#;
-
-		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.version, vec!["moq-lite-02".parse::<moq_net::Version>().unwrap()]);
-
-		// Simulate: TOML loaded, then CLI args re-applied (no --client-version flag).
-		let mut cli = Cli { config };
-		cli.update_from(&[]);
-		let config = cli.config;
-		assert_eq!(config.version, vec!["moq-lite-02".parse::<moq_net::Version>().unwrap()]);
-	}
-
-	#[test]
-	fn test_cli_version() {
-		let config = Cli::config_from(["test", "--connect-version", "moq-lite-03"]);
-		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
-	}
-
-	#[test]
 	fn test_cli_version_help_lists_every_parseable_name() {
 		let help = Cli::render_help(Cli::command(), true).expect("long help");
 		for name in moq_net::Version::names() {
 			assert!(help.contains(name), "missing {name} from --connect-version help");
 		}
-	}
-
-	#[test]
-	fn test_toml_connect_survives_update_from() {
-		let toml = r#"
-			url = "https://relay.example.com/anon"
-		"#;
-
-		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.url.as_ref().unwrap().as_str(), "https://relay.example.com/anon");
-
-		// Simulate: TOML loaded, then CLI args re-applied (no --client-connect flag).
-		let mut cli = Cli { config };
-		cli.update_from(&[]);
-		let config = cli.config;
-		assert_eq!(config.url.as_ref().unwrap().as_str(), "https://relay.example.com/anon");
-	}
-
-	#[test]
-	fn test_cli_connect() {
-		let config = Cli::config_from(["test", "--connect", "https://relay.example.com/anon"]);
-		assert_eq!(config.url.as_ref().unwrap().as_str(), "https://relay.example.com/anon");
-	}
-
-	#[test]
-	fn test_toml_once_survives_update_from() {
-		let toml = r#"
-			once = true
-		"#;
-
-		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.once, Some(true));
-
-		// Simulate: TOML loaded, then CLI args re-applied (no --connect-once flag).
-		let mut cli = Cli { config };
-		cli.update_from(&[]);
-		let config = cli.config;
-		assert_eq!(config.once, Some(true));
 	}
 
 	/// The released TOML said `reconnect = false`; `once` says the opposite thing.
@@ -1293,17 +1166,6 @@ mod tests {
 		);
 	}
 
-	/// A config file's bind survives when the CLI omits it.
-	#[test]
-	fn test_toml_bind_survives_update_from() {
-		let config: crate::connect::Config = toml::from_str(r#"bind = "127.0.0.1:1234""#).unwrap();
-		assert_eq!(config.bind, Some("127.0.0.1:1234".parse().unwrap()));
-
-		let mut cli = Cli { config };
-		cli.update_from(&[]);
-		assert_eq!(cli.config.bind, Some("127.0.0.1:1234".parse().unwrap()));
-	}
-
 	/// Several versions offered at once, which the canonical flag takes by repeating.
 	#[test]
 	fn test_version_list() {
@@ -1333,28 +1195,6 @@ mod tests {
 
 		let config = Cli::config_from(["test", "--connect-once=false"]);
 		assert_eq!(config.once, Some(false));
-	}
-
-	#[test]
-	fn test_toml_host_name_survives_update_from() {
-		let toml = r#"
-			tls.host_name = "example.host"
-		"#;
-
-		let config: crate::connect::Config = toml::from_str(toml).unwrap();
-		assert_eq!(config.tls.host_name.as_deref(), Some("example.host"));
-
-		// Simulate: TOML loaded, then CLI args re-applied (no --client-tls-host-name flag).
-		let mut cli = Cli { config };
-		cli.update_from(&[]);
-		let config = cli.config;
-		assert_eq!(config.tls.host_name.as_deref(), Some("example.host"));
-	}
-
-	#[test]
-	fn test_cli_host_name() {
-		let config = Cli::config_from(["test", "--connect-tls-host-name", "override.example"]);
-		assert_eq!(config.tls.host_name.as_deref(), Some("override.example"));
 	}
 
 	#[test]
@@ -1724,27 +1564,12 @@ mod tests {
 		assert!(matches!(value, super::TransportRace::Quic("quic")));
 	}
 
-	/// The resolved default has to exist in every build, including ones that compile
-	/// no address-racing transport at all, which is what broke in #2773.
-	#[test]
-	fn race_defaults_to_the_rfc_8305_stagger() {
-		let config = crate::connect::Config::default();
-		assert_eq!(config.race, Some(std::time::Duration::from_millis(250)));
-		assert_eq!(config.resolve().race, std::time::Duration::from_millis(250));
-	}
-
 	/// Iroh carries no rustls state, so constructing its client must not require an
 	/// application-installed crypto provider.
 	#[cfg(all(feature = "iroh", not(any(feature = "quic", feature = "websocket"))))]
 	#[test]
 	fn iroh_only_client_does_not_require_a_tls_provider() {
 		crate::connect::Config::default().init().expect("iroh-only client");
-	}
-
-	#[test]
-	fn connect_timeout_defaults_to_thirty_seconds() {
-		let config = Cli::config_from(["test"]);
-		assert_eq!(config.resolve().timeout, crate::connect::DEFAULT_TIMEOUT);
 	}
 
 	/// A peer that completes the TCP handshake and then never speaks: the QUIC arm

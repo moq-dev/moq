@@ -18,6 +18,8 @@
 //! model that keeps the order, one link shared by every client, batches, steps,
 //! and named profiles loaded as a [`Preset`]. The README says why each exists.
 
+#![warn(missing_docs)]
+
 use std::{
 	cmp::Reverse,
 	collections::{BTreeMap, BinaryHeap, HashMap, hash_map},

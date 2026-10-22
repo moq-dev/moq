@@ -621,19 +621,11 @@ mod tests {
 	}
 
 	#[test]
-	fn ingest_clock_rebases_first_frame_to_zero() {
-		let mut clock = IngestClock::default();
-		let mid = Mid::from("0");
-		let t0 = Instant::now();
-		// Raw RTP base is a large random value; the first frame must map to 0.
-		assert_eq!(clock.normalize(mid, t0, 5_000_000_000), 0);
-	}
-
-	#[test]
 	fn ingest_clock_tracks_rtp_delta_within_track() {
 		let mut clock = IngestClock::default();
 		let mid = Mid::from("0");
 		let t0 = Instant::now();
+		// Raw RTP base is a large random value; the first frame must map to 0.
 		assert_eq!(clock.normalize(mid, t0, 5_000_000_000), 0);
 		// A later frame advances by the RTP delta, not by arrival jitter.
 		let arrival = t0 + Duration::from_millis(17); // jittered arrival, ignored after anchor

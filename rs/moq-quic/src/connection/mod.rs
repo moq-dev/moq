@@ -1403,10 +1403,17 @@ impl Connection {
     fn close_inner(&mut self, now: Instant, reason: Close) {
         let was_closed = self.state.is_closed();
         if !was_closed {
+            // A peer that never answered the handshake will not answer the close either, so
+            // only the close timer would end the connection's activity. The closing period
+            // still answers a late reply; it just no longer holds up a shutdown.
+            let unanswered = matches!(&self.state, State::Handshake(state) if !state.rem_cid_set);
             self.close_common();
             self.set_close_timer(now);
             self.close = true;
             self.state = State::Closed(state::Closed { reason });
+            if unanswered {
+                self.report_draining();
+            }
         }
     }
 
@@ -3225,19 +3232,8 @@ impl Connection {
                     );
                 }
                 Frame::StopSending(frame::StopSending { id, error_code }) => {
-                    if id.initiator() != self.side.side() {
-                        if id.dir() == Dir::Uni {
-                            debug!("got STOP_SENDING on recv-only {}", id);
-                            return Err(TransportError::STREAM_STATE_ERROR(
-                                "STOP_SENDING on recv-only stream",
-                            ));
-                        }
-                    } else if self.streams.is_local_unopened(id) {
-                        return Err(TransportError::STREAM_STATE_ERROR(
-                            "STOP_SENDING on unopened stream",
-                        ));
-                    }
-                    if let Some(reliable_size) = self.streams.received_stop_sending(id, error_code)
+                    if let Some(reliable_size) =
+                        self.streams.received_stop_sending(id, error_code)?
                     {
                         self.spaces[SpaceId::Data]
                             .pending

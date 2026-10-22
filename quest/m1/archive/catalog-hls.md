@@ -18,8 +18,11 @@ Decided by the maintainer on 2026-10-17:
   that stores them ([epic](/quest/m1/archive/README.md)).
 - **Renamed to `hls`** (catalog field, track naming, types, wording), since it
   exists only for HLS compatibility, not archiving or seeking; seeking uses
-  `Time(pts)` ranges. The track naming convention becomes `<track>.hls.z`;
-  consumers still use the advertised name.
+  `Time(pts)` ranges. The track naming convention becomes `<track>.hls`;
+  consumers still use the advertised name. Decided 2026-10-20 (maintainer):
+  no `.z` suffix. This quest publishes it uncompressed, and
+  [one compressed track per name](/quest/m1/compress/migrate.md), which
+  lands after it, sets `compress: true` on the same name.
 - **Opt-in.** `moq-mux` publishes it only when the application enables it,
   and nothing publishes it by default. Rejected: always-on timelines for every
   track, which cost every publisher for a feature most never use.

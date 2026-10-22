@@ -2302,6 +2302,19 @@ mod tests {
 		assert!(quic.keylog);
 	}
 
+	/// The sink retries without a budget, so an outage of any length is ridden out
+	/// (the session tests' relay loss covers the redial itself).
+	#[test]
+	fn the_sink_retries_without_a_budget() {
+		gst::init().unwrap();
+		let sink = sink();
+		sink.set_property("url", "https://relay.example.com/anon");
+		sink.set_property("broadcast", "test");
+		let resolved = ResolvedSettings::try_from(sink.imp().settings.lock().unwrap().clone()).unwrap();
+		let config = super::super::session::connect_config(&resolved);
+		assert_eq!(config.backoff.timeout, Some(Duration::ZERO), "zero is unlimited");
+	}
+
 	#[test]
 	fn a_started_element_keeps_its_startup_properties() {
 		gst::init().unwrap();

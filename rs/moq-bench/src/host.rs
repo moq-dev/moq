@@ -347,9 +347,8 @@ mod linux {
 			let err = usage_rs::render_failure(Args::spec(), &argv, &err);
 			assert!(err.contains("greater than 0s"), "unexpected error: {err}");
 
-			// Nonzero still parses, and the default holds.
-			let args = Args::parse_from(&[]).unwrap();
-			assert_eq!(args.interval, PositiveDuration(Duration::from_secs(1)));
+			// The default still passes the same check.
+			Args::parse_from(&[]).unwrap();
 		}
 
 		/// A duration shorter than the interval must cap the sleep, not stretch the

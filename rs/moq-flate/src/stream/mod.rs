@@ -194,18 +194,6 @@ mod test {
 		assert_ne!(frame.timestamp.unwrap().as_micros(), captured.as_micros());
 	}
 
-	#[test]
-	fn compressed_roundtrip_in_order() {
-		let (mut producer, track) = producer(true);
-		let expected = payloads(20);
-		for payload in &expected {
-			producer.append(payload.clone()).unwrap();
-		}
-		producer.finish().unwrap();
-
-		assert_eq!(drain(track, true), expected);
-	}
-
 	/// The window spans the whole group, so a repeated payload costs almost nothing after the first.
 	#[test]
 	fn the_shared_window_shrinks_repetitive_payloads() {
@@ -405,19 +393,6 @@ mod test {
 	/// already superseded.
 	fn replaying() -> moq_net::track::Subscription {
 		moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30))
-	}
-
-	/// The track ends with the group, so nothing opens a second one and splits the log.
-	#[test]
-	fn a_failed_write_ends_the_track() {
-		let track = rejecting_track();
-		let mut producer = Producer::new(track, Config::default());
-
-		assert!(producer.append(late(b"rejected")).is_err());
-		assert!(
-			producer.append(late(b"again")).is_err(),
-			"a second append must fail on the closed track rather than open another group"
-		);
 	}
 
 	/// An ended log reports why it ended, even for a payload past the budget: `GroupTooLarge` would

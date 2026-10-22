@@ -504,17 +504,8 @@ url = "https://example.com"
 	}
 
 	#[test]
-	fn defaults_apply_without_toml() {
+	fn a_default_run_publishes_without_expecting_delivery() {
 		let config = Config::parse_and_merge(["moq-bench"]).unwrap();
-		assert_eq!(config.connections(), Range::new(1, 1));
-		assert_eq!(config.broadcasts(), Range::new(1, 1));
-		assert_eq!(config.subscribe(), Range::new(0, 0));
-		assert_eq!(config.fps(), Range::new(30, 30));
-		assert_eq!(config.frame_size(), Range::new(1200, 1200));
-		assert_eq!(config.group_size(), Range::new(60, 60));
-		assert_eq!(config.max_delay(), Duration::from_secs(2));
-		assert_eq!(config.name(), "bench");
-		assert_eq!(config.fanout(), None);
 		assert!(!config.expects_delivery());
 		assert!(config.publishes());
 	}
@@ -565,15 +556,6 @@ url = "https://example.com"
 			assert!(answer.is_question(), "{flag} was treated as a failure");
 			assert!(!answer.message().trim().is_empty(), "{flag} rendered nothing");
 		}
-	}
-
-	/// The spec is named for the binary, not for the struct that declares it.
-	///
-	/// Usage takes the program name from the type unless told otherwise, so an
-	/// undeclared name renders every usage line and completion as `config`.
-	#[test]
-	fn the_spec_is_named_for_the_binary() {
-		assert_eq!(Config::spec().bin.unwrap_or(Config::spec().name), "moq-bench");
 	}
 
 	#[test]

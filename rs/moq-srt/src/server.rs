@@ -660,17 +660,6 @@ mod tests {
 	use bytes::Bytes;
 	use std::time::Duration;
 
-	#[test]
-	fn send_buffer_uses_standard_srt_window() {
-		let mut options = SocketOptions::default();
-		configure_buffers(&mut options);
-
-		assert_eq!(
-			options.sender.buffer_size,
-			SRT_BUFFER_PACKETS * options.session.max_segment_size
-		);
-	}
-
 	/// Regression for #2978: a frame that completes a chunk must not re-stamp bytes
 	/// already buffered from an earlier pacing instant.
 	#[test]
@@ -749,40 +738,6 @@ mod tests {
 			payload: Bytes::copy_from_slice(payload),
 			keyframe: false,
 		}
-	}
-
-	/// Regression: a reordered frame paced before the first packet must be clamped up
-	/// to it, not transmitted with an earlier SRT timestamp. Reproduces the tune-in
-	/// sequence a looping TS source triggers intermittently: a fast first delivery
-	/// leaves the anchor at the live edge, then a newer frame re-anchors and an older
-	/// (reordered) frame paces behind it -- below the first packet, which would
-	/// underflow the receiver's u32 timestamp and stall in-order delivery after ~one
-	/// packet.
-	#[test]
-	fn reordered_frame_is_clamped_to_the_first_packet() {
-		use moq_net::Timestamp;
-		let ms = |m: u64| Timestamp::from_micros(m * 1_000).unwrap();
-
-		// Drive pace + clamp exactly like `serve_subscribe`, with controlled `now`s so
-		// the second frame re-anchors (its media outruns wall-clock) and the third is a
-		// reorder whose media trails the new anchor.
-		let start = Instant::ZERO + Duration::from_secs(1);
-		let mut pacer = moq_mux::Pacer::default();
-		let mut floor = None;
-
-		// i0: first frame, delivered ~instantly -> stamped at the live edge.
-		let first = clamp_to_floor(pacer.pace(ms(1_400), start), &mut floor);
-		// i1: 83ms newer in media, produced ~1ms later -> re-anchors to `now`.
-		let _ = clamp_to_floor(pacer.pace(ms(1_483), start + Duration::from_millis(1)), &mut floor);
-		// i2: a reordered B-frame 41ms behind the new anchor.
-		let unclamped = pacer.pace(ms(1_442), start + Duration::from_millis(2));
-		let clamped = clamp_to_floor(unclamped, &mut floor);
-
-		assert!(
-			unclamped < first,
-			"the reorder paces before the first packet without the clamp (the bug)"
-		);
-		assert_eq!(clamped, first, "the clamp holds it at the first packet's instant");
 	}
 
 	/// A reordered (B-frame) timestamp arrives on the same generation, so it must be

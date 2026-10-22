@@ -935,8 +935,8 @@ mod tests {
 	}
 
 	/// Only the URLs the renderers emit are served: the init under its hash, segments under the
-	/// current generation.
-	#[tokio::test]
+	/// current generation. Paused, since a refused lookup waits out [`READY_TIMEOUT`].
+	#[tokio::test(start_paused = true)]
 	async fn serves_only_versioned_media_urls() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
@@ -1084,8 +1084,9 @@ mod tests {
 		.await
 		.expect("sibling resolve timed out")
 		.expect("sibling broadcast");
-		drop(media);
-		drop(media_broadcast);
+		// Only the sibling goes: the catalog keeps listing the rendition, so the request
+		// reaches the media fetch rather than missing the rendition.
+		media_broadcast.close();
 		tokio::time::timeout(TIMEOUT, remote_media.closed())
 			.await
 			.expect("sibling close timed out");
@@ -1094,7 +1095,7 @@ mod tests {
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 
-		drop((catalog, catalog_broadcast));
+		drop((catalog, catalog_broadcast, media));
 		pair.accept.abort();
 	}
 }
