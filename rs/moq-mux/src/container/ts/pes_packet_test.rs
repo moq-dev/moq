@@ -228,6 +228,16 @@ impl Imported {
 
 /// Every frame on track `name`, and the error that ended it if one did.
 async fn read(consumer: &moq_net::broadcast::Consumer, name: &str) -> (Vec<crate::container::Frame>, Option<String>) {
+	let (frames, end) = read_until(consumer, name).await;
+	(frames, end.err())
+}
+
+/// Every frame on track `name`, and how it ended: `Ok(true)` finished, `Ok(false)` gone quiet
+/// still open, or the error that ended it.
+async fn read_until(
+	consumer: &moq_net::broadcast::Consumer,
+	name: &str,
+) -> (Vec<crate::container::Frame>, Result<bool, String>) {
 	let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(3600));
 	let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 	let mut reader = crate::container::Consumer::new(
@@ -238,8 +248,9 @@ async fn read(consumer: &moq_net::broadcast::Consumer, name: &str) -> (Vec<crate
 	loop {
 		match tokio::time::timeout(Duration::from_millis(50), reader.read_frame()).await {
 			Ok(Ok(Some(frame))) => frames.push(frame),
-			Ok(Ok(None)) | Err(_) => return (frames, None),
-			Ok(Err(err)) => return (frames, Some(err.to_string())),
+			Ok(Ok(None)) => return (frames, Ok(true)),
+			Err(_) => return (frames, Ok(false)),
+			Ok(Err(err)) => return (frames, Err(err.to_string())),
 		}
 	}
 }
@@ -833,4 +844,208 @@ async fn a_pmt_naming_or_dropping_the_pcr_reroutes_private_pes() {
 	assert!(err.is_some(), "the track ends with an error once the PCR goes");
 	assert!(imported.entry().is_none(), "the track left the catalog");
 	assert_eq!(imported.stats().refused, 2);
+}
+
+/// The `KLVA` registration with an `ISO_639_language_descriptor` for English after it.
+const KLVA_ENG: &[u8] = &[0x05, 0x04, b'K', b'L', b'V', b'A', 0x0a, 0x04, b'e', b'n', b'g', 0x00];
+
+/// The descriptors a catalog entry records, as `(tag, data)`.
+fn recorded(track: &super::catalog::Track) -> Vec<(u8, Vec<u8>)> {
+	track.descriptors.iter().map(|d| (d.tag, d.data.to_vec())).collect()
+}
+
+/// A raw descriptor loop as `(tag, data)`.
+fn descriptor_loop(mut raw: &[u8]) -> Vec<(u8, Vec<u8>)> {
+	let mut out = Vec::new();
+	while let [tag, len, rest @ ..] = raw {
+		let (data, tail) = rest.split_at(usize::from(*len));
+		out.push((*tag, data.to_vec()));
+		raw = tail;
+	}
+	out
+}
+
+/// Start reading track `name` before the input that ends it is imported.
+async fn reader(
+	imported: &Imported,
+	name: &str,
+) -> tokio::task::JoinHandle<(Vec<crate::container::Frame>, Result<bool, String>)> {
+	let consumer = imported.consumer.clone();
+	let name = name.to_string();
+	let reader = tokio::spawn(async move { read_until(&consumer, &name).await });
+	for _ in 0..10 {
+		tokio::task::yield_now().await;
+	}
+	reader
+}
+
+/// A PMT revision that retypes the private stream, from 0x06 under `KLVA` to 0x15 under the
+/// metadata descriptor, or changes its descriptors alone, finishes the old track and carries
+/// what follows under a new name whose entry records the revision. The PES still waiting for a
+/// PCR when the revision lands goes out on the old track, placed from the PCRs before it.
+#[tokio::test(start_paused = true)]
+async fn a_revised_private_stream_publishes_under_a_fresh_name() {
+	for (stream_type, revised) in [(0x15, METADATA), (0x06, KLVA_ENG)] {
+		let mut feed = Feed::new(0x06, KLVA);
+		let start = 1_000 * MS;
+		feed.pcr(start)
+			.picture(start)
+			.data(klv(1, 8))
+			.pcr(start + 40 * MS)
+			.data(klv(2, 8));
+		let held = placed(feed.clock(feed.pes[1].0).unwrap(), 0);
+		let head = feed.bytes();
+		let streams: &[(u8, u16, &[u8])] = &[(0x02, VIDEO_PID, &[]), (stream_type, DATA_PID, revised)];
+		feed.mux.pmt_with(PMT_PID, 1, CLOCK_PID, streams, 0);
+		let at = start + 80 * MS;
+		feed.pcr(at)
+			.picture(at)
+			.data(sync_klv(3, at / 300 + LEAD))
+			.pcr(at + 40 * MS);
+
+		let mut imported = start_import(&head);
+		let (old, _) = imported.entry().unwrap();
+		let old_reader = reader(&imported, &old).await;
+		imported.import.decode(&feed.bytes()[head.len()..]).unwrap();
+
+		let (frames, end) = old_reader.await.unwrap();
+		assert_eq!(end, Ok(true), "the old track finishes");
+		assert_eq!(frames.len(), 2);
+		assert_eq!(frames[1].timestamp.as_micros() as u64, held);
+		let tracks = imported.catalog.snapshot().ext.mpegts.tracks;
+		let listed: Vec<_> = tracks.iter().filter(|(_, track)| track.pid == DATA_PID).collect();
+		assert_eq!(listed.len(), 1, "one entry for the PID: {tracks:?}");
+		let (name, entry) = listed[0];
+		assert_ne!(*name, old, "the revised stream is carried under a new name");
+		assert_eq!(entry.pes_packet.as_ref().unwrap().stream_type, stream_type);
+		assert_eq!(recorded(entry), descriptor_loop(revised));
+
+		let name = name.clone();
+		imported.import.finish().unwrap();
+		let (frames, err) = read(&imported.consumer, &name).await;
+		assert!(err.is_none(), "{err:?}");
+		assert_eq!(frames.len(), 1);
+		assert_eq!(&frames[0].payload[..], &feed.pes[2].1[..]);
+	}
+}
+
+/// A PMT that stops listing the private stream finishes its track and takes it out of the
+/// catalog, its PID no longer counted as quiet; a later PMT listing the PID again opens a new
+/// track rather than reviving the retired name.
+#[tokio::test(start_paused = true)]
+async fn a_dropped_private_stream_finishes_and_its_reused_pid_opens_a_new_track() {
+	let mut feed = Feed::new(0x06, KLVA);
+	let start = 1_000 * MS;
+	feed.pcr(start).picture(start).data(klv(1, 8)).pcr(start + 40 * MS);
+	let head = feed.bytes();
+	feed.mux.pmt_with(PMT_PID, 1, CLOCK_PID, &[(0x02, VIDEO_PID, &[])], 0);
+	feed.picture(start + 40 * MS).data(klv(2, 8)).pcr(start + 80 * MS);
+	let dropped = feed.bytes();
+	let streams: &[(u8, u16, &[u8])] = &[(0x02, VIDEO_PID, &[]), (0x06, DATA_PID, KLVA)];
+	feed.mux.pmt_with(PMT_PID, 1, CLOCK_PID, streams, 0);
+	feed.picture(start + 80 * MS).data(klv(3, 8)).pcr(start + 120 * MS);
+
+	let mut imported = start_import(&head);
+	let (old, _) = imported.entry().unwrap();
+	let old_reader = reader(&imported, &old).await;
+	imported.import.decode(&dropped[head.len()..]).unwrap();
+	let (frames, end) = old_reader.await.unwrap();
+	assert_eq!(end, Ok(true), "the dropped stream's track finishes");
+	assert_eq!(frames.len(), 1, "nothing after the drop is carried");
+	assert!(imported.entry().is_none(), "the track left the catalog");
+	assert_eq!(imported.stats().units, 1);
+	assert_eq!(imported.stats().quiet, None, "a PID the PMT dropped is not silent");
+
+	imported.import.decode(&feed.bytes()[dropped.len()..]).unwrap();
+	imported.import.finish().unwrap();
+	let (name, _) = imported.entry().expect("the PID is carried again");
+	assert_ne!(name, old, "a reused PID gets a new name");
+	let (frames, err) = read(&imported.consumer, &name).await;
+	assert!(err.is_none(), "{err:?}");
+	assert_eq!(frames.len(), 1);
+	assert_eq!(&frames[0].payload[..], &feed.pes[2].1[..]);
+}
+
+/// A PMT dropping a private stream before any media timestamp anchors the clock refuses the
+/// import, as end of input does, rather than drop the PES it holds; aborting the import then
+/// ends the stream's track with its cause.
+#[tokio::test(start_paused = true)]
+async fn a_private_stream_dropped_before_the_media_clock_refuses_the_import() {
+	let mut feed = Feed::new(0x06, KLVA);
+	let start = 1_000 * MS;
+	feed.pcr(start).data(klv(1, 8)).pcr(start + 40 * MS);
+	let head = feed.bytes();
+	feed.mux.pmt_with(PMT_PID, 1, CLOCK_PID, &[(0x02, VIDEO_PID, &[])], 0);
+
+	let mut imported = start_import(&head);
+	let (name, _) = imported.entry().unwrap();
+	let held = reader(&imported, &name).await;
+	let err = imported
+		.import
+		.decode(&feed.bytes()[head.len()..])
+		.expect_err("the held PES has no media timestamp to be placed by");
+	assert!(err.to_string().contains("without a media timestamp"), "{err:#}");
+	imported.import.abort(moq_net::Error::Unsupported);
+	let (_, end) = held.await.unwrap();
+	assert!(end.as_ref().is_err_and(|err| err.contains("unsupported")), "{end:?}");
+}
+
+/// A PMT dropping a private stream past a lone PCR ends it as end of input would: the PES no
+/// PCR interval places is counted unplaced, and its track finishes.
+#[tokio::test(start_paused = true)]
+async fn a_private_stream_dropped_past_a_lone_pcr_counts_its_pes_unplaced() {
+	let mut feed = Feed::new(0x06, KLVA);
+	feed.pcr(1_000 * MS).picture(1_000 * MS).data(klv(0, 8));
+	let head = feed.bytes();
+	feed.mux.pmt_with(PMT_PID, 1, CLOCK_PID, &[(0x02, VIDEO_PID, &[])], 0);
+
+	let mut imported = start_import(&head);
+	let (name, _) = imported.entry().unwrap();
+	let held = reader(&imported, &name).await;
+	imported.import.decode(&feed.bytes()[head.len()..]).unwrap();
+	let (frames, end) = held.await.unwrap();
+	assert!(frames.is_empty());
+	assert!(end.is_ok(), "{end:?}");
+	assert_eq!(imported.stats().unplaced, 1);
+}
+
+/// Revisions apply by what they say, across the 5-bit `version_number` wrap: versions 30, 31,
+/// then 0 each relabel the stream and open their own track, while a repetition of any of them
+/// keeps the track it opened.
+#[test]
+fn pmt_revisions_apply_across_the_version_wrap() {
+	let mut feed = Feed::new(0x06, KLVA);
+	let mut imported = start(false);
+	let mut names = Vec::new();
+	let mut decoded = 0;
+	let revisions: [(u8, u8, &[u8]); 4] = [
+		(0, 0x06, KLVA),
+		(30, 0x06, KLVA_ENG),
+		(31, 0x15, METADATA),
+		(0, 0x06, KLVA),
+	];
+	for (i, (version, stream_type, descriptors)) in revisions.into_iter().enumerate() {
+		let streams: &[(u8, u16, &[u8])] = &[(0x02, VIDEO_PID, &[]), (stream_type, DATA_PID, descriptors)];
+		if i > 0 {
+			feed.mux.pmt_at(version, PMT_PID, 1, CLOCK_PID, streams, 0);
+		}
+		let bytes = feed.bytes();
+		imported.import.decode(&bytes[decoded..]).unwrap();
+		let (name, entry) = imported.entry().unwrap();
+		assert_eq!(
+			entry.pes_packet.as_ref().unwrap().stream_type,
+			stream_type,
+			"version {version}"
+		);
+		assert_eq!(recorded(&entry), descriptor_loop(descriptors), "version {version}");
+
+		feed.mux.pmt_at(version, PMT_PID, 1, CLOCK_PID, streams, 0);
+		let repeated = feed.bytes();
+		imported.import.decode(&repeated[bytes.len()..]).unwrap();
+		decoded = repeated.len();
+		assert_eq!(imported.entry().unwrap().0, name, "a repetition of version {version}");
+		names.push(name);
+	}
+	let distinct: std::collections::HashSet<_> = names.iter().collect();
+	assert_eq!(distinct.len(), revisions.len(), "{names:?}");
 }

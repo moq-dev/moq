@@ -96,6 +96,8 @@ source's. `export ts --passthrough` reports it without `mpegts`.
 | `offset` | Gauge, milliseconds: how far the output clock sits from the source's plus the delay. Positive holds frames longer than the delay. The clock pulls it shut over ten minutes. |
 | `drift` | Gauge, parts per million: the source clock's rate against ours, positive running fast. |
 | `outOfTolerance` | Measurements that found the source clock past the 30 ppm ISO/IEC 13818-1 allows, which the output cannot follow. |
+| `overruns` | `export ts --sync` only: groups that began behind the end of the one before on their PID, where legs can differ until the lane catches up. |
+| `late` | `export ts --sync` only: packets dropped for reaching their slot after it went out, leaving stuffing. |
 
 ## Broadcasts
 
@@ -184,8 +186,8 @@ writes only when a track's frame changed, so silence means nothing moved, not
 that the producer is gone. The track ends when the producer does, or at
 depth 1 or more when its group's broadcast is unannounced; the group may
 return later as a new broadcast. A frame too large to cache (32 MB) ends its
-track with a `FrameTooLarge` error, while the `.z` flavor, which compresses
-under the limit, keeps updating.
+track with a `FrameTooLarge` error. The `.z` flavor meets the same limit by its
+uncompressed size, since a reader inflates the whole group.
 
 ### Totals
 
@@ -258,7 +260,7 @@ real sums. Started minus ended stays exact. A child appears while a broadcast
 under it has counters, and leaves after the frame carrying its last one; its
 tail stays in the rollup, and a child that returns starts over. Children are
 never capped, so roughly ten thousand across four tiers outgrow the 32 MB frame
-limit: that encoding's track then ends with `FRAME_TOO_LARGE` instead of going
+limit: both encodings' tracks then end with `FRAME_TOO_LARGE` instead of going
 stale.
 
 ## Entries

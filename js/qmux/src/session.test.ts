@@ -714,7 +714,7 @@ describe("Session integration (scripted peer)", () => {
 			// every keep-alive tick finds our send side silent.
 			peer.blockWrites();
 			for (let i = 0; i < 40; i++) {
-				await clock.advanceAsync(Nano.fromMilli(Milli(50)));
+				await clock.advance(Nano.fromMilli(Milli(50)));
 				peer.send({ type: "ping_response", sequence: 0n });
 				await settle();
 			}
@@ -1007,10 +1007,10 @@ describe("Session integration (scripted peer)", () => {
 				);
 
 				// Exactly at the deadline the session is still open; one tick past it closes.
-				await clock.advanceAsync(Nano.fromMilli(Milli(150)));
+				await clock.advance(Nano.fromMilli(Milli(150)));
 				await settle();
 				expect(settled).toBe(false);
-				await clock.advanceAsync(Nano.fromMilli(Milli(50)));
+				await clock.advance(Nano.fromMilli(Milli(50)));
 
 				const err = await expectSessionFailure(session);
 				expect(err.message).toContain("idle timeout");
@@ -1028,7 +1028,7 @@ describe("Session integration (scripted peer)", () => {
 				await session.ready;
 				await waitFor(() => peer.has("transport_parameters"));
 
-				await clock.advanceAsync(Nano.fromMilli(Milli(200)));
+				await clock.advance(Nano.fromMilli(Milli(200)));
 				const err = await expectSessionFailure(session);
 				expect(err.message).toContain("idle timeout");
 				expect(peer.has("ping_request")).toBe(false);
@@ -1048,7 +1048,7 @@ describe("Session integration (scripted peer)", () => {
 				const writable = await session.createUnidirectionalStream();
 				const writer = writable.getWriter();
 				for (let i = 0; i < 6; i++) {
-					await clock.advanceAsync(Nano.fromMilli(Milli(45)));
+					await clock.advance(Nano.fromMilli(Milli(45)));
 					await writer.write(new Uint8Array([i]));
 					// The peer answers every other write, as a live peer responding to the
 					// keep-alive would. A send restarts the deadline only once per receive
@@ -1083,7 +1083,7 @@ describe("Session integration (scripted peer)", () => {
 				const writer = writable.getWriter();
 				try {
 					for (let i = 0; i < 12; i++) {
-						await clock.advanceAsync(Nano.fromMilli(Milli(45)));
+						await clock.advance(Nano.fromMilli(Milli(45)));
 						await writer.write(new Uint8Array([i]));
 						await settle();
 					}
