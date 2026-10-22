@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON snapshot `deltaRatio` is `deltas`
+
+`SnapshotConfig.deltaRatio: UInt` is replaced by `deltas: Boolean` (default `true`).
+Pass `deltas = false` where you passed `deltaRatio = 0u`, and drop the argument otherwise.
+Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
+
 ### Priorities are signed (#6142)
 
 `TrackInfo.priority`, `Subscription.priority`, and `FetchGroupOptions.priority` are `Byte`, higher first, and 0 is the unset midpoint; write `priority = 3` instead of `3u`.
