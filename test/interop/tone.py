@@ -65,7 +65,7 @@ def check(prefix, tones):
     lines = Path(f"{prefix}.txt").read_text().split("\n")
     try:
         rate, channels = (int(v) for v in lines[0].split())
-        frames = [tuple(int(v) for v in line.split()) for line in lines[1:] if line.strip()]
+        frames = [(int(ts), int(count)) for ts, count in (line.split() for line in lines[1:] if line.strip())]
     except ValueError as err:
         raise Failure(f"malformed frame log: {err}") from None
     if channels != len(tones):

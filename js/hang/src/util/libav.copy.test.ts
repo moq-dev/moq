@@ -40,7 +40,13 @@ test("the polyfill deinterleaves every channel to f32-planar", async () => {
 		expect(Array.from(new Float32Array(unaligned.slice(1).buffer))).toEqual(
 			[0, 1, 2].map((frame) => Math.fround(data[frame * 2 + 1] / scale)),
 		);
-		for (const bad of [{ planeIndex: -1 }, { planeIndex: 0.5 }, { planeIndex: 0, frameOffset: -1 }]) {
+		for (const bad of [
+			{ planeIndex: -1 },
+			{ planeIndex: 0.5 },
+			{ planeIndex: 0, frameOffset: -1 },
+			// WebCodecs refuses an offset at the end even though nothing would be copied.
+			{ planeIndex: 0, frameOffset: 3 },
+		]) {
 			expect(() => audio.copyTo(backing, { ...bad, format: "f32-planar" })).toThrow(RangeError);
 		}
 		audio.close();

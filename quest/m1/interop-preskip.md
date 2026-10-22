@@ -22,6 +22,9 @@ Things to look out for:
   which clients are left out.
 - Add a negative control that misapplies the pre-skip on purpose, so the check
   is proven able to fail.
+- The GStreamer subscriber likely fails it today: `opusdec` trims pre-skip only
+  from a buffer's `GstAudioClippingMeta`, never from the OpusHead, and `moqsrc`
+  attaches none.
 
 Public API: none expected. Wire: none.
 

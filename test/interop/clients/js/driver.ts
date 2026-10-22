@@ -19,6 +19,7 @@ import { parseArgs } from "node:util";
 import type { Page } from "playwright";
 import {
 	type BrowserErrors,
+	Failure,
 	finishTraces,
 	launch,
 	open,
@@ -189,6 +190,8 @@ try {
 				predicate: toneHeard,
 			});
 		} catch (err) {
+			// Only a tone wait that ran out is an audio check failure; a page error reports as itself.
+			if (!(err instanceof Failure)) throw err;
 			// `wrong tone` is the marker the harness's control requires: audible audio in the publisher's
 			// layout that does not carry its tones. Anything else failing is a plain audio failure.
 			const state = await readPlayerState(page);

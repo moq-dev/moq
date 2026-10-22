@@ -1414,9 +1414,12 @@ fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
 	Ok(caps)
 }
 
+/// An OpusTags packet (RFC 7845 §5.2) with no vendor and no comments.
+const OPUS_TAGS: &[u8] = b"OpusTags\0\0\0\0\0\0\0\0";
+
 /// The `audio/x-opus` caps opusdec and moqsink negotiate on: the stream layout as mapping fields,
-/// which decodebin needs to pick a decoder, plus the catalog's OpusHead (pre-skip and gain) as the
-/// streamheader.
+/// which decodebin needs to pick a decoder, plus the catalog's OpusHead and an empty OpusTags as the
+/// streamheader. opusdec reads the head, and so its output gain, only from a two-buffer streamheader.
 fn opus_caps(config: &hang::catalog::AudioConfig, rate: i32, channels: i32) -> Result<gst::Caps> {
 	let head = match &config.description {
 		Some(description) => moq_mux::codec::opus::Config::parse(&mut description.as_ref())
@@ -1456,7 +1459,10 @@ fn opus_caps(config: &hang::catalog::AudioConfig, rate: i32, channels: i32) -> R
 	if let Some(description) = &config.description {
 		builder = builder.field(
 			"streamheader",
-			gst::Array::new([gst::Buffer::from_slice(description.clone())]),
+			gst::Array::new([
+				gst::Buffer::from_slice(description.clone()),
+				gst::Buffer::from_slice(OPUS_TAGS),
+			]),
 		);
 	}
 	Ok(builder.build())
@@ -1533,7 +1539,20 @@ mod tests {
 				assert_eq!(structure.get::<i32>("channel-mapping-family").unwrap(), 0);
 				assert_eq!(structure.get::<i32>("stream-count").unwrap(), 1);
 				assert_eq!(structure.get::<i32>("coupled-count").unwrap(), channels as i32 - 1);
-				assert_eq!(structure.has_field("streamheader"), description.is_some());
+				let headers = structure.get_optional::<gst::Array>("streamheader").unwrap();
+				let headers: Option<Vec<Vec<u8>>> = headers.map(|headers| {
+					headers
+						.iter()
+						.map(|header| header.get::<gst::Buffer>().unwrap().map_readable().unwrap().to_vec())
+						.collect()
+				});
+				assert_eq!(
+					headers,
+					description
+						.as_ref()
+						.map(|head| vec![head.to_vec(), super::OPUS_TAGS.to_vec()]),
+					"opusdec ignores a streamheader without the OpusTags after the OpusHead"
+				);
 			}
 		}
 	}

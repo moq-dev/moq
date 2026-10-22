@@ -96,7 +96,7 @@ function fixPlanarCopy(Data: typeof AudioData): void {
 
 		const start = options.frameOffset ?? 0;
 		const count = options.frameCount ?? this.numberOfFrames - start;
-		if (!index(start) || !index(count) || start + count > this.numberOfFrames) {
+		if (!index(start) || !index(count) || start >= this.numberOfFrames || start + count > this.numberOfFrames) {
 			throw new RangeError("frames out of range");
 		}
 		// Bounded by the caller's view, not the buffer behind it.
