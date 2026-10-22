@@ -6339,7 +6339,7 @@ class LocMoqContainer extends MoqContainer {
   }
 }
 
-enum MoqContainerFormat { fmp4, mkv, ts, flv }
+enum MoqContainerFormat { fmp4, mkv, ts, flv, cmaf }
 
 class FfiConverterMoqContainerFormat {
   static LiftRetVal<MoqContainerFormat> read(Uint8List buf) {
@@ -6353,6 +6353,8 @@ class FfiConverterMoqContainerFormat {
         return LiftRetVal(MoqContainerFormat.ts, 4);
       case 4:
         return LiftRetVal(MoqContainerFormat.flv, 4);
+      case 5:
+        return LiftRetVal(MoqContainerFormat.cmaf, 4);
       default:
         throw UniffiInternalError(
           UniffiInternalError.unexpectedEnumCase,
@@ -8093,6 +8095,7 @@ class FfiConverterMoqAuthToken {
 
 abstract class MoqBandwidthInterface {
   MoqReservation reserve({required MoqTrackDemand demand, required int maxBps});
+  void setTarget({required int? targetBps});
 }
 
 final _MoqBandwidthFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -8140,6 +8143,16 @@ class MoqBandwidth implements MoqBandwidthInterface {
       FfiConverterMoqReservation.lift,
       null,
     );
+  }
+
+  void setTarget({required int? targetBps}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqbandwidth_set_target(
+        uniffiClonePointer(),
+        FfiConverterOptionalUInt64.lower(targetBps),
+        status,
+      );
+    }, null);
   }
 }
 
@@ -15932,6 +15945,15 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqbandwidth_reserve(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqbandwidth_set_target(
+  Pointer<Void> ptr,
+  RustBuffer target_bps,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -18640,6 +18662,9 @@ external int uniffi_moq_ffi_checksum_method_moqauthtoken_grant();
 external int uniffi_moq_ffi_checksum_method_moqbandwidth_reserve();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqbandwidth_set_target();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqbandwidthconsumer_cancel();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -19327,6 +19352,9 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqbandwidth_reserve() != 27807) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
+  if (uniffi_moq_ffi_checksum_method_moqbandwidth_set_target() != 36601) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
   if (uniffi_moq_ffi_checksum_method_moqbandwidthconsumer_cancel() != 58304) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
@@ -19581,7 +19609,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_request_broadcast() !=
-      64026) {
+      65225) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqorigindynamic_cancel() != 47453) {

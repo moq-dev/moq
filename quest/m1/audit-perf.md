@@ -93,8 +93,10 @@ large to review alongside the rest; those become `/quest-plan` follow-ups:
    Bisect the second pair first, and treat a larger catalog as intended.
 4. `annexb` export also gained +9k in `c389bd051`..`eb6ac57cb` and +10k in
    `75d9bf1c0`..`dcd7d2cbb`, and +27k at `fe722cec9` (#5929), of which the m0 PR recovered 8.5k; attribute the rest only if it persists.
-5. The subscribe path's remaining ~1,260 instructions over pre-#5929 belong to
-   [Allocation-free single-range subscriber window](/quest/m1/window-alloc.md).
+5. The subscribe path's remaining ~1,260 instructions over pre-#5929 stay:
+   an inline single-range window ([#6241](https://github.com/moq-dev/moq/pull/6241))
+   removed three allocations but regressed join time about 6%, so it was
+   dropped (maintainer, 2026-10-22).
 
 ### Unbenchmarked hot and fan-out paths, ranked
 
@@ -132,7 +134,3 @@ browser, not node or bun. Benchmarks never gate the merge queue (decided
 2026-10-20, maintainer): each Nightly compares them into the git.moq.dev
 report, which the [nightly benchmark regression report](/quest/m2/bench-ci.md)
 owns; don't duplicate it.
-
-## Related
-
-- [Allocation-free single-range subscriber window](/quest/m1/window-alloc.md) - the subscribe cost the m0 run left after its fix

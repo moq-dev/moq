@@ -148,7 +148,7 @@ pub enum moq_video_format {
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_container_format {
-	/// Fragmented MP4 / CMAF.
+	/// Fragmented MP4 / CMAF, split into one frame per sample.
 	MOQ_CONTAINER_FORMAT_FMP4 = 0,
 	/// Matroska / WebM.
 	MOQ_CONTAINER_FORMAT_MKV = 1,
@@ -156,6 +156,8 @@ pub enum moq_container_format {
 	MOQ_CONTAINER_FORMAT_TS = 2,
 	/// Flash Video, as used by RTMP.
 	MOQ_CONTAINER_FORMAT_FLV = 3,
+	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
+	MOQ_CONTAINER_FORMAT_CMAF = 4,
 }
 
 /// Configuration for [moq_publish_audio].
@@ -312,6 +314,7 @@ fn container_format_from_u32(value: u32) -> Result<moq_mux::import::ContainerFor
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_MKV as u32 => ContainerFormat::Mkv,
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_TS as u32 => ContainerFormat::Ts,
 		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_FLV as u32 => ContainerFormat::Flv,
+		v if v == moq_container_format::MOQ_CONTAINER_FORMAT_CMAF as u32 => ContainerFormat::Cmaf,
 		_ => return Err(Error::InvalidCode),
 	})
 }
@@ -2097,7 +2100,9 @@ pub extern "C" fn moq_origin_announced_broadcast_cancel(task: u32) -> i32 {
 /// Resolves against what is announced *now*, where [moq_origin_announced_broadcast] waits
 /// indefinitely: it returns an announced broadcast at once, and fails when none is reachable,
 /// including a broadcast created but not announced. It does NOT wait for a later
-/// announcement. Serve on-demand paths with [moq_origin_dynamic].
+/// announcement. Serve on-demand paths with [moq_origin_dynamic]. A moq-lite client session
+/// only asks its peer about paths something watches, through [moq_origin_announced] or
+/// [moq_origin_announced_broadcast], so a path nothing watches is unreachable on it.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
 /// with a terminal code: `0` (finished, including after [moq_origin_request_cancel]) or a negative

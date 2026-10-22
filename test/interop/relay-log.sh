@@ -27,6 +27,19 @@ relay_connections() {
     '
 }
 
+# Check that every relay connection opened from log line FROM on negotiated VERSION, following the
+# relay's `negotiated version=...` log. Prints a FAIL line for each that did not and returns 1.
+# A connection negotiates once, as it opens, so an earlier round's straggler never logs it here.
+check_versions() {
+    local round="$1" from="$2" want="$3" id version failed=0
+    while read -r id version; do
+        [[ "$version" != "$want" ]] || continue
+        echo "  FAIL  $round round: relay connection $id negotiated $version, not $want"
+        failed=1
+    done < <(relay_log_since "$from" | sed -n 's/.*conn{id=\([0-9]*\) .*negotiated version=\([^ ]*\).*/\1 \2/p')
+    ((failed == 0))
+}
+
 # Fail the round for every relay connection it opened that idled out rather than closed.
 #
 # The relay times a silent peer out after its 10 s QUIC idle timeout, which can land long

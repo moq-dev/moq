@@ -694,7 +694,7 @@ async fn timeline_tracks_are_republished_and_finished_on_request() {
 
 	let mut records = Vec::new();
 	while let Some(event) = timeline.next().await.unwrap() {
-		if let window::Event::Push { value, .. } = event {
+		if let window::Event::Push { value, .. } = event.value {
 			records.push(value.sequence);
 		}
 	}
