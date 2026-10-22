@@ -1538,7 +1538,8 @@ where
 			if !self.stale.is_empty() {
 				self.resubscribe(&catalog, &mpegts)?;
 			}
-			let es_pids: Vec<u16> = self.tracks.values().map(|t| t.pid).collect();
+			let mut es_pids: Vec<u16> = self.tracks.values().map(|t| t.pid).collect();
+			es_pids.push(self.psi.as_ref().unwrap().pcr_pid);
 			reject_colliding_si_pids(&mpegts, self.pmt_pid(), &es_pids)?;
 			// The layout is locked but the timing is not: a `jitter` or `framerate` published
 			// after the tables still sizes the decode clock.
@@ -1976,13 +1977,7 @@ where
 		let mut tracks: Vec<&Track> = self.tracks.values().collect();
 		tracks.sort_by_key(|t| t.pid);
 
-		// Section-framed streams require a video track in the supported program layout.
-		let needs_clock = tracks.iter().any(|t| matches!(&t.kind, Kind::Verbatim { .. }));
 		let video = tracks.iter().find(|t| matches!(t.kind, Kind::Video(_)));
-		anyhow::ensure!(
-			!needs_clock || video.is_some(),
-			"TS export of section-framed verbatim streams (e.g. SCTE-35) requires a video track for the program clock"
-		);
 		let pcr_pid = video
 			.or_else(|| {
 				tracks.iter().find(|t| {
@@ -1993,7 +1988,15 @@ where
 				})
 			})
 			.map(|t| t.pid)
-			.context("TS export requires a video or audio track for the PCR")?;
+			// Sparse data cannot carry the clock's cadence: reserve a PID used only by PCR.
+			.or_else(|| {
+				(FIRST_ES_PID..0x1fff).find(|pid| {
+					*pid != self.pmt_pid()
+						&& tracks.iter().all(|track| track.pid != *pid)
+						&& self.si.keys().all(|(si, _)| si != pid)
+				})
+			})
+			.context("TS export has no unused PID for the PCR")?;
 
 		let streams = tracks
 			.iter()

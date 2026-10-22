@@ -258,6 +258,7 @@ The record is a member beside `verbatim` rather than a `framing` value, so a con
 A publisher demultiplexing a transport stream places each PES or section by the PCRs of its program ({{mpeg2}} Section 2.4.2.2): its first byte is interpolated between the reference bytes of the PCRs either side of it, and one past its timebase's last PCR is extrapolated from that timebase's last two.
 A timebase ends at a PCR discontinuity, and at a PMT that moves the `PCR_PID`.
 Each PCR takes the 2^33 multiple of its base that lands it nearest the media's PTS, and the placement moves onto the catalog clock by the same shift as the media, so its timestamp depends only on the input and that shift.
+When the PMT declares no media stream, the first PCR anchors that shift, subsequent PCRs retain their era across the wrap, and media added later unwraps its PTS against that history.
 A PES or section before the first PCR the publisher reads, or past a lone one, has nothing to place it and is dropped.
 The publisher moves each PTS and DTS by the media's shift modulo 2^33, keeping their prefix and marker bits, and leaves every other byte as received; the PES CRC covers the previous packet's data bytes, not its header, so it stays valid.
 The publisher MUST refuse a `verbatim` or `pesPacket` stream in a program with no PCR.
@@ -366,6 +367,7 @@ A consumer rebuilding a transport stream:
 
 - MUST place each track on its recorded `pid`, and MUST assign an unused PID to a track with none.
 - MUST put the PMT on `program.pmtPid` and build the PAT and PMT from `program`.
+- MUST choose a PCR PID and emit PCRs on it at the program clock's repetition interval. With no media stream it MUST use an unused PID with adaptation-only PCR packets and no PMT elementary-stream entry. It MUST NOT refuse a program for lacking video.
 - MUST re-emit each track's `descriptors` as its ES-level descriptors, and `programDescriptors` as the PMT's `program_info`.
 - MUST re-emit each `si` entry's sections byte-for-byte on that entry's PID, reading them from its track ({{si-track}}), at least as often as its `interval` when declared.
 - MUST packetize each `verbatim` frame as one section on its track's PID.
@@ -443,6 +445,7 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 ## draft-lcurley-moq-mpegts-01
 {:numbered="false"}
 
+- Programs without media anchor on PCR, preserving its era across the wrap; rebuilding supports audio clocks and a dedicated PCR-only PID for data-only programs.
 - Added the `m2ts` section, a transport stream carried whole, with its mapping onto MSFTS; the comparison uses MSFTS's `mpeg2ts` names.
 - Section-framed `verbatim` timestamps use PCR-derived placement at the first section byte, as whole PES do, rather than a video presentation time.
 - Added the `pesPacket` record: each frame one whole PES packet, timestamped with its placement. A consumer that predates it drops the track rather than refusing the catalog.

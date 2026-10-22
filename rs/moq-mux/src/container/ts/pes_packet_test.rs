@@ -606,16 +606,62 @@ async fn a_pes_past_a_lone_pcr_is_unplaced() {
 	assert_eq!(imported.stats().unplaced, 1);
 }
 
-/// A program of data alone never names a media time for the program clock to shift by, so its
+/// A PMT declaring media still waits for its PTS before anchoring, so its
 /// PES are refused at the end of the input rather than published on a guessed clock.
 #[test]
-fn a_data_only_program_is_refused() {
+fn a_program_with_missing_media_timestamps_is_refused() {
 	let mut feed = Feed::new(0x06, KLVA);
 	for i in 0..10 {
 		feed.pcr(1_000 * MS + i * 40 * MS).data(klv(i as u8, 8));
 	}
 	let err = import(&feed.bytes(), false).err().expect("the import is refused");
 	assert!(err.to_string().contains("without a media timestamp"), "{err:#}");
+}
+
+/// No media PTS is needed when the PMT declares only data: PCR carries the era too.
+#[tokio::test(start_paused = true)]
+async fn a_data_only_program_preserves_placements_across_the_pcr_wrap() {
+	let mut mux = Mux::default();
+	mux.pat(&[(1, PMT_PID)])
+		.pmt_with(PMT_PID, 1, CLOCK_PID, &[(0x06, DATA_PID, KLVA)], 0);
+	let mut feed = Feed {
+		mux,
+		pcrs: Vec::new(),
+		pes: Vec::new(),
+	};
+	let start = WRAP - 100 * MS;
+	for i in 0..10 {
+		feed.pcr(start + i * 40 * MS).data(klv(i as u8, 8));
+	}
+	feed.pcr(start + 400 * MS);
+	let imported = import(&feed.bytes(), false).unwrap();
+	let (name, _) = imported.entry().unwrap();
+	let (frames, err) = read(&imported.consumer, &name).await;
+	assert!(err.is_none());
+	assert_eq!(frames.len(), feed.pes.len());
+	for (frame, (at, pes)) in frames.iter().zip(&feed.pes) {
+		assert_eq!(frame.payload.as_ref(), pes);
+		assert_eq!(
+			frame.timestamp.as_micros(),
+			u128::from(placed(feed.clock(*at).unwrap(), 0))
+		);
+	}
+	assert!(frames.windows(2).all(|pair| pair[0].timestamp < pair[1].timestamp));
+}
+
+#[test]
+fn a_data_only_program_without_pcr_refuses_sections_and_whole_pes() {
+	let mut mux = Mux::default();
+	mux.pat(&[(1, PMT_PID)])
+		.pmt(PMT_PID, 1, NO_PCR, &[(0x06, DATA_PID), (0x05, DATA_PID + 1)], 0);
+	mux.whole(DATA_PID, &klv(0, 8));
+	mux.section(DATA_PID + 1, &[0xfc, 0x30, 0]);
+	let imported = import(&mux.bytes(), false).unwrap();
+	assert!(imported.catalog.snapshot().ext.mpegts.tracks.is_empty());
+	let stats = imported.import.stats();
+	for pid in [DATA_PID, DATA_PID + 1] {
+		assert_eq!(stats.streams[&pid].refused, 1);
+	}
 }
 
 /// A flagged clock break ends the placement timebase: the PES past its last PCR is extrapolated

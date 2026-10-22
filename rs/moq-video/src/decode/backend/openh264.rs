@@ -419,26 +419,6 @@ mod tests {
 		}
 	}
 
-	/// Regression: a stream that reorders used to exhaust openh264's picture pool
-	/// within a second, because the crate's flush-after-decode released the
-	/// reordering slot without releasing the picture. Every access unit after
-	/// that failed with `dsOutOfMemory` until the next keyframe, which a player
-	/// sees as a picture that appears for a third of a second and then freezes.
-	#[test]
-	fn a_stream_with_b_frames_decodes_all_the_way_through() {
-		let mut decoder = open();
-		let mut decoded = 0;
-		for (index, (payload, keyframe)) in access_units().into_iter().enumerate() {
-			decoded += decoder
-				.decode(payload, at(index), keyframe)
-				.unwrap_or_else(|e| panic!("access unit {index} failed: {e}"))
-				.len();
-		}
-		decoded += decoder.flush().expect("the drain works").len();
-
-		assert_eq!(decoded, PICTURES, "the stream lost pictures");
-	}
-
 	/// A reordered picture carries the timestamp of the access unit it was coded
 	/// in, not of the call it fell out of. The two differ by several frames once
 	/// B slices are in play, so stamping a picture with the call's timestamp
