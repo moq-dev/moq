@@ -142,8 +142,12 @@ test.each(["ascending", "descending"] as const)("a fill outranks its group's liv
 	priority.add(rest, 5, 2 ** 45);
 	priority.add(fill, 5, 0);
 	priority.add(other, order === "ascending" ? 4 : 6, Number.MAX_SAFE_INTEGER);
-	expect(streams[1].sendOrder).toBeGreaterThan(streams[0].sendOrder!);
-	expect(streams[2].sendOrder).toBeGreaterThan(streams[1].sendOrder!);
+	const [restOrder, fillOrder, otherOrder] = streams.map((stream) => {
+		if (stream.sendOrder === undefined) throw new Error("send order missing");
+		return stream.sendOrder;
+	});
+	expect(fillOrder).toBeGreaterThan(restOrder);
+	expect(otherOrder).toBeGreaterThan(fillOrder);
 	priority.remove(fill);
 	expect(streams[0].sendOrder).toBe(sendOrder({ priority: 7, position: 1 }));
 	priority.close();

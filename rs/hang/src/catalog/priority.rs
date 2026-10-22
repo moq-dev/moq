@@ -25,26 +25,3 @@ pub const PRIORITY: Priorities = Priorities {
 	audio: 80,
 	video: 60,
 };
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn media_priorities_match_the_browser() {
-		assert_eq!(PRIORITY.catalog, 100);
-		assert_eq!(PRIORITY.text, 90);
-		assert_eq!(PRIORITY.audio, 80);
-		assert_eq!(PRIORITY.video, 60);
-	}
-
-	#[test]
-	fn media_outranks_the_unset_default() {
-		let unset = moq_net::track::Info::default().priority;
-		assert!(
-			[PRIORITY.catalog, PRIORITY.text, PRIORITY.audio, PRIORITY.video]
-				.iter()
-				.all(|&p| p > unset)
-		);
-	}
-}

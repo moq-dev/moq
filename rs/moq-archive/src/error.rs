@@ -40,20 +40,6 @@ pub enum Error {
 		intended: Option<u64>,
 	},
 
-	/// An existing `.info` was recorded from another publisher instance: the source
-	/// restarted, so the caller starts a new prefix.
-	#[error(
-		"source epoch {} does not match the recorded {}",
-		epoch_text(intended),
-		epoch_text(existing)
-	)]
-	EpochMismatch {
-		/// The epoch already recorded.
-		existing: Option<moq_net::Epoch>,
-		/// The epoch of the source being recorded now.
-		intended: Option<moq_net::Epoch>,
-	},
-
 	/// The object has no groups.
 	#[error("empty object")]
 	Empty,
@@ -102,14 +88,6 @@ pub enum Error {
 	#[error("moq: {0}")]
 	Moq(String),
 
-	/// The track was already enrolled, or is the recording's own timeline.
-	#[error("track already enrolled: {0}")]
-	Enrolled(String),
-
-	/// The track is untimed, so a DVR has no content time to measure its retention by.
-	#[error("untimed track: {0}")]
-	Untimed(String),
-
 	/// A frame's timestamp does not match its track: missing on a timed track, or present on an
 	/// untimed one.
 	#[error("frame timing does not match the track")]
@@ -118,14 +96,6 @@ pub enum Error {
 	/// The source broadcast or one of its tracks failed.
 	#[error("source: {0}")]
 	Source(String),
-
-	/// The recording's timeline could not be recovered, segmented, or published.
-	#[error("timeline: {0}")]
-	Timeline(String),
-
-	/// The writer stopped accepting commands.
-	#[error("writer closed")]
-	Closed,
 }
 
 impl From<object_store::Error> for Error {
@@ -151,10 +121,3 @@ impl From<serde_json::Error> for Error {
 
 /// A [`Result`](std::result::Result) using this crate's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
-
-fn epoch_text(epoch: &Option<moq_net::Epoch>) -> String {
-	match epoch {
-		Some(epoch) => epoch.to_string(),
-		None => "none".to_string(),
-	}
-}

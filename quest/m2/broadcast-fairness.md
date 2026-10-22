@@ -5,8 +5,10 @@
 On a shared relay-to-relay session, broadcasts share the link fairly and
 priority orders streams only inside each broadcast, so one tenant's viewers
 asking for the highest priority never starve another tenant's broadcast.
-Opening more subscriptions or broadcasts must never buy more bandwidth than
-the bucket allows. Single-tenant deployments and the first and last mile keep
+Opening more subscriptions must never buy a broadcast more than its bucket
+allows. Until tenant keying lands, a peer that opens more broadcasts does get
+more shares, on send and receive alike; tenant keying is what closes that.
+Single-tenant deployments and the first and last mile keep
 strict priority across the session, as today.
 
 ## Plan
@@ -20,7 +22,8 @@ Today every session schedules strictly: one `PriorityQueue` or one moq-quic
 send group per subscription, ranked by the subscriber's priority, then the
 publisher's track priority, then subscription id
 (`rs/moq-net/src/priority.rs`). A relay forwards the max of its downstream
-subscriber priorities upstream (`model/subscription.rs`), and
+subscriber priorities upstream (`model/subscription.rs`, `lite/subscriber.rs`,
+and on moq-transport upstreams `ietf/subscriber.rs`), and
 `rs/moq-relay/src/cluster.rs` runs one bidirectional session per peer pair
 carrying every broadcast, so a viewer asking for 127 raises its track above
 every other tenant's on the cluster link.
@@ -37,6 +40,32 @@ Direction carried over from 2026-09-19, not re-confirmed:
   trait break for every implementer.
 - The draft would say a relay MAY scope priority to the broadcast on a
   relay-to-relay connection; no carrier is needed on the wire.
+- Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
+  order, [receive memory](/quest/m1/quic/receive-memory.md), then
+  [Rust request credit](/quest/m1/rs-request-credit.md), then the send domain.
+
+Receive ranks, folded in from
+[moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)'s follow-ups by
+the maintainer on 2026-10-20. When the receive window is stuck, #5878 evicts
+the lowest subscription priority first across every broadcast on the session,
+then the group its subscription would deliver last, and sets a stream's rank
+once, when its header decodes:
+
+- With fairness on, rank received groups within their broadcast's domain
+  first, as sends are, so one broadcast's priorities never evict another's
+  partial groups. Received FETCH streams map to a domain through the same
+  carrier the send side settles.
+- Ranking inside domains still leaves the session-wide window to share, so a
+  broadcast that fills it would block every other one. Add a fair domain tier
+  ahead of the ranks, mirroring the byte-fair send tier: a stuck window evicts
+  from the domain holding the most beyond an even share of the window across
+  the domains with partial groups, then by rank within that domain. A
+  broadcast that fills the window alone may keep it until another arrives. A
+  full window admits no newcomer's bytes, so settle what enters a broadcast
+  into the fair set first, and test that it gets in.
+- Re-rank a receive stream when its subscription's priority or group order
+  changes, instead of keeping the rank from its header. This one does not
+  need fairness; split it out if it should land first.
 
 Dropped 2026-10-20 from
 [moq-dev/moq#6142](https://github.com/moq-dev/moq/pull/6142), which landed
@@ -61,11 +90,16 @@ good plan here". Open questions it left:
 
 Prove it with two broadcasts on one cluster session over a bufferbloated
 link: neither starves, a downstream 127 does not change the upstream order,
-and with fairness off the strict order is unchanged.
+and with fairness off the strict order is unchanged. On the receive side, a
+high priority in one broadcast never makes a stuck window evict another
+broadcast's partial groups first, a broadcast that filled the window before
+another began receiving yields down to its even share, and a priority or order
+update moves an already-ranked stream.
 
 ## Required
 
 - [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - every transport shares moq-quic's scheduler, so fairness has one implementation
+- [Rust request credit](/quest/m1/rs-request-credit.md) - the previous `transport::poll` break; the send domain goes on top
 
 ## Related
 

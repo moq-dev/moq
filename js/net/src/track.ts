@@ -462,6 +462,9 @@ class TrackState {
 	// First timestamps mutate group state rather than track state, so held groups
 	// watch this revision as well as arrivals when enforcing latency after handoff.
 	timelineChanged = new Signal(0);
+	// Bumped when a wire subscription declares or resolves where its live feed starts, so a
+	// publisher holding its first group for that answer wakes.
+	startChanged = new Signal(0);
 	/** Best-effort datagram channel, parallel to {@link groups}; a bounded send buffer per subscriber. */
 	datagrams = new Signal<Datagram[]>([]);
 	latest?: number;
@@ -583,6 +586,7 @@ let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | unde
 let cachedHolds: (producer: Producer, sequence: number) => boolean;
 // Whether a group may still land on the producer's live feed; assigned in its static block.
 let mayLand: (producer: Producer, land: Land) => boolean;
+let sourceStart: (producer: Producer) => number | "pending" | undefined;
 
 // The sequence-order cursor lives inside `Subscriber` (it shares the group buffer and the
 // drift anchor with the arrival cursor), so `Ordered` reaches it through this bridge,
@@ -734,9 +738,9 @@ export class Producer {
 	// may deliver in any order: readers wait for a hole below it to fill, or for the track
 	// to close, rather than end at the boundary with groups still to arrive.
 	#tailPending = false;
-	// The first group the wire subscription's live feed serves (see `hooks.startTrack`), and
-	// the floor the SUBSCRIBE it answered requested.
-	#served?: { start: number; requested?: number };
+	// The first group the wire subscription's live feed serves (see `hooks.startTrack`), unset
+	// until its START resolves it, and the floor the SUBSCRIBE requested.
+	#served?: { start?: number; requested?: number };
 	// The sequences the live feed delivered, as a group or a datagram: what a pending tail is
 	// judged by. Eviction never touches it. A gap folds away a subscription's grace after a
 	// later arrival opened it, as the session's tail does, so this holds only the gaps still
@@ -749,12 +753,14 @@ export class Producer {
 	}
 
 	static {
+		sourceStart = (producer) => producer.#served && producer.#feedStart();
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
 		hooks.startTrack = (producer, served) => {
 			producer.#served = served;
 			producer.#owe();
+			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
 		};
 		hooks.receiveTrack = (producer) => {
 			producer.#remote = true;
@@ -780,6 +786,11 @@ export class Producer {
 		};
 		hooks.bindSequence = bindProducerSequence;
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
+		hooks.linger = (producer) => {
+			const maxAge = producer.#state.info.peek()?.maxAge;
+			if (producer.#state.closed.peek() !== null || maxAge === undefined) return Milli.zero;
+			return Milli(Math.min(maxAge, Milli.fromNano(CACHE_WINDOW)));
+		};
 		hooks.reportedLargest = (producer, largest) => producer.#advanceLargest(largest);
 		cachedHolds = (producer, sequence) => {
 			const entry = producer.#cached.get(sequence);
@@ -1516,12 +1527,21 @@ export class Producer {
 	// The feed starts at the declared start while the demand keeps the floor its SUBSCRIBE asked
 	// for, since an update gets no fresh START: a moved floor stands on its own, and moving
 	// back restores the START. Without either, the first arrival stands in for it.
-	#owes(final: number): boolean {
-		if (!this.#tailPending) return false;
+	// Until the START arrives, the feed start is pending; the requested floor still bounds it.
+	#feedStart(): number | "pending" | undefined {
 		const groups = this.#state.update.peek()?.groups;
 		const requested = groups?.start === undefined ? undefined : groupBounds(groups).start;
 		const served = this.#served;
-		const floor = served && served.requested === requested ? served.start : (requested ?? this.#arrivals.first());
+		if (!served || served.requested !== requested) return requested;
+		if (served.start !== undefined) return served.start;
+		// A closed track never gets its START.
+		return this.#state.closed.peek() === undefined ? "pending" : requested;
+	}
+
+	#owes(final: number): boolean {
+		if (!this.#tailPending) return false;
+		const feed = this.#feedStart();
+		const floor = (feed === "pending" ? this.#served?.requested : feed) ?? this.#arrivals.first();
 		if (floor === undefined) return final > 0;
 		return !this.#arrivals.covers(Math.min(floor, final), final);
 	}
@@ -1845,6 +1865,13 @@ export class Subscriber {
 		hooks.joinSubscriber = (subscriber) => {
 			if (subscriber.#resume) subscriber.#resume.join();
 			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);
+		};
+		hooks.sourceStart = (subscriber) => {
+			if (subscriber.#resume) return subscriber.#resume.start();
+			const producer = subscriber.#state.producer;
+			const start = producer && sourceStart(producer);
+			if (start === undefined || start === "pending") return start;
+			return Math.max(start, subscriber.#cursor.peek().start);
 		};
 		hooks.tryRecvGroup = (subscriber, started) => subscriber.#tryRecvGroup(started);
 		hooks.tryNextGroup = (subscriber) => subscriber.#tryNextGroup();
@@ -2225,7 +2252,7 @@ export class Subscriber {
 			}
 			for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
 				const dropped = report(run.start, run.end, run.error);
-				if (!dropped || dropped.kind !== "drop") continue;
+				if (dropped?.kind !== "drop") continue;
 				if (dropped.end < run.end)
 					this.#pending.unshift({ start: dropped.end, end: run.end, error: run.error });
 				return dropped;
@@ -2306,6 +2333,7 @@ export class Subscriber {
 		const dispose = [
 			this.#state.groups.changed(fn),
 			this.#state.drops.changed(fn),
+			this.#state.startChanged.changed(fn),
 			this.#cursor.changed(fn),
 			this.#state.closed.changed(fn),
 			this.#state.end.changed(fn),

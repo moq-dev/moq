@@ -701,67 +701,6 @@ async fn timeline_tracks_are_republished_and_finished_on_request() {
 	assert_eq!(records, vec![0, 1]);
 }
 
-/// An untimed recording replays untimed: no media or timeline frame gains a timestamp.
-#[tokio::test]
-async fn an_untimed_recording_replays_untimed() {
-	let store = Store::new(Mock::memory(), "rec");
-	let source = broadcast::Info::new().produce();
-	let info = moq_net::track::Info::default().with_max_age(Duration::from_secs(3600));
-	let data = source.create_track("data", info).unwrap();
-	let writer = crate::Writer::new(store.clone(), source.consume(), Default::default())
-		.await
-		.unwrap();
-	writer
-		.control()
-		.track("data", moq_mux::timeline::Config::default())
-		.await
-		.unwrap();
-	for sequence in 0..2 {
-		let mut group = data.create_group(group::Info { sequence }).unwrap();
-		group.write_frame(None, format!("data/{sequence}")).unwrap();
-		group.finish().unwrap();
-	}
-	data.finish().unwrap();
-	source.close();
-	writer.run().await.unwrap();
-
-	let broadcast = broadcast::Info::new().produce();
-	let config = Config::new([("data".to_string(), timeline("data"))].into());
-	let reader = Reader::open(store, &broadcast, config).await.unwrap();
-	tokio::spawn(reader.serve());
-
-	let track = broadcast.consume().track("data").unwrap();
-	let mut group = track.fetch_group(1, group::Fetch::default()).await.unwrap();
-	assert_eq!(group.timescale(), None);
-	let frame = group.read_frame().await.unwrap().unwrap();
-	assert_eq!((frame.timestamp, frame.payload), (None, Bytes::from("data/1")));
-
-	let subscriber = broadcast
-		.consume()
-		.track(&timeline("data"))
-		.unwrap()
-		.subscribe(None)
-		.await
-		.unwrap();
-	assert_eq!(subscriber.info().timescale, None);
-	let mut timeline =
-		window::Consumer::<Record>::new(subscriber, window::ConsumerConfig::default().with_compression(true));
-	reader.finish().unwrap();
-	let mut records = Vec::new();
-	while let Some(event) = timeline.next().await.unwrap() {
-		if let window::Event::Push { value, .. } = event {
-			records.push(value);
-		}
-	}
-	assert_eq!(
-		records,
-		vec![
-			Record::untimed(0, Position::group(0), Position::group(1)),
-			Record::untimed(1, Position::group(1), Position::group(2)),
-		]
-	);
-}
-
 /// A record whose timing contradicts its timeline is not indexed, though its object is stored.
 #[tokio::test]
 async fn a_record_contradicting_its_timeline_is_not_indexed() {

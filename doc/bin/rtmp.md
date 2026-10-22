@@ -53,5 +53,5 @@ carries the best of each.
 Implemented in pure Rust (no librtmp). The CLI speaks plaintext `rtmp://`
 only, so stream keys cross the network unencrypted. The library adds RTMPS on
 the same port when the embedder supplies a TLS config, and can refuse plaintext
-there. FLAC enhanced-audio payloads are dropped because hang has no catalog
-codec for them. MP3 works in both legacy and enhanced audio tags.
+there. FLAC enhanced-audio payloads are dropped because the FLV import does not
+map them. MP3 works in both legacy and enhanced audio tags.

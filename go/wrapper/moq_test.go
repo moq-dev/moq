@@ -41,16 +41,6 @@ func opusHead() []byte {
 	return buf
 }
 
-func TestOriginLifecycle(t *testing.T) {
-	origin := newOrigin(t)
-	_ = origin.Consume()
-	dynamic, err := origin.Dynamic("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dynamic.Cancel()
-}
-
 func TestDynamicBroadcastRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()

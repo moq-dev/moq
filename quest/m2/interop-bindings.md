@@ -4,7 +4,7 @@
 
 `just test interop --all` publishes and subscribes through the Kotlin, Swift,
 and Dart bindings against every other client, so a wrapper regression in
-network delivery fails CI.
+network delivery fails the nightly interop run.
 
 ## Plan
 
@@ -26,8 +26,11 @@ clients already cover.
   alternative is a macOS nightly job that runs only the Swift pairs.
   Recommendation: Linux, so one matrix covers every pair, unless the
   toolchain pushes the job past its time budget.
-- Add `kt/`, `swift/`, and `dart/` to the interop workflow's PR path filter
-  once their clients are in the matrix.
+- Interop runs nightly (`interop.yml`'s schedule), not through a PR path
+  filter (decided 2026-10-20, maintainer, because main PRs skip cloud CI
+  since #6038 and interop does not gate merges). The new clients join that
+  nightly matrix; add `kt/`, `swift/`, and `dart/` to the release-PR path
+  filter only if the release line backports them.
 
 Public API: none. Wire: none.
 
