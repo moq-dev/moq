@@ -128,9 +128,19 @@ if(MOQ_FFI_DIR)
     set(MOQ_FFI_CARGO "")
 else()
     # Cargo builds for the host, so a cross-compiling project stages a prebuilt input instead.
-    if(CMAKE_CROSSCOMPILING)
-        message(FATAL_ERROR "A source build of moq-ffi targets the host; when cross-compiling, "
-            "set MOQ_FFI_DIR to a native package for the target")
+    # A 32-bit or other-architecture compiler on the same OS (`-m32`, Visual Studio's `-A Win32`)
+    # leaves CMAKE_CROSSCOMPILING false, so compare the compiler with a 64-bit host too.
+    unset(_host_arch)
+    if(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+        set(_host_arch x64)
+    elseif(CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+        set(_host_arch ARM64)
+    endif()
+    if(CMAKE_CROSSCOMPILING
+        OR (DEFINED _host_arch AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+        OR (DEFINED _host_arch AND MSVC AND NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL _host_arch))
+        message(FATAL_ERROR "A source build of moq-ffi targets the host; for another target "
+            "or architecture, set MOQ_FFI_DIR to a native package for it")
     endif()
     # The top-level build tree, so a project adding both packages shares one cargo build and
     # one rule for its outputs, as Ninja requires.
