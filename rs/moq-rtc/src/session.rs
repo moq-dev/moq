@@ -49,6 +49,10 @@ pub trait MediaSink: Send {
 	/// Called once when the session ends with a genuine failure, so the sink can
 	/// abort its tracks with the real cause instead of a bare `Error::Dropped`.
 	fn abort(&mut self, err: moq_net::Error);
+
+	/// Called once when the peer ends the session cleanly after its final media: finish
+	/// every track and return the finished broadcast, which stays up until it drops.
+	fn finish(&mut self) -> Result<moq_net::broadcast::Finish>;
 }
 
 /// What the session does with the negotiated media stream.
@@ -134,7 +138,16 @@ impl Session {
 		self.handle_media(mid)
 	}
 
-	pub async fn run(mut self) -> Result<()> {
+	/// End an ingest cleanly after its final media: finish the sink's tracks and return the
+	/// finished broadcast to linger on. `None` for an egress session, which publishes nothing.
+	pub fn finish(self) -> Result<Option<moq_net::broadcast::Finish>> {
+		match self.role {
+			MediaRole::Ingest(mut sink) => sink.finish().map(Some),
+			MediaRole::Egress(_) => Ok(None),
+		}
+	}
+
+	pub async fn run(&mut self) -> Result<()> {
 		let result = self.run_loop().await;
 		// A genuine failure (not a normal peer disconnect or an unconnected offer)
 		// propagates to subscribers as the real cause; the normal ends just let the
@@ -458,6 +471,14 @@ impl Bridges {
 	pub fn push(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()> {
 		if let Some(bridge) = self.inner.get_mut(&mid) {
 			bridge.push(frame)?;
+		}
+		Ok(())
+	}
+
+	/// Finish every bridge's track after the final frame.
+	pub fn finish(&mut self) -> Result<()> {
+		for bridge in self.inner.values_mut() {
+			bridge.finish()?;
 		}
 		Ok(())
 	}

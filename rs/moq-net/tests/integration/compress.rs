@@ -2,9 +2,8 @@
 
 //! A compressed track crosses a relay to every kind of subscriber.
 //!
-//! The publisher hop always speaks moq-lite 07, so the relay caches the DEFLATE slices as
-//! received. A moq-lite 07 subscriber gets them as stored and inflates them itself; every
-//! other version gets the plain frames the relay inflates once for all of them.
+//! Negotiated IETF and lite-07 hops keep DEFLATE slices as received. Peers that cannot
+//! signal compression receive the plain frames the relay inflates once for all of them.
 
 use crate::support;
 
@@ -15,8 +14,18 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Every downstream wire: one that carries compression, and ones that do not.
-const VERSIONS: &[&str] = &["moq-lite-07-wip", "moq-lite-06", "moq-lite-03", "moq-transport-17"];
+/// Negotiated IETF and lite-07 wires, plus versions that require plain fallback.
+const VERSIONS: &[&str] = &[
+	"moq-lite-07-wip",
+	"moq-lite-06",
+	"moq-lite-03",
+	"moq-transport-14",
+	"moq-transport-15",
+	"moq-transport-16",
+	"moq-transport-17",
+	"moq-transport-18",
+	"moq-transport-22",
+];
 
 fn compressed() -> moq_net::track::Info {
 	moq_net::track::Info::default()
@@ -43,16 +52,15 @@ struct Fixture {
 	_origins: Vec<moq_net::origin::Producer>,
 }
 
-/// A compressed track published over moq-lite 07 to a relay, and subscribed from the relay
-/// over `downstream`.
-async fn connect(downstream: &str) -> Fixture {
+/// A compressed track crosses a relay between the requested protocols.
+async fn connect(upstream: &str, downstream: &str) -> Fixture {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast.create_track("data", compressed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let relay = produce_origin(2);
-	let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
+	let mut options = MockConnectOptions::new(upstream.parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(relay.clone());
 	let upstream = connect_mock(options).await;
@@ -79,15 +87,18 @@ async fn connect(downstream: &str) -> Fixture {
 }
 
 /// Whole and chunked frames on a compressed track read back as written on every version,
-/// and only a moq-lite 07 subscriber learns the track is compressed.
+/// and only a peer that can signal it learns the track is compressed.
 #[moq_clock::test]
 async fn relay_serves_every_version() {
 	for &version in VERSIONS {
 		moq_clock::timeout(TIMEOUT, async {
-			let mut fixture = connect(version).await;
+			let mut fixture = connect("moq-lite-07-wip", version).await;
 			assert_eq!(
 				fixture.subscriber.info().compress,
-				version == "moq-lite-07-wip",
+				!matches!(
+					version,
+					"moq-lite-06" | "moq-lite-03" | "moq-transport-14" | "moq-transport-15" | "moq-transport-16"
+				),
 				"{version}: compression declared"
 			);
 
@@ -110,6 +121,9 @@ async fn relay_serves_every_version() {
 				frame.write(bytes::Bytes::copy_from_slice(chunk)).unwrap();
 			}
 			frame.finish().unwrap();
+			group
+				.write_frame(Timestamp::from_millis(3).unwrap(), bytes::Bytes::new())
+				.unwrap();
 			group.finish().unwrap();
 
 			let mut group = fixture.subscriber.recv_group().await.unwrap().expect("group");
@@ -117,6 +131,7 @@ async fn relay_serves_every_version() {
 				let frame = group.read_frame().await.unwrap().expect("frame");
 				assert_eq!(&frame.payload[..], &payload(index)[..], "{version}: frame {index}");
 			}
+			assert!(group.read_frame().await.unwrap().unwrap().payload.is_empty());
 			assert!(group.read_frame().await.unwrap().is_none(), "{version}: extra frame");
 		})
 		.await
@@ -128,9 +143,15 @@ async fn relay_serves_every_version() {
 /// compressed or inflated.
 #[moq_clock::test]
 async fn datagrams_serve_every_version() {
-	for &version in &["moq-lite-07-wip", "moq-lite-06"] {
+	for &version in &[
+		"moq-lite-07-wip",
+		"moq-lite-06",
+		"moq-transport-16",
+		"moq-transport-17",
+		"moq-transport-22",
+	] {
 		moq_clock::timeout(TIMEOUT, async {
-			let mut fixture = connect(version).await;
+			let mut fixture = connect("moq-lite-07-wip", version).await;
 			fixture
 				.track
 				.insert_datagram(0, Timestamp::from_millis(0).unwrap(), payload(0))
@@ -210,6 +231,100 @@ async fn datagrams_meter_the_bytes_on_the_wire() {
 			assert_eq!(sent.bytes, expected, "{version}: egress metered as sent");
 			assert_eq!(sent.inflated, 0, "{version}: egress inflated nothing");
 			drop((upstream, downstream, publisher, relay, origin));
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}
+
+/// Negotiated IETF ingress stays compressed across a relay to IETF or lite-07 egress.
+#[moq_clock::test]
+async fn ietf_ingress_stays_compressed_across_protocols() {
+	for upstream in ["moq-transport-17", "moq-transport-18", "moq-transport-22"] {
+		for downstream in [
+			"moq-lite-07-wip",
+			"moq-transport-16",
+			"moq-transport-22",
+			"moq-transport-14",
+		] {
+			moq_clock::timeout(TIMEOUT, async {
+				let mut fixture = connect(upstream, downstream).await;
+				assert_eq!(
+					fixture.subscriber.info().compress,
+					!matches!(downstream, "moq-transport-14" | "moq-transport-16"),
+					"{upstream} -> {downstream}"
+				);
+				let mut group = fixture.track.append_group().unwrap();
+				for index in 0..3 {
+					group
+						.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
+						.unwrap();
+				}
+				group.finish().unwrap();
+				let mut received = fixture.subscriber.recv_group().await.unwrap().unwrap();
+				for index in 0..3 {
+					assert_eq!(
+						received.read_frame().await.unwrap().unwrap().payload.as_ref(),
+						payload(index)
+					);
+				}
+				assert!(received.read_frame().await.unwrap().is_none());
+				fixture
+					.track
+					.insert_datagram(1, Timestamp::from_millis(3).unwrap(), payload(3))
+					.unwrap();
+				assert_eq!(
+					fixture
+						.subscriber
+						.recv_datagram()
+						.await
+						.unwrap()
+						.unwrap()
+						.payload
+						.as_ref(),
+					payload(3)
+				);
+			})
+			.await
+			.unwrap_or_else(|_| panic!("{upstream} -> {downstream}: timed out"));
+		}
+	}
+}
+
+/// A finished compressed track remains fetchable without subscribing to its live feed.
+#[moq_clock::test]
+async fn ietf_fetch_keeps_the_stored_form() {
+	for version in ["moq-transport-16", "moq-transport-18", "moq-transport-22"] {
+		moq_clock::timeout(TIMEOUT, async {
+			let publisher = produce_origin(1);
+			let broadcast = publisher.create_broadcast("bcast").unwrap();
+			let track = broadcast.create_track("data", compressed()).unwrap();
+			let mut group = track.append_group().unwrap();
+			for index in 0..3 {
+				group
+					.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
+					.unwrap();
+			}
+			group.finish().unwrap();
+			track.finish().unwrap();
+			broadcast.announce(Default::default()).unwrap();
+			let origin = produce_origin(2);
+			let mut options = MockConnectOptions::new(version.parse().unwrap());
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(origin.clone());
+			let _pair = connect_mock(options).await;
+			origin.consume().routed("bcast").await.unwrap();
+			let remote = origin.consume().request_broadcast("bcast", None).await.unwrap();
+			let consumer = remote.track("data").unwrap();
+			assert_eq!(consumer.query().await.unwrap().compress, version != "moq-transport-16");
+			let mut fetched = consumer.fetch_group(0, moq_net::group::Fetch::default()).await.unwrap();
+			for index in 0..3 {
+				assert_eq!(
+					fetched.read_frame().await.unwrap().unwrap().payload.as_ref(),
+					payload(index)
+				);
+			}
+			assert!(fetched.read_frame().await.unwrap().is_none());
 		})
 		.await
 		.unwrap_or_else(|_| panic!("{version}: timed out"));

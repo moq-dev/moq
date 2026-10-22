@@ -221,6 +221,8 @@
           # JSR publishing. We call `deno publish` directly instead of `bunx jsr`
           # so the release doesn't race on a runtime binary download.
           deno
+          # One browser build for local and CI Playwright checks.
+          playwright-driver.browsers
         ];
 
         # Python dependencies
@@ -630,6 +632,10 @@
             # What sh/dispatch.sh checks before a scoped `just check` or `just
             # fix`. IN_NIX_SHELL would also pass inside another project's shell.
             MOQ_DEV_SHELL = "1";
+
+            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+            PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;
+            PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
 
             # Where `just obs compile` and `just obs test` look for libobs. Set
             # on every platform so the plugin type-checks against the pinned OBS

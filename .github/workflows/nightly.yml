@@ -90,7 +90,7 @@ jobs:
       fail-fast: false
       matrix:
         # Unset keys default to the ARM runner, the plain dev shell, the Rust
-        # cache, no perf sampling, no Chromium, and nextest's default profile.
+        # cache, no perf sampling, and nextest's default profile.
         include:
           - name: Binding benchmark
             recipe: bench-ffi
@@ -145,13 +145,11 @@ jobs:
             uncached: true
           - name: Browser backend baseline
             recipe: test wasm-baseline --uniffi
-            chromium: true
             artifact: wasm-backend-baseline
             artifact-path: target/test
           # Bounded: fails on crashes, missing output, or invalid samples, never on timing.
           - name: Browser benchmark smoke
             recipe: bench-browser --smoke
-            chromium: true
             artifact: bench-browser
             artifact-path: target/bench/browser
           - name: Audit
@@ -201,12 +199,6 @@ jobs:
       - name: Allow perf kernel sampling
         if: matrix.perf
         run: sudo sysctl -w kernel.perf_event_paranoid=-1
-
-      # Playwright's Chromium isn't in the nix devShell; `--with-deps` installs
-      # its apt runtime libs, and the recipe's own install then no-ops.
-      - name: Playwright Chromium
-        if: matrix.chromium
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
 
       - name: Run workload
         id: workload
@@ -383,9 +375,9 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Install publisher and player engines
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium firefox"
+        run: nix develop --command env PLAYWRIGHT_BROWSERS_PATH="${{ runner.temp }}/playwright" bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium firefox"
       - name: Media and negative controls
-        run: nix develop --command just test media --media-engines firefox
+        run: nix develop --command env PLAYWRIGHT_BROWSERS_PATH="${{ runner.temp }}/playwright" just test media --media-engines firefox
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
           # Playwright checks a browser's libraries with the `ldd` on PATH, which in the
@@ -428,11 +420,6 @@ jobs:
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
-      # Playwright's Chromium isn't in the nix devShell; `--with-deps` installs
-      # its apt runtime libs, and run.sh's own install then no-ops.
-      - name: Playwright Chromium
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
-
       - name: WebSocket fallback startup benchmark
         run: nix develop --command just js qmux-bench
 
