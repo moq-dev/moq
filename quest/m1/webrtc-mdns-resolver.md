@@ -17,13 +17,17 @@ create any number of tasks and queries, and they outlive the peer.
 - ✅ Bound the cost by design, not with a candidate cap: the `Peer` owns one
   resolver task, aborted on drop. That task dedupes lines by host name, resolves
   each distinct name once, sequentially, and sends every line that shares
-  the name. Trickled `.local` candidates join the same queue rather than
-  resolving inline.
-- The cost is one mDNS query in flight per peer, so total work scales with
-  the peers signaling already admits.
+  the name. A description's lines are already held, bounded by its size.
+- Trickled `.local` candidates reach the resolver through a bounded channel,
+  so `add_candidate` waits for resolver capacity rather than queueing. Held
+  candidates are then bounded by what the peer has sent, and the peer's
+  signaling stalls behind its own slow names.
+- The cost is one mDNS query in flight per peer, and the work queued behind it
+  is bounded by the peer's descriptions and backpressured trickle.
 
 Tests: a description with many `.local` lines sharing one name issues one
-query; many distinct names resolve one at a time; dropping the peer cancels
+query; many distinct names resolve one at a time; sustained trickled distinct
+names make `add_candidate` wait instead of queueing; dropping the peer cancels
 pending resolution. Use a fake resolver rather than real multicast.
 
 Public API: none. Wire: none.
