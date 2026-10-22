@@ -2,6 +2,7 @@ import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.t
 import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import { U64 } from "../util/u64.ts";
+import { ABSENT_WIRE } from "./priority.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // Implementation limit for object extension blocks, independent of the IETF draft.
@@ -244,7 +245,7 @@ export class Group {
 		const trackAlias = await r.u62();
 		const groupId = await r.u53();
 		const subGroupId = flags.hasSubgroup ? await r.u53() : 0;
-		const publisherPriority = hasPriority ? await r.u8() : 128; // Default priority when absent
+		const publisherPriority = hasPriority ? await r.u8() : ABSENT_WIRE;
 
 		return new Group({ trackAlias, groupId, subGroupId, publisherPriority, flags });
 	}

@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Priorities are signed (#6142)
+
+`track_info` on the catalog producer and tracks takes an `i8` priority, higher first, with 0 unset; pass `hang::catalog::PRIORITY` as before.
+
 ### fMP4 import unwraps to Legacy (#6250)
 
 `container::fmp4::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.

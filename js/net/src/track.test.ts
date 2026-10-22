@@ -450,14 +450,15 @@ test("a maxDelay or maxAge that is not a duration is refused, not rounded into o
 	expect(() => producer.subscribe({ maxDelay: Milli(Number.MAX_SAFE_INTEGER + 1) })).toThrow(RangeError);
 });
 
-test("priority 255 is accepted and 256 is refused", () => {
+test("priority -128..=127 is accepted and anything outside is refused", () => {
 	const producer = new TrackProducer("video");
-	producer.accept({ priority: 255 });
-	expect(producer.priority).toBe(255);
-	expect(() => producer.accept({ priority: 256 })).toThrow(RangeError);
-	expect(() => producer.accept({ priority: -1 })).toThrow(RangeError);
+	producer.accept({ priority: 127 });
+	expect(producer.priority).toBe(127);
+	expect(new TrackProducer("audio").subscribe({ priority: -128 }).subscription.peek()?.priority).toBe(-128);
+	expect(() => producer.accept({ priority: 128 })).toThrow(RangeError);
+	expect(() => producer.accept({ priority: -129 })).toThrow(RangeError);
 	expect(() => producer.accept({ priority: 1.5 })).toThrow(RangeError);
-	expect(() => producer.subscribe({ priority: 256 })).toThrow(RangeError);
+	expect(() => producer.subscribe({ priority: 128 })).toThrow(RangeError);
 });
 
 test("infoDefaults re-validates timescale and the safe maxAge bound", () => {

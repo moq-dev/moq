@@ -294,12 +294,13 @@ impl Allocator {
 	/// bit; within a tier the split is max-min fair, so a share asking for less
 	/// than an even cut takes all of it and leaves the difference to the others.
 	///
-	/// That is the *publisher's* priority, which is not what orders the local send
-	/// queue: that ranks by each subscription's own priority, so a subscriber
-	/// asking for video ahead of audio is served that way whatever this decides.
-	/// The publisher's is still the right one to divide by, since allocation is a
-	/// decision about what to *produce*, and there is no single subscriber
-	/// priority to read when several are watching one track.
+	/// That is the *publisher's* priority, which the send order only falls back on:
+	/// it ranks by each subscription's own priority first, so a subscriber asking for
+	/// video ahead of audio is served that way whatever this decides, and this one
+	/// breaks the ties (or alone orders a broadcast's tracks on a session scheduled
+	/// per broadcast). The publisher's is still the right one to divide by, since
+	/// allocation is a decision about what to *produce*, and there is no single
+	/// subscriber priority to read when several are watching one track.
 	///
 	/// That last part carries a publisher that leaves `priority` at its default:
 	/// one tier of audio and video still serves audio's small reservation in full
@@ -475,7 +476,7 @@ impl Registry {
 /// One registered track's standing reservation.
 struct Entry {
 	demand: track::Demand,
-	priority: u8,
+	priority: i8,
 	max: Rate,
 }
 
@@ -535,7 +536,7 @@ struct Share {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Want {
 	id: u64,
-	priority: u8,
+	priority: i8,
 	max: Rate,
 }
 
@@ -755,15 +756,15 @@ mod tests {
 	use crate::broadcast;
 
 	/// Priorities matching `hang`'s, which is what the allocator sees in practice.
-	const AUDIO: u8 = 80;
-	const VIDEO: u8 = 60;
+	const AUDIO: i8 = 80;
+	const VIDEO: i8 = 60;
 
 	/// Bits per second, so the tables below stay readable.
 	fn bps(bps: u64) -> Rate {
 		Rate::from_bps(bps)
 	}
 
-	fn want(id: u64, priority: u8, max: u64) -> Want {
+	fn want(id: u64, priority: i8, max: u64) -> Want {
 		Want {
 			id,
 			priority,
@@ -772,7 +773,7 @@ mod tests {
 	}
 
 	/// A standalone track at `priority`, plus the broadcast keeping it alive.
-	fn track(priority: u8) -> (broadcast::Producer, track::Producer) {
+	fn track(priority: i8) -> (broadcast::Producer, track::Producer) {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast
 			.create_track("t", track::Info::timed().with_priority(priority))

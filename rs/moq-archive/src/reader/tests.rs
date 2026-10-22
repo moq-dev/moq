@@ -645,7 +645,7 @@ async fn a_track_without_usable_info_is_not_found() {
 	archive
 		.raw(
 			&Key::info("future").unwrap(),
-			br#"{"version":3,"priority":0,"timescale":1000}"#,
+			br#"{"version":4,"priority":0,"timescale":1000}"#,
 		)
 		.await;
 

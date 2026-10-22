@@ -52,9 +52,9 @@ const CACHE_WINDOW = Nano.fromMilli(Milli(30_000));
 // The cache scans at most this many times per idle cache window.
 const PRUNE_SLICES = 8;
 
-// The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
-// draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
-const DEFAULT_PRIORITY = 127;
+// The unset priority, the midpoint of the signed range: moq-lite carries it as 128 and
+// moq-transport as 127, one urgency on both.
+const DEFAULT_PRIORITY = 0;
 
 /**
  * Sanity cap on a datagram payload: the QUIC DATAGRAM frame ceiling. The real limit is
@@ -120,7 +120,7 @@ export interface Info {
 	 * or non-finite value and a result past `Number.MAX_SAFE_INTEGER`.
 	 */
 	maxAge?: Milli;
-	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`, higher first). Defaults to `127`. */
+	/** Tie-break priority between subscriptions of equal subscriber priority (`-128..=127`, higher first). Defaults to `0`. */
 	priority: number;
 	/**
 	 * How many times its first frame a group's later stored bytes may grow before a joining
@@ -158,9 +158,9 @@ function wireMillis(field: string, value: Milli): Milli {
 	return Milli(millis);
 }
 
-function priorityByte(value: number): number {
-	if (!Number.isInteger(value) || value < 0 || value > 255) {
-		throw new RangeError(`priority must be an integer in 0..=255: ${value}`);
+function priorityValue(value: number): number {
+	if (!Number.isInteger(value) || value < -128 || value > 127) {
+		throw new RangeError(`priority must be an integer in -128..=127: ${value}`);
 	}
 	return value;
 }
@@ -182,7 +182,7 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 		compress: info.compress ?? false,
 		timescale,
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
-		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
+		priority: priorityValue(info.priority ?? DEFAULT_PRIORITY),
 		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
 		...(info.unchecked ? { unchecked: true } : {}),
 	};
@@ -212,7 +212,7 @@ export interface Groups {
  * The obsolete subscriber `maxAge` field is refused at runtime; use `maxDelay`.
  */
 export interface Subscription {
-	/** Delivery priority relative to this session's other subscriptions (`0..=255`). Defaults to `0`. */
+	/** Delivery priority relative to this session's other subscriptions (`-128..=127`, higher first). Defaults to `0`. */
 	priority?: number;
 	/**
 	 * How long (milliseconds) a non-latest group stays worth delivering, by the same two
@@ -261,7 +261,7 @@ function subscriptionDefaults(subscription: Subscription = {}): Subscription {
 	if ("maxAge" in subscription) throw new TypeError("Subscriber maxAge is unsupported; use maxDelay");
 	const bounds = groupBounds(subscription.groups ?? {});
 	return {
-		priority: priorityByte(subscription.priority ?? 0),
+		priority: priorityValue(subscription.priority ?? DEFAULT_PRIORITY),
 		maxDelay: wireMillis("maxDelay", subscription.maxDelay ?? Milli.zero),
 		order: orderOf(subscription.order),
 		groups: {
@@ -726,9 +726,9 @@ export class Demand {
 		return this.#state.closed;
 	}
 
-	/** Publisher priority from the committed {@link Info}, or 0 before {@link Request.accept}. */
+	/** Publisher priority from the committed {@link Info}, or the default before {@link Request.accept}. */
 	get priority(): number {
-		return this.#state.info.peek()?.priority ?? 0;
+		return this.#state.info.peek()?.priority ?? DEFAULT_PRIORITY;
 	}
 }
 

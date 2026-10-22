@@ -148,7 +148,7 @@ impl Message for Subscribe<'_> {
 				// A zero cap still distinguishes a requested wait from an immediate miss.
 				let rendezvous = rendezvous_timeout.is_some_and(|millis| millis > 0);
 
-				let subscriber_priority = subscriber_priority.unwrap_or(128);
+				let subscriber_priority = subscriber_priority.unwrap_or(super::priority::ABSENT_WIRE);
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
 				// An absent LOCATION_FILTER means the subscription is unfiltered.
 				let filter = filter.unwrap_or(Filter::Unfiltered);
@@ -448,7 +448,7 @@ impl Message for SubscribeUpdate {
 					.encode(w, version)?;
 				self.start_location.encode(w, version)?;
 				w.varint(self.end_group)?;
-				w.u8(self.subscriber_priority.unwrap_or(128));
+				w.u8(self.subscriber_priority.unwrap_or(super::priority::ABSENT_WIRE));
 				w.bool(self.forward.unwrap_or(true));
 				encode_params!(w, version,
 					0x03 => self.authorization_token.clone(),

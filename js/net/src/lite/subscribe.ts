@@ -5,6 +5,7 @@ import type { Reader, Writer } from "../stream.ts";
 import type { Location, Order } from "../track.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
+import { fromWire, toWire } from "./priority.ts";
 import {
 	hasDropCode,
 	hasFrameBounds,
@@ -230,10 +231,10 @@ export class SubscribeUpdate {
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
-				await w.u8(this.priority);
+				await w.u8(toWire(this.priority));
 				break;
 			default:
-				await w.u8(this.priority);
+				await w.u8(toWire(this.priority));
 				await encodeOrder(w, version, this.order);
 				await w.u53(this.maxDelay);
 				await encodeStartGroup(w, version, this.startGroup);
@@ -249,9 +250,9 @@ export class SubscribeUpdate {
 		switch (version) {
 			case Version.DRAFT_01:
 			case Version.DRAFT_02:
-				return new SubscribeUpdate({ priority: await r.u8() });
+				return new SubscribeUpdate({ priority: fromWire(await r.u8()) });
 			default: {
-				const priority = await r.u8();
+				const priority = fromWire(await r.u8());
 				const order = await decodeOrder(r, version);
 				const maxDelay = await r.u53();
 				const startGroup = await decodeStartGroup(r, version);
@@ -351,7 +352,7 @@ export class Subscribe {
 		await w.string(Path.encode(this.broadcast));
 		await encodeEpoch(w, version, this.epoch);
 		await w.string(this.track);
-		await w.u8(this.priority);
+		await w.u8(toWire(this.priority));
 
 		switch (version) {
 			case Version.DRAFT_01:
@@ -372,7 +373,7 @@ export class Subscribe {
 		const broadcast = Path.decode(await r.string());
 		const epoch = await decodeEpoch(r, version);
 		const track = await r.string();
-		const priority = await r.u8();
+		const priority = fromWire(await r.u8());
 
 		switch (version) {
 			case Version.DRAFT_01:
@@ -446,12 +447,12 @@ export class SubscribeOk {
 				// noop
 				break;
 			case Version.DRAFT_01:
-				await w.u8(this.priority ?? 0);
+				await w.u8(toWire(this.priority));
 				break;
 			// Draft-05+ never sends SUBSCRIBE_OK, but keep the field layout matching
 			// Draft-03/04 so a stray future use stays well-formed.
 			default:
-				await w.u8(this.priority);
+				await w.u8(toWire(this.priority));
 				await padGroupOrder(w, version);
 				await w.u53(this.maxDelay);
 				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
@@ -471,10 +472,10 @@ export class SubscribeOk {
 				// noop
 				break;
 			case Version.DRAFT_01:
-				priority = await r.u8();
+				priority = fromWire(await r.u8());
 				break;
 			default:
-				priority = await r.u8();
+				priority = fromWire(await r.u8());
 				await skipGroupOrder(r, version);
 				maxDelay = await r.u53();
 				startGroup = await r.u53();

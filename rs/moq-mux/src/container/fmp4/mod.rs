@@ -332,7 +332,7 @@ impl Kind {
 	}
 
 	/// The publisher priority for this kind of media.
-	fn priority(self) -> u8 {
+	fn priority(self) -> i8 {
 		match self {
 			Self::Video => hang::catalog::PRIORITY.video,
 			Self::Audio => hang::catalog::PRIORITY.audio,
