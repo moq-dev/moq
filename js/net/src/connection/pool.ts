@@ -7,6 +7,7 @@
 import { Milli, Nano } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
+import type * as Auth from "../auth.ts";
 import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
@@ -77,6 +78,12 @@ export interface ConnectionProps {
 	delay?: ReloadDelay;
 
 	/**
+	 * Credentials to present, kept apart from the URL; see {@link ConnectProps.tokens}. Pass a
+	 * `Signal` to replace them before they expire. Implies a private loop.
+	 */
+	tokens?: readonly string[] | Signal<readonly string[]>;
+
+	/**
 	 * How to react to the relay's GOAWAY; an unset field uses its default. Every connection
 	 * migrates on GOAWAY, dialing the replacement while the old session finishes its groups.
 	 * This only tunes where it may go and for how long the old session serves.
@@ -111,7 +118,7 @@ export interface ConnectionProps {
  * session finishes its groups, and the handle and its origin carry across. A redirect the
  * {@link ConnectionProps.goaway} policy refuses stops the loop like an auth rejection does.
  *
- * Options the pool cannot honor (transport options, delay, goaway, a pinned
+ * Options the pool cannot honor (transport options, delay, goaway, tokens, a pinned
  * certificate, caller-owned origins) use a private loop. An explicit `share: true`
  * refuses them. A supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
  * instead.
@@ -180,6 +187,15 @@ export class Connection {
 	readonly origin: Getter<Origin.Table | undefined>;
 
 	/**
+	 * The auth handle for the current URL, or undefined while disabled or URL-less.
+	 *
+	 * Every session the connection makes presents the tokens it holds, so a route naming one
+	 * keeps it across a reconnect, and its grant follows the live session. A shared handle's
+	 * is the same one every other handle on this URL uses, since they share the session.
+	 */
+	readonly auth: Getter<Auth.Handle | undefined>;
+
+	/**
 	 * Settles once this handle is released via {@link close}: `null` on a clean close, or
 	 * the abort {@link Error}. Peek it synchronously (`undefined` while open), observe it
 	 * reactively, or `await` it. Attempt failures live on {@link error} instead.
@@ -194,6 +210,7 @@ export class Connection {
 	readonly #probe = new Signal<Getter<ProbeType | undefined> | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	readonly #bandwidth = new Signal<Handle | undefined>(undefined);
+	readonly #auth = new Signal<Auth.Handle | undefined>(undefined);
 	readonly #error = new Signal<Error | undefined>(undefined);
 	#signals: Effect;
 
@@ -217,6 +234,7 @@ export class Connection {
 		this.probe = new Follow(this.#probe);
 		this.origin = this.#origin;
 		this.bandwidth = this.#bandwidth;
+		this.auth = this.#auth;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
 
 		const linger = props?.linger;
@@ -240,6 +258,7 @@ export class Connection {
 
 			effect.set(this.#origin, lease.origin, undefined);
 			effect.set(this.#bandwidth, lease.connection.bandwidth, undefined);
+			effect.set(this.#auth, lease.connection.auth, undefined);
 
 			// Proxy the shared loop's outputs, so this handle reads like its own connection.
 			effect.run((nested) => nested.set(this.#status, nested.get(lease.connection.status), "disconnected"));
@@ -264,6 +283,7 @@ export class Connection {
 			websocket: props.websocket,
 			delay: props.delay,
 			goaway: props.goaway,
+			tokens: props.tokens,
 		});
 		this.#signals.cleanup(() => loop.close());
 
@@ -271,6 +291,7 @@ export class Connection {
 			if (!effect.get(this.enabled) || !effect.get(href)) return;
 			effect.set(this.#origin, origin, undefined);
 			effect.set(this.#bandwidth, loop.bandwidth, undefined);
+			effect.set(this.#auth, loop.auth, undefined);
 		});
 		this.#signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
 		this.#signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
@@ -387,6 +408,9 @@ function refuse(props?: ConnectionProps): void {
 	if (props.delay !== undefined) {
 		throw new Error("delay cannot be shared; pass share: false");
 	}
+	if (props.tokens !== undefined) {
+		throw new Error("tokens cannot be shared; pass share: false");
+	}
 	if (props.goaway !== undefined) {
 		throw new Error("goaway cannot be shared; pass share: false");
 	}
@@ -398,6 +422,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 		props.webtransport !== undefined ||
 		props.websocket !== undefined ||
 		props.delay !== undefined ||
+		props.tokens !== undefined ||
 		props.goaway !== undefined ||
 		props.publish !== undefined ||
 		props.consume !== undefined

@@ -77,6 +77,17 @@ class Moq internal constructor(
     fun auth(): Auth = session.auth()
 
     /**
+     * Replace the credentials every dial presents ([ClientConfig.tokens]), such as before the
+     * current ones expire.
+     *
+     * The next dial presents them, and a live session with in-band AUTH presents them at once,
+     * withdrawing each replaced token once its replacements are answered. After an
+     * authorization refusal the client redials only if they changed. An empty token throws
+     * `MoqException.Config`.
+     */
+    fun setTokens(tokens: List<String>) = client.setTokens(tokens)
+
+    /**
      * Drain finished tracks within one second, throwing on failure.
      * Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
      * Lite versions, including the default lite-06, wait only for transport ACKs.

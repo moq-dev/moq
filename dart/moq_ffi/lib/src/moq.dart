@@ -3131,6 +3131,7 @@ class FfiConverterMoqBackoff {
 class MoqClientConfig {
   final String? bind;
   final List<String> versions;
+  final List<String> tokens;
   final int? timeoutUs;
   final int? raceUs;
   final int? resolutionDelayUs;
@@ -3144,6 +3145,7 @@ class MoqClientConfig {
   MoqClientConfig({
     this.bind = null,
     this.versions = const [],
+    this.tokens = const [],
     this.timeoutUs = null,
     this.raceUs = null,
     this.resolutionDelayUs = null,
@@ -3174,6 +3176,11 @@ class FfiConverterMoqClientConfig {
     );
     final versions = versions_lifted.value;
     new_offset += versions_lifted.bytesRead;
+    final tokens_lifted = FfiConverterSequenceString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final tokens = tokens_lifted.value;
+    new_offset += tokens_lifted.bytesRead;
     final timeoutUs_lifted = FfiConverterOptionalUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -3228,6 +3235,7 @@ class FfiConverterMoqClientConfig {
       MoqClientConfig(
         bind: bind,
         versions: versions,
+        tokens: tokens,
         timeoutUs: timeoutUs,
         raceUs: raceUs,
         resolutionDelayUs: resolutionDelayUs,
@@ -3247,6 +3255,7 @@ class FfiConverterMoqClientConfig {
     final total_length =
         FfiConverterOptionalString.allocationSize(value.bind) +
         FfiConverterSequenceString.allocationSize(value.versions) +
+        FfiConverterSequenceString.allocationSize(value.tokens) +
         FfiConverterOptionalUInt64.allocationSize(value.timeoutUs) +
         FfiConverterOptionalUInt64.allocationSize(value.raceUs) +
         FfiConverterOptionalUInt64.allocationSize(value.resolutionDelayUs) +
@@ -3271,6 +3280,10 @@ class FfiConverterMoqClientConfig {
     );
     new_offset += FfiConverterSequenceString.write(
       value.versions,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterSequenceString.write(
+      value.tokens,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalUInt64.write(
@@ -3319,6 +3332,7 @@ class FfiConverterMoqClientConfig {
   static int allocationSize(MoqClientConfig value) {
     return FfiConverterOptionalString.allocationSize(value.bind) +
         FfiConverterSequenceString.allocationSize(value.versions) +
+        FfiConverterSequenceString.allocationSize(value.tokens) +
         FfiConverterOptionalUInt64.allocationSize(value.timeoutUs) +
         FfiConverterOptionalUInt64.allocationSize(value.raceUs) +
         FfiConverterOptionalUInt64.allocationSize(value.resolutionDelayUs) +
@@ -12448,6 +12462,7 @@ abstract class MoqClientInterface {
   void cancel();
   Future<MoqSession> connect({required String url});
   MoqException? failure();
+  void setTokens({required List<String> tokens});
 }
 
 final _MoqClientFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -12520,6 +12535,16 @@ class MoqClient implements MoqClientInterface {
       FfiConverterOptionalMoqException.lift,
       null,
     );
+  }
+
+  void setTokens({required List<String> tokens}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqclient_set_tokens(
+        uniffiClonePointer(),
+        FfiConverterSequenceString.lower(tokens),
+        status,
+      );
+    }, moqExceptionErrorHandler);
   }
 }
 
@@ -17843,6 +17868,15 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqclient_failure(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Void Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqclient_set_tokens(
+  Pointer<Void> ptr,
+  RustBuffer tokens,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -19058,6 +19092,9 @@ external int uniffi_moq_ffi_checksum_method_moqclient_connect();
 external int uniffi_moq_ffi_checksum_method_moqclient_failure();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqclient_set_tokens();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqsession_auth();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -19304,6 +19341,24 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqaudioproducer_write() != 48796) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqauth_add() != 1074) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqauth_grant() != 14588) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqauth_grant_changed() != 5195) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqauthtoken_cancel() != 59324) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqauthtoken_closed() != 31020) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqauthtoken_grant() != 31654) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqauth_add() != 1074) {
@@ -19763,6 +19818,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqclient_failure() != 29341) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqclient_set_tokens() != 4148) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_auth() != 1680) {

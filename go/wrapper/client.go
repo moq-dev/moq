@@ -24,6 +24,7 @@ type clientConfig struct {
 	tlsHostName      *string
 	bind             *string
 	versions         []string
+	tokens           []string
 	timeout          *time.Duration
 	race             *time.Duration
 	resolutionDelay  *time.Duration
@@ -60,6 +61,7 @@ func (c *clientConfig) ffi() (ffi.MoqClientConfig, error) {
 	cfg := ffi.MoqClientConfig{
 		Bind:              c.bind,
 		Versions:          c.versions,
+		Tokens:            c.tokens,
 		TimeoutUs:         us("connect timeout", c.timeout),
 		RaceUs:            us("race", c.race),
 		ResolutionDelayUs: us("resolution delay", c.resolutionDelay),
@@ -208,6 +210,16 @@ func WithBind(addr string) ClientOption {
 func WithVersions(versions ...string) ClientOption {
 	offered := append([]string(nil), versions...)
 	return func(c *clientConfig) { c.versions = offered }
+}
+
+// WithTokens sets the credentials every dial presents. The first is the
+// connection credential, sent in SETUP and, while an offered version can't
+// carry it there, the URL's ?jwt=; each other one widens the session's grant
+// over in-band AUTH. A URL that already carries ?jwt= keeps it, and then every
+// token rides AUTH. Replace them before they expire with [Client.SetTokens].
+func WithTokens(tokens ...string) ClientOption {
+	presented := append([]string(nil), tokens...)
+	return func(c *clientConfig) { c.tokens = presented }
 }
 
 // WithConnectTimeout bounds one connect attempt, dial and handshake together.
@@ -387,6 +399,15 @@ func (c *Client) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
 // for a future announcement.
 func (c *Client) RequestBroadcast(ctx context.Context, path string) (*BroadcastConsumer, error) {
 	return c.consumer.RequestBroadcast(ctx, path)
+}
+
+// SetTokens replaces the credentials every dial presents, such as before the
+// current ones expire. The next dial presents them, and a live session with
+// in-band AUTH presents them at once, withdrawing each replaced token once its
+// replacements are answered. After an authorization refusal the client redials
+// only if they changed. An empty token is refused.
+func (c *Client) SetTokens(tokens ...string) error {
+	return c.inner.SetTokens(append([]string(nil), tokens...))
 }
 
 // Session returns the underlying session. Hold the client (or session) to keep

@@ -700,6 +700,16 @@ token_url() {
     printf '%s/?jwt=%s' "$URL" "$token"
 }
 
+# Set `connect` to moq-cli's arguments for <url>, moving a `?jwt=` token to
+# `--connect-token` so it rides SETUP on $AUTH_VERSION. The binding clients keep it
+# in the URL, which covers the query form.
+rust_connect() {
+    case "$1" in
+        *'?jwt='*) connect=(--connect "${1%%\?jwt=*}" --connect-token "${1#*\?jwt=}") ;;
+        *) connect=(--connect "$1") ;;
+    esac
+}
+
 # moq-cli logs each grant it receives over AUTH at debug, under `moq_net::auth`.
 CLI_LOG="${RUST_LOG:-info},moq_net::auth=debug"
 
@@ -759,7 +769,9 @@ run_publisher() {
     case "$lang" in
         rust)
             # A finished import stays up for its max-age; `stop_publisher` allows 10 s to close.
-            ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$AUTH_VERSION" \
+            local connect
+            rust_connect "$url"
+            ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" "${connect[@]}" --connect-version "$AUTH_VERSION" \
                 --broadcast "$broadcast" import --max-age 1s avc3
             ;;
         python)
@@ -906,8 +918,9 @@ PYCODE
                 [[ -s "$HARNESS_RUN/$broadcast.raw" ]]
                 return
             fi
-            local n
-            n=$(RUST_LOG="$CLI_LOG" timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$url" \
+            local n connect
+            rust_connect "$url"
+            n=$(RUST_LOG="$CLI_LOG" timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" "${connect[@]}" \
                 --connect-version "$AUTH_VERSION" --broadcast "$broadcast" export fmp4 | head -c 1 | wc -c | tr -d ' ' || true)
             [[ "${n:-0}" -ge 1 ]]
             ;;

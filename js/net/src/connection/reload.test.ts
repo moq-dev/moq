@@ -246,6 +246,41 @@ test("an announced request follows the reconnect on the same handle", async () =
 	}
 });
 
+test("an ended auth handle gives up instead of retrying", async () => {
+	const original = globalThis.WebTransport;
+	const url = new URL("https://example.com/");
+	const servers: Promise<{ abort(): void }>[] = [];
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		servers.push(accept(pair.server, url));
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	// An unbounded retry window, so only the ended handle can stop the loop.
+	const reload = new Reload({
+		enabled: true,
+		url,
+		websocket: { enabled: false },
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+	});
+	const warned = spyOn(console, "warn").mockImplementation(() => {});
+	try {
+		await waitUntil(() => reload.established.peek() !== undefined);
+		const aborted = new Error("auth handle aborted");
+		reload.auth.abort(aborted);
+		(await servers[0])?.abort();
+
+		await waitUntil(() => reload.error.peek() !== undefined);
+		expect(reload.error.peek()).toBe(aborted);
+		expect(servers.length).toBe(1);
+	} finally {
+		warned.mockRestore();
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
 test("a reload that gives up keeps requests pending until it is disposed", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
@@ -393,6 +428,80 @@ for (const code of [SessionCode.Unauthorized, SessionCode.Expired]) {
 		}
 	});
 }
+
+/**
+ * Stub WebTransport for lite-06, which carries the credential in the URL: refuses `refused`
+ * once `release` resolves, and accepts any other credential, recording each dialed jwt.
+ */
+function refusing(refused: string, release: Promise<void>) {
+	const dialed: (string | null)[] = [];
+	const stub = function StubWebTransport(target: string | URL) {
+		const jwt = new URL(target).searchParams.get("jwt");
+		dialed.push(jwt);
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		void accept(pair.server, new URL(target)).then(async () => {
+			if (jwt !== refused) return;
+			await release;
+			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		});
+		return pair.client;
+	};
+	return { dialed, stub: stub as unknown as typeof WebTransport };
+}
+
+test("a refused credential replaced since its dial redials with the new one", async () => {
+	const original = globalThis.WebTransport;
+	const { promise: release, resolve } = Promise.withResolvers<void>();
+	const { dialed, stub } = refusing("old", release);
+	globalThis.WebTransport = stub;
+
+	const tokens = new Signal<readonly string[]>(["old"]);
+	const reload = new Reload({
+		url: new URL("https://example.com/"),
+		versions: ["moq-lite-06"],
+		websocket: { enabled: false },
+		tokens,
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+	});
+	try {
+		await waitUntil(() => reload.established.peek() !== undefined);
+		tokens.set(["new"]);
+		resolve();
+		await waitUntil(() => dialed.includes("new"));
+		expect(dialed).toEqual(["old", "new"]);
+		await waitUntil(() => reload.established.peek() !== undefined);
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("new tokens redial a URL that stopped on refusing the old ones", async () => {
+	const original = globalThis.WebTransport;
+	const { dialed, stub } = refusing("old", Promise.resolve());
+	globalThis.WebTransport = stub;
+
+	const tokens = new Signal<readonly string[]>(["old"]);
+	const reload = new Reload({
+		url: new URL("https://example.com/"),
+		versions: ["moq-lite-06"],
+		websocket: { enabled: false },
+		tokens,
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+	});
+	try {
+		await waitUntil(() => reload.error.peek() !== undefined);
+		expect(dialed).toEqual(["old"]);
+		tokens.set(["new"]);
+		await waitUntil(() => dialed.includes("new"));
+		await waitUntil(() => reload.established.peek() !== undefined);
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
 
 test("an unauthorized session close during setup stops retrying", async () => {
 	const original = globalThis.WebTransport;

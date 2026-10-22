@@ -150,7 +150,7 @@ impl Server {
 		version: lite::Version,
 		client_setup: Option<lite::AcceptedSetup<S>>,
 		peer_hop: Option<crate::Hop>,
-		auth: crate::auth::Handle,
+		auth: crate::auth::Link,
 	) -> Result<(Session, crate::Driver<S>), Error>
 	where
 		S: crate::transport::poll::Session,
@@ -168,6 +168,7 @@ impl Server {
 				cost: None,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				token: None,
 				ietf: self.extensions.ietf && version.has_ietf(),
 			}
 		} else {
@@ -294,18 +295,21 @@ impl Server {
 			_ => return Err(Error::Version),
 		};
 
-		let auth = crate::auth::Handle::new(match &handshake {
+		let auth = crate::auth::Link::new(match &handshake {
 			PausedHandshake::LiteBare { version, .. } | PausedHandshake::LiteSetup { version, .. } => {
 				version.has_auth()
 			}
 			PausedHandshake::Boxed(_) => false,
 		});
+		let token = match &handshake {
+			PausedHandshake::LiteSetup { client_setup, .. } => client_setup.setup.token.clone(),
+			_ => None,
+		};
 		Ok(Handshake {
 			path,
 			role,
 			origin,
-			// moq-lite carries no SETUP token.
-			token: None,
+			token,
 			assigned_hop: crate::Hop::random(),
 			auth,
 			inner: Some(RequestInner {
@@ -462,8 +466,8 @@ impl Server {
 			// Lite 01/02 and moq-transport 14-16 carry no AUTH, though a moq-transport request
 			// still carries a token.
 			auth: match version {
-				Version::Ietf(_) => crate::auth::Handle::ietf(false),
-				Version::Lite(_) => crate::auth::Handle::new(false),
+				Version::Ietf(_) => crate::auth::Link::ietf(false),
+				Version::Lite(_) => crate::auth::Link::new(false),
 			},
 			inner: Some(RequestInner {
 				server: self.clone(),
@@ -503,7 +507,7 @@ impl Server {
 			assigned_hop: crate::Hop::random(),
 			// The client's SETUP already settled whether it offered MoQ Auth, so it is
 			// negotiated exactly when we offer it too.
-			auth: crate::auth::Handle::ietf(peer_setup.declared.auth && self.extensions.auth),
+			auth: crate::auth::Link::ietf(peer_setup.declared.auth && self.extensions.auth),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -535,7 +539,7 @@ pub struct Handshake<S: crate::transport::poll::Session> {
 	assigned_hop: crate::Hop,
 	/// The session's auth handle, available before [`Handshake::ok`] so the caller can
 	/// take the peer's token requests before any arrive.
-	auth: crate::auth::Handle,
+	auth: crate::auth::Link,
 	// Taken by `ok`/`close`; `Drop` rejects the handshake if neither ran.
 	inner: Option<RequestInner<S>>,
 }
@@ -584,7 +588,7 @@ trait Paused<S: crate::transport::poll::Session>: MaybeSend + MaybeSync {
 		server: Server,
 		runtime: Deadlines,
 		peer_hop: Option<crate::Hop>,
-		auth: crate::auth::Handle,
+		auth: crate::auth::Link,
 	) -> Accept<S>;
 
 	/// Reject the handshake, closing the transport with `err`'s wire code.
@@ -611,7 +615,7 @@ where
 		server: Server,
 		runtime: Deadlines,
 		peer_hop: Option<crate::Hop>,
-		auth: crate::auth::Handle,
+		auth: crate::auth::Link,
 	) -> Accept<S> {
 		use crate::util::MaybeBoxedExt as _;
 		async move {
@@ -639,6 +643,7 @@ where
 				version,
 				path: None,
 				authority: None,
+				token: None,
 				peer_setup_stream: Some(peer_setup.stream),
 				peer_declared: Some(peer_setup.declared),
 				auth: auth.clone(),
@@ -691,7 +696,7 @@ where
 		server: Server,
 		runtime: Deadlines,
 		peer_hop: Option<crate::Hop>,
-		auth: crate::auth::Handle,
+		auth: crate::auth::Link,
 	) -> Accept<S> {
 		use crate::util::MaybeBoxedExt as _;
 		async move {
@@ -774,6 +779,7 @@ where
 						version: v,
 						path: None,
 						authority: None,
+						token: None,
 						peer_setup_stream: None,
 						peer_declared: Some(peer_declared),
 						auth: auth.clone(),
@@ -849,13 +855,14 @@ where
 	/// Take [`requests`](crate::auth::Handle::requests) here to answer the client's
 	/// tokens yourself; the choice is fixed once the session's driver first runs.
 	pub fn auth(&self) -> crate::auth::Handle {
-		self.auth.clone()
+		self.auth.handle().clone()
 	}
 
-	/// The credential the client presented in its SETUP's `AUTHORIZATION TOKEN` option.
+	/// The connection credential the client presented in its SETUP: moq-transport's
+	/// `AUTHORIZATION TOKEN` option, or moq-lite-07's Token parameter.
 	///
-	/// Only moq-transport carries one, so moq-lite sessions return `None`. The transport
-	/// has not verified it: authorize on it the way you would a URL token.
+	/// Older moq-lite versions carry none, so they return `None`. The transport has not
+	/// verified it: authorize on it the way you would a URL token.
 	pub fn token(&self) -> Option<&setup::Token> {
 		self.token.as_ref()
 	}
@@ -1186,6 +1193,7 @@ mod tests {
 			role,
 			cost: None,
 			hop,
+			token: None,
 			ietf: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
@@ -1512,7 +1520,7 @@ mod tests {
 			origin: None,
 			token: None,
 			assigned_hop: Hop::random(),
-			auth: crate::auth::Handle::ietf(false),
+			auth: crate::auth::Link::ietf(false),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
 				runtime: Deadlines::new(moq_clock::now()),

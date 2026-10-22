@@ -25,6 +25,11 @@ pub struct MoqClientConfig {
 	/// Empty offers every supported version; [`moq_versions`] lists them.
 	#[uniffi(default = [])]
 	pub versions: Vec<String>,
+	/// Credentials every dial presents. The first is the connection credential, unless the URL
+	/// carries its own `?jwt=`; each other one widens the session's grant. Replace them with
+	/// [`MoqClient::set_tokens`].
+	#[uniffi(default = [])]
+	pub tokens: Vec<String>,
 	/// How long one connect may take, dial and handshake together, in microseconds. 0 waits
 	/// forever.
 	#[uniffi(default = None)]
@@ -286,6 +291,20 @@ pub(crate) fn parse_versions(versions: &[String]) -> Result<Vec<moq_net::Version
 #[cfg(not(target_arch = "wasm32"))]
 type Dialing = Arc<std::sync::Mutex<Option<moq_tokio::connection::Monitor>>>;
 
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_tokens(tokens: Vec<String>) -> Result<Vec<moq_tokio::connect::Token>, MoqError> {
+	tokens
+		.into_iter()
+		.map(|token| {
+			token
+				.try_into()
+				.map_err(|err: moq_tokio::connect::EmptyToken| MoqError::Config {
+					reason: err.to_string(),
+				})
+		})
+		.collect()
+}
+
 /// Native QUIC/WebTransport client state: the configured endpoint and the wired origins.
 #[cfg(not(target_arch = "wasm32"))]
 struct Client {
@@ -319,6 +338,7 @@ impl Client {
 			connect.bind = Some(bind);
 		}
 		connect.version = parse_versions(&config.versions)?;
+		connect.tokens = parse_tokens(config.tokens)?;
 		connect.timeout = config.timeout_us.map(std::time::Duration::from_micros);
 		connect.race = config.race_us.map(std::time::Duration::from_micros);
 		connect.resolution_delay = config.resolution_delay_us.map(std::time::Duration::from_micros);
@@ -592,6 +612,22 @@ mod tests {
 			..Default::default()
 		};
 		assert!(matches!(MoqClient::new(missing), Err(MoqError::Config { .. })));
+
+		let empty = MoqClientConfig {
+			tokens: vec![String::new()],
+			..Default::default()
+		};
+		assert!(matches!(MoqClient::new(empty), Err(MoqError::Config { .. })));
+	}
+
+	#[test]
+	fn set_tokens_refuses_an_empty_token() {
+		let client = MoqClient::new(MoqClientConfig::default()).unwrap();
+		client.set_tokens(vec!["a".into(), "b".into()]).unwrap();
+		assert!(matches!(
+			client.set_tokens(vec![String::new()]),
+			Err(MoqError::Config { .. })
+		));
 	}
 
 	#[test]
@@ -600,6 +636,7 @@ mod tests {
 		MoqClient::new(MoqClientConfig {
 			bind: Some("127.0.0.1:0".into()),
 			versions: vec!["moq-lite-03".into()],
+			tokens: vec!["credential".into()],
 			once: true,
 			backoff: MoqBackoff {
 				timeout_us: Some(0),
@@ -631,6 +668,8 @@ impl Client {
 		let MoqClientConfig {
 			bind,
 			versions,
+			// Presenting tokens needs the native client's dial and AUTH handling.
+			tokens,
 			timeout_us,
 			race_us,
 			resolution_delay_us,
@@ -649,6 +688,7 @@ impl Client {
 			..tls.clone()
 		};
 		if bind.is_some()
+			|| !tokens.is_empty()
 			|| timeout_us.is_some()
 			|| race_us.is_some()
 			|| resolution_delay_us.is_some()
@@ -755,6 +795,10 @@ pub struct MoqClient {
 	/// Shared with the state, which the `connect` in flight holds locked.
 	#[cfg(not(target_arch = "wasm32"))]
 	dialing: Dialing,
+	/// Held outside the task, which a connect holds for as long as it dials, so a refresh
+	/// can land mid-dial.
+	#[cfg(not(target_arch = "wasm32"))]
+	tokens: moq_tokio::connect::Tokens,
 }
 
 #[uniffi::export]
@@ -766,8 +810,28 @@ impl MoqClient {
 		Ok(Arc::new(Self {
 			#[cfg(not(target_arch = "wasm32"))]
 			dialing: client.dialing.clone(),
+			#[cfg(not(target_arch = "wasm32"))]
+			tokens: client.client.tokens(),
 			task: Task::new(client),
 		}))
+	}
+
+	/// Replace the credentials every dial presents, such as before the current ones expire.
+	///
+	/// The next dial presents them, and a live session that supports in-band AUTH presents
+	/// them at once, withdrawing each replaced token once its replacements are answered.
+	/// After an authorization refusal the client redials only if they changed.
+	pub fn set_tokens(&self, tokens: Vec<String>) -> Result<(), MoqError> {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			self.tokens.set(parse_tokens(tokens)?);
+			Ok(())
+		}
+		#[cfg(target_arch = "wasm32")]
+		{
+			let _ = tokens;
+			Err(MoqError::Unsupported)
+		}
 	}
 
 	/// Connect to a MoQ server and wait for the session to be established.
@@ -1162,8 +1226,8 @@ impl MoqSession {
 	pub fn auth(&self) -> Arc<MoqAuth> {
 		Arc::new(MoqAuth::new(match &self.inner {
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => crate::auth::Handle::Connection(connection.auth()),
-			Inner::Session(session) => crate::auth::Handle::Session(session.auth()),
+			Inner::Connection(connection) => connection.auth(),
+			Inner::Session(session) => session.auth(),
 		}))
 	}
 

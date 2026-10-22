@@ -16,10 +16,12 @@ pub struct Client {
 	versions: Versions,
 	setup_path: Option<String>,
 	setup_authority: Option<String>,
+	setup_token: Option<setup::Token>,
 	cost: Option<u64>,
 	peer_hop: Option<crate::Hop>,
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
+	auth: Option<crate::auth::Handle>,
 }
 
 impl Client {
@@ -95,6 +97,31 @@ impl Client {
 		self
 	}
 
+	/// Present `token` as the connection credential in SETUP, on versions that carry one
+	/// (moq-lite-07+ and every moq-transport draft we speak). The session's empty-token
+	/// AUTH stream then answers with its grant.
+	///
+	/// Other versions send nothing, so a caller that may negotiate one also puts the
+	/// token in the URL query. moq-lite carries no Token Type, so only
+	/// [`Token::OUT_OF_BAND`](setup::Token::OUT_OF_BAND) reaches it; another type fails
+	/// the handshake.
+	pub fn with_token(mut self, token: setup::Token) -> Self {
+		self.setup_token = Some(token);
+		self
+	}
+
+	/// Build every session on `auth`, so each presents the tokens it holds and a route
+	/// naming one of its [`Auth`](crate::auth::Auth)s keeps it across a reconnect. Omit to
+	/// give each session a handle of its own, which ends with it.
+	///
+	/// The handle backs one active session at a time, plus the ones draining after a
+	/// GOAWAY: connecting another while one is still active fails with
+	/// [`Error::Duplicate`].
+	pub fn with_auth(mut self, auth: crate::auth::Handle) -> Self {
+		self.auth = Some(auth);
+		self
+	}
+
 	/// Choose which extensions to offer in SETUP. Defaults to every moq-transport one, and
 	/// not [`ietf`](setup::Extensions::ietf), which only relays turn on.
 	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
@@ -151,6 +178,16 @@ impl Client {
 		self.peer_hop.unwrap_or_else(crate::Hop::random)
 	}
 
+	/// The new session's side of its auth handle: the one from [`with_auth`](Self::with_auth),
+	/// or one of its own. `requests` for moq-transport, where a request carries a token.
+	fn link(&self, supported: bool, requests: bool) -> Result<crate::auth::Link, Error> {
+		match &self.auth {
+			Some(handle) => crate::auth::Link::attach(handle, supported, requests),
+			None if requests => Ok(crate::auth::Link::ietf(supported)),
+			None => Ok(crate::auth::Link::new(supported)),
+		}
+	}
+
 	/// The origin pair a session attaches, tagged and filtered.
 	///
 	/// Reads through the publish (egress) consumer and writes through the
@@ -201,6 +238,8 @@ impl Client {
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				// Older versions carry the credential in the URL query instead.
+				token: self.setup_token.clone().filter(|_| version.has_auth()),
 				ietf: self.extensions.ietf && version.has_ietf(),
 			}
 		} else {
@@ -219,7 +258,7 @@ impl Client {
 			version,
 			our_setup,
 			peer_setup: None,
-			auth: crate::auth::Handle::new(version.has_auth()),
+			auth: self.link(version.has_auth(), false)?,
 		})?;
 
 		Ok(Session::new(
@@ -293,7 +332,7 @@ impl Client {
 				// We advertise the request path in our SETUP for URL-less transports.
 				// The peer's SETUP decides whether AUTH is negotiated. A handle that does not
 				// offer it keeps the option out of our SETUP and presents no credential.
-				let auth = crate::auth::Handle::ietf(self.extensions.auth);
+				let auth = self.link(self.extensions.auth, true)?;
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					limits: self.limits,
@@ -308,6 +347,7 @@ impl Client {
 					version: draft,
 					path: self.setup_path.clone(),
 					authority: self.setup_authority.clone(),
+					token: self.setup_token.clone(),
 					peer_setup_stream: None,
 					peer_declared: None,
 					auth: auth.clone(),
@@ -398,6 +438,9 @@ impl Client {
 		if let Some(authority) = &self.setup_authority {
 			parameters.set_bytes(ietf::ParameterBytes::Authority, authority.clone().into_bytes());
 		}
+		if let Some(token) = &self.setup_token {
+			ietf::token::into_setup(&mut parameters, token, ietf_encoding)?;
+		}
 		if self.extensions.solicit {
 			ietf::solicit::into_setup(&mut parameters, ietf_encoding);
 		}
@@ -439,7 +482,7 @@ impl Client {
 					our_setup: lite::Setup::default(),
 					peer_setup: None,
 					// Negotiated over the bidi SETUP: lite 01/02, which carry no AUTH.
-					auth: crate::auth::Handle::new(v.has_auth()),
+					auth: self.link(v.has_auth(), false)?,
 				})?;
 
 				(
@@ -467,7 +510,7 @@ impl Client {
 
 				let stream = stream.with_version(v);
 				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
-				let auth = crate::auth::Handle::ietf(false);
+				let auth = self.link(false, true)?;
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
@@ -483,6 +526,7 @@ impl Client {
 					version: v,
 					path: None,
 					authority: None,
+					token: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
 					auth: auth.clone(),
@@ -851,7 +895,11 @@ mod tests {
 	/// The client SETUP on the bidi control stream (the pre-draft-17 framing) carries the
 	/// AUTHORITY next to the PATH.
 	#[moq_clock::test]
-	async fn draft14_setup_carries_the_authority() {
+	async fn draft14_setup_carries_the_authority_and_token() {
+		let token = setup::Token {
+			kind: setup::Token::OUT_OF_BAND,
+			value: b"connection-credential".to_vec(),
+		};
 		let fake = FakeSession::new(Some(ALPN_LITE), mock_server_setup(Version::Lite(lite::Version::Lite01)));
 		let client = Client::new()
 			.with_versions(
@@ -862,7 +910,8 @@ mod tests {
 				.into(),
 			)
 			.with_path("/anon")
-			.with_authority("relay.example.com:4443");
+			.with_authority("relay.example.com:4443")
+			.with_token(token.clone());
 
 		let (_session, driver) = client.connect(moq_clock::now(), fake.clone()).await.unwrap();
 		moq_clock::sim::spawn(crate::time::run(driver));
@@ -877,6 +926,10 @@ mod tests {
 		assert_eq!(
 			parameters.get_bytes(ietf::ParameterBytes::Path),
 			Some(b"/anon".as_ref())
+		);
+		assert_eq!(
+			ietf::token::from_setup(&parameters, ietf::Version::Draft14).unwrap(),
+			Some(token)
 		);
 	}
 

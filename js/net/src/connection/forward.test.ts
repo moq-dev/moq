@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { Once } from "@moq/signals";
 import * as Announce from "../announced.ts";
+import { AuthSession } from "../auth_session.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
 import { Route } from "../hop.ts";
@@ -49,7 +50,11 @@ class FakeSession {
 	#die!: (reason: Error | null) => void;
 
 	constructor() {
-		registerWire(this, { consume: (path) => this.consume(path), goaway: new Once() });
+		registerWire(this, {
+			consume: (path) => this.consume(path),
+			goaway: new Once(),
+			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
+		});
 		this.closed = new Promise((resolve) => {
 			this.#die = resolve;
 		});

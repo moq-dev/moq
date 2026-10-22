@@ -43,7 +43,7 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	pub peer_hop: Option<Hop>,
 	/// Our tokens' grants, which bound what we announce and serve, and the app's
 	/// claim on answering the peer's tokens.
-	pub auth: crate::auth::Handle,
+	pub auth: crate::auth::Link,
 	/// What the default acceptor grants the peer's connection credential.
 	pub peer_grant: crate::auth::Grant,
 	/// The supervisor's estimate, which a PROBE stream follows.
@@ -77,7 +77,7 @@ struct Shared<S: crate::transport::poll::Session> {
 	priority: PriorityQueue,
 	version: Version,
 	goaway: crate::goaway::Protocol,
-	auth: crate::auth::Handle,
+	auth: crate::auth::Link,
 	peer_grant: crate::auth::Grant,
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
@@ -272,7 +272,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		announced: &mut announce::Consumer,
 		self_origin: Hop,
 		version: Version,
-		auth: Option<crate::auth::Handle>,
+		auth: Option<crate::auth::Link>,
 	) -> Result<(), Error> {
 		let mut run = AnnounceRun::new(crate::PathOwned::default(), self_origin, version);
 		run.auth = auth.map(|handle| {
@@ -2767,8 +2767,8 @@ mod announce_test {
 		let mut run = AnnounceRun::new(crate::Path::new("").to_owned(), consumer.hop(), Version::Lite07);
 		let waiter = kio::Waiter::noop();
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&crate::auth::Grant {
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant {
 			subscribe: crate::Pattern::literal("b").unwrap().into(),
 			..Default::default()
 		});
@@ -2806,8 +2806,8 @@ mod announce_test {
 		let mut run = AnnounceRun::new(crate::Path::new("").to_owned(), consumer.hop(), Version::Lite07);
 		let waiter = kio::Waiter::noop();
 		assert!(run.poll(&mut stream, &consumer, &mut announced, &waiter).is_pending());
-		let auth = crate::auth::Handle::new(false);
-		auth.authorize(&crate::auth::Grant::default());
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::default());
 		let Poll::Ready(restricted) = auth.poll_permit(crate::auth::Direction::Publish, &mut 0, &waiter) else {
 			panic!("the changed grant is ready");
 		};
@@ -3021,7 +3021,7 @@ mod announce_test {
 	}
 
 	/// [`harness_on`], announcing under `auth`'s grant.
-	async fn harness_with(version: Version, auth: Option<crate::auth::Handle>) -> Harness {
+	async fn harness_with(version: Version, auth: Option<crate::auth::Link>) -> Harness {
 		let origin = Hop::new(1).unwrap().produce();
 		let announcement = origin
 			.announce(
@@ -3225,8 +3225,8 @@ mod announce_test {
 			expires: None,
 		};
 		for anonymous in [false, true] {
-			let auth = crate::auth::Handle::new(false);
-			auth.authorize(&grant(&["cam"]));
+			let auth = crate::auth::Link::new(false);
+			auth.handle().authorize(&grant(&["cam"]));
 			let mut h = harness_with(Version::Lite07, Some(auth.clone())).await;
 
 			// Same chain and cost, so only the instance changed. Both land before the loop polls.
@@ -3237,7 +3237,7 @@ mod announce_test {
 				None => h.origin.clone().peer().announce("cam", route),
 			}
 			.unwrap();
-			auth.authorize(&grant(&["cam", "other"]));
+			auth.handle().authorize(&grant(&["cam", "other"]));
 			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 			settle().await;
 			match h.wire.take_announces().as_slice() {
@@ -6870,7 +6870,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
@@ -7041,7 +7041,7 @@ mod tests {
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
 			goaway,
 			peer_hop: None,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
@@ -7341,7 +7341,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
@@ -7476,7 +7476,7 @@ mod tests {
 						peer_hop: None,
 						subscriptions: Default::default(),
 						fetches: Default::default(),
-						auth: crate::auth::Handle::new(false),
+						auth: crate::auth::Link::new(false),
 						peer_grant: Default::default(),
 						client: false,
 					});
@@ -7563,7 +7563,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
@@ -7684,7 +7684,7 @@ mod tests {
 			peer_hop: None,
 			subscriptions: Default::default(),
 			fetches: Default::default(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 		});
@@ -7845,7 +7845,7 @@ mod tests {
 				peer_hop: None,
 				subscriptions: crate::session::Slots::new(0),
 				fetches: Default::default(),
-				auth: crate::auth::Handle::new(false),
+				auth: crate::auth::Link::new(false),
 				peer_grant: Default::default(),
 				client: false,
 			});
@@ -7884,7 +7884,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
@@ -7951,7 +7951,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: crate::session::Slots::new(0),

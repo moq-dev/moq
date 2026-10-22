@@ -807,16 +807,21 @@ mod tests {
 		let clock = manual();
 		let (lease, mut admissions) = admission(grant("a/**", 30)).await;
 		let (client, mut supervising) = sessions(lease).await;
-		for _ in 0..3 {
-			let auth = client.auth();
-			let (result, ()) = tokio::join!(auth.add("replacement"), async {
-				admissions
-					.next()
-					.await
-					.unwrap()
-					.refuse(super::super::Error::Unavailable("auth server down".into()));
-			});
-			assert!(matches!(result, Err(moq_net::Error::Session(SessionError::Internal))));
+		let mut adding = present(&client, "replacement");
+		for attempt in 0..3 {
+			let admission = admissions.next().await.unwrap();
+			assert_eq!(
+				admission.request.query.as_deref(),
+				Some("jwt=replacement"),
+				"attempt {attempt}"
+			);
+			admission.refuse(super::super::Error::Unavailable("auth server down".into()));
+			// The refusal may pass, so the client presents the token again after a backoff
+			// shorter than each step below, rather than ending it.
+			assert!(
+				settles_pending(&mut adding).await,
+				"a transient refusal ended the token"
+			);
 			clock.advance(Duration::from_secs(5));
 		}
 		clock.advance(Duration::from_secs(15) - Duration::from_nanos(1));
@@ -830,6 +835,7 @@ mod tests {
 		// instant, and the client's transport can break before the close code lands.
 		client.closed().await;
 		client.abort(moq_net::Error::Cancel);
+		adding.abort();
 	}
 
 	/// Present `token` in the background, as a peer whose credit allows it.
@@ -873,7 +879,8 @@ mod tests {
 	}
 
 	/// A waiting token whose admission times out is refused without reaching the
-	/// decider, while the check it waited behind keeps its slot past the timeout.
+	/// decider, while the check it waited behind keeps its slot past the timeout. The
+	/// refusal may pass, so the client keeps presenting both tokens.
 	#[tokio::test(start_paused = true)]
 	async fn a_waiting_token_times_out_without_reaching_the_decider() {
 		let (lease, mut admissions) = admission_with(grant("a/**", 3000), 1).await;
@@ -881,20 +888,23 @@ mod tests {
 		let slow = present(&client, "slow");
 		let held = admissions.next().await.unwrap();
 		let waiting = present(&client, "waiting");
-		assert!(matches!(
-			waiting.await.unwrap(),
-			Err(moq_net::Error::Session(SessionError::Internal))
-		));
-		assert!(matches!(
-			slow.await.unwrap(),
-			Err(moq_net::Error::Session(SessionError::Internal))
-		));
+		// Past the ten-second admission timeout, and the retries that follow it.
+		tokio::time::sleep(Duration::from_secs(30)).await;
+		assert!(
+			!waiting.is_finished() && !slow.is_finished(),
+			"a transient refusal ended a token"
+		);
 		assert!(
 			admissions.next().now_or_never().is_none(),
 			"a timed-out check released its slot"
 		);
 
-		// The decider giving up frees the slot for the next token, not the expired one.
+		// Withdrawn, the retried tokens leave the queue. The decider giving up frees the
+		// slot for the next token, not the expired one.
+		slow.abort();
+		waiting.abort();
+		let _ = slow.await;
+		let _ = waiting.await;
 		drop(held);
 		let _next = present(&client, "next");
 		let admission = admissions.next().await.unwrap();
