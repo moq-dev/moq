@@ -25,7 +25,10 @@ Decided 2026-10-22 by the maintainer:
 - An SI sub-table, pending or active, that the source has not repeated
   within its table's maximum repetition interval (ETSI EN 300 468 / TR 101
   211, measured on the program clock so an input stall retires nothing)
-  retires; an active one's retirement cuts a snapshot without it.
+  retires; an active one's retirement cuts a snapshot without it. A
+  `table_id` `catalog::si_interval` does not know has no table maximum, so
+  it retires on the longest one EN 300 468 sets for any SI table (30 s, EIT
+  schedule other and TDT/TOT): every conformant table repeats within it.
 - Replace `MAX_REVISIONS` by making an ended route cost O(1): mint fresh
   names from a counter so reserving them is a high-water mark, and drop the
   retired route's entries. Find every per-revision store first (catalog
@@ -34,7 +37,7 @@ Decided 2026-10-22 by the maintainer:
   another runtime constant; the source's repetition is the bound by design.
 
 Tests: incomplete EIT generations with distinct identities retire after
-their interval; a sub-table the source stops sending leaves the snapshot; a
+their interval, and so do unknown long-form `table_id`s; a sub-table the source stops sending leaves the snapshot; a
 stall in input retires nothing; a fixture revising its PMT past 65,536 times
 keeps running with flat retained state.
 
