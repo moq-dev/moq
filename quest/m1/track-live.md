@@ -11,7 +11,7 @@ The built-in publishers' live-edge reads stay private and carry
 
 ## Plan
 
-Decided 2026-10-22 (maintainer): ready now. [moq-dev/moq#6138](https://github.com/moq-dev/moq/pull/6138) merged; Public serving lives on only for its own leftover, which this quest does not wait for.
+Waits for [moq-dev/moq#6138](https://github.com/moq-dev/moq/pull/6138) (public serving cursor) to merge, then applies the markers. Public serving lives on after that only for its own leftover, which this quest does not wait for.
 
 Settled by the maintainer on 2026-10-22 (moq-dev/moq#6278):
 
@@ -25,8 +25,8 @@ Settled by the maintainer on 2026-10-22 (moq-dev/moq#6278):
 - ✅ Groups cached before live are never served while idle; once live, a
   reader gets what its ranges and max delay hold, as on a cold relay.
 
-Public serving ([moq-dev/moq#6138](https://github.com/moq-dev/moq/pull/6138), merged) re-marked these items as pending on this quest, so apply the markers now.
+Public serving ([moq-dev/moq#6138](https://github.com/moq-dev/moq/pull/6138), still open) re-marks these items as pending on this quest; once it merges, apply the markers.
 
 ## Related
 
-- [Public serving](/quest/m1/public-model/serve.md) - moved the publishers' live-edge markers onto this quest
+- [Public serving](/quest/m1/public-model/serve.md) - moves the publishers' live-edge markers onto this quest
