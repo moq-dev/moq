@@ -44,9 +44,11 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
 - [Redundant failover drift](/quest/m0/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
+- [web-transport-proto 0.6.3](/quest/m0/web-transport-proto-0.6.3.md) - `main` and `release` lock the upstream release that bounds decoded CONNECT headers, so a peer can't make a relay hold megabytes per session before auth
 - [qmux 0.5.3](/quest/m0/qmux-0.5.3.md) - crates.io publishes qmux 0.5.3 with the builder session config the release backport of #5609 needs
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
 - [Release fixed delay](/quest/m0/release-fixed-delay.md) - a fixed latency on `release`, which moq.dev runs, ignores the catalog's jitter and delay as `main` already does
+- [Release resubscribe hang](/quest/m0/release-resubscribe-hang.md) - a moq-lite-06 subscription that closes and reopens on `release` is proven to reach the relay, or the hang is fixed and backported
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [Simplification audit](/quest/m0/audit-simplify.md) - overbuilt code and APIs are collapsed, merged, or narrowed into a net simpler whole
 - [Lint override and deprecation audit](/quest/m0/audit-lints.md) - every lint suppression is still needed and says why, nothing calls a deprecated API, and stale Rust overrides fail the build
