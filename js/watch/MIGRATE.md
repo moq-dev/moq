@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### AAC decoding support is a `Level`
+
+`Support.Audio.aac` is `"full" | "partial" | "none"` like `opus`, instead of a boolean, since the libav fallback now decodes AAC where `AudioDecoder` is missing.
+Replace `aac === true` with `aac !== "none"`, or with `aac === "full"` to require a native decoder.
+
 ### A cleanly ended catalog keeps playing
 
 When the catalog track ends cleanly, the player keeps its catalog and `"live"` status until the broadcast closes or is withdrawn, instead of going `"offline"` at once.
