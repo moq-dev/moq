@@ -3343,7 +3343,6 @@ where
 		enum End {
 			Idle,
 			Revoked,
-			Unjoined(Error),
 			Done(Result<ietf::PublishDone<'static>, Error>),
 			Fetch(group::Request),
 			Update(Update),
@@ -3373,8 +3372,7 @@ where
 		let answered_here = !matches!(self.version, Version::Draft14 | Version::Draft15);
 
 		let mut fetch_done = fetching.is_none();
-		// Our grant stopped covering the track, or its join failed: it is aborted rather than
-		// kept lingering.
+		// Our grant stopped covering the track: it is aborted rather than kept lingering.
 		let mut failed = false;
 		// How the upstream subscription ended, which ends a listing entry it held.
 		let mut ended: Option<Result<(), Error>> = None;
@@ -3399,7 +3397,7 @@ where
 					{
 						fetch_done = true;
 						if let Err(err) = res {
-							return Poll::Ready(End::Unjoined(err));
+							tracing::debug!(%err, "joining FETCH failed, joining at the next whole group");
 						}
 					}
 					// An error is the track closing, which the arms below report.
@@ -3496,13 +3494,6 @@ where
 						ended = Some(Err(Error::Unauthorized));
 						break true;
 					}
-					End::Unjoined(err) => {
-						tracing::debug!(%err, "joining FETCH failed");
-						let _ = track.clone().abort(err.clone());
-						failed = true;
-						ended = Some(Err(err));
-						break true;
-					}
 					End::Fetch(request) => {
 						let fetch = self.clone().run_group_fetch(
 							broadcast_path.to_owned(),
@@ -3538,7 +3529,6 @@ where
 									.subscribes
 									.get(&request_id)
 									.map(|held| (held.tail.consume(), held.fill.clone()));
-								let mut unjoined = None;
 								if let Some((tail, fill)) = held {
 									let mut settle = Settle::new(&self.runtime, tail);
 									kio::wait(|waiter| {
@@ -3548,8 +3538,7 @@ where
 										{
 											fetch_done = true;
 											if let Err(err) = res {
-												unjoined = Some(err);
-												return Poll::Ready(());
+												tracing::debug!(%err, "joining FETCH failed, joining at the next whole group");
 											}
 										}
 										poll_settled(&mut settle, waiter, &fill, count)
@@ -3561,14 +3550,9 @@ where
 										fill.end();
 									}
 								}
-								if let Some(err) = unjoined {
-									tracing::debug!(%err, "joining FETCH failed");
-									let _ = track.clone().abort(err);
-								} else {
-									// A no-op once an END_OF_TRACK declared the end, whose readers wait
-									// for a missing group only as long as the grace.
-									let _ = track.finish();
-								}
+								// A no-op once an END_OF_TRACK declared the end, whose readers wait
+								// for a missing group only as long as the grace.
+								let _ = track.finish();
 							}
 							Err(err) => {
 								tracing::debug!(%err, "subscribe ended with error");
@@ -3632,7 +3616,7 @@ where
 			})
 			.await;
 		}
-		// A session abort took the copy too, and a revoked grant or a failed join ended it.
+		// A session abort took the copy too, and a revoked grant ended it.
 		if aborted || failed {
 			return None;
 		}
@@ -3876,7 +3860,8 @@ where
 	/// it: a publisher serves one group per FETCH, so an earlier start's groups are left to
 	/// group FETCHes of their own. The subscribe's request id names the FETCH. The data
 	/// arrives on its own fetch stream and [`Self::recv_fill`] stitches it. A refusal or a
-	/// failed send is an error, since the head it owes is never coming.
+	/// failed send settles the fill as [`Fill::Done`], as a failed draft-20 fill does: only
+	/// a stream that starts mid-group is lost, and a whole group still stands alone.
 	fn start_joining_fetch(&self, subscribe_id: RequestId, track: &track::Producer) -> Option<JoiningTask> {
 		let fill = self.state.lock().subscribes.get(&subscribe_id)?.fill.clone();
 		let track = track.clone();
@@ -15846,10 +15831,12 @@ mod joining_fetch_tests {
 		}
 	}
 
-	/// The peer refusing the joining FETCH fails the subscription with its reason, rather
-	/// than leaving readers waiting on a head that is never coming.
+	/// A publisher that serves no FETCH refuses the joining FETCH. That costs the head of
+	/// the Largest group and nothing more, as a failed draft-20 fill does: the fill settles,
+	/// so a stream starting mid-group is dropped rather than parked, and the subscription
+	/// keeps delivering whole groups.
 	#[moq_clock::test]
-	async fn a_refused_fetch_fails_the_subscription() {
+	async fn a_refused_fetch_joins_at_the_next_whole_group() {
 		let largest = Some(ietf::Location { group: 4, object: 1 });
 		for version in JOINING_DRAFTS {
 			let mut run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_error(version)).await;
@@ -15858,13 +15845,10 @@ mod joining_fetch_tests {
 				.expect("SUBSCRIBE_OK accepted the track")
 				.unwrap();
 			assert!(
-				matches!(received.finished().now_or_never(), Some(Err(Error::Unsupported))),
-				"{version}"
+				received.finished().now_or_never().is_none(),
+				"{version}: the track is still live"
 			);
-			assert!(
-				run.subscriber.state.lock().subscribes.is_empty(),
-				"{version}: the subscription is cancelled upstream"
-			);
+			assert!(!run.fill_outstanding(), "{version}: no head is coming");
 		}
 	}
 
