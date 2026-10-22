@@ -2198,8 +2198,11 @@ impl TrackState {
 	}
 
 	/// One past the highest sequence produced: where the live edge stands against the end.
+	/// A replacement starts at its name's, since what earlier producers wrote never arrives here.
 	fn edge(&self) -> u64 {
-		self.max_sequence.map_or(0, |max| max.saturating_add(1))
+		self.max_sequence
+			.map_or(0, |max| max.saturating_add(1))
+			.max(self.sequence.next())
 	}
 
 	/// Whether a group below `fin` the wire subscription still owes has yet to arrive.
@@ -2924,7 +2927,8 @@ impl Producer {
 
 	/// Mark the track as finished after the last appended group.
 	///
-	/// Ends the track at the head of the group after the current max_sequence.
+	/// Ends the track at the head of the group after the largest one written to its name,
+	/// including by an earlier producer this one replaces.
 	/// No new groups at or above it can be appended.
 	/// NOTE: Old groups with lower sequence numbers can still arrive.
 	pub fn finish(&self) -> Result<()> {
@@ -2933,6 +2937,9 @@ impl Producer {
 			Some(max) => max.checked_add(1).ok_or(coding::BoundsExceeded)?,
 			None => 0,
 		};
+		// A replacement continues its name's timeline: ending below an earlier producer's
+		// groups would contradict the ones subscribers already received.
+		let final_sequence = final_sequence.max(state.sequence.next());
 		state.set_end(Position::group(final_sequence))
 	}
 

@@ -123,6 +123,21 @@ test("a replacement producer refuses a rewind past its predecessor", () => {
 	next.close();
 });
 
+// A replacement that closes before writing anything still ends past its predecessor's groups:
+// an end below them would contradict the ones subscribers already received.
+test("an empty replacement ends past its predecessor's groups", async () => {
+	const broadcast = new BroadcastProducer();
+	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	first.appendGroup().close();
+	first.close();
+
+	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	const subscriber = second.subscribe();
+	second.close();
+	expect(await subscriber.finished()).toEqual({ group: 1, frame: 0 });
+	broadcast.close();
+});
+
 // A name keeps one sequence namespace across producer replacements. The application owns where a
 // replacement starts: an append that would reuse an earlier producer's sequence throws.
 test("a replacement producer refuses to append a sequence the name already wrote", async () => {
