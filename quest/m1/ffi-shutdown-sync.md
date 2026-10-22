@@ -38,3 +38,4 @@ Public API: breaking in moq-ffi and every binding. Wire: none.
 ## Related
 
 - [FFI shutdown backport](/quest/m0/ffi-shutdown-backport.md) - the release line's async `drain()`
+- [MIGRATE matches release](/quest/m1/api-audit/migrate.md) - plans entries saying `shutdown` became an async `Result`; they must describe the final sync shape instead

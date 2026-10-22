@@ -13,7 +13,3 @@ Find which phase overran (C++ publisher start, the browser's first frame, or
 teardown) from that run's log first, then reproduce under load.
 
 Public API: none expected. Wire: none.
-
-## Related
-
-- [More tests under load](/quest/m1/test-flakes-2/README.md) - the same load round
