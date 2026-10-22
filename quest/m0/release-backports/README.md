@@ -54,5 +54,4 @@ findings; expanding this shortlist needs a separate scope decision.
 - [Fixed playback delay](/quest/m0/release-fixed-delay.md) - the merged behavior-only backport reaches moq.dev with its release deploy
 - [QPACK bound](/quest/m0/web-transport-proto-0.6.3.md) - existing upstream dependency fix for decoded CONNECT headers
 - [Draining shutdown](/quest/m0/ffi-shutdown-backport.md) - existing additive drain API and qmux stream-limit backport
-- [Resubscribe investigation](/quest/m0/release-resubscribe-hang.md) - benchmark correction and investigation retirement retain their existing owner
 - [Release execution](/quest/m2/release/README.md) - reconcile release-only fixes through the documented merge sequence at the breaking cut
