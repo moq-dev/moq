@@ -4,6 +4,65 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Stage a requested track before subscribers see it (#6111)
+
+`track::Request::stage(info)` returns a `track::Staged` that derefs to the track's `Producer` while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
+A relay that holds groups of a lazily served track writes them before committing, so the first reader (and an IETF `SUBSCRIBE_OK`'s Largest Location) sees them.
+Dropping a `Staged` uncommitted rejects the request with `Error::Dropped`. `accept(info)` is unchanged and equals `stage(info).commit()`.
+
+```rust
+let mut staged = request.stage(info);
+for group in retained { /* staged.create_group(..), write, finish */ }
+let producer = staged.commit();
+```
+
+### Frame writers own their group (#6111)
+
+`group::Producer::create_frame` now takes the writer by value and returns an owned `frame::Producer` with no lifetime.
+`frame::Producer::finish` hands the group writer back, and `frame::Producer::group()` returns `&group::Producer` instead of a `group::Info` copy.
+A frame the group refuses (closed, or past its size) now aborts the group.
+
+```rust
+// Before
+let mut frame = group.create_frame(info)?;
+frame.write(payload)?;
+frame.finish()?;
+// After
+let mut frame = group.create_frame(info)?;
+frame.write(payload)?;
+group = frame.finish()?;
+```
+
+A caller that holds the group behind `&mut` can write a whole frame with `write_frame` instead.
+
+### A received track's end waits for groups in flight (#6111)
+
+Call `track::Producer::received()` before writing what a peer sends into a track, then declare the peer's end with `finish_at`.
+On a received copy, readers wait at a hole below that end for the subscription's max delay (or one second) in case its group is still in flight; `drop_groups(range, err)` marks groups the peer said it skipped, so readers stop waiting for them and a group still arriving there ends with `err`.
+`finish_at` now accepts a repeat of the same end and a refinement within the last group; any other second end fails with `Error::ProtocolViolation`.
+
+`track::Request::request_start(floor)` leaves an accepted copy's start pending at `floor` until `track::Producer::start_at` resolves it, for a subscriber whose peer reports the start after accepting.
+
+### A frameless group is not the live edge (#6111)
+
+Every group reaches readers as soon as it is created, but the live edge, `largest()`, and the judgment of whether a group was succeeded count a group only once its first frame opens or it finishes.
+A group followed by a frameless one is judged against the next group that has a frame.
+
+### Ending a track aborts its open groups (#6111)
+
+Aborting a track (`abort` or `abort_unused`) now aborts its unfinished groups with the same error, so their readers end with it and their writers fail.
+Dropping the last `track::Producer` without a finish aborts them with `Error::Dropped`, and `close` with `Error::SessionClosed`.
+`track::Producer::close`, `track::Producer::received`, and `group::Producer::info` are now public.
+
+### Priorities are signed, with 0 unset (#6142)
+
+`track::Info::priority`, `track::Subscription::priority`, `group::Fetch::priority`, and `group::Request::priority()` are `i8`, higher first, and 0 is the unset midpoint.
+The track's default was 127, the midpoint, and the subscription's was 0, the least urgent; both are 0 now.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+The publisher's `Info::priority` now breaks ties between subscriptions at one subscriber priority.
+
+On the wire, moq-lite carries `priority + 128` and moq-transport `127 - priority`, so an unset priority goes out as 128 on moq-lite (was 127) and 127 on moq-transport (was 128), and an absent moq-transport priority reads as 0.
+
 ### A client session asks only about what its readers watch (#6165)
 
 On moq-lite, a client session no longer asks its peer for announcements under its whole subscribe scope at connect.

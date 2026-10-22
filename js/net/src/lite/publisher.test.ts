@@ -247,18 +247,24 @@ async function servingNextGroup(opened: ReadableStreamDefaultReader<ReadableStre
 //
 // Every group is left open, so all of their streams are in flight and ranked against each
 // other. A group that finished would leave the ranking, which is the point of it.
-async function groupSendOrders(options: { priority: number; sequences: number[]; update?: number }) {
-	const { priority, sequences, update } = options;
+async function groupSendOrders(options: {
+	priority: number;
+	sequences: number[];
+	update?: number;
+	publisher?: number;
+	version?: Version;
+}) {
+	const { priority, sequences, update, version = Version.DRAFT_05 } = options;
 	const groups = sequences.map((sequence) => new GroupProducer(sequence));
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, priority: options.publisher });
 
-	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
-	const server = await Stream.accept(pair.server, Version.DRAFT_05);
+	const client = await Stream.open(pair.client, { version });
+	const server = await Stream.accept(pair.server, version);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	const msg = replaySubscribe({
@@ -275,7 +281,7 @@ async function groupSendOrders(options: { priority: number; sequences: number[];
 	try {
 		for (const [index, group] of groups.entries()) {
 			if (index === 1 && update !== undefined) {
-				await replayUpdate({ priority: update }).encode(client.writer, Version.DRAFT_05);
+				await replayUpdate({ priority: update }).encode(client.writer, version);
 				// Wait for the publisher to apply it, rather than assuming it beat the next group.
 				while (track.subscription.peek()?.priority !== update) await track.subscription.changed();
 			}
@@ -322,6 +328,13 @@ test("lite draft-05: equal priorities tie regardless of group numbering", async 
 	]);
 
 	expect(fresh).toEqual(ongoing);
+});
+
+// The track's publisher priority breaks ties on every draft, as in Rust, including the drafts
+// before lite-05 that acknowledge with SUBSCRIBE_OK instead of TRACK_INFO.
+test.each([Version.DRAFT_03, Version.DRAFT_05])("lite %s: the publisher priority ranks each group", async (version) => {
+	const orders = await groupSendOrders({ priority: 7, publisher: 5, sequences: [0], version });
+	expect(orders).toEqual([sendOrder({ priority: 7, publisher: 5 })]);
 });
 
 // SUBSCRIBE_UPDATE re-ranks the subscription, so every group it is serving picks up the new
@@ -1093,7 +1106,7 @@ for (const skipped of ["failed", "stale"] as const) {
 			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
 			sub.track.writeGroup(group);
 			group.close(skipped === "failed" ? new Error("cut") : undefined);
-			if (skipped === "failed") hooks.dropTrackGroups(sub.track, 7, 8, new Error("cut"));
+			if (skipped === "failed") sub.track.dropGroups(7, 8, new Error("cut"));
 			sub.serve(6);
 			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");

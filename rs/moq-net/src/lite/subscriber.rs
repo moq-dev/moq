@@ -86,8 +86,6 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	sources: kio::Queue<MintedSource>,
 	going_away: crate::goaway::GoingAway,
 	auth: crate::auth::Handle,
-	/// What this session may allocate up front for frames still arriving.
-	frames: frame::Budget,
 	/// Broadcasts the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
 }
@@ -112,7 +110,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		Self {
 			session: config.session,
 			runtime: config.runtime,
-			origin: config.origin,
+			// Its own frame budget, so a peer's declared sizes crowd out no other session.
+			origin: config.origin.with_own_frames(),
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
 			session_origin: config.peer_hop.unwrap_or(crate::Hop::UNKNOWN),
@@ -126,7 +125,6 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			sources: kio::Queue::new(),
 			going_away: config.going_away,
 			auth: config.auth,
-			frames: Default::default(),
 			announces: Default::default(),
 		}
 	}
@@ -576,7 +574,7 @@ impl SubscriptionCleanup {
 	/// their cleanup independently; this records the track's terminal state.
 	fn abort(&self, err: &Error) {
 		for (_, entry) in self.0.lock().drain() {
-			let _ = entry.producer.abort_session(err.clone());
+			let _ = entry.producer.abort(err.clone());
 		}
 	}
 	fn close(&self) {
@@ -947,8 +945,6 @@ enum GroupRecvState {
 		group: crate::recv::Group,
 		track: track::Producer,
 		ingest: FrameIngest,
-		/// Whether readers see the group yet; see [`track::Producer::receive_group`].
-		shown: bool,
 		_reading: Reading,
 	},
 	Done,
@@ -984,9 +980,9 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 
 						let group_info = group::Info { sequence: hdr.sequence };
 						// Stats (groups/frames/bytes) are counted in the model as the group
-						// is written, through the tagged `track::Producer`. Withheld from
-						// readers until its first frame lands.
-						let received = entry.producer.receive_group(group_info);
+						// is written, through the tagged `track::Producer`. The track counts
+						// it as content once its first frame lands.
+						let received = entry.producer.create_group(group_info);
 						// The subscription's end waits until this stream is read. Counted
 						// whatever the cache said, since the publisher counts every stream it
 						// opens (a resubscribe resends a cached group), and only after the
@@ -1040,17 +1036,12 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					self.state = GroupRecvState::Serve {
 						group: crate::recv::Group::new(group),
 						track,
-						ingest: FrameIngest::new(&self.subscriber, framing, ietf, hdr.frame_start),
-						shown: false,
+						ingest: FrameIngest::new(framing, self.subscriber.version, ietf, hdr.frame_start),
 						_reading: reading,
 					};
 				}
 				GroupRecvState::Serve {
-					group,
-					track,
-					ingest,
-					shown,
-					..
+					group, track, ingest, ..
 				} => {
 					// The track or group dying cancels the stream; the peer's own close
 					// arrives through the ingest's reads.
@@ -1061,13 +1052,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						if let Poll::Ready(err) = group.handle().poll_closed(waiter) {
 							break 'serve Err(err);
 						}
-						let res = ingest.poll(&mut self.reader, group, waiter);
-						// Shown once its first frame opens, even mid-payload.
-						if !*shown && group.handle().is_started() {
-							track.reveal_group(group.handle());
-							*shown = true;
-						}
-						match res {
+						match ingest.poll(&mut self.reader, group, waiter) {
 							Poll::Ready(res) => break 'serve res,
 							Poll::Pending => return Poll::Pending,
 						}
@@ -1077,16 +1062,13 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 					// short drops into an already-aborted group instead of reporting a loss.
 					let GroupRecvState::Serve {
 						group,
-						track,
 						ingest: _ingest,
-						shown,
 						_reading,
+						..
 					} = std::mem::replace(&mut self.state, GroupRecvState::Done)
 					else {
 						unreachable!()
 					};
-					// A group that ended without a frame shows once it settles.
-					let handle = (!shown).then(|| group.handle().clone());
 					let res = match res {
 						Ok(()) => {
 							let _ = group.finish();
@@ -1102,9 +1084,6 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 							Err(err)
 						}
 					};
-					if let Some(handle) = handle {
-						track.reveal_group(&handle);
-					}
 					return Poll::Ready(res);
 				}
 				GroupRecvState::Done => return Poll::Ready(Ok(())),
@@ -1123,7 +1102,6 @@ struct FrameIngest {
 	/// zigzag-delta decode. The first frame's delta is absolute (prev = 0).
 	prev_ts: u64,
 	phase: IngestPhase,
-	budget: frame::Budget,
 	/// Where the stream's frames start, the first Object ID until a record names it.
 	frame_start: u64,
 	/// `Some` once the Group State of the `ietf` extension arrived: every frame follows an
@@ -1172,17 +1150,12 @@ enum IngestPhase {
 		inflated: Option<u64>,
 	},
 	/// Streaming the frame payload.
-	Payload { frame: frame::ProducerOwned },
+	Payload { frame: frame::Producer },
 }
 
 impl FrameIngest {
 	/// `ietf` when the session negotiated the extension, so the stream starts with a Group State.
-	fn new<S: crate::transport::poll::Session>(
-		subscriber: &Subscriber<S>,
-		framing: lite::Framing,
-		ietf: bool,
-		frame_start: u64,
-	) -> Self {
+	fn new(framing: lite::Framing, version: Version, ietf: bool, frame_start: u64) -> Self {
 		Self {
 			framing,
 			prev_ts: 0,
@@ -1190,10 +1163,9 @@ impl FrameIngest {
 				true => IngestPhase::State,
 				false => IngestPhase::Timing,
 			},
-			budget: subscriber.frames.clone(),
 			frame_start,
 			records: None,
-			media_time: subscriber.version.has_media_time(),
+			media_time: version.has_media_time(),
 		}
 	}
 
@@ -1358,20 +1330,16 @@ impl FrameIngest {
 						}
 						None => None,
 					};
-					// `create_frame_owned` is the allocation chokepoint: it rejects an
-					// oversized `size` and allocates up front only within the budget, so
-					// no pre-check is needed. No wire timestamp (pre-lite-05) means an
-					// untimed frame.
-					// A compressed frame stores the slice as it arrives, its inflated size
-					// checked against the same limits before anything inflates.
-					let frame = group.create_frame_owned(
-						frame::Header {
-							info: frame::Info { size, timestamp },
-							fields,
-							inflated,
-						},
-						&self.budget,
-					)?;
+					// `create_object` is the allocation chokepoint: it rejects an oversized
+					// `size` and allocates up front only within the origin's budget, so no
+					// pre-check is needed. No wire timestamp (pre-lite-05) means an untimed
+					// frame. A compressed frame stores the slice as it arrives, its inflated
+					// size checked against the same limits before anything inflates.
+					let frame = group.create_object(frame::Header {
+						info: frame::Info { size, timestamp },
+						fields,
+						inflated,
+					})?;
 					self.phase = IngestPhase::Payload { frame };
 				}
 				IngestPhase::Payload { frame } => {
@@ -2136,7 +2104,7 @@ mod tests {
 
 	/// A group arriving at the relay as its header lands: cached, then accounted for.
 	fn arrive(track: &track::Producer, tail: &kio::Producer<Tail>, sequence: u64, now: crate::time::Instant) {
-		let mut group = track.receive_group(group::Info { sequence }).unwrap();
+		let mut group = track.create_group(group::Info { sequence }).unwrap();
 		group.write_frame(None, &b"x"[..]).unwrap();
 		group.finish().unwrap();
 		let Ok(mut ledger) = tail.write() else {
@@ -2221,7 +2189,7 @@ mod tests {
 			let h = Harness::new(Version::Lite04);
 			let (mut track, fetching, req) = feed_fetch(3);
 			for sequence in [5, 6] {
-				let mut group = track.receive_group(group::Info { sequence }).unwrap();
+				let mut group = track.create_group(group::Info { sequence }).unwrap();
 				group.write_frame(None, &b"x"[..]).unwrap();
 				group.finish().unwrap();
 			}
@@ -2264,7 +2232,7 @@ mod tests {
 				"group 3 was asked for just now (update: {update})"
 			);
 
-			let mut group = track.receive_group(group::Info { sequence: 3 }).unwrap();
+			let mut group = track.create_group(group::Info { sequence: 3 }).unwrap();
 			group.write_frame(None, &b"x"[..]).unwrap();
 			group.finish().unwrap();
 			fetches.poll(&sub, now, &kio::Waiter::noop());
@@ -3243,7 +3211,7 @@ mod tests {
 			"video",
 			crate::track::Info::timed(),
 		);
-		let mut cached = track.receive_group(group::Info { sequence: 3 }).unwrap();
+		let mut cached = track.create_group(group::Info { sequence: 3 }).unwrap();
 		cached.write_frame(Timestamp::ZERO, &b"x"[..]).unwrap();
 		cached.finish().unwrap();
 		let tail = kio::Producer::new(Tail::default());
@@ -4531,7 +4499,7 @@ mod tests {
 		let established = h.wire().len();
 
 		let arrive = |serving: &ServeLoop<SinkSession>, sequence| {
-			let mut group = serving.serving.receive_group(group::Info { sequence }).unwrap();
+			let mut group = serving.serving.create_group(group::Info { sequence }).unwrap();
 			for frame in [&b"key"[..], b"abc", b"d"] {
 				group.write_frame(None, frame).unwrap();
 			}
@@ -5803,7 +5771,7 @@ struct SubStream<S: crate::transport::poll::Session> {
 	/// downstream aggregate changes.
 	max_delay: Duration,
 	start: Option<Position>,
-	priority: u8,
+	priority: i8,
 	order: crate::track::Order,
 	/// The start the SUBSCRIBE itself carried, fixed for the stream's life. A
 	/// SUBSCRIBE_START describes this demand and no fresh one follows an update,
@@ -5901,11 +5869,7 @@ impl Announced {
 
 	/// Attach a route, queued for its first serve pass.
 	fn attach(&mut self, path: PathOwned, route: crate::origin::Route, dynamic: crate::origin::Dynamic) {
-		let wake = Arc::new(RouteWake {
-			path: path.clone(),
-			queued: atomic::AtomicBool::new(false),
-			ready: self.ready.clone(),
-		});
+		let wake = crate::util::QueueWake::new(path.clone(), self.ready.clone());
 		let route = AnnouncedRoute::new(route, dynamic, wake);
 		route.waker.wake_by_ref();
 		self.routes.insert(path, Held::Attached(Box::new(route)));
@@ -6011,7 +5975,7 @@ impl Announced {
 				continue;
 			};
 			// Cleared before polling, so a request landing mid-pass queues the route again.
-			entry.wake.queued.store(false, atomic::Ordering::Release);
+			entry.wake.popped();
 			let cx = std::task::Context::from_waker(&entry.waker);
 			let route_waiter = entry.park.hold(&cx);
 			while let Poll::Ready(Ok(request)) = entry.dynamic.poll_requested_broadcast(route_waiter) {
@@ -6102,14 +6066,18 @@ struct AnnouncedRoute {
 	/// Whether the GOAWAY drain already re-priced this route.
 	drained: bool,
 	/// Queues this route on its prefix's ready set when its request queue wakes.
-	wake: Arc<RouteWake>,
+	wake: Arc<crate::util::QueueWake<PathOwned>>,
 	waker: std::task::Waker,
 	/// Keeps this route's registration on its request queue alive between passes.
 	park: kio::Park,
 }
 
 impl AnnouncedRoute {
-	fn new(route: crate::origin::Route, dynamic: crate::origin::Dynamic, wake: Arc<RouteWake>) -> Self {
+	fn new(
+		route: crate::origin::Route,
+		dynamic: crate::origin::Dynamic,
+		wake: Arc<crate::util::QueueWake<PathOwned>>,
+	) -> Self {
 		Self {
 			route,
 			dynamic,
@@ -6139,26 +6107,6 @@ impl AnnouncedRoute {
 		let mut route = self.route.clone();
 		route.cost = crate::origin::Cost::DRAIN;
 		let _ = self.dynamic.update_route(route);
-	}
-}
-
-/// One attached route's waker: queues the route for the next serve pass.
-struct RouteWake {
-	path: PathOwned,
-	/// Set while queued, so a burst of wakes queues the route once.
-	queued: atomic::AtomicBool,
-	ready: kio::Queue<PathOwned>,
-}
-
-impl std::task::Wake for RouteWake {
-	fn wake(self: Arc<Self>) {
-		self.wake_by_ref();
-	}
-
-	fn wake_by_ref(self: &Arc<Self>) {
-		if !self.queued.swap(true, atomic::Ordering::AcqRel) {
-			let _ = self.ready.try_push(self.path.clone());
-		}
 	}
 }
 
@@ -6269,11 +6217,6 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						if subscription.start().is_none() {
 							subscription.set_bounds(producer.idle_newest().map(Position::group), subscription.end());
 						}
-						// The track's arrivals outlive a subscription, and this one asks for
-						// its groups only now.
-						if let Some(start) = subscription.start() {
-							producer.demand_arrivals(start.group..u64::MAX);
-						}
 						// Open an upstream SUBSCRIBE for the first subscriber.
 						Ok(Begin::Establish(self.prepare_establish(producer, subscription)))
 					}
@@ -6284,15 +6227,13 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						active.priority = subscription.priority;
 						active.order = subscription.order;
 						active.max_delay = subscription.max_delay;
-						// A lowered floor owes groups nobody asked for until now, in the track's
-						// arrivals that held fetches read as well as in the session's tail.
+						// A lowered floor owes groups nobody asked for until now, in the session's
+						// tail as well as in the track's arrivals, which its start declaration
+						// restarts.
 						let lowered = subscription.start().map(|start| {
 							let floor = active.start.map(|start| start.group).or(active.served);
 							start.group..floor.unwrap_or(u64::MAX)
 						});
-						if let Some(groups) = &lowered {
-							producer.demand_arrivals(groups.clone());
-						}
 						if let Ok(mut tail) = active.tail.write() {
 							tail.set_grace(tail::grace(subscription.max_delay));
 							if let Some(groups) = lowered {
@@ -6741,7 +6682,6 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 							}
 						},
 						ServeEnd::Finished => {
-							serve_loop.serving.set_tail_pending(false);
 							let _ = serve_loop.serving.finish();
 						}
 						ServeEnd::GiveBack(err) => {
@@ -7136,10 +7076,11 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 		// Lite-06+ resolves each subscription's start from its budget, so the floor
 		// the SUBSCRIBE asks for is not where delivery begins until SUBSCRIBE_START says.
 		let request = match serve.subscriber.version.resolves_start() {
-			true => request.resolving_start(),
+			true => request.request_start(None),
 			false => request,
 		};
 		let serving = request.accept(info);
+		serving.received();
 		Self {
 			largest: None,
 			demand: serving.demand(),
@@ -7330,14 +7271,14 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									// then finds the track already finished.
 									lite::SubscribeResponse::End(end) => {
 										// Lower groups may still be on the wire, behind a higher
-										// one, so the end holds readers at a hole until the tail
-										// settles. finish_at rejects a boundary at or below a group
+										// one, so the end holds readers at a hole until it fills or
+										// its grace passes. finish_at rejects a boundary at or below a group
 										// already received. lite-05 specified an inclusive end,
 										// and `@moq/net` 0.1.3 to 0.1.9 sent one, so there it
 										// only costs the early boundary: warn, and let the FIN
 										// finish the track. Later drafts made it exclusive, so
 										// the publisher contradicted its own end.
-										if let Err(err) = self.serving.finish_at_pending(Position::group(end.group)) {
+										if let Err(err) = self.serving.finish_at(Position::group(end.group)) {
 											match serve.subscriber.version {
 												Version::Lite05 => {
 													tracing::warn!(track = %serve.name, group = end.group, %err, "invalid subscribe end")
@@ -7747,8 +7688,8 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						producer: crate::recv::Group::new(producer),
 						joined,
 						ingest: Box::new(FrameIngest::new(
-							&self.serve.subscriber,
 							lite::Framing::new(&self.info, self.serve.subscriber.version),
+							self.serve.subscriber.version,
 							ietf,
 							frame_start,
 						)),

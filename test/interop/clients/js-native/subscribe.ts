@@ -3,22 +3,29 @@
  * `@moq/hang` under a runtime with no native WebTransport, via moq's own
  * `@moq/web-transport` polyfill (a prebuilt NAPI QUIC/HTTP3 addon, the one piece
  * that comes from npm rather than this checkout). Runs under both node and bun.
- * Connect, find the video track in the .hang catalog, read it through the same
- * container consumer the browser player uses, and exit 0 as soon as a non-empty
- * frame arrives (1 on timeout). Subscribe-only: publishing media needs a
- * WebCodecs encoder a native JS runtime lacks.
+ * Connect, wait for a .hang catalog with video and audio, read video through the
+ * same container consumer the browser player uses until a non-empty frame arrives,
+ * and decode the first --audio-ms of audio to --audio-out for tone.py to judge.
+ * Neither runtime has WebCodecs, so audio decodes through `@moq/hang`'s libav
+ * fallback, as a player under them would. Exits 0 once both are done (1 on
+ * timeout). Subscribe-only: publishing media needs a WebCodecs encoder a native
+ * JS runtime lacks.
  *
- *     node --import tsx subscribe.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20
+ *     node --import tsx subscribe.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20 \
+ *         --audio-out /tmp/audio --audio-ms 600
  *
  * `--version` offers only that version. Any grant the relay sends over AUTH is printed as an
  * `auth granted` line.
  *
  * @module
  */
+import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
+import * as Cmaf from "@moq/hang/cmaf";
 import * as Container from "@moq/hang/container";
+import { Hex, Libav } from "@moq/hang/util";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { install } from "@moq/web-transport";
@@ -34,6 +41,11 @@ install();
 // subscriber has to move on to the next group instead of failing.
 const MAX_DELAY = Milli(1000);
 
+// Audio is checked for gaps, which a reader skipping behind live would cause itself: the matrix
+// starts every subscriber at once, and a runtime starved by the others can fall a second behind.
+// That is this reader's speed, not the delivery under test, so it gets a wider budget.
+const AUDIO_MAX_DELAY = Milli(5000);
+
 const { positionals, values } = parseArgs({
 	allowPositionals: true,
 	options: {
@@ -41,33 +53,164 @@ const { positionals, values } = parseArgs({
 		broadcast: { type: "string" },
 		timeout: { type: "string", default: "20" },
 		version: { type: "string" },
+		"audio-out": { type: "string" },
+		"audio-ms": { type: "string" },
 	},
 });
 
 const role = positionals[0];
 const url = values.url;
 const broadcast = values.broadcast;
+const audioOut = values["audio-out"];
+const audioMs = Number.parseInt(values["audio-ms"] ?? "", 10);
 const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
-if (role !== "subscribe" || !url || !broadcast || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-	console.error("usage: subscribe.ts subscribe --url U --broadcast B [--timeout S>0] [--version V]");
+if (
+	role !== "subscribe" ||
+	!url ||
+	!broadcast ||
+	!audioOut ||
+	!(audioMs > 0) ||
+	!Number.isFinite(timeoutMs) ||
+	timeoutMs <= 0
+) {
+	console.error(
+		"usage: subscribe.ts subscribe --url U --broadcast B --audio-out PREFIX --audio-ms MS [--timeout S>0] [--version V]",
+	);
 	process.exit(2);
 }
 
 // The .hang catalog lives on the "catalog.json" track. It's a @moq/json snapshot+delta
-// value, reconstructed by Json.Snapshot.Consumer. A lazy publisher may announce video in a
-// later update, so keep reading until one has it.
-async function video(bc: Moq.Broadcast.Consumer): Promise<[string, Catalog.VideoConfig]> {
+// value, reconstructed by Json.Snapshot.Consumer. A lazy publisher may announce a
+// rendition in a later update, so keep reading until one has both video and audio.
+async function catalog(
+	bc: Moq.Broadcast.Consumer,
+): Promise<{ video: [string, Catalog.VideoConfig]; audio: [string, Catalog.AudioConfig] }> {
 	const track = bc.track("catalog.json").subscribe({ priority: Catalog.PRIORITY.catalog });
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track, schema: Catalog.RootSchema });
 	for (;;) {
 		const root = (await catalog.latest())?.value;
-		if (!root) throw new Error("catalog ended without a video track");
-		const first = Object.entries(root.video?.renditions ?? {})[0];
-		if (first) return first;
+		if (!root) throw new Error("catalog ended without a video and an audio track");
+		const video = Object.entries(root.video?.renditions ?? {})[0];
+		const audio = Object.entries(root.audio?.renditions ?? {})[0];
+		if (video && audio) return { video, audio };
 	}
 }
 
+function containerFormat(config: Catalog.VideoConfig | Catalog.AudioConfig, kind: "video" | "audio"): Container.Format {
+	switch (config.container.kind) {
+		case "legacy":
+			return new Container.Legacy.Format(config);
+		case "loc":
+			return new Container.Loc.Format(kind);
+		case "cmaf":
+			return new Cmaf.Format(Cmaf.decodeInitSegment(Buffer.from(config.container.init, "base64")));
+		default:
+			throw new Error(`unsupported ${kind} container: ${JSON.stringify(config.container)}`);
+	}
+}
+
+async function video(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.VideoConfig): Promise<number> {
+	const sub = bc.track(name).subscribe({ priority: 0, maxDelay: MAX_DELAY });
+	const consumer = new Container.Consumer(sub, { format: containerFormat(config, "video"), maxDelay: MAX_DELAY });
+	try {
+		for (;;) {
+			const next = await consumer.next();
+			if (!next) break;
+			const bytes = next.kind === "frame" ? next.frame.payload.byteLength : 0;
+			if (bytes > 0) return bytes;
+		}
+	} finally {
+		consumer.close();
+	}
+	throw new Error("no frame data received");
+}
+
+/** Decode the first {@link audioMs} of the rendition to `{audioOut}.{txt,pcm}`, the layout tone.py reads. */
+async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.AudioConfig): Promise<void> {
+	const channels = config.numberOfChannels;
+	const want = (audioMs * config.sampleRate) / 1000;
+	const log = [`${config.sampleRate} ${channels}`];
+	const pcm: Float32Array[] = [];
+	let decoded = 0;
+	let failed: Error | undefined;
+
+	const { promise: done, resolve } = Promise.withResolvers<void>();
+	const decoder = new AudioDecoder({
+		output: (data) => {
+			if (decoded < want) {
+				// Every AudioData converts to f32-planar; interleave it the way the other clients write.
+				const frames = data.numberOfFrames;
+				const planes = Array.from({ length: data.numberOfChannels }, (_, plane) => {
+					const samples = new Float32Array(frames);
+					data.copyTo(samples, { planeIndex: plane, format: "f32-planar" });
+					return samples;
+				});
+				const interleaved = new Float32Array(frames * planes.length);
+				for (let i = 0; i < frames; i++) {
+					for (const [c, plane] of planes.entries()) interleaved[i * planes.length + c] = plane[i];
+				}
+				log.push(`${data.timestamp} ${frames}`);
+				pcm.push(interleaved);
+				decoded += frames;
+				if (decoded >= want) resolve();
+			}
+			data.close();
+		},
+		error: (error) => {
+			failed = error;
+			resolve();
+		},
+	});
+	// Opus in every container is raw packets; its description (an OpusHead or dOps) is not
+	// what WebCodecs wants, which is why the browser player leaves it out too.
+	decoder.configure({
+		codec: config.codec,
+		sampleRate: config.sampleRate,
+		numberOfChannels: channels,
+		description: config.codec === "opus" || !config.description ? undefined : Hex.toBytes(config.description),
+	});
+
+	const sub = bc.track(name).subscribe({ priority: Catalog.PRIORITY.audio, maxDelay: AUDIO_MAX_DELAY });
+	const consumer = new Container.Consumer(sub, {
+		format: containerFormat(config, "audio"),
+		maxDelay: AUDIO_MAX_DELAY,
+	});
+	const feed = (async () => {
+		// The consumer also hands back the backlog the relay served behind the live edge, older
+		// groups after newer ones. A player places those by timestamp; a stateful Opus decoder can
+		// only move forward, so skip them, as video does.
+		let last = Number.NEGATIVE_INFINITY;
+		for (;;) {
+			const next = await consumer.next();
+			if (!next) throw new Error("audio track ended early");
+			if (next.kind !== "frame" || next.frame.timestamp <= last) continue;
+			last = next.frame.timestamp;
+			if (decoder.state === "closed") return;
+			decoder.decode(
+				new EncodedAudioChunk({ type: "key", data: next.frame.payload, timestamp: next.frame.timestamp }),
+			);
+		}
+	})();
+	try {
+		await Promise.race([done, feed]);
+	} finally {
+		consumer.close();
+		if (decoder.state !== "closed") decoder.close();
+	}
+	if (failed) throw failed;
+
+	writeFileSync(`${audioOut}.txt`, `${log.join("\n")}\n`);
+	writeFileSync(
+		`${audioOut}.pcm`,
+		Buffer.concat(pcm.map((samples) => Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength))),
+	);
+}
+
 async function run(): Promise<void> {
+	// Before subscribing: compiling libav's wasm blocks the event loop long enough that a
+	// subscription already open falls a group behind and skips it.
+	if (!(await Libav.polyfill())) throw new Error("no AudioDecoder");
+
 	const origin = new Moq.Origin.Producer();
 	const connection = await Moq.Connection.connect({
 		url: new URL(url as string),
@@ -95,36 +238,13 @@ async function run(): Promise<void> {
 			bc = requested.active.peek();
 		}
 
-		const [name, config] = await video(bc);
-		let format: Container.Format;
-		if (config.container.kind === "legacy") {
-			format = new Container.Legacy.Format(config);
-		} else if (config.container.kind === "loc") {
-			format = new Container.Loc.Format("video");
-		} else {
-			throw new Error(`unsupported video container: ${JSON.stringify(config.container)}`);
-		}
-
-		const sub = bc.track(name).subscribe({ priority: 0, maxDelay: MAX_DELAY });
-		const consumer = new Container.Consumer(sub, { format, maxDelay: MAX_DELAY });
-		try {
-			for (;;) {
-				const next = await consumer.next();
-				if (!next) break;
-				const bytes = next.kind === "frame" ? next.frame.payload.byteLength : 0;
-				if (bytes > 0) {
-					// The harness judges success by this marker, not the exit code: the
-					// @moq/web-transport NAPI addon can segfault during the runtime's exit
-					// teardown after a frame has arrived (an upstream bug, seen under bun),
-					// which would turn a real success into a signal exit.
-					console.error(`received ${bytes} bytes from ${broadcast}`);
-					return;
-				}
-			}
-		} finally {
-			consumer.close();
-		}
-		throw new Error("no frame data received");
+		const renditions = await catalog(bc);
+		const [bytes] = await Promise.all([video(bc, ...renditions.video), audio(bc, ...renditions.audio)]);
+		// The harness judges success by this marker, not the exit code: the
+		// @moq/web-transport NAPI addon can segfault during the runtime's exit
+		// teardown after a frame has arrived (an upstream bug, seen under bun),
+		// which would turn a real success into a signal exit.
+		console.error(`received ${bytes} bytes and ${audioMs}ms of audio from ${broadcast}`);
 	} finally {
 		unwatch();
 		requested?.close();

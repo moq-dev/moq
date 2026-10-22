@@ -2513,7 +2513,7 @@ test("drafts 14 to 16 apply an update and still end a subscription on UNSUBSCRIB
 			expect(await peer.reader.u53()).toBe(RequestOk.id);
 			expect((await RequestOk.decode(peer.reader, version)).requestId).toBe(2n);
 		}
-		while (track.subscription.peek()?.priority !== 245) await track.subscription.changed();
+		while (track.subscription.peek()?.priority !== 117) await track.subscription.changed();
 
 		await peer.writer.u53(Unsubscribe.id);
 		await new Unsubscribe({ requestId: 0n }).encode(peer.writer, version);
@@ -3534,6 +3534,51 @@ test("draft-20: a fill works on a dynamically requested track", async () => {
 	}
 });
 
+// A failed group stream must release that group while the subscription serves later ones.
+// Chromium can throw synchronously after closure; other transports reject their open promise.
+for (const synchronous of [true, false]) {
+	test(`a ${synchronous ? "thrown" : "rejected"} group open does not escape the subscription`, async () => {
+		using clock = manual();
+		const fx = fixture();
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const attempted = Promise.withResolvers<void>();
+		const failure = new Error("stream opening failed");
+		const create = spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(() => {
+			attempted.resolve();
+			if (synchronous) throw failure;
+			return Promise.reject(failure);
+		});
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 7n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+				filter: { kind: "absolute", startGroup: 0n, startObject: 0n },
+			}),
+		);
+
+		try {
+			writeGroup(track, 1);
+			await attempted.promise;
+			await clock.advance(Nano.zero);
+			writeGroup(track, 1);
+
+			const next = await fx.uni.read();
+			if (next.done) throw new Error("subscription ended after its first group failed");
+			const served = await readGroup(next.value);
+			expect(served.sequence).toBe(1);
+			expect(served.objects).toEqual([{ id: 0, payload: "1.0" }]);
+			expect(create).toHaveBeenCalledTimes(2);
+		} finally {
+			client.close();
+			fx.close();
+			await clock.advance(Nano.zero);
+		}
+	});
+}
+
 // PUBLISH_DONE MUST wait until every stream the subscription will open is closed, so its
 // Stream Count is final. A group still queued for a stream slot when the track ends is one.
 test("draft-20: PUBLISH_DONE waits for a queued group and counts every stream", async () => {
@@ -3786,14 +3831,14 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		await client.writer.write(new Uint8Array([0x02, 0, 4, 2, 1, 0x20, 10]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.priority).toBe(245);
+		expect(track.subscription.peek()?.priority).toBe(117);
 		// Only the priority changes; retention and the group range survive.
 		expect(track.subscription.peek()?.maxDelay).toBe(before?.maxDelay);
 		expect(track.subscription.peek()?.groups).toEqual(before?.groups);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.priority).toBe(245);
+		expect(track.subscription.peek()?.priority).toBe(117);
 	} finally {
 		client.close();
 		track.close();

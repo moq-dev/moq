@@ -20,8 +20,8 @@ allocations and packet-dispatch tail latency during churn. Confirm through
 publisher × subscriber traffic on a shared session. Preserve byte fairness,
 priority ordering and eventual progress rather than changing scheduler policy.
 
-Coordinate with [priority scope](/quest/m1/track-priority-scope.md); benchmark
-the current semantics after that work lands if it changes these paths. No new
+Benchmark the priority semantics from
+[moq-dev/moq#6142](https://github.com/moq-dev/moq/pull/6142). No new
 priority contract is selected by this performance quest.
 
 Follow the [survey's benchmark contract](/quest/m2/performance-survey/README.md):

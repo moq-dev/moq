@@ -20,6 +20,7 @@ import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { liteTimescale } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { nextChange } from "../util/change.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -609,18 +610,8 @@ export class Publisher {
 		// afterwards would sleep through it, leaving the change unannounced until something
 		// unrelated moved. A grant change re-diffs the same way, withdrawing what it no longer
 		// covers and announcing what it now does.
-		// TODO Make a better helper within Signals.
-		let dispose: Dispose = () => {};
-		const arm = () =>
-			new Promise<"changed">((resolve) => {
-				const table = this.#advertised.changed(() => resolve("changed"));
-				const grant = this.#grant?.changed(() => resolve("changed"));
-				dispose = () => {
-					table();
-					grant?.();
-				};
-			});
-		let changed = arm();
+		const arm = () => nextChange(this.#advertised, this.#grant);
+		let { changed, dispose } = arm();
 
 		try {
 			// Nothing is announced before the grant it would be checked against. A local close
@@ -762,7 +753,7 @@ export class Publisher {
 				if (woke !== "changed") break;
 
 				// Re-arm before reading, so an advertise that lands while we write is not lost.
-				changed = arm();
+				({ changed, dispose } = arm());
 
 				const latest = this.#advertised.peek();
 				if (!latest) break;
@@ -891,6 +882,12 @@ export class Publisher {
 		const served: Run[] | undefined = hasTrackStream(this.version) ? [] : undefined;
 
 		try {
+			// Every draft waits for the track's info, as Rust does: it surfaces a rejected track
+			// (accept never called, track closed) as an error here, which resets the stream, and
+			// its priority breaks ties between this session's subscriptions at one subscriber
+			// priority.
+			const info = await untilAborted(track.info(), left.signal);
+			const publisher = info.priority;
 			// Older drafts carry no timestamps.
 			let stamp: Stamp | undefined;
 			let compress = false;
@@ -902,10 +899,7 @@ export class Publisher {
 				//
 				// The timescale is an immutable property, so serving MUST use exactly
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so
-				// they always agree. Awaiting info() also surfaces a rejected track
-				// (accept never called, track closed) as an error here, which resets the
-				// stream.
-				const info = await untilAborted(track.info(), left.signal);
+				// they always agree.
 				stamp = stamping(this.version, liteTimescale(info));
 				compress = hasCompression(this.version) && !!info.compress;
 			} else {
@@ -954,6 +948,7 @@ export class Publisher {
 				sub: msg.id,
 				broadcast: msg.broadcast,
 				stamp,
+				publisher,
 				compress,
 				served,
 				bounds: {
@@ -1124,12 +1119,14 @@ export class Publisher {
 			sub: bigint;
 			broadcast: Path.Valid;
 			stamp: Stamp | undefined;
+			/** The track's publisher priority, breaking ties between subscriptions. */
+			publisher: number;
 			compress: boolean;
 			served: Run[] | undefined;
 			bounds: FrameBounds;
 		},
 	): Promise<boolean> {
-		const { sub, broadcast, stamp, compress, served, bounds } = serving;
+		const { sub, broadcast, stamp, publisher, compress, served, bounds } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = hasTrackStream(this.version);
@@ -1178,7 +1175,7 @@ export class Publisher {
 		};
 
 		// One ranking for the whole subscription, shared by every group it serves.
-		const priority = new Priority(track);
+		const priority = new Priority(track, publisher);
 
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();

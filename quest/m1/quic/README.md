@@ -8,9 +8,10 @@ MoQ never negotiates. One core serves the tokio backend, the thread-per-core
 `moq-uring` backend, and qmux; iroh stays on upstream noq. BBR correctness,
 reliable stream resets (#5690), hierarchical send groups (#5711, #5770), one
 `Limits` type for relay peers (#5871), and endpoint sharding (#5688) are on
-`main`. What remains is bounded incomplete-message memory; per-broadcast
+`main`. What remains is bounded incomplete-message memory and clean exits
+for connection-blocked writers; per-broadcast
 fairness gives the crate-private send domains (#5872) their consumer in
-[Scope track priority](/quest/m1/track-priority-scope.md).
+[Broadcast fairness](/quest/m2/broadcast-fairness.md).
 qmux already runs on the shared stream state machine, outside this epic.
 Per-stream acknowledgment progress, per-stream deadlines, and the experiments
 (the egress profile, ECN measurement, deadline keep-alive) live in
@@ -71,11 +72,12 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 ## Required
 
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
+- [Connection-blocked writers end cleanly](/quest/m1/quic/connection-blocked.md) - an ended stream leaves the blocked-writer list, and STOP_SENDING surfaces under exhausted connection credit
 
 ## Related
 
-- [Scope track priority](/quest/m1/track-priority-scope.md) - the
-  per-broadcast fairness policy on cluster sessions
+- [Broadcast fairness](/quest/m2/broadcast-fairness.md) - the
+  per-broadcast fairness policy on cluster sessions, a consumer for send domains
 - [Native probing](/quest/m1/probe-native.md) - moq-quic retransmits in-flight data during ProbeBW_UP to probe up to a session's target
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a redial starts at the previous connection's rate

@@ -55,7 +55,7 @@ import {
 	ObjectIdGap,
 } from "./object.ts";
 import { Parameters } from "./parameters.ts";
-import { fromWire, toWire } from "./priority.ts";
+import { ABSENT_WIRE, fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishDoneStatus, publishDoneClean } from "./publish.ts";
 import {
 	type AdvertParams,
@@ -101,6 +101,8 @@ type Subscription = {
 // before the setup promise settles.
 type SubscribeSetupState = {
 	stream?: RequestStream;
+	// The accepted subscription, which a registered alias names.
+	subscription?: Subscription;
 	registeredAlias?: bigint;
 	/**
 	 * Whether the caller has given up. Setup checks this once the stream exists so a request
@@ -812,26 +814,24 @@ export class Subscriber {
 
 		// Keep the request pending until SUBSCRIBE_OK supplies immutable track metadata.
 		// Group streams already wait on the alias, so early data stays behind this response.
-		const producer = hooks.pendingTrackProducer(request);
-		const subscription: Subscription = { track: producer, tail: new Tail() };
-
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
 		// flows back via `state` so the timeout path can clean up the stream
 		// and any registration if setup eventually finishes.
 		const state: SubscribeSetupState = {};
 		const deadline = new Deadline();
-		const setup = this.#openSubscribe(state, broadcast, request, subscription, requestId, deadline, epoch);
+		const setup = this.#openSubscribe(state, broadcast, request, requestId, deadline, epoch);
 
 		// The publisher can be serving before it answers, so waiting only on the response
 		// would miss the local side going away and leave it serving a track nobody reads.
 		// Demand returning before we commit is not abandonment, matching the serving loop.
-		const demand = producer.demand();
+		const demand = request.demand();
 		const waitAbandoned = async (): Promise<null> => {
 			await demandAbandoned(demand);
 			return null;
 		};
 
 		let stream: RequestStream;
+		let subscription: Subscription;
 		let trackAlias: bigint;
 		// The SUBSCRIBER_PRIORITY the request went out with.
 		let priority: number;
@@ -844,6 +844,7 @@ export class Subscriber {
 				const result = await untilAborted(race([accepted, waitAbandoned()]), valid);
 				if (result !== null) {
 					stream = result.stream;
+					subscription = result.subscription;
 					trackAlias = result.alias;
 					priority = result.priority;
 					maxAge = result.maxAge;
@@ -869,7 +870,11 @@ export class Subscriber {
 			const cleanup = async (afterSetup: boolean) => {
 				state.cancelled = true;
 
-				if (state.registeredAlias !== undefined && this.#aliases.retire(state.registeredAlias, subscription)) {
+				if (
+					state.registeredAlias !== undefined &&
+					state.subscription &&
+					this.#aliases.retire(state.registeredAlias, state.subscription)
+				) {
 					this.#timescales.delete(state.registeredAlias);
 				}
 
@@ -903,6 +908,7 @@ export class Subscriber {
 			return;
 		}
 
+		const producer = subscription.track;
 		let disposeGrant: Dispose | undefined;
 		try {
 			// Which terminal fired decides whether we owe the publisher a cancellation, so
@@ -1136,11 +1142,16 @@ export class Subscriber {
 		state: SubscribeSetupState,
 		broadcast: Path.Valid,
 		request: track.Request,
-		subscription: Subscription,
 		requestId: bigint,
 		deadline: Deadline,
 		epoch: Epoch.Valid | undefined,
-	): Promise<{ stream: RequestStream; alias: bigint; priority: number; maxAge?: number }> {
+	): Promise<{
+		stream: RequestStream;
+		subscription: Subscription;
+		alias: bigint;
+		priority: number;
+		maxAge?: number;
+	}> {
 		const version = this.#session.version;
 
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
@@ -1213,31 +1224,37 @@ export class Subscriber {
 		if (maxCacheDuration !== undefined && maxCacheDuration > BigInt(Number.MAX_SAFE_INTEGER)) {
 			throw new RangeError("max cache duration exceeds safe milliseconds");
 		}
-		request.accept({
+		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
+			throw new RangeError("largest group exceeds safe integers");
+		}
+		// Staged until the answer is written in below, so no reader sees the track before its
+		// Largest and start.
+		const staged = request.stage({
 			// No TIMESCALE (always so on drafts 14-16, which can't carry it) means no timeline,
 			// and the track must not claim one when served onward.
 			timescale: ok.properties.timescale,
-			priority: fromWire(ok.properties.priority ?? 128),
+			priority: fromWire(ok.properties.priority ?? ABSENT_WIRE),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
 			unchecked: ok.properties.timescale != null,
 		});
-		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
-			throw new RangeError("largest group exceeds safe integers");
+		const producer = staged.producer;
+		const subscription: Subscription = { track: producer, tail: new Tail() };
+		state.subscription = subscription;
+		if (ok.largest) {
+			// Object IDs can start past zero or skip, while readers see frame ordinals, so only
+			// the group carries over: its first frame is the edge a reader can count on.
+			hooks.reportedLargest(producer, { group: Number(ok.largest.groupId), frame: 0 });
 		}
 		// The live join starts at the publisher's edge, whatever floor the demand asked for.
 		// With no Largest it skips nothing, so every group is owed: a lower one's stream may
 		// still arrive after a higher one's.
 		const groups = request.subscription.groups;
-		hooks.startTrack(subscription.track, {
+		hooks.startTrack(producer, {
 			start: ok.largest ? Number(ok.largest.groupId) : 0,
 			requested: groups?.start === undefined ? undefined : groupBounds(groups).start,
 		});
-		if (ok.largest) {
-			// Object IDs can start past zero or skip, while readers see frame ordinals, so only
-			// the group carries over: its first frame is the edge a reader can count on.
-			hooks.reportedLargest(subscription.track, { group: Number(ok.largest.groupId), frame: 0 });
-		}
+		staged.commit();
 
 		try {
 			this.#aliases.set(ok.trackAlias, subscription, { broadcast, name: request.name, epoch });
@@ -1253,7 +1270,13 @@ export class Subscriber {
 			throw err;
 		}
 		state.registeredAlias = ok.trackAlias;
-		return { stream: state.stream, alias: ok.trackAlias, priority: msg.subscriberPriority, maxAge: msg.maxAge };
+		return {
+			stream: state.stream,
+			subscription,
+			alias: ok.trackAlias,
+			priority: msg.subscriberPriority,
+			maxAge: msg.maxAge,
+		};
 	}
 
 	/**

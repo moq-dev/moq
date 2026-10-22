@@ -579,7 +579,7 @@ class FfiConverterMoqFetchGroupOptions {
 
   static LiftRetVal<MoqFetchGroupOptions> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final priority_lifted = FfiConverterUInt8.read(
+    final priority_lifted = FfiConverterInt8.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final priority = priority_lifted.value;
@@ -597,7 +597,7 @@ class FfiConverterMoqFetchGroupOptions {
 
   static RustBuffer lower(MoqFetchGroupOptions value) {
     final total_length =
-        FfiConverterUInt8.allocationSize(value.priority) +
+        FfiConverterInt8.allocationSize(value.priority) +
         FfiConverterOptionalUInt64.allocationSize(value.maxDelayUs) +
         0;
     final buf = Uint8List(total_length);
@@ -607,7 +607,7 @@ class FfiConverterMoqFetchGroupOptions {
 
   static int write(MoqFetchGroupOptions value, Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    new_offset += FfiConverterUInt8.write(
+    new_offset += FfiConverterInt8.write(
       value.priority,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -619,7 +619,7 @@ class FfiConverterMoqFetchGroupOptions {
   }
 
   static int allocationSize(MoqFetchGroupOptions value) {
-    return FfiConverterUInt8.allocationSize(value.priority) +
+    return FfiConverterInt8.allocationSize(value.priority) +
         FfiConverterOptionalUInt64.allocationSize(value.maxDelayUs) +
         0;
   }
@@ -704,7 +704,7 @@ class FfiConverterMoqSubscription {
 
   static LiftRetVal<MoqSubscription> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final priority_lifted = FfiConverterUInt8.read(
+    final priority_lifted = FfiConverterInt8.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final priority = priority_lifted.value;
@@ -737,7 +737,7 @@ class FfiConverterMoqSubscription {
 
   static RustBuffer lower(MoqSubscription value) {
     final total_length =
-        FfiConverterUInt8.allocationSize(value.priority) +
+        FfiConverterInt8.allocationSize(value.priority) +
         FfiConverterUInt64.allocationSize(value.maxDelayUs) +
         FfiConverterOptionalSequenceMoqRange.allocationSize(value.ranges) +
         FfiConverterOptionalMoqOrder.allocationSize(value.order) +
@@ -749,7 +749,7 @@ class FfiConverterMoqSubscription {
 
   static int write(MoqSubscription value, Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    new_offset += FfiConverterUInt8.write(
+    new_offset += FfiConverterInt8.write(
       value.priority,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -769,7 +769,7 @@ class FfiConverterMoqSubscription {
   }
 
   static int allocationSize(MoqSubscription value) {
-    return FfiConverterUInt8.allocationSize(value.priority) +
+    return FfiConverterInt8.allocationSize(value.priority) +
         FfiConverterUInt64.allocationSize(value.maxDelayUs) +
         FfiConverterOptionalSequenceMoqRange.allocationSize(value.ranges) +
         FfiConverterOptionalMoqOrder.allocationSize(value.order) +
@@ -930,9 +930,9 @@ class FfiConverterMoqFlateConfig {
 }
 
 class MoqJsonSnapshotConfig {
-  final int deltaRatio;
+  final bool deltas;
   final bool compression;
-  MoqJsonSnapshotConfig({this.deltaRatio = 8, this.compression = false});
+  MoqJsonSnapshotConfig({this.deltas = true, this.compression = false});
 }
 
 class FfiConverterMoqJsonSnapshotConfig {
@@ -942,25 +942,25 @@ class FfiConverterMoqJsonSnapshotConfig {
 
   static LiftRetVal<MoqJsonSnapshotConfig> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final deltaRatio_lifted = FfiConverterUInt32.read(
+    final deltas_lifted = FfiConverterBool.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final deltaRatio = deltaRatio_lifted.value;
-    new_offset += deltaRatio_lifted.bytesRead;
+    final deltas = deltas_lifted.value;
+    new_offset += deltas_lifted.bytesRead;
     final compression_lifted = FfiConverterBool.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final compression = compression_lifted.value;
     new_offset += compression_lifted.bytesRead;
     return LiftRetVal(
-      MoqJsonSnapshotConfig(deltaRatio: deltaRatio, compression: compression),
+      MoqJsonSnapshotConfig(deltas: deltas, compression: compression),
       new_offset - buf.offsetInBytes,
     );
   }
 
   static RustBuffer lower(MoqJsonSnapshotConfig value) {
     final total_length =
-        FfiConverterUInt32.allocationSize(value.deltaRatio) +
+        FfiConverterBool.allocationSize(value.deltas) +
         FfiConverterBool.allocationSize(value.compression) +
         0;
     final buf = Uint8List(total_length);
@@ -970,8 +970,8 @@ class FfiConverterMoqJsonSnapshotConfig {
 
   static int write(MoqJsonSnapshotConfig value, Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    new_offset += FfiConverterUInt32.write(
-      value.deltaRatio,
+    new_offset += FfiConverterBool.write(
+      value.deltas,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterBool.write(
@@ -982,7 +982,7 @@ class FfiConverterMoqJsonSnapshotConfig {
   }
 
   static int allocationSize(MoqJsonSnapshotConfig value) {
-    return FfiConverterUInt32.allocationSize(value.deltaRatio) +
+    return FfiConverterBool.allocationSize(value.deltas) +
         FfiConverterBool.allocationSize(value.compression) +
         0;
   }
@@ -2739,7 +2739,7 @@ class MoqTrackInfo {
   final int? timescale;
   final bool compress;
   MoqTrackInfo({
-    this.priority = 127,
+    this.priority = 0,
     this.maxAgeUs = null,
     this.refresh = null,
     this.timescale = null,
@@ -2754,7 +2754,7 @@ class FfiConverterMoqTrackInfo {
 
   static LiftRetVal<MoqTrackInfo> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final priority_lifted = FfiConverterUInt8.read(
+    final priority_lifted = FfiConverterInt8.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final priority = priority_lifted.value;
@@ -2793,7 +2793,7 @@ class FfiConverterMoqTrackInfo {
 
   static RustBuffer lower(MoqTrackInfo value) {
     final total_length =
-        FfiConverterUInt8.allocationSize(value.priority) +
+        FfiConverterInt8.allocationSize(value.priority) +
         FfiConverterOptionalUInt64.allocationSize(value.maxAgeUs) +
         FfiConverterOptionalUInt32.allocationSize(value.refresh) +
         FfiConverterOptionalUInt64.allocationSize(value.timescale) +
@@ -2806,7 +2806,7 @@ class FfiConverterMoqTrackInfo {
 
   static int write(MoqTrackInfo value, Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    new_offset += FfiConverterUInt8.write(
+    new_offset += FfiConverterInt8.write(
       value.priority,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -2830,7 +2830,7 @@ class FfiConverterMoqTrackInfo {
   }
 
   static int allocationSize(MoqTrackInfo value) {
-    return FfiConverterUInt8.allocationSize(value.priority) +
+    return FfiConverterInt8.allocationSize(value.priority) +
         FfiConverterOptionalUInt64.allocationSize(value.maxAgeUs) +
         FfiConverterOptionalUInt32.allocationSize(value.refresh) +
         FfiConverterOptionalUInt64.allocationSize(value.timescale) +
@@ -11764,7 +11764,7 @@ class MoqGroupRequest implements MoqGroupRequestInterface {
         uniffiClonePointer(),
         status,
       ),
-      FfiConverterUInt8.lift,
+      FfiConverterInt8.lift,
       null,
     );
   }
@@ -13337,6 +13337,29 @@ class FfiConverterDouble64 {
   static int write(double value, Uint8List buf) {
     buf.buffer.asByteData(buf.offsetInBytes).setFloat64(0, value);
     return FfiConverterDouble64.allocationSize();
+  }
+}
+
+class FfiConverterInt8 {
+  static int lift(int value) => value;
+  static LiftRetVal<int> read(Uint8List buf) {
+    return LiftRetVal(buf.buffer.asByteData(buf.offsetInBytes).getInt8(0), 1);
+  }
+
+  static int lower(int value) {
+    if (value < -128 || value > 127) {
+      throw ArgumentError("Value out of range for i8: " + value.toString());
+    }
+    return value;
+  }
+
+  static int allocationSize([int value = 0]) {
+    return 1;
+  }
+
+  static int write(int value, Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt8(0, lower(value));
+    return 1;
   }
 }
 
@@ -15515,29 +15538,6 @@ class FfiConverterUInt64 {
   }
 }
 
-class FfiConverterUInt8 {
-  static int lift(int value) => value;
-  static LiftRetVal<int> read(Uint8List buf) {
-    return LiftRetVal(buf.buffer.asByteData(buf.offsetInBytes).getUint8(0), 1);
-  }
-
-  static int lower(int value) {
-    if (value < 0 || value > 255) {
-      throw ArgumentError("Value out of range for u8: " + value.toString());
-    }
-    return value;
-  }
-
-  static int allocationSize([int value = 0]) {
-    return 1;
-  }
-
-  static int write(int value, Uint8List buf) {
-    buf.buffer.asByteData(buf.offsetInBytes).setUint8(0, lower(value));
-    return 1;
-  }
-}
-
 class FfiConverterUint8List {
   static Uint8List lift(RustBuffer value) {
     return FfiConverterUint8List.read(value.asUint8List()).value;
@@ -17491,7 +17491,7 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqgrouprequest_demand(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Uint8 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+@Native<Int8 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
 external int uniffi_moq_ffi_fn_method_moqgrouprequest_priority(
@@ -19692,7 +19692,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqgrouprequest_demand() != 31288) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqgrouprequest_priority() != 1745) {
+  if (uniffi_moq_ffi_checksum_method_moqgrouprequest_priority() != 15373) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqgrouprequest_sequence() != 29523) {

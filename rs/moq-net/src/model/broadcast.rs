@@ -65,6 +65,11 @@ pub struct Info {
 	/// Stamped on every [`Consumer`] an origin resolves, like [`Self::path`]. `None` for a
 	/// route without an epoch and for a handle not resolved through an origin.
 	pub epoch: Option<crate::Epoch>,
+
+	// What the frames this broadcast's groups are still receiving may allocate up front,
+	// inherited from the origin handle that created it.
+	// private: tuning
+	pub(crate) frames: super::frame::Budget,
 }
 
 impl Default for Info {
@@ -74,6 +79,7 @@ impl Default for Info {
 			cache_duration: std::time::Duration::MAX,
 			path: crate::PathOwned::default(),
 			epoch: None,
+			frames: Default::default(),
 		}
 	}
 }
@@ -2143,6 +2149,57 @@ mod test {
 
 		let stale = request.accept(crate::track::Info::timed());
 		assert!(stale.append_group().is_err());
+	}
+
+	/// A staged track resolves no subscriber until it commits, and then with what was
+	/// written meanwhile.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_staged_track_resolves_subscribers_at_commit() {
+		let producer = Info::new().produce();
+		let request = producer.reserve_track("track1").unwrap();
+		let track = producer.consume().track("track1").unwrap();
+		let mut subscribing = std::pin::pin!(track.subscribe(None));
+		assert!(futures::poll!(subscribing.as_mut()).is_pending());
+
+		let mut staged = request.stage(crate::track::Info::timed());
+		staged.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		moq_clock::sim::yield_now().await;
+		assert!(futures::poll!(subscribing.as_mut()).is_pending(), "still staged");
+
+		let _track = staged.commit();
+		let mut subscriber = subscribing.await.unwrap();
+		assert_eq!(subscriber.recv_group().await.unwrap().unwrap().sequence, 0);
+	}
+
+	/// Dropping a staged track uncommitted rejects the request, so its subscribers fail
+	/// rather than wait on a track nobody will publish.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn dropping_a_staged_track_rejects_the_request() {
+		let producer = Info::new().produce();
+		let request = producer.reserve_track("track1").unwrap();
+		let track = producer.consume().track("track1").unwrap();
+		let subscribing = track.subscribe(None);
+
+		let mut staged = request.stage(crate::track::Info::timed());
+		staged.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		drop(staged);
+		assert!(matches!(subscribing.await, Err(Error::Dropped)));
+	}
+
+	/// Dropping a staged track uncommitted aborts a group still being written through it, so
+	/// its writer fails rather than fill a track nobody will read.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn dropping_a_staged_track_aborts_its_open_groups() {
+		let producer = Info::new().produce();
+		let request = producer.reserve_track("track1").unwrap();
+		let staged = request.stage(crate::track::Info::timed());
+		let mut group = staged.append_group().unwrap();
+		drop(staged);
+		let write = group.write_frame(crate::Timestamp::ZERO, b"x".as_slice());
+		assert!(matches!(write, Err(Error::Dropped)), "{write:?}");
 	}
 
 	/// Ending the broadcast doesn't cascade into a track someone is publishing: it keeps
