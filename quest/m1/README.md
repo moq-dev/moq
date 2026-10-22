@@ -128,7 +128,6 @@ lite-07 stream type here.
 - [FromStr parsers](/quest/m1/from-str-trait.md) - hang, moq-auth, and moq-msf implement `FromStr` instead of inherent `from_str`
 - [Drop dead items](/quest/m1/drop-dead-items.md) - the audit's uncalled public items and test helpers are removed
 - [Warmup in the hang draft](/quest/m1/warmup-draft.md) - the draft lets a dual-decoder consumer present before `warmup`, matching the shipping `decode::Consumer`
-- [Binding migration guides](/quest/m1/migrate-guides.md) - the FFI and wrapper guides drop the contradictory `finish` entries, fix the untimed default, and document async shutdown
 - [API-diff check](/quest/m1/api-diff.md) - a recipe diffs every published package's API against its last release, run on PRs into release and against main before the cut
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over the even drafts 14 to 22
 - [Runner nightly](/quest/m1/interop-runner-nightly.md) - a nightly job runs the upstream interop runner against our relay and clients, so newly registered implementations with a published image are tested without a change here
