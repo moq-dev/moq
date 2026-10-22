@@ -26,7 +26,7 @@ use crate::catalog::hang::Container as HangContainer;
 use crate::codec::annexb::{InBand, InBandCodec};
 use crate::codec::h264::Avc1;
 use crate::codec::h265::Hvc1;
-use crate::container::{Consumer, Frame, Read};
+use crate::container::{Consumer, Frame};
 
 /// Per-track video transform that bridges between codec shapes.
 pub(crate) enum VideoTransform {
@@ -350,7 +350,7 @@ impl ExportSource {
 
 	/// The group sequence of the last frame read, or None until the subscription resolves.
 	/// Meaningful only once a frame was read.
-	fn group(&self) -> Option<u64> {
+	pub(crate) fn group(&self) -> Option<u64> {
 		match &self.state {
 			SourceState::Active(consumer) => Some(consumer.group()),
 			_ => None,
@@ -431,7 +431,7 @@ impl ExportSource {
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		loop {
 			match ready!(self.poll_event(waiter))? {
-				Some(Event::Frame(frame)) => return Poll::Ready(Ok(Some(frame))),
+				Some(Event::Frame { frame, .. }) => return Poll::Ready(Ok(Some(frame))),
 				Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut) => continue,
 				None => return Poll::Ready(Ok(None)),
 			}
@@ -443,7 +443,7 @@ impl ExportSource {
 		loop {
 			let event = ready!(self.poll_track(waiter))?;
 			match &event {
-				Some(Event::Frame(frame)) => {
+				Some(Event::Frame { frame, .. }) => {
 					if !self.spliced(frame)? {
 						continue;
 					}
@@ -524,20 +524,20 @@ impl ExportSource {
 		loop {
 			// Scope the consumer borrow to the poll so `self.transform` /
 			// `self.refresh_description` can borrow `self` afterwards.
-			let frame = {
+			let (frame, arrived) = {
 				let SourceState::Active(consumer) = &mut self.state else {
 					unreachable!("subscription resolved into an Active consumer");
 				};
 				match ready!(consumer.poll_item(waiter))? {
-					Some(Item::Read(Read::Frame { group, frame })) => {
+					Some(Item::Frame { group, frame, arrived }) => {
 						if self.ends.is_some_and(|(end_group, _)| end_group != group) {
 							self.finish_ends();
 						}
 						self.open = true;
 						self.received.frame(frame.timestamp, frame.payload.len());
-						frame
+						(frame, arrived)
 					}
-					Some(Item::Read(Read::Gap { timestamp, duration })) => {
+					Some(Item::Gap { timestamp, duration }) => {
 						// Say what the export never receives and where.
 						tracing::warn!(
 							track = consumer.name(),
@@ -550,7 +550,7 @@ impl ExportSource {
 						self.cuts += u64::from(std::mem::take(&mut self.open));
 						return Poll::Ready(Ok(Some(Event::GroupEnd)));
 					}
-					Some(Item::Read(Read::End { group, end })) => {
+					Some(Item::End { group, end }) => {
 						if self.ends.is_some_and(|(end_group, _)| end_group != group) {
 							self.finish_ends();
 						}
@@ -578,7 +578,7 @@ impl ExportSource {
 
 			let Some(transform) = self.transform.as_mut() else {
 				self.resolve_video_dimensions(&frame.payload)?;
-				return Poll::Ready(Ok(Some(Event::Frame(frame))));
+				return Poll::Ready(Ok(Some(Event::Frame { frame, arrived })));
 			};
 
 			// Spent on the next emitted frame even when that frame is a keyframe itself.
@@ -596,11 +596,12 @@ impl ExportSource {
 				Some(payload) => {
 					self.refresh_description();
 					self.resolve_video_dimensions(&payload)?;
-					return Poll::Ready(Ok(Some(Event::Frame(Frame {
+					let frame = Frame {
 						payload,
 						keyframe,
 						..frame
-					}))));
+					};
+					return Poll::Ready(Ok(Some(Event::Frame { frame, arrived })));
 				}
 			}
 		}
@@ -1120,7 +1121,7 @@ mod tests {
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(
 			export.poll_event(&waiter),
-			Poll::Ready(Ok(Some(Event::Frame(_))))
+			Poll::Ready(Ok(Some(Event::Frame { .. })))
 		));
 		assert_eq!((export.skips(), export.markers()), (0, 0));
 		assert!(matches!(

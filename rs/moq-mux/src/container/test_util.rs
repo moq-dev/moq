@@ -352,6 +352,7 @@ impl Link {
 		let server_transport = Gated {
 			inner: server_transport,
 			gate: gate.clone(),
+			answers: true,
 		};
 		let client = moq_net::Client::new()
 			.with_versions(version.into())
@@ -360,6 +361,51 @@ impl Link {
 			.with_versions(version.into())
 			.with_subscriber(to.clone());
 		// Each driver runs as soon as its handshake resolves: the accept waits on the client's SETUP.
+		let sessions = tokio::join!(
+			async {
+				let (session, driver) = client
+					.connect_lite(moq_net::time::now(), client_transport)
+					.await
+					.unwrap();
+				tokio::spawn(moq_net::time::run(driver));
+				session
+			},
+			async {
+				let (session, driver) = server
+					.accept_lite(moq_net::time::now(), server_transport)
+					.await
+					.unwrap();
+				tokio::spawn(moq_net::time::run(driver));
+				session
+			}
+		);
+		Self {
+			_sessions: sessions,
+			gate,
+		}
+	}
+
+	/// A lazily discovering client session subscribing into `to` from a server publishing
+	/// `from`. A server that never `answers` accepts no request stream, as a stalled peer.
+	pub(crate) async fn lazy(from: &moq_net::origin::Producer, to: &moq_net::origin::Producer, answers: bool) -> Self {
+		use moq_net::transport::memory;
+
+		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+		let mut config = memory::Config::default();
+		config.protocol = Some(version.alpn().to_string());
+		let (client_transport, server_transport) = memory::pair(config);
+		let gate = Gate(std::sync::Arc::new(std::sync::Mutex::new((usize::MAX, None))));
+		let server_transport = Gated {
+			inner: server_transport,
+			gate: gate.clone(),
+			answers,
+		};
+		let client = moq_net::Client::new()
+			.with_versions(version.into())
+			.with_subscriber(to.clone());
+		let server = moq_net::Server::new()
+			.with_versions(version.into())
+			.with_publisher(from.consume());
 		let sessions = tokio::join!(
 			async {
 				let (session, driver) = client
@@ -403,6 +449,8 @@ struct Gate(std::sync::Arc<std::sync::Mutex<(usize, Option<std::task::Waker>)>>)
 struct Gated {
 	inner: moq_net::transport::memory::Session,
 	gate: Gate,
+	/// Whether it accepts the peer's request (bidi) streams at all.
+	answers: bool,
 }
 
 impl moq_net::transport::poll::Session for Gated {
@@ -431,6 +479,9 @@ impl moq_net::transport::poll::Session for Gated {
 		&mut self,
 		cx: &mut std::task::Context<'_>,
 	) -> std::task::Poll<Result<moq_net::transport::poll::BiStreams<Self>, Self::Error>> {
+		if !self.answers {
+			return std::task::Poll::Pending;
+		}
 		self.inner.poll_accept_bi(cx)
 	}
 

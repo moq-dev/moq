@@ -360,7 +360,7 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 
 		// A draining close of a session still serving a live track gives up after its drain.
 		const closing = server.close().catch(() => {});
-		await clock.advanceAsync(Nano.fromMilli(Milli(1000)));
+		await clock.advance(Nano.fromMilli(Milli(1000)));
 		await closing;
 		await expect(
 			(async () => {

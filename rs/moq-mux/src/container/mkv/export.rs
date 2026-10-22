@@ -12,6 +12,7 @@ use crate::Result;
 use crate::catalog::Stream;
 use crate::container::ExportSource;
 use crate::container::Frame;
+use crate::container::consumer::Event;
 use crate::container::mkv::Error;
 
 /// Matroska TimestampScale: 1 ms (in nanoseconds).
@@ -77,7 +78,10 @@ struct MkvTrack {
 	reorder: Option<(u64, u64)>,
 	source: ExportSource,
 	pending: Option<crate::jitter::Arrival<Frame>>,
-	empty: moq_clock::Instant,
+	// When the source was subscribed: nothing it delivers reached the export before then.
+	subscribed: moq_clock::Instant,
+	// The latest arrival read from the source, which settles the frames held for their DTS.
+	latest: moq_clock::Instant,
 	finished: bool,
 	track_number: u64,
 	kind: TrackKind,
@@ -98,7 +102,8 @@ impl MkvTrack {
 			reorder: None,
 			source,
 			pending: None,
-			empty: moq_clock::now(),
+			subscribed: moq_clock::now(),
+			latest: moq_clock::Instant::ZERO,
 			finished: false,
 			track_number,
 			kind,
@@ -120,7 +125,7 @@ impl MkvTrack {
 		self.reorder = None;
 		self.source = source.continuing(&self.source);
 		self.finished = false;
-		self.empty = moq_clock::now();
+		self.subscribed = moq_clock::now();
 		self.moved = true;
 		Ok(())
 	}
@@ -173,7 +178,7 @@ impl MkvTrack {
 		});
 		while let Some((mut arrival, dts)) = self.clock.pop(lookahead, floor, flush) {
 			if !self.finished && !flush {
-				arrival.arrived = arrival.arrived.max(self.empty);
+				arrival.arrived = arrival.arrived.max(self.latest);
 			}
 			arrival.decode = moq_net::Timestamp::from_scale(dts, 90_000)?;
 			jitter.push(name.to_owned(), arrival)?;
@@ -424,17 +429,16 @@ impl<S: Stream> Export<S> {
 					if track.finished {
 						break;
 					}
-					let frame = match track.source.poll_read(waiter)? {
-						Poll::Ready(Some(frame)) => frame,
+					let (frame, arrived) = match track.source.poll_event(waiter)? {
+						Poll::Ready(Some(Event::Frame { frame, arrived })) => (frame, arrived.max(track.subscribed)),
+						Poll::Ready(Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut)) => continue,
 						Poll::Ready(None) => {
 							track.finished = true;
 							break;
 						}
-						Poll::Pending => {
-							track.empty = moq_clock::now();
-							break;
-						}
+						Poll::Pending => break,
 					};
+					track.latest = track.latest.max(arrived);
 					let geometry_ready = track.kind == TrackKind::Audio
 						|| self
 							.catalog_snapshot
@@ -456,7 +460,7 @@ impl<S: Stream> Export<S> {
 						track.moved = false;
 					}
 					crate::jitter::Arrival {
-						arrived: track.empty,
+						arrived,
 						read: moq_clock::now(),
 						decode: frame.timestamp,
 						restart: track.source.markers(),

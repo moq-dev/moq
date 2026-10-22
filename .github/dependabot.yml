@@ -80,6 +80,10 @@ updates:
       bun:
         patterns:
           - "*"
+    ignore:
+      # Pinned to the root flake's Chromium (sh/js/playwright.py), so it moves
+      # with a nixpkgs bump rather than ahead of it.
+      - dependency-name: "playwright"
 
   - package-ecosystem: "uv"
     directory: "/"

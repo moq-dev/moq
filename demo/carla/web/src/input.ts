@@ -20,7 +20,7 @@ export function takeoverState(measured: DriveState | undefined): DriveState {
 }
 
 /** Slew rates in normalized units per second. Heavy responses, with fast safety actions. */
-export const RATES = {
+const RATES = {
 	/** Steering: full lock takes ~2.2 s of held key. */
 	steer: 0.45,
 	/** Recentering (C) is a touch quicker than turning further. */
@@ -36,7 +36,7 @@ export const RATES = {
 };
 
 /** A gear change requires some brake and a released throttle. */
-export const SHIFT_MAX_THROTTLE = 0.01;
+const SHIFT_MAX_THROTTLE = 0.01;
 
 /** Mirror the truck-side gear interlock so rejected shifts get immediate UI feedback. */
 export function canShift(state: Pick<DriveState, "throttle" | "brake">): boolean {

@@ -186,9 +186,9 @@ fn verify_late_joiner(producer_config: snapshot::Config, ticks: u64) -> usize {
 	yielded
 }
 
-fn cfg(delta_ratio: u32, compression: bool) -> snapshot::Config {
+fn cfg(deltas: bool, compression: bool) -> snapshot::Config {
 	let mut config = snapshot::Config::default();
-	config.delta_ratio = delta_ratio;
+	config.deltas = deltas;
 	config.compression = if compression {
 		Compression::Deflate
 	} else {
@@ -207,10 +207,10 @@ fn main() {
 	let snapshot_len = serde_json::to_vec(&telemetry(0)).unwrap().len();
 
 	let combos = [
-		("snapshot-per-group, plaintext", cfg(0, false)),
-		("snapshot-per-group, deflate   ", cfg(0, true)),
-		("snapshot+delta,     plaintext", cfg(8, false)),
-		("snapshot+delta,     deflate   ", cfg(8, true)),
+		("snapshot-per-group, plaintext", cfg(false, false)),
+		("snapshot-per-group, deflate   ", cfg(false, true)),
+		("snapshot+delta,     plaintext", cfg(true, false)),
+		("snapshot+delta,     deflate   ", cfg(true, true)),
 	];
 
 	println!("Telemetry stream: {TICKS} ticks, ~{snapshot_len} bytes per snapshot\n");

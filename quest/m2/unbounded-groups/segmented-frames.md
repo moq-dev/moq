@@ -22,8 +22,9 @@ See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
 - Choose the segment size from benchmarks, and keep it a storage detail
   rather than a public knob. Coalescing the chunks the transport delivers is
   fine.
-- Update [Receive memory](/quest/m1/quic/receive-memory.md) so a frame's
-  payload releases credit per segment. The frame header stays a whole unit.
+- Release a frame payload's receive-lease credit per segment, rather than
+  per frame ([#5878](https://github.com/moq-dev/moq/pull/5878)). The frame
+  header stays a whole unit.
 - Measure `group.rs`, `frame.rs` (`frame_recv`), and `memory.rs` before and
   after. Add a large-frame case swept over frame size.
 

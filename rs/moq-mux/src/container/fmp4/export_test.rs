@@ -2190,14 +2190,9 @@ async fn cmaf_source_exports_at_the_frame_timestamp() {
 	let fragment = super::encode_fragment(info, &samples).unwrap();
 
 	let mut group = track.append_group().unwrap();
-	let mut frame = group
-		.create_frame(moq_net::frame::Info {
-			size: fragment.len() as u64,
-			timestamp: Some(moq_net::Timestamp::from_secs(10).unwrap()),
-		})
+	group
+		.write_frame(moq_net::Timestamp::from_secs(10).unwrap(), fragment)
 		.unwrap();
-	frame.write(fragment).unwrap();
-	frame.finish().unwrap();
 	group.finish().unwrap();
 	track.finish().unwrap();
 
