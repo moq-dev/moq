@@ -2452,7 +2452,8 @@ where
 	}
 
 	/// The PID the PCR rides alone under [`Self::with_sync`]: the first above the program's
-	/// elementary streams that nothing else in it uses, so every leg picks the same one.
+	/// elementary streams that nothing else in it uses, else the first below them, so every
+	/// leg picks the same one.
 	fn clock_pid(&self) -> anyhow::Result<u16> {
 		let used: HashSet<u16> = self
 			.tracks
@@ -2468,6 +2469,7 @@ where
 			.max()
 			.unwrap_or(FIRST_ES_PID);
 		(top + 1..0x1FFF)
+			.chain(FIRST_ES_PID..top)
 			.find(|pid| !used.contains(pid))
 			.context("MPEG-TS --sync found no PID left for the PCR")
 	}
