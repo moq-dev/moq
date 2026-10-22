@@ -373,7 +373,7 @@ impl Binding {
 struct Lookup {
 	origin: moq_net::origin::Consumer,
 	path: moq_net::PathOwned,
-	/// Dropped once the request is made: a broadcast resolved through a discovered route
+	/// Dropped once the request settles: a broadcast resolved through a discovered route
 	/// keeps its own path watched.
 	watch: Option<moq_net::announce::Follow>,
 	request: Option<moq_net::origin::Requesting>,
@@ -395,28 +395,41 @@ impl Lookup {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<moq_net::broadcast::Consumer, moq_net::Error>> {
-		if self.request.is_none() {
-			if let Some(watch) = &mut self.watch {
-				// The follower reduces the covering routes to the one serving the path, so its
-				// latest event is whether a route serves it now. Ask as soon as one does:
-				// waiting for every session to sync would let one that never answers hold the
-				// lookup up. Without a route, only sync concludes that none will.
-				let mut routed = false;
-				loop {
-					match watch.poll_next(waiter) {
-						Poll::Ready(Some(moq_net::announce::Event::End(_))) => routed = false,
-						Poll::Ready(Some(_)) => routed = true,
-						Poll::Ready(None) | Poll::Pending => break,
+		loop {
+			if self.request.is_none() {
+				if let Some(watch) = &mut self.watch {
+					// The follower reduces the covering routes to the one serving the path, so its
+					// latest event is whether a route serves it now. Ask as soon as one does:
+					// waiting for every session to sync would let one that never answers hold the
+					// lookup up. Without a route, only sync concludes that none will.
+					let mut routed = false;
+					loop {
+						match watch.poll_next(waiter) {
+							Poll::Ready(Some(moq_net::announce::Event::End(_))) => routed = false,
+							Poll::Ready(Some(_)) => routed = true,
+							Poll::Ready(None) | Poll::Pending => break,
+						}
+					}
+					if !routed {
+						ready!(watch.poll_synced(waiter));
 					}
 				}
-				if !routed {
-					ready!(watch.poll_synced(waiter));
-				}
+				self.request = Some(self.origin.request_broadcast(&self.path, None).into_inner());
+			}
+			let result = ready!(self.request.as_ref().expect("requested above").poll_ok(waiter));
+			// The route can retract between the follower reporting it and the request reading
+			// the table. Until every session has synced, keep following for another.
+			let unsynced = self
+				.watch
+				.as_ref()
+				.is_some_and(|watch| watch.poll_synced(&kio::Waiter::noop()).is_pending());
+			if matches!(result, Err(moq_net::Error::Unroutable)) && unsynced {
+				self.request = None;
+				continue;
 			}
 			self.watch = None;
-			self.request = Some(self.origin.request_broadcast(&self.path, None).into_inner());
+			return Poll::Ready(result);
 		}
-		self.request.as_ref().expect("requested above").poll_ok(waiter)
 	}
 }
 
