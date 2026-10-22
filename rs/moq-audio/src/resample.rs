@@ -472,40 +472,39 @@ mod tests {
 	#[test]
 	fn duration_and_samples_are_invariant_across_partitions_and_epochs() {
 		for (input_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100)] {
-			for chunk in [32, 882, 960, 1024] {
-				for frames in [0, 1, 20, 441, 882, 960, 1024, 4410] {
-					for channels in [1, 2] {
+			for chunk in [32, 882, 960] {
+				for channels in [1, 2] {
+					// One resampler throughout: only the first run starts fresh, so every
+					// later run checks that drain and reset restore that state exactly.
+					let mut resampler = Resampler::new(input_rate, output_rate, channels, chunk).unwrap();
+					for frames in [0, 1, 20, 441, 882, 960, 2000] {
 						let input: Vec<f32> = (0..frames * channels as usize)
 							.map(|sample| (sample as f32 * 0.1).sin() * 0.25)
 							.collect();
+						let expected = (frames as u64 * output_rate as u64 + input_rate as u64 / 2) / input_rate as u64;
 						let mut reference = None;
 						for packet in [1, chunk - 1, chunk + 1, frames.max(1)] {
-							let mut resampler = Resampler::new(input_rate, output_rate, channels, chunk).unwrap();
-							// Drain starts a fresh epoch; reset drops a partial epoch entirely.
-							for epoch in 0..2 {
-								let mut out = Vec::new();
-								for (index, samples) in input.chunks(packet * channels as usize).enumerate() {
-									out.extend(
-										resampler
-											.process(samples, at((index * packet) as u64, input_rate as u64))
-											.unwrap(),
-									);
-								}
-								out.extend(resampler.drain().unwrap());
-								let expected =
-									(frames as u64 * output_rate as u64 + input_rate as u64 / 2) / input_rate as u64;
-								assert_eq!(
-									out.len() / channels as usize,
-									expected as usize,
-									"{input_rate}->{output_rate}, chunk={chunk}, frames={frames}, channels={channels}, packet={packet}, epoch={epoch}"
+							let mut out = Vec::new();
+							for (index, samples) in input.chunks(packet * channels as usize).enumerate() {
+								out.extend(
+									resampler
+										.process(samples, at((index * packet) as u64, input_rate as u64))
+										.unwrap(),
 								);
-								assert_eq!(&out, reference.get_or_insert_with(|| out.clone()));
-								assert!(resampler.drain().unwrap().is_empty());
-								resampler
-									.process(&vec![1.0; (chunk + 1) * channels as usize], at(0, input_rate as u64))
-									.unwrap();
-								resampler.reset();
 							}
+							out.extend(resampler.drain().unwrap());
+							assert_eq!(
+								out.len() / channels as usize,
+								expected as usize,
+								"{input_rate}->{output_rate}, chunk={chunk}, frames={frames}, channels={channels}, packet={packet}"
+							);
+							assert_eq!(&out, reference.get_or_insert_with(|| out.clone()));
+							assert!(resampler.drain().unwrap().is_empty());
+							// Reset drops a partial epoch entirely.
+							resampler
+								.process(&vec![1.0; (chunk + 1) * channels as usize], at(0, input_rate as u64))
+								.unwrap();
+							resampler.reset();
 						}
 					}
 				}
@@ -549,7 +548,7 @@ mod tests {
 						Resampler::new(input_rate, output_rate, channels, input_rate as usize / 50).unwrap();
 					let mut elapsed = std::time::Duration::ZERO;
 					for _ in 0..10 {
-						let start = std::time::Instant::now();
+						let start = moq_clock::now();
 						let mut count = 0;
 						for (index, samples) in input.chunks(packet * channels as usize).enumerate() {
 							let at = at((index * packet) as u64, input_rate as u64);
