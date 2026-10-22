@@ -55,6 +55,7 @@ import {
 	hasAnnounceOk,
 	hasDatagrams,
 	hasFetchMaxDelay,
+	hasMediaTime,
 	hasOrder,
 	hasProbeRtt,
 	hasRefresh,
@@ -863,7 +864,9 @@ export class Subscriber {
 			timescale.set(0);
 			drainOk = true;
 		}
-		hooks.receiveTrack(producer);
+		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
+		// this copy holds its first group until the answer arrives.
+		if (resolvesStart(this.version)) hooks.startTrack(producer, { requested: msg.startGroup });
 
 		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
 		const entry: SubscribeEntry = {
@@ -962,7 +965,8 @@ export class Subscriber {
 	// Map the wire TRACK_INFO onto the model track.Info a producer/consumer holds.
 	#toModelInfo(info: TrackInfo): track.Info {
 		return {
-			timescale: info.timescale,
+			// Lite-05/06 timestamps may be send times, so the copy is untimed and the ingest drops them.
+			timescale: hasMediaTime(this.version) ? info.timescale : undefined,
 			// Publisher Max Age rides on the wire, so the local media-time budget
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
@@ -1161,7 +1165,7 @@ export class Subscriber {
 	// the gap.
 	async #runFetchResponse(stream: Stream, group: netGroup.Producer, timescale: number): Promise<void> {
 		try {
-			const decode = frameDecoder(timescale);
+			const decode = frameDecoder(timescale, hasMediaTime(this.version));
 
 			// Serve until the stream FINs, the group closes, or every reader leaves. A group can
 			// stay open indefinitely (a catalog or JSON stream), so an abandoned fetch is stopped by
@@ -1453,7 +1457,7 @@ export class Subscriber {
 				scale = timescale.peek();
 			}
 
-			await readFrames(stream, producer, scale);
+			await readFrames(stream, producer, scale, hasMediaTime(this.version));
 
 			producer.close();
 			stream.stop(StreamCode.Cancel);
@@ -1529,8 +1533,11 @@ export class Subscriber {
 		const scale = entry.timescale.peek();
 		if (scale === undefined) return;
 
+		// Dropped where it may be a send time, like a frame's.
 		const timestamp =
-			dg.timestamp === undefined ? undefined : new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
+			dg.timestamp === undefined || !hasMediaTime(this.version)
+				? undefined
+				: new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
 		// A datagram's sequence is never owed a stream, so it never holds the tail open.
 		entry.tail.account(dg.sequence, dg.sequence + 1);
 		entry.track.insertDatagram(dg.sequence, timestamp, dg.payload);

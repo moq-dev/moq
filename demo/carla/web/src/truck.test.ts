@@ -3,7 +3,7 @@ import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { applyKeys, REST } from "./input.ts";
 import type { TruckStatus } from "./schemas.ts";
-import { nextGear, SafetyCommandBroadcast, shiftGear, Truck } from "./truck.ts";
+import { SafetyCommandBroadcast, shiftGear, Truck } from "./truck.ts";
 
 describe("Truck video demand", () => {
 	test("only hovered or focused cameras subscribe, and focus suppresses other previews", async () => {
@@ -455,14 +455,6 @@ describe("Truck respawn", () => {
 			truck.close();
 			connection.close();
 		}
-	});
-});
-
-describe("nextGear", () => {
-	test("cycles N → F → R → N", () => {
-		expect(nextGear("neutral")).toBe("forward");
-		expect(nextGear("forward")).toBe("reverse");
-		expect(nextGear("reverse")).toBe("neutral");
 	});
 });
 

@@ -76,7 +76,7 @@ function unzigzag(v: bigint): bigint {
  * FRAME format), decoded into a Timestamp at that scale. Scale 0 (pre-lite-05) carries no
  * timestamp, so frames arrive untimed.
  */
-export function frameDecoder(scale: number): (c: Cursor) => netGroup.Frame {
+export function frameDecoder(scale: number, timed = true): (c: Cursor) => netGroup.Frame {
 	if (scale === 0) {
 		return (c) => ({ payload: c.read(c.u53()) });
 	}
@@ -88,13 +88,23 @@ export function frameDecoder(scale: number): (c: Cursor) => netGroup.Frame {
 		const payload = c.read(c.u53());
 		// After the last read, so a decode that ran short and gets retried adds the delta once.
 		prevTs += delta;
+		// Read to stay in step, but dropped where it may be a send time.
+		if (!timed) return { payload };
 		return { payload, timestamp: new Time.Timestamp(Number(prevTs), timescale) };
 	};
 }
 
-/** Write a group stream's frames into `producer` until the stream ends or the producer closes. */
-export async function readFrames(stream: Reader, producer: netGroup.Producer, scale: number): Promise<void> {
-	const decode = frameDecoder(scale);
+/**
+ * Write a group stream's frames into `producer` until the stream ends or the producer closes.
+ * Each frame's timestamp is read at `scale` and kept only when `timed`.
+ */
+export async function readFrames(
+	stream: Reader,
+	producer: netGroup.Producer,
+	scale: number,
+	timed = true,
+): Promise<void> {
+	const decode = frameDecoder(scale, timed);
 
 	for (;;) {
 		// Every frame already buffered is written without an await, so the reader wakes once

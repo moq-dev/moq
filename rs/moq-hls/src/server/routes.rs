@@ -236,7 +236,7 @@ async fn master(server: &Server, broadcast: &str, query: Option<&str>) -> Respon
 	};
 	// A master listing no variant is unplayable: wait for one that can start, else answer
 	// unavailable.
-	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.advertised()).await;
+	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.advertised()).await;
 	let (video, audio) = broadcaster.variants(query);
 	if video.is_empty() && audio.is_empty() {
 		return not_found();
@@ -248,13 +248,13 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 	let Some(broadcaster) = server.broadcaster(broadcast).await else {
 		return not_found();
 	};
-	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
+	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
 	if broadcaster.is_empty() {
 		return not_found();
 	}
 	// A manifest whose timelines are all empty confuses players; give the broadcast a moment
 	// to index its first complete segment before answering.
-	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.playable()).await;
+	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.playable()).await;
 	// Each representation names its init by hash, which an inline codec only learns from media.
 	broadcaster.build_inits().await;
 	match broadcaster.manifest(query) {
@@ -272,7 +272,7 @@ async fn media(server: &Server, broadcast: &str, kind: Kind, rendition: &str, qu
 	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
 		return not_found();
 	};
-	match tokio::time::timeout(READY_TIMEOUT, rendition.playlist(range, child_query.as_deref())).await {
+	match moq_clock::timeout(READY_TIMEOUT, rendition.playlist(range, child_query.as_deref())).await {
 		Ok(Ok(Some(playlist))) => m3u8(playlist),
 		Ok(Ok(None)) | Err(_) => not_found(),
 		Ok(Err(crate::Error::RangeNotDurable | crate::Error::RangeUnavailable(_))) => range_not_satisfiable(),
@@ -364,7 +364,7 @@ async fn segment(
 /// Resolve a rendition, waiting for the catalog to populate.
 async fn rendition_for(server: &Server, broadcast: &str, kind: Kind, rendition: &str) -> Option<Arc<Rendition>> {
 	let broadcaster = server.broadcaster(broadcast).await?;
-	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
+	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
 	broadcaster.rendition(kind, rendition)
 }
 
@@ -427,6 +427,7 @@ fn server_error(err: crate::Error) -> Response {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 
@@ -934,8 +935,8 @@ mod tests {
 	}
 
 	/// Only the URLs the renderers emit are served: the init under its hash, segments under the
-	/// current generation.
-	#[tokio::test]
+	/// current generation. Paused, since a refused lookup waits out [`READY_TIMEOUT`].
+	#[tokio::test(start_paused = true)]
 	async fn serves_only_versioned_media_urls() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
@@ -1083,8 +1084,9 @@ mod tests {
 		.await
 		.expect("sibling resolve timed out")
 		.expect("sibling broadcast");
-		drop(media);
-		drop(media_broadcast);
+		// Only the sibling goes: the catalog keeps listing the rendition, so the request
+		// reaches the media fetch rather than missing the rendition.
+		media_broadcast.close();
 		tokio::time::timeout(TIMEOUT, remote_media.closed())
 			.await
 			.expect("sibling close timed out");
@@ -1093,7 +1095,7 @@ mod tests {
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 
-		drop((catalog, catalog_broadcast));
+		drop((catalog, catalog_broadcast, media));
 		pair.accept.abort();
 	}
 }

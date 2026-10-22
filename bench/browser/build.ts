@@ -9,9 +9,9 @@
  * `:copy` injects one extra copy of every received stream chunk into @moq/net, the control
  * that proves the suite can see a copy-heavy change.
  */
-import { readdir } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import type { BunPlugin } from "bun";
+import { workspace } from "./workspace.ts";
 
 const PAGES = ["transport", "cmaf", "media"].map((page) => join(import.meta.dir, "page", `${page}.ts`));
 
@@ -35,34 +35,6 @@ for (const spec of specs) {
 	if (!result.success) throw new AggregateError(result.logs, `${name} failed to bundle`);
 	await Bun.write(join(out, name, "index.html"), "<!doctype html><body></body>\n");
 	console.log(`bundled ${name} from ${root}${copy ? " with an injected chunk copy" : ""}`);
-}
-
-/** Resolves `@moq/<name>[/<sub>]` through the variant checkout's package exports. */
-function workspace(root: string): BunPlugin {
-	return {
-		name: "workspace",
-		async setup(build) {
-			const packages = new Map<string, { dir: string; exports: Record<string, string> }>();
-			for (const entry of await readdir(join(root, "js"), { withFileTypes: true })) {
-				if (!entry.isDirectory()) continue;
-				const manifest = Bun.file(join(root, "js", entry.name, "package.json"));
-				if (!(await manifest.exists())) continue;
-				const { name, exports } = await manifest.json();
-				if (typeof exports !== "object" || exports === null) continue;
-				packages.set(name, { dir: join(root, "js", entry.name), exports });
-			}
-			build.onResolve({ filter: /^@moq\// }, (args) => {
-				const [scope, name, ...rest] = args.path.split("/");
-				const found = packages.get(`${scope}/${name}`);
-				// Published dependencies resolve normally.
-				if (!found) return undefined;
-				const key = rest.length ? `./${rest.join("/")}` : ".";
-				const target = found.exports[key];
-				if (typeof target !== "string") throw new Error(`${args.path} is not a source export of ${found.dir}`);
-				return { path: join(found.dir, target) };
-			});
-		},
-	};
 }
 
 /** `?worklet` imports become a blob URL of the separately bundled worklet, as vite-plugin-worklet does. */

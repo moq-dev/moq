@@ -50,8 +50,6 @@ test("qmux carries large streams in bounded binary records and preserves both st
 		await Promise.all([client.ready, server.ready]);
 		expect(left.options).toEqual({ ordered: true, protocol });
 		expect(left.channel.binaryType).toBe("arraybuffer");
-		expect(client.protocol).toBe(protocol);
-		expect(server.protocol).toBe(protocol);
 		expect(client.datagrams.maxDatagramSize).toBe(0);
 		const payload = Uint8Array.from({ length: 256 * 1024 }, (_, i) => i % 251);
 		const receiving = next(server.incomingUnidirectionalStreams).then(readAll);

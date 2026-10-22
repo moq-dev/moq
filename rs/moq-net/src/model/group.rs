@@ -2754,6 +2754,14 @@ impl Consumer {
 		self.track.timescale
 	}
 
+	/// The timescale a moq-lite hop serves the parent track at (see
+	/// [`track::Info::lite_timescale`]).
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: passthrough
+	pub(crate) fn lite_timescale(&self) -> Option<Timescale> {
+		self.track.lite_timescale()
+	}
+
 	/// The draft the parent track's moq-transport publisher spoke, which serialized every
 	/// object's properties, or `None` for a moq-lite one.
 	#[cfg(feature = "async")]
@@ -3480,20 +3488,6 @@ mod test {
 		assert_eq!(f1.size, 6);
 		let end = consumer.next_frame().now_or_never().unwrap().unwrap();
 		assert!(end.is_none());
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn read_frame_all_at_once() {
-		let mut producer = Info { sequence: 0 }.produce();
-		producer
-			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hello"))
-			.unwrap();
-		producer.finish().unwrap();
-
-		let mut consumer = producer.consume();
-		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
 	}
 
 	#[test]

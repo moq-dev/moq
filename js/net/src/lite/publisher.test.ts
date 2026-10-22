@@ -534,6 +534,41 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	}
 });
 
+// An unchecked track goes out untimed, so lite-06 carries its send time, never the frame's own
+// timestamp, which may be a moq-transport arrival time.
+test("lite draft-06: an unchecked track's fetched frames carry their send time", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
+
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, unchecked: true });
+
+	const group = new GroupProducer(0);
+	group.writeFrame(textFrame("hello", Timestamp.fromMillis(36_000_000)));
+	group.close();
+	track.writeGroup(group);
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_06);
+	if (!server) throw new Error("publisher never saw the fetch stream");
+
+	const msg = new Fetch({ broadcast: Path.from("test"), track: "video", priority: 0, group: 0 });
+	try {
+		const before = Math.floor(Timestamp.now().value);
+		await publisher.runFetch(msg, server);
+		const after = Math.ceil(Timestamp.now().value);
+
+		// The first frame's zigzag delta is against 0, in the milliseconds TRACK_INFO declares.
+		const sent = Number((await client.reader.u62()) >> 1n);
+		expect(sent).toBeGreaterThanOrEqual(before);
+		expect(sent).toBeLessThanOrEqual(after);
+	} finally {
+		publisher.close();
+		client.close();
+	}
+});
+
 // How long a served-subscription test waits for the next group stream before calling the
 // publisher idle. Nothing waits this out: it only bounds the read when a group never comes.
 const IDLE_MS = 500;
@@ -980,6 +1015,100 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 		await sub.close();
 	}
 });
+
+// A relay receives the newest group first while its source still promises older groups.
+// START must preserve that promise, bounded by the downstream floor and first served group.
+for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+	for (const [source, expected] of [
+		[0, 2],
+		[3, 3],
+		[9, 6],
+	]) {
+		test(`lite ${version}: descending delivery resolves source start ${source} at ${expected}`, async () => {
+			const sub = await servedSubscription({ version, startGroup: 2 });
+			try {
+				hooks.startTrack(sub.track, { start: source, requested: 2 });
+				sub.serve(6);
+				expect(await sub.servedSequence()).toBe(6);
+				const response = await decodeSubscribeResponse(sub.client.reader, version);
+				if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+				expect(response.start.group).toBe(expected);
+				if (expected < 6) {
+					sub.serve(expected);
+					expect(await sub.servedSequence()).toBe(expected);
+				}
+			} finally {
+				await sub.close();
+			}
+		});
+	}
+}
+
+// A relay's group stream can beat the upstream START on its own stream. Resolving from that
+// group would give up the backlog the START still promises, so the first group waits for it.
+for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+	test(`lite ${version}: START waits for the upstream START before resolving`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 2 });
+		try {
+			hooks.startTrack(sub.track, { requested: 2 });
+			sub.serve(6);
+			await flush();
+			hooks.startTrack(sub.track, { start: 3, requested: 2 });
+			const response = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(response.start.group).toBe(3);
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+
+	// A track that closes never gets its START, so the held group must not wait for it.
+	test(`lite ${version}: a closed source releases the START it was waiting for`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 2 });
+		try {
+			hooks.startTrack(sub.track, { requested: 2 });
+			sub.serve(6);
+			await flush();
+			sub.track.close();
+			const response = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+}
+
+for (const skipped of ["failed", "stale"] as const) {
+	test(`lite draft-06: START advances past a ${skipped} group from the source`, async () => {
+		const sub = await servedSubscription({
+			version: Version.DRAFT_06,
+			startGroup: 5,
+			maxAge: skipped === "stale" ? Milli(0) : undefined,
+		});
+		try {
+			hooks.startTrack(sub.track, { start: 5, requested: 5 });
+			const group = new GroupProducer(5);
+			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
+			sub.track.writeGroup(group);
+			group.close(skipped === "failed" ? new Error("cut") : undefined);
+			if (skipped === "failed") hooks.dropTrackGroups(sub.track, 7, 8, new Error("cut"));
+			sub.serve(6);
+			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(response.start.group).toBe(6);
+			if (skipped === "failed") {
+				const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+				if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
+				expect([dropped.drop.start, dropped.drop.end]).toEqual([7, 7]);
+			}
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+}
 
 // Pre-06 an absent Group Start is the latest group. An update that drops a named floor
 // re-pins there, so a group created below it afterwards is not served.
@@ -2169,7 +2298,7 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 		write(2, 20_000);
 		open();
 
-		expect(String(await streamReset)).toContain("max delay budget");
+		expect(String(await streamReset)).toContain("abandoned waiting for a stream slot");
 		expect(writes).toBe(0);
 		await flush();
 		expect(unhandled).toEqual([]);
