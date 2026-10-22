@@ -6,7 +6,7 @@ use crate::{Error, Result, VERSION};
 
 /// Immutable track properties stored at `<encoded-track>/.info`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "Stored")]
+#[serde(deny_unknown_fields)]
 pub struct Info {
 	/// Recording format version; must be [`VERSION`].
 	pub version: u64,
@@ -16,29 +16,6 @@ pub struct Info {
 	/// is untimed and its frames store no timestamps.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timescale: Option<u64>,
-}
-
-/// [`Info`] as stored, also taking the `epoch` an older `Writer` recorded, so [`Reader`](crate::Reader)
-/// still replays those recordings; it goes when `Reader` does.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Stored {
-	version: u64,
-	priority: u8,
-	#[serde(default)]
-	timescale: Option<u64>,
-	#[serde(default, rename = "epoch")]
-	_epoch: Option<serde::de::IgnoredAny>,
-}
-
-impl From<Stored> for Info {
-	fn from(stored: Stored) -> Self {
-		Self {
-			version: stored.version,
-			priority: stored.priority,
-			timescale: stored.timescale,
-		}
-	}
 }
 
 impl Info {
@@ -129,17 +106,11 @@ mod tests {
 	}
 
 	#[test]
-	fn an_older_writers_epoch_is_ignored() {
-		let info = Info::decode(br#"{"version":2,"priority":0,"timescale":1000,"epoch":"x"}"#).unwrap();
-		assert_eq!(info, Info::new(0, Some(1000)).unwrap());
-		assert_eq!(
-			info.encode().unwrap().as_ref(),
-			br#"{"version":2,"priority":0,"timescale":1000}"#
-		);
-	}
-
-	#[test]
 	fn unknown_members_and_missing_fields_are_refused() {
+		assert!(matches!(
+			Info::decode(br#"{"version":2,"priority":0,"timescale":1000,"epoch":"x"}"#),
+			Err(Error::Json(_))
+		));
 		assert!(matches!(
 			Info::decode(br#"{"version":2,"priority":0,"timescale":1,"extra":true}"#),
 			Err(Error::Json(_))

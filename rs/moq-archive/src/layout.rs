@@ -9,7 +9,6 @@ use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::path::{check_id, decode_track, encode_track, push};
-use crate::segment::Frame;
 use crate::{Error, ID_WIDTH, Result, VERSION};
 
 /// The broadcast's completion marker, beside its track segments.
@@ -144,6 +143,15 @@ impl End {
 	}
 }
 
+/// One frame's timestamp and original payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Frame {
+	/// Absolute timestamp in the track's timescale, or `None` on an untimed track.
+	pub timestamp: Option<u64>,
+	/// Original frame payload, including any group-scoped compression.
+	pub payload: Bytes,
+}
+
 /// One stored sequence, in the form it was forwarded in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Entry {
@@ -188,6 +196,15 @@ impl Object {
 			frame: self.frame_start,
 			pts: first.first().timestamp,
 		})
+	}
+
+	/// Its payload bytes plus a small per-frame overhead, for a byte-bounded cache.
+	pub(crate) fn weight(&self) -> u64 {
+		let frames = self.entries.iter().flat_map(|entry| match entry {
+			Entry::Group { frames, .. } => frames.as_slice(),
+			Entry::Datagram { frame, .. } => std::slice::from_ref(frame),
+		});
+		frames.map(|frame| frame.payload.len() as u64 + 32).sum::<u64>() + 64
 	}
 
 	/// The position just past the last stored frame or datagram.

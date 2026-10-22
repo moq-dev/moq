@@ -16,8 +16,7 @@ use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
 use super::Shared;
 use super::ordered::{Item, Ordered};
 use super::resume::Stored;
-use crate::layout::{self, End, Entry, Object};
-use crate::segment::Frame;
+use crate::layout::{self, End, Entry, Frame, Object};
 use crate::{Error, Info, Result};
 
 /// Record each run of the track `name` reported through `queue`, until the queue closes with the
