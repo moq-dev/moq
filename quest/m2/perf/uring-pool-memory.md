@@ -10,13 +10,16 @@ retained memory matters.
 ## Plan
 
 The pools grow and never shrink, by design (`rs/moq-uring/src/udp.rs`
-module docs). Per socket, so per worker: 16 receive buffers of ~64 KiB
+module docs). Per socket, so per worker in the relay: 16 receive buffers of ~64 KiB
 (~1 MiB, touched) and 64 send buffers of 64 KiB (4 MiB reserved, touched
 when written) at start, up to 256 receive and 1024 send buffers (~80 MiB).
 A receive flood or a load spike ratchets each worker toward that ceiling.
 The worker-turn benches use 2 KiB buffers, so none measures this.
 
-Add pool capacity and occupancy to the worker metrics as gauges, then run the relay at
+Add pool capacity and occupancy to the worker metrics as gauges summed
+over the worker's sockets, each socket adding its growth and subtracting
+its pools on drop, since an embedder can open several per worker; cover
+two live sockets. Then run the relay at
 production sizing on the fanout and chat shapes, sweeping connections and
 workers, and record RSS and pool capacity during and after a burst.
 RSS is process-wide, so attribute it with a control run whose pools are

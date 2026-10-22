@@ -30,7 +30,9 @@ reachable by an embedder:
   close (idle timeout included) behind 64 KiB of unread data never
   surfaces. `moq-tokio/src/transport.rs` has the same cap and returns
   Pending without registering a waker. Fix both: check terminal state
-  before the cap, keeping held credit.
+  before the cap, keeping held credit, and register the closed watcher so
+  a read that drains below the cap wakes it. Test with `poll_closed` and
+  the draining read in separate tasks.
 
 Use the existing teardown and credit integration tests' shapes; drive time
 with the manual clock for the idle-timeout case.
