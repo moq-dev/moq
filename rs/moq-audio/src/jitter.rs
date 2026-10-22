@@ -9,7 +9,6 @@
 //! Every value is `f64` milliseconds, evaluated in the order the page writes it,
 //! so both languages produce bit-identical targets from the same trace.
 
-use std::collections::VecDeque;
 use std::time::Duration;
 
 /// Milliseconds of media time the reference search looks back over.
@@ -36,13 +35,13 @@ const FRESH_MAX: f64 = 0.1;
 /// Idle intervals folded at once, purely to bound the work.
 const IDLE_MAX: f64 = 1024.0;
 
-/// Arrivals kept in the reference window.
+/// Arrivals kept in the reference window, a power of two so it is also the ring's
+/// largest capacity.
 ///
 /// The window is media time, and a publisher chooses the timestamp rate, so an
-/// uncapped history can hold millions of entries from a stream that advances a
-/// microsecond per frame. This bounds both memory and a reordered frame's scan,
-/// and stays far above the 2 s window of any real track (a 1000 fps track holds
-/// 2000).
+/// uncapped history holds every frame of a stream that advances a nanosecond per
+/// frame. Lookups are logarithmic either way; this bounds the memory, and stays far
+/// above the 2 s window of any real track (a 1000 fps track holds 2000).
 const MAX_HISTORY: usize = 8192;
 
 /// The playout target, fixed or estimated.
@@ -97,19 +96,148 @@ fn prior(i: usize) -> f64 {
 }
 
 /// One arrival still inside the reference window.
+#[derive(Clone, Copy, Default)]
 struct Entry {
-	/// Position in the arrival sequence, so the minimum deque can drop retired entries.
-	seq: u64,
 	arrival: f64,
 	media: f64,
 }
 
-/// A candidate reference: the smallest delay seen at or before its arrival.
-struct MinKey {
-	seq: u64,
-	key: f64,
-	arrival: f64,
-	media: f64,
+impl Entry {
+	/// What the reference minimises: how late this frame arrived for its timestamp.
+	fn key(&self) -> f64 {
+		self.arrival - self.media
+	}
+}
+
+/// The arrivals inside the reference window, in media order, answering any
+/// prefix's fastest arrival in logarithmic time.
+///
+/// A reordered frame is measured against the prefix at or before its timestamp,
+/// so a peer that sends only reordered frames would otherwise force a scan per
+/// frame. Entries live in a ring indexed from `head`, and a segment tree over the
+/// ring's slots holds each node's fastest slot, the older on a tie, as the scan
+/// would pick. A query never spans the ring's wrap point within one node, so a
+/// node fully inside it is in arrival order.
+#[derive(Default)]
+struct History {
+	/// The ring, its length a power of two that grows up to `MAX_HISTORY`.
+	ring: Vec<Entry>,
+	/// The slot of the oldest entry.
+	head: usize,
+	/// The number of entries held.
+	len: usize,
+	/// Leaf `ring.len() + slot` holds `slot`; each parent holds the faster of its children.
+	tree: Vec<usize>,
+}
+
+impl History {
+	/// Append an arrival newer than every entry, after dropping those it pushes out of the window.
+	fn push(&mut self, arrival: f64, media: f64) {
+		// Pruning by media time rather than by arrival is what makes a timestamp jump
+		// self-correcting: everything before it leaves the window at once.
+		while self.len > 0 && self.ring[self.head].media < media - WINDOW {
+			self.pop();
+		}
+		if self.len == MAX_HISTORY {
+			self.pop();
+		}
+		if self.len == self.ring.len() {
+			self.grow();
+		}
+
+		let capacity = self.ring.len();
+		let slot = (self.head + self.len) & (capacity - 1);
+		self.ring[slot] = Entry { arrival, media };
+		self.len += 1;
+
+		let mut node = (capacity + slot) / 2;
+		while node > 0 {
+			self.tree[node] = self.faster(self.tree[2 * node], self.tree[2 * node + 1]);
+			node /= 2;
+		}
+	}
+
+	fn pop(&mut self) {
+		self.head = (self.head + 1) & (self.ring.len() - 1);
+		self.len -= 1;
+	}
+
+	/// Double the ring, unwrapping it to start at slot zero, and rebuild the tree.
+	fn grow(&mut self) {
+		let old = self.ring.len();
+		let capacity = (old * 2).max(1);
+		let mut ring = vec![Entry::default(); capacity];
+		for (index, entry) in ring.iter_mut().enumerate().take(self.len) {
+			*entry = self.ring[(self.head + index) & (old - 1)];
+		}
+		self.ring = ring;
+		self.head = 0;
+
+		self.tree = vec![0; 2 * capacity];
+		for slot in 0..capacity {
+			self.tree[capacity + slot] = slot;
+		}
+		for node in (1..capacity).rev() {
+			self.tree[node] = self.faster(self.tree[2 * node], self.tree[2 * node + 1]);
+		}
+	}
+
+	/// The fastest entry with `entry.media <= media`, the oldest on a tie.
+	fn reference(&self, media: f64) -> Option<Entry> {
+		// Media timestamps increase along the ring, so the prefix ends at a binary search.
+		let mask = self.ring.len().wrapping_sub(1);
+		let (mut lo, mut hi) = (0, self.len);
+		while lo < hi {
+			let mid = lo + (hi - lo) / 2;
+			if self.ring[(self.head + mid) & mask].media <= media {
+				lo = mid + 1;
+			} else {
+				hi = mid;
+			}
+		}
+		let last = lo.checked_sub(1)?;
+
+		let end = (self.head + last) & mask;
+		let slot = if self.head <= end {
+			self.range(self.head, end)
+		} else {
+			let older = self.range(self.head, mask);
+			self.faster(older, self.range(0, end))
+		};
+		Some(self.ring[slot])
+	}
+
+	/// The fastest slot in `first..=last`, which must not wrap.
+	fn range(&self, first: usize, last: usize) -> usize {
+		let capacity = self.ring.len();
+		let (mut lo, mut hi) = (first + capacity, last + capacity + 1);
+		let (mut older, mut newer): (Option<usize>, Option<usize>) = (None, None);
+		while lo < hi {
+			if lo & 1 == 1 {
+				older = Some(older.map_or(self.tree[lo], |slot| self.faster(slot, self.tree[lo])));
+				lo += 1;
+			}
+			if hi & 1 == 1 {
+				hi -= 1;
+				newer = Some(newer.map_or(self.tree[hi], |slot| self.faster(self.tree[hi], slot)));
+			}
+			lo /= 2;
+			hi /= 2;
+		}
+		match (older, newer) {
+			(Some(older), Some(newer)) => self.faster(older, newer),
+			(older, newer) => older.or(newer).expect("a non-empty range"),
+		}
+	}
+
+	/// Of two slots, `older` first in arrival order, the faster one, keeping `older` on a tie.
+	fn faster(&self, older: usize, newer: usize) -> usize {
+		if self.ring[newer].key() < self.ring[older].key() {
+			newer
+		} else {
+			older
+		}
+	}
 }
 
 /// Estimates the playout target from arrival timing alone.
@@ -120,15 +248,7 @@ pub(crate) struct Estimator {
 	advertised: f64,
 
 	/// Arrivals still inside the reference window, in media order.
-	history: VecDeque<Entry>,
-	/// The prefix minimum of `arrival - media` over `history`, front first.
-	///
-	/// Keys increase from front to back, so the front is the smallest, and a retired
-	/// entry is dropped by its sequence number. This makes an in-order frame's reference
-	/// O(1) instead of a scan over a count the publisher chose.
-	minima: VecDeque<MinKey>,
-	/// The next entry's position in the arrival sequence.
-	next_seq: u64,
+	history: History,
 	/// The largest media timestamp observed, so a reordered frame is recognized.
 	newest: f64,
 
@@ -149,9 +269,7 @@ impl Estimator {
 		Self {
 			frame: 0.0,
 			advertised,
-			history: VecDeque::new(),
-			minima: VecDeque::new(),
-			next_seq: 0,
+			history: History::default(),
 			newest: f64::NEG_INFINITY,
 			origin: None,
 			interval: 0.0,
@@ -166,30 +284,7 @@ impl Estimator {
 		// newer frame, so it is never the fastest, and nothing later is measured against it.
 		if media > self.newest {
 			self.newest = media;
-
-			// Pruning by media time rather than by arrival is what makes a timestamp jump
-			// self-correcting: everything before it leaves the window at once.
-			while self.history.front().is_some_and(|entry| entry.media < media - WINDOW) {
-				self.history.pop_front();
-			}
-			while self.history.len() >= MAX_HISTORY {
-				self.history.pop_front();
-			}
-
-			let seq = self.next_seq;
-			self.next_seq += 1;
-			let key = arrival - media;
-			self.history.push_back(Entry { seq, arrival, media });
-			while self.minima.back().is_some_and(|min| min.key >= key) {
-				self.minima.pop_back();
-			}
-			self.minima.push_back(MinKey {
-				seq,
-				key,
-				arrival,
-				media,
-			});
-			self.trim_minima();
+			self.history.push(arrival, media);
 		}
 
 		// The fastest frame in the window at or before this one, so delay is measured
@@ -197,13 +292,13 @@ impl Estimator {
 		// frame held behind newer ones reads as the wait playing it in order costs. A
 		// frame older than the whole window, such as a subscription's backlog behind its
 		// live edge, has nothing to be measured against.
-		let Some((reference, reference_media)) = self.reference(media) else {
+		let Some(reference) = self.history.reference(media) else {
 			return;
 		};
 
 		// Written in this order on purpose: the document requires bit-identical
 		// arithmetic, so the difference is not reassociated.
-		let delay = f64::max(0.0, arrival - reference - (media - reference_media));
+		let delay = f64::max(0.0, arrival - reference.arrival - (media - reference.media));
 
 		let Some(origin) = self.origin else {
 			self.origin = Some(arrival);
@@ -226,34 +321,6 @@ impl Estimator {
 
 		self.interval = interval;
 		self.peak = delay;
-	}
-
-	/// The fastest arrival at or before `media`, as its `(arrival, media)`.
-	fn reference(&self, media: f64) -> Option<(f64, f64)> {
-		if media >= self.newest {
-			// Every entry is at or before a frame in media order, and the deque's front
-			// is their minimum.
-			return self.minima.front().map(|min| (min.arrival, min.media));
-		}
-
-		// A reordered frame sees only a prefix, which the minimum deque cannot answer.
-		// The history cap bounds the scan.
-		self.history
-			.iter()
-			.take_while(|entry| entry.media <= media)
-			.min_by(|a, b| (a.arrival - a.media).total_cmp(&(b.arrival - b.media)))
-			.map(|entry| (entry.arrival, entry.media))
-	}
-
-	/// Drop minimums whose arrivals left the history.
-	fn trim_minima(&mut self) {
-		let Some(front) = self.history.front().map(|entry| entry.seq) else {
-			self.minima.clear();
-			return;
-		};
-		while self.minima.front().is_some_and(|min| min.seq < front) {
-			self.minima.pop_front();
-		}
 	}
 
 	fn target(&self) -> f64 {
@@ -411,9 +478,25 @@ pub(crate) mod tests {
 		assert_eq!(target.millis(), BUCKETS as f64 * BUCKET + 20.0);
 	}
 
-	/// The minimum deque must answer exactly what the documented scan would.
+	/// The documented scan: the first entry with the smallest key at or before `media`.
+	fn scan(history: &History, media: f64) -> Option<(f64, f64)> {
+		let mut reference: Option<Entry> = None;
+		for index in 0..history.len {
+			let entry = history.ring[(history.head + index) & (history.ring.len() - 1)];
+			if entry.media > media {
+				break;
+			}
+			if reference.is_none_or(|best| entry.key() < best.key()) {
+				reference = Some(entry);
+			}
+		}
+		reference.map(|entry| (entry.arrival, entry.media))
+	}
+
+	/// The tree must pick exactly the entry the documented scan would, ties included,
+	/// since a tied entry with a different `(arrival, media)` rounds the delay differently.
 	#[test]
-	fn reference_matches_a_naive_prefix_scan() {
+	fn reference_matches_the_scan() {
 		let mut estimator = Estimator::new(0.0);
 		let mut seed = 0x9e37_79b9_7f4a_7c15u64;
 		for index in 0..400 {
@@ -426,32 +509,40 @@ pub(crate) mod tests {
 			} else {
 				(index as f64) * 20.0
 			};
-			let arrival = (index as f64) * 20.0 + (seed >> 40) as f64 / 1024.0;
-			estimator.observe(arrival, media);
+			// Whole milliseconds of jitter tie often; the occasional fraction does not.
+			let jitter = if index % 5 == 0 {
+				(seed >> 40) as f64 / 1024.0
+			} else {
+				(seed >> 61) as f64
+			};
+			estimator.observe((index as f64) * 20.0 + jitter, media);
 
-			for query in [media - 10.0, media, media + 10.0, media + 1.0e6] {
-				let expected = estimator
-					.history
-					.iter()
-					.take_while(|entry| entry.media <= query)
-					.map(|entry| entry.arrival - entry.media)
-					.min_by(f64::total_cmp);
-				let actual = estimator.reference(query).map(|(arrival, media)| arrival - media);
-				assert_eq!(actual, expected, "frame {index}, query {query}");
+			let history = &estimator.history;
+			for query in [media - 30.0, media - 10.0, media, media + 10.0, media + 1.0e6] {
+				let actual = history.reference(query).map(|entry| (entry.arrival, entry.media));
+				assert_eq!(actual, scan(history, query), "frame {index}, query {query}");
 			}
 		}
 	}
 
-	/// A peer choosing a microsecond per frame cannot grow the history without bound.
+	/// A peer choosing a microsecond per frame cannot grow the history without bound,
+	/// and the full, wrapped ring still answers every prefix.
 	#[test]
 	fn the_history_is_capped() {
 		let mut estimator = Estimator::new(0.0);
-		// One frame per microsecond of media, for well past the cap.
 		for index in 0..(MAX_HISTORY + 5000) {
-			estimator.observe(index as f64, index as f64 / 1000.0);
+			let media = index as f64 / 1000.0;
+			estimator.observe(index as f64 + (index % 7) as f64, media);
+			if index % 997 == 0 {
+				let history = &estimator.history;
+				for query in [media - 3.0, media - 0.5, media] {
+					let actual = history.reference(query).map(|entry| (entry.arrival, entry.media));
+					assert_eq!(actual, scan(history, query), "frame {index}, query {query}");
+				}
+			}
 		}
-		assert_eq!(estimator.history.len(), MAX_HISTORY);
-		assert!(estimator.minima.len() <= MAX_HISTORY);
+		assert_eq!(estimator.history.len, MAX_HISTORY);
+		assert_eq!(estimator.history.ring.len(), MAX_HISTORY);
 		assert!(estimator.target().is_finite());
 	}
 }
