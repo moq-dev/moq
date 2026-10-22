@@ -37,6 +37,10 @@ struct Setup {
 }
 
 async fn setup(version: &str) -> Setup {
+	setup_with_gate(version, None).await
+}
+
+async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Setup {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
@@ -46,6 +50,7 @@ async fn setup(version: &str) -> Setup {
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 	options.client_publish = Some(publisher.consume());
 	options.server_subscribe = Some(subscriber.clone());
+	options.server_gate = gate;
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
@@ -59,8 +64,10 @@ async fn setup(version: &str) -> Setup {
 		.expect("broadcast resolves");
 
 	// The publisher only learns of a subscription once the subscriber polls it.
+	let (ready, active) = futures::channel::oneshot::channel();
 	let reader = moq_clock::sim::spawn(async move {
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.expect("subscribe");
+		let _ = ready.send(());
 		let mut got = Vec::new();
 		loop {
 			let mut group = match sub.recv_group().await {
@@ -81,6 +88,12 @@ async fn setup(version: &str) -> Setup {
 	moq_clock::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
 		.expect("no subscriber appeared");
+	// Both ends hold the subscription, so a close tests only the group tail and not a
+	// control response still in flight.
+	moq_clock::timeout(TIMEOUT, active)
+		.await
+		.expect("the subscription never became active")
+		.expect("reader alive");
 
 	Setup {
 		pair,
@@ -306,19 +319,66 @@ async fn close_requires_subscriber_fin() {
 #[moq_clock::test]
 async fn older_lite_close_keeps_ack_drain() {
 	for version in ["moq-lite-05", "moq-lite-06"] {
+		peer_close_reads_buffered_tail(version).await;
+	}
+}
+
+#[moq_clock::test]
+async fn earlier_lite_peer_close_reads_buffered_tail() {
+	for version in ["moq-lite-01", "moq-lite-02", "moq-lite-03", "moq-lite-04"] {
+		peer_close_reads_buffered_tail(version).await;
+	}
+}
+
+#[moq_clock::test]
+async fn ietf_peer_close_reads_buffered_tail() {
+	for version in ["moq-transport-14", "moq-transport-17", "moq-transport-22"] {
+		peer_close_reads_buffered_tail(version).await;
+	}
+}
+
+async fn peer_close_reads_buffered_tail(version: &str) {
+	let Setup {
+		pair, track, reader, ..
+	} = setup(version).await;
+	// Delivery to the transport acknowledges the FIN before the receiving
+	// protocol driver has consumed the buffered stream.
+	pair.client_transport.ack_fins();
+	let mut group = track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
+	group.finish().unwrap();
+	track.finish().unwrap();
+	pair.client.close().await.expect("released draft still drains on ACKs");
+	let (got, _) = reader.await.unwrap();
+	assert_eq!(got, vec![b"last".to_vec()], "{version}");
+}
+
+/// Legacy session/control streams and the accept error race the buffered group.
+/// Holding the whole receiver ensures the close is visible on its first poll.
+#[moq_clock::test]
+async fn peer_close_before_receiver_poll_keeps_buffered_tail() {
+	for version in [
+		"moq-lite-01",
+		"moq-lite-02",
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-transport-14",
+		"moq-transport-17",
+	] {
+		let gate = kio::Producer::new(true);
 		let Setup {
-			pair,
-			track,
-			reader: _reader,
-			..
-		} = setup(version).await;
+			pair, track, reader, ..
+		} = setup_with_gate(version, Some(gate.consume())).await;
+		*gate.write().ok().expect("receiver gate remains open") = false;
 		pair.client_transport.ack_fins();
-		pair.client_transport.hold_unis();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
 		group.finish().unwrap();
 		track.finish().unwrap();
-		pair.client.close().await.expect("released draft still drains on ACKs");
+		pair.client.close().await.expect("FIN delivery needs no receiver poll");
+		*gate.write().ok().expect("receiver gate remains open") = true;
+		let (got, _) = reader.await.unwrap();
+		assert_eq!(got, vec![b"last".to_vec()], "{version}");
 	}
 }
 

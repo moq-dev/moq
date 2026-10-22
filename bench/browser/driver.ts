@@ -102,6 +102,8 @@ const server = Bun.serve({
 	port: 0,
 	async fetch(request) {
 		const path = new URL(request.url).pathname;
+		if (path === "/cmaf-fixtures.json")
+			return new Response(Bun.file(new URL("../../js/hang/src/cmaf/fixtures.json", import.meta.url)));
 		const page = /^\/([a-z0-9-]+)\/(transport|cmaf|media)$/.exec(path);
 		if (page)
 			return new Response(
@@ -466,11 +468,11 @@ async function cmaf(variant: string, shape: Cmaf, round: number, pass: Pass) {
 	const opened = await open(variant, "cmaf");
 	try {
 		await opened.page.evaluate((shape) => window.cmaf.prepare(shape), shape);
-		const expected = shape.sizes.reduce(
-			(sum, size, frame) => (sum + check(payload(size, frame), size, frame, false)) >>> 0,
-			0,
-		);
-		for (const phase of ["encode", "decode"] as const) {
+		const expected = shape.sizes.reduce((sum, size, frame) => {
+			const pattern = shape.kind === "video" && frame > 0 ? 1 : 0;
+			return (sum + check(payload(size, pattern), size, pattern, false)) >>> 0;
+		}, 0);
+		for (const phase of ["decode"] as const) {
 			const before = await metrics(opened);
 			let result: Phase | undefined;
 			const run = async () => {

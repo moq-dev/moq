@@ -82,6 +82,7 @@ mod tests {
 		let properties = Properties {
 			unknown: Default::default(),
 			dynamic_groups: false,
+			compress: false,
 			max_cache_duration: None,
 			timescale: Some(Timescale::new(90_000).unwrap()),
 			priority: Some(64),

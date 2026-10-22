@@ -643,6 +643,8 @@ impl Device {
 		// A negative return is `EINTR` or `ENOMEM` and leaves `revents` untouched,
 		// so there is nothing to read and the caller's own deadline still bounds it.
 		if ready > 0 && event.revents & (libc::POLLIN | libc::POLLOUT | libc::POLLPRI) == 0 {
+			// The device thread runs outside any runtime, so it blocks on the host clock.
+			#[allow(clippy::disallowed_methods)]
 			std::thread::sleep(timeout);
 		}
 	}

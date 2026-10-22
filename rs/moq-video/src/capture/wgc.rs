@@ -2,7 +2,9 @@
 //! Native API calls live separately so the stop/wakeup contract runs in host CI.
 
 use std::sync::{Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use moq_clock::Instant;
 
 use moq_net::Timestamp;
 

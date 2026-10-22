@@ -103,5 +103,4 @@ every sequence delivered or dropped.
 
 ## Related
 
-- [Track priority scope](/quest/m1/track-priority-scope.md) - group order within a track now follows the subscription
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age
