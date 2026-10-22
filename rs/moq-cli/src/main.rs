@@ -417,17 +417,6 @@ impl Directions {
 	}
 }
 
-/// The broadcasts `names` and everything beneath them, as patterns to scope an origin.
-fn consumed(names: impl IntoIterator<Item = impl AsRef<str>>) -> anyhow::Result<moq_net::Patterns> {
-	names
-		.into_iter()
-		.map(|name| {
-			let name = name.as_ref();
-			moq_net::Pattern::subtree(name).with_context(|| format!("invalid broadcast name `{name}`"))
-		})
-		.collect()
-}
-
 /// Attach the shared Origin to the MoQ network: dial a relay, accept inbound
 /// sessions, mesh with the LAN, or any combination.
 ///
@@ -450,16 +439,11 @@ fn consumed(names: impl IntoIterator<Item = impl AsRef<str>>) -> anyhow::Result<
 /// the estimate is only meaningful across everything sharing it. A stage that built
 /// its own would split its own tracks correctly and still oversubscribe every other
 /// stage on the same connection, which is the whole problem.
-///
-/// The dialed relay is asked only for `consumed`, the broadcasts the stages read.
-/// moq-transport drafts 14 and 15 cannot ask for the empty namespace, so an
-/// unscoped subscriber discovers nothing from a peer that announces nothing unasked.
 async fn spawn_moq(
 	moq: &MoqSide,
 	net: &Net,
 	cluster: moq_relay::cluster::Cluster,
 	directions: Directions,
-	consumed: &moq_net::Patterns,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Attached> {
 	let cluster = cluster
@@ -495,10 +479,7 @@ async fn spawn_moq(
 			dialer = dialer.with_publisher(origin.consume());
 		}
 		if directions.consume {
-			let scoped = origin
-				.scope("", consumed)
-				.context("failed to scope the origin to the consumed broadcasts")?;
-			dialer = dialer.with_subscriber(scoped);
+			dialer = dialer.with_subscriber(origin.clone());
 		}
 
 		// Both directions ride one connection, so this dials directly rather than
@@ -567,7 +548,7 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 		client,
 		connection,
 		..
-	} = spawn_moq(&moq, &net, cluster.clone(), directions, &consumed([&name])?, &mut tasks).await?;
+	} = spawn_moq(&moq, &net, cluster.clone(), directions, &mut tasks).await?;
 
 	let result = play::run(origin.consume(), name, args, tasks).await;
 	detach(connection, client, &cluster).await;
@@ -595,23 +576,13 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	let mut client = None;
 	let mut connection = None;
 	let result = async {
-		let exports = stages.iter().filter(|stage| matches!(stage, Command::Export(_)));
-		let consumed = consumed(exports.map(|stage| stage.broadcast(&moq)))?;
 		let Attached {
 			bandwidth,
 			origin,
 			client: dialer,
 			connection: attached,
 			shutdown,
-		} = spawn_moq(
-			&moq,
-			&net,
-			cluster.clone(),
-			Directions::of(&stages),
-			&consumed,
-			&mut tasks,
-		)
-		.await?;
+		} = spawn_moq(&moq, &net, cluster.clone(), Directions::of(&stages), &mut tasks).await?;
 		client = dialer;
 		connection = attached;
 
@@ -1304,8 +1275,7 @@ mod tests {
 			publish: true,
 			consume: false,
 		};
-		let consumed = moq_net::Patterns::new();
-		let Err(err) = spawn_moq(&invocation.moq, &net, cluster, directions, &consumed, &mut tasks).await else {
+		let Err(err) = spawn_moq(&invocation.moq, &net, cluster, directions, &mut tasks).await else {
 			panic!("the occupied port must fail startup");
 		};
 		assert!(err.to_string().contains("failed to bind listeners"), "{err:#}");
@@ -1461,7 +1431,6 @@ mod tests {
 				publish: true,
 				consume: false,
 			},
-			&moq_net::Patterns::new(),
 			&mut tasks,
 		)
 		.await
