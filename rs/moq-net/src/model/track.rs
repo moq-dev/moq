@@ -6107,6 +6107,26 @@ impl Cursor {
 		}
 	}
 
+	/// Pass groups another copy already handed out, without delivering or metering them.
+	fn skip_ordered(&mut self, floor: Option<u64>) {
+		let next = self.next_sequence.zip(floor).map(|(next, floor)| next.max(floor));
+		if next == self.next_sequence {
+			return;
+		}
+		self.next_sequence = next;
+		if self
+			.peeked
+			.as_ref()
+			.is_some_and(|peeked| next.is_none_or(|next| peeked.group.sequence < next))
+		{
+			self.peeked = None;
+		}
+		// A group delivered on another copy is not a stale skip on this one.
+		if !self.seek_pending.is_empty() {
+			self.seek_pending = next.map_or_else(BTreeMap::new, |next| self.seek_pending.split_off(&next));
+		}
+	}
+
 	/// The lowest servable group past the last one returned, walking off everything the
 	/// drift budget has convicted on the way.
 	fn poll_next_group(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
@@ -6454,6 +6474,22 @@ impl Subscriber {
 				})?;
 			},
 			Inner::Resume(resume, _) => resume.poll_peek_group(ordered, &self.delivered, waiter),
+		}
+	}
+
+	/// Pass groups another route copy handed out, preserving the arrival cursor and bounds.
+	pub(super) fn skip_ordered(&mut self, floor: Option<u64>) {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.skip_ordered(floor),
+			Inner::Resume(resume, _) => {
+				// Its retention decisions also need the containing reader's past prefix.
+				// This records what is no longer owed, without handing a group out.
+				self.delivered.forget_below(floor.unwrap_or(u64::MAX));
+				if floor.is_none() {
+					self.delivered.insert(u64::MAX);
+				}
+				resume.skip_ordered(floor);
+			}
 		}
 	}
 
@@ -12982,6 +13018,68 @@ mod test {
 			.expect("would have errored")
 			.expect("track should not be closed");
 		assert_eq!(group.sequence, 5);
+	}
+
+	#[test]
+	fn skipping_another_copys_groups_preserves_arrival_bounds_and_the_last_sequence() {
+		let producer = track_producer("test", Info::timed());
+		let mut subscriber = producer.subscribe(replay());
+		for sequence in [u64::MAX - 1, u64::MAX] {
+			producer
+				.create_group(group::Info { sequence })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		let waiter = kio::Waiter::noop();
+		assert_eq!(
+			subscriber.poll_peek_group(true, &waiter).map(Result::unwrap),
+			Poll::Ready(Some(u64::MAX - 1))
+		);
+		subscriber.skip_ordered(Some(u64::MAX));
+		assert_eq!(
+			subscriber.poll_peek_group(true, &waiter).map(Result::unwrap),
+			Poll::Ready(Some(u64::MAX))
+		);
+		subscriber.skip_ordered(None);
+		subscriber.skip_ordered(Some(0));
+		assert_eq!(
+			subscriber.poll_peek_group(true, &waiter).map(Result::unwrap),
+			Poll::Ready(None)
+		);
+		assert_eq!(subscriber.delivered.runs(), 0, "skips are not deliveries");
+		assert_eq!(subscriber.take_stale().groups, 0, "duplicates are not stale skips");
+		let Inner::Plain(cursor) = &subscriber.inner else {
+			unreachable!()
+		};
+		assert_eq!(cursor.min_sequence, 0);
+		assert_eq!(cursor.end_sequence, None);
+		assert_eq!(cursor.index, 0);
+		assert_eq!(
+			subscriber.poll_peek_group(false, &waiter).map(Result::unwrap),
+			Poll::Ready(Some(u64::MAX - 1))
+		);
+	}
+
+	#[test]
+	fn an_ordered_skip_counts_only_convictions_not_delivered_elsewhere() {
+		let mut producer = track_producer("test", Info::timed());
+		for second in 0..4 {
+			append_at(&mut producer, second * 1000);
+		}
+		let mut subscriber = producer.subscribe(None);
+		let waiter = kio::Waiter::noop();
+		assert_eq!(
+			subscriber.poll_peek_group(true, &waiter).map(Result::unwrap),
+			Poll::Ready(Some(3))
+		);
+		subscriber.skip_ordered(Some(2));
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) else {
+			panic!("the reserved group is still delivered");
+		};
+		assert_eq!(group.sequence, 3);
+		assert_eq!(subscriber.take_stale().groups, 1, "only group 2 was skipped for age");
+		assert_eq!(subscriber.take_stale().groups, 0, "counted once");
 	}
 
 	#[test]
