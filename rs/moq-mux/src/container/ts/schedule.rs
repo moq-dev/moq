@@ -621,6 +621,16 @@ impl Schedule {
 		}
 	}
 
+	/// Hold the packets on `pid` to no buffer, for a stream with no T-STD model: one taking a
+	/// PID over must not inherit its predecessor's.
+	pub fn clear_buffer(&mut self, pid: u16) {
+		let before = self.transport_buffer(pid);
+		self.buffers.remove(&pid);
+		if self.transport_buffer(pid) != before {
+			self.remap();
+		}
+	}
+
 	/// Hold the program tables, the PAT and the PMT on `pmt_pid`, to the one TBsys they share.
 	pub fn set_tables(&mut self, pmt_pid: u16) {
 		let held = self.pmt == Some(pmt_pid)
