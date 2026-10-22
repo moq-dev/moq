@@ -74,8 +74,8 @@ async function opens(read: Promise<{ done: boolean }>, clock: Manual): Promise<b
 		},
 		() => {},
 	);
-	await clock.advanceAsync(Nano.zero);
-	await clock.advanceAsync(Nano.fromMilli(Milli(STREAM_WAIT)));
+	await clock.advance(Nano.zero);
+	await clock.advance(Nano.fromMilli(Milli(STREAM_WAIT)));
 	return opened;
 }
 

@@ -268,7 +268,7 @@ test("stopping the announce with linger serves the finished broadcast until its 
 			(await new Json.Snapshot.Consumer<Catalog.Root>({ track: catalog }).latest())?.value.video,
 		).toBeDefined();
 
-		await clock.advanceAsync(Nano.fromMilli(Milli(30_000)));
+		await clock.advance(Nano.fromMilli(Milli(30_000)));
 		expect(net.closed.peek()).toBeNull();
 		expect(net.route).toBeUndefined();
 		// A fresh broadcast waits unannounced for the next announce.

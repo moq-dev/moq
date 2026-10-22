@@ -176,7 +176,7 @@ test("a refused redirect ends the connection instead of reconnecting", async () 
 			await waitUntil(() => drained.closed);
 
 			// Nothing redials: not the original URL, not anything else.
-			await clock.advanceAsync(Nano.fromMilli(Milli(50)));
+			await clock.advance(Nano.fromMilli(Milli(50)));
 			expect(dials.length, uri).toBe(1);
 		} finally {
 			reload.close();
