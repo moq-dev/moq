@@ -1,6 +1,7 @@
 package moq
 
 import (
+	"math"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
@@ -11,7 +12,12 @@ import (
 // target language has a duration type. These records mirror the generated ones
 // with time.Duration fields and convert at the boundary.
 
+// fromMicros saturates past time.Duration's ~292 years, which a peer's delay or
+// max age can exceed, rather than wrapping to a negative duration.
 func fromMicros(us uint64) time.Duration {
+	if us > uint64(math.MaxInt64/int64(time.Microsecond)) {
+		return time.Duration(math.MaxInt64)
+	}
 	return time.Duration(us) * time.Microsecond
 }
 
