@@ -18,19 +18,26 @@ tail, don't drop the group. This was ranked m2 because it blocks no m1
 interop goal: a publisher that answers SUBSCRIBE_OK before writing, or that
 serves the joining FETCH, never triggers it.
 
-Where it happens: `claim_fill` in `rs/moq-net/src/ietf/subscriber.rs`
-returns no head, and the mid-group stream fails with "no fill to stitch a
-mid-group stream onto", which drops it. The outcome is a race. If the
-stream arrives while the fill is still pending, the tail is kept. If the
-refusal lands first, the whole group is lost. Cloudflare's moq-test-client
-reproduces both: it writes object 0 before SUBSCRIBE_OK and refuses the
-joining FETCH
+Where it happens: `open_group` in `rs/moq-net/src/ietf/subscriber.rs`.
+The outcome is a race between the mid-group stream and the joining FETCH's
+refusal:
+
+- If the refusal lands first, the fill is no longer outstanding, and the
+  stream takes the unfilled path, which keeps the tail with its first
+  Object ID.
+- If the stream arrives while the fill is still pending, it waits in
+  `claim_fill`. Once the refusal settles the fill, `claim` returns no head,
+  and the stream fails with "no fill to stitch a mid-group stream onto",
+  which drops the whole group.
+
+Cloudflare's moq-test-client reproduces both: it writes object 0 before
+SUBSCRIBE_OK and refuses the joining FETCH
 ([cloudflare/moq-rs#281](https://github.com/cloudflare/moq-rs/issues/281)).
 
 The model already holds such a group: `group::Producer::start_at` trims a
 group's front, and a reader positioned below it gets `Error::Lagged`. The
-ingest fix is to open the group with `start_at(start)` once the fill has
-settled with no head, instead of failing the stream.
+ingest fix is to give a stream that waited on a fill that settled with no
+head the same unfilled path, instead of failing it.
 
 Open design points, with recommendations:
 
@@ -47,9 +54,9 @@ Open design points, with recommendations:
    (`a_joining_fetch_refuses_a_missing_prefix_before_fetch_ok`), rather
    than ask upstream again.
 
-Tests: a subscriber unit test where the fill is refused before the
-mid-group stream arrives, and another where it is refused after. The two
-orders must end the same way. Add a relay-level test that a moq-transport
+Tests: a subscriber unit test for each order, with the fill refused before
+the mid-group stream arrives and after it. The two orders must end the same
+way. Add a relay-level test that a moq-transport
 subscriber receives the tail while a moq-lite subscriber gets the DROP.
 
 Public API: none expected. Wire: none.

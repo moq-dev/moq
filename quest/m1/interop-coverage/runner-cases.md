@@ -32,8 +32,8 @@ Cloudflare's moq-test-client (draft-18):
   relay's SUBSCRIBE, so SUBSCRIBE_OK's Largest Location is (0, 0), and it
   refuses the relay's joining FETCH (REQUEST_ERROR 3). moq-relay joins the
   live edge with Largest Object plus a joining FETCH (draft-18 §5.1.3),
-  which is the draft's own join, so object 0 is lost, and when the refusal
-  lands first, so is all of group 0.
+  which is the draft's own join, so object 0 is lost. When the group's
+  stream arrives before the refusal, all of group 0 is lost.
 - Disputed: the client fails on any status object other than End of Group.
   moq-relay ends the track with END_OF_TRACK at (3, 0), which draft-18
   allows (§11.2.1.1). The runner's data-plane conventions leave status
