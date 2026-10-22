@@ -9,6 +9,13 @@ HTTP `/fetch` and `/announced` keep refusing capped tokens; see
 
 ## Plan
 
+The token claim this quest enforces does not exist yet: [auth access is
+patterns](/quest/m1/api-audit/auth-access.md) removed the unenforced
+`publish.rate`/`subscribe.rate` fields before the release. Whichever rate
+quest lands first re-adds them as optional, with a rate type moq-auth owns
+(or a lower shared units crate), converted at the relay boundary so moq-auth
+never depends on moq-net.
+
 TCP carries the backpressure, but only if the kernel cannot absorb the
 excess:
 
