@@ -419,6 +419,9 @@ impl Track {
 				Poll::Pending => {
 					if std::mem::take(&mut self.settle) && !input.waiting_for_header {
 						self.release(name, input.jitter, true)?;
+						// A cut takes a start group it left short now, not with the next group,
+						// which may arrive after that start was due.
+						input.jitter.cut(&self.pid, self.base.2 + self.source.cuts());
 					}
 					self.empty = moq_clock::now();
 					break;
