@@ -28,8 +28,10 @@ have existed since the OBS plugin moved onto the C++ package in
 
 Decided with the maintainer on 2026-10-22:
 
-- Mirror `hang::catalog::Video::ranked` in OBS: sort by enabled, then
-  preference, then coded area, then bitrate, with ties in name order. Skip
+- Mirror hang's `ranked()` per section in OBS, with ties in name order.
+  Video (`hang::catalog::Video::ranked`) sorts by enabled, then preference,
+  then coded area, then bitrate. Audio (`hang::catalog::Audio::ranked`) sorts
+  by enabled, then bitrate, then sample rate, then channel count. Skip
   disabled renditions and take the first one the source can decode. A
   section where every rendition is disabled is handled like an absent
   section: clear the track, and blank it for video. Don't add a ranking API
@@ -37,7 +39,7 @@ Decided with the maintainer on 2026-10-22:
 - Make `epoch` part of rendition identity for both the active and the
   pending track.
 
-Extend `cpp/obs/test/moq-source-test.cpp` with these cases: ranking order, a
+Extend `cpp/obs/test/moq-source-test.cpp` with these cases: video and audio ranking order, a
 disabled first rendition, an all-disabled section, and an epoch-only change.
 No public API or wire change.
 
