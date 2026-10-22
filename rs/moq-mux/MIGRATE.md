@@ -8,6 +8,12 @@ How to update your code for each breaking change, newest first.
 
 `track_info` on the catalog producer and tracks takes an `i8` priority, higher first, with 0 unset; pass `hang::catalog::PRIORITY` as before.
 
+### `Container` decodes one frame instead of reading a group
+
+`Container::poll_read(group, waiter)` and its async `read(group)` are replaced by `Container::decode(frame)`, which decodes one `moq_net::frame::Frame` into media frames.
+Read the frame yourself and hand it over: `while let Some(frame) = group.read_frame().await? { for media in container.decode(frame)? { .. } }`.
+An implementation drops its `group.poll_read_frame` call and its `None` end-of-group case, and decodes the frame it is given.
+
 ### `Source` resolution takes the reference's epoch (#5699)
 
 `Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional epoch after `rel`.

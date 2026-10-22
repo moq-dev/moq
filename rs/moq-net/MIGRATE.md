@@ -13,6 +13,12 @@ The publisher's `Info::priority` now breaks ties between subscriptions at one su
 
 On the wire, moq-lite carries `priority + 128` and moq-transport `127 - priority`, so an unset priority goes out as 128 on moq-lite (was 127) and 127 on moq-transport (was 128), and an absent moq-transport priority reads as 0.
 
+### Frames carry their arrival time
+
+`frame::Frame` gains a private arrival stamp, read with `Frame::arrived()`, so it can no longer be built with a struct literal.
+Replace `Frame { timestamp, payload }` with `Frame::new(timestamp, payload)`.
+`timestamp` and `payload` stay public fields.
+
 ### A dropped or cut group ends its reader with an error (#6143)
 
 A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `track::Subscriber` saw it is now handed out, and reading it fails with the publisher's error; before, it was skipped or ended cleanly.

@@ -35,6 +35,9 @@ Decided 2026-10-20 by the maintainer:
 A `programDescriptors` change is an entry change too: the PMT carries the
 revised `program_info` at the next `version_number`.
 
+Under `moq export ts --sync`, the revision is a function of the catalog
+alone, so identical legs revise their PMT identically.
+
 Rust: `rs/moq-mux` TS export. Draft
 ([mpegts](/drafts/draft-lcurley-moq-mpegts.md)): the rebuild section says
 how a consumer revises the PMT.
@@ -49,4 +52,3 @@ TSDuck round trip with a generated mid-stream PMT revision so
 ## Related
 
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a moved PMT PID reaches the export as a new PAT
-- [Hitless TS](/quest/m2/ts-hitless.md) - identical legs must revise their PMT identically
