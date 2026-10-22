@@ -568,6 +568,7 @@ export class Consumer {
 			group.#state.unverified = true;
 		};
 		hooks.groupArrived = (group) => group.#state.arrived;
+		hooks.groupStarted = (group) => group.#state.total.peek() > 0 || group.#state.closed.peek() !== undefined;
 		hooks.arriveGroup = (group, at) => {
 			group.#state.arrived = at;
 		};
