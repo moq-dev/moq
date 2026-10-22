@@ -26,7 +26,7 @@ pub(super) type TrackKey = (PathOwned, Arc<str>);
 /// How a PUBLISH_DONE leaves the listing: only TRACK_ENDED removes the track. Any other
 /// status, INTERNAL_ERROR included, fails the listing, so it asks again rather than hide a
 /// track that may still be live.
-fn listing_end(done: &ietf::PublishDone, version: Version) -> Result<(), Error> {
+pub(super) fn listing_end(done: &ietf::PublishDone, version: Version) -> Result<(), Error> {
 	match done.status_code == ietf::PublishDoneStatus::TrackEnded.code(version) {
 		true => Ok(()),
 		false => Err(done
@@ -1435,6 +1435,52 @@ mod tests {
 				Poll::Pending => panic!("{status:?}: the listing stood"),
 			}
 		}
+	}
+
+	/// A resumed listed track ending any way but TRACK_ENDED fails the listing, even a
+	/// clean SUBSCRIPTION_ENDED (drafts 18-19), which says nothing of the track itself.
+	#[moq_clock::test]
+	async fn a_resumed_track_ending_otherwise_fails_the_listing() {
+		let version = Version::Draft19;
+		let mut h = harness(version);
+		let _listing = h.establish().await;
+		let mut video = h.publish("video", 1).await;
+		assert_eq!(event(&mut h.tracks).as_deref(), Some("+video"));
+
+		let mut dynamic = h._broadcast.dynamic();
+		let track = h._broadcast.consume().track("video").unwrap();
+		let _reader = track.subscribe(None);
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let mut subscriber = h.subscriber.clone();
+		let _serving = moq_clock::sim::spawn(async move {
+			subscriber
+				.run_subscribe(Path::new("bcast"), dynamic, None, request)
+				.await;
+		});
+
+		let (id, body) = read(&mut video).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID, "not resumed");
+		let resume: ietf::SubscribeUpdate = body.message(version).unwrap();
+		assert_eq!(resume.forward, Some(true));
+		let ok = ietf::RequestOk {
+			request_id: None,
+			active: None,
+			largest: None,
+		};
+		write(&mut video, ietf::RequestOk::ID, &ok).await;
+		assert!(h.listening.poll_failed(&kio::Waiter::noop()).is_pending());
+
+		// SUBSCRIPTION_ENDED, which drafts 18 and 19 register.
+		let done = ietf::PublishDone {
+			request_id: None,
+			status_code: 0x3,
+			stream_count: 0,
+			reason_phrase: "".into(),
+		};
+		write(&mut video, ietf::PublishDone::ID, &done).await;
+		// The subscription waits out its data streams before it ends.
+		moq_clock::sleep(Duration::from_secs(5)).await;
+		assert!(h.listening.poll_failed(&kio::Waiter::noop()).is_ready());
 	}
 
 	/// A skipped track is listed through a paused SUBSCRIBE of ours, once it answers.

@@ -3323,7 +3323,7 @@ where
 		enum End {
 			Idle,
 			Revoked,
-			Done(Result<u64, Error>),
+			Done(Result<ietf::PublishDone<'static>, Error>),
 			Fetch(group::Request),
 			Update(Update),
 		}
@@ -3485,8 +3485,13 @@ where
 						break true;
 					}
 					End::Done(res) => {
-						ended = Some(res.as_ref().map(|_| ()).map_err(Clone::clone));
-						match res {
+						// Only TRACK_ENDED ends a listing entry quietly; a clean end of another
+						// kind, such as SUBSCRIPTION_ENDED, leaves the track's fate unknown.
+						ended = Some(match &res {
+							Ok(done) => tracks::listing_end(done, self.version),
+							Err(err) => Err(err.clone()),
+						});
+						match res.map(|done| done.stream_count) {
 							Ok(count) => {
 								tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscribe complete");
 								// The publisher sends PUBLISH_DONE once every data stream it opened
@@ -3697,17 +3702,17 @@ where
 		version: Version,
 		unanswered: &AtomicU64,
 		messages: &mut super::request_stream::Messages<S>,
-	) -> Result<u64, Error> {
+	) -> Result<ietf::PublishDone<'static>, Error> {
 		// A refused update is followed by PUBLISH_DONE, which ends the subscription. Its
 		// count stays, so no further update goes out meanwhile, and no answer is owed.
 		let mut refused = false;
 		loop {
 			let super::request_stream::Framed(type_id, body) = messages.message(reader).await?;
 			if type_id == ietf::PublishDone::ID {
-				let msg: ietf::PublishDone = body.message(version)?;
+				let msg: ietf::PublishDone<'static> = body.message(version)?;
 				tracing::debug!(message = ?msg, "received publish done");
 				msg.end(version)?;
-				return Ok(msg.stream_count);
+				return Ok(msg);
 			}
 			let answer = matches!(type_id, ietf::RequestOk::ID | ietf::RequestError::ID)
 				&& !refused && unanswered.load(Ordering::Relaxed) > 0;
@@ -6024,7 +6029,7 @@ mod tests {
 		)
 		.await;
 		if clean {
-			assert_eq!(result.unwrap(), 0);
+			assert_eq!(result.unwrap().stream_count, 0);
 		} else {
 			assert!(matches!(result, Err(Error::ProtocolViolation)));
 		}
