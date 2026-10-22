@@ -863,7 +863,9 @@ impl poll::Chunks for Script {
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<bytes::Bytes>, Self::Error>> {
 		let chunk: bytes::Bytes = {
 			let mut script = self.script.lock().unwrap();
-			let take = max.min(script.len());
+			// A real transport hands over what each packet carried, so a body that is all
+			// ready at once still takes many reads.
+			let take = max.min(script.len()).min(8 * 1024);
 			script.drain(..take).collect()
 		};
 
