@@ -33,4 +33,3 @@ Public API: behavior only. Wire: none.
 
 - [Recovery verdicts](/quest/m1/recovery-verdicts.md) - aligns Rust `route_failed` with JS in the same file
 - [Resumed close](/quest/m1/resume-closed.md) - the JS half of a declared end across copies
-- [Resumed datagrams](/quest/m1/resume-datagrams.md) - the other resume reader fix in the same file
