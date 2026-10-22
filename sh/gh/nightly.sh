@@ -102,7 +102,7 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track resume interests priority subscribe-drop refresh; do
+        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track resume interests priority subscribe-drop refresh observed; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
@@ -111,6 +111,11 @@ case "$1" in
         javascript e2ee just js e2ee-bench
         javascript json-stream just js json-stream-bench
         javascript signals just js signals-bench
+        javascript json-codec just js json-codec-bench
+        javascript json-parse just js json-parse-bench
+        javascript slow-group just js slow-group-bench
+        javascript audio-warmup just js audio-warmup-bench
+        javascript clock just js clock-bench
         ;;
 esac
 

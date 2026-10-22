@@ -2483,6 +2483,9 @@ mod tests {
 						let waiter = kio::Waiter::noop();
 						let mut fixtures = Vec::new();
 						for _ in 0..tracks {
+							// The sim counts ready polls per task poll to catch spinning loops, so
+							// give each track's setup, and the timed loop below, a poll of its own.
+							moq_clock::sim::yield_now().await;
 							let (track, callers, requests) = feed_batch(1_000_000..1_000_000 + held);
 							let tail = kio::Producer::new(Tail::default());
 							let sub = feed_sub(&tail).await;
@@ -2506,6 +2509,7 @@ mod tests {
 							fixtures.push((track, callers, tail, sub, scan, fetches));
 						}
 						let (track, _callers, tail, sub, scan, fetches) = &mut fixtures[0];
+						moq_clock::sim::yield_now().await;
 						#[allow(clippy::disallowed_methods)]
 						let began = std::time::Instant::now();
 						for sequence in runs * 2..runs * 2 + EVENTS {

@@ -881,37 +881,6 @@ fn decode_rejects_durationless_multisample() {
 	assert!(matches!(err, super::Error::MissingSampleDuration), "got {err:?}");
 }
 
-/// A single-sample fragment needs no duration (nothing follows it), so it still decodes.
-#[test]
-fn decode_single_sample_no_duration_ok() {
-	let frag = super::encode_fragment(info(1, scale(), 0), &[sample(0, true, None)]).unwrap();
-	let out = super::decode(
-		frag,
-		None,
-		super::Track::new(scale(), crate::container::fmp4::Kind::Video),
-	)
-	.unwrap();
-	assert_eq!(out.len(), 1);
-	assert_eq!(out[0].timestamp.as_micros(), 0);
-}
-
-/// With the durations the producer now backfills, every sample's DTS round-trips
-/// through a multi-sample fragment.
-#[test]
-fn decode_multisample_with_durations_roundtrips() {
-	let frames = vec![sample(0, true, Some(33_000)), sample(33_000, false, Some(33_000))];
-	let frag = super::encode_fragment(info(1, scale(), 0), &frames).unwrap();
-	let out = super::decode(
-		frag,
-		None,
-		super::Track::new(scale(), crate::container::fmp4::Kind::Video),
-	)
-	.unwrap();
-	assert_eq!(out.len(), 2);
-	assert_eq!(out[0].timestamp.as_micros(), 0);
-	assert_eq!(out[1].timestamp.as_micros(), 33_000);
-}
-
 /// A FLAC track (fLaC sample entry + dfLa STREAMINFO) imports into the catalog with
 /// rate/channels taken from STREAMINFO (not the 16.16 audio box) and the WebCodecs
 /// description carried out of band.

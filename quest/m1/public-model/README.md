@@ -28,8 +28,8 @@ Rules every child follows:
   enforces the marks):
   - "moq-transport passthrough only" (decided 2026-10-13; subgroups were
     dropped from it in #5704): object IDs and `skip`, object and unknown track properties, END_OF_GROUP status
-    objects, datagram object IDs, dynamic groups, and upstream request
-    signaling. Owned by [moq-transport passthrough](/quest/m1/ietf-extension/README.md).
+    objects, datagram object IDs, and upstream request signaling. Dynamic
+    groups left this list when #5930 made `Demand::wanted` public. Owned by [moq-transport passthrough](/quest/m1/ietf-extension/README.md).
     A relay built on the public model drops them, as plain moq-lite does.
   - "tunes the built-in sessions": constants and wake or allocation batching
     that change cost, never behavior a third party can observe.
@@ -100,6 +100,7 @@ Work owned by this README, after the children land:
 
 ## Required
 
+- [Claim request type](/quest/m1/public-model/claim-request-type.md) - accepting an application claim's request fails to compile instead of panicking
 - [Public ingest](/quest/m1/public-model/ingest.md) - a custom subscriber writes received groups, frames, starts, and ends into a track through public calls
 - [Public serving](/quest/m1/public-model/serve.md) - a custom publisher reads a track's start, cursor, and group expiry for its wire through public calls
 - [Public routes and answering](/quest/m1/public-model/answer.md) - a custom relay ingests routes, answers broadcast and track requests on demand, and advertises without echoing a peer's routes back

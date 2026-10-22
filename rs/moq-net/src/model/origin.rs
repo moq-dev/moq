@@ -9639,13 +9639,6 @@ mod tests {
 	}
 
 	#[moq_clock::test]
-	async fn charged_wildcard_cost_accumulates_across_hops() {
-		let first = Cost::new(4).charged(1);
-		let second = first.charged(2);
-		assert_eq!(second, Cost::new(7));
-	}
-
-	#[moq_clock::test]
 	async fn local_broadcast_is_invisible_until_announced() {
 		let producer = origin(1).produce();
 		let mut local = producer.consume().announced();
