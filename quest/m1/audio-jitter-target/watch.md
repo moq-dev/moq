@@ -20,23 +20,28 @@ estimator's 2 s ceiling, as native does; a subscription cut to the target hid
 every frame later than it. `demo/web` sets no delay and `js/watch` stores none,
 so a fresh tile runs auto.
 
-The harness's `js/watch/src/audio/replay.ts` plays the recorded traces in
-`test/audio-quality/traces/` (the #3477 traces are gone) through
-`Container.Consumer` and both rings on a simulated clock, and resolves `"auto"`
-from the same estimator through a real `Sync`, resizing the ring as it moves.
-Its exact budgets were re-measured when `main` merged in: underruns fell to at
-most 2 a minute on every trace, but a ring that runs dry now re-stalls and
-refills to the target, so `stalled_share` and `silence_share` rose (up to 3% on
-`relay-bbb` and `relay-mic`), and `relay-mic` converges from a 420 ms p95 over
-about 22 s with skip-aheads on the way down.
+The harness's `js/watch/src/audio/replay.ts` replays the version 3 traces in
+`test/audio-quality/traces/` through `Container.Consumer`, a real `Sync`, and
+both rings on a simulated clock. Each arrival carries an encoded duration
+from container metadata, the Opus TOC, or the codec's fixed sample count.
+Replay never infers a frame's duration from timestamp spacing. The AAC-LC
+fixtures retain their original arrivals with exact 1024-sample durations;
+`relay-mic` was re-recorded with Chromium's fake capture device because the
+old recording retained no payloads from which to recover Opus durations.
+
+Re-measured on 2026-10-22: all eight replay rows have zero underruns. The
+fresh `relay-mic` has zero skips, stalls, or silence, a 60 ms p95 target,
+and 3.5 s convergence on both rings, over a 2 ms minimum RTT. It is a new
+fake-device recording, so that result proves neither an improvement on
+the old path nor the manual goal. The AAC recordings still refill: worst
+stalled share is 2.5% (`relay-bbb`, isolated), with `local-aac` skipping
+about twice a minute while converging over 15.5 s.
 
 - Decide whether those re-stall refills are what the goal wants, using the
-  replay rows as the measurement. Tighten the replay budgets with any fix.
-  Tighten the browser rows only from nightly runner measurements, re-measured
-  as `test/audio-quality/budgets.json`'s note describes.
-- The replay sizes every frame as the trace's median spacing, which a trace
-  missing most of its frames defeats; record the codec's frame duration in the
-  trace and replay that instead.
+  replay rows and the manual proof as the measurement. The deterministic
+  replay ceilings match the recorded durations. Tighten browser rows only
+  from nightly runner measurements, re-measured as
+  `test/audio-quality/budgets.json`'s note describes.
 - Manual run against the public relay on Chrome and Safari, the two rows the
   issue measured, with a real microphone and 40 ms or more of added RTT. Watch
   the stats panel's audio underrun counter and the latency tab's auto readout,
