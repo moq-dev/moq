@@ -48,6 +48,11 @@ with padding.
 - The lowest rendition never disables. Native probing retransmits in-flight
   data, so a session with every rung stopped has nothing to probe with once
   its last packets are acknowledged, and could never re-enable a rung.
+- Disable only on a session with a sender. Native probing needs moq-quic's
+  BBR3, so a session without it (iroh on noq, or moq-quic configured for
+  CUBIC or no congestion control) could never raise its estimate to resume a
+  stopped rung; there every rung keeps encoding and follows its grant down,
+  as today. Padding stays browser-only rather than covering these.
 - Assign descending track priority down the renditions so the allocator
   fills lower rungs first; [Scope track priority](/quest/m1/track-priority-scope.md)
   settles how that number also orders sends.
@@ -60,7 +65,8 @@ Tests with mocked time: a shrinking grant disables the top rung first and
 keeps the lower ones at their share; a recovering grant re-enables it only
 past the hysteresis and after its viewers left; a jittering grant near the
 boundary does not flap the catalog; a grant below every boundary keeps the
-lowest rung encoding. Prove one shaped-uplink run through moq-ffi, including
+lowest rung encoding; a session without a sender never disables a rung.
+Prove one shaped-uplink run through moq-ffi, including
 a path that reopens after the grant fell below the lowest rung.
 
 Public API: the shared rule in `moq_mux::rate` and whatever knobs the

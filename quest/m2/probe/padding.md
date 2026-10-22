@@ -22,8 +22,10 @@ Decided with the maintainer on 2026-10-17 (see the
   data instead ([native probing](/quest/m1/probe-native.md)). Padding is
   ordinary stream data that any controller counts and paces, and it
   implements the [target](/quest/m1/probe-target.md) quest's sender hook in
-  `js/net`. Decided 2026-10-20: browser-only. moq-quic is the only Rust
-  transport, so no native session needs it.
+  `js/net`. Decided 2026-10-20: browser-only. A native session without
+  native probing (iroh on noq, or moq-quic under CUBIC) has no sender, so
+  [native rung disable](/quest/m1/simulcast-rung-disable.md) never stops a
+  rung there.
 - **The browser's send target.** The `js/net` mirror of the
   [send target](/quest/m1/probe-target.md) lands here, beside the sender that
   uses it: the same reservation sum, opt-out, and sender seam, matching the
