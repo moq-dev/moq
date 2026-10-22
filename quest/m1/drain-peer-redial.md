@@ -6,7 +6,8 @@ When a clustered relay drains, its cluster peers fail over to other routes
 instead of redialing it, and they reconnect once its replacement is up. Peer
 redials back off with jitter and a cap of tens of seconds, so a mesh
 recovering from an outage doesn't redial in lockstep and a recovered peer
-is not left waiting minutes. Fixed on `main` and backported to `release`.
+is not left waiting minutes. It ships with the next cut from `main`; the
+maintainer decided on 2026-10-22 not to backport it to `release`.
 
 ## Plan
 
@@ -39,7 +40,6 @@ relay while it drains, and one reconnect after it restarts. Backoff tests
 assert spread and cap under controlled time.
 
 Public API: none expected; report any connect config change. Wire: none.
-Backport onto `release` as a separate PR.
 
 ## Related
 

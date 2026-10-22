@@ -344,6 +344,8 @@ async fn a_late_sink_reads_the_final_stats() {
 	let (expected, health) = written(CLIP);
 
 	let mut import = moq(&relay, "demo", &["import", "--stats", "--max-age", "10s", "ts"])
+		// Readiness is an INFO event, independent of the invoking shell's filter.
+		.env("RUST_LOG", "info")
 		.stdin(Stdio::piped())
 		.stderr(Stdio::piped())
 		.spawn()
