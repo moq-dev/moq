@@ -642,6 +642,13 @@ impl Connection {
         self.0.state.lock("stats").inner.stats()
     }
 
+    /// Whether the connection has freed the send stream's state
+    #[cfg(test)]
+    pub(crate) fn send_stream_freed(&self, id: StreamId) -> bool {
+        let mut state = self.0.state.lock("send_stream_freed");
+        state.inner.send_stream(id).stopped().is_err()
+    }
+
     /// How many streams have `SendStream::stopped` waiters registered, to check none leak
     #[cfg(test)]
     pub(crate) fn stopped_waiters(&self) -> usize {
@@ -1285,9 +1292,9 @@ impl State {
                     // Might mean any number of streams are ready, so we wake up everyone
                     shared.stream_budget_available[dir as usize].notify_waiters();
                 }
-                Stream(StreamEvent::Finished { id }) => wake_stream_notify(id, &mut self.stopped),
-                Stream(StreamEvent::Stopped { id, .. }) => {
-                    wake_stream_notify(id, &mut self.stopped);
+                Stream(StreamEvent::Finished { id }) => self.resolve_stopped(id, None),
+                Stream(StreamEvent::Stopped { id, error_code }) => {
+                    self.resolve_stopped(id, Some(error_code));
                     wake_stream(id, &mut self.blocked_writers);
                 }
                 PathUpdated => {
@@ -1378,11 +1385,10 @@ impl State {
         self.close(0u32.into(), Bytes::new(), shared);
     }
 
-    /// Resolves the stream's `stopped` waiters on a local reset, which no stream event reports,
-    /// with the peer's STOP_SENDING code if it arrived before the reset
-    pub(crate) fn stopped_by_reset(&mut self, id: StreamId, stopped: Option<VarInt>) {
+    /// Resolves the stream's `stopped` waiters with the peer's STOP_SENDING code, or `None`
+    pub(crate) fn resolve_stopped(&mut self, id: StreamId, outcome: Option<VarInt>) {
         if let Some(waiters) = self.stopped.remove(&id) {
-            let _ = waiters.reset.set(stopped);
+            let _ = waiters.outcome.set(outcome);
             waiters.notify.notify_waiters();
         }
     }
@@ -1430,15 +1436,9 @@ fn wake_all(wakers: &mut FxHashMap<StreamId, Waker>) {
 #[derive(Debug, Default)]
 pub(crate) struct StopWaiters {
     pub(crate) notify: Notify,
-    /// The stream was reset locally, with the peer's STOP_SENDING code if it arrived first. A
-    /// later STOP_SENDING no longer counts.
-    pub(crate) reset: OnceLock<Option<VarInt>>,
-}
-
-fn wake_stream_notify(stream_id: StreamId, wakers: &mut FxHashMap<StreamId, Arc<StopWaiters>>) {
-    if let Some(waiters) = wakers.remove(&stream_id) {
-        waiters.notify.notify_waiters()
-    }
+    /// What a STOP_SENDING, a delivered finish, or a local reset settled, kept here because the
+    /// stream may be freed before a woken waiter polls. Once set, nothing later counts.
+    pub(crate) outcome: OnceLock<Option<VarInt>>,
 }
 
 fn wake_all_notify(wakers: &mut FxHashMap<StreamId, Arc<StopWaiters>>) {

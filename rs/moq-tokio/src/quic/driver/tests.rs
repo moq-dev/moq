@@ -1837,6 +1837,32 @@ async fn stream_stop_after_reset_is_ignored() {
     assert_eq!(stopped, Ok(Ok(None)));
 }
 
+/// A stop code that arrived first still wins once the reset stream is freed before the waiter polls
+#[tokio::test]
+async fn stream_stop_survives_freed_reset() {
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let (conn, server) = connect_self(&endpoint).await;
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    send.write_all(b"hello").await.unwrap();
+    let stopped = send.stopped();
+    let mut recv = server.accept_uni().await.unwrap();
+    recv.stop(5u32.into()).unwrap();
+    stop_sending_received(&conn).await;
+
+    send.reset(7u32.into()).unwrap();
+    let id = send.id();
+    timeout(Duration::from_secs(10), async {
+        while !conn.send_stream_freed(id) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the reset stream was never freed");
+    let stopped = timeout(Duration::from_secs(10), stopped).await;
+    assert_eq!(stopped, Ok(Ok(Some(5u32.into()))));
+}
+
 /// A local reset resolves `stopped`, though no stream event reports it
 #[tokio::test]
 async fn stream_reset_resolves_stopped() {

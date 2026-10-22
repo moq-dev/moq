@@ -224,7 +224,7 @@ impl SendStream {
         let stopped = stream.stopped().ok().flatten();
         stream.reset(error_code)?;
         self.reset = Some(stopped);
-        conn.stopped_by_reset(self.stream, stopped);
+        conn.resolve_stopped(self.stream, stopped);
         conn.wake();
         Ok(())
     }
@@ -247,7 +247,7 @@ impl SendStream {
         let stopped = stream.stopped().ok().flatten();
         stream.reset_at(offset, error_code)?;
         self.reset = Some(stopped);
-        conn.stopped_by_reset(self.stream, stopped);
+        conn.resolve_stopped(self.stream, stopped);
         conn.wake();
         Ok(())
     }
@@ -330,7 +330,7 @@ impl SendStream {
                 // we need to declare `waiters` outside of the block, and update it inside.
                 {
                     let mut conn = conn.state.lock("SendStream::stopped");
-                    if let Some(&stopped) = waiters.reset.get() {
+                    if let Some(&stopped) = waiters.outcome.get() {
                         return Ok(stopped);
                     }
                     if let Some(output) = send_stream_stopped(&mut conn, stream, is_0rtt) {
@@ -435,7 +435,7 @@ impl Drop for SendStream {
             }
         };
         if reset.is_ok() {
-            conn.stopped_by_reset(self.stream, stopped);
+            conn.resolve_stopped(self.stream, stopped);
             conn.wake();
         }
     }
