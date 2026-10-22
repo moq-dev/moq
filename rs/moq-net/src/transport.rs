@@ -88,6 +88,35 @@ impl Wire {
 	}
 }
 
+/// The rate a transport's sender probes up to, which the session sets and the transport reads.
+///
+/// A sender raises the congestion estimate while the connection is app-limited below
+/// this target, so a rate the session wants to send can be funded once the path has room.
+/// The session writes the sum of its [`Allocator`](crate::bandwidth::Allocator)'s
+/// reservations here; the transport reads it whenever it decides how to fill its pacing.
+/// Probing to it is local, so it never reaches the wire.
+///
+/// Clones share one value, which starts at zero: nothing to probe for.
+#[derive(Clone, Debug, Default)]
+pub struct Probe(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl Probe {
+	/// Create a target of zero.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// The rate to probe up to, in bits per second; zero means don't probe.
+	pub fn target(&self) -> u64 {
+		self.0.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// Set the rate to probe up to, in bits per second.
+	pub fn set_target(&self, bps: u64) {
+		self.0.store(bps, std::sync::atomic::Ordering::Relaxed);
+	}
+}
+
 /// Connection-level statistics.
 ///
 /// Methods return `Option`: `None` means the implementation doesn't track
@@ -288,6 +317,14 @@ pub mod poll {
 
 		/// Return the wire counters this transport updates, or `None` when it tracks none.
 		fn wire(&self) -> Option<super::Wire> {
+			None
+		}
+
+		/// Return the target this transport's sender probes up to, or `None` when it has no sender.
+		///
+		/// The session sets the target; see [`super::Probe`]. Without a sender nothing probes,
+		/// so the congestion estimate stops rising while the connection is app-limited.
+		fn probe(&self) -> Option<super::Probe> {
 			None
 		}
 

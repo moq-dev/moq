@@ -217,6 +217,12 @@ impl Client {
 		self
 	}
 
+	/// Share `bandwidth`'s reservations with every session this client dials.
+	pub(crate) fn with_bandwidth(mut self, bandwidth: moq_net::bandwidth::Allocator) -> Self {
+		self.moq = self.moq.with_bandwidth(bandwidth);
+		self
+	}
+
 	/// Price the links this client dials; see [`moq_net::Client::with_cost`].
 	pub fn with_cost(mut self, cost: u64) -> Self {
 		self.moq = self.moq.with_cost(cost);
