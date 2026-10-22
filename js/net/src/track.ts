@@ -786,6 +786,11 @@ export class Producer {
 		};
 		hooks.bindSequence = bindProducerSequence;
 		hooks.cachedLargest = (producer) => producer.#cachedLargest();
+		hooks.linger = (producer) => {
+			const maxAge = producer.#state.info.peek()?.maxAge;
+			if (producer.#state.closed.peek() !== null || maxAge === undefined) return Milli.zero;
+			return Milli(Math.min(maxAge, Milli.fromNano(CACHE_WINDOW)));
+		};
 		hooks.reportedLargest = (producer, largest) => producer.#advanceLargest(largest);
 		cachedHolds = (producer, sequence) => {
 			const entry = producer.#cached.get(sequence);
