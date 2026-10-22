@@ -11,7 +11,7 @@ Each runs locally from a checkout. The web demo and MoQ Boy also live at
 ## Web demo
 
 ```bash
-just            # relay + Big Buck Bunny + the web UI at http://localhost:5173
+just            # relay + Big Buck Bunny + the web UI at http://localhost:5173/watch.html
 ```
 
 A Vite app in [`demo/web/`](https://github.com/moq-dev/moq/tree/main/demo/web)

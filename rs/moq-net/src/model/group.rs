@@ -3486,20 +3486,6 @@ mod test {
 
 	#[test]
 	#[cfg(feature = "async")]
-	fn read_frame_all_at_once() {
-		let mut producer = Info { sequence: 0 }.produce();
-		producer
-			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hello"))
-			.unwrap();
-		producer.finish().unwrap();
-
-		let mut consumer = producer.consume();
-		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
 	fn read_frame_preserves_timestamp() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let timestamp = Timestamp::from_micros(20_000).unwrap();

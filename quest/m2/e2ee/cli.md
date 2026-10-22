@@ -8,7 +8,7 @@ Existing plaintext commands remain the default; an explicit application credenti
 
 ## Plan
 
-- Integrate the Rust E2EE layer into `moq-cli` publication and playback before semantic mux output and after protected track input. Keep codec, capture, playback, and synchronization logic outside the crypto layer.
+- Hand the [trait-generic CLI paths](/quest/m2/net-wrap/cli.md) an encrypted broadcast for publication and playback. Keep codec, capture, playback, and synchronization logic outside the crypto layer.
 - Accept the credential through a dedicated file descriptor, otherwise-unused stdin, or a permission-checked file (`0600` on Unix), never a command argument or environment variable. Redact errors and tracing, zeroize owned secret bytes, and document shell-safe invocation.
 - Follow the approved protected naming contract for mux, video, audio,
   timeline, and catalog construction. Take the semantic broadcast name from

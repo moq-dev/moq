@@ -105,9 +105,11 @@ through as tracks. Each such PES goes through whole, at its place on the program
 is refused with a warning: any in a program with no PCR, and one whose PES carry
 an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
 or have a malformed header.
-SCTE-35 cues and private PES wait for a media timestamp; input ending or
-declaring a clock break before that timestamp is refused, so a program of data
-alone fails.
+SCTE-35 cues and private PES share the media clock, or anchor on the first PCR
+when the PMT declares only data. Audio-only and data-only programs round-trip
+without video; a data-only program still requires PCR. A program declaring
+media waits for its timestamp and is refused if input ends or declares a clock
+break before one arrives.
 PES and untimed section staging share a bounded budget, so a source that never
 supplies a PES boundary or clock fails rather than retaining bytes indefinitely.
 It takes one program: a multi-program
