@@ -244,7 +244,11 @@ mod tests {
 	/// publishes `pub_origin`, over loopback TCP.
 	async fn lazy_client(
 		pub_origin: moq_net::origin::Producer,
-	) -> (moq_net::origin::Producer, moq_tokio::Connection, tokio::task::JoinHandle<()>) {
+	) -> (
+		moq_net::origin::Producer,
+		moq_tokio::Connection,
+		tokio::task::JoinHandle<()>,
+	) {
 		let sub_origin = moq_tokio::origin::spawn();
 
 		let mut listen = moq_tokio::listen::Config::default();
