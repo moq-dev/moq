@@ -30,7 +30,7 @@ use super::{
 use crate::{
     ApplicationClose, Dir, Duration, Instant, MAX_STREAM_COUNT, SendDatagramError, Side,
     TransportError, VarInt,
-    frame::{self, Close, Datagram, FrameStruct},
+    frame::{self, Close, Datagram},
     transport_parameters::TransportParameters,
 };
 
@@ -551,14 +551,19 @@ impl Connection {
         }
 
         let mut frames = 0;
-        while let Some(frame) = wire::next_frame(&mut payload)? {
+        loop {
+            let before = payload.len();
+            let Some(frame) = wire::next_frame(&mut payload)? else {
+                break;
+            };
+            let frame_len = before - payload.len();
             frames += 1;
             if frames > 1 && !self.config.version.uses_records() {
                 return Err(TransportError::FRAME_ENCODING_ERROR(
                     "draft-00 message carries more than one frame",
                 ));
             }
-            self.on_frame(frame, size, now)?;
+            self.on_frame(frame, size, frame_len, now)?;
             if self.error.is_some() {
                 // The peer closed; ignore the rest
                 return Ok(());
@@ -592,6 +597,7 @@ impl Connection {
         &mut self,
         frame: wire::Frame,
         payload_len: usize,
+        frame_len: usize,
         now: Instant,
     ) -> Result<(), TransportError> {
         let params = matches!(frame, wire::Frame::TransportParameters(_));
@@ -717,7 +723,8 @@ impl Connection {
                         "unexpected DATAGRAM frame",
                     ));
                 };
-                if datagram.size(true) as u64 > max.into_inner() {
+                // The limit is on the frame as encoded, with or without its Length field
+                if frame_len as u64 > max.into_inner() {
                     return Err(TransportError::PROTOCOL_VIOLATION("oversized datagram"));
                 }
                 // The receive buffer charges only the payload, so a small one must not pin
@@ -862,10 +869,8 @@ impl Datagrams<'_> {
     pub fn max_size(&self) -> Option<usize> {
         let peer = self.conn.peer.as_ref()?.tp.max_datagram_frame_size?;
         self.conn.config.max_datagram_frame_size?;
-        let frame = usize::try_from(peer.into_inner())
-            .unwrap_or(usize::MAX)
-            .min(self.conn.budget());
-        Some(frame.saturating_sub(Datagram::SIZE_BOUND))
+        let frame = peer.into_inner().min(self.conn.budget() as u64);
+        Datagram::max_payload(frame).map(|payload| payload as usize)
     }
 
     /// Receive the next datagram

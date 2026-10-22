@@ -514,6 +514,48 @@ fn datagrams() {
 }
 
 #[test]
+fn datagram_limits_count_the_encoded_frame() {
+    let mut limited = config(Version::QMux02);
+    limited.max_datagram_frame_size = Some(VarInt::from_u32(1200));
+
+    // A frame without its Length field may fill the limit exactly
+    let mut pair = Pair::with(config(Version::QMux02), limited.clone());
+    let mut fits = vec![0x30];
+    fits.resize(1200, 7);
+    pair.server.handle_record(fits.into(), pair.now);
+    assert_eq!(pair.server.datagrams().recv().unwrap().len(), 1199);
+    let mut over = vec![0x30];
+    over.resize(1201, 7);
+    pair.server.handle_record(over.into(), pair.now);
+    assert_eq!(
+        transport_error(&mut pair.server).code,
+        TransportErrorCode::PROTOCOL_VIOLATION
+    );
+
+    // Sending sizes the Length field exactly: 1200 bytes carry 1197
+    let mut pair = Pair::with(config(Version::QMux02), limited);
+    assert_eq!(pair.client.datagrams().max_size(), Some(1197));
+    pair.client
+        .datagrams()
+        .send(vec![7; 1197].into(), SendOptions::default())
+        .unwrap();
+    pair.drive();
+    assert_eq!(pair.server.datagrams().recv().unwrap().len(), 1197);
+
+    // A limit too small for an empty frame takes none
+    let mut tiny = config(Version::QMux02);
+    tiny.max_datagram_frame_size = Some(VarInt::from_u32(1));
+    let mut pair = Pair::with(config(Version::QMux02), tiny);
+    assert_eq!(pair.client.datagrams().max_size(), None);
+    assert!(
+        pair.client
+            .datagrams()
+            .send(Bytes::new(), SendOptions::default())
+            .is_err()
+    );
+}
+
+#[test]
 fn a_small_datagram_does_not_pin_its_record() {
     let mut pair = Pair::new(config(Version::QMux02));
     let mut record = Vec::new();
