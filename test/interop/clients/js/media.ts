@@ -326,6 +326,13 @@ async function observe(
 	return { samples, grade };
 }
 
+/**
+ * How long a failed window waits for each page to report its long animation frames. Playwright puts
+ * no timeout on an evaluate, so a page whose main thread never returns would otherwise hold the
+ * failure, the other page's evidence, the host's and the browser cleanup until the job times out.
+ */
+const STALL_READ_MS = 2000;
+
 /** How often the host's busiest processes are read during a window. */
 const HOST_INTERVAL_S = 0.5;
 
@@ -376,21 +383,31 @@ async function explainStalls(
 	// The window has already failed, so a plain evaluate's user activation can no longer skew it, and
 	// unlike `inspect` it reads a non-Chromium player too. The bounds come from the driver's clock,
 	// which the pages' epoch timestamps share, so each page reports on its own and one that cannot be
-	// read leaves the other's evidence intact.
+	// read, or does not answer within STALL_READ_MS, leaves the other's evidence intact.
 	const { start, end } = bounds;
 	for (const [name, page] of [
 		["player", player],
 		["fixture", fixturePage],
 	] as const) {
 		if (!page) continue;
+		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
-			const frames = await page.evaluate(
-				({ key, from, to }) =>
-					((globalThis as unknown as Record<string, LongFrame[] | undefined>)[key] ?? []).filter(
-						(frame) => frame.at + frame.duration >= from && frame.at <= to,
-					),
-				{ key: LONG_FRAMES, from: start, to: end },
-			);
+			const unanswered = new Promise<never>((_, reject) => {
+				timer = setTimeout(
+					() => reject(new Error(`no answer within ${STALL_READ_MS}ms, so its main thread is still blocked`)),
+					STALL_READ_MS,
+				);
+			});
+			const frames = await Promise.race([
+				page.evaluate(
+					({ key, from, to }) =>
+						((globalThis as unknown as Record<string, LongFrame[] | undefined>)[key] ?? []).filter(
+							(frame) => frame.at + frame.duration >= from && frame.at <= to,
+						),
+					{ key: LONG_FRAMES, from: start, to: end },
+				),
+				unanswered,
+			]);
 			console.error(`  ${label}: ${name} long animation frames: ${frames.length}`);
 			for (const frame of frames) {
 				console.error(
@@ -399,6 +416,8 @@ async function explainStalls(
 			}
 		} catch (err) {
 			console.error(`  ${label}: ${name} long animation frames unavailable: ${err}`);
+		} finally {
+			clearTimeout(timer);
 		}
 	}
 
