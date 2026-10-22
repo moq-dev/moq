@@ -7,6 +7,9 @@ publish:   read raw Annex-B H.264 from stdin (e.g. piped from ffmpeg) and feed
 subscribe: connect, find the video track in the catalog, and exit 0 as soon as
            any non-empty frame arrives (exit 1 on timeout / no data).
 
+--finish verifies a finite tail, natural media/catalog EOF, announcement END, and
+same-session health; --frames sets its exact size. --finish-ack selects publisher
+finish mode and names the FIFO releasing teardown after the real linger.
 --version offers only that version. --grant waits for the grant the relay sends over
 AUTH and prints it as an `auth granted` line before the client starts.
 
@@ -81,11 +84,13 @@ async def _print_grant(client: moq.Client, timeout: float) -> None:
     )
 
 
-async def publish(url: str, broadcast: str, version: str | None, grant: bool, timeout: float) -> None:
+async def publish(
+    url: str, broadcast: str, version: str | None, grant: bool, timeout: float, finish_ack: str | None
+) -> None:
     async with _client(url, version) as client:
         if grant:
             await _print_grant(client, timeout)
-        # Hold the producer for the lifetime of the publish loop; finish() unpublishes.
+        # Hold the producer for the lifetime of the publish loop.
         producer = client.create_broadcast(broadcast)
         catalog = moq.media.CatalogProducer(producer)
         media = moq.media.TrackStreamProducer.video(
@@ -123,6 +128,26 @@ async def publish(url: str, broadcast: str, version: str | None, grant: bool, ti
             await tone
         audio.finish()
         media.finish()
+        if finish_ack is not None:
+            # finish() also finalizes the catalog. ACK never controls the real linger.
+            finished = producer.finish()
+            print(f"finish ready linger_us={finished.linger // timedelta(microseconds=1)}", flush=True)
+            await finished.wait()
+            health = client.create_broadcast(f"{broadcast}.health")
+            live = health.publish_track("live")
+            live.write_frame(b"session-alive")
+            live.finish()
+            health.announce()
+
+            def acknowledge() -> None:
+                with open(finish_ack) as ack:
+                    if ack.readline() != "complete\n":
+                        raise RuntimeError("expected finish completion acknowledgement")
+
+            await loop.run_in_executor(None, acknowledge)
+            if client.session is None or client.session.connects() != 1:
+                raise RuntimeError("publisher reconnected during finish")
+            print("finish acknowledged", flush=True)
 
 
 async def _catalog_with_video(consumer: moq.BroadcastConsumer) -> moq.media.Catalog:
@@ -136,10 +161,78 @@ async def _catalog_with_video(consumer: moq.BroadcastConsumer) -> moq.media.Cata
     raise RuntimeError("catalog stream ended without a video track")
 
 
-async def subscribe(url: str, broadcast: str, version: str | None, grant: bool, timeout: float) -> None:
+async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> None:
+    # Watch the exact path before resolving it, retaining END while media drains.
+    async with client.announced(broadcast) as announcements:
+        async with client.announced_broadcast(broadcast) as announced:
+            consumer = await announced
+            async with await moq.media.CatalogConsumer.subscribe(consumer) as catalogs:
+                async for catalog in catalogs:
+                    if catalog.video:
+                        break
+                else:
+                    raise RuntimeError("catalog ended without video")
+                id, video = next(iter(catalog.video.items()))
+                async with await moq.media.TrackConsumer.subscribe(
+                    consumer, id, video, subscription=moq.Subscription(max_delay=MAX_DELAY)
+                ) as media:
+                    count = 0
+                    async for frame in media:
+                        # Empty payloads carry endpoint metadata, not codec frames.
+                        if not frame.payload:
+                            continue
+                        count += 1
+                        if count > frames:
+                            raise RuntimeError(f"expected {frames} frames, received more")
+                    if count != frames:
+                        raise RuntimeError(f"expected {frames} frames, received {count}")
+                # Do not cancel the catalog after its first snapshot: EOF is part of the case.
+                async for _ in catalogs:
+                    pass
+
+        started = False
+        async for event in announcements:
+            if isinstance(event, moq.AnnounceEventRestart) and event.announce.prefix == broadcast:
+                raise RuntimeError("broadcast restarted during finish")
+            if isinstance(event, moq.AnnounceEventStart) and event.announce.prefix == broadcast:
+                started = True
+            if isinstance(event, moq.AnnounceEventEnd) and event.announce.prefix == broadcast:
+                if not started:
+                    raise RuntimeError("broadcast ended without announcement")
+                break
+        else:
+            raise RuntimeError("announcement stream ended before broadcast END")
+
+    async with client.announced_broadcast(f"{broadcast}.health") as announced_health:
+        health = await announced_health
+        async with await health.subscribe_track("live") as live:
+            seen = False
+            async for group in live:
+                async with group:
+                    async for frame in group:
+                        if seen or frame.payload != b"session-alive":
+                            raise RuntimeError("unexpected session health payload")
+                        seen = True
+            if not seen:
+                raise RuntimeError("missing session health payload")
+    if client.session is None or client.session.connects() != 1:
+        raise RuntimeError("subscriber reconnected during finish")
+    print(f"finish clean frames={frames} catalog=eof announce=end health=ok", flush=True)
+
+
+async def subscribe(
+    url: str, broadcast: str, version: str | None, grant: bool, timeout: float, finish: bool, frames: int
+) -> None:
     async with _client(url, version) as client:
         if grant:
             await _print_grant(client, timeout)
+        if finish:
+            print("finish reader ready", flush=True)
+            command = await asyncio.wait_for(asyncio.to_thread(sys.stdin.readline), timeout)
+            if command != "read\n":
+                raise RuntimeError("expected finish read command")
+            await asyncio.wait_for(_finish_subscribe(client, broadcast, frames), timeout)
+            return
         consumer = await asyncio.wait_for(client.announced_broadcast(broadcast), timeout)
         catalog = await asyncio.wait_for(_catalog_with_video(consumer), timeout)
 
@@ -173,15 +266,22 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--version")
     parser.add_argument("--grant", action="store_true")
+    parser.add_argument("--finish-ack", help="publisher completion FIFO; enables clean finish")
+    parser.add_argument("--finish", action="store_true", help="verify a late tail and clean broadcast end")
+    parser.add_argument("--frames", type=int, default=10, help="expected finish video frame count")
     args = parser.parse_args()
+    if args.frames <= 0 or (args.finish and args.role != "subscribe") or (args.finish_ack and args.role != "publish"):
+        parser.error("finish requires a subscriber, finish-ack a publisher, and frames must be positive")
 
     # Warnings and errors from the Rust layer, such as a publication outside the grant.
     moq.log_level("warn")
     try:
         if args.role == "publish":
-            asyncio.run(publish(args.url, args.broadcast, args.version, args.grant, args.timeout))
+            asyncio.run(publish(args.url, args.broadcast, args.version, args.grant, args.timeout, args.finish_ack))
         else:
-            asyncio.run(subscribe(args.url, args.broadcast, args.version, args.grant, args.timeout))
+            asyncio.run(
+                subscribe(args.url, args.broadcast, args.version, args.grant, args.timeout, args.finish, args.frames)
+            )
     except KeyboardInterrupt:
         pass
     except (TimeoutError, asyncio.TimeoutError):

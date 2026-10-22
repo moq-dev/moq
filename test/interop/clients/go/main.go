@@ -11,11 +11,15 @@
 //	ffmpeg ... -f h264 - | go-interop publish --url http://localhost:4443 --broadcast b.hang
 //	go-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
 //
+// --finish verifies a finite tail, natural media/catalog EOF, announcement END, and
+// same-session health; --frames sets its exact size. --finish-ack selects publisher
+// finish mode and names the FIFO releasing teardown after the real linger.
 // --version offers only that version. --grant waits for the grant the relay sends
 // over AUTH and prints it as an `auth granted` line before the client starts.
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -121,7 +125,7 @@ func patterns(list []string) string {
 	return string(out)
 }
 
-func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeout time.Duration) error {
+func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeout time.Duration, finishAck string) error {
 	client, err := dial(ctx, url, opts, timeout)
 	if err != nil {
 		return err
@@ -196,7 +200,57 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 	if err := audio.Finish(); err != nil {
 		return err
 	}
-	return media.Finish()
+	if err := media.Finish(); err != nil {
+		return err
+	}
+	if finishAck == "" {
+		return nil
+	}
+	// Finish also finalizes the catalog. ACK never controls the real linger.
+	finished, err := producer.Finish()
+	if err != nil {
+		return err
+	}
+	defer finished.Close()
+	fmt.Printf("finish ready linger_us=%d\n", finished.Linger().Microseconds())
+	if err := finished.Wait(ctx); err != nil {
+		return err
+	}
+	health, err := client.CreateBroadcast(broadcast + ".health")
+	if err != nil {
+		return err
+	}
+	defer health.Close()
+	live, err := health.PublishTrack("live", nil)
+	if err != nil {
+		return err
+	}
+	if err := live.WriteFrame(moq.Frame{Payload: []byte("session-alive")}); err != nil {
+		return err
+	}
+	if err := live.Finish(); err != nil {
+		return err
+	}
+	if err := health.Announce(moq.Route{}); err != nil {
+		return err
+	}
+	ack, err := os.Open(finishAck)
+	if err != nil {
+		return err
+	}
+	defer ack.Close()
+	command, err := bufio.NewReader(ack).ReadString('\n')
+	if err != nil {
+		return err
+	}
+	if command != "complete\n" {
+		return errors.New("expected finish completion acknowledgement")
+	}
+	if client.Session().Connects() != 1 {
+		return errors.New("publisher reconnected during finish")
+	}
+	fmt.Println("finish acknowledged")
+	return nil
 }
 
 // The catalog is a live track. A lazy publisher (e.g. the browser, which only
@@ -223,15 +277,161 @@ func catalogWithVideo(ctx context.Context, consumer *moq.BroadcastConsumer) (*mo
 	}
 }
 
-func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, timeout time.Duration) error {
+// finishSubscribe retains each reader until its natural EOF, then proves the session still serves.
+func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, frames int) error {
+	announcements, err := client.Announced(moq.AnnounceOptions{Prefix: broadcast})
+	if err != nil {
+		return err
+	}
+	defer announcements.Cancel()
+	announced, err := client.AnnouncedBroadcast(broadcast)
+	if err != nil {
+		return err
+	}
+	defer announced.Cancel()
+	consumer, err := announced.Available(ctx)
+	if err != nil {
+		return err
+	}
+	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer)
+	if err != nil {
+		return err
+	}
+	defer catalogs.Cancel()
+	var catalog *moqmedia.Catalog
+	for {
+		catalog, err = catalogs.Next(ctx)
+		if err != nil {
+			return err
+		}
+		if catalog == nil {
+			return errors.New("catalog ended without video")
+		}
+		if len(catalog.Video) != 0 {
+			break
+		}
+	}
+	var id string
+	var video moqmedia.Video
+	for id, video = range catalog.Video {
+		break
+	}
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: maxDelay}})
+	if err != nil {
+		return err
+	}
+	defer media.Cancel()
+	count := 0
+	for {
+		frame, err := media.Next(ctx)
+		if err != nil {
+			return err
+		}
+		if frame == nil {
+			break
+		}
+		// Empty payloads carry endpoint metadata, not codec frames.
+		if len(frame.Payload) == 0 {
+			continue
+		}
+		count++
+		if count > frames {
+			return fmt.Errorf("expected %d frames, received more", frames)
+		}
+	}
+	if count != frames {
+		return fmt.Errorf("expected %d frames, received %d", frames, count)
+	}
+	for {
+		catalog, err := catalogs.Next(ctx)
+		if err != nil {
+			return err
+		}
+		if catalog == nil {
+			break
+		}
+	}
+	started := false
+	for {
+		event, err := announcements.Next(ctx)
+		if err != nil {
+			return err
+		}
+		if event == nil {
+			return errors.New("announcement stream ended before broadcast END")
+		}
+		if start, ok := event.(moq.AnnounceEventStart); ok && start.Announce.Prefix == broadcast {
+			started = true
+		}
+		if restart, ok := event.(moq.AnnounceEventRestart); ok && restart.Announce.Prefix == broadcast {
+			return errors.New("broadcast restarted during finish")
+		}
+		if end, ok := event.(moq.AnnounceEventEnd); ok && end.Announce.Prefix == broadcast {
+			if !started {
+				return errors.New("broadcast ended without announcement")
+			}
+			break
+		}
+	}
+	healthAnnounced, err := client.AnnouncedBroadcast(broadcast + ".health")
+	if err != nil {
+		return err
+	}
+	defer healthAnnounced.Cancel()
+	health, err := healthAnnounced.Available(ctx)
+	if err != nil {
+		return err
+	}
+	live, err := health.SubscribeTrack(ctx, "live", nil)
+	if err != nil {
+		return err
+	}
+	defer live.Cancel()
+	frame, err := live.ReadFrame(ctx)
+	if err != nil {
+		return err
+	}
+	if frame == nil || string(frame.Payload) != "session-alive" {
+		return errors.New("unexpected session health payload")
+	}
+	frame, err = live.ReadFrame(ctx)
+	if err != nil {
+		return err
+	}
+	if frame != nil {
+		return errors.New("session health track did not end after one frame")
+	}
+	if client.Session().Connects() != 1 {
+		return errors.New("subscriber reconnected during finish")
+	}
+	fmt.Printf("finish clean frames=%d catalog=eof announce=end health=ok\n", frames)
+	return nil
+}
+
+func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, timeout time.Duration, finish bool, frames int) error {
+	parent := ctx
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
 	client, err := dial(ctx, url, opts, timeout)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
+	if finish {
+		fmt.Println("finish reader ready")
+		command, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil {
+			return err
+		}
+		if command != "read\n" {
+			return errors.New("expected finish read command")
+		}
+	}
+	if finish {
+		readCtx, cancel := context.WithTimeout(parent, timeout)
+		defer cancel()
+		return finishSubscribe(readCtx, client, broadcast, frames)
+	}
 
 	announced, err := client.AnnouncedBroadcast(broadcast)
 	if err != nil {
@@ -291,11 +491,18 @@ func run() error {
 	timeout := flags.Float64("timeout", 20, "seconds to wait for data")
 	version := flags.String("version", "", "offer only this version")
 	grant := flags.Bool("grant", false, "wait for the grant the relay sends over AUTH and print it")
+	finishAck := flags.String("finish-ack", "", "publisher completion FIFO; enables clean finish")
+	finish := flags.Bool("finish", false, "verify a late tail and clean broadcast end")
+	frames := flags.Int("frames", 10, "expected finish video frame count")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		return err
 	}
 	if *url == "" || *broadcast == "" {
 		return errors.New("--url and --broadcast are required")
+	}
+
+	if *frames <= 0 || (*finish && role != "subscribe") || (*finishAck != "" && role != "publish") {
+		return errors.New("finish requires a subscriber, finish-ack a publisher, and frames must be positive")
 	}
 
 	// Warnings and errors from the Rust layer, such as a publication outside the grant.
@@ -307,9 +514,9 @@ func run() error {
 	opts := dialOptions{version: *version, grant: *grant}
 	switch role {
 	case "publish":
-		return publish(ctx, *url, *broadcast, opts, wait)
+		return publish(ctx, *url, *broadcast, opts, wait, *finishAck)
 	case "subscribe":
-		return subscribe(ctx, *url, *broadcast, opts, wait)
+		return subscribe(ctx, *url, *broadcast, opts, wait, *finish, *frames)
 	default:
 		return fmt.Errorf("unknown role %q", role)
 	}
