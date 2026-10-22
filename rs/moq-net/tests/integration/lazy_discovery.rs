@@ -221,6 +221,35 @@ async fn a_broader_request_holds_the_narrower_open() {
 	}
 }
 
+/// A narrower request still lingering when a broader one opens is held like one still
+/// watched, rather than lingering out on its own timer.
+#[moq_clock::test]
+async fn a_broader_request_holds_a_lingering_narrower_open() {
+	for version in VERSIONS {
+		let lazy = Lazy::new(version).await;
+		let mut narrower = lazy.watch("a");
+		synced(&mut narrower).await;
+		drop(narrower);
+
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		let mut root = lazy.watch("");
+		assert_eq!(synced(&mut root).await, ["a/x", "b/y"], "{version}");
+		assert_eq!(lazy.requests(), 2, "{version}");
+
+		// Past the narrower request's own linger: it is held, not closed.
+		moq_clock::sleep(LINGERED).await;
+		assert!(root.try_next().is_none(), "{version}: nothing retracted");
+
+		// The broader request lingers out, then the narrower one it held does.
+		drop(root);
+		moq_clock::sleep(LINGERED).await;
+		assert!(!lazy.routes("b/y").await, "{version}");
+		assert!(lazy.routes("a/x").await, "{version}");
+		moq_clock::sleep(LINGERED).await;
+		assert!(!lazy.routes("a/x").await, "{version}");
+	}
+}
+
 /// A broadcast resolved through a discovered route keeps it discovered after the
 /// listing that found it closes.
 #[moq_clock::test]

@@ -35,9 +35,9 @@ pub(crate) enum Change {
 ///
 /// A request stays open while anything at or beneath its prefix is wanted, so a
 /// narrower want rides it rather than opening a request that would later have to take
-/// its routes over. A narrower request already open when a broader one opens stays open
-/// until the broader one goes, so neither takes the other's routes over before it has
-/// synced. Nothing here ever reopens a request that ended on its own: the next want
+/// its routes over. A narrower request already open when a broader one opens, wanted or
+/// lingering, stays open until the broader one goes, so neither takes the other's routes
+/// over before it has synced. Nothing here ever reopens a request that ended on its own: the next want
 /// that nothing covers does.
 pub(crate) struct Discovery {
 	/// `None` for a session that asks about everything once, or once the origin closed.
@@ -182,9 +182,31 @@ impl Discovery {
 
 		if want && !covered {
 			let snapshot = snapshot.expect("a wanted prefix comes with its snapshot");
-			self.requests.insert(prefix.clone(), Request::default());
+			let request = self.hold_lingering(&prefix);
+			self.requests.insert(prefix.clone(), request);
 			self.changes.push_back(Change::Open(prefix, snapshot));
 		}
+	}
+
+	/// A new request at `prefix` holds the narrower ones still lingering beneath it, as it
+	/// would had they been released after it opened, so none closes before it has synced.
+	fn hold_lingering(&mut self, prefix: &PathOwned) -> Request {
+		let mut request = Request::default();
+		let beneath: Vec<_> = self
+			.lingering
+			.iter()
+			.filter(|(_, other)| other.has_prefix(prefix))
+			.cloned()
+			.collect();
+		for (at, other) in beneath {
+			self.lingering.remove(&(at, other.clone()));
+			if let Some(narrower) = self.requests.get_mut(&other) {
+				narrower.linger = None;
+			}
+			request.held.insert(other);
+		}
+		self.timer.set(self.lingering.first().map(|(at, _)| *at));
+		request
 	}
 
 	/// Keep the request at `prefix` open: something beneath it is wanted again.
