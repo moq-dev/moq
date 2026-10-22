@@ -418,7 +418,7 @@ impl<E: catalog::Catalog> Capture<E> {
 
 	/// Fold one completed section from `pid` into its `(pid, table_id)` entry,
 	/// creating the entry on first sight of the pair.
-	pub fn section(&mut self, pid: u16, section: Vec<u8>) -> anyhow::Result<()> {
+	pub fn section(&mut self, pid: u16, section: Bytes) -> anyhow::Result<()> {
 		let Some(&table_id) = section.first() else {
 			return Ok(());
 		};
@@ -426,7 +426,6 @@ impl<E: catalog::Catalog> Capture<E> {
 		// state, not the current one; carrying it would need a second generation slot
 		// per sub-table for a table nothing re-emits, so it is dropped until the
 		// version becomes current.
-		let section = Bytes::from(section);
 		if long_form(&section) && section[5] & 0x01 == 0 {
 			return Ok(());
 		}

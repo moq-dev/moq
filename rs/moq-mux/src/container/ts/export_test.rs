@@ -4198,7 +4198,9 @@ async fn an_sdt_revision_dropping_the_service_retires_it() {
 	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
 	capture.select(1);
 	let mut revise = |version: u8, services: &[(u16, &[u8])]| {
-		capture.section(0x0011, sdt_actual(version, 0, 0, services)).unwrap();
+		capture
+			.section(0x0011, sdt_actual(version, 0, 0, services).into())
+			.unwrap();
 		capture.flush(Timestamp::ZERO, true).unwrap();
 		catalog
 			.snapshot()
@@ -4241,7 +4243,7 @@ async fn a_corrupt_sdt_keeps_the_last_good_snapshot() {
 	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
 	capture.select(1);
 	let mut feed = |section: Vec<u8>| {
-		capture.section(0x0011, section).unwrap();
+		capture.section(0x0011, section.into()).unwrap();
 		capture.flush(Timestamp::ZERO, true).unwrap();
 		catalog
 			.snapshot()
@@ -4282,7 +4284,7 @@ async fn a_partial_sdt_revision_keeps_the_last_good_snapshot() {
 	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
 	capture.select(1);
 	let mut feed = |section: Vec<u8>| {
-		capture.section(0x0011, section).unwrap();
+		capture.section(0x0011, section.into()).unwrap();
 		capture.flush(Timestamp::ZERO, true).unwrap();
 		catalog
 			.snapshot()
@@ -4332,7 +4334,7 @@ async fn a_selection_filters_eit_schedule() {
 		make_long_section(0x50, service, 0, 0, 0, &body)
 	};
 	for service in [1, 2] {
-		capture.section(0x0012, schedule(service)).unwrap();
+		capture.section(0x0012, schedule(service).into()).unwrap();
 	}
 	capture.finish(Timestamp::ZERO).unwrap();
 
