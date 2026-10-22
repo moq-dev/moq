@@ -289,7 +289,11 @@ impl Fanout {
 			});
 		}
 		if feed.anchor.is_none() {
-			feed.anchor = Some(SystemTime::now().checked_sub(end).unwrap_or(SystemTime::UNIX_EPOCH));
+			feed.anchor = Some(
+				SystemTime::from(moq_clock::wall())
+					.checked_sub(end)
+					.unwrap_or(SystemTime::UNIX_EPOCH),
+			);
 		}
 		let period = feed.last.as_ref().map_or(moq_net::Timestamp::ZERO, |last| {
 			if last.reference == *reference {

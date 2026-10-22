@@ -45,6 +45,7 @@ members = [
     "rs/moq-v4l",
     "rs/moq-video",
     "rs/moq-wasm",
+    "rs/qmux",
     "rs/uniffi-bindgen",
 ]
 default-members = [
@@ -89,6 +90,7 @@ default-members = [
     "rs/moq-v4l",
     "rs/moq-video",
     # "rs/moq-wasm",  # wasm32-unknown-unknown target only
+    "rs/qmux",
     # Maturin runs the workspace's `uniffi-bindgen` binary from the root to
     # generate the Python wheel, and that only searches default members. Its
     # `cli` feature keeps a plain check from compiling the generator.
@@ -221,7 +223,7 @@ percent-encoding = "2"
 pollster = "1.0"
 # default-features off to skip the fork and timeout machinery; crates opt into what they use.
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
-qmux = { version = "0.6.5", default-features = false }
+qmux = { version = "0.7.0", path = "rs/qmux", default-features = false }
 rand = "0.10.1"
 rangemap = "1.8"
 # default-features off so each consumer picks its crypto provider.

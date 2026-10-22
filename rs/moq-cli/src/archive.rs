@@ -275,7 +275,7 @@ pub async fn import(
 	};
 	let refresh = async {
 		loop {
-			tokio::time::sleep(interval).await;
+			moq_clock::sleep(interval).await;
 			// A rendition the recording enrolled after the replay started.
 			for (track, timeline) in listing.timelines().await? {
 				if let std::collections::btree_map::Entry::Vacant(entry) = timelines.entry(track) {
@@ -310,6 +310,7 @@ fn open(url: &Url) -> anyhow::Result<moq_archive::Store<Arc<dyn ObjectStore>>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 

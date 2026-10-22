@@ -7,8 +7,8 @@ use moq_mux::container::{flv, fmp4, ts};
 pub enum PublishFormat {
 	/// Raw AVC (H.264) Annex B elementary stream.
 	Avc3,
-	/// Fragmented MP4 (CMAF).
-	Fmp4,
+	/// Fragmented MP4 (CMAF), republished whole as CMAF when `passthrough`.
+	Fmp4 { passthrough: bool },
 	/// MPEG-TS (transport stream), limited to one `program` of a multiplex when given.
 	Ts { program: Option<u16> },
 	/// MPEG-TS published whole, paced on `pcr_pid` when given rather than the PMT's clock.
@@ -381,9 +381,9 @@ impl Publish {
 					import: Box::new(import),
 				}
 			}
-			PublishFormat::Fmp4 => {
+			PublishFormat::Fmp4 { passthrough } => {
 				let timebase = catalog.timebase();
-				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve());
+				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_passthrough(*passthrough);
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts { .. } => unreachable!("TS is handled above with the mpegts catalog extension"),
@@ -605,7 +605,7 @@ async fn decode(
 	// diagnosed by the rate at which these climb, and stdin may never end, so
 	// they have to surface as they accumulate rather than at exit.
 	let mut log = ts::stats::Log::default();
-	let mut sampled = tokio::time::Instant::now();
+	let mut sampled = moq_clock::now();
 	let sections = report.as_ref().map(crate::report::Stats::sections);
 	let report_mpegts = |snapshot: &ts::stats::Snapshot| {
 		if let Some(sections) = &sections {
@@ -630,7 +630,7 @@ async fn decode(
 			}
 
 			if sampled.elapsed() >= ts::stats::Log::INTERVAL {
-				sampled = tokio::time::Instant::now();
+				sampled = moq_clock::now();
 				if let Some(stats) = decoder.stats() {
 					report_mpegts(&stats);
 					log.sample(stats);
@@ -787,6 +787,7 @@ impl CaptureArgs {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub(crate) mod tests {
 	use std::time::Duration;
 
@@ -1566,7 +1567,8 @@ pub(crate) mod tests {
 		for (format, input) in [
 			(PublishFormat::Ts { program: None }, TS),
 			(PublishFormat::TsPassthrough { pcr_pid: None }, TS),
-			(PublishFormat::Fmp4, FMP4),
+			(PublishFormat::Fmp4 { passthrough: false }, FMP4),
+			(PublishFormat::Fmp4 { passthrough: true }, FMP4),
 		] {
 			let origin = moq_tokio::origin::spawn();
 			let consumer = origin.consume();

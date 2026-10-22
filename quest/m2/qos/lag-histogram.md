@@ -14,9 +14,10 @@ last partial interval.
 
 Decided 2026-10-08: split out of the QoS line so the dashboard and publisher
 timeliness can require a histogram that exists on `main`. This quest lands it
-on `main` once prefix tracks have, moved from the per-path `publisher.json`
-and `subscriber.json` map rows it writes today onto the totals and prefix
-tracks.
+on `main` now that prefix tracks have landed
+([#5811](https://github.com/moq-dev/moq/pull/5811)), moved from the
+per-path `publisher.json` and `subscriber.json` map rows it writes today
+onto the totals and prefix tracks.
 
 Decided 2026-10-09: the QoS line
 ([#4133](https://github.com/moq-dev/moq/pull/4133)) closed without landing,

@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use tokio::time::Instant;
+use moq_clock::Instant;
 
 use crate::Frame;
 
