@@ -29,7 +29,9 @@ pub(super) type TrackKey = (PathOwned, Arc<str>);
 /// so it asks again rather than hide a track that may still be live.
 pub(super) fn unlisted(end: Result<(), Error>) -> Result<(), Error> {
 	match end {
-		Err(Error::Remote(code)) if u64::from(code) == ietf::PublishDoneStatus::InternalError.code(Version::Draft18) => {
+		Err(Error::Remote(code))
+			if u64::from(code) == ietf::PublishDoneStatus::InternalError.code(Version::Draft18) =>
+		{
 			Ok(())
 		}
 		end => end,
@@ -156,7 +158,11 @@ impl<S: crate::transport::poll::Session> Listings<S> {
 			.map(|listener| &*listener.lister)
 	}
 
-	fn listen(&mut self, path: PathOwned, lister: Arc<broadcast::Lister>) -> (u64, kio::Consumer<Option<Error>>, Option<Opening>) {
+	fn listen(
+		&mut self,
+		path: PathOwned,
+		lister: Arc<broadcast::Lister>,
+	) -> (u64, kio::Consumer<Option<Error>>, Option<Opening>) {
 		// What a broader listing already holds is listed at once.
 		for ((namespace, name), entry) in &self.entries {
 			if namespace == &path
@@ -291,12 +297,9 @@ impl<S: crate::transport::poll::Session> Listings<S> {
 
 	/// The entry `handoff` belongs to, if it still stands.
 	fn watched_by(&mut self, key: &TrackKey, handoff: &kio::Shared<Handoff<S>>) -> Option<&mut Entry<S>> {
-		self.entries.get_mut(key).filter(|entry| {
-			entry
-				.handoff
-				.as_ref()
-				.is_some_and(|held| held.same_channel(handoff))
-		})
+		self.entries
+			.get_mut(key)
+			.filter(|entry| entry.handoff.as_ref().is_some_and(|held| held.same_channel(handoff)))
 	}
 
 	/// End the entry held by the subscription with `request_id`: TRACK_ENDED unlists it,
@@ -384,7 +387,10 @@ where
 		let result = self.subscribe_tracks(&prefix, blockers, &live).await;
 		let mut listings = self.listings.lock();
 		if let Err(err) = result
-			&& listings.requests.get(&key).is_some_and(|request| request.live.is_some())
+			&& listings
+				.requests
+				.get(&key)
+				.is_some_and(|request| request.live.is_some())
 		{
 			listings.fail(&prefix, err);
 		}
@@ -541,10 +547,17 @@ where
 	/// A fresh subscription of ours to `name` in `namespace`, and its info once accepted.
 	fn subscribed(&self, namespace: &PathOwned, name: &str) -> Option<(RequestId, Option<track::Info>)> {
 		let state = self.state.lock();
+		let aliases = state.aliases.read();
+		// A paused one is on its way out with the entry it held.
+		let paused = |id: &RequestId, track: &TrackState| {
+			track
+				.alias
+				.is_some_and(|alias| aliases.map.get(&alias) == Some(&Alias::Paused(*id)))
+		};
 		state
 			.subscribes
 			.iter()
-			.find(|(_, track)| track.broadcast == *namespace && track.name == name)
+			.find(|(id, track)| track.broadcast == *namespace && track.name == name && !paused(id, track))
 			.map(|(id, track)| (*id, track.producer.as_ref().map(|producer| producer.info().clone())))
 	}
 
@@ -597,7 +610,11 @@ where
 
 	/// Open a paused SUBSCRIBE for a skipped track and list it once its SUBSCRIBE_OK
 	/// arrives. `None` once its entry was let go.
-	async fn open_paused(&self, key: &TrackKey, handoff: &kio::Shared<Handoff<S>>) -> Result<Option<Upstream<S>>, Error> {
+	async fn open_paused(
+		&self,
+		key: &TrackKey,
+		handoff: &kio::Shared<Handoff<S>>,
+	) -> Result<Option<Upstream<S>>, Error> {
 		let gone = |waiter: &kio::Waiter| {
 			handoff
 				.poll(waiter, |handoff| match handoff.gone {
@@ -742,7 +759,11 @@ where
 
 	/// Serve a PUBLISH: hold one answering our SUBSCRIBE_TRACKS paused as its track's entry,
 	/// refuse a redundant one, and decline one no listing asked for.
-	pub(super) async fn serve_publish(&mut self, mut stream: Stream<S, Version>, msg: ietf::Publish<'_>) -> Result<(), Error> {
+	pub(super) async fn serve_publish(
+		&mut self,
+		mut stream: Stream<S, Version>,
+		msg: ietf::Publish<'_>,
+	) -> Result<(), Error> {
 		let key: TrackKey = (msg.track_namespace.to_owned(), msg.track_name.as_ref().into());
 		let info = accepted_info(&msg.properties, self.version);
 		let offer = {
@@ -754,7 +775,11 @@ where
 				_ => request::to_code(&Error::Unroutable, request::Kind::Publish, self.version),
 			};
 			if listings.covering(&key.0).is_none() {
-				match listings.requests.values().any(|request| key.0.has_prefix(&request.prefix)) {
+				match listings
+					.requests
+					.values()
+					.any(|request| key.0.has_prefix(&request.prefix))
+				{
 					true => Offer::Refuse(
 						request::to_code(&Error::Unroutable, request::Kind::Publish, self.version),
 						"listing cancelled",
@@ -905,9 +930,11 @@ where
 				Step::Wanted => {
 					let upstream = {
 						let mut held = handoff.lock();
-						match held.gone {
-							true => upstream,
-							false => {
+						match (held.gone, held.wanted) {
+							(true, _) => upstream,
+							// The subscription gave up before it was handed over.
+							(false, false) => continue,
+							(false, true) => {
 								held.upstream = Some(upstream);
 								return;
 							}
@@ -966,10 +993,12 @@ where
 
 	/// Ready with the subscription `handoff` hands over, or `None` once it ended instead.
 	pub(super) fn poll_handoff(handoff: &kio::Shared<Handoff<S>>, waiter: &kio::Waiter) -> Poll<Option<Upstream<S>>> {
-		let mut handoff = ready!(handoff.poll(waiter, |handoff| match handoff.gone || handoff.upstream.is_some() {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
-		}));
+		let mut handoff = ready!(
+			handoff.poll(waiter, |handoff| match handoff.gone || handoff.upstream.is_some() {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			})
+		);
 		Poll::Ready(handoff.upstream.take())
 	}
 
@@ -1044,7 +1073,6 @@ where
 			}
 		});
 	}
-
 
 	/// Pause a subscription nobody reads that is its track's entry, and hold it again.
 	pub(super) async fn pause(&self, key: TrackKey, mut upstream: Upstream<S>) {
@@ -1253,7 +1281,9 @@ mod tests {
 			let id = stream.reader.varint().await.unwrap();
 			(id, stream.reader.decode::<ietf::Body>().await.unwrap())
 		};
-		moq_clock::timeout(TIMEOUT, read).await.expect("the subscriber sent nothing")
+		moq_clock::timeout(TIMEOUT, read)
+			.await
+			.expect("the subscriber sent nothing")
 	}
 
 	async fn write<M: ietf::Message + std::fmt::Debug>(stream: &mut PeerStream, id: u64, msg: &M) {
@@ -1366,7 +1396,10 @@ mod tests {
 	/// answerer sends once a track is no longer listed, does too (decided 2026-10-22).
 	#[moq_clock::test]
 	async fn a_track_ended_publish_removes_the_track() {
-		for status in [ietf::PublishDoneStatus::TrackEnded, ietf::PublishDoneStatus::InternalError] {
+		for status in [
+			ietf::PublishDoneStatus::TrackEnded,
+			ietf::PublishDoneStatus::InternalError,
+		] {
 			let version = Version::Draft22;
 			let mut h = harness(version);
 			let _listing = h.establish().await;

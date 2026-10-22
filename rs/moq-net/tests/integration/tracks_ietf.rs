@@ -155,7 +155,10 @@ async fn before_draft_18_the_listing_is_refused() {
 
 	let (subscriber, _pair) = connect(&publisher, "moq-transport-17").await;
 	let mut tracks = resolve(&subscriber, "bcast").await.tracks().unwrap();
-	assert_eq!(next(&mut tracks).await, format!("error: {}", moq_net::Error::Unsupported));
+	assert_eq!(
+		next(&mut tracks).await,
+		format!("error: {}", moq_net::Error::Unsupported)
+	);
 }
 
 /// A reader of a listed track resumes its held PUBLISH, so its data arrives with no
@@ -295,7 +298,10 @@ async fn a_nested_listing_reuses_the_broader_one() {
 
 		let _z = inner.create_track("z", None).unwrap();
 		assert_eq!(next(&mut inner_tracks).await, "+z", "{version}");
-		assert!(quiet(&mut outer_tracks).await, "{version}: a nested track listed in its parent");
+		assert!(
+			quiet(&mut outer_tracks).await,
+			"{version}: a nested track listed in its parent"
+		);
 	}
 }
 
@@ -406,11 +412,7 @@ async fn a_listing_past_the_announces_cap_is_reset() {
 			}
 		};
 		assert!(added < CAP, "{version}: listed {added} tracks under a cap of {CAP}");
-		assert_eq!(
-			end,
-			format!("error: {}", moq_net::Error::TooManyRequests),
-			"{version}"
-		);
+		assert_eq!(end, format!("error: {}", moq_net::Error::TooManyRequests), "{version}");
 
 		assert!(
 			moq_clock::timeout(Duration::from_millis(100), pair.server.closed())
