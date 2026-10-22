@@ -547,6 +547,9 @@
 
           inherit uniffi-bindgen-cpp uniffi-bindgen-dart;
 
+          # The @moq/libav npm package, which js/libav/build.ts copies into js/libav/dist.
+          moq-libav = pkgs.callPackage ./js/libav/package.nix { };
+
           # The quest CLI alone, so quest.yml can validate the tree without
           # realising the whole dev shell.
           quest = quest-cli;

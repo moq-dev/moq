@@ -51,6 +51,8 @@ use datagrams::DatagramState;
 pub use datagrams::{Datagrams, SendDatagramError};
 
 mod mtud;
+#[cfg(feature = "mux")]
+pub mod mux;
 mod pacing;
 
 mod packet_builder;

@@ -17,6 +17,10 @@ pub(super) struct Recv {
     pub(super) assembler: Assembler,
     sent_max_stream_data: u64,
     pub(super) end: u64,
+    /// The end of the data STREAM frames carried, which on an ordered transport is where the
+    /// next one starts. Unlike `end`, a reset's final size does not raise it.
+    #[cfg(feature = "mux")]
+    pub(super) data_end: u64,
     pub(super) stopped: bool,
 }
 
@@ -27,6 +31,8 @@ impl Recv {
             assembler: Assembler::new(),
             sent_max_stream_data: initial_max_data,
             end: 0,
+            #[cfg(feature = "mux")]
+            data_end: 0,
             stopped: false,
         })
     }
@@ -37,6 +43,10 @@ impl Recv {
         self.assembler.reinit();
         self.sent_max_stream_data = initial_max_data;
         self.end = 0;
+        #[cfg(feature = "mux")]
+        {
+            self.data_end = 0;
+        }
         self.stopped = false;
     }
 
@@ -82,6 +92,10 @@ impl Recv {
         }
 
         self.end = self.end.max(end);
+        #[cfg(feature = "mux")]
+        {
+            self.data_end = self.data_end.max(end);
+        }
         // A reset stream only still delivers the data below its Reliable Size
         if let RecvState::ResetRecvd { reliable_size, .. } = self.state {
             let len = reliable_size

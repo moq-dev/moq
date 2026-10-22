@@ -228,6 +228,7 @@ jobs:
               - "rs/moq-srt/**"
               - "rs/moq-stats/**"
               - "rs/moq-tokio/**"
+              - "rs/qmux/**"
               - "Cargo.toml"
               - "Cargo.lock"
               - "rust-toolchain.toml"

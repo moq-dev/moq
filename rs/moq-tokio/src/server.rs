@@ -737,7 +737,8 @@ impl Server {
 							link.local = local;
 							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
 							let quic = Some(crate::quic::Connection::new((*session).clone()));
-							let (request, deadline) = accept_request(&setup.server, session, binding, deadline).await?;
+							let session = crate::transport::Session::new(session, binding);
+							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
 							Ok(Request { transport, url, identity, authority, link, kind: RequestKind::Quic(Box::new(request)), quic, deadline, active })
@@ -756,7 +757,8 @@ impl Server {
 						self.accept.push(async move {
 							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
 							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
-							let (request, deadline) = accept_request(&setup.server, session, binding, deadline).await?;
+							let session = crate::transport::Session::new(session, binding);
+							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							Ok(Request {
 								transport: Transport::Iroh,
 								url,
@@ -788,7 +790,7 @@ impl Server {
 						self.accept.push(async move {
 							let (session, url, accepted) = within(deadline, _pending).await?;
 							let mut options = crate::websocket::Options::new(url, setup.server, active);
-							options.link = Link { remote: Some(accepted.remote), local, alpn: accepted.protocol, ..Default::default() };
+							options.link = Link { remote: Some(accepted.remote), local, alpn: Some(accepted.protocol), ..Default::default() };
 							accept_websocket(session, options, deadline).await
 						}.boxed());
 					}
@@ -923,8 +925,7 @@ impl Listener {
 		};
 		let (session, protocol) = within(deadline, handshake).await?;
 
-		let (request, deadline) =
-			accept_request(&server.moq, session, moq_net::transport::Binding::InBand, deadline).await?;
+		let (request, deadline) = accept_request(&server.moq, session, deadline).await?;
 		Ok(Request {
 			transport: Transport::WebRtc,
 			url: None,
@@ -1051,16 +1052,13 @@ impl Setup {
 async fn accept_request<S>(
 	server: &moq_net::Server,
 	session: S,
-	binding: moq_net::transport::Binding,
 	deadline: Option<moq_clock::Instant>,
-) -> crate::Result<(PendingRequest<crate::transport::Session<S>>, Option<Deadline>)>
+) -> crate::Result<(PendingRequest<S>, Option<Deadline>)>
 where
-	S: crate::transport::Grouped,
-	crate::transport::Session<S>: moq_net::transport::poll::Boxable,
-	<crate::transport::Session<S> as moq_net::transport::poll::Session>::SendStream: moq_net::transport::MaybeSync,
-	<crate::transport::Session<S> as moq_net::transport::poll::Session>::RecvStream: moq_net::transport::MaybeSync,
+	S: moq_net::transport::poll::Boxable + Send + Sync,
+	S::SendStream: moq_net::transport::MaybeSync,
+	S::RecvStream: moq_net::transport::MaybeSync,
 {
-	let session = crate::transport::Session::new(session, binding);
 	let deadline = deadline.map(|at| Deadline::new(at, session.clone()));
 	let accept = async { Ok(server.accept_request(moq_net::time::now(), session).await?) };
 	let request = Deadline::bound(deadline.as_ref(), accept).await?;
@@ -1073,8 +1071,7 @@ pub(crate) async fn accept_websocket(
 	options: crate::websocket::Options,
 	deadline: Option<moq_clock::Instant>,
 ) -> crate::Result<Request> {
-	let (request, deadline) =
-		accept_request(&options.server, session, moq_net::transport::Binding::Uri, deadline).await?;
+	let (request, deadline) = accept_request(&options.server, session, deadline).await?;
 	let authority = options.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 	Ok(Request {
 		transport: Transport::WebSocket,
@@ -1109,13 +1106,15 @@ impl Deadline {
 	))]
 	fn new<S>(at: moq_clock::Instant, session: S) -> Self
 	where
-		S: web_transport_trait::poll::Session + Clone + Send + Sync + 'static,
+		S: moq_net::transport::poll::Session + Send + Sync,
 	{
 		let close = move || {
 			let err = moq_net::Error::Timeout;
-			session
-				.clone()
-				.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
+			moq_net::transport::poll::Session::close(
+				&mut session.clone(),
+				moq_net::SessionError::from(&err).to_code(),
+				&err.to_string(),
+			);
 		};
 		Self {
 			at,
@@ -1565,7 +1564,7 @@ async fn stream_request(
 		deadline,
 		active,
 	} = incoming;
-	match accept_request(&setup.server, session, moq_net::transport::Binding::InBand, deadline).await {
+	match accept_request(&setup.server, session, deadline).await {
 		Ok((request, deadline)) => {
 			let request = Request {
 				transport,
@@ -1605,7 +1604,7 @@ pub(crate) enum RequestKind {
 		feature = "websocket",
 		feature = "webrtc"
 	))]
-	Qmux(Box<PendingRequest<crate::transport::Session<qmux::Session>>>),
+	Qmux(Box<PendingRequest<qmux::Session>>),
 }
 
 /// The transport-level facts a backend captures while accepting a connection, before the
@@ -2206,8 +2205,8 @@ mod tests {
 		let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
 		let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
 		(
-			qmux::ws::Upgraded::new(client).with_alpn(ALPN).connect(),
-			qmux::ws::Upgraded::new(server).with_alpn(ALPN).accept(),
+			qmux::ws::Upgraded::new(client, ALPN).connect().unwrap(),
+			qmux::ws::Upgraded::new(server, ALPN).accept().unwrap(),
 		)
 	}
 
@@ -2215,8 +2214,8 @@ mod tests {
 	#[cfg(feature = "websocket")]
 	#[tokio::test(start_paused = true)]
 	async fn upgraded_websocket_preserves_request_metadata() {
+		use moq_net::transport::poll::{SendOptions, SendStream as _, Session as _};
 		use qmux::ws::tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
-		use web_transport_trait::{SendStream as _, Session as _};
 
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
@@ -2232,11 +2231,11 @@ mod tests {
 		};
 		options.identity = Some(crate::tls::PeerIdentity::from_chain(Vec::new()));
 		let accept = tokio::spawn(crate::websocket::accept(server, options));
-		let client = qmux::ws::Upgraded::new(client)
-			.with_alpn("qmux-01.moq-lite-06")
-			.connect();
-		let mut setup = client.open_uni().await.unwrap();
-		setup.write_all(&[1, 1, 0]).await.unwrap();
+		let mut client = qmux::ws::Upgraded::new(client, "qmux-01.moq-lite-06")
+			.connect()
+			.unwrap();
+		let mut setup = client.open_uni(SendOptions::default()).await.unwrap();
+		assert_eq!(setup.write(&[1, 1, 0]).await.unwrap(), 3);
 		setup.finish().unwrap();
 		let request = accept.await.unwrap().unwrap();
 		assert_eq!(request.transport(), Transport::WebSocket);
@@ -2279,6 +2278,19 @@ mod tests {
 		}
 	}
 
+	/// The scripted peer never fails, only parks, so its error is never built.
+	#[cfg(feature = "websocket")]
+	#[derive(Debug, Clone, thiserror::Error)]
+	#[error("scripted peer error")]
+	struct ScriptedError;
+
+	#[cfg(feature = "websocket")]
+	impl web_transport_trait::Error for ScriptedError {
+		fn session_error(&self) -> Option<(u32, String)> {
+			None
+		}
+	}
+
 	/// Records every write, or accepts none at all when `stalled`.
 	#[cfg(feature = "websocket")]
 	struct ScriptedSend {
@@ -2288,7 +2300,7 @@ mod tests {
 
 	#[cfg(feature = "websocket")]
 	impl web_transport_trait::SendStream for ScriptedSend {
-		type Error = qmux::Error;
+		type Error = ScriptedError;
 
 		async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
 			if self.stalled {
@@ -2337,7 +2349,7 @@ mod tests {
 
 	#[cfg(feature = "websocket")]
 	impl web_transport_trait::RecvStream for ScriptedRecv {
-		type Error = qmux::Error;
+		type Error = ScriptedError;
 
 		async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
 			let Some(mut data) = self.data.take() else {
@@ -2360,7 +2372,7 @@ mod tests {
 	impl web_transport_trait::Session for Scripted {
 		type SendStream = ScriptedSend;
 		type RecvStream = ScriptedRecv;
-		type Error = qmux::Error;
+		type Error = ScriptedError;
 
 		async fn accept_uni(&self) -> Result<Self::RecvStream, Self::Error> {
 			std::future::pending().await
@@ -2440,8 +2452,7 @@ mod tests {
 		let start = tokio::time::Instant::now();
 		let Err(err) = accept_request(
 			&setup.server,
-			peer.clone(),
-			moq_net::transport::Binding::Uri,
+			crate::transport::Session::new(peer.clone(), moq_net::transport::Binding::Uri),
 			setup.deadline(),
 		)
 		.await
@@ -2487,8 +2498,7 @@ mod tests {
 		let start = tokio::time::Instant::now();
 		let Ok((request, deadline)) = accept_request(
 			&setup.server,
-			peer.clone(),
-			moq_net::transport::Binding::Uri,
+			crate::transport::Session::new(peer.clone(), moq_net::transport::Binding::Uri),
 			setup.deadline(),
 		)
 		.await
@@ -2514,9 +2524,9 @@ mod tests {
 	#[cfg(feature = "websocket")]
 	#[tokio::test(start_paused = true)]
 	async fn completed_setup_outlives_the_deadline() {
-		use web_transport_trait::Session as _;
+		use moq_net::transport::poll::Session as _;
 
-		let (client, server) = session_pair().await;
+		let (mut client, server) = session_pair().await;
 		let timeout = std::time::Duration::from_secs(10);
 		let setup = Setup {
 			activity: Default::default(),
@@ -2525,7 +2535,7 @@ mod tests {
 		};
 		let deadline = setup.deadline();
 
-		let transport = crate::transport::Session::new(client.clone(), moq_net::transport::Binding::Uri);
+		let transport = client.clone();
 		let connect = tokio::spawn(async move {
 			let (session, driver) = moq_net::Client::new()
 				.connect(moq_net::time::now(), transport)
@@ -2535,8 +2545,7 @@ mod tests {
 			session
 		});
 
-		let Ok((request, _)) = accept_request(&setup.server, server, moq_net::transport::Binding::Uri, deadline).await
-		else {
+		let Ok((request, _)) = accept_request(&setup.server, server, deadline).await else {
 			panic!("a prompt SETUP was refused");
 		};
 		let (_session, driver) = request.ok().await.expect("server handshake");
@@ -2573,10 +2582,7 @@ mod tests {
 				.await
 				.expect("upgrade");
 			let (_session, driver) = moq_net::Client::new()
-				.connect(
-					moq_net::time::now(),
-					crate::transport::Session::new(session, moq_net::transport::Binding::Uri),
-				)
+				.connect(moq_net::time::now(), session)
 				.await
 				.expect("client handshake");
 			moq_net::time::run(driver).await
