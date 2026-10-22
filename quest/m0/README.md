@@ -49,7 +49,6 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
 - [Release fixed delay](/quest/m0/release-fixed-delay.md) - a fixed latency on `release`, which moq.dev runs, ignores the catalog's jitter and delay as `main` already does
 - [Release resubscribe hang](/quest/m0/release-resubscribe-hang.md) - a moq-lite-06 subscription that closes and reopens on `release` is proven to reach the relay, or the hang is fixed and backported
-- [Publisher stall estimate](/quest/m0/publish-stall-estimate.md) - a live browser publish holds its viewers at the Auto target instead of ratcheting their buffer up with every stall
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [Simplification audit](/quest/m0/audit-simplify.md) - overbuilt code and APIs are collapsed, merged, or narrowed into a net simpler whole
 - [Lint override and deprecation audit](/quest/m0/audit-lints.md) - every lint suppression is still needed and says why, nothing calls a deprecated API, and stale Rust overrides fail the build
