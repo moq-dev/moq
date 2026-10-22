@@ -405,8 +405,12 @@ export class Staged {
 	/**
 	 * Publish the track: every waiting subscriber resolves now, with what was written. Throws,
 	 * rejecting the request, if the info is invalid or something written does not match it.
+	 * Throws without publishing once committed or disposed.
 	 */
 	commit(): Producer {
+		// Rust's `commit(self)` consumes the handle; here a disposed one has already rejected
+		// its subscribers, and accepting a closed producer would silently do nothing.
+		if (this.#done) throw new Error("staged track already committed or dropped");
 		this.#done = true;
 		try {
 			return this.producer.accept(this.#info);
