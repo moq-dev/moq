@@ -91,16 +91,26 @@ impl Misses {
 		&self.given_up
 	}
 
-	/// The lowest answered group still cached, forgetting one evicted before it was read.
-	pub fn next_filled(&mut self, state: &TrackState, given_up: &mut GivenUp) -> Option<crate::group::Handle> {
-		while let Some(&sequence) = self.filled.first() {
+	/// The next answered group still cached in `order`, forgetting one evicted before it was
+	/// read.
+	pub fn next_filled(
+		&mut self,
+		state: &TrackState,
+		order: Order,
+		given_up: &mut GivenUp,
+	) -> Option<crate::group::Handle> {
+		loop {
+			let sequence = match order {
+				Order::Ascending => self.filled.first(),
+				Order::Descending => self.filled.last(),
+			}
+			.copied()?;
 			if let Some(slot) = state.lookup.get(&sequence).filter(|slot| !slot.is_aborted()) {
 				return Some(slot.serving().clone());
 			}
 			self.filled.remove(&sequence);
 			self.give_up(sequence..sequence + 1, given_up);
 		}
-		None
 	}
 
 	/// Take `sequence` as handed out.

@@ -5848,11 +5848,13 @@ impl Cursor {
 		}
 	}
 
-	/// The lowest group a fill answered for this cursor, cached and not handed out yet.
+	/// The next group a fill answered for this cursor in its order, cached and not handed
+	/// out yet.
 	fn next_filled(&mut self) -> Option<group::Handle> {
 		let misses = self.misses.as_mut()?;
+		let order = self.subscription.read().order;
 		let mut given_up = Vec::new();
-		let group = misses.next_filled(&self.state.read(), &mut given_up);
+		let group = misses.next_filled(&self.state.read(), order, &mut given_up);
 		if let Some(drops) = &mut self.drops {
 			for run in given_up {
 				drops.give_up(run);
@@ -15351,6 +15353,37 @@ mod test {
 			dynamic.poll_requested_fill(&waiter).is_pending(),
 			"a refusal is not asked again"
 		);
+	}
+
+	/// Groups a fill answered before the reader came back are handed out in the reader's
+	/// order, so a warm cache keeps a descending reader newest first.
+	#[test]
+	#[cfg(feature = "async")]
+	fn filled_groups_are_read_in_the_readers_order() {
+		for order in [Order::Descending, Order::Ascending] {
+			let mut producer = track_producer("test", Info::timed());
+			let dynamic = producer.dynamic();
+			let mut subscriber = producer.subscribe(replay().with_groups(0..).with_order(order));
+			producer.start_at(2).unwrap();
+			write_group(&producer, 2);
+			let waiter = kio::Waiter::noop();
+			while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+			let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+				panic!("below the start is a miss");
+			};
+			while let Some(sequence) = fill.next() {
+				write_filled(fill.accept(sequence, None), sequence);
+			}
+			let mut read = Vec::new();
+			while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) {
+				read.push(group.sequence);
+			}
+			let expected = match order {
+				Order::Descending => [1, 0],
+				Order::Ascending => [0, 1],
+			};
+			assert_eq!(read, expected, "{order:?}");
+		}
 	}
 
 	/// A group the handler refused that still arrives live is delivered.
