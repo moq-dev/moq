@@ -42,6 +42,13 @@ noise.
   match payload billing per label, such as per signing key. The drain runs
   once a second, using under 0.01% of a core at 10,000 sessions. Deleting
   those bytes was rejected.
+- `track_gap_flush` is accepted at O(log gaps + retired entries) per shared
+  successor, after [#6287](https://github.com/moq-dev/moq/pull/6287) indexed
+  the gap ledger and retired a shared verdict's gaps with one split. Each
+  retired entry must be freed exactly once, so the batch is already amortized
+  optimal; a representation that hides that reclamation would widen scope for
+  no measured benefit. Sparse arrivals cost O(log gaps) amortized, and at 4096
+  gaps flush, read, and expiry instructions fell 84 to 95%.
 
 ### Release as a baseline
 
@@ -56,9 +63,9 @@ usually pays for a feature.
 
 | Bench | release | main | Ratio | Owner |
 |---|---|---|---|---|
-| `track_gap_flush/4096` | 5.7 us | 551 us | 96x | [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) |
-| `track_gap_flush/512` | 1.8 us | 48 us | 27x | same |
-| `track_gap_flush/64` | 1.5 us | 6.2 us | 4.1x | same |
+| `track_gap_flush/4096` | 5.7 us | 551 us | 96x | accepted (above) |
+| `track_gap_flush/512` | 1.8 us | 48 us | 27x | accepted (above) |
+| `track_gap_flush/64` | 1.5 us | 6.2 us | 4.1x | accepted (above) |
 | `stats/session-report/1000x10` | 11.0 us | 86.8 us | 7.9x | [Stats report](/quest/m1/release-perf/stats-report.md) |
 | `track_gc/idle/16384` | 11.6 ns | 73.7 ns | 6.3x | [Idle GC](/quest/m1/release-perf/gc-idle.md) |
 | `origin/resume_overlap/sequence/1r_64g_32c` | 93 us | 426 us | 4.6x | [Resume duplicates](/quest/m1/release-perf/resume-duplicates.md) |
@@ -93,7 +100,6 @@ one.
 ## Required
 
 - [FETCH fan-out](/quest/m1/release-perf/fetch-fanout.md) - a relay serves later viewers' lite FETCHes of a group from its cache, so per-viewer cost falls with viewers again
-- [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) - an arrival and a gap flush cost O(log gaps), not O(gaps)
 - [Resume duplicates](/quest/m1/release-perf/resume-duplicates.md) - an ordered resume skips copies of an already-delivered group without consuming them
 - [Idle GC](/quest/m1/release-perf/gc-idle.md) - an idle track GC skips the wall-clock pass when nothing is due
 - [Stats report](/quest/m1/release-perf/stats-report.md) - the stats drain locks each row once and its bench counts the wire walk; per-label bytes stay, at an accepted O(live sessions)
