@@ -487,6 +487,10 @@ impl StreamsState {
     /// violation.
     #[cfg(feature = "mux")]
     pub(crate) fn rx_offset(&self, id: StreamId) -> Option<u64> {
+        // A peer stream not opened yet starts at offset 0 too
+        if id.initiator() != self.side && id.index() >= self.next_remote[id.dir() as usize] {
+            return Some(0);
+        }
         let recv = self.recv.get(&id)?;
         // Present but unopened: the peer may send on it, starting at offset 0
         Some(

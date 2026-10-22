@@ -414,7 +414,15 @@ fn stream_offsets_follow_the_transport_order() {
 
     let mut server = Connection::new(config(Version::QMux01), Side::Server, now);
     server.handle_record(after_params(Version::QMux01, &first), now);
-    server.handle_record(gap.into(), now);
+    server.handle_record(gap.clone().into(), now);
+    assert_eq!(
+        transport_error(&mut server).code,
+        TransportErrorCode::PROTOCOL_VIOLATION
+    );
+
+    // Including as the stream's first frame
+    let mut server = Connection::new(config(Version::QMux01), Side::Server, now);
+    server.handle_record(after_params(Version::QMux01, &gap), now);
     assert_eq!(
         transport_error(&mut server).code,
         TransportErrorCode::PROTOCOL_VIOLATION
@@ -502,6 +510,26 @@ fn datagrams() {
             .datagrams()
             .send(Bytes::from_static(b"hello"), SendOptions::default()),
         Err(SendDatagramError::Disabled)
+    );
+}
+
+#[test]
+fn a_small_datagram_does_not_pin_its_record() {
+    let mut pair = Pair::new(config(Version::QMux02));
+    let mut record = Vec::new();
+    record.write_var(0x31); // DATAGRAM with a length
+    record.write_var(1);
+    record.put_u8(7);
+    record.resize(DEFAULT_MAX_RECORD_SIZE as usize, 0); // PADDING
+    let record = Bytes::from(record);
+    let span = record.as_ptr_range();
+    pair.server.handle_record(record.clone(), pair.now);
+
+    let datagram = pair.server.datagrams().recv().unwrap();
+    assert_eq!(datagram, &[7][..]);
+    assert!(
+        !span.contains(&datagram.as_ptr()),
+        "the datagram still points into its record"
     );
 }
 
