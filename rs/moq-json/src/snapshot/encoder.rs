@@ -353,10 +353,11 @@ impl<T: Serialize> Encoder<T> {
 		//
 		// Charged the larger of the encoded payload and the plaintext: a sync-flushed DEFLATE frame
 		// can come out slightly larger than its input, while the reader's window counts what it
-		// inflates. Compressing first advances the window, but [`Self::snapshot`] opens a fresh one,
-		// so an over-budget delta costs only the wasted compression.
+		// inflates. Compressing first advanced the window past what any reader holds, so drop the
+		// group before rolling: if the snapshot is refused too, the next update must not be a delta.
 		let charge = (payload.len() as u64).max(bytes.len() as u64);
 		if self.group_bytes + charge > self.max_group_bytes {
+			self.reset();
 			return self.snapshot(value).map(Some);
 		}
 
@@ -909,6 +910,31 @@ mod test {
 		assert!(
 			rolled.payload.len() < 500,
 			"the patch deflates small, so only its plaintext overflows"
+		);
+	}
+
+	/// A delta that overflows the group advances the window before the roll is attempted, so a refused
+	/// roll must not leave that window behind: the next update is a snapshot a reader can decode.
+	#[test]
+	fn a_refused_roll_resynchronizes() {
+		let config = Config {
+			delta_ratio: 100,
+			compression: Compression::Deflate,
+		};
+		let mut encoder = Encoder::<Value>::new(config);
+		encoder.max_group_bytes = 200;
+		assert!(commit(&mut encoder, &json!({ "a": 1 })).unwrap().keyframe);
+		assert!(matches!(
+			encoder.update(&json!({ "a": 1, "b": "x".repeat(300) })),
+			Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
+		));
+
+		let next = commit(&mut encoder, &json!({ "a": 2 })).expect("a snapshot");
+		assert!(next.keyframe);
+		let mut decoder = moq_flate::Decoder::new();
+		assert_eq!(
+			serde_json::from_slice::<Value>(&decoder.frame(&next.payload).unwrap()).unwrap(),
+			json!({ "a": 2 })
 		);
 	}
 

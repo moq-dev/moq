@@ -230,8 +230,8 @@ export class Encoder<T> {
 			//
 			// Charged the larger of the encoded payload and the plaintext: a sync-flushed DEFLATE frame
 			// can come out slightly larger than its input, while the reader's window counts what it
-			// inflates. Compressing first advances the window, but `#snapshot` opens a fresh one, so an
-			// over-budget delta costs only the wasted compression.
+			// inflates. Compressing first advanced the window past what any reader holds, so drop the
+			// group before rolling: if the snapshot is refused too, the next update must not be a delta.
 			const charge = Math.max(payload.length, delta.length);
 			if (this.#groupBytes + charge <= this.#maxGroupBytes) {
 				this.#last = json;
@@ -240,6 +240,7 @@ export class Encoder<T> {
 				this.#groupFrames += 1;
 				return this.#pend({ payload, keyframe: false });
 			}
+			this.reset();
 		}
 
 		const payload = this.#snapshot(new TextEncoder().encode(text));

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
+import { Decoder as Flate } from "@moq/flate";
 import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Encoder } from "./encoder.ts";
@@ -417,6 +418,19 @@ test("a compressed delta is gated on its inflated size", () => {
 	const rolled = encoder.update(patched);
 	expect(rolled?.keyframe).toBe(true);
 	expect(rolled?.payload.length).toBeLessThan(500);
+});
+
+// A delta that overflows the group advances the window before the roll is attempted, so a refused roll
+// must not leave that window behind: the next update is a snapshot a reader can decode.
+test("a refused roll resynchronizes", () => {
+	const encoder = new Encoder<Value>({ compression: "deflate", deltaRatio: 100, maxGroupBytes: 200 });
+	encoder.update({ a: 1 })?.commit();
+	expect(() => encoder.update({ a: 1, b: "x".repeat(300) })).toThrow(NetError.FrameTooLarge);
+
+	const next = encoder.update({ a: 2 });
+	expect(next?.keyframe).toBe(true);
+	const decoded = new TextDecoder().decode(new Flate().frame(next?.payload ?? new Uint8Array()));
+	expect(JSON.parse(decoded)).toEqual({ a: 2 });
 });
 
 // A compressed snapshot is refused by its plaintext, the way a plain one is, however small it deflates:
