@@ -95,6 +95,8 @@ struct StepOutcome {
 	/// When several renditions fail, this is the one whose failure another pass could still clear,
 	/// so a single permanently-dead variant doesn't end an import the others could still serve.
 	failed: Option<Error>,
+	/// Every rendition's playlist carries `EXT-X-ENDLIST` and its last segment is imported.
+	ended: bool,
 }
 
 /// What a step does when a rendition fails.
@@ -356,6 +358,8 @@ struct TrackState {
 	/// Consecutive failed ingest attempts, reset by any successful one. See
 	/// [`MAX_RENDITION_FAILURES`].
 	failures: usize,
+	/// The playlist carries `EXT-X-ENDLIST` and its last segment is imported: nothing follows.
+	ended: bool,
 }
 
 impl TrackState {
@@ -371,6 +375,7 @@ impl TrackState {
 			map: None,
 			media_range: RangeCursor::default(),
 			failures: 0,
+			ended: false,
 		}
 	}
 
@@ -393,7 +398,10 @@ impl TrackState {
 			*target_duration = Some(playlist.target_duration);
 		}
 
-		self.consume_segments(fetcher, &playlist).await
+		let consumed = self.consume_segments(fetcher, &playlist).await?;
+		let last = playlist.media_sequence + playlist.segments.len() as u64;
+		self.ended = playlist.end_list && self.next_sequence.is_none_or(|next| next == last);
+		Ok(consumed)
 	}
 
 	/// Where in `playlist.segments` this track resumes, re-anchoring (and warning) if the
@@ -636,7 +644,11 @@ impl Import {
 		Ok(())
 	}
 
-	/// Run the import loop until cancelled.
+	/// Run the import loop until the playlist ends or the import fails.
+	///
+	/// The playlist ends cleanly once every rendition's playlist carries `EXT-X-ENDLIST` and its
+	/// last segment is imported; this then returns `Ok`, and [`finish`](Self::finish) ends the
+	/// broadcast. A playlist that never ends runs until cancelled.
 	///
 	/// A failed step is logged and retried with escalating backoff, and the import ends with the
 	/// last error once the backoff budget is spent, so a broken source surfaces within seconds
@@ -693,6 +705,10 @@ impl Import {
 					continue;
 				}
 			};
+			if outcome.ended {
+				info!("HLS playlist ended");
+				return Ok(());
+			}
 			let delay = refresh_delay(outcome.target_duration, outcome.wrote_segments);
 
 			debug!(
@@ -704,6 +720,21 @@ impl Import {
 
 			tokio::time::sleep(delay).await;
 		}
+	}
+
+	/// Finish every rendition's tracks and the catalog once [`run`](Self::run) returned `Ok`,
+	/// returning the finished broadcast, which stays announced until it is dropped. Keep it
+	/// until its media is stale, with [`Finish::wait`](moq_net::broadcast::Finish::wait), so
+	/// subscribers still catching up drain the tail.
+	pub fn finish(mut self) -> Result<moq_net::broadcast::Finish> {
+		for track in self.video.iter_mut().chain(self.audio.iter_mut()) {
+			if let Some(importer) = &mut track.importer {
+				importer.finish()?;
+			}
+		}
+		self.sink.catalog.finish()?;
+		// Taken while the importers are alive, so it holds the tracks just finished.
+		Ok(self.sink.broadcast.clone().finish())
 	}
 
 	/// Abort every rendition's importer with `err` so subscribers see the real cause.
@@ -780,11 +811,13 @@ impl Import {
 			}
 		}
 
+		let ended = self.video.iter().chain(self.audio.iter()).all(|track| track.ended);
 		Ok(StepOutcome {
 			wrote_segments,
 			target_duration,
 			failed,
 			ok,
+			ended,
 		})
 	}
 
@@ -1418,6 +1451,46 @@ mod tests {
 		assert_eq!(snapshot.video.renditions.len(), 1);
 		assert_eq!(snapshot.audio.renditions.len(), 1);
 		assert_eq!(import.video[0].next_sequence, Some(2));
+	}
+
+	/// A playlist that ends (`EXT-X-ENDLIST`) ends the import once its last segment is in, and the
+	/// finished broadcast keeps serving it, catalog included, for the retention.
+	#[tokio::test]
+	async fn an_ended_playlist_finishes_the_import() {
+		let (init, fragments) = fmp4_parts(2);
+		let mut resource = init.clone();
+		resource.extend_from_slice(&fragments[0]);
+		resource.extend_from_slice(&fragments[1]);
+		let playlist = format!(
+			"#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"media.mp4\",BYTERANGE=\"{}@0\"\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}@{}\nmedia.mp4\n#EXTINF:1,\n#EXT-X-BYTERANGE:{}\nmedia.mp4\n#EXT-X-ENDLIST\n",
+			init.len(),
+			fragments[0].len(),
+			init.len(),
+			fragments[1].len()
+		);
+		let dir = temp_dir();
+		std::fs::write(dir.join("media.mp4"), &resource).unwrap();
+		std::fs::write(dir.join("media.m3u8"), playlist).unwrap();
+
+		let max_age = Duration::from_secs(3);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
+		let catalog = CatalogProducer::new(&mut broadcast, config).unwrap();
+		let playlist = Url::from_file_path(dir.join("media.m3u8")).unwrap();
+		let mut import = Import::new(broadcast, catalog, Config::new(playlist)).unwrap();
+
+		tokio::time::timeout(Duration::from_secs(10), import.run())
+			.await
+			.expect("an ended playlist ends the import")
+			.unwrap();
+		let finish = import.finish().unwrap();
+		assert_eq!(finish.linger(), max_age);
+		let mut listed = consumer.track("catalog.json").unwrap().subscribe(None).await.unwrap();
+		assert!(
+			listed.recv_group().await.unwrap().is_some(),
+			"the late subscriber reads the catalog"
+		);
 	}
 
 	/// A rendition that has stopped making progress is dropped after a few consecutive
