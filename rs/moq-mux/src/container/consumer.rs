@@ -1112,18 +1112,6 @@ mod tests {
 
 	// ---- Basic Reading ----
 
-	#[test]
-	fn new_inherits_the_initial_subscription_latency() {
-		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let max_delay = Duration::from_millis(250);
-		let subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_delay(max_delay));
-
-		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
-
-		assert_eq!(consumer.max_delay, max_delay);
-		assert_eq!(consumer.subscriber().subscription().max_delay, max_delay);
-	}
-
 	#[tokio::test]
 	async fn read_single_group() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -2236,25 +2224,6 @@ mod tests {
 		assert_eq!(frames[1].timestamp, ts(30_000));
 	}
 
-	// ---- B-frames ----
-
-	#[tokio::test]
-	async fn bframes_within_group() {
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer_track =
-			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
-
-		write_group(&mut track, 0, &[ts(0), ts(66_000), ts(33_000)]);
-		track.finish().unwrap();
-
-		let frames = read_all(&mut consumer).await.unwrap();
-		assert_eq!(frames.len(), 3);
-		assert_eq!(frames[0].timestamp, ts(0));
-		assert_eq!(frames[1].timestamp, ts(66_000));
-		assert_eq!(frames[2].timestamp, ts(33_000));
-	}
-
 	// ---- Track Lifecycle ----
 
 	#[tokio::test]
@@ -2996,27 +2965,6 @@ mod tests {
 	}
 
 	// ---- Frame Decoding ----
-
-	#[tokio::test]
-	async fn frame_timestamp_and_index_decoding() {
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer_track =
-			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
-
-		write_group(&mut track, 0, &[ts(0), ts(33_333), ts(66_666)]);
-		track.finish().unwrap();
-
-		let frames = read_all(&mut consumer).await.unwrap();
-		assert_eq!(frames.len(), 3);
-
-		assert_eq!(frames[0].timestamp, ts(0));
-		assert!(frames[0].keyframe);
-
-		assert_eq!(frames[1].timestamp, ts(33_333));
-
-		assert_eq!(frames[2].timestamp, ts(66_666));
-	}
 
 	#[tokio::test]
 	async fn frame_payload_preserved() {

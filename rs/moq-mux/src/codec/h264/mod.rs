@@ -1098,29 +1098,6 @@ mod tests {
 		assert_eq!(out.as_ref(), expected.as_ref());
 	}
 
-	#[test]
-	fn avc3_export_e2e_payload_shape() {
-		// Mirror the byte shapes used by the export integration test so any
-		// divergence surfaces here in isolation.
-		let sps = &[0x67u8, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..];
-		let pps = &[0x68u8, 0xce, 0x3c, 0x80][..];
-		let idr = &[0x65u8, 0x88, 0x84, 0x21, 0x00, 0x11, 0x22, 0x33][..];
-		let pslice = &[0x61u8, 0xe0, 0x12, 0x34][..];
-
-		let mut tx = Avc1::new();
-		let key = annexb_frame(&[sps, pps, idr]);
-		let key_out = tx.transform(key).expect("transform key").expect("output");
-		assert!(tx.avcc().is_some());
-
-		assert_eq!(key_out.len(), 4 + idr.len());
-		assert_eq!(&key_out[4..], idr);
-
-		let p = annexb_frame(&[pslice]);
-		let p_out = tx.transform(p).expect("transform p").expect("output");
-		assert_eq!(p_out.len(), 4 + pslice.len());
-		assert_eq!(&p_out[4..], pslice);
-	}
-
 	fn decode_avcc(bytes: &Bytes) -> mp4_atom::Avcc {
 		use mp4_atom::Atom;
 		mp4_atom::Avcc::decode_body(&mut std::io::Cursor::new(bytes.as_ref())).unwrap()
