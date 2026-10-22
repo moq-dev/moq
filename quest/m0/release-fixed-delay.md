@@ -12,8 +12,7 @@ contains the fix and numeric selections no longer include those estimates.
 The implementation merged into release in
 [moq-dev/moq#6217](https://github.com/moq-dev/moq/pull/6217). Verify its release
 deploy reaches moq.dev, then retire this quest; no duplicate backport is
-needed. The [focused backports](/quest/m0/release-backports/README.md) track
-the other selected fixes.
+needed.
 
 The backport preserves the behavior from
 [moq-dev/moq#4162](https://github.com/moq-dev/moq/pull/4162) without its

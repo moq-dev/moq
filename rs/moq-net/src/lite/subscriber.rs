@@ -850,7 +850,11 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 					};
 					self.state = match kind {
 						lite::DataType::Group => UniState::Group(GroupRecv::new(self.subscriber.clone(), reader)),
-						lite::DataType::Setup => UniState::Setup { reader },
+						lite::DataType::Setup => {
+							let mut reader = reader;
+							reader.set_priority(crate::priority::RECV_CONTROL);
+							UniState::Setup { reader }
+						}
 						lite::DataType::Padding => UniState::Padding {
 							reader,
 							budget: kio::coop::Budget::new(32),
@@ -1029,6 +1033,11 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						group.start_at(hdr.frame_start)?;
 						(group, entry.producer.clone(), entry.framing, reading)
 					};
+					let (priority, order) = track
+						.subscription()
+						.map_or((0, Default::default()), |sub| (sub.priority, sub.order));
+					self.reader
+						.set_priority(crate::priority::recv_group(priority, hdr.sequence, order));
 
 					// The timescale came from TRACK_INFO (read before this subscription was
 					// even registered), so frames decode immediately. No SUBSCRIBE_OK to
