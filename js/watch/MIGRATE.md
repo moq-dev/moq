@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A cleanly ended catalog keeps playing
+
+When the catalog track ends cleanly, the player keeps its catalog and `"live"` status until the broadcast closes or is withdrawn, instead of going `"offline"` at once.
+Wait for `Broadcast.out.status` to report `"offline"` to learn that a finished broadcast ended, not for the catalog to clear.
+
 ### A newer catalog reports `unsupported`
 
 Handle `"unsupported"` in `Broadcast.out.status` by asking the viewer to update their player.

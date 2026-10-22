@@ -72,6 +72,27 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
+      - name: TS audio-only SCTE-35
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --clockless audio-scte35
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      - name: TS sections-only clock
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --clockless sections
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      - name: TS whole-PES-only clock
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --clockless pes
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
       # `import/export ts --passthrough`: from its first packet the capture is the source's
       # packets in place, and every compliance check grades it as it grades that interval of
       # the source. The generated clip fails the T-STD model on its own; the capture must too.
