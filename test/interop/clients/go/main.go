@@ -387,19 +387,35 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 		return err
 	}
 	defer live.Cancel()
-	frame, err := live.ReadFrame(ctx)
+	group, err := live.NextGroup(ctx)
 	if err != nil {
 		return err
 	}
-	if frame == nil || string(frame.Payload) != "session-alive" {
-		return errors.New("unexpected session health payload")
+	if group == nil {
+		return errors.New("missing session health group")
 	}
-	frame, err = live.ReadFrame(ctx)
+	defer group.Cancel()
+	frame, err := group.ReadFrame(ctx)
+	if err != nil {
+		return err
+	}
+	if frame == nil || string(frame.Payload) != "session-alive" || frame.Timestamp != nil {
+		return errors.New("unexpected session health payload or timestamp")
+	}
+	frame, err = group.ReadFrame(ctx)
 	if err != nil {
 		return err
 	}
 	if frame != nil {
-		return errors.New("session health track did not end after one frame")
+		return errors.New("session health group did not end after one frame")
+	}
+	next, err := live.NextGroup(ctx)
+	if err != nil {
+		return err
+	}
+	if next != nil {
+		next.Cancel()
+		return errors.New("session health track did not end after one group")
 	}
 	if client.Session().Connects() != 1 {
 		return errors.New("subscriber reconnected during finish")
