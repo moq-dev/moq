@@ -96,6 +96,7 @@ is published; older versions are unchanged.
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 - [Compressed tracks in js/net](/quest/m1/compress/js.md) - JS reads and writes compressed lite-07 tracks instead of refusing them
 - [TRACKS in js/net](/quest/m1/archive/tracks-js.md) - JS speaks lite-07's Tracks Stream, which Rust already does
+- [Listing end reason](/quest/m1/listing-end-reason.md) - lite-07's TRACKS_FINISH says a listed track finished, so an IETF answerer can end it with TRACK_ENDED
 - [lite-07 padding](/quest/m1/lite07-padding.md) - lite-07 reserves the padding stream type the browser probes with
 
 ## Related

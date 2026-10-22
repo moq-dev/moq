@@ -18,10 +18,18 @@ and the answerer sends TRACK_ENDED only for a track that really finished.
 
 ## Plan
 
-- Public API and wire, so settle the shape with the maintainer first: how
-  `TracksEvent::Removed` and `broadcast::Lister::remove` carry the end, and a
-  lite-07 TRACKS_REMOVE field so a relay chain keeps it (`drafts/` and js/net
-  in the same change).
+Decided 2026-10-22 (maintainer), public API and wire:
+
+- Rust and JS gain a `TracksEvent::Finished { name }` variant beside
+  `Removed { name }`, which now means unfinished, and `Lister::finish(name)`
+  beside `remove`. Rejected: a `finished: bool` flag, and an `End` enum on
+  `Removed`.
+- lite-07 gains a TRACKS_FINISH event type on the Tracks Stream, with the same
+  body as TRACKS_REMOVE, so a relay chain keeps the distinction. TRACKS_REMOVE
+  keeps its meaning. Rejected: a reason field on TRACKS_REMOVE. Update
+  `drafts/draft-lcurley-moq-lite.md` and js/net in the same change.
+- It lands before the lite-07 freeze: [Finalize moq-lite-07](/quest/m1/lite07-finalize.md)
+  Requires it.
 - A relay's copy reports what its upstream reported, never what its cache
   happens to know.
 - Test Rust-to-Rust over drafts 18-22: a finished track is removed, an
