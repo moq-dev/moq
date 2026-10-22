@@ -92,8 +92,9 @@ impl Wire {
 ///
 /// A sender raises the congestion estimate while the connection is app-limited below
 /// this target, so a rate the session wants to send can be funded once the path has room.
-/// The session writes the sum of its [`Allocator`](crate::bandwidth::Allocator)'s
-/// reservations here; the transport reads it whenever it decides how to fill its pacing.
+/// The session writes its [`Allocator`](crate::bandwidth::Allocator)'s target here, the
+/// reservations' ceilings summed unless overridden; the transport reads it whenever it
+/// decides how to fill its pacing.
 /// Probing to it is local, so it never reaches the wire.
 ///
 /// Clones share one value, which starts at zero: nothing to probe for.

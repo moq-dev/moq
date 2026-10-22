@@ -230,6 +230,8 @@ impl Allocator {
 	}
 
 	/// The same registry dividing `estimate` instead, or nothing when it is `None`.
+	// private: capability gap
+	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn with_estimate(&self, estimate: Option<Consumer>) -> Self {
 		Self {
 			estimate: estimate.unwrap_or(Consumer {
@@ -254,6 +256,8 @@ impl Allocator {
 	}
 
 	/// Follow the probe target, for the session that probes on the reservations' behalf.
+	// private: capability gap
+	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn target(&self) -> Target {
 		Target {
 			registry: Some(self.registry.consume()),
@@ -476,6 +480,8 @@ struct Entry {
 }
 
 /// An [`Allocator`]'s probe target, followed by the session that probes for it.
+// private: capability gap
+// Sessions follow their allocator's target; a custom session has no public way to yet.
 pub(crate) struct Target {
 	/// `None` once every allocator is gone.
 	registry: Option<kio::Consumer<Registry>>,
@@ -486,6 +492,8 @@ impl Target {
 	/// The target once it differs from the last one returned, arming `waiter` otherwise.
 	///
 	/// Zero once every allocator is gone, since nothing is left reserving.
+	// private: capability gap
+	// Sessions follow their allocator's target; a custom session has no public way to yet.
 	pub(crate) fn poll_changed(&mut self, waiter: &kio::Waiter) -> Poll<Rate> {
 		let Some(registry) = &self.registry else {
 			return Poll::Pending;
@@ -1221,7 +1229,10 @@ mod tests {
 		let _other = allocator.reserve(&other.demand(), bps(500_000));
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(500_000)));
 		drop(idle);
-		assert!(target.poll_changed(&waiter).is_pending(), "a pruned claim is not released twice");
+		assert!(
+			target.poll_changed(&waiter).is_pending(),
+			"a pruned claim is not released twice"
+		);
 	}
 
 	/// The override replaces the sum for every clone until it is cleared.

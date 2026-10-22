@@ -1404,6 +1404,10 @@ mod tests {
 
 		reserved.update(crate::bandwidth::Rate::from_bps(3_000_000));
 		probes_to(&second, 3_000_000).await;
-		assert_eq!(first.probe_target(), 4_000_000, "a closed session's sender is left alone");
+		assert_eq!(
+			first.probe_target(),
+			4_000_000,
+			"a closed session's sender is left alone"
+		);
 	}
 }
