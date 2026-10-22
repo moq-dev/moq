@@ -864,6 +864,9 @@ export class Subscriber {
 			timescale.set(0);
 			drainOk = true;
 		}
+		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
+		// this copy holds its first group until the answer arrives.
+		if (resolvesStart(this.version)) hooks.startTrack(producer, { requested: msg.startGroup });
 
 		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
 		const entry: SubscribeEntry = {

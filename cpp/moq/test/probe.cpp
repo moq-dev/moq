@@ -109,6 +109,18 @@ int main() {
     CHECK(!moq::MediaTimebase::init(timebase_owner));
     ok(timebase_other->close(), "close timebase other");
 
+    // A finished broadcast lingers for its longest max age; closing the handle ends the wait early.
+    auto finished = ok(moq::BroadcastProducer::init(), "finished broadcast");
+    moq::TrackInfo aged;
+    aged.max_age_us = 3600000000;
+    ok(ok(finished->publish_track("status", aged), "publish aged track")->finish(), "finish aged track");
+    auto finish = ok(finished->finish(), "broadcast finish");
+    CHECK(finish->linger_us() == 3600000000);
+    CHECK(!finished->publish_track("events", {}));
+    auto lingering = finish->wait();
+    finish->close();
+    ok(lingering.get(), "finish wait");
+
     // A synchronous error is a returned value, not an exception.
     auto unbound = ok(moq::Server::init({}), "server init");
     auto fingerprints = unbound->cert_fingerprints();

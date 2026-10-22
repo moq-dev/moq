@@ -22,6 +22,9 @@ text; this quest owns the following behavior it left out.
   today, as `failed_binding_does_not_retry_a_later_publisher` asserts; that
   changes. The "no retarget" rule applies only to readers that follow no
   announcement.
+  Decided 2026-10-20 (maintainer): this quest owns `Source::follow` and
+  [sink restart follow](/quest/m1/sink-restart-follow.md) reuses it, so
+  no reader hand-rolls its own follow loop.
 - `moqsrc`: Start binds the rendition, End idles its pad, and Restart
   restarts its pump.
 - Exporters: a late first announcement starts the rendition and End ends
@@ -46,3 +49,4 @@ epoch, and concurrent old/new consumers, in the moq-mux unit tests and the
 
 - [Sink restart follow](/quest/m1/sink-restart-follow.md) - exporters and sinks that follow an epochless Restart of their own broadcast
 - [Export rendition rebind](/quest/m1/export-rendition-rebind.md) - exporters rebuild a rendition whose reference changes
+- [Hang contribution references](/quest/m2/contribution-ref.md) - builds its lazy contribution entries on these reference rules

@@ -108,4 +108,4 @@ separately; it does not adopt any of them in advance.
 ## Related
 
 - [TS validation](/test/ts/README.md) - shaped paths, whole-group shedding, and measured baselines
-- [Native probing](/quest/m2/probe/native.md) - preserving an estimate and discovering spare capacity are separate problems
+- [Native probing](/quest/m1/probe-native.md) - preserving an estimate and discovering spare capacity are separate problems

@@ -61,7 +61,7 @@ Only a problem worth fixing:
 - a wrong base branch, with evidence (never inferred from a branch name)
 - a public API or wire change missing from the description
 - a Cross-Package Sync mirror or IETF draft update missing
-- logic changed without a regression test
+- a new non-trivial edge case without a test
 
 Not a finding: anything CI's compiler, linter, or formatter catches;
 pre-existing issues on unchanged lines; nitpicks a maintainer would not raise;

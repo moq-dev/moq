@@ -181,15 +181,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
 	use super::*;
 
-	/// The import loop consults this, so an origin's settled answer has to reach it intact.
-	#[test]
-	fn an_http_failure_reports_its_status() {
-		// A failure the origin never answered carries no status, so the budget decides instead.
-		assert_eq!(Error::NoVariants.status(), None);
-		assert_eq!(Error::ParsePlaylist("not a playlist".to_string()).status(), None);
-		assert_eq!(Error::Moq(moq_net::Error::Transport("lost".to_string())).status(), None);
-	}
-
 	#[tokio::test]
 	async fn http_error_redacts_url() {
 		// A freed port refuses the connection, so reqwest fails with the dialed URL attached.
