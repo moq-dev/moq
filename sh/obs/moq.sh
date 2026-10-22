@@ -6,7 +6,8 @@
 # copy-if-different render keep a no-op rebuild cheap.
 #
 # Debug, for the same reason `just obs ci` is: the Rust cache CI restores holds
-# dev-profile artifacts.
+# dev-profile artifacts. It shares `just cpp check`'s package build, so a run of
+# both configures it once.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../cpp/moq"
@@ -15,10 +16,10 @@ if ! command -v uniffi-bindgen-cpp >/dev/null 2>&1; then
     echo "uniffi-bindgen-cpp not on PATH; run inside 'nix develop', which supplies it" >&2
     exit 1
 fi
-build="$PWD/build/obs"
-prefix="$build/prefix"
+build="$PWD/build/package"
+prefix="$PWD/build/prefix"
 {
-    cmake -S . -B "$build" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR=lib
+    cmake -S . -B "$build" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR=lib -DMOQ_FFI_DIR=
     cmake --build "$build" --config Release
     cmake --install "$build" --config Release --prefix "$prefix"
 } >&2

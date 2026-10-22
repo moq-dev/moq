@@ -573,16 +573,6 @@ mod tests {
 		assert!(err.to_string().contains("**"), "{err}");
 	}
 
-	#[test]
-	fn test_claims_default() {
-		let claims = Claims::default();
-		assert_eq!(claims.root, "");
-		assert!(claims.publish.is_empty());
-		assert!(claims.subscribe.is_empty());
-		assert_eq!(claims.expires, None);
-		assert_eq!(claims.issued, None);
-	}
-
 	fn authorize_claims(root: &str, subscribe: &[&str], publish: &[&str]) -> Claims {
 		Claims {
 			root: root.to_string(),

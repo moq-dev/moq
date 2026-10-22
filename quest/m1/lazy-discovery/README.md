@@ -32,8 +32,9 @@ Shared rules for the children:
   filters locally.
 - When the last watcher of a prefix leaves, its request lingers for the
   connection's existing `linger` (default 2s) before closing. No new option.
-- A plain `request(path)` stays blind: it opens no announce request and
-  subscribes at once.
+- A plain JS `request(path)` stays blind: it opens no announce request and
+  subscribes at once. Rust has no blind requests or answers (decided
+  2026-10-20, recorded in [the Rust child](/quest/m1/lazy-discovery/rust.md)).
 - Docs and examples that a change makes stale are updated in that change.
 
 End to end, once all children land: the customer's flow (one connection,

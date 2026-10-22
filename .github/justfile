@@ -40,6 +40,7 @@ test:
     python3 sh/rs/test-lints.test.py
     python3 sh/rs/model-markers.test.py
     python3 sh/gh/nightly.test.py
+    python3 sh/gh/pages-clean.test.py
     python3 sh/gh/bench-report.test.py
     python3 sh/gh/ts-paths.test.py
     sh/go/publish-wrapper.test.sh
@@ -116,3 +117,7 @@ benchmark-publish *args:
 # Commit a built report to gh-pages under one directory, leaving the branch checked out for the deploy.
 pages-publish directory report site:
     sh/gh/pages-publish.sh {{ quote(directory) }} {{ quote(report) }} {{ quote(site) }}
+
+# Delete this run's Pages artifact before uploading a replacement on a rerun.
+pages-clean:
+    sh/gh/pages-clean.sh

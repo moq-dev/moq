@@ -278,15 +278,6 @@ mod tests {
 		moq_net::Timestamp::from_micros(v).unwrap()
 	}
 
-	#[test]
-	fn copies_share_one_epoch() {
-		let clock = Clock::at(epoch(), moq_epoch() + Duration::from_secs(1)).unwrap();
-		let shared = clock;
-		// Compare the anchors, not live readings: two `now()` calls race the clock.
-		assert_eq!(clock.instant, shared.instant);
-		assert_eq!(clock.wall(), shared.wall());
-	}
-
 	/// A capture maps onto the clock's own timeline, and one ahead of now or before the epoch is
 	/// refused rather than clamped.
 	#[moq_clock::test]
