@@ -191,7 +191,10 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 		return;
 	};
 	let frames = match &first.entries[position] {
-		Entry::Group { sequence: found, frames } if *found == sequence => frames,
+		Entry::Group {
+			sequence: found,
+			frames,
+		} if *found == sequence => frames,
 		// A datagram stays lossy and uncached, never a fetched group.
 		Entry::Datagram { sequence: found, .. } if *found == sequence => {
 			fill.drop_groups(sequence..sequence + 1);
@@ -222,7 +225,10 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 	for object in &objects[1..] {
 		let next = start + stored.len() as u64;
 		match object.entries.first() {
-			Some(Entry::Group { sequence: found, frames }) if *found == sequence && object.frame_start == next => {
+			Some(Entry::Group {
+				sequence: found,
+				frames,
+			}) if *found == sequence && object.frame_start == next => {
 				stored.extend((next..).zip(frames));
 			}
 			_ => {

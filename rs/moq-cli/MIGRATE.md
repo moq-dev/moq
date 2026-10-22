@@ -4,12 +4,17 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### `import archive` reads what `export archive` writes
+
+`moq import archive <url>` replays one recorded broadcast, the `<url>/<broadcast>/@<epoch>` prefix `export archive` wrote, every track included; point `<url>` at that prefix.
+It no longer reads timeline recordings made by older `moq` versions.
+`--follow <interval>` is removed: a recording still being made is always followed, until `export archive` marks it complete; set the check interval with `--refresh` (default 1s).
+
 ### `export archive` records a prefix (#6160)
 
 `moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/@<epoch>`, until the connection ends, instead of one broadcast at `<url>`.
 Point `<url>` at the root you want recordings under, and drop `--catalog-format`, which it now refuses.
 Untimed tracks record, and `--retention` works on them.
-`import archive` does not read the new layout yet; it still replays recordings made by older `moq` versions.
 
 ### `--cluster-lan-secret` is a file path only (#5910)
 

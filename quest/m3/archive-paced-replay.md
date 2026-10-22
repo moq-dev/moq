@@ -10,7 +10,7 @@ viewer who joins late joins mid-replay.
 
 ## Plan
 
-Retargeted 2026-10-17 onto [Archive consumer](/quest/m1/archive/consumer.md),
+Retargeted 2026-10-17 onto the archive consumer,
 whose broadcast already includes the archived catalog as an ordinary track.
 
 - Decided 2026-10-08: the catalog paces on the same clock as the media, each
@@ -36,7 +36,3 @@ whose broadcast already includes the archived catalog as an ordinary track.
   current group, and that two tracks stay aligned.
 - Deferred in the 2026-09-30 audit and moved to m3 in the 2026-10-05 audit: no
   named consumer.
-
-## Required
-
-- [Archive consumer](/quest/m1/archive/consumer.md) - the stored broadcast this paces

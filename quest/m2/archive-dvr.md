@@ -31,4 +31,4 @@ over missing groups, and return to live.
 ## Required
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - the `Time(pts)` range a seek sends
-- [Archive consumer](/quest/m1/archive/consumer.md) - serves a stored broadcast and resolves time ranges from its keys
+- [Archive time ranges](/quest/m2/archive-time-ranges.md) - the archive consumer resolves time ranges from its keys

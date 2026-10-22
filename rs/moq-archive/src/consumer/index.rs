@@ -61,7 +61,9 @@ impl Index {
 
 	/// The newest object, which holds the newest stored sequence.
 	pub fn newest(&self) -> Option<(Start, Path)> {
-		self.objects.last_key_value().map(|(start, path)| (*start, path.clone()))
+		self.objects
+			.last_key_value()
+			.map(|(start, path)| (*start, path.clone()))
 	}
 
 	/// The objects holding group `sequence` from frame `frame` on, oldest first: the last one

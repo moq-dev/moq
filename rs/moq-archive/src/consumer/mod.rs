@@ -4,7 +4,7 @@
 //! stored track on a `moq_net` broadcast, the archived catalog included, with its stored
 //! timescale and priority and no max age: the store's retention bounds what it holds. Each
 //! track's live feed starts at its newest stored sequence, and every older group is served on
-//! demand from the store through [`track::Dynamic`] fills, each sequence in its recorded form: a
+//! demand from the store through [`track::Dynamic`](moq_net::track::Dynamic) fills, each sequence in its recorded form: a
 //! group as a group, a datagram as a datagram.
 //!
 //! A growing archive is followed: every [`Config::refresh`], one delimiter LIST of the prefix
@@ -38,8 +38,8 @@ use std::time::Duration;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use moq_net::broadcast;
-use object_store::{ObjectStore, ObjectStoreExt};
 use object_store::path::Path;
+use object_store::{ObjectStore, ObjectStoreExt};
 
 use crate::layout::{self, End, Object};
 use crate::{Error, Result, Store};

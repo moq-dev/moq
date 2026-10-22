@@ -191,7 +191,9 @@ async fn a_recording_round_trips() {
 		.with_priority(3)
 		.with_max_age(Duration::from_secs(1));
 	let video = source.create_track("video", timed).unwrap();
-	let mut log = source.create_track("log", track::Info::default().with_priority(9)).unwrap();
+	let mut log = source
+		.create_track("log", track::Info::default().with_priority(9))
+		.unwrap();
 	let config = crate::producer::Config::default()
 		.with_duration(Duration::from_secs(2))
 		.with_flush(Duration::from_secs(100));
@@ -203,7 +205,9 @@ async fn a_recording_round_trips() {
 		let mut group = video.create_group(group::Info { sequence }).unwrap();
 		for index in 0..3 {
 			let pts = Timestamp::from_millis(sequence * 10_000 + index).unwrap();
-			group.write_frame(pts, Bytes::from(vec![sequence as u8, index as u8, 0xff])).unwrap();
+			group
+				.write_frame(pts, Bytes::from(vec![sequence as u8, index as u8, 0xff]))
+				.unwrap();
 		}
 		group.finish().unwrap();
 		sleep(Duration::from_millis(10)).await;
@@ -273,7 +277,11 @@ async fn groups_come_from_cached_objects_and_span_them() {
 	let archive = Archive::new();
 	archive.track("video", 0, true).await;
 	archive
-		.object("video", 0, vec![frames(true, 0, 0..2), frames(true, 1, 0..2), frames(true, 2, 0..3)])
+		.object(
+			"video",
+			0,
+			vec![frames(true, 0, 0..2), frames(true, 1, 0..2), frames(true, 2, 0..3)],
+		)
 		.await;
 	archive.object("video", 3, vec![frames(true, 2, 3..5)]).await;
 	archive.object("video", 0, vec![frames(true, 3, 0..1)]).await;
@@ -318,7 +326,9 @@ async fn a_gap_reads_as_dropped() {
 async fn a_pruned_start_reads_as_dropped() {
 	let archive = Archive::new();
 	archive.track("video", 0, true).await;
-	archive.object("video", 2, vec![frames(true, 5, 2..4), frames(true, 6, 0..2)]).await;
+	archive
+		.object("video", 2, vec![frames(true, 5, 2..4), frames(true, 6, 0..2)])
+		.await;
 	archive.object("video", 0, vec![frames(true, 7, 0..2)]).await;
 	archive.object("video", 0, vec![frames(true, 8, 0..1)]).await;
 
@@ -353,7 +363,9 @@ async fn a_growing_archive_is_followed() {
 	archive.object("a", 0, vec![frames(true, 1, 0..2)]).await;
 	archive.object("b", 0, vec![frames(true, 51, 0..1)]).await;
 	// A new object continuing the open group 51.
-	archive.object("b", 1, vec![frames(true, 51, 1..2), frames(true, 52, 0..1)]).await;
+	archive
+		.object("b", 1, vec![frames(true, 51, 1..2), frames(true, 52, 0..1)])
+		.await;
 	assert_eq!(next(&mut a).await.unwrap(), (0, expected(true, 0, 0..1)));
 	assert_eq!(sequence(&mut a).await, Some(1));
 	assert_eq!(next(&mut b).await.unwrap(), (51, expected(true, 51, 0..2)));
@@ -375,7 +387,9 @@ async fn a_growing_archive_is_followed() {
 async fn an_archive_without_markers_stays_open() {
 	let archive = Archive::new();
 	archive.track("video", 0, true).await;
-	archive.object("video", 0, vec![frames(true, 0, 0..1), frames(true, 1, 0..1)]).await;
+	archive
+		.object("video", 0, vec![frames(true, 0, 0..1), frames(true, 1, 0..1)])
+		.await;
 	// A track `end` alone is not final: the broadcast never wrote `.end`.
 	archive.end("video", End::Finish(At { group: 2, frame: 0 })).await;
 
@@ -396,16 +410,25 @@ async fn a_completed_archive_ends_as_recorded() {
 	archive.track("video", 0, true).await;
 	archive.track("audio", 0, true).await;
 	archive.track("errored", 0, true).await;
-	archive.object("video", 0, vec![frames(true, 0, 0..2), frames(true, 1, 0..2)]).await;
-	archive.object("audio", 0, vec![frames(true, 0, 0..2), frames(true, 1, 0..2)]).await;
-	archive.object("errored", 0, vec![frames(true, 0, 0..1), frames(true, 1, 0..1)]).await;
+	archive
+		.object("video", 0, vec![frames(true, 0, 0..2), frames(true, 1, 0..2)])
+		.await;
+	archive
+		.object("audio", 0, vec![frames(true, 0, 0..2), frames(true, 1, 0..2)])
+		.await;
+	archive
+		.object("errored", 0, vec![frames(true, 0, 0..1), frames(true, 1, 0..1)])
+		.await;
 	archive.end("video", End::Finish(At { group: 2, frame: 0 })).await;
 	archive.end("audio", End::Finish(At { group: 1, frame: 2 })).await;
 	archive.end("errored", End::Error(64 + 7)).await;
 	archive.complete().await;
 
 	let (broadcast, _run) = serve(&archive.store).await;
-	for (track, end) in [("video", Position::group(2)), ("audio", Position { group: 1, frame: 2 })] {
+	for (track, end) in [
+		("video", Position::group(2)),
+		("audio", Position { group: 1, frame: 2 }),
+	] {
 		let mut reader = subscribe(&broadcast, track).await;
 		assert_eq!(next(&mut reader).await.unwrap(), (0, expected(true, 0, 0..2)));
 		assert_eq!(next(&mut reader).await.unwrap(), (1, expected(true, 1, 0..2)));
@@ -441,7 +464,11 @@ async fn groups_and_datagrams_keep_their_forms() {
 	let archive = Archive::new();
 	archive.track("mixed", 0, false).await;
 	archive
-		.object("mixed", 0, vec![frames(false, 0, 0..1), datagram(false, 1), frames(false, 2, 0..1)])
+		.object(
+			"mixed",
+			0,
+			vec![frames(false, 0, 0..1), datagram(false, 1), frames(false, 2, 0..1)],
+		)
 		.await;
 
 	let (broadcast, _run) = serve(&archive.store).await;
@@ -452,7 +479,9 @@ async fn groups_and_datagrams_keep_their_forms() {
 		.with_max_delay(None);
 	let mut reader = track.subscribe(subscription).await.unwrap();
 
-	archive.object("mixed", 0, vec![datagram(false, 3), frames(false, 4, 0..1)]).await;
+	archive
+		.object("mixed", 0, vec![datagram(false, 3), frames(false, 4, 0..1)])
+		.await;
 	let datagram = timeout(10 * REFRESH, reader.recv_datagram())
 		.await
 		.expect("the datagram arrives")
@@ -468,7 +497,11 @@ async fn groups_and_datagrams_keep_their_forms() {
 	// The newest stored group arrives live as a group, still open.
 	let mut sequences = Vec::new();
 	while sequences.last() != Some(&4) {
-		let group = timeout(10 * REFRESH, reader.recv_group()).await.unwrap().unwrap().unwrap();
+		let group = timeout(10 * REFRESH, reader.recv_group())
+			.await
+			.unwrap()
+			.unwrap()
+			.unwrap();
 		sequences.push(group.sequence);
 	}
 	assert!(!sequences.contains(&1) && !sequences.contains(&3), "{sequences:?}");
@@ -534,7 +567,9 @@ async fn an_empty_or_unrecognized_prefix_is_refused() {
 
 	// A directory that is not a canonical track name.
 	let archive = Archive::new();
-	archive.raw("catalog.json/.info", br#"{"version":2,"priority":0}"#).await;
+	archive
+		.raw("catalog.json/.info", br#"{"version":2,"priority":0}"#)
+		.await;
 	assert!(matches!(open(archive.store.clone()).await, Some(Error::Track)));
 }
 
@@ -551,7 +586,10 @@ async fn an_unordered_listing_is_sorted() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
 	for sequence in 0..3 {
-		assert_eq!(next(&mut reader).await.unwrap(), (sequence, expected(true, sequence, 0..1)));
+		assert_eq!(
+			next(&mut reader).await.unwrap(),
+			(sequence, expected(true, sequence, 0..1))
+		);
 	}
 	assert_eq!(super::tests::sequence(&mut reader).await, Some(3));
 }
