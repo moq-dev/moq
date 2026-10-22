@@ -39,7 +39,7 @@ The quickest way to see it in action (requires [Nix](https://nixos.org/download.
 nix develop -c just
 ```
 
-Then visit <https://localhost:8080>. Don't have Nix? See the [demo guide](https://doc.moq.dev/setup/) for manual setup.
+It opens the watch, publish, and stats pages in your browser, or visit <http://localhost:5173/watch.html>. Don't have Nix? See the [demo guide](https://doc.moq.dev/setup/) for manual setup.
 
 ## Architecture
 
@@ -85,11 +85,11 @@ This repository provides both [Rust](rs) and [TypeScript](js) libraries with sim
 | [moq-net](rs/moq-net)            | The networking layer: real-time pub/sub with built-in caching, fan-out, and prioritization. Negotiates either the `moq-lite` or `moq-transport` wire protocol. | [![docs.rs](https://docs.rs/moq-net/badge.svg)](https://docs.rs/moq-net)       |
 | [moq-relay](rs/moq-relay)   | A clusterable relay server. This relay performs fan-out connecting multiple clients and servers together.                             |                                                                                |
 | [moq-auth](rs/moq-auth)     | The authorization contract `moq-relay` speaks: requests, grants, leases, and the JWT that rides them. `moq auth` is the CLI.          | [![docs.rs](https://docs.rs/moq-auth/badge.svg)](https://docs.rs/moq-auth)     |
-| [moq-tokio](rs/moq-tokio) | Opinionated helpers to configure a Quinn QUIC endpoint. It's harder than it should be.                                                | [![docs.rs](https://docs.rs/moq-tokio/badge.svg)](https://docs.rs/moq-tokio) |
+| [moq-tokio](rs/moq-tokio) | Connect and listen over QUIC, WebTransport, WebSocket, TCP/TLS, and Unix sockets, plus optional iroh and WebRTC.                    | [![docs.rs](https://docs.rs/moq-tokio/badge.svg)](https://docs.rs/moq-tokio) |
 | [moq-c](rs/moq-c)             | C bindings for `moq-net`.                                                                                                             | [![docs.rs](https://docs.rs/moq-c/badge.svg)](https://docs.rs/moq-c)           |
 | [hang](rs/hang)             | Media-specific encoding/streaming layered on top of `moq-net`. Can be used as a library.                      | [![docs.rs](https://docs.rs/hang/badge.svg)](https://docs.rs/hang)             |
 | [moq-cli](rs/moq-cli)       | A CLI for publishing media to MoQ relays.                                                                                             |                                                                                |
-| [moq-mux](rs/moq-mux)       | Media muxers and demuxers (fMP4/CMAF, HLS) for importing content into MoQ broadcasts.                                                 | [![docs.rs](https://docs.rs/moq-mux/badge.svg)](https://docs.rs/moq-mux)       |
+| [moq-mux](rs/moq-mux)       | Media muxers and demuxers (fMP4/CMAF, MPEG-TS, FLV, Matroska) for importing content into MoQ broadcasts.                              | [![docs.rs](https://docs.rs/moq-mux/badge.svg)](https://docs.rs/moq-mux)       |
 | [moq-gst](rs/moq-gst)       | A GStreamer plugin for publishing or consuming MoQ broadcasts. Not built by default; requires GStreamer dev libraries.                         |                                                                                |
 
 ### TypeScript
