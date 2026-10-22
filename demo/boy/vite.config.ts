@@ -1,18 +1,18 @@
 import { resolve } from "path";
 import { defineConfig } from "vite";
 import solidPlugin from "vite-plugin-solid";
-import { crossOriginIsolation } from "../../js/common/vite-plugin-isolate";
-import { worklet } from "../../js/common/vite-plugin-worklet";
+import { crossOriginIsolation } from "../../js/common/vite-plugin-isolate.ts";
+import { worklet } from "../../js/common/vite-plugin-worklet.ts";
 
 export default defineConfig({
 	root: "src",
-	envDir: resolve(__dirname),
+	envDir: resolve(import.meta.dirname),
 	plugins: [solidPlugin(), worklet(), crossOriginIsolation()],
 	build: {
 		target: "esnext",
 		rollupOptions: {
 			input: {
-				main: resolve(__dirname, "src/index.html"),
+				main: resolve(import.meta.dirname, "src/index.html"),
 			},
 		},
 	},
@@ -20,6 +20,6 @@ export default defineConfig({
 		hmr: false,
 	},
 	optimizeDeps: {
-		exclude: ["@libav.js/variant-opus-af"],
+		exclude: ["@moq/libav"],
 	},
 });

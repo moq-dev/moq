@@ -23,6 +23,7 @@
 //! inline NALs on every keyframe. CMAF tracks are rejected with a clear error.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -46,12 +47,14 @@ use crate::catalog::hang::Catalog;
 use crate::codec::annexb::InBandCodec;
 use crate::codec::video::{Hrd, Reorder};
 use crate::codec::{aac, annexb, opus};
+use crate::container::consumer::Event;
 use crate::container::decode::{DecodeClock, MAX_REORDER};
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
 
 use super::adts;
 use super::catalog;
+use super::lane::{self, Grid, Lane, Layout, Need, Unplaced};
 use super::psi;
 use super::schedule::{self, Buffer, Schedule};
 
@@ -60,7 +63,7 @@ const PMT_PID: u16 = 0x1000;
 /// First elementary-stream PID; each track gets the next one.
 const FIRST_ES_PID: u16 = 0x1001;
 /// Re-emit PAT/PMT at least this often (wall-clock of the media) for tune-in.
-const PSI_INTERVAL: Duration = Duration::from_millis(500);
+pub(super) const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// The floor between emissions of a *changed* SI snapshot, bounding how fast a
 /// revising publisher can make the mux re-emit its tables. The import side
 /// debounces its own snapshot cuts (`si::DEBOUNCE`), but export consumes any
@@ -68,6 +71,11 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// enforced on the media timeline. Clamped to the entry's own interval, so a
 /// table asking for faster repetition than this still gets it.
 const SI_REVISION_INTERVAL: Duration = Duration::from_secs(1);
+/// How many of an SI entry's newest snapshots [`Export::with_sync`] keeps by media time: more
+/// than a delay's worth of revisions, which the importer debounces.
+const SI_HISTORY: usize = 16;
+/// The SI packets a second every [`Export::with_sync`] multiplex keeps clear of its lanes.
+const SI_LANE: u64 = 80;
 /// Emit a PCR on every crossing of this media-time grid ([`Schedule`]).
 /// TR 101 290 V1.4.1 flags a gap over 100 ms; broadcast muxes emit every 25-40 ms.
 pub(super) const PCR_INTERVAL: Duration = Duration::from_millis(25);
@@ -199,6 +207,10 @@ where
 	trimmed: u64,
 	/// Each elementary stream's access units and silence on the PCR returned ([`Self::stats`]).
 	liveness: super::import::Liveness,
+	/// Place every packet on a fixed lane of the constant rate ([`Self::with_sync`]).
+	sync: bool,
+	/// Under [`Self::with_sync`], the slot whose SI has been queued ([`Self::queue_si`]).
+	si_slot: Option<u128>,
 }
 
 /// What a queued output frame tells [`Export::stats`], applied only once the frame is
@@ -220,10 +232,13 @@ struct Pending {
 	skip: u64,
 	/// How many of those jumps cut a group short ([`jitter::Arrival::cut`]).
 	cut: u64,
-	/// The earliest the frame could have arrived: when its source was last found empty.
+	/// When it landed in this node's cache ([`moq_net::frame::Frame::arrived`]), so a stall
+	/// that holds the export back too does not hide that it came late.
 	arrived: moq_clock::Instant,
-	/// When it was read: the latest it could have arrived.
+	/// When it was read.
 	read: moq_clock::Instant,
+	/// The MoQ group it was read from, and whether it was the first frame read from that group.
+	group: (u64, bool),
 }
 
 /// A frame waiting in the jitter buffer, with what it needs from the moment it was read.
@@ -239,6 +254,22 @@ struct Queued {
 	description: Option<Bytes>,
 	/// The PES it may share ([`Track::pack_start`]).
 	pes: Option<PesStart>,
+	/// Its packets on the track's lane, under [`Export::with_sync`].
+	planned: Option<Planned>,
+}
+
+/// A frame's packets, numbered, and their positions on the timeline ([`Track::plan`]).
+struct Planned {
+	packets: Vec<u8>,
+	positions: Vec<u128>,
+}
+
+/// A track's lane under [`Export::with_sync`].
+struct Synced {
+	layout: Arc<Layout>,
+	lane: Lane,
+	/// The release slot of the last frame planned ([`Track::plan`]).
+	released: Option<u128>,
 }
 
 /// The PES an audio frame may share ([`Track::pack_start`]): the place of its first frame on
@@ -249,10 +280,11 @@ struct Track {
 	source: ExportSource,
 	/// The first frame, held until the program tables are built.
 	pending: Option<Pending>,
-	/// When the source was last found empty. A frame read since arrived no earlier, and
-	/// no later than it is read; the jitter buffer judges it on the earlier bound, so a caller
-	/// that polls late (a sink sleeping to pace its writes) does not make it late.
-	empty: moq_clock::Instant,
+	/// When the source was subscribed. Nothing it delivers reached the export before then,
+	/// however long the cache held it.
+	subscribed: moq_clock::Instant,
+	/// The latest arrival read from the source, which settles the frames held for their DTS.
+	latest: moq_clock::Instant,
 	/// The marker count the decode clock runs under.
 	restart: u64,
 	/// The marker, skip and cut counts of the sources the track read before this one, so the
@@ -274,6 +306,12 @@ struct Track {
 	/// The source's cut count at the last frame queued. A cut since clears what a track that
 	/// has not started holds.
 	held: Option<u64>,
+	/// The source ended a group, cleanly or cut. The next group presents after every picture
+	/// of this one, its leading pictures included, so the end settles each DTS the clock holds:
+	/// waiting on the next group instead would make what this one delivered late behind a hole
+	/// upstream. Settled once the source has nothing more right now, so a track's end, read
+	/// with its last group's, still takes the end of the stream's settlement.
+	settle: bool,
 	/// The PTS of the last keyframe queued, which leading pictures present before.
 	keyframe: Option<Timestamp>,
 	/// What the catalog and the SPS declare about the video's reordering.
@@ -285,6 +323,10 @@ struct Track {
 	/// The last frame's decode time, its jitter buffer key ([`Self::release_key`]) and the PES
 	/// it may share.
 	released: Option<(Timestamp, Timestamp, Option<PesStart>)>,
+	/// The MoQ group of the last frame read.
+	group: Option<u64>,
+	/// Its lane, under [`Export::with_sync`].
+	sync: Option<Synced>,
 }
 
 /// Shared program state needed while reading one track.
@@ -302,7 +344,8 @@ impl Track {
 		Self {
 			source,
 			pending: None,
-			empty: moq_clock::now(),
+			subscribed: moq_clock::now(),
+			latest: moq_clock::Instant::ZERO,
 			restart: 0,
 			base: (0, 0, 0),
 			finished: false,
@@ -313,11 +356,14 @@ impl Track {
 			recovery_gap: None,
 			leading_floor: None,
 			held: None,
+			settle: false,
 			keyframe: None,
 			timing: Timing::default(),
 			buffer: None,
 			pack: None,
 			released: None,
+			group: None,
+			sync: None,
 		}
 	}
 
@@ -332,6 +378,10 @@ impl Track {
 			self.release(name, jitter, true)?;
 			self.restart = pending.restart;
 			self.clock = DecodeClock::default();
+			if let Some(sync) = &mut self.sync {
+				sync.lane.reset();
+				sync.released = None;
+			}
 		}
 		let Kind::Video(stream_type) = self.kind else {
 			return self.push(name, pending, None, None, jitter);
@@ -343,15 +393,26 @@ impl Track {
 			let ahead = self.held == Some(pending.cut);
 			self.leading_floor = recover.then_some((pending.frame.timestamp, ahead));
 		}
+		// Under sync they go on to be planned and decode-clocked, as on a leg that held what
+		// they reference, and the jitter buffer drops them as leading: the frames after them
+		// keep their positions and DTS.
 		if let Some((floor, ahead)) = self.leading_floor
 			&& pending.frame.timestamp < floor
+			&& self.sync.is_none()
+			&& !radl(stream_type, self.source.description(), &pending.frame)
 		{
 			jitter.lose(&self.pid, ahead);
 			return Ok(());
 		}
+		// Frames still held from a group cut short wait on frames that will not come, so under
+		// sync they go, as on a leg that never read them.
+		if self.sync.is_some() && self.held.is_some_and(|held| held != pending.cut) {
+			self.clock.discard();
+		}
 		self.held = Some(pending.cut);
 		if pending.frame.keyframe {
-			self.timing.describe(stream_type, self.source.description(), name);
+			self.timing
+				.describe(stream_type, self.source.description(), name, self.sync.is_some());
 		}
 		let pts = to_ticks(pending.frame.timestamp);
 		self.clock.push((pending, self.source.description().cloned()), pts);
@@ -370,8 +431,17 @@ impl Track {
 			if !input.waiting_for_header && input.jitter.full(&self.pid) {
 				break;
 			}
-			match self.source.poll_read(waiter)? {
-				Poll::Ready(Some(frame)) => {
+			match self.source.poll_event(waiter)? {
+				Poll::Ready(Some(Event::Frame { frame, arrived })) => {
+					let arrived = arrived.max(self.subscribed);
+					// The frame settles what its group's end left held, so they are ready as it lands.
+					self.latest = self.latest.max(arrived);
+					if std::mem::take(&mut self.settle) && !input.waiting_for_header {
+						self.release(name, input.jitter, true)?;
+					}
+					// A group arrives from its first frame, so the first read from it opens it.
+					let sequence = self.source.group().unwrap_or_default();
+					let opens = self.group.replace(sequence) != Some(sequence);
 					if input.waiting_for_header && !self.source.header_ready() {
 						*input.trimmed += 1;
 						continue;
@@ -381,8 +451,9 @@ impl Track {
 						restart: self.base.0 + self.source.markers(),
 						skip: self.base.1 + self.source.skips(),
 						cut: self.base.2 + self.source.cuts(),
-						arrived: self.empty,
+						arrived,
 						read: moq_clock::now(),
+						group: (sequence, opens),
 					};
 					// A new timeline must reach the reset before tune-in alignment can drop it.
 					if let Some(start) = input.video_start
@@ -398,12 +469,18 @@ impl Track {
 					}
 					self.queue(name, pending, input.jitter)?;
 				}
+				// Under sync the frames read settle each DTS, not when this leg found the source
+				// empty, and [`Self::queue`] drops what a cut group left held.
+				Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => self.settle = self.sync.is_none(),
+				Poll::Ready(Some(Event::FrameEnd { .. })) => {}
 				Poll::Ready(None) => {
 					self.finished = true;
 					break;
 				}
 				Poll::Pending => {
-					self.empty = moq_clock::now();
+					if std::mem::take(&mut self.settle) && !input.waiting_for_header {
+						self.release(name, input.jitter, true)?;
+					}
 					break;
 				}
 			}
@@ -464,6 +541,9 @@ impl Track {
 	/// timeline that is a multiple of them, cut again where they would span more than half the
 	/// delay and at each [`Self::psi_slot`].
 	fn pack_start(&self, payload: &[u8], timestamp: Timestamp, delay: Duration) -> Option<PesStart> {
+		if self.sync.is_some() {
+			return None;
+		}
 		let (samples, rate) = self.samples(payload).filter(|_| !delay.is_zero())?;
 		let len = match self.kind {
 			Kind::Aac { .. } => adts::MIN_HEADER_LEN + payload.len(),
@@ -489,12 +569,179 @@ impl Track {
 	/// as [`schedule::ahead`] lets them, and nothing without a delay or for a placed frame,
 	/// whose timestamp is when it goes out.
 	fn ahead(&self, delay: Duration) -> Duration {
+		PCR_INTERVAL * u32::try_from(self.ahead_slots(delay)).unwrap_or(u32::MAX)
+	}
+
+	/// [`Self::ahead`] in slots. Under [`Export::with_sync`] a unit goes out no further ahead
+	/// than its lane fills its decoder buffer in, less a slot, so the buffer holds whatever
+	/// the frames' sizes.
+	fn ahead_slots(&self, delay: Duration) -> u128 {
 		// A placed frame goes out at its placement, never ahead of it.
 		if delay.is_zero() || self.kind.placed() {
-			return Duration::ZERO;
+			return 0;
 		}
-		let slots = schedule::ahead(self.buffer().as_ref(), schedule::slot(delay.as_nanos()));
-		PCR_INTERVAL * u32::try_from(slots).unwrap_or(u32::MAX)
+		let buffer = self.buffer();
+		let slots = schedule::ahead(buffer.as_ref(), schedule::slot(delay.as_nanos()));
+		match (&self.sync, buffer.and_then(|buffer| buffer.size)) {
+			(Some(sync), Some(size)) => {
+				let rate = u128::from(sync.layout.payload_rate(sync.lane.index()).max(1));
+				let fills = size as u128 * 8 * 1_000_000_000 / rate;
+				slots.min(schedule::slot(fills).saturating_sub(1))
+			}
+			_ => slots,
+		}
+	}
+
+	/// The lane the track takes under [`Export::with_sync`], in packets a second. Lanes are
+	/// fixed before any frame is seen, so audio and the other streams take the most their
+	/// codec can send, and video the rest of the rate, up to what its receiver buffers pass on.
+	fn lane_need(&self) -> Need {
+		// A frame's packets: its PES header with a PTS, and the adaptation field of a flag.
+		let packets = |bytes: u64| (bytes + 16).div_ceil(TsBytes::MAX_SIZE as u64);
+		let per_second = |bytes: u64, samples: u64, rate: u32| (packets(bytes) * u64::from(rate)).div_ceil(samples);
+		match &self.kind {
+			Kind::Video(_) => Need::Rest(self.buffer().map_or(u64::MAX, |buffer| {
+				let payload = buffer
+					.leak
+					.map_or(u64::MAX, |leak| leak / (TsBytes::MAX_SIZE as u64 * 8));
+				(buffer.rate / (TsPacket::SIZE as u64 * 8)).min(payload)
+			})),
+			// At most 6144 bits a channel in a raw data block (ISO 14496-3 4.5.3.2), with the
+			// ADTS header and the program config element a frame may repeat.
+			Kind::Aac { config, .. } => {
+				let channels = match config.channel_config {
+					0 | 7 => 8,
+					n => u64::from(n),
+				};
+				let pce = config.program_config.as_ref().map_or(0, |pce| pce.len() as u64);
+				Need::Fixed(per_second(768 * channels + 7 + pce, 1024, config.sample_rate))
+			}
+			// Layer II tops out at 384 kb/s, and 160 kb/s at the half rates (ISO 13818-3).
+			Kind::Mp2 { sample_rate } => {
+				let top: u64 = if *sample_rate >= 32_000 { 384_000 } else { 160_000 };
+				let frame = 144 * top / u64::from((*sample_rate).max(1)) + 1;
+				Need::Fixed(per_second(frame, 1152, *sample_rate))
+			}
+			Kind::Ac3 => Need::Fixed(AC3_LANE),
+			Kind::Eac3 => Need::Fixed(EAC3_LANE),
+			Kind::Opus { channel_config_code } => Need::Fixed(opus_lane(*channel_config_code)),
+			Kind::Verbatim { .. } => Need::Fixed(SECTION_LANE),
+			// DVB carries Dolby audio and teletext as private data its descriptors name.
+			Kind::PesPacket { stream_type: 0x06 } => match Dolby::described(&self.descriptors) {
+				Some(Dolby::Ac3) => Need::Fixed(AC3_LANE),
+				Some(Dolby::Eac3) => Need::Fixed(EAC3_LANE),
+				None if self.descriptors.iter().any(|d| d.tag == TELETEXT_DESCRIPTOR) => Need::Fixed(TELETEXT_LANE),
+				None => Need::Fixed(VERBATIM_LANE),
+			},
+			Kind::PesPacket { .. } => Need::Fixed(VERBATIM_LANE),
+		}
+	}
+
+	/// Plan a frame on the track's lane under [`Export::with_sync`]: packetized, numbered on
+	/// from its group's earlier units, at the positions [`Lane::plan`] gives. `None` places
+	/// nothing: a group this leg did not hold from its first unit, a malformed section, or
+	/// a section its lane cannot carry by its deadline. A placed frame's deadline is the delay
+	/// after its placement, which it goes out from; any other's is its decode time, less the
+	/// drain.
+	fn plan(
+		&mut self,
+		name: &str,
+		frame: &Frame,
+		(decode, dts): (Timestamp, Option<u64>),
+		description: Option<&Bytes>,
+		group: (u64, bool),
+		delay: Duration,
+	) -> anyhow::Result<Option<Planned>> {
+		let (release, by) = match self.kind.placed() {
+			// The PCR runs a slot behind the positions ([`Layout::time`]), so a placed unit is
+			// released a slot past its placement to go out no earlier than it.
+			true => (
+				decode.as_nanos() + PCR_INTERVAL.as_nanos(),
+				decode.as_nanos() + delay.as_nanos(),
+			),
+			false => {
+				let by = decode.as_nanos().saturating_sub(self.drain().as_nanos());
+				(lane::release(by, self.ahead_slots(delay)), by)
+			}
+		};
+		let video = matches!(self.kind, Kind::Video(_));
+		let room = match video && group.1 {
+			true => self.timing.room(frame),
+			false => None,
+		};
+		let Some(sync) = &mut self.sync else {
+			return Ok(None);
+		};
+		let opening = sync.lane.opening(group);
+		// A receiver tunes in at the tables, so an AAC program config element leads the first
+		// frame its group places and the first released on or after each repetition of them.
+		let slot = schedule::slot(release);
+		let pce = opening
+			|| sync
+				.released
+				.is_some_and(|last| last / lane::PSI_SLOTS < slot / lane::PSI_SLOTS);
+		sync.released = Some(slot);
+		let mut packets = Vec::new();
+		match es_payload(&self.kind, description, frame, pce)? {
+			Some(es) => {
+				let unit = PesUnit {
+					pid: self.pid,
+					is_video: video,
+					keyframe: frame.keyframe,
+					timestamp: frame.timestamp,
+					dts,
+					stream_id: stream_id(&self.kind),
+				};
+				pes_packets(&mut packets, &unit, &es, opening)?;
+			}
+			None if let Kind::PesPacket { stream_type } = self.kind => {
+				PesPacket::parse(&frame.payload, stream_type)
+					.with_context(|| format!("MPEG-TS track '{name}' carries a malformed PES packet"))?;
+				whole_pes_packets(&mut packets, self.pid, &frame.payload, opening)?;
+			}
+			None if is_complete_section(&frame.payload) => {
+				section_packets(&mut packets, self.pid, &frame.payload, opening)?;
+			}
+			None => {
+				tracing::warn!(track = %name, len = frame.payload.len(), "dropping malformed private section on export");
+				return Ok(None);
+			}
+		}
+		let count = packets.len() / TsPacket::SIZE;
+		// A unit is released as early as a full CPB would need it. A group's first picture whose
+		// buffering period says how much room its encoder's HRD has left when it decodes it goes
+		// out as much later as its lane takes to carry that room. The HRD received every earlier
+		// picture before that picture's first bit (ITU-T H.264 C.3), so a lane faster than the
+		// HRD's rate has by then carried the group before on any leg that holds it. It never goes
+		// out so late that it would miss its own deadline.
+		let release = match room {
+			Some(bits) => sync.layout.later(sync.lane.index(), release, bits, by, count),
+			None => release,
+		};
+		let overruns = sync.lane.overruns();
+		let plan = sync.lane.plan(&sync.layout, group, release, by, count);
+		if sync.lane.overruns() > overruns {
+			tracing::warn!(track = %name, pid = self.pid, "--sync group began behind the one before it: its lane is too narrow for legs that lose different data to agree here");
+		}
+		match plan {
+			Ok(placed) => {
+				lane::number(&mut packets, placed.counter);
+				Ok(Some(Planned {
+					packets,
+					positions: placed.positions,
+				}))
+			}
+			Err(Unplaced::Partial) => Ok(None),
+			Err(Unplaced::Late) if matches!(self.kind, Kind::Verbatim { .. }) => {
+				tracing::warn!(track = %name, count, "verbatim unit its lane cannot carry by its deadline; dropped");
+				Ok(None)
+			}
+			Err(Unplaced::Late) => anyhow::bail!(
+				"MPEG-TS --sync cannot carry a {count}-packet unit on PID {} by its deadline on its lane at {} b/s; raise --mux-rate or the delay",
+				self.pid,
+				sync.layout.rate()
+			),
+		}
 	}
 
 	/// Where the jitter buffer orders a frame decoding at `decode` under `delay`: at its release
@@ -538,18 +785,25 @@ impl Track {
 
 	/// Queue every held video frame whose DTS is settled, or all of them when `flush`.
 	///
-	/// A held frame is ready no earlier than the frame read since the source was last found
-	/// empty, which settled it, so it is judged as arriving then. Frames held through a silence,
+	/// A held frame is ready no earlier than the latest frame the source delivered, which
+	/// settled it, so it is judged as arriving then. Frames held through a silence,
 	/// such as a dead publisher's last frames settled only by its replacement's, are late by the
 	/// silence: the jitter buffer drops them, where their own arrival would queue them behind a
 	/// schedule that has already gone past them. Nothing settles the frames still held when the
 	/// track ends, so they keep their own arrival and go out late if they must.
+	///
+	/// Under sync, a stream whose SPS declares its depth is settled by counting frames at the
+	/// SPS's delay, so a frame's DTS never depends on what the leg read before it.
 	fn release(&mut self, name: &str, jitter: &mut jitter::Buffer<u16, Queued>, flush: bool) -> anyhow::Result<()> {
 		let (delay, lookahead) = self.timing.reorder();
 		let lookahead = lookahead.max(self.timing.jitter);
-		while let Some(((mut pending, description), dts)) = self.clock.pop(lookahead, delay, flush) {
+		let counted = self.sync.as_ref().and(self.timing.depth());
+		while let Some(((mut pending, description), dts)) = match counted {
+			Some(depth) => self.clock.pop_counted(depth, delay, flush),
+			None => self.clock.pop(lookahead, delay, flush),
+		} {
 			if !self.finished {
-				pending.arrived = pending.arrived.max(self.empty);
+				pending.arrived = pending.arrived.max(self.latest);
 			}
 			self.push(name, pending, Some(dts), description, jitter)?;
 		}
@@ -572,14 +826,26 @@ impl Track {
 			cut,
 			arrived,
 			read,
+			group,
 		} = pending;
 		let dts = dts.filter(|&dts| dts != to_ticks(frame.timestamp));
 		let decode = dts
 			.and_then(|ticks| Timestamp::from_scale(ticks, 90_000).ok())
 			.unwrap_or(frame.timestamp);
 		let (key, pes) = self.release_key(decode, jitter.delay(), &frame)?;
+		// Planned as it is read, so a frame the jitter buffer drops still moves its group on.
+		let planned = match self.sync.is_some() {
+			true => match self.plan(name, &frame, (decode, dts), description.as_ref(), group, jitter.delay())? {
+				Some(planned) => Some(planned),
+				None => return Ok(()),
+			},
+			false => None,
+		};
 		let video = matches!(self.kind, Kind::Video(_));
-		let leading = video && !frame.keyframe && self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe);
+		let leading = video
+			&& !frame.keyframe
+			&& self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe)
+			&& !matches!(self.kind, Kind::Video(stream_type) if radl(stream_type, description.as_ref(), &frame));
 		if video && frame.keyframe {
 			self.keyframe = Some(frame.timestamp);
 		}
@@ -610,6 +876,7 @@ impl Track {
 				dts,
 				description,
 				pes,
+				planned,
 			},
 		};
 		if jitter.push(self.pid, arrival)? == Push::Late {
@@ -638,6 +905,8 @@ struct Timing {
 	level: Option<Level>,
 	/// The HRD its SPS declares.
 	hrd: Option<Hrd>,
+	/// The NAL unit length and buffering period layout of an H.264 rendition with a NAL HRD.
+	buffering: Option<(usize, crate::codec::h264::Buffering)>,
 }
 
 impl Timing {
@@ -650,14 +919,24 @@ impl Timing {
 	}
 
 	/// Read the reorder depth from the codec config a keyframe is carried with.
-	fn describe(&mut self, stream_type: StreamType, description: Option<&Bytes>, name: &str) {
+	fn describe(&mut self, stream_type: StreamType, description: Option<&Bytes>, name: &str, synced: bool) {
 		if self.description.as_ref() == description {
 			return;
 		}
 		self.description = description.cloned();
 		self.declared = description.and_then(|d| declared_reorder(stream_type, d));
 		self.hrd = description.and_then(|d| declared_hrd(stream_type, d));
+		self.buffering = description.and_then(|d| declared_buffering(stream_type, d));
 		tracing::debug!(track = %name, reorder = ?self.reorder(), "video reordering declared");
+		if synced && self.declared.is_none() {
+			tracing::warn!(track = %name, "no reorder depth declared: if it reorders, --sync legs may give it different DTS");
+		}
+	}
+
+	/// The frames a picture can follow in output order after preceding them in decode order,
+	/// when the SPS declares it ([`Reorder::pictures`]).
+	fn depth(&self) -> Option<usize> {
+		self.declared.map(Reorder::pictures)
 	}
 
 	/// The receiver's buffers (H.222.0 2.14.3.1, 2.17.2): EB is the HRD's CPB, else the
@@ -683,6 +962,18 @@ impl Timing {
 	/// source may send a picture, so the export has to as well.
 	fn buffer_delay(&self) -> Option<Duration> {
 		self.hrd.map(|hrd| fill(hrd.cpb_size, hrd.bit_rate))
+	}
+
+	/// The room, in bits, the HRD's CPB has left when it decodes `frame`, the first picture of a
+	/// buffering period: its size less what reaches it at its BitRate over the
+	/// `initial_cpb_removal_delay` the period's SEI gives.
+	fn room(&self, frame: &Frame) -> Option<u64> {
+		let ((length_size, buffering), hrd) = (self.buffering?, self.hrd?);
+		let delay = crate::codec::h264::initial_cpb_removal_delay(&frame.payload, length_size, buffering)?;
+		Some(
+			hrd.cpb_size
+				.saturating_sub(hrd.bit_rate.saturating_mul(u64::from(delay)) / 90_000),
+		)
 	}
 
 	/// The least reorder delay and lookahead the SPS declares, in ticks, so two exporters agree
@@ -824,9 +1115,12 @@ struct SiTrack {
 	state: SiState,
 	/// The reduced newest *complete* group: what emission re-transmits.
 	active: super::si::Snapshot,
-	/// A group still being read; swapped into `active` when it ends, so a torn
-	/// half-received snapshot is never emitted.
-	pending: Option<(moq_net::group::Consumer, super::si::Snapshot)>,
+	/// A group still being read, with its first frame's media time; swapped into `active`
+	/// when it ends, so a torn half-received snapshot is never emitted.
+	pending: Option<(moq_net::group::Consumer, super::si::Snapshot, Option<Timestamp>)>,
+	/// The newest snapshots' sections by media time, for [`Export::with_sync`] to send each
+	/// in the slot its time falls in ([`Self::due`]).
+	history: VecDeque<(Timestamp, Vec<Bytes>)>,
 	/// A promoted snapshot changed `active` and has not hit the wire yet: emit on
 	/// the revision floor ([`SI_REVISION_INTERVAL`]) instead of waiting out the
 	/// repetition interval. For a clock table (TDT/TOT) the cadence is the content,
@@ -880,8 +1174,35 @@ impl SiTrack {
 			dirty: !active.is_empty(),
 			active,
 			pending: None,
+			history: VecDeque::new(),
 			last_emit: None,
 			max_age,
+		}
+	}
+
+	/// The sections to send in slot `index` under [`Export::with_sync`], if any: a snapshot in
+	/// the slot its media time falls in, and the one in force on the absolute repetition grid
+	/// unless `table_id` is a clock table, whose every value is a revision. An inline entry's
+	/// fixed snapshot is in force throughout.
+	fn due(&mut self, index: u128, table_id: u8) -> Option<Vec<Bytes>> {
+		while self
+			.history
+			.get(1)
+			.is_some_and(|(pts, _)| schedule::slot(pts.as_nanos()) <= index)
+		{
+			self.history.pop_front();
+		}
+		let interval = schedule::slot(self.interval.unwrap_or(PSI_INTERVAL).as_nanos()).max(1);
+		let repeat = !is_clock_table(table_id) && index.is_multiple_of(interval);
+		match self.history.front() {
+			Some((pts, sections)) => {
+				let at = schedule::slot(pts.as_nanos());
+				(at == index || (at < index && repeat)).then(|| sections.clone())
+			}
+			None if matches!(self.state, SiState::Done) && repeat && !self.active.is_empty() => {
+				Some(self.active.sections().cloned().collect())
+			}
+			None => None,
 		}
 	}
 
@@ -953,7 +1274,7 @@ impl SiTrack {
 				// one, including a partially-read pending group.
 				match track.poll_next_group(waiter) {
 					Poll::Ready(Ok(Some(group))) => {
-						self.pending = Some((group, Default::default()));
+						self.pending = Some((group, Default::default(), None));
 					}
 					Poll::Ready(Ok(None)) => {
 						ended = true;
@@ -975,9 +1296,10 @@ impl SiTrack {
 		// Read the pending group to its end, then promote it wholesale: emitting a
 		// half-received snapshot would re-introduce the torn state the group
 		// boundary exists to prevent.
-		while let Some((group, snapshot)) = &mut self.pending {
+		while let Some((group, snapshot, pts)) = &mut self.pending {
 			let (promote, drop_pending) = match group.poll_read_frame(waiter) {
 				Poll::Ready(Ok(Some(frame))) => {
+					*pts = pts.or(frame.timestamp);
 					snapshot.apply(&frame.payload);
 					(false, false)
 				}
@@ -989,7 +1311,13 @@ impl SiTrack {
 				Poll::Pending => break,
 			};
 			if promote {
-				let (_, snapshot) = self.pending.take().unwrap();
+				let (_, snapshot, pts) = self.pending.take().unwrap();
+				if let Some(pts) = pts {
+					self.history.push_back((pts, snapshot.sections().cloned().collect()));
+					if self.history.len() > SI_HISTORY {
+						self.history.pop_front();
+					}
+				}
 				// A repeated group (the same section set re-published) is not a change:
 				// treating it as one would turn the source's snapshot cadence into extra
 				// wire repetitions.
@@ -1049,7 +1377,28 @@ where
 			trimmed: 0,
 			mux_rate: None,
 			mux_rate_override: None,
+			sync: false,
+			si_slot: None,
 		}
+	}
+
+	/// Render every packet as a function of the broadcast alone, so two exports of it that
+	/// joined at different moments and received it with different skew emit identical TS for
+	/// the content both hold, continuity counters included, as the legs of a 1+1 pair must.
+	///
+	/// Each PID gets a fixed lane of the constant multiplex rate, a function of the slot and
+	/// the catalog, and each MoQ group lays its units from a position its first unit's
+	/// timestamp gives. What a leg lacks leaves its positions as stuffing, so the other leg's
+	/// packets are untouched and complementary losses stay complementary. The PCR rides a PID
+	/// of its own, and each PID's continuity counter restarts at every group, its first packet
+	/// flagging the break. Audio is not packed: one frame a PES.
+	///
+	/// Needs a constant rate ([`Self::with_mux_rate`], or the catalog's), and fails at the
+	/// program tables without one, or if the rate cannot carry each track's lane. The lanes
+	/// take a worst case per codec, and the video lane needs headroom over the video's rate.
+	pub fn with_sync(mut self) -> Self {
+		self.sync = true;
+		self
 	}
 
 	/// Pad the output with null packets to `mux_rate` bits per second, whatever the
@@ -1330,7 +1679,7 @@ where
 			}
 			// SI emission rides media frames, so a snapshot that arrived behind the
 			// last one gets one trailing flush before the stream ends.
-			if self.catalog_ended && !self.si_flushed {
+			if self.catalog_ended && !self.si_flushed && !self.sync {
 				self.si_flushed = true;
 				if let Some(out) = self.write_si_tail()? {
 					return Poll::Ready(Ok(Some(out)));
@@ -1515,7 +1864,9 @@ where
 			if !self.stale.is_empty() {
 				self.resubscribe(&catalog, &mpegts)?;
 			}
-			let es_pids: Vec<u16> = self.tracks.values().map(|t| t.pid).collect();
+			// The PCR may ride a PID of its own, which SI must not take either.
+			let mut es_pids: Vec<u16> = self.tracks.values().map(|t| t.pid).collect();
+			es_pids.push(self.psi.as_ref().unwrap().pcr_pid);
 			reject_colliding_si_pids(&mpegts, self.pmt_pid(), &es_pids)?;
 			// The layout is locked but the timing is not: a `jitter` or `framerate` published
 			// after the tables still sizes the decode clock.
@@ -1663,8 +2014,8 @@ where
 			track.base.1 += track.source.skips() + 1;
 			track.base.2 += track.source.cuts() + 1;
 			track.source = source;
+			track.subscribed = moq_clock::now();
 			track.finished = false;
-			track.empty = moq_clock::now();
 		}
 		Ok(())
 	}
@@ -1696,6 +2047,13 @@ where
 				skips - (track.base.0 + track.source.markers())
 			})
 			.sum();
+		stats.release.overruns = self
+			.tracks
+			.values()
+			.filter_map(|track| track.sync.as_ref())
+			.map(|sync| sync.lane.overruns())
+			.sum();
+		stats.release.late = self.schedule.grid().map_or(0, |grid| grid.late());
 		if self.psi.is_none() {
 			return stats;
 		}
@@ -1785,6 +2143,7 @@ where
 		if !same || self.psi.is_none() {
 			let mut next = Self::new(self.source.clone(), catalog);
 			next.replay = self.replay;
+			next.sync = self.sync;
 			next = next.with_delay(self.delay);
 			if let Some(rate) = self.mux_rate_override {
 				next = next.with_mux_rate(rate);
@@ -1891,7 +2250,9 @@ where
 			si.last_emit = None;
 		}
 		self.video_start = None;
-		self.pcr_discontinuity = true;
+		// Under sync the grid flags a slot that does not follow the last ([`Grid::index`]).
+		self.pcr_discontinuity = !self.sync;
+		self.si_slot = None;
 		self.tables.clear();
 		for track in self.tracks.values_mut() {
 			track.pack = None;
@@ -1949,28 +2310,54 @@ where
 
 	/// Build the PAT/PMT once every track's PID and codec is known.
 	fn build_psi(&mut self) -> anyhow::Result<()> {
+		// A measured rate would give each leg a grid of its own.
+		let sync = match self.sync {
+			true => Some(self.mux_rate.context(
+				"MPEG-TS --sync needs a constant multiplex rate: pass --mux-rate, or publish the catalog's mpegts.muxRate",
+			)?),
+			false => None,
+		};
+		if sync.is_some() {
+			// The video lane's reach is its first keyframe's HRD, which every leg reads alike.
+			for (name, track) in self.tracks.iter_mut() {
+				if let Kind::Video(stream_type) = track.kind {
+					track
+						.timing
+						.describe(stream_type, track.source.description(), name, true);
+				}
+			}
+		}
+
 		// Order tracks by PID for a stable layout; first video track carries the PCR.
 		let mut tracks: Vec<&Track> = self.tracks.values().collect();
 		tracks.sort_by_key(|t| t.pid);
 
-		// Section-framed streams require a video track in the supported program layout.
-		let needs_clock = tracks.iter().any(|t| matches!(&t.kind, Kind::Verbatim { .. }));
-		let video = tracks.iter().find(|t| matches!(t.kind, Kind::Video(_)));
-		anyhow::ensure!(
-			!needs_clock || video.is_some(),
-			"TS export of section-framed verbatim streams (e.g. SCTE-35) requires a video track for the program clock"
-		);
-		let pcr_pid = video
-			.or_else(|| {
-				tracks.iter().find(|t| {
-					matches!(
-						t.kind,
-						Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
-					)
+		let pcr_pid = match sync {
+			// A media PID flags the break at every group, which on the PCR's PID would declare a
+			// break in the time base, so under sync the PCR rides a PID of its own.
+			Some(_) => self.clock_pid()?,
+			None => tracks
+				.iter()
+				.find(|t| matches!(t.kind, Kind::Video(_)))
+				.or_else(|| {
+					tracks.iter().find(|t| {
+						matches!(
+							t.kind,
+							Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
+						)
+					})
 				})
-			})
-			.map(|t| t.pid)
-			.context("TS export requires a video or audio track for the PCR")?;
+				.map(|t| t.pid)
+				// Sparse data cannot carry the clock's cadence: reserve a PID used only by PCR.
+				.or_else(|| {
+					(FIRST_ES_PID..0x1fff).find(|pid| {
+						*pid != self.pmt_pid()
+							&& tracks.iter().all(|track| track.pid != *pid)
+							&& self.si.keys().all(|(si, _)| si != pid)
+					})
+				})
+				.context("TS export has no unused PID for the PCR")?,
+		};
 
 		let streams = tracks
 			.iter()
@@ -2056,18 +2443,75 @@ where
 		for track in self.tracks.values() {
 			self.liveness.register(track.pid);
 		}
-		self.psi = Some(Psi {
+		let psi = Psi {
 			pat: super::psi::encode_pat(&pat)?,
 			pmt: super::psi::encode_pmt(&pmt, self.version)?,
 			pcr_pid,
 			pmt_pid,
-		});
+		};
+		if let Some(rate) = sync {
+			self.lay_lanes(rate, &psi)?;
+		}
+		self.psi = Some(psi);
+		Ok(())
+	}
+
+	/// The PID the PCR rides alone under [`Self::with_sync`]: the first above the program's
+	/// elementary streams that nothing else in it uses, else the first below them, so every
+	/// leg picks the same one.
+	fn clock_pid(&self) -> anyhow::Result<u16> {
+		let used: HashSet<u16> = self
+			.tracks
+			.values()
+			.map(|track| track.pid)
+			.chain([self.pmt_pid()])
+			.chain(self.si.keys().map(|(pid, _)| *pid))
+			.collect();
+		let top = self
+			.tracks
+			.values()
+			.map(|track| track.pid)
+			.max()
+			.unwrap_or(FIRST_ES_PID);
+		(top + 1..0x1FFF)
+			.chain(FIRST_ES_PID..top)
+			.find(|pid| !used.contains(pid))
+			.context("MPEG-TS --sync found no PID left for the PCR")
+	}
+
+	/// Give each track its lane of `rate` under [`Self::with_sync`], beside the tables in
+	/// `psi` and room for the SI, and lay every slot on them from now on.
+	fn lay_lanes(&mut self, rate: u64, psi: &Psi) -> anyhow::Result<()> {
+		// Flagged, so each emission has the adaptation field a jump sets the flag in ([`Grid::lay`]).
+		let mut tables = Vec::new();
+		section_packets(&mut tables, Pid::PAT, &psi.pat, true)?;
+		section_packets(&mut tables, psi.pmt_pid, &psi.pmt, true)?;
+		let tables = tables.as_chunks::<{ TsPacket::SIZE }>().0.to_vec();
+		let mut needs: Vec<(u16, Need)> = self
+			.tracks
+			.values()
+			.map(|track| (track.pid, track.lane_need()))
+			.collect();
+		needs.sort_unstable_by_key(|(pid, _)| *pid);
+		let layout = Arc::new(Layout::new(rate, tables.len(), SI_LANE, &needs)?);
+		for track in self.tracks.values_mut() {
+			let lane = layout.lane(track.pid).context("a track without a lane")?;
+			track.sync = Some(Synced {
+				layout: layout.clone(),
+				lane: Lane::new(lane),
+				released: None,
+			});
+		}
+		self.schedule.set_sync(Grid::new(layout, tables));
 		Ok(())
 	}
 
 	/// Packetize one media frame and queue it on the [`Schedule`], re-emitting PAT/PMT
 	/// before video keyframes (and periodically) so receivers can tune in mid-stream.
 	fn mux(&mut self, name: &str, queued: Queued) -> anyhow::Result<()> {
+		if self.sync {
+			return self.mux_sync(queued);
+		}
 		let Queued {
 			frame,
 			decode,
@@ -2099,36 +2543,8 @@ where
 			*repeat = false;
 		}
 		let keyframe = frame.keyframe;
-
-		// Build the elementary-stream payload for this frame. Video needs the
-		// resolved avcC/hvcC to rewrite length-prefixed NALs as Annex-B. Section-framed
-		// verbatim streams carry no PES payload; the section is written separately below.
-		let es_payload = match &kind {
-			Kind::Video(stream_type) => Some(video_es_payload(*stream_type, description.as_ref(), &frame)?),
-			Kind::Aac { config, repeat } => {
-				let pce = if *repeat {
-					config.program_config.as_deref().unwrap_or_default()
-				} else {
-					&[]
-				};
-				let raw_len = pce.len() + frame.payload.len();
-				let header =
-					adts::write_header(config.object_type, config.sample_rate, config.channel_config, raw_len)?;
-				let mut framed = Vec::with_capacity(header.len() + raw_len);
-				framed.extend_from_slice(&header);
-				framed.extend_from_slice(pce);
-				framed.extend_from_slice(&frame.payload);
-				Some(framed)
-			}
-			// Each moq Opus frame is one packet; prefix the Opus-in-TS control header.
-			Kind::Opus { .. } => Some(opus_es_payload(&frame.payload)),
-			// Legacy audio frames were ingested whole (framing header included), so
-			// they pass through untouched.
-			Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => Some(frame.payload.to_vec()),
-			Kind::Verbatim { .. } => None,
-			// The frame is the PES already, written by [`Self::place`] below.
-			Kind::PesPacket { .. } => None,
-		};
+		let pce = matches!(kind, Kind::Aac { repeat: true, .. });
+		let es_payload = es_payload(&kind, description.as_ref(), &frame, pce)?;
 
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
 
@@ -2194,16 +2610,13 @@ where
 			// carry the bytes verbatim.
 			None => self.write_section(&mut out, pid, &frame.payload)?,
 			Some(es_payload) => {
-				// Opus is private-data PES, carried under private_stream_1 like ffmpeg; media
-				// derives it from is_video.
-				let stream_id = matches!(kind, Kind::Opus { .. }).then_some(StreamId::PRIVATE_STREAM_1);
 				let unit = PesUnit {
 					pid,
 					is_video,
 					keyframe,
 					timestamp: frame.timestamp,
 					dts,
-					stream_id,
+					stream_id: stream_id(&kind),
 				};
 				// Only a delay leaves the frames time to wait for the ones after them.
 				let track = self.tracks.get(name).context("missing track")?;
@@ -2271,6 +2684,48 @@ where
 			frame.keyframe,
 			frames,
 		)
+	}
+
+	/// Put a frame's planned packets on their lane under [`Self::with_sync`]. The tables and SI
+	/// have positions of their own ([`Self::queue_si`]), so nothing rides with it.
+	fn mux_sync(&mut self, queued: Queued) -> anyhow::Result<()> {
+		let Some(planned) = queued.planned else {
+			return Ok(());
+		};
+		self.schedule.decodes_at(queued.decode.as_nanos());
+		let grid = self.schedule.sync().context("MPEG-TS --sync lanes not laid out")?;
+		grid.place(&planned.packets, &planned.positions, queued.frame.keyframe);
+		Ok(())
+	}
+
+	/// Queue the SI due in slot `index` under [`Self::with_sync`], in PID and table order, each
+	/// entry's sections numbered from zero with the first flagging the break: every leg holding
+	/// the same snapshots sends the same packets ([`SiTrack::due`]).
+	fn queue_si(&mut self, index: u128) -> anyhow::Result<()> {
+		if self.si_slot.is_some_and(|slot| slot >= index) {
+			return Ok(());
+		}
+		self.si_slot = Some(index);
+		let mut keys: Vec<(u16, u8)> = self.si.keys().copied().collect();
+		keys.sort_unstable();
+		let mut out = Vec::new();
+		for (pid, table_id) in keys {
+			let Some(sections) = self.si.get_mut(&(pid, table_id)).and_then(|si| si.due(index, table_id)) else {
+				continue;
+			};
+			let mut packets = Vec::new();
+			for section in sections.iter().filter(|section| is_complete_section(section)) {
+				let first = packets.is_empty();
+				section_packets(&mut packets, pid, section, first)?;
+			}
+			lane::number(&mut packets, 0);
+			out.extend_from_slice(&packets);
+		}
+		if !out.is_empty() {
+			let grid = self.schedule.sync().context("MPEG-TS --sync lanes not laid out")?;
+			grid.push_si(index, &out);
+		}
+		Ok(())
 	}
 
 	/// Mux an audio frame into `name`'s PES, sending the PES on first if the frame cannot join
@@ -2431,7 +2886,8 @@ where
 	fn slot_due(&self) -> Option<(u128, moq_clock::Instant)> {
 		let (known, settled) = self.slot_settled()?;
 		let settled = Timestamp::from_micros(u64::try_from(settled / 1_000).ok()?).ok()?;
-		Some((known, self.jitter.at(settled)?))
+		// The tail of the generation still going out keeps its own clock after the next is acquired.
+		Some((known, self.jitter.at(self.generation, settled)?))
 	}
 
 	/// The `known` that settles the next grid slot, and the jitter buffer key, in nanoseconds,
@@ -2526,6 +2982,14 @@ where
 			{
 				self.flush_packs(|_, due| due <= index + lead)?;
 			}
+			// With nothing more coming, SI joins only slots the media still runs to: an entry due
+			// in every slot would otherwise keep the grid from emptying.
+			if self.sync
+				&& let Some((index, _)) = self.schedule.upcoming()
+				&& known.map_or(!self.schedule.media_done(), |known| index < known)
+			{
+				self.queue_si(index)?;
+			}
 			let Some(slot) = self.schedule.next(known)? else {
 				break;
 			};
@@ -2533,11 +2997,14 @@ where
 			let mut payload = slot.layout(&clock, pmt_pid, &NULL_PACKET);
 			// The slot opens with its PCR, in the clock packet or the clock PID's packet that
 			// carries it, whose adaptation field flags the break.
-			let discontinuity = std::mem::take(&mut self.pcr_discontinuity);
+			let discontinuity = std::mem::take(&mut self.pcr_discontinuity) || slot.jump;
 			if discontinuity {
 				payload[5] |= 0x80;
 			}
-			self.number(&mut payload);
+			// Under sync every packet was numbered where it was planned.
+			if !self.sync {
+				self.number(&mut payload);
+			}
 			let frame = Frame {
 				timestamp: slot_stamp(slot.index)?,
 				duration: None,
@@ -2573,112 +3040,17 @@ where
 
 	/// Packetize a PES payload into 188-byte TS packets.
 	fn write_pes(&mut self, out: &mut Vec<u8>, unit: &PesUnit, payload: &[u8]) -> anyhow::Result<()> {
-		let pts = to_ts_timestamp(unit.timestamp)?;
-		// A reordered video frame carries DTS alongside PTS; else PTS-only. The decode clock
-		// is continuous ticks, so wrap into the 33-bit wire field here, like the PTS.
-		let dts = unit
-			.dts
-			.map(|t| TsTimestamp::new(t & TS_TIMESTAMP_MASK).map_err(anyhow::Error::msg))
-			.transpose()?;
-		let stream_id = match unit.stream_id {
-			Some(id) => StreamId::new(id),
-			None if unit.is_video => StreamId::new(StreamId::VIDEO_MIN),
-			None => StreamId::new(StreamId::AUDIO_MIN),
-		};
-		let header = mpeg2ts::pes::PesHeader {
-			stream_id,
-			priority: false,
-			data_alignment_indicator: true,
-			copyright: false,
-			original_or_copy: false,
-			pts: Some(pts),
-			dts,
-			escr: None,
-		};
-
-		// The optional PES header grows by 5 bytes when it also carries a DTS.
-		let optional_len = PES_OPTIONAL_LEN + if dts.is_some() { PES_DTS_LEN } else { 0 };
-
-		// `pes_packet_len` counts the optional header plus the payload (not the
-		// 6-byte fixed prefix). Unbounded for video (0); bounded for audio when
-		// it fits a u16.
-		let pes_packet_len = if unit.is_video {
-			0
-		} else {
-			u16::try_from(optional_len + payload.len()).unwrap_or(0)
-		};
-
-		let mut offset = 0;
-		let mut first = true;
-		loop {
-			let flag = first && self.breaks(unit.pid);
-			let adaptation = ((first && unit.keyframe) || flag).then(|| AdaptationField {
-				random_access_indicator: first && unit.keyframe,
-				..flags(flag)
-			});
-
-			let header_len = if first { 6 + optional_len } else { 0 };
-			let af_len = adaptation.as_ref().map(adaptation_size).unwrap_or(0);
-			let avail = TsBytes::MAX_SIZE - header_len - af_len;
-			let take = avail.min(payload.len() - offset);
-			let chunk = &payload[offset..offset + take];
-
-			let ts_payload = if first {
-				TsPayload::PesStart(Pes {
-					header: header.clone(),
-					pes_packet_len,
-					data: TsBytes::new(chunk).map_err(anyhow::Error::msg)?,
-				})
-			} else {
-				TsPayload::PesContinuation(TsBytes::new(chunk).map_err(anyhow::Error::msg)?)
-			};
-
-			self.write_packet(out, unit.pid, adaptation, ts_payload)?;
-
-			offset += take;
-			first = false;
-			if offset >= payload.len() {
-				break;
-			}
-		}
-		Ok(())
+		let flag = self.breaks(unit.pid);
+		pes_packets(out, unit, payload, flag)
 	}
 
-	/// Packetize `pes`, a whole PES packet, into TS packets on `pid` without touching a byte of
-	/// it, stuffing the last packet's adaptation field. The `mpeg2ts` writer would rebuild the
-	/// PES header instead, so the packets are laid out by hand.
+	/// Packetize `pes`, a whole PES packet, on `pid` unchanged ([`whole_pes_packets`]).
 	fn write_pes_packet(&mut self, out: &mut Vec<u8>, pid: u16, pes: &[u8]) -> anyhow::Result<()> {
-		anyhow::ensure!(pid < 0x1FFF, "PID out of range: {pid}");
-		let mut offset = 0;
-		while offset < pes.len() {
-			let start = offset == 0;
-			let flag = start && self.breaks(pid);
-			// The adaptation field: its length byte, then a flags byte for the break.
-			let field = if flag { 2 } else { 0 };
-			let take = (TsBytes::MAX_SIZE - field).min(pes.len() - offset);
-			let field = TsBytes::MAX_SIZE - take;
-			out.extend_from_slice(&[0x47, u8::from(start) << 6 | (pid >> 8) as u8, pid as u8]);
-			match field {
-				0 => out.push(0x10),
-				_ => {
-					out.push(0x30);
-					out.push((field - 1) as u8);
-					if field > 1 {
-						out.push(if flag { 0x80 } else { 0 });
-						out.resize(out.len() + field - 2, 0xff);
-					}
-				}
-			}
-			out.extend_from_slice(&pes[offset..offset + take]);
-			offset += take;
-		}
-		Ok(())
+		let flag = self.breaks(pid);
+		whole_pes_packets(out, pid, pes, flag)
 	}
 
-	/// Packetize a complete PSI or private section verbatim. The first packet
-	/// carries the pointer_field plus the section start as a `Section` payload (sets
-	/// the unit-start bit so the receiver finds the pointer_field); continuations are
-	/// `Raw`. The section bytes are opaque, so this round-trips byte-for-byte.
+	/// Packetize a complete PSI or private section verbatim ([`section_packets`]).
 	fn write_section(&mut self, out: &mut Vec<u8>, pid: u16, section: &[u8]) -> anyhow::Result<()> {
 		// The verbatim track is public; a non-importer producer could publish a frame
 		// that isn't a complete section. Drop it (with a warning) rather than emit a
@@ -2688,65 +3060,177 @@ where
 			tracing::warn!(pid, len = section.len(), "dropping malformed private section on export");
 			return Ok(());
 		}
-
-		let mut offset = 0;
-		let mut first = true;
-		loop {
-			let flag = (first && self.breaks(pid)).then(|| flags(true));
-			let payload = if first {
-				// pointer_field (1 byte, written by `Section`) eats one payload byte, and a flag
-				// for the break its adaptation field.
-				let room = TsBytes::MAX_SIZE - 1 - flag.as_ref().map_or(0, adaptation_size);
-				let take = room.min(section.len());
-				let chunk = &section[..take];
-				offset = take;
-				TsPayload::Section(Section {
-					pointer_field: 0,
-					data: TsBytes::new(chunk).map_err(anyhow::Error::msg)?,
-				})
-			} else {
-				let take = TsBytes::MAX_SIZE.min(section.len() - offset);
-				let chunk = &section[offset..offset + take];
-				offset += take;
-				TsPayload::Raw(TsBytes::new(chunk).map_err(anyhow::Error::msg)?)
-			};
-
-			self.write_packet(out, pid, flag, payload)?;
-			first = false;
-			if offset >= section.len() {
-				break;
-			}
-		}
-		Ok(())
+		let flag = self.breaks(pid);
+		section_packets(out, pid, section, flag)
 	}
+}
 
-	/// Serialize one TS packet into `out`. Its continuity counter is numbered when it goes
-	/// out ([`Self::number`]), since the schedule decides that order.
-	fn write_packet(
-		&mut self,
-		out: &mut Vec<u8>,
-		pid: u16,
-		adaptation_field: Option<AdaptationField>,
-		payload: TsPayload,
-	) -> anyhow::Result<()> {
-		let continuity_counter = ContinuityCounter::default();
+/// Packetize a PES payload into 188-byte TS packets, flagging a break in the first when `flag`.
+fn pes_packets(out: &mut Vec<u8>, unit: &PesUnit, payload: &[u8], flag: bool) -> anyhow::Result<()> {
+	let pts = to_ts_timestamp(unit.timestamp)?;
+	// A reordered video frame carries DTS alongside PTS; else PTS-only. The decode clock
+	// is continuous ticks, so wrap into the 33-bit wire field here, like the PTS.
+	let dts = unit
+		.dts
+		.map(|t| TsTimestamp::new(t & TS_TIMESTAMP_MASK).map_err(anyhow::Error::msg))
+		.transpose()?;
+	let stream_id = match unit.stream_id {
+		Some(id) => StreamId::new(id),
+		None if unit.is_video => StreamId::new(StreamId::VIDEO_MIN),
+		None => StreamId::new(StreamId::AUDIO_MIN),
+	};
+	let header = mpeg2ts::pes::PesHeader {
+		stream_id,
+		priority: false,
+		data_alignment_indicator: true,
+		copyright: false,
+		original_or_copy: false,
+		pts: Some(pts),
+		dts,
+		escr: None,
+	};
 
-		let packet = TsPacket {
-			header: TsHeader {
-				transport_error_indicator: false,
-				transport_priority: false,
-				pid: Pid::new(pid)?,
-				transport_scrambling_control: TransportScramblingControl::NotScrambled,
-				continuity_counter,
-			},
-			adaptation_field,
-			payload: Some(payload),
+	// The optional PES header grows by 5 bytes when it also carries a DTS.
+	let optional_len = PES_OPTIONAL_LEN + if dts.is_some() { PES_DTS_LEN } else { 0 };
+
+	// `pes_packet_len` counts the optional header plus the payload (not the
+	// 6-byte fixed prefix). Unbounded for video (0); bounded for audio when
+	// it fits a u16.
+	let pes_packet_len = if unit.is_video {
+		0
+	} else {
+		u16::try_from(optional_len + payload.len()).unwrap_or(0)
+	};
+
+	let mut offset = 0;
+	let mut first = true;
+	loop {
+		let flag = first && flag;
+		let adaptation = ((first && unit.keyframe) || flag).then(|| AdaptationField {
+			random_access_indicator: first && unit.keyframe,
+			..flags(flag)
+		});
+
+		let header_len = if first { 6 + optional_len } else { 0 };
+		let af_len = adaptation.as_ref().map(adaptation_size).unwrap_or(0);
+		let avail = TsBytes::MAX_SIZE - header_len - af_len;
+		let take = avail.min(payload.len() - offset);
+		let chunk = &payload[offset..offset + take];
+
+		let ts_payload = if first {
+			TsPayload::PesStart(Pes {
+				header: header.clone(),
+				pes_packet_len,
+				data: TsBytes::new(chunk).map_err(anyhow::Error::msg)?,
+			})
+		} else {
+			TsPayload::PesContinuation(TsBytes::new(chunk).map_err(anyhow::Error::msg)?)
 		};
 
-		let mut writer = TsPacketWriter::new(out);
-		writer.write_ts_packet(&packet).map_err(anyhow::Error::msg)?;
-		Ok(())
+		write_packet(out, unit.pid, adaptation, ts_payload)?;
+
+		offset += take;
+		first = false;
+		if offset >= payload.len() {
+			break;
+		}
 	}
+	Ok(())
+}
+
+/// Packetize `pes`, a whole PES packet, into TS packets on `pid` without touching a byte of
+/// it, flagging a break in the first packet when `flag` and stuffing the last packet's
+/// adaptation field. The `mpeg2ts` writer would rebuild the PES header instead, so the packets
+/// are laid out by hand.
+fn whole_pes_packets(out: &mut Vec<u8>, pid: u16, pes: &[u8], flag: bool) -> anyhow::Result<()> {
+	anyhow::ensure!(pid < 0x1FFF, "PID out of range: {pid}");
+	let mut offset = 0;
+	while offset < pes.len() {
+		let start = offset == 0;
+		let flag = start && flag;
+		// The adaptation field: its length byte, then a flags byte for the break.
+		let field = if flag { 2 } else { 0 };
+		let take = (TsBytes::MAX_SIZE - field).min(pes.len() - offset);
+		let field = TsBytes::MAX_SIZE - take;
+		out.extend_from_slice(&[0x47, u8::from(start) << 6 | (pid >> 8) as u8, pid as u8]);
+		match field {
+			0 => out.push(0x10),
+			_ => {
+				out.push(0x30);
+				out.push((field - 1) as u8);
+				if field > 1 {
+					out.push(if flag { 0x80 } else { 0 });
+					out.resize(out.len() + field - 2, 0xff);
+				}
+			}
+		}
+		out.extend_from_slice(&pes[offset..offset + take]);
+		offset += take;
+	}
+	Ok(())
+}
+
+/// Packetize a complete PSI or private section verbatim, flagging a break in the first packet
+/// when `flag`. The first packet carries the pointer_field plus the section start as a
+/// `Section` payload (sets the unit-start bit so the receiver finds the pointer_field);
+/// continuations are `Raw`. The section bytes are opaque, so this round-trips byte-for-byte.
+fn section_packets(out: &mut Vec<u8>, pid: u16, section: &[u8], flag: bool) -> anyhow::Result<()> {
+	let mut offset = 0;
+	let mut first = true;
+	loop {
+		let flag = (first && flag).then(|| flags(true));
+		let payload = if first {
+			// pointer_field (1 byte, written by `Section`) eats one payload byte, and a flag
+			// for the break its adaptation field.
+			let room = TsBytes::MAX_SIZE - 1 - flag.as_ref().map_or(0, adaptation_size);
+			let take = room.min(section.len());
+			let chunk = &section[..take];
+			offset = take;
+			TsPayload::Section(Section {
+				pointer_field: 0,
+				data: TsBytes::new(chunk).map_err(anyhow::Error::msg)?,
+			})
+		} else {
+			let take = TsBytes::MAX_SIZE.min(section.len() - offset);
+			let chunk = &section[offset..offset + take];
+			offset += take;
+			TsPayload::Raw(TsBytes::new(chunk).map_err(anyhow::Error::msg)?)
+		};
+
+		write_packet(out, pid, flag, payload)?;
+		first = false;
+		if offset >= section.len() {
+			break;
+		}
+	}
+	Ok(())
+}
+
+/// Serialize one TS packet into `out`. Its continuity counter is numbered when it goes
+/// out ([`Export::number`]), since the schedule decides that order.
+fn write_packet(
+	out: &mut Vec<u8>,
+	pid: u16,
+	adaptation_field: Option<AdaptationField>,
+	payload: TsPayload,
+) -> anyhow::Result<()> {
+	let continuity_counter = ContinuityCounter::default();
+
+	let packet = TsPacket {
+		header: TsHeader {
+			transport_error_indicator: false,
+			transport_priority: false,
+			pid: Pid::new(pid)?,
+			transport_scrambling_control: TransportScramblingControl::NotScrambled,
+			continuity_counter,
+		},
+		adaptation_field,
+		payload: Some(payload),
+	};
+
+	let mut writer = TsPacketWriter::new(out);
+	writer.write_ts_packet(&packet).map_err(anyhow::Error::msg)?;
+	Ok(())
 }
 
 impl<E: catalog::Catalog> Export<crate::catalog::Consumer<E>> {
@@ -3124,6 +3608,33 @@ fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 	}
 }
 
+/// The most packets a second an AC-3 PID takes ([`Track::lane_need`]): 44.1 kHz's largest
+/// frame, 2788 bytes in 16 packets, 28.7 times a second (ATSC A/52 Table 5.18).
+const AC3_LANE: u64 = 460;
+/// E-AC-3's: its largest frame, 4096 bytes in 23 packets, at six blocks of 48 kHz.
+const EAC3_LANE: u64 = 719;
+/// Teletext's: a nine-packet PES, a frame's full data units (ETSI EN 300 472), at 25 frames.
+const TELETEXT_LANE: u64 = 225;
+/// Any other verbatim PES's, which nothing bounds: two packets a slot.
+const VERBATIM_LANE: u64 = 80;
+/// A section-framed stream's (SCTE-35, ...): a packet a slot.
+const SECTION_LANE: u64 = 40;
+
+/// An Opus PID's most packets a second ([`Track::lane_need`]): `code`'s channels at Opus's
+/// 510 kb/s ceiling (RFC 6716 2.1.1), in packets as short as 2.5 ms or as long as 20 ms,
+/// whichever takes more.
+fn opus_lane(code: u8) -> u64 {
+	let channels = u64::from(code.clamp(1, 8));
+	[400u64, 200, 100, 50]
+		.into_iter()
+		.map(|per_second| {
+			let bytes = (channels * 510_000 / 8 / per_second).min(channels * 1275) + 8;
+			(bytes + 16).div_ceil(TsBytes::MAX_SIZE as u64) * per_second
+		})
+		.max()
+		.unwrap_or(0)
+}
+
 /// The DVB AC-3 descriptor's tag (ETSI EN 300 468 6.2.1), marking AC-3 as private data.
 const AC3_DESCRIPTOR: u8 = 0x6a;
 
@@ -3236,6 +3747,52 @@ fn dolby_sync(codec: Dolby, payload: &[u8]) -> Option<usize> {
 /// Whether `bytes` could begin a Dolby sync word, for all they show of it.
 fn ac3_sync_prefix(bytes: &[u8]) -> bool {
 	bytes.iter().zip([0x0b, 0x77]).all(|(&byte, sync)| byte == sync)
+}
+
+/// Build the elementary-stream payload for a frame of `kind`, repeating an AAC program config
+/// element when `pce`. Video needs the resolved avcC/hvcC to rewrite length-prefixed NALs as
+/// Annex-B. Section-framed verbatim streams carry no PES payload, so they have none.
+fn es_payload(kind: &Kind, description: Option<&Bytes>, frame: &Frame, pce: bool) -> anyhow::Result<Option<Vec<u8>>> {
+	Ok(match kind {
+		Kind::Video(stream_type) => Some(video_es_payload(*stream_type, description, frame)?),
+		Kind::Aac { config, .. } => {
+			let pce = match pce {
+				true => config.program_config.as_deref().unwrap_or_default(),
+				false => &[],
+			};
+			let raw_len = pce.len() + frame.payload.len();
+			let header = adts::write_header(config.object_type, config.sample_rate, config.channel_config, raw_len)?;
+			let mut framed = Vec::with_capacity(header.len() + raw_len);
+			framed.extend_from_slice(&header);
+			framed.extend_from_slice(pce);
+			framed.extend_from_slice(&frame.payload);
+			Some(framed)
+		}
+		// Each moq Opus frame is one packet; prefix the Opus-in-TS control header.
+		Kind::Opus { .. } => Some(opus_es_payload(&frame.payload)),
+		// Legacy audio frames were ingested whole (framing header included), so
+		// they pass through untouched.
+		Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => Some(frame.payload.to_vec()),
+		// Section-framed verbatim streams carry no PES payload.
+		Kind::Verbatim { .. } => None,
+		// The frame is the PES already, written by [`Export::place`].
+		Kind::PesPacket { .. } => None,
+	})
+}
+
+/// The PES stream_id a frame of `kind` goes out under, `None` to derive it from whether it is
+/// video: Opus is private-data PES, carried under private_stream_1 like ffmpeg.
+fn stream_id(kind: &Kind) -> Option<u8> {
+	matches!(kind, Kind::Opus { .. }).then_some(StreamId::PRIVATE_STREAM_1)
+}
+
+/// Whether a video frame is an HEVC RADL picture, which leads its keyframe but references only
+/// it, so it goes out wherever that keyframe does rather than being trimmed as an orphan.
+fn radl(stream_type: StreamType, description: Option<&Bytes>, frame: &Frame) -> bool {
+	stream_type == StreamType::H265
+		&& description
+			.and_then(|description| crate::codec::h265::hvcc_params(description).ok())
+			.is_some_and(|(length_size, _)| crate::codec::h265::hvc1_is_radl(&frame.payload, length_size))
 }
 
 /// Build the Annex-B elementary-stream payload for one video frame: rewrite the
@@ -3468,6 +4025,16 @@ fn declared_hrd(stream_type: StreamType, description: &[u8]) -> Option<Hrd> {
 	}
 }
 
+/// The NAL unit length and buffering period layout of an H.264 rendition whose first SPS
+/// declares a NAL HRD.
+fn declared_buffering(stream_type: StreamType, description: &[u8]) -> Option<(usize, crate::codec::h264::Buffering)> {
+	if !matches!(stream_type, StreamType::H264) {
+		return None;
+	}
+	let avcc = crate::codec::h264::Avcc::parse(description).ok()?;
+	Some((avcc.length_size, crate::codec::h264::sps_buffering(avcc.sps.first()?)?))
+}
+
 /// The reordering declared by the first SPS in a video rendition's avcC/hvcC.
 fn declared_reorder(stream_type: StreamType, description: &[u8]) -> Option<Reorder> {
 	match stream_type {
@@ -3578,7 +4145,7 @@ mod tests {
 			// The last available audio frame, including its scheduling lead, anchors both orders.
 			let (decode, key, _) = tracks[1].released.unwrap();
 			assert_eq!(decode.as_micros(), 800_000);
-			assert_eq!(jitter.at(key), Some(start + Duration::from_millis(500)), "{order:?}");
+			assert_eq!(jitter.at(0, key), Some(start + Duration::from_millis(500)), "{order:?}");
 			tokio::time::advance(Duration::from_millis(500)).await;
 			let video = std::iter::from_fn(|| match jitter.poll_next(&waiter) {
 				std::task::Poll::Ready(ready) => Some(ready),

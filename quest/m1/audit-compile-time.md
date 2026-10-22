@@ -21,7 +21,7 @@ follow-up through `/quest-plan`.
 
 Scope: this audit owns per-crate build cost in one build (dev, release, and
 incremental). The [CI workflow audit](/quest/m1/audit-ci.md) owns job-level CI
-cost and caching; the [dependency audit](/quest/m1/audit-deps.md) owns
+cost and caching; the [dependency audit](/quest/m2/audit-deps.md) owns
 deduplicating and upgrading dependencies.
 
 What to check first: whether [moq-net compiles once](/quest/m1/net-erase-transport.md)
@@ -88,7 +88,8 @@ selected 29 Rust packages (moq-net and every dependent, including C, FFI,
 GStreamer and WASM). Phases: rustdoc 1m41s (678 hits, 76 misses, 34 bypassed),
 WASM clippy 18.8 s, io-uring clippy 33.5 s, test build 5m40s (524 hits, 83
 misses, 5 bypassed). Nextest started 7,890 tests and stopped after 663 on the
-known [failover flake](/quest/m1/test-flakes-2/redundant-failover-drift.md).
+known failover flake, fixed by
+[moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 Cargo rebuilds every dependent when an upstream crate's source changes at all,
 even a comment, so the test build is the bulk of the compile cost.
 

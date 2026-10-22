@@ -22,6 +22,20 @@ updates:
         patterns:
           - "*"
 
+  # The smoke suite's own toolchain flake, kept apart so its PR can carry the
+  # matching npm playwright pin (test/smoke/freshness.sh fails until it does)
+  # without holding up the root flake.
+  - package-ecosystem: "nix"
+    directory: "/test/smoke"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      smoke-nix:
+        patterns:
+          - "*"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -52,11 +66,11 @@ updates:
         versions: [">=0.33"]
 
   - package-ecosystem: "bun"
+    # Every infra/ directory is a standalone Worker with its own lockfile; the
+    # glob keeps a new one from going unupdated.
     directories:
       - "/"
-      - "/infra/apt"
-      - "/infra/rpm"
-      - "/infra/moq-sh"
+      - "/infra/*"
       - "/demo/pub"
     schedule:
       interval: "weekly"
@@ -66,6 +80,10 @@ updates:
       bun:
         patterns:
           - "*"
+    ignore:
+      # Pinned to the root flake's Chromium (sh/js/playwright.py), so it moves
+      # with a nixpkgs bump rather than ahead of it.
+      - dependency-name: "playwright"
 
   - package-ecosystem: "uv"
     directory: "/"

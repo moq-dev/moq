@@ -26,4 +26,4 @@ Its history stays there, since the move is a fresh snapshot.
 
 ## Related
 
-- [Hosted worklet adoption](/quest/m2/release/dogfood-assets.md) - links moq.dev's half, which the move ports back into this tree
+- [Hosted worklet adoption](https://github.com/moq-dev/moq.dev/blob/main/quest/m0/dogfood-assets.md) - moq.dev's half, which the move ports back into this tree

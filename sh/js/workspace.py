@@ -65,6 +65,8 @@ def selection(root, paths):
                           "inputs": inputs(root, directory)}
 
     selected = set()
+    # A workspace's `bench/` is no export, so no dependent can import it: only its owner checks it.
+    benched = set()
     fallback = paths is None
     for path in paths or []:
         owners = [(name, p["directory"]) for name, p in packages.items()
@@ -72,7 +74,8 @@ def selection(root, paths):
         if not owners:
             fallback = True
             break
-        selected.add(max(owners, key=lambda owner: len(owner[1]))[0])
+        name, directory = max(owners, key=lambda owner: len(owner[1]))
+        (benched if path.startswith(directory + "/bench/") else selected).add(name)
         # Manifests miss a package reading another tree's files, so add those readers too.
         selected |= {name for name, package in packages.items()
                      if any(reads(path, i) for i in package["inputs"])}
@@ -88,6 +91,7 @@ def selection(root, paths):
             if expanded == selected:
                 break
             selected = expanded
+        selected |= benched
 
     # A selected consumer can need an unchanged dependency's generated bindings.
     dependencies = set(selected)
@@ -138,6 +142,7 @@ def run(action, plan):
 
     command("bun", "install", "--frozen-lockfile")
     if action == "test":
+        command("python3", "sh/js/playwright.test.py")
         command("bun", "test", "js/common/declarations.test.ts", "js/common/deps.test.ts",
                 "js/common/docs.test.ts", "js/common/worklet.test.ts")
         scripts("test")
@@ -159,6 +164,7 @@ def run(action, plan):
                              r"import\.meta\.env", "js"])
     if result.returncode != 1:
         raise RuntimeError("import.meta.env scan found a reference or failed")
+    command("python3", "sh/js/playwright.py")
     command("bun", "js/common/deps.ts")
     if plan["wasm"]:
         command("just", "js", "wasm", "dev")
@@ -181,7 +187,8 @@ def run(action, plan):
         finally:
             Path(name).unlink()
     # The fallback also covers unowned inputs, including demo/pub's Worker.
-    command("bun", "biome", "check", *(["js", "bench/browser", "test", "doc", "demo"] if plan["all"] else
+    # Recommended rules default to warn, which Biome otherwise lets pass.
+    command("bun", "biome", "check", "--error-on-warnings", *(["js", "bench/browser", "test", "doc", "demo"] if plan["all"] else
                                        [p["directory"] for p in packages.values()] + ["js/common"]))
     scripts("build")
     for name in ("@moq/watch", "@moq/publish"):

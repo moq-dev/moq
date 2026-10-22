@@ -200,6 +200,7 @@ impl Server {
 				goaway: start.goaway,
 				auth: start.auth,
 				estimate: Some(start.estimate),
+				bandwidth: crate::bandwidth::Allocator::default(),
 			},
 		))
 	}
@@ -446,6 +447,7 @@ impl Server {
 					hidden: ietf::hidden::from_setup(&params, v),
 					max_age: ietf::max_age::from_setup(&params, v),
 					active_count: ietf::active_count::from_setup(&params, v),
+					flate: ietf::flate::from_setup(&params, v)?,
 					..Default::default()
 				};
 				(path, token, request_id_max, peer_declared)
@@ -657,6 +659,7 @@ where
 					goaway,
 					auth,
 					estimate: None,
+					bandwidth: crate::bandwidth::Allocator::default(),
 				},
 			))
 		}
@@ -720,6 +723,7 @@ where
 					ietf::hidden::into_setup(&mut parameters, v);
 					ietf::max_age::into_setup(&mut parameters, v);
 					ietf::active_count::into_setup(&mut parameters, v);
+					ietf::flate::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
 				}
 				Version::Lite(v) => lite::Parameters::default().encode_bytes(v)?,
@@ -795,6 +799,7 @@ where
 					goaway,
 					auth,
 					estimate,
+					bandwidth: crate::bandwidth::Allocator::default(),
 				},
 			))
 		}
@@ -1045,10 +1050,10 @@ mod tests {
 			_cx: &mut std::task::Context<'_>,
 		) -> std::task::Poll<Result<Self::RecvStream, Self::Error>> {
 			match self.uni.lock().unwrap().pop_front() {
-				Some(data) => std::task::Poll::Ready(Ok(FakeRecv {
+				Some(data) => std::task::Poll::Ready(Ok(crate::transport::poll::Buffered::new(FakeChunks {
 					data: data.into(),
 					stops: self.stops.clone(),
-				})),
+				}))),
 				None if self.close_code().is_some() => std::task::Poll::Ready(Err(FakeError)),
 				None => std::task::Poll::Pending,
 			}
@@ -1060,10 +1065,10 @@ mod tests {
 			match self.bi.lock().unwrap().pop_front() {
 				Some(data) => std::task::Poll::Ready(Ok((
 					FakeSend,
-					FakeRecv {
+					crate::transport::poll::Buffered::new(FakeChunks {
 						data: data.into(),
 						stops: self.stops.clone(),
-					},
+					}),
 				))),
 				None => std::task::Poll::Pending,
 			}
@@ -1145,31 +1150,27 @@ mod tests {
 		}
 	}
 
-	struct FakeRecv {
+	type FakeRecv = crate::transport::poll::Buffered<FakeChunks>;
+
+	struct FakeChunks {
 		data: VecDeque<u8>,
 		stops: Arc<Mutex<Vec<u32>>>,
 	}
-	impl crate::transport::poll::RecvStream for FakeRecv {
+	impl crate::transport::poll::Chunks for FakeChunks {
 		type Error = FakeError;
-		fn poll_read(
+		fn poll_read_chunk(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
-			dst: &mut [u8],
-		) -> std::task::Poll<Result<Option<usize>, Self::Error>> {
+			max: usize,
+		) -> std::task::Poll<Result<Option<Bytes>, Self::Error>> {
 			if self.data.is_empty() {
 				return std::task::Poll::Ready(Ok(None));
 			}
-			let size = dst.len().min(self.data.len());
-			for slot in dst.iter_mut().take(size) {
-				*slot = self.data.pop_front().unwrap();
-			}
-			std::task::Poll::Ready(Ok(Some(size)))
+			let size = max.min(self.data.len());
+			std::task::Poll::Ready(Ok(Some(self.data.drain(..size).collect())))
 		}
 		fn stop(&mut self, code: u32) {
 			self.stops.lock().unwrap().push(code);
-		}
-		fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
-			std::task::Poll::Ready(Ok(()))
 		}
 	}
 

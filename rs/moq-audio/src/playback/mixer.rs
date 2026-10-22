@@ -396,6 +396,7 @@ impl Mixer {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 

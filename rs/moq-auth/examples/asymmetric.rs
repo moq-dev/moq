@@ -4,6 +4,9 @@
 // and the public key verifies them. This is the recommended approach for
 // production: the relay only needs the public key.
 
+// A standalone program stamping a real token, so it reads the host clock.
+#![allow(clippy::disallowed_methods)]
+
 use std::time::{Duration, SystemTime};
 
 fn main() -> anyhow::Result<()> {

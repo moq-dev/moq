@@ -54,6 +54,16 @@ class SelectTest(unittest.TestCase):
                 self.assertTrue(any("/demo/carla/bridge#moq-carla-bridge" in call for call in calls), calls)
         self.assertEqual(self.selected("demo/carla/web/src/main.ts"), [])
 
+    def test_a_bench_selects_only_its_crate(self):
+        bench = "rs/moq-stats/benches/producer_tick.rs"
+        for action in ("lint", "test"):
+            with self.subTest(action=action):
+                calls = self.selected(bench, action=action)
+                self.assertTrue(any("#moq-stats@" in call or "/rs/moq-stats#" in call for call in calls), calls)
+                self.assertFalse(any("moq-relay" in call or "moq-cli" in call for call in calls), calls)
+        calls = self.selected(bench, "rs/moq-stats/src/lib.rs", action="test")
+        self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
+
 
 
 class RecipeTest(unittest.TestCase):
@@ -104,8 +114,8 @@ class FeatureTest(unittest.TestCase):
     def test_tokio_keeps_extremes_and_crypto_contracts(self):
         boundary = self.trace("tokio")
         exhaustive = self.trace("tokio", "--all")
-        self.assertEqual(sum(call.startswith("clippy ") for call in boundary), 2)
-        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 10)
+        self.assertEqual(sum(call.startswith("clippy ") for call in boundary), 3)
+        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 12)
         self.assertEqual([call for call in boundary if not call.startswith("clippy ")],
                          [call for call in exhaustive if not call.startswith("clippy ")])
 

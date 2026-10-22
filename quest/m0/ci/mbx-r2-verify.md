@@ -2,29 +2,34 @@
 
 ## Goal
 
-Condition: the `mbx-moq-dev` bootstrap in `infra/README.md` is complete,
-including the `cache-write` Environment's `gh-readonly-queue/main/*` branch
-policy, and the merge queue has merged Rust changes since. Check it with
-`gh run list --workflow check.yml --event merge_group`.
+Condition: the `mbx-moq-dev` bootstrap in `infra/README.md` is complete and
+scheduled Nightly runs on `main` have built Rust since. Check it with
+`gh run list --workflow nightly.yml --branch main`.
 
-Then confirm the cache earns its keep, and record the numbers in the PR that
-closes this:
+Then confirm the cache earns its keep for the hosted jobs that still use R2
+(Nightly on `main`, release pull requests, and the macOS and Windows jobs),
+and record the numbers in the PR that closes this:
 
-- Each merge queue and `main` job's `Check the cache` step reports
-  `effective read-write`, and a release pull request's reports
-  `effective read-only`.
-- The merge queue's Check show mbx remote hits for code the queued
-  pull request did not touch, and Nightly's macOS and Windows jobs hit what
-  the previous Nightly wrote.
+- Each Nightly job's `Check the cache` step reports `effective read-write`,
+  and a release pull request's reports `effective read-only`.
+- Nightly's Linux, macOS and Windows jobs hit what the previous Nightly
+  wrote.
 - Restore plus build time against the 150-210s Actions restore of the ~6 GB
-  store it replaced, from the same diff before and after.
-- Each object expires 30 days after upload, and the queue builds only what
-  its diff selects, so an expired crate stays cold until a queue or `main`
-  job builds it again. Count how often a queue entry pays that rebuild.
+  store it replaced, from the same commit before and after.
+- Each object expires 30 days after upload, so a crate no Nightly builds in
+  that window stays cold for the next hosted job. Count how often a Nightly
+  job pays that rebuild.
 - Bucket size and request counts after a month, against the 30-day expiry in
   `infra/mbx/lifecycle.json`. Shorten or lengthen it from that.
 
+## Plan
+
+Decided 2026-10-22 (maintainer): narrowed to hosted jobs. Since
+[#6040](https://github.com/moq-dev/moq/pull/6040) the merge queue runs on the
+self-hosted `moq-queue` runner with mbx's local store, so it neither reads nor
+writes R2.
+
 ## Related
 
-- [Require the release gates](/quest/m0/ci/release-gates.md) - the macOS and Windows jobs this cache serves
+- [Require the release gate](/quest/m0/ci/release-gates.md) - the macOS and Windows jobs this cache serves
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - the same R2 and Environment bootstrap for Nix

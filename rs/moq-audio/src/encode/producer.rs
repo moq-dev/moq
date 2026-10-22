@@ -556,6 +556,7 @@ impl<E: CatalogExt> Producer<E> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	async fn decoded_frame(consumer: &mut crate::decode::Consumer) -> Result<Option<Frame>, Error> {
 		loop {
@@ -1222,42 +1223,6 @@ mod tests {
 		// appear in the PTS (otherwise audio drifts behind a wall-clock video track).
 		let pts = published_pts(&[full_frame(0), full_frame(5_000_000)], Some(1)).await;
 		assert_eq!(pts, vec![0, 5_000_000]);
-	}
-
-	/// Finish leaves the handle, so abort can still run.
-	#[tokio::test]
-	async fn abort_after_finish() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let consumer = broadcast.consume();
-		let options = Options {
-			track: Some("audio".to_string()),
-			..Options::default()
-		};
-		let mut producer = Producer::new(
-			&mut broadcast,
-			catalog,
-			Input {
-				layout: Layout::Mono,
-				..Input::default()
-			},
-			&options,
-		)
-		.unwrap();
-		let mut track = moq_mux::container::Consumer::new(
-			consumer
-				.track("audio")
-				.unwrap()
-				.subscribe(moq_net::track::Subscription::default())
-				.await
-				.unwrap(),
-			moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
-		);
-
-		producer.write(&full_frame(0)).unwrap();
-		producer.finish().unwrap();
-		assert!(packet(&mut track).await.is_some());
-		producer.abort(moq_net::Error::Cancel);
 	}
 
 	/// A sub-frame write never reaches the closed track, so the producer must

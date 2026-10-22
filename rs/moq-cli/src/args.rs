@@ -335,6 +335,12 @@ impl Invocation {
 					"`export {sink}` reads no media to report on; remove --echo"
 				);
 			}
+			if matches!(export.sink, ExportSink::Archive(_)) {
+				anyhow::ensure!(
+					export.catalog_format.is_none(),
+					"`export archive` records every track without reading a catalog, so it takes no --catalog-format"
+				);
+			}
 			if export.echo.is_some() {
 				if export.sink.stdout().is_none()
 					&& let Some(sink) = export.sink.ignores_selection()
@@ -788,7 +794,7 @@ pub enum ImportSource {
 	/// Raw H.264 Annex-B from stdin.
 	Avc3,
 	/// Fragmented MP4 / CMAF from stdin.
-	Fmp4,
+	Fmp4(Fmp4Import),
 	/// MPEG-TS from stdin.
 	Ts(TsImport),
 	/// FLV / RTMP container from stdin.
@@ -816,7 +822,9 @@ impl ImportSource {
 	pub fn stdin_format(&self) -> Option<PublishFormat> {
 		Some(match self {
 			Self::Avc3 => PublishFormat::Avc3,
-			Self::Fmp4 => PublishFormat::Fmp4,
+			Self::Fmp4(args) => PublishFormat::Fmp4 {
+				passthrough: args.passthrough,
+			},
 			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
 				pcr_pid: args.pcr_pid.map(|pid| pid.0),
 			},
@@ -840,9 +848,19 @@ impl ImportSource {
 			}
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => Some("`import capture` encodes, and its encoders do not count yet"),
-			Self::Avc3 | Self::Fmp4 | Self::Ts(_) | Self::Flv => None,
+			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
 		}
 	}
+}
+
+/// The fMP4 stdin container: whether to unwrap its fragments.
+#[derive(usage_rs::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct Fmp4Import {
+	/// Publish each fragment whole as CMAF instead of splitting it into one frame per sample.
+	/// Keeps the source's exact sample timing, but every player has to parse ISO BMFF.
+	#[usage(long)]
+	pub passthrough: bool,
 }
 
 /// The MPEG-TS stdin container: which programs of a multiplex to publish.
@@ -1001,7 +1019,7 @@ pub enum ExportSink {
 	Srt(crate::srt::ExportArgs),
 	/// WebRTC: WHIP client pushing to a remote (`--connect`) or WHEP server serving plays (`--listen`).
 	Rtc(crate::rtc::Args),
-	/// Record the broadcast into an object store until it ends.
+	/// Record every broadcast announced under `--broadcast` into an object store.
 	Archive(crate::archive::ExportArgs),
 	/// Write the broadcast's stats snapshots to stdout as JSON lines.
 	Stats,
@@ -1050,6 +1068,7 @@ impl ExportSink {
 			fragment_duration: None,
 			mux_rate: None,
 			passthrough: false,
+			sync: false,
 		};
 		let buffered = |format, args: &Buffered| Stdout {
 			format,
@@ -1059,6 +1078,7 @@ impl ExportSink {
 			fragment_duration: None,
 			mux_rate: None,
 			passthrough: false,
+			sync: false,
 		};
 		Some(match self {
 			Self::Fmp4(args) => Stdout {
@@ -1077,6 +1097,7 @@ impl ExportSink {
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
 				passthrough: args.passthrough,
+				sync: args.sync,
 			},
 			Self::Flv(args) => buffered(SubscribeFormat::Flv, args),
 			Self::H264(args) => container(SubscribeFormat::H264, args),
@@ -1099,6 +1120,8 @@ pub struct Stdout {
 	pub mux_rate: Option<u64>,
 	/// Write the `m2ts` passthrough track back out (`ts` only).
 	pub passthrough: bool,
+	/// Render identical packets to every other `--sync` export of the broadcast (`ts` only).
+	pub sync: bool,
 }
 
 /// Staleness options for stdout sinks without a fixed release delay.
@@ -1221,6 +1244,13 @@ pub struct Transport {
 	#[usage(long, conflicts("--linger", "--stitch", "--mux-rate"))]
 	pub passthrough: bool,
 
+	/// Render every packet from the broadcast alone, on a fixed lane per PID, so two exports
+	/// of it emit identical TS for the content both receive, continuity counters included,
+	/// as the legs of a 1+1 pair must. Needs a constant rate, the same on every leg
+	/// (`--mux-rate`, or the catalog's).
+	#[usage(long, conflicts("--stitch", "--passthrough"))]
+	pub sync: bool,
+
 	/// The released spelling of [`Self::delay`].
 	#[usage(long = "max-age", hide = true)]
 	max_age: Option<crate::duration::Duration>,
@@ -1275,14 +1305,6 @@ mod tests {
 	#[test]
 	fn valid_stage() {
 		let _ = Stage::to_kdl();
-	}
-
-	#[test]
-	fn single_stage() {
-		let cli = Invocation::try_parse_from(["moq", "--connect", "http://relay", "import", "ts"]).unwrap();
-		assert_eq!(cli.stages.len(), 1);
-		assert_eq!(cli.stages[0].name(), "import");
-		assert!(cli.validate().is_ok());
 	}
 
 	/// Only TS can mark where a returned broadcast restarts, so only `export ts` may linger.
@@ -1346,6 +1368,27 @@ mod tests {
 		assert!(stdout.passthrough);
 		assert_eq!(stdout.max_delay, Duration::from_secs(2));
 		for flags in [&["--stitch"][..], &["--linger", "10s"], &["--mux-rate", "20000000"]] {
+			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
+		}
+	}
+
+	/// `export ts --sync` keeps its legs identical within one publisher epoch, so it refuses
+	/// `--stitch`, and `--passthrough`, whose output is already the source's own packets.
+	#[test]
+	fn export_ts_sync_refuses_a_stitch_and_a_passthrough() {
+		let parse = |args: &[&str]| {
+			let mut argv = vec!["moq", "export", "--broadcast", "b", "ts", "--sync"];
+			argv.extend_from_slice(args);
+			Invocation::try_parse_from(argv)
+		};
+		let cli = parse(&["--mux-rate", "12000000"]).unwrap();
+		let Command::Export(export) = &cli.stages[0] else {
+			panic!("not an export");
+		};
+		let stdout = export.sink.stdout().unwrap();
+		assert!(stdout.sync);
+		assert_eq!(stdout.mux_rate, Some(12_000_000));
+		for flags in [&["--stitch"][..], &["--passthrough"]] {
 			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
 		}
 	}

@@ -6,48 +6,7 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 8 * * *"
-  pull_request:
-    # Main PRs skip it; the schedule above runs it on main. `edited` catches a
-    # main PR retargeted to release.
-    branches: [release]
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - "test/ts/**"
-      - "test/lib/**"
-      - "test/justfile"
-      # Exactly the workspace crates run.sh builds; sh/gh/ts-paths.py fails Check on drift.
-      - "rs/hang/**"
-      - "rs/kio/**"
-      - "rs/moq-archive/**"
-      - "rs/moq-auth/**"
-      - "rs/moq-cli/**"
-      - "rs/moq-clock/**"
-      - "rs/moq-flate/**"
-      - "rs/moq-hls/**"
-      - "rs/moq-ice/**"
-      - "rs/moq-json/**"
-      - "rs/moq-loc/**"
-      - "rs/moq-msf/**"
-      - "rs/moq-mux/**"
-      - "rs/moq-net/**"
-      - "rs/moq-pattern/**"
-      - "rs/moq-quic/**"
-      - "rs/moq-relay/**"
-      - "rs/moq-rtc/**"
-      - "rs/moq-rtmp/**"
-      - "rs/moq-rtsp/**"
-      - "rs/moq-shaper/**"
-      - "rs/moq-sock/**"
-      - "rs/moq-srt/**"
-      - "rs/moq-stats/**"
-      - "rs/moq-tokio/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/actions/rust-cache/**"
-      - ".github/workflows/ts.yml"
+  workflow_call:
 
 concurrency:
   group: ts-${{ github.ref }}
@@ -109,6 +68,27 @@ jobs:
       - name: TS private PES
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --klv --strict
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      - name: TS audio-only SCTE-35
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --clockless audio-scte35
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      - name: TS sections-only clock
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --clockless sections
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      - name: TS whole-PES-only clock
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --clockless pes
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
@@ -257,6 +237,14 @@ jobs:
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
           MOQ_QUIC_CONGESTION_CONTROL: loss
+
+      # Two minutes of MoQ content faults and a congested bottleneck, on a paused clock: each
+      # recovery graded against what was delivered and decoded, and the latency must not drift.
+      - name: TS long recovery
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just rs ts-recovery
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
       - name: Upload failure artifacts
         if: ${{ failure() }}

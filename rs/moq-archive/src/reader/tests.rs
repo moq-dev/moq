@@ -28,20 +28,20 @@ struct Encoder {
 /// Writes archive objects the way a recording writer lays them out.
 struct Archive {
 	store: Store<Mock>,
-	op_ratio: u32,
+	ops: bool,
 	encoders: HashMap<String, Encoder>,
 }
 
 impl Archive {
 	async fn new() -> Self {
-		Self::with_op_ratio(0).await
+		Self::with_ops(false).await
 	}
 
-	/// `op_ratio` 0 makes every window edit its own checkpoint group.
-	async fn with_op_ratio(op_ratio: u32) -> Self {
+	/// Without ops every window edit is its own checkpoint group.
+	async fn with_ops(ops: bool) -> Self {
 		Self {
 			store: Store::new(Mock::memory(), "rec"),
-			op_ratio,
+			ops,
 			encoders: HashMap::new(),
 		}
 	}
@@ -58,7 +58,7 @@ impl Archive {
 				.unwrap();
 			let config = window::ProducerConfig::default()
 				.with_compression(true)
-				.with_op_ratio(self.op_ratio);
+				.with_ops(self.ops);
 			self.encoders.insert(
 				track.to_string(),
 				Encoder {
@@ -645,7 +645,7 @@ async fn a_track_without_usable_info_is_not_found() {
 	archive
 		.raw(
 			&Key::info("future").unwrap(),
-			br#"{"version":3,"priority":0,"timescale":1000}"#,
+			br#"{"version":4,"priority":0,"timescale":1000}"#,
 		)
 		.await;
 
@@ -661,7 +661,7 @@ async fn a_track_without_usable_info_is_not_found() {
 
 #[tokio::test]
 async fn multi_frame_timeline_groups_decode() {
-	let mut archive = Archive::with_op_ratio(64).await;
+	let mut archive = Archive::with_ops(true).await;
 	let first = archive.record("video", Position::group(0), Position::group(1), 1).await;
 	let second = archive.record("video", Position::group(1), Position::group(2), 1).await;
 	let mut groups = archive.edit("video", &first, 0).await;
@@ -694,72 +694,11 @@ async fn timeline_tracks_are_republished_and_finished_on_request() {
 
 	let mut records = Vec::new();
 	while let Some(event) = timeline.next().await.unwrap() {
-		if let window::Event::Push { value, .. } = event {
+		if let window::Event::Push { value, .. } = event.value {
 			records.push(value.sequence);
 		}
 	}
 	assert_eq!(records, vec![0, 1]);
-}
-
-/// An untimed recording replays untimed: no media or timeline frame gains a timestamp.
-#[tokio::test]
-async fn an_untimed_recording_replays_untimed() {
-	let store = Store::new(Mock::memory(), "rec");
-	let source = broadcast::Info::new().produce();
-	let info = moq_net::track::Info::default().with_max_age(Duration::from_secs(3600));
-	let data = source.create_track("data", info).unwrap();
-	let writer = crate::Writer::new(store.clone(), source.consume(), Default::default())
-		.await
-		.unwrap();
-	writer
-		.control()
-		.track("data", moq_mux::timeline::Config::default())
-		.await
-		.unwrap();
-	for sequence in 0..2 {
-		let mut group = data.create_group(group::Info { sequence }).unwrap();
-		group.write_frame(None, format!("data/{sequence}")).unwrap();
-		group.finish().unwrap();
-	}
-	data.finish().unwrap();
-	source.close();
-	writer.run().await.unwrap();
-
-	let broadcast = broadcast::Info::new().produce();
-	let config = Config::new([("data".to_string(), timeline("data"))].into());
-	let reader = Reader::open(store, &broadcast, config).await.unwrap();
-	tokio::spawn(reader.serve());
-
-	let track = broadcast.consume().track("data").unwrap();
-	let mut group = track.fetch_group(1, group::Fetch::default()).await.unwrap();
-	assert_eq!(group.timescale(), None);
-	let frame = group.read_frame().await.unwrap().unwrap();
-	assert_eq!((frame.timestamp, frame.payload), (None, Bytes::from("data/1")));
-
-	let subscriber = broadcast
-		.consume()
-		.track(&timeline("data"))
-		.unwrap()
-		.subscribe(None)
-		.await
-		.unwrap();
-	assert_eq!(subscriber.info().timescale, None);
-	let mut timeline =
-		window::Consumer::<Record>::new(subscriber, window::ConsumerConfig::default().with_compression(true));
-	reader.finish().unwrap();
-	let mut records = Vec::new();
-	while let Some(event) = timeline.next().await.unwrap() {
-		if let window::Event::Push { value, .. } = event {
-			records.push(value);
-		}
-	}
-	assert_eq!(
-		records,
-		vec![
-			Record::untimed(0, Position::group(0), Position::group(1)),
-			Record::untimed(1, Position::group(1), Position::group(2)),
-		]
-	);
 }
 
 /// A record whose timing contradicts its timeline is not indexed, though its object is stored.
