@@ -41,8 +41,22 @@ must not starve the socket.
   Decided in the 2026-09-30 audit: the egress requeue quest merged here, since
   both budgets need the same sweep.
 - Add `passes` per turn to the metrics beside `turns`.
+- Ingress fairness: a pass budget does not bound work inside one poll.
+  The endpoint's `Inner::poll_run` calls `poll_recv` until `Pending`, so one
+  poll drains every queued receive completion, and `Endpoint::demux` drains
+  every datagram of each, where one GRO completion can carry many. Measure
+  saturated ingress against timers, control messages, and quiet connections
+  on the same worker, and if their latency shows it, budget both the
+  completions per poll and the datagrams per turn. Decided in the 2026-10-22
+  io_uring audit: a latency question, not a known starvation bug.
 
 Acceptance: turns and enters per received datagram on the chat shape
 (request-reply is the worst case), CPU per Gbps and p99 latency on the fanout
-shape, via `just bench BASE` on Linux. The existing starvation test keeps its
-meaning with a budget of 1 and gains a sibling proving the budget bound.
+shape, on Linux with the io_uring workers at both base and current, using
+`just bench-runtime` at each revision with the same worker count. The existing
+starvation test keeps its meaning with a budget of 1 and gains a sibling
+proving the budget bound.
+
+## Required
+
+- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the profile that attributes the turns

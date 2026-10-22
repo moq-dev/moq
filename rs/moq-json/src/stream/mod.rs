@@ -29,7 +29,9 @@
 //! Instead an append that might not fit is refused with [`moq_net::Error::GroupTooLarge`] before
 //! it is encoded, and the log stays intact and writable. With compression the check counts the
 //! record's raw size plus DEFLATE's worst-case overhead, since the compressed size is only known
-//! once the window has moved. The budget covers the whole log rather than a single record, so once
+//! once the window has moved, and each written record is charged its raw size: a reader's DEFLATE
+//! window is held to the same budget, so compression shrinks the wire but not how much a log can
+//! hold. The budget covers the whole log rather than a single record, so once
 //! it is spent every append is refused: the live stream is bounded history by design, a publisher
 //! with more to say opens a new track, and deep history is served from a recording.
 //!
@@ -194,19 +196,6 @@ mod test {
 		};
 		assert_eq!(frame.timestamp.unwrap().as_micros(), captured.as_micros());
 		assert_eq!(size, frame.payload.len());
-	}
-
-	#[test]
-	fn compressed_roundtrip_in_order() {
-		let (mut producer, track) = producer(compressed());
-		for n in 0..20 {
-			producer.append(&json!({ "group": n, "pts": n * 2_000 })).unwrap();
-		}
-		producer.finish().unwrap();
-
-		let records = drain(consume(track, true));
-		assert_eq!(records.len(), 20);
-		assert_eq!(records[7], json!({ "group": 7, "pts": 14_000 }));
 	}
 
 	#[test]
@@ -464,6 +453,18 @@ mod test {
 				"compression={compression}"
 			);
 		}
+	}
+
+	/// A compressed record is charged its plaintext, since that is what a reader's window inflates:
+	/// two records that each fit, and deflate to almost nothing, still overflow the budget together.
+	#[test]
+	fn a_compressed_log_is_charged_its_inflated_size() {
+		let (mut producer, track) = producer(compressed());
+		let half = Value::String("x".repeat(moq_net::group::MAX_CACHE_BYTES as usize / 2));
+		producer.append(&half).unwrap();
+		assert!(refused(producer.append(&half)));
+		producer.finish().unwrap();
+		assert_eq!(drain(consume(track, true)), vec![half]);
 	}
 
 	/// The budget covers the whole log, so once its frames are spent every append is refused, and

@@ -15,6 +15,36 @@ A refusal carries no application code: `DropGroups` fails the waiting fetches wi
 `Subscription.MaxDelay` is a `*time.Duration`, where nil leaves the publisher's max age alone to bound delivery.
 A zero-value `Subscription` now means that rather than live edge only: point `MaxDelay` at a zero duration to keep skipping at once.
 
+### JSON snapshot `DeltaRatio` is `Deltas`
+
+`json.SnapshotOptions.DeltaRatio *uint32` and `json.DefaultDeltaRatio` are replaced by `Deltas *bool` (nil enables deltas).
+Set `Deltas` to a pointer to `false` where you set `DeltaRatio` to a pointer to `0`, and leave it nil otherwise.
+Publish the track with a `Refresh` ratio so a joiner gets the value restated in a fresh group.
+
+### Priorities are signed (#6142)
+
+`TrackInfo.Priority`, `Subscription.Priority`, and `FetchGroupOptions.Priority` are `int8`, and `Fill.Priority()` returns one.
+Higher is first and the zero value is the unset midpoint, so a `TrackInfo` that leaves `Priority` zero now gets the default rather than the least urgent priority; drop any `Priority: 127` that asked for the midpoint.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `Announced()` or `AnnouncedBroadcast()`, instead of under its whole scope at connect.
+`OriginConsumer.RequestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
+Resolve the path with `AnnouncedBroadcast()`, or hold `Announced()` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
+### `media.ContainerFormatFmp4` unwraps to Legacy (#6250)
+
+A container import with `media.ContainerFormatFmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `media.ContainerFormatCmaf` to keep publishing CMAF.
+
+### Catalog references carry their epoch
+
+`ffi.MoqVideo` and `ffi.MoqAudio` gain `Epoch`, the publisher instance their `Broadcast` reference names.
+`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, reference, epoch)`; pass the rendition's `Epoch` alongside its `Broadcast`, or `nil` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another epoch.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.Finish()` lets go.
@@ -57,7 +87,7 @@ A subscription now reads only the groups its own `Ranges` cover.
 `TrackDemand.IsUsed`, `Used`, and `Unused` are gone.
 `Wanted()` returns nil while nobody subscribes, otherwise the group subscribers want next, and `WantedChanged(ctx)` waits for it to change (the first call returns at once).
 Loop on `WantedChanged` until it returns non-nil where you called `Used`, and nil where you called `Unused`.
-`TrackInfo` gains `Refresh`. `GroupDemand` is unchanged.
+`TrackInfo` gains `Refresh`.
 
 ### `CongestionControl` gained `CongestionControlNone` (#5926)
 

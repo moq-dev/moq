@@ -64,7 +64,7 @@ func datagramFromFFI(d *ffi.MoqDatagram) *Datagram {
 // empty non-nil slice asks for nothing), and the order the publisher sends pending
 // groups in (nil for newest first).
 type Subscription struct {
-	Priority uint8
+	Priority int8
 	MaxDelay *time.Duration
 	Ranges   []Range
 	Order    *Order
@@ -96,11 +96,11 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 // non-latest group is cached (nil for no limit), how many times its first frame
 // a group's later bytes may grow before a joining subscriber asks for a new group
 // (nil never asks), and the timescale in ticks per second (nil means untimed on
-// both publish and receive). A zero Priority is the least urgent; set 127 for the
+// both publish and receive). Priority is higher first; the zero Priority is the
 // midpoint a nil TrackInfo uses. Compress DEFLATEs each group on the wire to peers
 // that support it; readers always see the original frames.
 type TrackInfo struct {
-	Priority  uint8
+	Priority  int8
 	MaxAge    *time.Duration
 	Refresh   *uint32
 	Timescale *uint64

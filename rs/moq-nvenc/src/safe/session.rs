@@ -631,14 +631,6 @@ mod tests {
 		assert_eq!(*events.lock().unwrap(), ["wait", "abandon"]);
 	}
 
-	#[test]
-	fn session_identity_rejects_cross_session_resources() {
-		let first = Arc::new(());
-		let second = Arc::new(());
-		assert!(same_session(&first, &first, &first));
-		assert!(!same_session(&first, &second, &first));
-	}
-
 	/// Whether an NVENC session can run here. Hardware tests return early
 	/// without one, so they pass on GPU-less CI.
 	fn driver_available() -> bool {

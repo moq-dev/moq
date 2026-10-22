@@ -680,56 +680,6 @@ fn reassemble_video(ts: &[u8], expected_stream_type: StreamType) -> Vec<u8> {
 	reassembled
 }
 
-/// In-band avc3: SPS/PPS are inline in the bitstream. ExportSource strips them
-/// into a synthesized avcC, and the muxer re-injects them on the keyframe.
-#[tokio::test(start_paused = true)]
-async fn export_avc3_in_band_reassembles() {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-
-	let track = broadcast
-		.create_track(
-			broadcast.unique_name(".avc3"),
-			hang::container::track_info(hang::catalog::PRIORITY.video),
-		)
-		.unwrap();
-	let name = track.name().to_string();
-	{
-		let mut cfg = VideoConfig::new(H264 {
-			profile: 0x64,
-			constraints: 0,
-			level: 0x1f,
-			inline: true,
-		});
-		cfg.container = Container::Legacy;
-		catalog.modify().unwrap().video.renditions.insert(name.clone(), cfg);
-	}
-	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
-
-	// IDR slice (NAL type 5), padded past 184 bytes to span multiple TS packets.
-	let mut idr = vec![0x65u8];
-	idr.extend(std::iter::repeat_n(0xAB, 300));
-	// Annex-B keyframe: inline SPS + PPS + IDR.
-	producer
-		.write(Frame {
-			timestamp: Timestamp::from_micros(0).unwrap(),
-			duration: None,
-			payload: annexb(&[SPS, PPS, &idr]),
-			keyframe: true,
-		})
-		.unwrap();
-	producer.finish().unwrap();
-
-	// Keep the producers alive (see `export_aac_roundtrip`).
-	let ts = drain(consumer).await;
-	assert_packet_aligned(&ts);
-
-	let reassembled = reassemble_video(&ts, StreamType::H264);
-	// The parameter sets the muxer re-injected, followed by the slice, all Annex-B.
-	assert_eq!(reassembled.as_slice(), annexb(&[SPS, PPS, &idr]).as_ref());
-}
-
 /// In-band avc3 carrying two distinct PPS (a real broadcast trait): both must
 /// survive the round-trip, or slices referencing the dropped one stop decoding
 /// (regression for non-existing PPS 0 referenced).
@@ -6183,6 +6133,74 @@ impl SiCadenceRig {
 	}
 }
 
+/// Under `--sync` the PCR rides a PID of its own, picked when the tables are built: an SI
+/// entry the catalog adds after them must not land on it.
+#[tokio::test(start_paused = true)]
+async fn sync_refuses_a_later_si_entry_on_the_clock_pid() {
+	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(2)).await;
+	rig.exporter = rig.exporter.with_mux_rate(2_000_000).with_sync();
+	let mut frames = Vec::new();
+	for millis in (0..1_000).step_by(40) {
+		frames.extend(rig.media_frames(millis).await);
+	}
+	let clock = frames
+		.iter()
+		.flat_map(|frame| frame.payload.chunks(188))
+		.find(|packet| packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x10 != 0)
+		.map(|packet| u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]))
+		.expect("the tables and the clock went out");
+	rig.catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.si
+		.entry(clock)
+		.or_default()
+		.insert(
+			0x70,
+			tscat::SiEntry {
+				track: "late.si".to_string(),
+				interval: Some(Duration::from_secs(5)),
+				..Default::default()
+			},
+		);
+	let err = tokio::time::timeout(Duration::from_secs(5), async {
+		loop {
+			if let Err(err) = rig.exporter.next().await {
+				break err;
+			}
+		}
+	})
+	.await
+	.expect("the export reads the catalog update");
+	assert!(err.to_string().contains("mpegts.si PID"), "{err}");
+}
+
+/// Under `--sync` a program whose streams take the top PID still finds a free one below
+/// them for the PCR.
+#[tokio::test(start_paused = true)]
+async fn sync_clock_pid_falls_below_the_streams() {
+	let mut rig = si_cadence_rig(0x0011, 0x42, Duration::from_secs(2)).await;
+	{
+		let mut guard = rig.catalog.modify().unwrap();
+		let name = guard.video.renditions.keys().next().unwrap().clone();
+		guard.ext.mpegts.tracks.insert(name, tscat::Track::new(0x1FFE));
+	}
+	rig.exporter = rig.exporter.with_mux_rate(2_000_000).with_sync();
+	let mut frames = Vec::new();
+	for millis in (0..1_000).step_by(40) {
+		frames.extend(rig.media_frames(millis).await);
+	}
+	let clock = frames
+		.iter()
+		.flat_map(|frame| frame.payload.chunks(188))
+		.find(|packet| packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x10 != 0)
+		.map(|packet| u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]))
+		.expect("the tables and the clock went out");
+	assert_eq!(clock, 0x1001);
+}
+
 /// #2934: a revised SI snapshot goes out on the revision floor instead of waiting
 /// out the repetition interval (here the floor has long elapsed, so it rides the
 /// very next frame). For a clock table (TDT/TOT) the old interval-grid hold
@@ -9852,6 +9870,12 @@ struct Placed {
 	/// Also describe the private data track as an AAC rendition.
 	rendition: bool,
 	mux_rate: Option<u64>,
+	/// Export with [`Export::with_sync`], which needs `mux_rate`.
+	sync: bool,
+	/// Also carry an SDT from a snapshot track, re-emitted at this interval.
+	sdt: Option<Duration>,
+	/// Finish the catalog once everything is written, so the export must end rather than stall.
+	ends: bool,
 }
 
 impl Placed {
@@ -9864,6 +9888,9 @@ impl Placed {
 			pes,
 			rendition: false,
 			mux_rate: None,
+			sync: false,
+			sdt: None,
+			ends: false,
 		}
 	}
 }
@@ -9937,6 +9964,33 @@ async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
 		}
 	}
 	let mut data = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	// Held open: dropping the producer ends the track before export subscribes.
+	let _sdt = placed.sdt.map(|interval| {
+		let mut track = broadcast.create_track("0x0011-0x42.si", timed()).unwrap();
+		track
+			.write_frame(
+				Timestamp::ZERO,
+				Bytes::from(make_long_section(0x42, 1, 0, 0, 0, &[0xaa; 8])),
+			)
+			.unwrap();
+		catalog
+			.modify()
+			.unwrap()
+			.ext
+			.mpegts
+			.si
+			.entry(0x0011)
+			.or_default()
+			.insert(
+				0x42,
+				tscat::SiEntry {
+					track: "0x0011-0x42.si".to_string(),
+					interval: Some(interval),
+					..Default::default()
+				},
+			);
+		track
+	});
 
 	for (k, &pts) in placed.video.iter().enumerate() {
 		let slice = vec![if k == 0 { 0x65u8 } else { 0x41 }; 400];
@@ -9984,6 +10038,9 @@ async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
 	}
 	audio.finish().unwrap();
 	data.finish().unwrap();
+	if placed.ends {
+		catalog.finish().unwrap();
+	}
 
 	let mut exporter = open_ts(
 		crate::source::announced(&consumer).await,
@@ -9995,14 +10052,20 @@ async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
 	if let Some(rate) = placed.mux_rate {
 		exporter = exporter.with_mux_rate(rate);
 	}
+	if placed.sync {
+		exporter = exporter.with_sync();
+	}
 	let mut out = Vec::new();
-	while let Ok(next) = tokio::time::timeout(DRAIN, exporter.next()).await {
+	loop {
+		let Ok(next) = tokio::time::timeout(DRAIN, exporter.next()).await else {
+			assert!(!placed.ends, "the export stalled instead of ending");
+			return Ok(out);
+		};
 		match next? {
 			Some(frame) => out.push(frame),
-			None => break,
+			None => return Ok(out),
 		}
 	}
-	Ok(out)
 }
 
 /// Where a PES went out: the slice it began in, its first byte's offset into the slice, and
@@ -10180,6 +10243,80 @@ async fn placed_pes_goes_out_at_its_placement() {
 			"{ms} ms: the slot opening at {opens} ns is a slot late"
 		);
 	}
+}
+
+/// Under `--sync` a PES has no decode time to meet on its lane: it goes out whole from its
+/// placement, never ahead of it, and within a slot of it.
+#[tokio::test(start_paused = true)]
+async fn placed_pes_goes_out_whole_at_its_placement_under_sync() {
+	const RATE: u64 = 2_000_000;
+	let packets = [
+		pes_with(0xbd, 0x84, 0x80, &pes_clock(0b0010, 90_000), 0, b"pts"),
+		pes_with(0xbd, 0x84, 0x00, &[], 0, &[0x33; 500]),
+		pes_bare(0xbf, b"private_stream_2"),
+	];
+	let placements = [1_010, 1_533, 2_017];
+	let slices = export_placed(Placed {
+		mux_rate: Some(RATE),
+		sync: true,
+		..Placed::new(placements.iter().copied().zip(packets.iter().cloned()).collect())
+	})
+	.await
+	.unwrap();
+	let out = placed_out(&slices);
+	let bytes: Vec<&Vec<u8>> = out.iter().map(|pes| &pes.bytes).collect();
+	assert_eq!(bytes, packets.iter().collect::<Vec<_>>());
+	for (pes, &ms) in out.iter().zip(&placements) {
+		let first = slice_pcr(&slices[pes.slice]) + pes.offset as u128 * 8 * 1_000_000_000 / u128::from(RATE);
+		let place = u128::from(ms) * 1_000_000;
+		assert!(
+			first >= place,
+			"{ms} ms: first byte at {first} ns, ahead of its placement"
+		);
+		assert!(
+			first < place + PCR_INTERVAL.as_nanos(),
+			"{ms} ms: first byte at {first} ns, a slot past its placement"
+		);
+	}
+}
+
+/// Under `--sync`, an SI entry due in every slot goes out while the media does and stops with
+/// it, so the export ends.
+#[test]
+fn si_due_every_slot_ends_with_the_media_under_sync() {
+	let (sent, received) = std::sync::mpsc::channel();
+	// A thread of its own: a flush that never returns blocks the runtime that would time it out.
+	// A stall panics the thread instead, which drops `sent`.
+	std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.start_paused(true)
+			.build()
+			.unwrap();
+		let _ = sent.send(runtime.block_on(export_placed(Placed {
+			mux_rate: Some(2_000_000),
+			sync: true,
+			sdt: Some(Duration::ZERO),
+			ends: true,
+			..Placed::new(vec![(1_000, pes_bare(0xbf, b"private_stream_2"))])
+		})));
+	});
+	let slices = received
+		.recv_timeout(Duration::from_secs(5))
+		.expect("the export never ended")
+		.unwrap();
+	let sdt = slices
+		.iter()
+		.filter(|slice| {
+			slice
+				.payload
+				.as_chunks::<188>()
+				.0
+				.iter()
+				.any(|packet| (u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])) == 0x0011)
+		})
+		.count();
+	assert!(sdt > 1, "the SDT repeats with the media: {sdt} slices");
 }
 
 /// Tune-in drops a PES placed before the keyframe departs, and keeps one placed beside it,

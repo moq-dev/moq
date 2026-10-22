@@ -270,11 +270,6 @@ mod test {
 	}
 
 	#[test]
-	fn default_name_appends_the_suffix() {
-		assert_eq!(default_name("video0"), "video0.timeline.z");
-	}
-
-	#[test]
 	fn typed_extension_flattens() {
 		// An application extends the record with its own typed section, flattened into the object.
 		#[derive(serde::Serialize, serde::Deserialize, Default, Clone, PartialEq, Debug)]

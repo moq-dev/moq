@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Once } from "@moq/signals";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
@@ -291,6 +292,8 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
  * The old session closes either before the `restart` reaches the viewer or after.
  */
 async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> {
+	const clock = new Manual();
+	using _clock = { [Symbol.dispose]: clock.install() };
 	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_17;
 	const pair = createMockTransportPair(protocol);
 	const inject = kind === "ietf" ? captureFirstUni(pair.server) : undefined;
@@ -356,7 +359,9 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 		expect(await video.readString()).toBe("two");
 
 		// A draining close of a session still serving a live track gives up after its drain.
-		await server.close().catch(() => {});
+		const closing = server.close().catch(() => {});
+		await clock.advance(Nano.fromMilli(Milli(1000)));
+		await closing;
 		await expect(
 			(async () => {
 				for (;;) {

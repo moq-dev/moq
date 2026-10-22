@@ -42,6 +42,6 @@ that track ends) while the catalog names the new one.
 
 Raised by a Codex review of #5367, which added the per-rendition `track`
 field; the `broadcast` gap predates it. Deferred from that PR by the
-maintainer's recommended option. Starts after #5367 merges.
+maintainer's recommended option.
 
 Public API: none. Wire: none.

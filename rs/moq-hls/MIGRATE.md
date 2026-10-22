@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### HLS import unwraps fMP4 to Legacy (#6250)
+
+`import::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.
+Set `import::Config::passthrough` to keep publishing CMAF.
+
+### An ended playlist ends the import
+
+`import::Import::run` returns `Ok(())` once every rendition's playlist carries `EXT-X-ENDLIST` and its last segment is imported, instead of polling forever.
+Call `Import::finish` then, and keep the returned `broadcast::Finish` (or await `Finish::wait`) so subscribers still catching up drain the tail.
+
+```rust
+import.run().await?;
+import.finish()?.wait().await;
+```
+
 ### A failed timeline fails its listings
 
 `export::Broadcaster::manifest` and `export::Rendition::media_playlist` return `Result<Option<String>>`.

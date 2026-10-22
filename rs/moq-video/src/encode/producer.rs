@@ -831,6 +831,7 @@ fn map_capture_timestamp(epoch_micros: u64, timestamp: Timestamp) -> Result<Time
 #[cfg(test)]
 mod tests {
 	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+	#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 	use moq_mux::catalog::Stream as _;
 
@@ -1138,7 +1139,9 @@ mod tests {
 	/// published timestamp may land up to `SAMPLING` early, never late.
 	#[cfg(all(feature = "capture", feature = "openh264"))]
 	mod clock {
-		use std::time::{Duration, Instant, SystemTime};
+		use std::time::{Duration, SystemTime};
+
+		use moq_clock::Instant;
 
 		use super::*;
 		use crate::capture::Synthetic;
@@ -1176,15 +1179,10 @@ mod tests {
 		impl Fixture {
 			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
 			async fn start(behind: Duration, wall: SystemTime) -> Self {
-				// The capture stream counts on the host clock and the broadcast on moq-clock; the
-				// loop correlates the two, so each epoch is the same moment on its own clock.
-				let epoch = Instant::now()
+				let epoch = moq_clock::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
-				let start = moq_net::time::now()
-					.checked_sub(behind)
-					.expect("a monotonic clock that far back");
-				let clock = moq_mux::Clock::at(start, wall).unwrap();
+				let clock = moq_mux::Clock::at(epoch, wall).unwrap();
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
 				let consumer = broadcast.consume();
 				let config = moq_mux::catalog::Config::default()
@@ -1645,10 +1643,8 @@ mod tests {
 						let mut groups = Vec::new();
 						while let Some(mut group) = subscriber.recv_group().await.unwrap() {
 							let mut frames = Vec::new();
-							while let Some(batch) =
-								kio::wait(|waiter| format.poll_read(&mut group, waiter)).await.unwrap()
-							{
-								for frame in batch {
+							while let Some(wire) = group.read_frame().await.unwrap() {
+								for frame in format.decode(wire).unwrap() {
 									// A duration marker closes the group but is not an encoded picture.
 									if format.end(&frame).is_none() {
 										frames.push(frame.payload.len());

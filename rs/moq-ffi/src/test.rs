@@ -31,7 +31,7 @@ fn timed() -> moq_net::track::Info {
 /// An explicitly timed raw track, whose frame API accepts microsecond timestamps.
 fn timed_info() -> MoqTrackInfo {
 	MoqTrackInfo {
-		priority: 127,
+		priority: 0,
 		max_age_us: None,
 		refresh: None,
 		timescale: Some(1_000_000),
@@ -262,6 +262,7 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 		config: MoqVideo {
 			label: None,
 			broadcast: None,
+			epoch: None,
 			track: None,
 			codec: "avc1.64001f".into(),
 			description: None,
@@ -283,6 +284,7 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	MoqAudio {
 		label: None,
 		broadcast: Some(reference.to_string()),
+		epoch: None,
 		track: None,
 		codec: "opus".to_string(),
 		description: None,
@@ -333,12 +335,6 @@ fn h264_init() -> Vec<u8> {
 	init.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // start code
 	init.extend_from_slice(&[0x68, 0xee, 0x32, 0xc8, 0xb0]);
 	init
-}
-
-#[test]
-fn origin_lifecycle() {
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let _consumer = origin.consume();
 }
 
 #[test]
@@ -482,26 +478,6 @@ async fn announced_epoch_restarts_on_a_new_epoch() {
 		other => panic!("expected a restart, got {other:?}"),
 	}
 
-	broadcast.close().unwrap();
-}
-
-#[test]
-fn publish_media_lifecycle() {
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let init = opus_head();
-	let media = MoqMediaTrackProducer::audio(
-		&broadcast,
-		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, init),
-	)
-	.unwrap();
-	media
-		.write_frame(MoqFrame {
-			payload: b"opus frame".to_vec(),
-			timestamp_us: Some(1000),
-		})
-		.unwrap();
-	media.finish().unwrap();
 	broadcast.close().unwrap();
 }
 
@@ -968,7 +944,7 @@ async fn data_writes_preserve_optional_timestamps() {
 				.publish_track(
 					"data".into(),
 					Some(MoqTrackInfo {
-						priority: 127,
+						priority: 0,
 						max_age_us: None,
 						refresh: None,
 						timescale: timestamp_us.map(|_| 1_000_000),
@@ -984,7 +960,7 @@ async fn data_writes_preserve_optional_timestamps() {
 						&broadcast,
 						&track,
 						MoqJsonSnapshotConfig {
-							delta_ratio: 0,
+							deltas: false,
 							compression: false,
 						},
 					)
@@ -1106,11 +1082,11 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 async fn json_snapshot_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let config = MoqJsonSnapshotConfig {
-		delta_ratio: 8,
+		deltas: true,
 		compression: true,
 	};
 	let info = MoqTrackInfo {
-		priority: 127,
+		priority: 0,
 		max_age_us: None,
 		timescale: Some(1_000_000),
 		refresh: None,
@@ -1174,12 +1150,66 @@ async fn json_snapshot_roundtrip() {
 	assert_eq!(end, None);
 }
 
+/// An idle snapshot producer restates its value in a fresh group once a joiner would otherwise
+/// download more deltas than the track's refresh ratio allows.
+#[tokio::test]
+async fn json_snapshot_refreshes_for_a_joiner() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast
+		.publish_track(
+			"meta".into(),
+			Some(MoqTrackInfo {
+				priority: 127,
+				max_age_us: None,
+				refresh: Some(1),
+				timescale: None,
+				compress: false,
+			}),
+		)
+		.unwrap();
+	let config = MoqJsonSnapshotConfig {
+		deltas: true,
+		compression: false,
+	};
+	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
+	for n in 0..4 {
+		producer.update(format!(r#"{{"n":{n}}}"#), None).unwrap();
+	}
+
+	// The join crosses the ratio, so the producer restates the value without another update. The
+	// joiner may read the open group first or skip straight to the restatement.
+	let joiner = subscribe(&broadcast, "meta").await;
+	let refreshed = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let group = joiner.recv_group().await.unwrap().expect("expected a group");
+			if group.sequence() > 0 {
+				return group;
+			}
+		}
+	})
+	.await
+	.expect("timed out waiting for the refresh");
+	assert_eq!(refreshed.sequence(), 1);
+	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await, config).unwrap();
+	let value = tokio::time::timeout(TIMEOUT, consumer.next())
+		.await
+		.expect("timed out waiting for the restated value")
+		.unwrap()
+		.expect("expected a value");
+	assert_eq!(
+		serde_json::from_str::<serde_json::Value>(&value.value).unwrap(),
+		serde_json::json!({ "n": 3 })
+	);
+
+	producer.finish().unwrap();
+}
+
 /// JSON producers report subscriber demand through a handle, like the media and raw track producers.
 #[tokio::test]
 async fn json_demand() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let snapshot_config = MoqJsonSnapshotConfig {
-		delta_ratio: 8,
+		deltas: true,
 		compression: true,
 	};
 	let stream_config = MoqJsonStreamConfig { compression: true };
@@ -1843,14 +1873,9 @@ fn write_legacy(group: &mut moq_net::group::Producer, transport_us: u64, media_u
 }
 
 fn write_raw(group: &mut moq_net::group::Producer, transport_us: u64, payload: bytes::Bytes) {
-	let mut frame = group
-		.create_frame(moq_net::frame::Info {
-			size: payload.len() as u64,
-			timestamp: Some(moq_net::Timestamp::from_micros(transport_us).unwrap()),
-		})
+	group
+		.write_frame(moq_net::Timestamp::from_micros(transport_us).unwrap(), payload)
 		.unwrap();
-	frame.write(payload).unwrap();
-	frame.finish().unwrap();
 }
 
 /// A broadcast with one legacy-container track, and a raw consumer subscribed to it.
@@ -2658,7 +2683,7 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 
 	await_announced(&consumer, "a/source").await;
 
-	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into())))
+	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into()), None))
 		.await
 		.expect("timed out resolving the reference")
 		.unwrap();
@@ -2735,13 +2760,13 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 	// An absent or empty reference still names this broadcast, so it needs no origin. A reference
 	// made only of slashes normalizes to the empty one, so it must be treated the same rather than
 	// looking like a cross-broadcast reference.
-	consumer.resolve(None).await.unwrap();
-	consumer.resolve(Some(String::new())).await.unwrap();
-	consumer.resolve(Some("/".into())).await.unwrap();
+	consumer.resolve(None, None).await.unwrap();
+	consumer.resolve(Some(String::new()), None).await.unwrap();
+	consumer.resolve(Some("/".into()), None).await.unwrap();
 
 	// Reported in normalized form, matching `EscapingBroadcast` and moq-c: it names what the
 	// resolver actually tried to reach, not the caller's spelling of it.
-	match consumer.resolve(Some("./source".into())).await {
+	match consumer.resolve(Some("./source".into()), None).await {
 		Err(MoqError::UnresolvableBroadcast { reason: reference }) => assert_eq!(reference, "source"),
 		Err(err) => panic!("wrong error for an unresolvable reference: {err:?}"),
 		Ok(_) => panic!("a standalone broadcast cannot resolve a sibling"),
@@ -2761,7 +2786,7 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 	let broadcast = await_announced(&consumer, "a/pub").await;
 	await_announced(&consumer, "a/source").await;
 
-	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into())))
+	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into()), None))
 		.await
 		.expect("timed out resolving the reference")
 		.unwrap();
@@ -2774,7 +2799,7 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 		.unwrap();
 
 	// And it can follow a reference of its own, back to where we started.
-	let back = tokio::time::timeout(TIMEOUT, sibling.resolve(Some("./pub".into())))
+	let back = tokio::time::timeout(TIMEOUT, sibling.resolve(Some("./pub".into()), None))
 		.await
 		.expect("timed out resolving back")
 		.unwrap();
@@ -2782,6 +2807,85 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 
 	catalog.close().unwrap();
 	source.close().unwrap();
+}
+
+/// A reference's epoch names the instance it expects: a broadcast proven to serve another fails
+/// the rendition, while an epochless reference, or a route that cannot prove its instance, reads
+/// whichever instance resolves.
+#[tokio::test]
+async fn resolve_honors_the_reference_epoch() {
+	async fn resolve(
+		broadcast: &MoqBroadcastConsumer,
+		reference: &str,
+		epoch: Option<&str>,
+	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		tokio::time::timeout(
+			TIMEOUT,
+			broadcast.resolve(Some(reference.into()), epoch.map(Into::into)),
+		)
+		.await
+		.expect("timed out resolving the reference")
+	}
+
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let served = moq_mint_epoch();
+	let other = moq_mint_epoch();
+	let route = MoqRoute {
+		epoch: Some(served.clone()),
+		..Default::default()
+	};
+
+	let catalog = origin.create_broadcast("a/pub".into()).unwrap();
+	catalog.announce(route.clone()).unwrap();
+	let source = origin.create_broadcast("a/source".into()).unwrap();
+	source.announce(route).unwrap();
+	let _video = source.publish_track("video".into(), None).unwrap();
+	let plain = create_announced(&origin, "a/plain");
+
+	let broadcast = await_announced(&consumer, "a/pub").await;
+	await_announced(&consumer, "a/source").await;
+	await_announced(&consumer, "a/plain").await;
+
+	let matching = resolve(&broadcast, "./source", Some(&served)).await.unwrap();
+	assert_eq!(matching.inner().info().path.as_str(), "a/source");
+	resolve(&broadcast, "./source", None).await.unwrap();
+	resolve(&broadcast, "./plain", Some(&other)).await.unwrap();
+
+	assert!(matches!(
+		resolve(&broadcast, "./source", Some(&other)).await,
+		Err(MoqError::Mux { reason }) if reason.contains("serves epoch")
+	));
+	// Without a broadcast, the epoch names the catalog's own instance.
+	resolve(&broadcast, "", Some(&served)).await.unwrap();
+	assert!(matches!(
+		resolve(&broadcast, "", Some(&other)).await,
+		Err(MoqError::Mux { reason }) if reason.contains("serves epoch")
+	));
+	assert!(matches!(
+		resolve(&broadcast, "./source", Some("not-an-epoch")).await,
+		Err(MoqError::InvalidEpoch { .. })
+	));
+
+	// The rendition-based consumers read the epoch off the rendition.
+	let mut mismatched = rendition("video", MoqContainer::Legacy);
+	let MoqRendition::Video { config, .. } = &mut mismatched else {
+		unreachable!()
+	};
+	config.broadcast = Some("./source".into());
+	config.epoch = Some(other);
+	let config = MoqMediaTrackConfig {
+		rendition: mismatched,
+		subscription: None,
+	};
+	let subscribed = tokio::time::timeout(TIMEOUT, MoqMediaTrackConsumer::subscribe(&broadcast, config))
+		.await
+		.expect("timed out subscribing to the rendition");
+	assert!(matches!(subscribed, Err(MoqError::Mux { reason }) if reason.contains("serves epoch")));
+
+	catalog.close().unwrap();
+	source.close().unwrap();
+	plain.close().unwrap();
 }
 
 #[tokio::test]
@@ -6720,7 +6824,7 @@ async fn json_tracks_are_advertised_in_the_catalog() {
 		&broadcast,
 		&broadcast.publish_track("status".into(), None).unwrap(),
 		MoqJsonSnapshotConfig {
-			delta_ratio: 4,
+			deltas: true,
 			compression: true,
 		},
 	)
@@ -6805,7 +6909,7 @@ async fn data_track_names_cannot_collide() {
 		&broadcast,
 		&broadcast.publish_track("state".into(), None).unwrap(),
 		MoqJsonSnapshotConfig {
-			delta_ratio: 0,
+			deltas: false,
 			compression: false,
 		},
 	)

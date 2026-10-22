@@ -31,7 +31,7 @@ use crate::Error;
 pub(super) struct Asking {
 	/// Where the reader's own start falls, for the frame of a run beginning at its group.
 	pub start: Option<Position>,
-	pub priority: u8,
+	pub priority: i8,
 	pub max_delay: Option<Duration>,
 	pub order: Order,
 }
@@ -446,7 +446,7 @@ impl TrackState {
 			return (unfed, awaited);
 		}
 		let mut from = hole.start;
-		let grace = self.arrivals.grace();
+		let grace = self.arrival_grace();
 		let mut gap =
 			|groups: ops::Range<u64>, unfed: &mut RangeSet<u64>| match self.arrivals.folds_at(groups.start, grace) {
 				Some(at) if at <= now => unfed.insert(groups),

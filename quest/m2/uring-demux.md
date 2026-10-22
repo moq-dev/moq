@@ -55,4 +55,4 @@ off on the ring, from shard steering.
 
 ## Related
 
-- [Stream sessions](/quest/m3/uring-tcp/README.md) - the TCP half of moving the relay onto the ring
+- [Stream transports](/quest/m2/perf/stream/README.md) - the TCP half of moving the relay onto the ring

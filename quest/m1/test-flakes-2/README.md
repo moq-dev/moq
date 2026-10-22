@@ -26,34 +26,21 @@ Rules every child keeps:
   (the draft-16 cancel race was a retry sweep jittered past a fixed settle
   budget). Wait out the jitter's whole window, not a count of small steps.
 
-Added 2026-10-15 (maintainer): three flakes seen while landing that day's
-merge batch, ranked by how likely each hides a product bug.
-
 This README's own work, after the children: run `just check --all` several
 times on a loaded machine, as the first round did.
 
-Added 2026-10-19 (maintainer): three more, the redial pair first since CI
-hit it. The same day's test cost audit added the macOS QUIC connects and the
-[redundant failover drift](/quest/m0/redundant-failover-drift.md), which moved
-to m0 on 2026-10-20 (maintainer): it may hide a TS export bug and fails loaded
-`just check` runs.
+The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
+fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 
-Added 2026-10-20 (maintainer): three more from that day's merge batch, the
-draft-16 cancel race first since it fails on a mocked clock and so may hide
-an ordering bug. The failed-listen test was meant to join the redial quest,
-which #6032 had already finished, so it reuses #6032's reserved-port fix as
-its own child. moq-uring's `host_tracks_moq_clock` was seen the same day
-but #6056 had already fixed it by measuring the calibration gap.
-
-Added 2026-10-21 (maintainer): three small flakes and a fresh-worktree
-interop failure from the m0/m1 merge run, kept in one child since each is
-small.
+Added 2026-10-21 (maintainer): small flakes from the m0/m1 merge run, kept
+in one child.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Three flakes and fresh-worktree interop](/quest/m1/test-flakes-2/three-flakes.md) - OBS stop drain, the js/net RSS test, the audio harness RTT sample, and interop's bun install
+- [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
+- [Interop cpp to js budget](/quest/m1/test-flakes-2/interop-cpp-js.md) - the cpp -> js cell finishes inside its 30 s budget, fixed at its cause
 
 ## Related
 

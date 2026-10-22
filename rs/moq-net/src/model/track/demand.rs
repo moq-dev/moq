@@ -17,7 +17,7 @@ use ranges::Ranges;
 #[derive(Default)]
 pub(super) struct Subscriptions {
 	count: usize,
-	priority: BTreeMap<u8, usize>,
+	priority: BTreeMap<i8, usize>,
 	// Keyed by budget, so `None` counts as the widest of all.
 	max_delay: BTreeMap<Duration, usize>,
 	ranges: Ranges,
@@ -33,7 +33,7 @@ pub(super) struct Subscriptions {
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (u8, Option<Duration>, Order);
+type Scalars = (i8, Option<Duration>, Order);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
@@ -168,7 +168,6 @@ impl Subscriptions {
 		}
 	}
 
-	#[cfg(test)]
 	pub(super) fn len(&self) -> usize {
 		self.count
 	}

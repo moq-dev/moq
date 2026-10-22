@@ -400,7 +400,7 @@ func (f *Fill) EndGroup() uint64 {
 }
 
 // Priority is the most urgent delivery priority among the readers waiting on it.
-func (f *Fill) Priority() uint8 {
+func (f *Fill) Priority() int8 {
 	return f.inner.Priority()
 }
 

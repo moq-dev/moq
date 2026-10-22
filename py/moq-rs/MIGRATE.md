@@ -11,6 +11,36 @@ How to update your code for each breaking change, newest first.
 A refusal carries no application code: `drop_groups` fails the waiting fetches with `moq.Error.NotFound`.
 `Subscription.max_delay` also accepts `None`, leaving the publisher's max age alone to bound delivery.
 
+### JSON snapshot `delta_ratio` is `deltas`
+
+`SnapshotProducer(delta_ratio=...)` is replaced by `deltas: bool = True`.
+Pass `deltas=False` where you passed `delta_ratio=0`, and drop the argument otherwise.
+Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
+
+### Priorities are signed (#6142)
+
+`TrackInfo.priority`, `Subscription.priority`, and `FetchGroupOptions.priority` take `-128..=127`, higher first, and 0 is the unset midpoint.
+`TrackInfo.priority` defaulted to 127 and now defaults to 0.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announced_broadcast()`, instead of under its whole scope at connect.
+`OriginConsumer.request_broadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
+Resolve the path with `announced_broadcast()`, or hold `announced()` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
+### `ContainerFormat.FMP4` unwraps to Legacy (#6250)
+
+A container import with `ContainerFormat.FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `ContainerFormat.CMAF` to keep publishing CMAF.
+
+### Catalog references carry their epoch
+
+`Video` and `Audio` renditions gain `epoch`, the publisher instance their `broadcast` reference names.
+`BroadcastConsumer.resolve(reference)` becomes `resolve(reference, epoch)`; pass the rendition's `epoch` alongside its `broadcast`, or `None` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, raise for a rendition whose broadcast is proven to serve another epoch.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.finish()` lets go.
@@ -47,7 +77,7 @@ A subscription now reads only the groups its own `ranges` cover.
 `TrackDemand.is_used()`, `used()`, and `unused()` are gone.
 `wanted()` returns `None` while nobody subscribes, otherwise the group subscribers want next, and `await wanted_changed()` waits for it to change (the first call returns at once).
 Loop on `wanted_changed()` until it returns non-`None` where you awaited `used()`, and `None` where you awaited `unused()`.
-`TrackInfo` gains `refresh`. `GroupDemand` is unchanged.
+`TrackInfo` gains `refresh`.
 
 ### `CongestionControl` gained `NONE` (#5926)
 

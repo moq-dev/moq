@@ -93,6 +93,7 @@ class Datagram:
 class Subscription:
     """Subscriber-side delivery preferences, mirroring moq-net's ``track::Subscription``.
 
+    ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
     ``max_delay`` is how far a non-latest group may fall behind before it is skipped;
     zero skips at once, ``None`` leaves the publisher's max age alone to bound it, and it
     caps every range. ``ranges`` are the spans of the track to
@@ -122,7 +123,8 @@ def _subscription(subscription: Subscription | None) -> MoqSubscription | None:
 class TrackInfo:
     """Publisher-side track properties, mirroring moq-net's ``track::Info``.
 
-    ``priority`` defaults to 127, the middle of the range. ``max_age`` is how long the
+    ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint. It breaks
+    ties between subscriptions of equal subscriber priority. ``max_age`` is how long the
     publisher caches a non-latest group, ``None`` for no limit. ``refresh`` is how many
     times its first frame a group's later bytes may grow before a joining subscriber
     asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
@@ -131,7 +133,7 @@ class TrackInfo:
     always see the original frames.
     """
 
-    priority: int = 127
+    priority: int = 0
     max_age: timedelta | None = None
     refresh: int | None = None
     timescale: int | None = None

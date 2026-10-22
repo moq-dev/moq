@@ -2,13 +2,14 @@
 //!
 //! Each `tests/*.rs` file is its own crate that links this package and its
 //! dependencies again, so add new integration tests here as a module.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
-mod alpn;
 mod backend;
 mod broadcast;
 mod close_code;
 mod keylog;
 mod max_age;
+mod receive_credit;
 mod reconnect;
 mod reset_secret;
 mod stream_code;

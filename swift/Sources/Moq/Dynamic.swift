@@ -65,7 +65,7 @@ public final class Fill: Sendable {
     }
 
     /// The most urgent delivery priority among the readers waiting on it.
-    public var priority: UInt8 {
+    public var priority: Int8 {
         ffi.priority()
     }
 

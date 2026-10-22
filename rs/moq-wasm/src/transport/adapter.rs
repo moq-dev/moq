@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, Bytes};
 use moq_net::transport::{self as moq, poll};
 use std::task::{Context, Poll};
 use web_transport_trait::{self as wt, poll as backend};
@@ -55,17 +55,18 @@ impl<S> Session<S> {
 }
 impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'static> poll::Session for Session<S> {
 	type SendStream = SendStream<S::SendStream>;
-	type RecvStream = RecvStream<S::RecvStream>;
+	// The backend cannot hold its receive window for moq-net, so reads are buffered here.
+	type RecvStream = poll::Buffered<RecvStream<S::RecvStream>>;
 	type Error = Error<S::Error>;
 	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
 		backend::Session::poll_accept_uni(&mut self.0, cx)
 			.map_err(Error)
-			.map(|res| res.map(RecvStream))
+			.map(|res| res.map(|recv| poll::Buffered::new(RecvStream(recv))))
 	}
 	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		backend::Session::poll_accept_bi(&mut self.0, cx)
 			.map_err(Error)
-			.map(|res| res.map(|(send, recv)| (SendStream(send), RecvStream(recv))))
+			.map(|res| res.map(|(send, recv)| (SendStream(send), poll::Buffered::new(RecvStream(recv)))))
 	}
 	fn poll_open_uni(
 		&mut self,
@@ -83,7 +84,14 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		backend::Session::poll_open_bi(&mut self.0, cx)
 			.map_err(Error)
-			.map(|res| res.map(|(send, recv)| (SendStream(send).scheduled(options), RecvStream(recv))))
+			.map(|res| {
+				res.map(|(send, recv)| {
+					(
+						SendStream(send).scheduled(options),
+						poll::Buffered::new(RecvStream(recv)),
+					)
+				})
+			})
 	}
 	fn send_group(&mut self, _: i64) -> Option<poll::Ungrouped> {
 		None
@@ -156,26 +164,13 @@ impl<S: backend::SendStream + 'static> poll::SendStream for SendStream<S> {
 }
 /// An incoming WebTransport stream adapted to moq-net.
 pub struct RecvStream<S>(S);
-impl<S: backend::RecvStream + 'static> poll::RecvStream for RecvStream<S> {
+impl<S: backend::RecvStream + 'static> poll::Chunks for RecvStream<S> {
 	type Error = Error<S::Error>;
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		backend::RecvStream::poll_read(&mut self.0, cx, dst).map_err(Error)
-	}
-	fn poll_read_buf<B: BufMut>(
-		&mut self,
-		cx: &mut Context<'_>,
-		buf: &mut B,
-	) -> Poll<Result<Option<usize>, Self::Error>> {
-		backend::RecvStream::poll_read_buf(&mut self.0, cx, buf).map_err(Error)
-	}
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 		backend::RecvStream::poll_read_chunk(&mut self.0, cx, max).map_err(Error)
 	}
 	fn stop(&mut self, code: u32) {
 		backend::RecvStream::stop(&mut self.0, code)
-	}
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		backend::RecvStream::poll_closed(&mut self.0, cx).map_err(Error)
 	}
 }
 

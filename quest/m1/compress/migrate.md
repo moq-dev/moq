@@ -4,8 +4,8 @@
 
 Every first-party compressed track is one name with `compress: true`:
 `catalog.json` in moq-mux and js/publish, each moq-stats `.json` track, and
-the hang timeline. `catalog.json.z`, the stats `.z` siblings,
-`<track>.timeline.z`, hang's catalog `compression` field, the "hangz"
+the hang `<track>.hls` track. `catalog.json.z`, the stats `.z` siblings,
+hang's catalog `compression` field, the "hangz"
 consumer options, the moq-flate crate, `@moq/flate`, `moq-mux::binary`,
 moq-json's and `@moq/json`'s `Config::compression`, and the bindings' `flate`
 namespace are deleted.
@@ -14,16 +14,23 @@ namespace are deleted.
 
 See the [epic](/quest/m1/compress/README.md) for the decisions.
 
+Decided 2026-10-20 (maintainer): the timeline is `<track>.hls` with
+`compress: true`, never `<track>.hls.z`. [Catalog HLS field](/quest/m1/archive/catalog-hls.md)
+renames it and publishes it uncompressed, and the
+[archive consumer](/quest/m1/archive/consumer.md) replaces the CLI's archive
+reader, so this quest lands after both and only sets the flag.
+
 - Delete the `.z` names outright, with no transition release: hangz is opt-in
   and `main` takes breaking changes. Add the MIGRATE.md entries.
 - Publishers: `rs/moq-mux/src/catalog/producer.rs`, `js/publish`
   (`broadcast.ts`, `catalog.ts`), `rs/moq-stats` (drop `TrackPair`), and
-  `rs/hang/src/timeline.rs` set `compress` on their one track.
-- Consumers: `rs/moq-mux/src/catalog/consumer.rs`, `rs/moq-cli`
-  (`subscribe.rs`, `archive.rs`), and `js/watch` lose their hangz paths.
-  moq-mux's hang catalog adapter over `hang::catalog::Consumer`
-  ([#6114](https://github.com/moq-dev/moq/pull/6114)) drops its `format`
-  field and `CatalogFormat::HangZ` goes away; check whether
+  the `hls` track writer (`rs/hang/src/timeline.rs` today) set `compress` on
+  their one track.
+- Consumers: `rs/moq-mux/src/catalog/consumer.rs`, `rs/moq-cli/src/subscribe.rs`,
+  and `js/watch` lose their hangz paths; the CLI's archive path is already on
+  the archive consumer. moq-mux's hang catalog adapter over
+  `hang::catalog::Consumer` ([#6114](https://github.com/moq-dev/moq/pull/6114))
+  drops its `format` field and `CatalogFormat::HangZ` goes away; check whether
   `catalog::msf::Consumer` can reuse hang's escaping-path check instead of
   its own (decided 2026-10-20 instead of a separate quest).
 - moq-stats deltas: the `.z` side uses merge-patch deltas and the plain side
@@ -53,4 +60,5 @@ Public API: removals listed above. Wire: the hang catalog loses
 
 ## Required
 
-- [JavaScript](/quest/m1/compress/js.md) - js/publish and js/watch need the JS side before they drop `.z`
+- [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - renames the timeline to `<track>.hls`, which this compresses
+- [Archive consumer](/quest/m1/archive/consumer.md) - replaces the CLI archive reader that reads `.z` timelines

@@ -22,7 +22,3 @@ also bounds its own worker fanout so it does not overwhelm the desktop.
   separately from admission delay. Choose defaults from those measurements.
 - Explain direct invocation and configuration in existing developer docs.
   Preserve selected tests and their failure behavior.
-
-## Required
-
-- [Pin the gate](/quest/m0/ci/quest-gate-pin.md) - the shared primitive is available in the devshell

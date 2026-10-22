@@ -10,7 +10,7 @@ info, and declares a received end in JS, through public calls only.
 
 ## Plan
 
-Split from the [ingest](/quest/m1/public-model/ingest.md),
+Split from the ingest ([moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111)),
 [serving](/quest/m1/public-model/serve.md), and
 [answering](/quest/m1/public-model/answer.md) quests in review of #5717,
 so those three do not wait on the large quests that replace these items.
@@ -18,9 +18,9 @@ Rules and the inventory method are in the
 [epic](/quest/m1/public-model/README.md); rerun the inventory first, since
 the prerequisites will have deleted or renamed most of these.
 
-- Fetch ingest (Rust `group::Request` fields `state` and `result`,
-  `track::TrackState` with `TrackState::abort`, `track::FetchOutcome`,
-  `group::Request::finish_track_at`, `track::Consumer::poll_landed`): remove
+- Fetch ingest (Rust `track::GroupFill`, `track::TrackState` with
+  `TrackState::abort`, `track::FillOutcome`,
+  `GroupFill::finish_track_at`, `track::Consumer::poll_landed`): remove
   the need. Model ranges replaces per-group requests with ranges, and its
   public range answer is the ingest path.
 - Cache peeks (Rust `track::Consumer::peek_latest`, `peek_before`,
@@ -37,8 +37,9 @@ the prerequisites will have deleted or renamed most of these.
   requests that Model ranges defines, completing the answering quest's
   `Broadcast.requested` decision.
 - JS `hooks.endTrack` and `hooks.startTrack` (the JS `finish_at_pending` and
-  `start_at`): public under the received-end shape the ingest quest settles in
-  Rust.
+  `start_at`): public under the received-end shape Rust settled in
+  [moq-dev/moq#6111](https://github.com/moq-dev/moq/pull/6111): `finish_at`
+  on a `received()` copy, and `start_at` after `track::Request::request_start`.
 
 Tests: as in the other children, mock time in each language, with the
 built-in sessions moved onto the public calls.
@@ -46,6 +47,5 @@ built-in sessions moved onto the public calls.
 ## Required
 
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - replaces per-group fetches, the peeks, and `fork`
-- [Public ingest](/quest/m1/public-model/ingest.md) - settles the received-end shape JS mirrors
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - the JS `Track.Request`/`Track.Dynamic` range requests that answer track info and fetches
-- [Public routes and answering](/quest/m1/public-model/answer.md) - the public `Broadcast.requested` handout this completes
+- [Public answering](/quest/m1/public-model/answer.md) - the public `Broadcast.requested` handout this completes
