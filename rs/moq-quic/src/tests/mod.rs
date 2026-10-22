@@ -1786,8 +1786,26 @@ fn stream_id_limit() {
     assert_eq!(chunks.next(usize::MAX), Ok(None));
     let _ = chunks.finalize();
 
-    // Server will only send MAX_STREAM_ID now that the application's been notified
+    // Lose the stream-credit grant itself, after proving the sender exhausted its budget.
+    let grants = |pair: &mut Pair| {
+        pair.server_conn_mut(server_ch)
+            .stats()
+            .frame_tx
+            .max_streams_uni
+    };
+    let before = grants(&mut pair);
+    pair.to_client.loss = 1.0;
+    drive_until(&mut pair, |pair| grants(pair) > before);
+    let lost = grants(&mut pair);
+    assert_eq!(
+        pair.client_streams(client_ch)
+            .open(Dir::Uni, Default::default()),
+        None,
+        "the dropped grant did not reach the sender"
+    );
+    pair.to_client.loss = 0.0;
     pair.drive();
+    assert!(grants(&mut pair) > lost, "stream credit was retransmitted");
     assert_matches!(
         pair.client_conn_mut(client_ch).poll(),
         Some(Event::Stream(StreamEvent::Available { dir: Dir::Uni }))
@@ -2734,6 +2752,7 @@ fn migration() {
 
 fn test_flow_control(config: TransportConfig, window_size: usize) {
     let _guard = subscribe();
+    let stream_limited = config.stream_receive_window.into_inner() == window_size as u64;
     let mut pair = Pair::new(
         Default::default(),
         ServerConfig {
@@ -2809,7 +2828,31 @@ fn test_flow_control(config: TransportConfig, window_size: usize) {
 
     info!("finished reading");
     assert_eq!(cursor, window_size);
+    // Lose the grant that releases the exhausted window. Count the frame, so a data loss or
+    // an unrelated ACK cannot satisfy the activation proof.
+    let grants = |pair: &mut Pair| {
+        let stats = pair.server_conn_mut(server_ch).stats().frame_tx;
+        if stream_limited {
+            stats.max_stream_data
+        } else {
+            stats.max_data
+        }
+    };
+    let before = grants(&mut pair);
+    pair.to_client.loss = 1.0;
+    drive_until(&mut pair, |pair| grants(pair) > before);
+    let lost = grants(&mut pair);
+    assert_eq!(
+        pair.client_send(client_ch, s).write(&msg),
+        Err(WriteError::Blocked),
+        "the dropped grant did not reach the sender"
+    );
+    pair.to_client.loss = 0.0;
     pair.drive();
+    assert!(
+        grants(&mut pair) > lost,
+        "flow-control credit was retransmitted"
+    );
     info!("writing");
     assert_eq!(pair.client_send(client_ch, s).write_limit(), window_size);
     assert_eq!(pair.client_send(client_ch, s).write(&msg), Ok(window_size));

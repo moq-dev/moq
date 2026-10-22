@@ -170,8 +170,9 @@ fn partial_frame_gives_way() {
 			let mut high_sub = within(&handle, "the high subscription", subscribe("high", 100)).await;
 
 			// Three quarters of the window, held by a frame that never finishes.
-			let mut low_group = low.append_group().expect("low group");
-			let mut low_frame = low_group
+			let mut low_frame = low
+				.append_group()
+				.expect("low group")
 				.create_frame(frame::Info {
 					size: WINDOW as u64,
 					timestamp: Some(Timestamp::ZERO),
@@ -208,7 +209,6 @@ fn partial_frame_gives_way() {
 
 			// The session survives, and the low track keeps delivering what fits.
 			drop(low_frame);
-			drop(low_group);
 			let mut group = low.append_group().expect("after group");
 			group.write_frame(Timestamp::ZERO, &b"after"[..]).expect("after frame");
 			group.finish().expect("finish after");

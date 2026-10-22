@@ -255,8 +255,9 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 	let (high, mut high_sub) = setup.subscribe("high", 100).await;
 
 	// Three quarters of the window, held by a frame that never finishes.
-	let mut low_group = low.append_group().unwrap();
-	let mut low_frame = low_group
+	let mut low_frame = low
+		.append_group()
+		.unwrap()
 		.create_frame(frame::Info {
 			size: WINDOW as u64,
 			timestamp: Some(Timestamp::ZERO),
@@ -276,7 +277,6 @@ async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<
 
 	// The session survives, and the low track keeps delivering what fits.
 	drop(low_frame);
-	drop(low_group);
 	let mut group = low.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, &b"after"[..]).unwrap();
 	group.finish().unwrap();
@@ -347,8 +347,9 @@ async fn lite_frame_past_the_window_gives_way() {
 	let setup = setup("moq-lite-06", transport(WINDOW as u64)).await;
 	let (low, mut low_sub) = setup.subscribe("low", 1).await;
 
-	let mut low_group = low.append_group().unwrap();
-	let mut low_frame = low_group
+	let mut low_frame = low
+		.append_group()
+		.unwrap()
 		.create_frame(frame::Info {
 			size: 2 * WINDOW as u64,
 			timestamp: Some(Timestamp::ZERO),
@@ -372,7 +373,6 @@ async fn lite_frame_past_the_window_gives_way() {
 	}
 
 	drop(low_frame);
-	drop(low_group);
 	let mut group = low.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, &b"after"[..]).unwrap();
 	group.finish().unwrap();
@@ -558,9 +558,9 @@ async fn the_largest_unit_completes_under_pressure(version: &str) {
 	// Several groups' worth of frames that never finish, opened before and after.
 	let mut partial = Vec::new();
 	let mut open_partial = || {
-		// Leaked, so the frame can borrow its group for the rest of the test.
-		let group = Box::leak(Box::new(low.append_group().unwrap()));
-		let mut frame = group
+		let mut frame = low
+			.append_group()
+			.unwrap()
 			.create_frame(frame::Info {
 				size: WINDOW as u64,
 				timestamp: Some(Timestamp::ZERO),

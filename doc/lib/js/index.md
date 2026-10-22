@@ -8,6 +8,12 @@ description: The browser implementation, published as @moq/* on npm
 A from-scratch implementation for browsers, built on WebTransport, WebCodecs,
 and WebAudio. `@moq/net` also runs in Node, Bun, and Deno.
 
+For a player or publisher, start with the [web components](#web-components).
+For custom data, start with [@moq/net](/lib/js/net); for a meeting, use
+[@moq/room](/lib/js/room). [Examples](/setup/examples) links complete apps and
+small examples. Package pages link the API references; source lives under
+[`js/`](https://github.com/moq-dev/moq/tree/main/js).
+
 ## Packages
 
 | Package | Does |
