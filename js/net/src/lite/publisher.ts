@@ -1091,8 +1091,13 @@ export class Publisher {
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
+		// Dispositions before START refine its boundary; later ones must be named as drops.
+		const skipped: { start: number; end: number; error: Error }[] = [];
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startSequence: number | undefined;
+		// The first group and the edge seen before it was popped, held until the source
+		// resolves where its feed starts.
+		let first: { group: group.Consumer; largest: track.Location | undefined } | undefined;
 		let endSent = false;
 
 		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
@@ -1147,6 +1152,12 @@ export class Publisher {
 		});
 		try {
 			for (;;) {
+				if (startSequence !== undefined && skipped.length > 0) {
+					for (const range of skipped) {
+						if (!(await drop(Math.max(range.start, startSequence), range.end, range.error))) return false;
+					}
+					skipped.length = 0;
+				}
 				if (pendingDrops.length > 0) {
 					for (const dropped of pendingDrops.splice(0)) {
 						if (
@@ -1216,14 +1227,18 @@ export class Publisher {
 				// answered past, so the source's largest says where the live feed is.
 				const largest =
 					!startSent && hasLargest(this.version)
-						? newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest)
+						? newer(first?.largest, newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest))
 						: undefined;
-				const recv = hooks.tryRecvGroup(track, startSent);
+				const recv = first
+					? ({ kind: "group", group: first.group } as const)
+					: hooks.tryRecvGroup(track, emitRange);
+				first = undefined;
 				switch (recv.kind) {
 					case "error":
 						throw recv.error;
 					case "drop":
-						if (!(await drop(recv.start, recv.end, recv.error))) return false;
+						if (!startSent) skipped.push({ start: recv.start, end: recv.end, error: recv.error });
+						else if (!(await drop(recv.start, recv.end, recv.error))) return false;
 						continue;
 					case "idle":
 						// A start past everything the track has (a subscriber resuming just after
@@ -1297,16 +1312,32 @@ export class Publisher {
 				const range = frameRange(bounds, group.sequence);
 
 				if (emitRange && !startSent) {
+					const source = hooks.sourceStart(track);
+					// A group stream can beat the upstream START on its own stream, and resolving
+					// from the group alone would give up the backlog that START still promises.
+					if (source === "pending") {
+						first = { group, largest };
+						await waitForSubscription(controls, track, drops);
+						continue;
+					}
 					startSent = true;
-					startSequence = group.sequence;
-					// SUBSCRIBE_START names the first group served now. A later group at or
-					// above an explicit floor is still delivered, so the cursor stays put.
+					// Newest-first delivery can put a group ahead of where the source's feed
+					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
+					startSequence = Math.min(group.sequence, source ?? group.sequence);
+					// A group given up cannot be where the feed starts. Adjacent runs given up with
+					// different errors stay separate, so walk them in order.
+					skipped.sort((a, b) => a.start - b.start);
+					for (const range of skipped) {
+						if (range.start <= startSequence && range.end > startSequence)
+							startSequence = Math.min(range.end, group.sequence);
+					}
+					// A later group above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
 					// Group Start is the latest group, and this sequence becomes the floor.
 					// Lite-06 encodes a floor of group 0 as 0, so an omitted start is not pinned.
 					if (bounds.startGroup === undefined && !resolvesStart(this.version)) {
 						hooks.replaceGroups(track, {
-							start: { included: group.sequence },
+							start: { included: startSequence },
 							end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
 						});
 					}
@@ -1314,7 +1345,7 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(group.sequence, largest) },
+								{ start: new SubscribeStart(startSequence, largest) },
 								this.version,
 							),
 						))

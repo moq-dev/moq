@@ -332,7 +332,7 @@ impl Session {
 		});
 
 		let supervisor = Supervisor {
-			goaway: Some(goaway.deadline()),
+			goaway: Some(goaway.deadline(&runtime)),
 			version,
 			local_close: protocol.local_close(),
 			runtime: runtime.clone(),

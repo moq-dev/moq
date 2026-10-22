@@ -44,14 +44,18 @@ Decided 2026-10-16 (maintainer interview):
 - QUIC receive credit is released per segment, so an arbitrary-size frame
   never needs a matching receive allowance. The aim is to avoid
   over-allocating, not to bound a frame.
-- Refills patch the group's state in place, as sorted runs, written only
-  below `committed` so they never race the tail writer. They replace
-  today's separate `Slot.head` copy.
+- Refills patch the group's state in place, written only below
+  `committed` so they never race the tail writer. They replace today's
+  separate `Slot.head` copy. Whether the state is sorted runs or the
+  [append-only log](/quest/m2/perf/kio-channel-contention/log.md) (or a ring
+  buffer) is the [group storage benchmark](/quest/m2/group-storage-bench.md)'s
+  call (decided 2026-10-20, maintainer, leaning log because hot-path
+  performance matters more than evicting the middle).
 - Readers pin nothing: reads refresh recency as today. A reader that
   falls into an evicted run refills like a joiner. With nothing to refill
-  from, it gets `Error::Evicted`. Within a group, victims go front to back
-  until [Middle eviction](/quest/m2/unbounded-groups/middle-eviction.md)
-  makes the head the last victim, however stale it is.
+  from, it gets `Error::Evicted`. Within a group, victims go front to back.
+  Keeping the head for joiners while evicting the middle moved to m3
+  ([Middle eviction](/quest/m3/middle-eviction.md), decided 2026-10-20).
 - Whole cold groups are still evicted first. A group loses part of itself
   only when it is the protected live edge or is being read.
 - Over moq-transport, an object with a hole fails the reader with `Evicted`
@@ -81,5 +85,8 @@ moq-transport, with memory held near the pool size.
 - [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md) - large frames store as sealed segments, preallocate at most one, and release receive credit per segment
 - [Front eviction](/quest/m2/unbounded-groups/front-eviction.md) - groups shed whole frames from their front under pressure and refill them in place; the group caps go
 - [Byte holes](/quest/m2/unbounded-groups/byte-holes.md) - segments inside a frame evict and refill by `(frame, byte)` on the next lite version; the frame cap goes
-- [Middle eviction](/quest/m2/unbounded-groups/middle-eviction.md) - a group keeps its head for joiners and its tail for live readers, evicting between
 - [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - `@moq/net` drops its caps, streams huge frames, and matches front eviction
+
+## Related
+
+- [Middle eviction](/quest/m3/middle-eviction.md) - a group keeps its head for joiners and its tail for live readers, evicting between

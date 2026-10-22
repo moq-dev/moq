@@ -45,6 +45,7 @@ harness:
 # draft, and Lite AUTH_ERROR NOT_SUPPORTED after a grant in both directions.
 [positional-arguments]
 interop *args:
+    cd .. && bun install --frozen-lockfile
     just rs test -p moq-net --lib varint_interop ietf_datagram_interop ietf_track_status_interop auth_unsupported_interop --run-ignored all
     ./interop/interop.sh "$@"
 
