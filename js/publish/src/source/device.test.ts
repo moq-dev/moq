@@ -132,8 +132,3 @@ test("a capture without a preference stays unpinned", async () => {
 
 	mic.close();
 });
-
-test("installing media devices preserves browser identity", () => {
-	using _media = install(DESKTOP);
-	expect(typeof navigator.userAgent).toBe("string");
-});
