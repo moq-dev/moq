@@ -4,9 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Snapshot consumers are bounded by default
+### A compressed group is held to the group budget
 
-`snapshot::consumer::Config::default()` now sets `max_size` to `DEFAULT_MAX_SIZE` (4 MiB), so a compressed frame from a peer cannot reconstruct an unbounded value. A consumer that needs a larger state sets `max_size` itself, or `None` to keep only the DEFLATE frame cap.
+A compressed group may inflate to at most `moq_net::group::MAX_CACHE_BYTES` (32 MiB), the most a plain group carries, so a peer's small frames cannot make a reader hold more than an uncompressed track would.
+The encoders charge each frame its plaintext: a compressed snapshot or window header over 32 MiB fails with `moq_net::Error::FrameTooLarge` (snapshot) or the window's group cache error, where it used to pass up to 64 MiB, and deltas and ops roll a new group once a group's plaintext would pass the budget.
+A compressed stream's budget is 32 MiB of record plaintext.
+`snapshot::consumer::Config::max_size` still sets a tighter limit, but no longer stops inflation early; a frame inflates within the group budget and is then refused.
 
 ### Consumers return `Timed<T>` (#5677)
 

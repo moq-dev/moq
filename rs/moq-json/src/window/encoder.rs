@@ -185,6 +185,10 @@ pub struct Encoder<T> {
 	/// Frames emitted into the current group, header included.
 	group_frames: usize,
 
+	/// Bytes charged to the current group's budget: each frame's slice, or its plaintext when that
+	/// is larger, since a reader's DEFLATE window is held to the same budget.
+	group_bytes: u64,
+
 	/// Whether the next frame must be a header because a frame was lost. Kept separate from the
 	/// window, which a resync must never discard.
 	resync: bool,
@@ -208,6 +212,7 @@ impl<T> Encoder<T> {
 			op_bytes: 0,
 			header_len: 0,
 			group_frames: 0,
+			group_bytes: 0,
 			resync: true,
 			_marker: PhantomData,
 		}
@@ -234,6 +239,7 @@ impl<T> Encoder<T> {
 		self.op_bytes = 0;
 		self.header_len = 0;
 		self.group_frames = 0;
+		self.group_bytes = 0;
 		self.resync = true;
 	}
 
@@ -268,43 +274,28 @@ impl<T> Encoder<T> {
 			&& self.op_bytes <= ratio * self.header_len
 	}
 
-	/// Reject plaintext that the paired DEFLATE decoder could not produce.
-	fn validate_plaintext(len: usize, kind: &str) -> Result<()> {
-		if u64::try_from(len).unwrap_or(u64::MAX) > moq_flate::DEFAULT_MAX_FRAME_SIZE {
-			return Err(Error::Json(format!(
-				"window {kind} exceeds the decoder's decompressed size limit"
-			)));
-		}
-		Ok(())
-	}
-
-	/// Compress an already-serialized op into the open group, charging it to the budget.
-	fn frame(&mut self, bytes: Vec<u8>) -> Result<Encoded> {
-		Self::validate_plaintext(bytes.len(), "frame")?;
+	/// Emit an op when the header will remain cached and inflatable, otherwise restate the window
+	/// in a new group.
+	///
+	/// Charged the larger of the slice and the plaintext: a sync-flushed DEFLATE frame can come out
+	/// slightly larger than its input, while a reader's window counts what it inflates.
+	fn emit_op(&mut self, bytes: Vec<u8>) -> Result<Option<Encoded>> {
+		let plain = bytes.len() as u64;
 		let payload = match self.flate.as_mut() {
 			Some(flate) => flate.frame(&bytes),
 			None => Bytes::from(bytes),
 		};
-
 		self.op_bytes += payload.len() as u64;
 		self.group_frames += 1;
-
-		Ok(Encoded {
+		self.group_bytes = self.group_bytes.saturating_add(plain.max(payload.len() as u64));
+		if self.group_bytes > moq_net::group::MAX_CACHE_BYTES {
+			self.reset();
+			return Ok(None);
+		}
+		Ok(Some(Encoded {
 			payload,
 			keyframe: false,
-		})
-	}
-
-	/// Emit an op when the header will remain cached, otherwise restate the window in a new group.
-	fn emit_op(&mut self, bytes: Vec<u8>) -> Result<Option<Encoded>> {
-		let encoded = self.frame(bytes)?;
-		let group_bytes = self.header_len.saturating_add(self.op_bytes);
-		if group_bytes > moq_net::group::MAX_CACHE_BYTES {
-			self.reset();
-			Ok(None)
-		} else {
-			Ok(Some(encoded))
-		}
+		}))
 	}
 
 	/// Serialize a bounded suffix before mutably borrowing the compression state.
@@ -332,7 +323,11 @@ impl<T> Encoder<T> {
 
 	/// Encode the header restating the whole window and opening a new group.
 	fn emit_header(&mut self, bytes: Vec<u8>) -> Result<Encoded> {
-		Self::validate_plaintext(bytes.len(), "header")?;
+		// A reader inflates the header whole, so its plaintext meets the group budget too.
+		let plain = bytes.len() as u64;
+		if plain > moq_net::group::MAX_CACHE_BYTES {
+			return Err(Error::Json("window header exceeds the group cache limit".into()));
+		}
 
 		// Open a fresh per-group encoder (cold window) and compress the header as frame 0, recording
 		// its wire size as the op budget's anchor.
@@ -351,6 +346,7 @@ impl<T> Encoder<T> {
 		self.header_len = payload.len() as u64;
 		self.op_bytes = 0;
 		self.group_frames = 1;
+		self.group_bytes = plain.max(self.header_len);
 		self.flate = flate;
 		self.resync = false;
 
@@ -531,22 +527,24 @@ mod test {
 		assert_eq!(encoder.window(), vec![Value::from(2)]);
 	}
 
+	/// Compression doesn't lift the limit: a reader inflates the header whole, so one past the group
+	/// budget is refused however small it deflates.
 	#[test]
 	fn a_header_larger_than_the_group_cache_is_rejected() {
-		let mut encoder = Encoder::<String>::new(ProducerConfig::default());
-		let record = "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize);
+		for compression in [false, true] {
+			let config = ProducerConfig {
+				compression,
+				..Default::default()
+			};
+			let mut encoder = Encoder::<String>::new(config);
+			let record = "x".repeat(moq_net::group::MAX_CACHE_BYTES as usize);
 
-		let err = encoder.push(&record).err().expect("oversized header should fail");
-		assert!(err.to_string().contains("group cache limit"));
-		assert!(encoder.window().is_empty());
+			let err = encoder.push(&record).err().expect("oversized header should fail");
+			assert!(err.to_string().contains("group cache limit"));
+			assert!(encoder.window().is_empty());
 
-		let frame = encoder.push(&"ok".to_string()).unwrap();
-		assert!(frame.keyframe);
-	}
-
-	#[test]
-	fn plaintext_is_bounded_by_the_decoder_limit() {
-		let len = usize::try_from(moq_flate::DEFAULT_MAX_FRAME_SIZE + 1).unwrap();
-		assert!(Encoder::<()>::validate_plaintext(len, "frame").is_err());
+			let frame = encoder.push(&"ok".to_string()).unwrap();
+			assert!(frame.keyframe);
+		}
 	}
 }

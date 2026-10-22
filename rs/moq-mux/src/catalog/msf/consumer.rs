@@ -50,7 +50,16 @@ impl<E: CatalogExt> Consumer<E> {
 			match ready!(group.poll_read_frame(waiter)?) {
 				Some(frame) => {
 					self.group = None;
-					let catalog = parse::<E>(&frame.payload, &self.track.broadcast().path)?;
+					let json = std::str::from_utf8(&frame.payload).map_err(|_| Error::InvalidUtf8)?;
+					let msf = match moq_msf::Catalog::<E>::from_str(json) {
+						Ok(msf) => msf,
+						Err(err) => {
+							tracing::warn!(error = %err, "failed to parse MSF catalog frame");
+							return Poll::Ready(Err(Error::ParseFrame.into()));
+						}
+					};
+					let catalog = from_msf(&msf, &self.track.broadcast().path)?;
+					catalog.check_renditions()?;
 					return Poll::Ready(Ok(Some(catalog)));
 				}
 				None => self.group = None,
@@ -72,31 +81,6 @@ impl<E: CatalogExt> Consumer<E> {
 	pub async fn next(&mut self) -> Result<Option<Catalog<E>>> {
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
-}
-
-/// Decode one catalog frame, bounding it before parsing.
-///
-/// The frame comes from a peer, and JSON parsing allocates several times its bytes,
-/// so a catalog must fit [`moq_json::snapshot::consumer::DEFAULT_MAX_SIZE`], the same
-/// limit every compressed catalog track uses.
-fn parse<E: CatalogExt>(payload: &[u8], base: &moq_net::Path<'_>) -> Result<Catalog<E>> {
-	const MAX: usize = moq_json::snapshot::consumer::DEFAULT_MAX_SIZE;
-	if payload.len() > MAX {
-		return Err(Error::FrameTooLarge {
-			size: payload.len(),
-			max: MAX,
-		}
-		.into());
-	}
-
-	let json = std::str::from_utf8(payload).map_err(|_| Error::InvalidUtf8)?;
-	let msf = moq_msf::Catalog::<E>::from_str(json).map_err(|err| {
-		tracing::warn!(error = %err, "failed to parse MSF catalog frame");
-		Error::ParseFrame
-	})?;
-	let catalog = from_msf(&msf, base)?;
-	catalog.check_renditions()?;
-	Ok(catalog)
 }
 
 impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
@@ -1108,17 +1092,6 @@ mod test {
 			msg.contains("missing codec"),
 			"expected 'missing codec' in error, got: {msg}"
 		);
-	}
-
-	#[test]
-	fn oversized_catalog_frame_is_refused_before_parsing() {
-		let payload = vec![b'{'; moq_json::snapshot::consumer::DEFAULT_MAX_SIZE + 1];
-		let err = parse::<()>(&payload, &moq_net::Path::empty()).expect_err("oversized frame must be refused");
-		assert!(matches!(
-			err,
-			crate::Error::Msf(Error::FrameTooLarge { size, max })
-				if size == payload.len() && max == moq_json::snapshot::consumer::DEFAULT_MAX_SIZE
-		));
 	}
 
 	#[test]

@@ -402,6 +402,30 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 	expect(values[values.length - 1]).toEqual({ v: "y".repeat(size) });
 });
 
+// A compressed delta is charged its plaintext too: the reader's window counts what it inflates, so a
+// patch that deflates to almost nothing still rolls the group once its plaintext would overflow the
+// budget. Matches the Rust `a_compressed_delta_is_gated_on_its_inflated_size`.
+test("a compressed delta is gated on its inflated size", () => {
+	const value = { v: "x".repeat(1000) };
+	const patched = { v: "y".repeat(1000) };
+	const encoder = new Encoder<Value>({
+		compression: "deflate",
+		deltaRatio: 100,
+		maxGroupBytes: JSON.stringify(value).length + 500,
+	});
+	encoder.update(value)?.commit();
+	const rolled = encoder.update(patched);
+	expect(rolled?.keyframe).toBe(true);
+	expect(rolled?.payload.length).toBeLessThan(500);
+});
+
+// A compressed snapshot is refused by its plaintext, the way a plain one is, however small it deflates:
+// no reader could inflate it.
+test("a compressed snapshot past the budget is refused", () => {
+	const encoder = new Encoder<Value>({ compression: "deflate", deltaRatio: 0, maxGroupBytes: 100 });
+	expect(() => encoder.update({ v: "x".repeat(1000) })).toThrow(NetError.FrameTooLarge);
+});
+
 test("a compressed delta is gated on its encoded size, not its plaintext", async () => {
 	// A sync-flushed DEFLATE frame can come out larger than its input, so the plaintext is not an
 	// upper bound on what lands in the group. A patch that fits the budget by its plaintext but not
@@ -418,8 +442,9 @@ test("a compressed delta is gated on its encoded size, not its plaintext", async
 	expect(delta?.keyframe).toBe(false);
 	expect(delta?.payload.length).toBeGreaterThan(plaintext);
 
-	// A budget with room for the plaintext patch but not the encoded one.
-	const maxGroupBytes = (snapshot?.payload.length ?? 0) + plaintext;
+	// A budget with room for the plaintext patch but not the encoded one. The snapshot is charged its
+	// plaintext, which outweighs its slice.
+	const maxGroupBytes = JSON.stringify(value).length + plaintext;
 	const track = new Track.Producer("test");
 	const producer = new Producer<Value>({ track, compression: "deflate", maxGroupBytes });
 	producer.update({ value: value });
