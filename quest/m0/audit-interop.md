@@ -7,7 +7,8 @@ match what we ship: the client builds on the latest published moq-tokio and
 `@moq/net`, the declared draft versions, and the relay endpoints. Every red
 cell with a moq.dev side on <https://git.moq.dev/relays/> and on the
 runner's report is classified from its logs and either fixed (ours),
-reported upstream (theirs), or noted as down.
+reported upstream (theirs), noted as down, or noted as unsupported (a
+feature outside the moq-net API).
 
 ## Plan
 
@@ -66,9 +67,9 @@ Ours, to fix in this run:
   DEBUG, not WARN.
 - js/net writes each control message as id, length, and body in separate
   writes (`js/net/src/ietf/message.ts`, `connection/handshake.ts`). Encode
-  once and write once, as Rust does. red5 only parses a SETUP that arrives
-  in one frame, and JS waits for its SETUP with no deadline, so the
-  session silently stalls.
+  once and write once, as Rust does, which saves frames and syscalls. It
+  does not fix red5: QUIC keeps no write boundaries, so red5's one-frame
+  SETUP parser (reported upstream below) can still stall on a split.
 - The JS subscriber joins video unfiltered before draft-20
   (`js/net/src/ietf/subscribe.ts`) and then stops every headless group
   stream. Asking for Next Group Start avoids requesting what it discards.
@@ -83,8 +84,8 @@ Ours, to fix in this run:
 - Runner report of 2026-10-19: moq-relay fails `data-subgroup-basic`
   (owned by [runner cases](/quest/m1/interop-coverage/runner-cases.md)) and
   answers `rendezvous-timeout` with 0x10 instead of TIMEOUT. Cloudflare
-  moq-rs fails ten cases because moq-relay declines PUBLISH, which is out of
-  scope (not in the moq-net API).
+  moq-rs fails ten cases because moq-relay declines PUBLISH: unsupported,
+  since PUBLISH is not in the moq-net API.
 - Unchased: a late-joining Rust subscriber on moqx got an empty catalog
   group and its joining FETCH never yielded the object.
 
