@@ -634,6 +634,10 @@ mod tests {
 
 	use super::*;
 
+	#[allow(
+		clippy::large_enum_variant,
+		reason = "a test fixture built once per case; only large when extra features grow the video config"
+	)]
 	enum TestConfig {
 		Video(hang::catalog::VideoConfig),
 		Audio(hang::catalog::AudioConfig),

@@ -27,7 +27,17 @@ pub type Target = fn(&[u8]) -> bool;
 /// Build a cached group with optional private object fields for model benchmarks.
 pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Producer) {
 	let broadcast = broadcast::Producer::new(broadcast::Info::default());
-	let track = broadcast.create_track("objects", None).unwrap();
+	// Object properties come from a moq-transport publisher, whose draft serialized them.
+	let info = track::Info {
+		properties: properties.then(|| {
+			std::sync::Arc::new(crate::model::object::TrackProperties {
+				version: ietf::Version::Draft22,
+				values: Vec::new(),
+			})
+		}),
+		..Default::default()
+	};
+	let track = broadcast.create_track("objects", info).unwrap();
 	let mut group = track.append_group().unwrap();
 	let payload = Bytes::from_static(&[0; 64]);
 	for id in 0..frames {
@@ -40,7 +50,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 							id: 0x80,
 							value: crate::model::object::Value::Int(96_000),
 						}],
-						crate::model::object::Encoding::Draft19,
+						ietf::Version::Draft22,
 					)
 					.unwrap(),
 					..Default::default()
@@ -151,30 +161,38 @@ where
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	// The body doesn't say whether it carries a timestamp or an inflated size, or whether
-	// the session negotiated the `ietf` extension, so try every reading.
-	let ietf: &[bool] = match version.has_ietf() {
+	// The body doesn't say whether it carries a timestamp or an inflated size, whether the
+	// session negotiated the `ietf` extension, or which draft its track came from, so try
+	// every reading.
+	let negotiated: &[bool] = match version.has_ietf() {
 		true => &[false, true],
 		false => &[false],
 	};
 	let mut any = false;
-	for &ietf in ietf {
+	for &negotiated in negotiated {
 		for timescale in [Some(crate::Timescale::MILLI), None] {
-			for compressed in [false, true] {
-				let format = lite::Format { timescale, compressed };
-				let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, ietf, |_| format)
-				else {
-					continue;
-				};
-				any = true;
+			for ietf in [None, Some(ietf::Version::Draft14), Some(ietf::Version::Draft22)] {
+				for compressed in [false, true] {
+					let framing = lite::Framing {
+						timescale,
+						ietf,
+						compressed,
+					};
+					let Ok(decoded) =
+						lite::Datagram::decode(Bytes::copy_from_slice(data), version, negotiated, |_| framing)
+					else {
+						continue;
+					};
+					any = true;
 
-				let Ok(first) = decoded.encode_bytes(version) else {
-					continue;
-				};
+					let Ok(first) = decoded.encode_bytes(version) else {
+						continue;
+					};
 
-				let echo = lite::Datagram::decode(first, version, ietf, |_| format)
-					.expect("could not decode our own encoding");
-				assert_eq!(echo, decoded, "datagram did not survive a round trip");
+					let echo = lite::Datagram::decode(first, version, negotiated, |_| framing)
+						.expect("could not decode our own encoding");
+					assert_eq!(echo, decoded, "datagram did not survive a round trip");
+				}
 			}
 		}
 	}
@@ -484,8 +502,9 @@ impl LiteSample {
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
 			Self::Datagram => {
-				lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| lite::Format {
+				lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, false, |_| lite::Framing {
 					timescale: Some(crate::Timescale::MILLI),
+					ietf: None,
 					compressed: false,
 				})
 				.map(|_| 1)

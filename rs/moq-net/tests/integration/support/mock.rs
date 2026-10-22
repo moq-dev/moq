@@ -49,6 +49,7 @@ struct Conn {
 	finishes: AtomicUsize,
 	blocked_writes: kio::Shared<usize>,
 	hold_fins: AtomicBool,
+	hold_writes: AtomicBool,
 	/// Acknowledge every FIN as soon as it is sent, before the peer reads it.
 	ack_fins: AtomicBool,
 	/// One-way delay for stream data and STOP_SENDING in each direction. Zero by default.
@@ -215,12 +216,20 @@ impl poll::SendStream for MockSendStream {
 	type Group = poll::Ungrouped;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		if self.conn.hold_writes.load(Ordering::Relaxed) {
+			let written = poll::Session::poll_closed(&mut self.session, cx).map(Err);
+			return self.wrote(buf.first().copied(), written);
+		}
 		let written = self.inner.poll_write(cx, buf);
 		self.wrote(buf.first().copied(), written)
 	}
 
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		let first = buf.chunk().first().copied();
+		if self.conn.hold_writes.load(Ordering::Relaxed) {
+			let written = poll::Session::poll_closed(&mut self.session, cx).map(Err);
+			return self.wrote(first, written);
+		}
 		let written = self.inner.poll_write_buf(cx, buf);
 		self.wrote(first, written)
 	}
@@ -713,6 +722,11 @@ impl MockSession {
 	/// Acknowledge every FIN as soon as it is sent, before the peer reads it, as QUIC does.
 	pub fn ack_fins(&self) {
 		self.side.conn.ack_fins.store(true, Ordering::Relaxed);
+	}
+
+	/// Hold every stream write until the session closes, as a peer with a full receive window.
+	pub fn hold_writes(&self) {
+		self.side.conn.hold_writes.store(true, Ordering::Relaxed);
 	}
 
 	/// Withhold FIN acknowledgements while continuing to deliver stream data.

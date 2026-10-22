@@ -1,6 +1,6 @@
 [package]
 name = "moq-archive"
-description = "Versioned hang recording objects on any object_store::ObjectStore"
+description = "MoQ broadcast archives on any object_store::ObjectStore"
 authors = ["Luke Curley <kixelated@gmail.com>"]
 repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
@@ -19,7 +19,6 @@ hang = { workspace = true }
 kio = { workspace = true }
 moq-clock = { workspace = true }
 moq-json = { workspace = true }
-moq-mux = { workspace = true }
 moq-net = { workspace = true }
 object_store = { workspace = true }
 percent-encoding = { workspace = true }
@@ -41,7 +40,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "test-util"] }
 
 [[bench]]
-name = "writer"
+name = "producer"
 harness = false
 
 [lints]

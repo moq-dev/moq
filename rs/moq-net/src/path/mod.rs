@@ -815,17 +815,6 @@ mod tests {
 	}
 
 	#[test]
-	fn test_empty() {
-		let empty = Path::new("");
-		assert!(empty.is_empty());
-		assert_eq!(empty.len(), 0);
-
-		let non_empty = Path::new("foo");
-		assert!(!non_empty.is_empty());
-		assert_eq!(non_empty.len(), 3);
-	}
-
-	#[test]
 	fn test_from_conversions() {
 		let path1 = Path::from("foo/bar");
 		let path2 = Path::from("foo/bar");

@@ -462,12 +462,13 @@ impl Target {
 	}
 }
 
-/// The model's info for a track the publisher described (SUBSCRIBE_OK or TRACK_STATUS_OK).
+/// The model's info for a track a `version` publisher described (SUBSCRIBE_OK or
+/// TRACK_STATUS_OK).
 ///
 /// The copy keeps the units the publisher declared, so it matches a copy of the same
 /// instance that arrived over another route: resuming across routes refuses one whose
 /// metadata differs. A sealed TIMESCALE travels downstream unchanged, so it must too.
-fn accepted_info(properties: &ietf::Properties) -> track::Info {
+fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info {
 	let mut info = track::Info::default()
 		.with_timescale(properties.timescale)
 		.with_max_age(properties.max_cache_duration)
@@ -475,14 +476,18 @@ fn accepted_info(properties: &ietf::Properties) -> track::Info {
 		// A publisher answering NEW_GROUP_REQUEST refreshes on any join with a delta to skip;
 		// this session carries the request back to it.
 		.with_refresh(properties.dynamic_groups.then_some(0));
-	info.properties =
-		Some(std::sync::Arc::new(properties.unknown.clone())).filter(|unknown| !unknown.values.is_empty());
+	info.properties = Some(std::sync::Arc::new(crate::model::object::TrackProperties {
+		version,
+		values: properties.unknown.clone(),
+	}));
 	info
 }
 
-/// Why a track answered with `properties` is neither processed nor forwarded, if it is not.
-fn refused(properties: &ietf::Properties) -> Option<Error> {
-	properties.unknown.refused(&accepted_info(properties))
+/// Why a track a `version` publisher answered with `properties` is neither processed nor
+/// forwarded, if it is not.
+fn refused(properties: &ietf::Properties, version: Version) -> Option<Error> {
+	let info = accepted_info(properties, version);
+	info.properties.as_deref()?.refused(&info)
 }
 
 /// The Largest Group a subscription knows: its SUBSCRIBE_OK's, or a newer one since.
@@ -2939,8 +2944,8 @@ where
 			// A track that needs a property we do not understand, or carries more than we
 			// could forward, is neither processed nor forwarded: the subscription is
 			// cancelled and the subscribers refused.
-			Ok(Some(accepted)) if refused(&accepted.properties).is_some() => {
-				let err = refused(&accepted.properties).expect("checked by the guard");
+			Ok(Some(accepted)) if refused(&accepted.properties, self.version).is_some() => {
+				let err = refused(&accepted.properties, self.version).expect("checked by the guard");
 				tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, %err, "subscribe refused");
 				// Refuse before waiting on the peer to acknowledge the cancellation.
 				if let Some(pending) = self.take_pending(request_id) {
@@ -2990,10 +2995,13 @@ where
 		let timescale = properties
 			.timescale
 			.or(resumed.as_ref().and_then(|idle| idle.timescale));
-		let info = accepted_info(&ietf::Properties {
-			timescale,
-			..properties
-		});
+		let info = accepted_info(
+			&ietf::Properties {
+				timescale,
+				..properties
+			},
+			self.version,
+		);
 		// The copy already holds the track: it is current again up to the answer's Largest
 		// Location once the join's head lands or a newer group does, since leaving cut the
 		// group it was in.
@@ -3871,7 +3879,7 @@ where
 		let _ = stream.writer.finish();
 		let ok = match response {
 			// A track that needs a property we do not understand is not forwarded.
-			Ok(ok) => match refused(&ok.properties) {
+			Ok(ok) => match refused(&ok.properties, self.version) {
 				Some(err) => Err(err),
 				None => Ok(ok),
 			},
@@ -3888,7 +3896,7 @@ where
 
 		tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status known");
 		let dynamic = request.dynamic();
-		let mut track = request.accept(accepted_info(&ok.properties));
+		let mut track = request.accept(accepted_info(&ok.properties, self.version));
 		track.received();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 		track.set_idle();
@@ -7337,7 +7345,8 @@ mod tests {
 		// The one real bidi everything is multiplexed onto.
 		let control_stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let running = adapter.clone();
-		let (_goaway_handle, goaway) = crate::goaway::Handle::new(true);
+		let (_goaway_handle, goaway) =
+			crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
 		moq_clock::sim::spawn(async move {
 			let _ = running.run(control_stream.reader, control_stream.writer, goaway).await;
 		});
@@ -12424,10 +12433,13 @@ mod stitch_tests {
 		let track = broadcast
 			.create_track(
 				"video",
-				accepted_info(&ietf::Properties {
-					timescale,
-					..Default::default()
-				}),
+				accepted_info(
+					&ietf::Properties {
+						timescale,
+						..Default::default()
+					},
+					ingress,
+				),
 			)
 			.unwrap();
 		let mut h = Harness::with_timescale(Fill::Done, vec![script], timescale);
@@ -12608,7 +12620,7 @@ mod stitch_tests {
 		let relayed = bytes::Bytes::copy_from_slice(decoder.bytes().unwrap());
 		let decoded = super::super::object::read(&relayed, version, Some(Timescale::MILLI)).unwrap();
 		assert_eq!(decoded.timestamp, Some(Timestamp::new(42, Timescale::MILLI).unwrap()));
-		assert_eq!(super::super::object::listed(&decoded.properties).len(), 1);
+		assert_eq!(super::super::object::listed(&decoded.properties, version).len(), 1);
 	}
 
 	fn object_stream(version: Version, first: bool, objects: &[(u64, &[u8], Option<u64>)]) -> Vec<u8> {
@@ -12764,7 +12776,7 @@ mod stitch_tests {
 			);
 			if let Some(end) = end_object {
 				assert_eq!(
-					super::super::object::listed(&end.properties)
+					super::super::object::listed(&end.properties, version)
 						.first()
 						.map(|property| property.id),
 					legacy.then_some(0x3e)
@@ -12844,7 +12856,7 @@ mod stitch_tests {
 		let version = Version::Draft14;
 		let status = [0x10, 7];
 		let leaves = |properties: &crate::model::object::Properties| {
-			super::super::object::write(properties, None, version, None).unwrap()
+			super::super::object::write(properties, Some(version), None, version, None).unwrap()
 		};
 
 		let script = object_stream(
@@ -13021,7 +13033,7 @@ mod stitch_tests {
 					.unwrap();
 				assert_eq!(frame.fields.as_ref().unwrap().id, id);
 				assert_eq!(
-					super::super::object::listed(&frame.fields.as_ref().unwrap().properties)[0].id,
+					super::super::object::listed(&frame.fields.as_ref().unwrap().properties, version)[0].id,
 					0x3e
 				);
 			}
@@ -13117,8 +13129,7 @@ mod stitch_tests {
 			] {
 				let script = object_stream(ingress, true, &[(0, &properties, None)]);
 				let (bytes, log) = relay_passthrough_stream(script, ingress, egress).await;
-				let encoding = super::super::object::encoding;
-				if !super::super::object::same_bytes(encoding(ingress), encoding(egress)) {
+				if !super::super::object::same_bytes(ingress, egress) {
 					assert!(!log.resets().is_empty(), "incompatible immutable bytes must be refused");
 					continue;
 				}
@@ -13128,6 +13139,41 @@ mod stitch_tests {
 				assert_eq!(decoder.varint().unwrap(), 0);
 				assert_eq!(decoder.bytes().unwrap(), properties);
 			}
+		}
+	}
+
+	/// Draft 19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT. A draft-18 publisher's 0x06 is
+	/// dropped on its way to draft 19 when mutable, and refused when sealed, through a
+	/// moq-lite hop too: drafts 18 and 19 serialize a block alike, so only the track's
+	/// carried ingress draft tells them apart.
+	#[moq_clock::test]
+	async fn passthrough_keeps_0x06_from_crossing_draft_19() {
+		let (ingress, egress) = (Version::Draft18, Version::Draft19);
+		// 0x06 = 42 and 0x20 = 7, mutable.
+		let mutable = [0x06, 42, 0x20 - 0x06, 7];
+		let script = object_stream(ingress, true, &[(0, &mutable, None)]);
+		let (bytes, log) = relay_passthrough_stream(script, ingress, egress).await;
+		assert!(log.resets().is_empty());
+		let mut decoder = Decoder::new(&bytes, egress.into());
+		ietf::GroupHeader::decode(&mut decoder, egress).unwrap();
+		assert_eq!(decoder.varint().unwrap(), 0);
+		assert_eq!(decoder.bytes().unwrap(), [0x20, 7], "the mutable 0x06 crossed");
+
+		// 0x0b = { 0x06 = 42 }, sealed.
+		let sealed = [0x0b, 2, 0x06, 42];
+		let script = object_stream(ingress, true, &[(0, &sealed, None)]);
+		let (_, log) = relay_passthrough_stream(script, ingress, egress).await;
+		assert!(!log.resets().is_empty(), "the sealed 0x06 crossed");
+
+		// Within a side of draft 19 both cross unchanged.
+		for properties in [&mutable[..], &sealed] {
+			let script = object_stream(ingress, true, &[(0, properties, None)]);
+			let (bytes, log) = relay_passthrough_stream(script, ingress, ingress).await;
+			assert!(log.resets().is_empty());
+			let mut decoder = Decoder::new(&bytes, ingress.into());
+			ietf::GroupHeader::decode(&mut decoder, ingress).unwrap();
+			assert_eq!(decoder.varint().unwrap(), 0);
+			assert_eq!(decoder.bytes().unwrap(), properties);
 		}
 	}
 
@@ -13143,7 +13189,9 @@ mod stitch_tests {
 			{
 				let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let track = broadcast.create_track("video", None).unwrap();
+				let track = broadcast
+					.create_track("video", accepted_info(&Default::default(), version))
+					.unwrap();
 				let mut h = Harness::with_timescale(Fill::Done, vec![], None);
 				h.subscriber.version = version;
 				h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
@@ -13269,7 +13317,9 @@ mod stitch_tests {
 			for (egress, status) in pairs {
 				let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let track = broadcast.create_track("video", None).unwrap();
+				let track = broadcast
+					.create_track("video", accepted_info(&Default::default(), ingress))
+					.unwrap();
 				let mut h = Harness::with_timescale(Fill::Done, vec![], None);
 				h.subscriber.version = ingress;
 				h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());

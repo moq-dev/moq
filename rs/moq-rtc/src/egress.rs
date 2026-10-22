@@ -259,6 +259,10 @@ fn pick(source: &moq_mux::Source, catalog: &Catalog, formats: &[Format]) -> Opti
 }
 
 /// A catalog rendition a media line can serve.
+#[allow(
+	clippy::large_enum_variant,
+	reason = "one per media line, so the variant sizes never add up to an allocation's worth; only large when extra features grow the video config"
+)]
 enum Rendition {
 	Audio(String, hang::catalog::AudioConfig),
 	Video(String, hang::catalog::VideoConfig),

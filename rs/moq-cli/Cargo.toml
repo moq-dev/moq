@@ -120,8 +120,6 @@ moq-clock = { workspace = true }
 moq-hls = { workspace = true, features = ["server"] }
 # Writes and reads the stats and feedback snapshots.
 moq-json = { workspace = true }
-# Names the MSF catalog track `export archive` records.
-moq-msf = { workspace = true }
 moq-mux = { workspace = true }
 # Cluster, LAN mesh, and inbound `/.cluster` auth. default-features off so the
 # CLI's own feature set (iroh, quic, cluster-lan) is what selects them.

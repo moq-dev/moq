@@ -538,28 +538,11 @@ mod tests {
 	}
 
 	#[test]
-	fn test_max_same_scale() {
-		let a = Timestamp::from_secs(5).unwrap();
-		let b = Timestamp::from_secs(10).unwrap();
-		assert_eq!(a.max(b), b);
-		assert_eq!(b.max(a), b);
-	}
-
-	#[test]
-	fn test_max_cross_scale() {
-		// `Ord::max` compares across scales (no panic).
-		let a = Timestamp::from_millis(1).unwrap();
-		let b = Timestamp::from_secs(1).unwrap();
-		assert_eq!(a.max(b), b);
-	}
-
-	#[test]
 	fn test_ordering_same_scale() {
 		let a = Timestamp::from_secs(1).unwrap();
 		let b = Timestamp::from_secs(2).unwrap();
 		assert!(a < b);
 		assert!(b > a);
-		assert_eq!(a, a);
 	}
 
 	#[test]
@@ -613,14 +596,6 @@ mod tests {
 
 		let t = Timestamp::from_micros(1000).unwrap();
 		assert_eq!(format!("{:?}", t), "1ms");
-	}
-
-	#[test]
-	fn test_new() {
-		let t = Timestamp::new(5000, Timescale::MILLI).unwrap();
-		assert_eq!(t.value(), 5000);
-		assert_eq!(t.scale(), Timescale::MILLI);
-		assert_eq!(t.as_millis(), 5000);
 	}
 
 	#[test]

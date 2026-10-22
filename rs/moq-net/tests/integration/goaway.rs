@@ -42,6 +42,52 @@ const GOAWAY_VERSIONS: &[&str] = &[
 	"moq-transport-19",
 ];
 
+/// A full receive window or missing FIN ACK cannot hold a drain beyond its local deadline.
+async fn closes_stalled_goaway(version: Version, writes: bool) {
+	let pair = connect_mock(MockConnectOptions::new(version)).await;
+	moq_clock::sim::idle().await;
+	let before = pair.server_transport.blocked_writes();
+	if writes {
+		pair.server_transport.hold_writes();
+	} else {
+		pair.server_transport.hold_fin_acknowledgements();
+	}
+	let started = moq_clock::now();
+	let timeout = Duration::from_secs(1);
+	pair.server.drain().send(Goaway::new().with_timeout(timeout)).unwrap();
+	let reason = moq_clock::timeout(timeout * 2, pair.server.closed())
+		.await
+		.unwrap_or_else(|_| panic!("{version}: a stalled GOAWAY held the session past its deadline"));
+	assert!(
+		matches!(reason, moq_net::Error::Session(moq_net::SessionError::GoawayTimeout)),
+		"{version}: {reason}"
+	);
+	assert_eq!(moq_clock::now() - started, timeout, "{version}: drain window moved");
+	if writes {
+		assert!(
+			pair.server_transport.blocked_writes() > before,
+			"{version}: GOAWAY never tried to write"
+		);
+	}
+}
+
+#[moq_clock::test]
+async fn a_stalled_lite_goaway_is_still_closed_at_the_deadline() {
+	for name in ["moq-lite-04", "moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+		let version = name.parse().unwrap();
+		for writes in [false, true] {
+			closes_stalled_goaway(version, writes).await;
+		}
+	}
+}
+
+#[moq_clock::test]
+async fn a_stalled_ietf_goaway_is_still_closed_at_the_deadline() {
+	for name in Version::names().filter(|name| name.starts_with("moq-transport-")) {
+		closes_stalled_goaway(name.parse().unwrap(), true).await;
+	}
+}
+
 /// Server drains with a redirect URI; the client observes it through
 /// `Session::draining()`. Exercises every GOAWAY channel in the version
 /// matrix, in both directions.

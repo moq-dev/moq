@@ -15,15 +15,25 @@ fn timed() -> moq_net::track::Info {
 const TIMEOUT: Duration = Duration::from_secs(10);
 const PATH: &str = "robot/cell-clumsy-octopus/cameras/left.hang";
 
-async fn spawn_relay(
-	id: u64,
-	connect: Vec<String>,
-	cluster_version: Option<moq_net::Version>,
-) -> (u16, tokio::task::JoinHandle<()>) {
+/// How long the far end watches for a flap after the broadcast first serves a
+/// frame there. Propagation on loopback takes milliseconds, so this is many
+/// times the window a reflected route has to replace the live one.
+const SETTLE: Duration = Duration::from_secs(1);
+
+/// A relay on loopback, with the internal listener up so [`Mesh::start`] can see
+/// its dialed peers.
+struct Node {
+	port: u16,
+	internal: u16,
+	task: tokio::task::JoinHandle<()>,
+}
+
+async fn spawn_relay(id: u64, connect: Vec<String>, cluster_version: Option<moq_net::Version>) -> Node {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let mut config = Config::default();
 	config.listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
+	config.internal.listen = Some("127.0.0.1:0".parse().expect("parse internal bind"));
 	config.connect.bind = Some("127.0.0.1:0".parse().expect("parse client bind"));
 	config.connect.tls.insecure = Some(true);
 	config.connect.version.extend(cluster_version);
@@ -34,11 +44,80 @@ async fn spawn_relay(
 	// `load` binds the TCP listener, so the port is ours before anyone dials it.
 	let relay = Relay::load(config).await.expect("relay load");
 	let port = relay.tcp_addr().expect("TCP listener is configured").port();
-	let handle = tokio::spawn(async move {
+	let internal = relay.internal().addr().expect("internal listener is configured").port();
+	let task = tokio::spawn(async move {
 		let _ = relay.run().await;
 	});
 
-	(port, handle)
+	Node { port, internal, task }
+}
+
+/// Wait until the relay behind `internal` holds a session with each of the
+/// `dialed` peers it connects to.
+async fn wait_dialed(internal: u16, dialed: usize) {
+	let url = format!("http://127.0.0.1:{internal}/nodes");
+	let deadline = tokio::time::Instant::now() + TIMEOUT;
+	loop {
+		let body = reqwest::get(&url)
+			.await
+			.expect("fetch /nodes")
+			.text()
+			.await
+			.expect("read /nodes");
+		let nodes: serde_json::Value = serde_json::from_str(&body).expect("parse /nodes");
+		if nodes["nodes"].as_array().expect("a node list").len() == dialed {
+			return;
+		}
+		assert!(tokio::time::Instant::now() < deadline, "the mesh never formed: {nodes}");
+		tokio::time::sleep(Duration::from_millis(10)).await;
+	}
+}
+
+/// The redundant mesh: B dials A, C dials A and B, and D dials C, so a broadcast
+/// published at A reaches D over two paths that reflect it back toward A.
+struct Mesh {
+	nodes: [Node; 4],
+}
+
+impl Mesh {
+	/// Start every relay and wait for every dial to land, so a publish crosses the
+	/// whole mesh rather than racing its links coming up.
+	async fn start(cluster_version: Option<moq_net::Version>) -> Self {
+		let a = spawn_relay(11, vec![], cluster_version).await;
+		let b = spawn_relay(12, vec![format!("tcp://127.0.0.1:{}", a.port)], cluster_version).await;
+		let c = spawn_relay(
+			13,
+			vec![
+				format!("tcp://127.0.0.1:{}", a.port),
+				format!("tcp://127.0.0.1:{}", b.port),
+			],
+			cluster_version,
+		)
+		.await;
+		let d = spawn_relay(14, vec![format!("tcp://127.0.0.1:{}", c.port)], cluster_version).await;
+		for (node, dialed) in [(&b, 1), (&c, 2), (&d, 1)] {
+			wait_dialed(node.internal, dialed).await;
+		}
+		Self { nodes: [a, b, c, d] }
+	}
+
+	/// Where publishers ingest.
+	fn a(&self) -> u16 {
+		self.nodes[0].port
+	}
+
+	/// The far end, where viewers read.
+	fn d(&self) -> u16 {
+		self.nodes[3].port
+	}
+}
+
+impl Drop for Mesh {
+	fn drop(&mut self) {
+		for node in &self.nodes {
+			node.task.abort();
+		}
+	}
 }
 
 fn client(version: Option<moq_net::Version>) -> moq_tokio::Client {
@@ -165,50 +244,54 @@ async fn read_first_frame(port: u16) -> Result<Vec<u8>, String> {
 	Ok(payload)
 }
 
-async fn watch_announces(port: u16, window: Duration) -> Vec<(String, bool)> {
+/// Connect a viewer to `port` and record every route change it sees until
+/// `stop` fires. Returns once the viewer is connected, so nothing published
+/// afterward can slip past it.
+async fn watch_announces(
+	port: u16,
+	stop: tokio::sync::oneshot::Receiver<()>,
+) -> tokio::task::JoinHandle<Vec<(String, bool)>> {
 	let url: Url = format!("tcp://127.0.0.1:{port}").parse().expect("parse url");
 	let origin = moq_tokio::origin::spawn();
 	let mut announced = origin.consume().announced();
-	let _session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
+	let session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
 		.await
 		.expect("viewer connect timeout")
 		.expect("viewer connect failed");
 
-	let mut updates = Vec::new();
-	let deadline = tokio::time::Instant::now() + window;
-	while let Ok(Some((update, active))) = tokio::time::timeout_at(deadline, next_update(&mut announced)).await {
-		updates.push((update.prefix.as_str().to_string(), active));
-	}
-	updates
+	tokio::spawn(async move {
+		let _session = session;
+		let mut updates = Vec::new();
+		tokio::pin!(stop);
+		loop {
+			tokio::select! {
+				_ = &mut stop => break,
+				update = next_update(&mut announced) => match update {
+					Some((update, active)) => updates.push((update.prefix.as_str().to_string(), active)),
+					None => break,
+				},
+			}
+		}
+		updates
+	})
 }
 
 async fn assert_unknown_publisher_stays_announced(cluster_version: Option<moq_net::Version>) {
-	let (a_port, a) = spawn_relay(11, vec![], cluster_version).await;
-	let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], cluster_version).await;
-	let (c_port, c) = spawn_relay(
-		13,
-		vec![format!("tcp://127.0.0.1:{a_port}"), format!("tcp://127.0.0.1:{b_port}")],
-		cluster_version,
-	)
-	.await;
-	let (d_port, d) = spawn_relay(14, vec![format!("tcp://127.0.0.1:{c_port}")], cluster_version).await;
+	let mesh = Mesh::start(cluster_version).await;
 
-	tokio::time::sleep(Duration::from_millis(500)).await;
-	let watcher = tokio::spawn(watch_announces(d_port, Duration::from_secs(8)));
-	// Attach the viewer before publishing so a short-lived announce is observed.
-	tokio::time::sleep(Duration::from_millis(250)).await;
-	let publisher = publish_unknown(a_port).await;
-	let updates = watcher.await.expect("viewer task");
+	let (stop, stopped) = tokio::sync::oneshot::channel();
+	let watcher = watch_announces(mesh.d(), stopped).await;
+	let publisher = publish_unknown(mesh.a()).await;
 
 	// The announce is only half the contract: the route it advertises must
 	// actually serve a frame at the far end of the mesh.
-	let frame = read_first_frame(d_port).await;
+	let frame = read_first_frame(mesh.d()).await;
+	tokio::time::sleep(SETTLE).await;
+	let _ = stop.send(());
+	let updates = watcher.await.expect("viewer task");
 
 	drop(publisher);
-	a.abort();
-	b.abort();
-	c.abort();
-	d.abort();
+	drop(mesh);
 
 	let announces = updates.iter().filter(|(_, active)| *active).count();
 	let unannounces = updates.iter().filter(|(_, active)| !*active).count();
@@ -239,28 +322,11 @@ async fn every_ingest_version_crosses_a_redundant_mesh() {
 		"moq-transport-16",
 		"moq-transport-17",
 	] {
-		let (a_port, a) = spawn_relay(11, vec![], None).await;
-		let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], None).await;
-		let (c_port, c) = spawn_relay(
-			13,
-			vec![format!("tcp://127.0.0.1:{a_port}"), format!("tcp://127.0.0.1:{b_port}")],
-			None,
-		)
-		.await;
-		let (d_port, d) = spawn_relay(14, vec![format!("tcp://127.0.0.1:{c_port}")], None).await;
-		tokio::time::sleep(Duration::from_millis(500)).await;
-
-		let _publisher = publish_version(a_port, version).await;
-		tokio::time::sleep(Duration::from_millis(750)).await;
-
-		if let Err(err) = read_first_frame(d_port).await {
+		let mesh = Mesh::start(None).await;
+		let _publisher = publish_version(mesh.a(), version).await;
+		if let Err(err) = read_first_frame(mesh.d()).await {
 			failures.push(format!("{version}: {err}"));
 		}
-
-		a.abort();
-		b.abort();
-		c.abort();
-		d.abort();
 	}
 
 	assert!(failures.is_empty(), "cross-mesh failures:\n{}", failures.join("\n"));
@@ -272,22 +338,20 @@ async fn every_ingest_version_crosses_a_redundant_mesh() {
 /// must not suppress the republish.
 #[tokio::test]
 async fn unknown_publisher_republish_stays_routable() {
-	let (a_port, a) = spawn_relay(11, vec![], None).await;
-	let (b_port, b) = spawn_relay(12, vec![format!("tcp://127.0.0.1:{a_port}")], None).await;
-	let (c_port, c) = spawn_relay(
-		13,
-		vec![format!("tcp://127.0.0.1:{a_port}"), format!("tcp://127.0.0.1:{b_port}")],
-		None,
-	)
-	.await;
-	let (d_port, d) = spawn_relay(14, vec![format!("tcp://127.0.0.1:{c_port}")], None).await;
-	tokio::time::sleep(Duration::from_millis(500)).await;
+	let mesh = Mesh::start(None).await;
+
+	let url: Url = format!("tcp://127.0.0.1:{}", mesh.d()).parse().expect("parse url");
+	let origin = moq_tokio::origin::spawn();
+	let mut announced = origin.consume().announced();
+	let _session = tokio::time::timeout(TIMEOUT, client(None).with_subscriber(origin).connect(url).established())
+		.await
+		.expect("viewer connect timeout")
+		.expect("viewer connect failed");
 
 	for round in 0..3 {
-		let publisher = publish_unknown(a_port).await;
-		tokio::time::sleep(Duration::from_millis(750)).await;
+		let publisher = publish_unknown(mesh.a()).await;
 
-		let frame = read_first_frame(d_port).await;
+		let frame = read_first_frame(mesh.d()).await;
 		assert_eq!(
 			frame.unwrap_or_else(|err| panic!("round {round}: the republished broadcast never came back: {err}")),
 			b"hello",
@@ -297,13 +361,17 @@ async fn unknown_publisher_republish_stays_routable() {
 		// The session ends; the broadcast unannounces everywhere before the
 		// next round republishes the same path.
 		drop(publisher);
-		tokio::time::sleep(Duration::from_millis(750)).await;
+		tokio::time::timeout(TIMEOUT, async {
+			while let Some((update, active)) = next_update(&mut announced).await {
+				if !active && update.prefix.as_str() == PATH {
+					return;
+				}
+			}
+			panic!("round {round}: the viewer's origin closed");
+		})
+		.await
+		.unwrap_or_else(|_| panic!("round {round}: the broadcast never unannounced at the far end"));
 	}
-
-	a.abort();
-	b.abort();
-	c.abort();
-	d.abort();
 }
 
 #[tokio::test]

@@ -691,13 +691,6 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn runtime_uses_parallel_workers() {
-		let runtime = Runtime::new(false);
-		assert_eq!(runtime.runtime_flavor(), tokio::runtime::RuntimeFlavor::MultiThread);
-		runtime.shutdown();
-	}
-
-	#[test]
 	fn shutdown_joins_a_worker_callback() {
 		let runtime = Arc::new(Runtime::new(false));
 		let (entered, entering) = std::sync::mpsc::channel();

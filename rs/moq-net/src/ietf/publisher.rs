@@ -53,25 +53,21 @@ fn track_properties(info: &track::Info, wanted: bool, version: Version) -> Resul
 	if !wanted {
 		return Ok(ietf::Properties::default());
 	}
-	let mut unknown = info.properties.as_deref().cloned().unwrap_or_default();
+	let Some(track) = info.properties.as_deref() else {
+		return Ok(ietf::Properties::restated(info));
+	};
+	let mut unknown = track.values.clone();
 	let block = !matches!(version, Version::Draft14 | Version::Draft15);
-	if block
-		&& unknown.immutable().is_some()
-		&& !unknown
-			.encoding
-			.is_some_and(|encoding| super::object::same_bytes(encoding, super::object::encoding(version)))
-	{
+	if block && track.immutable().is_some() && !super::object::same_bytes(track.version, version) {
 		return Err(Error::Unsupported);
 	}
 	// Across draft-19, forwarding 0x06 would give it a different meaning, as for object
 	// properties. A mutable one is dropped; a sealed one is refused.
-	if unknown.encoding.is_some_and(|encoding| {
-		super::object::delivery_timeout(encoding) != super::object::has_delivery_timeout(version)
-	}) {
-		if block && unknown.sealed().any(|id| id == 0x06) {
+	if super::object::has_delivery_timeout(track.version) != super::object::has_delivery_timeout(version) {
+		if block && track.sealed().any(|id| id == 0x06) {
 			return Err(Error::Unsupported);
 		}
-		unknown.values.retain(|property| property.id != 0x06);
+		unknown.retain(|property| property.id != 0x06);
 	}
 	Ok(ietf::Properties {
 		unknown,
@@ -135,6 +131,8 @@ struct FetchObjectInfo<'a> {
 	timescale: Option<Timescale>,
 	version: Version,
 	fields: Option<&'a crate::model::object::Fields>,
+	/// The draft the track's publisher spoke, which serialized `fields`.
+	source: Option<Version>,
 }
 
 fn fetch_prior(version: Version, prior: Option<u64>, object: u64) -> Result<FetchPrior, Error> {
@@ -1966,6 +1964,7 @@ where
 									timescale,
 									version,
 									fields: frame.fields.as_deref(),
+									source: group.ietf(),
 								},
 							)
 							.await?;
@@ -2012,6 +2011,7 @@ where
 							timescale,
 							version,
 							fields: frame.fields.as_deref(),
+							source: group.ietf(),
 						},
 					)
 					.await?;
@@ -2064,12 +2064,13 @@ where
 			timescale,
 			version,
 			fields,
+			source,
 		} = header;
 		// Relayed properties survive without a timescale. Plain frames generate a
 		// timestamp only on drafts that can declare its units.
 		let timescale = timescale.filter(|_| ietf::Properties::sends_timescale(version));
 		let properties = if let Some(fields) = fields {
-			let properties = super::object::write(&fields.properties, timestamp, version, timescale)?;
+			let properties = super::object::write(&fields.properties, source, timestamp, version, timescale)?;
 			(!properties.is_empty()).then_some(properties)
 		} else {
 			match timescale {
@@ -2464,7 +2465,9 @@ where
 			.iter()
 			.filter_map(|frame| Some((frame.fields.as_deref()?, frame.timestamp)));
 		for (fields, frame) in frames.chain(group.end_object.as_deref().map(|end| (end, None))) {
-			if let Err(err) = super::object::write(&fields.properties, frame, self.version, timescale) {
+			if let Err(err) =
+				super::object::write(&fields.properties, group.info.ietf(), frame, self.version, timescale)
+			{
 				return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await;
 			}
 		}
@@ -2604,6 +2607,7 @@ where
 						timescale,
 						version: self.version,
 						fields: frame.fields.as_deref(),
+						source: group.info.ietf(),
 					},
 				)
 				.await?;
@@ -2620,6 +2624,7 @@ where
 						timescale,
 						version: self.version,
 						fields: Some(end),
+						source: group.info.ietf(),
 					},
 				)
 				.await?;
@@ -4497,6 +4502,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 					};
 					let properties = match super::object::write(
 						forwarded,
+						self.track.info().ietf(),
 						datagram.datagram.timestamp,
 						self.version,
 						self.timescale,
@@ -5032,6 +5038,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 										extensions: self.msg.flags.has_extensions,
 										timescale: self.timescale,
 										version: self.version,
+										source: self.group.ietf(),
 									},
 								)?;
 								self.prior_object = Some(id);
@@ -5078,6 +5085,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 												extensions: self.msg.flags.has_extensions,
 												timescale: self.timescale,
 												version: self.version,
+												source: self.group.ietf(),
 											},
 										)?;
 										self.prior_object = Some(id);
@@ -5108,6 +5116,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 													extensions: self.msg.flags.has_extensions,
 													timescale: self.timescale,
 													version: self.version,
+													source: self.group.ietf(),
 												},
 											)?;
 											self.ended = true;
@@ -5205,6 +5214,8 @@ struct ObjectEncoding {
 	extensions: bool,
 	timescale: Option<Timescale>,
 	version: Version,
+	/// The draft the track's publisher spoke, which serialized the objects' properties.
+	source: Option<Version>,
 }
 
 fn object_delta(prior: Option<u64>, id: u64) -> Result<u64, Error> {
@@ -5241,6 +5252,7 @@ fn buffer_object<W: crate::transport::poll::SendStream>(
 		let ext = match object.fields {
 			Some(fields) => super::object::write(
 				&fields.properties,
+				encoding.source,
 				object.timestamp,
 				encoding.version,
 				encoding.timescale,
@@ -9916,7 +9928,7 @@ mod serve_tests {
 		w.bytes(b"opaque").unwrap();
 		let properties =
 			crate::coding::decode_buf(&mut bytes::Bytes::from(block), version, ietf::Properties::decode).unwrap();
-		assert_eq!(properties.unknown.values.len(), 2, "{version}");
+		assert_eq!(properties.unknown.len(), 2, "{version}");
 		properties
 	}
 
@@ -9927,7 +9939,10 @@ mod serve_tests {
 		for version in [Version::Draft16, Version::Draft17, Version::Draft22] {
 			let upstream = unknown_properties(version);
 			let info = track::Info {
-				properties: Some(Arc::new(upstream.unknown.clone())),
+				properties: Some(Arc::new(crate::model::object::TrackProperties {
+					version,
+					values: upstream.unknown.clone(),
+				})),
 				..track::Info::timed()
 			};
 
@@ -9991,7 +10006,10 @@ mod serve_tests {
 		assert!(upstream.dynamic_groups);
 		let info = track::Info {
 			refresh: Some(0),
-			properties: Some(Arc::new(upstream.unknown.clone())),
+			properties: Some(Arc::new(crate::model::object::TrackProperties {
+				version: Version::Draft22,
+				values: upstream.unknown.clone(),
+			})),
 			..track::Info::timed()
 		};
 
@@ -10025,10 +10043,23 @@ mod serve_tests {
 		}
 	}
 
+	/// The info a relay behind a moq-lite hop with the `ietf` extension learns of a track
+	/// published with `info`.
+	async fn across_a_hop(info: track::Info) -> track::Info {
+		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
+		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
+		let _track = broadcast.create_track("video", info).unwrap();
+		let (downstream, _sessions) = crate::lite::ietf::test_hop(&upstream, "room", [true, true]).await;
+		let broadcast = downstream.consume().request_broadcast("room", None).await.unwrap();
+		broadcast.track("video").unwrap().query().await.unwrap()
+	}
+
 	/// Draft 19 assigns 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a track property 0x06 crosses
 	/// that boundary as an object property does: dropped when mutable, refused when sealed.
-	#[test]
-	fn track_property_0x06_does_not_cross_draft_19() {
+	/// Drafts 18 and 19 serialize alike, so across a relay hop only the track's carried
+	/// ingress draft says which meaning it has.
+	#[moq_clock::test]
+	async fn track_property_0x06_does_not_cross_draft_19() {
 		let upstream = |block: &[u8]| {
 			let properties = crate::coding::decode_buf(
 				&mut bytes::Bytes::copy_from_slice(block),
@@ -10037,11 +10068,14 @@ mod serve_tests {
 			)
 			.unwrap();
 			track::Info {
-				properties: Some(Arc::new(properties.unknown)),
+				properties: Some(Arc::new(crate::model::object::TrackProperties {
+					version: Version::Draft18,
+					values: properties.unknown,
+				})),
 				..Default::default()
 			}
 		};
-		let ids = |properties: ietf::Properties| properties.unknown.values.iter().map(|p| p.id).collect::<Vec<_>>();
+		let ids = |properties: ietf::Properties| properties.unknown.iter().map(|p| p.id).collect::<Vec<_>>();
 
 		// 0x06 = 42, 0x3801 = "hi"
 		let mut block = Vec::new();
@@ -10050,22 +10084,33 @@ mod serve_tests {
 		w.varint(42).unwrap();
 		w.varint(0x3801 - 0x06).unwrap();
 		w.bytes(b"hi").unwrap();
-		let mutable = upstream(&block);
-		assert_eq!(
-			ids(track_properties(&mutable, true, Version::Draft18).unwrap()),
-			[0x06, 0x3801]
-		);
-		assert_eq!(
-			ids(track_properties(&mutable, true, Version::Draft22).unwrap()),
-			[0x3801]
-		);
-
 		let sealed = upstream(&[0x0b, 2, 0x06, 42]);
-		assert!(track_properties(&sealed, true, Version::Draft18).is_ok());
-		assert!(matches!(
-			track_properties(&sealed, true, Version::Draft22),
-			Err(Error::Unsupported)
-		));
+		for hop in [false, true] {
+			let (mutable, sealed) = match hop {
+				false => (upstream(&block), sealed.clone()),
+				true => (across_a_hop(upstream(&block)).await, across_a_hop(sealed.clone()).await),
+			};
+			assert_eq!(mutable.ietf(), Some(Version::Draft18), "hop={hop}");
+			assert_eq!(
+				ids(track_properties(&mutable, true, Version::Draft18).unwrap()),
+				[0x06, 0x3801],
+				"hop={hop}"
+			);
+			assert_eq!(
+				ids(track_properties(&mutable, true, Version::Draft19).unwrap()),
+				[0x3801],
+				"hop={hop}"
+			);
+
+			assert!(track_properties(&sealed, true, Version::Draft18).is_ok(), "hop={hop}");
+			assert!(
+				matches!(
+					track_properties(&sealed, true, Version::Draft19),
+					Err(Error::Unsupported)
+				),
+				"hop={hop}"
+			);
+		}
 	}
 
 	/// A range ending inside its group stops at its End Object, which draft 20 counts

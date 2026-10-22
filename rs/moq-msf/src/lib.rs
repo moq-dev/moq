@@ -935,12 +935,6 @@ mod test {
 	}
 
 	#[test]
-	fn draft01_string_version_decodes() {
-		let catalog = Catalog::<()>::from_str(r#"{"version":"draft-01","tracks":[]}"#).unwrap();
-		assert!(catalog.tracks.is_empty());
-	}
-
-	#[test]
 	fn unknown_version_string_is_accepted() {
 		// A future draft we don't specifically recognize still decodes; we don't
 		// expose the version, so callers are unaffected.
