@@ -56,8 +56,8 @@ always a prefix. A service that serves only some of the paths beneath it
 refuses the rest as they are requested. Announcements are hints; the request is
 what decides.
 
-Inside a broadcast, a reader can list its tracks (moq-lite-07, Rust only so
-far): each track with its fixed properties, a synced mark, then tracks as they
+Inside a broadcast, a reader can list its tracks (moq-lite-07): each track
+with its fixed properties, a synced mark, then tracks as they
 come and go. Listing is discovery, not delivery: subscribe to each track you
 want, and its groups still cached upstream reach you late. A broadcast lists
 the tracks its publisher creates, never one served only on request, and a path

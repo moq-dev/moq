@@ -105,6 +105,36 @@ for (const trackCount of [8, 32, 128]) {
 	}
 }
 
+// One created and removed track reaches every listing, however many tracks the broadcast holds.
+const listed = 256;
+console.log("tracks,listings,create_remove_and_read_us");
+for (const trackCount of [8, 128, 1024]) {
+	for (const listingCount of [1, 8, 32]) {
+		const broadcast = new BroadcastProducer();
+		for (let index = 0; index < trackCount; index++) broadcast.createTrack(`held-${index}`);
+		const listings = Array.from({ length: listingCount }, () => broadcast.consume().tracks());
+		// Past each listing's initial set and SYNCED.
+		for (const listing of listings) {
+			for (let index = 0; index <= trackCount; index++) await listing.next();
+		}
+		const start = performance.now();
+		for (let index = 0; index < listed; index++) {
+			broadcast.createTrack(`new-${index}`);
+			for (const listing of listings) {
+				const event = await listing.next();
+				if (event?.kind !== "added" || event.name !== `new-${index}`) throw new Error("listing missed a track");
+			}
+			broadcast.removeTrack(`new-${index}`);
+			for (const listing of listings) {
+				if ((await listing.next())?.kind !== "removed") throw new Error("listing missed a removal");
+				checksum++;
+			}
+		}
+		console.log(`${trackCount},${listingCount},${(((performance.now() - start) * 1000) / listed).toFixed(1)}`);
+		broadcast.close();
+	}
+}
+
 // Resolve one touched path while both the table and that path's readers grow.
 console.log("request,routes,readers,update_and_read_us");
 const epoch = Epoch.parse("01900000-0000-7000-8000-000000000001");

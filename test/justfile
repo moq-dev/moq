@@ -42,11 +42,12 @@ harness:
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
 # and on lite-06/07 messages (the filter also matches `lite_varint_interop`), then
 # moq-transport OBJECT_DATAGRAMs both ways and the JS answer to TRACK_STATUS on every
-# draft, Lite AUTH_ERROR NOT_SUPPORTED after a grant, and Lite padding in both directions.
+# draft, Lite AUTH_ERROR NOT_SUPPORTED after a grant, Lite padding, and lite-07 TRACKS
+# listings, each in both directions.
 [positional-arguments]
 interop *args:
     cd .. && bun install --frozen-lockfile
-    just rs test -p moq-net --lib varint_interop ietf_datagram_interop ietf_track_status_interop ietf_compression_fallback_interop auth_unsupported_interop padding_interop --run-ignored all
+    just rs test -p moq-net --lib varint_interop ietf_datagram_interop ietf_track_status_interop ietf_compression_fallback_interop auth_unsupported_interop padding_interop tracks_interop --run-ignored all
     ./interop/interop.sh "$@"
 
 # The harnesses append one record per case to MOQ_TEST_RESULTS; flags link the page to its
