@@ -1559,18 +1559,22 @@ def check_pmt_versions(ts_path: str, packet_size: int) -> Check:
 
     A demux keeps the table it has until the version changes, so a change made under the same
     version never reaches it, and a copy of the table a revision replaced, arriving after it,
-    reverts the revision. A version one up to 15 behind the newest is older, modulo 32. A
-    revision that skips versions is reported, not failed: what a receiver sees still changes
-    at every new version."""
+    reverts the revision. A version one up to 15 behind the newest is older, modulo 32. So is
+    a table coming back under the version it went out at before the versions since have come
+    round to it, which modulo 32 alone reads as a skip forward. A revision that skips versions
+    is reported, not failed: what a receiver sees still changes at every new version."""
     with open(ts_path, "rb") as handle:
         data = handle.read()
     revisions = skipped = 0
     for program, runs in sorted(pmt_tables(data, packet_size).items()):
-        for (_, newest, _), (index, version, _) in zip(runs, runs[1:]):
+        for at in range(1, len(runs)):
+            newest, (index, version, body) = runs[at - 1][1], runs[at]
             behind = (newest - version) % 32
+            last = max((n for n in range(at) if runs[n][1:] == (version, body)), default=None)
+            returned = last is not None and len({v for _, v, _ in runs[last + 1 : at]}) < 31
             if behind == 0:
                 detail = f"program {program}: the PMT changed at packet {index} under version {version}"
-            elif behind < 16:
+            elif behind < 16 or returned:
                 detail = f"program {program}: version {version} at packet {index}, after version {newest}"
             else:
                 revisions += 1

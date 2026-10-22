@@ -348,6 +348,54 @@ async fn a_descriptor_change_revises_the_entry_and_keeps_the_clock() {
 	);
 }
 
+/// A listed track keeps the descriptors its packets went out under: a catalog revising them
+/// under the same name revises nothing, as a revised stream comes under a new name.
+#[tokio::test(start_paused = true)]
+async fn a_listed_track_keeps_its_descriptors() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	let (name, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let language = |language: &[u8]| super::catalog::Descriptor {
+		tag: language[0],
+		data: bytes::Bytes::copy_from_slice(&language[2..]),
+	};
+	catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.tracks
+		.get_mut(&name)
+		.unwrap()
+		.descriptors = vec![language(ENG)];
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 0, 3_000).await;
+	catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.tracks
+		.get_mut(&name)
+		.unwrap()
+		.descriptors = vec![language(FRA)];
+	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 3_000, 6_000).await;
+	audio.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	let tables = tables(&frames, OWN_PMT_PID);
+	let streams: Vec<_> = tables.iter().map(|table| table.streams.clone()).collect();
+	assert_eq!(streams, [vec![(AUDIO, AUDIO_PID, ENG.to_vec())]]);
+}
+
 /// The PCR leaves a PID only with the track it rode on, for the next audio track.
 #[tokio::test(start_paused = true)]
 async fn the_clock_moves_only_when_its_track_retires() {
@@ -366,6 +414,57 @@ async fn the_clock_moves_only_when_its_track_retires() {
 	let clocks: Vec<(u8, u16)> = tables.iter().map(|table| (table.version, table.pcr_pid)).collect();
 	assert_eq!(clocks, vec![(0, AUDIO_PID), (1, OTHER_AUDIO_PID)]);
 	assert_eq!(tables[1].streams, vec![(AUDIO, OTHER_AUDIO_PID, FRA.to_vec())]);
+}
+
+/// The PCR leaves the PID of a track that retires only behind a PMT naming the PID it moves
+/// to: a receiver holding the PMT before finds the clock on the PID that one names.
+#[tokio::test(start_paused = true)]
+async fn the_clock_moves_behind_the_pmt_naming_its_pid() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	let (name, mut clock) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let (_, mut other) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	live(
+		&mut export,
+		&mut frames,
+		start,
+		&mut [(&mut clock, 0x21), (&mut other, 0x21)],
+		0,
+		3_000,
+	)
+	.await;
+	remove(&mut catalog, &name);
+	clock.finish().unwrap();
+	live(&mut export, &mut frames, start, &mut [(&mut other, 0x21)], 3_000, 6_000).await;
+	other.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	let mut named = None;
+	let mut clocks = Vec::new();
+	for frame in &frames {
+		for packet in packets(std::slice::from_ref(frame)) {
+			if packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x10 != 0 {
+				if let Some(named) = named {
+					assert_eq!(pid(packet), named, "a PCR on a PID the PMT out does not name");
+				}
+				clocks.push(pid(packet));
+			}
+		}
+		if let Some(table) = tables(std::slice::from_ref(frame), OWN_PMT_PID).last() {
+			named = Some(table.pcr_pid);
+		}
+	}
+	clocks.dedup();
+	assert_eq!(clocks, [AUDIO_PID, OTHER_AUDIO_PID]);
 }
 
 /// A PID the PMT dropped can come back as another stream.
@@ -1354,6 +1453,117 @@ async fn draining_descriptor_sets_that_outgrow_a_section_give_way_to_the_current
 	let mut runs = infos.clone();
 	runs.dedup();
 	assert_eq!(runs, [vec![0x80], vec![0x81, 0x80], vec![0x82, 0x80, 0x81], vec![0x83]]);
+}
+
+/// A stream added while one that left drains, the two too many for a section beside the
+/// rest, ends the drain there: the PMT lists the program the catalog does.
+#[tokio::test(start_paused = true)]
+async fn a_draining_stream_too_many_for_a_section_gives_way() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	// A stream with 255 bytes of descriptors: three fit a section, four do not.
+	fn track(
+		broadcast: &mut moq_net::broadcast::Producer,
+		catalog: &mut crate::catalog::Producer<Ext>,
+		pid: u16,
+	) -> (String, Writer) {
+		let (name, writer) = aac_track(broadcast, catalog, Some(pid));
+		let descriptor = super::catalog::Descriptor {
+			tag: 0x80,
+			data: bytes::Bytes::from(vec![pid as u8; 250]),
+		};
+		catalog
+			.modify()
+			.unwrap()
+			.ext
+			.mpegts
+			.tracks
+			.get_mut(&name)
+			.unwrap()
+			.descriptors = vec![descriptor];
+		(name, writer)
+	}
+	let (_, mut first) = track(&mut broadcast, &mut catalog, AUDIO_PID);
+	let (_, mut second) = track(&mut broadcast, &mut catalog, OTHER_AUDIO_PID);
+	let (name, mut leaving) = track(&mut broadcast, &mut catalog, 0x105);
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	let mut tracks = [(&mut first, 0x21), (&mut second, 0x21), (&mut leaving, 0x21)];
+	live(&mut export, &mut frames, start, &mut tracks, 0, 3_000).await;
+	remove(&mut catalog, &name);
+	let (_, mut added) = track(&mut broadcast, &mut catalog, 0x106);
+	let mut tracks = [
+		(&mut first, 0x21),
+		(&mut second, 0x21),
+		(&mut leaving, 0x21),
+		(&mut added, 0x21),
+	];
+	live(&mut export, &mut frames, start, &mut tracks, 3_000, 4_000).await;
+	leaving.finish().unwrap();
+	let mut tracks = [(&mut first, 0x21), (&mut second, 0x21), (&mut added, 0x21)];
+	live(&mut export, &mut frames, start, &mut tracks, 4_000, 7_000).await;
+	for track in [&mut first, &mut second, &mut added] {
+		track.finish().unwrap();
+	}
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	let pids: Vec<Vec<u16>> = layouts(&tables(&frames, OWN_PMT_PID))
+		.into_iter()
+		.map(|(_, streams)| streams.into_iter().map(|(_, pid)| pid).collect())
+		.collect();
+	assert_eq!(
+		pids,
+		[
+			vec![AUDIO_PID, OTHER_AUDIO_PID, 0x105],
+			vec![AUDIO_PID, OTHER_AUDIO_PID, 0x106]
+		]
+	);
+}
+
+/// Tracks the catalog takes back before sending anything, their sources left open, go with
+/// it, each on a PID of its own as they are.
+#[tokio::test(start_paused = true)]
+async fn tracks_withdrawn_before_sending_anything_go() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	let (_, mut first) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 0, 3_000).await;
+	let mut open = Vec::new();
+	for at in (3_000..8_000).step_by(1_000) {
+		let (name, withdrawn) = aac_track(&mut broadcast, &mut catalog, None);
+		live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], at, at + 500).await;
+		remove(&mut catalog, &name);
+		live(
+			&mut export,
+			&mut frames,
+			start,
+			&mut [(&mut first, 0x21)],
+			at + 500,
+			at + 1_000,
+		)
+		.await;
+		open.push(withdrawn);
+	}
+	assert_eq!(export.tracks(), 1);
+	first.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+	drop(open);
 }
 
 /// Write a frame stamped `millis`, filled with its mark, to each of `tracks` for each 20 ms

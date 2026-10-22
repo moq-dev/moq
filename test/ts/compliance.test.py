@@ -89,6 +89,17 @@ class PmtVersions(unittest.TestCase):
         self.assertEqual(check.status, compliance.Status.FAIL)
         self.assertIn("after version 1", check.detail)
 
+    def test_a_copy_past_half_the_versions_back_fails(self):
+        revisions = [(version, [0x101, 0x200 + version]) for version in range(18)]
+        check = self.check(*revisions, (0, [0x101, 0x200]))
+        self.assertEqual(check.status, compliance.Status.FAIL)
+        self.assertIn("after version 17", check.detail)
+
+    def test_a_table_back_after_every_version_passes(self):
+        cycle = [(version % 32, [0x101, 0x200 + version % 32]) for version in range(33)]
+        check = self.check(*cycle)
+        self.assertEqual((check.status, check.metrics["revisions"]), (compliance.Status.PASS, 32))
+
 
 if __name__ == "__main__":
     unittest.main()
