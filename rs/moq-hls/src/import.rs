@@ -657,7 +657,7 @@ impl Import {
 	/// `404` playlist ends the import immediately, since no amount of waiting turns it into a `200`.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
-		let mut deadline = tokio::time::Instant::now() + STEP_RETRY_BUDGET;
+		let mut deadline = moq_clock::now() + STEP_RETRY_BUDGET;
 
 		loop {
 			// A step where *nothing* ingested while a rendition was failing is a failed pass wearing
@@ -681,7 +681,7 @@ impl Import {
 				Ok(outcome) => {
 					// The source is alive, so the earlier failures no longer describe it.
 					delay = STEP_RETRY_MIN;
-					deadline = tokio::time::Instant::now() + STEP_RETRY_BUDGET;
+					deadline = moq_clock::now() + STEP_RETRY_BUDGET;
 					outcome
 				}
 				// A status the origin actually sent is its answer: a 404 playlist is not going to
@@ -690,7 +690,7 @@ impl Import {
 					return Err(err);
 				}
 				Err(err) => {
-					let now = tokio::time::Instant::now();
+					let now = moq_clock::now();
 					if now >= deadline {
 						return Err(err);
 					}
@@ -702,7 +702,7 @@ impl Import {
 						.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)
 						.min(deadline - now);
 					delay = (delay * 2).min(STEP_RETRY_MAX);
-					tokio::time::sleep(wait).await;
+					moq_clock::sleep(wait).await;
 					continue;
 				}
 			};
@@ -715,7 +715,7 @@ impl Import {
 				"HLS import step complete"
 			);
 
-			tokio::time::sleep(delay).await;
+			moq_clock::sleep(delay).await;
 		}
 	}
 
@@ -1044,6 +1044,7 @@ fn moq_sequence(discontinuity_sequence: u64, media_sequence: u64) -> Result<u64>
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use std::path::{Path, PathBuf};

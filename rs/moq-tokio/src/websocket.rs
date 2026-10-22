@@ -151,7 +151,7 @@ where
 {
 	let deadline = options
 		.timeout
-		.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
+		.and_then(|timeout| moq_clock::now().checked_add(timeout));
 	// A vanished peer sends no FIN. Ping and timeout bound the same stale-session
 	// lifetime that QUIC's idle timeout bounds on the native path.
 	let mut upgraded = qmux::ws::Upgraded::new(socket)
@@ -412,7 +412,7 @@ pub(crate) async fn connect(
 	// TODO if let chain
 	match resolved.delay {
 		delay if !delay.is_zero() && !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
-			tokio::time::sleep(delay).await;
+			moq_clock::sleep(delay).await;
 			tracing::debug!(peer = %crate::connect::Endpoint(&url), delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
 		}
 		_ => {}
@@ -745,7 +745,7 @@ impl Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						tokio::time::sleep(delay).await;
+						moq_clock::sleep(delay).await;
 					}
 				}
 			}

@@ -24,7 +24,3 @@ the timestamps came from moq-transport and are unchecked.
 Mirror it in js/net, where `Info.unchecked` is `@internal`. If the timed
 encoding on that hop needs a wire change, update
 `drafts/draft-lcurley-moq-lite.md` (or the extension's draft) in the same PR.
-
-## Required
-
-- [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - adds `unchecked` and the untimed serving this changes

@@ -35,6 +35,7 @@ use publish::Publish;
 use subscribe::{Subscribe, SubscribeArgs};
 
 use anyhow::Context;
+use moq_relay::shutdown::Signals;
 use tokio::task::JoinSet;
 
 #[cfg(feature = "jemalloc")]
@@ -115,7 +116,7 @@ async fn spawn_server(
 	let started = cluster.clone().start().await.context("cluster failed to start")?;
 
 	// Stream sockets bind asynchronously in `listen`, so this must finish before
-	// `spawn_moq` reports readiness. The serve task only owns an already-bound
+	// readiness is reported. The serve task only owns an already-bound
 	// listener and cannot discover a late bind failure.
 	let listener = server.listen().await.context("failed to bind listeners")?;
 	spawn_serve(
@@ -426,6 +427,8 @@ impl Directions {
 /// hops it crossed, and our own Hop ID is one of them, so a broadcast we
 /// publish is never announced back to us.
 ///
+/// Every attachment is up once this returns, so the caller reports readiness then.
+///
 /// Returns the dialed [`Connection`](moq_tokio::Connection), if any, for a graceful
 /// close, and an allocator over the uplink's bandwidth estimate, for the sources that
 /// share it. Capture encoders follow their slice; passthrough imports reserve
@@ -465,8 +468,7 @@ async fn spawn_moq(
 		None => None,
 	};
 
-	let (started, shutdown) =
-		notify_when_initialized(spawn_server(tasks, moq, &cluster, net, directions), moq::notify_ready).await?;
+	let (started, shutdown) = spawn_server(tasks, moq, &cluster, net, directions).await?;
 	// Even standalone: it is what reports a panic in the origin driver.
 	tasks.spawn(async move { started.run().await });
 
@@ -515,16 +517,6 @@ struct Attached {
 	shutdown: Option<Shutdown>,
 }
 
-/// Report readiness only after every configured MoQ attachment initializes.
-async fn notify_when_initialized<T>(
-	initialization: impl std::future::Future<Output = anyhow::Result<T>>,
-	notify_ready: impl FnOnce(),
-) -> anyhow::Result<T> {
-	let value = initialization.await?;
-	notify_ready();
-	Ok(value)
-}
-
 /// Fill the shared Origin from MoQ, then play one broadcast locally.
 ///
 /// The playback event loop runs on this task's thread rather than a spawned one:
@@ -549,6 +541,7 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 		connection,
 		..
 	} = spawn_moq(&moq, &net, cluster.clone(), directions, &mut tasks).await?;
+	moq::notify_ready();
 
 	let result = play::run(origin.consume(), name, args, tasks).await;
 	detach(connection, client, &cluster).await;
@@ -569,7 +562,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 
 	// Before anything listens: a client can count its session established as soon
 	// as the listener is up, and a signal then must drain it, not kill the process.
-	let signals = Signals::new()?;
+	let mut signals = Signals::new()?;
 
 	// The stage combinations were refused up front by `Invocation::validate`, before
 	// anything bound a port or dialed out.
@@ -585,6 +578,11 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		} = spawn_moq(&moq, &net, cluster.clone(), Directions::of(&stages), &mut tasks).await?;
 		client = dialer;
 		connection = attached;
+		// A signal while attaching drains once `drive` takes it, with no READY first.
+		if signals.pending() {
+			moq::stop();
+		}
+		moq::notify_ready();
 
 		// stdin and stdout are one resource each, so two stages can't share them.
 		let mut stdin = None;
@@ -941,6 +939,7 @@ async fn drive(
 		tokio::select! {
 			biased;
 			() = signals.recv() => {
+				moq::stop();
 				if let Some(shutdown) = shutdown {
 					drain(shutdown, &mut signals).await;
 				}
@@ -956,47 +955,6 @@ async fn drive(
 	};
 	tasks.shutdown().await;
 	result
-}
-
-/// SIGINT or, on unix, SIGTERM (what process supervisors send on stop), caught from
-/// construction on. Until a handler is installed the default action kills the
-/// process, so build this before anything can accept a session.
-struct Signals {
-	#[cfg(unix)]
-	interrupt: tokio::signal::unix::Signal,
-	#[cfg(unix)]
-	terminate: tokio::signal::unix::Signal,
-	#[cfg(not(unix))]
-	ctrl_c: tokio::signal::windows::CtrlC,
-}
-
-impl Signals {
-	fn new() -> anyhow::Result<Self> {
-		#[cfg(unix)]
-		{
-			use tokio::signal::unix::{SignalKind, signal};
-			Ok(Self {
-				interrupt: signal(SignalKind::interrupt()).context("failed to listen for SIGINT")?,
-				terminate: signal(SignalKind::terminate()).context("failed to listen for SIGTERM")?,
-			})
-		}
-		#[cfg(not(unix))]
-		{
-			let ctrl_c = tokio::signal::windows::ctrl_c().context("failed to listen for Ctrl-C")?;
-			Ok(Self { ctrl_c })
-		}
-	}
-
-	/// Resolve on the next signal, including one caught before this was polled.
-	async fn recv(&mut self) {
-		#[cfg(unix)]
-		tokio::select! {
-			_ = self.interrupt.recv() => {}
-			_ = self.terminate.recv() => {}
-		}
-		#[cfg(not(unix))]
-		self.ctrl_c.recv().await;
-	}
 }
 
 /// The listener / HTTP-serving endpoints bridge one named broadcast, so an
@@ -1028,9 +986,9 @@ fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Resu
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
-	use std::cell::Cell;
 	use std::future::Future;
 	use std::pin::Pin;
 
@@ -1203,50 +1161,9 @@ mod tests {
 			.unwrap();
 	}
 
-	/// A stream bind failure is part of initialization, so systemd must never see
-	/// READY=1 for a process that has no listening socket.
-	#[tokio::test]
-	async fn a_stream_bind_failure_prevents_readiness() {
-		let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
-		let addr = occupied.local_addr().expect("occupied address").to_string();
-		let invocation =
-			Invocation::try_parse_from(["moq", "--listen-tcp-bind", &addr, "--auth-public", "**", "import", "ts"])
-				.expect("parse stream-only invocation");
-		let cluster = invocation.moq.cluster().expect("create cluster");
-		let net = Net {
-			quic: invocation.moq.quic.clone(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
-		};
-		let mut tasks = JoinSet::new();
-		let ready = Cell::new(false);
-
-		let err = match notify_when_initialized(
-			spawn_server(
-				&mut tasks,
-				&invocation.moq,
-				&cluster,
-				&net,
-				Directions {
-					publish: true,
-					consume: false,
-				},
-			),
-			|| ready.set(true),
-		)
-		.await
-		{
-			Ok(_) => panic!("the occupied port must fail initialization"),
-			Err(err) => err,
-		};
-
-		assert!(err.to_string().contains("failed to bind listeners"), "{err:#}");
-		assert!(!ready.get(), "readiness must be withheld after a bind failure");
-		assert!(tasks.is_empty(), "nothing should be spawned after a bind failure");
-	}
-
-	/// `--connect` dials only once the listener is up, so a bind failure leaves no
-	/// live dial to drop without its close.
+	/// A stream bind failure fails startup before the caller can report READY, and
+	/// `--connect` dials only once the listener is up, so it leaves no live dial to
+	/// drop without its close.
 	#[tokio::test]
 	async fn a_stream_bind_failure_starts_no_dial() {
 		let _ = moq_tokio::crypto::install_default();
