@@ -105,7 +105,6 @@ lite-07 stream type here.
 - [Relay signal install](/quest/m1/relay-signal-install.md) - a shutdown signal after the relay starts serving drains it, without leaking handlers into an embedder whose startup failed
 - [JS redirect keys strip userinfo](/quest/m1/js-reload-userinfo.md) - js/net keys a reconnect endpoint without URL userinfo, matching Rust
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
-- [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - the in-tree @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Resumed close](/quest/m1/resume-closed.md) - a resumed JS track keeps its declared end across copies, and its `closed` and `largest()` settle on a clean end
 - [Replica resume](/quest/m1/replica-resume.md) - a lagging same-epoch replica resumes with every frame exactly once and in order, on lite-07 and on moq-transport
