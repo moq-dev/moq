@@ -68,6 +68,12 @@ announce churn on today's hop-list mesh, shipping with the next cut from
 route layer ships; and stats groups as
 tracks, so per-group stats stop costing cluster announces.
 
+Added 2026-10-22 (maintainer, security audit of the relay, auth, stats,
+ACME, and WebRTC): a clean close misreported as a revocation, injectable
+metric tiers, an unbudgeted ACME renewal, unbounded mDNS work per WebRTC
+offer, and an undocumented stats linger cut. The audit's `server_name`
+finding was already owned by the auth contract quest.
+
 ## Required
 
 - [Epoch correctness](/quest/m0/broadcast-epoch/README.md) - publisher identity, duplicate suppression, and catalog pinning gate the breaking cut
@@ -172,6 +178,11 @@ tracks, so per-group stats stop costing cluster announces.
 - [Peer count bounds](/quest/m1/peer-count-bounds.md) - namespace interests, a legacy announce list, a WebSocket upgrade, and public HTTP admission are bounded by what the peer sent or by an existing budget
 - [Caption store bounds](/quest/m1/caption-store-bounds.md) - a hostile caption track cannot grow a viewer's cue and region store or its per-frame work without bound
 - [Auth contract](/quest/m1/auth-contract.md) - the auth server receives the certificate-selecting SNI, documented as client-chosen, and a certificate grants nothing alone
+- [Clean close reason](/quest/m1/clean-close-reason.md) - a session that closes on its own is never recorded as `Unauthorized` because its in-band credentials closed with it
+- [Metric-safe tiers](/quest/m1/metric-tier.md) - tiers are `[A-Za-z0-9._-]` paths refused where they are set, and every metric label value is escaped
+- [ACME renewal budget](/quest/m1/acme-renewal-budget.md) - renewal counts failed validations against the startup budget and pauses instead of locking the hostname out
+- [WebRTC mDNS resolver](/quest/m1/webrtc-mdns-resolver.md) - each peer resolves its `.local` candidates in one owned task, one distinct name at a time
+- [Stats group linger](/quest/m1/stats-group-linger.md) - at depth >= 1 a lingered group ends its held tracks, documented and tested
 - [Nightly benchmark regressions](/quest/m1/bench-ci.md) - each nightly compares the Rust Criterion benches against the previous nightly's commit on the same hosted runner, publishes it to the git.moq.dev report, and alerts on a regression
 - [Performance audit](/quest/m1/audit-perf.md) - benchmarks that regressed since the m0 run are explained, fixed, or planned, and unbenched hot paths get coverage
 
