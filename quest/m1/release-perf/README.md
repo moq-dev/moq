@@ -104,4 +104,4 @@ one.
 ## Related
 
 - [Performance audit](/quest/m1/audit-perf.md) - compares nightly to nightly; this epic compares main to release
-- [Benchmark regressions in CI](/quest/m2/bench-ci.md) - PR-time comparison against the base branch
+- [Nightly benchmark regressions](/quest/m1/bench-ci.md) - paired nightly-to-nightly comparison on one runner
