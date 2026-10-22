@@ -156,6 +156,12 @@ impl Config {
 			return Err(crate::Error::InvalidConfig("zero rtt_interval"));
 		}
 
+		// QUIC's stream count ceiling (RFC 9000 §4.6), which peers enforce on the parameter
+		const MAX_STREAM_COUNT: u64 = 1 << 60;
+		if self.max_streams_bidi > MAX_STREAM_COUNT || self.max_streams_uni > MAX_STREAM_COUNT {
+			return Err(crate::Error::InvalidConfig("stream count above 2^60"));
+		}
+
 		let mut config = mux::Config::default();
 		config.version = self.version;
 		config.max_concurrent_bidi_streams = varint(self.max_streams_bidi)?;
@@ -209,5 +215,23 @@ mod tests {
 			..Config::default()
 		};
 		assert!(matches!(rtt.to_mux(), Err(crate::Error::InvalidConfig(_))));
+	}
+
+	#[test]
+	fn stream_counts_above_quics_ceiling_are_refused() {
+		let at = Config {
+			max_streams_bidi: 1 << 60,
+			max_streams_uni: 1 << 60,
+			..Config::default()
+		};
+		assert!(at.to_mux().is_ok());
+		for (bidi, uni) in [((1 << 60) + 1, 0), (0, (1 << 60) + 1)] {
+			let over = Config {
+				max_streams_bidi: bidi,
+				max_streams_uni: uni,
+				..Config::default()
+			};
+			assert!(matches!(over.to_mux(), Err(crate::Error::InvalidConfig(_))));
+		}
 	}
 }
