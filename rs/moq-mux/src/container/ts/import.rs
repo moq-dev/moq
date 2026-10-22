@@ -729,7 +729,7 @@ impl<E: catalog::Catalog> Import<E> {
 		// or it would keep intercepting the PID and the new stream would never get data.
 		// This only fires on a genuine remap: section PIDs otherwise route to
 		// `ensure_section`, never here.
-		if let Some(mut section) = self.sections.remove(&pid.as_u16()) {
+		if let Some(mut section) = self.retire_section(pid) {
 			section.finish()?;
 			self.pending.remove(&pid);
 			self.headers.remove(&pid);
@@ -943,6 +943,15 @@ impl<E: catalog::Catalog> Import<E> {
 				.or_insert(current);
 		}
 		Some(stream)
+	}
+
+	/// Remove the section route on `pid`, keeping the row of the track it published.
+	fn retire_section(&mut self, pid: Pid) -> Option<SectionStream<E>> {
+		let section = self.sections.remove(&pid.as_u16())?;
+		self.retired_stats
+			.entry(pid.as_u16())
+			.or_insert_with(|| stats::Stream::new(".ts", stats::Class::Data));
+		Some(section)
 	}
 
 	/// Open the PES whose header `pes` begins where `span` says, if any PCR came before it.
@@ -1225,7 +1234,7 @@ impl<E: catalog::Catalog> Import<E> {
 	fn refuse(&mut self, pid: Pid, why: &str) -> anyhow::Result<()> {
 		self.pending.remove(&pid);
 		self.headers.remove(&pid);
-		if let Some(section) = self.sections.remove(&pid.as_u16()) {
+		if let Some(section) = self.retire_section(pid) {
 			section.abort(moq_net::Error::Unsupported);
 		}
 		// MPEG-1/2 video still paces the program once its PES are refused.
@@ -1562,13 +1571,13 @@ impl<E: catalog::Catalog> Import<E> {
 		for (&pid, &unplaced) in &self.unplaced {
 			streams
 				.entry(pid)
-				.or_insert_with(|| stats::Stream::new(".ts", stats::Class::Data))
+				.or_insert_with(|| stats::Stream::new("", stats::Class::Data))
 				.unplaced = unplaced;
 		}
 		for (&pid, &refused) in &self.refused {
 			streams
 				.entry(pid)
-				.or_insert_with(|| stats::Stream::new(".ts", stats::Class::Data))
+				.or_insert_with(|| stats::Stream::new("", stats::Class::Data))
 				.refused = refused;
 		}
 		if let Some(claims) = &self.claims {
