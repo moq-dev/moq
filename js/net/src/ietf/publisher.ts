@@ -265,9 +265,12 @@ type StreamCount = { opened: number; terminalSent?: boolean };
 /** A PUBLISH's state across every pause and resume. */
 interface Published {
 	streams: StreamCount;
-	unlisted: Once<true>;
+	unlisted: Once<Unlisted>;
 	answer: boolean;
 }
+
+/** How a listed track left the listing: it finished, or it left unfinished. */
+type Unlisted = "finished" | "removed";
 
 /** Stop forwarding without ending the subscription. */
 class Paused extends Error {}
@@ -863,13 +866,14 @@ export class Publisher {
 					revoked,
 					...(published ? [published.unlisted] : []),
 				]);
-				if (end === true) throw new NotFound("track no longer listed");
+				if (end === "removed") throw new NotFound("track no longer listed");
 				if (end === "revoked") {
 					console.info(`subscription no longer authorized: broadcast=${name} track=${track.name}`);
 					unauthorized = true;
 					unsubscribe();
 				}
-				ended = end === served;
+				// A track that finished leaves the listing with TRACK_ENDED, like one served to its end.
+				ended = end === served || end === "finished";
 			} catch (err: unknown) {
 				publishError = error(err);
 				if (published) {
@@ -2351,7 +2355,7 @@ export class Publisher {
 		changed: Signal<number>;
 	}) {
 		const namespace = Path.join(msg.prefix, suffix);
-		const listed = new Map<string, Once<true>>();
+		const listed = new Map<string, Once<Unlisted>>();
 		const skipped = new Map<string, symbol>();
 		const tasks = new Set<Promise<void>>();
 		const cancel = adding.subscribe((active) => {
@@ -2366,8 +2370,8 @@ export class Publisher {
 				const event = await untilAborted(listing.next(), hold.signal);
 				if (!event) break;
 				if (event.kind === "synced") continue;
-				if (event.kind === "removed") {
-					listed.get(event.name)?.set(true);
+				if (event.kind === "removed" || event.kind === "finished") {
+					listed.get(event.name)?.set(event.kind);
 					listed.delete(event.name);
 					const key = skipped.get(event.name);
 					if (key) skips.delete(key);
@@ -2385,7 +2389,7 @@ export class Publisher {
 					changed.update((n) => n + 1);
 					continue;
 				}
-				const unlisted = new Once<true>();
+				const unlisted = new Once<Unlisted>();
 				listed.set(event.name, unlisted);
 				const key = JSON.stringify([namespace, event.name]);
 				if (this.#session.version === Version.DRAFT_18) this.#trackClaims.set(key, "publish");
@@ -2413,7 +2417,7 @@ export class Publisher {
 		} finally {
 			cancel();
 			listing?.close();
-			for (const entry of listed.values()) entry.set(true);
+			for (const entry of listed.values()) entry.set("removed");
 			for (const key of skipped.values()) skips.delete(key);
 			await Promise.all(tasks);
 		}
@@ -2433,7 +2437,7 @@ export class Publisher {
 		source: broadcast.Consumer;
 		name: string;
 		info: Info;
-		unlisted: Once<true>;
+		unlisted: Once<Unlisted>;
 		adding: Signal<boolean>;
 	}) {
 		const version = this.#session.version;
@@ -2532,9 +2536,11 @@ export class Publisher {
 				if (!this.#gate.allows(namespace) || unlisted.peek() !== undefined) {
 					await request.writer.u53(PublishDone.id);
 					await new PublishDone({
-						statusCode: this.#gate.allows(namespace)
-							? PublishDoneStatus.INTERNAL_ERROR
-							: PublishDoneStatus.UNAUTHORIZED,
+						statusCode: !this.#gate.allows(namespace)
+							? PublishDoneStatus.UNAUTHORIZED
+							: unlisted.peek() === "finished"
+								? PublishDoneStatus.TRACK_ENDED
+								: PublishDoneStatus.INTERNAL_ERROR,
 						streamCount: BigInt(state.streams.opened),
 						reasonPhrase: "track no longer listed or granted",
 					}).encode(request.writer, version);
@@ -2581,16 +2587,20 @@ export class Publisher {
 				}
 				const revoked = new Once<true>();
 				const gate = this.#gate.watch(namespace, () => revoked.set(true));
-				let next: Framed | undefined | true;
+				let next: Framed | undefined | true | Unlisted;
 				try {
 					next = await race([request.next(), unlisted, revoked, ended]);
 				} finally {
 					gate.dispose();
 				}
-				if (next === true) {
+				if (next === true || next === "finished" || next === "removed") {
 					await request.writer.u53(PublishDone.id);
 					await new PublishDone({
-						statusCode: revoked.peek() ? PublishDoneStatus.UNAUTHORIZED : PublishDoneStatus.INTERNAL_ERROR,
+						statusCode: revoked.peek()
+							? PublishDoneStatus.UNAUTHORIZED
+							: next === "finished"
+								? PublishDoneStatus.TRACK_ENDED
+								: PublishDoneStatus.INTERNAL_ERROR,
 						streamCount: BigInt(state.streams.opened),
 						reasonPhrase: "track no longer listed or granted",
 					}).encode(request.writer, version);

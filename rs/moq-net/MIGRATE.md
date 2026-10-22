@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A listing says whether a removed track finished (#6399)
+
+`broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
+`broadcast::Lister::finish()`, which ended every reader as if the broadcast ended, is `Lister::end()`. `Lister::finish(name)` now unlists a track as finished, beside `remove(name)` for one that left unfinished.
+
 ### Receive streams are read through leases (#5878)
 
 `transport::poll::RecvStream` now has `poll_lease(cx, want)`, `set_priority`, and `stop`, plus the provided `poll_read_chunk` and `read_chunk`.

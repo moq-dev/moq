@@ -281,13 +281,17 @@ impl<S: crate::transport::poll::Session> Listings<S> {
 		self.entries.insert(key, entry);
 	}
 
-	fn remove(&mut self, key: &TrackKey) {
+	/// Unlist the entry for `key`, as a track that `finished` or left unfinished.
+	fn remove(&mut self, key: &TrackKey, finished: bool) {
 		let Some(entry) = self.entries.remove(key) else {
 			return;
 		};
 		if entry.info.is_some() {
 			for lister in self.listers(&key.0) {
-				let _ = lister.remove(&key.1);
+				let _ = match finished {
+					true => lister.finish(&key.1),
+					false => lister.remove(&key.1),
+				};
 			}
 		}
 	}
@@ -306,16 +310,16 @@ impl<S: crate::transport::poll::Session> Listings<S> {
 			.filter(|entry| entry.handoff.as_ref().is_some_and(|held| held.same_channel(handoff)))
 	}
 
-	/// End the entry held by the subscription with `request_id`: TRACK_ENDED unlists it,
-	/// and anything else fails its listings.
+	/// End the entry held by the subscription with `request_id`: TRACK_ENDED unlists it as
+	/// finished, and anything else fails its listings.
 	fn ended(&mut self, key: &TrackKey, request_id: RequestId, end: Result<(), Error>) {
 		if self.held_by(key, request_id).is_none() {
 			return;
 		}
 		match end {
-			Ok(()) => self.remove(key),
+			Ok(()) => self.remove(key, true),
 			Err(err) => {
-				self.remove(key);
+				self.remove(key, false);
 				self.fail(&key.0, err);
 			}
 		}
@@ -604,7 +608,7 @@ where
 					tracing::debug!(broadcast = %key.0, track = %key.1, %err, "paused subscribe failed");
 					let mut listings = this.listings.lock();
 					if listings.watched_by(&key, &handoff).is_some() {
-						listings.remove(&key);
+						listings.remove(&key, false);
 						listings.fail(&key.0, err);
 					}
 				}
@@ -893,7 +897,7 @@ where
 			self.remove_subscribe(request_id);
 			let mut listings = self.listings.lock();
 			if listings.watched_by(&key, &handoff).is_some() {
-				listings.remove(&key);
+				listings.remove(&key, false);
 				listings.fail(&key.0, err);
 			}
 			return Ok(());
@@ -1000,9 +1004,9 @@ where
 		let mut listings = self.listings.lock();
 		if listings.watched_by(&key, &handoff).is_some() {
 			match end {
-				Ok(()) => listings.remove(&key),
+				Ok(()) => listings.remove(&key, true),
 				Err(err) => {
-					listings.remove(&key);
+					listings.remove(&key, false);
 					listings.fail(&key.0, err);
 				}
 			}
@@ -1335,6 +1339,7 @@ mod tests {
 		match tracks.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Added { name, .. }))) => Some(format!("+{name}")),
 			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Removed { name }))) => Some(format!("-{name}")),
+			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Finished { name }))) => Some(format!("~{name}")),
 			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Synced))) => Some("synced".into()),
 			Poll::Ready(other) => Some(format!("{other:?}")),
 			Poll::Pending => None,

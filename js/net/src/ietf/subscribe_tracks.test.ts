@@ -135,6 +135,25 @@ for (const version of drafts) {
 		uni.releaseLock();
 	});
 
+	// The PUBLISH ends as its track left the listing: TRACK_ENDED once it finished, in error
+	// otherwise, since a track removed unfinished may go on elsewhere.
+	for (const finished of [true, false]) {
+		test(`an unlisted track's PUBLISH ends ${finished ? "with TRACK_ENDED" : "in error"} (${version})`, async () => {
+			const fx = fixture(version);
+			const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
+			broadcast.announce();
+			const track = broadcast.createTrack("video");
+			const listing = await fx.list();
+			await ok(listing, version);
+			const { stream } = await fx.offered();
+			if (finished) track.close();
+			broadcast.removeTrack("video");
+			expect(await stream.reader.u53()).toBe(PublishDone.id);
+			const done = await PublishDone.decode(stream.reader, version);
+			expect(done.statusCode).toBe(finished ? PublishDoneStatus.TRACK_ENDED : PublishDoneStatus.INTERNAL_ERROR);
+		});
+	}
+
 	test(`track listing skips beyond the cap and rejects overlapping prefixes (${version})`, async () => {
 		const fx = fixture(version, 1);
 		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));

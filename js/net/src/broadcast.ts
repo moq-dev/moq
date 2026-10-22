@@ -315,7 +315,7 @@ function adopt(state: BroadcastState, producer: track.Producer, info: track.Info
 	void producer.closed.then((closed) => {
 		if (!(closed instanceof Error)) return;
 		if (state.tracks.get(producer.name) === producer) state.tracks.delete(producer.name);
-		state.listing.unlistOwn(producer.name, producer);
+		state.listing.unlistOwn(producer.name, producer, false);
 	});
 }
 
@@ -456,7 +456,8 @@ export class Producer {
 		if (!track) return;
 		this.#state.tracks.delete(name);
 		this.#state.demands.get(track)?.();
-		this.#state.listing.unlistOwn(name, track);
+		// A track that closed cleanly before its removal finished.
+		this.#state.listing.unlistOwn(name, track, track.closed.peek() === null);
 	}
 
 	/** A lazy read handle for a track on this broadcast. */
