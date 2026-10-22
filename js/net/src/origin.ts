@@ -376,11 +376,14 @@ function unroutable(): StreamError {
 /** A served route from {@link Producer.dynamic}: the queue a handler drains. */
 class ServeState {
 	readonly root: Path.Valid;
+	/** The prefix the route claims; every served path is at or beneath it. */
+	readonly prefix: Path.Valid;
 	/** False when a session announced the route: it may serve that session's broadcast. */
 	readonly originated: boolean;
 
-	constructor(root: Path.Valid, originated: boolean) {
+	constructor(root: Path.Valid, prefix: Path.Valid, originated: boolean) {
 		this.root = root;
+		this.prefix = prefix;
 		this.originated = originated;
 	}
 
@@ -437,6 +440,9 @@ class ServeState {
 			this.settled.update((n) => n + 1);
 			return;
 		}
+		// A route claiming a prefix names no broadcast, so a path it serves on request has no
+		// inventory to list.
+		if (path !== this.prefix) hooks.stampUnlisted(front);
 		this.served.set(path, front);
 		void front.closed.then(() => {
 			if (this.served.get(path) !== front) return;
@@ -1338,7 +1344,7 @@ export class Producer implements Table {
 
 	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean, publishes: boolean): Dynamic {
 		prefix = this.#scope.prefix(prefix);
-		const server = new ServeState(this.#scope.root, originated);
+		const server = new ServeState(this.#scope.root, prefix, originated);
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {
 			identity: {},

@@ -113,10 +113,10 @@ for (const protocol of protocols) {
 				expect(ended).toBe(false);
 				write(1);
 				if (mode === "expires") {
-					await clock.advanceAsync(Nano.fromMilli(Milli(budget - 1)));
+					await clock.advance(Nano.fromMilli(Milli(budget - 1)));
 					expect(ended).toBe(false);
-					await clock.advanceAsync(Nano.fromMilli(Milli(1)));
-				} else await clock.advanceAsync(Nano.fromMilli(Milli(33_750)));
+					await clock.advance(Nano.fromMilli(Milli(1)));
+				} else await clock.advance(Nano.fromMilli(Milli(33_750)));
 				expect(ended).toBe(true);
 				if (protocol.kind === "lite") {
 					for (;;) {
@@ -130,7 +130,7 @@ for (const protocol of protocols) {
 				// The transport cannot cancel createUnidirectionalStream. A late slot is reset,
 				// never used to transmit the obsolete group's header or frames.
 				slot.resolve();
-				await clock.advanceAsync(Nano.zero);
+				await clock.advance(Nano.zero);
 				expect(writes).toBe(0);
 				expect(resets).toBe(1);
 			} finally {

@@ -105,6 +105,10 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	fn wire(&self) -> Option<moq::Wire> {
 		self.0.wire()
 	}
+
+	fn probe(&self) -> Option<moq::Probe> {
+		self.0.probe()
+	}
 }
 
 impl<T: poll::SendStream> poll::SendStream for Local<T> {

@@ -176,7 +176,7 @@ test("a refused redirect ends the connection instead of reconnecting", async () 
 			await waitUntil(() => drained.closed);
 
 			// Nothing redials: not the original URL, not anything else.
-			await clock.advanceAsync(Nano.fromMilli(Milli(50)));
+			await clock.advance(Nano.fromMilli(Milli(50)));
 			expect(dials.length, uri).toBe(1);
 		} finally {
 			reload.close();
@@ -326,7 +326,7 @@ async function bounce(
 		next.password = `secret-${hop}`;
 	}
 	const other = next.href;
-	await clock.advanceAsync(Nano.fromMilli(life));
+	await clock.advance(Nano.fromMilli(life));
 	await goaway(dial.server, other);
 	await waitUntil(() => reload.redirect.peek()?.href === other);
 	return other;
@@ -383,7 +383,7 @@ test("redirect endpoint keys omit userinfo without changing the dial URL", async
 
 	try {
 		await waitUntil(() => reload.status.peek() === "connected");
-		await clock.advanceAsync(Nano.fromMilli(life));
+		await clock.advance(Nano.fromMilli(life));
 		await goaway(dials[0]?.server as WebTransport, to.href);
 		await elapse(clock, () => dials.length === 2);
 		expect(moves.mock.calls).toEqual([["https://relay.example/room", "https://relay.example:5443/room"]]);
@@ -460,7 +460,7 @@ test("a one-way rolling restart migrates without backing off", async () => {
 	try {
 		await waitUntil(() => reload.status.peek() === "connected");
 		// Outlive the initial delay so only loop detection could slow this down.
-		await clock.advanceAsync(Nano.fromMilli(Milli(1100)));
+		await clock.advance(Nano.fromMilli(Milli(1100)));
 		await goaway(dials[0]?.server as WebTransport, moved.href);
 		expect(await elapse(clock, () => dials.length === 2)).toBe(Milli(0));
 	} finally {
@@ -485,7 +485,7 @@ test("repeated GOAWAYs back to the same place are restarts, not a loop", async (
 		for (let i = 1; i <= 3; i++) {
 			await waitUntil(() => dials.length === i && reload.status.peek() === "connected");
 			// Outlive the initial delay so only loop detection could slow this down.
-			await clock.advanceAsync(Nano.fromMilli(Milli(350)));
+			await clock.advance(Nano.fromMilli(Milli(350)));
 			await goaway(dials[i - 1]?.server as WebTransport, "");
 			expect(await elapse(clock, () => dials.length === i + 1), `restart ${i}`).toBe(Milli(0));
 		}

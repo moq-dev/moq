@@ -117,14 +117,14 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 		config: { frameRate: 25 },
 	});
 	const send = async (millis = 40) => {
-		await clock.advanceAsync(Nano.fromMilli(Milli(millis)));
+		await clock.advance(Nano.fromMilli(Milli(millis)));
 		const timestamp = Nano.toMicro(Nano(clock.now()));
 		baseline.observe(0, timestamp); // An on-time audio rendition shares the broadcast.
 		controller.enqueue(new Input(timestamp) as never);
-		await clock.advanceAsync(Nano.zero);
+		await clock.advance(Nano.zero);
 	};
 	try {
-		await clock.advanceAsync(Nano.zero);
+		await clock.advance(Nano.zero);
 		expect(encoder.out.resolved.peek()).toBeDefined();
 		const live = SlowEncoder.instances.find((instance) => instance.state === "configured");
 		if (!live) throw new Error("live encoder was not configured");
@@ -135,7 +135,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 			largestQueue = Math.max(largestQueue, live.encodeQueueSize);
 			if (frame % 3 === 2) {
 				live.finish();
-				await clock.advanceAsync(Nano.zero);
+				await clock.advance(Nano.zero);
 			}
 		}
 		// A kept frame waits exactly two capture intervals, independent of stream duration.
@@ -163,7 +163,7 @@ test("a slower-than-realtime encoder drops input instead of ratcheting catalog l
 		encoder.close();
 		fanout.close();
 		track.close();
-		await clock.advanceAsync(Nano.zero);
+		await clock.advance(Nano.zero);
 		restore();
 		for (const [index, name] of ["VideoEncoder", "VideoFrame"].entries()) {
 			const original = originals[index];

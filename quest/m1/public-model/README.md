@@ -44,8 +44,7 @@ Rules every child follows:
   on one naming a deleted quest.
 - Items replaced by another quest's new API wait for that quest instead of
   growing a public shape it deletes: fetch and per-group requests
-  ([Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)), announce
-  interest ([Rust lazy discovery](/quest/m1/lazy-discovery/rust.md)).
+  ([Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md)).
 
 Inventory method, to rerun before each child starts (counts drift). Rust:
 replace every `pub(crate)` under `rs/moq-net/src/model/` with

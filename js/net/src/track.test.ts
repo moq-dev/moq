@@ -26,10 +26,10 @@ function manualTime(initial: number) {
 	const clock = new Manual();
 	const restore = clock.install();
 	const to = (ms: number) => Nano(Nano.fromMilli(Milli(ms)) - clock.now());
-	clock.advance(to(initial));
+	clock.jump(to(initial));
 	return {
-		set: (ms: number) => clock.advance(to(ms)),
-		advance: (ms: number) => clock.advanceAsync(to(ms)),
+		set: (ms: number) => clock.jump(to(ms)),
+		advance: (ms: number) => clock.advance(to(ms)),
 		restore,
 	};
 }
@@ -1395,7 +1395,7 @@ test("an abandoned open group ages out with no further write", async () => {
 		if (!group) throw new Error("missing group");
 		expect(await group.readString()).toBe("first");
 		const read = group.readFrame().catch((err: unknown) => err);
-		await clock.advance(10_000 + CACHE_WINDOW_MS + 1);
+		await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
 		expect(await read).toBeInstanceOf(TooFarBehind);
 	} finally {
 		producer.close();
@@ -2496,8 +2496,8 @@ test("an ended track's buffered groups age out for a stale subscriber", async ()
 			group.close();
 			producer.close(abort);
 
-			// Nothing writes after close, so only the scheduled cache cleanup runs.
-			await clock.advance(10_000 + CACHE_WINDOW_MS + 100);
+			// Nothing writes after close; the scheduled cleanup can lag by one scan slice.
+			await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
 			if (abort) expect(() => stale.tryRecvGroup()).toThrow(abort);
 			else expect(stale.tryRecvGroup()).toBeUndefined();
 		} finally {

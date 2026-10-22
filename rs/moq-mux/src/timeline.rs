@@ -864,7 +864,7 @@ impl<E: RecordExt> Consumer<E> {
 	/// Get the next window event, or `None` once the track ends.
 	pub async fn next(&mut self) -> crate::Result<Option<Event<E>>> {
 		match self.inner.next().await? {
-			Some(event) => Ok(Some(self.decode_event(event)?)),
+			Some(event) => Ok(Some(self.decode_event(event.value)?)),
 			None => Ok(None),
 		}
 	}
@@ -872,7 +872,8 @@ impl<E: RecordExt> Consumer<E> {
 	/// Poll for the next window event, without blocking.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event<E>>>> {
 		match self.inner.poll_next(waiter)? {
-			Poll::Ready(Some(event)) => Poll::Ready(self.decode_event(event).map(Some)),
+			// Each record carries its own pts, so the frame timestamp adds nothing.
+			Poll::Ready(Some(event)) => Poll::Ready(self.decode_event(event.value).map(Some)),
 			Poll::Ready(None) => Poll::Ready(Ok(None)),
 			Poll::Pending => Poll::Pending,
 		}

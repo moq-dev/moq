@@ -758,6 +758,8 @@ Unidirectional streams are used for data transmission.
 | ------ | -------- | ----------- |
 |    0x1 | Setup    | Either      |
 | ------ | -------- | ----------- |
+|    0x2 | Padding  | Either      |
+| ------ | -------- | ----------- |
 
 ### Setup {#setup-stream}
 Each endpoint MUST open a Setup Stream (0x1) at the start of the session to advertise the optional capabilities and extensions it supports.
@@ -767,6 +769,13 @@ There is exactly one Setup Stream per direction; an endpoint that receives a sec
 An endpoint with no optional capabilities sends a SETUP with an empty parameter list rather than omitting the stream, giving the peer a deterministic signal that no capabilities are forthcoming.
 
 See the [Session](#session) section for how an endpoint avoids waiting on the peer's SETUP before exchanging other streams.
+
+### Padding {#padding-stream}
+Either endpoint MAY open a Padding Stream (0x2), followed by arbitrary bytes until FIN.
+The receiver MUST read and discard those bytes incrementally, returning stream and connection flow-control credit as they arrive without retaining the body.
+Receiving padding does not change session or subscription state.
+This allows bandwidth probes to measure delivery without requiring a media subscription.
+Versions before lite-07 do not define this stream type and reset only the stream, as required for unknown stream types.
 
 ### Group
 A publisher creates Group Streams in response to a Subscribe Stream.
@@ -1755,6 +1764,8 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-07
+
+- Added Padding Stream (0x2), read and discarded incrementally by either endpoint.
 
 - Added the Tracks Stream (0x8) with TRACKS, TRACKS_ADD, TRACKS_REMOVE, and SYNCED: a subscriber lists one Broadcast's Tracks, each with its TRACK_INFO, then SUBSCRIBEs to those it wants. A relay answers at once with what it holds. Older versions reset the stream type.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.

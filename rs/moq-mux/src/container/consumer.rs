@@ -1,19 +1,19 @@
 use std::collections::VecDeque;
 use std::task::{Poll, ready};
 
+use moq_clock::Instant;
 use moq_net::Timestamp;
 
 use super::{Container, Frame, Read, TimestampRewind};
 
 /// Media and group boundaries in delivery order.
 pub(crate) enum Event {
-	Frame(Frame),
+	/// A media frame, with when the wire frame carrying it landed in this node's cache
+	/// ([`moq_net::frame::Frame::arrived`]).
+	Frame { frame: Frame, arrived: Instant },
 	/// An endpoint marker. `opens` when no media precedes it in its group: a declared stop
 	/// (a marker group or an audio terminal) rather than the previous frame's duration.
-	FrameEnd {
-		end: Timestamp,
-		opens: bool,
-	},
+	FrameEnd { end: Timestamp, opens: bool },
 	/// The group finished cleanly.
 	GroupEnd,
 	/// The group was lost upstream partway, so nothing more of it arrives. The gap it leaves is
@@ -23,7 +23,22 @@ pub(crate) enum Event {
 
 /// Read items and exporter-only boundaries in delivery order.
 pub(crate) enum Item {
-	Read(Read),
+	/// [`Read::Frame`], with when it landed as [`Event::Frame`] has.
+	Frame {
+		group: u64,
+		frame: Frame,
+		arrived: Instant,
+	},
+	/// [`Read::Gap`].
+	Gap {
+		timestamp: Timestamp,
+		duration: Timestamp,
+	},
+	/// [`Read::End`].
+	End {
+		group: u64,
+		end: Timestamp,
+	},
 	FrameEnd(Timestamp),
 	GroupEnd,
 	Cut,
@@ -130,7 +145,7 @@ pub struct Consumer<F: Container> {
 	gap: bool,
 
 	// The item a gap was returned ahead of.
-	next: Option<Read>,
+	next: Option<Item>,
 
 	// The group the last event came from.
 	group: u64,
@@ -150,7 +165,7 @@ fn pts_contiguous(end: Option<std::time::Duration>, next_start: std::time::Durat
 }
 
 /// A gap from the delivered `edge` to `resume`, in the resume's scale.
-fn gap(edge: std::time::Duration, resume: Timestamp) -> Read {
+fn gap(edge: std::time::Duration, resume: Timestamp) -> Item {
 	let scale = resume.scale();
 	// A next group may start before the edge (an overlapping endpoint), so the span bottoms out at zero.
 	let start = edge
@@ -162,7 +177,7 @@ fn gap(edge: std::time::Duration, resume: Timestamp) -> Read {
 	let duration = resume
 		.checked_sub(timestamp)
 		.expect("at or below the resume, in its scale");
-	Read::Gap { timestamp, duration }
+	Item::Gap { timestamp, duration }
 }
 
 impl<F: Container> Consumer<F> {
@@ -255,44 +270,43 @@ impl<F: Container> Consumer<F> {
 	/// avoiding the need for `tokio::select!` or `FuturesUnordered`.
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Read>, F::Error>> {
 		loop {
-			match ready!(self.poll_item(waiter))? {
-				Some(Item::Read(read)) => return Poll::Ready(Ok(Some(read))),
+			let read = match ready!(self.poll_item(waiter))? {
+				Some(Item::Frame { group, frame, .. }) => Read::Frame { group, frame },
+				Some(Item::Gap { timestamp, duration }) => Read::Gap { timestamp, duration },
+				Some(Item::End { group, end }) => Read::End { group, end },
 				Some(Item::FrameEnd(_) | Item::GroupEnd | Item::Cut) => continue,
 				None => return Poll::Ready(Ok(None)),
-			}
+			};
+			return Poll::Ready(Ok(Some(read)));
 		}
 	}
 
 	/// Read items while preserving boundaries needed to finish exporter fragments.
 	pub(crate) fn poll_item(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Item>, F::Error>> {
-		if let Some(read) = self.next.take() {
-			return Poll::Ready(Ok(Some(Item::Read(read))));
+		if let Some(item) = self.next.take() {
+			return Poll::Ready(Ok(Some(item)));
 		}
 		let edge = self.edge;
 		let event = ready!(self.poll_event(waiter))?;
-		let read = match event {
-			Some(Event::Frame(frame)) => Read::Frame {
-				group: self.group,
-				frame,
-			},
-			Some(Event::FrameEnd { end, opens: true }) => Read::End { group: self.group, end },
+		let (item, resume) = match event {
+			Some(Event::Frame { frame, arrived }) => {
+				let resume = frame.timestamp;
+				let group = self.group;
+				(Item::Frame { group, frame, arrived }, resume)
+			}
+			Some(Event::FrameEnd { end, opens: true }) => (Item::End { group: self.group, end }, end),
 			Some(Event::FrameEnd { end, opens: false }) => return Poll::Ready(Ok(Some(Item::FrameEnd(end)))),
 			Some(Event::GroupEnd) => return Poll::Ready(Ok(Some(Item::GroupEnd))),
 			Some(Event::Cut) => return Poll::Ready(Ok(Some(Item::Cut))),
 			None => return Poll::Ready(Ok(None)),
 		};
-		let resume = match &read {
-			Read::Frame { frame, .. } => frame.timestamp,
-			Read::End { end, .. } => *end,
-			Read::Gap { .. } => unreachable!("events never read as a gap"),
-		};
 		if std::mem::take(&mut self.gap)
 			&& let Some(edge) = edge
 		{
-			self.next = Some(read);
-			return Poll::Ready(Ok(Some(Item::Read(gap(edge, resume)))));
+			self.next = Some(item);
+			return Poll::Ready(Ok(Some(gap(edge, resume))));
 		}
-		Poll::Ready(Ok(Some(Item::Read(read))))
+		Poll::Ready(Ok(Some(item)))
 	}
 
 	/// Read media or a clean group boundary without waiting for a successor group.
@@ -385,7 +399,7 @@ impl<F: Container> Consumer<F> {
 				&& group.sequence <= self.current
 			{
 				match group.poll_read(waiter, &self.format) {
-					Poll::Ready(Ok(Some(Event::Frame(frame)))) => {
+					Poll::Ready(Ok(Some(Event::Frame { frame, arrived }))) => {
 						let seq = group.group.sequence;
 						let ts = frame.timestamp;
 						if let Some(floor) = self.floor
@@ -400,7 +414,7 @@ impl<F: Container> Consumer<F> {
 							+ frame.duration.map(std::time::Duration::from).unwrap_or_default();
 						self.advance(end);
 						self.group = seq;
-						return Poll::Ready(Ok(Some(Event::Frame(frame))));
+						return Poll::Ready(Ok(Some(Event::Frame { frame, arrived })));
 					}
 					Poll::Ready(Ok(Some(Event::FrameEnd { end, opens }))) => {
 						self.group = group.group.sequence;
@@ -756,8 +770,8 @@ struct GroupBuffer<F: Container> {
 	// A decode error found while looking ahead, delivered after the frames buffered before it.
 	fault: Option<F::Error>,
 
-	// Read frames that haven't been consumed yet.
-	buffered: VecDeque<Frame>,
+	// Read frames that haven't been consumed yet, each with when its wire frame landed.
+	buffered: VecDeque<(Frame, Instant)>,
 	markers: VecDeque<(usize, Timestamp)>,
 	delivered: usize,
 
@@ -800,9 +814,9 @@ impl<F: Container> GroupBuffer<F> {
 				let (index, end) = self.markers.pop_front().unwrap();
 				return Poll::Ready(Ok(Some(Event::FrameEnd { end, opens: index == 0 })));
 			}
-			if let Some(frame) = self.buffered.pop_front() {
+			if let Some((frame, arrived)) = self.buffered.pop_front() {
 				self.delivered += 1;
-				return Poll::Ready(Ok(Some(Event::Frame(frame))));
+				return Poll::Ready(Ok(Some(Event::Frame { frame, arrived })));
 			}
 			if !ready!(self.buffer_once(waiter, format)?) {
 				return Poll::Ready(Ok(None));
@@ -817,19 +831,17 @@ impl<F: Container> GroupBuffer<F> {
 		if let Some(err) = self.fault.take() {
 			return Poll::Ready(Err(Failure::Decode(err)));
 		}
-		// A read only advances the cursor once it hands a frame to the container, so an error
-		// that leaves it in place is the transport's, while one after it is the payload's: an
-		// abort of the tail behind a malformed frame must not hide that frame.
-		let index = self.group.index();
-		let read = ready!(format.poll_read(&mut self.group, waiter));
-		let consumed = self.group.index() != index;
-		self.empty &= !consumed;
-		let frames = match read {
-			Ok(Some(frames)) => frames,
+		// A failed read is the transport's, while a failed decode is the payload's: an abort of
+		// the tail behind a malformed frame must not hide that frame.
+		let wire = match ready!(self.group.poll_read_frame(waiter)) {
+			Ok(Some(wire)) => wire,
 			Ok(None) => return Poll::Ready(Ok(false)),
-			Err(err) if !consumed && self.poll_aborted(waiter) => return Poll::Ready(Err(Failure::Lost(err))),
-			Err(err) => return Poll::Ready(Err(Failure::Decode(err))),
+			Err(err) if self.poll_aborted(waiter) => return Poll::Ready(Err(Failure::Lost(err.into()))),
+			Err(err) => return Poll::Ready(Err(Failure::Decode(err.into()))),
 		};
+		self.empty = false;
+		let arrived = wire.arrived();
+		let frames = format.decode(wire).map_err(Failure::Decode)?;
 		if format.kind() == super::Kind::Data {
 			// A data track's marker is one object with no bytes, alone in its group.
 			if self.bare || (frames.is_empty() && self.media) {
@@ -871,7 +883,7 @@ impl<F: Container> GroupBuffer<F> {
 			self.index += 1;
 			self.media = true;
 
-			self.buffered.push_back(frame);
+			self.buffered.push_back((frame, arrived));
 		}
 
 		Poll::Ready(Ok(true))
@@ -1011,27 +1023,20 @@ mod tests {
 			Ok(())
 		}
 
-		fn poll_read(
-			&self,
-			group: &mut moq_net::group::Consumer,
-			waiter: &kio::Waiter,
-		) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		fn decode(&self, frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 			use bytes::Buf;
 
-			let Some(mut data) = ready!(group.poll_read_frame(waiter)?).map(|f| f.payload) else {
-				return Poll::Ready(Ok(None));
-			};
-
+			let mut data = frame.payload;
 			let timestamp = ts(data.get_u64_le());
 			let duration = ts(data.get_u64_le());
 			let payload = data.copy_to_bytes(data.remaining());
 
-			Poll::Ready(Ok(Some(vec![Frame {
+			Ok(vec![Frame {
 				timestamp,
 				payload,
 				keyframe: false,
 				duration: Some(duration),
-			}])))
+			}])
 		}
 	}
 
@@ -1414,21 +1419,16 @@ mod tests {
 
 	/// An object with no bytes marks a break only on a data track: on a media track it is
 	/// malformed, and fails to decode rather than read as a marker.
-	#[tokio::test]
-	async fn an_empty_object_is_a_marker_only_on_a_data_track() {
+	#[test]
+	fn an_empty_object_is_a_marker_only_on_a_data_track() {
 		for kind in [
 			crate::container::Kind::Data,
 			crate::container::Kind::Audio,
 			crate::container::Kind::Video,
 		] {
-			let track = track_producer("empty", hang::container::track_info(hang::catalog::PRIORITY.audio));
-			let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-			group.write_frame(ts(0), Bytes::new()).unwrap();
-			group.finish().unwrap();
-			let mut group = group.consume();
-			let read = Container::Legacy(kind).read(&mut group).await;
+			let read = Container::Legacy(kind).decode(moq_net::frame::Frame::new(ts(0), Bytes::new()));
 			match kind {
-				crate::container::Kind::Data => assert!(matches!(read, Ok(Some(frames)) if frames.is_empty())),
+				crate::container::Kind::Data => assert!(matches!(read, Ok(frames) if frames.is_empty())),
 				_ => assert!(read.is_err(), "{kind:?}: {read:?}"),
 			}
 		}
@@ -1489,14 +1489,14 @@ mod tests {
 	fn a_gap_spans_the_edge_to_the_resume_in_its_scale() {
 		let scale = moq_net::Timescale::new(90_000).unwrap();
 		let resume = Timestamp::new(90_000, scale).unwrap();
-		let Read::Gap { timestamp, duration } = gap(Duration::from_millis(500), resume) else {
+		let Item::Gap { timestamp, duration } = gap(Duration::from_millis(500), resume) else {
 			unreachable!()
 		};
 		assert_eq!(timestamp, Timestamp::new(45_000, scale).unwrap());
 		assert_eq!(duration, Timestamp::new(45_000, scale).unwrap());
 
 		// A next group overlapping the edge leaves an empty span at the resume point.
-		let Read::Gap { timestamp, duration } = gap(Duration::from_secs(2), resume) else {
+		let Item::Gap { timestamp, duration } = gap(Duration::from_secs(2), resume) else {
 			unreachable!()
 		};
 		assert_eq!(timestamp, resume);
@@ -2459,7 +2459,7 @@ mod tests {
 			"the cut is said before the successor"
 		);
 		let event = consumer.poll_event(&waiter);
-		let Poll::Ready(Ok(Some(Event::Frame(frame)))) = event else {
+		let Poll::Ready(Ok(Some(Event::Frame { frame, .. }))) = event else {
 			panic!(
 				"expected a successor frame, current={}; pending={}",
 				consumer.current,
@@ -2688,25 +2688,19 @@ mod tests {
 			Ok(())
 		}
 
-		fn poll_read(
-			&self,
-			group: &mut moq_net::group::Consumer,
-			waiter: &kio::Waiter,
-		) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		fn decode(&self, frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 			use bytes::Buf;
 
-			let Some(mut data) = ready!(group.poll_read_frame(waiter)?).map(|f| f.payload) else {
-				return Poll::Ready(Ok(None));
-			};
+			let mut data = frame.payload;
 			if data.as_ref() == b"FAIL" {
-				return Poll::Ready(Err(crate::Error::UnknownFormat("malformed payload".into())));
+				return Err(crate::Error::UnknownFormat("malformed payload".into()));
 			}
-			Poll::Ready(Ok(Some(vec![Frame {
+			Ok(vec![Frame {
 				timestamp: ts(data.get_u64_le()),
 				payload: Bytes::new(),
 				keyframe: false,
 				duration: None,
-			}])))
+			}])
 		}
 	}
 

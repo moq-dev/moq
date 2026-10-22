@@ -12,6 +12,23 @@ Every session now takes a `transport::poll::Boxable` transport, whose streams mu
 A `!Send` transport wraps itself in a type that checks the thread on use, such as `moq_uring::transport::Local`.
 `Client::connect` and `Server::accept_request` are plain functions returning `impl Future`, so call them as before with `.await`.
 
+### A client session asks only about what its readers watch (#6165)
+
+On moq-lite, a client session no longer asks its peer for announcements under its whole subscribe scope at connect.
+It asks only under the prefixes its subscribe origin's readers watch, with `announced()`, `follow`, `routed`, `routed_broadcast`, or `announced_broadcast`, and stops asking 2s after nothing at or beneath a prefix is watched.
+`request_broadcast` watches nothing, so on a client it fails with `Error::Unroutable` for a path no reader watches, even when the peer announces it.
+Resolve a path with `routed_broadcast` or `announced_broadcast`, or hold an `announced()` stream over its prefix while requesting, the way `routed` already did after connecting.
+A broadcast resolved through a discovered route keeps its path watched until dropped.
+A server session, and a client fed into a `Producer::peer` or `Producer::upstream` handle, still asks for everything it may, so a relay discovers as before.
+Serving another session's request is not a watch, so a client that relays what it discovers to its own sessions should feed its client session `origin.upstream()` (or `peer()`) instead of a plain handle.
+moq-transport sessions, and moq-lite-03/04 sessions (whose announce streams mark no initial set), are unchanged.
+
+### Frames carry their arrival time
+
+`frame::Frame` gains a private arrival stamp, read with `Frame::arrived()`, so it can no longer be built with a struct literal.
+Replace `Frame { timestamp, payload }` with `Frame::new(timestamp, payload)`.
+`timestamp` and `payload` stay public fields.
+
 ### A dropped or cut group ends its reader with an error (#6143)
 
 A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `track::Subscriber` saw it is now handed out, and reading it fails with the publisher's error; before, it was skipped or ended cleanly.

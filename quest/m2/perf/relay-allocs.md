@@ -24,4 +24,13 @@ that grows with the table shows as a slope.
 
 Decided 2026-10-17 (maintainer): m2, under perf.
 
+Decided 2026-10-22 (maintainer): this waits on
+[dropping web-transport-trait](/quest/m2/drop-web-transport-trait.md), which
+replaces the session clones and boxed opens at the top of this profile;
+re-profile after it lands before fixing what remains.
+
 Public API: none expected. Wire: none.
+
+## Required
+
+- [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) - removes the per-stream session clone and boxed future, so the profile is retaken after it

@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### AAC decoding support is a `Level`
+
+`Support.Audio.aac` is `"full" | "partial" | "none"` like `opus`, instead of a boolean, since the libav fallback now decodes AAC where `AudioDecoder` is missing.
+Replace `aac === true` with `aac !== "none"`, or with `aac === "full"` to require a native decoder.
+
 ### CMAF decoding loads on demand
 
 Allow your bundler to emit and serve the dynamic `@moq/hang/cmaf` chunk when using CMAF renditions.

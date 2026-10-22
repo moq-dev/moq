@@ -26,6 +26,12 @@ narrower Rust `route_failed`, moved to the recovery verdicts work.
 
 Regression test per gap, on a mocked clock, mirrored in JS where JS lacks one.
 
+Decided 2026-10-22 (maintainer), settled in
+[#6224](https://github.com/moq-dev/moq/pull/6224)'s review: Rust refuses a copy
+declaring a different end with the same non-route-failure classification as
+JS's `Incompatible` (`js/net/src/resume.ts`). Merge order: #6136, then #6224
+(#6209 and #6251 have landed).
+
 Public API: behavior only. Wire: none.
 
 ## Related
