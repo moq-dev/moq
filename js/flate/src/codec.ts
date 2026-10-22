@@ -1,12 +1,10 @@
 // The group-scoped DEFLATE codec: see the module docs in index.ts.
 
+import { Group } from "@moq/net";
 import * as pako from "pako";
 
 /** The default DEFLATE level ({@link Encoder}): a good size/speed balance for small, repetitive payloads. */
 export const DEFAULT_LEVEL = 6;
-
-/** The default per-frame decompressed-size cap ({@link Decoder}): 64 MiB. */
-export const DEFAULT_MAX_FRAME_SIZE = 64 * 1024 * 1024;
 
 // The trailing bytes of a DEFLATE sync flush, stripped on the wire and re-appended to decode.
 const SYNC_FLUSH_TAIL = new Uint8Array([0x00, 0x00, 0xff, 0xff]);
@@ -92,18 +90,13 @@ export class Encoder {
 	}
 }
 
-/** Options for a {@link Decoder}. */
-export interface DecoderOptions {
-	/**
-	 * Per-frame decompressed-size cap. A frame that inflates past this is rejected (zip-bomb guard).
-	 * Defaults to {@link DEFAULT_MAX_FRAME_SIZE}.
-	 */
-	maxFrameSize?: number;
-}
-
 /**
  * Decodes a stream's frame slices back into the original payloads. Hold one per stream; feed slices
  * in frame order (each frame builds on the earlier ones).
+ *
+ * A peer could send tiny slices that inflate hugely, so the window's total output is held to the
+ * group budget, `Group.MAX_GROUP_CACHE_BYTES`: the most a plain group can carry. A compressed group
+ * then costs a reader no more than a plain one, however small its slices.
  *
  * @public
  */
@@ -111,23 +104,19 @@ export class Decoder {
 	#inflate = new pako.Inflate({ raw: true });
 	#chunks: Uint8Array[] = [];
 	#total = 0;
+	// Bytes the whole window has inflated to, across every frame.
+	#inflated = 0;
 	#tooLarge = false;
-	#maxFrameSize: number;
-
-	/** The per-frame decompressed-size cap in bytes, in effect for this decoder. */
-	get maxFrameSize(): number {
-		return this.#maxFrameSize;
-	}
 
 	/** Start a fresh decoder with a cold window. */
-	constructor(options: DecoderOptions = {}) {
-		this.#maxFrameSize = options.maxFrameSize ?? DEFAULT_MAX_FRAME_SIZE;
+	constructor() {
 		this.#inflate.onData = (chunk) => {
 			const bytes = chunk as Uint8Array;
 			this.#total += bytes.length;
+			this.#inflated += bytes.length;
 			// Bound the inflated output as it is produced; a tiny slice can expand enormously. Stop
-			// retaining past the cap, then reject once the push returns.
-			if (this.#total > this.#maxFrameSize) {
+			// retaining past the budget, then reject once the push returns.
+			if (this.#inflated > Group.MAX_GROUP_CACHE_BYTES) {
 				this.#tooLarge = true;
 				return;
 			}
@@ -137,21 +126,22 @@ export class Decoder {
 
 	/**
 	 * Decompress the next frame's `slice` back into its payload. Empty in yields empty out. Throws if
-	 * the input is malformed or inflates past the per-frame size cap.
+	 * the input is malformed, or once the window's output across every frame so far passes the group
+	 * budget.
 	 */
 	frame(slice: Uint8Array): Uint8Array {
 		if (slice.length === 0) return slice;
+		if (this.#tooLarge) throw new Error(`decompressed group exceeded ${Group.MAX_GROUP_CACHE_BYTES} bytes`);
 
 		this.#chunks = [];
 		this.#total = 0;
-		this.#tooLarge = false;
 
 		// Feed the slice then the re-appended sync-flush marker as two pushes, so no combined buffer is
 		// allocated. The marker delimits the frame and flushes its last bytes out of the inflate buffer.
 		this.#inflate.push(slice, false);
 		this.#inflate.push(SYNC_FLUSH_TAIL, pako.Z_SYNC_FLUSH);
 		if (this.#inflate.err) throw new Error(`decompression failed: ${this.#inflate.msg}`);
-		if (this.#tooLarge) throw new Error(`decompressed frame exceeded ${this.#maxFrameSize} bytes`);
+		if (this.#tooLarge) throw new Error(`decompressed group exceeded ${Group.MAX_GROUP_CACHE_BYTES} bytes`);
 
 		return concat(this.#chunks, this.#total);
 	}

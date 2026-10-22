@@ -33,6 +33,8 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn iroh::endpoint::Cont
 #[derive(Clone, Copy, Debug)]
 struct Unlimited;
 
+// noq's traits take its std instants, which this controller ignores.
+#[allow(clippy::disallowed_types)]
 impl noq_proto::congestion::Controller for Unlimited {
 	fn on_congestion_event(&mut self, _: std::time::Instant, _: std::time::Instant, _: bool, _: bool, _: u64, _: u64) {}
 
@@ -56,6 +58,7 @@ impl noq_proto::congestion::Controller for Unlimited {
 	}
 }
 
+#[allow(clippy::disallowed_types)]
 impl noq_proto::congestion::ControllerFactory for Unlimited {
 	fn build(self: Arc<Self>, _: std::time::Instant, _: u16) -> Box<dyn noq_proto::congestion::Controller> {
 		Box::new(*self)
@@ -492,6 +495,7 @@ fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 

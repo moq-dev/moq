@@ -37,7 +37,7 @@ test("every frame in a chunk reaches the reader before it wakes", async () => {
 	const producer = new Producer(0);
 	const consumer = producer.consume();
 	const frames = Array.from({ length: 10 }, (_, index) => ({ delta: 1, payload: [index] }));
-	const done = readFrames(streamOf([encode(frames)]), producer, SCALE);
+	const done = readFrames(streamOf([encode(frames)]), producer, { scale: SCALE });
 
 	expect((await consumer.readFrame())?.payload).toEqual(new Uint8Array([0]));
 	expect(consumer.frameCount).toBe(10);
@@ -57,7 +57,7 @@ test("frames split at every byte keep their payloads and timestamps", async () =
 	const bytes = encode(frames);
 	const chunks = Array.from(bytes, (byte) => new Uint8Array([byte]));
 
-	await readFrames(streamOf(chunks), producer, SCALE);
+	await readFrames(streamOf(chunks), producer, { scale: SCALE });
 	producer.close();
 
 	let ts = 0;
@@ -73,7 +73,7 @@ test("frames split at every byte keep their payloads and timestamps", async () =
 test("frames without a timescale carry no timestamp prefix", async () => {
 	const producer = new Producer(0);
 	const consumer = producer.consume();
-	await readFrames(streamOf([encode([{ payload: [7] }, { payload: [8, 9] }])]), producer, 0);
+	await readFrames(streamOf([encode([{ payload: [7] }, { payload: [8, 9] }])]), producer, { scale: 0 });
 	producer.close();
 
 	expect((await consumer.readFrame())?.payload).toEqual(new Uint8Array([7]));
@@ -84,16 +84,16 @@ test("frames without a timescale carry no timestamp prefix", async () => {
 test("a stream that ends inside a frame rejects", async () => {
 	const producer = new Producer(0);
 	const bytes = encode([{ delta: 1, payload: [1, 2, 3] }]);
-	await expect(readFrames(streamOf([bytes.subarray(0, bytes.byteLength - 1)]), producer, SCALE)).rejects.toThrow(
-		"unexpected end of stream",
-	);
+	await expect(
+		readFrames(streamOf([bytes.subarray(0, bytes.byteLength - 1)]), producer, { scale: SCALE }),
+	).rejects.toThrow("unexpected end of stream");
 });
 
 test("stops once the group closes", async () => {
 	const producer = new Producer(0);
 	// Never ends: only the close can stop the read.
 	const stream = new Reader(new ReadableStream<Uint8Array>(), undefined, VERSION);
-	const done = readFrames(stream, producer, SCALE);
+	const done = readFrames(stream, producer, { scale: SCALE });
 	producer.close();
 	await done;
 });

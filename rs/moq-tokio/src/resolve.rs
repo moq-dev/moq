@@ -329,7 +329,7 @@ impl Candidates {
 				// stagger between attempts dwarfs this.
 				if self.count == 0 && !self.delayed && self.full.pending() {
 					self.delayed = true;
-					let _ = tokio::time::timeout(self.delay, self.answer_full()).await;
+					let _ = moq_clock::timeout(self.delay, self.answer_full()).await;
 					continue;
 				}
 
@@ -560,6 +560,7 @@ impl Candidates {
 /// afresh needs a name whose answer changes between dials. Entries carry the
 /// port too, so two servers on one loopback address can stand in for two hosts.
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub(crate) mod hosts {
 	use std::collections::HashMap;
 	use std::net::SocketAddr;
@@ -588,7 +589,7 @@ impl Query {
 
 		Self {
 			call: Some(tokio::spawn(async move {
-				tokio::time::sleep(delay).await;
+				moq_clock::sleep(delay).await;
 				Ok(addrs)
 			})),
 			..Default::default()
@@ -597,6 +598,7 @@ impl Query {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 

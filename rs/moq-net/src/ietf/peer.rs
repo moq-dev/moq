@@ -33,6 +33,9 @@ pub(crate) struct Peer {
 	/// MoQ Epoch: whether both sides offered it, so advertisements and requests carry the
 	/// publisher's epoch in both directions.
 	pub epoch: bool,
+
+	/// Whether this draft-17+ peer offered DEFLATE-compressed tracks.
+	pub flate: bool,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -118,6 +121,7 @@ mod tests {
 			auth: false,
 			active_count: false,
 			epoch: false,
+			flate: false,
 		};
 
 		let slot = PeerSetup::default();
@@ -133,6 +137,7 @@ mod tests {
 			auth: true,
 			active_count: true,
 			epoch: true,
+			flate: true,
 		});
 
 		assert_eq!(slot.get().await, first);

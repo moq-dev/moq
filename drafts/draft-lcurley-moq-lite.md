@@ -184,7 +184,9 @@ Each frame of a timed Track carries a presentation timestamp expressed in the Tr
 A Track without a `Timescale` is untimed: its frames and datagrams carry no timestamp.
 A publisher MUST NOT start a timed Group's frame 0 earlier than that of any lower-sequence Group it publishes.
 lite-05 and lite-06 cannot encode an untimed Track, so a publisher on those versions declares a `Timescale` of 1000 for it and stamps every frame and datagram with its send time in milliseconds.
-A receiver cannot tell such send times from presentation timestamps, and they need not rise with sequence, so it does not check received Groups against this rule.
+A receiver cannot tell such send times from presentation timestamps, and they need not rise with sequence, so it discards every timestamp received on those versions and treats the Track as untimed.
+On later versions a receiver MAY check a received Group against this rule, refusing a violating Group's stream (STOP_SENDING) with TIMESTAMP_MISMATCH.
+A relay that cannot vouch for a Track's timestamps, such as ones received over another protocol, MUST serve the Track untimed.
 
 ## Positions {#positions}
 A Position is a (Group Sequence, Frame Index) pair identifying one frame within a Track.
@@ -365,7 +367,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x38  | FRAME_TOO_LARGE | A frame declared a payload larger than the receiver accepts. |
 | ------- | ------------- | ----------- |
-|  0x39  | TIMESTAMP_MISMATCH | A frame's timestamp does not match its track's timescale. |
+|  0x39  | TIMESTAMP_MISMATCH | A frame's timestamp does not fit its track: it is present on an untimed track, absent on a timed one, or starts a Group before a lower-sequence one. |
 | ------- | ------------- | ----------- |
 |  0x3A  | NOT_FETCHABLE | The FETCH named a group delivered only as a datagram, which is never cached (see [Datagrams](#datagrams)). It has no moq-transport value; a bridge refuses the FETCH with DOES_NOT_EXIST. |
 | ------- | ------------- | ----------- |
@@ -665,6 +667,7 @@ A publisher SHOULD order a [datagram](#datagrams) among the subscription's strea
 ### Priority
 The `Subscriber Priority` is scoped to the connection and MAY change over the life of the subscription via SUBSCRIBE_UPDATE.
 The `Publisher Priority` is fixed for the lifetime of the Track (see [TRACK_INFO](#track-info)) and SHOULD be used only to resolve conflicts or ties.
+Both are a byte where higher is more urgent, and 128 is the midpoint an endpoint SHOULD use for a priority it was never given.
 
 A conflict can occur when a relay tries to serve multiple downstream subscriptions from a single upstream subscription.
 The relay cannot pick any one subscriber's priority, so the upstream subscription SHOULD use the publisher priority instead of some combination of different subscriber priorities.
@@ -756,6 +759,8 @@ Unidirectional streams are used for data transmission.
 | ------ | -------- | ----------- |
 |    0x1 | Setup    | Either      |
 | ------ | -------- | ----------- |
+|    0x2 | Padding  | Either      |
+| ------ | -------- | ----------- |
 
 ### Setup {#setup-stream}
 Each endpoint MUST open a Setup Stream (0x1) at the start of the session to advertise the optional capabilities and extensions it supports.
@@ -765,6 +770,13 @@ There is exactly one Setup Stream per direction; an endpoint that receives a sec
 An endpoint with no optional capabilities sends a SETUP with an empty parameter list rather than omitting the stream, giving the peer a deterministic signal that no capabilities are forthcoming.
 
 See the [Session](#session) section for how an endpoint avoids waiting on the peer's SETUP before exchanging other streams.
+
+### Padding {#padding-stream}
+Either endpoint MAY open a Padding Stream (0x2), followed by arbitrary bytes until FIN.
+The receiver MUST read and discard those bytes incrementally, returning stream and connection flow-control credit as they arrive without retaining the body.
+Receiving padding does not change session or subscription state.
+This allows bandwidth probes to measure delivery without requiring a media subscription.
+Versions before lite-07 do not define this stream type and reset only the stream, as required for unknown stream types.
 
 ### Group
 A publisher creates Group Streams in response to a Subscribe Stream.
@@ -1206,7 +1218,7 @@ A unique identifier chosen by the subscriber.
 A Subscribe ID MUST NOT be reused within the same session, even if the prior subscription has been closed.
 
 **Subscriber Priority**:
-The priority of the subscription within the session, represented as a u8.
+The priority of the subscription within the session, represented as a u8 with 128 as the midpoint.
 The publisher SHOULD transmit *higher* values first during congestion.
 See the [Prioritization](#prioritization) section for more information.
 
@@ -1328,7 +1340,7 @@ This is what lets the properties live on their own stream, fetched once and cach
 Publisher properties fan *out* at a relay (one upstream subscription serving many downstreams), so a change would have to propagate everywhere; subscriber properties fan *in*, which the relay already merges, so they MAY change freely via SUBSCRIBE_UPDATE.
 
 **Publisher Priority**:
-The publisher's priority for this Track, represented as a u8, used only to resolve ties between subscriptions of equal subscriber priority.
+The publisher's priority for this Track, represented as a u8 with 128 as the midpoint, used only to resolve ties between subscriptions of equal subscriber priority.
 See the [Prioritization](#prioritization) section for more information.
 
 **Publisher Max Age**:
@@ -1754,6 +1766,9 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- Added Padding Stream (0x2), read and discarded incrementally by either endpoint.
+
+- Named 128 the midpoint priority for an unset Subscriber or Publisher Priority.
 - Added the Tracks Stream (0x8) with TRACKS, TRACKS_ADD, TRACKS_REMOVE, and SYNCED: a subscriber lists one Broadcast's Tracks, each with its TRACK_INFO, then SUBSCRIBEs to those it wants. A relay answers at once with what it holds. Older versions reset the stream type.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 
@@ -1761,7 +1776,7 @@ The `Message Length` describes the payload size on the wire.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 
-- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's. Receivers do not check it, since a received timestamp may be a send time.
+- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A receiver discards the timestamps it receives over lite-05/06, which may be send times, and a relay serves a Track whose timestamps it cannot vouch for untimed.
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
 
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1). A relay requests descending upstream unless every subscription it serves is ascending.

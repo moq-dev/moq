@@ -53,7 +53,6 @@ echo "building the pages..."
 (
     cd "$CLIENT"
     bun install --frozen-lockfile
-    bunx playwright install chromium
     bunx vite build --outDir "$HARNESS_RUN/page" --emptyOutDir
 )
 
