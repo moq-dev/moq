@@ -1345,7 +1345,10 @@ where
 							properties.group_order = Some(order.into());
 						}
 						acked = Some(forwarding.opened.clone());
-						self.write_subscribe_ok(&mut stream.writer, request_id, None, properties)
+						// Required once the track has content, read from the cache as TRACK_STATUS
+						// reads it.
+						let largest = live_edge(&track).largest;
+						self.write_subscribe_ok(&mut stream.writer, request_id, largest, properties)
 							.await?;
 						self.pause_join(forwarding.join);
 						let done = self
@@ -9086,6 +9089,35 @@ mod serve_tests {
 		}
 	}
 
+	/// An initially paused SUBSCRIBE_OK names the cached Largest Location, as a forwarding one
+	/// does, without subscribing for it.
+	#[moq_clock::test]
+	async fn an_initially_paused_subscribe_reports_its_largest() {
+		for version in [Version::Draft14, Version::Draft22] {
+			let h = serve(version);
+			let mut group = h.track.create_group(group::Info { sequence: 3 }).unwrap();
+			group.write_frame(timestamp(), b"a".as_slice()).unwrap();
+			group.write_frame(timestamp(), b"b".as_slice()).unwrap();
+			settle().await;
+			let mut msg = subscribe(Filter::NextObject, None);
+			msg.forward = false;
+			let mut request = request_session(version);
+			request.log = h.log.clone();
+			let stream = Stream::open(&mut request, version).await.unwrap();
+			let mut running = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+			serve_until(running.as_mut(), "the paused acknowledgement", || {
+				!h.log.trail().is_empty() && Wire::read(&h.log, version).sent(ietf::SubscribeOk::ID).is_some()
+			})
+			.await;
+			assert_eq!(
+				subscribe_ok(&h.log, version).largest,
+				Some(Location { group: 3, object: 1 }),
+				"{version}"
+			);
+			assert!(h.track.subscription().is_none(), "{version}: paused demand");
+		}
+	}
+
 	/// A paused request's source failing ends it in error, never as a clean content end.
 	#[moq_clock::test]
 	async fn a_paused_subscribe_keeps_source_failure_distinct_from_completion() {
@@ -13520,6 +13552,40 @@ mod serve_tests {
 			assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{version}");
 			let error = ietf::RequestError::decode(&mut buf, version).unwrap();
 			assert_eq!(error.error_code, 0x3, "{version}");
+		}
+	}
+
+	/// A paused subscription refuses that token too. Draft 14 answers no update, so there the
+	/// refusal only ends the subscription.
+	#[moq_clock::test]
+	async fn a_paused_subscription_refuses_a_token_it_was_admitted_without() {
+		for version in [Version::Draft14, Version::Draft22] {
+			let auth = crate::auth::Handle::new(false);
+			auth.authorize(&crate::auth::Grant::all());
+			let h = serve_with_auth(version, auth, Vec::new());
+			let mut request = ScriptedSession::per_stream(vec![update_with_tokens(version, &[TOKEN])]);
+			if version == Version::Draft14 {
+				request = request.with_virtual_requests();
+			}
+			request.log = h.log.clone();
+			let mut msg = subscribe(Filter::NextObject, None);
+			msg.forward = false;
+			let stream = Stream::open(&mut request, version).await.unwrap();
+			let ended = moq_clock::timeout(
+				Duration::from_secs(10),
+				h.publisher.clone().run_subscribe_stream(stream, msg),
+			)
+			.await
+			.expect("the refused update ends the subscription");
+			assert!(ended.is_err(), "{version}: {ended:?}");
+
+			let wire = Wire::read(&h.log, version);
+			assert!(wire.sent(ietf::SubscribeOk::ID).is_some(), "{version}");
+			assert_eq!(
+				wire.sent(ietf::RequestError::ID).is_some(),
+				version != Version::Draft14,
+				"{version}: answered the update"
+			);
 		}
 	}
 

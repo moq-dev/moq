@@ -1042,9 +1042,12 @@ where
 				None => None,
 			};
 			if let Some((reason, err)) = refusal {
-				self.write_subscribe_error(&mut stream.writer, update.request_id, &err, reason)
-					.await
-					.ok()?;
+				// Draft 14 answers no update.
+				if self.version != Version::Draft14 {
+					self.write_subscribe_error(&mut stream.writer, update.request_id, &err, reason)
+						.await
+						.ok()?;
+				}
 				return Some(Served::UpdateFailed(Error::Unsupported));
 			}
 			if let Some(priority) = update.priority {

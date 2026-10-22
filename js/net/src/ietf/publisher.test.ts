@@ -4075,6 +4075,33 @@ test("an initially paused SUBSCRIBE holds no demand until it resumes", async () 
 	}
 });
 
+test("an initially paused SUBSCRIBE_OK names the cached largest without subscribing", async () => {
+	for (const version of [Version.DRAFT_16, V20]) {
+		const fx = fixture(version);
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		writeGroup(track, 2);
+		const { client, ok } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+				forward: false,
+			}),
+		);
+		try {
+			// Below draft-20 it rounds down to the group's start, as a forwarding one does.
+			expect(ok.largest).toEqual({ groupId: 0n, objectId: version === V20 ? 1n : 0n });
+			expect(track.subscription.peek()).toBeUndefined();
+		} finally {
+			client.close();
+			track.close();
+			fx.close();
+		}
+	}
+});
+
 test("namespace subscription survives requester FIN and stops on STOP_SENDING", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });

@@ -594,7 +594,14 @@ export class Publisher {
 				left.signal.removeEventListener("abort", leave);
 				lookup.abort();
 			}
-			await this.#subscribeOk(request, msg, info, undefined);
+			// Read from the cache as TRACK_STATUS reads it, without subscribing.
+			const largest = wireOf(broadcast).largest(msg.trackName);
+			await this.#subscribeOk(
+				request,
+				msg,
+				info,
+				largest && { group: BigInt(largest.group), object: BigInt(largest.frame) },
+			);
 			state.acked = true;
 		}
 		await this.#pausedSubscribe({ msg, request, broadcast, state, left: left.signal });
