@@ -48,7 +48,10 @@ alive, so retaining it costs memory a peer controls. Candidate bounds:
 
 Recommendation: the subscription limit, plus the request close where the
 draft has one. Keep only entries that can be answered (`Joined::Group`); an
-unsubscribed or refused subscription still drops its entry at once. A head
+unsubscribed or refused subscription still drops its entry at once. The
+entry must not outlive what authorized the subscription: when its request
+token's grant expires or is revoked, or the session grant no longer covers
+the track, drop it, since a late FETCH reads the cache on that authority. A head
 evicted from the cache meanwhile stays a loud refusal. The existing wait in
 `joined()` bounds a FETCH whose subscription has not arrived yet; do not
 stretch it to cover this.
@@ -62,6 +65,8 @@ Tests, on mocked time with no sleeps, for each of drafts 14 to 19:
   stay at the limit, the oldest are dropped, and their late FETCHes are
   refused. New subscriptions are still admitted.
 - On drafts 17 to 19, closing the subscription's request drops its entry.
+- A request token that expires (by mocked time) or is revoked after the
+  finish drops the entry, and the late FETCH is refused.
 - An unsubscribed subscription's FETCH is refused, and session close frees
   every entry.
 
