@@ -62,7 +62,9 @@ pub trait Writer: Send + 'static {
 		std::future::ready(Ok(()))
 	}
 
-	/// Gracefully close the transport.
+	/// Gracefully close the transport. Drop the [`Reader`] first so a byte stream also drains
+	/// the peer until it finishes, which only the peer bounds, so bound or cancel the wait;
+	/// otherwise this closes only the send half.
 	fn close(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
 	/// Perform any timer-driven background work and resolve once it's done. The
