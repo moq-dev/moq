@@ -10,6 +10,7 @@ How to update your code for each breaking change, newest first.
 Stamp them with `moq_clock::wall()`, or use `Wall::try_from` for third-party timestamps.
 JWT and auth JSON still encode integer Unix seconds, with the same rounding.
 Decoding saturates on every platform: a time before 1970 reads as `Wall::UNIX_EPOCH` and one past 2554 as the last representable `Wall`, so expiry checks are unchanged.
+That last `Wall` encodes as `18446744074`, so an auth server now sees a relay's certificate expiry past 2554, such as rcgen's default year 4096, as that value.
 
 ### `Client::connect` has no timeout of its own (#5765)
 
