@@ -74,6 +74,14 @@ struct Parked {
 /// The smallest index size worth sweeping.
 const HELD_SWEEP_MIN: usize = 16;
 
+/// The size at which an index of `len` lists next sweeps out the ones every reader has left:
+/// twice what it holds, so each sweep is paid for by the keys added before it. Reset whenever
+/// the index sweeps or drains, so what it can hold of departed readers follows what it holds
+/// now, never its peak.
+fn sweep_at(len: usize) -> usize {
+	(len * 2).max(HELD_SWEEP_MIN)
+}
+
 impl Default for Wakes {
 	fn default() -> Self {
 		Self {
@@ -101,6 +109,7 @@ impl Wakes {
 			}
 			let earliest = parked.deadlines.first_key_value().map_or(u64::MAX, |(at, _)| *at);
 			self.earliest.store(earliest, Ordering::Relaxed);
+			parked.deadlines_sweep = sweep_at(parked.deadlines.len());
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
 	}
@@ -117,7 +126,7 @@ impl Wakes {
 			parked.deadlines.retain(|_, list| !list.is_empty());
 			// `earliest` may now be below every deadline left, which only costs the next write
 			// the lock: `presented` recomputes it.
-			parked.deadlines_sweep = (parked.deadlines.len() * 2).max(HELD_SWEEP_MIN);
+			parked.deadlines_sweep = sweep_at(parked.deadlines.len());
 		}
 		parked.deadlines.entry(deadline).or_default().register(waiter);
 		self.earliest.fetch_min(deadline, Ordering::Relaxed);
@@ -135,7 +144,7 @@ impl Wakes {
 		// A swept deadline may stay armed with the pool, which then releases nothing.
 		if parked.wall.len() >= parked.wall_sweep {
 			parked.wall.retain(|_, list| !list.is_empty());
-			parked.wall_sweep = (parked.wall.len() * 2).max(HELD_SWEEP_MIN);
+			parked.wall_sweep = sweep_at(parked.wall.len());
 		}
 		parked.wall.entry(at).or_default().register(waiter);
 		if parked.wall_armed.is_some_and(|armed| armed <= at) {
@@ -161,6 +170,7 @@ impl Wakes {
 				woken.push(entry.remove());
 			}
 			parked.wall_armed = parked.wall.first_key_value().map(|(at, _)| *at);
+			parked.wall_sweep = sweep_at(parked.wall.len());
 			parked.wall_armed
 		};
 		woken.iter_mut().for_each(kio::WaiterList::wake);
@@ -187,7 +197,7 @@ impl Wakes {
 		// than in `landed`, which every insert takes.
 		if parked.held.len() >= parked.held_sweep {
 			parked.held.retain(|_, list| !list.is_empty());
-			parked.held_sweep = (parked.held.len() * 2).max(HELD_SWEEP_MIN);
+			parked.held_sweep = sweep_at(parked.held.len());
 		}
 		parked.held.entry(sequence).or_default().register(waiter);
 	}
@@ -197,7 +207,7 @@ impl Wakes {
 		let mut parked = self.parked.lock();
 		if parked.arrivals.len() >= parked.arrival_sweep {
 			parked.arrivals.retain(|_, list| !list.is_empty());
-			parked.arrival_sweep = (parked.arrivals.len() * 2).max(HELD_SWEEP_MIN);
+			parked.arrival_sweep = sweep_at(parked.arrivals.len());
 		}
 		parked.arrivals.entry(sequence).or_default().register(waiter);
 	}
@@ -207,7 +217,7 @@ impl Wakes {
 		let mut parked = self.parked.lock();
 		if parked.starts.len() >= parked.starts_sweep {
 			parked.starts.retain(|_, list| !list.is_empty());
-			parked.starts_sweep = (parked.starts.len() * 2).max(HELD_SWEEP_MIN);
+			parked.starts_sweep = sweep_at(parked.starts.len());
 		}
 		parked.starts.entry(from).or_default().register(waiter);
 		self.starts_from.fetch_min(from, Ordering::Relaxed);
@@ -228,6 +238,7 @@ impl Wakes {
 			}
 			let from = parked.starts.first_key_value().map_or(u64::MAX, |(from, _)| *from);
 			self.starts_from.store(from, Ordering::Relaxed);
+			parked.starts_sweep = sweep_at(parked.starts.len());
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
 	}
@@ -241,6 +252,7 @@ impl Wakes {
 			while let Some(at) = parked.arrivals.range(groups).next().map(|(at, _)| *at) {
 				woken.extend(parked.arrivals.remove(&at));
 			}
+			parked.arrival_sweep = sweep_at(parked.arrivals.len());
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
 	}
@@ -266,6 +278,7 @@ impl Wakes {
 			while let Some(at) = parked.held.range(from..=sequence).next().map(|(at, _)| *at) {
 				woken.extend(parked.held.remove(&at));
 			}
+			parked.held_sweep = sweep_at(parked.held.len());
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
 	}
@@ -332,7 +345,7 @@ mod test {
 	#[test]
 	fn departed_deadlines_are_swept() {
 		let wakes = Wakes::default();
-		let now = crate::time::Instant::now();
+		let now = crate::time::Instant::ZERO;
 		for i in 0..1_000u64 {
 			let waiter = kio::Waiter::noop();
 			let budget = Duration::from_secs(1) + Duration::from_micros(i);
