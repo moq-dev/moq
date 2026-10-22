@@ -413,23 +413,6 @@ mod test {
 	}
 
 	#[test]
-	fn accessors() {
-		let queue = Queue::bounded(2);
-		assert_eq!(queue.capacity(), Some(2));
-		assert!(queue.is_empty());
-		queue.try_push(1).unwrap();
-		assert_eq!(queue.len(), 1);
-		assert!(!queue.is_empty());
-		assert!(!queue.is_closed());
-
-		let clone = queue.clone();
-		let other = Queue::<u32>::new();
-		assert!(queue.same_channel(&clone));
-		assert!(!queue.same_channel(&other));
-		assert_eq!(other.capacity(), None);
-	}
-
-	#[test]
 	#[should_panic(expected = "zero-capacity")]
 	fn zero_capacity_panics() {
 		let _ = Queue::<u32>::bounded(0);

@@ -31,7 +31,8 @@ Where the model stands today, all in `rs/moq-net`:
 - Group order within a track follows each subscription's `order` (#5385),
   newest first by default.
 - A relay forwards the max of its downstream subscriber priorities upstream
-  (`model/subscription.rs`, `lite/subscriber.rs`), never the publisher's track
+  (`model/subscription.rs`, `lite/subscriber.rs`, and on moq-transport
+  upstreams `ietf/subscriber.rs` since #5922), never the publisher's track
   priority, so one viewer asking for 255 raises that track above every other
   tenant's on the cluster link (`rs/moq-relay/src/cluster.rs`: one
   bidirectional session per peer pair carries every broadcast). The draft
@@ -43,8 +44,9 @@ default so a single-tenant deployment keeps strict priority across the link.
 A tenant-keyed domain (one bucket per customer, however many broadcasts they
 run) needs the tenant identity from the auth line first and is a later
 refinement of the same tier, not a different design. Opening more
-subscriptions or broadcasts must never buy more bandwidth than the bucket
-allows.
+subscriptions must never buy a broadcast more than its bucket allows. Until
+tenant keying lands, a peer that opens more broadcasts does get more shares,
+on send and receive alike; tenant keying is what closes that.
 
 Decided 2026-10-08: the signed priority type lands here, so the priority API
 breaks once instead of twice. Subscribe ranges owns group order, so this quest
@@ -68,15 +70,14 @@ Direction to settle in the draft first, then the code:
   or narrow the goal to subscription delivery.
 - Rank by track priority, then subscription, then the subscription's own group
   order (`Subscription::order`, newest first by default).
-- Decide whether the publisher's `track::Info::priority` breaks a tie
-  between equal subscriber priorities in `Priority::cmp`
-  (`rs/moq-net/src/priority.rs`). The
-  [ladder controller](/quest/m3/ladder/controller.md), now in m3, wants that
-  tiebreak; this quest owns the answer and the code change, so the controller
-  only consumes it (2026-10-06 audit). Either way, make the docs agree:
+- Decided 2026-10-20 (maintainer): the publisher's `track::Info::priority`
+  breaks a tie between equal subscriber priorities in `Priority::cmp`
+  (`rs/moq-net/src/priority.rs`), so the same number decides what to produce
+  and, among equal subscriber priorities, what to send first. The
+  [ladder controller](/quest/m3/ladder/controller.md) only consumes it.
   `Info::priority` in `rs/moq-net/src/model/track.rs` already claims the
-  tiebreak, and the allocator doc in `rs/moq-net/src/model/bandwidth.rs`
-  presents send order as unrelated.
+  tiebreak; fix the allocator doc in `rs/moq-net/src/model/bandwidth.rs`,
+  which presents send order as unrelated.
 - A per-session cap on distinct ranks is a scheduling detail; whatever replaces
   the 255-entry sort must stay O(log n) per group under chat-shaped churn.
 - moq-quic already has the fair tier: send domains sharing bytes by deficit
@@ -84,6 +85,30 @@ Direction to settle in the draft first, then the code:
   by its tests) until this quest gives them a consumer. Exposing them also
   gives moq-net's `poll::Session::send_group(priority)` a domain, so land that
   in the same trait break and implementers break once.
+
+Receive ranks, folded in from
+[#5878](https://github.com/moq-dev/moq/pull/5878)'s follow-ups by the
+maintainer on 2026-10-20. When the receive window is stuck, #5878 evicts the
+lowest subscription priority first across every broadcast on the session,
+then the group its subscription would deliver last, and sets a stream's rank
+once, when its header decodes:
+
+- With fairness on, rank received groups within their broadcast's domain
+  first, as sends are, so one broadcast's priorities never evict another's
+  partial groups. Received FETCH streams map to a domain through the same
+  carrier the send side settles, or fall out with it if the goal narrows to
+  subscription delivery.
+- Ranking inside domains still leaves the session-wide window to share, so
+  a broadcast that fills it would block every other one. Add a fair domain
+  tier ahead of the ranks, mirroring the byte-fair send tier: a stuck window
+  evicts from the domain holding the most beyond an even share of the window
+  across the domains with partial groups, then by rank within that domain.
+  A broadcast that fills the window alone may keep it until another arrives.
+  A full window admits no newcomer's bytes, so settle what enters a broadcast
+  into the fair set first (its subscription, or the header of a stream the
+  stuck-window eviction made room for), and test that it gets in.
+- Re-rank a receive stream when its subscription's priority or group order
+  changes, instead of keeping the rank from its header.
 
 Signed priority, decided with the maintainer:
 
@@ -105,17 +130,31 @@ Signed priority, decided with the maintainer:
 - Look for anything that does arithmetic on priority (the lite send queue, JS
   send-order packing, the bandwidth allocator, the relay's max-of-subscribers)
   and keep its ordering, not just its type.
-- moq-archive's `Info::priority` follows. Its version-1 `.info` stores the
-  `u8`, so existing recordings must keep their meaning: store the moq-lite
-  byte (`p + 128`) or bump the format version, never reinterpret silently.
+- moq-archive's `.info` priority follows and breaks in place with the
+  archive line's other formats (decided 2026-10-20, maintainer): no format
+  version or compatibility mapping for recordings made before the cut.
 - The moxygen default (127, #4273) already shipped, so the default byte moves
   a second time. Add an upgrade note to the release's upgrade page saying why.
   Rejected: a mapping that keeps today's bytes (lite byte = p + 127).
 
+Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
+order, [receive memory](/quest/m1/quic/receive-memory.md), then
+[Rust request credit](/quest/m1/rs-request-credit.md), then this quest, which
+adds the send domain last. The publisher serve loops it rewrites already
+park one group per subscription for a stalled subscriber
+([moq-dev/moq#6140](https://github.com/moq-dev/moq/pull/6140)); keep that
+bound. The moq-c half lands on the
+[generated C package](/quest/m1/c/README.md), not the frozen hand-written
+ABI, so C users break once.
+
 Prove scoping with the existing lite publisher tests extended to two
 broadcasts on one session with fairness on: neither starves, a downstream 255
 does not change the upstream order, and with fairness off the strict order is
-unchanged. The io_uring workers apply the same setting. Move
+unchanged. On the receive side, with fairness on, a high priority in one
+broadcast never makes a stuck window evict another broadcast's partial groups
+first, a broadcast that filled the window before another began receiving
+yields down to its even share instead of blocking the newcomer, and a priority
+or order update moves an already-ranked stream. The io_uring workers apply the same setting. Move
 `doc/concept/moq-lite.md` (the 0..255 knob) and `doc/concept/standard.md`
 (IETF 128 maps to 127) to the new range and mapping.
 
@@ -123,6 +162,11 @@ Public API impact: `u8` priority fields become `i8` in every language, and
 `Subscribe.priority` on a cluster session changes meaning. Wire impact: none
 in format, but the default byte moves from 127 to 128 on moq-lite and from 128
 to 127 on IETF. Report both with the draft change.
+
+## Required
+
+- [Generated C bindings](/quest/m1/c/README.md) - the `i8` priority reaches C through the generated package, so C users break once
+- [Rust request credit](/quest/m1/rs-request-credit.md) - the previous `transport::poll` break; this one adds the send domain on top
 
 ## Related
 

@@ -48,9 +48,13 @@ select_packages() {
         return
     fi
 
-    local seeds edges selected
+    local seeds benches edges selected
+    # A crate's `benches/` builds only its own bench targets, which no other crate can
+    # depend on and the test build never compiles, so it selects that crate alone
+    # (for its lint) rather than every dependent's tests.
+    benches=$(sed -n 's|^rs/\([^/]*\)/benches/.*|\1|p' "$list")
     seeds=$({
-        sed -n 's|^rs/\([^/]*\)/.*|\1|p' "$list"
+        sed -n '\|^rs/[^/]*/benches/|d; s|^rs/\([^/]*\)/.*|\1|p' "$list"
         jq -r --rawfile list "$list" '($list | split("\n")) as $paths | .packages[]
             | (.manifest_path | split("/")) as $p | select($p[-4] == "demo")
             | select(any($paths[]; startswith("demo/\($p[-3])/\($p[-2])/"))) | .name' <<<"$metadata"
@@ -74,7 +78,8 @@ select_packages() {
 			} while (grew)
 			for (name in want) if (want[name]) print name
 		}
-	' <<<"$edges" | sort -u)
+	' <<<"$edges")
+    selected=$(printf '%s\n%s\n' "$selected" "$benches" | sed '/^$/d' | sort -u)
 
     [[ -n "$selected" ]] || return 0
 
@@ -145,10 +150,13 @@ case "$action" in
         # A selection can hold nothing testable, and
         # nextest exits 4 on that; the whole workspace finding none really is wrong.
         [[ "$packages" == ALL ]] || flags+=(--no-tests=pass)
-        just rs test "${flags[@]}"
+        # CI keeps Cargo's per-crate build timings, which check.yml uploads.
+        timings=()
+        [[ "${GITHUB_ACTIONS:-}" != true ]] || timings=(--timings)
+        just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         # Tests behind the off-by-default `capture` and `play` features.
-        if wants '(moq-video|moq-audio)'; then just rs capture-test; fi
-        if wants moq-cli; then just rs play; fi
+        if wants '(moq-video|moq-audio)'; then just rs capture-test ${timings[@]+"${timings[@]}"}; fi
+        if wants moq-cli; then just rs play ${timings[@]+"${timings[@]}"}; fi
         ;;
     platform)
         # moq-gst links GStreamer via pkg-config, which the runners don't have.
