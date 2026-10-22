@@ -87,6 +87,8 @@ pub mod auth;
 mod client;
 mod coding;
 #[cfg(feature = "async")]
+mod discovery;
+#[cfg(feature = "async")]
 mod driver;
 mod epoch;
 mod error;

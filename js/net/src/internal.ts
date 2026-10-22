@@ -580,6 +580,8 @@ export const hooks: {
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
 	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
+	/** Mark a broadcast handle served through a route claiming a shorter prefix: it lists nothing. */
+	stampUnlisted: (target: BroadcastConsumer) => void;
 } = {
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
@@ -753,6 +755,9 @@ export const hooks: {
 		throw new Error("broadcast.ts not loaded");
 	},
 	stampEpoch: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	stampUnlisted: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 };

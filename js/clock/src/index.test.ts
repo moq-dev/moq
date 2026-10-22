@@ -52,13 +52,13 @@ test("manual reads and wall corrections share a clock without inventing elapsed 
 	const clock = manual();
 	expect<number>(now()).toBe(0);
 	expect<number>(wall()).toBe(Manual.WALL_START);
-	clock.advance(ns(Milli(5)));
+	clock.jump(ns(Milli(5)));
 	expect<number>(now()).toBe(5_000_000);
 	expect<number>(wall()).toBe(Manual.WALL_START + 5);
 	clock.stepWall(Wall(Manual.WALL_START - 1000));
 	expect<number>(now()).toBe(5_000_000);
 	clock.stepWall(Wall(Manual.WALL_START + 1000));
-	clock.advance(ns(Milli(1)));
+	clock.jump(ns(Milli(1)));
 	expect<number>(clock.now()).toBe(6_000_000);
 	expect<number>(clock.wall()).toBe(Manual.WALL_START + 1001);
 	expect<number>(origin()).toBe(Manual.WALL_START + 1000 - 5);
@@ -66,16 +66,16 @@ test("manual reads and wall corrections share a clock without inventing elapsed 
 
 test("many small advances move wall time by their combined duration", () => {
 	const clock = new Manual();
-	for (let i = 0; i < 10_000; i++) clock.advance(Nano(100));
+	for (let i = 0; i < 10_000; i++) clock.jump(Nano(100));
 	expect<number>(clock.now()).toBe(1_000_000);
 	expect<number>(clock.wall()).toBe(Manual.WALL_START + 1);
 });
 
 test("installation restores nested and out-of-order scopes without reviving them", () => {
 	const outer = manual();
-	outer.advance(Nano(4));
+	outer.jump(Nano(4));
 	const inner = manual();
-	inner.advance(Nano(8));
+	inner.jump(Nano(8));
 	expect<number>(now()).toBe(8);
 	restores[0]();
 	expect<number>(now()).toBe(8);
@@ -92,13 +92,13 @@ test("deadlines fire in time then arming order and reached deadlines fire withou
 	void sleepUntil(Instant(10)).then(() => order.push(2));
 	void sleepUntil(Instant(5)).then(() => order.push(1));
 	void sleepUntil(Instant(10)).then(() => order.push(3));
-	await clock.advanceAsync(Nano(10));
+	await clock.advance(Nano(10));
 	expect(order).toEqual([1, 2, 3]);
 	await sleepUntil(Instant(1));
 	await sleep(Nano.zero);
 });
 
-test("advanceAsync drains arbitrarily deep microtasks and newly due timers", async () => {
+test("advance drains arbitrarily deep microtasks and newly due timers", async () => {
 	const clock = manual();
 	let done = false;
 	void (async () => {
@@ -107,7 +107,7 @@ test("advanceAsync drains arbitrarily deep microtasks and newly due timers", asy
 		await sleep(Nano.zero);
 		done = true;
 	})();
-	await clock.advanceAsync(Nano(5));
+	await clock.advance(Nano(5));
 	expect(done).toBe(true);
 });
 
@@ -118,15 +118,15 @@ test("a sleep stays on its creation clock and abort releases it", async () => {
 		done = true;
 	});
 	const second = manual();
-	await second.advanceAsync(Nano(10));
+	await second.advance(Nano(10));
 	expect(done).toBe(false);
-	await first.advanceAsync(Nano(10));
+	await first.advance(Nano(10));
 	await pending;
 	const abort = new AbortController();
 	const cancelled = sleep(Nano(100), { signal: abort.signal }).catch((error: unknown) => error);
 	abort.abort();
 	expect(await cancelled).toHaveProperty("name", "AbortError");
-	await second.advanceAsync(Nano(100));
+	await second.advance(Nano(100));
 	await expect(sleep(Nano.zero, { signal: abort.signal })).rejects.toHaveProperty("name", "AbortError");
 });
 
@@ -136,8 +136,8 @@ test("timeouts prefer ready work, propagate rejection, and expire on the manual 
 	const failure = new Error("operation failed");
 	await expect(timeout(Nano(10), Promise.reject(failure))).rejects.toBe(failure);
 	const pending = timeout(Nano(10), new Promise<never>(() => {})).catch((error: unknown) => error);
-	await clock.advanceAsync(Nano(9));
-	await clock.advanceAsync(Nano(1));
+	await clock.advance(Nano(9));
+	await clock.advance(Nano(1));
 	expect(await pending).toBeInstanceOf(Elapsed);
 });
 
@@ -146,12 +146,12 @@ test("interval burst delivers every missed scheduled tick", async () => {
 	const ticks = interval(Nano(10));
 	try {
 		expect<number>(await ticks.tick()).toBe(0);
-		clock.advance(Nano(35));
+		clock.jump(Nano(35));
 		expect<number>(await ticks.tick()).toBe(10);
 		expect<number>(await ticks.tick()).toBe(20);
 		expect<number>(await ticks.tick()).toBe(30);
 		const next = ticks.tick();
-		await clock.advanceAsync(Nano(5));
+		await clock.advance(Nano(5));
 		expect<number>(await next).toBe(40);
 		expect<number>(ticks.period()).toBe(10);
 	} finally {
@@ -166,10 +166,10 @@ for (const behavior of [MissedTickBehavior.Delay, MissedTickBehavior.Skip]) {
 		ticks.setMissedTickBehavior(behavior);
 		try {
 			expect<number>(await ticks.tick()).toBe(0);
-			clock.advance(Nano(35));
+			clock.jump(Nano(35));
 			expect<number>(await ticks.tick()).toBe(10);
 			const next = ticks.tick();
-			await clock.advanceAsync(Nano(behavior === MissedTickBehavior.Delay ? 10 : 5));
+			await clock.advance(Nano(behavior === MissedTickBehavior.Delay ? 10 : 5));
 			expect<number>(await next).toBe(behavior === MissedTickBehavior.Delay ? 45 : 40);
 		} finally {
 			ticks.close();
@@ -227,7 +227,7 @@ test("many cancelled and live timers retain deadline and arming order", async ()
 		);
 	});
 	for (let index = aborts.length - 1; index >= 0; index--) if (index % 3 === 0) aborts[index].abort();
-	await clock.advanceAsync(Nano(17));
+	await clock.advance(Nano(17));
 	await Promise.all(pending);
 	expect(fired).toEqual(expected.sort((a, b) => a.at - b.at || a.index - b.index).map(({ index }) => index));
 });
@@ -239,7 +239,7 @@ test("fire advances exactly to the earliest deadline and runs only what is due",
 	void sleepUntil(Instant(10)).then(() => order.push(1));
 	void sleepUntil(Instant(20)).then(() => order.push(20));
 	void sleepUntil(Instant(10)).then(() => order.push(2));
-	clock.advance(Nano(3));
+	clock.jump(Nano(3));
 	expect<number>(await clock.fire()).toBe(10);
 	expect<number>(now()).toBe(10);
 	expect(order).toEqual([1, 2]);
@@ -275,7 +275,7 @@ test("fire waits, without a timer, until a later host task arms one", async () =
 
 test("fire resolves when a later host task arms an already-due timer", async () => {
 	const clock = manual();
-	clock.advance(Nano(4));
+	clock.jump(Nano(4));
 	let woke = false;
 	const pending = clock.fire();
 	await hostTimeout(0);
@@ -291,4 +291,127 @@ test("fire stops at an already-due timer a pending microtask chain arms", async 
 	void sleepUntil(Instant(100));
 	void Promise.resolve().then(() => sleep(Nano(0)));
 	expect<number>(await clock.fire()).toBe(0);
+});
+
+test("advance steps through deadlines armed by earlier timers and stops at its target", async () => {
+	const clock = manual();
+	const at: number[] = [];
+	void (async () => {
+		for (let i = 0; i < 4; i++) {
+			await sleep(Nano(10));
+			at.push(now());
+		}
+	})();
+	await clock.advance(Nano(30));
+	expect(at).toEqual([10, 20, 30]);
+	expect<number>(now()).toBe(30);
+	expect<number>(await clock.fire()).toBe(40);
+	expect(at).toEqual([10, 20, 30, 40]);
+});
+
+test("advance drains one timer's tasks before firing the next at the same deadline", async () => {
+	const clock = manual();
+	const abort = new AbortController();
+	const order: string[] = [];
+	void sleep(Nano(10)).then(() => {
+		order.push("first");
+		abort.abort();
+	});
+	void sleep(Nano(10), { signal: abort.signal }).then(
+		() => order.push("second"),
+		() => order.push("cancelled"),
+	);
+	await clock.advance(Nano(10));
+	expect(order).toEqual(["first", "cancelled"]);
+});
+
+test("a timer armed while draining joins existing timers at the same deadline", async () => {
+	const clock = manual();
+	const order: string[] = [];
+	void sleep(Nano(10)).then(() => {
+		order.push("first");
+		void sleepUntil(Instant(10)).then(() => order.push("new"));
+	});
+	void sleep(Nano(10)).then(() => order.push("second"));
+	await clock.advance(Nano(10));
+	expect(order).toEqual(["first", "second", "new"]);
+});
+
+test("a past deadline armed while draining observes the current instant", async () => {
+	const clock = manual();
+	const at: number[] = [];
+	void sleep(Nano(10)).then(async () => {
+		at.push(now());
+		await sleepUntil(Instant(3));
+		at.push(now());
+	});
+	await clock.advance(Nano(10));
+	expect(at).toEqual([10, 10]);
+	expect<number>(clock.now()).toBe(10);
+});
+
+for (const driver of ["advance", "fire"] as const) {
+	test(`${driver} rejects overlapping time drivers without releasing its ownership`, async () => {
+		const clock = manual();
+		const pending = driver === "advance" ? clock.advance(Nano(10)) : clock.fire();
+		try {
+			await expect(clock.advance(Nano(100))).rejects.toThrow("already pending");
+			expect(() => clock.jump(Nano(100))).toThrow("already pending");
+			await expect(clock.fire()).rejects.toThrow("already pending");
+			expect<number>(clock.now()).toBe(0);
+		} finally {
+			// Let fire finish even if an assertion fails before it has a timer.
+			void sleepUntil(Instant(10));
+			await pending;
+		}
+		expect<number>(clock.now()).toBe(10);
+		clock.jump(Nano(1));
+		await clock.advance(Nano(1));
+		void sleep(Nano(1));
+		expect<number>(await clock.fire()).toBe(13);
+	});
+}
+
+test("a timer callback cannot move time beyond the active advance target", async () => {
+	const clock = manual();
+	const at: number[] = [];
+	const callback = sleep(Nano(5)).then(async () => {
+		await expect(clock.advance(Nano(100))).rejects.toThrow("already pending");
+		expect(() => clock.jump(Nano(100))).toThrow("already pending");
+		await expect(clock.fire()).rejects.toThrow("already pending");
+		await sleepUntil(Instant(7));
+		at.push(now());
+	});
+	await clock.advance(Nano(10));
+	await callback;
+	expect(at).toEqual([7]);
+	expect<number>(clock.now()).toBe(10);
+});
+
+test("fire returns the first deadline reached when a host task arms an earlier timer", async () => {
+	const clock = manual();
+	const at: number[] = [];
+	void sleepUntil(Instant(10)).then(() => at.push(now()));
+	const pending = clock.fire();
+	const channel = new MessageChannel();
+	try {
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			void sleepUntil(Instant(5)).then(() => at.push(now()));
+		};
+		channel.port2.postMessage(null);
+		const fired = await pending;
+		// A host may run the task before selection or during the drain after firing.
+		// Either way fire must stop where it first observed a timer becoming ready.
+		expect<number>(fired).toBe(at[0]);
+		expect(at.every((value) => value === fired)).toBe(true);
+		if (fired < 10) {
+			expect<number>(await clock.fire()).toBe(10);
+			expect(at).toEqual([5, 10]);
+		}
+	} finally {
+		channel.port1.close();
+		channel.port2.close();
+	}
 });

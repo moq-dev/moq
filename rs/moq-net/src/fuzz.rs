@@ -313,6 +313,26 @@ pub fn snapshot(origin: &crate::origin::Producer, prefix: &str) -> Snapshot {
 	Snapshot(origin.snapshot(prefix))
 }
 
+/// What a client session fed into an origin hears it should ask its peer about, for
+/// the interests bench.
+pub struct Interests(crate::model::Interests);
+
+/// Register as a client session fed into `origin` does.
+pub fn interests(origin: &crate::origin::Producer) -> Interests {
+	Interests(origin.interests())
+}
+
+impl Interests {
+	/// Take every change heard so far, returning how many there were.
+	pub fn drain(&self) -> usize {
+		let mut changes = 0;
+		while let std::task::Poll::Ready(Some(_)) = self.0.poll_next(&kio::Waiter::noop()) {
+			changes += 1;
+		}
+		changes
+	}
+}
+
 /// Add `n` publisher-side payload bytes on `(path, tier)`, creating the entry
 /// when the path is tracked. The stats producer bench marks a share of held
 /// paths changed this way, without a media frame. A later [`crate::stats::Registry::report`]

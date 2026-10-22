@@ -824,7 +824,7 @@ test("Consumer measures arrivals as they land", async () => {
 		// late, so the evidence pulls the estimate down from the cold start.
 		for (let i = 0; i < 5; i++) {
 			writeGroupWithLegacyFrames(track, i, [(i * 520_000) as Micro]);
-			await clock.advanceAsync(Nano.fromMilli(Milli(520)));
+			await clock.advance(Nano.fromMilli(Milli(520)));
 		}
 		expect(consumer.spread.peek()).toBeLessThan(100 as Milli);
 

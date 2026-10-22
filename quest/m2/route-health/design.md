@@ -14,7 +14,9 @@ reproducing a stall that transport failure and ordinary reconnect miss; if
 none exists, bring abandoning the line back to the maintainer. A killed relay
 in a same-epoch diamond qualifies until the idle timeout fires
 ([#6062](https://github.com/moq-dev/moq/issues/6062)); measure the media it
-loses and how far a standby shortens that. Preserve
+loses and how far a standby shortens that, starting from
+[#6183](https://github.com/moq-dev/moq/pull/6183)'s mock-time diamond in
+`rs/moq-net/tests/integration/route_change.rs`. Preserve
 application priorities, automatic health-driven switching and failback, a
 payload-free steady standby, and bounded payload overlap to verify delivery.
 The mechanism is entirely excluded for epochless broadcasts.

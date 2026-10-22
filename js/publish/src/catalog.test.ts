@@ -109,7 +109,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 
 test("catalog producer advertises the page clock from the first snapshot", async () => {
 	const clock = new Manual();
-	clock.advance(Nano.fromMilli(Milli(5000)));
+	clock.jump(Nano.fromMilli(Milli(5000)));
 	const restore = clock.install();
 	const catalog = new CatalogProducer();
 
@@ -336,7 +336,7 @@ describe("estimate publication window", () => {
 	let clock = new Manual();
 	let restore: (() => void) | undefined;
 	const scopes: Effect[] = [];
-	const advance = (ms: number) => clock.advanceAsync(Nano.fromMilli(Milli(ms)));
+	const advance = (ms: number) => clock.advance(Nano.fromMilli(Milli(ms)));
 	afterEach(() => {
 		for (const scope of scopes.splice(0)) scope.close();
 		restore?.();
@@ -367,7 +367,7 @@ describe("estimate publication window", () => {
 			}
 		})();
 		const sent = async () => {
-			await clock.advanceAsync(Nano(0));
+			await clock.advance(Nano(0));
 			return newest;
 		};
 		return { producer, effect, sent, consumer, estimate };

@@ -29,6 +29,7 @@ import {
 	scopeHead,
 	scopeOverlaps,
 } from "../internal.ts";
+import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
@@ -726,6 +727,8 @@ export class Subscriber {
 	#createConsume(path: Path.Valid, instance: ReturnType<BroadcastCache["instance"]>): broadcast.Consumer {
 		// moq-transport resolves metadata through SUBSCRIBE and has no one-shot group fetch here.
 		const consumer = new ConsumeBroadcast();
+		// Registered before anyone can list the broadcast, so no reader syncs on an empty answer.
+		void this.#refuseListing(wireOf(consumer).lister());
 		void (async () => {
 			for (;;) {
 				const request = await wireOf(consumer).requested();
@@ -736,6 +739,22 @@ export class Subscriber {
 			}
 		})();
 		return this.#consumes.insert(path, instance, consumer);
+	}
+
+	// moq-transport lists no tracks here: refuse each listing until the broadcast closes, since an
+	// empty answer would claim the peer lists nothing.
+	async #refuseListing(lister: Lister): Promise<void> {
+		try {
+			for (;;) {
+				while (!lister.used.peek()) {
+					if (lister.ended.peek() !== undefined) return;
+					await race([Signal.race(lister.used, lister.ended)]);
+				}
+				lister.abort(new Error("track listing requires moq-lite-07 or newer"));
+			}
+		} finally {
+			lister.close();
+		}
 	}
 
 	// The adapter is gone. If the transport has already closed, that close is the

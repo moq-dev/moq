@@ -36,9 +36,9 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 		await flush();
 		if (budget > 0) {
 			expect(results).toHaveLength(1);
-			await clock.advanceAsync(Nano.fromMilli(Milli(budget - 1)));
+			await clock.advance(Nano.fromMilli(Milli(budget - 1)));
 			expect(results).toHaveLength(1);
-			await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+			await clock.advance(Nano.fromMilli(Milli(1)));
 		}
 		expect(results.slice(1)).toEqual([
 			{ kind: "gap", timestamp: Micro(10_000), duration: Micro.zero },
@@ -82,15 +82,15 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 		await flush();
 		write(2, 20_000);
 		await flush();
-		await clock.advanceAsync(Nano.fromMilli(Milli(50)));
+		await clock.advance(Nano.fromMilli(Milli(50)));
 		write(1, 10_000);
 		await flush();
 		expect(results.map((read) => read.kind)).toEqual(["frame", "frame", "frame"]);
 		write(4);
 		await flush();
-		await clock.advanceAsync(Nano.fromMilli(Milli(99)));
+		await clock.advance(Nano.fromMilli(Milli(99)));
 		expect(results).toHaveLength(3);
-		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await clock.advance(Nano.fromMilli(Milli(1)));
 		expect(results.slice(3)).toEqual([
 			{ kind: "gap", timestamp: Micro(20_000), duration: Micro.zero },
 			{ kind: "end", group: 4, end: Micro(20_000) },
@@ -134,7 +134,7 @@ test("the holes a stalled source left behind share one budget", async () => {
 		for (const sequence of [2, 4, 6]) write(sequence);
 		await flush();
 		expect(results).toHaveLength(1);
-		await clock.advanceAsync(Nano.fromMilli(Milli(100)));
+		await clock.advance(Nano.fromMilli(Milli(100)));
 		expect(results.map((read) => read.kind)).toEqual(["frame", "gap", "frame", "gap", "frame", "gap", "frame"]);
 	} finally {
 		consumer.close();
@@ -174,11 +174,11 @@ test("a hole is late from the earliest arrival past it", async () => {
 		await flush();
 		write(4);
 		await flush();
-		await clock.advanceAsync(Nano.fromMilli(Milli(50)));
+		await clock.advance(Nano.fromMilli(Milli(50)));
 		write(2);
 		await flush();
 		expect(results).toHaveLength(1);
-		await clock.advanceAsync(Nano.fromMilli(Milli(50)));
+		await clock.advance(Nano.fromMilli(Milli(50)));
 		expect(results.map((read) => read.kind)).toEqual(["frame", "gap", "frame", "gap", "frame"]);
 	} finally {
 		consumer.close();

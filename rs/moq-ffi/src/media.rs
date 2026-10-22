@@ -285,7 +285,7 @@ pub enum MoqVideoFormat {
 /// A container that publishes its own tracks, which may be more than one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MoqContainerFormat {
-	/// Fragmented MP4 / CMAF.
+	/// Fragmented MP4 / CMAF, split into one frame per sample.
 	Fmp4,
 	/// Matroska / WebM.
 	Mkv,
@@ -293,6 +293,8 @@ pub enum MoqContainerFormat {
 	Ts,
 	/// Flash Video, as used by RTMP.
 	Flv,
+	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
+	Cmaf,
 }
 
 /// What an audio publish needs: a format, its codec init bytes, and an optional label.
@@ -472,6 +474,7 @@ impl From<MoqContainerFormat> for moq_mux::import::ContainerFormat {
 	fn from(format: MoqContainerFormat) -> Self {
 		match format {
 			MoqContainerFormat::Fmp4 => Self::Fmp4,
+			MoqContainerFormat::Cmaf => Self::Cmaf,
 			MoqContainerFormat::Mkv => Self::Mkv,
 			MoqContainerFormat::Ts => Self::Ts,
 			MoqContainerFormat::Flv => Self::Flv,

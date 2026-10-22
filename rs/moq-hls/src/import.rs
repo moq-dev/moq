@@ -65,12 +65,20 @@ pub struct Config {
 	///
 	/// This is a [`reqwest::Client`].
 	pub client: Option<Client>,
+
+	/// Republish each fMP4 fragment whole as CMAF instead of splitting it into one Legacy frame per
+	/// sample. See [`fmp4::Import::with_passthrough`](moq_mux::container::fmp4::Import::with_passthrough).
+	pub passthrough: bool,
 }
 
 impl Config {
 	/// Create an import configuration for `playlist` using the default HTTP client.
 	pub fn new(playlist: Url) -> Self {
-		Self { playlist, client: None }
+		Self {
+			playlist,
+			client: None,
+			passthrough: false,
+		}
 	}
 }
 
@@ -316,15 +324,18 @@ struct Sink {
 	/// new `EXT-X-MAP`, shifts by its offset: separate offsets would shift each by its own first
 	/// fragment's arrival.
 	timebase: moq_mux::catalog::Timebase,
+	/// Republish fragments whole rather than unwrapping their samples.
+	passthrough: bool,
 }
 
 impl Sink {
-	fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer) -> Self {
+	fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, passthrough: bool) -> Self {
 		let timebase = catalog.timebase();
 		Self {
 			broadcast,
 			catalog,
 			timebase,
+			passthrough,
 		}
 	}
 
@@ -333,7 +344,9 @@ impl Sink {
 		// A reservation (not a bare clone) so this init's tracks publish together.
 		// The pass holds a separate reservation across every rendition; this one
 		// only covers the tracks this init segment declares.
-		Fmp4::new(self.broadcast.clone(), self.timebase.reserve()).with_select(select.clone())
+		Fmp4::new(self.broadcast.clone(), self.timebase.reserve())
+			.with_select(select.clone())
+			.with_passthrough(self.passthrough)
 	}
 }
 
@@ -619,7 +632,7 @@ impl Import {
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let base_url = cfg.playlist;
 		Ok(Self {
-			sink: Sink::new(broadcast, catalog),
+			sink: Sink::new(broadcast, catalog, cfg.passthrough),
 			fetcher: Fetcher::new(cfg.client)?,
 			base_url,
 			video: Vec::new(),
@@ -1170,7 +1183,7 @@ mod tests {
 	fn sink() -> Sink {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		Sink::new(broadcast, catalog)
+		Sink::new(broadcast, catalog, false)
 	}
 
 	fn track_state() -> TrackState {
@@ -1654,7 +1667,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 		let mut catalogs = catalog.consume().unwrap();
-		let sink = Sink::new(broadcast, catalog.clone());
+		let sink = Sink::new(broadcast, catalog.clone(), false);
 
 		let mut first = sink.importer(&select_muxed());
 		first.decode(&init).unwrap();

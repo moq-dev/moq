@@ -39,7 +39,11 @@ async fn viewer(
 ) -> (MockPair, moq_net::bandwidth::Consumer) {
 	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
 	options.server_publish = Some(origin.consume());
-	options.client_subscribe = Some(origin::Producer::new(origin::Config::new(Hop::new(2).unwrap())).0);
+	// Driven, so its readers' interests reach the session and the viewer asks for what
+	// the server publishes.
+	let (subscribe, driver) = origin::Producer::new(origin::Config::new(Hop::new(2).unwrap()));
+	support::harness::spawn(driver);
+	options.client_subscribe = Some(subscribe);
 	options.stats = STATS;
 	options.server_polls = polls;
 	let pair = connect_mock(options).await;

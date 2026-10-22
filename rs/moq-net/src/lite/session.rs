@@ -347,7 +347,7 @@ where
 		session_stream: setup_stream,
 		ending: None,
 		publisher,
-		subscriber: SubscriberDriver::new(subscriber, early),
+		subscriber: SubscriberDriver::new(subscriber, early, client),
 		session,
 	};
 
