@@ -31,5 +31,4 @@ fields). Wire: none.
 
 ## Required
 
-- [moq-json groups roll on demand](/quest/m1/refresh/json.md) - replaces `delta_ratio` with `deltas`, which this reshapes
 - [Producers drop the phantom catalog type](/quest/m1/catalog-phantom.md) - edits the same `json::Snapshot` signature
