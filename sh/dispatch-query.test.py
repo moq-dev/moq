@@ -22,13 +22,13 @@ class QueryTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.repo = self.root / "repo"
         (self.repo / "sh").mkdir(parents=True)
-        for script in ("dispatch.sh", "changed.sh"):
+        for script in ("dispatch.sh", "changed.sh", "local.sh"):
             shutil.copy(ROOT / "sh" / script, self.repo / "sh" / script)
         self.bin = self.root / "bin"
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
             (self.bin / command).symlink_to(shutil.which(command))
-        self.env = dict(os.environ, PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
+        self.env = dict(os.environ, MOQ_LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
                         GIT_CONFIG_GLOBAL=os.devnull, MOQ_STRICT="1")
         for key in ("MOQ_DEV_SHELL", "MOQ_ALLOW_HOST", "GITHUB_BASE_REF"):
             self.env.pop(key, None)

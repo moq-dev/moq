@@ -191,7 +191,7 @@ class SelectionTest(unittest.TestCase):
     def test_executor_runs_only_selected_package_scripts_without_wasm(self):
         calls = self.calls(["doc/index.md"])
         scripts = [c for c in calls if c[:2] == ["bun", "run"]]
-        self.assertEqual(scripts, [["bun", "run", "--filter=docs", "--elide-lines=0", action]
+        self.assertEqual(scripts, [["bun", "run", "--sequential", "--filter=docs", "--elide-lines=0", action]
                                   for action in ("check", "build")])
         self.assertNotIn(["just", "js", "wasm", "dev"], calls)
         self.assertTrue(any(c[:2] == ["bunx", "tsc"] for c in calls))
@@ -225,7 +225,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_tests_do_not_build_wasm_or_unselected_packages(self):
         calls = self.calls(["doc/index.md"], "test")
-        self.assertIn(["bun", "run", "--filter=docs", "--elide-lines=0", "test"], calls)
+        self.assertIn(["bun", "run", "--sequential", "--filter=docs", "--elide-lines=0", "test"], calls)
         self.assertFalse(any(c[0] == "just" for c in calls))
 
     def test_owned_package_without_scripts_keeps_harness_check(self):

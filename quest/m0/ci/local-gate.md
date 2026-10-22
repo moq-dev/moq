@@ -1,24 +1,32 @@
-# [M] Share local check capacity across worktrees
+# [S] Verify shared local check admission
 
 ## Goal
 
-Expensive local check and test phases enter `quest gate` automatically, sharing
-one host/user budget with other worktrees and repositories. One admitted suite
-also bounds its own worker fanout so it does not overwhelm the desktop.
+Finish validating automatic host admission and bounded local worker fanout across
+root, direct language, and fixture entrypoints, preserving selected tests,
+failure status, and cancellation cleanup.
 
 ## Plan
 
-- Decided 2026-10-15: gate expensive commands, not agent sessions. Put admission
-  before expensive builds and fixture launch, outside test timeout clocks.
-  Keep hosted CI's existing runner/merge-queue behavior.
-- Audit root and direct language/test entrypoints together. Nested invocation
-  must not deadlock or bypass the cap. Cheap selection and docs-only checks
-  should remain cheap. Verify cancellation leaves no owned workload running.
-- Reuse mbx for Rust compilation. Measure nextest thread/group limits and Bun
-  workspace fanout for local runs; do not blindly enable mbx test scheduling
-  where queued time would consume nextest's timeout budget.
-- Benchmark representative solo and concurrent checkouts, recording wall time,
-  CPU time, worker counts, cache state, and other host load. Compare total work
-  separately from admission delay. Choose defaults from those measurements.
-- Explain direct invocation and configuration in existing developer docs.
-  Preserve selected tests and their failure behavior.
+- [Implementation PR](https://github.com/moq-dev/moq/pull/6256) adds shared
+  admission before expensive builds and fixture launch, outside test timeout
+  clocks. Nested work reuses admission and supervision; hosted CI keeps its
+  existing scheduling. Rust compilation still uses mbx.
+- Measured warm solo and paired checkouts with admission delay separated from
+  work wall time and CPU time. Local nextest defaults to four workers, with
+  the existing io-uring group limit retained. Bun workspace scripts run
+  sequentially. The PR records the measurements and budget tradeoff.
+- Launcher and dispatch tests verify hosted CI, nested and external admission,
+  failure status, worker overrides, and cancellation of descendants. They run
+  in the existing nightly tooling suite.
+- Remaining: run the complete `just ci` gate on a host whose Nix runner-image
+  builder can create the required user namespace. The current builder fails
+  writing `/proc/self/uid_map` with `Operation not permitted`; other PRs report
+  the same restriction, including [the listener tests](https://github.com/moq-dev/moq/pull/6234).
+- The direct Rust test phase also stops at
+  `stats::a_late_sink_reads_the_final_stats`, which fails with "the import
+  exited before its input ended". The CLI source is unchanged and
+  [the listener PR](https://github.com/moq-dev/moq/pull/6234) reproduces the
+  failure on the base. Resolve that independently before the full gate can pass.
+- Two existing nightly fixture assertions are owned by
+  [the CI audit](https://github.com/moq-dev/moq/pull/6266).

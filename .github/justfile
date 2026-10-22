@@ -2,7 +2,7 @@ set working-directory := '..'
 
 # Build and test the persistent NixOS runner VM on x86_64 Linux.
 runner-vm:
-    nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
+    bash sh/local.sh nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
 
 # Lint GitHub Actions workflows, their alert coverage, and that every step runs a recipe.
 check:
@@ -14,6 +14,7 @@ check:
 
 # Tests of repository tooling; nightly, not on every pull request.
 test:
+    python3 sh/local.test.py
     python3 sh/coverage.test.py
     python3 sh/size/report.test.py
     python3 sh/size/release.test.py

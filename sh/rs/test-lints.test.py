@@ -18,6 +18,8 @@ class TestLints(unittest.TestCase):
             (root / "rs").mkdir()
             (root / "sh" / "rs").mkdir(parents=True)
             (root / "src").mkdir()
+            for script in ("local.sh", "local.ts"):
+                shutil.copy(ROOT / "sh" / script, root / "sh" / script)
             (root / "justfile").write_text("mod rs\n")
             shutil.copy(ROOT / "rs" / "justfile", root / "rs" / "justfile")
             shutil.copy(ROOT / "sh" / "rs" / "nextest.sh", root / "sh" / "rs" / "nextest.sh")

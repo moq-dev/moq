@@ -423,3 +423,21 @@ within a source; dimensions belong in the name. Supported units are `ns`, `us`,
 and context. Validate and split sources into cost and throughput histories with
 `just gh benchmark-report prepare INPUT_DIRECTORY OUTPUT_DIRECTORY`; extending
 the table requires no new renderer or data branch.
+
+## Local check capacity
+
+Prepare the same warm dependencies and artifacts in each isolated checkout, then
+compare solo and concurrent suites with their actual worker counts:
+
+```bash
+just bench-local --checkout "$PWD" --checkout /path/to/another/checkout \
+  --workers 1 4 8 24 --samples 3 --cache warm -- \
+  cargo nextest run --locked -p moq-net --lib
+```
+
+Each JSON record retains host load, configured workers, admission delay, work
+wall time, total wall time, and child CPU time. Logs stay under each checkout's
+`.scratch/local-bench/`. To compare Bun workspace fanout, repeat with the same
+`bun run --filter=... test` command, then add `--sequential`. Admission remains
+outside the suite's timeout clocks. Use separate checkouts to avoid measuring
+Cargo's artifact lock instead of competing work.

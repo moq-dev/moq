@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${GITHUB_ACTIONS:-}" != true && "${MOQ_LOCAL_SUPERVISED:-}" != 1 ]]; then
+    exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
+fi
+
 # Build moq-net alone: a workspace build unifies its default features back in.
 # Normal dependencies exclude the simulation executor and bench-only Tokio.
 minimal=$(cargo tree --locked -p moq-net --no-default-features -e normal --prefix none)

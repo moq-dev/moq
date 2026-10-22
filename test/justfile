@@ -30,7 +30,7 @@ harness:
     cd .. && bun test test/interop/compat/resolve.test.ts test/interop/compat/claims.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
-    cd interop/clients/js && bun test ./harness.browser.ts ./signals-dom.browser.ts ./publish-ui.browser.ts ./capture-channel-count.browser.ts ./open-gop.browser.ts ./src/contract.test.ts ./src/resume.test.ts
+    cd interop/clients/js && bash ../../../../sh/local.sh bun test ./harness.browser.ts ./signals-dom.browser.ts ./publish-ui.browser.ts ./capture-channel-count.browser.ts ./open-gop.browser.ts ./src/contract.test.ts ./src/resume.test.ts
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
@@ -214,11 +214,11 @@ wasm *args:
 video:
     cd .. && bun install --frozen-lockfile
     cd video && bunx playwright install chromium
-    cd video && bun test ./renderer.browser.ts
+    cd video && bash ../../sh/local.sh bun test ./renderer.browser.ts
 
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:
-    cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
+    bash ../sh/local.sh cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:
@@ -226,7 +226,7 @@ bare-fin:
 
 # Explore JSON snapshot codec sequences with a fresh replayable seed.
 json-properties:
-    bash json-properties.sh
+    bash ../sh/local.sh bash json-properties.sh
 
 # The TypeScript qmux peer as client and server against qmux 0.6.3's Rust
 # interop examples, per draft. `cargo install` keeps that release out of the
@@ -242,7 +242,7 @@ qmux:
 p2p:
     cd .. && bun install --frozen-lockfile
     cd p2p && bunx playwright install chromium
-    cd p2p && bun test ./transport.browser.ts
+    cd p2p && bash ../../sh/local.sh bun test ./transport.browser.ts
 
 # Retain complete backend assets, parity, and raw alternating browser samples.
 [positional-arguments]

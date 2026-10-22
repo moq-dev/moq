@@ -18,7 +18,7 @@ class CoverageTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        for script in ("sh/js/coverage.py", "sh/rs/coverage.sh", "sh/rs/nextest.sh"):
+        for script in ("sh/js/coverage.py", "sh/rs/coverage.sh", "sh/rs/nextest.sh", "sh/local.sh"):
             target = self.root / script
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / script, target)
@@ -44,7 +44,7 @@ for arg in sys.argv:
             target.chmod(0o755)
         self.calls = self.root / "calls"
         self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
-                        COVERAGE_CALLS=str(self.calls), BASH_ENV="/dev/null", GITHUB_ACTIONS="")
+                        COVERAGE_CALLS=str(self.calls), BASH_ENV="/dev/null", GITHUB_ACTIONS="", MOQ_LOCAL_SUPERVISED="1")
 
     def javascript(self, name="", fail=False):
         directories = ["js/first", "js/second", "js/empty"]
