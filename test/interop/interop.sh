@@ -1174,10 +1174,17 @@ run_tail_client() {
     local lang="$1" role="$2" broadcast="$3" url="$4" version="${5:-}" mode="${6:-}" limit="$TIMEOUT"
     # The publisher outlives the subscriber's whole deadline, waiting for its acknowledgement.
     [[ "$role" == publish ]] && limit=$(awk -v t="$TIMEOUT" 'BEGIN { print t * 2 }')
+    # A mode follows the version, which is empty for the defaults.
+    local extra=()
+    if [[ -n "$mode" ]]; then
+        extra=("$version" "$mode")
+    elif [[ -n "$version" ]]; then
+        extra=("$version")
+    fi
     case "$lang" in
-        rust) timeout -k 3 "$limit" "$TARGET_BASE/$PROFILE/examples/interop-tail" "$role" "$url" "$broadcast" ${version:+"$version"} ${mode:+"$mode"} ;;
-        js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" node --import tsx tail.ts "$role" "$url" "$broadcast" ${version:+"$version"} ${mode:+"$mode"}) ;;
-        js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" bun tail.ts "$role" "$url" "$broadcast" ${version:+"$version"} ${mode:+"$mode"}) ;;
+        rust) timeout -k 3 "$limit" "$TARGET_BASE/$PROFILE/examples/interop-tail" "$role" "$url" "$broadcast" ${extra[@]+"${extra[@]}"} ;;
+        js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" node --import tsx tail.ts "$role" "$url" "$broadcast" ${extra[@]+"${extra[@]}"}) ;;
+        js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" bun tail.ts "$role" "$url" "$broadcast" ${extra[@]+"${extra[@]}"}) ;;
         *)
             echo "unknown tail client: $lang" >&2
             return 1
@@ -1294,7 +1301,7 @@ run_fetch_round() {
     from=$(relay_next_line)
     mkfifo "$fifo"
     exec 9<>"$fifo"
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" rust publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version"
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" rust publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" cached
     pid="$HARNESS_PID"
     if timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
         --broadcast "$broadcast" fetch tail --group 0 >"$LOGS/$name.raw" &&

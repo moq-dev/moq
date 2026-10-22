@@ -2,7 +2,9 @@
 //!
 //! `drop` cuts group 1. `join` reads from whichever group the subscription starts at: a
 //! moq-transport subscription starts at the largest group rather than at the range asked for,
-//! so it must read a contiguous run of groups through the last one.
+//! so it must read a contiguous run of groups through the last one. `cached` publishes every
+//! group before connecting, so a FETCH of a past group never races its write: moq-transport
+//! refuses a FETCH that starts past the largest group rather than waiting for it.
 use std::time::Duration;
 
 use anyhow::{Context, ensure};
@@ -12,20 +14,41 @@ use tokio::io::AsyncBufReadExt;
 const GROUPS: u64 = 4;
 const BYTES: usize = 256 * 1024;
 
+/// Publish every group, cutting group 1 for `drop`.
+fn write(track: &mut moq_net::track::Producer, drop: bool) -> anyhow::Result<()> {
+	// Declare the end before the final group's payload is even available.
+	track.finish_at(moq_net::track::Position::group(GROUPS))?;
+	for sequence in 0..GROUPS {
+		let mut group = track.append_group()?;
+		if drop && sequence == 1 {
+			group.abort(moq_net::Error::App(1))?;
+			continue;
+		}
+		group.write_frame(moq_net::Timestamp::ZERO, vec![sequence as u8; BYTES])?;
+		group.finish()?;
+	}
+	Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
 	ensure!(
 		(4..=6).contains(&args.len()),
-		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join]]"
+		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached]]"
 	);
 	let url: url::Url = args[2].parse()?;
 	let mode = args.get(5).map(String::as_str);
-	ensure!(matches!(mode, None | Some("drop" | "join")), "unknown mode: {mode:?}");
+	ensure!(
+		matches!(mode, None | Some("drop" | "join" | "cached")),
+		"unknown mode: {mode:?}"
+	);
 	let drop = mode == Some("drop");
 	let join = mode == Some("join");
+	let cached = mode == Some("cached");
 	let mut config = moq_tokio::connect::Config::default();
-	if let Some(version) = args.get(4) {
+	// An empty version offers the defaults, so a mode can follow it.
+	if let Some(version) = args.get(4).filter(|version| !version.is_empty()) {
 		config.version.push(version.parse().map_err(anyhow::Error::msg)?);
 	}
 	config.websocket.enabled = Some(false);
@@ -40,24 +63,19 @@ async fn main() -> anyhow::Result<()> {
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)?;
 			broadcast.announce(Default::default())?;
+			if cached {
+				write(&mut track, drop)?;
+			}
 			let session = client
 				.clone()
 				.with_publisher(&origin)
 				.connect(url)
 				.established()
 				.await?;
-			let mut demand = track.demand();
-			while demand.wanted_changed().await?.is_none() {}
-			// Declare the end before the final group's payload is even available.
-			track.finish_at(moq_net::track::Position::group(GROUPS))?;
-			for sequence in 0..GROUPS {
-				let mut group = track.append_group()?;
-				if drop && sequence == 1 {
-					group.abort(moq_net::Error::App(1))?;
-					continue;
-				}
-				group.write_frame(moq_net::Timestamp::ZERO, vec![sequence as u8; BYTES])?;
-				group.finish()?;
+			if !cached {
+				let mut demand = track.demand();
+				while demand.wanted_changed().await?.is_none() {}
+				write(&mut track, drop)?;
 			}
 			// A finished track is not a drained transport. Keep the session alive
 			// until the harness confirms the subscriber checked every byte and EOF.
