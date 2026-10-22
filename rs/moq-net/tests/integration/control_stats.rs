@@ -1,6 +1,6 @@
 #![cfg(feature = "async")]
 
-//! Control-body counters cross real protocol drivers, including legacy multiplexing.
+//! Control counters cross real protocol drivers, including legacy multiplexing.
 
 use crate::support::{
 	harness::{MockConnectOptions, connect_mock, now, spawn, subscribed},
