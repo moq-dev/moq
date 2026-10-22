@@ -375,6 +375,11 @@ impl StreamsState {
             // We don't buffer data on stopped streams, so issue flow control credit immediately
             self.add_read_credits(new_bytes)
         };
+        if new_bytes == 0 {
+            // Neither spent nor returned credit, so a stuck window stays as it was, and a peer at
+            // its limit cannot make every repeated frame pay for a scan of every stream.
+            return Ok(transmit);
+        }
         Ok(self.evict_after_arrival(transmit))
     }
 
@@ -466,6 +471,9 @@ impl StreamsState {
             0 => ShouldTransmit(false),
             credit => self.add_read_credits(credit),
         };
+        if new_bytes == 0 && credit == 0 {
+            return Ok(transmit);
+        }
         Ok(self.evict_after_arrival(transmit))
     }
 
@@ -3771,6 +3779,29 @@ mod tests {
             client.local_max_data > client.data_recvd,
             "the peer has credit"
         );
+    }
+
+    /// Repeated frames at the peer's limit spend and return no credit, so they skip the stuck
+    /// check rather than each paying for it.
+    #[test]
+    fn creditless_arrivals_skip_the_stuck_check() {
+        const WINDOW: u64 = 1000;
+        let (mut client, ids) = stuck(WINDOW);
+        data(&mut client, ids[1], 0, 10, false);
+        let _ = stop(&mut client, ids[1], 0);
+        let room = client.local_max_data - client.data_recvd;
+        data(&mut client, ids[0], 0, room as usize, false);
+        assert_eq!(
+            client.local_max_data, client.data_recvd,
+            "the peer is at its limit"
+        );
+
+        let scans = client.scans;
+        for _ in 0..100 {
+            data(&mut client, ids[0], 0, 10, false);
+            data(&mut client, ids[1], 0, 10, false);
+        }
+        assert_eq!(client.scans, scans);
     }
 
     /// A reset that wakes a waiting reader leaves it ready to observe the reset and release its
