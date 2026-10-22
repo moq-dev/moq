@@ -102,7 +102,7 @@ async fn drain(consumer: moq_net::broadcast::Consumer) -> BytesMut {
 }
 
 /// `drain` for an exporter built with an explicit catalog extension.
-async fn drain_with<S: crate::catalog::Stream>(exporter: Export<S>) -> BytesMut
+pub(super) async fn drain_with<S: crate::catalog::Stream>(exporter: Export<S>) -> BytesMut
 where
 	S::Ext: tscat::Catalog,
 {
@@ -3080,15 +3080,19 @@ async fn service_layer_survives_roundtrip() {
 	.await;
 	assert_packet_aligned(&ts);
 
-	// The rebuilt PAT preserves the transport/service identity and PMT PID.
+	// The rebuilt PAT preserves the transport/service identity and PMT PID, and points at the
+	// carried NIT through the network entry.
 	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
 	let mut checked_pat = false;
 	while let Some(packet) = reader.read_ts_packet().unwrap() {
 		if let Some(TsPayload::Pat(pat)) = packet.payload {
 			assert_eq!(pat.transport_stream_id, 1, "TSID preserved in the rebuilt PAT");
-			assert_eq!(pat.table.len(), 1);
-			assert_eq!(pat.table[0].program_num, 1, "service number preserved");
-			assert_eq!(pat.table[0].program_map_pid.as_u16(), 0x1000, "PMT PID preserved");
+			let table: Vec<_> = pat
+				.table
+				.iter()
+				.map(|entry| (entry.program_num, entry.program_map_pid.as_u16()))
+				.collect();
+			assert_eq!(table, [(0, 0x0010), (1, 0x1000)], "network entry, then the service");
 			checked_pat = true;
 			break;
 		}
@@ -3106,6 +3110,10 @@ async fn service_layer_survives_roundtrip() {
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
 	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	import2.finish().unwrap();
+	assert!(
+		!import2.stats().streams.contains_key(&0x0010),
+		"the network entry names captured SI, not a PID to count"
+	);
 
 	let snapshot2 = catalog2.snapshot();
 	let program2 = snapshot2

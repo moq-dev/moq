@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `ts::stats::Snapshot::streams` rows cover PIDs that carry no track (#6252)
+
+A TS import now reports a row for every PID it does not carry: a listed stream it refuses, and, once the PMTs are in, a PID no table claims. Such a row has an empty `track` and class `Data`, and its `refused` counts the refusal or the PID's packets; `refused` also counts TS-scrambled packets on a carried stream.
+MPEG-1/2 video is a `pesPacket` track with class `Video` rather than a clock-only row.
+Filter on a non-empty `track` where you read the rows as published tracks.
+
 ### `Source` resolution takes the reference's epoch (#5699)
 
 `Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional epoch after `rel`.

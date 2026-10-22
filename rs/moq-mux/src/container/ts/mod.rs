@@ -24,6 +24,7 @@
 //! [`Release`] writes that track back out on a fixed delay.
 
 mod adts;
+mod claims;
 mod damage;
 mod export;
 mod follower;
@@ -70,3 +71,5 @@ mod pes_packet_test;
 mod recovery_test;
 #[cfg(test)]
 mod release_test;
+#[cfg(test)]
+mod routes_test;

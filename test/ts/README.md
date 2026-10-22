@@ -44,6 +44,7 @@ just test ts --leak             # 1080p video with no HRD, filling its level's 2
 just test ts --full             # the same with two audio PIDs, filling its multiplex with no nulls
 just test ts --fragment-pes    # legal headers split across packets, with FFmpeg/TSDuck grading
 just test ts --klv              # KLV and DVB AC-3 carried as whole PES, graded against the source
+just test ts --mpeg2            # MPEG-2 video carried as whole PES, decoded from the capture
 just test ts --delay 2s         # pass the exporter's --delay
 just test ts --hrd --rate 7000000 # congest the subscriber's leg below the media rate
 just test ts --loss 1           # drop 1% of the relay's datagrams to the subscriber
@@ -67,6 +68,12 @@ byte-equal outside its PTS and DTS, which move by one shift; none out before its
 source placement on the program clock, and none after its PTS; and FFmpeg reading
 each as KLV with the same PES and PTS. `holes.py` and the T-STD model grade the
 AC-3, whose buffer drains each sync frame at its own decode time.
+
+`--mpeg2` publishes Main Profile at Main Level MPEG-2 video beside MPEG audio. The
+importer does not decode MPEG-2 video, so it rides its track whole while its PTS
+still paces the program. `mpeg2.py` decodes source and capture with FFmpeg: past
+the GOP the subscriber joins in, every picture is the source's next one, through
+the source's last. `holes.py` and the T-STD model grade the rest.
 
 `--live` swaps the analyzer, not the rig: the same round-trip runs, but the
 subscriber's stdout goes straight into `pcr-timing.py` instead of a capture file.
@@ -144,8 +151,8 @@ decoder (2.4.2; Rec. ITU-T H.222.0, whose 10/2014 edition is a free download),
 fed on the stream's own PCR clock:
 
 ```text
-video (AVC 2.14.3.1, HEVC 2.17.2)   TB --Rx--> MB --Rbx (leak)--> EB --DTS--> decoder
-audio (2.4.2.3)                     TB --Rx--> B  ----------------PTS--> decoder
+video (H.262 2.4.2.3, AVC 2.14.3.1, HEVC 2.17.2)   TB --Rx--> MB --Rbx (leak)--> EB --DTS--> decoder
+audio (2.4.2.3)                                    TB --Rx--> B  ----------------PTS--> decoder
 ```
 
 It fails a stream where TB, MB, EB or B overflows, where TB stays occupied for a
@@ -156,7 +163,7 @@ underflowed access unit finished arriving, and the longest any access unit waite
 
 TSDuck supplies the transport analysis, not this decoder-buffer model. Commercial
 analyzers advertise T-STD checks; no suitable maintained open-source replacement
-was established for this harness. Its parameters are transcribed from the specs: H.264 Table A-1 and H.265 Table A.8 for the level, the
+was established for this harness. Its parameters are transcribed from the specs: H.262 Tables 8-13 and 8-14, H.264 Table A-1 and H.265 Table A.8 for the level, the
 ADTS and "other audio" rates and sizes in H.222.0 2.4.2.3, and ATSC A/52 and A/53
 Part 5 for AC-3 and E-AC-3. TSDuck does the parsing: `tstables` decodes the PMT
 and `tsp -P pes --avc-access-unit` the SPS, AVC and HEVC alike.
@@ -170,6 +177,11 @@ level defaults too. An `AVC_timing_and_HRD_descriptor` or
 `HEVC_timing_and_HRD_descriptor` with `hrd_management_valid` switches MB-to-EB
 transfer to the HRD's own schedule, which is not modelled, so such a stream is
 refused.
+
+MPEG-2 video takes Rx = 1.2 Rmax and Rbx = Rmax from its level, EB from the
+sequence header's `vbv_buffer_size`, and MB from what the level's VBV leaves over,
+as H.222.0 2.4.2.3 specifies for the leak method a variable-rate encoder signals
+with `vbv_delay` 0xFFFF. Its picture, GOP or sequence header opens each access unit.
 
 Opus is graded against ADTS's buffers for the same channel count: the Opus-in-TS
 draft gives Rx (2 Mb/s for 1-2 channels, matching ADTS) but leaves the buffer size
@@ -894,7 +906,7 @@ browser interop. It runs nightly on `main`, and release PRs touching a workspace
 crate `run.sh` builds (kept in sync by `sh/gh/ts-paths.py`), the harness, or the
 toolchain run it too:
 `just test ts-controls`, `just test ts-pair-controls`, the default and 2 Mb/s round trips, HRD, leak, full, headroom,
-open-GOP, KLV (strict), passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
+open-GOP, KLV (strict), MPEG-2 video, passthrough (generated, Kyrion and MPTS), EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
 Nightly and manual runs also invoke `just test ts --pair`,

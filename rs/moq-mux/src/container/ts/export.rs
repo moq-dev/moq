@@ -774,7 +774,11 @@ impl Kind {
 	/// alike at both edges.
 	fn class(&self) -> super::stats::Class {
 		match self {
-			Kind::Video(_) => super::stats::Class::Video,
+			// MPEG-1/2 video rides whole, but paces the program as decoded video does.
+			Kind::Video(_)
+			| Kind::PesPacket {
+				stream_type: 0x01 | 0x02,
+			} => super::stats::Class::Video,
 			Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => {
 				super::stats::Class::Audio
 			}
@@ -791,6 +795,39 @@ struct Psi {
 	/// PID the PMT rides on: the source's original (preserved from the service
 	/// record) or the synthesized [`PMT_PID`] for a media-only source.
 	pmt_pid: u16,
+	transport_stream_id: u16,
+	program_number: u16,
+	/// Whether the PAT lists the network entry, pointing at the NIT the export carries.
+	network: bool,
+}
+
+/// The DVB NIT's PID (ETSI EN 300 468 5.1.3), the network PID the PAT's program 0 names.
+const NIT_PID: u16 = 0x0010;
+/// The `table_id` of the NIT describing the delivering network.
+const NIT_ACTUAL: u8 = 0x40;
+
+/// The PAT for the exported program at `version`, listing the network PID as program 0 first when
+/// the export carries the NIT (ISO/IEC 13818-1 2.4.4.3), which a receiver otherwise cannot find.
+fn encode_pat(
+	transport_stream_id: u16,
+	program_number: u16,
+	pmt_pid: u16,
+	network: bool,
+	version: VersionNumber,
+) -> anyhow::Result<Bytes> {
+	let network = network.then(|| ProgramAssociation {
+		program_num: 0,
+		program_map_pid: Pid::new(NIT_PID).expect("a valid PID"),
+	});
+	let program = ProgramAssociation {
+		program_num: program_number,
+		program_map_pid: Pid::new(pmt_pid)?,
+	};
+	super::psi::encode_pat(&Pat {
+		transport_stream_id,
+		version_number: version,
+		table: network.into_iter().chain([program]).collect(),
+	})
 }
 
 /// Per-frame PES descriptor (everything but the payload bytes).
@@ -1504,6 +1541,22 @@ where
 			}
 		}
 
+		// A NIT acquired or lost after the tables went out revises the PAT's network entry.
+		let network = self.carries_nit();
+		if let Some(psi) = self.psi.as_mut()
+			&& psi.network != network
+		{
+			self.version.increment();
+			psi.pat = encode_pat(
+				psi.transport_stream_id,
+				psi.program_number,
+				psi.pmt_pid,
+				network,
+				self.version,
+			)?;
+			psi.network = network;
+		}
+
 		// The desired track set: media renditions plus the verbatim streams.
 		let mut active: BTreeMap<String, ()> = BTreeMap::new();
 		for name in catalog.video.renditions.keys() {
@@ -2059,14 +2112,8 @@ where
 			.filter(|&id| id != 0)
 			.unwrap_or(1);
 
-		let pat = Pat {
-			transport_stream_id,
-			version_number: self.version,
-			table: vec![ProgramAssociation {
-				program_num: program_number,
-				program_map_pid: Pid::new(pmt_pid)?,
-			}],
-		};
+		let network = self.carries_nit();
+		let pat = encode_pat(transport_stream_id, program_number, pmt_pid, network, self.version)?;
 		let pmt = super::psi::Pmt {
 			program_number,
 			pcr_pid: Some(Pid::new(pcr_pid)?),
@@ -2080,12 +2127,20 @@ where
 			self.liveness.register(track.pid);
 		}
 		self.psi = Some(Psi {
-			pat: super::psi::encode_pat(&pat)?,
+			pat,
 			pmt: super::psi::encode_pmt(&pmt, self.version)?,
 			pcr_pid,
 			pmt_pid,
+			transport_stream_id,
+			program_number,
+			network,
 		});
 		Ok(())
+	}
+
+	/// Whether the catalog carries a NIT on its PID, which the PAT then points a receiver at.
+	fn carries_nit(&self) -> bool {
+		self.si.contains_key(&(NIT_PID, NIT_ACTUAL))
 	}
 
 	/// Packetize one media frame and queue it on the [`Schedule`], re-emitting PAT/PMT
@@ -2260,10 +2315,11 @@ where
 		};
 		let pid = track.pid;
 		let place = frame.timestamp.as_nanos();
+		// Its first access unit decodes at the DTS, which a reordered picture carries ahead of its PTS.
 		let decode = pes
 			.as_ref()
-			.and_then(|pes| pes.pts)
-			.map(|pts| unwrap_pts(pts, frame.timestamp));
+			.and_then(|pes| pes.dts.or(pes.pts))
+			.map(|ticks| unwrap_pts(ticks, frame.timestamp));
 		let dolby = Dolby::described(&track.descriptors)
 			.filter(|_| matches!(track.kind, Kind::PesPacket { stream_type: 0x06 }));
 		let frames = match (&pes, decode, dolby) {
@@ -2814,6 +2870,8 @@ const PES_DTS_LEN: usize = 5;
 struct PesPacket {
 	/// Its PTS in 90 kHz ticks, as the 33-bit field carries it.
 	pts: Option<u64>,
+	/// Its DTS, likewise, where it differs from the PTS.
+	dts: Option<u64>,
 	/// Where its payload begins, past the header.
 	payload: usize,
 }
@@ -2837,6 +2895,7 @@ impl PesPacket {
 		}
 		Ok(Self {
 			pts: pes.pts,
+			dts: pes.dts,
 			payload: pes.header.len(),
 		})
 	}

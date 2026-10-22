@@ -1,11 +1,12 @@
 //! Every program of a multiplex, each imported as its own broadcast.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Context;
 use mpeg2ts::ts::{Pid, TsPacket};
 
-use super::import::{Framer, PatReader};
+use super::claims::Claims;
+use super::import::{Framer, Liveness, PatReader, SectionReassembler};
 use super::{Ext, Import, psi, stats};
 use crate::catalog;
 
@@ -26,6 +27,8 @@ pub struct Programs {
 	scan: PatScan,
 	/// Empty until the PAT arrives.
 	programs: Vec<Program>,
+	/// Every program's PAT and PMT, read once for the PIDs none of them claims.
+	tables: Tables,
 }
 
 /// One program's broadcast.
@@ -71,6 +74,7 @@ impl Programs {
 			pending: Vec::new(),
 			scan: PatScan::default(),
 			programs: Vec::new(),
+			tables: Tables::new(),
 		}
 	}
 
@@ -96,7 +100,9 @@ impl Programs {
 				.clone()
 				.with_catalog(catalog::hang::Catalog::<Ext>::default());
 			let catalog = catalog::Producer::new(&mut broadcast, config)?;
-			let mut import = Import::new(broadcast.clone(), catalog.reserve()).with_program(program);
+			let mut import = Import::new(broadcast.clone(), catalog.reserve())
+				.with_program(program)
+				.in_multiplex();
 			// Seeded with the scanner's PAT rather than replaying its packets, so every section
 			// reaches the importer and nothing the scanner counted is counted again.
 			import.handle_pat(&pat)?;
@@ -112,6 +118,7 @@ impl Programs {
 				pending: Some((route, listed)),
 			});
 		}
+		self.tables.pat(&pat);
 		let pending = std::mem::take(&mut self.pending);
 		self.feed(&pending)
 	}
@@ -121,6 +128,7 @@ impl Programs {
 			program.import.decode(data)?;
 			program.announce_if_listed()?;
 		}
+		self.tables.decode(data);
 		Ok(())
 	}
 
@@ -128,7 +136,9 @@ impl Programs {
 	///
 	/// Every importer reads the same PAT, and programs sharing a PMT PID read the same PMT
 	/// sections, so a dropped section counts once however many read it. Every importer also
-	/// grades every packet of the multiplex, so each TR 101 290 error counts once too.
+	/// grades every packet of the multiplex, so each TR 101 290 error counts once too. A PID no
+	/// program's PMT and no captured SI claims is counted here, once for the multiplex, in the
+	/// row of the program that carries it whenever one does.
 	pub fn stats(&self) -> stats::Snapshot {
 		let mut stats = stats::Snapshot::default();
 		let mut crc_errors = BTreeMap::<u16, u64>::new();
@@ -141,6 +151,7 @@ impl Programs {
 			}
 			errors.max(program.import.errors());
 		}
+		stats::Stream::dropped(&mut stats.streams, self.tables.claims.rows());
 		// The importers only see the PATs after the one that started them.
 		*crc_errors.entry(Pid::PAT).or_default() += self.scan.crc_error;
 		stats.crc_error = crc_errors.values().sum();
@@ -184,6 +195,120 @@ fn program_broadcast(name: &str, program: u16) -> String {
 			format!("{stem}/{program}{}", format.extension())
 		}
 		None => format!("{name}/{program}"),
+	}
+}
+
+/// The multiplex's own reading of the PAT and every PMT it lists, so a PID is counted dropped only
+/// when no program claims it. Each importer reads only its own program's PMT.
+struct Tables {
+	framer: Framer,
+	/// A trailing partial packet.
+	scratch: Vec<u8>,
+	pat: PatReader,
+	/// A reassembler for each PMT PID the PAT lists.
+	pmts: HashMap<Pid, SectionReassembler>,
+	/// Each `(program_number, PMT PID)` the PAT lists: a PMT on another program's PID is ignored.
+	listed: HashSet<(u16, Pid)>,
+	/// The program and PCR PID whose clock times a PMT's lapse: the first program to deliver one.
+	clock: Option<(u16, Pid)>,
+	liveness: Liveness,
+	claims: Claims,
+}
+
+impl Tables {
+	fn new() -> Self {
+		Self {
+			framer: Framer::default(),
+			scratch: Vec::new(),
+			pat: PatReader::default(),
+			pmts: HashMap::new(),
+			listed: HashSet::new(),
+			clock: None,
+			liveness: Liveness::default(),
+			// Every program's catalog carries the `mpegts` section, so the SI is captured.
+			claims: Claims::new(super::catalog::SI_PIDS),
+		}
+	}
+
+	/// A whole PAT: the programs it lists, and their PMT PIDs to read.
+	fn pat(&mut self, pat: &psi::Pat) {
+		let listed: Vec<_> = pat
+			.programs
+			.iter()
+			.filter(|entry| entry.program_number != 0)
+			.map(|entry| (entry.program_number, entry.pmt_pid))
+			.collect();
+		self.pmts.retain(|pid, _| listed.iter().any(|(_, pmt)| pmt == pid));
+		for (_, pid) in &listed {
+			self.pmts.entry(*pid).or_default();
+		}
+		self.claims.pat(&listed, self.liveness.now());
+		self.listed = listed.into_iter().collect();
+	}
+
+	/// Read the tables and the clock out of `data`, counting each packet no table claims.
+	fn decode(&mut self, data: &[u8]) {
+		self.scratch.extend_from_slice(data);
+		let mut off = 0;
+		while let Some(at) = self.framer.next(&self.scratch, &mut off) {
+			let pkt: [u8; TsPacket::SIZE] = self.scratch[at..at + TsPacket::SIZE].try_into().unwrap();
+			// A packet flagged corrupt may carry another PID's number, and its tables and clock
+			// are as untrustworthy.
+			if pkt[1] & 0x80 != 0 {
+				continue;
+			}
+			let pid = (u16::from(pkt[1] & 0x1f) << 8) | u16::from(pkt[2]);
+			self.claims.packet(pid);
+			let Ok(pid) = Pid::new(pid) else {
+				continue;
+			};
+			if pid.as_u16() == Pid::PAT {
+				// The importers count a bad CRC.
+				if let Some(pat) = self.pat.push(&pkt, &mut 0) {
+					self.pat(&pat);
+				}
+			} else if let Some(reassembler) = self.pmts.get_mut(&pid) {
+				let mut sections = Vec::new();
+				reassembler.push(&pkt, &mut sections);
+				for section in sections {
+					if section.first() != Some(&psi::PMT_TABLE_ID) || !psi::crc_ok(&section) {
+						continue;
+					}
+					if let Some(pmt) = psi::Pmt::parse(&section)
+						&& self.listed.contains(&(pmt.program_number, pid))
+					{
+						self.pmt(&pmt);
+					}
+				}
+			}
+			if self.clock.is_some_and(|(_, clock)| clock == pid) && super::import::adaptation_valid(&pkt) {
+				if super::import::discontinuity_indicator(&pkt) {
+					self.liveness.discontinuity();
+				}
+				if let Some(pcr) = super::import::pcr(&pkt) {
+					self.liveness.pcr(pcr);
+					if let Some(now) = self.liveness.now() {
+						self.claims.tick(now);
+					}
+				}
+			}
+		}
+		self.scratch.drain(..off);
+	}
+
+	/// A PMT's claims, and the clock it names if it is the first to name one.
+	fn pmt(&mut self, pmt: &psi::Pmt) {
+		let pids = pmt.streams.iter().map(|es| es.pid.as_u16());
+		self.claims
+			.pmt(pmt.program_number, pids.chain(pmt.pcr_pid.map(|pid| pid.as_u16())));
+		match (self.clock, pmt.pcr_pid) {
+			(None, Some(pcr)) => self.clock = Some((pmt.program_number, pcr)),
+			(Some((program, old)), pcr) if program == pmt.program_number && pcr != Some(old) => {
+				self.clock = pcr.map(|pcr| (program, pcr));
+				self.liveness.discontinuity();
+			}
+			_ => {}
+		}
 	}
 }
 
