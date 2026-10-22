@@ -775,7 +775,7 @@ where
 	///
 	/// The same exclusion the announce path applies (see [`Self::select`]), which is what
 	/// keeps advertised paths truthful and prevents subscription cycles of any length.
-	async fn serving_origin(&self) -> origin::Consumer {
+	pub(super) async fn serving_origin(&self) -> origin::Consumer {
 		self.excluding(&self.peer().await)
 	}
 
