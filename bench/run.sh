@@ -122,7 +122,7 @@ fi
 BASE_TARGET=$TARGET/base
 CURRENT_TARGET=$TARGET/current
 
-ARTIFACTS=${MOQ_BENCH_ARTIFACTS:-$TARGET/runs}
+ARTIFACTS=${MOQ_BENCH_ARTIFACTS:-$ROOT/.scratch/bench}
 mkdir -p "$ARTIFACTS"
 ARTIFACTS=$(cd "$ARTIFACTS" && pwd -P)
 # Each run copies bench/ and untracked sources, so it must land in neither.
@@ -267,9 +267,12 @@ run_criterion_target() {
 
 criterion_cases() {
     local checkout=$1
-    local manifest target features benchmark
-    local listing=$RUN/criterion-listing
+    local manifest target benchmark discovery
     local target_list=$RUN/criterion-targets
+    local label=base
+    if [[ $checkout == "$ROOT" ]]; then
+        label=current
+    fi
 
     if ! criterion_targets "$checkout" >"$target_list"; then
         return 1
@@ -278,21 +281,18 @@ criterion_cases() {
         printf 'no Criterion benchmark targets found\n' >&2
         return 1
     fi
-    while IFS=$'\t' read -r manifest target features; do
-        if ! (
-            cd "$checkout" || exit 1
-            CARGO_TARGET_DIR=$(target_dir "$checkout") \
-                cargo bench --locked --manifest-path "$manifest" --bench "$target" ${features:+--features "$features"} -- --list
-        ) | sed -n 's/: benchmark$//p' >"$listing"; then
-            return 1
-        fi
-        if [[ ! -s $listing ]]; then
-            printf 'Criterion target has no benchmark cases: %s/%s\n' "$manifest" "$target" >&2
-            return 1
-        fi
+    while IFS=$'\t' read -r manifest target _; do
+        discovery=$RUN/criterion-discovery/$label/$manifest/$target
+        # --list prints truncated display titles. A separate short measurement
+        # writes full IDs without polluting the actual comparison samples.
+        (
+            CRITERION_ARGS=(--warm-up-time 0.001 --measurement-time 0.001 --sample-size 10 --nresamples 1 --noplot)
+            CRITERION_HOME=$discovery run_criterion_target "$checkout" "$manifest" "$target" --save-baseline discovery
+        ) >&2 || return 1
+        python3 "$ROOT/bench/compare.py" --criterion-cases "$discovery" >"$RUN/criterion-listing" || return 1
         while IFS= read -r benchmark; do
             printf '%s\t%s\t%s\n' "$manifest" "$target" "$benchmark"
-        done <"$listing"
+        done <"$RUN/criterion-listing"
     done <"$target_list"
 }
 
@@ -302,31 +302,38 @@ compare_criterion() {
     local base_cases=$RUN/criterion-base.cases
     local current_cases=$RUN/criterion-current.cases
     local keys=$RUN/criterion-case.keys
-    local manifest target benchmark base_match current_match
+    local manifest target benchmark base_match current_match home
+    local index=0
 
     criterion_cases "$base_checkout" >"$base_cases"
     criterion_cases "$current_checkout" >"$current_cases"
     sort -u "$base_cases" "$current_cases" >"$keys"
 
     while IFS=$'\t' read -r manifest target benchmark; do
-        base_match=$(awk -F '\t' -v manifest="$manifest" -v target="$target" -v benchmark="$benchmark" \
-            '$1 == manifest && $2 == target && $3 == benchmark { print; exit }' "$base_cases")
-        current_match=$(awk -F '\t' -v manifest="$manifest" -v target="$target" -v benchmark="$benchmark" \
-            '$1 == manifest && $2 == target && $3 == benchmark { print; exit }' "$current_cases")
+        index=$((index + 1))
+        home=$RUN/criterion/$index
+        base_match=$(MOQ_CASE_MANIFEST=$manifest MOQ_CASE_TARGET=$target MOQ_CASE_ID=$benchmark awk -F '\t' \
+            '$1 == ENVIRON["MOQ_CASE_MANIFEST"] && $2 == ENVIRON["MOQ_CASE_TARGET"] && $3 == ENVIRON["MOQ_CASE_ID"] { print; exit }' "$base_cases")
+        current_match=$(MOQ_CASE_MANIFEST=$manifest MOQ_CASE_TARGET=$target MOQ_CASE_ID=$benchmark awk -F '\t' \
+            '$1 == ENVIRON["MOQ_CASE_MANIFEST"] && $2 == ENVIRON["MOQ_CASE_TARGET"] && $3 == ENVIRON["MOQ_CASE_ID"] { print; exit }' "$current_cases")
 
         if [[ -n $base_match ]]; then
             printf '\nCriterion baseline: %s\n' "$benchmark"
-            run_criterion_target "$base_checkout" "$manifest" "$target" \
+            CRITERION_HOME=$home run_criterion_target "$base_checkout" "$manifest" "$target" \
                 --save-baseline base "$benchmark" --exact
         fi
         if [[ -n $current_match ]]; then
             printf '\nCriterion current: %s\n' "$benchmark"
             if [[ -n $base_match ]]; then
-                run_criterion_target "$current_checkout" "$manifest" "$target" \
+                # Truncated directory names can receive different uniqueness suffixes
+                # when cases are added or reordered between revisions.
+                python3 "$ROOT/bench/compare.py" --criterion-baseline \
+                    "$RUN/criterion-discovery/current/$manifest/$target" "$benchmark" "$home"
+                CRITERION_HOME=$home run_criterion_target "$current_checkout" "$manifest" "$target" \
                     --baseline-lenient base "$benchmark" --exact
             else
-                run_criterion_target "$current_checkout" "$manifest" "$target" \
-                    --discard-baseline "$benchmark" --exact
+                CRITERION_HOME=$home run_criterion_target "$current_checkout" "$manifest" "$target" \
+                    --save-baseline current "$benchmark" --exact
             fi
         fi
     done <"$keys"
