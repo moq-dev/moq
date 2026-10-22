@@ -32,8 +32,10 @@ for (const name of ["check"]) {
 		expect(setup.some((step) => step.uses === "./.github/actions/nix")).toBe(true);
 		expect(setup.some((step) => step.uses === "./.github/actions/rust-cache")).toBe(true);
 		expect(setup.filter((step) => step.run).at(-1)?.name).toBe(job.name);
-		for (const step of setup) {
+		const checkIndex = setup.findIndex((step) => step.name === job.name);
+		for (const [index, step] of setup.entries()) {
 			if (step.uses?.startsWith("actions/upload-artifact@")) {
+				expect(index).toBeGreaterThan(checkIndex);
 				expect(step.if?.replace(/^\$\{\{\s*|\s*\}\}$/g, "")).toBe(
 					"!cancelled() && steps.scope.outputs.rust == 'true'",
 				);
