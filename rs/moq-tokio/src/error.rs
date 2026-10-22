@@ -115,6 +115,11 @@ pub enum Error {
 	#[error("quic max_streams must be between 1 and 2^60")]
 	StreamsRange,
 
+	/// The QUIC connection receive window can't fit the largest message a session
+	/// assembles. The payload is the minimum, in bytes.
+	#[error("quic receive_window must be at least {0} bytes to fit the largest message")]
+	ReceiveWindowTooSmall(u64),
+
 	/// Every backend we tried gave up without reporting why.
 	#[error("failed to connect to server")]
 	ConnectFailed,
@@ -268,6 +273,7 @@ impl Error {
 			| Self::Deprecated(_)
 			| Self::IdleTimeoutRange
 			| Self::WindowRange(_)
+			| Self::ReceiveWindowTooSmall(_)
 			| Self::StreamsRange
 			| Self::QlogUnsupported
 			| Self::KeylogUnset

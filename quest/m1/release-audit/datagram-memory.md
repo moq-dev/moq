@@ -45,5 +45,4 @@ with the maintainer before implementing it.
 
 ## Related
 
-- [Reliable receive memory](/quest/m1/quic/receive-memory.md) - parser-held incomplete streams, not completed datagram queues
 - [Compressed tracks](/quest/m1/compress/README.md) - shared compression behavior and fallback

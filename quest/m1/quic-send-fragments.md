@@ -7,6 +7,11 @@ chunks, if benchmarks establish a material cost.
 
 ## Plan
 
+Decided 2026-10-22 (maintainer): moved from the m2 performance survey to m1,
+since it sits on every relay's egress path and is cheap to settle before the
+cut. A duplicate m1 quest planned from the repository improvement audit was
+dropped in its favor.
+
 At the audit revision, [SendBuffer::get](/rs/moq-quic/src/connection/send_buffer.rs)
 starts at the first unacknowledged segment for each lookup (lines 146-162).
 [Packetization](/rs/moq-quic/src/connection/streams/state.rs) calls it again
