@@ -2111,6 +2111,7 @@ where
 				stream
 					.writer
 					.encode(&ietf::RequestOk {
+						largest: None,
 						request_id: Some(request_id),
 						active: None,
 					})
@@ -2121,6 +2122,7 @@ where
 				stream
 					.writer
 					.encode(&ietf::RequestOk {
+						largest: None,
 						request_id: None,
 						active: None,
 					})
@@ -6054,6 +6056,7 @@ mod tests {
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
+				largest: None,
 				request_id: None,
 				active: None,
 			})
@@ -6149,6 +6152,7 @@ mod tests {
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestOk {
+					largest: None,
 					request_id: None,
 					active: None,
 				})
@@ -6231,6 +6235,7 @@ mod tests {
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestOk {
+					largest: None,
 					request_id: None,
 					active: count,
 				})
@@ -6283,6 +6288,7 @@ mod tests {
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
+				largest: None,
 				request_id: None,
 				active,
 			})
@@ -8463,6 +8469,7 @@ mod tests {
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestOk {
+					largest: None,
 					request_id: None,
 					active: None,
 				})
@@ -9817,6 +9824,9 @@ mod tests {
 				largest_location: None,
 				forward: true,
 				properties: ietf::Properties::default(),
+				subscriber_priority: None,
+				group_order: None,
+				filter: None,
 			};
 
 			// Errors are surfaced to the peer on the stream, not raised as a session error.
@@ -16143,6 +16153,7 @@ mod new_group_tests {
 		stream
 			.writer
 			.encode(&ietf::RequestOk {
+				largest: None,
 				request_id: None,
 				active: None,
 			})

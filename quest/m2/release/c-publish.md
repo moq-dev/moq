@@ -10,8 +10,9 @@ the C interop client build and run against it from a clean consumer checkout.
 The m1 C line proves the same cases with the built archive before the cut.
 This quest proves registry/release delivery after publication and records the
 artifact versions and results. It cannot block the cut that creates them.
-Coordinate the final hand-written package notice before replacing its
-publication; retain the source until its retirement condition is satisfied.
+The hand-written crate never published, so there is no old package to
+supersede; its source stays until
+[c-retire](/quest/m2/release/c-retire.md).
 
 ## Required
 

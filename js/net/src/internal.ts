@@ -319,6 +319,8 @@ export interface ResumeSource {
 	forgetPastBudget(delivered: Delivered): void;
 	/** The newest sequence any copy has seen. */
 	latest(): number | undefined;
+	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
+	start(): number | "pending" | undefined;
 	/** The serving copy's declared exclusive end. */
 	end(): Location | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
@@ -377,9 +379,10 @@ export const hooks: {
 	 * Declare the first group a wire subscription's live feed serves (lite SUBSCRIBE_START, or
 	 * IETF SUBSCRIBE_OK's Largest) for the floor its SUBSCRIBE requested: while the demand keeps
 	 * that floor, a pending tail owes nothing below it. Mirrors the Rust `start_at`; assigned by
-	 * `track.ts`.
+	 * `track.ts`. Without `start`, the SUBSCRIBE is still waiting on the START that resolves it,
+	 * as the Rust `request_start`.
 	 */
-	startTrack: (producer: Producer, served: { start: number; requested?: number }) => void;
+	startTrack: (producer: Producer, served: { start?: number; requested?: number }) => void;
 	// pending: /quest/m1/public-model/ingest.md
 	/**
 	 * Mark a track as a session's copy of a remote one: its groups are never checked for a
@@ -395,12 +398,23 @@ export const hooks: {
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Location | undefined;
+	/**
+	 * How long a broadcast finishing now keeps this track servable: its max-age capped by the
+	 * cache window once it closed cleanly, else zero; assigned by `track.ts`.
+	 */
+	linger: (producer: Producer) => Milli;
 	// private: capability gap
 	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
 	reportedLargest: (producer: Producer, largest: Location | undefined) => void;
 	// pending: /quest/m1/track-live.md
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => number | undefined;
+	// pending: /quest/m1/public-model/serve.md
+	/**
+	 * The source's declared start, raised to the subscriber's cursor floor, or `"pending"` while
+	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
+	 */
+	sourceStart: (subscriber: Subscriber) => number | "pending" | undefined;
 	// pending: /quest/m1/track-live.md
 	/** The newest frame buffered for a subscriber, which wire answers name; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Location | undefined;
@@ -482,6 +496,9 @@ export const hooks: {
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
 	/** Carry a handed-out group across its logical track's route changes. */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
+	// pending: /quest/m1/public-model/serve.md
+	/** Start a group operation unless the handed-out group has expired, and stop it if the group expires mid-flight. */
+	guardGroup: <T>(group: GroupConsumer, operation: () => Promise<T>) => Promise<T>;
 	/** Make an evicted mirror terminal while its track timeline still contains it. */
 	evictGroup: (group: GroupConsumer) => void;
 	/** Attach the origin advertisement of a created broadcast. */
@@ -528,10 +545,16 @@ export const hooks: {
 	cachedLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
+	linger: () => {
+		throw new Error("track.ts not loaded");
+	},
 	reportedLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
 	latestSequence: () => {
+		throw new Error("track.ts not loaded");
+	},
+	sourceStart: () => {
 		throw new Error("track.ts not loaded");
 	},
 	bufferedLargest: () => {
@@ -625,6 +648,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	guardGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	evictGroup: () => {

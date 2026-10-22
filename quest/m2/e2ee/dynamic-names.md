@@ -23,9 +23,12 @@ Decided with the maintainer on 2026-10-17:
 - The Rust publishers do not wait on it (maintainer, 2026-10-19): the
   broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876),
   and [rust-publish](/quest/m2/e2ee/rust-publish.md) declares every track it
-  serves. [Reopen](/quest/m2/e2ee/reopen.md) and the
-  [consumer shape](/quest/m2/e2ee/consumer.md) still wait, since the chosen
-  mapping can change the physical names they handle.
+  serves. The [consumer shape](/quest/m2/e2ee/consumer.md) still waits,
+  since the chosen mapping can change the physical names it handles.
+- A dynamic name answers through the
+  [moq-net traits](/quest/m2/net-wrap/README.md) the wrappers implement
+  (`dynamic`, `track::Request`), so the design keeps their methods and
+  changes only the name mapping behind them (2026-10-20).
 
 Background: a physical track name is a one-way HKDF of the semantic name
 (the draft's Key Derivation section). Only the CDN sees physical names, and a

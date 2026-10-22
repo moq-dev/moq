@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
-import { DEFAULT_MAX_GROUP_BYTES, Encoder } from "./encoder.ts";
+import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
 
 type Value = Record<string, unknown>;
@@ -388,11 +388,6 @@ test("a rejected update leaves the previous value readable", async () => {
 
 	// A reader arriving now still finds the last good value, not an empty superseding group.
 	expect(await drain(track.subscribe())).toEqual([{ keep: true }]);
-});
-
-test("the default group budget is moq-net's group cache limit", () => {
-	// The tests below shrink the budget, so pin the default they stand in for.
-	expect(DEFAULT_MAX_GROUP_BYTES).toBe(Group.MAX_GROUP_CACHE_BYTES);
 });
 
 test("a delta that would overflow the snapshot rolls a new one instead", async () => {

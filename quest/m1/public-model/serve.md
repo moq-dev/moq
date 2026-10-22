@@ -1,12 +1,13 @@
-# [XS] Public group abandonment in Rust
+# [S] Public group abandonment and JS feed start
 
 ## Goal
 
 A custom `moq-net` publisher waiting on its transport, for stream credit or to
 drain, learns through a public call when to give up on a group: the budget
 expired it, or its copy was aborted before the publisher read it all and no
-route will continue it. The built-in lite and IETF publishers use the same
-call.
+route will continue it. A custom `@moq/net` publisher learns where the
+source's feed starts, as the public Rust `poll_start` answers. The built-in
+lite and IETF publishers use the same calls.
 
 ## Plan
 
@@ -33,8 +34,17 @@ copy. **Decision** on the public shape:
 - Keep `poll_abandoned` private: a custom publisher reads the abort on its
   next frame read instead, but holds the credit it waited for until then.
 
-Check whether the JS publishers need the same: `Group.Consumer.expired`
-covers the budget, not an aborted copy parked on credit.
+Also left: the JS `hooks.sourceStart`, which
+[#6206](https://github.com/moq-dev/moq/pull/6206) added after this cut so the
+lite publisher keeps a descending feed's start. It is the JS counterpart of
+`poll_start` (the source's start, raised to the cursor floor, or `"pending"`
+until the upstream START arrives); make it a public `Track.Subscriber` call.
+
+JS has the same gap: [#6214](https://github.com/moq-dev/moq/pull/6214) races a
+parked group open against the private `hooks.guardGroup`, since
+`Group.Consumer.expired` covers the budget but not an evicted copy. Settle its
+public shape with `poll_abandoned`'s, as an `abandoned` promise beside
+`expired` or by widening `expired` to every terminal give-up.
 
 ## Related
 

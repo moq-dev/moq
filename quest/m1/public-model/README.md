@@ -28,8 +28,8 @@ Rules every child follows:
   enforces the marks):
   - "moq-transport passthrough only" (decided 2026-10-13; subgroups were
     dropped from it in #5704): object IDs and `skip`, object and unknown track properties, END_OF_GROUP status
-    objects, datagram object IDs, dynamic groups, and upstream request
-    signaling. Owned by [moq-transport passthrough](/quest/m1/ietf-extension/README.md).
+    objects, datagram object IDs, and upstream request signaling. Dynamic
+    groups left this list when #5930 made `Demand::wanted` public. Owned by [moq-transport passthrough](/quest/m1/ietf-extension/README.md).
     A relay built on the public model drops them, as plain moq-lite does.
   - "tunes the built-in sessions": constants and wake or allocation batching
     that change cost, never behavior a third party can observe.
@@ -103,7 +103,7 @@ Work owned by this README, after the children land:
 
 - [Claim request type](/quest/m1/public-model/claim-request-type.md) - accepting an application claim's request fails to compile instead of panicking
 - [Public ingest](/quest/m1/public-model/ingest.md) - a custom subscriber writes received groups, frames, starts, and ends into a track through public calls
-- [Public group abandonment in Rust](/quest/m1/public-model/serve.md) - a custom Rust publisher parked on its transport learns when to give up on a group, the last serving item left
+- [Public group abandonment and JS feed start](/quest/m1/public-model/serve.md) - a custom Rust publisher parked on its transport learns when to give up on a group, and a JS one where the feed starts, the last serving items left
 - [Public routes and answering](/quest/m1/public-model/answer.md) - a custom relay ingests routes, answers broadcast and track requests on demand, and advertises without echoing a peer's routes back
 - [Public model after ranges, handover, and the JS tail](/quest/m1/public-model/deferred.md) - fetch and track-info answering, the cache peeks, JS `fork`/`mirror`, and JS `endTrack`, once the quests that reshape them land
 

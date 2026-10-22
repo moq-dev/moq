@@ -1110,8 +1110,13 @@ export class Publisher {
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = hasTrackStream(this.version);
 		let startSent = false;
+		// Dispositions before START refine its boundary; later ones must be named as drops.
+		const skipped: { start: number; end: number; error: Error }[] = [];
 		// Where SUBSCRIBE_START resolved, lowered by an update that asks for groups below it.
 		let startSequence: number | undefined;
+		// The first group and the edge seen before it was popped, held until the source
+		// resolves where its feed starts.
+		let first: { group: group.Consumer; largest: track.Location | undefined } | undefined;
 		let endSent = false;
 
 		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
@@ -1166,6 +1171,12 @@ export class Publisher {
 		});
 		try {
 			for (;;) {
+				if (startSequence !== undefined && skipped.length > 0) {
+					for (const range of skipped) {
+						if (!(await drop(Math.max(range.start, startSequence), range.end, range.error))) return false;
+					}
+					skipped.length = 0;
+				}
 				if (pendingDrops.length > 0) {
 					for (const dropped of pendingDrops.splice(0)) {
 						if (
@@ -1235,14 +1246,18 @@ export class Publisher {
 				// answered past, so the source's largest says where the live feed is.
 				const largest =
 					!startSent && hasLargest(this.version)
-						? newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest)
+						? newer(first?.largest, newer(hooks.bufferedLargest(track), hooks.peekLargest(track).largest))
 						: undefined;
-				const recv = track.tryRecvGroup({ drops: startSent });
+				const recv = first
+					? ({ kind: "group", group: first.group } as const)
+					: track.tryRecvGroup({ drops: emitRange });
+				first = undefined;
 				switch (recv.kind) {
 					case "error":
 						throw recv.error;
 					case "drop":
-						if (!(await drop(recv.start, recv.end, recv.error))) return false;
+						if (!startSent) skipped.push({ start: recv.start, end: recv.end, error: recv.error });
+						else if (!(await drop(recv.start, recv.end, recv.error))) return false;
 						continue;
 					case "idle":
 						// A start past everything the track has (a subscriber resuming just after
@@ -1313,19 +1328,35 @@ export class Publisher {
 				const range = frameRange(bounds, group.sequence);
 
 				if (emitRange && !startSent) {
+					const source = hooks.sourceStart(track);
+					// A group stream can beat the upstream START on its own stream, and resolving
+					// from the group alone would give up the backlog that START still promises.
+					if (source === "pending") {
+						first = { group, largest };
+						await waitForSubscription(controls, track, drops);
+						continue;
+					}
 					startSent = true;
-					startSequence = group.sequence;
-					// SUBSCRIBE_START names the first group served now. A later group at or
-					// above an explicit floor is still delivered, so the cursor stays put.
+					// Newest-first delivery can put a group ahead of where the source's feed
+					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
+					startSequence = Math.min(group.sequence, source ?? group.sequence);
+					// A group given up cannot be where the feed starts. Adjacent runs given up with
+					// different errors stay separate, so walk them in order.
+					skipped.sort((a, b) => a.start - b.start);
+					for (const range of skipped) {
+						if (range.start <= startSequence && range.end > startSequence)
+							startSequence = Math.min(range.end, group.sequence);
+					}
+					// A later group above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
 					// Group Start is the latest group, and this sequence becomes the floor.
 					// Lite-06 encodes a floor of group 0 as 0, so an omitted start is not pinned.
-					if (bounds.startGroup === undefined && !resolvesStart(this.version)) raiseFloor(group.sequence);
+					if (bounds.startGroup === undefined && !resolvesStart(this.version)) raiseFloor(startSequence);
 					if (
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(group.sequence, largest) },
+								{ start: new SubscribeStart(startSequence, largest) },
 								this.version,
 							),
 						))
@@ -1578,14 +1609,28 @@ export class Publisher {
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
 			// in the order we asked, which is oldest-first, exactly backwards for live media.
 			// Failing here drops the group and lets the next one compete for the next slot.
-			const stream = await Writer.tryOpen(this.#quic, {
-				version: this.version,
-				sendOrder: priority.rank(group.sequence, start),
-				cancel: unsubscribed,
-				waitUntilAvailable: false,
-			});
+			// Watch the group while the transport parks the open, and release that watch
+			// once the open settles. tryOpen owns resetting a slot that arrives too late.
+			const opened = Promise.withResolvers<void>();
+			let failure: Error | undefined;
+			const abandoned = hooks
+				.guardGroup(group, () => opened.promise)
+				.catch((err: unknown) => {
+					failure = error(err);
+				});
+			let stream: Writer | undefined;
+			try {
+				stream = await Writer.tryOpen(this.#quic, {
+					version: this.version,
+					sendOrder: priority.rank(group.sequence, start),
+					cancel: race([unsubscribed, abandoned]),
+					waitUntilAvailable: false,
+				});
+			} finally {
+				opened.resolve();
+			}
 			if (!stream) {
-				const failed = new Error("no stream slot");
+				const failed = failure ?? new Error("no stream slot");
 				group.close(failed);
 				return failed;
 			}

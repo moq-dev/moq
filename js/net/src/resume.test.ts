@@ -107,6 +107,30 @@ async function setup() {
 	};
 }
 
+test("a routed source start follows the serving copy and its subscriber floor", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	hooks.startTrack(ta.producer, { start: 1 });
+	hooks.startTrack(tb.producer, { start: 5, requested: 3 });
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ groups: { start: { included: 3 } } });
+	try {
+		expect(hooks.sourceStart(sub)).toBe(3);
+		const subscribed = tb.producer.subscription.changed();
+		front.serve(b.consume());
+		await subscribed;
+		expect(hooks.sourceStart(sub)).toBe(5);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 test("a fork continues its open group across a route failure after its parent closes", async () => {
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
