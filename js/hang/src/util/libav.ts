@@ -15,39 +15,38 @@ export async function polyfill(): Promise<boolean> {
 
 		// @moq/libav is libav.js's opus-af variant plus the AAC decoder, which no published variant has.
 		// I forked libavjs-webcodecs-polyfill to avoid Typescript errors; there's no changes otherwise.
-		loading = Promise.all([
-			import("@moq/libav"),
-			import("@kixelated/libavjs-webcodecs-polyfill"),
-		]).then(async ([{ default: LibAV }, libav]) => {
-			const native = globalThis.AudioDecoder;
-			await libav.load({ LibAV, polyfill: true });
-			if (native) return true;
+		loading = Promise.all([import("@moq/libav"), import("@kixelated/libavjs-webcodecs-polyfill")]).then(
+			async ([{ default: LibAV }, libav]) => {
+				const native = globalThis.AudioDecoder;
+				await libav.load({ LibAV, polyfill: true });
+				if (native) return true;
 
-			type Config = Parameters<InstanceType<typeof libav.AudioDecoder>["configure"]>[0];
-			const aac = (config: Config) => typeof config.codec === "string" && AAC.has(config.codec);
-			const route = (config: Config): Config =>
-				aac(config) ? { ...config, codec: { libavjs: { codec: "aac" } } } : config;
+				type Config = Parameters<InstanceType<typeof libav.AudioDecoder>["configure"]>[0];
+				const aac = (config: Config) => typeof config.codec === "string" && AAC.has(config.codec);
+				const route = (config: Config): Config =>
+					aac(config) ? { ...config, codec: { libavjs: { codec: "aac" } } } : config;
 
-			class AudioDecoder extends libav.AudioDecoder {
-				#planar = false;
+				class AudioDecoder extends libav.AudioDecoder {
+					#planar = false;
 
-				constructor(init: ConstructorParameters<typeof libav.AudioDecoder>[0]) {
-					super({ ...init, output: (data) => init.output(this.#planar ? planar(data) : data) });
+					constructor(init: ConstructorParameters<typeof libav.AudioDecoder>[0]) {
+						super({ ...init, output: (data) => init.output(this.#planar ? planar(data) : data) });
+					}
+
+					override configure(config: Config): void {
+						this.#planar = aac(config);
+						super.configure(route(config));
+					}
+
+					static override async isConfigSupported(config: Config) {
+						const { supported } = await libav.AudioDecoder.isConfigSupported(route(config));
+						return { supported, config };
+					}
 				}
-
-				override configure(config: Config): void {
-					this.#planar = aac(config);
-					super.configure(route(config));
-				}
-
-				static override async isConfigSupported(config: Config) {
-					const { supported } = await libav.AudioDecoder.isConfigSupported(route(config));
-					return { supported, config };
-				}
-			}
-			globalThis.AudioDecoder = AudioDecoder as unknown as typeof globalThis.AudioDecoder;
-			return true;
-		});
+				globalThis.AudioDecoder = AudioDecoder as unknown as typeof globalThis.AudioDecoder;
+				return true;
+			},
+		);
 	}
 	return await loading;
 }
