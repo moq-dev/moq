@@ -1,14 +1,17 @@
 import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
-import { Producer as BroadcastProducer } from "./broadcast.ts";
+import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
-import { NotFound, StreamCode, StreamError } from "./error.ts";
-import { Producer as GroupProducer } from "./group.ts";
+import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
+import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Route } from "./hop.ts";
-import { hooks } from "./internal.ts";
+import type { Session as IetfSession } from "./ietf/adapter.ts";
+import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
+import { hooks, MAX_DATAGRAMS } from "./internal.ts";
+import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
-import { Front } from "./resume.ts";
+import { Front, routeFailed } from "./resume.ts";
 import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
@@ -485,6 +488,86 @@ test("datagrams a new copy replays are handed out once", async () => {
 	close();
 });
 
+test("a replacement delivers unseen datagrams below the newest sequence", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	try {
+		const { a, b, swap, active, close } = await setup();
+		const ta = copy(a);
+		const tb = copy(b);
+		const sub = active.track("seq").subscribe({ maxDelay: Milli(100) });
+		ta.producer.insertDatagram(10, undefined, enc.encode("10"));
+		expect((await sub.recvDatagram())?.sequence).toBe(10);
+		await swap();
+		tb.producer.insertDatagram(10, undefined, enc.encode("10"));
+		tb.producer.insertDatagram(5, undefined, enc.encode("5"));
+		const next = hooks.tryRecvDatagram(sub);
+		expect(next.kind).toBe("datagram");
+		if (next.kind === "datagram") expect(next.datagram.sequence).toBe(5);
+		expect(hooks.tryRecvDatagram(sub).kind).toBe("idle");
+		sub.close();
+		close();
+	} finally {
+		restore();
+	}
+});
+
+test.each([0, 100])("datagram identities stay within the reader's %p ms budget", async (budget) => {
+	const clock = new Manual();
+	const restore = clock.install();
+	try {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const ta = copy(a);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(budget) });
+		const send = (sequence: number) => ta.producer.insertDatagram(sequence, undefined, enc.encode("d"));
+		const recv = () => hooks.tryRecvDatagram(sub);
+		send(10);
+		expect(recv().kind).toBe("datagram");
+		await clock.advance(Nano(60_000_000_000));
+		send(10);
+		expect(recv().kind).toBe("idle");
+		send(5);
+		expect(recv().kind).toBe("datagram");
+		if (budget > 0) {
+			await clock.advance(Nano(budget * 500_000));
+			send(10);
+			expect(recv().kind).toBe("idle");
+			await clock.advance(Nano(budget * 500_000));
+		}
+		send(10);
+		expect(recv().kind).toBe("datagram");
+		sub.close();
+		front.consumer.close();
+		a.close();
+	} finally {
+		restore();
+	}
+});
+
+test("datagram identities are capped by the replay buffer", () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	// Superseded identities never expire within an hour, so only the cap bounds them.
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+	const send = (sequence: number) => ta.producer.insertDatagram(sequence, undefined, enc.encode("d"));
+	const recv = () => hooks.tryRecvDatagram(sub).kind;
+	for (let sequence = 0; sequence <= MAX_DATAGRAMS + 1; sequence++) {
+		send(sequence);
+		expect(recv()).toBe("datagram");
+	}
+	send(1);
+	expect(recv()).toBe("idle");
+	send(0);
+	expect(recv()).toBe("datagram");
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
 test("a route that goes for good ends the track as its last copy does", async () => {
 	const { a, active, disposeA, request, close } = await setup();
 	const ta = copy(a);
@@ -719,7 +802,7 @@ for (const fails of [true, false]) {
 		expect(tb.producer.demand().wanted.peek()).not.toBeUndefined();
 
 		const cut = new StreamError(StreamCode(70), { message: "cut" });
-		hooks.dropTrackGroups(tb.producer, 0, 1, cut);
+		tb.producer.dropGroups(0, 1, cut);
 		await expect(read).rejects.toBe(cut);
 
 		sub.close();
@@ -729,21 +812,25 @@ for (const fails of [true, false]) {
 	});
 }
 
-test("track info keeps one answer across routes", async () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const b = new BroadcastProducer();
-	a.createTrack("seq", { priority: 1 });
-	b.createTrack("seq", { priority: 2 });
-	front.serve(a.consume());
-	expect((await front.consumer.track("seq").info()).priority).toBe(1);
-	front.serve(b.consume());
-	await expect(front.consumer.track("seq").info()).rejects.toThrow("changed its properties");
-
-	front.consumer.close();
-	a.close();
-	b.close();
-});
+for (const [field, first, second] of [
+	["priority", { priority: 1 }, { priority: 2 }],
+	["compression", { compress: true }, { compress: false }],
+] as const) {
+	test(`track info keeps one ${field} answer across routes`, async () => {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		a.createTrack("seq", first);
+		b.createTrack("seq", second);
+		front.serve(a.consume());
+		expect(await front.consumer.track("seq").info()).toMatchObject(first);
+		front.serve(b.consume());
+		await expect(front.consumer.track("seq").info()).rejects.toThrow("changed its properties");
+		front.consumer.close();
+		a.close();
+		b.close();
+	});
+}
 
 test("a datagram reader lets go of the copies a swap replaced", async () => {
 	const front = new Front();
@@ -1442,8 +1529,8 @@ test.each(["lands", "dropped", "expired"])(
 			expect(drain(sub)).toEqual([]);
 			expect(ta.producer.demand().wanted.peek()).toBeDefined();
 
-			if (outcome === "dropped") hooks.dropTrackGroups(ta.producer, 1, 2, new NotFound("group"));
-			if (outcome === "expired") await clock.advanceAsync(Nano.fromMilli(SECOND));
+			if (outcome === "dropped") ta.producer.dropGroups(1, 2, new NotFound("group"));
+			if (outcome === "expired") await clock.advance(Nano.fromMilli(SECOND));
 			if (outcome !== "lands") {
 				// The groups drained above are released once their close settles.
 				await settle();
@@ -1668,3 +1755,170 @@ test.each([Milli(100), Milli(3_600_000)])(
 		}
 	},
 );
+
+test.each([
+	["fails", (answer: Lister) => answer.abort(new Error("old route failed"))],
+	["ends", (answer: Lister) => answer.finish()],
+	["changes", (answer: Lister) => answer.add("gone", { priority: 0 })],
+])("a listing follows the source that took over as the old one's listing %s", async (_, end) => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const from = a.consume();
+	// The old source's listing is answered, as a session answers its peer's.
+	const answer = wireOf(from).lister();
+	answer.synced();
+	b.createTrack("seq");
+	front.serve(from);
+	const tracks = front.consumer.tracks();
+	try {
+		expect(await tracks.next()).toMatchObject({ kind: "synced" });
+
+		// The new source takes over just as the old source's listing settles, which a later
+		// reader of it sees at the same moment the front's reader does.
+		const witness = from.tracks();
+		expect(await witness.next()).toMatchObject({ kind: "synced" });
+		const takeover = () => front.serve(b.consume());
+		const settled = witness.next().then(takeover, takeover);
+		end(answer);
+		await settled;
+		expect(await tracks.next()).toMatchObject({ kind: "added", name: "seq" });
+		b.createTrack("late");
+		expect(await tracks.next()).toMatchObject({ kind: "added", name: "late" });
+	} finally {
+		tracks.close();
+		answer.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+test("only delivery codes are a route failing", () => {
+	// Mirrors `only_delivery_codes_are_a_route_failing` in rs/moq-net/src/model/resume.rs.
+	const delivery = [0x0, 0x1, 0x3, 0x4, 0x31];
+	const codes = [...Array.from({ length: 0x40 }, (_, code) => code), 64, 64 + 5, 0xffffffff];
+	for (const code of codes) {
+		expect([code, routeFailed(new StreamError(code as StreamCode))]).toEqual([code, delivery.includes(code)]);
+	}
+	// The session the copy came through closed: the route went with it.
+	expect(routeFailed(new SessionError(SessionCode.Internal))).toBe(true);
+	// Content that failed to parse is the group's under its name.
+	expect(routeFailed(new Error("malformed"))).toBe(false);
+});
+
+/**
+ * A route serving `source` that records the groups it is asked to fetch, through every handle the
+ * front clones from it, answering each with `answer` or as `source` would.
+ */
+function counted(source: BroadcastProducer, answer?: (sequence: number) => GroupConsumer | undefined) {
+	const asked: number[] = [];
+	class Counted extends BroadcastConsumer {
+		constructor(shared?: never) {
+			super(shared);
+			const original = wireOf(this);
+			overrideBroadcastWire(this, {
+				fetchGroup: (name, sequence, options) => {
+					asked.push(sequence);
+					const answered = answer?.(sequence);
+					return answered ? Promise.resolve(answered) : original.fetchGroup(name, sequence, options);
+				},
+			});
+		}
+
+		override clone(): Counted {
+			return new Counted(this.shareState());
+		}
+
+		static of(consumer: BroadcastConsumer): Counted {
+			return new Counted((consumer as Counted).shareState());
+		}
+	}
+	return { route: Counted.of(source.consume()), asked };
+}
+
+for (const fetched of [false, true]) {
+	test(`a verdict ends a ${fetched ? "fetched" : "read"} group once, never asking its own route again`, async () => {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const stalled = copy(a).write(0, 1, false);
+		const malformed = new StreamError(StreamCode.MalformedTrack);
+		// Once the group is read, a hostile route answers every fetch with a copy that fails the
+		// same way.
+		let hostile = false;
+		const { route, asked } = counted(a, (sequence) => {
+			if (!hostile) return undefined;
+			const copy = new GroupProducer(sequence);
+			copy.writeFrame({ payload: enc.encode(`${sequence}.0`) });
+			setTimeout(() => copy.close(malformed), 0);
+			return copy.consume();
+		});
+		const sub = front.consumer.track("seq").subscribe();
+		front.serve(route);
+		const group = fetched ? await front.consumer.track("seq").fetchGroup(0) : sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		asked.length = 0;
+		hostile = true;
+
+		stalled.close(malformed);
+		await expect(group.readFrame()).rejects.toBe(malformed);
+		await settle();
+		expect(asked).toEqual([]);
+
+		sub.close();
+		front.consumer.close();
+		a.close();
+	});
+}
+
+test("a verdict every route repeats moves to the newer route once, then ends the group", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const stalled = copy(a).write(0, 1, false);
+	const repeat = copy(b).write(0, 1, false);
+	const malformed = new StreamError(StreamCode.MalformedTrack);
+	const routeA = counted(a);
+	const routeB = counted(b);
+	front.serve(routeA.route);
+	const sub = front.consumer.track("seq").subscribe();
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+
+	front.serve(routeB.route);
+	await settle();
+	stalled.close(malformed);
+	const read = group.readFrame();
+	expect(await isPending(read)).toBe(true);
+	repeat.close(malformed);
+	await expect(read).rejects.toBe(malformed);
+	await expect(group.readFrame()).rejects.toBe(malformed);
+	expect([routeA.asked, routeB.asked]).toEqual([[], []]);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("a route whose IETF session closed before subscribing moves the track to the next route", async () => {
+	// The session went away: it has no request ID left to spend.
+	const session = { nextRequestId: async () => undefined } as unknown as IetfSession;
+	const front = new Front();
+	const b = new BroadcastProducer();
+	const tb = copy(b);
+	front.serve(new IetfSubscriber({ session }).consume(path));
+	const sub = front.consumer.track("seq").subscribe();
+	await settle();
+
+	front.serve(b.consume());
+	await settle();
+	tb.write(0);
+	expect(drain(sub)).toEqual([0]);
+
+	sub.close();
+	front.consumer.close();
+	b.close();
+});

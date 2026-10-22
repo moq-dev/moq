@@ -16,9 +16,8 @@ for.
 
 Run on a quiet Linux host where `perf` works. Profile the io_uring workers
 on the video and chat workloads at #5926's base (`1dd9b83d1`) and at `main`,
-and read the `[vdso]` share. `just bench-profile cpu` profiles only tokio
-workers today, so either extend it to `io-uring-workers` or run `perf`
-against the `just bench-runtime` relay. Read relay CPU from the
+and read the `[vdso]` share with `just bench-profile cpu` on
+`io-uring-workers`, given the base revision. Read relay CPU from the
 `io-uring-workers` rows of `just bench-runtime`, run at both revisions on the
 same host and worker count. `just bench BASE` won't do: it runs only the
 default tokio runtime.
@@ -28,3 +27,7 @@ clock; a follow-up decides whether it is worth chasing. Either result
 deletes this quest.
 
 Public API: none. Wire: none.
+
+## Required
+
+- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the recipe this profiles with

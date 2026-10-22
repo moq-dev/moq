@@ -17,7 +17,7 @@ re-clamps a live encoder.
 
 Decided in the quest audit: this quest owns net's in-band grants, their lite
 codecs, relay propagation, and publisher clamps. Token and HTTP grant types in
-`moq-auth` and `js/auth` already carry [bitrate caps](/doc/bin/relay/auth.md#claims); reuse their admitted caps here.
+Token claims carry no bitrate caps since [auth access is patterns](/quest/m1/api-audit/auth-access.md) removed the field nothing enforced; whichever rate quest enforces first re-adds an optional `rate` to the claims with a rate type moq-auth owns (converted at the relay boundary, so moq-auth never depends on moq-net), and this quest reuses the admitted caps.
 
 Update the AUTH grant in `drafts/draft-lcurley-moq-lite.md` and run
 `just drafts check`. Rates target the next unpublished lite version after finalized lite-07,

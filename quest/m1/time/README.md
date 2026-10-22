@@ -81,6 +81,14 @@ reasons, so later sessions don't reopen them:
   `disallowed-types` in a per-crate `clippy.toml`, and a biome
   `noRestrictedGlobals` override, allowing only the backend modules. The
   workspace-wide test and lint sweep follows in m2.
+- **Third-party std clocks.** A third-party API that takes
+  `std::time::Instant` (str0m, srt-tokio, winit, qlog) converts with
+  `Instant::into_std` and `Instant::from_std`, native only, through the runtime
+  clock's origin: exact on a running clock, durations only on paused tokio or
+  the simulator. Device threads outside any runtime keep `std::thread::sleep`
+  under a per-site `#[allow]`, since they have no ambient clock to wait on
+  (decided 2026-10-20 by the maintainer, in
+  [#6135](https://github.com/moq-dev/moq/pull/6135)).
 - **Consolidation.** perf/3122 (one clock read per io_uring turn) landed with
   moq-uring on moq-clock in [#5926](https://github.com/moq-dev/moq/pull/5926). The relay seam
   [bench-relay](/quest/m2/bench-relay.md) needed is `moq_relay::Accepted`:
@@ -97,8 +105,7 @@ cleanup and the global lint ratchet belong to
 
 ## Required
 
-- [Every crate on moq-clock](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-clock, with controlled tests for the production/public API migrations
-- [JS timers fire at their own deadlines](/quest/m1/time/js-deadlines.md) - `Manual.advance` (renamed from `advanceAsync`) steps to each deadline, sync `advance` becomes `jump`, and `Effect.interval` arms its first period synchronously
+- [Public wall times on moq_clock::Wall](/quest/m1/time/wall.md) - public `SystemTime`s become `moq_clock::Wall`, and the ratchets ban the type
 
 ## Related
 

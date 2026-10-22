@@ -20,7 +20,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::Context;
-use tokio::time::{Instant, timeout_at};
+use moq_clock::Instant;
+use moq_clock::timeout_at;
 #[cfg(feature = "capture")]
 use usage_rs::complete::{Candidate, CompleteCtx, CompletionFuture};
 use usage_rs::complete::{CompletionOverlay, CompletionRequest, Shell, render};
@@ -359,7 +360,7 @@ mod tests {
 		);
 
 		// A cursor sitting on the separator is typing `--`, not inside a stage.
-		assert!(complete("moq import fmp4 --").await.is_empty());
+		assert!(complete("moq import flv --").await.is_empty());
 	}
 
 	/// Every overlay is scoped to a command that declares the value it answers for.

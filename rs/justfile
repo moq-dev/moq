@@ -197,7 +197,7 @@ android *args:
 wasm *args:
     cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@" -- -D warnings
 
-# Run the browser clock backend on the Playwright Chromium installed by wasm.yml,
+# Run the browser clock backend on the root devShell's Playwright Chromium,
 # with the runtime and with reads alone.
 wasm-test:
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown

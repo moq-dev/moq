@@ -20,6 +20,20 @@ protocol. A publisher in Python is consumable by a subscriber in Swift.
 | [C++](/lib/cpp/) | `moq-cpp` via CMake or pkg-config | C++ apps, engines, and plugins. |
 | <img class="language-icon" src="/icons/languages/c.svg" alt="" /> [C](/lib/c/) | `moq-c` | The plain-C ABI, for C and any language with a C FFI; C++ should use the package above. |
 
+## Choose the layer
+
+| You need | Start with |
+| --- | --- |
+| A browser player or camera publisher | [@moq/watch](/lib/js/watch) and [@moq/publish](/lib/js/publish), with web components or a headless API |
+| A meeting roster and chat | [@moq/room](/lib/js/room) or [moq-room](/lib/rs/moq-room) |
+| Native media capture, encode, decode, or playback | [Rust audio](/lib/rs/moq-audio) and [video](/lib/rs/moq-video), or the media and codec layers in your language binding |
+| To import an existing media stream | [moq-mux](/lib/rs/moq-mux), or a [gateway](/bin/#gateways) if you want a ready-to-run tool |
+| State snapshots, chat logs, or other JSON data | [@moq/json](/lib/js/json), [moq-json](/lib/rs/moq-json), or your binding's [JSON layer](/lib/layers#json) |
+| Custom payloads and subscription behavior | [@moq/net](/lib/js/net) or [moq-net](/lib/rs/moq-net), also exposed by the bindings |
+
+[Examples](/setup/examples) links runnable consumers. [Layers](/lib/layers)
+maps the native binding namespaces; the language pages link API references.
+
 ## How they relate
 
 Rust is the reference implementation; every server-side tool is built on it.
