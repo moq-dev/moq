@@ -41,7 +41,7 @@ Direction carried over from 2026-09-19, not re-confirmed:
 - The draft would say a relay MAY scope priority to the broadcast on a
   relay-to-relay connection; no carrier is needed on the wire.
 - Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
-  order, [receive memory](/quest/m1/quic/receive-memory.md), then
+  order, receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)), then
   [Rust request credit](/quest/m1/rs-request-credit.md), then the send domain.
 
 Receive ranks, folded in from
@@ -103,4 +103,3 @@ update moves an already-ranked stream.
 ## Related
 
 - [One parked group per subscription](https://github.com/moq-dev/moq/pull/6140) - the parked group each subscription keeps must still yield the next stream by broadcast
-- [Bound incomplete messages](/quest/m1/quic/receive-memory.md) - the receive-side counterpart on the same moq-quic sessions

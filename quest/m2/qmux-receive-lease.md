@@ -11,9 +11,8 @@ chosen after weighing its cost against today's.
 
 ## Plan
 
-Starts after [moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)
-merges (open on 2026-10-22). Re-read the landed code before designing, since
-the lease API may still move.
+[moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878) merged on
+2026-10-22; re-read the landed lease API before designing.
 
 State with #5878: qmux's `RecvStream` wraps its reader in moq-net's
 `poll::Buffered`, which returns connection credit as it reads. `max_data`
@@ -62,9 +61,6 @@ Public API: qmux's `RecvStream` leases natively instead of through
 `Buffered`, and its window defaults or validation change (MIGRATE.md). Wire:
 QMux MAX_DATA and STOP_SENDING only, no MoQ format change.
 
-## Required
-
-- [Bound incomplete messages](/quest/m1/quic/receive-memory.md) - the receive leases ([#5878](https://github.com/moq-dev/moq/pull/5878)) this extends to qmux
 
 ## Related
 

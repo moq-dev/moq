@@ -8,10 +8,8 @@ MoQ never negotiates. One core serves the tokio backend, the thread-per-core
 `moq-uring` backend, and qmux; iroh stays on upstream noq. BBR correctness,
 reliable stream resets (#5690), hierarchical send groups (#5711, #5770), one
 `Limits` type for relay peers (#5871), and endpoint sharding (#5688) are on
-`main`. What remains is bounded incomplete-message memory; clean exits for
-connection-blocked writers moved to
-[their own quest](/quest/m1/quic-connection-blocked.md) so they outlive this
-epic (2026-10-22). Per-broadcast
+`main`, and receive leases bound incomplete-message memory (#5878). What
+remains is clean exits for connection-blocked writers; per-broadcast
 fairness gives the crate-private send domains (#5872) their consumer in
 [Broadcast fairness](/quest/m2/broadcast-fairness.md).
 qmux already runs on the shared stream state machine, outside this epic.
@@ -73,7 +71,7 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 ## Required
 
-- [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
+- [Connection-blocked writers end cleanly](/quest/m1/quic/connection-blocked.md) - an ended stream leaves the blocked-writer list, and STOP_SENDING surfaces under exhausted connection credit
 
 ## Related
 

@@ -15,11 +15,10 @@ Boundaries:
 - Only what moq-net can do. Subgroups other than 0, rendezvous, and
   per-request authorization tokens are not exposed, so they are out of
   scope, and runner cells that need them stay red by design. PUBLISH (push)
-  and outbound forward=0 join coverage once
-  [SUBSCRIBE_TRACKS outbound](/quest/m1/archive/subscribe-tracks-outbound.md)
-  ([#6280](https://github.com/moq-dev/moq/pull/6280)) and
+  and outbound forward=0 join coverage now that SUBSCRIBE_TRACKS outbound
+  ([#6280](https://github.com/moq-dev/moq/pull/6280)) has landed, and once
   [IETF subscribe pause](/quest/m1/ietf-subscribe-pause.md)
-  ([#6299](https://github.com/moq-dev/moq/pull/6299)) land (decided
+  ([#6299](https://github.com/moq-dev/moq/pull/6299)) lands (decided
   2026-10-22, maintainer).
 - Media stays hang. No MSF catalog in our runner clients.
 - New cases live in-tree (`test/interop`), not in the runner's spec.
@@ -53,5 +52,6 @@ coverage on `main` at `3ab6cbf81d`.
 
 ## Related
 
+- [Runner client bump](/quest/m2/release/runner-client-bump.md) - after the cut publishes #5083, the runner's Rust client stops stamping every object
 - [Interop audit](/quest/m0/audit-interop.md) - classifies the red cells these cases produce
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - Moxygen's moq-test conformance through moq-relay

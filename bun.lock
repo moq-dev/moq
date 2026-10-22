@@ -509,6 +509,13 @@
         "typescript": "7.0.2",
       },
     },
+    "test/receive-credit": {
+      "name": "@moq/receive-credit-test",
+      "dependencies": {
+        "@moq/net": "workspace:*",
+        "@moq/web-transport": "^0.1.5",
+      },
+    },
     "test/video": {
       "name": "@moq/video-test",
       "dependencies": {
@@ -845,6 +852,8 @@
     "@moq/qmux": ["@moq/qmux@workspace:js/qmux"],
 
     "@moq/qmux-interop": ["@moq/qmux-interop@workspace:test/qmux"],
+
+    "@moq/receive-credit-test": ["@moq/receive-credit-test@workspace:test/receive-credit"],
 
     "@moq/room": ["@moq/room@workspace:js/room"],
 

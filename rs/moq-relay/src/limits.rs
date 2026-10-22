@@ -134,9 +134,9 @@ pub struct Quic {
 
 impl Default for Quic {
 	fn default() -> Self {
-		// An order of magnitude above the `[quic]` defaults, which are sized for
-		// one viewer rather than a link carrying a whole cluster's traffic.
-		let window = std::num::NonZeroU64::new(10 * moq_tokio::quic::DEFAULT_RECEIVE_WINDOW).expect("non-zero");
+		// Well above the `[quic]` defaults, which are sized for one viewer rather
+		// than a link carrying a whole cluster's traffic.
+		let window = std::num::NonZeroU64::new(640 << 20).expect("non-zero");
 		Self {
 			max_streams: std::num::NonZeroU64::new(10 * moq_tokio::quic::DEFAULT_MAX_STREAMS).expect("non-zero"),
 			receive_window: window,

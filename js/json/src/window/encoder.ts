@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
+import { Encoder as Flate } from "@moq/flate";
 import { Group } from "@moq/net";
 
 /** Frames (header included) in one group before a new group is forced, matching the Snapshot cap. Kept well below the net per-group cap so a roll always precedes GroupTooLarge. */
@@ -83,7 +83,8 @@ export class Encoder<T> {
 	#start = 0;
 
 	#flate?: Flate;
-	// Bytes in this group, header included.
+	// Bytes charged to this group, header included: each frame's slice, or its plaintext when that
+	// is larger, since a reader's DEFLATE window is held to the same budget.
 	#groupBytes = 0;
 	#groupFrames = 0;
 	// Whether the next frame must be a header after a lost frame.
@@ -204,16 +205,17 @@ export class Encoder<T> {
 		return this.#ops && this.#groupFrames > 0 && this.#groupFrames < MAX_GROUP_FRAMES;
 	}
 
-	/** Compress an already-serialized op into the open group, if its header remains cached. */
+	/**
+	 * Compress an already-serialized op into the open group, if its header remains cached and
+	 * inflatable. Charged the larger of the slice and the plaintext: a sync-flushed DEFLATE frame can
+	 * come out slightly larger than its input, while a reader's window counts what it inflates.
+	 */
 	#emitOp(text: string): Uint8Array | undefined {
 		const bytes = new TextEncoder().encode(text);
-		if (bytes.length > DEFAULT_MAX_FRAME_SIZE) {
-			throw new Error("window frame exceeds the decoder's decompressed size limit");
-		}
 		const payload = this.#flate ? this.#flate.frame(bytes) : bytes;
 
-		this.#groupBytes += payload.length;
 		this.#groupFrames += 1;
+		this.#groupBytes += Math.max(payload.length, bytes.length);
 		if (this.#groupBytes > Group.MAX_GROUP_CACHE_BYTES) {
 			this.#resyncGroup();
 			return undefined;
@@ -240,8 +242,9 @@ export class Encoder<T> {
 		const checkpoint = start === offset ? "" : `,"start":${start}`;
 		const text = `{"offset":${offset}${checkpoint},"records":[${window.join(",")}]}`;
 		const bytes = new TextEncoder().encode(text);
-		if (bytes.length > DEFAULT_MAX_FRAME_SIZE) {
-			throw new Error("window header exceeds the decoder's decompressed size limit");
+		// A reader inflates the header whole, so its plaintext meets the group budget too.
+		if (bytes.length > Group.MAX_GROUP_CACHE_BYTES) {
+			throw new Error("window header exceeds the group cache limit");
 		}
 
 		// A fresh per-group encoder (cold window), with the header as frame 0.
@@ -252,7 +255,7 @@ export class Encoder<T> {
 		}
 
 		this.#flate = flate;
-		this.#groupBytes = payload.length;
+		this.#groupBytes = Math.max(payload.length, bytes.length);
 		this.#groupFrames = 1;
 		this.#resync = false;
 

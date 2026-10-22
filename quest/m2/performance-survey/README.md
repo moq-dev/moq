@@ -91,7 +91,7 @@ No duplicate quest or workflow edit belongs here.
 - The [release audit](/quest/m1/release-audit/README.md) owns QMux copying
   ([qmux-copy](/quest/m1/release-audit/qmux-copy.md)), CMAF allocation abuse
   ([cmaf-counts](/quest/m1/release-audit/cmaf-counts.md)), media reorder queues
-  ([decode-order](/quest/m1/ts-reliability/decode-order.md)), watch teardown
+  ([export-reorder](/quest/m1/release-audit/export-reorder.md)), watch teardown
   ([watch-errors](/quest/m1/release-audit/watch-errors.md)), and the HLS
   contract quests. MKV fragmentation below concerns parser replay before those
   queues.
@@ -115,7 +115,6 @@ No duplicate quest or workflow edit belongs here.
 
 ## Required
 
-- [Fragmented QUIC sends](/quest/m2/performance-survey/quic-send-fragments.md) - packetization cost under a retained fragmented flight
 - [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - polling and memory after peak task occupancy subsides
 - [Bandwidth grants](/quest/m2/performance-survey/bandwidth-grants.md) - repeated full allocation in Rust and JS
 - [Cached JS group joins](/quest/m2/performance-survey/js-cached-groups.md) - repeated sorting while replaying retained groups

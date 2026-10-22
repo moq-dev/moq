@@ -90,6 +90,7 @@ child records whether its behavior is new on main or inherited from release.
 - [Review HLS admission](/quest/m1/release-audit/hls-admission.md) - resolve the security-sensitive resource-boundary review before the cut
 - [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
 - [OBS decode timing](/quest/m1/release-audit/obs-decode-timing.md) - the shipping OBS source stamps each reordered picture with its own timestamp and drains at clean EOF
+- [Bound export reorder storage](/quest/m1/release-audit/export-reorder.md) - flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
 - [Validate CMAF header fields](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count, and a zero timescale is refused
 - [Preserve fMP4 sample runs](/quest/m1/release-audit/fmp4-passthrough.md) - passthrough does not substitute gap or interleaved bytes for media samples
 - [JS honors subscription bounds](/quest/m1/release-audit/js-subscription-bounds.md) - each reader and each datagram stays inside its own subscription's group bounds, not the aggregate's
@@ -111,10 +112,8 @@ child records whether its behavior is new on main or inherited from release.
 
 ## Related
 
-- [Decode order](/quest/m1/ts-reliability/decode-order.md) - owns the export reorder storage finding, folded in on 2026-10-22
 - [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - range lists and frame offsets build on the bounds fixed here
 - [OBS video source](/quest/m2/obs-moq-video/source.md) - the decoder replacement keeps the timing and EOF behavior fixed here
-- [Receive memory](/quest/m1/quic/receive-memory.md) - incomplete reliable input remains a separate connection-credit concern
 - [QPACK dependency fix](/quest/m0/web-transport-proto-0.6.3.md) - decoded header expansion is already tracked
 - [Compressed tracks](/quest/m1/compress/README.md) - mid-group widening and application migration have existing owners
 - [Archive consumer](/quest/m1/archive/consumer.md) - current producer and CLI reader still need the new-format roundtrip
