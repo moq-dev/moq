@@ -13,10 +13,6 @@ a PUBLISHed track.
 ## Plan
 
 Mirror `rs/moq-net/src/ietf/publisher/tracks.rs`, reading tracks through the
-TRACKS listing that [TRACKS in js/net](/quest/m1/archive/tracks-js.md) adds.
+TRACKS listing (`broadcast.Consumer.tracks()`).
 Mirror its tests, and drop the JavaScript caveat from
 `doc/concept/standard.md`.
-
-## Required
-
-- [TRACKS in js/net](/quest/m1/archive/tracks-js.md) - `@moq/net` lists a broadcast's tracks, which this listing reads

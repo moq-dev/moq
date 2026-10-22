@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `Announced()` or `AnnouncedBroadcast()`, instead of under its whole scope at connect.
+`MoqOriginConsumer.RequestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
+Resolve the path with `AnnouncedBroadcast()`, or hold `Announced()` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+Regenerate the bindings for the changed `request_broadcast` checksum.
+
+### Catalog references carry their epoch
+
+`MoqVideo` and `MoqAudio` gain `Epoch *string`, the publisher instance their `Broadcast` reference names.
+`MoqBroadcastConsumer.Resolve` takes the rendition's `epoch` after `reference`; pass it alongside, or `nil` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
+Regenerate the bindings for the changed records and checksums.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer.Finish()` lets go, instead of unlisting when its producer finishes or is released.

@@ -984,10 +984,10 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	origin.close();
 });
 
-test("integration: lite draft-05 fetches a cached group", async () => {
+test("integration: lite draft-07 fetches a cached group", async () => {
 	const enc = new TextEncoder();
 	const dec = new TextDecoder();
-	const pair = createMockTransportPair(Lite.ALPN_05);
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 
 	const [client, server] = await Promise.all([
@@ -1160,10 +1160,10 @@ test("integration: lite draft-05 coalesces concurrent fetches of one group", asy
 	server.abort();
 });
 
-test("integration: lite draft-05 fetches an in-progress group", async () => {
+test("integration: lite draft-07 fetches an in-progress group", async () => {
 	const enc = new TextEncoder();
 	const dec = new TextDecoder();
-	const pair = createMockTransportPair(Lite.ALPN_05);
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 
 	const [client, server] = await Promise.all([
@@ -1202,8 +1202,8 @@ test("integration: lite draft-05 fetches an in-progress group", async () => {
 // The publisher caches TRACK_INFO so it only asks the application once per track. The cache
 // has to expire with the broadcast that answered it: a republish puts a different producer
 // on the path, and its immutable properties are its own.
-test("integration: lite draft-05 track info follows a republished broadcast", async () => {
-	const pair = createMockTransportPair(Lite.ALPN_05);
+test("integration: lite draft-07 track info follows a republished broadcast", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 
 	const [client, server] = await Promise.all([
@@ -1240,9 +1240,9 @@ test("integration: lite draft-05 track info follows a republished broadcast", as
 
 // FETCH reads the same cache to decide the timescale it serves frames in, so a stale entry
 // quantizes the successor's timestamps to the predecessor's resolution.
-test("integration: lite draft-05 fetch uses the republished track's timescale", async () => {
+test("integration: lite draft-07 fetch uses the republished track's timescale", async () => {
 	const enc = new TextEncoder();
-	const pair = createMockTransportPair(Lite.ALPN_05);
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
 
 	const [client, server] = await Promise.all([

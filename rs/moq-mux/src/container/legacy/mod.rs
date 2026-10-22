@@ -4,8 +4,6 @@
 //! followed by the raw codec bitstream. Simple but ad-hoc; new
 //! broadcasts should use [`crate::container::loc`] instead.
 
-use std::task::Poll;
-
 use crate::container::{Container, Frame, Kind};
 
 /// Hang Legacy wire format configured for the track's media role.
@@ -53,24 +51,15 @@ impl Container for Wire {
 		Ok(())
 	}
 
-	fn poll_read(
-		&self,
-		group: &mut moq_net::group::Consumer,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
-		use std::task::ready;
-
-		let Some(data) = ready!(group.poll_read_frame(waiter).map_err(hang::Error::from)?) else {
-			return Poll::Ready(Ok(None));
-		};
+	fn decode(&self, frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 		// On a data track an object with no bytes is its discontinuity marker, not a frame.
 		// Elsewhere it is malformed, so it fails to decode below.
-		if self.0 == Kind::Data && data.payload.is_empty() {
-			return Poll::Ready(Ok(Some(Vec::new())));
+		if self.0 == Kind::Data && frame.payload.is_empty() {
+			return Ok(Vec::new());
 		}
 
-		let hang_frame = hang::container::Frame::decode(data.payload)?;
-		Poll::Ready(Ok(Some(vec![Frame {
+		let hang_frame = hang::container::Frame::decode(frame.payload)?;
+		Ok(vec![Frame {
 			timestamp: hang_frame.timestamp,
 			payload: hang_frame.payload,
 			// Legacy doesn't carry the keyframe bit on the wire; the
@@ -78,6 +67,6 @@ impl Container for Wire {
 			keyframe: false,
 			// Legacy carries no per-frame duration.
 			duration: None,
-		}])))
+		}])
 	}
 }

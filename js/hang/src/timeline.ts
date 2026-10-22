@@ -85,7 +85,8 @@ export class Consumer implements AsyncIterable<Event> {
 
 	/** Get the next timeline event, or `undefined` when the track ends. Throws on an untimed record. */
 	async next(): Promise<Event | undefined> {
-		const event = await this.#window.next();
+		// Each record carries its own pts, so the frame timestamp adds nothing.
+		const event = (await this.#window.next())?.value;
 		if (event === undefined) return undefined;
 		if ("push" in event) {
 			const { index } = event.push;

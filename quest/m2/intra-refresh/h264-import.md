@@ -12,9 +12,11 @@ were immediately decodable.
 ## Plan
 
 The recovery-boundary planning prerequisite must settle the precision and
-publication ordering before implementing the duration proposal below. In
-particular, rounding down and raising a catalog value after a longer sweep
-are not yet proven safe for a viewer that already received those pictures.
+publication ordering before implementing the duration proposal below. Raising
+a catalog value after a longer sweep is not yet proven safe for a viewer that
+already received those pictures. Decided 2026-10-22 (maintainer): precision
+follows the hang draft, which rounds up
+([#5212](https://github.com/moq-dev/moq/pull/5212)).
 
 - `rs/moq-mux/src/codec/h264/split.rs`: `sei_has_recovery_point` returns the
   `recovery_frame_cnt` the `h264-parser` crate already exposes on
@@ -31,8 +33,8 @@ are not yet proven safe for a viewer that already received those pictures.
   reference picture whose `frame_num` is the recovery point's plus the count,
   modulo `MaxFrameNum`), so the importer tracks slice-header `frame_num` from
   the recovery point, finds that picture, and sets `warmup` to its timestamp
-  minus the group start, rounded down to whole milliseconds so the recovery
-  picture itself is never withheld. The catalog is published once the first
+  minus the group start, rounded up to whole milliseconds as the hang draft
+  requires, so the history always reaches the recovery picture. The catalog is published once the first
   sweep has measured it; a later, longer sweep mutates it upward. A stream
   whose recovery picture never arrives before the next recovery point is
   refused, not published with a guess.
@@ -45,4 +47,4 @@ are not yet proven safe for a viewer that already received those pictures.
 
 ## Required
 
-- [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - resolve the rounded and later-mutated warmup contract before implementing it
+- [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - resolve the later-mutated warmup contract before implementing it

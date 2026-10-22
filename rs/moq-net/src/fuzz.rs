@@ -313,6 +313,26 @@ pub fn snapshot(origin: &crate::origin::Producer, prefix: &str) -> Snapshot {
 	Snapshot(origin.snapshot(prefix))
 }
 
+/// What a client session fed into an origin hears it should ask its peer about, for
+/// the interests bench.
+pub struct Interests(crate::model::Interests);
+
+/// Register as a client session fed into `origin` does.
+pub fn interests(origin: &crate::origin::Producer) -> Interests {
+	Interests(origin.interests())
+}
+
+impl Interests {
+	/// Take every change heard so far, returning how many there were.
+	pub fn drain(&self) -> usize {
+		let mut changes = 0;
+		while let std::task::Poll::Ready(Some(_)) = self.0.poll_next(&kio::Waiter::noop()) {
+			changes += 1;
+		}
+		changes
+	}
+}
+
 /// Add `n` publisher-side payload bytes on `(path, tier)`, creating the entry
 /// when the path is tracked. The stats producer bench marks a share of held
 /// paths changed this way, without a media frame. A later [`crate::stats::Registry::report`]
@@ -324,6 +344,24 @@ pub fn bump_publisher_bytes(
 	n: u64,
 ) {
 	registry.bump_publisher_bytes(path, tier, n);
+}
+
+/// An allocator's probe target as its session follows it, for the bandwidth bench.
+pub struct ProbeTarget(crate::bandwidth::Target);
+
+impl ProbeTarget {
+	/// Follow `allocator`'s target.
+	pub fn new(allocator: &crate::bandwidth::Allocator) -> Self {
+		Self(allocator.target())
+	}
+
+	/// The target in bits per second once it moved, without parking.
+	pub fn poll(&mut self) -> Option<u64> {
+		match self.0.poll_changed(&kio::Waiter::noop()) {
+			std::task::Poll::Ready(target) => Some(target.as_bps()),
+			std::task::Poll::Pending => None,
+		}
+	}
 }
 
 /// A payload-byte meter for the stats write-path benchmark.

@@ -18,8 +18,9 @@ peer-visible QUIC flow control instead of a separate header quota error.
 The native transport primitive is a separate prerequisite; do not activate
 whole-message retention without its recovery policy in this quest.
 
-In flight as [#5878](https://github.com/moq-dev/moq/pull/5878) (draft);
-the earlier drafts #5735 and #5752 were closed in its favor.
+In flight as [#5878](https://github.com/moq-dev/moq/pull/5878) (ready for
+review) on branch `quest/m1/quic/receive-memory-lease`; the earlier drafts
+#5735 and #5752 were closed in its favor.
 
 Decided 2026-10-20 (maintainer): three quests break moq-net's
 `transport::poll` traits, so they land in order and each rebases its trait

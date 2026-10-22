@@ -6,8 +6,9 @@ use std::time::Duration;
 use anyhow::Context;
 use base64::Engine;
 use hang::moq_net;
+use moq_clock::Instant;
+use moq_clock::timeout_at;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-use tokio::time::{Instant, timeout_at};
 
 use crate::args::MoqSide;
 
