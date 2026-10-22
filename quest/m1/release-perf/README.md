@@ -46,6 +46,33 @@ noise.
   with those wires; the earlier under-0.01% estimate omitted their walk.
   This remaining per-session and per-connection sampling is accepted. Deleting
   per-label bytes was rejected.
+- The mux exports' and Annex B import's fixed cost per broadcast is accepted.
+  It publishes required output: a per-track timeline and an immediately
+  completed catalog record. Their cold DEFLATE state is most of it (81% of a
+  one-frame import's instructions are its zero-fill), and the encoders already
+  build that state lazily on first use. It is paid once per broadcast: the
+  import ratio falls from 3.97x at one frame to 1.49x at 64. TS export's
+  growth to 2.09x at `4x64` is in the export reap that
+  [moq-dev/moq#6281](https://github.com/moq-dev/moq/pull/6281) changes.
+- The model's remaining per-group and per-frame cost is accepted, after
+  [moq-dev/moq#6294](https://github.com/moq-dev/moq/pull/6294) cut the
+  accidental part (a second track upgrade per first frame, a 128-bit division
+  per buffered datagram on join, and draining empty waiter lists on every
+  write). What remains pays for features: the arrival stamp each frame reads
+  from the clock ([#6249](https://github.com/moq-dev/moq/pull/6249)), largest
+  notifications ([#5725](https://github.com/moq-dev/moq/pull/5725)), the
+  rewind check and starts index each first frame fills
+  ([#5803](https://github.com/moq-dev/moq/pull/5803),
+  [#6074](https://github.com/moq-dev/moq/pull/6074)), indexed expiry wakes,
+  the bounded wall-clock expiry scan per append, and a subscriber's ranges and
+  datagram max delay ([#5195](https://github.com/moq-dev/moq/pull/5195)).
+  None of it grows with the sweeps. `track_stamp_groups/sparse` stays highest
+  at 4.4x, because release's first frame skipped nearly all of that work.
+- Session delivery is accepted at 1.28x to 1.77x in instructions. It is the
+  per-group and per-frame cost above on every hop, measured through the
+  flow-controlled mock transport
+  ([#5530](https://github.com/moq-dev/moq/pull/5530)) that release's harness
+  lacked.
 
 ### Release as a baseline
 
@@ -67,28 +94,37 @@ usually pays for a feature.
 | `track_gc/idle/16384` | 11.6 ns | 73.7 ns | 6.3x | [Idle GC](/quest/m1/release-perf/gc-idle.md) |
 | `origin/resume_overlap/sequence/1r_64g_32c` | 93 us | 426 us | 4.6x | [Resume duplicates](/quest/m1/release-perf/resume-duplicates.md) |
 | `session_delivery_group_cost/moq-transport-22/.../viewers=64/.../fetch` | 1.19 ms | 3.86 ms | 3.2x | accepted (above) |
-| `group_write_frames/single/8192` | 424 us | 486 us | 1.17x | [Re-check](/quest/m1/release-perf/recheck.md) |
+| `group_write_frames/single/8192` | 424 us | 486 us | 1.17x | accepted (above) |
 
 Main is much faster on subscriber churn, joins, range demand, and idle
 sessions (by 100x to 3000x). The relay load test used 21% less CPU on video
 and 12% less on fanout, with the same delivery.
 
-### Screen only (one run, unconfirmed)
+### Screen only, re-measured
 
-- moq-mux: `container-export/ts/4x1` 4.7x and `mkv/4x1` 3.9x (median 1.41x
-  over 27 cases); `annexb-import-{bytes,frames}` median 2.1x (up to 3.6x).
-- moq-net track: `track_stamp_groups` median 2.7x (4.7x at `sparse/4096`),
-  `track_sparse_read/timed/4096` 4.3x, `track_datagram_subscriber_join`
-  median 2.3x, `track_parallel_write` 1.6x, `track_fanout_frame` 1.42x,
-  `track_empty_run` median 1.36x.
-- moq-net origin and session: `origin/announce_duplicate/30d_1s` 4.3x,
-  `session_delivery_relays` median 1.56x, `paced` 1.45x, `scale` 1.43x.
-- moq-stats `aggregate` at live=16, departed=4096: 2.1x. The other rows were
-  1.0 to 1.3x, so this one is probably noise.
-- kio `contended_notify` and `contended_log` at 16 threads: 4 to 5x. These
-  are contention benches on a busy host, so they are likely noise.
-- JS `net/bench/frames.ts` on bun: lite rows 1.2 to 1.3x, IETF rows 1.3 to
-  2.2x ([JS frames](/quest/m1/release-perf/js-frames.md)).
+Re-measured on 2026-10-22 with callgrind instructions per operation, release
+rebuilt under main's dev shell with fat LTO. Ratios are main over release;
+the moq-net and kio rows include the fixes above.
+
+| Bench | Screen | Instructions | Owner |
+|---|---|---|---|
+| `container-export/ts/4x1`, `mkv/4x1` | 4.7x, 3.9x | 1.70x, 1.59x | accepted (above) |
+| `annexb-import`, 1 and 64 frames | median 2.1x | 3.97x, 1.49x | accepted (above) |
+| `track_stamp_groups/append/64`, `sparse/64` | median 2.7x | 2.21x, 4.43x | accepted (above) |
+| `track_parallel_write/1` | 1.6x | 1.99x | accepted (above) |
+| `track_fanout_frame/1` | 1.42x | 1.86x | accepted (above) |
+| `track_empty_run/{fresh/1,stale/8}/512` | median 1.36x | 1.53x | accepted (above) |
+| `track_datagram_subscriber_join/0d/1`, `64d/64` | median 2.3x | 2.12x, 3.55x | accepted (above) |
+| `track_sparse_read/timed/4096` | 4.3x | | [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) |
+| `origin/announce_duplicate`, `1d_1s` to `240d_240s` | 4.3x | 1.06x to 1.16x | noise |
+| `session_delivery_{relays,paced,scale}` | 1.43x to 1.56x | 1.28x to 1.77x | accepted (above) |
+| moq-stats `aggregate`, live=16, departed=4096 | 2.1x | 1.05x | noise |
+| kio `contended_{notify,log}`, 16 threads | 4x to 5x | wall 1.04x to 1.15x | noise |
+| JS `net/bench/frames.ts` on bun | 1.2x to 2.2x | | [JS frames](/quest/m1/release-perf/js-frames.md) |
+
+The kio contention benches spin across threads, so instructions don't measure
+them; the row is the least loaded of three alternating wall-time rounds, and
+later rounds swung both ways.
 
 The raw report lived in a scratch directory that has since been removed.
 `just bench <base>` now pairs full Criterion IDs; point `MOQ_BENCH_ARTIFACTS`
@@ -100,7 +136,6 @@ outside the worktree to keep the next one.
 - [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) - an arrival and a gap flush cost O(log gaps), not O(gaps)
 - [Resume duplicates](/quest/m1/release-perf/resume-duplicates.md) - an ordered resume skips copies of an already-delivered group without consuming them
 - [Idle GC](/quest/m1/release-perf/gc-idle.md) - an idle track GC skips the wall-clock pass when nothing is due
-- [Re-check](/quest/m1/release-perf/recheck.md) - the screen-only moves are re-measured with instruction counts, and the ones that hold are fixed or accepted
 - [JS frames](/quest/m1/release-perf/js-frames.md) - the js/net frame path is no slower than release in a browser, or the gap is accepted
 
 ## Related
