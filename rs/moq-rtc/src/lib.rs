@@ -77,6 +77,7 @@ pub use error::*;
 pub use server::{Response, Server, whep, whip};
 
 #[cfg(all(test, feature = "server"))]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use std::time::Duration;
 
