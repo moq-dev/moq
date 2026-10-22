@@ -43,8 +43,9 @@ default so a single-tenant deployment keeps strict priority across the link.
 A tenant-keyed domain (one bucket per customer, however many broadcasts they
 run) needs the tenant identity from the auth line first and is a later
 refinement of the same tier, not a different design. Opening more
-subscriptions or broadcasts must never buy more bandwidth than the bucket
-allows.
+subscriptions must never buy a broadcast more than its bucket allows. Until
+tenant keying lands, a peer that opens more broadcasts does get more shares,
+on send and receive alike; tenant keying is what closes that.
 
 Decided 2026-10-08: the signed priority type lands here, so the priority API
 breaks once instead of twice. Subscribe ranges owns group order, so this quest
@@ -85,6 +86,30 @@ Direction to settle in the draft first, then the code:
   gives moq-net's `poll::Session::send_group(priority)` a domain, so land that
   in the same trait break and implementers break once.
 
+Receive ranks, folded in from
+[#5878](https://github.com/moq-dev/moq/pull/5878)'s follow-ups by the
+maintainer on 2026-10-20. When the receive window is stuck, #5878 evicts the
+lowest subscription priority first across every broadcast on the session,
+then the group its subscription would deliver last, and sets a stream's rank
+once, when its header decodes:
+
+- With fairness on, rank received groups within their broadcast's domain
+  first, as sends are, so one broadcast's priorities never evict another's
+  partial groups. Received FETCH streams map to a domain through the same
+  carrier the send side settles, or fall out with it if the goal narrows to
+  subscription delivery.
+- Ranking inside domains still leaves the session-wide window to share, so
+  a broadcast that fills it would block every other one. Add a fair domain
+  tier ahead of the ranks, mirroring the byte-fair send tier: a stuck window
+  evicts from the domain holding the most beyond an even share of the window
+  across the domains with partial groups, then by rank within that domain.
+  A broadcast that fills the window alone may keep it until another arrives.
+  A full window admits no newcomer's bytes, so settle what enters a broadcast
+  into the fair set first (its subscription, or the header of a stream the
+  stuck-window eviction made room for), and test that it gets in.
+- Re-rank a receive stream when its subscription's priority or group order
+  changes, instead of keeping the rank from its header.
+
 Signed priority, decided with the maintainer:
 
 - moq-lite carries `p + 128` (flip the top bit). The mapping is one-to-one
@@ -115,7 +140,11 @@ Signed priority, decided with the maintainer:
 Prove scoping with the existing lite publisher tests extended to two
 broadcasts on one session with fairness on: neither starves, a downstream 255
 does not change the upstream order, and with fairness off the strict order is
-unchanged. The io_uring workers apply the same setting. Move
+unchanged. On the receive side, with fairness on, a high priority in one
+broadcast never makes a stuck window evict another broadcast's partial groups
+first, a broadcast that filled the window before another began receiving
+yields down to its even share instead of blocking the newcomer, and a priority
+or order update moves an already-ranked stream. The io_uring workers apply the same setting. Move
 `doc/concept/moq-lite.md` (the 0..255 knob) and `doc/concept/standard.md`
 (IETF 128 maps to 127) to the new range and mapping.
 

@@ -21,7 +21,7 @@ import os
 import sys
 import threading
 import time
-from typing import Callable
+from typing import Callable, NoReturn
 
 log = logging.getLogger(__name__)
 
@@ -36,20 +36,21 @@ class Heartbeat:
     stale, it is not being watched.
     """
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, now: Callable[[], float] = time.monotonic) -> None:
         self.name = name
+        self._now = now
         self._last: float | None = None
 
     def beat(self) -> None:
-        self._last = time.monotonic()
+        self._last = self._now()
 
     def age(self) -> float:
         if self._last is None:
             return 0.0
-        return time.monotonic() - self._last
+        return self._now() - self._last
 
 
-def die(reason: str) -> None:
+def die(reason: str) -> NoReturn:
     """Exit without unwinding, so nothing that hangs gets a say in the shutdown.
 
     The stacks are the only record of where the hang was, so they go out first.
@@ -71,15 +72,14 @@ class Watchdog:
     by the RPC timeout but unbounded in number, counts against nobody.
     """
 
-    def __init__(self, stall: float, *heartbeats: Heartbeat, fail: Callable[[str], None] = die) -> None:
-        self.loop = Heartbeat("event loop")
+    def __init__(self, stall: float, *heartbeats: Heartbeat, now: Callable[[], float] = time.monotonic) -> None:
+        self.loop = Heartbeat("event loop", now)
         self._armed = heartbeats
         self._heartbeats = (self.loop, *heartbeats)
         self._stall = stall
         # Check often enough that a stall is caught soon after the threshold,
         # not up to a whole interval late.
         self._interval = min(PULSE_INTERVAL, stall / 4)
-        self._fail = fail
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="watchdog", daemon=True)
 
@@ -99,10 +99,15 @@ class Watchdog:
             self.loop.beat()
             await asyncio.sleep(self._interval)
 
+    def check(self) -> str | None:
+        """Why the process should end, or None while every heartbeat is fresh."""
+        for heartbeat in self._heartbeats:
+            age = heartbeat.age()
+            if age > self._stall:
+                return f"{heartbeat.name} has not advanced in {age:.1f} s (limit {self._stall:.1f} s)"
+        return None
+
     def _run(self) -> None:
         while not self._stop.wait(self._interval):
-            for heartbeat in self._heartbeats:
-                age = heartbeat.age()
-                if age > self._stall:
-                    self._fail(f"{heartbeat.name} has not advanced in {age:.1f} s (limit {self._stall:.1f} s)")
-                    return
+            if (reason := self.check()) is not None:
+                die(reason)

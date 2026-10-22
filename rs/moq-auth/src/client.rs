@@ -1077,19 +1077,18 @@ mod tests {
 		}
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn revalidate_runs_on_cadence_and_applies_the_reply() {
 		let log = Log::default();
-		let server = server(log.clone(), |request| {
+		let script = Script::new(log.clone(), |request| {
 			let mut grant = grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1)));
 			if request.event == Event::Revalidate {
 				grant.tier = Some("moved".into());
 			}
-			ResponseTemplate::new(200).set_body_json(grant)
-		})
-		.await;
+			Some(Ok(grant))
+		});
 
-		let mut consumer = client(&server).connect(request()).await.unwrap();
+		let mut consumer = script.connect().await.unwrap();
 		let fresh = tokio::time::timeout(Duration::from_secs(3), consumer.changed())
 			.await
 			.expect("a re-check within the cadence")
@@ -1098,47 +1097,41 @@ mod tests {
 		assert_eq!(log.events()[..2], [Event::Connect, Event::Revalidate]);
 	}
 
-	#[tokio::test]
+	/// A 401 or 403 is the same refusal (`refusals_and_outages_refuse_at_connect` maps
+	/// them), and an empty grant is a no too.
+	#[tokio::test(start_paused = true)]
 	async fn a_refusal_on_recheck_revokes() {
-		for answer in [
-			ResponseTemplate::new(401),
-			ResponseTemplate::new(403),
-			ResponseTemplate::new(200).set_body_json(Grant::default()),
-		] {
-			let server = server(Log::default(), {
-				let answer = answer.clone();
-				move |request| match request.event {
-					Event::Connect => ResponseTemplate::new(200)
-						.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(60)))),
-					_ => answer.clone(),
-				}
-			})
-			.await;
+		let refusals: [fn() -> crate::Result<Grant>; 2] =
+			[|| Err(Error::Refused(Default::default())), || Ok(Grant::default())];
+		for refuse in refusals {
+			let script = Script::new(Log::default(), move |request| {
+				Some(match request.event {
+					Event::Connect => Ok(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1)))),
+					_ => refuse(),
+				})
+			});
 
-			let consumer = client(&server).connect(request()).await.unwrap();
-			consumer.revalidate();
+			let consumer = script.connect().await.unwrap();
 			let reason = tokio::time::timeout(Duration::from_secs(3), consumer.closed())
 				.await
-				.expect("revoked by the nudged re-check");
+				.expect("revoked within the cadence");
 			assert_eq!(reason, Reason::Refused);
 		}
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn an_invalid_grant_on_recheck_revokes() {
-		let unbounded = grant(None, Some(Duration::from_secs(1)));
-		let server = server(Log::default(), move |request| match request.event {
-			Event::Connect => ResponseTemplate::new(200)
-				.set_body_json(grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(60)))),
-			_ => ResponseTemplate::new(200).set_body_json(unbounded.clone()),
-		})
-		.await;
+		let script = Script::new(Log::default(), |request| {
+			Some(Ok(match request.event {
+				Event::Connect => grant(Some(Duration::from_secs(3600)), Some(Duration::from_secs(1))),
+				_ => grant(None, Some(Duration::from_secs(1))),
+			}))
+		});
 
-		let consumer = client(&server).connect(request()).await.unwrap();
-		consumer.revalidate();
+		let consumer = script.connect().await.unwrap();
 		let reason = tokio::time::timeout(Duration::from_secs(3), consumer.closed())
 			.await
-			.expect("revoked by the nudged re-check");
+			.expect("revoked within the cadence");
 		assert_eq!(reason, Reason::Invalid);
 	}
 
@@ -1251,8 +1244,7 @@ mod tests {
 		});
 
 		let consumer = script.connect().await.unwrap();
-		tokio::time::sleep(Duration::from_millis(1500)).await;
-		assert!(log.events().contains(&Event::Revalidate), "the re-check is in flight");
+		log.until(|log| log.iter().any(|r| r.event == Event::Revalidate)).await;
 		consumer.close("disconnected", Bytes::default());
 		assert!(matches!(
 			log.end().await.event,

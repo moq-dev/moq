@@ -22,6 +22,15 @@ fn timed() -> moq_net::track::Info {
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The cluster's first redial backoff. A GOAWAY this soon after connecting scores
+/// the session as a failed attempt, so the redial waits this long first.
+const BACKOFF: Duration = Duration::from_millis(300);
+
+/// The cluster's `--goaway-handover`: short, so a test observes the old session
+/// close quickly, but past [`BACKOFF`] plus the redial, so the draining leg
+/// serves until the replacement takes over.
+const HANDOVER: Duration = Duration::from_secs(1);
+
 /// Bound `fut` by [`TEST_TIMEOUT`], panicking with `step` so a hang names the
 /// exact stage that failed instead of a bare "test timed out".
 async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
@@ -149,7 +158,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.goaway.handover = Some(Duration::from_secs(2));
+	client_config.goaway.handover = Some(HANDOVER);
+	client_config.backoff.initial = Some(BACKOFF);
 
 	let mut cluster_config = cluster::Config::default();
 	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
@@ -292,8 +302,8 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// ── the relay cluster under test, dialing sibling A ─────────────
 		let mut client_config = moq_tokio::connect::Config::default();
 		client_config.tls.insecure = Some(true);
-		// Short handover so the test observes the old session close quickly.
-		client_config.goaway.handover = Some(Duration::from_secs(2));
+		client_config.goaway.handover = Some(HANDOVER);
+		client_config.backoff.initial = Some(BACKOFF);
 
 		let mut cluster_config = cluster::Config::default();
 		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
@@ -416,8 +426,8 @@ async fn spawn_relay_with_upstream(
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	// Short handover so the test observes the old session close quickly.
-	client_config.goaway.handover = Some(Duration::from_secs(2));
+	client_config.goaway.handover = Some(HANDOVER);
+	client_config.backoff.initial = Some(BACKOFF);
 	// Only lite-07 carries the epoch that lets a failover resume the subscription.
 	client_config.version = vec![LITE_07.parse().unwrap()];
 
@@ -499,8 +509,8 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let mid_a_origin = moq_tokio::origin::spawn();
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	// Short handover so the test observes the old session close quickly.
-	client_config.goaway.handover = Some(Duration::from_secs(2));
+	client_config.goaway.handover = Some(HANDOVER);
+	client_config.backoff.initial = Some(BACKOFF);
 	client_config.version = vec![LITE_07.parse().unwrap()];
 	let mid_a_client = client_config.init(Default::default()).expect("mid-a client init");
 	let (_mid_a_upstream_client, mid_a_upstream) = within(
@@ -686,9 +696,9 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		"BOTTOM must not propagate the upstream GOAWAY downstream"
 	);
 	// The async observer must stay pending too (bounded probe: everything
-	// above already synchronized, so 2s of silence is decisive).
+	// above already synchronized, so 500ms of silence is decisive).
 	let leaked = tokio::time::timeout(
-		Duration::from_secs(2),
+		Duration::from_millis(500),
 		sub_connection.draining().expect("connected").recv(),
 	)
 	.await;
@@ -764,8 +774,8 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	// Short handover so the test observes the old session close quickly.
-	client_config.goaway.handover = Some(Duration::from_secs(2));
+	client_config.goaway.handover = Some(HANDOVER);
+	client_config.backoff.initial = Some(BACKOFF);
 	// Only lite-07 carries the epoch that lets the redial resume the subscription.
 	client_config.version = vec![LITE_07.parse().unwrap()];
 

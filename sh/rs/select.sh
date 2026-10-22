@@ -150,10 +150,13 @@ case "$action" in
         # A selection can hold nothing testable, and
         # nextest exits 4 on that; the whole workspace finding none really is wrong.
         [[ "$packages" == ALL ]] || flags+=(--no-tests=pass)
-        just rs test "${flags[@]}"
+        # CI keeps Cargo's per-crate build timings, which check.yml uploads.
+        timings=()
+        [[ "${GITHUB_ACTIONS:-}" != true ]] || timings=(--timings)
+        just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         # Tests behind the off-by-default `capture` and `play` features.
-        if wants '(moq-video|moq-audio)'; then just rs capture-test; fi
-        if wants moq-cli; then just rs play; fi
+        if wants '(moq-video|moq-audio)'; then just rs capture-test ${timings[@]+"${timings[@]}"}; fi
+        if wants moq-cli; then just rs play ${timings[@]+"${timings[@]}"}; fi
         ;;
     platform)
         # moq-gst links GStreamer via pkg-config, which the runners don't have.

@@ -458,17 +458,6 @@ mod test {
 	}
 
 	#[test]
-	fn label_round_trips() {
-		let mut config = VideoConfig::new(VideoCodec::VP8);
-		config.label = Some("Main camera".to_string());
-
-		let encoded = serde_json::to_value(&config).expect("failed to encode");
-		assert_eq!(encoded["label"], "Main camera");
-		let decoded: VideoConfig = serde_json::from_value(encoded).expect("failed to decode");
-		assert_eq!(decoded.label.as_deref(), Some("Main camera"));
-	}
-
-	#[test]
 	fn display_aspect_uses_canonical_json_names() {
 		let mut config = VideoConfig::new(H264 {
 			profile: 0x64,

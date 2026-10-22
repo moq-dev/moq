@@ -29,9 +29,7 @@ single run can be off by 2x. Pin to the queue VM's 8 CPUs with `taskset -c
 0-7` when timing the whole suite. A test whose time differs between runs by
 about 3 s is waiting out a QUIC draining period, not computing.
 
-What the m1 run (2026-10-21) fixed: moq-auth's stalled re-check close on the
-paused clock (11 s to 0.03 s) and its refusal re-checks by a nudge instead
-of the cadence (3 s and 1 s), the 900 s TS export past-limit failure the
+What the m1 run (2026-10-21) fixed: the 900 s TS export past-limit failure the
 jitter buffer's tests already cover (16.6 s), the close-code tests dialing
 `localhost` against an IPv4-only server (3 s to 0.5 s each on the NixOS
 runner, which lists `::1` first), and the split-accept driver tests' 333 ms
@@ -40,6 +38,10 @@ own Rust crate or JS workspace; a moq-stats bench edit had run the relay and
 CLI suites. To catch the `localhost` race on a host without it, run the
 suite under an `/etc/hosts` that lists `::1` first (`unshare -rm`, then a
 bind mount over `/etc/hosts`); only the close-code tests regressed.
+[moq-dev/moq#6192](https://github.com/moq-dev/moq/pull/6192) landed alongside:
+moq-auth's re-checks on the paused clock, moq-c's encoder probe, moq-gst's and
+moq-relay's idle and retry waits, and moq-cli's export process tests moved to
+nightly.
 
 Baselines from queue run
 [39546261474](https://github.com/moq-dev/moq/actions/runs/39546261474), a full
@@ -70,13 +72,6 @@ Check first:
 - CPU-bound simulations in a debug build: five TS export timing cases (3 to
   11 s each) and the jitter buffer's day of drift (6 to 13 s), whose `Steer`
   rebuilds the hull and median over its whole window on every step.
-- moq-cli's export tests pace a real clip through separate processes; the
-  redundant-importer cases wait out a killed importer's idle timeout
-  ([moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113) shortens it).
-  moq-relay's `cluster_idle` and flapping-peer drill wait the default 10 s
-  idle timeout on purpose, and moq-gst's `relay_loss` test the retry budget.
-- moq-c tests took 0.8 to 1.7 s in the queue against 0.02 s locally; not yet
-  explained.
 
 ## Required
 
