@@ -3954,10 +3954,11 @@ where
 					err.to_string().as_ref(),
 				);
 			}
-			// Release a mid-group tail parked on the head.
+			// Release a mid-group tail parked on the head, including one still being written:
+			// a request that failed after FETCH_OK cannot be trusted to finish its stream.
 			if res.is_err()
 				&& let Ok(mut state) = fill.write()
-				&& matches!(*state, Fill::Requested | Fill::Serving(_))
+				&& matches!(*state, Fill::Requested | Fill::Serving(_) | Fill::Active)
 			{
 				*state = Fill::Done;
 			}
@@ -15659,6 +15660,28 @@ mod joining_fetch_tests {
 	#[moq_clock::test]
 	async fn revocation_cancels_an_accepted_fetch_before_the_subscribe_fin_is_acked() {
 		revoked_child_fetch(true).await;
+	}
+
+	/// From draft 18 the joining FETCH's request stays open after FETCH_OK. Its failure while
+	/// the head is still being written settles the fill, so a mid-group tail is not parked
+	/// on a head that may never finish.
+	#[moq_clock::test]
+	async fn a_request_failing_mid_head_settles_the_fill() {
+		for version in [Version::Draft18, Version::Draft19] {
+			let session = ScriptedSession::per_stream_reset(vec![fetch_ok(version)]);
+			let (subscriber, track, _tasks) = pending_join(session, version);
+			let fill = subscriber.state.lock().subscribes[&RequestId(99)].fill.clone();
+			// A fetch stream is writing the head.
+			if let Ok(mut state) = fill.write() {
+				*state = Fill::Active;
+			}
+			let mut joining = subscriber.start_joining_fetch(RequestId(99), &track).unwrap();
+			assert!(
+				kio::wait(|waiter| joining.poll(waiter)).await.is_err(),
+				"{version}: the reset request fails"
+			);
+			assert!(matches!(*fill.read(), Fill::Done), "{version}: the head is released");
+		}
 	}
 
 	#[moq_clock::test]
