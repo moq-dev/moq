@@ -82,8 +82,7 @@ test("shared invalid counters refuse instead of rounding", async () => {
 });
 
 test("feedback discovery agrees with the Rust fixed track and final path suffix", () => {
-	expect(Echo.TRACK).toBe("feedback.json");
-	expect(Echo.SUFFIX).toBe(".echo");
+	expect({ track: Echo.TRACK, suffix: Echo.SUFFIX }).toEqual({ track: "feedback.json", suffix: ".echo" });
 	expect(Echo.isEcho(Path.from("room/alice.echo"))).toBe(true);
 	expect(Echo.isEcho(Path.from("room.echo/alice"))).toBe(false);
 	expect(Echo.isEcho(Path.from("room/alice.echoes"))).toBe(false);

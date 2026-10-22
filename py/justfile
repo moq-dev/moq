@@ -10,6 +10,10 @@
 
 set working-directory := '.'
 
+# The test clock (`moq.testing`). `--features` replaces pyproject's list, so it
+# names the software encoder the tests use again.
+test_features := "--features testing,openh264"
+
 default:
     just check
 
@@ -28,13 +32,16 @@ _develop *args:
 #
 # `docs` runs here because a broken autodoc reference otherwise surfaces on Read
 # the Docs after the fact. It mocks the native module, so it costs no Rust build.
+#
+# The build has `test`'s features, so `just check` running both compiles moq-ffi
+# once. The release builds compile the default features.
 
 # Lint, type-check, editable-build, check the doc samples, and render the docs.
 check:
     uv sync --locked --no-install-workspace
     uv run --no-sync ruff check .
     uv run --no-sync ruff format --check .
-    just _develop
+    just _develop {{ test_features }}
     uv run --no-sync pyright
     just samples
     just docs
@@ -52,8 +59,7 @@ fix:
 # Run the unit tests, on a build with the test clock (`moq.testing`).
 test:
     uv sync --locked --no-install-workspace
-    # `--features` replaces pyproject's list, so name the software encoder the tests use again.
-    just _develop --features testing,openh264
+    just _develop {{ test_features }}
     uv run --no-sync pytest moq-rs/tests/ moq-ffi/tests/
 
 # Local dev build: editable install of moq-ffi (with the cdylib + uniffi
@@ -89,4 +95,4 @@ package:
 docs:
     rm -rf dist/docs
     uv run --isolated --locked --only-group docs \
-        sphinx-build -b html moq-rs/docs dist/docs
+        sphinx-build -b html -W --keep-going moq-rs/docs dist/docs

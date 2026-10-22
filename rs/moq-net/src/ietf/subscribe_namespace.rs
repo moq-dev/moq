@@ -627,11 +627,16 @@ mod tests {
 		assert!(crate::coding::decode_buf(&mut buf, Version::Draft18, SubscribeNamespace::decode_msg).is_err());
 	}
 
+	/// SUBSCRIBE_NAMESPACE's message types, pinned to the drafts: 0x11 through draft-17,
+	/// renumbered to 0x50 in draft-18.
 	#[test]
-	fn message_ids() {
-		// 0x11 through draft-17 (legacy), renumbered to 0x50 in draft-18 (#1542).
-		assert_eq!(SubscribeNamespaceLegacy::ID, 0x11);
-		assert_eq!(SubscribeNamespace::ID, 0x50);
+	fn message_type_code_points() {
+		for (name, id, spec) in [
+			("SUBSCRIBE_NAMESPACE (draft-17)", SubscribeNamespaceLegacy::ID, 0x11),
+			("SUBSCRIBE_NAMESPACE", SubscribeNamespace::ID, 0x50),
+		] {
+			assert_eq!(id, spec, "{name}");
+		}
 	}
 
 	#[test]

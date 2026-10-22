@@ -22,8 +22,8 @@ const FORGET = 0.983;
 /** Milliseconds of arrival time per resampled observation. */
 const RESAMPLE = 500;
 
-/** Holds the forget factor below `FORGET` early on, so evidence overwrites the prior. */
-const RAMP = 2;
+/** The most weight one observation takes, so a lone one holds the quantile for one half-life at most. */
+const FRESH_MAX = 0.1;
 
 /** Idle intervals folded at once, purely to bound the work. */
 const IDLE_MAX = 1024;
@@ -53,8 +53,8 @@ export class Jitter {
 	#peak = 0;
 
 	#histogram = Float64Array.from(PRIOR);
-	/** Observations folded in, which drives the cold-start ramp. */
-	#count = 0;
+	/** How much of the histogram is still the prior's rather than evidence. */
+	#prior = 1;
 
 	/** Fold one frame in: `arrival` on the receiver's monotonic clock, `media` its timestamp. */
 	observe(arrival: Milli, media: Milli): void {
@@ -114,7 +114,7 @@ export class Jitter {
 	fork(): Jitter {
 		const fork = new Jitter();
 		fork.#histogram = Float64Array.from(this.#histogram);
-		fork.#count = this.#count;
+		fork.#prior = this.#prior;
 		return fork;
 	}
 
@@ -128,17 +128,21 @@ export class Jitter {
 		return (BUCKETS * BUCKET) as Milli;
 	}
 
-	// `h = f*h + (1-f)*x`, where x is all weight on the observed bucket, or the prior when the
-	// interval held no arrival. The total stays at 1 without renormalizing.
+	// Evidence decays by `FORGET` and the prior holds the rest, of which an observation takes up to
+	// `FRESH_MAX`, so the prior is replaced within seconds while no single interval outweighs the
+	// quantile's tail for long. Once the prior is gone this is `h = f*h + (1-f)*x`. An interval with
+	// no arrival takes nothing, so its share returns to the prior. The total stays at 1 without
+	// renormalizing.
 	#fold(bucket: number | undefined): void {
-		this.#count += 1;
-		const forget = Math.min(FORGET, this.#count / (this.#count + RAMP));
-		const fresh = 1 - forget;
+		const rest = 1 - FORGET * (1 - this.#prior);
+		const fresh = bucket === undefined ? 0 : Math.min(FRESH_MAX, rest);
+		const left = rest - fresh;
+		const seed = left - FORGET * this.#prior;
 
 		for (let i = 0; i < BUCKETS; i++) {
-			this.#histogram[i] *= forget;
-			if (bucket === undefined) this.#histogram[i] += fresh * PRIOR[i];
+			this.#histogram[i] = FORGET * this.#histogram[i] + seed * PRIOR[i];
 		}
 		if (bucket !== undefined) this.#histogram[bucket] += fresh;
+		this.#prior = left;
 	}
 }

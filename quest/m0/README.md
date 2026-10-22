@@ -23,17 +23,6 @@ serve instead of enumerating broadcasts. Serving the relay's ingested-only
 view (`origin::Consumer::local()`) to localhost workers belongs to moq.pro's
 edge, which embeds moq-relay; it moved there on 2026-09-28.
 
-Interop: Fastly's moq-relay-interop report (run of 2026-09-23, build
-7ee2b02) was triaged against `main` on 2026-10-07. Its SETUP, UNSUBSCRIBE
-and error-code items were already fixed. Fastly's reruns that day found
-that a relay moves End of Track's Location and refuses imquic's End of
-Group status. The fixes below LOCATION_FILTER come from them and go ahead
-of Seattle. The cold-relay Largest stays compliant with INVALID_RANGE
-(decided 2026-10-08), and the deviations doc landed in #5022.
-An imquic draft-22 rig (2026-10-08) hit LOCATION_FILTER and a clear
-FIRST_OBJECT at object 0 (#5027). Both shipped with moq-noq 1.3.5 in
-moq-relay 0.17.3 and `@moq/net` 0.4.3.
-
 Identity: the [broadcast epoch](/quest/m0/broadcast-epoch/README.md) line
 gates the next release (decided 2026-10-03:
 #4741 resumes an un-epoched republish into the old broadcast and stalls its
@@ -41,39 +30,10 @@ viewers). #4741 can merge to main, but no release ships until first-party
 publishers mint epochs. Backport patches cut from `release` don't carry
 #4741 and aren't gated (decided 2026-10-08).
 
-Liveness: a serve loop with work always ready never yields, which starved
-an FFI publisher's QUIC driver and fails hosted Interop's go lanes (found
-2026-10-08 landing #4225). The publish serve loops now yield through a
-`kio::coop::Budget`. The Go and Python interop cells it fails
-moved here from m1 the same day, because the stall masks interop on every
-wire PR and hides as slow passes; the harness now fails a cell whose
-connection idles out.
-
-Audio playout: the jitter target is default in both languages (#4162); the
-[line](/quest/m1/audio-jitter-target/README.md) moved to m1 in the
-2026-10-08 audit, since only a manual browser proof and a native trace replay
-remain and the release only requires the production clock and playback contracts
-that depend on them.
-
-Interop on main (2026-10-13): the cross-client matrix failed with `unroutable`
-whenever WebSocket won the connect race: since #5294, #4180's upgrade
-retired epochless handles before its held `Restart` reached anyone. Handles
-now retire only once it is deliverable. First-party consumers following it
-moved to m1 (maintainer, 2026-10-13), since the upgrade is removed.
-
-Crashes (2026-10-13, #5407): a publisher on a host whose wall clock reads
-before 2020 panics, and `panic = "abort"` turned any library panic into a
-dead host app. Both joined m0 (maintainer) and are fixed: the clock at its
-source, and unwinding so a panic closes only its connection.
-
-Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
-quests here. The nixpkgs bump broke the Linux zigbuild release builds (its
-GCC 16 miscompiles lld 21; fixed by bumping nixpkgs past the upstream fix),
-and fat LTO in the release profile broke the fuzz build. Audio quality has been
-red since it landed, against budgets recorded locally; re-measuring them on
-the runner moved here from Watch (maintainer, 2026-10-13). The other red jobs
-have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
-(#5389) and Windows tests (#5339).
+Flakes (2026-10-20, maintainer): the redundant failover drift moved here from
+the m1 [load round](/quest/m1/test-flakes-2/README.md). It fails loaded
+`just check` runs, the local gate every merge waits on, and may hide a TS
+export bug.
 
 Hygiene (decided 2026-10-19): the audits sit at the end of this list.
 Each recurs once per major release: its PR adds the next run to the following
@@ -82,12 +42,12 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 
 ## Required
 
-- [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
+- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
+- [Redundant failover drift](/quest/m0/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
 - [qmux 0.5.3](/quest/m0/qmux-0.5.3.md) - crates.io publishes qmux 0.5.3 with the builder session config the release backport of #5609 needs
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
 - [Release fixed delay](/quest/m0/release-fixed-delay.md) - a fixed latency on `release`, which moq.dev runs, ignores the catalog's jitter and delay as `main` already does
 - [Publisher stall estimate](/quest/m0/publish-stall-estimate.md) - a live browser publish holds its viewers at the Auto target instead of ratcheting their buffer up with every stall
-- [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
-- [Performance audit](/quest/m0/audit-perf.md) - benchmarks that regressed since the last run are explained, fixed, or planned, and unbenched hot paths get coverage
+- [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [Lint override and deprecation audit](/quest/m0/audit-lints.md) - every lint suppression is still needed and says why, nothing calls a deprecated API, and stale Rust overrides fail the build
-- [Quest tree audit](/quest/m0/audit-quests.md) - the tree agrees with itself and with main
+- [Interop audit](/quest/m0/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down
