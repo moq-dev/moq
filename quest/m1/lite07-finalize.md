@@ -101,7 +101,6 @@ Timestamp provenance landed in
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 - [lite-06 max sequence](/quest/m1/lite06-max-sequence.md) - the refusal boundary for an uncarriable sequence is settled before lite-07 freezes
 - [TRACKS in js/net](/quest/m1/archive/tracks-js.md) - JS speaks lite-07's Tracks Stream, which Rust already does
-- [lite-07 padding](/quest/m1/lite07-padding.md) - lite-07 reserves the padding stream type the browser probes with
 
 ## Related
 
