@@ -23,13 +23,13 @@ type Pins = Arc<Mutex<HashMap<moq_net::PathOwned, moq_net::broadcast::Consumer>>
 /// reference. Build one with [`Source::new`].
 ///
 /// A source serves its own path from the broadcast it was built from, and keeps the first
-/// broadcast it resolves for each sibling; a [binding](Self::bind) waits for the sibling's first
-/// announcement to resolve it. Every later request for a path is served from that handle
-/// ([`broadcast`](Self::broadcast),
-/// [`catalog`](Self::catalog), [`resolve`](Self::resolve), [`bind`](Self::bind),
-/// [`subscribe_track`](Self::subscribe_track), and an export's track requests). A route replaced
-/// after that is never resolved, epoch or not, so two publishers never splice into one export; a
-/// request on a held broadcast that has ended fails instead. Clones share the held broadcasts.
+/// broadcast it resolves for each sibling. Every later request for a path is served from that
+/// handle ([`broadcast`](Self::broadcast), [`catalog`](Self::catalog),
+/// [`resolve`](Self::resolve), [`bind`](Self::bind), [`subscribe_track`](Self::subscribe_track),
+/// and an export's track requests, which wait for a sibling's first announcement). A route
+/// replaced after that is never resolved, epoch or not, so two publishers never splice into one
+/// export; a request on a held broadcast that has ended fails instead. Clones share the held
+/// broadcasts.
 ///
 /// A reader that follows a sibling's announcements instead, restarting on each new instance,
 /// uses [`follow`](Self::follow), which holds nothing.
@@ -151,7 +151,7 @@ impl Source {
 						let mut routing = self.origin.routed_broadcast(path).into_inner();
 						// Issue the request now: a handler answers it whether or not anyone reads yet.
 						let _ = kio::Task::poll(&mut routing, &kio::Waiter::noop());
-						Lookup::Announced(Mutex::new(routing))
+						Lookup::Announced(Box::new(Mutex::new(routing)))
 					}
 					false => Lookup::Now(self.origin.request_broadcast(path, None).into_inner()),
 				},
@@ -191,7 +191,8 @@ impl Source {
 	}
 
 	/// The skipping counterpart to [`Self::bind`] for a catalog entry, returning `None` when its
-	/// broadcast walks above the origin root.
+	/// broadcast walks above the origin root. Unlike a binding, it waits for a sibling nothing
+	/// announces yet, so a late first announcement starts the rendition.
 	///
 	/// The exporters use it to drop a single bad rendition rather than fail the whole export.
 	/// [`Self::retain_selectable`] already removes those renditions, so this is the second half of
@@ -248,10 +249,6 @@ impl Source {
 	/// broadcast must be (see [`Source`]). Use it when you need the broadcast handle itself
 	/// (e.g. to FETCH individual groups) rather than a subscription.
 	///
-	/// Answers for the routes as they stand: a sibling nothing announces yet fails, rather than
-	/// waiting for it as [`bind`](Self::bind) does, so a reader choosing among renditions can
-	/// move on to the next.
-	///
 	/// A reference that escapes above the origin root is
 	/// [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast): the rendition names
 	/// no broadcast, so there is nothing to resolve.
@@ -260,15 +257,14 @@ impl Source {
 		rel: Option<&moq_net::path::Relative<'_>>,
 		epoch: Option<&moq_net::Epoch>,
 	) -> crate::Result<moq_net::broadcast::Consumer> {
-		self.request_path(&self.target(rel)?, epoch, false).broadcast().await
+		self.bind(rel, epoch)?.broadcast().await
 	}
 
 	/// Start one broadcast request now and retain its result for repeated reads.
 	///
 	/// Unlike [`resolve`](Self::resolve), this issues the request without awaiting or polling.
-	/// A path nothing announces yet resolves once something does, and a remote or dynamic
-	/// handler may answer later. Once answered, the binding never resolves the path again, even
-	/// after its publisher is replaced or goes; [`follow`](Self::follow) does.
+	/// A remote or dynamic handler may answer later. The binding never retries a failed request
+	/// or resolves the path again after a publisher is replaced; [`follow`](Self::follow) does.
 	///
 	/// A path this source already resolved binds to that broadcast; otherwise the origin is
 	/// asked, deduplicating repeat requests for one path so the catalog and every rendition share
@@ -282,15 +278,15 @@ impl Source {
 		rel: Option<&moq_net::path::Relative<'_>>,
 		epoch: Option<&moq_net::Epoch>,
 	) -> crate::Result<Binding> {
-		Ok(self.request_path(&self.target(rel)?, epoch, true))
+		Ok(self.request_path(&self.target(rel)?, epoch, false))
 	}
 
 	/// Resolve an optional cross-broadcast reference and subscribe to track `name`,
 	/// awaiting SUBSCRIBE_OK.
 	///
 	/// `rel` is a rendition's catalog `broadcast` field: `None` (or an empty reference)
-	/// subscribes on the catalog broadcast; anything else is bound as in [`bind`](Self::bind),
-	/// waiting for the referenced broadcast's first announcement, and checked against `epoch`. A
+	/// subscribes on the catalog broadcast; anything else fetches the referenced broadcast
+	/// from the origin first, checked against `epoch` as in [`resolve`](Self::resolve). A
 	/// reference that escapes above the origin root is
 	/// [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast).
 	///
@@ -326,7 +322,7 @@ impl Source {
 		let path = self.target(rel)?;
 		let instances = match path == self.path {
 			true => Instances::Fixed(Some(self.broadcast())),
-			false => Instances::Announced(self.origin.announced_broadcast(&path, None)?),
+			false => Instances::Announced(Box::new(self.origin.announced_broadcast(&path, None)?)),
 		};
 		Ok(Follow::with(instances, epoch))
 	}
@@ -347,7 +343,7 @@ pub struct Follow {
 
 enum Instances {
 	/// Every instance announced at a path.
-	Announced(moq_net::origin::AnnouncedBroadcast),
+	Announced(Box<moq_net::origin::AnnouncedBroadcast>),
 	/// One instance, handed out once.
 	Fixed(Option<moq_net::broadcast::Consumer>),
 }
@@ -371,7 +367,7 @@ impl Follow {
 		epoch: Option<&moq_net::Epoch>,
 	) -> crate::Result<Self> {
 		let announced = origin.announced_broadcast(path, None)?;
-		Ok(Self::with(Instances::Announced(announced), epoch))
+		Ok(Self::with(Instances::Announced(Box::new(announced)), epoch))
 	}
 
 	fn with(instances: Instances, epoch: Option<&moq_net::Epoch>) -> Self {
@@ -438,12 +434,10 @@ fn proves_other(epoch: Option<&moq_net::Epoch>, broadcast: &moq_net::broadcast::
 
 /// A held broadcast or the retained result of one eagerly issued broadcast request.
 ///
-/// A pending request waits for a path nothing announces yet and rides out route churn until it
-/// resolves (see [`routed_broadcast`](moq_net::origin::Consumer::routed_broadcast)). Once
-/// answered, reading the binding never looks up its path again, even after a failure or
-/// publisher replacement. Issuing a request does not establish an epoch relationship with a
-/// separate catalog broadcast. A binding made with an epoch refuses a broadcast proven to serve
-/// another one.
+/// Reading the binding never looks up its path again, even after a failure or publisher
+/// replacement. Pending requests follow the origin's routing semantics; issuing a request
+/// does not establish an epoch relationship with a separate catalog broadcast. A binding made
+/// with an epoch refuses a broadcast proven to serve another one.
 ///
 /// Build one with [`Source::bind`], or with [`Binding::new`] for a broadcast already in hand.
 pub struct Binding {
@@ -459,7 +453,7 @@ enum Lookup {
 	/// For the routes as they stand.
 	Now(moq_net::origin::Requesting),
 	/// Once something announces the path, riding out route churn.
-	Announced(Mutex<moq_net::origin::Routing>),
+	Announced(Box<Mutex<moq_net::origin::Routing>>),
 }
 
 enum Bound {
@@ -624,16 +618,34 @@ mod tests {
 		assert!(first.is_clone(&binding.broadcast().await.unwrap()));
 	}
 
-	/// A binding made before anything announces its path resolves on the first announcement,
-	/// and keeps that instance once it is replaced.
-	#[tokio::test(start_paused = true)]
-	async fn a_binding_waits_for_the_first_announcement() {
+	/// A failed lookup pins nothing: the guarantee starts at a path's first resolution.
+	#[tokio::test]
+	async fn failed_binding_does_not_retry_a_later_publisher() {
 		let origin = produce_origin();
 		let _catalog = origin.publish("pub", Default::default()).unwrap();
 		settle().await;
 		let source = resolved(&origin, "pub").await;
 		let media = Relative::new("media");
 		let binding = source.bind(Some(&media), None).unwrap();
+		assert!(binding.broadcast().await.is_err());
+		let _publisher = origin.publish("media", Default::default()).unwrap();
+		settle().await;
+		assert!(!source.resolve(Some(&media), None).await.unwrap().is_closed());
+		assert!(binding.broadcast().await.is_err());
+	}
+
+	/// An export's request made before anything announces its sibling resolves on the first
+	/// announcement, and keeps that instance once it is replaced.
+	#[tokio::test(start_paused = true)]
+	async fn an_export_request_waits_for_the_first_announcement() {
+		let origin = produce_origin();
+		let _catalog = origin.publish("pub", Default::default()).unwrap();
+		settle().await;
+		let source = resolved(&origin, "pub").await;
+		let media = Relative::new("media");
+		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		config.broadcast = Some(media.to_owned());
+		let binding = source.try_request(&config).unwrap();
 		settle().await;
 		assert!(binding.poll_broadcast(&kio::Waiter::noop()).is_pending());
 

@@ -3155,7 +3155,10 @@ mod session_tests {
 		assert_eq!(recorder.written(&mut second, 2), pad, "the return moved to another pad");
 		stop(session);
 
-		assert!(recorder.seen().contains(&Seen::Start(pad)), "no new stream on the kept pad");
+		assert!(
+			recorder.seen().contains(&Seen::Start(pad)),
+			"no new stream on the kept pad"
+		);
 		recorder.assert_one_pad_held();
 	}
 
@@ -3178,7 +3181,10 @@ mod session_tests {
 		stop(session);
 
 		let seen = recorder.seen();
-		let switched = seen.iter().position(|seen| *seen == Seen::Buffer(pad.clone(), 2)).unwrap();
+		let switched = seen
+			.iter()
+			.position(|seen| *seen == Seen::Buffer(pad.clone(), 2))
+			.unwrap();
 		assert!(
 			!seen[switched..].contains(&Seen::Buffer(pad.clone(), 1)),
 			"the replaced sibling kept playing: {seen:?}"
@@ -3213,12 +3219,20 @@ mod session_tests {
 		let mut follow = origin.consume().follow("cam").unwrap();
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 		let mut new = Publisher::sibling(&origin, epoch());
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Restart(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::announce::Event::Restart(_))
+		});
 		new.write(2);
 		drop(new);
-		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Restart(_)));
+		await_event(&mut follow, |event| {
+			matches!(event, moq_net::announce::Event::Restart(_))
+		});
 
-		assert_eq!(recorder.written(&mut old, 3), pad, "the named instance moved to another pad");
+		assert_eq!(
+			recorder.written(&mut old, 3),
+			pad,
+			"the named instance moved to another pad"
+		);
 		stop(session);
 		assert!(
 			!recorder.seen().contains(&Seen::Buffer(pad, 2)),

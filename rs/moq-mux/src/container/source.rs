@@ -766,7 +766,11 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		let ended = tokio::time::timeout(Duration::from_secs(1), kio::wait(|waiter| late.poll_read(waiter))).await;
-		assert!(matches!(ended, Ok(Ok(None))), "{:?}", ended.map(|read| read.map(|_| ())));
+		assert!(
+			matches!(ended, Ok(Ok(None))),
+			"{:?}",
+			ended.map(|read| read.map(|_| ()))
+		);
 		drop((track, replacement, new));
 	}
 
