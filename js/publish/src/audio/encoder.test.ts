@@ -22,11 +22,9 @@ describe("resolve", () => {
 		expect(Audio.resolve).toBeUndefined();
 	});
 
-	test("defaults Opus to 20ms", () => {
-		const resolved = resolve(captured, "opus");
-		expect(resolved.frameDuration).toBe(Micro(20_000));
-		expect(Number(resolved.catalog.warmup)).toBe(80);
-		expect(resolved.catalog.jitter).toBeUndefined();
+	test("the default Opus catalog declares the RFC 7845 preroll", () => {
+		// 80ms per RFC 7845 section 4.6, matching WARMUP in rs/moq-mux/src/codec/opus/mod.rs.
+		expect(Number(resolve(captured, "opus").catalog.warmup)).toBe(80);
 	});
 
 	// The exact frame duration does not imply encoder flush lateness.

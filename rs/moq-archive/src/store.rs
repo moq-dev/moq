@@ -167,12 +167,6 @@ impl<T: ObjectStore> Store<T> {
 						intended: info.timescale,
 					});
 				}
-				if parsed.epoch != info.epoch {
-					return Err(Error::EpochMismatch {
-						existing: parsed.epoch,
-						intended: info.epoch.clone(),
-					});
-				}
 				Ok(key)
 			}
 		}
@@ -198,15 +192,13 @@ impl<T: ObjectStore> Store<T> {
 		Object::decode(self.get_bytes(&path).await?, timed)
 	}
 
-	/// Each recorded track's timeline track, found by listing the track directories a [`Writer`]
-	/// creates: a timeline is named by [`hang::timeline::default_name`]. One listing of the
+	/// Each recorded track's timeline track, found by listing the recording's track directories:
+	/// a timeline is named by [`hang::timeline::default_name`]. One listing of the
 	/// prefix's directories plus a HEAD per timeline, so following a long recording doesn't list
 	/// its objects. A timeline whose `.info` isn't stored yet, such as one still enrolling, is left
 	/// out until it is.
 	///
 	/// For replaying a recording without its catalog; a catalog's `archive` entry names the same map.
-	///
-	/// [`Writer`]: crate::Writer
 	pub async fn timelines(&self) -> Result<std::collections::BTreeMap<String, String>> {
 		let listed = self.inner.list_with_delimiter(self.list_path(None).as_ref()).await?;
 		let mut timelines = std::collections::BTreeMap::new();

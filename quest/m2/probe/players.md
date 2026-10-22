@@ -16,7 +16,7 @@ Decided with the maintainer on 2026-10-17 (see the
 already reads the catalog, which keeps moq-net catalog-agnostic, and only an
 enabled rendition is one it could switch to. Targets are on by default.
 
-- The handle comes from the [target](/quest/m2/probe/target.md) quest; this
+- The handle comes from the [viewer targets](/quest/m2/probe/viewer-target.md) quest; this
   quest only decides its `max`.
 - Settle what a rendition without a catalog bitrate contributes.
 - A probe that reaches the target must make the rendition selectable.
@@ -31,4 +31,4 @@ and yields to an application override.
 
 ## Required
 
-- [Session probe target](/quest/m2/probe/target.md) - the per-broadcast viewer handle
+- [Viewer targets](/quest/m2/probe/viewer-target.md) - the per-broadcast viewer handle

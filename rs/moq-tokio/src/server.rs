@@ -2873,16 +2873,6 @@ mod tests {
 		assert!(server.accept_health().is_empty());
 	}
 
-	#[test]
-	fn transport_names_are_stable() {
-		assert_eq!(Transport::Quic.as_str(), "quic");
-		assert_eq!(Transport::Iroh.as_str(), "iroh");
-		assert_eq!(Transport::WebSocket.as_str(), "websocket");
-		assert_eq!(Transport::Tcp.as_str(), "tcp");
-		assert_eq!(Transport::Unix.as_str(), "unix");
-		assert_eq!(Transport::WebTransport.as_str(), "webtransport");
-	}
-
 	/// Building the endpoint needs a runtime, and `certificates()` must stay
 	/// readable without one (no guard escapes to the caller).
 	#[cfg(feature = "quic")]

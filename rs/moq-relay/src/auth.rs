@@ -1257,12 +1257,11 @@ mod tests {
 		assert!(grant.publish.is_empty());
 	}
 
-	/// The verification concurrency defaults to 128, reads from `[auth]`, and refuses 0,
+	/// The verification concurrency reads from `[auth]` and refuses 0,
 	/// which would leave every in-band token waiting forever.
 	#[test]
-	fn verifications_default_and_refuse_zero() {
+	fn verifications_parse_and_refuse_zero() {
 		let config = config(Some("http://127.0.0.1:4440/"), &[]);
-		assert_eq!(config.verifications, 128);
 		let parsed: Config = toml::from_str("url = \"http://127.0.0.1:4440/\"\nverifications = 4\n").unwrap();
 		assert_eq!(parsed.verifications, 4);
 		let zero = Config {

@@ -50,6 +50,20 @@ fn hvc1_is_keyframe(data: &[u8], length_size: usize) -> bool {
 		.any(|nal| nal.first().is_some_and(|header| is_irap(split::nal_unit_type(*header))))
 }
 
+/// Whether an hvc1-shaped (length-prefixed) access unit is a RADL picture: one that leads its
+/// IRAP but references only it, so it decodes wherever that IRAP does (H.265 8.1.2).
+pub(crate) fn hvc1_is_radl(data: &[u8], length_size: usize) -> bool {
+	let Ok(nals) = crate::codec::annexb::length_prefixed_nals(data, length_size) else {
+		return false;
+	};
+	// RADL_N and RADL_R; types below 32 are slices.
+	let mut slices = (nals.map_while(std::result::Result::ok))
+		.filter_map(|nal| nal.first().map(|header| (header >> 1) & 0x3f))
+		.filter(|kind| *kind < 32)
+		.peekable();
+	slices.peek().is_some() && slices.all(|kind| matches!(kind, 6 | 7))
+}
+
 /// True for the IRAP (intra random access point) NAL types, the ones that open a group.
 /// HEVC random access is broader than H.264's single IDR type.
 pub(crate) fn is_irap(nal_type: NALUnitType) -> bool {

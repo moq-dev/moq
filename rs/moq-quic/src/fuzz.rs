@@ -195,7 +195,7 @@ pub fn streams(data: &[u8]) -> bool {
                     SendStream::new(StreamId(id), &mut state, &mut pending, &conn_state).finish();
             }
             StreamOp::ReceivedStopSending { id, error_code } => {
-                state.received_stop_sending(StreamId(id), varint(error_code));
+                let _ = state.received_stop_sending(StreamId(id), varint(error_code));
             }
             StreamOp::ReceivedReset {
                 id,
