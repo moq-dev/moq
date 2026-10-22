@@ -1404,12 +1404,10 @@ async fn a_stall_drops_what_it_made_late() {
 	);
 }
 
-/// The whole path stalls, so nothing wakes the export until it delivers what it held. The export
-/// judges a frame as arriving when its source was last found empty, which is when the export last
-/// ran, so what the stall held behind the deadline still goes out, late.
+/// The whole path stalls, so nothing wakes the export until it delivers what it held. Each frame
+/// is judged on when it landed, not on when the export next ran, so what the stall held behind the
+/// deadline is dropped rather than sent late.
 #[tokio::test(start_paused = true)]
-#[ignore = "an export nothing wakes judges a frame on when it last ran; moq-net stamping each frame's \
-            arrival fixes it: /quest/m1/ts-reliability/arrival-stamps.md"]
 async fn a_path_stall_drops_what_it_made_late() {
 	recover(arm(Profile::Closed, |slot| hold(true, slot))).await;
 }

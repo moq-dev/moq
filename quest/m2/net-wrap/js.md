@@ -34,3 +34,5 @@ Wire: the `draft-lcurley-moq-e2ee.md` compress flag from
 ## Required
 
 - [moq-net traits](/quest/m2/net-wrap/traits.md) - the names and methods this mirrors
+
+- [moq-e2ee implements the traits](/quest/m2/net-wrap/e2ee.md) - owns the authenticated logical compression encoding this mirrors

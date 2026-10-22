@@ -85,7 +85,7 @@ public final class GroupRequest: Sendable {
     }
 
     /// The consumer's delivery priority for this fetch.
-    public var priority: UInt8 {
+    public var priority: Int8 {
         ffi.priority()
     }
 

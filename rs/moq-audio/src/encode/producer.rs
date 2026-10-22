@@ -556,6 +556,7 @@ impl<E: CatalogExt> Producer<E> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	async fn decoded_frame(consumer: &mut crate::decode::Consumer) -> Result<Option<Frame>, Error> {
 		loop {

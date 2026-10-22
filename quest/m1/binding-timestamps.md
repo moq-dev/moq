@@ -32,9 +32,10 @@ Decided with the maintainer on 2026-10-18:
 - **m1**, beside data consumer timestamps.
 - **#5677 shipped** the data-value timestamps with the interim microsecond
   fields; this quest converts every site at once, `MoqJsonValue` included.
-- **Shape mirrors the core:** one `{value, scale}` per value, `value` at most
-  `2^62 - 1` and `scale` non-zero and at most `2^62 - 1`, matching
-  `Timestamp::new` and `Timescale::new`. The FFI boundary refuses anything else with
+- **Shape mirrors the core:** one `{value, scale}` per value, `value` bounded
+  as `Timestamp::new` bounds it (`2^61 - 1` once
+  [#6168](https://github.com/moq-dev/moq/pull/6168) lands, decided 2026-10-22)
+  and `scale` non-zero and at most `2^62 - 1`, matching `Timescale::new`. The FFI boundary refuses anything else with
   an error. Rejected: raw ticks at the track scale beside
   `MoqTrackInfo.timescale`, because a producer argument needs its own scale
   and per-value records match the core and JS.
