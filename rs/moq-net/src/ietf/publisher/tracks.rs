@@ -867,7 +867,8 @@ where
 
 		params.new_group = new_group;
 		let mut state = Forwarding {
-			ended: track.clone(),
+			ended: None,
+			broadcast: None,
 			track,
 			namespace,
 			params,
@@ -935,10 +936,21 @@ where
 					if session.poll_closed(&mut cx).is_ready() || stream.writer.poll_closed(&mut cx).is_ready() {
 						return Poll::Ready(Wait::Cancelled);
 					}
-					if !state.published
-						&& let Poll::Ready(ended) = state.ended.poll_complete(waiter)
-					{
-						return Poll::Ready(Wait::Ended(ended));
+					if !state.published {
+						match (&state.ended, &state.broadcast) {
+							(Some(source), _) => {
+								if let Poll::Ready(ended) = source.poll_complete(waiter) {
+									return Poll::Ready(Wait::Ended(ended));
+								}
+							}
+							// Whether the track completed is unknown, so never TRACK_ENDED.
+							(None, Some(broadcast)) => {
+								if broadcast.poll_closed(waiter).is_ready() {
+									return Poll::Ready(Wait::Ended(Err(Error::Unroutable)));
+								}
+							}
+							(None, None) => {}
+						}
 					}
 					if let Poll::Ready(verdict) = state.renewal.poll(waiter) {
 						return Poll::Ready(Wait::Renewal(verdict));
@@ -963,6 +975,12 @@ where
 
 			let update = match wait {
 				Wait::Update(update) => update,
+				// An idle copy retired upstream says nothing about the content. Stay paused
+				// without an observer: the broadcast ending, or resuming, finds the end.
+				Wait::Ended(Err(Error::Cancel)) => {
+					state.ended = None;
+					continue;
+				}
 				Wait::Ended(ended) => return Some(Served::Track(ended)),
 				Wait::Renewal(verdict) => {
 					if let Err(done) = self
@@ -1133,7 +1151,7 @@ where
 		.await?;
 
 		let edge = live_edge(track);
-		state.ended = track.serving().unwrap_or_else(|| track.clone());
+		state.ended = Some(track.serving().unwrap_or_else(|| track.clone()));
 		let range = subscribe_range(params.filter, edge, self.version);
 		range.apply(&mut subscription);
 		let _ = subscriber.update(subscription);

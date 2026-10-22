@@ -554,8 +554,11 @@ type Renewal = request_update::Renewal<super::request_stream::Update>;
 /// The state a subscription retains while forwarding is paused.
 struct Forwarding<'a, S: crate::transport::poll::Session> {
 	track: track::Consumer,
-	/// The current source, observed weakly after the logical route's idle copy retires.
-	ended: track::Consumer,
+	/// The current source, observed weakly for its end while paused; `None` once it was
+	/// retired idle, which ends nothing.
+	ended: Option<track::Consumer>,
+	/// A SUBSCRIBE's broadcast: once nothing observes the source, its end ends the request.
+	broadcast: Option<crate::broadcast::Consumer>,
 	namespace: crate::PathOwned,
 	params: tracks::Params,
 	dynamic: bool,
@@ -1297,7 +1300,8 @@ where
 					let order = msg.group_order.to_order();
 					let mut forwarding = Forwarding {
 						track: track.clone(),
-						ended: track.clone(),
+						ended: Some(track.clone()),
+						broadcast: Some(broadcast.clone()),
 						namespace: msg.track_namespace.to_owned(),
 						params: tracks::Params {
 							priority: msg.subscriber_priority,
@@ -1326,7 +1330,7 @@ where
 								));
 							}
 						};
-						forwarding.ended = track.serving().unwrap_or_else(|| track.clone());
+						forwarding.ended = Some(track.serving().unwrap_or_else(|| track.clone()));
 						forwarding.dynamic = info.refresh.is_some();
 						let mut properties = match track_properties(
 							&info,
@@ -1436,7 +1440,7 @@ where
 							.compression(self.peer_setup.get().await.flate)
 							.ranked(self.priority.clone());
 					forwarding.dynamic = track_serve.dynamic;
-					forwarding.ended = cache.serving().unwrap_or_else(|| cache.clone());
+					forwarding.ended = Some(cache.serving().unwrap_or_else(|| cache.clone()));
 					forwarding.opened = track_serve.opened.clone();
 					// A fixed start is no join, so its NEW_GROUP_REQUEST asks as an update's would.
 					if fixed.start.is_some()
@@ -9066,9 +9070,9 @@ mod serve_tests {
 		}
 	}
 
-	/// An idle upstream copy being cancelled must not become a clean content end.
+	/// A paused request's source failing ends it in error, never as a clean content end.
 	#[moq_clock::test]
-	async fn a_paused_subscribe_keeps_source_cancellation_distinct_from_completion() {
+	async fn a_paused_subscribe_keeps_source_failure_distinct_from_completion() {
 		let version = Version::Draft22;
 		let h = serve(version);
 		let mut msg = subscribe(Filter::NextObject, None);
@@ -9079,16 +9083,153 @@ mod serve_tests {
 			!h.log.trail().is_empty() && Wire::read(&h.log, version).sent(ietf::SubscribeOk::ID).is_some()
 		})
 		.await;
-		h.track.abort(Error::Cancel).unwrap();
+		h.track.abort(Error::Dropped).unwrap();
 		assert!(matches!(
 			moq_clock::timeout(Duration::from_secs(10), running)
 				.await
-				.expect("source cancellation"),
-			Err(Error::Cancel)
+				.expect("source failure"),
+			Err(Error::Dropped)
 		));
 		assert_ne!(
 			Wire::read(&h.log, version).publish_done.unwrap().0,
 			ietf::PublishDoneStatus::TrackEnded.code(version)
+		);
+	}
+
+	/// A paused request outlives its relayed source's idle linger: the copy retired with
+	/// Cancel ends nothing. Resuming asks the source afresh at its live edge, and the
+	/// route's withdrawal ends the request in error instead.
+	#[moq_clock::test]
+	async fn a_paused_subscribe_outlives_the_upstream_linger() {
+		for version in [Version::Draft16, Version::Draft22] {
+			for withdraw in [false, true] {
+				paused_through_the_linger(version, withdraw).await;
+			}
+		}
+	}
+
+	async fn paused_through_the_linger(version: Version, withdraw: bool) {
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let route = origin.dynamic_route("room", crate::origin::Route::default()).unwrap();
+		let session = ScriptedSession::per_stream(vec![Vec::new()]);
+		let log = session.log.clone();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer::default());
+		let publisher = Publisher::new(
+			crate::time::sim(),
+			session.clone(),
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			peer_setup,
+			version,
+		);
+		let mut request = ScriptedSession::new(Vec::new());
+		request.log = log.clone();
+		let stream = Stream::open(&mut request.clone(), version).await.unwrap();
+		let mut msg = subscribe(Filter::NextObject, None);
+		msg.forward = false;
+		let mut running = std::pin::pin!(publisher.clone().run_subscribe_stream(stream, msg));
+
+		// The relay's upstream session serves the route, as an IETF or lite subscriber does.
+		let resolving = std::cell::RefCell::new(None);
+		serve_until(running.as_mut(), "the broadcast request", || {
+			if let Poll::Ready(Ok(asked)) = route.poll_requested_broadcast(&kio::Waiter::noop()) {
+				*resolving.borrow_mut() = Some(asked);
+			}
+			resolving.borrow().is_some()
+		})
+		.await;
+		let upstream = crate::broadcast::Info::new().produce();
+		let dynamic = std::cell::RefCell::new(upstream.dynamic());
+		resolving.into_inner().unwrap().accept(&upstream);
+		let next_copy = async |running: std::pin::Pin<&mut _>| {
+			let asked = std::cell::RefCell::new(None);
+			serve_until(running, "the track request", || {
+				if let Poll::Ready(Ok(request)) = dynamic.borrow_mut().poll_requested_track(&kio::Waiter::noop()) {
+					*asked.borrow_mut() = Some(request);
+				}
+				asked.borrow().is_some()
+			})
+			.await;
+			asked.into_inner().unwrap().accept(crate::track::Info::timed())
+		};
+		let copy = next_copy(running.as_mut()).await;
+		let mut group = copy.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(timestamp(), b"before".as_slice()).unwrap();
+		group.finish().unwrap();
+		serve_until(running.as_mut(), "SUBSCRIBE_OK for the paused request", || {
+			!log.trail().is_empty() && Wire::read(&log, version).sent(ietf::SubscribeOk::ID).is_some()
+		})
+		.await;
+
+		// Nothing reads the copy, so the upstream subscriber retires it after its linger.
+		let lingered = moq_clock::Instant::now() + track::IDLE_LINGER;
+		while moq_clock::Instant::now() < lingered {
+			assert!(futures::poll!(running.as_mut()).is_pending(), "{version}: lingering");
+			moq_clock::sleep(Duration::from_secs(1)).await;
+		}
+		assert!(copy.abort_unused(Error::Cancel).is_ok(), "{version}: paused demand");
+		for _ in 0..100 {
+			assert!(
+				futures::poll!(running.as_mut()).is_pending(),
+				"{version}: the retired copy ended the paused request"
+			);
+			settle().await;
+		}
+		assert!(Wire::read(&log, version).publish_done.is_none(), "{version}");
+
+		if withdraw {
+			drop(route);
+			assert!(
+				moq_clock::timeout(Duration::from_secs(10), running)
+					.await
+					.expect("the withdrawn route ends the paused request")
+					.is_err(),
+				"{version}"
+			);
+			assert_ne!(
+				Wire::read(&log, version).publish_done.map(|(status, _)| status),
+				Some(ietf::PublishDoneStatus::TrackEnded.code(version)),
+				"{version}: a withdrawn route is no content end"
+			);
+			return;
+		}
+
+		// Resuming asks upstream again, joining at the live edge it reports.
+		let mut update = subscription_update(0x40);
+		update.forward = Some(true);
+		request.push(&encode_update(version, &update).await);
+		let copy = next_copy(running.as_mut()).await;
+		let mut group = copy.create_group(group::Info { sequence: 7 }).unwrap();
+		group.write_frame(timestamp(), b"edge".as_slice()).unwrap();
+		serve_until(running.as_mut(), "the resume acknowledgement", || {
+			Wire::read(&log, version).sent(ietf::RequestOk::ID).is_some()
+		})
+		.await;
+		group.write_frame(timestamp(), b"after-resume".as_slice()).unwrap();
+		serve_until(running.as_mut(), "resumed data", || {
+			data_streams(&log)
+				.values()
+				.any(|sent| sent.contains(&Sent::Write(b"after-resume".to_vec())))
+		})
+		.await;
+		assert!(
+			!data_streams(&log)
+				.values()
+				.any(|sent| sent.contains(&Sent::Write(b"edge".to_vec()))),
+			"{version}: resume at the live edge"
+		);
+		group.finish().unwrap();
+		copy.finish().unwrap();
+		moq_clock::timeout(Duration::from_secs(10), running)
+			.await
+			.expect("the resumed request ends with its track")
+			.unwrap();
+		assert_eq!(
+			Wire::read(&log, version).publish_done.map(|(status, _)| status),
+			Some(ietf::PublishDoneStatus::TrackEnded.code(version)),
+			"{version}"
 		);
 	}
 
