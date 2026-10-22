@@ -88,6 +88,11 @@ bun install --frozen-lockfile
 [[ -n "${BROWSER_BIN:-}" ]] || bunx playwright install chromium
 
 cd "$HERE"
+# The in-memory paths share Chromium installation and artifact retention with this lane.
+for benchmark in frames drift; do
+    bun micro.ts --bench "$benchmark" --rounds 1 --out "$HARNESS_RUN/$benchmark.json" \
+        current="$WORKSPACE" aa="$WORKSPACE"
+done
 bun test ./fixture.test.ts ./summary.test.ts
 variants=(current="$WORKSPACE" aa="$WORKSPACE" copy="$WORKSPACE:copy")
 names=current,aa,copy
