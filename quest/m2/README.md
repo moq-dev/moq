@@ -103,6 +103,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Bindings in the interop matrix](/quest/m2/interop-bindings.md) - Kotlin, Swift, and Dart publish and subscribe against every other interop client
 - [WebGPU HDR](/quest/m2/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
+- [qmux receive leases](/quest/m2/qmux-receive-lease.md) - WebSocket, TCP, and WebRTC sessions bound incomplete messages by their receive window, at a per-session cost the maintainer picks
 - [QUIC caps](/quest/m2/rate-quic.md) - paced MAX_DATA credit in and a capped pacer out hold a QUIC session to its token's bitrate
 - [WebSocket caps](/quest/m2/rate-websocket.md) - paced reads and writes over bounded socket buffers hold WebSocket to the same caps
 - [Publishers learn their cap](/quest/m2/rate-grant.md) - the AUTH grant carries the caps and publishers clamp their encoder to them
@@ -195,6 +196,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Relay metrics through prometheus-client](/quest/m2/relay-prometheus-client.md) - `/metrics` renders through the maintained client with the same series
 - [IETF request order](/quest/m2/ietf-request-order.md) - d14/15 requests take their ID after opening, legacy `control.sending()` races are gone, and SUBSCRIBE_NAMESPACE never closes over its own close
 - [JS IETF request streams](/quest/m2/js-request-stream.md) - `RequestStream` owns deadlines and cancellation, and TRACK trailing bytes close the session like Rust
+- [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - a pre-draft-20 joining FETCH that arrives after its subscription finished is still answered, within a bound the peer already negotiates
 - [Error cleanups](/quest/m2/error-cleanups.md) - delete the unused `Error::SessionClosed`; raw transport failures already map to `Unroutable`
 - [FromStr parsers](/quest/m2/from-str-trait.md) - hang, moq-auth, and moq-msf implement `FromStr` instead of inherent `from_str`
 - [Drop dead items](/quest/m2/drop-dead-items.md) - the audit's uncalled public items and test helpers are removed
