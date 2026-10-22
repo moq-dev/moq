@@ -144,7 +144,9 @@ impl FromIterator<Pattern> for Patterns {
 		});
 		sorted.dedup_by(|a, b| a == b);
 
-		let mut out = Patterns(Vec::with_capacity(sorted.len()));
+		// Grow with what survives: reserving for the input would keep capacity for every
+		// pattern a broad member discards, for as long as the union lives.
+		let mut out = Patterns::new();
 		let mut tier_start = 0;
 		let mut tier = None;
 		for pattern in sorted {
