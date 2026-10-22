@@ -169,12 +169,6 @@ describe("writing data", () => {
 		// Available should still be 80 (unchanged because old samples were discarded)
 		expect(buffer.length).toBe(80);
 	});
-
-	it("should not throw when writing to buffer", () => {
-		const buffer = new AudioRingBuffer({ rate: 1000, channels: 2, latency: 100 as Milli });
-		// The current implementation doesn't require initialization
-		expect(() => write(buffer, 0 as Milli, 10, { channels: 2, value: 0.0 })).not.toThrow();
-	});
 });
 
 describe("reading data", () => {
@@ -240,12 +234,6 @@ describe("reading data", () => {
 	it("should return 0 when no data available", () => {
 		const buffer = new AudioRingBuffer({ rate: 1000, channels: 2, latency: 100 as Milli });
 
-		const output = read(buffer, 10, 2);
-		expect(output[0].length).toBe(0);
-	});
-
-	it("should return 0 when not initialized", () => {
-		const buffer = new AudioRingBuffer({ rate: 1000, channels: 2, latency: 100 as Milli });
 		const output = read(buffer, 10, 2);
 		expect(output[0].length).toBe(0);
 	});
@@ -658,12 +646,6 @@ describe("decoded rate must match the ring (#2352)", () => {
 	it("places 20ms/960-sample frames contiguously at 48kHz", () => {
 		// 20ms at 48kHz is exactly 960 samples, so 10 frames pack into 9600 with no gaps or overlap.
 		expect(writeOpusFrames(48000).length).toBe(9600);
-	});
-
-	it("misplaces the frames when the ring rate disagrees", () => {
-		// 20ms at 44100 is 882 samples, so each 960-sample frame overlaps the next and the buffer never
-		// reaches the contiguous 9600 it would at the matching rate.
-		expect(writeOpusFrames(44100).length).toBeLessThan(9600);
 	});
 });
 

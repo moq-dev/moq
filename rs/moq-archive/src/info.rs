@@ -6,7 +6,7 @@ use crate::{Error, Result, VERSION};
 
 /// Immutable track properties stored at `<encoded-track>/.info`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "Stored")]
 pub struct Info {
 	/// Recording format version; must be [`VERSION`].
 	pub version: u64,
@@ -16,9 +16,29 @@ pub struct Info {
 	/// is untimed and its frames store no timestamps.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timescale: Option<u64>,
-	/// The source's publisher epoch, when its route had one. A resume from another refuses.
-	#[serde(default, skip_serializing_if = "Option::is_none", with = "epoch")]
-	pub epoch: Option<moq_net::Epoch>,
+}
+
+/// [`Info`] as stored, also taking the `epoch` an older `Writer` recorded, so [`Reader`](crate::Reader)
+/// still replays those recordings; it goes when `Reader` does.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Stored {
+	version: u64,
+	priority: u8,
+	#[serde(default)]
+	timescale: Option<u64>,
+	#[serde(default, rename = "epoch")]
+	_epoch: Option<serde::de::IgnoredAny>,
+}
+
+impl From<Stored> for Info {
+	fn from(stored: Stored) -> Self {
+		Self {
+			version: stored.version,
+			priority: stored.priority,
+			timescale: stored.timescale,
+		}
+	}
 }
 
 impl Info {
@@ -28,16 +48,9 @@ impl Info {
 			version: VERSION,
 			priority,
 			timescale,
-			epoch: None,
 		};
 		info.validate()?;
 		Ok(info)
-	}
-
-	/// Record `epoch` as the source's publisher epoch.
-	pub fn with_epoch(mut self, epoch: Option<moq_net::Epoch>) -> Self {
-		self.epoch = epoch;
-		self
 	}
 
 	/// Encode as compact JSON.
@@ -64,25 +77,6 @@ impl Info {
 			check_id(timescale).map_err(|_| Error::Timescale(timescale))?;
 		}
 		Ok(())
-	}
-}
-
-/// The epoch as its UUID text.
-mod epoch {
-	use serde::{Deserialize, Deserializer, Serializer, de::Error};
-
-	pub fn serialize<S: Serializer>(epoch: &Option<moq_net::Epoch>, serializer: S) -> Result<S::Ok, S::Error> {
-		match epoch {
-			Some(epoch) => serializer.serialize_str(epoch.as_str()),
-			None => serializer.serialize_none(),
-		}
-	}
-
-	pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<moq_net::Epoch>, D::Error> {
-		let Some(text) = Option::<String>::deserialize(deserializer)? else {
-			return Ok(None);
-		};
-		text.parse().map(Some).map_err(D::Error::custom)
 	}
 }
 
@@ -127,27 +121,21 @@ mod tests {
 	}
 
 	#[test]
-	fn epoch_roundtrip() {
-		let epoch: moq_net::Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
-		let info = Info::new(0, Some(1000)).unwrap().with_epoch(Some(epoch));
-		let bytes = info.encode().unwrap();
-		assert_eq!(
-			bytes.as_ref(),
-			br#"{"version":2,"priority":0,"timescale":1000,"epoch":"01900000-0000-7000-8000-000000000001"}"#
-		);
-		assert_eq!(Info::decode(&bytes).unwrap(), info);
-		assert!(matches!(
-			Info::decode(br#"{"version":2,"priority":0,"timescale":1000,"epoch":"not-a-uuid"}"#),
-			Err(Error::Json(_))
-		));
-	}
-
-	#[test]
 	fn timescale_bounds() {
 		assert!(Info::new(0, Some(1)).is_ok());
 		assert!(Info::new(0, Some(ID_MAX)).is_ok());
 		assert!(matches!(Info::new(0, Some(0)), Err(Error::Timescale(0))));
 		assert!(matches!(Info::new(0, Some(ID_MAX + 1)), Err(Error::Timescale(_))));
+	}
+
+	#[test]
+	fn an_older_writers_epoch_is_ignored() {
+		let info = Info::decode(br#"{"version":2,"priority":0,"timescale":1000,"epoch":"x"}"#).unwrap();
+		assert_eq!(info, Info::new(0, Some(1000)).unwrap());
+		assert_eq!(
+			info.encode().unwrap().as_ref(),
+			br#"{"version":2,"priority":0,"timescale":1000}"#
+		);
 	}
 
 	#[test]

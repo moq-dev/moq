@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { SessionCode, SessionError } from "../error.ts";
@@ -194,21 +195,12 @@ function holdFins(transport: MockTransport, streams: "uni" | "incoming-bidi") {
 	};
 }
 
-// Captures the one-second close deadline so a test fires it by hand instead of waiting.
+// Holds the one-second close deadline on a manual clock, so a test fires it by hand instead of waiting.
 function mockDeadline() {
-	let expire: (() => void) | undefined;
-	const original = globalThis.setTimeout;
-	const timer = spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
-		if (ms !== 1000) return original(fn, ms);
-		expire = fn;
-		return 0 as unknown as ReturnType<typeof setTimeout>;
-	}) as typeof setTimeout);
+	const clock = new Manual();
 	return {
-		expire: () => {
-			if (!expire) throw new Error("close armed no deadline");
-			expire();
-		},
-		restore: () => timer.mockRestore(),
+		expire: () => clock.advanceAsync(Nano.fromMilli(Milli(1000))),
+		restore: clock.install(),
 	};
 }
 
@@ -330,8 +322,9 @@ test("a lite-07 subscriber withholding FIN holds close until the deadline", asyn
 		await settle();
 		expect(served.closed()).toBe(false);
 
-		deadline.expire();
-		await expect(closing).rejects.toThrow("session close timed out");
+		const failure = closing.catch((error: unknown) => error);
+		await deadline.expire();
+		expect(await failure).toHaveProperty("message", "session close timed out");
 		expect(served.closed()).toBe(true);
 	} finally {
 		deadline.restore();
