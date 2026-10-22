@@ -19,7 +19,7 @@ Decided 2026-10-22 from the security audit, with the maintainer:
 - A namespace interest takes its `announces` permit before the decision, as moq-lite already does, and releases it only when the stream ends. A reflected or refused namespace therefore holds the same permit every other announce does.
 - `ANNOUNCE_INIT` is a legacy lite-01/02 message. Make its decoder take the session's announce budget, or otherwise bound the count by the body and that budget, so the existing resource limit is the bound rather than a new constant.
 - The WebSocket socket caps message and frame size at qmux's own `max_record_size`, from one shared constant, since qmux carries one record per message.
-- `admit_http` takes a semaphore permit, and the h2 listener sets `max_concurrent_streams`. Over the limit answers 503 instead of queueing, which is backpressure rather than a refusal of valid input.
+- Bound admission with backpressure, not load shedding: the h2 listener sets `max_concurrent_streams`, and any global bound on in-flight admissions stops accepting or polling new work while full rather than answering 503. A valid request in an ordinary burst waits; it is never refused by a threshold, and what it holds while waiting stays within the connection and stream bounds.
 
 Each fix lands with a regression test that fails on main. The admission fan-out gets a benchmark swept over connections and streams, per the fan-out rule.
 

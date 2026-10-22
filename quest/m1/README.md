@@ -120,7 +120,7 @@ lite-07 stream type here.
 - [Compile time audit](/quest/m1/audit-compile-time.md) - build-time hotspots are measured against the m0 baselines and the worst are fixed or planned
 - [Peer count bounds](/quest/m1/peer-count-bounds.md) - namespace interests, a legacy announce list, a WebSocket upgrade, and public HTTP admission are bounded by what the peer sent or by an existing budget
 - [Caption store bounds](/quest/m1/caption-store-bounds.md) - a hostile caption track cannot grow a viewer's cue and region store or its per-frame work without bound
-- [Auth contract](/quest/m1/auth-contract.md) - the auth server receives the real SNI, a certificate grants nothing alone, and the auth client refuses a redirect that would replay a credential
+- [Auth contract](/quest/m1/auth-contract.md) - the auth server receives the real SNI, and a certificate grants nothing alone
 - [Performance audit](/quest/m1/audit-perf.md) - benchmarks that regressed since the m0 run are explained, fixed, or planned, and unbenched hot paths get coverage
 
 ## Related
