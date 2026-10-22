@@ -57,13 +57,13 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 		for class in [Control::Announce, Control::Subscribe] {
 			assert!(
 				rows.iter()
-					.any(|(row_tier, row_class, encoded, _)| *row_tier == tier && *row_class == class && *encoded > 0),
+					.any(|(row_tier, row_class, bytes)| *row_tier == tier && *row_class == class && bytes.tx > 0),
 				"{version}: {class:?}: {rows:?}"
 			);
 		}
-		let decoded: u64 = rows.iter().map(|(_, _, _, decoded)| decoded).sum();
+		let rx: u64 = rows.iter().map(|(_, _, bytes)| bytes.rx).sum();
 		assert!(
-			decoded > 0 && decoded < 64 * 1024,
+			rx > 0 && rx < 64 * 1024,
 			"{version}: media payload entered control counters: {rows:?}"
 		);
 	}
@@ -82,7 +82,7 @@ async fn control_counts_without_origins() {
 		let rows = registry.snapshot().control();
 		assert!(
 			rows.iter()
-				.any(|(row_tier, class, encoded, _)| *row_tier == tier && *class == Control::Session && *encoded > 0),
+				.any(|(row_tier, class, bytes)| *row_tier == tier && *class == Control::Session && bytes.tx > 0),
 			"{version}: {rows:?}"
 		);
 	}

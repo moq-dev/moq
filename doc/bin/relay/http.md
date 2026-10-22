@@ -54,9 +54,8 @@ internal sessions and the stats feed. Compare them with payload to spot
 transport overhead and idle traffic. Transports that do not report them
 contribute zero.
 
-`moq_relay_control_encoded_body_bytes_total` and
-`moq_relay_control_decoded_body_bytes_total` count control-message bytes by
-`tier` and `class` (`session`, `announce`, `track_info`, `subscribe`, `fetch`,
+`moq_relay_control_tx_bytes_total` and `moq_relay_control_rx_bytes_total`
+count control-message bytes by `tier` and `class` (`session`, `announce`, `track_info`, `subscribe`, `fetch`,
 `probe`, `auth`, `goaway`, `other`) to spot control-heavy sessions. They leave
 out media payload and transport overhead such as framing, ACKs, and
 retransmissions.

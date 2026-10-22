@@ -381,7 +381,7 @@ mod tests {
 	fn control_body_counts_consumed_messages_not_peeks_or_failed_decodes() {
 		use crate::{
 			lite,
-			stats::{Control, Registry, Tier},
+			stats::{Bytes, Control, Registry, Tier},
 		};
 		let registry = Registry::new(Default::default());
 		let session = registry.tier(Tier::default()).session("");
@@ -391,6 +391,7 @@ mod tests {
 			rtt: Some(4),
 		};
 		let bytes = msg.encode_bytes(version).unwrap();
+		let size = bytes.len() as u64;
 		let mut reader = Reader::new(StopLog::default(), version).with_stats(&session);
 		reader.buffer.extend_from_slice(&bytes);
 		reader.buffer.extend_from_slice(&bytes);
@@ -403,7 +404,7 @@ mod tests {
 		assert!(matches!(reader.poll_decode::<lite::Probe>(&mut cx), Poll::Ready(Ok(_))));
 		assert_eq!(
 			registry.snapshot().control(),
-			vec![(Tier::default(), Control::Probe, 0, bytes.len() as u64)]
+			vec![(Tier::default(), Control::Probe, Bytes { tx: 0, rx: size })]
 		);
 		assert!(matches!(reader.poll_decode::<lite::Probe>(&mut cx), Poll::Ready(Ok(_))));
 		reader.buffer.extend_from_slice(&[0x80]);
@@ -419,7 +420,7 @@ mod tests {
 		));
 		assert_eq!(
 			registry.snapshot().control(),
-			vec![(Tier::default(), Control::Probe, 0, bytes.len() as u64 * 2)]
+			vec![(Tier::default(), Control::Probe, Bytes { tx: 0, rx: size * 2 })]
 		);
 	}
 

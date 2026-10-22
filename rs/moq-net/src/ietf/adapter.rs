@@ -2160,7 +2160,7 @@ mod tests {
 		use crate::{
 			coding::{Encode, Stream},
 			lite::test_transport::{Log, ScriptedSession, SinkSend},
-			stats::{Control as Class, Registry, Tier},
+			stats::{Bytes, Control as Class, Registry, Tier},
 		};
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
 			let registry = Registry::new(Default::default());
@@ -2192,7 +2192,7 @@ mod tests {
 			physical.write_all(&mut raw.clone()).await.unwrap();
 			assert_eq!(
 				registry.snapshot().control(),
-				vec![(Tier::default(), Class::Fetch, size, 0)],
+				vec![(Tier::default(), Class::Fetch, Bytes { tx: size, rx: 0 })],
 				"{version:?}"
 			);
 			assert_eq!(*log.writes.lock().unwrap(), raw);
@@ -2203,7 +2203,7 @@ mod tests {
 			virtual_stream.reader.decode::<ietf::FetchCancel>().await.unwrap();
 			assert_eq!(
 				registry.snapshot().control(),
-				vec![(Tier::default(), Class::Fetch, size, size)],
+				vec![(Tier::default(), Class::Fetch, Bytes { tx: size, rx: size })],
 				"virtual decode counted a physical frame twice: {version:?}"
 			);
 			adapter.send_max_request_id(RequestId(123));
@@ -2212,7 +2212,7 @@ mod tests {
 					.snapshot()
 					.control()
 					.iter()
-					.any(|(_, class, encoded, _)| *class == Class::Other && *encoded > 0),
+					.any(|(_, class, bytes)| *class == Class::Other && bytes.tx > 0),
 				"adapter-generated messages bypassed the typed writer"
 			);
 		}

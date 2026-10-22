@@ -385,7 +385,7 @@ mod tests {
 	fn control_body_counts_successful_encodes_once_before_transport_delivery() {
 		use crate::{
 			lite,
-			stats::{Control, Registry, Tier},
+			stats::{Bytes, Control, Registry, Tier},
 		};
 		let stats = Registry::new(Default::default());
 		let session = stats.tier(Tier::new("internal")).session("");
@@ -404,7 +404,7 @@ mod tests {
 		assert!(writer.poll_flush(&mut Context::from_waker(Waker::noop())).is_pending());
 		assert_eq!(
 			stats.snapshot().control(),
-			vec![(Tier::new("internal"), Control::Probe, size, 0)]
+			vec![(Tier::new("internal"), Control::Probe, Bytes { tx: size, rx: 0 })]
 		);
 		writer
 			.buffer(&lite::Track {
@@ -418,9 +418,10 @@ mod tests {
 				.snapshot()
 				.control()
 				.into_iter()
-				.find(|(_, class, _, _)| *class == Control::TrackInfo)
+				.find(|(_, class, _)| *class == Control::TrackInfo)
 				.unwrap()
 				.2
+				.tx
 		};
 		let before = track_info();
 		let properties = lite::ietf::TrackProperties::default();

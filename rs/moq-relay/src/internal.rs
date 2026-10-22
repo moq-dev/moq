@@ -519,27 +519,28 @@ fn render_metrics(
 		}
 	}
 
-	for (name, help, received) in [
+	let control = snap.control();
+	for (name, help, field) in [
 		(
-			"moq_relay_control_encoded_body_bytes_total",
-			"Successfully encoded control-message body bytes including codec prefixes; excludes transport overhead.",
-			false,
+			"moq_relay_control_tx_bytes_total",
+			"Control-message bytes encoded for sending, including codec prefixes; excludes transport overhead.",
+			(|b: &moq_net::stats::Bytes| b.tx) as fn(&moq_net::stats::Bytes) -> u64,
 		),
 		(
-			"moq_relay_control_decoded_body_bytes_total",
-			"Successfully decoded control-message body bytes including codec prefixes; excludes transport overhead.",
-			true,
+			"moq_relay_control_rx_bytes_total",
+			"Control-message bytes decoded, including codec prefixes; excludes transport overhead.",
+			(|b: &moq_net::stats::Bytes| b.rx) as fn(&moq_net::stats::Bytes) -> u64,
 		),
 	] {
 		let _ = writeln!(out, "# HELP {name} {help}");
 		let _ = writeln!(out, "# TYPE {name} counter");
-		for (tier, class, encoded, decoded) in snap.control() {
-			let value = if received { decoded } else { encoded };
+		for (tier, class, bytes) in &control {
 			let _ = writeln!(
 				out,
-				"{name}{{tier=\"{}\",class=\"{}\"}} {value}",
+				"{name}{{tier=\"{}\",class=\"{}\"}} {}",
 				tier.as_str(),
-				class.as_str()
+				class.as_str(),
+				field(bytes)
 			);
 		}
 	}

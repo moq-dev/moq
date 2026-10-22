@@ -895,7 +895,17 @@ impl Role {
 	}
 }
 
-/// The bounded class of a successfully encoded or decoded control-message body.
+/// Cumulative bytes sent and received, returned per [`Control`] class by [`Snapshot::control`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Bytes {
+	/// Bytes successfully encoded for sending, counted even if the stream later fails.
+	pub tx: u64,
+	/// Bytes of complete messages decoded and consumed.
+	pub rx: u64,
+}
+
+/// The bounded class of a successfully encoded or decoded control message.
 ///
 /// Counters include prefixes inside a complete codec value, but exclude separately
 /// coded selectors and raw payload writes. A framed IETF body counts after its
@@ -936,7 +946,7 @@ impl Control {
 		Self::Other,
 	];
 
-	/// The stable label used by control-body metrics.
+	/// The stable label used by control metrics.
 	pub fn as_str(self) -> &'static str {
 		match self {
 			Self::Session => "session",
@@ -974,16 +984,16 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-	/// The `(tier, class, encoded, decoded)` control-body totals, sorted by tier and class.
+	/// The `(tier, class, totals)` control-message rows with any traffic, sorted by tier and class.
 	/// Includes prefixes inside complete codec values, but excludes separately coded type selectors,
 	/// media payload, and transport framing, acknowledgements, and retransmissions.
-	pub fn control(&self) -> Vec<(Tier, Control, u64, u64)> {
+	pub fn control(&self) -> Vec<(Tier, Control, Bytes)> {
 		let mut rows = Vec::new();
 		for (tier, totals) in &self.control {
 			for class in Control::ALL {
-				let [encoded, decoded] = totals[class as usize];
-				if encoded != 0 || decoded != 0 {
-					rows.push((tier.clone(), class, encoded, decoded));
+				let [tx, rx] = totals[class as usize];
+				if tx != 0 || rx != 0 {
+					rows.push((tier.clone(), class, Bytes { tx, rx }));
 				}
 			}
 		}
@@ -2618,7 +2628,10 @@ mod tests {
 		context.control(Control::Announce, 17, false);
 		context.retag(second.clone(), "");
 		context.control(Control::TrackInfo, 23, true);
-		let expected = vec![(second, Control::TrackInfo, 0, 23), (first, Control::Announce, 17, 0)];
+		let expected = vec![
+			(second, Control::TrackInfo, Bytes { tx: 0, rx: 23 }),
+			(first, Control::Announce, Bytes { tx: 17, rx: 0 }),
+		];
 		assert_eq!(registry.snapshot().control(), expected);
 		drop(context);
 		registry.report(&mut Report::default());
