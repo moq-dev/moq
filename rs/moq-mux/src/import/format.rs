@@ -53,14 +53,14 @@ pub enum VideoFormat {
 pub enum ContainerFormat {
 	/// Fragmented MP4 / CMAF, unwrapped into one frame per sample.
 	Fmp4,
-	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
-	Cmaf,
 	/// Matroska / WebM.
 	Mkv,
 	/// MPEG-2 transport stream.
 	Ts,
 	/// Flash Video, as used by RTMP.
 	Flv,
+	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
+	Cmaf,
 }
 
 /// Any format an importer handles, and the kind of import it selects.
