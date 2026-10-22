@@ -187,9 +187,16 @@ pub struct ConnectionStats {
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CreditStats {
-    /// Bytes read with [`Chunks::hold()`](crate::Chunks::hold) whose credit is not released yet
-    pub held: u64,
+    /// Bytes leased with [`RecvStream::lease()`](crate::RecvStream::lease) and not consumed yet,
+    /// which keep their credit
+    pub leased: u64,
     /// Bytes the peer may still send before it needs more credit, including credit not yet
     /// advertised
     pub available: u64,
+    /// Streams evicted so far because incomplete leases filled the window; see
+    /// [`RecvStream::lease()`](crate::RecvStream::lease)
+    pub evicted: u64,
+    /// The most credit the peer has had spent at once, leased or not yet read: how close the
+    /// connection came to filling its receive window
+    pub peak_spent: u64,
 }

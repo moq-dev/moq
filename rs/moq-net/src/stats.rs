@@ -137,7 +137,7 @@ use std::{
 	fmt,
 	sync::{
 		Arc, Mutex, MutexGuard, PoisonError, Weak,
-		atomic::{AtomicU64, AtomicUsize, Ordering},
+		atomic::{AtomicU64, AtomicUsize, Ordering, fence},
 	},
 };
 
@@ -317,15 +317,19 @@ impl SessionCounters {
 		}
 	}
 
-	/// Read the gauge into a [`Presence`]. Ended is loaded with `Acquire`
+	/// Read the gauge and whether all its payload meters have ended. Ended is loaded with `Acquire`
 	/// before started with `Relaxed`, the same pairing as [`Counters::snapshot`],
 	/// so the readout never shows `ended > started`.
-	fn snapshot(&self) -> Presence {
+	fn snapshot(&self) -> (Presence, bool) {
 		let sessions_failed = self.sessions_failed.snapshot();
 		let sessions_ended = self.sessions_ended.load(Ordering::Acquire);
 		let sessions_started = self.sessions_started.load(Ordering::Relaxed);
-		let (sent_bytes, received_bytes) = self.bytes().read();
-		Presence {
+		let (sent_bytes, received_bytes, empty) = {
+			let mut bytes = self.bytes();
+			let (sent, received) = bytes.read();
+			(sent, received, bytes.live.is_empty())
+		};
+		let presence = Presence {
 			sessions_refused: self.sessions_refused.snapshot(),
 			sessions_failed,
 			requests: self.requests.load(Ordering::Relaxed),
@@ -337,7 +341,8 @@ impl SessionCounters {
 			received_bytes,
 			announces_peak: self.announces_peak.load(Ordering::Relaxed),
 			subscriptions_peak: self.subscriptions_peak.load(Ordering::Relaxed),
-		}
+		};
+		(presence, empty)
 	}
 
 	fn bytes(&self) -> MutexGuard<'_, SessionBytes> {
@@ -402,8 +407,12 @@ impl SessionBytes {
 		let Self { sent, received, live } = self;
 		let (mut live_sent, mut live_received) = (0, 0);
 		live.retain(|_, arrival| {
-			// Unique means the session and every meter it handed out have dropped.
-			let ended = Arc::get_mut(&mut arrival.traffic).is_some();
+			// No Weak<SessionTraffic> exists, so a unique arrival cannot gain another writer.
+			let ended = Arc::strong_count(&arrival.traffic) == 1;
+			if ended {
+				// Pair with the last writer's Arc drop before loading its final relaxed counters.
+				fence(Ordering::Acquire);
+			}
 			let (now_sent, now_received) = arrival.traffic.load();
 			let (delta_sent, delta_received) = (now_sent - arrival.sent, now_received - arrival.received);
 			if ended {
@@ -1204,7 +1213,7 @@ impl Registry {
 			for (tier, labels) in sessions.iter() {
 				let totals = snap.sessions.entry(tier.clone()).or_default();
 				for counters in labels.values() {
-					totals.add(counters.snapshot());
+					totals.add(counters.snapshot().0);
 				}
 			}
 		}
@@ -1262,8 +1271,8 @@ impl Registry {
 				// Nothing can join a row only the map holds (that needs the lock held here),
 				// but a meter outliving its session still writes until its last clone drops.
 				let unheld = Arc::strong_count(counters) == 1;
-				let presence = counters.snapshot();
-				let closed = unheld && counters.bytes().live.is_empty();
+				let (presence, empty) = counters.snapshot();
+				let closed = unheld && empty;
 				report.sessions.push(SessionEntry {
 					tier: tier.clone(),
 					label: label.clone(),
@@ -2237,7 +2246,7 @@ mod tests {
 			.sessions
 			.lock()
 			.get(tier)
-			.and_then(|labels| labels.get(&PathOwned::from(label.to_string())).map(|c| c.snapshot()))
+			.and_then(|labels| labels.get(&PathOwned::from(label.to_string())).map(|c| c.snapshot().0))
 	}
 
 	fn test_stats() -> Registry {
@@ -2572,13 +2581,17 @@ mod tests {
 			}
 		});
 		let mut previous = 0;
+		let mut previous_received = 0;
 		while !worker.is_finished() {
-			let bytes: u64 = stats
-				.snapshot()
-				.traffic()
-				.iter()
-				.map(|(_, _, traffic)| traffic.bytes)
-				.sum();
+			let snap = stats.snapshot();
+			let received = snap.sessions().iter().map(|(_, row)| row.received_bytes).sum::<u64>();
+			assert!(
+				received >= previous_received,
+				"retiring a session must retain its final payload bytes"
+			);
+			assert!(received <= 256);
+			previous_received = received;
+			let bytes: u64 = snap.traffic().iter().map(|(_, _, traffic)| traffic.bytes).sum();
 			assert!(
 				bytes >= previous,
 				"retiring an entry must not double-count or lose its bytes"
@@ -2594,6 +2607,7 @@ mod tests {
 		);
 		assert_eq!(snap.sessions()[0].1.sessions_started, 256);
 		assert_eq!(snap.sessions()[0].1.sessions_ended, 256);
+		assert_eq!(snap.sessions()[0].1.received_bytes, 256);
 		assert!(stats.shared().entries.lock().is_empty());
 		assert!(stats.shared().sessions.lock().is_empty());
 		let retired = stats.shared().retired.lock();
@@ -2679,6 +2693,7 @@ mod tests {
 		// check the line order.
 		let body_start = src.find("fn snapshot(&self) -> Traffic").expect("snapshot fn present");
 		let body = &src[body_start..];
+		let body = &body[..body.find("\n\t}\n").expect("snapshot fn end")];
 		let ended_pos = body.find("self.announces_ended.load").expect("announces_ended load");
 		let started_pos = body
 			.find("self.announces_started.load")
@@ -3077,9 +3092,10 @@ mod tests {
 		// `sessions_ended > sessions_started` leak into a readout.
 		let src = include_str!("stats.rs");
 		let body_start = src
-			.find("fn snapshot(&self) -> Presence")
+			.find("fn snapshot(&self) -> (Presence, bool)")
 			.expect("SessionCounters::snapshot fn present");
 		let body = &src[body_start..];
+		let body = &body[..body.find("\n\t}\n").expect("SessionCounters::snapshot fn end")];
 		let ended_pos = body.find("self.sessions_ended.load").expect("sessions_ended load");
 		let started_pos = body.find("self.sessions_started.load").expect("sessions_started load");
 		assert!(

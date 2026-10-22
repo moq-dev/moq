@@ -26,7 +26,7 @@ backpressure the peer cannot ignore, rather than metering and closing.
   flow-control limited (its congestion controller does not back off) and
   queues until [the grant](/quest/m2/rate-grant.md) clamps its encoder.
   Keep rate pacing separate from the connection memory allowance in
-  [message assembly](/quest/m1/quic/receive-memory.md). The memory allowance
+  message assembly (receive leases, [#5878](https://github.com/moq-dev/moq/pull/5878)). The memory allowance
   must fit the largest supported encoded unit even when it takes many rate
   intervals to receive. Limit each grant by both rate allowance and available
   memory backing; do not wait for a whole-message credit release to grant
@@ -95,7 +95,3 @@ pacing alone does not trigger pressure cancellation.
 Decided in the 2026-10-10 receive-memory interview: memory allowance and
 rate pacing are independent bounds. This replaces the earlier assumption
 that a one-second rate window can also be the complete assembly allowance.
-
-## Required
-
-- [Bound message assembly](/quest/m1/quic/receive-memory.md) - separate retained memory from paced outstanding credit

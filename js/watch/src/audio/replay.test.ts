@@ -8,7 +8,12 @@ const CONFIG = { codec: "opus", sampleRate: RATE, numberOfChannels: 1 } as Catal
 
 /** Twenty ms frames for `seconds`, one per group, each arriving `lateness(i)` ms after it was captured. */
 function paced(seconds: number, lateness: (i: number) => number): Arrival[] {
-	return Array.from({ length: seconds * 50 }, (_, i) => ({ at: i * 20 + lateness(i), timestamp: i * 20, group: i }));
+	return Array.from({ length: seconds * 50 }, (_, i) => ({
+		at: i * 20 + lateness(i),
+		timestamp: i * 20,
+		group: i,
+		duration: 20,
+	}));
 }
 
 /** How long {@link paced} observes `seconds` of frames: the frames, plus one more. */
@@ -137,7 +142,7 @@ describe.each(["shared", "post"] as const)("%s ring at auto", (ring) => {
 
 describe.each(["shared", "post"] as const)("%s ingress diagnostics", (ring) => {
 	it("keeps recorded arrival and lateness when delivery is held", async () => {
-		const trace = [0, 20, 40].map((timestamp) => ({ timestamp, at: timestamp + 1000, group: 0 }));
+		const trace = [0, 20, 40].map((timestamp) => ({ timestamp, at: timestamp + 1000, group: 0, duration: 20 }));
 		const run = async (decodeAfter?: number) => {
 			let window: Quantum["arrivals"] = [];
 			for await (const quantum of replay(trace, {
@@ -163,4 +168,74 @@ describe.each(["shared", "post"] as const)("%s ingress diagnostics", (ring) => {
 			})),
 		);
 	});
+});
+
+describe.each(["shared", "post"] as const)("%s recorded frame durations", (ring) => {
+	it("keeps missing packets out of the codec term even when most packets are absent", async () => {
+		const trace = Array.from({ length: 600 }, (_, i) => ({
+			at: i * 100,
+			timestamp: i * 100,
+			group: 0,
+			duration: 20,
+		}));
+		let delay = 0;
+		for await (const quantum of replay(trace, {
+			ring,
+			rate: RATE,
+			config: CONFIG,
+			delay: "auto",
+			duration: 60_000,
+		}))
+			delay = quantum.delay;
+		expect(delay).toBe(40);
+	});
+
+	it("updates the codec term when the packet duration changes", async () => {
+		const trace = Array.from({ length: 600 }, (_, i) => ({
+			at: i * 100,
+			timestamp: i * 100,
+			group: 0,
+			duration: i < 300 ? 20 : 10,
+		}));
+		const targets: number[] = [];
+		for await (const quantum of replay(trace, {
+			ring,
+			rate: RATE,
+			config: CONFIG,
+			delay: "auto",
+			duration: 60_000,
+		})) {
+			if (quantum.at >= 29_000 && quantum.at <= 29_100) targets.push(quantum.delay);
+			if (quantum.at >= 59_000) targets.push(quantum.delay);
+		}
+		expect(new Set(targets)).toEqual(new Set([40, 30]));
+	});
+
+	it("plays a single packet for its recorded duration", async () => {
+		const trace = [{ at: 0, timestamp: 0, group: 0, duration: 20 }];
+		let heard = 0;
+		for await (const { output } of replay(trace, {
+			ring,
+			rate: RATE,
+			config: CONFIG,
+			delay: Milli(20),
+			duration: 100,
+		}))
+			heard += output.filter((sample) => sample !== 0).length;
+		expect(heard).toBe(960);
+	});
+});
+
+it("replay refuses missing, non-finite or non-positive recorded durations", async () => {
+	for (const duration of [undefined, Number.NaN, Number.POSITIVE_INFINITY, 0, -20]) {
+		const trace = [{ at: 0, timestamp: 0, group: 0, duration }] as Arrival[];
+		const reader = replay(trace, {
+			ring: "shared",
+			rate: RATE,
+			config: CONFIG,
+			delay: "auto",
+			duration: 100,
+		});
+		await expect(reader.next()).rejects.toThrow("invalid recorded frame duration");
+	}
 });
