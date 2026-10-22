@@ -288,8 +288,9 @@ moq-lite 07 receiver. Since moq-lite 05 and 06 send times look like media time,
 a receiver drops every timestamp it gets over them and the track arrives
 untimed.
 Timestamps received over moq-transport, whose peers may stamp arrival times,
-are not checked and are only passed on over moq-transport: a relay serves that
-track to moq-lite untimed.
+are not checked. Rust relays preserve them across moq-lite 07 when both peers
+negotiate the [ietf extension](/draft/moq-ietf), which carries their origin and
+keeps them unchecked. A moq-lite peer without it receives that track untimed.
 
 A publisher may compress a track, which pays off for repetitive data such as
 JSON and not for media. Each group's frames become one DEFLATE stream

@@ -2758,8 +2758,8 @@ impl Consumer {
 	/// [`track::Info::lite_timescale`]).
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
-	pub(crate) fn lite_timescale(&self) -> Option<Timescale> {
-		self.track.lite_timescale()
+	pub(crate) fn lite_timescale(&self, ietf: bool) -> Option<Timescale> {
+		self.track.lite_timescale(ietf)
 	}
 
 	/// The draft the parent track's moq-transport publisher spoke, which serialized every

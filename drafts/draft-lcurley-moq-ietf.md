@@ -143,6 +143,11 @@ The Version also gives each property its meaning: drafts 18 and 19 serialize a b
 Other properties are opaque to this extension.
 
 ## Timestamps {#timestamps}
+A relay MUST preserve a relayed track's Timescale and timestamps across a negotiated hop.
+A nonzero Version identifies timestamps from MoQ Transport, which may be arrival times and need not rise with Group Sequence.
+The receiver MUST NOT apply moq-lite's group-start rewind check to such a track; a Version of zero retains that check.
+Without this extension, a relay MUST serve a MoQ Transport track untimed as {{moql}} requires.
+
 On a timed track, the FRAME's Timestamp, or the datagram's for a datagram, is the object's time, and nothing else carries it.
 The Property Block MUST NOT contain a mutable Timestamp (0x10) there; a receiver MUST treat one as malformed.
 A relay forwarding the object to {{moqt}} restates the time as the mutable Timestamp, unless a Timestamp inside the Immutable Properties already says it.
@@ -258,6 +263,7 @@ A high, distinctive value is used to avoid collisions with the low values {{moql
 
 ## Since draft-lcurley-moq-ietf-00 (in progress)
 
+- Preserve relayed track timestamps and their unchecked MoQ Transport provenance across negotiated hops.
 - Initial version.
 
 # Acknowledgments

@@ -167,14 +167,6 @@ pub struct Info {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
 	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
-	/// Whether this timed track's timestamps arrived over moq-transport, whose peers may
-	/// stamp arrival times, so no group is checked for a rewind.
-	///
-	/// They stay on moq-transport: a moq-lite hop serves the track untimed, since its
-	/// receivers check every timestamp. Never set on an untimed track.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/ingest.md
-	pub(crate) unchecked: bool,
 }
 
 impl Default for Info {
@@ -186,7 +178,6 @@ impl Default for Info {
 			compress: false,
 			refresh: None,
 			properties: None,
-			unchecked: false,
 		}
 	}
 }
@@ -226,15 +217,16 @@ impl Info {
 		self
 	}
 
-	/// The timescale a moq-lite hop serves this track at: none for an
-	/// [unchecked](Self::unchecked) one.
+	/// The timescale served on a moq-lite hop, preserving moq-transport timestamps only
+	/// when the hop negotiated the `ietf` extension.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// private: passthrough
-	pub(crate) fn lite_timescale(&self) -> Option<Timescale> {
-		self.timescale.filter(|_| !self.unchecked)
+	pub(crate) fn lite_timescale(&self, ietf: bool) -> Option<Timescale> {
+		self.timescale.filter(|_| self.ietf().is_none() || ietf)
 	}
 
-	/// The draft the track's moq-transport publisher spoke, `None` for a moq-lite one.
+	/// The original moq-transport publisher's draft, whose timestamps may rewind, or
+	/// `None` for a native moq-lite track.
 	// private: passthrough
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
 		self.properties.as_ref().map(|properties| properties.version)
@@ -845,9 +837,9 @@ impl TrackState {
 	/// so the watermark caps it instead.
 	///
 	/// Usually one group lookup each way; only unstarted or partial neighbors are skipped.
-	/// `None` on an [unchecked](Info::unchecked) track, whose timestamps may rewind.
+	/// `None` on a track with moq-transport provenance, whose timestamps may rewind.
 	pub(super) fn neighbors(&self, sequence: u64) -> Option<Neighbors> {
-		if self.info.as_ref().is_some_and(|info| info.unchecked) {
+		if self.info.as_ref().is_some_and(|info| info.ietf().is_some()) {
 			return None;
 		}
 		let bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);

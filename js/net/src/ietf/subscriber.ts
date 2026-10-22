@@ -1200,7 +1200,7 @@ export class Subscriber {
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
-			unchecked: ok.properties.timescale != null,
+			ietf: version,
 		});
 		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
 			throw new RangeError("largest group exceeds safe integers");

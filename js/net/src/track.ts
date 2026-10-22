@@ -18,6 +18,7 @@ import {
 	toStreamCode,
 } from "./error.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
+import type { IetfVersion } from "./ietf/version.ts";
 import {
 	type DropRun,
 	dropAt,
@@ -127,15 +128,9 @@ export interface Info {
 	 * snapshot or keyframe. `0` asks on any join after a delta. An integer in `0..2^32`.
 	 */
 	refresh?: number;
-	/**
-	 * Whether this timed track's timestamps arrived over moq-transport, whose peers may stamp
-	 * arrival times, so no group is checked for a rewind. A moq-lite hop serves the track
-	 * untimed, since its receivers check every timestamp. Mirrors the Rust
-	 * `track::Info::unchecked`.
-	 *
-	 * @internal
-	 */
-	unchecked?: boolean;
+	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
+	// private: passthrough
+	ietf?: IetfVersion;
 }
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
@@ -163,22 +158,20 @@ function priorityByte(value: number): number {
 }
 
 // private: passthrough
-/** The timescale a moq-lite hop serves a track at: none for an {@link Info.unchecked} one. @internal */
+/** The timescale a moq-lite hop serves a track at: none for an {@link Info.ietf} one. @internal */
 export function liteTimescale(info: Info): Timescale | undefined {
-	return info.unchecked ? undefined : (info.timescale ?? undefined);
+	return info.ietf === undefined ? (info.timescale ?? undefined) : undefined;
 }
 
 /** Fill in any unset {@link Info} fields with their defaults. */
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	const timescale = info.timescale == null ? undefined : Timescale(info.timescale);
-	// Only a timed track has timestamps to doubt.
-	if (info.unchecked && timescale === undefined) throw new RangeError("an untimed track can't be unchecked");
 	return {
 		timescale,
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
 		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
 		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
-		...(info.unchecked ? { unchecked: true } : {}),
+		...(info.ietf === undefined ? {} : { ietf: info.ietf }),
 	};
 }
 
@@ -1419,9 +1412,9 @@ export class Producer {
 		this.#publish(group, start, late);
 	}
 
-	// Whether this track's timestamps may rewind (see {@link Info.unchecked}).
+	// Whether this track's timestamps may rewind (see {@link Info.ietf}).
 	#unchecked(): boolean {
-		return this.#state.info.peek()?.unchecked === true;
+		return this.#state.info.peek()?.ietf !== undefined;
 	}
 
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.

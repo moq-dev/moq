@@ -6,6 +6,7 @@ import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { fromTransport, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
+import { Version as IetfVersion } from "../ietf/version.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -542,7 +543,7 @@ test("lite draft-06: an unchecked track's fetched frames carry their send time",
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, unchecked: true });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, ietf: IetfVersion.DRAFT_22 });
 
 	const group = new GroupProducer(0);
 	group.writeFrame(textFrame("hello", Timestamp.fromMillis(36_000_000)));

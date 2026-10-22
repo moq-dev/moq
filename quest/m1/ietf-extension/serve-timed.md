@@ -9,18 +9,26 @@ untimed.
 
 ## Plan
 
-Decided 2026-10-21 with the maintainer: m1, under moq-transport passthrough.
+Implementation is complete in
+[moq-dev/moq#6300](https://github.com/moq-dev/moq/pull/6300).
+The original moq-transport version is the sole unchecked-timestamp provenance;
+the duplicate Rust and JS flags are removed. Rust serves that track timed in
+TRACK_INFO, listings, SUBSCRIBE, FETCH, and datagrams only when the lite-07
+session negotiated `ietf`. Unknown and native moq-lite provenance retain the
+normal rewind checks, and a peer declining either offer receives it untimed.
 
-[moq-dev/moq#6150](https://github.com/moq-dev/moq/pull/6150) marks a timed
-track received over moq-transport with the crate-private
-`track::Info::unchecked` and serves it untimed to moq-lite, so its
-timestamps stop at the first lite hop.
-[moq-dev/moq#6107](https://github.com/moq-dev/moq/pull/6107) gives every
-moq-transport track `track::Info::ietf()`, its ingress version. Derive
-`unchecked` from `ietf()` instead of keeping a second flag, and let the lite
-publisher serve such a track timed to an `ietf` extension peer, which knows
-the timestamps came from moq-transport and are unchecked.
+JS mirrors the ingress-version provenance and keeps serving IETF tracks untimed
+over its lite sessions. The epic deliberately excludes JS `ietf` passthrough;
+this quest does not add that separate implementation.
 
-Mirror it in js/net, where `Info.unchecked` is `@internal`. If the timed
-encoding on that hop needs a wire change, update
-`drafts/draft-lcurley-moq-lite.md` (or the extension's draft) in the same PR.
+The former timestamp-loss test fails before the source change and passes after.
+Hop coverage checks the original units and opaque property, real FETCH before
+any subscription, a rewound later group, datagrams, and both declined offers.
+The complete Rust net suite passes 2926 tests (8 existing skips), and the
+focused JS suites pass 327 tests. The matching base and extension drafts and
+the existing timing explanation are synchronized.
+
+Retirement of this completed file and its links is the remaining action. The
+session's automatic approval review has blocked completed-quest removal under
+the unattended no-abandonment instruction; retain the accurate quest pending
+narrow retirement authorization rather than bypass that block.
