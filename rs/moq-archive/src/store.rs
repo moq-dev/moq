@@ -146,6 +146,9 @@ impl<T: ObjectStore> Store<T> {
 	}
 
 	/// Create `.info`, or accept an existing object with the same parsed properties.
+	///
+	/// An existing recording in an older format is refused with [`Error::Version`]: a reader
+	/// still reads it, but nothing appends to it.
 	pub async fn put_info(&self, track: &str, info: &Info) -> Result<Key> {
 		let key = Key::info(track)?;
 		let path = self.path(&key)?;
@@ -155,6 +158,9 @@ impl<T: ObjectStore> Store<T> {
 			Create::Exists => {
 				let existing = self.get_bytes(&path).await?;
 				let parsed = Info::decode(&existing)?;
+				if parsed.version != info.version {
+					return Err(Error::Version(parsed.version));
+				}
 				if parsed.priority != info.priority {
 					return Err(Error::Priority {
 						existing: parsed.priority,
@@ -409,7 +415,7 @@ mod tests {
 			.inner()
 			.put(
 				&path,
-				br#"{ "timescale": 1000, "priority": 1, "version": 2 }"#.as_ref().into(),
+				br#"{ "timescale": 1000, "priority": 1, "version": 3 }"#.as_ref().into(),
 			)
 			.await
 			.unwrap();
@@ -420,7 +426,7 @@ mod tests {
 			.bytes()
 			.await
 			.unwrap();
-		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 1, "version": 2 }"#);
+		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 1, "version": 3 }"#);
 	}
 
 	#[tokio::test]
@@ -433,8 +439,11 @@ mod tests {
 				&br#"{"version":1,"priority":0,"timescale":1000}"#[..],
 				(|err| matches!(err, Error::Version(1))) as fn(&Error) -> bool,
 			),
+			("v2", br#"{"version":2,"priority":128,"timescale":1000}"#, |err| {
+				matches!(err, Error::Version(2))
+			}),
 			("junk", b"not json", |err| matches!(err, Error::Json(_))),
-			("zero", br#"{"version":2,"priority":0,"timescale":0}"#, |err| {
+			("zero", br#"{"version":3,"priority":0,"timescale":0}"#, |err| {
 				matches!(err, Error::Timescale(0))
 			}),
 		] {

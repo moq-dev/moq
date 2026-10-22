@@ -14,12 +14,10 @@ Cause, from reading the code on 2026-10-20: `js/watch/src/media.ts` pushes
 (`js/net/src/lite/subscriber.ts`, `#sameSubscription`) compares it exactly.
 Video's `maxDelay` follows `sync.out.maxDelay`, which moves with the per-frame
 arrival spread (20 ms steps, at most every 500 ms) and every catalog estimate
-republish. Audio only joins once `maxDelay` passes `AUTO_MAX_DELAY`. In the
-report, the ratcheting estimate fixed by [Publisher stall
-estimate](/quest/m0/publish-stall-estimate.md) drove most of it.
+republish. Audio only joins once `maxDelay` passes `AUTO_MAX_DELAY`.
 
-Settled: measure first. Once that quest lands, count updates per track for a
-live camera publish and `bbb.hang`, then pick a cut with the numbers, and
+Settled: measure first with the bounded publisher encode queue. Count updates
+per track for a live camera publish and `bbb.hang`, then pick a cut with the numbers, and
 close this as unneeded if they are already quiet. Options weighed when
 planning:
 
@@ -31,7 +29,3 @@ planning:
 Coalescing to one update "in flight" was ruled out: moq-lite's
 SUBSCRIBE_UPDATE has no acknowledgement, and the sender already sends only the
 latest value whenever the stream applies backpressure.
-
-## Required
-
-- [Publisher stall estimate](/quest/m0/publish-stall-estimate.md) - the runaway estimate dominates the update rate until it is fixed

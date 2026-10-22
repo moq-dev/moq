@@ -11,8 +11,9 @@ use moq_net::Timestamp;
 
 /// A frame handed to [`Buffer::push`].
 pub(crate) struct Arrival<T> {
-	/// The earliest the frame could have arrived, which its deadline is judged on, so a
-	/// caller that reads late does not make it late.
+	/// When the frame reached the reader: when it landed in the cache, or when the reader
+	/// subscribed if that was later. Its deadline is judged on this, so a caller that reads late
+	/// does not make it late, and a stall that holds the caller back too does not hide that it is.
 	pub arrived: Instant,
 	/// When it was read: the latest it could have arrived, which its freshness is judged on,
 	/// so frames read together do not look fresher than they are.
