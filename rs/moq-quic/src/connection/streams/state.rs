@@ -383,7 +383,10 @@ impl StreamsState {
         self.data_recvd = self.data_recvd.saturating_add(new_bytes);
         // Credit only returns between arrivals, so an arrival is when the most is spent. A shrink
         // leaves the advertised limit in place as debt, so that credit is still outstanding.
-        let spent = (self.data_recvd + self.receive_window + self.receive_window_shrink_debt)
+        let spent = self
+            .data_recvd
+            .saturating_add(self.receive_window)
+            .saturating_add(self.receive_window_shrink_debt)
             .saturating_sub(self.local_max_data);
         self.peak_spent = self.peak_spent.max(spent);
     }
