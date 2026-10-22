@@ -73,14 +73,13 @@ impl Default for Options {
 /// The catalog rendition is registered at construction (not on first write), so
 /// a subscriber that opens the catalog before any frames arrive still sees the
 /// track.
-pub struct Producer<E: CatalogExt = ()> {
+pub struct Producer {
 	encoder: Encoder,
 	input: Input,
 	/// Converts the input layout to the codec's, when they differ.
 	remix: Option<Remix>,
 	resampler: Option<Resampler>,
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
-	_ext: std::marker::PhantomData<fn() -> E>,
 	pending: Vec<f32>,
 	/// Codec samples a group carries before the packet reaching it closes the group.
 	group_samples: u64,
@@ -118,13 +117,12 @@ struct Terminal {
 /// [`encode`](Self::encode) to supply the layout it describes. Unlike a catalog
 /// [`Reserved`](moq_mux::catalog::Reserved) this does not withhold the catalog:
 /// subscribers see the broadcast without this rendition until it resolves.
-pub(crate) struct Reserved<E: CatalogExt = ()> {
+pub(crate) struct Reserved {
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
-	_ext: std::marker::PhantomData<fn() -> E>,
 }
 
-impl<E: CatalogExt> Reserved<E> {
-	pub(crate) fn new(
+impl Reserved {
+	pub(crate) fn new<E: CatalogExt>(
 		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		options: &Options,
@@ -147,10 +145,7 @@ impl<E: CatalogExt> Reserved<E> {
 			None,
 		)?;
 
-		Ok(Self {
-			track,
-			_ext: std::marker::PhantomData,
-		})
+		Ok(Self { track })
 	}
 
 	/// Build the encoder for `input` and register the rendition describing it.
@@ -193,14 +188,13 @@ impl<E: CatalogExt> Reserved<E> {
 	}
 
 	/// Spend the reservation on a registered encoder, publishing through the track.
-	pub(crate) fn encode(self, registered: Registered) -> Producer<E> {
+	pub(crate) fn encode(self, registered: Registered) -> Producer {
 		Producer {
 			encoder: registered.encoder,
 			input: registered.input,
 			remix: registered.remix,
 			resampler: registered.resampler,
 			track: self.track,
-			_ext: self._ext,
 			pending: Vec::new(),
 			group_samples: registered.group_samples,
 			grouped: 0,
@@ -228,7 +222,7 @@ pub(crate) struct Registered {
 
 /// What a capture publication needs while its layout is still undiscovered.
 #[cfg(feature = "capture")]
-impl<E: CatalogExt> Reserved<E> {
+impl Reserved {
 	/// The resolved track name, available before the layout is.
 	pub(crate) fn name(&self) -> &str {
 		self.track.name()
@@ -251,10 +245,10 @@ impl<E: CatalogExt> Reserved<E> {
 	}
 }
 
-impl<E: CatalogExt> Producer<E> {
+impl Producer {
 	/// Publish a track encoding `input` into `broadcast`, registering its
 	/// rendition in `catalog` immediately.
-	pub fn new(
+	pub fn new<E: CatalogExt>(
 		broadcast: &mut moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer<E>,
 		input: Input,

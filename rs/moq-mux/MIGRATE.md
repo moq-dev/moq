@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `json` and `binary` producers have no catalog type parameter (#6398)
+
+`json::Snapshot<T, E>` and `json::Stream<T, E>` are `json::Snapshot<T>` and `json::Stream<T>`, and `binary::Snapshot<E>` and `binary::Stream<E>` are `binary::Snapshot` and `binary::Stream`: the catalog entry they keep is type-erased.
+The catalog `Producer<E>` methods that create them are unchanged, so callers only drop the type argument from the names.
+
 ### JSON `delta_ratio` is `deltas`
 
 `json::Config::delta_ratio` and `with_delta_ratio` are replaced by `deltas: bool` and `with_deltas` (default `true`).

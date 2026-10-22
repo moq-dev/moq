@@ -273,7 +273,7 @@ impl MoqVideoEncoder {
 /// anyway would leave a truncated stream indistinguishable from a complete one,
 /// and only the local caller would ever learn otherwise.
 fn finalize(
-	mut producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	mut producer: moq_video::encode::Producer,
 	drained: Result<(), moq_video::Error>,
 	finished: &crate::producer::Finished,
 ) -> Result<(), MoqError> {
@@ -313,7 +313,7 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 /// backend opens. The sink owns the thread instead, so every caller is welcome.
 struct VideoProducer {
 	encoder: moq_video::encode::Sink,
-	producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
+	producer: moq_video::encode::Producer,
 	format: MoqVideoPixelFormat,
 	/// The encoded resolution, from the publish config. Frames carry only pixels,
 	/// so this is what says how to read them.

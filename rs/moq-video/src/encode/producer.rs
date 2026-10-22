@@ -91,7 +91,7 @@ enum Codecs {
 /// `E` is the catalog's application extension, defaulting to none. A host
 /// carrying its own catalog sections (the FFI bindings use `hang::Extra`)
 /// publishes into a catalog of the same shape.
-pub struct Producer<E: CatalogExt = ()> {
+pub struct Producer {
 	codecs: Codecs,
 	/// The published track, read for its largest group.
 	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
@@ -99,10 +99,9 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// The largest group published, as last read from `track`.
 	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
 	largest: Option<u64>,
-	_ext: std::marker::PhantomData<fn() -> E>,
 }
 
-impl<E: CatalogExt> Producer<E> {
+impl Producer {
 	/// Publish a track carrying `rendition` into `broadcast`, registering it under
 	/// `reserved`, a [`catalog::Producer::reserve`](moq_mux::catalog::Producer::reserve)
 	/// that carries any per-track hint such as the encoder's GOP duration
@@ -117,7 +116,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// discover a track an on-demand encoder has not run for yet; because it
 	/// already says what the first keyframe says, that keyframe confirms the
 	/// catalog instead of correcting it.
-	pub fn new(
+	pub fn new<E: CatalogExt>(
 		broadcast: moq_net::broadcast::Producer,
 		reserved: moq_mux::catalog::Reserved<E>,
 		rendition: hang::catalog::VideoConfig,
@@ -139,7 +138,7 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// Use this when the caller owns the track name. [`new`](Self::new) derives a
 	/// unique name from the codec instead.
-	pub fn with_track(
+	pub fn with_track<E: CatalogExt>(
 		track: moq_net::track::Producer,
 		reserved: moq_mux::catalog::Reserved<E>,
 		rendition: hang::catalog::VideoConfig,
@@ -165,7 +164,6 @@ impl<E: CatalogExt> Producer<E> {
 			codecs,
 			track: published,
 			largest: None,
-			_ext: std::marker::PhantomData,
 		})
 	}
 
@@ -658,7 +656,7 @@ fn log_track_ended(err: moq_net::Error) {
 }
 
 #[cfg(any(feature = "capture", all(test, feature = "openh264")))]
-fn capture_stopped<E: CatalogExt>(producer: &mut Producer<E>) -> Result<(), Error> {
+fn capture_stopped(producer: &mut Producer) -> Result<(), Error> {
 	// The shared clock keeps advancing while capture is stopped. Mark the break before waiting
 	// for demand again so the next timestamp does not stretch the previous frame across the gap.
 	producer.discontinuity()
@@ -702,8 +700,8 @@ async fn wait_capture<T>(
 /// so their joins return promptly unless the underlying device or encoder is
 /// itself wedged.
 #[cfg(feature = "capture")]
-async fn capture_loop<E: CatalogExt, S: CaptureSource>(
-	producer: &mut Producer<E>,
+async fn capture_loop<S: CaptureSource>(
+	producer: &mut Producer,
 	demand: &moq_net::track::Demand,
 	source: &mut S,
 	capture: &capture::Config,

@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `encode::Producer` and the capture `Driver` have no catalog type parameter (#6398)
+
+`encode::Producer<E>` is `encode::Producer`, and the capture `Driver<E>` is `Driver`: neither holds a catalog after construction.
+`Producer::new`, `Control::new` and `publish_capture` stay generic over the catalog `Producer<E>` they take, so callers only drop the type argument from names such as `encode::Producer<Extra>`.
+
 ### Decoded reads carry encoder ends (#5687)
 
 `decode::Consumer::read()` returns `decode::Read` events instead of bare frames: `Frame { discontinuity, frame }` and `End { discontinuity, end }`; `None` still means the track is finished.

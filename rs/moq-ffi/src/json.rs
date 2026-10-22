@@ -15,7 +15,6 @@ use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::producer::{MoqBroadcastProducer, MoqTrackProducer};
-use moq_mux::catalog::hang::Extra;
 
 /// Options for a JSON snapshot track (lossy latest-value mode).
 ///
@@ -107,7 +106,7 @@ mod tests {
 /// value restated in a fresh group, by a task this producer runs until it is finished or dropped.
 #[derive(uniffi::Object)]
 pub struct MoqJsonSnapshotProducer {
-	inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value, Extra>>>>,
+	inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value>>>>,
 
 	/// Closed on finish or drop, which stops the refresh task.
 	alive: kio::Producer<()>,
@@ -118,10 +117,7 @@ impl MoqJsonSnapshotProducer {
 	///
 	/// A failed restatement only stops the refreshes: the error that caused it (a closed track, a
 	/// rejected write) reaches the caller through its next update.
-	async fn refresh(
-		inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value, Extra>>>>,
-		alive: kio::Consumer<()>,
-	) {
+	async fn refresh(inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value>>>>, alive: kio::Consumer<()>) {
 		loop {
 			let stop = kio::wait(|waiter| {
 				if alive.poll_closed(waiter).is_ready() {
@@ -288,7 +284,7 @@ impl MoqJsonSnapshotConsumer {
 /// Publishes an ordered log of JSON records, one record per append.
 #[derive(uniffi::Object)]
 pub struct MoqJsonStreamProducer {
-	inner: std::sync::Mutex<Option<moq_mux::json::Stream<Value, Extra>>>,
+	inner: std::sync::Mutex<Option<moq_mux::json::Stream<Value>>>,
 }
 
 #[uniffi::export]

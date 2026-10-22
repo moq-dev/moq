@@ -28,7 +28,3 @@ API changes).
 
 Public API: breaking Rust (moq-mux `json_snapshot` signature, `json::Config`
 fields). Wire: none.
-
-## Required
-
-- [Producers drop the phantom catalog type](/quest/m1/catalog-phantom.md) - edits the same `json::Snapshot` signature

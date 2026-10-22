@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `encode::Producer` has no catalog type parameter (#6398)
+
+`encode::Producer<E>` is `encode::Producer`: it held no catalog after construction.
+`Producer::new` and `with_track` stay generic over the `Reserved<E>` they take, so callers only drop the type argument from names such as `encode::Producer<Extra>`.
+`encode::Driver<E>` keeps its parameter, since it owns the typed catalog.
+
 ### `Control::cut` is not rate limited, and capture advertises refresh (#6048)
 
 `encode::Control::cut` no longer spaces keyframes 500 ms apart: every request forces one on the next frame, so frequent calls produce all-keyframe video.
