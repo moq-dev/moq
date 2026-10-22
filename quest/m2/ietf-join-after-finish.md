@@ -28,6 +28,15 @@ out the registration wait in `joined()`, and is refused as an unknown
 subscription, so the subscriber loses the Largest group. Short or
 already-finished tracks hit this often.
 
+It flakes the pinned-pass interop `tail` cells with a Rust publisher, about
+one run in six on draft 14 (seen 2026-10-22 while landing
+[moq-dev/moq#6407](https://github.com/moq-dev/moq/pull/6407)): the tail test
+finishes its track before SUBSCRIBE_OK, so PUBLISH_DONE follows within
+milliseconds. The relay's settle grace (about a second) ends long before the
+10 s registration wait refuses the FETCH, and the empty subscription stream
+for the Largest group then becomes an empty group, which `rust -> rust` and
+`rust -> js-native-*` read as "empty group".
+
 Fix it at the publisher: the subscriber cannot recover a head nobody serves,
 and other publishers may refuse the same way.
 
