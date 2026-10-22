@@ -12,12 +12,27 @@ distribution-mechanism matrix.
 
 It stands up a `moq-relay`, then for each publisher language publishes an H.264
 broadcast and confirms every subscriber sees data flowing before the timeout.
-Most subscribers check for a non-empty frame. The browser additionally verifies
+Most subscribers check for a non-empty video frame. The browser additionally verifies
 WebCodecs output painted to a canvas and drives the player's pause/resume controls.
-Every publisher but the Rust CLI also carries an Opus track, which the browser
-subscriber checks end-to-end: the browser encodes fake microphone audio, and the
-Python, Go, and C++ clients encode a synthetic tone through `moq-ffi` at a 2.5 ms frame
-duration, so the matrix covers the FFI audio path with a non-default codec config.
+
+Every publisher also sends an Opus tone, one sine per channel, and every subscriber
+decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
+660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in
+fragmented MP4, the browser encodes its fake microphone playing the tone from a WAV
+file, and the Python, Go, and C++ clients encode it through `moq-ffi` at a 2.5 ms
+frame duration, so the matrix covers the FFI audio path with a non-default codec config.
+Each subscriber decodes with what it already has: moq-audio for Rust (the
+`interop-audio` example, since the CLI has no PCM output), `moq-ffi` for Python,
+Go, and C++, `moq-c` for C, `decodebin` on `audio_0` for GStreamer, and
+`@moq/hang`'s libav WebCodecs fallback under Node and Bun. Each writes its first
+600 ms of PCM and frame timestamps for [`tone.py`](tone.py), which requires the
+publisher's channel count, contiguous timestamps, and each channel's tone carrying
+most of its energy by a Goertzel filter. A garbled decode (wrong channel order or
+sample rate), silence, or a timestamp gap fails the cell; a misapplied pre-skip only
+shifts the tone's phase, which this does not check. The browser
+runs the same filter on each channel of the player's audio graph. A negative control
+then has the Rust CLI swap its channels' tones, and every subscriber must refuse it
+as the wrong tone, not fail some other way. `interop.sh` is the one place the tones are chosen.
 
 The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
@@ -56,7 +71,7 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 
 | Client | Source under test | Built with | Roles |
 |---|---|---|---|
-| Rust | `rs/moq-relay` + `rs/moq-cli` | `cargo build` | publish (video) + subscribe |
+| Rust | `rs/moq-relay` + `rs/moq-cli` (+ `rs/moq-audio` for the `interop-audio` example) | `cargo build` | publish (video + audio) + subscribe |
 | Python | `py/moq-rs` (+ `rs/moq-ffi`, import `moq`) | `uv build` wheels (maturin + hatchling), installed into a venv in the run directory | publish (video + audio) + subscribe |
 | Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `sh/go/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
 | C++ | `cpp/moq` (+ `rs/moq-ffi`, `find_package(moq-cpp)`) | `cmake` build + install of `cpp/moq` (uniffi-bindgen-cpp), then `cmake` for the client | publish (video + audio) + subscribe |
@@ -85,8 +100,9 @@ marks the cell unavailable.
 
 The GStreamer client builds the `moqsrc` plugin from `rs/moq-gst` and points
 `GST_PLUGIN_PATH` at it, then reads a broadcast with
-`gst-launch-1.0 moqsrc ... ! filesink`. The plugin dynamic-links the host's
-GStreamer, so this cell needs `gst-launch-1.0` + the core plugins on the system.
+`gst-launch-1.0 moqsrc ... ! filesink`, decoding `audio_0` through `decodebin`.
+The plugin dynamic-links the host's GStreamer, so this cell needs `gst-launch-1.0`
+plus the core plugins and `opusdec` on the system.
 The `nix develop` shell ships them; a bare shell without GStreamer marks the cell
 unavailable rather than failing it.
 
@@ -382,9 +398,12 @@ contract](../README.md).
 interop.sh              orchestrator: build clients, run the relay + matrix or media checks
 interop.toml            relay config (token auth via `moq auth serve`, self-signed localhost)
 report.py               the CI report: case records to a static pass/fail page
+tone.py                 judges a subscriber's decoded audio against its publisher's tones
 bare-fin.ts             the JS side of `just test bare-fin`, driven by moq-net's tests
 varint.ts               the JS side of the varint check, driven by moq-net's tests
 clients/
+  rust/audio.rs           the Rust subscriber's audio decode via rs/moq-audio (`interop-audio`)
+  rust/tail.rs            the finite raw-track client (`interop-tail`)
   python/interop.py       publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
   cpp/main.cpp            publish/subscribe via cpp/moq (find_package(moq-cpp))

@@ -30,10 +30,9 @@ archive (per-track `.timeline.z` records named by the catalog's root
   lists each broadcast's tracks as they appear, and the archive SUBSCRIBEs per
   track, gating the lite-07 cut (`broadcast::Consumer::tracks` in Rust,
   `broadcast.Consumer.tracks()` in JS).
-  moq-transport answers SUBSCRIBE_TRACKS through the same hook (Rust now,
-  [js/net](/quest/m1/archive/subscribe-tracks-js.md) next) and learns an
-  IETF peer's tracks with a FORWARD=0 SUBSCRIBE_TRACKS
-  ([outbound SUBSCRIBE_TRACKS](/quest/m1/archive/subscribe-tracks-outbound.md)). Rejected:
+  moq-transport answers SUBSCRIBE_TRACKS through the same hook in Rust and
+  JavaScript and, in Rust, learns an IETF peer's tracks with a FORWARD=0
+  SUBSCRIBE_TRACKS whose held PUBLISHes resume for data. Rejected:
   SUBSCRIBE_ALL, whose relay had to merge pushed feeds into pulled copies
   ([moq-dev/moq#5931](https://github.com/moq-dev/moq/pull/5931)). The archive
   no longer selects tracks from a catalog.
@@ -87,8 +86,6 @@ from a host. Each child fixes the stale docs it touches.
 
 - [Archive consumer](/quest/m1/archive/consumer.md) - `archive::Consumer` serves a stored prefix as a broadcast from its key listing, and `moq export/import archive` use the new pair
 - [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - the root `archive` section is gone; an opt-in per-rendition `hls` field marks each aligned HLS segment's first group and pts and declares its nominal duration
-- [Outbound SUBSCRIBE_TRACKS](/quest/m1/archive/subscribe-tracks-outbound.md) - an IETF peer's tracks are listed through the TRACKS hook by a FORWARD=0 SUBSCRIBE_TRACKS, whose held PUBLISH resumes for data
-- [SUBSCRIBE_TRACKS in js/net](/quest/m1/archive/subscribe-tracks-js.md) - `@moq/net` answers SUBSCRIBE_TRACKS as Rust does, instead of NOT_SUPPORTED
 - [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - one `EXT-X-TARGETDURATION` for the run, from the declared `hls` duration; an overrun is listed with a warning
 - [History from the retained floor](/quest/m1/archive/history-floor.md) - HLS history over an archive consumer broadcast whose start was pruned lists from its oldest stored segment
 

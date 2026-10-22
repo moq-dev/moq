@@ -66,6 +66,9 @@ Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
+- [One epoch, one producer](/quest/m2/e2ee/lifecycle-hardening.md) - the epoch rule
+  holds in the TypeScript API, a failed grouped write ends the group, and an
+  out-of-range datagram is dropped
 
 ## Closes
 

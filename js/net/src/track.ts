@@ -633,27 +633,6 @@ type CachedGroup = {
 // A group's checked start, kept by sequence.
 type Start = { sequence: number; start: Timestamp };
 
-// Whether `a` presents before `b`, whatever their scales. Cross-scale products can pass
-// 2^53, so they are compared exactly in BigInt, as Rust does in u128.
-function earlier(a: Timestamp, b: Timestamp): boolean {
-	if (a.scale === b.scale) return a.value < b.value;
-	const [ma, ea] = binary(a.value);
-	const [mb, eb] = binary(b.value);
-	const e = Math.min(ea, eb);
-	return (ma * BigInt(b.scale)) << BigInt(ea - e) < (mb * BigInt(a.scale)) << BigInt(eb - e);
-}
-
-// A finite, non-negative `value` exactly as `mantissa * 2^exponent`. Doubling is exact, so
-// a fraction becomes an integer within its binary digits.
-function binary(value: number): [bigint, number] {
-	let exponent = 0;
-	while (!Number.isInteger(value)) {
-		value *= 2;
-		exponent--;
-	}
-	return [BigInt(value), exponent];
-}
-
 let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 // A fresh read handle on a group the producer still caches; assigned in its static block.
 let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | undefined;
@@ -1207,11 +1186,11 @@ export class Producer {
 		const evicted = this.#evicted;
 		const late = evicted !== undefined && sequence <= evicted.sequence;
 		if (evicted && late) {
-			if (ceiling === undefined || earlier(evicted.start, ceiling)) ceiling = evicted.start;
+			if (ceiling === undefined || evicted.start.isBefore(ceiling)) ceiling = evicted.start;
 		} else if (evicted) {
-			if (floor === undefined || earlier(floor, evicted.start)) floor = evicted.start;
+			if (floor === undefined || floor.isBefore(evicted.start)) floor = evicted.start;
 		}
-		if ((floor && earlier(start, floor)) || (ceiling && earlier(ceiling, start))) throw new TimestampMismatch();
+		if ((floor && start.isBefore(floor)) || ceiling?.isBefore(start)) throw new TimestampMismatch();
 		return late;
 	}
 
@@ -2047,6 +2026,23 @@ export class Subscriber {
 						!delivered.has(group.sequence) &&
 						!(group.closed.peek() instanceof Error),
 				);
+		hooks.spent = (subscriber, start, end, delivered) => {
+			const state = subscriber.#state;
+			// A datagram outside the cursor is gone for good, as a read would discard it.
+			const cursor = subscriber.#cursor.peek();
+			const readable = state.datagrams
+				.peek()
+				.some(
+					(datagram) =>
+						datagram.sequence >= cursor.start &&
+						(cursor.end === undefined || datagram.sequence < cursor.end),
+				);
+			return (
+				(state.closed.peek() !== undefined || subscriber.#complete()) &&
+				!readable &&
+				!hooks.hasUnreadGroup(subscriber, start, end, delivered)
+			);
+		};
 		hooks.staleAt = (subscriber, sequence) => ({
 			expired: () => subscriber.#staleAt(sequence, subscriber.#drift(), true),
 			changed: subscriber.#expiryChanged(),
@@ -2448,9 +2444,9 @@ export class Subscriber {
 	// A group from the routes' copies; see #resume.
 	#tryResumed(ordered: boolean): Recv {
 		const resume = this.#resume as ResumeSource;
+		// A clean end leaves what the copies hold readable, as a direct reader's buffer is.
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
-		if (closed !== undefined) return { kind: "done" };
 		const recv = resume.tryGroup(ordered, this.#delivered);
 		if (recv.kind === "group") this.#handOut(recv.group.sequence, ordered);
 		return recv;
@@ -2550,10 +2546,7 @@ export class Subscriber {
 	// The synchronous half of #recvDatagram.
 	#tryDatagram(): RecvDatagram {
 		const closed = this.#state.closed.peek();
-		if (this.#resume) {
-			if (closed instanceof Error) return { kind: "error", error: closed };
-			if (closed !== undefined) return { kind: "done" };
-		}
+		if (this.#resume && closed instanceof Error) return { kind: "error", error: closed };
 		// The group range bounds datagrams too, judged when each is read. One outside it is
 		// gone for good: nothing holds it for a later raise, unlike a group past the cap.
 		const { start, end } = this.#cursor.peek();

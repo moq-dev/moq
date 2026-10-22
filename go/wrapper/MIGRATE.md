@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON snapshot `DeltaRatio` is `Deltas`
+
+`json.SnapshotOptions.DeltaRatio *uint32` and `json.DefaultDeltaRatio` are replaced by `Deltas *bool` (nil enables deltas).
+Set `Deltas` to a pointer to `false` where you set `DeltaRatio` to a pointer to `0`, and leave it nil otherwise.
+Publish the track with a `Refresh` ratio so a joiner gets the value restated in a fresh group.
+
 ### Priorities are signed (#6142)
 
 `TrackInfo.Priority`, `Subscription.Priority`, and `FetchGroupOptions.Priority` are `int8`, and `GroupRequest.Priority()` returns one.

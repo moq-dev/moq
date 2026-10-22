@@ -2,13 +2,15 @@
 // package with find_package(moq-cpp).
 //
 // publish reads raw Annex-B H.264 from stdin (e.g. piped from ffmpeg) and feeds it to a
-// streaming importer, which infers frame boundaries. Alongside it, a synthetic tone is
-// encoded through libopus so the matrix exercises the FFI audio path, not only the video
-// one. subscribe connects, finds the video track in the catalog, and exits 0 as soon as any
-// non-empty frame arrives (exit 1 on timeout or no data).
+// streaming importer, which infers frame boundaries. Alongside it, a tone per channel
+// (--tone) is encoded through libopus so the matrix exercises the FFI audio path, not only
+// the video one. subscribe connects, waits for a catalog with video and audio, decodes
+// --audio-ms of audio to --audio-out for tone.py to judge, and exits 0 once a non-empty
+// video frame arrives too (exit 1 on timeout or no data).
 //
-//   ffmpeg ... -f h264 - | cpp-interop publish --url http://localhost:4443 --broadcast b.hang
-//   cpp-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
+//   ffmpeg ... -f h264 - | cpp-interop publish --url http://localhost:4443 --broadcast b.hang --tone 440
+//   cpp-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20 \
+//       --audio-out /tmp/audio --audio-ms 600
 //
 // --version offers only that version. --grant waits for the grant the relay sends over AUTH
 // and prints it as an `auth granted` line before the client starts.
@@ -22,7 +24,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -45,10 +49,10 @@ constexpr size_t READ_CHUNK = 64 * 1024;
 // SubscribeMedia max delay: how much reordering the jitter buffer tolerates.
 constexpr uint64_t MAX_DELAY_US = 1'000'000;
 
-// Synthetic audio: a 48 kHz mono tone, encoded as Opus.
+// Synthetic audio: a 48 kHz tone per channel at 0.5 amplitude, encoded as Opus.
 constexpr const char *AUDIO_TRACK = "tone";
 constexpr uint32_t AUDIO_RATE = 48'000;
-constexpr double AUDIO_TONE_HZ = 440.0;
+constexpr double AUDIO_AMPLITUDE = 0.5;
 constexpr double PI = 3.14159265358979323846;
 // A non-default frame duration, and the shortest Opus offers. 20 ms would pass even if the
 // microsecond field were truncated to milliseconds somewhere.
@@ -150,17 +154,23 @@ void close_session(const std::shared_ptr<moq::Session> &session) {
     until(session->shutdown(), Clock::now() + std::chrono::seconds(5), "session shutdown");
 }
 
-// Feeds the encoder a real-time tone until `stop` is set.
-void publish_tone(const std::shared_ptr<moq::AudioProducer> &audio, const std::atomic<bool> &stop) {
+// Feeds the encoder a real-time tone per channel, interleaved, until `stop` is set.
+void publish_tone(
+    const std::shared_ptr<moq::AudioProducer> &audio, const std::vector<double> &tones, const std::atomic<bool> &stop
+) {
     const auto started = Clock::now();
-    std::vector<uint8_t> data(AUDIO_BATCH_SAMPLES * sizeof(float));
+    std::vector<uint8_t> data(AUDIO_BATCH_SAMPLES * tones.size() * sizeof(float));
     uint64_t timestamp_us = 0;
     size_t phase = 0;
     while (!stop.load()) {
         for (size_t i = 0; i < AUDIO_BATCH_SAMPLES; i++) {
-            auto sample = static_cast<float>(std::sin(2 * PI * AUDIO_TONE_HZ * static_cast<double>(phase + i) / AUDIO_RATE));
-            // Little-endian f32, which is every target this runs on.
-            std::memcpy(&data[i * sizeof(float)], &sample, sizeof(float));
+            for (size_t c = 0; c < tones.size(); c++) {
+                auto sample = static_cast<float>(
+                    AUDIO_AMPLITUDE * std::sin(2 * PI * tones[c] * static_cast<double>(phase + i) / AUDIO_RATE)
+                );
+                // Little-endian f32, which is every target this runs on.
+                std::memcpy(&data[(i * tones.size() + c) * sizeof(float)], &sample, sizeof(float));
+            }
         }
         ok(audio->write({timestamp_us, data}), "tone write");
         phase += AUDIO_BATCH_SAMPLES;
@@ -170,7 +180,7 @@ void publish_tone(const std::shared_ptr<moq::AudioProducer> &audio, const std::a
     }
 }
 
-int publish(const std::string &url, const std::string &path, const Dial &dial) {
+int publish(const std::string &url, const std::string &path, const Dial &dial, const std::vector<double> &tones) {
     // No deadline to publish: the harness stops the publisher when the round ends.
     const auto forever = Clock::now() + std::chrono::hours(24);
     auto session = connect(url, dial, forever);
@@ -186,18 +196,20 @@ int publish(const std::string &url, const std::string &path, const Dial &dial) {
     output.track = AUDIO_TRACK;
     output.frame_duration_us = AUDIO_FRAME_DURATION_US;
     auto audio = ok(
-        moq::AudioProducer::init(catalog, {moq::AudioSampleFormat::kF32, AUDIO_RATE, 1}, output, nullptr),
+        moq::AudioProducer::init(
+            catalog, {moq::AudioSampleFormat::kF32, AUDIO_RATE, static_cast<uint32_t>(tones.size())}, output, nullptr
+        ),
         "audio producer"
     );
     ok(broadcast->announce({}), "announce");
     std::printf(
-        "publishing \"%s\" (Annex-B H.264 from stdin + a %.0f Hz tone) to %s\n", path.c_str(), AUDIO_TONE_HZ,
+        "publishing \"%s\" (Annex-B H.264 from stdin + a %zu-channel tone) to %s\n", path.c_str(), tones.size(),
         url.c_str()
     );
     std::fflush(stdout);
 
     std::atomic<bool> stop{false};
-    std::thread tone([&] { publish_tone(audio, stop); });
+    std::thread tone([&] { publish_tone(audio, tones, stop); });
 
     // read returns as soon as any bytes are available, so ffmpeg's real-time output is
     // forwarded rather than batched into full chunks.
@@ -224,7 +236,41 @@ int publish(const std::string &url, const std::string &path, const Dial &dial) {
     return 0;
 }
 
-int subscribe(const std::string &url, const std::string &path, const Dial &dial, double timeout) {
+// Decodes the first `audio_ms` of the rendition to `out`.{txt,pcm}, the layout tone.py reads.
+void decode_audio(
+    const std::shared_ptr<moq::BroadcastConsumer> &consumer, const std::string &id, const moq::Audio &audio,
+    const std::string &out, uint64_t audio_ms, Clock::time_point deadline
+) {
+    moq::AudioDecoderOutput output{};
+    output.format = moq::AudioSampleFormat::kF32;
+    output.max_delay_us = MAX_DELAY_US;
+    auto decoder = until(moq::AudioConsumer::subscribe(consumer, id, audio, output), deadline, "audio consumer");
+
+    std::ofstream log(out + ".txt");
+    std::ofstream pcm(out + ".pcm", std::ios::binary);
+    log << audio.sample_rate << " " << audio.channel_count << "\n";
+    const size_t frame_bytes = sizeof(float) * audio.channel_count;
+    uint64_t decoded = 0;
+    while (decoded * 1000 < audio_ms * audio.sample_rate) {
+        auto frame = until(decoder->next(), deadline, "audio frame");
+        if (!frame) {
+            fail("audio track ended early");
+        }
+        const size_t samples = frame->data.size() / frame_bytes;
+        log << frame->timestamp_us << " " << samples << "\n";
+        pcm.write(reinterpret_cast<const char *>(frame->data.data()), static_cast<std::streamsize>(frame->data.size()));
+        decoded += samples;
+    }
+    decoder->cancel();
+    if (!log || !pcm) {
+        fail("writing the decoded audio");
+    }
+}
+
+int subscribe(
+    const std::string &url, const std::string &path, const Dial &dial, double timeout,
+    const std::string &audio_out, uint64_t audio_ms
+) {
     const auto deadline =
         Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(timeout));
     auto session = connect(url, dial, deadline);
@@ -233,14 +279,14 @@ int subscribe(const std::string &url, const std::string &path, const Dial &dial,
     auto consumer = until(announced->available(), deadline, "available");
 
     // The catalog is a live track. A lazy publisher (e.g. the browser, which only encodes on
-    // demand) may announce video in a later update rather than the first snapshot, so wait
-    // for a catalog that actually has a video track.
+    // demand) may announce a rendition in a later update rather than the first snapshot, so
+    // wait for a catalog that has both video and audio.
     auto catalogs = until(moq::MediaCatalogConsumer::subscribe(consumer), deadline, "catalog consumer");
     std::optional<moq::Catalog> catalog;
-    while (!catalog || catalog->video.empty()) {
+    while (!catalog || catalog->video.empty() || catalog->audio.empty()) {
         catalog = until(catalogs->next(), deadline, "catalog");
         if (!catalog) {
-            fail("catalog stream ended without a video track");
+            fail("catalog stream ended without a video and an audio track");
         }
     }
     const auto &[id, video] = *catalog->video.begin();
@@ -251,6 +297,11 @@ int subscribe(const std::string &url, const std::string &path, const Dial &dial,
         moq::MediaTrackConsumer::subscribe(consumer, {moq::Rendition::kVideo{id, video}, subscription}), deadline,
         "container consumer"
     );
+
+    // Audio first: it has to arrive without a gap, and the video consumer keeps its first frame
+    // (or skips to a newer one) while this reads.
+    const auto &[audio_id, audio] = *catalog->audio.begin();
+    decode_audio(consumer, audio_id, audio, audio_out, audio_ms, deadline);
 
     size_t total = 0;
     while (total == 0) {
@@ -273,12 +324,18 @@ int subscribe(const std::string &url, const std::string &path, const Dial &dial,
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fail("usage: cpp-interop publish|subscribe --url URL --broadcast PATH [--timeout SECONDS] [--version V] [--grant]");
+        fail(
+            "usage: cpp-interop publish|subscribe --url URL --broadcast PATH [--timeout SECONDS] [--version V] "
+            "[--grant] [--tone HZ,...] [--audio-out PREFIX --audio-ms MS]"
+        );
     }
     const std::string role = argv[1];
     std::string url;
     std::string broadcast;
     Dial dial;
+    std::vector<double> tones;
+    std::string audio_out;
+    uint64_t audio_ms = 0;
     double timeout = 20;
     for (int i = 2; i < argc; i++) {
         const std::string flag = argv[i];
@@ -298,6 +355,15 @@ int main(int argc, char **argv) {
             timeout = std::atof(value.c_str());
         } else if (flag == "--version") {
             dial.version = value;
+        } else if (flag == "--tone") {
+            std::stringstream list(value);
+            for (std::string hz; std::getline(list, hz, ',');) {
+                tones.push_back(std::atof(hz.c_str()));
+            }
+        } else if (flag == "--audio-out") {
+            audio_out = value;
+        } else if (flag == "--audio-ms") {
+            audio_ms = std::strtoull(value.c_str(), nullptr, 10);
         } else {
             fail(("unknown flag " + flag).c_str());
         }
@@ -309,10 +375,16 @@ int main(int argc, char **argv) {
     ok(moq::moq_log_level("warn"), "log level");
 
     if (role == "publish") {
-        return publish(url, broadcast, dial);
+        if (tones.empty()) {
+            fail("publish needs --tone");
+        }
+        return publish(url, broadcast, dial, tones);
     }
     if (role == "subscribe") {
-        return subscribe(url, broadcast, dial, timeout);
+        if (audio_out.empty() || audio_ms == 0) {
+            fail("subscribe needs --audio-out and --audio-ms");
+        }
+        return subscribe(url, broadcast, dial, timeout, audio_out, audio_ms);
     }
     fail(("unknown role " + role).c_str());
 }
