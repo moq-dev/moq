@@ -618,6 +618,7 @@ mod tests {
 
 	use super::*;
 
+	#[allow(clippy::large_enum_variant)]
 	enum TestConfig {
 		Video(hang::catalog::VideoConfig),
 		Audio(hang::catalog::AudioConfig),

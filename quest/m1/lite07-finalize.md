@@ -71,6 +71,10 @@ On 2026-10-19 TRACKS, a per-broadcast track listing, replaced SUBSCRIBE_ALL
 and kept that slot.
 The `Time(pts)` range end rides in Subscribe ranges, already Required.
 
+Decided 2026-10-20: the padding stream type joins Required, so the m2
+browser [padding probes](/quest/m2/probe/padding.md) can use lite-07 without
+a new version.
+
 Rust's lite-07 varints already carry the full 64 bits the draft specifies,
 so no codec work waits on the cut.
 
@@ -92,6 +96,7 @@ is published; older versions are unchanged.
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 - [Compressed tracks in js/net](/quest/m1/compress/js.md) - JS reads and writes compressed lite-07 tracks instead of refusing them
 - [TRACKS in js/net](/quest/m1/archive/tracks-js.md) - JS speaks lite-07's Tracks Stream, which Rust already does
+- [lite-07 padding](/quest/m1/lite07-padding.md) - lite-07 reserves the padding stream type the browser probes with
 
 ## Related
 

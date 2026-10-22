@@ -63,6 +63,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [MSFTS convergence](/quest/m3/msfts-convergence.md) - the demultiplexed TS lane converges on MSFTS where they differ, once an MSFTS implementer engages
 - [#2279](/quest/m3/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
 - [CEA-608/708](/quest/m3/captions-cea.md) - captions carried inside video SEI become a real text rendition at import
+- [WebXR playback](/quest/m3/watch-webxr.md) - `<moq-watch>` renders equirectangular and stereo renditions through WebXR layers on a headset
 - [Paced replay](/quest/m3/archive-paced-replay.md) - an archive consumer pushes stored groups to live subscribers on one shared clock, so any live player plays it
 - [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - a Rust encoder
   reads its viewers' feedback and adapts its bitrate

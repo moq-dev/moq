@@ -174,6 +174,5 @@ max age or the range.
 
 ## Related
 
-- [Archive producer](/quest/m1/archive/producer.md) - its resume floor crosses relays that viewers may have warmed
 - [Drop set](/quest/m1/drop-set.md) - closes the gap this leaves for groups already reported dropped
 - [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - the JS byte bound for groups and the cursor runs between them
