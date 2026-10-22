@@ -25,8 +25,12 @@ peer cursors, which on a dense mesh is about 20 per relay.
 - `sync_route` calls `TableCursor::update` for every visible cursor on every
   route change at a prefix. `update` clones the hops, epoch, and auth and
   rebuilds the captures before comparing against the previous value, so most
-  calls allocate only to find a no-op. Compare the winning route's identity
-  and instance first and return early.
+  calls allocate only to find a no-op. Compare the new winner against the
+  cursor's current entry by reference first (instance, captures,
+  servability, and every metadata field `update` delivers: hops, cost,
+  entry, epoch, auth) and clone only on a difference. An in-place update
+  that keeps the route and instance but changes metadata must still reach
+  the cursor.
 
 Tests: count `scan` steps and `update` allocations per event, not
 wall-clock time. An origin dropping K broadcasts costs each cursor at most
@@ -35,9 +39,10 @@ cursor's winner allocates nothing for that cursor. Keep the `mesh_withdraw`
 residual fixtures passing with unchanged event sequences, since this changes
 cost, not behavior.
 
-Benchmark in `rs/moq-net/benches/announce.rs` (or `origin.rs`): one origin
-withdrawing 1k and 10k broadcasts under 20 cursors, and one broadcast's route
-churning under 20 cursors, against `main` before the change.
+Benchmark in `rs/moq-net/benches/announce.rs` (or `origin.rs`), swept over
+both fan-out axes: one origin withdrawing 1k and 10k broadcasts, and one
+broadcast's route churning, each under 1, 20, and 100 cursors, against `main`
+before the change.
 
 Backport: per CONTRIBUTING, land on `main`, then port onto `release` as a
 separate PR keeping the published API. No wire change, no public API change.

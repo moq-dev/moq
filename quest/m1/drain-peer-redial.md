@@ -30,8 +30,8 @@ redial, delete the first half of this quest and record why.
 
 Fix, if reproduced: a cluster peer that receives GOAWAY without a URI does
 not redial the same node until its session closes. It then follows the
-normal dial loop, so a restarted relay is picked up. Customer clients keep
-today's behavior. Add full jitter to the peer redial backoff and lower its
+normal dial loop, so a restarted relay is picked up. Non-cluster clients
+keep today's behavior. Add full jitter to the peer redial backoff and lower its
 cap.
 
 Tests: the reproduction above asserts no session reopens to the draining
