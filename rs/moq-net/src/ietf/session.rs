@@ -328,15 +328,17 @@ pub fn start(config: Config<crate::driver::Transport>) -> Result<(Driver, crate:
 								Version::Draft16 => {
 									let mut sub_ns_adapter = sub_ns_adapter;
 									let (send, recv) = sub_ns_adapter.open_native_bi().await?;
+									let mut reader = crate::coding::Reader::new(
+										crate::transport::boxed::RecvStream::new(recv),
+										version,
+									);
+									reader.set_priority(crate::priority::RECV_CONTROL);
 									Stream {
 										writer: crate::coding::Writer::new(
 											crate::transport::boxed::SendStream::new(send),
 											version,
 										),
-										reader: crate::coding::Reader::new(
-											crate::transport::boxed::RecvStream::new(recv),
-											version,
-										),
+										reader,
 									}
 								}
 								_ => Stream::open(&mut crate::driver::Transport::new(sub_ns_adapter), version).await?,
@@ -717,6 +719,7 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 			continue;
 		}
 
+		reader.set_priority(crate::priority::RECV_CONTROL);
 		let setup: setup::Setup = reader.decode().await?;
 		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, version)?;
 		let path = match params.get_bytes(ietf::ParameterBytes::Path) {
@@ -1097,6 +1100,7 @@ impl<S: crate::transport::poll::Boxable> Uni<S> {
 				// The negotiation gates the announce and dispatch loops, so a SETUP we
 				// cannot read must end the session rather than leave them parked on a
 				// slot nothing will ever fill.
+				reader.set_priority(crate::priority::RECV_CONTROL);
 				let msg = reader.decode::<setup::Setup>().await?;
 				if let Some(peer_setup) = peer_setup {
 					peer_setup.set(decode_peer_setup(msg.parameters, version, client)?);

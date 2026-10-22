@@ -12,6 +12,28 @@ Every session now takes a `transport::poll::Boxable` transport, whose streams mu
 A `!Send` transport wraps itself in a type that checks the thread on use, such as `moq_uring::transport::Local`.
 `Client::connect` and `Server::accept_request` are plain functions returning `impl Future`, so call them as before with `.await`.
 
+### Receive streams are read through leases (#5878)
+
+`transport::poll::RecvStream` now has `poll_lease(cx, want)`, `set_priority`, and `stop`, plus the provided `poll_read_chunk` and `read_chunk`.
+`poll_read`, `poll_read_buf`, `poll_closed`, `read`, `read_buf`, `closed`, `Read`, and `ReadBuf` are gone.
+A lease borrows the stream's unreleased bytes as a `bytes::Buf`: reading moves past bytes for good, but they keep their flow-control credit until `Lease::release()`.
+Bytes not read stay for the next lease, `Lease::chunks()` peeks without reading, and `is_fin` replaces `closed`.
+A transport that can only hand out chunks implements `transport::poll::Chunks` (`poll_read_chunk` and `stop`) and wraps each stream in `transport::poll::Buffered`.
+
+```rust
+// Before
+let n = stream.read(&mut buf).await?;
+
+// After: copy what arrived, then return its credit
+let mut lease = poll_fn(|cx| stream.poll_lease(cx, 1)).await?;
+let n = lease.remaining().min(buf.len()); // 0 with `lease.is_fin()` is the end
+lease.copy_to_slice(&mut buf[..n]);
+lease.release();
+```
+
+`transport::CloseKind` gained `Evicted`, which `Error::from_transport` maps to `Error::Evicted`.
+`transport::Stats` gained `streams_evicted()`, and `session::Stats` the matching `streams_evicted` field.
+
 ### Stage a requested track before subscribers see it (#6111)
 
 `track::Request::stage(info)` returns a `track::Staged` that derefs to the track's `Producer` while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.

@@ -8,7 +8,7 @@
 use std::any::Any;
 use std::task::{Context, Poll};
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, Bytes};
 
 use super::poll::{self, SendOptions};
 use super::{Binding, CloseKind, MaybeSend, MaybeSync, Probe, Wire};
@@ -97,6 +97,9 @@ impl RecvStream {
 		Self(Box::new(stream))
 	}
 }
+
+/// A boxed [`poll::Lease`], borrowed from a [`RecvStream`].
+pub(crate) struct Lease<'a>(Box<dyn ErasedLease + 'a>);
 
 /// The transport's connection stats, read once.
 #[derive(Clone, Copy, Debug, Default)]
@@ -197,11 +200,17 @@ trait ErasedSend: MaybeSend + MaybeSync {
 }
 
 trait ErasedRecv: MaybeSend + MaybeSync {
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Error>>;
-	fn poll_read_buf(&mut self, cx: &mut Context<'_>, buf: &mut dyn BufMut) -> Poll<Result<Option<usize>, Error>>;
+	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Lease<'_>, Error>>;
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>>;
+	fn set_priority(&mut self, priority: i64);
 	fn stop(&mut self, code: u32);
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>>;
+}
+
+// Not `MaybeSend`: a lease may hold its transport's lock, and never outlives a poll.
+trait ErasedLease: Buf {
+	fn chunks(&self) -> Box<dyn Iterator<Item = &[u8]> + '_>;
+	fn is_fin(&self) -> bool;
+	fn release(self: Box<Self>);
 }
 
 type GroupOf<S> = <<S as poll::Session>::SendStream as poll::SendStream>::Group;
@@ -351,24 +360,36 @@ impl<T: poll::SendStream<Group: MaybeSend + MaybeSync> + MaybeSend + MaybeSync> 
 }
 
 impl<T: poll::RecvStream + MaybeSend + MaybeSync> ErasedRecv for T {
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Error>> {
-		poll::RecvStream::poll_read(self, cx, dst).map_err(Error::new)
+	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Lease<'_>, Error>> {
+		poll::RecvStream::poll_lease(self, cx, want)
+			.map(|res| res.map(|lease| Lease(Box::new(lease))).map_err(Error::new))
 	}
 
-	fn poll_read_buf(&mut self, cx: &mut Context<'_>, mut buf: &mut dyn BufMut) -> Poll<Result<Option<usize>, Error>> {
-		poll::RecvStream::poll_read_buf(self, cx, &mut buf).map_err(Error::new)
-	}
-
+	// Forwarded rather than left to the provided method, so reading a chunk never boxes a lease.
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		poll::RecvStream::poll_read_chunk(self, cx, max).map_err(Error::new)
+	}
+
+	fn set_priority(&mut self, priority: i64) {
+		poll::RecvStream::set_priority(self, priority)
 	}
 
 	fn stop(&mut self, code: u32) {
 		poll::RecvStream::stop(self, code)
 	}
+}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		poll::RecvStream::poll_closed(self, cx).map_err(Error::new)
+impl<L: poll::Lease> ErasedLease for L {
+	fn chunks(&self) -> Box<dyn Iterator<Item = &[u8]> + '_> {
+		Box::new(poll::Lease::chunks(self))
+	}
+
+	fn is_fin(&self) -> bool {
+		poll::Lease::is_fin(self)
+	}
+
+	fn release(self: Box<Self>) {
+		poll::Lease::release(*self)
 	}
 }
 
@@ -481,24 +502,54 @@ impl poll::SendStream for SendStream {
 
 impl poll::RecvStream for RecvStream {
 	type Error = Error;
+	type Lease<'a> = Lease<'a>;
 
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Error>> {
-		self.0.poll_read(cx, dst)
-	}
-
-	fn poll_read_buf<B: BufMut>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<Option<usize>, Error>> {
-		self.0.poll_read_buf(cx, buf)
+	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Lease<'_>, Error>> {
+		self.0.poll_lease(cx, want)
 	}
 
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
 		self.0.poll_read_chunk(cx, max)
 	}
 
+	fn set_priority(&mut self, priority: i64) {
+		self.0.set_priority(priority)
+	}
+
 	fn stop(&mut self, code: u32) {
 		self.0.stop(code)
 	}
+}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		self.0.poll_closed(cx)
+impl Buf for Lease<'_> {
+	fn remaining(&self) -> usize {
+		self.0.remaining()
+	}
+
+	fn chunk(&self) -> &[u8] {
+		self.0.chunk()
+	}
+
+	fn advance(&mut self, n: usize) {
+		self.0.advance(n)
+	}
+
+	// Forwarded so a transport's zero-copy override survives the box.
+	fn copy_to_bytes(&mut self, n: usize) -> Bytes {
+		self.0.copy_to_bytes(n)
+	}
+}
+
+impl poll::Lease for Lease<'_> {
+	fn chunks(&self) -> impl Iterator<Item = &[u8]> {
+		self.0.chunks()
+	}
+
+	fn is_fin(&self) -> bool {
+		self.0.is_fin()
+	}
+
+	fn release(self) {
+		self.0.release()
 	}
 }

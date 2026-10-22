@@ -7029,23 +7029,29 @@ fn partial_poll_reports_starvation() {
     );
 }
 
-/// Write what the client can and read what the server can, holding its credit, until neither
-/// makes progress. Returns the bytes read.
-fn pump_held(
+/// The bytes the server has leased from `s`.
+fn leased(pair: &mut Pair, server_ch: ConnectionHandle, s: StreamId) -> usize {
+    pair.server_conn_mut(server_ch)
+        .leased(s)
+        .map_or(0, |lease| lease.len())
+}
+
+/// Write what the client can of `msg` up to `until`, finishing at its end, and lease what the
+/// server can, without consuming, until neither makes progress. Returns the bytes newly leased.
+fn pump_leased(
     pair: &mut Pair,
     (client_ch, server_ch): (ConnectionHandle, ConnectionHandle),
     s: StreamId,
-    msg: &[u8],
+    (msg, until): (&[u8], usize),
     sent: &mut usize,
-    held: &mut Credit,
 ) -> usize {
     let mut total = 0;
     loop {
         // Deliver whatever credit the server queued since the last round.
         pair.drive();
         let mut wrote = 0;
-        if *sent < msg.len()
-            && let Ok(n) = pair.client_send(client_ch, s).write(&msg[*sent..])
+        if *sent < until
+            && let Ok(n) = pair.client_send(client_ch, s).write(&msg[*sent..until])
         {
             wrote = n;
             *sent += n;
@@ -7055,15 +7061,9 @@ fn pump_held(
         }
         pair.drive();
 
-        let mut read = 0;
-        let mut recv = pair.server_recv(server_ch, s);
-        if let Ok(mut chunks) = recv.read(true) {
-            while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
-                read += chunk.bytes.len();
-            }
-            held.merge(chunks.hold());
-            let _ = chunks.finalize();
-        }
+        let before = leased(pair, server_ch, s);
+        let _ = pair.server_recv(server_ch, s).lease(0);
+        let read = leased(pair, server_ch, s) - before;
         if read == 0 && wrote == 0 {
             return total;
         }
@@ -7071,11 +7071,15 @@ fn pump_held(
     }
 }
 
-/// Held reads keep replenishing a stream window much smaller than the connection's, while the
-/// connection window stays spent until the bytes are released. A release far below the usual
-/// `MAX_DATA` threshold still unblocks the peer, without relying on its DATA_BLOCKED.
+/// Leases keep replenishing a stream window much smaller than the connection's, while the
+/// connection window stays spent until the bytes are consumed. A consume below the usual
+/// `MAX_DATA` threshold still unblocks the peer once it nears its limit, without relying on its
+/// DATA_BLOCKED.
+///
+/// The peer never spends the whole window: a lease held then would be evicted, since nothing
+/// could free it.
 #[test]
-fn held_credit_spends_connection_window_only() {
+fn lease_spends_connection_window_only() {
     const WINDOW: usize = 4000;
     let _guard = subscribe();
     let mut transport = TransportConfig::default();
@@ -7094,59 +7098,38 @@ fn held_credit_spends_connection_window_only() {
         .client_streams(client_ch)
         .open(Dir::Uni, Default::default())
         .unwrap();
-    let msg = vec![0xAB; 3 * WINDOW];
-    let (mut sent, mut held) = (0, Credit::default());
+    let msg = vec![0xAB; WINDOW + 50];
+    let mut sent = 0;
 
+    // Three stream windows' worth, all leased and none consumed.
     assert_eq!(
-        pump_held(&mut pair, chs, s, &msg, &mut sent, &mut held),
-        WINDOW
+        pump_leased(&mut pair, chs, s, (&msg, 3000), &mut sent),
+        3000
     );
-    assert_eq!(held.len(), WINDOW as u64);
     let stats = pair.server_conn_mut(server_ch).stats().credit;
-    assert_eq!((stats.held, stats.available), (WINDOW as u64, 0));
+    assert_eq!((stats.leased, stats.available), (3000, 1000));
 
-    let small = held.split(100);
-    let _ = pair.server_conn_mut(server_ch).release(small);
-    assert_eq!(
-        pump_held(&mut pair, chs, s, &msg, &mut sent, &mut held),
-        100
-    );
+    // Too little to announce while the peer has room, so the peer blocks at the window, and the
+    // frame that spends the last of its room is what announces it.
+    let mut recv = pair.server_recv(server_ch, s);
+    recv.advance(100);
+    let _ = recv.release();
+    let all = msg.len();
+    assert_eq!(pump_leased(&mut pair, chs, s, (&msg, all), &mut sent), 1050);
+    assert_eq!(sent, msg.len());
+    assert_eq!(leased(&mut pair, server_ch, s), WINDOW + 50 - 100);
 
-    // Credit too small to announce while the peer still has room goes out once the peer spends
-    // that room, even though the receiver reads nothing in between.
-    let big = held.split(600);
-    let _ = pair.server_conn_mut(server_ch).release(big);
-    pair.drive_server();
-    let small = held.split(100);
-    let _ = pair.server_conn_mut(server_ch).release(small);
-    let before = sent;
-    for _ in 0..4 {
-        if let Ok(n) = pair.client_send(client_ch, s).write(&msg[sent..]) {
-            sent += n;
-        }
-        pair.drive();
-    }
-    assert_eq!(sent - before, 700);
-    assert_eq!(
-        pump_held(&mut pair, chs, s, &msg, &mut sent, &mut held),
-        700
-    );
-
-    let mut total = WINDOW + 100 + 700;
-    while total < msg.len() {
-        let all = mem::take(&mut held);
-        let _ = pair.server_conn_mut(server_ch).release(all);
-        let read = pump_held(&mut pair, chs, s, &msg, &mut sent, &mut held);
-        assert!(read > 0, "a release unblocks the peer");
-        total += read;
-    }
     assert_eq!(
         pair.server_recv(server_ch, s).read(true).err(),
         Some(ReadableError::ClosedStream),
-        "finished and reclaimed while its tail is still held"
+        "finished and reclaimed while its tail is still leased"
     );
-    let _ = pair.server_conn_mut(server_ch).release(held);
-    assert_eq!(pair.server_conn_mut(server_ch).stats().credit.held, 0);
+    assert!(pair.server_conn_mut(server_ch).leased(s).unwrap().is_fin());
+    let all = leased(&mut pair, server_ch, s);
+    let mut recv = pair.server_recv(server_ch, s);
+    recv.advance(all);
+    let _ = recv.release();
+    assert_eq!(pair.server_conn_mut(server_ch).stats().credit.leased, 0);
 }
 
 #[test]

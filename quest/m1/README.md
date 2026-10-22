@@ -85,6 +85,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
 - [Binding encoder config](/quest/m1/binding-encoder-config.md) - binding encoders take an exact rational framerate, and the publication track name moves to options only the producers take
+- [FFI shutdown requests the drain synchronously](/quest/m1/ffi-shutdown-sync.md) - `shutdown()` becomes a sync drain request awaited with `closed()`, so a dropped future can no longer cancel
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
 - [Refresh](/quest/m1/refresh/README.md) - a join asks for a fresh group once the current group's deltas exceed a publisher-advertised byte ratio, at every hop; replaces `Demand::used`/`unused` and moq-json's `delta_ratio`
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
@@ -116,6 +117,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [AAC alias classification](/quest/m1/aac-he-alias.md) - every accepted AAC spelling gets the right frame duration from one classification
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence, and the media fixture's cold-start audio-tone flake is fixed at its cause
+- [Signals notify on every structural change](/quest/m1/signals-equality.md) - a renamed `undefined` key or a changed sparse array length notifies, checked by a fast-check model of the notification contract
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - the in-tree @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
 - [qmux local lifecycle](/quest/m1/qmux-local-lifecycle.md) - an abort blocked on send credit resets at once, and a close behind a backed-up socket still sends APPLICATION_CLOSE
@@ -132,15 +134,21 @@ tracks, so per-group stats stop costing cluster announces.
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
 - [HLS cursor failure](/quest/m1/hls-segments-failure.md) - the export segment cursor returns a failed timeline as an error after draining, so a truncated recording never looks complete
 - [Track live signal](/quest/m1/track-live.md) - a reader can wait for its track's feed to be live, so a player skips old cached groups while a fresh upstream subscription starts
+- [Producers drop the phantom catalog type](/quest/m1/catalog-phantom.md) - moq-video, moq-audio and moq-mux producers lose an `E: CatalogExt` parameter that only `PhantomData` holds
+- [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
 - [Audio devices on ARM](/quest/m1/audio-devices-arm.md) - `just rs audio-devices` passes on the hosted ARM runner
+- [Tooling tests gate every merge](/quest/m1/gh-test-gate.md) - every queue Check runs `just gh test`, so a change to the CI selector or release tooling cannot merge without its own tests
 - [NixOS leaf dials its root](/quest/m1/nix-cluster-connect.md) - the NixOS relay module sets the cluster variable the relay reads, so a leaf joins its root instead of running standalone
 - [Wayland display id](/quest/m1/wayland-display-id.md) - a requested display id off X11 is refused or honored, never silently replaced by a portal pick shared across publications
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
+- [Nightly OBS TSan suite](/quest/m1/obs-test-nightly.md) - Nightly runs `just obs test` so a broken suite is seen
+- [libav polyfill fork fix](/quest/m1/libav-polyfill-fork.md) - our polyfill fork copies planar audio correctly and `@moq/hang` drops its patch
 - [Wire-compat audio](/quest/m1/wire-compat-audio.md) - the wire-compat media lanes decode and check the interop tone across releases
 - [Interop AAC](/quest/m1/interop-aac.md) - the Rust interop publisher adds an AAC tone and every subscriber checks it beside Opus
 - [Interop pre-skip](/quest/m1/interop-preskip.md) - the interop tone check anchors phase to timestamps, so a misapplied pre-skip fails
 - [Native audio decode conformance](/quest/m1/audio-decode-conformance.md) - Opus and AAC decode through every moq-audio backend, moq-c, and moq-ffi is checked against known tones and clips, like moq-video's suite
 - [moq-net internals](/quest/m1/net-internals.md) - no per-group session clones, no transport type parameter in lite and IETF internals, and the `Local` check measured
+- [Fragmented QUIC sends](/quest/m1/quic-send-fragments.md) - a chunk-size by retained-flight sweep decides whether `SendBuffer::get`'s front-to-back scan needs a cursor or index
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Subscribe update churn](/quest/m1/subscribe-update-churn.md) - a viewer sends SUBSCRIBE_UPDATE only on a meaningful change, measured after the publisher stall fix
 - [Unprefixed C++ free functions](/quest/m1/cpp-free-function-prefix.md) - generated free functions drop `moq_`, and `moq.hpp` deletes its five pass-through wrappers before C++ first publishes
@@ -151,10 +159,16 @@ tracks, so per-group stats stop costing cluster announces.
 - [API-diff check](/quest/m1/api-diff.md) - a recipe diffs every published package's API against its last release, run on PRs into release and against main before the cut
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over the even drafts 14 to 22
 - [Runner nightly](/quest/m1/interop-runner-nightly.md) - a nightly job runs the upstream interop runner against our relay and clients, so newly registered implementations with a published image are tested without a change here
+- [One Annex-B exporter](/quest/m1/annexb-export.md) - H.264 and H.265 Annex-B export share one private lifecycle, which also follows a rebound rendition
+- [One CLI duration type](/quest/m1/cli-duration.md) - moq-cli, moq-bench and moq-relay reuse moq-tokio's public `cli::Duration` instead of their own copies
+- [Shared watch and publish UI](/quest/m1/js-ui.md) - a new `@moq/ui` package holds the graph, buttons, and support banner that watch and publish duplicate
 - [CI workflow audit](/quest/m1/audit-ci.md) - every workflow and job gives a signal someone sees, at a cost that signal justifies, or is fixed, moved, or deleted
 - [Simplification audit](/quest/m1/audit-simplify.md) - repeat the simplification audit, starting with the m0 leftovers, before the next major release
 - [Artifact size audit](/quest/m1/audit-size.md) - binary, FFI, WASM, and bundle growth since the m0 run is explained, fixed, or planned
 - [Compile time audit](/quest/m1/audit-compile-time.md) - build-time hotspots are measured against the m0 baselines and the worst are fixed or planned
+- [Peer count bounds](/quest/m1/peer-count-bounds.md) - namespace interests, a legacy announce list, a WebSocket upgrade, and public HTTP admission are bounded by what the peer sent or by an existing budget
+- [Caption store bounds](/quest/m1/caption-store-bounds.md) - a hostile caption track cannot grow a viewer's cue and region store or its per-frame work without bound
+- [Auth contract](/quest/m1/auth-contract.md) - the auth server receives the certificate-selecting SNI, documented as client-chosen, and a certificate grants nothing alone
 - [Nightly benchmark regressions](/quest/m1/bench-ci.md) - each nightly compares the Rust Criterion benches against the previous nightly's commit on the same hosted runner, publishes it to the git.moq.dev report, and alerts on a regression
 - [Performance audit](/quest/m1/audit-perf.md) - benchmarks that regressed since the m0 run are explained, fixed, or planned, and unbenched hot paths get coverage
 

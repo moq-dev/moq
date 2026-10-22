@@ -2258,7 +2258,13 @@ mod tests {
 	}
 
 	#[cfg(feature = "websocket")]
-	impl crate::transport::Grouped for Scripted {}
+	impl crate::transport::Grouped for Scripted {
+		type Recv = moq_net::transport::poll::Buffered<crate::transport::RecvStream<ScriptedRecv>>;
+
+		fn recv(stream: crate::transport::RecvStream<ScriptedRecv>) -> Self::Recv {
+			moq_net::transport::poll::Buffered::new(stream)
+		}
+	}
 
 	/// Delivers `data` once, then nothing more.
 	#[cfg(feature = "websocket")]
