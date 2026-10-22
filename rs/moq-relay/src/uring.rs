@@ -898,6 +898,7 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 

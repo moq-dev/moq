@@ -11,7 +11,9 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use moq_clock::Instant;
 
 use str0m::{Candidate, Event, Rtc};
 use tokio::net::UdpSocket;
@@ -47,6 +49,10 @@ pub trait MediaSink: Send {
 	/// Called once when the session ends with a genuine failure, so the sink can
 	/// abort its tracks with the real cause instead of a bare `Error::Dropped`.
 	fn abort(&mut self, err: moq_net::Error);
+
+	/// Called once when the peer ends the session cleanly after its final media: finish
+	/// every track and return the finished broadcast, which stays up until it drops.
+	fn finish(&mut self) -> Result<moq_net::broadcast::Finish>;
 }
 
 /// What the session does with the negotiated media stream.
@@ -132,7 +138,16 @@ impl Session {
 		self.handle_media(mid)
 	}
 
-	pub async fn run(mut self) -> Result<()> {
+	/// End an ingest cleanly after its final media: finish the sink's tracks and return the
+	/// finished broadcast to linger on. `None` for an egress session, which publishes nothing.
+	pub fn finish(self) -> Result<Option<moq_net::broadcast::Finish>> {
+		match self.role {
+			MediaRole::Ingest(mut sink) => sink.finish().map(Some),
+			MediaRole::Egress(_) => Ok(None),
+		}
+	}
+
+	pub async fn run(&mut self) -> Result<()> {
 		let result = self.run_loop().await;
 		// A genuine failure (not a normal peer disconnect or an unconnected offer)
 		// propagates to subscribers as the real cause; the normal ends just let the
@@ -186,7 +201,9 @@ impl Session {
 				// block; egress sessions never get here so the clock stays untouched.
 				if let MediaRole::Ingest(sink) = &mut self.role {
 					let media_us = media_time_to_micros(&data.time);
-					let timestamp_us = self.ingest_clock.normalize(data.mid, data.network_time, media_us);
+					let timestamp_us =
+						self.ingest_clock
+							.normalize(data.mid, Instant::from_std(data.network_time), media_us);
 					sink.on_frame(
 						data.mid,
 						codec::Frame {
@@ -458,6 +475,14 @@ impl Bridges {
 		Ok(())
 	}
 
+	/// Finish every bridge's track after the final frame.
+	pub fn finish(&mut self) -> Result<()> {
+		for bridge in self.inner.values_mut() {
+			bridge.finish()?;
+		}
+		Ok(())
+	}
+
 	/// Abort every bridge's track with `err` so subscribers see the real cause
 	/// rather than a bare `Error::Dropped`.
 	///
@@ -506,7 +531,7 @@ pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> str0m::RtcConf
 /// [`rtc_config_with_codecs`] directly so it can inject the mux's known
 /// credentials before building.
 pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
-	rtc_config_with_codecs(codecs).build(std::time::Instant::now())
+	rtc_config_with_codecs(codecs).build(moq_clock::now().into_std())
 }
 
 /// Bind an ephemeral UDP socket for a single client session, read by its own

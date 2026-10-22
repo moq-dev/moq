@@ -22,7 +22,3 @@ when the configured delay is a number, the output delay is that number;
 - Add a regression test in `js/watch/src/sync.test.ts` on `release`: a
   registered rendition jitter does not raise a fixed delay.
 - The fix reaches `moq.dev` with the next release deploy.
-
-## Related
-
-- [Publisher stall estimate](/quest/m0/publish-stall-estimate.md) - why the catalog terms grow in the first place

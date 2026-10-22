@@ -8,7 +8,7 @@
 /// have no count and are read until the end of the message payload.
 ///
 /// MAX_CACHE_DURATION, TIMESCALE, DEFAULT_PUBLISHER_PRIORITY, DEFAULT_PUBLISHER_GROUP_ORDER,
-/// and DYNAMIC_GROUPS are understood; the rest are kept so a relay can forward them.
+/// DYNAMIC_GROUPS, and COMPRESSION are understood; the rest are kept so a relay can forward them.
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -73,6 +73,9 @@ pub struct Properties {
 	/// Whether the track takes NEW_GROUP_REQUEST (DYNAMIC_GROUPS = 1), mutable or sealed.
 	pub dynamic_groups: bool,
 
+	/// Whether each subgroup carries the negotiated group-scoped DEFLATE codec.
+	pub compress: bool,
+
 	/// Everything else, Immutable Properties included, forwarded as the publisher sent it,
 	/// serialized as the message's draft serializes them.
 	pub(crate) unknown: Vec<Property>,
@@ -100,6 +103,7 @@ impl Properties {
 			group_order: Some(GroupOrder::Descending),
 			// A track opted in to refresh answers a NEW_GROUP_REQUEST as a join.
 			dynamic_groups: info.refresh.is_some(),
+			compress: info.compress,
 			unknown: Vec::new(),
 		}
 	}
@@ -144,6 +148,10 @@ impl Properties {
 		// Omitted means 0, so only support is worth bytes.
 		if self.dynamic_groups {
 			known.push(int(DYNAMIC_GROUPS, 1));
+		}
+
+		if self.compress && super::flate::supported(version) {
+			known.push(int(super::flate::COMPRESSION, 1));
 		}
 
 		let mut properties: Vec<_> = known
@@ -263,6 +271,12 @@ impl Properties {
 				};
 			}
 			DYNAMIC_GROUPS => self.dynamic_groups = dynamic_groups(value)?,
+			super::flate::COMPRESSION => {
+				if value != 1 {
+					return Err(DecodeError::InvalidValue);
+				}
+				self.compress = true;
+			}
 			_ => return Ok(false),
 		}
 		if seen.contains(&id) {
@@ -275,12 +289,13 @@ impl Properties {
 
 /// The Track Properties moq-net applies itself, which a relay restates from the track's
 /// info rather than forwarding the publisher's.
-const UNDERSTOOD: [u64; 5] = [
+const UNDERSTOOD: [u64; 6] = [
 	MAX_CACHE_DURATION,
 	TIMESCALE,
 	DEFAULT_PUBLISHER_PRIORITY,
 	DEFAULT_PUBLISHER_GROUP_ORDER,
 	DYNAMIC_GROUPS,
+	super::flate::COMPRESSION,
 ];
 
 /// Whether moq-net applies the Track Property `id` itself.
@@ -384,6 +399,7 @@ impl TrackProperties {
 			// Advisory: a relay serves its own order and forwards the publisher's preference.
 			DEFAULT_PUBLISHER_GROUP_ORDER => false,
 			DYNAMIC_GROUPS => sealed.dynamic_groups != restated.dynamic_groups,
+			super::flate::COMPRESSION => sealed.compress != restated.compress,
 			_ => unreachable!("only the understood properties are seen"),
 		})
 	}
@@ -489,6 +505,7 @@ mod tests {
 			priority: Some(37),
 			group_order: Some(GroupOrder::Descending),
 			dynamic_groups: true,
+			compress: false,
 		};
 
 		let mut buf = Vec::new();
@@ -558,6 +575,7 @@ mod tests {
 		let properties = Properties {
 			unknown: Default::default(),
 			dynamic_groups: false,
+			compress: false,
 			max_cache_duration: None,
 			timescale: Some(Timescale::MILLI),
 			priority: None,
@@ -580,6 +598,7 @@ mod tests {
 		let properties = Properties {
 			unknown: Default::default(),
 			dynamic_groups: false,
+			compress: false,
 			max_cache_duration: None,
 			timescale: None,
 			priority: None,
@@ -637,6 +656,7 @@ mod tests {
 		let mut buf = Vec::new();
 		Properties {
 			dynamic_groups: true,
+			compress: false,
 			..Default::default()
 		}
 		.encode(&mut Encoder::new(&mut buf, Version::Draft22.into()), Version::Draft22)
@@ -647,6 +667,7 @@ mod tests {
 		// (draft 15 carries DYNAMIC_GROUPS as a SUBSCRIBE_OK parameter instead).
 		let both = Properties {
 			dynamic_groups: true,
+			compress: false,
 			timescale: Some(Timescale::MILLI),
 			..Default::default()
 		};
@@ -782,6 +803,7 @@ mod tests {
 			priority: Some(1),
 			group_order: Some(GroupOrder::Descending),
 			dynamic_groups: true,
+			compress: false,
 			unknown: unknown(MAX_FORWARDED).values,
 		};
 		assert!(
@@ -900,7 +922,8 @@ mod tests {
 				TIMESCALE,
 				DEFAULT_PUBLISHER_PRIORITY,
 				DEFAULT_PUBLISHER_GROUP_ORDER,
-				DYNAMIC_GROUPS
+				DYNAMIC_GROUPS,
+				super::super::flate::COMPRESSION
 			]
 		);
 	}
