@@ -27,10 +27,15 @@ building a `TransportConfig` per connection.
 
 Derive the interval inside `moq-quic`, where the negotiated timeout is set,
 keeping it under a third so a lost PING and its probe land before the peer's
-timer. moq-tokio's and moq-uring's drivers, and anything else on `moq-quic`,
-then get it with no plumbing. Pick how `TransportConfig` and the config
-express "derived" (an `Option`, or a sentinel) by what reads clearest in the
-`[quic]` section and CLI; document it in `doc/bin/relay/config.md`.
+timer. The derived interval lives in connection-local state on `Connection`,
+which `reset_keep_alive` reads; the shared `Arc<TransportConfig>` keeps only
+the configured value. moq-tokio's and moq-uring's drivers, and anything else
+on `moq-quic`, then get it with no plumbing. An explicit `quic.keep_alive`
+longer than the negotiated idle timeout is capped at the derived interval,
+since a keep-alive longer than the idle timeout can never keep the connection
+up. Pick how `TransportConfig` and the config express "derived" (an `Option`,
+or a sentinel) by what reads clearest in the `[quic]` section and CLI;
+document it in `doc/bin/relay/config.md`.
 
 Rejected: a public `Connection::idle_timeout()` and a live per-connection
 `set_keep_alive_interval`. Once the derivation is inside `moq-quic`, neither
@@ -46,5 +51,8 @@ mechanism and stays as is.
 The acceptance test: a connection whose peer advertises a shorter idle
 timeout than ours stays up while idle, its PINGs spaced below the negotiated
 timeout, with no per-connection config. Also test that the derived interval
-follows a changed local idle timeout; an idle connection survives with the
-default; an explicit value wins; `0s` disables.
+follows a changed local idle timeout: with a 30 s peer timeout, a local 10 s
+and then 5 s each become the negotiated timeout, and the interval shrinks
+with it. An idle connection survives with the default; an explicit value
+wins, except one longer than the negotiated timeout, which is capped at the
+derived interval; `0s` disables.
