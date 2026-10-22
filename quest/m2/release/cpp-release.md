@@ -20,9 +20,9 @@ last moq-c build until this tag. Decided when the C++ line landed on `main`
 Advanced settings or the dock's protocol and reconnect reason that the moq-c
 build had, so those parity quests gate this release.
 
-The nightly dry run is green: the
-[2026-10-20 Nightly](https://github.com/moq-dev/moq/actions/runs/39421743227)
-checked the installed consumers of all four packaged archives and built both
+The nightly C++ and OBS release checks pass: the
+[2026-10-20 Nightly](https://github.com/moq-dev/moq/actions/runs/39421743227),
+which failed only in unrelated lanes, checked the installed consumers of all four packaged archives and built both
 OBS plugins against them. It packages this run's prebuilt moq-ffi input,
 while a tag with `cpp/moq/FFI_VERSION` unset builds moq-ffi from source, a
 path no nightly checks. So if the pin is still unset, first dispatch
