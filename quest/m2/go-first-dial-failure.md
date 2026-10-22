@@ -19,7 +19,3 @@ while their examples only use `Moq.connect`, which never hands back a
 binding PRs that also touch those pages have landed.
 
 Public API: Go additive. Wire: none.
-
-## Required
-
-- [Binding linger](/quest/m1/linger-ffi.md) - touches the same binding docs

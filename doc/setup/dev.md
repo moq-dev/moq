@@ -47,6 +47,10 @@ winget: Git, Rust, Bun, Node, just, CMake, FFmpeg, and the Visual Studio Build T
 Run it from an Administrator terminal on a fresh machine, and re-run it after
 reopening the terminal if it reports tools missing from `PATH`.
 
+`bun install` normally builds `@moq/libav`, the Opus and AAC decoder behind the
+WebCodecs fallback, with Nix. On Windows it downloads the published package of
+the same version instead, and fails until npm has that version.
+
 Run `just` recipes from **Git Bash**, not PowerShell or `cmd`: they need
 `bash`. Only one `just dev` can run at a time on Windows, because
 the free-port probe needs `lsof`. If a rebuild fails with "Access is denied",
