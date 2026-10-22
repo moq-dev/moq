@@ -17,9 +17,20 @@ so any host with more than one address is exposed.
 
 Enable packet info on receive, carry the destination through the ring's
 control-message parser into `Endpoint::handle`, and set the source on
-transmit with `IP_PKTINFO` / `IPV6_PKTINFO`. Cover IPv4 and IPv6 wildcard
-binds and a dual-stack socket with an IPv4-mapped peer, on a host with two
-addresses (a dummy interface in the test namespace).
+transmit with `IP_PKTINFO` / `IPV6_PKTINFO`.
+
+Grow the control-message storage with it: `CONTROL_LEN = 64`
+(`rs/moq-uring/src/udp.rs`) fits only GRO/GSO plus TOS/TCLASS. With packet
+info the full set needs 80 bytes of `CMSG_SPACE` on IPv4 and 88 on IPv6
+(64-bit Linux), so a receive would set `MSG_CTRUNC` and the parser would
+drop the whole completion, and the unchecked send-side `Control` buffer
+would overflow. Size `CONTROL_LEN` (and so `RECV_OVERHEAD`) from the
+`CMSG_SPACE` sum, assert it at compile time, and test encoding and parsing
+the full combination for both families.
+
+Cover IPv4 and IPv6 wildcard binds and a dual-stack socket with an
+IPv4-mapped peer, on a host with two addresses (a dummy interface in the
+test namespace).
 
 Decided 2026-10-22 from the io_uring audit: m1.
 

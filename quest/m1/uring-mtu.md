@@ -24,7 +24,13 @@ derive it from the current MTU instead.
 
 Drop the overrides so the ring uses the same `TransportConfig` defaults as
 tokio, add the resolved setting to `moq_uring::quic::Transport` so
-discovery stays off unless configured, and lift the relay's refusal. Reproduce first: a test path that
+discovery stays off unless configured, and lift the relay's refusal. Also
+pass `allow_mtud = true` to `moq_quic::Endpoint::new`
+(`rs/moq-uring/src/quic/driver/endpoint.rs`), which hardcodes `false`
+today and would veto discovery for every connection whatever the setting;
+it is sound only once the sockets refuse to fragment (`PMTUDISC_PROBE` plus
+`IPV6_DONTFRAG`, from the send-errors quest), so land that first or set
+them here. Reproduce first: a test path that
 passes 1200-byte payloads but drops 1350 fails today and connects after.
 Then cover discovery staying off by default, a path MTU change
 mid-connection, and a larger MTU being discovered when enabled, with GSO
@@ -41,4 +47,4 @@ Public API: additive, a `mtu_discovery: bool` field on the
 
 ## Related
 
-- [A failed send never fails the socket](/quest/m1/uring-send-errors.md) - sets `IP_PMTUDISC_PROBE`, which PMTU discovery relies on
+- [A failed send never fails the socket](/quest/m1/uring-send-errors.md) - sets `PMTUDISC_PROBE` and `IPV6_DONTFRAG`, which `allow_mtud` relies on

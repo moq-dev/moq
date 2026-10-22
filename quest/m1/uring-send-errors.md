@@ -28,7 +28,12 @@ strangers share the socket.
 - Set `IP_PMTUDISC_PROBE` / `IPV6_PMTUDISC_PROBE` on the ring's sockets, as
   `moq-sock/src/udp/unix.rs` does for tokio, so a forged ICMP
   fragmentation-needed cannot shrink a peer's path MTU below a GSO train and
-  turn its next send into EMSGSIZE or a worker-wide GSO fallback.
+  turn its next send into EMSGSIZE or a worker-wide GSO fallback. On IPv6
+  also set `IPV6_DONTFRAG`, as moq-sock does: Linux's IPv6 output path can
+  still fragment under `IPV6_PMTUDISC_PROBE` alone, and MTU discovery needs
+  oversized probes dropped, not fragmented. moq-sock tolerates a missing
+  option by marking the socket as fragmenting; moq-uring is Linux-only,
+  where both exist, so a failure to set either fails socket construction.
 - Receive errors: anything but ENOBUFS and ECANCELED fails the endpoint;
   match tokio's tolerance (ConnectionReset, EMSGSIZE) in the same change.
 - Test by injecting completion results into the socket's send path, since
