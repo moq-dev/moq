@@ -55,6 +55,6 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [Interop audio delivery](/quest/m1/interop-audio.md) - the same decoders, end to end across clients
+- [Wire-compat audio](/quest/m1/wire-compat-audio.md) - the same decoders, end to end across releases
 - [AudioToolbox decode](/quest/m2/audio-decode-audiotoolbox.md) - a new backend that should join this suite when it lands
 - [Opus backends](/quest/m2/audio-opus-backend.md) - compares Opus implementations; this suite is its correctness floor

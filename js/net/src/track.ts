@@ -633,27 +633,6 @@ type CachedGroup = {
 // A group's checked start, kept by sequence.
 type Start = { sequence: number; start: Timestamp };
 
-// Whether `a` presents before `b`, whatever their scales. Cross-scale products can pass
-// 2^53, so they are compared exactly in BigInt, as Rust does in u128.
-function earlier(a: Timestamp, b: Timestamp): boolean {
-	if (a.scale === b.scale) return a.value < b.value;
-	const [ma, ea] = binary(a.value);
-	const [mb, eb] = binary(b.value);
-	const e = Math.min(ea, eb);
-	return (ma * BigInt(b.scale)) << BigInt(ea - e) < (mb * BigInt(a.scale)) << BigInt(eb - e);
-}
-
-// A finite, non-negative `value` exactly as `mantissa * 2^exponent`. Doubling is exact, so
-// a fraction becomes an integer within its binary digits.
-function binary(value: number): [bigint, number] {
-	let exponent = 0;
-	while (!Number.isInteger(value)) {
-		value *= 2;
-		exponent--;
-	}
-	return [BigInt(value), exponent];
-}
-
 let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 // A fresh read handle on a group the producer still caches; assigned in its static block.
 let cachedMirror: (producer: Producer, sequence: number) => GroupConsumer | undefined;
@@ -1207,11 +1186,11 @@ export class Producer {
 		const evicted = this.#evicted;
 		const late = evicted !== undefined && sequence <= evicted.sequence;
 		if (evicted && late) {
-			if (ceiling === undefined || earlier(evicted.start, ceiling)) ceiling = evicted.start;
+			if (ceiling === undefined || evicted.start.isBefore(ceiling)) ceiling = evicted.start;
 		} else if (evicted) {
-			if (floor === undefined || earlier(floor, evicted.start)) floor = evicted.start;
+			if (floor === undefined || floor.isBefore(evicted.start)) floor = evicted.start;
 		}
-		if ((floor && earlier(start, floor)) || (ceiling && earlier(ceiling, start))) throw new TimestampMismatch();
+		if ((floor && start.isBefore(floor)) || ceiling?.isBefore(start)) throw new TimestampMismatch();
 		return late;
 	}
 
