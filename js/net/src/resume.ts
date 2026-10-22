@@ -29,7 +29,8 @@
  * The logical track ends cleanly once its serving copy does and no group the reader lacks may
  * still land below that end on a copy it replaced. Its `closed` settles and the reader leaves the
  * route, keeping each copy only while it holds something left to read, as a direct reader keeps
- * its buffer. Its end is the first one any copy declared, which every later copy has to match.
+ * its buffer. Its end is the first one any copy declared, which every later copy has to match, and
+ * no copy may hold a group or datagram at or past it.
  *
  * @module
  */
@@ -287,7 +288,7 @@ class Reader implements ResumeSource {
 	#delivered = new Delivered();
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
 	#groupsRead = false;
-	/** The groups handed out while copies overlap and still read; see {@link #retains}. */
+	/** The groups handed out and still read, which other copies may back; see {@link #backs}. */
 	readonly out = new Set<Recover>();
 	/** Every group handed out and still open, which ends with the reader. */
 	#open = new Set<GroupConsumer>();
@@ -371,7 +372,9 @@ class Reader implements ResumeSource {
 		copy.sub.finished().then(
 			// A copy already let go says nothing more about the track.
 			(end) => {
-				if (this.#copies.includes(copy)) this.#declare(end);
+				if (!this.#copies.includes(copy)) return;
+				this.#declare(end);
+				this.#learnEnd();
 			},
 			() => {},
 		);
@@ -472,9 +475,11 @@ class Reader implements ResumeSource {
 	}
 
 	tryGroup(ordered: boolean, delivered: Delivered): Recv {
-		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
 		this.#delivered = delivered;
 		this.sync();
+		// Before anything is handed out, so a copy claiming other content hands out none of it.
+		this.#learnEnd();
+		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
 		this.#groupsRead = true;
 		// The lowest group any copy holds next, in either order: a replaced copy's buffered group
 		// comes before a later one the serving copy already has. Arrival order still delivers a
@@ -542,9 +547,10 @@ class Reader implements ResumeSource {
 	}
 
 	tryDatagram(delivered: Delivered): RecvDatagram {
-		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
 		this.#delivered = delivered;
 		this.sync();
+		this.#learnEnd();
+		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
 			// A replaced copy's datagrams are the serving one's to deliver.
@@ -767,9 +773,9 @@ class Reader implements ResumeSource {
 	#handOut(copy: Copy, group: GroupConsumer): GroupConsumer {
 		this.#newest = Math.max(this.#newest ?? 0, group.sequence);
 		// Another copy holding the group, now or once it lands there, is where a failure continues
-		// it, so it stays while the group is read; see #retains. Only while copies overlap: a
-		// passthrough read has none.
-		const recover = new Recover(this, group, copy, this.#copies.length > 1);
+		// it, so it stays while the group is read; see #backs. Recorded even with one copy, since a
+		// later route's copy may come to hold it.
+		const recover = new Recover(this, group, copy);
 		hooks.recoverGroup(group, recover);
 		recover.watch(group);
 		// Closed with the reader, as a direct reader's close reaches the groups it handed out.
@@ -828,11 +834,24 @@ class Reader implements ResumeSource {
 		return last?.generation === this.#generation ? last : undefined;
 	}
 
-	// The logical track's end, learning it from any copy that declared one.
+	// The logical track's end, learning it from any copy that declared one. A group or datagram
+	// at or past it, on any copy or already handed out, claims other content: a direct track
+	// refuses an end below what it received.
 	#learnEnd(): track.Location | undefined {
 		for (const copy of this.#copies) {
 			const end = copy.sub.end();
 			if (end) this.#declare(end);
+		}
+		const declared = this.#declared;
+		if (declared && !this.#closed) {
+			const final = finalSequence(declared);
+			const seen = (sequence: number | undefined) => sequence !== undefined && sequence >= final;
+			if (
+				seen(this.#newest) ||
+				seen(this.#datagram) ||
+				this.#copies.some((copy) => seen(hooks.latestSequence(copy.sub)))
+			)
+				this.#refuse();
 		}
 		return this.#declared;
 	}
@@ -851,12 +870,16 @@ class Reader implements ResumeSource {
 		} else if (finalSequence(declared) === finalSequence(end) && (declared.frame === 0 || end.frame === 0)) {
 			if (declared.frame === 0) this.#declared = end;
 		} else {
-			// Stop reading the copies that claim other content. `closed` settles with the refusal,
-			// unless it already settled cleanly.
-			this.#refused = new Incompatible(this.route.name);
-			this.#shell.close(this.#refused);
-			this.close(this.#refused);
+			this.#refuse();
 		}
+	}
+
+	// Stop reading the copies, which claim other content. `closed` settles with the refusal,
+	// unless it already settled cleanly.
+	#refuse(): void {
+		this.#refused = new Incompatible(this.route.name);
+		this.#shell.close(this.#refused);
+		this.close(this.#refused);
 	}
 
 	start(): number | "pending" | undefined {
@@ -1063,15 +1086,15 @@ class Recover implements GroupRecover {
 	#copy?: Copy;
 
 	/**
-	 * `out` puts the group on the reader's list of those still read, so the other copies that
-	 * hold it, or may yet get it, stay for a failure to continue from.
+	 * Puts the group on the reader's list of those still read, so the other copies that hold it,
+	 * or may yet get it, stay for a failure to continue from.
 	 */
-	constructor(reader: Reader, group: GroupConsumer, copy: Copy, out: boolean) {
+	constructor(reader: Reader, group: GroupConsumer, copy: Copy) {
 		this.#reader = reader;
 		this.sequence = group.sequence;
 		this.#copy = copy;
 		copy.lease++;
-		if (out) reader.out.add(this);
+		reader.out.add(this);
 	}
 
 	/**

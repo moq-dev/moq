@@ -1553,8 +1553,8 @@ test.each([true, false])("a replaced copy backs a group before its first arrival
 	(await next())?.close();
 	front.serve(b.consume());
 	await settle();
-	// Closed once replaced: the serving copy closing cleanly would end the track.
-	ta.producer.close();
+	// Its route fails once replaced: closing cleanly would declare the track ends at group 1.
+	ta.producer.close(new StreamError(StreamCode.SessionClosed));
 	front.serve(c.consume());
 	await settle();
 
@@ -1990,6 +1990,97 @@ test("a retained copy declaring another end after a clean end fails the reads", 
 		await settle();
 		expect(sub.end()).toEqual({ group: 3, frame: 0 });
 		await expect(sub.recvGroup()).rejects.toThrow("changed its properties");
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+test("a clean end keeps the serving copy while a group handed out before the swap may continue from it", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) });
+	try {
+		// Group 0 is handed out while the old route is the only one.
+		const stalled = ta.write(0, 1, false);
+		const group = await sub.recvGroup();
+		if (group?.sequence !== 0) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+
+		// The new route has all of group 0 and ends there.
+		front.serve(b.consume());
+		await settle();
+		tb.write(0, 2);
+		tb.producer.close();
+		await settle();
+		expect(sub.closed.peek()).toBeNull();
+
+		// The old route fails: the group continues from the copy that ended.
+		stalled.close(new StreamError(StreamCode.SessionClosed));
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.1");
+		expect(await group.readFrame()).toBeUndefined();
+		group.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+test.each(["handed out", "buffered"])("an end below a group another copy %s is refused", async (seen) => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		ta.write(5);
+		if (seen === "handed out") expect(drain(sub)).toEqual([5]);
+		front.serve(b.consume());
+		await settle();
+
+		// The new route ends the track before a group the old one has.
+		tb.producer.finishAt({ group: 3, frame: 0 });
+		await settle();
+		expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
+		expect(sub.closed.peek()).toBeInstanceOf(Error);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
+test("a group past the declared end on another copy is refused", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		ta.write(0);
+		ta.producer.finishAt({ group: 2, frame: 0 });
+		expect(drain(sub)).toEqual([0]);
+		front.serve(b.consume());
+		await settle();
+
+		// The new route has a group the end says never exists.
+		tb.write(3);
+		await settle();
+		expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
+		expect(sub.closed.peek()).toBeInstanceOf(Error);
 	} finally {
 		sub.close();
 		front.consumer.close();
