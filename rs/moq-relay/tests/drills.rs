@@ -825,7 +825,7 @@ fn bursty() -> moq_shaper::Profile {
 /// QUIC credit tighter than a burst on the impaired lane: fewer concurrent
 /// streams than a burst has groups (each group is a stream, each FETCH another),
 /// and receive windows of a few groups, so senders wait on MAX_STREAMS and
-/// MAX_DATA mid-burst, over a path whose overflowing queue drops their grants.
+/// MAX_DATA mid-burst while the path is congested.
 fn credit(lane: Lane, mut quic: moq_tokio::quic::Config) -> moq_tokio::quic::Config {
 	if let Lane::Impaired = lane {
 		quic.max_streams = Some(16);
