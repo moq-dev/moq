@@ -8267,6 +8267,72 @@ async fn a_track_renamed_on_its_pid_across_returns_retires_the_one_before() {
 	assert_eq!(export.tracks(), 1);
 }
 
+/// A track a same-instance return renames on its PID counts its silence from its own listing,
+/// not from the last unit of the stale one before it, which retires only once it is listed.
+#[tokio::test(start_paused = true)]
+async fn a_track_renamed_on_its_pid_across_a_return_is_quiet_from_its_listing() {
+	let origin = crate::source::produce_origin();
+	let epoch = moq_net::Epoch::mint();
+	let route = || moq_net::origin::Route::default().with_epoch(epoch.clone());
+	let rendition = |broadcast: &mut moq_net::broadcast::Producer,
+	                 catalog: &mut crate::catalog::Producer<tscat::Ext>,
+	                 name: &str| {
+		let track = aac_rendition(broadcast, catalog, name);
+		catalog
+			.modify()
+			.unwrap()
+			.ext
+			.mpegts
+			.tracks
+			.insert(name.to_string(), tscat::Track::new(0x101));
+		track
+	};
+
+	let (mut broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
+	let mut track = rendition(&mut broadcast, &mut catalog, "0.aac");
+	let source = crate::source::resolved(&origin, "live").await;
+	let mut export = open_ts(source, crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap()
+		.with_delay(Duration::from_secs(1))
+		.with_replay();
+	let start = tokio::time::Instant::now();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut track, ms);
+	}
+	drain_frames(&mut export).await;
+	drop((broadcast, catalog, track));
+	let _ = drain_to_end(&mut export).await;
+	let (before, _) = export.liveness(0x101);
+
+	tokio::time::sleep(Duration::from_secs(10)).await;
+	let (mut broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
+	let back = origin.consume().routed_broadcast("live").await.unwrap();
+	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
+	let mut export = export.follow(back, stream).unwrap();
+	drain_frames(&mut export).await;
+	let mut track = rendition(&mut broadcast, &mut catalog, "1.aac");
+	let resumed = start.elapsed().as_millis() as u64;
+	let mut quiet = Vec::new();
+	for ms in (resumed..resumed + 4000).step_by(20) {
+		write_aac(&mut track, ms);
+		poll_frames(&mut export);
+		let (units, since) = export.liveness(0x101);
+		if export.listed_on(0x101) == Some("1.aac") && units == before {
+			quiet.push(since);
+		}
+		tokio::time::sleep(Duration::from_millis(20)).await;
+	}
+	assert!(!quiet.is_empty(), "the track was listed with none of its units out");
+	assert!(
+		quiet
+			.iter()
+			.all(|since| since.is_some_and(|since| since < Duration::from_secs(1))),
+		"{quiet:?}"
+	);
+	drop((broadcast, catalog, track));
+}
+
 /// A PMT revision no slot laid before a switch reached no receiver: the replacement's PMT
 /// follows the last one out by one version.
 #[tokio::test(start_paused = true)]
