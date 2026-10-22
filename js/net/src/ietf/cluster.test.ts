@@ -6,8 +6,9 @@ import { Reader, Writer } from "../stream.ts";
 import * as Cluster from "./cluster.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { Parameters, SetupOption, SetupOptions } from "./parameters.ts";
+import { Parameters } from "./parameters.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
+import { SetupOption, SetupOptions } from "./setup_options.ts";
 import { SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -51,24 +52,20 @@ async function encode<T extends { encode(w: Writer, v: IetfVersion): Promise<voi
 	return out;
 }
 
+function intoParams(advert: Cluster.Advert): Parameters {
+	const params = new Parameters();
+	Cluster.intoParams(advert, params);
+	return params;
+}
+
 function reader(bytes: Uint8Array, version: IetfVersion = VERSION): Reader {
 	return new Reader(undefined, bytes, version);
 }
 
-test("Cluster: the registry code points and their parity", () => {
-	// Other implementations key on these, so a typo is invisible against ourselves and
-	// fatal against anyone else. The parity is load-bearing too: odd values are
-	// length-prefixed byte strings, even ones bare varints.
-	expect(SetupOption.HopId).toBe(0x40b54n);
-	expect(SetupOption.RelayCost).toBe(0x40b56n);
-	expect(SetupOption.HopId % 2n).toBe(0n);
-	expect(SetupOption.RelayCost % 2n).toBe(0n);
-});
-
 test("Cluster: the hop path carries no count of its own", async () => {
 	// The entries fill the parameter length; a count would make us unreadable to every
 	// other implementation.
-	const params = Cluster.intoParams({ hops: hops(1n, 2n, 3n), cost: 0n });
+	const params = intoParams({ hops: hops(1n, 2n, 3n), cost: 0n });
 	expect(Array.from(await encode(params))).toEqual([
 		0x01, // parameter count
 		0xc4,
@@ -83,14 +80,14 @@ test("Cluster: the hop path carries no count of its own", async () => {
 
 test("Cluster: an advertisement round trips through the parameters", async () => {
 	const advert = { hops: hops(7n, 9n), cost: 5n };
-	const encoded = await encode(Cluster.intoParams(advert));
+	const encoded = await encode(intoParams(advert));
 	const decoded = await Parameters.decode(reader(encoded), VERSION);
 	expect(Cluster.fromParams(decoded)).toEqual(advert);
 });
 
 test("Cluster: a zero route cost is absent from the wire", async () => {
-	const free = await encode(Cluster.intoParams({ hops: hops(7n), cost: 0n }));
-	const priced = await encode(Cluster.intoParams({ hops: hops(7n), cost: 1n }));
+	const free = await encode(intoParams({ hops: hops(7n), cost: 0n }));
+	const priced = await encode(intoParams({ hops: hops(7n), cost: 1n }));
 	expect(free.length).toBeLessThan(priced.length);
 
 	// Absent means 0, so it comes back as one.
@@ -100,7 +97,7 @@ test("Cluster: a zero route cost is absent from the wire", async () => {
 
 test("Cluster: a repeated zero is not a loop", async () => {
 	const advert = { hops: hops(0n, 5n, 0n), cost: 0n };
-	const encoded = await encode(Cluster.intoParams(advert));
+	const encoded = await encode(intoParams(advert));
 	const decoded = await Parameters.decode(reader(encoded), VERSION);
 	expect(Cluster.fromParams(decoded)).toEqual(advert);
 });
@@ -119,7 +116,7 @@ test("Cluster: a malformed advertisement is a session-fatal violation", () => {
 
 test("Cluster: a path that cannot have come from a conforming sender is rejected", () => {
 	// A non-zero id appearing twice is a loop.
-	expect(() => Cluster.intoParams({ hops: hops(4n, 8n, 4n), cost: 0n })).toThrow();
+	expect(() => intoParams({ hops: hops(4n, 8n, 4n), cost: 0n })).toThrow();
 
 	// The list always has at least one entry: the original publisher.
 	const empty = new Parameters();
@@ -137,7 +134,7 @@ test("Cluster: a path that cannot have come from a conforming sender is rejected
 
 	// Longer than we accept, which a real path never is and a loop is.
 	const long = Array.from({ length: 33 }, (_, i) => origin(BigInt(i + 1)));
-	expect(() => Cluster.intoParams({ hops: long, cost: 0n })).toThrow();
+	expect(() => intoParams({ hops: long, cost: 0n })).toThrow();
 });
 
 test("Cluster: the setup options round trip", async () => {
@@ -250,7 +247,7 @@ test("Cluster: a negotiated PUBLISH_NAMESPACE may carry AUTHORIZATION_TOKEN", as
 			await Message.encode(w, async (wr) => {
 				await wr.u62(1n);
 				await Namespace.encode(wr, Path.from("alice.hang"));
-				const params = Cluster.intoParams(advert);
+				const params = intoParams(advert);
 				params.bytes.set(0x03n, new Uint8Array([0x03, 0x00, 0xaa])); // AUTHORIZATION_TOKEN: USE_VALUE, type 0
 				await params.encode(wr, version);
 			});

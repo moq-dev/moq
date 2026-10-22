@@ -65,40 +65,53 @@ export const KEY_MAP: Record<string, string> = {
  * signals from this class to render the interface.
  */
 export class Game {
+	/** The session identifier, such as the ROM name. */
 	readonly sessionId: string;
 	readonly #signals = new Moq.Signals.Effect();
 
-	// Config references.
+	/** The session currently expanded, shared by every game on the page. */
 	readonly expanded: Moq.Signals.Signal<string | undefined>;
 	readonly #viewerPrefix: string;
 
-	// Reactive state exposed to UI.
+	/** Whether the pointer is over this game's tile. */
 	readonly hovered = new Moq.Signals.Signal(false);
+	/** Whether this game is expanded or hovered, which enables audio and input. */
 	readonly active = new Moq.Signals.Signal(false);
+	/** The playback delay target. */
 	readonly delay = new Moq.Signals.Signal<Watch.Delay>("auto");
+	/** Whether the viewer muted this game. */
 	readonly userMuted = new Moq.Signals.Signal(false);
+	/** The playback volume, from 0 to 1. */
 	readonly volume = new Moq.Signals.Signal(0.25);
+	/** The latest status the emulator published, or undefined before the first. */
 	readonly status = new Moq.Signals.Signal<GameStatus | undefined>(undefined);
+	/** The identifier of this viewer's feedback broadcast while it publishes. */
 	readonly viewerId = new Moq.Signals.Signal<string | undefined>(undefined);
 
-	// The canvas to render into, owned here and wired into the renderer (read-only there).
-	// The UI sets this once the <canvas> is mounted.
+	/** The canvas the video renders into, set by the UI once it is mounted. */
 	readonly canvas = new Moq.Signals.Signal<HTMLCanvasElement | undefined>(undefined);
 
 	// The video rendition target, owned here and wired into the video source as an input.
 	readonly #target = new Moq.Signals.Signal<Watch.Video.Target | undefined>(undefined);
 
-	// Watch API objects exposed so UI can access canvas, etc.
+	/** The game's broadcast. */
 	readonly broadcast: Watch.Broadcast;
+	/** The clock that keeps video and audio in step. */
 	readonly sync: Watch.Sync;
+	/** Picks the video rendition to fetch. */
 	readonly videoSource: Watch.Video.Source;
+	/** Decodes the video rendition. */
 	readonly videoDecoder: Watch.Video.Decoder;
+	/** Draws decoded frames into {@link canvas}. */
 	readonly videoRenderer: Watch.Video.Renderer;
+	/** Picks the audio rendition to fetch. */
 	readonly audioSource: Watch.Audio.Source;
+	/** Decodes the audio rendition. */
 	readonly audioDecoder: Watch.Audio.Decoder;
+	/** Plays decoded audio. */
 	readonly audioEmitter: Watch.Audio.Emitter;
 
-	// Input state.
+	/** The Game Boy buttons currently held down. */
 	readonly heldButtons = new Set<string>();
 
 	// Internal command publishing state.
@@ -219,6 +232,7 @@ export class Game {
 		return entries;
 	}
 
+	/** Stop playback and input for this session. */
 	close() {
 		this.#signals.close();
 	}

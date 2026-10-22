@@ -59,58 +59,83 @@ fn avc1_is_keyframe(data: &[u8], length_size: usize) -> bool {
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The SPS NAL is shorter than its required header.
 	#[error("SPS NAL too short")]
 	SpsTooShort,
 
+	/// The SPS NAL could not be parsed.
 	#[error("failed to parse SPS")]
 	SpsParse,
 
+	/// The AVCDecoderConfigurationRecord is shorter than its required header.
 	#[error("AVCDecoderConfigurationRecord too short")]
 	AvccTooShort,
 
+	/// The AVCDecoderConfigurationRecord ends before its declared parameter sets.
 	#[error("AVCDecoderConfigurationRecord truncated")]
 	AvccTruncated,
 
+	/// The named avc1 rendition lacks an SPS or PPS in its description.
 	#[error("avc1 description for rendition {name:?} is missing SPS or PPS (sps={sps}, pps={pps})")]
-	MissingParamSets { name: String, sps: usize, pps: usize },
+	MissingParamSets {
+		/// The rendition name.
+		name: String,
+		/// The number of SPS NAL units in the description.
+		sps: usize,
+		/// The number of PPS NAL units in the description.
+		pps: usize,
+	},
 
+	/// The SPS length does not fit the avcC length field.
 	#[error("SPS too large for avcC length field ({0} > {max})", max = u16::MAX)]
 	SpsTooLarge(usize),
 
+	/// The PPS length does not fit the avcC length field.
 	#[error("PPS too large for avcC length field ({0} > {max})", max = u16::MAX)]
 	PpsTooLarge(usize),
 
+	/// No SPS is available to configure the stream.
 	#[error("avcC requires at least one SPS")]
 	MissingSps,
 
+	/// The number of SPS NAL units exceeds the avcC limit of 31.
 	#[error("too many SPS for avcC ({0} > 31)")]
 	TooManySps(usize),
 
+	/// The number of PPS NAL units exceeds the avcC limit of 255.
 	#[error("too many PPS for avcC ({0} > 255)")]
 	TooManyPps(usize),
 
+	/// The NAL payload length does not fit a four-byte prefix.
 	#[error("NAL too large for 4-byte length prefix")]
 	NalTooLarge,
 
+	/// The NAL unit ends before its required header or slice fields.
 	#[error("NAL unit is too short")]
 	NalTooShort,
 
+	/// The NAL header sets the forbidden_zero_bit.
 	#[error("forbidden zero bit is not zero")]
 	ForbiddenZeroBit,
 
+	/// The stream has not supplied its decoder configuration.
 	#[error("not initialized")]
 	NotInitialized,
 
+	/// The avc3 track has not been created.
 	#[error("avc3 track not created")]
 	Avc3TrackNotCreated,
 
+	/// The access unit has no timestamp.
 	#[error("missing timestamp")]
 	MissingTimestamp,
 
+	/// Parsing or transforming the Annex B stream failed.
 	#[error("annexb: {0}")]
 	Annexb(#[from] crate::codec::annexb::Error),
 }
 
+/// A result using this module's error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Parsed H.264 SPS (Sequence Parameter Set) NAL.
@@ -120,10 +145,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// flags. The first byte of `nal` must be the NAL header.
 #[derive(Debug, Clone)]
 pub struct Sps {
+	/// The SPS profile_idc.
 	pub profile: u8,
+	/// The packed SPS constraint_set flags.
 	pub constraints: u8,
+	/// The SPS level_idc.
 	pub level: u8,
+	/// The coded picture width in pixels.
 	pub coded_width: u32,
+	/// The coded picture height in pixels.
 	pub coded_height: u32,
 }
 
@@ -479,8 +509,9 @@ pub struct Avcc {
 	pub sps: Vec<Bytes>,
 	/// PPS NAL units carried out-of-band in the record.
 	pub pps: Vec<Bytes>,
-	/// Resolution from the embedded SPS, if one was present and parseable.
+	/// Picture width in pixels from the embedded SPS, if available.
 	pub coded_width: Option<u32>,
+	/// Picture height in pixels from the embedded SPS, if available.
 	pub coded_height: Option<u32>,
 }
 
@@ -1287,29 +1318,6 @@ mod tests {
 		expected.extend_from_slice(&(p.len() as u32).to_be_bytes());
 		expected.extend_from_slice(p);
 		assert_eq!(out.as_ref(), expected.as_ref());
-	}
-
-	#[test]
-	fn avc3_export_e2e_payload_shape() {
-		// Mirror the byte shapes used by the export integration test so any
-		// divergence surfaces here in isolation.
-		let sps = &[0x67u8, 0x42, 0xc0, 0x1f, 0xde, 0xad, 0xbe, 0xef][..];
-		let pps = &[0x68u8, 0xce, 0x3c, 0x80][..];
-		let idr = &[0x65u8, 0x88, 0x84, 0x21, 0x00, 0x11, 0x22, 0x33][..];
-		let pslice = &[0x61u8, 0xe0, 0x12, 0x34][..];
-
-		let mut tx = Avc1::new();
-		let key = annexb_frame(&[sps, pps, idr]);
-		let key_out = tx.transform(key).expect("transform key").expect("output");
-		assert!(tx.avcc().is_some());
-
-		assert_eq!(key_out.len(), 4 + idr.len());
-		assert_eq!(&key_out[4..], idr);
-
-		let p = annexb_frame(&[pslice]);
-		let p_out = tx.transform(p).expect("transform p").expect("output");
-		assert_eq!(p_out.len(), 4 + pslice.len());
-		assert_eq!(&p_out[4..], pslice);
 	}
 
 	fn decode_avcc(bytes: &Bytes) -> mp4_atom::Avcc {

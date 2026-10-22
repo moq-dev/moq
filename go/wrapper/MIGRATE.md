@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.Finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
+### A claim answers by publishing (#5678)
+
+`OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
+Replace `request.Accept(broadcast)` with `request.Prepare(epoch)`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under that epoch and returns its producer.
+Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
+
 ### `TrackInfo` gains `Compress` (#5928)
 
 A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals need no change.
@@ -12,6 +23,13 @@ A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals ne
 
 `AnchorTime` names the group containing a presentation time, and type switches over `Anchor` need a case for it.
 `TrackConsumer.Update` also fails on a time anchor an untimed track can't serve.
+
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Update generated `moq.dev/moq-ffi` sources and its bundled static libraries together,
+then rebuild the application; older generated guards reject the rebuilt library.
+Application calls are unchanged.
 
 ### JSON consumers return `*json.Timed` (#5677)
 

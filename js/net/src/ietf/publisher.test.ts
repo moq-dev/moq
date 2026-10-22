@@ -1,5 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Auth, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -55,6 +55,39 @@ const CLUSTER = { cluster: true, epoch: false };
 
 /** How long to wait for a stream before calling it absent, which is how a regression reports. */
 const STREAM_WAIT = 1000;
+
+/** A manual clock, installed until disposed. */
+function manual(): Manual & Disposable {
+	const clock = new Manual();
+	return Object.assign(clock, { [Symbol.dispose]: clock.install() });
+}
+
+/**
+ * Whether `read` yields a stream once pending work has armed its timers and {@link STREAM_WAIT}
+ * has passed on `clock`, which fires any retry that would open one.
+ */
+async function opens(read: Promise<{ done: boolean }>, clock: Manual): Promise<boolean> {
+	let opened = false;
+	read.then(
+		(next) => {
+			opened = !next.done;
+		},
+		() => {},
+	);
+	await clock.advanceAsync(Nano.zero);
+	await clock.advanceAsync(Nano.fromMilli(Milli(STREAM_WAIT)));
+	return opened;
+}
+
+/** Expect the publisher to open no bidirectional stream within {@link STREAM_WAIT} on `clock`. */
+async function noStream(transport: WebTransport, clock: Manual): Promise<void> {
+	const reader = transport.incomingBidirectionalStreams.getReader();
+	try {
+		expect(await opens(reader.read(), clock)).toBe(false);
+	} finally {
+		reader.releaseLock();
+	}
+}
 
 /** Long enough for the publish to reach the announce loop's signal. */
 const SETTLE = 5;
@@ -300,7 +333,7 @@ test("TRACK_STATUS outside the grant is refused on every draft", async () => {
 		const session = new NativeSession(pair.server, version, true);
 		const grant = new Signal<Grant | undefined>(nothing());
 		const { pub, origin } = publisher(pair.server, { session, grant });
-		const requests = origin.dynamic(Path.from("room")).requested();
+		const requests = origin.dynamicRoute(Path.from("room")).requested();
 
 		const outside = requestStream(version);
 		await pub.runTrackStatusRequest(trackStatus("room"), outside.stream);
@@ -383,7 +416,7 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
-		const requests = origin.dynamic(Path.from("room")).requested();
+		const requests = origin.dynamicRoute(Path.from("room")).requested();
 
 		// The broadcast is still resolving: its handler never answers.
 		const early = requestStream(version);
@@ -696,6 +729,89 @@ test("a blocked group header is reset when the group expires", async () => {
 	}
 });
 
+// A finished group's stream still holds the connection until its FIN is acknowledged. One
+// whose FIN never completes is waited on only while the group is within the budget, then
+// reset like a stream still serving, as the Rust `GroupServe` does. The track ending first
+// does not end the wait: PUBLISH_DONE waits on the stream, so the budget still judges it.
+test("a group stream whose FIN never completes is reset when the group expires", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+
+	let closing!: () => void;
+	const closeStarted = new Promise<void>((resolve) => {
+		closing = resolve;
+	});
+	let reset = false;
+	let resetting!: () => void;
+	const streamReset = new Promise<void>((resolve) => {
+		resetting = resolve;
+	});
+	const stalled = new WritableStream<Uint8Array>({
+		start(controller) {
+			// An abort while the close is in flight reaches the sink only through its signal.
+			controller.signal.addEventListener("abort", () => {
+				reset = true;
+				resetting();
+			});
+		},
+		close() {
+			closing();
+			return new Promise<void>(() => {});
+		},
+	});
+	spyOn(pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
+
+	const budget = Milli(5000);
+	const { pub, origin } = publisher(pair.server);
+	const broadcast = publish(origin, Path.from("test"));
+	// No subscriber max age, so the track's caps the budget.
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: budget });
+	const client = await Stream.open(pair.client, { version: VERSION });
+	const server = await Stream.accept(pair.server, VERSION);
+	if (!server) throw new Error("publisher never accepted the subscribe stream");
+
+	try {
+		void pub.runSubscribe(
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+			}),
+			server,
+		);
+
+		const write = (sequence: number) => {
+			const group = new GroupProducer(sequence);
+			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
+			group.close();
+			track.writeGroup(group);
+		};
+
+		write(0);
+		await closeStarted;
+		// The newest group is never stale, however long its FIN takes. Kept inside the cache's
+		// idle window: a group evicted once superseded is no longer judged.
+		await clock.advanceAsync(Nano.fromMilli(Milli(budget * 2)));
+		expect(reset).toBe(false);
+
+		// Its successor presents no further, so only the wall clock since it arrived convicts
+		// group 0, after the track has ended.
+		write(1);
+		track.close();
+		await clock.advanceAsync(Nano.fromMilli(Milli(budget - 1)));
+		expect(reset).toBe(false);
+		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await streamReset;
+	} finally {
+		client.close();
+		broadcast.close();
+		origin.close();
+		restore();
+	}
+});
+
 // A group can go stale while its stream is still opening. Serving it must abandon the group
 // without starting a write: an abandoned write rejects once the stream resets, and nothing
 // would handle it (Node exits on the first unhandled rejection).
@@ -764,7 +880,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 		write(2, 20_000);
 		open();
 
-		expect(String(await streamReset)).toContain("max delay budget");
+		expect(String(await streamReset)).toContain("abandoned waiting for a stream slot");
 		expect(writes).toBe(0);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(unhandled).toEqual([]);
@@ -924,7 +1040,7 @@ test("a subscription outside a covering route's claim does not hear it", async (
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("room/chat"))]));
-	const dynamic = chat.dynamic(Path.from("room"));
+	const dynamic = chat.dynamicRoute(Path.from("room"));
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
 	const accepted = await Stream.accept(pair.server, VERSION);
@@ -956,8 +1072,8 @@ test("a subscription hears the best covering route its claim allows", async () =
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true });
 	const scoped = (path: string) =>
 		origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from(path))]));
-	const chat = scoped("room/chat").dynamic(Path.from("room"), { cost: 1n });
-	const video = scoped("room/video").dynamic(Path.from("room"), { cost: 5n });
+	const chat = scoped("room/chat").dynamicRoute(Path.from("room"), { cost: 1n });
+	const video = scoped("room/video").dynamicRoute(Path.from("room"), { cost: 5n });
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
 	const accepted = await Stream.accept(pair.server, VERSION);
@@ -997,8 +1113,8 @@ test("a subscription hears a broader covering route when the narrowest cannot se
 	});
 	const chat = origin
 		.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/chat"))]))
-		.dynamic(Path.from("tenant"));
-	const broad = origin.dynamic(Path.empty(), { cost: 5n });
+		.dynamicRoute(Path.from("tenant"));
+	const broad = origin.dynamicRoute(Path.empty(), { cost: 5n });
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
 	const accepted = await Stream.accept(pair.server, VERSION);
@@ -1035,7 +1151,7 @@ test("a covering route's claim is compared relative to the served root", async (
 		requiresSolicitation: true,
 	});
 	const chat = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.subtree(Path.from("tenant/room/chat"))]));
-	const dynamic = chat.dynamic(Path.from("tenant/room"));
+	const dynamic = chat.dynamicRoute(Path.from("tenant/room"));
 
 	const subscription = await Stream.open(pair.client, { version: VERSION });
 	const accepted = await Stream.accept(pair.server, VERSION);
@@ -1061,6 +1177,7 @@ test("a covering route's claim is compared relative to the served root", async (
  * uninterested) into a request every few seconds for the life of the session.
  */
 test("a refusal that forbids retrying is not retried", async () => {
+	using clock = manual();
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const { pub, origin } = publisher(pair.server);
 	publish(origin, Path.from("lonely"));
@@ -1073,7 +1190,7 @@ test("a refusal that forbids retrying is not retried", async () => {
 	await declinePublishNamespace(stream, 0n);
 
 	// Well past the retry the loop would otherwise take.
-	expect(await nextStream(pair.client)).toBeUndefined();
+	await noStream(pair.client, clock);
 
 	origin.close();
 });
@@ -2285,6 +2402,7 @@ test.each([
 	["an unchanged price with Cluster", HopSchema.parse(9n)],
 	["any re-price without Cluster", undefined],
 ])("%s sends nothing", async (_, peer) => {
+	using clock = manual();
 	const self: Hop = HopSchema.parse(7n);
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
@@ -2300,7 +2418,7 @@ test.each([
 	await acceptPublishNamespace(stream);
 
 	broadcast.announce({ cost: peer === undefined ? 8n : 4n });
-	expect(await nextStream(pair.client)).toBeUndefined();
+	await noStream(pair.client, clock);
 
 	origin.close();
 });
@@ -2678,6 +2796,7 @@ async function readFill(stream: ReadableStream<Uint8Array>): Promise<ServedFill>
  * claim END_OF_GROUP, or the subscriber would think the group ended at the cap.
  */
 test("draft-20: an absolute filter trims the range it serves", async () => {
+	using clock = manual();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	for (let i = 0; i < 4; i++) writeGroup(track, 3);
@@ -2724,7 +2843,7 @@ test("draft-20: an absolute filter trims the range it serves", async () => {
 		});
 
 		// Groups 0 and 3 are outside the range, so nothing more is opened.
-		expect(await nextUni(fx.uni)).toBeUndefined();
+		expect(await opens(fx.uni.read(), clock)).toBe(false);
 	} finally {
 		fx.close();
 		client.close();
@@ -2927,6 +3046,7 @@ test("draft-20: a fill spanning several groups resets its stream", async () => {
 
 /** A fill against a track with nothing published has an empty range: no stream is owed. */
 test("draft-20: an empty track opens no fill stream", async () => {
+	using clock = manual();
 	const fx = fixture();
 	fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -2944,7 +3064,7 @@ test("draft-20: an empty track opens no fill stream", async () => {
 
 	try {
 		expect(ok.largest).toBeUndefined();
-		expect(await nextUni(fx.uni)).toBeUndefined();
+		expect(await opens(fx.uni.read(), clock)).toBe(false);
 	} finally {
 		fx.close();
 		client.close();
@@ -3253,6 +3373,7 @@ test("draft-20: an inline terminal reset after its FIN falls back to a standalon
  * and PUBLISH_DONE would never go out.
  */
 test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DONE", async () => {
+	using clock = manual();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1); // group 0, the whole requested range
@@ -3286,7 +3407,7 @@ test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DO
 		const end = await nextUni(fx.uni);
 		if (!end) throw new Error("the track's end was never marked");
 		expect(await readEndOfTrack(end)).toBe(2);
-		expect(await nextUni(fx.uni)).toBeUndefined();
+		expect(await opens(fx.uni.read(), clock)).toBe(false);
 	} finally {
 		fx.close();
 		client.close();

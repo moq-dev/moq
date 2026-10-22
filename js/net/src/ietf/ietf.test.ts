@@ -8,11 +8,12 @@ import { Fetch } from "./fetch.ts";
 import * as GoAway from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
 import { FetchFrame, type FetchPosition, Frame, Group, type GroupFlags } from "./object.ts";
-import { Parameters, SetupOptions } from "./parameters.ts";
+import { Parameters } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import * as Setup from "./setup.ts";
+import { SetupOptions } from "./setup_options.ts";
 import * as Subscribe from "./subscribe.ts";
 import * as SubscribeNamespace from "./subscribe_namespace.ts";
 import * as Track from "./track.ts";
@@ -1543,10 +1544,12 @@ test("Parameters v18 wire is identical to v17 (no count prefix, delta encoded ke
 	expect(Array.from(await v18)).toEqual(Array.from(await v17));
 });
 
-test("SubscribeNamespace: message IDs", () => {
-	// 0x11 through draft-17 (legacy), renumbered to 0x50 in draft-18 (#1542).
-	expect(SubscribeNamespace.SubscribeNamespaceLegacy.id).toBe(0x11);
-	expect(SubscribeNamespace.SubscribeNamespace.id).toBe(0x50);
+test("SubscribeNamespace: message IDs match the draft registries", () => {
+	// 0x11 through draft-17, renumbered to 0x50 in draft-18.
+	expect({
+		legacy: SubscribeNamespace.SubscribeNamespaceLegacy.id,
+		current: SubscribeNamespace.SubscribeNamespace.id,
+	}).toEqual({ legacy: 0x11, current: 0x50 });
 });
 
 test("SubscribeNamespace: decode rejects the wrong draft version", async () => {

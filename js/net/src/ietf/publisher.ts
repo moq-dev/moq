@@ -904,14 +904,28 @@ export class Publisher {
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
 			// in the order we asked, not the subscription's order. Failing here drops the group
 			// and lets the next one compete for the next slot.
-			const stream = await Writer.tryOpen(this.#quic, {
-				cancel: unsubscribed,
-				version: this.#session.version,
-				sendOrder: ranking.rank(group.sequence, slice.skip),
-				waitUntilAvailable: false,
-			});
+			// Watch the group while the transport parks the open, and release that watch
+			// once the open settles. tryOpen owns resetting a slot that arrives too late.
+			const opened = Promise.withResolvers<void>();
+			let failure: Error | undefined;
+			const abandoned = hooks
+				.guardGroup(group, () => opened.promise)
+				.catch((err: unknown) => {
+					failure = error(err);
+				});
+			let stream: Writer | undefined;
+			try {
+				stream = await Writer.tryOpen(this.#quic, {
+					version: this.#session.version,
+					sendOrder: ranking.rank(group.sequence, slice.skip),
+					cancel: race([unsubscribed, abandoned]),
+					waitUntilAvailable: false,
+				});
+			} finally {
+				opened.resolve();
+			}
 			if (!stream) {
-				group.close(new Error("no stream slot"));
+				group.close(failure ?? new Error("no stream slot"));
 				return;
 			}
 			streams.opened += 1;
@@ -992,15 +1006,17 @@ export class Publisher {
 				}
 
 				stream.close();
+				// Its bytes still hold the connection until acknowledged, so a group gone stale
+				// meanwhile is reset like one still serving, as the Rust `GroupServe` does. Awaited
+				// even without a marker: PUBLISH_DONE waits on this group, so the track, whose
+				// timeline judges the budget, stays open until the stream settles.
+				const delivered = await race([
+					hooks.guardGroup(group, () => stream.closed).then(() => true),
+					unsubscribed.then(() => false),
+				]);
 				// Only a stream that closed cleanly delivered the marker: one reset after its FIN
 				// may not have, which leaves the standalone fallback in place, as in Rust.
-				if (marked) {
-					const delivered = stream.closed.then(
-						() => true,
-						() => false,
-					);
-					streams.terminalSent = (await race([delivered, unsubscribed.then(() => false)])) === true;
-				}
+				if (marked) streams.terminalSent = delivered === true;
 			} catch (err: unknown) {
 				stream.reset(error(err));
 			} finally {

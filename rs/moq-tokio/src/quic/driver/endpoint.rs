@@ -342,8 +342,8 @@ impl Endpoint {
 
     /// Wait until no connection on the endpoint is still active
     ///
-    /// A connection stops being active once its peer's close arrives, or once its closing
-    /// period ends if the peer never answers. An attempt queued for [`accept()`] or partway
+    /// A connection stops being active once its peer's close arrives, at its own close if the
+    /// peer never answered the handshake, or once its closing period ends otherwise. An attempt queued for [`accept()`] or partway
     /// through [`Incoming::accept`] still counts as active. Unlike [`wait_idle()`], this does
     /// not sit out the closing period for a peer that already has the close, nor wait for the
     /// [`Connection`](crate::quic::driver::Connection) handles to drop.

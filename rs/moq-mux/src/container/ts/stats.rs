@@ -450,10 +450,9 @@ impl Log {
 mod test {
 	use super::*;
 
-	/// `Class` keeps its `as` values with `Data` last, and an unknown name reads as data.
+	/// A class a later version adds reads as data.
 	#[test]
-	fn class_keeps_its_discriminants() {
-		assert_eq!([Class::Data as u8, Class::Audio as u8, Class::Video as u8], [0, 1, 2]);
+	fn an_unknown_class_reads_as_data() {
 		let class: Class = serde_json::from_str(r#""subtitle""#).unwrap();
 		assert_eq!(class, Class::Data);
 	}

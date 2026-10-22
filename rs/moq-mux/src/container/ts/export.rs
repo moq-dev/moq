@@ -47,6 +47,7 @@ use crate::catalog::hang::Catalog;
 use crate::codec::annexb::InBandCodec;
 use crate::codec::video::{Hrd, Reorder};
 use crate::codec::{aac, annexb, opus};
+use crate::container::consumer::Event;
 use crate::container::decode::{DecodeClock, MAX_REORDER};
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
@@ -303,6 +304,12 @@ struct Track {
 	/// The source's cut count at the last frame queued. A cut since clears what a track that
 	/// has not started holds.
 	held: Option<u64>,
+	/// The source ended a group, cleanly or cut. The next group presents after every picture
+	/// of this one, its leading pictures included, so the end settles each DTS the clock holds:
+	/// waiting on the next group instead would make what this one delivered late behind a hole
+	/// upstream. Settled once the source has nothing more right now, so a track's end, read
+	/// with its last group's, still takes the end of the stream's settlement.
+	settle: bool,
 	/// The PTS of the last keyframe queued, which leading pictures present before.
 	keyframe: Option<Timestamp>,
 	/// What the catalog and the SPS declare about the video's reordering.
@@ -346,6 +353,7 @@ impl Track {
 			recovery_gap: None,
 			leading_floor: None,
 			held: None,
+			settle: false,
 			keyframe: None,
 			timing: Timing::default(),
 			buffer: None,
@@ -388,6 +396,7 @@ impl Track {
 		if let Some((floor, ahead)) = self.leading_floor
 			&& pending.frame.timestamp < floor
 			&& self.sync.is_none()
+			&& !radl(stream_type, self.source.description(), &pending.frame)
 		{
 			jitter.lose(&self.pid, ahead);
 			return Ok(());
@@ -419,8 +428,11 @@ impl Track {
 			if !input.waiting_for_header && input.jitter.full(&self.pid) {
 				break;
 			}
-			match self.source.poll_read(waiter)? {
-				Poll::Ready(Some(frame)) => {
+			match self.source.poll_event(waiter)? {
+				Poll::Ready(Some(Event::Frame(frame))) => {
+					if std::mem::take(&mut self.settle) && !input.waiting_for_header {
+						self.release(name, input.jitter, true)?;
+					}
 					// A group arrives from its first frame, so the first read from it opens it.
 					let sequence = self.source.group().unwrap_or_default();
 					let opens = self.group.replace(sequence) != Some(sequence);
@@ -451,11 +463,18 @@ impl Track {
 					}
 					self.queue(name, pending, input.jitter)?;
 				}
+				// Under sync the frames read settle each DTS, not when this leg found the source
+				// empty, and [`Self::queue`] drops what a cut group left held.
+				Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => self.settle = self.sync.is_none(),
+				Poll::Ready(Some(Event::FrameEnd { .. })) => {}
 				Poll::Ready(None) => {
 					self.finished = true;
 					break;
 				}
 				Poll::Pending => {
+					if std::mem::take(&mut self.settle) && !input.waiting_for_header {
+						self.release(name, input.jitter, true)?;
+					}
 					self.empty = moq_clock::now();
 					break;
 				}
@@ -818,7 +837,10 @@ impl Track {
 			false => None,
 		};
 		let video = matches!(self.kind, Kind::Video(_));
-		let leading = video && !frame.keyframe && self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe);
+		let leading = video
+			&& !frame.keyframe
+			&& self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe)
+			&& !matches!(self.kind, Kind::Video(stream_type) if radl(stream_type, description.as_ref(), &frame));
 		if video && frame.keyframe {
 			self.keyframe = Some(frame.timestamp);
 		}
@@ -1457,6 +1479,7 @@ where
 		kio::wait(|waiter| self.poll_next(waiter)).await
 	}
 
+	/// Poll for the next MPEG-TS packet frame, or `None` once the export ends.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Frame>>> {
 		// 1. Drain catalog updates, discovering the track layout.
 		while !self.catalog_ended {
@@ -1836,13 +1859,9 @@ where
 			if !self.stale.is_empty() {
 				self.resubscribe(&catalog, &mpegts)?;
 			}
-			// Under `--sync` the PCR rides a PID of its own, which SI must not take either.
-			let es_pids: Vec<u16> = self
-				.tracks
-				.values()
-				.map(|t| t.pid)
-				.chain(self.psi.as_ref().map(|psi| psi.pcr_pid))
-				.collect();
+			// The PCR may ride a PID of its own, which SI must not take either.
+			let mut es_pids: Vec<u16> = self.tracks.values().map(|t| t.pid).collect();
+			es_pids.push(self.psi.as_ref().unwrap().pcr_pid);
 			reject_colliding_si_pids(&mpegts, self.pmt_pid(), &es_pids)?;
 			// The layout is locked but the timing is not: a `jitter` or `framerate` published
 			// after the tables still sizes the decode clock.
@@ -2308,29 +2327,31 @@ where
 		let mut tracks: Vec<&Track> = self.tracks.values().collect();
 		tracks.sort_by_key(|t| t.pid);
 
-		// Section-framed streams require a video track in the supported program layout.
-		let needs_clock = tracks.iter().any(|t| matches!(&t.kind, Kind::Verbatim { .. }));
-		let video = tracks.iter().find(|t| matches!(t.kind, Kind::Video(_)));
-		anyhow::ensure!(
-			!needs_clock || video.is_some(),
-			"TS export of section-framed verbatim streams (e.g. SCTE-35) requires a video track for the program clock"
-		);
-		let pcr_pid = video
-			.or_else(|| {
-				tracks.iter().find(|t| {
-					matches!(
-						t.kind,
-						Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
-					)
-				})
-			})
-			.map(|t| t.pid)
-			.context("TS export requires a video or audio track for the PCR")?;
-		// A media PID flags the break at every group, which on the PCR's PID would declare a
-		// break in the time base, so under sync the PCR rides a PID of its own.
 		let pcr_pid = match sync {
+			// A media PID flags the break at every group, which on the PCR's PID would declare a
+			// break in the time base, so under sync the PCR rides a PID of its own.
 			Some(_) => self.clock_pid()?,
-			None => pcr_pid,
+			None => tracks
+				.iter()
+				.find(|t| matches!(t.kind, Kind::Video(_)))
+				.or_else(|| {
+					tracks.iter().find(|t| {
+						matches!(
+							t.kind,
+							Kind::Aac { .. } | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3
+						)
+					})
+				})
+				.map(|t| t.pid)
+				// Sparse data cannot carry the clock's cadence: reserve a PID used only by PCR.
+				.or_else(|| {
+					(FIRST_ES_PID..0x1fff).find(|pid| {
+						*pid != self.pmt_pid()
+							&& tracks.iter().all(|track| track.pid != *pid)
+							&& self.si.keys().all(|(si, _)| si != pid)
+					})
+				})
+				.context("TS export has no unused PID for the PCR")?,
 		};
 
 		let streams = tracks
@@ -2858,7 +2879,8 @@ where
 	fn slot_due(&self) -> Option<(u128, moq_clock::Instant)> {
 		let (known, settled) = self.slot_settled()?;
 		let settled = Timestamp::from_micros(u64::try_from(settled / 1_000).ok()?).ok()?;
-		Some((known, self.jitter.at(settled)?))
+		// The tail of the generation still going out keeps its own clock after the next is acquired.
+		Some((known, self.jitter.at(self.generation, settled)?))
 	}
 
 	/// The `known` that settles the next grid slot, and the jitter buffer key, in nanoseconds,
@@ -3757,6 +3779,15 @@ fn stream_id(kind: &Kind) -> Option<u8> {
 	matches!(kind, Kind::Opus { .. }).then_some(StreamId::PRIVATE_STREAM_1)
 }
 
+/// Whether a video frame is an HEVC RADL picture, which leads its keyframe but references only
+/// it, so it goes out wherever that keyframe does rather than being trimmed as an orphan.
+fn radl(stream_type: StreamType, description: Option<&Bytes>, frame: &Frame) -> bool {
+	stream_type == StreamType::H265
+		&& description
+			.and_then(|description| crate::codec::h265::hvcc_params(description).ok())
+			.is_some_and(|(length_size, _)| crate::codec::h265::hvc1_is_radl(&frame.payload, length_size))
+}
+
 /// Build the Annex-B elementary-stream payload for one video frame: rewrite the
 /// length-prefixed NALs to start-code-delimited NALs, injecting the parameter
 /// sets (SPS/PPS, plus VPS for H.265) from the avcC/hvcC after a leading AUD on
@@ -4107,7 +4138,7 @@ mod tests {
 			// The last available audio frame, including its scheduling lead, anchors both orders.
 			let (decode, key, _) = tracks[1].released.unwrap();
 			assert_eq!(decode.as_micros(), 800_000);
-			assert_eq!(jitter.at(key), Some(start + Duration::from_millis(500)), "{order:?}");
+			assert_eq!(jitter.at(0, key), Some(start + Duration::from_millis(500)), "{order:?}");
 			tokio::time::advance(Duration::from_millis(500)).await;
 			let video = std::iter::from_fn(|| match jitter.poll_next(&waiter) {
 				std::task::Poll::Ready(ready) => Some(ready),

@@ -39,7 +39,7 @@ use moq_relay::{Config, Relay, auth};
 /// Long enough that "exited immediately" and "waited out the window" cannot be
 /// confused, short enough to keep the test quick: a session that never leaves
 /// keeps `Relay::run` up this long.
-const DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Held by every test that raises SIGINT, so one test's signal cannot drain (or,
 /// as a second signal, kill) another test's relay.
@@ -175,9 +175,7 @@ async fn an_embedder_owns_the_signals_inner() {
 
 	// The signal is the embedder's: the relay keeps serving without a GOAWAY.
 	assert!(
-		tokio::time::timeout(Duration::from_secs(1), draining.recv())
-			.await
-			.is_err(),
+		tokio::time::timeout(DRAIN_TIMEOUT / 2, draining.recv()).await.is_err(),
 		"the relay drained on a signal the embedder owns"
 	);
 	assert!(!run.is_finished(), "the relay exited on a signal the embedder owns");
@@ -315,10 +313,11 @@ async fn a_trigger_before_run_keeps_the_deadline_inner() {
 		.expect("relay never exited")
 		.expect("relay task panicked")
 		.expect("relay exited with an error");
+	// A fresh window opened by `run` would end half a window past the deadline.
 	let over = std::time::Instant::now().saturating_duration_since(deadline);
 	assert!(
-		over <= Duration::from_secs(2),
-		"run returned {over:?} past the recorded deadline, not the one-second grace"
+		over < DRAIN_TIMEOUT / 2,
+		"run returned {over:?} past the recorded deadline, as if it opened a fresh window"
 	);
 }
 
@@ -343,8 +342,8 @@ async fn a_reconnecting_client_rides_out_a_restart_inner() {
 	broadcast.announce(Default::default()).expect("announce");
 	let mut publisher = moq_tokio::connect::Config::default();
 	// Redials paced well inside the drain, under a window that ends long before it.
-	publisher.backoff.initial = Some(Duration::from_millis(200));
-	publisher.backoff.max = Some(Duration::from_millis(200));
+	publisher.backoff.initial = Some(DRAIN_TIMEOUT / 15);
+	publisher.backoff.max = Some(DRAIN_TIMEOUT / 15);
 	publisher.backoff.timeout = Some(DRAIN_TIMEOUT / 3);
 	let publisher = publisher
 		.init(Default::default())

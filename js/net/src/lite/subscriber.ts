@@ -864,6 +864,9 @@ export class Subscriber {
 			drainOk = true;
 		}
 		hooks.receiveTrack(producer);
+		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
+		// this copy holds its first group until the answer arrives.
+		if (resolvesStart(this.version)) hooks.startTrack(producer, { requested: msg.startGroup });
 
 		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
 		const entry: SubscribeEntry = {
@@ -1254,8 +1257,10 @@ export class Subscriber {
 					console.warn(`invalid SUBSCRIBE_END: ${reason(error(err))}`);
 				}
 			} else if ("drop" in resp) {
+				// The publisher will never send these groups, so they are accounted for without a
+				// stream, and a reader of one still arriving ends with the drop's error now.
 				entry.tail.account(resp.drop.start, resp.drop.end + 1);
-				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1);
+				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1, resp.drop.cause(this.version));
 			}
 		}
 	}

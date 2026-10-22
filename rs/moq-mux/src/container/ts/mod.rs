@@ -68,4 +68,6 @@ mod passthrough_test;
 #[cfg(test)]
 mod pes_packet_test;
 #[cfg(test)]
+mod recovery_test;
+#[cfg(test)]
 mod release_test;

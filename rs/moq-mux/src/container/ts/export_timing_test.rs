@@ -859,15 +859,9 @@ async fn a_source_past_the_limit_is_counted() {
 	assert!(stats.release.out_of_tolerance > 0, "not counted");
 }
 
-/// The same source fails the export once it has used half the delay, about ten minutes in,
-/// rather than drop nearly every frame from then on.
-#[tokio::test(start_paused = true)]
-#[should_panic(expected = "past the 30 ppm the output's may follow")]
-async fn a_source_past_the_limit_fails_once_half_the_delay_is_gone() {
-	on_a_scaled_clock(1.0004, 900_000_000 / VIDEO_US).await;
-}
-
-/// A source 22% slow, as an importer starved of CPU, fails the export within seconds.
+/// A source 22% slow, as an importer starved of CPU, fails the export within seconds. Past the
+/// limit, a source fails once it has used half the delay however far off it runs; the jitter
+/// buffer's own tests time that at 40 and 400 ppm.
 #[tokio::test(start_paused = true)]
 #[should_panic(expected = "the source's clock runs -220")]
 async fn a_source_far_off_real_time_fails_within_seconds() {

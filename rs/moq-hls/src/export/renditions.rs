@@ -63,6 +63,8 @@ struct Feed {
 	discontinuities: Discontinuities,
 	/// The timeline ended cleanly; late-created renditions start ended (`EXT-X-ENDLIST`).
 	ended: bool,
+	/// A reference timeline the playlists still list failed; late-created renditions start failed.
+	failed: Option<crate::Error>,
 	/// The timeline stream is over (cleanly or not); late-created renditions start closed.
 	closed: bool,
 	/// The estimated wall-clock time of timeline `pts` 0, anchored when the first record
@@ -132,6 +134,7 @@ impl Producer {
 					joining: false,
 					discontinuities: Discontinuities::default(),
 					ended: false,
+					failed: None,
 					closed: false,
 					anchor: None,
 					generation: None,
@@ -156,6 +159,11 @@ impl Producer {
 	/// the first record arrives.
 	pub fn anchor(&self) -> Option<SystemTime> {
 		self.fanout.feed.lock().unwrap().anchor
+	}
+
+	/// Why a reference timeline the playlists list failed, if one did.
+	pub fn failure(&self) -> Option<crate::Error> {
+		self.fanout.feed.lock().unwrap().failed.clone()
 	}
 
 	/// A cursor over rendition changes, replaying the current set as [`Event::Added`].
@@ -221,8 +229,8 @@ impl Producer {
 	/// Close the channel, signalling consumers that no more renditions will appear.
 	///
 	/// Deliberately does NOT cascade into the renditions' own segment windows: those are ended
-	/// or closed by the timeline watcher (see [`Fanout::finish`]), whose clean-end path must run `end()` before `close()` or
-	/// the playlist never gets its `EXT-X-ENDLIST`.
+	/// or failed by the timeline watcher (see [`Fanout::finish`] and [`Fanout::fail`]), which must
+	/// mark them before closing them, or the playlist never gets its `EXT-X-ENDLIST` or error.
 	pub fn close(&self) {
 		let _ = self.state.close();
 	}
@@ -245,7 +253,7 @@ impl Fanout {
 	/// Fan one reference timeline record out to every living rendition, and into replay history.
 	pub fn push(&self, index: u64, entry: Entry, reference: &Reference) {
 		let mut feed = self.feed.lock().unwrap();
-		if !feed.accepts(reference) {
+		if !feed.accepts(reference) || feed.failed.is_some() {
 			return;
 		}
 		let pts = Duration::from(entry.pts);
@@ -410,7 +418,7 @@ impl Fanout {
 			Some(reference) => feed.accepts(reference),
 			None => feed.selection.as_ref().is_none_or(Option::is_none),
 		};
-		if !selected {
+		if !selected || feed.failed.is_some() {
 			return false;
 		}
 		feed.ended = true;
@@ -420,6 +428,29 @@ impl Fanout {
 				return false;
 			};
 			rendition.end();
+			rendition.close();
+			true
+		});
+		true
+	}
+
+	/// Fail every window with `err` when `reference`'s timeline failed, so no playlist reads as
+	/// finished. A superseded reader counts only in history mode while rows it must pop are still
+	/// listed; a live window trims a superseded reference's rows on its own.
+	pub fn fail(&self, reference: &Reference, err: crate::Error) -> bool {
+		let mut feed = self.feed.lock().unwrap();
+		let listed = feed.accepts(reference)
+			|| (feed.window.is_none() && feed.history.iter().any(|row| row.reference == *reference));
+		if feed.failed.is_some() || !listed {
+			return false;
+		}
+		feed.failed = Some(err.clone());
+		feed.closed = true;
+		feed.targets.retain(|target| {
+			let Some(rendition) = target.upgrade() else {
+				return false;
+			};
+			rendition.fail(err.clone());
 			rendition.close();
 			true
 		});
@@ -468,7 +499,7 @@ impl Producer {
 	}
 
 	/// Enroll a freshly-created rendition in the timeline feed, replaying the recent history
-	/// (and the ended/closed markers) so its window matches its siblings', and start following its
+	/// (and the ended/failed/closed markers) so its window matches its siblings', and start following its
 	/// own timeline.
 	fn register(&self, rendition: &Arc<Rendition>) {
 		let mut feed = self.fanout.feed.lock().unwrap();
@@ -480,6 +511,9 @@ impl Producer {
 		}
 		if feed.ended {
 			rendition.end();
+		}
+		if let Some(err) = &feed.failed {
+			rendition.fail(err.clone());
 		}
 		if feed.closed {
 			rendition.close();
@@ -757,6 +791,33 @@ mod tests {
 		fanout.push(1, entry(1, 2_000), &old);
 		fanout.push(1, entry(1, 2_000), &replacement);
 		assert_eq!(fanout.feed.lock().unwrap().history.len(), 2);
+	}
+
+	#[test]
+	fn only_a_reader_of_listed_rows_fails_the_feed() {
+		let err = || crate::Error::NoVariants;
+		// Live: a superseded reader's rows trim with the window, so its failure changes nothing.
+		let (fanout, new) = handed_off(5);
+		let old = fanout.feed.lock().unwrap().history[0].reference.clone();
+		assert!(!fanout.fail(&old, err()));
+		assert!(fanout.fail(&new, err()));
+		assert!(!fanout.finish(Some(&new)), "a failed feed never finishes");
+
+		// History: a retained reader fails the feed while rows it must pop stay listed.
+		let history = |popped: bool| {
+			let fanout = Producer::new(Duration::from_secs(30)).fanout();
+			fanout.unbound();
+			let old = Arc::new((Kind::Video, "old".into(), "old".into()));
+			fanout.select(Some(old.clone()));
+			fanout.push(0, entry(0, 0), &old);
+			fanout.select(Some(Arc::new((Kind::Video, "new".into(), "new".into()))));
+			if popped {
+				fanout.pop(0..1, &old);
+			}
+			fanout.fail(&old, err())
+		};
+		assert!(history(false));
+		assert!(!history(true));
 	}
 
 	#[test]

@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A failed timeline fails its listings
+
+`export::Broadcaster::manifest` and `export::Rendition::media_playlist` return `Result<Option<String>>`.
+Answer `Err(Error::TimelineFailed { .. })` with an uncacheable error (the server router uses 500 with `Cache-Control: no-store`) instead of serving a playlist.
+`Rendition::playlist` fails the same way, including for a range it used to refuse with `Error::RangeUnavailable`.
+A failed timeline no longer ends a playlist with `EXT-X-ENDLIST` or turns the DASH manifest `static`; only a clean finish does.
+A rendition whose own timeline failed is left out of the manifest and master playlist, while its siblings keep serving.
+
+```rust
+match rendition.media_playlist(query) {
+	Ok(Some(playlist)) => { /* serve it */ }
+	Ok(None) => { /* not ready yet: 404 */ }
+	Err(err) => { /* the export failed: 5xx, no-store */ }
+}
+```
+
 ### Imports always anchor their own timebase (#5967)
 
 `import::Config::timebase` and `Error::ForeignTimebase` are removed.

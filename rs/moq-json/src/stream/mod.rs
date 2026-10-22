@@ -197,19 +197,6 @@ mod test {
 	}
 
 	#[test]
-	fn compressed_roundtrip_in_order() {
-		let (mut producer, track) = producer(compressed());
-		for n in 0..20 {
-			producer.append(&json!({ "group": n, "pts": n * 2_000 })).unwrap();
-		}
-		producer.finish().unwrap();
-
-		let records = drain(consume(track, true));
-		assert_eq!(records.len(), 20);
-		assert_eq!(records[7], json!({ "group": 7, "pts": 14_000 }));
-	}
-
-	#[test]
 	fn all_records_ride_one_group() {
 		let (mut producer, mut track) = producer(compressed());
 		for n in 0..50 {

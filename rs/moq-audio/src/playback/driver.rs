@@ -777,7 +777,8 @@ impl Driver {
 		let supported = super::device::negotiate(&device)?;
 
 		let format = supported.sample_format();
-		let config: cpal::StreamConfig = supported.into();
+		let mut config = supported.config();
+		config.buffer_size = super::device::buffer_size(&device, &supported);
 		let rate = config.sample_rate;
 		let channels = config.channels as usize;
 

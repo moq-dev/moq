@@ -24,6 +24,7 @@ from .origin import (
     AnnounceEventRestart,
     AnnounceEventStart,
     AnnounceEventUpdate,
+    BroadcastPrepared,
     BroadcastRequest,
     OriginConsumer,
     OriginDynamic,
@@ -31,6 +32,7 @@ from .origin import (
 )
 from .publish import (
     BroadcastDynamic,
+    BroadcastFinish,
     BroadcastProducer,
     GroupDemand,
     GroupProducer,
@@ -41,7 +43,7 @@ from .publish import (
     TrackRequest,
 )
 from .server import Request, Server, Transport
-from .session import Bandwidth, Reservation, Session
+from .session import Auth, AuthToken, Bandwidth, Reservation, Session
 from .subscribe import (
     BroadcastConsumer,
     GroupConsumer,
@@ -59,6 +61,7 @@ from .types import (
     ErrorScope,
     FetchGroupOptions,
     Frame,
+    Grant,
     Order,
     ProtocolError,
     ProtocolKind,
@@ -87,10 +90,14 @@ __all__ = [
     "AudioCodec",
     "AudioEncoderInput",
     "AudioSampleFormat",
+    "Auth",
+    "AuthToken",
     "Backoff",
     "Bandwidth",
     "BroadcastConsumer",
     "BroadcastDynamic",
+    "BroadcastFinish",
+    "BroadcastPrepared",
     "BroadcastProducer",
     "BroadcastRequest",
     "Client",
@@ -104,6 +111,7 @@ __all__ = [
     "ProtocolError",
     "ProtocolKind",
     "FetchGroupOptions",
+    "Grant",
     "GroupConsumer",
     "GroupDemand",
     "GroupRequest",

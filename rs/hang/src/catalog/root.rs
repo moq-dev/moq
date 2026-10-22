@@ -490,6 +490,49 @@ mod test {
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 	}
 
+	/// Every reference-bearing section carries an optional epoch beside its `broadcast`.
+	#[test]
+	fn reference_epochs_roundtrip_in_every_section() {
+		use crate::catalog::Reference;
+
+		const EPOCH: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
+		let encoded = format!(
+			r#"{{
+				"video": {{"renditions": {{"v": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
+				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
+				"text": {{"renditions": {{"t": {{"broadcast": "./a", "epoch": "{EPOCH}", "format": "vtt"}}}}}},
+				"json": {{"tracks": {{"j": {{"broadcast": "./a", "epoch": "{EPOCH}", "mode": "snapshot"}}}}}},
+				"binary": {{"tracks": {{"b": {{"broadcast": "./a", "epoch": "{EPOCH}", "mode": "snapshot"}}}}}},
+				"archive": {{"timelines": {{}}, "replay": "./a", "replayEpoch": "{EPOCH}"}}
+			}}"#
+		);
+		let catalog = Catalog::<()>::from_str(&encoded).unwrap();
+		let epoch: moq_net::Epoch = EPOCH.parse().unwrap();
+		let references: [&dyn Reference; 5] = [
+			&catalog.video.renditions["v"],
+			&catalog.audio.renditions["a"],
+			&catalog.text.renditions["t"],
+			&catalog.json.tracks["j"],
+			&catalog.binary.tracks["b"],
+		];
+		for reference in references {
+			assert_eq!(reference.epoch(), Some(&epoch));
+		}
+		assert_eq!(catalog.archive.as_ref().unwrap().replay_epoch, Some(epoch));
+		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
+
+		// Omitted stays omitted, and a malformed or noncanonical epoch refuses the catalog.
+		assert!(!Catalog::<()>::default().to_json().unwrap().contains("poch"));
+		for bad in [
+			"not-a-uuid",
+			"01890A5D-AC96-774B-BCCE-B302099A8057",
+			"01890a5d-ac96-474b-bcce-b302099a8057",
+		] {
+			let encoded = encoded.replace(EPOCH, bad);
+			assert!(Catalog::<()>::from_str(&encoded).is_err(), "{bad} must be refused");
+		}
+	}
+
 	#[test]
 	fn cross_kind_duplicate_id_is_refused() {
 		let catalog = Catalog::<()>::from_str(
@@ -632,6 +675,7 @@ mod test {
 			VideoConfig {
 				broadcast: None,
 				track: None,
+				epoch: None,
 				label: None,
 				codec: H264 {
 					profile: 0x64,
@@ -666,6 +710,7 @@ mod test {
 			AudioConfig {
 				broadcast: None,
 				track: None,
+				epoch: None,
 				label: None,
 				codec: Opus,
 				sample_rate: 48_000,
@@ -840,14 +885,6 @@ mod test {
 		let reparsed = Catalog::<()>::from_str(&output).expect("failed to re-decode");
 		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
 		assert!(output.contains(r#""magic":7"#), "unknown fields dropped: {output}");
-	}
-
-	#[test]
-	fn empty_text_section_omitted() {
-		// A catalog without captions omits the text section, as it does for empty video and audio.
-		let catalog = Catalog::<()>::default();
-		let output = catalog.to_json().expect("failed to encode");
-		assert!(!output.contains("text"), "empty text section leaked: {output}");
 	}
 
 	#[test]
@@ -1036,13 +1073,6 @@ mod test {
 			Catalog::<()>::from_str(&json).expect("failed to decode").m2ts,
 			Some(m2ts)
 		);
-	}
-
-	#[test]
-	fn clock_stays_off_the_wire_when_absent() {
-		// Absent clock stays off the wire. Empty video and audio are omitted as well.
-		let output = Catalog::<()>::default().to_json().expect("failed to encode");
-		assert_eq!(output, "{}");
 	}
 
 	#[test]

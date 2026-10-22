@@ -31,14 +31,12 @@ production stability proven merely because upstream artifacts published.
 - [API shape review](/quest/m2/release/api-review.md) - every new or changed public API reviewed for a better shape before the cut
 - [Feature review](/quest/m2/release/feature-review.md) - every major work line since the last release judged end to end before the cut
 - [Cut and publish](/quest/m2/release/cut.md) - independently executable after m1; release-triggered publication
-- [Published catalog readers](/quest/m2/release/catalog-readers.md) - released Go and JS clients accept the current Rust publisher's live catalog in smoke; an earlier release-line patch may satisfy it
 - [Published assets](/quest/m2/release/assets-release.md) - npm carries hostable worklets
 - [C++ publication](/quest/m2/release/cpp-release.md) - archives and matching OBS plugin publish and install
 - [Generated C publication](/quest/m2/release/c-publish.md) - released archives run the C samples and interop client
 - [Dart publication](/quest/m2/release/dart-publish.md) - the wrapper and native artifacts install from the registry
 - [Final libmoq stub](/quest/m2/release/libmoq-final-release.md) - publish the migration notice before removing its source
 - [Retire libmoq](/quest/m2/release/libmoq-retire.md) - cleanup only after that publication
-- [Final hand-written C notice](/quest/m2/release/c-final-release.md) - publish the migration notice before source retirement
-- [Retire hand-written C](/quest/m2/release/c-retire.md) - complete the final old-package notice and source retirement
-- [Hosted worklet adoption](/quest/m2/release/dogfood-assets.md) - downstream consumers exercise the published assets
+- [Retire hand-written C](/quest/m2/release/c-retire.md) - delete the hand-written crate once generated C publishes
+- [Retire the web-transport JS qmux](/quest/m2/release/qmux-js-retire.md) - once `@moq/qmux` publishes from `js/qmux`, deprecate `@moq/web-socket-stream` and stop the second publisher
 - [moq.sh deployment](/quest/m2/release/moq-sh-deploy.md) - verify its release-triggered publication

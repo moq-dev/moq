@@ -50,6 +50,20 @@ fn hvc1_is_keyframe(data: &[u8], length_size: usize) -> bool {
 		.any(|nal| nal.first().is_some_and(|header| is_irap(split::nal_unit_type(*header))))
 }
 
+/// Whether an hvc1-shaped (length-prefixed) access unit is a RADL picture: one that leads its
+/// IRAP but references only it, so it decodes wherever that IRAP does (H.265 8.1.2).
+pub(crate) fn hvc1_is_radl(data: &[u8], length_size: usize) -> bool {
+	let Ok(nals) = crate::codec::annexb::length_prefixed_nals(data, length_size) else {
+		return false;
+	};
+	// RADL_N and RADL_R; types below 32 are slices.
+	let mut slices = (nals.map_while(std::result::Result::ok))
+		.filter_map(|nal| nal.first().map(|header| (header >> 1) & 0x3f))
+		.filter(|kind| *kind < 32)
+		.peekable();
+	slices.peek().is_some() && slices.all(|kind| matches!(kind, 6 | 7))
+}
+
 /// True for the IRAP (intra random access point) NAL types, the ones that open a group.
 /// HEVC random access is broader than H.264's single IDR type.
 pub(crate) fn is_irap(nal_type: NALUnitType) -> bool {
@@ -68,54 +82,73 @@ pub(crate) fn is_irap(nal_type: NALUnitType) -> bool {
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The NAL unit ends before its required header or slice fields.
 	#[error("NAL unit is too short")]
 	NalTooShort,
 
+	/// The named parameter set length exceeds the hvcC length field.
 	#[error("{0} too large for hvcC length field ({1} > {max})", max = u16::MAX)]
 	NalTooLargeForHvcc(&'static str, usize),
 
+	/// The number of parameter sets of the named type exceeds the hvcC limit.
 	#[error("too many {0} for hvcC ({1} > {max})", max = u16::MAX)]
 	TooManyNals(&'static str, usize),
 
+	/// The NAL payload length does not fit a four-byte prefix.
 	#[error("NAL too large for 4-byte length prefix")]
 	NalTooLarge,
 
+	/// The SPS NAL could not be parsed.
 	#[error("failed to parse SPS NAL unit")]
 	SpsParse,
 
+	/// The SPS does not declare a level_idc.
 	#[error("missing level_idc in SPS")]
 	MissingLevelIdc,
 
+	/// The NAL header sets the forbidden_zero_bit.
 	#[error("forbidden zero bit is not zero")]
 	ForbiddenZeroBit,
 
+	/// The stream has not supplied its decoder configuration.
 	#[error("not initialized")]
 	NotInitialized,
 
+	/// A frame arrived before the SPS.
 	#[error("expected SPS before any frames")]
 	MissingSps,
 
+	/// The access unit has no timestamp.
 	#[error("missing timestamp")]
 	MissingTimestamp,
 
+	/// The HEVCDecoderConfigurationRecord is shorter than its required header.
 	#[error("HEVCDecoderConfigurationRecord too short")]
 	HvccTooShort,
 
+	/// The HEVCDecoderConfigurationRecord ends before its declared parameter sets.
 	#[error("HEVCDecoderConfigurationRecord truncated")]
 	HvccTruncated,
 
+	/// The named hvc1 rendition lacks a VPS, SPS, or PPS in its description.
 	#[error("hvc1 description for rendition {name:?} is missing VPS, SPS, or PPS (vps={vps}, sps={sps}, pps={pps})")]
 	MissingParamSets {
+		/// The rendition name.
 		name: String,
+		/// The number of VPS NAL units in the description.
 		vps: usize,
+		/// The number of SPS NAL units in the description.
 		sps: usize,
+		/// The number of PPS NAL units in the description.
 		pps: usize,
 	},
 
+	/// Parsing or transforming the Annex B stream failed.
 	#[error("annexb: {0}")]
 	Annexb(#[from] crate::codec::annexb::Error),
 }
 
+/// A result using this module's error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// The parameter sets carried out-of-band in an HEVCDecoderConfigurationRecord,

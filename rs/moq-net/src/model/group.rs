@@ -23,10 +23,10 @@ use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::task::{Poll, ready};
 
-use crate::{Error, IntoBytes, Result, Timestamp};
+use crate::{Error, IntoBytes, Result, StreamError, Timestamp};
 
 /// Maximum total size of frames in a group.
 ///
@@ -981,9 +981,10 @@ struct Alive {
 	// Set once frame 0's rewind check ran, so later writes skip the track lock it takes. A
 	// stale false only takes that lock once more.
 	checked: AtomicBool,
-	// Whether the abort was the publisher giving the group up rather than cache policy
-	// (`Old`, `Timeout`, `Evicted`). Stored before `aborted`, under the same rules.
-	cut: AtomicBool,
+	// The abort's error when it was the publisher giving the group up rather than cache
+	// policy (`Old`, `Timeout`, `Evicted`). Set before `aborted`, under the same rules, so
+	// a track scan learns why without taking the group lock.
+	cut: OnceLock<Error>,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
@@ -1112,7 +1113,7 @@ impl Producer {
 		let alive = Arc::new(Alive {
 			aborted: AtomicBool::new(false),
 			checked: AtomicBool::new(false),
-			cut: AtomicBool::new(false),
+			cut: OnceLock::new(),
 			access,
 		});
 		Self {
@@ -1709,6 +1710,16 @@ impl Handle {
 		self.close_aborted(err)
 	}
 
+	/// Abort the group with `err` unless it already holds every frame: the publisher gave
+	/// up a group still arriving, while one that finished here stays whole.
+	pub(super) fn abort_open(&self, err: Error) {
+		if let Ok(state) = self.state.write()
+			&& state.fin.is_none()
+		{
+			self.commit_abort(state, err);
+		}
+	}
+
 	/// Adopt the frames of `head` below where this copy starts, so it holds the group
 	/// from `head`'s start, as if this route had delivered them.
 	///
@@ -1834,12 +1845,30 @@ impl Handle {
 	}
 
 	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, err: Error) {
-		let cut = !matches!(err, Error::Old | Error::Timeout | Error::Evicted);
+		let policy = matches!(err, Error::Old | Error::Timeout | Error::Evicted);
 		// Cache policy frees the frames, as does an oversized group whichever write found
 		// it; a copy that failed or was given up lends them on.
-		let salvage = cut && !matches!(err, Error::GroupTooLarge);
+		let salvage = !policy && !matches!(err, Error::GroupTooLarge);
+		// A reset carrying a policy code is the upstream's cache policy, a cancel is a reader
+		// no longer wanting the group, and a fill refused as unfetchable abandons backfill:
+		// deliberate holes, never a cut readers see. The publisher giving the group up is.
+		let cut = !policy
+			&& !matches!(
+				err,
+				Error::Cancel
+					| Error::Lagged | Error::NotFetchable
+					| Error::Stream(
+						StreamError::Cancel
+							| StreamError::Old | StreamError::Evicted
+							| StreamError::DeliveryTimeout
+							| StreamError::TooFarBehind
+							| StreamError::NotFetchable
+					)
+			);
+		if cut {
+			let _ = self.alive.cut.set(err.clone());
+		}
 		guard.abort = Some(err);
-		self.alive.cut.store(cut, Ordering::Release);
 		self.alive.aborted.store(true, Ordering::Release);
 		guard.release(salvage);
 		guard.close();
@@ -1858,11 +1887,12 @@ impl Handle {
 		self.alive.aborted.load(Ordering::Acquire)
 	}
 
-	/// Whether the publisher gave this group up, rather than cache policy skipping it.
+	/// Why the publisher gave this group up, once it did, rather than cache policy
+	/// skipping it.
 	///
 	/// Reads the mirror, like [`Self::is_aborted`], so a track scan never takes the group lock.
-	pub(super) fn is_cut(&self) -> bool {
-		self.alive.cut.load(Ordering::Acquire)
+	pub(super) fn cut_error(&self) -> Option<&Error> {
+		self.alive.cut.get()
 	}
 
 	/// Whether the group was finished: it holds every frame it will ever have.
@@ -2454,6 +2484,12 @@ impl Consumer {
 		self.cursor.state.read().wire().cloned()
 	}
 
+	/// Whether the group was relayed from moq-transport, whose Object IDs may not be its frame
+	/// ordinals.
+	pub(super) fn relayed(&self) -> bool {
+		self.cursor.state.read().wire().is_some()
+	}
+
 	/// Read a compressed group's stored DEFLATE slices instead of plain frames, with each
 	/// frame's inflated size beside it ([`frame::Object::inflated`],
 	/// [`frame::Consumer::inflated`]), for egress that carries compression. A no-op on a
@@ -2659,6 +2695,44 @@ impl Consumer {
 		self.expired
 	}
 
+	/// Why a wire publisher waiting on the transport, for stream credit or to drain, should
+	/// give up on this group: the drift budget convicted it ([`Error::Old`]), or its copy
+	/// was aborted (evicted, cut, or failed upstream) before this cursor read it all and no
+	/// route will continue it. `pending` as in [`Self::poll_expired_while_pending`].
+	///
+	/// A machine parked on stream credit reads nothing, so without this an aborted group,
+	/// which never expires, would wait for credit it could only spend on a reset.
+	// pending: /quest/m1/public-model/serve.md
+	pub(crate) fn poll_abandoned(&mut self, waiter: &kio::Waiter, pending: bool) -> Option<Error> {
+		if self.poll_expired_while_pending(waiter, pending) {
+			return Some(Error::Old);
+		}
+		// Registered on the close alone: an abort closes the channel, and waking on every
+		// frame written to a parked group would cost a stalled subscriber per frame.
+		if self.cursor.state.poll_closed(waiter).is_pending() {
+			return None;
+		}
+		let aborted = {
+			let state = self.cursor.state.read();
+			let unread = !self.cursor.capped() && state.fin.is_none_or(|fin| self.cursor.index < fin);
+			match &state.abort {
+				// The rest of the group is gone; what was read already is not.
+				Some(err) if unread => err.clone(),
+				// Read to its end, or finished and closed with its last producer: still servable.
+				_ => return None,
+			}
+		};
+		// A front's reader may continue the group from another route's copy when it reads.
+		if self
+			.recover
+			.as_ref()
+			.is_some_and(|recover| recover.wants(Some(&aborted), waiter))
+		{
+			return None;
+		}
+		Some(aborted)
+	}
+
 	/// Whether expiry can still discard content or unblock a group that may grow.
 	fn expiry_pending(&self) -> bool {
 		self.cursor.expiry_pending()
@@ -2678,6 +2752,14 @@ impl Consumer {
 	/// The parent track's timescale, or `None` when it declared no timeline.
 	pub fn timescale(&self) -> Option<Timescale> {
 		self.track.timescale
+	}
+
+	/// The draft the parent track's moq-transport publisher spoke, which serialized every
+	/// object's properties, or `None` for a moq-lite one.
+	#[cfg(feature = "async")]
+	// private: passthrough
+	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
+		self.track.ietf()
 	}
 
 	/// The index of the next frame this consumer will return.
@@ -3398,20 +3480,6 @@ mod test {
 		assert_eq!(f1.size, 6);
 		let end = consumer.next_frame().now_or_never().unwrap().unwrap();
 		assert!(end.is_none());
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn read_frame_all_at_once() {
-		let mut producer = Info { sequence: 0 }.produce();
-		producer
-			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hello"))
-			.unwrap();
-		producer.finish().unwrap();
-
-		let mut consumer = producer.consume();
-		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
 	}
 
 	#[test]

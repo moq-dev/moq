@@ -99,6 +99,19 @@ impl Follow {
 		}
 	}
 
+	/// Poll until every source feeding this follower has synced, registering `waiter` until
+	/// then. A path [`poll_next`](Self::poll_next) has not started by then is not announced,
+	/// rather than not heard yet. See [`announce::Consumer::poll_synced`](crate::announce::Consumer::poll_synced).
+	pub fn poll_synced(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.announced.poll_synced(waiter)
+	}
+
+	/// Wait until every source feeding this follower has synced; see [`Self::poll_synced`].
+	#[cfg(feature = "async")]
+	pub async fn synced(&self) {
+		kio::wait(|waiter| self.poll_synced(waiter)).await
+	}
+
 	/// The cursor's next event, counting what it delivers and when it runs dry.
 	fn poll_announced(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
 		let poll = self.announced.poll_next(waiter);
@@ -322,7 +335,7 @@ mod tests {
 		let epoch = Epoch::mint();
 
 		// A prefix above the path covers it.
-		let pool = origin.dynamic("pool", route(&epoch)).unwrap();
+		let pool = origin.dynamic_route("pool", route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A route beneath the path serves another broadcast.
@@ -334,7 +347,7 @@ mod tests {
 		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
 
 		// The covering prefix no longer serves the path, so its changes are not seen.
-		pool.update(pool.route().with_cost(5)).unwrap();
+		pool.update_route(pool.route().with_cost(5)).unwrap();
 		quiet(&mut follow).await;
 
 		// Another instance at the path.
@@ -345,7 +358,7 @@ mod tests {
 		drop(exact);
 		assert_eq!(followed(&mut follow).await, ("restart", "pool".into()));
 
-		pool.update(pool.route().with_cost(9)).unwrap();
+		pool.update_route(pool.route().with_cost(9)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
 
 		drop(pool);
@@ -357,7 +370,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn follow_starts_on_the_serving_route_when_joining_late() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _pool = origin.dynamic("pool", Route::default()).unwrap();
+		let _pool = origin.dynamic_route("pool", Route::default()).unwrap();
 		let _exact = origin.publish("pool/job", Route::default()).unwrap();
 
 		let mut follow = origin.consume().follow("pool/job").unwrap();
@@ -378,7 +391,7 @@ mod tests {
 		// Both land before the follower reads again, and the cursor delivers the prefix's start
 		// ahead of the path's end, but the path went unserved in between.
 		drop(exact);
-		let _pool = origin.dynamic("pool", route(&epoch)).unwrap();
+		let _pool = origin.dynamic_route("pool", route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
@@ -399,7 +412,7 @@ mod tests {
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
 		let epoch = Epoch::mint();
-		let _pool = origin.dynamic("pool", route(&epoch)).unwrap();
+		let _pool = origin.dynamic_route("pool", route(&epoch)).unwrap();
 		exact.announce(route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 
@@ -413,7 +426,7 @@ mod tests {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().follow("pool/job").unwrap();
 
-		let _pool = origin.dynamic("pool", Route::default()).unwrap();
+		let _pool = origin.dynamic_route("pool", Route::default()).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		let _exact = origin.publish("pool/job", Route::default()).unwrap();
@@ -429,7 +442,7 @@ mod tests {
 		let _chat = origin
 			.scope("", &chat)
 			.unwrap()
-			.dynamic("room/alice", Route::default())
+			.dynamic_route("room/alice", Route::default())
 			.unwrap();
 		let mut follow = origin.consume().follow("room/alice").unwrap();
 
@@ -488,7 +501,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_a_held_takeover_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.dynamic("live", Route::default()).unwrap();
+		let dynamic = origin.dynamic("live").unwrap();
 		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
 
 		// The wait is on the dynamic route's answer when the exact path takes over without an epoch.
@@ -504,7 +517,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_a_dropped_takeover_again() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.dynamic("live", Route::default()).unwrap();
+		let dynamic = origin.dynamic("live").unwrap();
 		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
 
 		let (dropped, _publish) = futures::join!(available(&mut announced), async {
@@ -524,7 +537,7 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_a_gap_while_resolving_once() {
 		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.dynamic("", Route::default()).unwrap();
+		let dynamic = origin.dynamic("").unwrap();
 		let mut announced = origin.consume().announced_broadcast("live", None).unwrap();
 
 		let (_arrival, _publish) = futures::join!(available(&mut announced), async {
@@ -547,7 +560,7 @@ mod tests {
 		let exact = origin.publish("live", route(&epoch)).unwrap();
 		let first = available(&mut announced).await;
 
-		let dynamic = origin.dynamic("", route(&epoch)).unwrap();
+		let dynamic = origin.dynamic_route("", route(&epoch)).unwrap();
 		exact.unannounce();
 		let served = broadcast::Info::new().produce();
 		let (again, ()) = futures::join!(available(&mut announced), async {

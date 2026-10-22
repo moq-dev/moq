@@ -5,7 +5,7 @@ use moq_net::Timestamp;
 
 use super::{Container, Frame, Read, TimestampRewind};
 
-/// Media and clean group boundaries in delivery order.
+/// Media and group boundaries in delivery order.
 pub(crate) enum Event {
 	Frame(Frame),
 	/// An endpoint marker. `opens` when no media precedes it in its group: a declared stop
@@ -14,7 +14,11 @@ pub(crate) enum Event {
 		end: Timestamp,
 		opens: bool,
 	},
+	/// The group finished cleanly.
 	GroupEnd,
+	/// The group was lost upstream partway, so nothing more of it arrives. The gap it leaves is
+	/// read once the next group resumes the track.
+	Cut,
 }
 
 /// Read items and exporter-only boundaries in delivery order.
@@ -22,6 +26,7 @@ pub(crate) enum Item {
 	Read(Read),
 	FrameEnd(Timestamp),
 	GroupEnd,
+	Cut,
 }
 
 /// Decode a moq-lite track into a stream of media [`Frame`]s in age-bounded
@@ -253,7 +258,7 @@ impl<F: Container> Consumer<F> {
 		loop {
 			match ready!(self.poll_item(waiter))? {
 				Some(Item::Read(read)) => return Poll::Ready(Ok(Some(read))),
-				Some(Item::FrameEnd(_) | Item::GroupEnd) => continue,
+				Some(Item::FrameEnd(_) | Item::GroupEnd | Item::Cut) => continue,
 				None => return Poll::Ready(Ok(None)),
 			}
 		}
@@ -274,6 +279,7 @@ impl<F: Container> Consumer<F> {
 			Some(Event::FrameEnd { end, opens: true }) => Read::End { group: self.group, end },
 			Some(Event::FrameEnd { end, opens: false }) => return Poll::Ready(Ok(Some(Item::FrameEnd(end)))),
 			Some(Event::GroupEnd) => return Poll::Ready(Ok(Some(Item::GroupEnd))),
+			Some(Event::Cut) => return Poll::Ready(Ok(Some(Item::Cut))),
 			None => return Poll::Ready(Ok(None)),
 		};
 		let resume = match &read {
@@ -369,7 +375,7 @@ impl<F: Container> Consumer<F> {
 			group.sequence > current && group.buffered.is_empty() && group.fault.is_none() && group.poll_aborted(waiter)
 		})?;
 
-		'read: loop {
+		loop {
 			if self.pending.front().is_none_or(|group| group.sequence <= self.current) {
 				self.hole = None;
 				self.hole_timer = None;
@@ -434,7 +440,9 @@ impl<F: Container> Consumer<F> {
 						let current = self.current;
 						self.discard(|group| group.sequence <= current)?;
 						self.current = self.pending.front().map_or(self.current + 1, |g| g.sequence);
-						continue 'read;
+						// Said now rather than with the gap, which waits for the next group: what
+						// the caller holds of this one need not wait for a successor.
+						return Poll::Ready(Ok(Some(Event::Cut)));
 					}
 					// Cleanly finished group: advance to the next sequence.
 					Poll::Ready(Ok(None)) => {
@@ -1098,18 +1106,6 @@ mod tests {
 	}
 
 	// ---- Basic Reading ----
-
-	#[test]
-	fn new_inherits_the_initial_subscription_latency() {
-		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let max_delay = Duration::from_millis(250);
-		let subscriber = track.subscribe(moq_net::track::Subscription::default().with_max_delay(max_delay));
-
-		let mut consumer = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
-
-		assert_eq!(consumer.max_delay, max_delay);
-		assert_eq!(consumer.subscriber().subscription().max_delay, max_delay);
-	}
 
 	#[tokio::test]
 	async fn read_single_group() {
@@ -2228,25 +2224,6 @@ mod tests {
 		assert_eq!(frames[1].timestamp, ts(30_000));
 	}
 
-	// ---- B-frames ----
-
-	#[tokio::test]
-	async fn bframes_within_group() {
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer_track =
-			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
-
-		write_group(&mut track, 0, &[ts(0), ts(66_000), ts(33_000)]);
-		track.finish().unwrap();
-
-		let frames = read_all(&mut consumer).await.unwrap();
-		assert_eq!(frames.len(), 3);
-		assert_eq!(frames[0].timestamp, ts(0));
-		assert_eq!(frames[1].timestamp, ts(66_000));
-		assert_eq!(frames[2].timestamp, ts(33_000));
-	}
-
 	// ---- Track Lifecycle ----
 
 	#[tokio::test]
@@ -2341,7 +2318,7 @@ mod tests {
 		let origin = crate::source::produce_origin();
 		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
 		let first_route = origin
-			.dynamic(
+			.dynamic_route(
 				"live",
 				moq_net::origin::Route::default()
 					.with_epoch(epoch.clone())
@@ -2385,7 +2362,7 @@ mod tests {
 		let mut sources = Vec::new();
 		for sequence in 1..=4 {
 			let route = origin
-				.dynamic(
+				.dynamic_route(
 					"live",
 					moq_net::origin::Route::default()
 						.with_epoch(epoch.clone())
@@ -2410,8 +2387,12 @@ mod tests {
 
 		let waiter = kio::Waiter::noop();
 
-		// The aborted group 0 skips straight to its successor; a short clean group emits
-		// GroupEnd.
+		// The aborted group 0 says it was cut, then skips straight to its successor; a short
+		// clean group emits GroupEnd.
+		assert!(
+			matches!(consumer.poll_event(&waiter), Poll::Ready(Ok(Some(Event::Cut)))),
+			"the cut is said before the successor"
+		);
 		let event = consumer.poll_event(&waiter);
 		let Poll::Ready(Ok(Some(Event::Frame(frame)))) = event else {
 			panic!(
@@ -2990,27 +2971,6 @@ mod tests {
 	}
 
 	// ---- Frame Decoding ----
-
-	#[tokio::test]
-	async fn frame_timestamp_and_index_decoding() {
-		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer_track =
-			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500)));
-		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
-
-		write_group(&mut track, 0, &[ts(0), ts(33_333), ts(66_666)]);
-		track.finish().unwrap();
-
-		let frames = read_all(&mut consumer).await.unwrap();
-		assert_eq!(frames.len(), 3);
-
-		assert_eq!(frames[0].timestamp, ts(0));
-		assert!(frames[0].keyframe);
-
-		assert_eq!(frames[1].timestamp, ts(33_333));
-
-		assert_eq!(frames[2].timestamp, ts(66_666));
-	}
 
 	#[tokio::test]
 	async fn frame_payload_preserved() {

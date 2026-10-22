@@ -230,8 +230,13 @@ impl Serving {
 		if let Some(subscribe) = subscribe {
 			request = request.with_subscriber(subscribe);
 		}
-		let (session, driver) = request.ok().await?;
-		let result = moq_relay::supervise(session, lease, self.shutdown.clone(), None).await;
+		let serving = self.shutdown.serve();
+		let (session, driver) = self
+			.shutdown
+			.until_deadline(request.ok())
+			.await
+			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
+		let result = moq_relay::supervise(session, lease, serving, None).await;
 		driver.await??;
 		result
 	}
@@ -289,15 +294,14 @@ struct Shutdown {
 	observer: moq_relay::shutdown::Observer,
 }
 
-/// Keep all stages and listener tasks alive while admitted sessions drain.
+/// Keep all stages and listener tasks alive while admitted sessions drain, the way
+/// the relay does, or until a second signal.
 async fn drain(shutdown: Shutdown, signals: &mut Signals) {
-	let deadline = tokio::time::Instant::now() + shutdown.observer.drain_timeout;
 	shutdown.trigger.start();
 	tracing::info!(window = ?shutdown.observer.drain_timeout, "shutdown requested; draining sessions (signal again to exit immediately)");
 	tokio::select! {
-		() = signals.recv() => {},
-		() = shutdown.observer.activity().close() => {},
-		() = tokio::time::sleep_until(deadline) => {},
+		() = signals.recv() => tracing::warn!("second shutdown signal; exiting immediately"),
+		() = shutdown.observer.drained() => {},
 	}
 }
 
@@ -881,12 +885,7 @@ fn spawn_export(
 				}
 			}
 			ExportSink::Archive(args) => {
-				let format = export
-					.catalog_format
-					.map(Into::into)
-					.or_else(|| moq_mux::catalog::CatalogFormat::detect(&name))
-					.unwrap_or_default();
-				tasks.spawn(archive::export(origin.consume(), name, format, args));
+				tasks.spawn(archive::export(origin.consume(), name, args));
 			}
 			ExportSink::Stats => {
 				tasks.spawn(report::print_stats(origin.consume(), name));
@@ -1101,6 +1100,69 @@ mod tests {
 		assert!(!draining.is_finished());
 		tokio::time::advance(window / 2).await;
 		draining.await.unwrap();
+	}
+
+	/// A session that stops reading never takes its GOAWAY, yet the deadline still
+	/// closes it, and the drain returns only once its lease recorded the shutdown.
+	#[tokio::test(start_paused = true)]
+	async fn drain_closes_a_stalled_session_at_the_deadline() {
+		use futures::FutureExt;
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		let _signals = SIGNALS.lock().await;
+		let window = std::time::Duration::from_secs(10);
+		let (trigger, observer) = moq_relay::shutdown::Observer::new(window);
+
+		let (auth, mut admissions) = moq_relay::auth::Auth::embedded("test");
+		let all = moq_auth::Pattern::all;
+		let (producer, consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
+		let (lease, ()) = tokio::join!(auth.admit(auth.request(moq_auth::Transport::Tcp, "/room")), async {
+			admissions.next().await.unwrap().grant(consumer);
+		});
+
+		let mut config = moq_net::transport::memory::Config::default();
+		config.protocol = Some("moq-lite-06".into());
+		let (client, server) = moq_net::transport::memory::pair(config);
+		let accepting = tokio::spawn(async move {
+			let (session, driver) = moq_net::Server::new()
+				.accept(moq_net::time::now(), server)
+				.await
+				.unwrap();
+			tokio::spawn(moq_net::time::run(driver));
+			session
+		});
+		let (_client, client_driver) = moq_net::Client::new()
+			.connect(moq_net::time::now(), client)
+			.await
+			.unwrap();
+		// Never dropped, which would close the transport: polled only until the session is served.
+		let reading = std::sync::Arc::new(AtomicBool::new(true));
+		tokio::spawn({
+			let reading = reading.clone();
+			async move {
+				let mut driver = std::pin::pin!(moq_net::time::run(client_driver));
+				std::future::poll_fn(|cx| match reading.load(Ordering::Relaxed) {
+					true => driver.as_mut().poll(cx),
+					false => std::task::Poll::Pending,
+				})
+				.await
+			}
+		});
+		let server = accepting.await.unwrap();
+		tokio::spawn(moq_relay::supervise(server, lease.unwrap(), observer.serve(), None));
+		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		reading.store(false, Ordering::Relaxed);
+
+		let mut signals = Signals::new().unwrap();
+		let shutdown = Shutdown { trigger, observer };
+		tokio::time::timeout(window * 2, drain(shutdown, &mut signals))
+			.await
+			.expect("a stalled session held the drain past its deadline");
+		let (reason, _) = producer
+			.closed()
+			.now_or_never()
+			.expect("the drain returned before the lease recorded its end");
+		assert_eq!(reason, moq_auth::lease::Reason::Shutdown);
 	}
 
 	/// A local pipeline that dies takes the process with it, even while another one is

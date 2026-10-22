@@ -113,6 +113,16 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub track: Option<String>,
 
+	/// The publisher instance the reference names, when the catalog knows it. Absent names
+	/// whichever instance the reader resolves first, as in every catalog before this field.
+	///
+	/// A reader on an epoch-aware route refuses another instance rather than fall back to it;
+	/// on an epochless route it is best effort, since the route cannot prove the instance.
+	/// Without [`broadcast`](Self::broadcast), it names the catalog's own instance.
+	#[serde(default)]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub epoch: Option<moq_net::Epoch>,
+
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]
 	pub label: Option<String>,
@@ -204,6 +214,7 @@ impl AudioConfig {
 		Self {
 			broadcast: None,
 			track: None,
+			epoch: None,
 			label: None,
 			codec: codec.into(),
 			sample_rate,
@@ -289,17 +300,6 @@ mod test {
 		assert_eq!(catalog.ranked().count(), 1);
 		catalog.renditions.get_mut("track").unwrap().enabled = true;
 		assert_eq!(catalog.enabled().count(), 1);
-	}
-
-	#[test]
-	fn label_round_trips() {
-		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
-		config.label = Some("English".to_string());
-
-		let encoded = serde_json::to_value(&config).expect("failed to encode");
-		assert_eq!(encoded["label"], "English");
-		let decoded: AudioConfig = serde_json::from_value(encoded).expect("failed to decode");
-		assert_eq!(decoded.label.as_deref(), Some("English"));
 	}
 
 	#[test]

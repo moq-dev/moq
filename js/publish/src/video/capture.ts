@@ -4,7 +4,7 @@ import { Fanout } from "../fanout";
 import { TrackProcessor } from "./processor";
 import { normalizeSource, type Source } from "./types";
 
-// Signals the capture reads.
+/** Signals the capture reads. */
 export type CaptureInput = {
 	// The raw capture source to pump frames from.
 	source: Getter<Source | undefined>;
@@ -34,6 +34,7 @@ type CaptureOutput = {
  * picture, so a still source (a screen share of an unchanging slide) is visible to it.
  */
 export class Capture {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<CaptureInput>;
 
 	readonly #out: CaptureOutput = {
@@ -41,6 +42,7 @@ export class Capture {
 		display: new Signal<{ width: number; height: number; scale?: number } | undefined>(undefined),
 		rotation: new Signal(0),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// The turn the newest frame declared via VideoFrame.rotation, or undefined where unsupported.
@@ -124,6 +126,7 @@ export class Capture {
 		});
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#signals.close();
 	}

@@ -4,10 +4,27 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
+### A claim answers by publishing (#5678)
+
+`OriginProducer.dynamic(prefix:)` takes no route, and `OriginDynamic.update(route:)` is gone.
+Replace `request.accept(broadcast:)` with `let prepared = try request.prepare(epoch: mintEpoch())`, fill `prepared.broadcast`, then `try prepared.publish()`, which announces it at the exact path under that epoch and returns its producer.
+
 ### Anchors can name a time (#6074)
 
 `Subscription.Anchor` gains `.time(timestampUs:)`, so exhaustive switches need a case for it.
 `TrackConsumer.update(subscription:)` now `throws`, on a time anchor an untimed track can't serve; call it with `try`.
+
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Regenerate the Swift sources and rebuild the `MoqFFI` XCFramework together,
+then rebuild the application; older generated guards reject the rebuilt library.
+Application calls are unchanged.
 
 ### JSON consumers yield `Json.Timed` (#5677)
 

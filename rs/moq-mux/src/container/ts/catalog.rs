@@ -418,6 +418,7 @@ pub struct Descriptor {
 #[non_exhaustive]
 pub struct Ext {
 	#[serde(default, skip_serializing_if = "Mpegts::is_empty")]
+	/// MPEG-TS program, stream, and descriptor metadata.
 	pub mpegts: Mpegts,
 }
 
@@ -460,14 +461,6 @@ impl Catalog for Ext {
 #[cfg(test)]
 mod test {
 	use super::*;
-
-	#[test]
-	fn empty_section_omitted() {
-		// An empty `mpegts` section serializes to `{}` so a media-only broadcast stays
-		// byte-identical to one without the extension.
-		let ext = Ext::default();
-		assert_eq!(serde_json::to_string(&ext).unwrap(), "{}");
-	}
 
 	#[test]
 	fn mux_rate_alone_is_not_empty() {

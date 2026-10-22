@@ -72,8 +72,9 @@ Decided:
   for the catalog instance's lifetime. Optional reference epochs constrain
   resolution on epoch-aware transports and remain best effort on epochless
   transports. Following never turns a replacement into seamless resume. The
-  [catalog references quest](/quest/m0/broadcast-epoch/catalog-references.md)
-  owns the schemas, readers, and compatibility documentation.
+  schemas, shared resolution, and compatibility documentation landed;
+  [reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md)
+  owns the native readers that follow announcements.
 - Every first-party publisher that can restart mints its own: the apps,
   moq-boy, the ingest gateways, moqsink, OBS, and the bindings. Players
   (`moq play`, `@moq/watch`, demo/web) follow the announce `Restart`. moq-stats mints one per
@@ -125,7 +126,7 @@ End+Start. The child quests own their focused regressions.
 
 ## Required
 
-- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - announcement followers restart replaced siblings; other readers retain pins, with optional epochs and legacy best effort
+- [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - native readers restart a replaced referenced sibling on its announcements, never past a named epoch
 
 ## Related
 

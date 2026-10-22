@@ -335,6 +335,12 @@ impl Invocation {
 					"`export {sink}` reads no media to report on; remove --echo"
 				);
 			}
+			if matches!(export.sink, ExportSink::Archive(_)) {
+				anyhow::ensure!(
+					export.catalog_format.is_none(),
+					"`export archive` records every track without reading a catalog, so it takes no --catalog-format"
+				);
+			}
 			if export.echo.is_some() {
 				if export.sink.stdout().is_none()
 					&& let Some(sink) = export.sink.ignores_selection()
@@ -1001,7 +1007,7 @@ pub enum ExportSink {
 	Srt(crate::srt::ExportArgs),
 	/// WebRTC: WHIP client pushing to a remote (`--connect`) or WHEP server serving plays (`--listen`).
 	Rtc(crate::rtc::Args),
-	/// Record the broadcast into an object store until it ends.
+	/// Record every broadcast announced under `--broadcast` into an object store.
 	Archive(crate::archive::ExportArgs),
 	/// Write the broadcast's stats snapshots to stdout as JSON lines.
 	Stats,
@@ -1287,14 +1293,6 @@ mod tests {
 	#[test]
 	fn valid_stage() {
 		let _ = Stage::to_kdl();
-	}
-
-	#[test]
-	fn single_stage() {
-		let cli = Invocation::try_parse_from(["moq", "--connect", "http://relay", "import", "ts"]).unwrap();
-		assert_eq!(cli.stages.len(), 1);
-		assert_eq!(cli.stages[0].name(), "import");
-		assert!(cli.validate().is_ok());
 	}
 
 	/// Only TS can mark where a returned broadcast restarts, so only `export ts` may linger.

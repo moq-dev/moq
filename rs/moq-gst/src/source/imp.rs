@@ -205,13 +205,19 @@ impl SessionController {
 	}
 }
 
+/// The dial's configuration: TLS as set, retrying without a budget.
+fn connect_config(settings: &ResolvedSettings) -> moq_tokio::connect::Config {
+	let mut config = moq_tokio::connect::Config::default();
+	config.tls.insecure = Some(settings.tls_disable_verify);
+	config.backoff.timeout = Some(std::time::Duration::ZERO);
+	config
+}
+
 /// Start the reconnecting dial and the origin its announcements land in.
 fn connect(
 	settings: &ResolvedSettings,
 ) -> Result<(moq_tokio::Client, moq_tokio::Connection, moq_net::origin::Consumer)> {
-	let mut config = moq_tokio::connect::Config::default();
-	config.tls.insecure = Some(settings.tls_disable_verify);
-	config.backoff.timeout = Some(std::time::Duration::ZERO);
+	let config = connect_config(settings);
 
 	// The origin and the connection loop are both spawned tasks.
 	let _rt = RUNTIME.enter();
@@ -404,6 +410,7 @@ struct Shape {
 	container: hang::catalog::Container,
 	track: String,
 	broadcast: Option<moq_net::path::RelativeOwned>,
+	epoch: Option<moq_net::Epoch>,
 }
 
 /// A pump's progress, shared with its [`ActiveTrack`] so teardown and pad creation can't both
@@ -880,6 +887,7 @@ fn reconcile(
 				container: container.clone(),
 				track: reference.track(name).to_string(),
 				broadcast: reference.broadcast().cloned(),
+				epoch: reference.epoch().cloned(),
 			};
 			desired.insert(name.clone(), Desired { kind, shape });
 		}
@@ -982,7 +990,7 @@ fn reconcile(
 
 		// Bind without waiting: an unavailable sibling or track must not park the catalog loop
 		// and hold up every other rendition. The pump resolves both under its cancellation scope.
-		let binding = match source.bind(d.shape.broadcast.as_ref()) {
+		let binding = match source.bind(d.shape.broadcast.as_ref(), d.shape.epoch.as_ref()) {
 			Ok(binding) => binding,
 			Err(err) => {
 				gst::warning!(CAT, "ignoring rendition {name}: {err:?}");
@@ -2503,6 +2511,14 @@ mod session_tests {
 		}
 	}
 
+	/// The source retries without a budget, so an outage of any length is ridden out
+	/// (`relay_loss_reconnects_after_refused_redials` covers the redial itself).
+	#[test]
+	fn the_source_retries_without_a_budget() {
+		let config = super::connect_config(&unreachable());
+		assert_eq!(config.backoff.timeout, Some(Duration::ZERO), "zero is unlimited");
+	}
+
 	/// `quic-keylog` reaches the client's QUIC config, which refuses it without `SSLKEYLOGFILE`.
 	#[test]
 	fn keylog_reaches_the_client() {
@@ -2956,7 +2972,7 @@ mod session_tests {
 
 		let mut old = Publisher::standalone(video_rendition());
 		let serving = std::sync::Arc::new(Mutex::new(old.broadcast.consume()));
-		let pool = std::sync::Arc::new(origin.dynamic("", epoch()).unwrap());
+		let pool = std::sync::Arc::new(origin.dynamic_route("", epoch()).unwrap());
 		let (handler, answer) = (pool.clone(), serving.clone());
 		let handler = super::RUNTIME.spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
@@ -2969,7 +2985,7 @@ mod session_tests {
 
 		let mut new = Publisher::standalone(video_rendition());
 		*serving.lock().unwrap() = new.broadcast.consume();
-		pool.update(epoch()).unwrap();
+		pool.update_route(epoch()).unwrap();
 		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
 
 		stop(session);
@@ -3187,6 +3203,8 @@ mod session_tests {
 		/// Set before a `close` so the redial meets it. The listener stays bound throughout:
 		/// rebinding a freed port races its release and other tests binding port 0.
 		admit: std::sync::Arc<Mutex<Admit>>,
+		/// Dials dropped while [`Admit::Down`], and a wakeup for each.
+		dropped: tokio::sync::watch::Sender<usize>,
 	}
 
 	impl Relay {
@@ -3200,6 +3218,8 @@ mod session_tests {
 				let serving = origin.clone();
 				let admit = std::sync::Arc::new(Mutex::new(Admit::Serve));
 				let admitting = admit.clone();
+				let dropped = tokio::sync::watch::Sender::new(0);
+				let dropping = dropped.clone();
 				let (close, mut closing) = tokio::sync::mpsc::unbounded_channel::<moq_net::Error>();
 				let task = tokio::spawn(async move {
 					let mut sessions: Vec<moq_net::Session> = Vec::new();
@@ -3217,7 +3237,10 @@ mod session_tests {
 											sessions.push(session);
 										}
 									}
-									Admit::Down => drop(request),
+									Admit::Down => {
+										drop(request);
+										dropping.send_modify(|dropped| *dropped += 1);
+									}
 									Admit::Refuse => request.reject(moq_tokio::server::Reject::Forbidden).await.unwrap(),
 								}
 							}
@@ -3230,6 +3253,7 @@ mod session_tests {
 					task,
 					close,
 					admit,
+					dropped,
 				}
 			})
 		}
@@ -3322,9 +3346,10 @@ mod session_tests {
 		assert_eq!(video, 1, "the switch took another pad");
 	}
 
-	/// Both elements keep their sessions alive across an outage beyond the default retry budget.
+	/// Both elements keep their sessions alive across an outage that refuses several redials.
+	/// `the_*_retries_without_a_budget` pin that no budget ever ends the retrying.
 	#[test]
-	fn relay_loss_reconnects_after_the_default_budget() {
+	fn relay_loss_reconnects_after_refused_redials() {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
 		let url = relay.url.clone();
@@ -3371,8 +3396,14 @@ mod session_tests {
 		let held = pipeline.by_name("src").unwrap().src_pads();
 		*relay.admit.lock().unwrap() = Admit::Down;
 		relay.close.send(moq_net::Error::GoingAway).unwrap();
-		// Real sockets use the real clock: this exercises the deployed 10s retry budget.
-		std::thread::sleep(Duration::from_secs(11));
+		// Two refused redials from each element, so each retried past a failed attempt.
+		let mut dropped = relay.dropped.subscribe();
+		super::RUNTIME
+			.block_on(async {
+				tokio::time::timeout(Duration::from_secs(30), dropped.wait_for(|dropped| *dropped >= 4)).await
+			})
+			.expect("the elements stopped redialing")
+			.unwrap();
 		while pull(Duration::ZERO).is_some() {}
 		*relay.admit.lock().unwrap() = Admit::Serve;
 		play();

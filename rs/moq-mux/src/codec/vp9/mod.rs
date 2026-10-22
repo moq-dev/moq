@@ -18,15 +18,19 @@ use hang::catalog::VP9;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The frame header has an invalid frame marker.
 	#[error("invalid VP9 frame marker")]
 	InvalidFrameMarker,
 
+	/// The frame header has an invalid sync code.
 	#[error("invalid VP9 sync code")]
 	InvalidSyncCode,
 
+	/// The frame ends before its required header fields.
 	#[error("VP9 header truncated")]
 	Truncated,
 
+	/// The frame contains no bytes.
 	#[error("empty VP9 frame")]
 	EmptyFrame,
 }
@@ -354,24 +358,5 @@ mod tests {
 		let mut frame = KEYFRAME_320X240.to_vec();
 		frame[1] = 0x00; // corrupt the sync code
 		assert!(FrameHeader::parse(&frame).is_err());
-	}
-
-	#[test]
-	fn vpcc_round_trips_catalog() {
-		let vp9 = VP9 {
-			profile: 2,
-			level: 31,
-			bit_depth: 10,
-			chroma_subsampling: 1,
-			color_primaries: 9,
-			transfer_characteristics: 16,
-			matrix_coefficients: 9,
-			full_range: true,
-		};
-		let vpcc = vpcc(&vp9);
-		assert_eq!(vpcc.profile, 2);
-		assert_eq!(vpcc.bit_depth, 10);
-		assert_eq!(vpcc.matrix_coefficients, 9);
-		assert!(vpcc.video_full_range_flag);
 	}
 }

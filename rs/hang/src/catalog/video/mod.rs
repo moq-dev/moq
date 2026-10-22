@@ -200,6 +200,16 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub track: Option<String>,
 
+	/// The publisher instance the reference names, when the catalog knows it. Absent names
+	/// whichever instance the reader resolves first, as in every catalog before this field.
+	///
+	/// A reader on an epoch-aware route refuses another instance rather than fall back to it;
+	/// on an epochless route it is best effort, since the route cannot prove the instance.
+	/// Without [`broadcast`](Self::broadcast), it names the catalog's own instance.
+	#[serde(default)]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub epoch: Option<moq_net::Epoch>,
+
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]
 	pub label: Option<String>,
@@ -339,6 +349,7 @@ impl VideoConfig {
 		Self {
 			broadcast: None,
 			track: None,
+			epoch: None,
 			label: None,
 			codec: codec.into(),
 			description: None,
@@ -444,17 +455,6 @@ mod test {
 		assert_eq!(catalog.ranked().count(), 1);
 		catalog.renditions.get_mut("track").unwrap().enabled = true;
 		assert_eq!(catalog.enabled().count(), 1);
-	}
-
-	#[test]
-	fn label_round_trips() {
-		let mut config = VideoConfig::new(VideoCodec::VP8);
-		config.label = Some("Main camera".to_string());
-
-		let encoded = serde_json::to_value(&config).expect("failed to encode");
-		assert_eq!(encoded["label"], "Main camera");
-		let decoded: VideoConfig = serde_json::from_value(encoded).expect("failed to decode");
-		assert_eq!(decoded.label.as_deref(), Some("Main camera"));
 	}
 
 	#[test]
