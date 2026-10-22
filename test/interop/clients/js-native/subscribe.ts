@@ -10,6 +10,9 @@
  *
  *     node --import tsx subscribe.ts subscribe --url http://127.0.0.1:4443 --broadcast b.hang --timeout 20
  *
+ * `--version` offers only that version. Any grant the relay sends over AUTH is printed as an
+ * `auth granted` line.
+ *
  * @module
  */
 import { parseArgs } from "node:util";
@@ -37,6 +40,7 @@ const { positionals, values } = parseArgs({
 		url: { type: "string" },
 		broadcast: { type: "string" },
 		timeout: { type: "string", default: "20" },
+		version: { type: "string" },
 	},
 });
 
@@ -45,7 +49,7 @@ const url = values.url;
 const broadcast = values.broadcast;
 const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
 if (role !== "subscribe" || !url || !broadcast || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-	console.error("usage: subscribe.ts subscribe --url U --broadcast B [--timeout S>0]");
+	console.error("usage: subscribe.ts subscribe --url U --broadcast B [--timeout S>0] [--version V]");
 	process.exit(2);
 }
 
@@ -65,12 +69,10 @@ async function video(bc: Moq.Broadcast.Consumer): Promise<[string, Catalog.Video
 
 async function run(): Promise<void> {
 	const origin = new Moq.Origin.Producer();
-	// The grant arrives over AUTH, which only the work-in-progress moq-lite-07 carries and no
-	// client offers by default.
 	const connection = await Moq.Connection.connect({
 		url: new URL(url as string),
 		consume: origin,
-		versions: ["moq-lite-07-wip"],
+		...(values.version ? { versions: [values.version] } : {}),
 		websocket: { enabled: false },
 	});
 	// The grant the relay sent, in the Rust client's `auth granted` shape, so the harness can

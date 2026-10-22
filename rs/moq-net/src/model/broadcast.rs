@@ -765,21 +765,6 @@ impl RequestValidity {
 			_ => Ok(()),
 		}
 	}
-
-	#[cfg(feature = "async")]
-	// pending: /quest/m1/public-model/answer.md
-	pub(crate) async fn run<T>(
-		&self,
-		future: impl std::future::Future<Output = Result<T, crate::Error>>,
-	) -> Result<T, crate::Error> {
-		let validity = self.start();
-		let mut future = std::pin::pin!(future);
-		kio::wait(|waiter| {
-			validity.check(waiter)?;
-			waiter.poll_future(future.as_mut())
-		})
-		.await
-	}
 }
 
 #[cfg(test)]

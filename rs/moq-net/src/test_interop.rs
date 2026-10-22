@@ -439,6 +439,7 @@ fn ietf_track_status_interop() {
 				_ => ietf::Properties {
 					unknown: Default::default(),
 					dynamic_groups: false,
+					compress: false,
 					max_cache_duration: Some(std::time::Duration::from_millis(5000)),
 					timescale: Some(crate::Timescale::MILLI),
 					// The JS track's priority 2, lower-first on the wire.
