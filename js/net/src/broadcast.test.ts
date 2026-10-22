@@ -140,6 +140,38 @@ test("an empty replacement ends past its predecessor's groups", async () => {
 	broadcast.close();
 });
 
+test("a removed producer writes nothing once its replacement claims the name", async () => {
+	const broadcast = new BroadcastProducer();
+	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	first.appendGroup().close();
+	broadcast.removeTrack("media");
+
+	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	const subscriber = second.subscribe();
+	second.close();
+	expect(() => first.appendGroup()).toThrow("replaced");
+	expect(() => first.writeGroup(new GroupProducer(1))).toThrow("replaced");
+	expect(() => first.appendDatagram(Timestamp.fromMillis(0), new Uint8Array())).toThrow("replaced");
+	expect(await subscriber.finished()).toEqual({ group: 1, frame: 0 });
+	first.close();
+	broadcast.close();
+});
+
+test("a removed producer's abort ignores its replacement's groups", async () => {
+	const broadcast = new BroadcastProducer();
+	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	first.finishAt({ group: 2, frame: 0 });
+	broadcast.removeTrack("media");
+
+	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	for (let i = 0; i < 3; i++) second.appendGroup().close();
+	const abort = new Error("cut off");
+	first.close(abort);
+	expect(first.closed.peek()).toBe(abort);
+	second.close();
+	broadcast.close();
+});
+
 // A name keeps one sequence namespace across producer replacements. The application owns where a
 // replacement starts: an append that would reuse an earlier producer's sequence throws.
 test("a replacement producer refuses to append a sequence the name already wrote", async () => {

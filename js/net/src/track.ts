@@ -763,6 +763,10 @@ export class Producer {
 	// `max_sequence`, and where the next append lands. The namespace above can run ahead of
 	// it: earlier producers of the same broadcast track advanced it too.
 	#received = 0;
+	// Where the namespace stood when a replacement claimed the name. From then on it is this
+	// producer's inherited edge, so the replacement's groups never count as its progress, and
+	// it writes nothing more, so it can't land a group past the replacement's end.
+	#handoff?: number;
 
 	// Recently written source groups, retained for replay to late subscribers and
 	// pruned once idle for longer than the cache window. Each entry tracks the mirror
@@ -839,6 +843,11 @@ export class Producer {
 		bindProducerSequence = (producer, sequence) => {
 			const own = producer.#sequence;
 			if (own === sequence) return;
+			if (producer.#state.closed.peek() === undefined) {
+				const owner = sequence.owner;
+				if (owner && owner.#state.closed.peek() === undefined) owner.#handoff = sequence.next;
+				sequence.owner = producer;
+			}
 			sequence.next = Math.max(sequence.next, producer.#received);
 			// What earlier producers of the name wrote is gone from this track's cache, so their
 			// highest checked start is its eviction watermark.
@@ -1448,6 +1457,7 @@ export class Producer {
 	// Refuse a write once the track is closed, or at or past its declared end.
 	#writable(sequence: number): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
+		if (this.#handoff !== undefined) throw new Error(`track ${this.name} was replaced`);
 		const end = this.#state.end.peek();
 		if (end !== undefined && sequence >= finalSequence(end)) {
 			throw new Error(`sequence ${sequence} is at or past the track's end ${end.group}/${end.frame}`);
@@ -1606,7 +1616,7 @@ export class Producer {
 		// A replacement continues its name's timeline, so it can't end before or inside a group
 		// an earlier producer wrote; only its own last group can be cut mid-way.
 		const ownLast = end.frame !== 0 && this.#received === end.group + 1;
-		if (end.group < this.#sequence.next && !ownLast) {
+		if (end.group < this.#inherited() && !ownLast) {
 			throw new ProtocolViolation(`track end ${end.group}/${end.frame} is inside the name's earlier groups`);
 		}
 		this.#finishAt(end);
@@ -1688,7 +1698,12 @@ export class Producer {
 	// replacement starts at its name's, since what earlier producers wrote never arrives here.
 	// Mirrors the Rust `edge`.
 	#liveEdge(): number {
-		return Math.max(this.#received, this.#sequence.next);
+		return Math.max(this.#received, this.#inherited());
+	}
+
+	// One past what the name's producers wrote, up to the replacement that superseded this one.
+	#inherited(): number {
+		return this.#handoff ?? this.#sequence.next;
 	}
 
 	#declareEnd(end: Location): void {
@@ -1751,6 +1766,7 @@ export class Producer {
 		const open = abort ? this.#cache.filter((entry) => entry.group.closed.peek() === undefined) : [];
 		closeTrackState(this.#state, abort);
 		this.#sequence.holders--;
+		if (this.#sequence.owner === this) this.#sequence.owner = undefined;
 		for (const { group } of this.#cache) group.close(abort);
 		for (const entry of open) {
 			this.#unlink(entry);

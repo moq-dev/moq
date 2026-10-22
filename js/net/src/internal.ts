@@ -209,6 +209,8 @@ export interface TrackSequence {
 	next: number;
 	/** Open producers writing through this namespace. */
 	holders: number;
+	/** The open producer the name's newest claim went to; a later claim supersedes it. */
+	owner?: Producer;
 	/**
 	 * The highest-sequence checked group start any producer of the name wrote, which bounds a
 	 * replacement's groups the way the eviction watermark bounds a track's own.
