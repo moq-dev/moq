@@ -889,7 +889,10 @@ class Reader implements ResumeSource {
 			this.wake();
 		} else if (declared.group === end.group && declared.frame === end.frame) {
 			return;
-		} else if (track.finalSequence(declared) === track.finalSequence(end) && (declared.frame === 0 || end.frame === 0)) {
+		} else if (
+			track.finalSequence(declared) === track.finalSequence(end) &&
+			(declared.frame === 0 || end.frame === 0)
+		) {
 			if (declared.frame === 0) this.#declared = end;
 		} else {
 			this.#refuse();

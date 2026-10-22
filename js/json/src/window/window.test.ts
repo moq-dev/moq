@@ -594,7 +594,7 @@ test("events carry their frame's timestamp, and a header's restated records get 
 	producer.cut();
 	producer.push({ value: { n: 3 }, at: at(400) });
 	producer.finish();
-	late.setGroups({ start: { included: 1 } });
+	late.withRange({ start: { included: 1 } });
 	const events: Timed<Event<Rec>>[] = [];
 	for await (const event of new Consumer<Rec>({ track: late })) events.push(event);
 	expect(events.map((event) => event.value)).toEqual([

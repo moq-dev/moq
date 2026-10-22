@@ -131,6 +131,8 @@ tracks, so per-group stats stop costing cluster announces.
 - [Rust resume holds a declared end](/quest/m1/resume-rust-end.md) - a resumed Rust track keeps a declared end across copies, dedupes flapping copies, and judges retention inside the reader's window
 - [Rust resume checks compression](/quest/m1/resume-compress.md) - a same-epoch route copy with a different `compress` is refused instead of corrupting framing
 - [Rust resume backs single-route groups](/quest/m1/resume-handed-out.md) - a group first read from one route keeps the later copy that holds it, with a passthrough benchmark
+- [JS resume reports drops](/quest/m1/resume-drops.md) - a routed JS subscriber reports its copies' dropped groups, so publishers forward SUBSCRIBE_DROP
+- [Lowered resume floor](/quest/m1/resume-floor.md) - lowering a resumed reader's floor re-offers groups only a released copy cached
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [Interop finish](/quest/m1/interop-finish.md) - the interop matrix proves a clean broadcast finish across implementations
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID

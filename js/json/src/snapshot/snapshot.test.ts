@@ -153,7 +153,7 @@ test("latest abandons a held group when a newer snapshot group rolls", async () 
 // below its cap, and a datagram past every group does not strand it.
 test("latest stays inside the reader's range", async () => {
 	const track = new Track.Producer("test");
-	const producer = new Producer<Value>({ track, deltaRatio: 0 });
+	const producer = new Producer<Value>({ track, deltas: false });
 	const subscriber = track.subscribe({ maxDelay: REPLAY_LATENCY }).withRange({ end: { excluded: 2 } });
 	const consumer = new Consumer<Value>({ track: subscriber });
 
