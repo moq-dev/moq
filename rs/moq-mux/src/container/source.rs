@@ -14,6 +14,7 @@
 //! a record derived from the codec string, or an avcC/hvcC synthesized from
 //! in-band parameter sets.
 
+use std::ops::Bound;
 use std::task::{Poll, ready};
 
 use std::time::Duration;
@@ -121,8 +122,8 @@ pub(crate) struct ExportSource {
 	max_delay: std::time::Duration,
 	/// Start at the newest group, rather than the oldest the max delay still reaches.
 	live: bool,
-	/// The first group to read, so a resubscription skips groups already read.
-	start: Option<u64>,
+	/// Read only groups after this one, so a resubscription skips groups already read.
+	after: Option<u64>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available — from the catalog
@@ -277,7 +278,7 @@ impl ExportSource {
 			media: Some(media),
 			max_delay,
 			live: false,
-			start: None,
+			after: None,
 			transform: None,
 			description: None,
 			video_codec: None,
@@ -330,7 +331,7 @@ impl ExportSource {
 	/// that still does fails with [`Error::RenditionRewound`](crate::Error::RenditionRewound).
 	pub(crate) fn resuming(mut self, resume: &Resume) -> Self {
 		if resume.target == self.target {
-			self.start = resume.group.map(|group| group + 1);
+			self.after = resume.group;
 		} else {
 			self.live = true;
 			self.splice = resume.latest.map(|read| Splice { read, group: None });
@@ -494,8 +495,8 @@ impl ExportSource {
 				(ready!(pending.poll_broadcast(waiter))?, name.clone())
 			};
 			let mut subscription = moq_net::track::Subscription::default().with_max_delay(self.max_delay);
-			if let Some(start) = self.start {
-				subscription = subscription.with_groups(start..);
+			if let Some(after) = self.after {
+				subscription = subscription.with_groups((Bound::Excluded(after), Bound::Unbounded));
 			}
 			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(subscription));
 		}
