@@ -15,9 +15,9 @@ From the 2026-10-22 security audit:
 
 - Document the immediate-failure rule on each async callback typedef in the generated header, once in the generator rather than per function.
 - Run the terminal callback through the same panic and poisoning handling as the rest of the call, so cleanup cannot be lost.
-- Make cancellation a terminal result: freeing a pending task delivers one cancelled callback, so the caller reclaims `user_data` in one place on every path. If the generator instead stops all callbacks once the free returns, document that ownership transfer explicitly; either way, settle it once for every async call.
+- Make cancellation a terminal result: freeing a pending task delivers one cancelled callback, so the caller reclaims `user_data` in one place on every path. The rule is the same for every async call.
 
-Tests: a call refused before it starts fires no callback; a call whose work panics still delivers one terminal callback; freeing a pending task, including from inside another callback, follows the documented cancellation rule exactly once.
+Tests: a call refused before it starts fires no callback; a call whose work panics still delivers one terminal callback; freeing a pending task, including from inside another callback, delivers one cancelled callback.
 
 Public API: header documentation and a guaranteed terminal callback. Wire: none.
 
