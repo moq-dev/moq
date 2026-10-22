@@ -31,8 +31,14 @@ for (const name of ["check"]) {
 		const setup = job.steps.slice(scopeIndex + 1);
 		expect(setup.some((step) => step.uses === "./.github/actions/nix")).toBe(true);
 		expect(setup.some((step) => step.uses === "./.github/actions/rust-cache")).toBe(true);
-		expect(setup.at(-1)?.name).toBe(job.name);
+		expect(setup.filter((step) => step.run).at(-1)?.name).toBe(job.name);
 		for (const step of setup) {
+			if (step.uses?.startsWith("actions/upload-artifact@")) {
+				expect(step.if?.replace(/^\$\{\{\s*|\s*\}\}$/g, "")).toBe(
+					"!cancelled() && steps.scope.outputs.rust == 'true'",
+				);
+				continue;
+			}
 			const output = step.uses === "./.github/actions/rust-cache" ? "rust" : "needed";
 			const hosted = step.uses === "./.github/actions/nix" ? " && runner.environment != 'self-hosted'" : "";
 			expect(step.if).toBe(`steps.scope.outputs.${output} == 'true'${hosted}`);
