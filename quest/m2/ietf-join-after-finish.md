@@ -5,31 +5,31 @@
 On drafts 14 to 19, a joining FETCH that reaches our publisher after its
 subscription finished cleanly is still answered from the subscription's
 saved Largest group. A track that ends within about one RTT of SUBSCRIBE_OK
-then finishes cleanly at the subscriber, head included, instead of failing.
+then finishes cleanly at the subscriber, head included, instead of losing
+its last group.
 What the publisher retains for this is bounded by design (the session, the
 subscription's request, or a limit the peer already negotiates), never by a
 timer constant.
 
 ## Plan
 
-Starts after [moq-dev/moq#6348](https://github.com/moq-dev/moq/pull/6348)
-merges (open on 2026-10-22). It makes every pre-draft-20 join a SUBSCRIBE
-followed, after SUBSCRIBE_OK, by a `RelativeJoining{0}` FETCH, and fails the
-subscription when that FETCH is refused. If it is abandoned, re-judge this
-quest.
+Every pre-draft-20 join is a SUBSCRIBE followed, after SUBSCRIBE_OK, by a
+`RelativeJoining{0}` FETCH ([moq-dev/moq#6348](https://github.com/moq-dev/moq/pull/6348)).
+A refused one costs the subscriber that group's head and nothing more
+([moq-dev/moq#6407](https://github.com/moq-dev/moq/pull/6407), decided with
+the maintainer on 2026-10-22): a stream starting mid-group is dropped and
+the subscription goes on.
 
 State: `rs/moq-net/src/ietf/publisher.rs` registers a `Join` entry in
 `Publisher::joins` when it dispatches the SUBSCRIBE, fills it with a `Joined`
 snapshot as SUBSCRIBE_OK goes out, and drops it when the subscription ends,
 before PUBLISH_DONE. A joining FETCH that arrives later finds no entry, waits
 out the registration wait in `joined()`, and is refused as an unknown
-subscription. Before #6348 the subscriber swallowed that refusal and lost the
-head silently; after it, the subscriber errors. Short or already-finished
-tracks hit this often.
+subscription, so the subscriber loses the Largest group. Short or
+already-finished tracks hit this often.
 
-Fix it at the publisher. Accepting the refusal at the subscriber after a clean
-PUBLISH_DONE would hide the lost head again, which is what #6348 fixed, and
-other publishers may refuse the same way.
+Fix it at the publisher: the subscriber cannot recover a head nobody serves,
+and other publishers may refuse the same way.
 
 A finished entry holds a `track::Consumer`, which keeps the track's cache
 alive, so retaining it costs memory a peer controls. Candidate bounds:
@@ -60,7 +60,8 @@ Tests, on mocked time with no sleeps, for each of drafts 14 to 19:
 
 - A track that finishes right after SUBSCRIBE_OK, with the joining FETCH
   delivered an RTT after PUBLISH_DONE: the FETCH returns the Largest group's
-  head and the subscriber's track finishes cleanly with it. Fails today.
+  head and the subscriber's track finishes cleanly with it. Today the FETCH
+  is refused and the group is lost.
 - More finished subscriptions than the limit with no FETCH: retained entries
   stay at the limit, the oldest are dropped, and their late FETCHes are
   refused. New subscriptions are still admitted.

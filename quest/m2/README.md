@@ -67,6 +67,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Probe](/quest/m2/probe/README.md) - a session probes up to the bitrate it wants to send or receive, so a stopped simulcast rendition resumes and a viewer up-switches; the browser pads where native sessions retransmit
 - [Failed groups reach the publisher](/quest/m2/group-failed.md) - Rust and both JS publishers surface a group whose delivery a subscriber's stream gave up on, with one shape
 - [Headless moq-transport groups](/quest/m2/ietf-headless-group.md) - a group whose head no fill or joining FETCH supplies keeps its tail instead of being dropped, and a relay forwards it to moq-transport subscribers
+- [Empty tail before its head](/quest/m2/ietf-empty-tail-race.md) - a pre-draft-20 joined group whose head lands after a clean PUBLISH_DONE is delivered whole, not empty
 - [A finished PROBE stops reporting](/quest/m2/probe-end-stale.md) - the Rust receive estimate reads unknown once its PROBE stream ends
 - [Wire stats](/quest/m2/wire-stats/README.md) - `Presence` counts each root's transport bytes on the wire, `wire_tx` and `wire_rx`, from QUIC, WebSocket, and embedder gateway sources
 - [Media stats](/quest/m2/stats/README.md) - publishers announce a stats track in the catalog, viewers answer a soliciting catalog through a per-catalog `.echo` broadcast, and one model turns both into a health verdict and a preflight report
