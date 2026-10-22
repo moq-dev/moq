@@ -41,8 +41,12 @@ Decided with the maintainer on 2026-10-22:
   also remember the last clamped `desired` from `update`. `deadline()` is
   the earliest time the ramp allowance clears the hysteresis threshold
   toward it, or reaches `policy.max` for the exempt final step. It returns
-  `None` when `target` equals `desired` or the last estimate was a drop, so
-  a settled controller never wakes.
+  `None` when `target` equals `desired`, when the last estimate was a drop,
+  or when `desired` is below `policy.max` and within hysteresis of `target`.
+  That last raise can never clear the threshold, because the ramp is capped
+  at `desired`. A settled controller therefore never wakes, and a due
+  deadline never spins the caller's select arm. Unit-test the
+  sub-hysteresis case.
 - Fix all three callers in the same PR.
 
 The new method is an additive change to the public `moq_mux::rate` API;

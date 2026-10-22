@@ -55,8 +55,10 @@ Extend `cpp/obs/test/moq-source-test.cpp` with these cases:
 - an all-disabled section
 - an epoch-only change
 
-Public API: an additive `preference` field on every binding's video
-catalog record. Wire: none.
+Public API: a new `preference` field on every binding's video catalog
+record. It changes generated record checksums, positional constructors, and
+Go unkeyed struct literals. So, like the earlier `epoch` addition, add a
+`## Unreleased` entry to each affected package's `MIGRATE.md`. Wire: none.
 
 ## Related
 
