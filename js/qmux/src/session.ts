@@ -1773,8 +1773,6 @@ export default class Session implements WebTransport {
 		}
 
 		await (dir === Stream.Dir.Bi ? this.#bidiStreamCredit : this.#uniStreamCredit).claim(1n);
-		// close() may have torn down the session while the claim resumed.
-		if (this.#closed) throw this.#closed;
 	}
 
 	/** Register a stream's initial send priority and expose a mutable `sendOrder`
@@ -1798,6 +1796,8 @@ export default class Session implements WebTransport {
 	 *  unless `waitUntilAvailable` is false. */
 	async createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream> {
 		await this.#claimStream(Stream.Dir.Bi, options, "Failed to create bidirectional stream.");
+		// close() may have torn down the session while the claim resumed.
+		if (this.#closed) throw this.#closed;
 
 		const sendOrder = options?.sendOrder ?? DEFAULT_SEND_ORDER;
 
@@ -1870,6 +1870,8 @@ export default class Session implements WebTransport {
 	 *  unless `waitUntilAvailable` is false. */
 	async createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>> {
 		await this.#claimStream(Stream.Dir.Uni, options, "Failed to create send stream.");
+		// close() may have torn down the session while the claim resumed.
+		if (this.#closed) throw this.#closed;
 
 		const sendOrder = options?.sendOrder ?? DEFAULT_SEND_ORDER;
 
