@@ -15,13 +15,17 @@ import * as Epoch from "./epoch.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer } from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
+import { Parameters } from "./ietf/parameters.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
+import { RequestOk } from "./ietf/request.ts";
+import { SubscribeTracks } from "./ietf/subscribe_tracks.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { createMockTransportPair, textFrame } from "./mock.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { Stream } from "./stream.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
 import { withTimeout } from "./util/timeout.ts";
@@ -1296,20 +1300,14 @@ test("integration: ietf fetch group is unsupported", async () => {
 	server.abort();
 });
 
-// Draft-18 defines SUBSCRIBE_TRACKS, so a limited endpoint answers NOT_SUPPORTED and the
-// subscription already on the session keeps going.
-test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
-	// SUBSCRIBE_TRACKS, Length, Request ID, Track Namespace Prefix ("room"), no parameters.
-	// A fresh even client ID, distinct from the connection's setup/discovery/subscription requests.
-	const subscribeTracks = new Uint8Array([0x51, 0x00, 0x08, 0x3e, 0x01, 0x04, 0x72, 0x6f, 0x6f, 0x6d, 0x00]);
-
-	for (const protocol of [
-		Ietf.ALPN.DRAFT_18,
-		Ietf.ALPN.DRAFT_19,
-		Ietf.ALPN.DRAFT_20,
-		Ietf.ALPN.DRAFT_21,
-		Ietf.ALPN.DRAFT_22,
-	]) {
+test("integration: cancelling an ietf track listing preserves an existing subscription", async () => {
+	for (const [protocol, version] of [
+		[Ietf.ALPN.DRAFT_18, Ietf.Version.DRAFT_18],
+		[Ietf.ALPN.DRAFT_19, Ietf.Version.DRAFT_19],
+		[Ietf.ALPN.DRAFT_20, Ietf.Version.DRAFT_20],
+		[Ietf.ALPN.DRAFT_21, Ietf.Version.DRAFT_21],
+		[Ietf.ALPN.DRAFT_22, Ietf.Version.DRAFT_22],
+	] as const) {
 		const pair = createMockTransportPair(protocol);
 		const origin = new OriginProducer();
 
@@ -1335,13 +1333,14 @@ test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
 		expect(await track.readString()).toBe("before");
 
 		const bidi = await pair.client.createBidirectionalStream();
-		const writer = bidi.writable.getWriter();
-		await writer.write(subscribeTracks);
-		const reply: number[] = [];
-		for await (const chunk of bidi.readable as ReadableStream<Uint8Array>) reply.push(...chunk);
-		// REQUEST_ERROR (0x05), a two-byte length, then the error code: NOT_SUPPORTED (0x3).
-		expect(reply[0]).toBe(0x05);
-		expect(reply[3]).toBe(0x03);
+		const listing = new Stream({ ...bidi, version });
+		const params = new Parameters();
+		params.forward = false;
+		await listing.writer.u53(SubscribeTracks.id);
+		await new SubscribeTracks(62n, Path.from("room"), params).encode(listing.writer, version);
+		expect(await listing.reader.u53()).toBe(RequestOk.id);
+		await RequestOk.decode(listing.reader, version);
+		listing.abort(new StreamError(StreamCode.Cancel));
 
 		for (const producer of served) producer.writeFrame(textFrame("after"));
 		expect(await track.readString()).toBe("after");

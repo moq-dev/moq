@@ -20,6 +20,8 @@ export class Publish {
 	contentExists: boolean;
 	largest: { groupId: bigint; objectId: bigint } | undefined;
 	forward: boolean;
+	properties?: Properties.Properties;
+	parameters?: Parameters;
 
 	constructor({
 		requestId,
@@ -31,6 +33,8 @@ export class Publish {
 		contentExists,
 		largest,
 		forward,
+		properties,
+		parameters,
 	}: {
 		requestId: bigint;
 		trackNamespace: Path.Valid;
@@ -41,6 +45,8 @@ export class Publish {
 		contentExists: boolean;
 		largest: { groupId: bigint; objectId: bigint } | undefined;
 		forward: boolean;
+		properties?: Properties.Properties;
+		parameters?: Parameters;
 	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
@@ -51,6 +57,8 @@ export class Publish {
 		this.contentExists = contentExists;
 		this.largest = largest;
 		this.forward = forward;
+		this.properties = properties;
+		this.parameters = parameters;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -79,7 +87,7 @@ export class Publish {
 			if (this.contentExists !== !!this.largest) {
 				throw new Error("contentExists and largest must both be true or false");
 			}
-			const params = new Parameters();
+			const params = this.parameters ?? new Parameters();
 			// GROUP_ORDER is a legal PUBLISH parameter only through draft-15; a later peer closes
 			// the session with PROTOCOL_VIOLATION when it sees one. The publisher's preference is
 			// a DEFAULT_PUBLISHER_GROUP_ORDER track property instead, which we write from
@@ -94,7 +102,11 @@ export class Publish {
 			await params.encode(w, version);
 
 			// Track Properties are the final field, so nothing may follow.
-			await Properties.encode(w, { groupOrder: this.groupOrder, priority: this.priority }, version);
+			await Properties.encode(
+				w,
+				this.properties ?? { groupOrder: this.groupOrder, priority: this.priority },
+				version,
+			);
 		}
 	}
 
@@ -146,6 +158,8 @@ export class Publish {
 			trackAlias,
 			groupOrder,
 			priority: properties.priority,
+			properties,
+			parameters: params,
 			contentExists: !!largest,
 			largest,
 			forward,

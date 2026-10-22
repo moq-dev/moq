@@ -884,10 +884,7 @@ mod compression_tests {
 			fields: None,
 			inflated: inflated(Some(crate::group::MAX_CACHE_BYTES + 1), true).unwrap(),
 		};
-		assert!(matches!(
-			group.create_frame_owned(header, &crate::frame::Budget::default()),
-			Err(Error::FrameTooLarge)
-		));
+		assert!(matches!(group.create_object(header), Err(Error::FrameTooLarge)));
 	}
 
 	fn property(id: u64, value: u64) -> Property {

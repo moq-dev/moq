@@ -45,11 +45,6 @@ artifact, so it adds no production backport here. The broader release audit
 in [moq-dev/moq#6311](https://github.com/moq-dev/moq/pull/6311) keeps its own
 findings; expanding this shortlist needs a separate scope decision.
 
-## Required
-
-- [TLS dependencies](/quest/m0/release-backports/tls.md) - release takes the targeted WebPKI fixes already on main
-- [FFI cancellation](/quest/m0/release-backports/ffi-cancellation.md) - cancelled reads and accepts leave the next event for the next caller
-
 ## Related
 
 - [Fixed playback delay](/quest/m0/release-fixed-delay.md) - the merged behavior-only backport reaches moq.dev with its release deploy

@@ -186,6 +186,7 @@ impl<T: DeserializeOwned> Decoder<T> {
 #[cfg(test)]
 mod test {
 	use super::super::consumer::Config as ConsumerConfig;
+	use super::super::encoder::MAX_DELTA_FRAMES;
 	use super::super::{Config, Encoder};
 	use super::*;
 	use crate::Compression;
@@ -344,14 +345,43 @@ mod test {
 		assert_eq!(roundtrip(deflate(), &values), values);
 	}
 
-	/// The window is per group, so a keyframe mid-stream has to restart it on both sides. A decoder
-	/// that kept the old window here would fail to inflate the new group's snapshot.
+	/// The window is per group, so a keyframe mid-stream has to restart it on both sides. An encoder
+	/// that kept the old window would emit frames a joiner starting at the new group can't inflate.
 	#[test]
 	fn compressed_roundtrip_across_a_group_boundary() {
-		// A tight ratio guarantees at least one roll partway through.
-		let values: Vec<Value> = (0..=40).map(|n| json!({ "n": n })).collect();
-		let config = deflate().with_delta_ratio(2);
-		assert_eq!(roundtrip(config, &values).last().unwrap(), &json!({ "n": 40 }));
+		let mut encoder = Encoder::<Value>::new(deflate().with_deltas(true));
+		// One decoder reads every group in turn, and a joiner starts cold at each group, as a late
+		// subscriber does. The joiner catches an encoder that carries its window across the boundary.
+		let mut decoder = Decoder::<Value>::new(consume(Compression::Deflate));
+		let mut joiner = Decoder::<Value>::new(consume(Compression::Deflate));
+
+		// The frame cap rolls the group partway through, and a restatement rolls it again.
+		let restate = MAX_DELTA_FRAMES + 10;
+		let mut keyframes = 0;
+		for n in 0..=2 * MAX_DELTA_FRAMES {
+			let value = json!({ "n": n });
+			let frame = if n == restate {
+				encoder.update(&value).unwrap().unwrap().commit();
+				encoder.snapshot().unwrap().unwrap()
+			} else {
+				encoder.update(&value).unwrap().unwrap()
+			};
+			if frame.keyframe {
+				keyframes += 1;
+				joiner = Decoder::<Value>::new(consume(Compression::Deflate));
+				decoder.snapshot(&frame.payload).unwrap();
+				joiner.snapshot(&frame.payload).unwrap();
+			} else {
+				decoder.delta(&frame.payload).unwrap();
+				joiner.delta(&frame.payload).unwrap();
+			}
+			frame.commit();
+			assert_eq!(decoder.decode().unwrap(), Some(value.clone()), "after update {n}");
+			assert_eq!(joiner.decode().unwrap(), Some(value), "a joiner after update {n}");
+		}
+
+		// The first group, the cap roll, and the restatement.
+		assert_eq!(keyframes, 3, "the stream has to cross group boundaries");
 	}
 
 	#[test]
@@ -371,7 +401,7 @@ mod test {
 	/// stale, and deserializing each one is exactly the cost the split exists to avoid.
 	#[test]
 	fn frames_apply_without_materializing() {
-		let mut encoder = Encoder::<Value>::new(Config::default().with_delta_ratio(100));
+		let mut encoder = Encoder::<Value>::new(Config::default().with_deltas(true));
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 
 		for n in 0..=20 {

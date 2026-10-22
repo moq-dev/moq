@@ -10,10 +10,12 @@
 # cargo/bun/uv/go/cmake/cc.
 #
 # It stands up a moq-relay, then for each publisher language publishes an H.264
-# broadcast and confirms every subscriber sees data flowing before the timeout.
-# Every publisher but the Rust CLI also carries audio. The browser subscriber
-# verifies rendered WebCodecs output, player pause/resume, and that audio, then
-# that a session the relay refuses hands Chromium the close code and reason.
+# broadcast with an Opus tone per audio channel, and confirms every subscriber sees
+# video and decodes that tone, contiguous, before the timeout (tone.py judges the
+# decode; the browser judges its own playback). A publisher with its channels'
+# tones swapped must then fail every subscriber's check. The browser subscriber
+# also verifies rendered WebCodecs output and player pause/resume, then that a
+# session the relay refuses hands Chromium the close code and reason.
 #
 # Every client dials with a token minted for its cell and verified by
 # `moq auth serve`. Clients that print the grant the relay sent back over AUTH
@@ -304,6 +306,37 @@ DROP_VERSIONS=(moq-lite-05 moq-lite-06 moq-lite-07-wip)
 # The lite drafts the compressed-track lanes cross: lite-07 carries the flag, lite-06 gets inflated bytes.
 COMPRESS_VERSIONS=(moq-lite-07-wip moq-lite-06)
 
+# Every publisher in this checkout sends a tone per audio channel, and every subscriber decodes
+# AUDIO_MS of it for tone.py (the browser: its page) to check against the publisher's list. This
+# is the one place the tones are chosen. A stereo publisher sends a different tone per channel, so a
+# channel swap fails too. A run that swaps in released CLIs or JS clients (the wire-compat lanes)
+# skips audio, and the bindings' clients, which always check it, refuse to run there.
+AUDIO=1
+[[ -z "${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" ]] || AUDIO=0
+if [[ "$AUDIO" -eq 0 ]]; then
+    for sub in "${SUB_LIST[@]}"; do
+        case "$sub" in
+            rust) ;;
+            js-native-node | js-native-bun) [[ -n "${INTEROP_COMPAT_CLIENT:-}" ]] || sub_needs_audio="$sub" ;;
+            *) sub_needs_audio="$sub" ;;
+        esac
+        if [[ -n "${sub_needs_audio:-}" ]]; then
+            echo "error: the $sub subscriber always checks audio, which a run with MOQ_BIN, INTEROP_SUB_MOQ, or INTEROP_COMPAT_CLIENT turns off" >&2
+            exit 2
+        fi
+    done
+fi
+AUDIO_MS=600
+STEREO_TONE="440,660"
+publisher_tone() {
+    case "$1" in
+        python | cpp) echo 440 ;;
+        *) echo "$STEREO_TONE" ;;
+    esac
+}
+# The wrong-tone control's publisher sends the stereo tone with its channels swapped.
+SWAPPED_TONE="660,440"
+
 # Record a case for the CI report: `record <outcome> case=C [field=value...]` (see
 # harness_result). Every session in a case dials the same relay with each client's own
 # transport choice, and the version of its pass, unless compat.sh pins one for the whole run.
@@ -363,6 +396,9 @@ plan_pass() {
             for sub in "${SUB_LIST[@]}"; do record "not run" case=unauthorized publisher="$pub" subscriber="$sub"; done
             record "not run" case="unauthorized publisher" publisher="$pub"
         done
+        if [[ "$AUDIO" -eq 1 && "$VERSION" == auto ]]; then
+            for sub in "${SUB_LIST[@]}"; do record "not run" case="wrong tone" publisher=rust subscriber="$sub"; done
+        fi
         [[ "$VERSION" != auto ]] || ! needs js || record "not run" case="refused session" subscriber=js
     fi
     [[ "$IN_TREE" -eq 1 ]] || return 0
@@ -456,8 +492,8 @@ build_relay_cli() {
         echo "error: failed to build moq-relay / moq-cli" >&2
         exit 1
     }
-    if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 ]]; then
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail)
+    if [[ "$MEDIA" -eq 0 ]]; then
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-audio)
     fi
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
     # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
@@ -681,7 +717,16 @@ prepare_gst() {
         GST_REGISTRY_1_0="$HARNESS_RUN/gst-registry.bin" \
         gst-inspect-1.0 moq 2>/dev/null | grep -qE '^[[:space:]]+moqsrc:'; then
         mark_broken gst "moqsrc not exposed (plugin failed to load against this GStreamer)"
+        return
     fi
+    # The audio check decodes through these, from the system's plugins.
+    local factory
+    for factory in decodebin opusdec audioconvert identity filesink; do
+        GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" gst-inspect-1.0 "$factory" >/dev/null 2>&1 || {
+            mark_broken gst "GStreamer has no $factory"
+            return
+        }
+    done
 }
 
 # ── setup ───────────────────────────────────────────────────────────────────
@@ -837,40 +882,82 @@ ffmpeg_h264() {
         -f h264 -
 }
 
+# An ffmpeg audio source playing <tone>: one 0.5-amplitude sine per channel, at 48 kHz.
+# shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
+tone_source() {
+    local hz tones exprs=() layout=mono
+    IFS=',' read -r -a tones <<<"$1"
+    for hz in "${tones[@]}"; do exprs+=("0.5*sin(2*PI*$hz*t)"); done
+    [[ "${#exprs[@]}" -eq 1 ]] || layout=stereo
+    local IFS='|'
+    printf 'aevalsrc=%s:s=48000:c=%s' "${exprs[*]}" "$layout"
+}
+
+# The Rust CLI's input: the same picture plus <tone> as Opus, both in fragmented MP4, so its
+# cells also cover moq-mux's fMP4 Opus import.
+# shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
+ffmpeg_fmp4() {
+    ffmpeg -hide_banner -loglevel error -re -f lavfi -i "testsrc=size=${SIZE}:rate=${FPS}" \
+        -re -f lavfi -i "$(tone_source "$1")" \
+        -c:v libx264 -profile:v baseline -preset ultrafast -pix_fmt yuv420p \
+        -x264-params "keyint=${FPS}:min-keyint=${FPS}:scenecut=0" \
+        -c:a libopus -b:a 128k \
+        -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 -
+}
+
+# The browser's microphone: <tone> as a WAV Chromium loops. Ten seconds is a whole number of
+# cycles of any whole-Hz tone, so the loop is seamless.
+# shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
+tone_wav() {
+    local wav
+    wav="$HARNESS_RUN/tone-${1//,/-}.wav"
+    [[ -f "$wav" ]] || ffmpeg -hide_banner -loglevel error -f lavfi -i "$(tone_source "$1"):d=10" -c:a pcm_s16le "$wav"
+    printf '%s' "$wav"
+}
+
 # The publisher pipeline, run in a process group of its own by `harness_spawn`
 # so reaping it takes ffmpeg with it. Every non-browser publisher consumes the
 # same ffmpeg Annex-B stream on stdin; the client frames it (moq-cli / the FFI
 # importers only frame-and-forward).
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 run_publisher() {
-    local lang="$1" broadcast="$2" url="$3"
+    local lang="$1" broadcast="$2" url="$3" tone="$4"
     client_flags "$lang"
     case "$lang" in
         rust)
             # A finished import stays up for its max-age; `stop_publisher` allows 10 s to close.
-            ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \
-                --broadcast "$broadcast" import --max-age 1s avc3
+            # Released CLIs (the wire-compat lanes) keep the video-only Annex-B input.
+            if [[ "$AUDIO" -eq 1 ]]; then
+                ffmpeg_fmp4 "$tone" | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \
+                    --broadcast "$broadcast" import --max-age 1s fmp4
+            else
+                ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \
+                    --broadcast "$broadcast" import --max-age 1s avc3
+            fi
             ;;
         python)
             ffmpeg_h264 | "$PY" "$CLIENTS/python/interop.py" \
-                publish --url "$url" --broadcast "$broadcast" ${FLAGS[@]+"${FLAGS[@]}"}
+                publish --url "$url" --broadcast "$broadcast" --tone "$tone" ${FLAGS[@]+"${FLAGS[@]}"}
             ;;
         go)
-            ffmpeg_h264 | "$GO_INTEROP" publish --url "$url" --broadcast "$broadcast" ${FLAGS[@]+"${FLAGS[@]}"}
+            ffmpeg_h264 | "$GO_INTEROP" publish --url "$url" --broadcast "$broadcast" --tone "$tone" ${FLAGS[@]+"${FLAGS[@]}"}
             ;;
         cpp)
-            ffmpeg_h264 | "$CPP_INTEROP" publish --url "$url" --broadcast "$broadcast" ${FLAGS[@]+"${FLAGS[@]}"}
+            ffmpeg_h264 | "$CPP_INTEROP" publish --url "$url" --broadcast "$broadcast" --tone "$tone" ${FLAGS[@]+"${FLAGS[@]}"}
             ;;
         js-native)
             # exec, so the client leads the group and `stop_publisher` waits for its own close.
             exec bun "$INTEROP_COMPAT_CLIENT/client.ts" publish "$url" "$broadcast"
             ;;
         js)
-            # Headless Chromium encodes its own H.264 from a fake camera via
-            # WebCodecs (lazily, once a subscriber creates demand). exec, so the
-            # driver leads the group and `stop_publisher` waits for its own close.
+            # Headless Chromium encodes its own H.264 from a fake camera, and Opus from a
+            # fake microphone playing the tone, via WebCodecs (lazily, once a subscriber
+            # creates demand). exec, so the driver leads the group and `stop_publisher`
+            # waits for its own close.
+            local wav
+            wav=$(tone_wav "$tone")
             cd "$CLIENTS/js" && exec bun driver.ts publish \
-                --url "$url" --broadcast "$broadcast" ${FLAGS[@]+"${FLAGS[@]}"}
+                --url "$url" --broadcast "$broadcast" --audio-file "$wav" ${FLAGS[@]+"${FLAGS[@]}"}
             ;;
         *)
             echo "unknown publisher: $lang" >&2
@@ -879,12 +966,13 @@ run_publisher() {
     esac
 }
 
-# start_publisher <round> <lang> <broadcast> <url>, logging to pub-<round>.log.
-# Sets global PUB_PID to the publisher's process group leader.
+# start_publisher <round> <lang> <broadcast> <url> [tone], logging to pub-<round>.log. The tone
+# defaults to the one subscribers expect from <lang>. Sets global PUB_PID to the publisher's
+# process group leader.
 PUB_PID=""
 start_publisher() {
-    local round="$1" lang="$2" broadcast="$3" url="$4"
-    harness_spawn "pub-$round" "$LOGS/pub-$round.log" run_publisher "$lang" "$broadcast" "$url"
+    local round="$1" lang="$2" broadcast="$3" url="$4" tone="${5:-$(publisher_tone "$2")}"
+    harness_spawn "pub-$round" "$LOGS/pub-$round.log" run_publisher "$lang" "$broadcast" "$url" "$tone"
     PUB_PID="$HARNESS_PID"
 }
 
@@ -937,10 +1025,75 @@ observe_group() {
         --timeout "$TIMEOUT" --track-file "$HARNESS_RUN/$broadcast.track" "$@")
 }
 
+# The GStreamer subscriber with audio: moqsrc's video_0 must deliver a byte, and audio_0 decodes
+# through decodebin to <out>.pcm while an identity logs each decoded buffer's timestamp and size.
+# Once enough of both has landed, an interrupt makes gst-launch stop the pipeline and close its
+# session. Not with -e: moqsrc does not end its pads on an EOS sent into the pipeline. The log,
+# trimmed to the buffers the file holds, becomes <out>.txt, the layout tone.py reads.
+# shellcheck disable=SC2329  # reached from run_subscriber, which 'harness_spawn' invokes
+run_gst_audio() {
+    local url="$1" broadcast="$2" out="$3" tone="$4" tones pid want deadline version
+    version=$(cell_version gst)
+    IFS=',' read -r -a tones <<<"$tone"
+    # At 48 kHz, f32: a stop condition only. tone.py judges whatever rate and layout decoded.
+    want=$((AUDIO_MS * 48 * 4 * ${#tones[@]}))
+    # SECONDS counts whole seconds, so a fractional timeout rounds up rather than down to nothing.
+    deadline=$((SECONDS + ${TIMEOUT%.*}))
+    [[ "$TIMEOUT" != *.* ]] || deadline=$((deadline + 1))
+    GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
+        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+versions="$version"} \
+        s.video_0 ! filesink location="$out.video" buffer-mode=2 \
+        s.audio_0 ! decodebin ! audioconvert ! audio/x-raw,format=F32LE,layout=interleaved \
+        ! identity name=frames silent=false ! filesink location="$out.pcm" buffer-mode=2 >"$out.gst" 2>&1 &
+    pid=$!
+    until [[ -s "$out.video" && "$(wc -c <"$out.pcm" 2>/dev/null || echo 0)" -ge "$want" ]]; do
+        if ! kill -0 "$pid" 2>/dev/null || ((SECONDS >= deadline)); then
+            kill -KILL "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            echo "gst: no video or not enough audio within ${TIMEOUT}s"
+            tail -n 20 "$out.gst"
+            return 1
+        fi
+        sleep 0.1
+    done
+    kill -INT "$pid"
+    # Shutdown shares the cell's budget, with the same 3 s grace `timeout -k 3` gives the others.
+    while kill -0 "$pid" 2>/dev/null && ((SECONDS < deadline + 3)); do sleep 0.1; done
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" || {
+        echo "gst-launch did not stop cleanly on an interrupt"
+        tail -n 20 "$out.gst"
+        return 1
+    }
+    python3 - "$out" <<'PYCODE'
+import os, re, sys
+out = sys.argv[1]
+text = open(f"{out}.gst").read()
+caps = re.search(r"GstIdentity:frames\.GstPad:src: caps = audio/x-raw, (.*)", text)
+assert caps, "no decoded audio caps in the gst log"
+rate = int(re.search(r"rate=\(int\)(\d+)", caps[1])[1])
+channels = int(re.search(r"channels=\(int\)(\d+)", caps[1])[1])
+# The pipeline stopped mid-stream, so the file may lack the last buffers the identity logged.
+held, kept, lines = os.path.getsize(f"{out}.pcm"), 0, [f"{rate} {channels}"]
+for size, h, m, s in re.findall(r"last-message = chain.*?\((\d+) bytes, dts: [^,]*, pts: (\d+):(\d+):([\d.]+)", text):
+    if kept + int(size) > held:
+        break
+    kept += int(size)
+    pts = round((int(h) * 3600 + int(m) * 60 + float(s)) * 1_000_000)
+    lines.append(f"{pts} {int(size) // (4 * channels)}")
+os.truncate(f"{out}.pcm", kept)
+open(f"{out}.txt", "w").write("\n".join(lines) + "\n")
+PYCODE
+}
+
+# run_subscriber <lang> <broadcast> <url> [audio prefix] [tone]: with $AUDIO, every subscriber
+# but the browser also decodes $AUDIO_MS of audio to <audio prefix>.{txt,pcm} for tone.py, and
+# the browser checks <tone> itself.
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 run_subscriber() {
-    local lang="$1" broadcast="$2" url="$3" publisher="${4:-}"
+    local lang="$1" broadcast="$2" url="$3" audio_out="${4:-}" tone="${5:-}" audio=()
     client_flags "$lang"
+    if [[ "$AUDIO" -eq 1 ]]; then audio=(--audio-out "$audio_out" --audio-ms "$AUDIO_MS"); fi
     case "$lang" in
         rust)
             # moq-cli only handles SIGINT, so -k forces SIGKILL if it ignores the
@@ -994,23 +1147,31 @@ PYCODE
                 [[ -s "$HARNESS_RUN/$broadcast.raw" ]]
                 return
             fi
-            local n
+            # The CLI has no PCM output, so moq-audio decodes the audio in a client of its own,
+            # alongside the CLI so the cell stays within one timeout.
+            local n audio_pid="" audio_status=0
+            if [[ "$AUDIO" -eq 1 ]]; then
+                timeout -k 3 "$TIMEOUT" "$TARGET_BASE/$PROFILE/examples/interop-audio" \
+                    "$url" "$broadcast" "$audio_out" "$AUDIO_MS" "$(cell_version rust)" &
+                audio_pid=$!
+            fi
             n=$(RUST_LOG="$CLI_LOG" timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$url" \
                 --connect-version "$(cell_version rust)" --broadcast "$broadcast" export fmp4 | head -c 1 | wc -c | tr -d ' ' || true)
-            [[ "${n:-0}" -ge 1 ]]
+            [[ -z "$audio_pid" ]] || wait "$audio_pid" || audio_status=$?
+            [[ "${n:-0}" -ge 1 && "$audio_status" -eq 0 ]]
             ;;
         python)
             "$PY" "$CLIENTS/python/interop.py" \
-                subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"}
+                subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"} ${audio[@]+"${audio[@]}"}
             ;;
         go)
-            "$GO_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"}
+            "$GO_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"} ${audio[@]+"${audio[@]}"}
             ;;
         cpp)
-            "$CPP_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"}
+            "$CPP_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"} ${audio[@]+"${audio[@]}"}
             ;;
         c)
-            "$C_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"}
+            "$C_INTEROP" subscribe --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"} ${audio[@]+"${audio[@]}"}
             ;;
         gst)
             # moqsrc exposes each rendition as a Sometimes pad (video_%u / audio_%u),
@@ -1025,6 +1186,10 @@ PYCODE
             # (which provides filesink); a private registry keeps the scan off the
             # user's cache. buffer-mode=2 makes filesink unbuffered so the first frame
             # reaches head immediately.
+            if [[ "$AUDIO" -eq 1 ]]; then
+                run_gst_audio "$url" "$broadcast" "$audio_out" "$tone"
+                return
+            fi
             local n version
             version=$(cell_version gst)
             n=$(
@@ -1038,23 +1203,20 @@ PYCODE
             [[ "${n:-0}" -ge 1 ]]
             ;;
         js)
-            # Headless Chromium decodes and renders via WebCodecs, then drives
-            # the real player's pause/resume controls. Every publisher but the
-            # Rust CLI carries audio (the browser from a fake microphone, the
-            # FFI clients from a synthetic Opus tone), so validate audio there.
-            if [[ "$publisher" != "rust" ]]; then FLAGS+=(--expect-audio); fi
+            # Headless Chromium decodes and renders via WebCodecs, checks the tone on each
+            # channel the player outputs, then drives the real player's pause/resume controls.
             (cd "$CLIENTS/js" && bun driver.ts subscribe \
-                --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"})
+                --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" --tone "$tone" ${FLAGS[@]+"${FLAGS[@]}"})
             ;;
         js-native-bun)
             # Native @moq/net via moq's WebTransport polyfill, under bun.
             run_native bun "$NATIVE_SCRIPT" subscribe \
-                --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"}
+                --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"} ${audio[@]+"${audio[@]}"}
             ;;
         js-native-node)
             # Same, under node (tsx runs the TS directly).
             run_native node --import tsx "$NATIVE_SCRIPT" subscribe \
-                --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"}
+                --url "$url" --broadcast "$broadcast" --timeout "$TIMEOUT" ${FLAGS[@]+"${FLAGS[@]}"} ${audio[@]+"${audio[@]}"}
             ;;
         *)
             echo "unknown subscriber: $lang" >&2
@@ -1075,30 +1237,41 @@ overall=0
 # creeping up on $TIMEOUT is a near-miss worth seeing before it fails.
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 run_cell() {
-    local pub="$1" sub="$2" broadcast="$3" url="$4" started=$SECONDS status=0
+    local pub="$1" sub="$2" broadcast="$3" url="$4" tone="$5" started=$SECONDS status=0
+    local decoded="$LOGS/$pub-$sub-audio"
     # `|| status=$?` rather than a bare call: under `set -e` a failing subscriber
     # would exit before it recorded anything, and a failure is exactly when the
     # duration is worth reading.
-    run_subscriber "$sub" "$broadcast" "$url" "$pub" || status=$?
+    run_subscriber "$sub" "$broadcast" "$url" "$decoded" "$tone" || status=$?
+    # The browser judges the tone in its page; every other subscriber leaves its decode here.
+    if [[ "$status" -eq 0 && "$AUDIO" -eq 1 && "$sub" != js ]]; then
+        python3 "$INTEROP_DIR/tone.py" --tone "$tone" "$decoded" || status=$?
+    fi
     echo "$((SECONDS - started))" >"$LOGS/$pub-$sub.secs"
     return "$status"
 }
 
-# run_round <round> <broadcast> <pub_pid> <want_pass> <from>: every subscriber dials with a
-# token for <broadcast> alone (see subscribe_grant), and must see data (want_pass=1) or
-# time out (0).
+# run_round <round> <broadcast> <pub_pid> <expect> <from>: every subscriber dials with a
+# token for <broadcast> alone (see subscribe_grant), and must see media with the tone its
+# publisher sends (expect=media), time out (nothing), or fail its audio check (wrong-tone).
 # <round> names the publisher in the output and the logs, and <from> is the relay log
 # line the round's connections start on.
 run_round() {
-    local pub="$1" broadcast="$2" pub_pid="$3" want_pass="$4" from="$5"
-    local pids=() names=() i sub sub_url sub_grant why
-    # The report's case: media must flow, or (want_pass=0) the token or the missing
-    # publisher must keep it from flowing.
-    local case=media publisher="${pub%-denied}"
-    if [[ "$want_pass" -eq 0 ]]; then
+    local pub="$1" broadcast="$2" pub_pid="$3" expect="$4" from="$5"
+    local pids=() names=() i sub sub_url sub_grant why tone
+    # A round is named after its publisher's language, plus `-denied` or `-swapped` for a control.
+    local publisher="${pub%-denied}"
+    publisher="${publisher%-swapped}"
+    # The report's case: media must flow, the token or the missing publisher must keep it from
+    # flowing, or every subscriber must refuse the swapped tone as the wrong tone.
+    local case=media
+    if [[ "$expect" == nothing ]]; then
         case=unauthorized
         [[ "$pub" != none ]] || case="no publisher"
+    elif [[ "$expect" == wrong-tone ]]; then
+        case="wrong tone"
     fi
+    tone=$(publisher_tone "$publisher")
     sub_url=$(token_url --subscribe "$(subscribe_grant "$broadcast")")
     sub_grant=$(grant_line "" "**/$broadcast")
     for sub in "${SUB_LIST[@]}"; do
@@ -1108,13 +1281,13 @@ run_round() {
             overall=1
             continue
         fi
-        harness_spawn "$pub-$sub" "$LOGS/$pub-$sub.log" run_cell "$pub" "$sub" "$broadcast" "$sub_url"
+        harness_spawn "$pub-$sub" "$LOGS/$pub-$sub.log" run_cell "$pub" "$sub" "$broadcast" "$sub_url" "$tone"
         pids+=("$HARNESS_PID")
         names+=("$sub")
     done
     # A publisher that streams forever should still be alive; if it died, the
     # subscriber failures below are a publisher bug, so surface its log.
-    if [[ "$want_pass" -eq 1 && -n "$pub_pid" ]] && ! kill -0 "$pub_pid" 2>/dev/null; then
+    if [[ "$expect" != nothing && -n "$pub_pid" ]] && ! kill -0 "$pub_pid" 2>/dev/null; then
         echo "  WARN  publisher '$pub' exited early:"
         sed 's/^/        /' "$LOGS/pub-$pub.log" 2>/dev/null || true
     fi
@@ -1123,20 +1296,32 @@ run_round() {
     # and bash 3.2 (macOS) errors on "${!pids[@]}" for an empty array under `set -u`.
     for i in ${pids[@]+"${!pids[@]}"}; do
         why=""
-        if harness_wait "${pids[$i]}"; then got=1; else got=0; fi
+        local log="$LOGS/$pub-${names[$i]}.log" outcome=nothing
+        if harness_wait "${pids[$i]}"; then
+            outcome=media
+        elif grep -q '^audio check failed: wrong tone' "$log"; then
+            # Media flowed and decoded, but not into the publisher's tone.
+            outcome=wrong-tone
+        fi
         elapsed=$(cat "$LOGS/$pub-${names[$i]}.secs" 2>/dev/null || echo "?")
-        local cell=(case="$case" publisher="$publisher" subscriber="${names[$i]}" log="$LOGS/$pub-${names[$i]}.log")
+        local cell=(case="$case" publisher="$publisher" subscriber="${names[$i]}" log="$log")
         [[ "$elapsed" == "?" ]] || cell+=(seconds="$elapsed")
-        if [[ "$got" -eq "$want_pass" ]] && why=$(check_grant "${names[$i]}" "$LOGS/$pub-${names[$i]}.log" "$sub_grant"); then
+        if [[ "$outcome" == "$expect" ]] && why=$(check_grant "${names[$i]}" "$log" "$sub_grant"); then
             echo "  PASS  $pub -> ${names[$i]} (${elapsed}s)"
             record pass "${cell[@]}"
             round_pass=1
         else
             echo "  FAIL  $pub -> ${names[$i]} (${elapsed}s of ${TIMEOUT}s)${why:+ $why}"
-            sed 's/^/        /' "$LOGS/$pub-${names[$i]}.log" 2>/dev/null || true
-            if [[ -z "$why" && "$want_pass" -eq 1 ]]; then
+            sed 's/^/        /' "$log" 2>/dev/null || true
+            if [[ -n "$why" ]]; then
+                :
+            elif [[ "$expect" == media ]] && grep -q '^audio check failed' "$log"; then
+                why=$(grep -m 1 '^audio check failed' "$log")
+            elif [[ "$expect" == media ]]; then
                 why="no data within ${TIMEOUT}s"
-            elif [[ -z "$why" ]]; then
+            elif [[ "$expect" == wrong-tone ]]; then
+                why="did not fail its audio check (outcome: $outcome)"
+            else
                 why="saw data it should not have"
             fi
             record fail "${cell[@]}" detail="$why"
@@ -1145,18 +1330,17 @@ run_round() {
     done
     # Every leg failing points at the publisher; surface its log even when the
     # process is still alive (e.g. connected and announcing but producing nothing).
-    if [[ "$want_pass" -eq 1 && "$round_pass" -eq 0 && ${#pids[@]} -gt 0 && -n "$pub_pid" ]]; then
+    if [[ "$expect" != nothing && "$round_pass" -eq 0 && ${#pids[@]} -gt 0 && -n "$pub_pid" ]]; then
         echo "  INFO  publisher '$pub' log:"
         sed 's/^/        /' "$LOGS/pub-$pub.log" 2>/dev/null || true
     fi
     # `stop_publisher` reaps it, retiring the entry, so teardown never signals this
     # now-reaped (possibly recycled) PID again.
     if [[ -n "$pub_pid" ]]; then
-        # A round is named after its publisher's language, plus `-denied` for the refused one.
-        stop_publisher "$pub_pid" "${pub%-denied}"
+        stop_publisher "$pub_pid" "$publisher"
     fi
     # A round that expects no data ends its subscribers by timing out, which is its point.
-    [[ "$want_pass" -eq 1 && "$IN_TREE" -eq 1 ]] || return 0
+    [[ "$expect" == media && "$IN_TREE" -eq 1 ]] || return 0
     if check_idle_outs "$pub" "$from"; then
         record pass case="relay close" publisher="$publisher" log="$HARNESS_RUN/relay.log"
     else
@@ -1410,7 +1594,7 @@ run_matrix() {
         # The exact broadcast, not its subtree.
         from=$(relay_next_line)
         start_publisher "$pub" "$pub" "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")"
-        run_round "$pub" "$broadcast" "$PUB_PID" 1 "$from"
+        run_round "$pub" "$broadcast" "$PUB_PID" media "$from"
         if why=$(check_grant "$pub" "$LOGS/pub-$pub.log" "$(grant_line "$broadcast" "")"); then
             if prints_grant "$pub"; then
                 echo "  PASS  $pub grant"
@@ -1423,6 +1607,17 @@ run_matrix() {
         fi
     done
 
+    # Negative control for the tone checks: the Rust CLI swaps its channels' tones, which every
+    # subscriber decodes fine but must refuse as the wrong tone, proving each one's check can fail.
+    # The checks are the same in every pass, so the auto pass covers them.
+    if [[ "$AUDIO" -eq 1 && "$VERSION" == auto ]]; then
+        broadcast="interop-swapped-$$-${RANDOM}.hang"
+        echo "=== publisher: rust  broadcast: $broadcast (tone $SWAPPED_TONE, subscribers expect $STEREO_TONE) ==="
+        from=$(relay_next_line)
+        start_publisher rust-swapped rust "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$SWAPPED_TONE"
+        run_round rust-swapped "$broadcast" "$PUB_PID" wrong-tone "$from"
+    fi
+
     # A publisher whose token excludes its broadcast must abort its session with
     # Unauthorized naming the path, and no subscriber may see the broadcast.
     for pub in "${PUB_LIST[@]}"; do
@@ -1432,7 +1627,7 @@ run_matrix() {
         echo "=== publisher: $pub  broadcast: $broadcast (token grants only $allowed) ==="
         from=$(relay_next_line)
         start_publisher "$pub-denied" "$pub" "$broadcast" "$(token_url --publish "$allowed")"
-        run_round "$pub-denied" "$broadcast" "$PUB_PID" 0 "$from"
+        run_round "$pub-denied" "$broadcast" "$PUB_PID" nothing "$from"
         log="$LOGS/pub-$pub-denied.log"
         if ! check_denied "$log" "$broadcast"; then
             echo "  FAIL  $pub publisher did not fail with Unauthorized naming $broadcast:"
@@ -1522,7 +1717,7 @@ elif [[ "$NEGATIVE" -eq 1 ]]; then
     # Negative control: no publisher. Every subscriber must FAIL (time out with
     # no data), proving the harness can actually report failure.
     echo "=== negative control: subscribers expect NO data ==="
-    run_round "none" "interop-missing-$$-$RANDOM.hang" "" 0 "$(relay_next_line)"
+    run_round "none" "interop-missing-$$-$RANDOM.hang" "" nothing "$(relay_next_line)"
 else
     for VERSION in "${VERSION_LIST[@]}"; do
         LOGS="$HARNESS_RUN"

@@ -92,7 +92,7 @@ use crate::catalog::{IntoRendition, Listing, RenditionConfig};
 /// Start from [`default`](Default::default) and chain the setters. The mode is not in here: it is
 /// fixed by which producer you create. To list the track in an application's own catalog section
 /// instead of `json`, pass that section's entry (see [`IntoRendition`]).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Config {
 	/// DEFLATE-compress the track's frames, advertised as
@@ -104,12 +104,23 @@ pub struct Config {
 	/// An optional identifier for the shape of each value, typically a JSON Schema URL.
 	pub schema: Option<String>,
 
-	/// Override the snapshot encoder's [`delta_ratio`](moq_json::snapshot::Config::delta_ratio),
-	/// or `None` for its default. Only a [`Snapshot`] reads it: a stream has no deltas.
+	/// Whether the snapshot encoder emits merge-patch deltas (see
+	/// [`moq_json::snapshot::Config::deltas`]). Only a [`Snapshot`] reads it: a stream has no
+	/// deltas. Defaults to `true`.
 	///
 	/// Not part of the catalog entry: deltas are a property of the frames, which every consumer
 	/// decodes the same way, so a reader needs nothing from the entry to follow them.
-	pub delta_ratio: Option<u32>,
+	pub deltas: bool,
+}
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			compression: false,
+			schema: None,
+			deltas: true,
+		}
+	}
 }
 
 impl Config {
@@ -125,9 +136,9 @@ impl Config {
 		self
 	}
 
-	/// Set [`delta_ratio`](Self::delta_ratio) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_delta_ratio(mut self, delta_ratio: u32) -> Self {
-		self.delta_ratio = Some(delta_ratio);
+	/// Set [`deltas`](Self::deltas) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_deltas(mut self, deltas: bool) -> Self {
+		self.deltas = deltas;
 		self
 	}
 }
@@ -157,14 +168,14 @@ fn prepare(config: &mut impl AsMut<JsonConfig>, mode: Mode) -> crate::Result<boo
 	crate::compression(json.compression.as_ref())
 }
 
-/// The snapshot encoder ratio on a [`Config`] builder, if `config` is one.
+/// Whether the snapshot encoder emits deltas: the [`Config`] builder's choice, if `config` is one.
 ///
-/// [`IntoRendition`] only returns the catalog entry, and this ratio is not a catalog field.
+/// [`IntoRendition`] only returns the catalog entry, and this switch is not a catalog field.
 /// Downcast keeps it on the existing builder instead of a new trait method.
-fn delta_ratio_of<C: std::any::Any>(config: &C) -> Option<u32> {
+fn deltas_of<C: std::any::Any>(config: &C) -> bool {
 	(config as &dyn std::any::Any)
 		.downcast_ref::<Config>()
-		.and_then(|config| config.delta_ratio)
+		.is_none_or(|config| config.deltas)
 }
 
 /// Publishes a latest-value JSON track, advertised in the catalog for as long as this handle lives.
@@ -187,16 +198,13 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 	where
 		C: IntoRendition<E, JsonConfig> + std::any::Any,
 	{
-		// Read before `into_rendition` consumes the builder. Only [`Config`] carries a ratio;
-		// a custom section entry has none, and the default encoder ratio applies.
-		let delta_ratio = delta_ratio_of(&config);
+		// Read before `into_rendition` consumes the builder. Only [`Config`] carries the switch;
+		// a custom section entry has none, and the encoder default applies.
+		let deltas = deltas_of(&config);
 		let mut config = config.into_rendition();
-		let mut json = moq_json::snapshot::Config::default();
+		let mut json = moq_json::snapshot::Config::default().with_deltas(deltas);
 		if prepare(&mut config, Mode::Snapshot)? {
 			json.compression = moq_json::Compression::Deflate;
-		}
-		if let Some(delta_ratio) = delta_ratio {
-			json.delta_ratio = delta_ratio;
 		}
 		let inner = moq_json::snapshot::Producer::new(track, json);
 		let listing = Listing::new(rendition, config)?;
@@ -220,6 +228,19 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 	/// A watch-only handle to whether this track has subscribers.
 	pub fn demand(&self) -> moq_net::track::Demand {
 		self.inner.demand()
+	}
+
+	/// Wait for a joiner to want a fresh group, then restate the value in one; see
+	/// [`moq_json::snapshot::Producer::refresh`].
+	///
+	/// A restatement is not a new value, so it measures neither `jitter` nor `delay`.
+	pub async fn refresh(&self) -> crate::Result<()> {
+		Ok(self.inner.refresh().await?)
+	}
+
+	/// Poll for [`refresh`](Self::refresh), for an owner driving the producer synchronously.
+	pub fn poll_refresh(&self, waiter: &kio::Waiter) -> std::task::Poll<crate::Result<()>> {
+		self.inner.poll_refresh(waiter).map_err(Into::into)
 	}
 
 	/// Publish a new value, superseding the previous one.
@@ -602,16 +623,16 @@ mod test {
 		}
 	}
 
-	/// `delta_ratio` is an encoder setting on [`Config`], not a catalog field. A ratio of 0
-	/// publishes each value as its own group; a positive ratio keeps the next value in that group.
+	/// `deltas` is an encoder setting on [`Config`], not a catalog field. Without deltas
+	/// each value is its own group; with them the next value joins that group.
 	#[test]
-	fn a_config_delta_ratio_reaches_the_encoder() {
+	fn a_config_deltas_switch_reaches_the_encoder() {
 		let (mut broadcast, catalog) = catalog();
 		let mut full = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "full"), Config::default().with_delta_ratio(0))
+			.json_snapshot::<Value>(track(&mut broadcast, "full"), Config::default().with_deltas(false))
 			.unwrap();
 		let mut delta = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "delta"), Config::default().with_delta_ratio(100))
+			.json_snapshot::<Value>(track(&mut broadcast, "delta"), Config::default())
 			.unwrap();
 
 		let mut full_track = full.consume();
@@ -624,8 +645,8 @@ mod test {
 		delta.finish().unwrap();
 
 		// The default subscription budget keeps only the latest group, aging untimed groups by
-		// wall clock. Ratio 0 rolled a new group for the second value, so that group holds one
-		// frame. A positive ratio appends the second value to the same group.
+		// wall clock. Without deltas the second value rolled a new group, so that group holds one
+		// frame. With deltas the second value joins the same group.
 		assert_eq!(ready_groups(&mut full_track), vec![1]);
 		assert_eq!(ready_groups(&mut delta_track), vec![2]);
 	}

@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Groups roll on joiner demand
+
+`Snapshot` `deltaRatio` and `Window` `opRatio` are replaced by `deltas` and `ops` booleans (both default `true`).
+Pass `deltas: false` where you passed `deltaRatio: 0`, and `ops: false` where you passed `opRatio: 0`.
+A group no longer rolls on a byte budget: create the track with a `refresh` ratio (`8` matches the old default), and the producer restates the value or window in a new group when a joiner asks.
+Without a ratio a group rolls only at its frame and byte caps.
+An `Encoder` user restates with `encoder.snapshot()` once `demand().wanted` passes the largest group it wrote.
+
+`encoder.value` (and so `producer.mutate()`) now holds the last committed value: a rejected publish no longer carries into the next edit, so retry the edit yourself if you still want it.
+
 ### Duplicate keys are refused
 
 Every decoder throws `DuplicateKey` for a frame in which a JSON object repeats a key, where `JSON.parse` used to keep the last copy.
