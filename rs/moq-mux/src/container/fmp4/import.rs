@@ -397,7 +397,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 			let timescale = moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?;
 			let output = match self.passthrough {
-				true => Output::Passthrough(Box::new(self.init_passthrough(trak, &moov, &reserved, kind, timescale)?)),
+				true => Output::Passthrough(Box::new(
+					self.init_passthrough(trak, &moov, &reserved, kind, timescale)?,
+				)),
 				false => self.init_unwrap(trak, &moov, &reserved, kind)?,
 			};
 
@@ -845,7 +847,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(config)
 	}
 
-
 	/// Whether the fragments in `moof` open a new segment, and so roll a group on every track.
 	///
 	/// A segment is the unit a group carries, which is what lets audio (whose samples are all
@@ -1058,7 +1059,9 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 				end = Some(end.map_or(sample_end, |max: Timestamp| max.max(sample_end)));
 				earliest = Some(earliest.map_or(timestamp, |min: Timestamp| min.min(timestamp)));
 
-				let next = offset.checked_add(sample.size as usize).ok_or(Error::InvalidDataOffset)?;
+				let next = offset
+					.checked_add(sample.size as usize)
+					.ok_or(Error::InvalidDataOffset)?;
 				if next > len {
 					return Err(Error::InvalidDataOffset.into());
 				}
@@ -1082,7 +1085,12 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 		// offsets disagree with the actual data and no sample can be addressed safely.
 		let start = start.unwrap_or(0);
 		if !(start <= offset && offset <= len) {
-			return Err(Error::SampleRangeOutOfBounds { start, end: offset, len }.into());
+			return Err(Error::SampleRangeOutOfBounds {
+				start,
+				end: offset,
+				len,
+			}
+			.into());
 		}
 
 		Ok(Run {

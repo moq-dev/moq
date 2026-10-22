@@ -277,14 +277,14 @@ pub enum MoqVideoFormat {
 pub enum MoqContainerFormat {
 	/// Fragmented MP4 / CMAF, split into one frame per sample.
 	Fmp4,
-	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
-	Cmaf,
 	/// Matroska / WebM.
 	Mkv,
 	/// MPEG-2 transport stream.
 	Ts,
 	/// Flash Video, as used by RTMP.
 	Flv,
+	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
+	Cmaf,
 }
 
 /// What an audio publish needs: a format, its codec init bytes, and an optional label.

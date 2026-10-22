@@ -678,7 +678,7 @@ fn test_av1_catalog() {
 		(color.primaries, color.range),
 		(None, Some(hang::catalog::Range::Limited))
 	);
-		let Container::Cmaf { init, .. } = &video.container else {
+	let Container::Cmaf { init, .. } = &video.container else {
 		panic!("expected Cmaf container");
 	};
 	let (ftyp, moov) = decode_init(init);
@@ -750,7 +750,7 @@ fn test_vp9_catalog() {
 
 	let video = catalog.video.renditions.values().next().unwrap();
 	assert!(video.codec.to_string().starts_with("vp09."), "codec: {}", video.codec);
-		let Container::Cmaf { init, .. } = &video.container else {
+	let Container::Cmaf { init, .. } = &video.container else {
 		panic!("expected Cmaf container");
 	};
 	let (ftyp, moov) = decode_init(init);
@@ -1375,7 +1375,10 @@ async fn records_with_skew(video_offset_us: i64, passthrough: bool) -> (Vec<(u64
 async fn audio_leading_video_still_indexes_one_group_each() {
 	let expected = vec![(0, 1), (1, 2), (2, 3)];
 	for passthrough in [false, true] {
-		assert_eq!(records_with_skew(20_000, passthrough).await, (expected.clone(), expected.clone()));
+		assert_eq!(
+			records_with_skew(20_000, passthrough).await,
+			(expected.clone(), expected.clone())
+		);
 	}
 }
 
@@ -1384,7 +1387,10 @@ async fn audio_leading_video_still_indexes_one_group_each() {
 async fn audio_lagging_video_still_indexes_one_group_each() {
 	let expected = vec![(0, 1), (1, 2), (2, 3)];
 	for passthrough in [false, true] {
-		assert_eq!(records_with_skew(-20_000, passthrough).await, (expected.clone(), expected.clone()));
+		assert_eq!(
+			records_with_skew(-20_000, passthrough).await,
+			(expected.clone(), expected.clone())
+		);
 	}
 }
 
