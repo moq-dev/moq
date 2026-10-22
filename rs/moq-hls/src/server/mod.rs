@@ -76,16 +76,22 @@ pub struct Server {
 
 struct Inner {
 	origin: moq_net::origin::Consumer,
+	/// Watches the whole scope while the server lives, so a lazily discovering client
+	/// session asks its peer once rather than once per requested path, which an HTTP
+	/// client could otherwise name without bound.
+	_watch: moq_net::announce::Consumer,
 	config: Config,
 	broadcasters: Mutex<HashMap<String, Arc<Broadcaster>>>,
 }
 
 impl Server {
-	/// Build a server reading broadcasts from `origin`. Every request is served;
-	/// gate access by layering middleware onto [`router`](Self::router).
+	/// Build a server reading broadcasts from `origin`, which it watches whole while it
+	/// lives. Every request is served; gate access by layering middleware onto
+	/// [`router`](Self::router).
 	pub fn new(origin: moq_net::origin::Consumer, config: Config) -> Self {
 		Self {
 			inner: Arc::new(Inner {
+				_watch: origin.clone().with_hidden(true).announced(),
 				origin,
 				config,
 				broadcasters: Mutex::new(HashMap::new()),

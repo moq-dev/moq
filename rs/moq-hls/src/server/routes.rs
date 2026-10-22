@@ -1047,6 +1047,31 @@ mod tests {
 		pair.accept.abort();
 	}
 
+	/// The server watches its whole scope, so a lookup rides one request to the peer
+	/// rather than opening its own for every path an HTTP client names.
+	#[tokio::test]
+	async fn lookups_ride_the_servers_scope_watch() {
+		let pair = lite_pair().await;
+		let other = pair.pub_origin.create_broadcast("room/other").expect("other");
+		other.announce(Default::default()).expect("announce other");
+
+		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
+		let missing = tokio::time::timeout(TIMEOUT, server.broadcaster("room/missing"))
+			.await
+			.expect("lookup timed out");
+		assert!(missing.is_none());
+
+		// Nothing watches `room/other` on its own, yet the synced lookup already discovered it.
+		pair.sub_origin
+			.consume()
+			.request_broadcast("room/other", None)
+			.await
+			.expect("discovered through the scope watch");
+
+		drop(other);
+		pair.accept.abort();
+	}
+
 	/// A client asks its peer only about watched paths, so a sibling no listing covers is
 	/// asked about before it is requested, on every lite version, including those whose
 	/// announce stream marks no initial set.

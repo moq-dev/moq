@@ -25,6 +25,10 @@ pub use crate::server::Response;
 struct RouterState {
 	server: Server,
 	subscriber: moq_net::origin::Consumer,
+	/// Watches the whole subscribe scope while the router lives, so a lazily discovering
+	/// client session asks its peer once rather than once per offered path, which an
+	/// unauthenticated caller could otherwise name without bound.
+	_watch: std::sync::Arc<moq_net::announce::Consumer>,
 }
 
 /// How long WHEP negotiation waits for the broadcast's first catalog snapshot
@@ -38,7 +42,11 @@ const CATALOG_TIMEOUT: Duration = Duration::from_secs(5);
 pub fn router(server: Server, subscriber: moq_net::origin::Consumer) -> Router {
 	Router::new()
 		.route("/{*path}", post(handle).delete(delete))
-		.with_state(RouterState { server, subscriber })
+		.with_state(RouterState {
+			_watch: std::sync::Arc::new(subscriber.clone().with_hidden(true).announced()),
+			server,
+			subscriber,
+		})
 }
 
 #[cfg(feature = "server")]
@@ -112,6 +120,10 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 /// returns the SDP answer plus an opaque `resource_id` for the WHEP `Location`
 /// header. The caller must run the returned [`Response`] to drive the MoQ->RTP
 /// session. Mirrors [`whip::accept`](super::whip::accept).
+///
+/// Each call watches `broadcast` while it resolves. A caller serving many paths from one
+/// lazily discovering client session should hold an `announced()` stream over its scope,
+/// as [`router`] does, so each call rides that one watch.
 ///
 /// `offer` is the raw SDP body; the caller is responsible for checking the
 /// `Content-Type: application/sdp` request header. Fails with [`Error::InvalidSdp`]
@@ -228,25 +240,12 @@ mod tests {
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
 
-	/// A plain moq-lite client origin asks its peer only about watched paths, so resolving
-	/// a WHEP play must watch the broadcast rather than request it blind.
-	#[tokio::test]
-	async fn a_broadcast_resolves_through_a_lazy_client_session() {
-		let pub_origin = moq_tokio::origin::spawn();
+	/// A plain (lazily discovering) moq-lite client subscribing from a server that
+	/// publishes `pub_origin`, over loopback TCP.
+	async fn lazy_client(
+		pub_origin: moq_net::origin::Producer,
+	) -> (moq_net::origin::Producer, moq_tokio::Connection, tokio::task::JoinHandle<()>) {
 		let sub_origin = moq_tokio::origin::spawn();
-
-		let mut source = pub_origin.create_broadcast("cam").expect("create broadcast");
-		source
-			.announce(moq_net::origin::Route::default())
-			.expect("announce broadcast");
-		let catalog =
-			moq_mux::catalog::Producer::new(&mut source, moq_mux::catalog::Config::default()).expect("create catalog");
-		let mut opus = crate::codec::opus::Bridge::new(source, catalog, 48_000, 2).expect("create Opus bridge");
-		opus.push(Frame {
-			timestamp_us: 20_000,
-			payload: Bytes::from_static(&[0xfc, 0xff, 0xfe]),
-		})
-		.expect("publish packet");
 
 		let mut listen = moq_tokio::listen::Config::default();
 		listen.tcp.bind = Some("127.0.0.1:0".parse().expect("addr"));
@@ -274,16 +273,68 @@ mod tests {
 			.with_subscriber(sub_origin.clone())
 			.with_reconnect(false);
 		let url: url::Url = format!("tcp://{addr}/").parse().expect("url");
-		let _connection = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+		let connection = tokio::time::timeout(TIMEOUT, client.connect(url).established())
 			.await
 			.expect("connect timed out")
 			.expect("connect");
+		(sub_origin, connection, accept)
+	}
+
+	/// A plain moq-lite client origin asks its peer only about watched paths, so resolving
+	/// a WHEP play must watch the broadcast rather than request it blind.
+	#[tokio::test]
+	async fn a_broadcast_resolves_through_a_lazy_client_session() {
+		let pub_origin = moq_tokio::origin::spawn();
+
+		let mut source = pub_origin.create_broadcast("cam").expect("create broadcast");
+		source
+			.announce(moq_net::origin::Route::default())
+			.expect("announce broadcast");
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut source, moq_mux::catalog::Config::default()).expect("create catalog");
+		let mut opus = crate::codec::opus::Bridge::new(source, catalog, 48_000, 2).expect("create Opus bridge");
+		opus.push(Frame {
+			timestamp_us: 20_000,
+			payload: Bytes::from_static(&[0xfc, 0xff, 0xfe]),
+		})
+		.expect("publish packet");
+
+		let (sub_origin, _connection, accept) = lazy_client(pub_origin).await;
 
 		let resolved = super::resolve(&sub_origin.consume(), moq_net::Path::new("cam"))
 			.await
 			.expect("the broadcast resolves");
 		assert!(!resolved.catalog_codecs().is_empty());
 
+		accept.abort();
+	}
+
+	/// The router watches its whole subscribe scope, so an offer's lookup rides one
+	/// request to the peer rather than opening its own for every path a caller names.
+	#[cfg(feature = "server")]
+	#[tokio::test]
+	async fn offers_ride_the_routers_scope_watch() {
+		let pub_origin = moq_tokio::origin::spawn();
+		let other = pub_origin.create_broadcast("other").expect("create broadcast");
+		other
+			.announce(moq_net::origin::Route::default())
+			.expect("announce broadcast");
+		let (sub_origin, _connection, accept) = lazy_client(pub_origin).await;
+
+		let _router = super::router(crate::server::Server::new(Default::default()), sub_origin.consume());
+		let missing = sub_origin.consume().follow("missing").expect("follow");
+		tokio::time::timeout(TIMEOUT, missing.synced())
+			.await
+			.expect("sync timed out");
+
+		// Nothing watches `other` on its own, yet the synced lookup already discovered it.
+		sub_origin
+			.consume()
+			.request_broadcast("other", None)
+			.await
+			.expect("discovered through the scope watch");
+
+		drop(other);
 		accept.abort();
 	}
 }
