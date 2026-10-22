@@ -495,23 +495,79 @@ fn aac_track(
 			.insert(name.clone(), super::catalog::Track::new(pid));
 	}
 	drop(guard);
-	let container = crate::catalog::hang::Container::Legacy(crate::container::Kind::Data);
+	let container = crate::catalog::hang::Container::Legacy(crate::container::Kind::Audio);
 	(name, Writer::new(track, container))
 }
 
 /// Write an AAC frame at `millis` to each of `tracks`.
 fn write_aac(tracks: &mut [&mut Writer], millis: u64) {
 	for track in tracks {
-		track
-			.write(Frame {
-				timestamp: moq_net::Timestamp::from_micros(millis * 1_000).unwrap(),
-				duration: None,
-				payload: bytes::Bytes::from(vec![0x21; 16]),
-				keyframe: true,
-			})
-			.unwrap();
-		track.cut(None).unwrap();
+		write_marked(track, millis, 0x21);
 	}
+}
+
+/// Write an AAC frame at `millis` to `track`, its payload filled with `mark`.
+fn write_marked(track: &mut Writer, millis: u64, mark: u8) {
+	let mut payload = vec![mark; 16];
+	payload[0] = 0x21;
+	track
+		.write(Frame {
+			timestamp: moq_net::Timestamp::from_micros(millis * 1_000).unwrap(),
+			duration: None,
+			payload: bytes::Bytes::from(payload),
+			keyframe: true,
+		})
+		.unwrap();
+	track.cut(None).unwrap();
+}
+
+/// The marks of the frames ([`write_marked`]) that went out on `pid`, in order.
+fn marks(frames: &[Frame], pid: u16, marks: &[u8]) -> Vec<u8> {
+	let mut payload = Vec::new();
+	for packet in packets(frames).filter(|packet| self::pid(packet) == pid && packet[3] & 0x10 != 0) {
+		let at = if packet[3] & 0x20 != 0 {
+			5 + usize::from(packet[4])
+		} else {
+			4
+		};
+		payload.extend_from_slice(&packet[at..]);
+	}
+	let mut out = Vec::new();
+	for (at, run) in payload.windows(15).enumerate() {
+		let mark = run[0];
+		if marks.contains(&mark) && run.iter().all(|&byte| byte == mark) && (at == 0 || payload[at - 1] != mark) {
+			out.push(mark);
+		}
+	}
+	out
+}
+
+/// The export of `consumer`.
+async fn export_of(consumer: &moq_net::broadcast::Consumer) -> super::Export<crate::catalog::Consumer<Ext>> {
+	let source = crate::source::announced(consumer).await;
+	let opened = super::export_test::open_ts(source, crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap();
+	opened.with_delay(DELAY).with_replay()
+}
+
+/// Open the export of `consumer` once its first frame is out.
+async fn open(
+	consumer: &moq_net::broadcast::Consumer,
+	frames: &mut Vec<Frame>,
+) -> super::Export<crate::catalog::Consumer<Ext>> {
+	let mut export = export_of(consumer).await;
+	let out = tokio::time::timeout(DELAY * 2, export.next()).await;
+	frames.push(out.expect("the tables went out").unwrap().unwrap());
+	settle(&mut export, frames).await;
+	export
+}
+
+/// Take `name` out of the catalog.
+fn remove(catalog: &mut crate::catalog::Producer<Ext>, name: &str) {
+	let mut guard = catalog.modify().unwrap();
+	guard.audio.renditions.remove(name);
+	guard.ext.mpegts.tracks.remove(name);
 }
 
 /// Under sync the tables stay as laid, so a track added after them fails the export.
@@ -617,4 +673,199 @@ async fn a_pid_recorded_after_its_track_takes_the_held_frames_along() {
 		[AUDIO_PID, OTHER_AUDIO_PID].into(),
 		"no PES left on another PID"
 	);
+}
+
+/// The next frame `export` writes.
+async fn next<S: crate::catalog::Stream>(export: &mut super::Export<S>) -> Frame
+where
+	S::Ext: super::catalog::Catalog,
+{
+	let out = tokio::time::timeout(DELAY * 4, export.next()).await;
+	out.expect("a frame").unwrap().expect("the export runs on")
+}
+
+/// A track not listed yet, whose first frame is held behind the old generation's tail, takes
+/// that frame along to the PID recorded meanwhile.
+#[tokio::test(start_paused = true)]
+async fn a_pid_recorded_while_its_frame_is_held_takes_the_frame_along() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	let (_, mut first) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	for millis in (0..3_000).step_by(20) {
+		write_aac(&mut [&mut first], millis);
+	}
+	let mut frames = Vec::new();
+	let mut export = open(&consumer, &mut frames).await;
+	while export.buffered() > 0 {
+		frames.push(next(&mut export).await);
+	}
+	let (name, mut second) = aac_track(&mut broadcast, &mut catalog, None);
+	settle(&mut export, &mut frames).await;
+	write_aac(&mut [&mut second], 3_000);
+	for millis in (3_020..3_500).step_by(20) {
+		write_aac(&mut [&mut first, &mut second], millis);
+	}
+	settle(&mut export, &mut frames).await;
+	tokio::time::advance(DELAY * 2).await;
+	let held = export.hold_next().expect("a frame due");
+	assert_ne!(held, AUDIO_PID, "the second track's frame is held");
+	catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.tracks
+		.insert(name, super::catalog::Track::new(OTHER_AUDIO_PID));
+	first.finish().unwrap();
+	second.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	assert_eq!(
+		tables(&frames, OWN_PMT_PID).last().expect("a PMT").streams,
+		vec![(AUDIO, AUDIO_PID, Vec::new()), (AUDIO, OTHER_AUDIO_PID, Vec::new())]
+	);
+}
+
+/// A track taking a PID over goes out behind everything the track before it there sent, even a
+/// tail sent further ahead of its decode time than the new track's first frame: none of the
+/// old stream goes out under the PMT revised for the new one.
+#[tokio::test(start_paused = true)]
+async fn a_track_taking_a_pid_over_goes_out_behind_the_tail_before_it() {
+	const OLD: u8 = 0xa5;
+	const NEW: u8 = 0x5a;
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	let (name, mut old) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let (_, mut other) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	live(
+		&mut export,
+		&mut frames,
+		start,
+		&mut [(&mut old, OLD), (&mut other, 0x21)],
+		0,
+		3_000,
+	)
+	.await;
+
+	// The old stream's tail goes out ahead of its time, running on past where the new one starts.
+	for millis in (3_000..3_800).step_by(20) {
+		write_marked(&mut old, millis, OLD);
+	}
+	old.finish().unwrap();
+	remove(&mut catalog, &name);
+	settle(&mut export, &mut frames).await;
+	let (_, mut new) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	settle(&mut export, &mut frames).await;
+	live(
+		&mut export,
+		&mut frames,
+		start,
+		&mut [(&mut new, NEW), (&mut other, 0x21)],
+		3_000,
+		5_000,
+	)
+	.await;
+	new.finish().unwrap();
+	other.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	let marks = marks(&frames, AUDIO_PID, &[OLD, NEW]);
+	let first = marks
+		.iter()
+		.position(|&mark| mark == NEW)
+		.expect("the new stream went out");
+	assert!(marks[..first].contains(&OLD), "the old stream went out first");
+	assert!(
+		marks[first..].iter().all(|&mark| mark == NEW),
+		"the old stream's tail went out after the new one began: {marks:x?}"
+	);
+}
+
+/// A PID the PMT stops listing is gone rather than quiet, so a stream returning on it counts
+/// its silence from its own listing, not from the last unit of the stream before it.
+#[tokio::test(start_paused = true)]
+async fn a_pid_that_leaves_the_pmt_is_gone_until_it_returns() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	let (name, mut old) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let (_, mut other) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	live(
+		&mut export,
+		&mut frames,
+		start,
+		&mut [(&mut old, 0x21), (&mut other, 0x21)],
+		0,
+		2_000,
+	)
+	.await;
+	old.finish().unwrap();
+	remove(&mut catalog, &name);
+	live(&mut export, &mut frames, start, &mut [(&mut other, 0x21)], 2_000, 5_000).await;
+	assert!(!export.stats().streams.contains_key(&AUDIO_PID), "the PID left the PMT");
+	assert_eq!(
+		export.liveness(AUDIO_PID).1,
+		None,
+		"a PID the PMT left is gone, not quiet"
+	);
+
+	let (_, mut new) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	settle(&mut export, &mut frames).await;
+	live(
+		&mut export,
+		&mut frames,
+		start,
+		&mut [(&mut new, 0x21), (&mut other, 0x21)],
+		5_000,
+		7_500,
+	)
+	.await;
+	let (_, quiet) = export.liveness(AUDIO_PID);
+	assert!(
+		quiet.is_some_and(|quiet| quiet < Duration::from_secs(1)),
+		"the returned stream is quiet for {quiet:?}"
+	);
+}
+
+/// Write a frame stamped `millis`, filled with its mark, to each of `tracks` for each 20 ms
+/// from `from` to `to`, `millis` after `start`, as a live source does, the export keeping up.
+async fn live<S: crate::catalog::Stream>(
+	export: &mut super::Export<S>,
+	frames: &mut Vec<Frame>,
+	start: tokio::time::Instant,
+	tracks: &mut [(&mut Writer, u8)],
+	from: u64,
+	to: u64,
+) where
+	S::Ext: super::catalog::Catalog,
+{
+	for millis in (from..to).step_by(20) {
+		tokio::time::sleep_until(start + Duration::from_millis(millis)).await;
+		for (track, mark) in tracks.iter_mut() {
+			write_marked(track, millis, *mark);
+		}
+		settle(export, frames).await;
+	}
 }
