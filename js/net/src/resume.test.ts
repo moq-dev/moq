@@ -2148,6 +2148,34 @@ test.each(["handed out", "buffered"])("an end below a group another copy %s is r
 	}
 });
 
+test.each(["handed out", "buffered"])("an end below a datagram another copy %s is refused", async (seen) => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		ta.producer.insertDatagram(5, undefined, enc.encode("5"));
+		if (seen === "handed out") expect(hooks.tryRecvDatagram(sub).kind).toBe("datagram");
+		front.serve(b.consume());
+		await settle();
+		// The new route delivers an older datagram last, then ends the track before the old route's.
+		tb.producer.insertDatagram(2, undefined, enc.encode("2"));
+		if (seen === "handed out") expect(hooks.tryRecvDatagram(sub).kind).toBe("datagram");
+		tb.producer.finishAt({ group: 3, frame: 0 });
+		await settle();
+		expect(hooks.tryRecvDatagram(sub).kind).toBe("error");
+		expect(sub.closed.peek()).toBeInstanceOf(Error);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 test("a group past the declared end on another copy is refused", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

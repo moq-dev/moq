@@ -870,7 +870,10 @@ class Reader implements ResumeSource {
 			if (
 				seen(this.#newest) ||
 				seen(this.#newestDatagram) ||
-				this.#copies.some((copy) => seen(hooks.latestSequence(copy.sub)))
+				// The largest counts datagrams too, which the latest group does not.
+				this.#copies.some(
+					(copy) => seen(hooks.latestSequence(copy.sub)) || seen(hooks.peekLargest(copy.sub).largest?.group),
+				)
 			)
 				this.#refuse();
 		}
