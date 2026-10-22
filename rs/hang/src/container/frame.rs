@@ -34,10 +34,10 @@ pub const TIMESCALE: Timescale = Timescale::MICRO;
 /// [`PRIORITY`](crate::catalog::PRIORITY) so every publisher orders its kinds the
 /// same way (`PRIORITY.video` for a video track, and so on). It's a parameter
 /// rather than a default because there is no correct value for "some media
-/// track": leaving it at zero is what puts audio and video in one undifferentiated
+/// track": leaving it at the unset 0 is what puts audio and video in one undifferentiated
 /// tier, both on the wire and in
 /// [`bandwidth::Allocator`](moq_net::bandwidth::Allocator).
-pub fn track_info(priority: u8) -> moq_net::track::Info {
+pub fn track_info(priority: i8) -> moq_net::track::Info {
 	moq_net::track::Info::default()
 		.with_timescale(TIMESCALE)
 		.with_max_age(MAX_AGE)

@@ -481,7 +481,11 @@ fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info
 		.with_compress(properties.compress)
 		.with_timescale(properties.timescale)
 		.with_max_age(properties.max_cache_duration)
-		.with_priority(super::priority::from_wire(properties.priority.unwrap_or(128)))
+		.with_priority(
+			properties
+				.priority
+				.map_or(super::priority::ABSENT, super::priority::from_wire),
+		)
 		// A publisher answering NEW_GROUP_REQUEST refreshes on any join with a delta to skip;
 		// this session carries the request back to it.
 		.with_refresh(properties.dynamic_groups.then_some(0));
@@ -7821,7 +7825,7 @@ mod tests {
 		});
 		settle().await;
 
-		let _high = track.subscribe(track::Subscription::default().with_priority(200));
+		let _high = track.subscribe(track::Subscription::default().with_priority(72));
 		settle().await;
 
 		let writes = log.writes.lock().unwrap().clone();
@@ -7846,7 +7850,7 @@ mod tests {
 		assert_eq!(update.subscription_request_id, subscribe);
 		assert_eq!(update.start_location, ietf::Location { group: 5, object: 3 });
 		assert_eq!(update.end_group, 0, "still open ended");
-		assert_eq!(update.subscriber_priority, Some(super::super::priority::to_wire(200)));
+		assert_eq!(update.subscriber_priority, Some(super::super::priority::to_wire(72)));
 		assert_eq!(update.forward, Some(true));
 	}
 
@@ -8062,7 +8066,7 @@ mod tests {
 				.expect("the subscription is registered");
 			assert_eq!(
 				track.producer.as_ref().unwrap().publisher_priority(),
-				255 - priority.unwrap_or(128),
+				priority.map_or(0, super::super::priority::from_wire),
 				"SUBSCRIBE_OK priority must be committed before alias registration"
 			);
 			// The answer's largest is known before any group arrives.
@@ -12014,7 +12018,7 @@ struct Update {
 	/// Draft-14's mandatory Start Location, repeated as it stands; unused on later drafts.
 	start_location: ietf::Location,
 	/// The aggregate subscriber priority, in the model's higher-first terms.
-	priority: Option<u8>,
+	priority: Option<i8>,
 	/// Subscriber age budget, in milliseconds.
 	max_age: Option<u64>,
 	/// NEW_GROUP_REQUEST.

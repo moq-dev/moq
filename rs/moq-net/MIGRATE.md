@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Priorities are signed, with 0 unset (#6142)
+
+`track::Info::priority`, `track::Subscription::priority`, `group::Fetch::priority`, and `group::Request::priority()` are `i8`, higher first, and 0 is the unset midpoint.
+The track's default was 127, the midpoint, and the subscription's was 0, the least urgent; both are 0 now.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+The publisher's `Info::priority` now breaks ties between subscriptions at one subscriber priority.
+
+On the wire, moq-lite carries `priority + 128` and moq-transport `127 - priority`, so an unset priority goes out as 128 on moq-lite (was 127) and 127 on moq-transport (was 128), and an absent moq-transport priority reads as 0.
+
 ### A client session asks only about what its readers watch (#6165)
 
 On moq-lite, a client session no longer asks its peer for announcements under its whole subscribe scope at connect.

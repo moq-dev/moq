@@ -521,14 +521,14 @@ pub struct moq_datagram {
 
 /// Publisher-side raw track properties.
 ///
-/// A null [moq_publish_track] `info` pointer uses the moq-net defaults.
-/// A zero-initialized struct also uses those defaults, except `priority`, which
-/// has no presence flag: zero is the least urgent, and 127 is the moq-net default.
+/// A null [moq_publish_track] `info` pointer uses the moq-net defaults, and so does a
+/// zero-initialized struct.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_track_info {
 	/// Priority, used to break ties between subscriptions of equal subscriber priority.
-	pub priority: u8,
+	/// Higher is more urgent; the default 0 is the midpoint.
+	pub priority: i8,
 
 	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
 	/// The publisher-side half of `moq_subscription.max_delay_us`.
@@ -597,8 +597,9 @@ pub enum moq_demand {
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_subscription {
-	/// Delivery priority. Higher values preempt lower ones under contention.
-	pub priority: u8,
+	/// Delivery priority. Higher values preempt lower ones under contention; the default 0 is
+	/// the midpoint.
+	pub priority: i8,
 
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in microseconds.
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
@@ -3156,9 +3157,9 @@ pub unsafe extern "C" fn moq_group_request_sequence(request: u32, dst: *mut u64)
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - `dst` must point at a writable `uint8_t`.
+/// - `dst` must point at a writable `int8_t`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_group_request_priority(request: u32, dst: *mut u8) -> i32 {
+pub unsafe extern "C" fn moq_group_request_priority(request: u32, dst: *mut i8) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
