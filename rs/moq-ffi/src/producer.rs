@@ -13,13 +13,13 @@ use crate::media::MoqFrame;
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 127, no publisher age limit, untimed).
+/// (priority 0, no publisher age limit, untimed).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
-	/// Higher is more urgent; the default 127 is the midpoint.
-	#[uniffi(default = 127)]
-	pub priority: u8,
+	/// Higher is more urgent; the default 0 is the midpoint.
+	#[uniffi(default = 0)]
+	pub priority: i8,
 	/// Maximum age of a non-latest group before the publisher evicts it, in
 	/// microseconds. Null imposes no publisher age limit. This is the publisher-side half of
 	/// [`MoqSubscription::max_delay_us`](crate::consumer::MoqSubscription::max_delay_us).
@@ -485,7 +485,7 @@ impl MoqTrackDynamic {
 #[derive(uniffi::Object)]
 pub struct MoqGroupRequest {
 	sequence: u64,
-	priority: u8,
+	priority: i8,
 	inner: std::sync::Mutex<Option<moq_net::group::Request>>,
 }
 
@@ -511,7 +511,7 @@ impl MoqGroupRequest {
 	}
 
 	/// The consumer's delivery priority for this fetch.
-	pub fn priority(&self) -> u8 {
+	pub fn priority(&self) -> i8 {
 		self.priority
 	}
 

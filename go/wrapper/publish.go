@@ -385,7 +385,7 @@ func (r *GroupRequest) Sequence() uint64 {
 }
 
 // Priority is the consumer's delivery priority for this fetch.
-func (r *GroupRequest) Priority() uint8 {
+func (r *GroupRequest) Priority() int8 {
 	return r.inner.Priority()
 }
 

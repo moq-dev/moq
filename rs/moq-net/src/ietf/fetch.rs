@@ -311,7 +311,7 @@ impl Message for Fetch<'_> {
 
 		Ok(Self {
 			request_id,
-			subscriber_priority: subscriber_priority.unwrap_or(128),
+			subscriber_priority: subscriber_priority.unwrap_or(super::priority::ABSENT_WIRE),
 			// No preference: the publisher picks the order.
 			group_order: group_order.unwrap_or(GroupOrder::Any),
 			fetch_type,
