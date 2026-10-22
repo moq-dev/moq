@@ -50,7 +50,10 @@ async fn main() -> anyhow::Result<()> {
 	let url: url::Url = args[2].parse()?;
 	let mode = args.get(5).map(String::as_str);
 	ensure!(
-		matches!(mode, None | Some("drop" | "join" | "cached" | "compress" | "datagram" | "status")),
+		matches!(
+			mode,
+			None | Some("drop" | "join" | "cached" | "compress" | "datagram" | "status")
+		),
 		"unknown mode: {mode:?}"
 	);
 	let drop = mode == Some("drop");
@@ -74,7 +77,9 @@ async fn main() -> anyhow::Result<()> {
 			let broadcast = origin.create_broadcast(&args[3])?;
 			let mut track = broadcast.create_track(
 				"tail",
-				moq_net::track::Info::default().with_timescale((!datagram).then_some(moq_net::Timescale::MILLI)).with_compress(compress),
+				moq_net::track::Info::default()
+					.with_timescale((!datagram).then_some(moq_net::Timescale::MILLI))
+					.with_compress(compress),
 			)?;
 			broadcast.announce(Default::default())?;
 			if cached {
@@ -160,7 +165,10 @@ async fn main() -> anyhow::Result<()> {
 				return Ok(());
 			}
 			if compress {
-				ensure!(track.info().compress == args.get(4).is_some_and(|version| version == "moq-lite-07-wip"), "wrong compression metadata");
+				ensure!(
+					track.info().compress == args.get(4).is_some_and(|version| version == "moq-lite-07-wip"),
+					"wrong compression metadata"
+				);
 			}
 			let mut seen = Vec::new();
 			while let Some(mut group) = track.recv_group().await? {

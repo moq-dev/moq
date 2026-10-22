@@ -151,16 +151,21 @@ The in-tree control lanes also run with `--tail`:
   rather than best-effort burst capacity. The publisher stays open until the read is
   acknowledged, keeping a reliable track end from overtaking the datagrams.
 - A JS wire requester gets the Rust publisher's exact largest location through
-  TRACK_STATUS on every draft. From draft 18, Rust also queries the JS publisher's
+  TRACK\_STATUS on every draft. From draft 18, Rust also queries the JS publisher's
   non-default priority before subscribing, when the answer can describe a track.
 - On drafts 14 and 16, a JS publisher advertises one usable track slot beyond namespace discovery, holds the first
   Rust subscription open through a data round trip while a second is queued, and
   grants credit when the first is cancelled. Sending the second without waiting
-  violates the peer adapter's live-request limit.
+  violates the peer adapter's live-request limit. A JS subscriber runs the same
+  held-first/queued-second exchange over QMux against a controlled JS peer, whose
+  grant and replenishment codecs are also exercised by the Rust subscriber.
 - On drafts 18, 20, and 22, a Rust GOAWAY names a second WebSocket endpoint serving
   the same publisher epoch. The JS reconnect loop retains its reader across the
   move. A separate read through the replacement proves it serves data before the
   original transport is cut; only the replacement can deliver the final group.
+  The reverse JS-server-to-Rust-client case uses a marker broadcast excluded from
+  the old endpoint's scope, then cuts that endpoint before publishing the final
+  group. Both directions use the original publisher stream.
   Drafts 14 and 16 cannot carry epochs and require an application restart, so this
   retained-reader lane does not claim to cover them.
 

@@ -66,7 +66,7 @@ try {
 						continue;
 					}
 					for (const size of compress ? [BYTES / 2, 0, BYTES / 2] : [BYTES]) {
-					group.writeFrame({ payload: new Uint8Array(size).fill(sequence) });
+						group.writeFrame({ payload: new Uint8Array(size).fill(sequence) });
 					}
 					group.close();
 				}
@@ -118,10 +118,13 @@ try {
 						try {
 							assert(group.sequence < GROUPS, `unexpected group ${group.sequence}`);
 							for (const size of compress ? [BYTES / 2, 0, BYTES / 2] : [BYTES]) {
-							const frame = await group.readFrame();
-							assert(frame, "empty group");
-							assert.equal(frame.payload.byteLength, size, "truncated group");
-							assert(frame.payload.every((byte) => byte === group.sequence), "corrupt group");
+								const frame = await group.readFrame();
+								assert(frame, "empty group");
+								assert.equal(frame.payload.byteLength, size, "truncated group");
+								assert(
+									frame.payload.every((byte) => byte === group.sequence),
+									"corrupt group",
+								);
 							}
 							assert.equal(await group.readFrame(), undefined, "extra frame");
 							seen.push(group.sequence);

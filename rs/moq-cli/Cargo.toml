@@ -184,3 +184,7 @@ path = "../../test/interop/clients/rust/goaway.rs"
 [[example]]
 name = "interop-control"
 path = "../../test/interop/clients/rust/control.rs"
+
+[[example]]
+name = "interop-goaway-client"
+path = "../../test/interop/clients/rust/goaway-client.rs"

@@ -377,10 +377,14 @@ plan_pass() {
             record "not run" case=datagram publisher="$runtime" subscriber=rust
             record "not run" case="wire track status" publisher=rust subscriber="$runtime"
             case "$VERSION" in
-                moq-transport-14 | moq-transport-16) record "not run" case="request credit" publisher="$runtime" subscriber=rust ;;
+                moq-transport-14 | moq-transport-16)
+                    record "not run" case="request credit" publisher="$runtime" subscriber=rust
+                    [[ "$runtime" != js-native-bun ]] || record "not run" case="request credit" publisher="$runtime" subscriber="$runtime"
+                    ;;
                 *)
                     record "not run" case="track status" publisher="$runtime" subscriber=rust
                     record "not run" case=goaway publisher=rust subscriber="$runtime"
+                    [[ "$runtime" != js-native-bun ]] || record "not run" case=goaway publisher="$runtime" subscriber=rust
                     ;;
             esac
         fi
@@ -469,7 +473,7 @@ build_relay_cli() {
         exit 1
     }
     if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 ]]; then
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-control --example interop-goaway)
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-control --example interop-goaway --example interop-goaway-client)
     fi
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
     # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
@@ -1526,11 +1530,23 @@ run_control_case() {
         status) cell=(case="wire track status" publisher=rust subscriber="$runtime" log="$LOGS/$name.log") ;;
         credit) cell=(case="request credit" publisher="$runtime" subscriber=rust log="$LOGS/$name.log") ;;
         goaway) command=("$TARGET_BASE/$PROFILE/examples/interop-goaway" "$version" "${runtime##*-}") ;;
+        reverse-goaway)
+            command=("$TARGET_BASE/$PROFILE/examples/interop-goaway-client" "$version")
+            cell=(case=goaway publisher="$runtime" subscriber=rust log="$LOGS/$name.log")
+            ;;
+        js-credit)
+            command=(bun "$CLIENTS/js-native/server.ts" credit "$version")
+            cell=(case="request credit" publisher="$runtime" subscriber="$runtime" log="$LOGS/$name.log")
+            ;;
     esac
     if is_broken "$runtime"; then
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
-    elif timeout -k 3 "$TIMEOUT" "${command[@]}" >"$LOGS/$name.log" 2>&1; then
+        return
+    fi
+    # Own the Rust launcher and its JS child together, including on a deadline or failure.
+    harness_spawn "$name" "$LOGS/$name.log" timeout -k 3 "$TIMEOUT" "${command[@]}"
+    if harness_wait "$HARNESS_PID"; then
         echo "  PASS  $kind rust <-> $runtime"
         record pass "${cell[@]}" seconds=$((SECONDS - started))
     else
@@ -1557,10 +1573,14 @@ run_tails() {
                 run_tail_pair "$runtime" rust datagram
                 run_control_case "$runtime" status
                 case "$VERSION" in
-                    moq-transport-14 | moq-transport-16) run_control_case "$runtime" credit ;;
+                    moq-transport-14 | moq-transport-16)
+                        run_control_case "$runtime" credit
+                        [[ "$runtime" != js-native-bun ]] || run_control_case "$runtime" js-credit
+                        ;;
                     *)
                         run_tail_pair "$runtime" rust "track status"
                         run_control_case "$runtime" goaway
+                        [[ "$runtime" != js-native-bun ]] || run_control_case "$runtime" reverse-goaway
                         ;;
                 esac
             fi
