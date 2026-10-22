@@ -18,7 +18,8 @@ const [mode, name] = process.argv.slice(2);
 assert(name && ["goaway", "credit"].includes(mode), "usage: server.ts goaway|credit VERSION");
 const version = (0xff000000 + Number(name.split("-").at(-1))) as Ietf.IetfVersion;
 const legacy = version === Ietf.Version.DRAFT_14 || version === Ietf.Version.DRAFT_16;
-const alpn = version === Ietf.Version.DRAFT_14 ? "moql" : `moqt-${Number(version) - 0xff000000}`;
+// JS offers draft 14 behind `moql`, negotiated in SETUP; Rust offers its own `moq-00` ALPN.
+const alpns = version === Ietf.Version.DRAFT_14 ? ["moql", "moq-00"] : [`moqt-${Number(version) - 0xff000000}`];
 const extensions = Extensions.offered();
 const origin = new Moq.Origin.Producer();
 const broadcast = origin.createBroadcast(Moq.Path.from("handover"));
@@ -47,8 +48,8 @@ function listen(publish: Moq.Origin.Consumer, window?: bigint) {
 		port: 0,
 		fetch(request, server) {
 			const protocol = selectSubprotocol(request.headers.get("sec-websocket-protocol"), {
-				protocols: [alpn],
-				versions: { [alpn]: legacy ? "qmux-00" : "qmux-01" },
+				protocols: alpns,
+				versions: Object.fromEntries(alpns.map((alpn) => [alpn, legacy ? "qmux-00" : "qmux-01"])),
 				requireProtocol: true,
 			});
 			if (!protocol) return new Response("no protocol", { status: 400 });
@@ -120,7 +121,6 @@ async function accept(quic: WebTransport, url: URL, publish: Moq.Origin.Consumer
 			}),
 		};
 	}
-	assert(window !== undefined, "legacy server needs an explicit test window");
 	const control = await Stream.accept(quic, version);
 	assert(control, "missing SETUP");
 	assert.equal(await control.reader.u53(), Lite.StreamId.ClientCompat);
@@ -201,7 +201,6 @@ if (mode === "credit") {
 		origin.close();
 	}
 } else {
-	assert(!legacy, "retained-reader GOAWAY requires an epoch-carrying draft");
 	const scoped = origin.scope(Moq.Path.empty(), new Moq.Path.Patterns([Moq.Path.Pattern.literal("handover")]));
 	const first = listen(scoped.consume());
 	const second = listen(origin.consume());

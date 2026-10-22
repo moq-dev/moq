@@ -412,6 +412,8 @@ plan_pass() {
             record "not run" case=datagram publisher=rust subscriber="$runtime"
             record "not run" case=datagram publisher="$runtime" subscriber=rust
             record "not run" case="wire track status" publisher=rust subscriber="$runtime"
+            record "not run" case=goaway publisher=rust subscriber="$runtime"
+            [[ "$runtime" != js-native-bun ]] || record "not run" case=goaway publisher="$runtime" subscriber=rust
             case "$VERSION" in
                 moq-transport-14 | moq-transport-16)
                     record "not run" case="request credit" publisher="$runtime" subscriber=rust
@@ -419,8 +421,6 @@ plan_pass() {
                     ;;
                 *)
                     record "not run" case="track status" publisher="$runtime" subscriber=rust
-                    record "not run" case=goaway publisher=rust subscriber="$runtime"
-                    [[ "$runtime" != js-native-bun ]] || record "not run" case=goaway publisher="$runtime" subscriber=rust
                     ;;
             esac
         fi
@@ -1767,6 +1767,8 @@ run_tails() {
                 run_tail_pair rust "$runtime" datagram
                 run_tail_pair "$runtime" rust datagram
                 run_control_case "$runtime" status
+                run_control_case "$runtime" goaway
+                [[ "$runtime" != js-native-bun ]] || run_control_case "$runtime" reverse-goaway
                 case "$VERSION" in
                     moq-transport-14 | moq-transport-16)
                         run_control_case "$runtime" credit
@@ -1774,8 +1776,6 @@ run_tails() {
                         ;;
                     *)
                         run_tail_pair "$runtime" rust "track status"
-                        run_control_case "$runtime" goaway
-                        [[ "$runtime" != js-native-bun ]] || run_control_case "$runtime" reverse-goaway
                         ;;
                 esac
             fi

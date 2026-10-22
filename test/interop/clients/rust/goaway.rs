@@ -1,4 +1,4 @@
-//! A real Rust server hands one JS subscription between two WebSocket endpoints.
+//! A real Rust server redirects one JS subscriber between two WebSocket endpoints.
 use std::process::Stdio;
 
 use anyhow::{Context, ensure};
@@ -31,6 +31,8 @@ async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
 	ensure!(args.len() == 3, "usage: interop-goaway VERSION node|bun");
 	let version: moq_net::Version = args[1].parse().map_err(anyhow::Error::msg)?;
+	// Without an epoch, JS re-subscribes instead of retaining its reader across the move.
+	let legacy = ["moq-transport-14", "moq-transport-16"].contains(&args[1].as_str());
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast("handover")?;
 	let mut track = broadcast.create_track("video", moq_net::track::Info::default())?;
@@ -74,6 +76,12 @@ async fn main() -> anyhow::Result<()> {
 	// Only the replacement can deliver the next group after this transport is cut.
 	session.abort(moq_net::Error::Cancel);
 	let _ = driver.await?;
+	if legacy {
+		ensure!(
+			output.next_line().await?.as_deref() == Some("resubscribed"),
+			"JS did not re-subscribe through the replacement"
+		);
+	}
 	write(&mut track, 2)?;
 	ensure!(
 		output.next_line().await?.as_deref() == Some("goaway resumed"),

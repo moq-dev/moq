@@ -182,8 +182,10 @@ The in-tree control lanes also run with `--tail`:
   The reverse JS-server-to-Rust-client case uses a marker broadcast excluded from
   the old endpoint's scope, then cuts that endpoint before publishing the final
   group. Both directions use the original publisher stream.
-  Drafts 14 and 16 cannot carry epochs and require an application restart, so this
-  retained-reader lane does not claim to cover them.
+- Drafts 14 and 16 carry no epoch, so nothing proves the replacement is the same
+  publisher. The same GOAWAY lanes there check that the held reader ends with the
+  original transport instead, and that requesting the path again subscribes
+  through the new URI and reads the final group.
 
 The standalone control endpoints use OS-assigned ports and production QMux,
 SETUP codecs, and request adapters. They verify their negotiated version directly.
