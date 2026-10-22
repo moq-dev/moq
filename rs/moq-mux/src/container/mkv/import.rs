@@ -85,7 +85,7 @@ enum TrackKind {
 impl TrackKind {
 	/// The publisher priority for this kind of media, so audio isn't stuck behind a
 	/// video backlog on a busy connection.
-	fn priority(&self) -> u8 {
+	fn priority(&self) -> i8 {
 		match self {
 			Self::Video => hang::catalog::PRIORITY.video,
 			Self::Audio => hang::catalog::PRIORITY.audio,
@@ -162,6 +162,7 @@ impl Media {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Import<E> {
+	/// Import a byte stream into the broadcast using its reserved catalog producer.
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
 		let container = hang::catalog::Container::default();
 		Self {

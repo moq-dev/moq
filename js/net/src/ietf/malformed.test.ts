@@ -9,9 +9,9 @@ import { Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { Connection } from "./connection.ts";
 import { GoAway } from "./goaway.ts";
-import { SetupOption, SetupOptions } from "./parameters.ts";
 import { RequestOk } from "./request.ts";
 import { Setup } from "./setup.ts";
+import { SetupOption, SetupOptions } from "./setup_options.ts";
 import { SubscribeOk } from "./subscribe.ts";
 import { SUBSCRIBE_TRACKS_ID, SubscribeNamespace } from "./subscribe_namespace.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
@@ -110,6 +110,16 @@ for (const [version, alpn] of DRAFTS) {
 		["a namespace over 4096 bytes", subscribe([field(4097)], 1), SessionCode.ProtocolViolation],
 		["a full track name over 4096 bytes", subscribe([field(4000)], 97), SessionCode.ProtocolViolation],
 		["a trailing byte", frame(0x03, [0, 1, ...field(4), ...field(5), 0, 0]), SessionCode.ProtocolViolation],
+		[
+			"an invalid SUBSCRIBE_TRACKS FORWARD",
+			frame(SUBSCRIBE_TRACKS_ID, [0, 0, 1, 0x10, 2]),
+			SessionCode.ProtocolViolation,
+		],
+		[
+			"a duplicate SUBSCRIBE_TRACKS FORWARD",
+			frame(SUBSCRIBE_TRACKS_ID, [0, 0, 2, 0x10, 0, 0, 1]),
+			SessionCode.ProtocolViolation,
+		],
 		[
 			"a SUBSCRIBE_TRACKS prefix over 32 fields",
 			frame(SUBSCRIBE_TRACKS_ID, [0, 33, ...new Array(33).fill(field(1)).flat(), 0]),

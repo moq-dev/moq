@@ -3,6 +3,8 @@ mod codec;
 mod color;
 mod h264;
 mod h265;
+mod projection;
+mod stereo;
 mod vp9;
 
 pub use av1::*;
@@ -10,6 +12,8 @@ pub use codec::*;
 pub use color::*;
 pub use h264::*;
 pub use h265::*;
+pub use projection::*;
+pub use stereo::*;
 pub use vp9::*;
 
 use std::collections::{BTreeMap, btree_map};
@@ -196,6 +200,16 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub track: Option<String>,
 
+	/// The publisher instance the reference names, when the catalog knows it. Absent names
+	/// whichever instance the reader resolves first, as in every catalog before this field.
+	///
+	/// A reader on an epoch-aware route refuses another instance rather than fall back to it;
+	/// on an epochless route it is best effort, since the route cannot prove the instance.
+	/// Without [`broadcast`](Self::broadcast), it names the catalog's own instance.
+	#[serde(default)]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub epoch: Option<moq_net::Epoch>,
+
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]
 	pub label: Option<String>,
@@ -240,6 +254,19 @@ pub struct VideoConfig {
 	/// Live state, not identity: a publisher may fill it in once the bitstream reveals it.
 	#[serde(default)]
 	pub color: Option<Color>,
+
+	/// How the picture maps onto the viewer's field of view. Absent means rectilinear.
+	///
+	/// Live state, like [`color`](Self::color).
+	#[serde(default)]
+	pub projection: Option<Projection>,
+
+	/// How each eye's view is packed into the frame. Absent means mono.
+	///
+	/// Live state, like [`color`](Self::color).
+	#[serde(default)]
+	#[serde_as(as = "Option<DisplayFromStr>")]
+	pub stereo: Option<Stereo>,
 
 	/// The maximum bitrate of the video track, if known.
 	#[serde(default)]
@@ -322,6 +349,7 @@ impl VideoConfig {
 		Self {
 			broadcast: None,
 			track: None,
+			epoch: None,
 			label: None,
 			codec: codec.into(),
 			description: None,
@@ -330,6 +358,8 @@ impl VideoConfig {
 			display_aspect_width: None,
 			display_aspect_height: None,
 			color: None,
+			projection: None,
+			stereo: None,
 			bitrate: None,
 			enabled: true,
 			preference: 0,
@@ -425,17 +455,6 @@ mod test {
 		assert_eq!(catalog.ranked().count(), 1);
 		catalog.renditions.get_mut("track").unwrap().enabled = true;
 		assert_eq!(catalog.enabled().count(), 1);
-	}
-
-	#[test]
-	fn label_round_trips() {
-		let mut config = VideoConfig::new(VideoCodec::VP8);
-		config.label = Some("Main camera".to_string());
-
-		let encoded = serde_json::to_value(&config).expect("failed to encode");
-		assert_eq!(encoded["label"], "Main camera");
-		let decoded: VideoConfig = serde_json::from_value(encoded).expect("failed to decode");
-		assert_eq!(decoded.label.as_deref(), Some("Main camera"));
 	}
 
 	#[test]

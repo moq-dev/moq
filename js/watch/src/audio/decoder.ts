@@ -27,6 +27,7 @@ import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
 import { Terminal } from "./terminal";
 
+/** Signals the decoder reads. */
 export type DecoderInput = {
 	// Whether to download the audio track. Defaults to true.
 	enabled: Getter<boolean>;
@@ -86,8 +87,11 @@ export interface Stats {
  * The user is responsible for hooking up audio to speakers, an analyzer, etc.
  */
 export class Decoder {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<DecoderInput>;
+	/** The source picking the rendition to decode. */
 	readonly source: Source;
+	/** The clock that schedules playback. */
 	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
@@ -101,6 +105,7 @@ export class Decoder {
 		underruns: new Signal<number>(0),
 		buffered: new Signal<Container.BufferedRanges>([]),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// Decode buffer: audio sent to worklet but not yet played
@@ -334,7 +339,7 @@ export class Decoder {
 		// tell whether a failure's source is still selected.
 		const active =
 			broadcast && track && identity && (running || this.#failed)
-				? broadcast.relativeBroadcast(effect, identity.broadcast)
+				? broadcast.relativeBroadcast(effect, identity.broadcast, identity.epoch)
 				: undefined;
 		const key = identity && JSON.stringify(identity);
 
@@ -415,15 +420,18 @@ export class Decoder {
 			// A config the probe accepted can still fail to parse (a malformed init segment or Opus
 			// header). Report it like a decode failure, which also retires the outgoing estimate.
 			const props = { config, failure, path: active.path };
-			try {
-				if (config.container.kind === "cmaf") {
-					this.#runCmafDecoder(run, sub, props);
-				} else {
-					this.#runLegacyDecoder(run, sub, props);
+			run.spawn(async () => {
+				try {
+					if (config.container.kind === "cmaf") {
+						await this.#runCmafDecoder(run, sub, props);
+					} else {
+						this.#runLegacyDecoder(run, sub, props);
+					}
+				} catch (error) {
+					if (run.abort.aborted) return;
+					failure.set(error instanceof Error ? error : new Error(String(error)));
 				}
-			} catch (error) {
-				failure.set(error instanceof Error ? error : new Error(String(error)));
-			}
+			});
 		});
 	}
 
@@ -514,15 +522,19 @@ export class Decoder {
 		});
 	}
 
-	#runCmafDecoder(
+	async #runCmafDecoder(
 		effect: Effect,
 		sub: Moq.Track.Subscriber,
 		{ config, failure, path }: { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid },
-	): void {
+	): Promise<void> {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
+		const abort = effect.abort;
+		const Cmaf = await import("@moq/hang/cmaf");
+		if (abort.aborted) return;
+
 		const initSegment = base64ToBytes(config.container.init);
-		const init = Container.Cmaf.decodeInitSegment(initSegment);
+		const init = Cmaf.decodeInitSegment(initSegment);
 		const opusDescription = config.description ? Util.Hex.toBytes(config.description) : init.description;
 		const preSkip = config.codec === "opus" && opusDescription ? Util.Opus.preSkip(opusDescription) : 0;
 		this.#terminal.clear(preSkip, Micro.fromMilli(Milli(config.warmup ?? 0)));
@@ -535,7 +547,7 @@ export class Decoder {
 					? Util.Hex.toBytes(config.description)
 					: init.description;
 
-		const consumer = this.#consume(effect, sub, new Container.Cmaf.Format(init), { config, path });
+		const consumer = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
 
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -701,9 +713,19 @@ export class Decoder {
 		const channels = Math.min(sample.numberOfChannels, ring.channels);
 		const channelData: Float32Array[] = [];
 		for (let channel = 0; channel < channels; channel++) {
-			const data = new Float32Array(frames);
-			sample.copyTo(data, { format: "f32-planar", planeIndex: channel, frameOffset, frameCount: frames });
-			channelData.push(data);
+			if (frameOffset === 0) {
+				const data = new Float32Array(frames);
+				sample.copyTo(data, { format: "f32-planar", planeIndex: channel, frameCount: frames });
+				channelData.push(data);
+				continue;
+			}
+			// WebKit's GStreamer port (Linux WebKitGTK and WPE) reads out of bounds converting
+			// interleaved audio to planar at a nonzero frameOffset, and its hardened builds abort the
+			// page. Opus pre-skip trims the first frame of every stream, so copy the whole plane and
+			// trim it here.
+			const data = new Float32Array(sample.numberOfFrames);
+			sample.copyTo(data, { format: "f32-planar", planeIndex: channel });
+			channelData.push(data.slice(frameOffset, frameOffset + frames));
 		}
 
 		// Hand off to the ring. Shared transport writes directly; post transport
@@ -752,8 +774,10 @@ export class Decoder {
 		});
 	}
 
-	// Flush the audio buffer and re-stall, re-anchoring playback to the next frame.
-	// Use in buffered mode at an utterance boundary (see Sync.reset).
+	/**
+	 * Flush the audio buffer and re-stall, re-anchoring playback to the next frame.
+	 * Use in buffered mode at an utterance boundary (see Sync.reset).
+	 */
 	reset(): void {
 		this.#ring.peek()?.reset();
 	}
@@ -772,12 +796,13 @@ export class Decoder {
 		return this.#arrivals.consume();
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#arrivals.close();
 		this.#signals.close();
 	}
 
-	// Whether the WebCodecs audio decoder can play this config.
+	/** Whether the WebCodecs audio decoder can play this config. */
 	static supported = supported;
 }
 
@@ -803,7 +828,8 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 			description = Util.Hex.toBytes(config.description);
 		} else if (config.container.kind === "cmaf") {
 			try {
-				description = Container.Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
+				const Cmaf = await import("@moq/hang/cmaf");
+				description = Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
 			} catch (err) {
 				// A malformed init segment means we can't extract the codec
 				// description, so we can't probe support reliably. Reject the
@@ -814,6 +840,9 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 			}
 		}
 	}
+	// Install the WebCodecs polyfill before probing, since playback would decode through it where
+	// AudioDecoder is missing (Node, Bun, older browsers). Loads nothing where WebCodecs audio is native.
+	await Util.Libav.polyfill();
 	const res = await AudioDecoder.isConfigSupported({
 		...config,
 		description,

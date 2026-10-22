@@ -16,9 +16,10 @@ use crate::quic::driver::{
 
 /// A stream that can only be used to send data
 ///
-/// If dropped, streams that haven't been explicitly [`reset()`] will be implicitly [`finish()`]ed,
-/// continuing to (re)transmit previously written data until it has been fully acknowledged or the
-/// connection is closed.
+/// If dropped, streams that haven't been explicitly [`finish()`]ed are [`reset()`], with code 0
+/// unless the peer stopped them, so the peer can't mistake a truncated stream for a complete one.
+/// A finished stream keeps (re)transmitting previously written data until it has been fully
+/// acknowledged or the connection is closed.
 ///
 /// # Cancellation
 ///
@@ -35,6 +36,12 @@ pub struct SendStream {
     conn: ConnectionRef,
     stream: StreamId,
     is_0rtt: bool,
+    finished: bool,
+    /// The offset and code a drop before `finish` resets at
+    drop_reset: (u64, VarInt),
+    /// `reset` or `reset_at` succeeded, with the peer's STOP_SENDING code if it arrived first, so
+    /// `stopped` has nothing left to wait for
+    reset: Option<Option<VarInt>>,
 }
 
 impl SendStream {
@@ -43,6 +50,9 @@ impl SendStream {
             conn,
             stream,
             is_0rtt,
+            finished: false,
+            drop_reset: (0, VarInt::from_u32(0)),
+            reset: None,
         }
     }
 
@@ -185,6 +195,7 @@ impl SendStream {
         let mut conn = self.conn.state.lock("finish");
         match conn.inner.send_stream(self.stream).finish() {
             Ok(()) => {
+                self.finished = true;
                 conn.wake();
                 Ok(())
             }
@@ -209,7 +220,11 @@ impl SendStream {
         if self.is_0rtt && conn.check_0rtt().is_err() {
             return Ok(());
         }
-        conn.inner.send_stream(self.stream).reset(error_code)?;
+        let mut stream = conn.inner.send_stream(self.stream);
+        let stopped = stream.stopped().ok().flatten();
+        stream.reset(error_code)?;
+        self.reset = Some(stopped);
+        conn.resolve_stopped(self.stream, stopped);
         conn.wake();
         Ok(())
     }
@@ -228,9 +243,11 @@ impl SendStream {
         if self.is_0rtt && conn.check_0rtt().is_err() {
             return Ok(());
         }
-        conn.inner
-            .send_stream(self.stream)
-            .reset_at(offset, error_code)?;
+        let mut stream = conn.inner.send_stream(self.stream);
+        let stopped = stream.stopped().ok().flatten();
+        stream.reset_at(offset, error_code)?;
+        self.reset = Some(stopped);
+        conn.resolve_stopped(self.stream, stopped);
         conn.wake();
         Ok(())
     }
@@ -269,8 +286,10 @@ impl SendStream {
     ///
     /// Yields `Some` with the stop error code if the peer stops the stream. Yields `None` if the
     /// local side [`finish()`](Self::finish)es the stream and then the peer acknowledges receipt
-    /// of all stream data (although not necessarily the processing of it), after which the peer
-    /// closing the stream is no longer meaningful.
+    /// of all stream data (although not necessarily the processing of it), or once the local side
+    /// resets it with [`reset()`](Self::reset) or [`reset_at()`](Self::reset_at), or by dropping
+    /// it unfinished, after which the peer closing the stream is no longer meaningful. A peer's
+    /// stop code still wins over a local reset if it arrived first, but not if it arrives after.
     ///
     /// For a variety of reasons, the peer may not send acknowledgements immediately upon receiving
     /// data. As such, relying on `stopped` to know when the peer has read a stream to completion
@@ -284,23 +303,43 @@ impl SendStream {
         let conn = self.conn.clone();
         let stream = self.stream;
         let is_0rtt = self.is_0rtt;
+        // Join the waiters now rather than on the first poll, so a reset in between, which no
+        // stream event reports, still reaches this future.
+        let waiters = {
+            let mut conn = conn.state.lock("SendStream::stopped");
+            // A reset settles it: a STOP_SENDING after it is recorded but no longer counts.
+            if let Some(stopped) = self.reset {
+                Err(Ok(stopped))
+            } else if let Some(output) = send_stream_stopped(&mut conn, stream, is_0rtt) {
+                Err(output)
+            } else {
+                Ok(conn.stopped.entry(stream).or_default().clone())
+            }
+        };
         async move {
+            let mut waiters = match waiters {
+                Ok(waiters) => waiters,
+                Err(output) => return output,
+            };
             loop {
                 // The `Notify::notified` future needs to be created while the lock is being held,
                 // otherwise a wakeup could be missed if triggered inbetween releasing the lock
                 // and creating the future.
                 // The lock may only be held in a block without `await`s, otherwise the future
                 // becomes `!Send`. `Notify::notified` is lifetime-bound to `Notify`, therefore
-                // we need to declare `notify` outside of the block, and initialize it inside.
-                let notify;
+                // we need to declare `waiters` outside of the block, and update it inside.
                 {
                     let mut conn = conn.state.lock("SendStream::stopped");
+                    if let Some(&stopped) = waiters.outcome.get() {
+                        return Ok(stopped);
+                    }
                     if let Some(output) = send_stream_stopped(&mut conn, stream, is_0rtt) {
                         return output;
                     }
 
-                    notify = conn.stopped.entry(stream).or_default().clone();
-                    notify.notified()
+                    // A wakeup that resolved nothing removed the waiters; join the current ones
+                    waiters = conn.stopped.entry(stream).or_default().clone();
+                    waiters.notify.notified()
                 }
                 .await
             }
@@ -310,6 +349,12 @@ impl SendStream {
     /// Get the identity of this stream
     pub fn id(&self) -> StreamId {
         self.stream
+    }
+
+    /// Reset at `offset` with `code`, instead of at 0 with code 0, if dropped before `finish`
+    #[cfg(feature = "quic")]
+    pub(crate) fn set_drop_reset(&mut self, offset: u64, code: VarInt) {
+        self.drop_reset = (offset, code);
     }
 
     /// Attempt to write bytes from buf into the stream.
@@ -375,15 +420,23 @@ impl Drop for SendStream {
         if conn.error.is_some() || (self.is_0rtt && conn.check_0rtt().is_err()) {
             return;
         }
-        match conn.inner.send_stream(self.stream).finish() {
-            Ok(()) => conn.wake(),
-            Err(FinishError::Stopped(reason)) => {
-                if conn.inner.send_stream(self.stream).reset(reason).is_ok() {
-                    conn.wake();
-                }
+        // Fails harmlessly when already reset.
+        let mut stream = conn.inner.send_stream(self.stream);
+        let stopped = stream.stopped().ok().flatten();
+        let reset = match stopped {
+            // Echo the code, as RFC 9000 section 3.5 asks, even after `finish`: the peer reads
+            // nothing more, so retransmitting the rest is wasted.
+            Some(code) => stream.reset(code),
+            None if self.finished => return,
+            None => {
+                let (offset, code) = self.drop_reset;
+                let offset = offset.min(stream.offset());
+                stream.reset_at(offset, code)
             }
-            // Already finished or reset, which is fine.
-            Err(FinishError::ClosedStream) => {}
+        };
+        if reset.is_ok() {
+            conn.resolve_stopped(self.stream, stopped);
+            conn.wake();
         }
     }
 }

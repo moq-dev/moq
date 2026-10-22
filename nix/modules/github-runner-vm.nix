@@ -52,6 +52,10 @@ let
           message = "services.github-runner-vms supports x86_64-linux KVM hosts.";
         }
         {
+          assertion = cfg.resources.disk >= 8;
+          message = "Runner VM ${name} needs at least 8 GiB for its base image.";
+        }
+        {
           assertion =
             config.networking.nat.externalInterface == null
             || config.networking.nat.externalInterface == cfg.network.uplink;
@@ -158,20 +162,30 @@ let
             echo "The ${user} user needs read and write access to /dev/kvm through the kvm group." >&2
             exit 1
           fi
-          if ! test -e "$STATE_DIRECTORY/root.qcow2"; then
-            cp --reflink=auto ${guest.config.system.build.image}/nixos.qcow2 "$STATE_DIRECTORY/root.qcow2.tmp"
-            chmod 0600 "$STATE_DIRECTORY/root.qcow2.tmp"
-            qemu-img resize "$STATE_DIRECTORY/root.qcow2.tmp" ${toString cfg.resources.disk}G
-            mv "$STATE_DIRECTORY/root.qcow2.tmp" "$STATE_DIRECTORY/root.qcow2"
+          if ! test -e "$STATE_DIRECTORY/root.raw"; then
+            if test -e "$STATE_DIRECTORY/root.qcow2"; then
+              echo "Migrate the existing runner disk to XFS before starting ${name}." >&2
+              exit 1
+            fi
+            cp --reflink=auto ${guest.config.system.build.image}/${guest.config.image.fileName} "$STATE_DIRECTORY/root.raw.tmp"
+            chmod 0600 "$STATE_DIRECTORY/root.raw.tmp"
+            qemu-img resize -f raw "$STATE_DIRECTORY/root.raw.tmp" ${toString cfg.resources.disk}G
+            mv "$STATE_DIRECTORY/root.raw.tmp" "$STATE_DIRECTORY/root.raw"
           fi
         '';
+        # Free page reporting returns pages the guest frees to the host, so QEMU holds
+        # what the guest uses rather than the peak since the VM started.
         script = ''
+          install -m 0600 ${pkgs.OVMF.fd.variables} "$RUNTIME_DIRECTORY/efivars.fd"
           exec ${qemu}/bin/qemu-system-x86_64 \
             -enable-kvm -cpu host -smp ${toString cfg.resources.cores} -m ${toString cfg.resources.memory} \
-            -drive file="$STATE_DIRECTORY/root.qcow2",format=qcow2,if=virtio,cache=none \
+            -drive if=pflash,format=raw,readonly=on,file=${pkgs.OVMF.fd.firmware} \
+            -drive if=pflash,format=raw,file="$RUNTIME_DIRECTORY/efivars.fd" \
+            -drive file="$STATE_DIRECTORY/root.raw",format=raw,if=virtio,cache=none \
             -netdev tap,id=net,ifname=${tap},script=no,downscript=no \
             -device virtio-net-pci,netdev=net,mac=02:00:00:00:23:02 \
             -device virtio-rng-pci \
+            -device virtio-balloon-pci,free-page-reporting=on \
             -fw_cfg name=opt/io.systemd.credentials/runner-token,file="$CREDENTIALS_DIRECTORY/runner-token" \
             -qmp unix:"$RUNTIME_DIRECTORY/qmp",server=on,wait=off \
             -nographic
@@ -265,7 +279,7 @@ in
               disk = lib.mkOption {
                 type = lib.types.ints.positive;
                 default = 128;
-                description = "Initial persistent disk capacity in GiB.";
+                description = "Initial persistent disk capacity in GiB, at least 8.";
               };
             };
             tokenFile = lib.mkOption {

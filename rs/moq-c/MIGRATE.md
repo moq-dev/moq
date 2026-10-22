@@ -4,6 +4,51 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON snapshot `delta_ratio` is `deltas`
+
+`moq_json_snapshot_config.delta_ratio` is replaced by `bool deltas`.
+Set `deltas = false` where you set `delta_ratio = 0`, and `deltas = true` for any positive ratio.
+With deltas on, the track carries a refresh ratio of 8 and the producer restates the value in a new group when a joiner asks.
+
+### Priorities are signed (#6142)
+
+`moq_track_info.priority` and `moq_subscription.priority` are `int8_t`, and `moq_group_request_priority` writes an `int8_t`, which changes the ABI.
+Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced` or `moq_origin_announced_broadcast`, instead of under its whole scope at connect.
+`moq_origin_request` watches nothing, so on a client it fails with a negative code for a path nothing watches, even when the relay announces it.
+Resolve the path with `moq_origin_announced_broadcast`, or hold `moq_origin_announced` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
+### `MOQ_CONTAINER_FORMAT_FMP4` unwraps to Legacy (#6250)
+
+A container import with `MOQ_CONTAINER_FORMAT_FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `MOQ_CONTAINER_FORMAT_CMAF` to keep publishing CMAF.
+
+### Finished tracks stay until the broadcast ends (#6157)
+
+`moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.
+Publish a replacement under a new name, and expect a finished track's demand terminal callback when the broadcast closes rather than at the finish.
+
+### A claim answers by publishing (#5678)
+
+`moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
+`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer under the epoch you pass: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under that epoch.
+`moq_broadcast_prepared_free` refuses an answer you will not publish.
+
+### `moq_track_info` gains `compress` (#5928)
+
+The new trailing field changes its ABI. A zero-initialized struct leaves it false, as before.
+
+### Anchors can name a time (#6074)
+
+`moq_anchor` gains `timestamp_us`, read with the new `MOQ_ANCHOR_TIME` kind, which changes its ABI.
+`moq_consume_track_update` fails with a negative code when the track refuses an update, such as a time anchor on an untimed track, leaving the subscription as it was.
+An update made before the subscription is established applies once it is, so a refusal then ends the consumer through its callback.
+
 ### JSON values carry their timestamp (#5677)
 
 `moq_json_value` gains `timestamp_us` and `timestamp_present`, which changes its ABI.

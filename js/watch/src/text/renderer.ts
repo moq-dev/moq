@@ -150,6 +150,7 @@ export function clearCue(store: CueStore, time: number): void {
 	}
 }
 
+/** Signals the renderer reads. */
 export type RendererInput = {
 	// The overlay element captions are drawn into. Owned by the caller (e.g. the <moq-watch> element),
 	// which positions it over the video canvas.
@@ -176,8 +177,11 @@ export type RendererProps = Inputs<RendererInput> & {
  * A caption-only broadcast (no audio/video to anchor the clock) shows nothing until media arrives.
  */
 export class Renderer {
+	/** The source picking the caption track. */
 	readonly source: Source;
+	/** The clock that schedules each cue. */
 	readonly sync: Sync;
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<RendererInput>;
 
 	#signals = new Effect();
@@ -209,7 +213,7 @@ export class Renderer {
 		const [_enabled, container, track, config, broadcast] = values;
 
 		// Honor a per-rendition `broadcast` override: subscribe on the resolved source broadcast.
-		const active = broadcast.relativeBroadcast(effect, config.broadcast);
+		const active = broadcast.relativeBroadcast(effect, config.broadcast, config.epoch);
 		if (!active) return;
 
 		// A new track gets its own chance to complain about its clock.
@@ -360,6 +364,7 @@ export class Renderer {
 		}
 	}
 
+	/** Stop and release everything this holds. */
 	close(): void {
 		this.#signals.close();
 	}

@@ -28,6 +28,9 @@ fuzz = ["async"]
 [dependencies]
 arrayvec = "0.7"
 bytes = { workspace = true }
+# zlib-rs, not the default miniz_oxide: miniz_oxide 0.9.1 can return from a sync flush with output
+# space left but the flush unfinished, silently truncating the frame.
+flate2 = { workspace = true, features = ["zlib-rs", "runtime_detection"] }
 futures = { workspace = true, optional = true }
 hashlink = { workspace = true }
 kio = { workspace = true }
@@ -102,6 +105,12 @@ name = "synced"
 harness = false
 required-features = ["fuzz"]
 
+# Reaches the crate-private session interests through the hidden `fuzz` module.
+[[bench]]
+name = "interests"
+harness = false
+required-features = ["fuzz"]
+
 # Reaches the private message codecs through the hidden `fuzz` module.
 [[bench]]
 name = "codec"
@@ -130,11 +139,14 @@ name = "track"
 harness = false
 required-features = ["async"]
 
-# Declares a pending tail through the hidden `fuzz` module.
+[[bench]]
+name = "tracks"
+harness = false
+
 [[bench]]
 name = "tail"
 harness = false
-required-features = ["fuzz"]
+required-features = ["async"]
 
 [[bench]]
 name = "priority"
@@ -170,6 +182,12 @@ required-features = ["fuzz"]
 [[bench]]
 name = "refresh"
 harness = false
+
+# Follows the session's probe target through the hidden `fuzz` module.
+[[bench]]
+name = "bandwidth"
+harness = false
+required-features = ["fuzz"]
 
 # Uses the hidden fuzz module to observe source selection without public API.
 [[bench]]

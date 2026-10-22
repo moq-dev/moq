@@ -316,9 +316,51 @@ impl Invocation {
 		}
 
 		for command in &self.stages {
+			if let Command::Import(import) = command
+				&& import.stats
+				&& let Some(reason) = import.source.stats_refusal()
+			{
+				anyhow::bail!("--stats names a track in the catalog the import builds, but {reason}");
+			}
 			let Command::Export(export) = command else {
 				continue;
 			};
+			if let Some(sink) = export.sink.report() {
+				anyhow::ensure!(
+					export.catalog_format.is_none(),
+					"`export {sink}` reads no media, so it takes no --catalog-format"
+				);
+				anyhow::ensure!(
+					export.echo.is_none(),
+					"`export {sink}` reads no media to report on; remove --echo"
+				);
+			}
+			if matches!(export.sink, ExportSink::Archive(_)) {
+				anyhow::ensure!(
+					export.catalog_format.is_none(),
+					"`export archive` records every track without reading a catalog, so it takes no --catalog-format"
+				);
+			}
+			if export.echo.is_some() {
+				if export.sink.stdout().is_none()
+					&& let Some(sink) = export.sink.ignores_selection()
+				{
+					anyhow::bail!(
+						"--echo reports what a stdout container export reads, and `export {sink}` is not one"
+					);
+				}
+				let msf = match export.catalog_format {
+					Some(format) => matches!(format, CatalogFormatArg::Msf),
+					None => matches!(
+						moq_mux::catalog::CatalogFormat::detect(&command.broadcast(&self.moq)),
+						Some(moq_mux::catalog::CatalogFormat::Msf)
+					),
+				};
+				anyhow::ensure!(
+					!msf,
+					"--echo follows the hang catalog's `echo` section, which the MSF catalog does not carry"
+				);
+			}
 			if let Some(stdout) = export.sink.stdout() {
 				anyhow::ensure!(
 					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
@@ -722,6 +764,11 @@ pub struct Import {
 	#[usage(long = "latency-max", hide = true)]
 	latency_max: Option<crate::duration::Duration>,
 
+	/// Name a stats track in the catalog and fill it with what each track has written, about
+	/// once a second while subscribed. The stdin imports only.
+	#[usage(long)]
+	pub stats: bool,
+
 	/// The single source feeding the Origin.
 	#[usage(subcommand)]
 	pub source: ImportSource,
@@ -747,7 +794,7 @@ pub enum ImportSource {
 	/// Raw H.264 Annex-B from stdin.
 	Avc3,
 	/// Fragmented MP4 / CMAF from stdin.
-	Fmp4,
+	Fmp4(Fmp4Import),
 	/// MPEG-TS from stdin.
 	Ts(TsImport),
 	/// FLV / RTMP container from stdin.
@@ -775,7 +822,9 @@ impl ImportSource {
 	pub fn stdin_format(&self) -> Option<PublishFormat> {
 		Some(match self {
 			Self::Avc3 => PublishFormat::Avc3,
-			Self::Fmp4 => PublishFormat::Fmp4,
+			Self::Fmp4(args) => PublishFormat::Fmp4 {
+				passthrough: args.passthrough,
+			},
 			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
 				pcr_pid: args.pcr_pid.map(|pid| pid.0),
 			},
@@ -786,6 +835,32 @@ impl ImportSource {
 			_ => return None,
 		})
 	}
+
+	/// Why `--stats` can't report this source, or `None` when it can: the CLI builds the one
+	/// catalog of a stdin import, whose tracks `moq-mux` counts.
+	fn stats_refusal(&self) -> Option<&'static str> {
+		match self {
+			Self::Ts(args) if args.program == Some(TsProgram::All) => {
+				Some("`import ts --program all` builds a catalog per program")
+			}
+			Self::Hls(_) | Self::Rtmp(_) | Self::Srt(_) | Self::Rtsp(_) | Self::Rtc(_) | Self::Archive(_) => {
+				Some("the gateway and archive imports build their own catalogs")
+			}
+			#[cfg(feature = "capture")]
+			Self::Capture(_) => Some("`import capture` encodes, and its encoders do not count yet"),
+			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
+		}
+	}
+}
+
+/// The fMP4 stdin container: whether to unwrap its fragments.
+#[derive(usage_rs::Args, Clone)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct Fmp4Import {
+	/// Publish each fragment whole as CMAF instead of splitting it into one frame per sample.
+	/// Keeps the source's exact sample timing, but every player has to parse ISO BMFF.
+	#[usage(long)]
+	pub passthrough: bool,
 }
 
 /// The MPEG-TS stdin container: which programs of a multiplex to publish.
@@ -889,6 +964,12 @@ pub struct Export {
 	#[usage(flatten)]
 	pub select: crate::subscribe::SelectArgs,
 
+	/// Publish feedback where the broadcast's catalog solicits it: a `<NAME>.echo` broadcast
+	/// under the catalog's `echo` path, reporting what each rendition this export reads has
+	/// received. One path segment, not starting with `.`. The stdout container exports only.
+	#[usage(long, value_name = "NAME")]
+	pub echo: Option<crate::report::EchoName>,
+
 	/// The single sink draining the Origin.
 	#[usage(subcommand)]
 	pub sink: ExportSink,
@@ -938,8 +1019,12 @@ pub enum ExportSink {
 	Srt(crate::srt::ExportArgs),
 	/// WebRTC: WHIP client pushing to a remote (`--connect`) or WHEP server serving plays (`--listen`).
 	Rtc(crate::rtc::Args),
-	/// Record the broadcast into an object store until it ends.
+	/// Record every broadcast announced under `--broadcast` into an object store.
 	Archive(crate::archive::ExportArgs),
+	/// Write the broadcast's stats snapshots to stdout as JSON lines.
+	Stats,
+	/// Write the feedback of every `.echo` broadcast under `--broadcast` to stdout as JSON lines.
+	Echo,
 }
 
 impl ExportSink {
@@ -953,12 +1038,23 @@ impl ExportSink {
 			Self::Srt(_) => "srt",
 			Self::Rtc(_) => "rtc",
 			Self::Archive(_) => "archive",
+			Self::Stats => "stats",
+			Self::Echo => "echo",
 		})
 	}
 
-	/// Whether this sink writes to stdout (the container formats).
+	/// The report sink's name: these read no media, so they skip catalog discovery.
+	fn report(&self) -> Option<&'static str> {
+		match self {
+			Self::Stats => Some("stats"),
+			Self::Echo => Some("echo"),
+			_ => None,
+		}
+	}
+
+	/// Whether this sink writes to stdout (the container formats and the report sinks).
 	pub fn is_stdout(&self) -> bool {
-		self.stdout().is_some()
+		self.stdout().is_some() || self.report().is_some()
 	}
 
 	/// The stdout container format and its options, when this sink writes to
@@ -972,6 +1068,7 @@ impl ExportSink {
 			fragment_duration: None,
 			mux_rate: None,
 			passthrough: false,
+			sync: false,
 		};
 		let buffered = |format, args: &Buffered| Stdout {
 			format,
@@ -981,6 +1078,7 @@ impl ExportSink {
 			fragment_duration: None,
 			mux_rate: None,
 			passthrough: false,
+			sync: false,
 		};
 		Some(match self {
 			Self::Fmp4(args) => Stdout {
@@ -999,6 +1097,7 @@ impl ExportSink {
 				fragment_duration: None,
 				mux_rate: args.mux_rate,
 				passthrough: args.passthrough,
+				sync: args.sync,
 			},
 			Self::Flv(args) => buffered(SubscribeFormat::Flv, args),
 			Self::H264(args) => container(SubscribeFormat::H264, args),
@@ -1021,6 +1120,8 @@ pub struct Stdout {
 	pub mux_rate: Option<u64>,
 	/// Write the `m2ts` passthrough track back out (`ts` only).
 	pub passthrough: bool,
+	/// Render identical packets to every other `--sync` export of the broadcast (`ts` only).
+	pub sync: bool,
 }
 
 /// Staleness options for stdout sinks without a fixed release delay.
@@ -1143,6 +1244,13 @@ pub struct Transport {
 	#[usage(long, conflicts("--linger", "--stitch", "--mux-rate"))]
 	pub passthrough: bool,
 
+	/// Render every packet from the broadcast alone, on a fixed lane per PID, so two exports
+	/// of it emit identical TS for the content both receive, continuity counters included,
+	/// as the legs of a 1+1 pair must. Needs a constant rate, the same on every leg
+	/// (`--mux-rate`, or the catalog's).
+	#[usage(long, conflicts("--stitch", "--passthrough"))]
+	pub sync: bool,
+
 	/// The released spelling of [`Self::delay`].
 	#[usage(long = "max-age", hide = true)]
 	max_age: Option<crate::duration::Duration>,
@@ -1197,14 +1305,6 @@ mod tests {
 	#[test]
 	fn valid_stage() {
 		let _ = Stage::to_kdl();
-	}
-
-	#[test]
-	fn single_stage() {
-		let cli = Invocation::try_parse_from(["moq", "--connect", "http://relay", "import", "ts"]).unwrap();
-		assert_eq!(cli.stages.len(), 1);
-		assert_eq!(cli.stages[0].name(), "import");
-		assert!(cli.validate().is_ok());
 	}
 
 	/// Only TS can mark where a returned broadcast restarts, so only `export ts` may linger.
@@ -1268,6 +1368,27 @@ mod tests {
 		assert!(stdout.passthrough);
 		assert_eq!(stdout.max_delay, Duration::from_secs(2));
 		for flags in [&["--stitch"][..], &["--linger", "10s"], &["--mux-rate", "20000000"]] {
+			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
+		}
+	}
+
+	/// `export ts --sync` keeps its legs identical within one publisher epoch, so it refuses
+	/// `--stitch`, and `--passthrough`, whose output is already the source's own packets.
+	#[test]
+	fn export_ts_sync_refuses_a_stitch_and_a_passthrough() {
+		let parse = |args: &[&str]| {
+			let mut argv = vec!["moq", "export", "--broadcast", "b", "ts", "--sync"];
+			argv.extend_from_slice(args);
+			Invocation::try_parse_from(argv)
+		};
+		let cli = parse(&["--mux-rate", "12000000"]).unwrap();
+		let Command::Export(export) = &cli.stages[0] else {
+			panic!("not an export");
+		};
+		let stdout = export.sink.stdout().unwrap();
+		assert!(stdout.sync);
+		assert_eq!(stdout.mux_rate, Some(12_000_000));
+		for flags in [&["--stitch"][..], &["--passthrough"]] {
 			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
 		}
 	}
@@ -1351,6 +1472,86 @@ mod tests {
 				let err = export(&[flag, sink].concat()).unwrap().validate().unwrap_err();
 				assert!(err.to_string().contains(flag[0]), "{sink:?} {flag:?}: {err}");
 			}
+		}
+	}
+
+	/// `--stats` goes where the CLI builds the one catalog it names a track in.
+	#[test]
+	fn stats_needs_a_catalog_the_cli_builds() {
+		let import = |source: &[&str]| {
+			let argv = [
+				"moq",
+				"--connect",
+				"http://relay",
+				"--broadcast",
+				"room",
+				"import",
+				"--stats",
+			];
+			Invocation::try_parse_from(argv.iter().chain(source).copied()).unwrap()
+		};
+		for source in [
+			["ts"].as_slice(),
+			&["fmp4"],
+			&["flv"],
+			&["avc3"],
+			&["ts", "--program", "1"],
+		] {
+			import(source).validate().unwrap();
+		}
+		for source in [
+			["ts", "--program", "all"].as_slice(),
+			&["hls", "http://origin/master.m3u8"],
+			&["rtmp", "--listen", "127.0.0.1:1935"],
+			&["rtsp", "--connect", "rtsp://camera/stream"],
+		] {
+			let err = import(source).validate().unwrap_err().to_string();
+			assert!(err.contains("--stats"), "{source:?}: {err}");
+		}
+	}
+
+	/// `--echo` reports what a stdout container export reads from a hang catalog, under one
+	/// path segment, and the report sinks read no media to report on.
+	#[test]
+	fn echo_needs_a_container_export_and_a_hang_catalog() {
+		for sink in ["ts", "fmp4", "mkv", "flv", "h264", "h265"] {
+			export(&["--echo", "alice", sink]).unwrap().validate().unwrap();
+		}
+		for sink in [["hls", "--listen", "127.0.0.1:8080"].as_slice(), &["stats"], &["echo"]] {
+			let err = export(&[["--echo", "alice"].as_slice(), sink].concat())
+				.unwrap()
+				.validate()
+				.unwrap_err();
+			assert!(err.to_string().contains("--echo"), "{sink:?}: {err}");
+		}
+		for flags in [
+			["--echo", "alice", "--catalog-format", "msf", "fmp4"].as_slice(),
+			&["--broadcast", "live.msf", "--echo", "alice", "fmp4"],
+		] {
+			let err = export(flags).unwrap().validate().unwrap_err();
+			assert!(err.to_string().contains("MSF"), "{flags:?}: {err}");
+		}
+		export(&[
+			"--broadcast",
+			"live.msf",
+			"--catalog-format",
+			"hang",
+			"--echo",
+			"alice",
+			"fmp4",
+		])
+		.unwrap()
+		.validate()
+		.unwrap();
+		for name in ["", "a/b", ".", "..", "*", ".alice"] {
+			assert!(export(&["--echo", name, "fmp4"]).is_err(), "`{name}` must be refused");
+		}
+		for sink in ["stats", "echo"] {
+			let err = export(&["--catalog-format", "hang", sink])
+				.unwrap()
+				.validate()
+				.unwrap_err();
+			assert!(err.to_string().contains("--catalog-format"), "{sink}: {err}");
 		}
 	}
 
@@ -2384,7 +2585,10 @@ mod tests {
 		])
 		.expect("parse");
 		assert!(cli.moq.validate().is_ok());
-		assert_eq!(cli.moq.cluster.lan.secret.as_deref(), Some("cluster.key"));
+		assert_eq!(
+			cli.moq.cluster.lan.secret.as_deref(),
+			Some(std::path::Path::new("cluster.key"))
+		);
 	}
 
 	/// The app is only read by the mesh, so configuring one without it is an

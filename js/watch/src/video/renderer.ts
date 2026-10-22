@@ -18,6 +18,7 @@ const INTERSECTION_THRESHOLD = 0.01;
  */
 export type Visible = "never" | "always" | (string & {});
 
+/** Signals the renderer reads. */
 export type RendererInput = {
 	canvas: Getter<HTMLCanvasElement | undefined>;
 
@@ -34,10 +35,12 @@ export type RendererProps = Inputs<RendererInput> & {
 	decoder: Decoder;
 };
 
-// An component to render a video to a canvas.
+/** Renders decoded video to a canvas. */
 export class Renderer {
+	/** The decoder supplying frames. */
 	readonly decoder: Decoder;
 
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<RendererInput>;
 
 	// Whether the canvas should currently download per the configured distance and tab focus.
@@ -46,6 +49,7 @@ export class Renderer {
 
 	#video: Video.Renderer;
 
+	/** The derived outputs, read-only. */
 	readonly out: Readonlys<{
 		// The most recently rendered frame, updated after each rAF paint.
 		frame: Getter<VideoFrame | undefined>;
@@ -139,7 +143,7 @@ export class Renderer {
 		effect.cleanup(() => this.#visible.set(false));
 	}
 
-	// Close the track and all associated resources.
+	/** Close the track and all associated resources. */
 	close() {
 		this.#signals.close();
 	}

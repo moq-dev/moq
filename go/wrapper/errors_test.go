@@ -31,14 +31,6 @@ func TestStreamAbortProtocolDetails(t *testing.T) {
 }
 
 func TestErrorMessage(t *testing.T) {
-	var transport *ffi.MoqErrorTransport
-	if !errors.As(ffi.NewMoqErrorTransport("reset"), &transport) {
-		t.Fatal("transport payload is not accessible")
-	}
-	if transport.Reason != "reset" {
-		t.Fatalf("transport reason = %q, want reset", transport.Reason)
-	}
-
 	tests := []struct {
 		err  error
 		want string

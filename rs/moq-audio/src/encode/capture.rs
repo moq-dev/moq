@@ -1056,7 +1056,7 @@ impl Supervisor {
 			};
 
 			tracing::warn!(error = %failure, "audio capture format unavailable");
-			tokio::time::sleep(self.advance()).await;
+			moq_clock::sleep(self.advance()).await;
 		}
 	}
 
@@ -1183,7 +1183,7 @@ impl Supervisor {
 						}
 						continue 'demand;
 					}
-					_ = tokio::time::sleep(wait) => {}
+					_ = moq_clock::sleep(wait) => {}
 				}
 			}
 		}
@@ -1211,6 +1211,7 @@ fn frame(samples: &[f32], timestamp_us: u64) -> Result<Frame, Error> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use std::collections::VecDeque;
 	use std::future::Future;

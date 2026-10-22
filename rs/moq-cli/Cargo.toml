@@ -118,8 +118,8 @@ moq-auth = { workspace = true, features = ["serve"] }
 moq-clock = { workspace = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
-# Names the MSF catalog track `export archive` records.
-moq-msf = { workspace = true }
+# Writes and reads the stats and feedback snapshots.
+moq-json = { workspace = true }
 moq-mux = { workspace = true }
 # Cluster, LAN mesh, and inbound `/.cluster` auth. default-features off so the
 # CLI's own feature set (iroh, quic, cluster-lan) is what selects them.
@@ -150,8 +150,8 @@ winit = { version = "0.30.13", optional = true }
 sd-notify = { workspace = true }
 
 [dev-dependencies]
-# Decodes the timeline the archive round-trip test checks.
-moq-json = { path = "../moq-json" }
+# Decodes the interop matrix's audio tone (the `interop-audio` example).
+moq-audio = { path = "../moq-audio" }
 # `test_relay` stands up a real relay for the `fetch` and `announced` tests to read through.
 moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
 # The scripted RTSP server `import rtsp` pulls from.
@@ -178,3 +178,7 @@ harness = false
 [[example]]
 name = "interop-tail"
 path = "../../test/interop/clients/rust/tail.rs"
+
+[[example]]
+name = "interop-audio"
+path = "../../test/interop/clients/rust/audio.rs"

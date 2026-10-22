@@ -22,6 +22,7 @@ A missing data timestamp stays untimed; the library never substitutes zero or no
 `package:moq/json.dart` consumers return `Value` (`value`, `timestampUs`) from `next()`; a snapshot consumer
 yields each state in order, and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `null` timescale are untimed on both publish and receive.
+`MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -29,6 +30,7 @@ Share `media.Timebase(broadcast: ...)` through `ContainerInit` when several impo
 one source timeline; omitting it keeps an independent offset. A timebase belongs to its
 broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
 so a raw byte stream needs no other importer.
+`ContainerFormat.fmp4` splits each fragment into one frame per sample; `ContainerFormat.cmaf` republishes it whole.
 `media.CatalogConsumer.subscribe`, `media.TrackConsumer.subscribe`, and `media.GroupConsumer.fetch`
 construct the read side from a broadcast; the last two take a catalog `media.Rendition` and
 follow its broadcast and track themselves. For arrival-order reads, decode each group from
@@ -64,7 +66,8 @@ moq
     default:
   }
 });
-final broadcast = await moq.requestBroadcast('live/camera');
+// Wait for a publisher at one path; call available() again for the next one.
+final broadcast = await moq.announcedBroadcast('live/camera').available();
 final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast);
 print(await catalog.next());
 ```
@@ -97,7 +100,7 @@ encoder.finish();
 // Decode a subscribed rendition. Dispose each frame promptly.
 import 'package:moq/video.dart' as video;
 
-final remote = await moq.requestBroadcast('live/camera');
+final remote = await moq.announcedBroadcast('live/camera').available();
 final renditions = await media.CatalogConsumer.subscribe(broadcast: remote);
 final decoder = await video.Consumer.subscribe(
   broadcast: remote,
@@ -135,7 +138,9 @@ shows which module holds each.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs: ...)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** `dispose()` each frame from a `video.Consumer` promptly rather than waiting for the garbage collector, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `await moq.close()` or `session.shutdown()` drains for up to one second and reports any error. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Cancelling a stream subscription releases its native cursor. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
-- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol, and while a client session reconnects `session.failure()` says why. Hold the owned `BandwidthConsumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `peek()` reads the current estimate in bits per second and `changed()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+- **Ending cleanly.** When the input ends, finish every track, then call `broadcast.finish()`. The returned `BroadcastFinish` keeps the broadcast announced and serving the finished tracks for `linger`, their longest max age, so a subscriber still catching up can drain them. `await finish.wait()` completes once the linger passes, and `finish.close()` closes the broadcast at once, completing the wait. `broadcast.close()` stays the abrupt end.
+- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol, and while a client session reconnects `session.failure()` says why. Before the first connect, `client.failure()` says why the dial is retrying. Hold the owned `BandwidthConsumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `peek()` reads the current estimate in bits per second and `changed()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+- **Authorization.** On `moq-lite-07-wip` (opt in with `ConnectOptions(versions: ...)`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), listen to `moq.auth().grants()` for the `Grant` the relay sent back, `null` until it answers and while a client session reconnects. `await auth().add(token: ...)` presents a fresh token without reconnecting, returns an `AuthToken` whose grant joins the union until `cancel()`, and is presented again on every reconnect. A refusal throws with the relay's code.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.

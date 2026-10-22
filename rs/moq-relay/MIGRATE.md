@@ -5,6 +5,43 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### WebSocket clients must offer a QMux subprotocol (#6231)
+
+The relay answers a WebSocket upgrade with 400 when its `Sec-WebSocket-Protocol` offers none of the relay's QMux subprotocols, instead of falling back to the legacy `webtransport` format.
+Upgrade any client that still speaks only `webtransport` over WebSocket before the relay.
+
+### io\_uring workers start serving separately (#6245)
+
+`uring::Workers::serve(cluster, auth, shutdown, sessions)` is now `spawn` with the same arguments, which sets every worker up without accepting, followed by `serve()`, which starts them accepting.
+Install anything that must be in place before the first session (`Relay::run` installs its signal handlers) between the two.
+
+### `supervise` takes a `Serving` guard (#6144)
+
+`moq_relay::supervise` takes the `shutdown::Serving` from `Observer::serve` in place of the `Observer`.
+Take it before the session's SETUP reply, and bound that reply with `Observer::until_deadline`, so the drain waits for the session to report its end but not for a stalled reply:
+
+```rust
+let serving = shutdown.serve();
+let (session, driver) = shutdown
+	.until_deadline(request.ok())
+	.await
+	.context("the SETUP reply was still pending at the drain deadline")??;
+moq_relay::supervise(session, lease, serving, None).await
+```
+
+### `cluster.lan.secret` is a file path only (#5910)
+
+`--cluster-lan-secret`, `MOQ_CLUSTER_LAN_SECRET`, and `[cluster.lan] secret` no longer accept 64 hex characters inline.
+Write the hex to a file (`openssl rand -hex 32 > cluster.key`) and pass its path; `LanConfig::secret` is now a `PathBuf`.
+
+### Admission runs under the handshake deadline (#5765)
+
+`listen.timeout` now bounds auth admission as part of the handshake, replacing the fixed ten-second admission timeout, so `"0"` also lets admission wait forever.
+HTTP reads bound admission by the web listener's timeout.
+`Auth::admit` and `Cluster::admit` no longer time out on their own, so a slow embedded decider no longer refuses after ten seconds: the caller owns the deadline.
+Bound them with `moq_tokio::server::Request::within` on an accepted session, or wrap them in `tokio::time::timeout`; dropping the future withdraws the admission from the decider.
+Tokens attached in band keep their ten-second bound and are refused as `auth::Error::Unavailable` past it.
+
 ### Usage types come from usage-rs 7 (#6060)
 
 The relay's `Args` and `Config` derives now implement usage-rs 7 traits.

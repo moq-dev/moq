@@ -53,6 +53,14 @@ the priority table in `doc/concept/moq-lite.md`: it now describes the field
 FETCH, answered through the model's ranges. Run `just drafts check` and
 `just test interop --all`.
 
+Decided 2026-10-22 (maintainer): SUBSCRIBE_OK carries the resolved start for
+a relative range start, so a reader's ordered cursor takes its floor from it
+([Container reads drop backfill](/quest/m1/read-backfill.md)).
+
 ## Required
 
 - [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the misses a relay fills upstream by range
+
+## Related
+
+- [Container reads drop backfill](/quest/m1/read-backfill.md) - floors its ordered cursor on the resolved start

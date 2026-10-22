@@ -626,6 +626,7 @@ fn channel(rate: u32) -> (ResamplingProd<f32>, ResamplingCons<f32>) {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use std::collections::VecDeque;
 	use std::time::Duration;
@@ -1143,7 +1144,11 @@ mod tests {
 		let mut energy = 0.0f64;
 		let mut buf = vec![0.0f32; REFERENCE_FRAME * REFERENCE_CHANNELS];
 
-		for _ in 0..20 {
+		// Until the tap hears it rather than for a fixed count: writes are dropped
+		// until the device first reads, and a device can take seconds to start
+		// (PulseAudio's idle null sink renders two seconds ahead).
+		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+		while energy <= 1.0 && tokio::time::Instant::now() < deadline {
 			let _ = sink.write(&tone).expect("write");
 			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 

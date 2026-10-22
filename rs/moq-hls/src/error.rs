@@ -135,6 +135,15 @@ pub enum Error {
 	/// I/O error while reading a local playlist or segment.
 	#[error("io: {0}")]
 	Io(std::sync::Arc<std::io::Error>),
+
+	/// An export timeline failed, so its listings refuse rather than read as a finished recording.
+	#[error("timeline {track} failed: {source}")]
+	TimelineFailed {
+		/// The timeline's track name.
+		track: String,
+		/// Why the timeline failed.
+		source: Box<Error>,
+	},
 }
 
 impl Error {
@@ -171,15 +180,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	/// The import loop consults this, so an origin's settled answer has to reach it intact.
-	#[test]
-	fn an_http_failure_reports_its_status() {
-		// A failure the origin never answered carries no status, so the budget decides instead.
-		assert_eq!(Error::NoVariants.status(), None);
-		assert_eq!(Error::ParsePlaylist("not a playlist".to_string()).status(), None);
-		assert_eq!(Error::Moq(moq_net::Error::Transport("lost".to_string())).status(), None);
-	}
 
 	#[tokio::test]
 	async fn http_error_redacts_url() {

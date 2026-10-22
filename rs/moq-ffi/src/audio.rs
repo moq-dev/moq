@@ -20,13 +20,21 @@ use crate::ffi::Task;
 /// <https://developer.mozilla.org/en-US/docs/Web/API/AudioData/format>
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqAudioSampleFormat {
+	/// Unsigned 8-bit PCM samples, interleaved by channel.
 	U8,
+	/// Signed 16-bit PCM samples, interleaved by channel.
 	S16,
+	/// Signed 32-bit PCM samples, interleaved by channel.
 	S32,
+	/// 32-bit floating-point PCM samples, interleaved by channel.
 	F32,
+	/// Unsigned 8-bit PCM samples, one plane per channel.
 	U8Planar,
+	/// Signed 16-bit PCM samples, one plane per channel.
 	S16Planar,
+	/// Signed 32-bit PCM samples, one plane per channel.
 	S32Planar,
+	/// 32-bit floating-point PCM samples, one plane per channel.
 	F32Planar,
 }
 
@@ -106,27 +114,34 @@ impl From<MoqAudioPreset> for moq_audio::encode::Preset {
 /// PCM layout the caller will pass to [`MoqAudioProducer::write`].
 #[derive(uniffi::Record)]
 pub struct MoqAudioEncoderInput {
+	/// The raw PCM sample layout.
 	pub format: MoqAudioSampleFormat,
+	/// The number of samples per second.
 	pub sample_rate: u32,
-	/// Interleaved channel count, which also names the speaker layout by the
+	/// The channel count, which also names the speaker layout by the
 	/// WAVE convention: 1 mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1,
 	/// 8 7.1, in front left, front right, center, LFE, back, side order.
 	pub channels: u32,
 }
 
-/// Codec-side configuration. `sample_rate` / `channels` `None` means
-/// "match the input (snapping the rate up to a libopus-supported
-/// value if necessary)".
+/// Codec-side configuration for a [`MoqAudioProducer`] or a standalone [`MoqAudioEncoder`].
+/// Opus snaps the encoded rate up to one libopus supports.
 #[derive(uniffi::Record)]
 pub struct MoqAudioEncoderOutput {
+	/// The codec used to encode this rendition.
 	pub codec: Arc<MoqAudioCodec>,
 	/// Track name for a broadcast-bound producer. `None` derives one from the codec.
 	#[uniffi(default = None)]
 	pub track: Option<String>,
+	/// The encoded samples per second. Absent matches a producer's input rate,
+	/// or 48000 for a standalone encoder, which has no input to match.
 	#[uniffi(default = None)]
 	pub sample_rate: Option<u32>,
+	/// The encoded channel count. Absent matches a producer's input, or 2 for a
+	/// standalone encoder, which has no input to match.
 	#[uniffi(default = None)]
 	pub channels: Option<u32>,
+	/// The target bitrate in bits per second, or absent for the codec default.
 	#[uniffi(default = None)]
 	pub bitrate: Option<u32>,
 	/// Encoded frame duration in microseconds. Opus accepts exactly
@@ -161,6 +176,7 @@ impl MoqAudioEncoderOutput {
 /// PCM layout the caller wants out of [`MoqAudioConsumer::next`].
 #[derive(uniffi::Record)]
 pub struct MoqAudioDecoderOutput {
+	/// The raw PCM sample layout.
 	pub format: MoqAudioSampleFormat,
 	/// `None` delivers samples at the codec's native rate.
 	#[uniffi(default = None)]
@@ -350,6 +366,7 @@ pub struct MoqAudioProducer {
 	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqBandwidth>>,
+	finished: crate::producer::Finished,
 }
 
 impl MoqAudioProducer {
@@ -379,6 +396,7 @@ impl MoqAudioProducer {
 		Ok(())
 	}
 
+	/// Encode and publish one PCM frame.
 	pub fn write(&self, frame: MoqAudioFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let frame = moq_audio::Frame::try_from(frame)?;
@@ -395,11 +413,15 @@ impl MoqAudioProducer {
 		self.reservation.lock().unwrap().clone()
 	}
 
+	/// Drain the encoder and finish the audio track.
+	///
+	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		self.reservation.lock().unwrap().take();
 		producer.finish()?;
+		self.finished.keep(producer);
 		Ok(())
 	}
 }
@@ -453,9 +475,10 @@ impl MoqAudioProducer {
 			options.bandwidth = bandwidth.allocator().clone();
 		}
 
-		let producer = broadcast.with_state(|state| {
-			moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)
-				.map_err(Into::into)
+		let (producer, finished) = broadcast.with_state(|state| {
+			let producer =
+				moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)?;
+			Ok((producer, state.finished.clone()))
 		})?;
 
 		// Producer::new does not reserve today (only capture does), so the
@@ -469,6 +492,7 @@ impl MoqAudioProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
 			reservation: std::sync::Mutex::new(reservation),
 			_bandwidth: bandwidth,
+			finished,
 		}))
 	}
 }
@@ -578,8 +602,9 @@ impl MoqAudioConsumer {
 		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
 		// dynamic handler and open an upstream subscription we would immediately drop.
 		let reference = catalog_audio.broadcast.clone();
+		let epoch = catalog_audio.epoch.clone();
 		let cfg = audio_config(catalog_audio)?;
-		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
+		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 
 		let mut config = moq_audio::decode::Options::default();
 		config.output.format = output.format.into();
@@ -614,6 +639,7 @@ mod tests {
 		MoqAudio {
 			label: None,
 			broadcast: None,
+			epoch: None,
 			track: None,
 			codec: codec.to_string(),
 			description: None,

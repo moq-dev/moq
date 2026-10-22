@@ -43,6 +43,12 @@ let
     ];
   };
   matchingNat = evaluate ids { externalInterface = "eth0"; };
+  smallDisk = valid.extendModules {
+    modules = [ { services.github-runner-vms.first.resources.disk = 7; } ];
+  };
+  minimumDisk = valid.extendModules {
+    modules = [ { services.github-runner-vms.first.resources.disk = 8; } ];
+  };
   wrongUplink = evaluate ids { externalInterface = "eth1"; };
   fixedAddress = evaluate ids { externalIP = "203.0.113.1"; };
   duplicate = evaluate {
@@ -56,11 +62,24 @@ assert pkgs.lib.assertMsg (pkgs.lib.all (item: item.assertion) valid.config.asse
   )
 );
 assert pkgs.lib.all (item: item.assertion) matchingNat.config.assertions;
+assert pkgs.lib.any (item: !item.assertion) smallDisk.config.assertions;
+assert pkgs.lib.all (item: item.assertion) minimumDisk.config.assertions;
+assert pkgs.lib.any (
+  item: !item.assertion
+) smallDisk.config.services.github-runner-vms.first.guest.config.assertions;
+assert pkgs.lib.all (
+  item: item.assertion
+) minimumDisk.config.services.github-runner-vms.first.guest.config.assertions;
 assert !valid.config.networking.firewall.filterForward;
 assert mixedNetworking.config.systemd.network.wait-online.enable;
 assert !valid.config.systemd.network.wait-online.enable;
 assert pkgs.lib.all (
   name: valid.config.systemd.services.${name}.serviceConfig.Restart == "always"
+) (builtins.attrNames ids);
+assert pkgs.lib.all (
+  name:
+  pkgs.lib.hasInfix "virtio-balloon-pci,free-page-reporting=on"
+    valid.config.systemd.services.${name}.script
 ) (builtins.attrNames ids);
 assert pkgs.lib.any (item: !item.assertion) duplicate.config.assertions;
 assert pkgs.lib.any (item: !item.assertion) wrongUplink.config.assertions;

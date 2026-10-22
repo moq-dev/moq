@@ -77,14 +77,17 @@ struct Serve {
 	/// `listen.timeout`, which each worker's endpoint starts at a connection's
 	/// first packet.
 	timeout: Option<std::time::Duration>,
+	/// `listen.reset.secret`, shared so any worker resets any worker's
+	/// connections, a restarted group's included.
+	reset_secret: Option<[u8; 32]>,
 }
 
 /// A bound group of io_uring QUIC workers sharing one port.
 ///
 /// [`bind`](Self::bind) opens every socket, so a returned value already owns
 /// the listen address and a port conflict is an error here rather than a
-/// worker that quietly died. Nothing is served until [`serve`](Self::serve)
-/// spawns the threads.
+/// worker that quietly died. [`spawn`](Self::spawn) starts every thread, and
+/// nothing is served until [`serve`](Self::serve).
 pub struct Workers {
 	members: Vec<moq_sock::shard::Socket>,
 	addr: SocketAddr,
@@ -102,9 +105,12 @@ pub struct Workers {
 	alpns: Arc<Vec<String>>,
 	versions: moq_net::Versions,
 	timeout: Option<std::time::Duration>,
+	reset_secret: Option<[u8; 32]>,
 
 	threads: Vec<(u16, std::thread::JoinHandle<()>)>,
 	stops: Vec<Arc<Stop>>,
+	/// Releases each spawned worker to accept; dropped unsent, it exits instead.
+	starts: Vec<std::sync::mpsc::Sender<()>>,
 	/// A worker's fatal error, reported to whoever polls [`failed`](Self::failed).
 	failures: tokio::sync::mpsc::UnboundedReceiver<anyhow::Error>,
 	failures_tx: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
@@ -214,6 +220,15 @@ impl Workers {
 		let mut udp = moq_uring::udp::Config::default();
 		udp.gso = quic.gso.unwrap_or(true);
 
+		let reset_secret = listen
+			.reset
+			.secret
+			.as_deref()
+			.map(moq_tokio::secret::Secret::read)
+			.transpose()
+			.context("invalid --listen-reset-secret")?
+			.map(|secret| *secret.as_bytes());
+
 		let (failures_tx, failures) = tokio::sync::mpsc::unbounded_channel();
 		tracing::info!(workers = count, %addr, "bound io_uring QUIC workers");
 
@@ -228,8 +243,10 @@ impl Workers {
 			alpns: Arc::new(alpns),
 			versions,
 			timeout: listen.resolved_timeout(),
+			reset_secret,
 			threads: Vec::new(),
 			stops: Vec::new(),
+			starts: Vec::new(),
 			failures,
 			failures_tx,
 			_group: group,
@@ -257,13 +274,14 @@ impl Workers {
 		self.certificates.clone()
 	}
 
-	/// Spawn the worker threads and start accepting.
+	/// Spawn the worker threads, each set up but not yet accepting.
 	///
 	/// Call from the shared runtime: it is captured as the home for
 	/// authentication and session supervision. Returns once every worker is
-	/// serving; a worker that cannot start (an old kernel, a ring failure) is
-	/// an error here rather than a thread that quietly died.
-	pub fn serve(
+	/// set up; a worker that cannot start (an old kernel, a ring failure) is
+	/// an error here rather than a thread that quietly died. Nothing accepts
+	/// until [`serve`](Self::serve), so a failure here has served nobody.
+	pub fn spawn(
 		&mut self,
 		cluster: cluster::Cluster,
 		auth: auth::Auth,
@@ -280,6 +298,7 @@ impl Workers {
 			versions: self.versions.clone(),
 			local: self.addr,
 			timeout: self.timeout,
+			reset_secret: self.reset_secret,
 		};
 
 		let cores = match self.pin {
@@ -292,6 +311,7 @@ impl Workers {
 			let core = cores.get(index as usize % cores.len().max(1)).copied();
 			let stop = Arc::new(Stop::default());
 			let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+			let (start_tx, start_rx) = std::sync::mpsc::channel();
 
 			let spawn = Spawn {
 				member,
@@ -302,6 +322,7 @@ impl Workers {
 				serve: serve.clone(),
 				stop: stop.clone(),
 				ready: ready_tx,
+				start: start_rx,
 				failures: self.failures_tx.clone(),
 			};
 			let thread = std::thread::Builder::new()
@@ -325,9 +346,18 @@ impl Workers {
 
 			self.threads.push((index, thread));
 			self.stops.push(stop);
+			self.starts.push(start_tx);
 		}
 
 		Ok(())
+	}
+
+	/// Start every [`spawn`](Self::spawn)ed worker accepting.
+	pub fn serve(&mut self) {
+		for start in self.starts.drain(..) {
+			// A worker that died since setup is reported through `failed`.
+			let _ = start.send(());
+		}
 	}
 
 	/// The first worker's fatal error. Pends until one dies, which a healthy
@@ -350,6 +380,8 @@ impl Workers {
 	}
 
 	fn signal(&mut self) -> Vec<(u16, std::thread::JoinHandle<()>)> {
+		// A worker still waiting to serve exits without serving.
+		self.starts.clear();
 		for stop in &self.stops {
 			stop.stop();
 		}
@@ -446,9 +478,11 @@ struct Spawn {
 	udp: moq_uring::udp::Config,
 	serve: Serve,
 	stop: Arc<Stop>,
-	/// Reports setup back to [`Workers::serve`], which blocks on it so a
+	/// Reports setup back to [`Workers::spawn`], which blocks on it so a
 	/// worker that cannot start is an error there rather than a dead thread.
 	ready: std::sync::mpsc::Sender<anyhow::Result<()>>,
+	/// Fires on [`Workers::serve`]; closes when the group stops first.
+	start: std::sync::mpsc::Receiver<()>,
 	/// Where a fatal error goes once the worker is running.
 	failures: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
 }
@@ -477,7 +511,8 @@ fn run_worker(spawn: Spawn) {
 			let _ = failures.send(anyhow::anyhow!("io_uring worker {index} stopped on its own"));
 		}
 		// Setup failure already went back through `ready`, which is what
-		// `Workers::serve` is blocking on.
+		// `Workers::spawn` is blocking on, and a worker stopped before it
+		// served was asked to.
 		Ok(_) => {}
 	}
 }
@@ -494,6 +529,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 		serve,
 		stop,
 		ready,
+		start,
 		failures,
 	} = spawn;
 	let index = member.shard().index();
@@ -522,6 +558,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 		let mut endpoint_config = moq_uring::quic::endpoint::Config::default().with_server(server);
 		endpoint_config.activity = serve.shutdown.activity.clone();
 		endpoint_config.handshake.timeout = serve.timeout;
+		endpoint_config.reset_secret = serve.reset_secret;
 		let endpoint =
 			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
@@ -535,6 +572,9 @@ fn serve_worker(spawn: Spawn) -> bool {
 		}
 	};
 	let _ = ready.send(Ok(()));
+	if start.recv().is_err() {
+		return false;
+	}
 
 	let handle = worker.handle();
 	let accept_handle = handle.clone();
@@ -776,10 +816,17 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 	auth_request.alpn = alpn.clone();
 	auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 	let admission = lifecycle.clone();
-	let (admitted, registration) = match lifecycle
-		.shared(&serve.tokio, async move { admission.admit(auth_request).await })
-		.await?
-	{
+	// The handshake deadline covers admission too, so a peer cannot hold the connection
+	// open behind a decision that never comes. Dropping the shared task withdraws it.
+	let decided = deadline
+		.bound(lifecycle.shared(&serve.tokio, async move { admission.admit(auth_request).await }))
+		.await
+		.inspect_err(|err| {
+			if matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::Timeout)) {
+				serve.cluster.refusals.record(crate::refusals::Refusal::Unavailable);
+			}
+		})?;
+	let (admitted, registration) = match decided {
 		Ok(admitted) => admitted,
 		Err(err) => {
 			// The status is what separates "your credential is bad" from "the auth
@@ -816,10 +863,19 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 		request = request.with_subscriber(publisher);
 	}
 	let lease = lease.preparing(request.auth(), request.role())?;
-	let (session, driver) = deadline
-		.bound(request.ok())
-		.await
-		.inspect_err(|err| crate::connection::setup_failed(&stats, err.downcast_ref()))?;
+	let serving = serve.shutdown.serve();
+	// Bounded by the drain deadline too, like the tokio path, so a peer that stalls
+	// the SETUP reply cannot hold the drain. That is a tokio timer, so it runs on the
+	// shared runtime, and dropping it aborts the task.
+	let shutdown = serve.shutdown.clone();
+	let expired = std::pin::pin!(lifecycle.shared(&serve.tokio, async move { shutdown.expired().await }));
+	let reply = std::pin::pin!(deadline.bound(request.ok()));
+	let (session, driver) = match futures::future::select(reply, expired).await {
+		futures::future::Either::Left((reply, _)) => {
+			reply.inspect_err(|err| crate::connection::setup_failed(&stats, err.downcast_ref()))?
+		}
+		futures::future::Either::Right(_) => anyhow::bail!("the SETUP reply was still pending at the drain deadline"),
+	};
 	let driver_handle = handle.clone();
 	let driver = async move {
 		match driver_handle.run(driver).await {
@@ -833,10 +889,16 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 	// supervision (credential expiry, GOAWAY drain) runs with the timers and the
 	// shutdown broadcast on the shared runtime.
 	let lifecycle = lifecycle.clone();
-	Ok(async move { lifecycle.supervise(session, lease, registration, transport).await }.boxed())
+	Ok(async move {
+		lifecycle
+			.supervise(serving, session, lease, registration, transport)
+			.await
+	}
+	.boxed())
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 
@@ -909,8 +971,35 @@ mod tests {
 		);
 	}
 
-	/// An auth decision still pending at the drain deadline is abandoned then,
-	/// although worker teardown only detaches the task awaiting it.
+	/// A group stopped before it serves, as when a later startup step fails, ends
+	/// the workers waiting to serve instead of hanging on their join.
+	#[tokio::test]
+	async fn a_group_stopped_before_serving_joins() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
+			&& std::env::var_os("MOQ_STRICT").is_none()
+		{
+			eprintln!("skipping io_uring relay test: {reason}");
+			return;
+		}
+
+		let mut server = moq_tokio::server::Config::default();
+		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		server.listen.tls.generate = vec!["localhost".into()];
+		let mut workers = Workers::bind(server, moq_tokio::worker::Config::new(2)).unwrap();
+		let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+		workers
+			.spawn(
+				cluster,
+				auth::Auth::refuse("test"),
+				shutdown::Observer::disabled(),
+				Default::default(),
+			)
+			.unwrap();
+		workers.shutdown().await;
+	}
+
+	/// An auth decision still pending at the drain deadline is abandoned by then.
 	#[tokio::test]
 	async fn pending_admission_is_abandoned_at_the_deadline() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -962,6 +1051,63 @@ mod tests {
 		tokio::time::timeout(window + std::time::Duration::from_secs(1), admission.abandoned())
 			.await
 			.expect("the admission outlived the drain deadline");
+		running.await.unwrap().unwrap();
+		connecting.abort();
+	}
+
+	/// `listen.timeout` bounds admission on the io_uring listener too: a decision
+	/// that never comes is abandoned at the handshake deadline.
+	#[tokio::test]
+	async fn pending_admission_is_abandoned_at_the_handshake_deadline() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
+			&& std::env::var_os("MOQ_STRICT").is_none()
+		{
+			eprintln!("skipping io_uring relay test: {reason}");
+			return;
+		}
+
+		let dir = tempfile::tempdir().unwrap();
+		let key = rcgen::KeyPair::generate().unwrap();
+		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.unwrap()
+			.self_signed(&key)
+			.unwrap();
+		let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+		std::fs::write(&cert_path, cert.pem()).unwrap();
+		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+
+		let timeout = std::time::Duration::from_secs(1);
+		let mut config = crate::Config::default();
+		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.listen.tls.cert = vec![cert_path];
+		config.listen.tls.key = vec![key_path];
+		config.listen.timeout = Some(timeout);
+		config.runtime.workers = Some(1);
+		config.runtime.pin = false;
+		config.runtime.io_uring = true;
+		config.drain_timeout = std::time::Duration::from_millis(100);
+		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let port = relay.addr().unwrap().port();
+		let mut admissions = relay.admissions().unwrap();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.insecure = Some(true);
+		client.once = Some(true);
+		client.bind = Some("127.0.0.1:0".parse().unwrap());
+		let url: url::Url = format!("moql://127.0.0.1:{port}/deadline").parse().unwrap();
+		let client = client.init(Default::default()).unwrap();
+		let connecting = tokio::spawn(async move { client.with_reconnect(false).connect(url).established().await });
+		let mut admission = admissions.next().await.unwrap();
+
+		// The handshake deadline is an io_uring timer, which a paused tokio clock cannot
+		// advance, so this waits out the real second with nobody answering.
+		tokio::time::timeout(timeout * 5, admission.abandoned())
+			.await
+			.expect("the admission outlived the handshake deadline");
+		trigger.start();
 		running.await.unwrap().unwrap();
 		connecting.abort();
 	}

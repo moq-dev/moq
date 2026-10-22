@@ -28,6 +28,16 @@ function parseUrl(value: string | null): URL | undefined {
 	}
 }
 
+// Parse the `versions` attribute: a comma-separated list, or the defaults when absent or empty.
+// The connection checks the names and reports an unsupported one on `connection.error`.
+function parseVersions(value: string | null): string[] | undefined {
+	const versions = value
+		?.split(",")
+		.map((version) => version.trim())
+		.filter((version) => version !== "");
+	return versions?.length ? versions : undefined;
+}
+
 function parseVolume(value: string | null): number {
 	if (!value?.trim()) return 0.5;
 	const volume = Number(value);
@@ -38,6 +48,7 @@ function parseVolume(value: string | null): number {
 
 const OBSERVED = [
 	"url",
+	"versions",
 	"name",
 	"paused",
 	"volume",
@@ -122,11 +133,10 @@ function parseBoolean(value: string | null, defaultValue: boolean): boolean {
 // There's no destructor for web components so this is the best we can do.
 const cleanup = new FinalizationRegistry<Effect>((signals) => signals.close());
 
-// An optional web component that wraps a <canvas>
+/** The `<moq-watch>` element: plays a broadcast into a nested <canvas>. */
 export default class MoqWatch extends HTMLElement {
 	static observedAttributes = OBSERVED;
 
-	// The connection to the moq-relay server.
 	/**
 	 * The relay connection, shared with every other element on the page pointing at the
 	 * same URL. Its `origin` is where the broadcasts live.
@@ -140,7 +150,7 @@ export default class MoqWatch extends HTMLElement {
 		return this.player.error;
 	}
 
-	// The broadcast being watched.
+	/** The broadcast being watched. */
 	broadcast: Broadcast;
 
 	/** Downloads and decodes the video track. `video.source` picks the rendition. */
@@ -164,9 +174,11 @@ export default class MoqWatch extends HTMLElement {
 	/** Keeps audio and video playing at the configured delay. */
 	sync: Sync;
 
-	// The mutable user controls. As the top of the tree, this element owns the
-	// writable Signals and wires read-only views into the pipeline. The UI and
-	// the attribute/property accessors read and write these directly.
+	/**
+	 * The mutable user controls. As the top of the tree, this element owns the
+	 * writable Signals and wires read-only views into the pipeline. The UI and
+	 * the attribute/property accessors read and write these directly.
+	 */
 	readonly controls = {
 		paused: new Signal(false),
 		volume: new Signal(0.5),
@@ -303,6 +315,15 @@ export default class MoqWatch extends HTMLElement {
 		});
 
 		this.signals.run((effect) => {
+			const versions = effect.get(this.connection.versions);
+			if (versions) {
+				this.setAttribute("versions", versions.join(","));
+			} else {
+				this.removeAttribute("versions");
+			}
+		});
+
+		this.signals.run((effect) => {
 			const name = effect.get(this.#name);
 			this.setAttribute("name", name.toString());
 		});
@@ -409,6 +430,8 @@ export default class MoqWatch extends HTMLElement {
 
 		if (name === "url") {
 			this.connection.url.set(parseUrl(newValue));
+		} else if (name === "versions") {
+			this.connection.versions.set(parseVersions(newValue));
 		} else if (name === "name") {
 			this.#name.set(Moq.Path.from(newValue ?? ""));
 		} else if (name === "paused") {
@@ -443,6 +466,7 @@ export default class MoqWatch extends HTMLElement {
 		}
 	}
 
+	/** The relay URL, mirrored by the `url` attribute. */
 	get url(): URL | undefined {
 		return this.connection.url.peek();
 	}
@@ -451,6 +475,16 @@ export default class MoqWatch extends HTMLElement {
 		this.connection.url.set(value ? new URL(value) : undefined);
 	}
 
+	/** The protocol versions to offer, most preferred first, mirrored by the `versions` attribute; undefined offers the defaults. */
+	get versions(): readonly string[] | undefined {
+		return this.connection.versions.peek();
+	}
+
+	set versions(value: readonly string[] | undefined) {
+		this.connection.versions.set(value);
+	}
+
+	/** The broadcast name, mirrored by the `name` attribute. */
 	get name(): Moq.Path.Valid {
 		return this.#name.peek();
 	}
@@ -459,6 +493,7 @@ export default class MoqWatch extends HTMLElement {
 		this.#name.set(Moq.Path.from(value));
 	}
 
+	/** Whether playback is paused, mirrored by the `paused` attribute. */
 	get paused(): boolean {
 		return this.controls.paused.peek();
 	}
@@ -467,6 +502,7 @@ export default class MoqWatch extends HTMLElement {
 		this.controls.paused.set(value);
 	}
 
+	/** The playback volume from 0 to 1, mirrored by the `volume` attribute. */
 	get volume(): number {
 		return this.controls.volume.peek();
 	}
@@ -475,6 +511,7 @@ export default class MoqWatch extends HTMLElement {
 		this.controls.volume.set(value);
 	}
 
+	/** Whether audio is muted, mirrored by the `muted` attribute. */
 	get muted(): boolean {
 		return this.controls.muted.peek();
 	}
@@ -483,6 +520,7 @@ export default class MoqWatch extends HTMLElement {
 		this.controls.muted.set(value);
 	}
 
+	/** When to download and render video, mirrored by the `visible` attribute. See {@link Video.Visible}. */
 	get visible(): Video.Visible {
 		return this.controls.visible.peek();
 	}
@@ -500,6 +538,7 @@ export default class MoqWatch extends HTMLElement {
 		this.controls.backend.set(value);
 	}
 
+	/** Whether to wait for the broadcast's announcement before subscribing, mirrored by the `announced` attribute. */
 	get announced(): boolean {
 		return this.#announced.peek();
 	}
@@ -548,6 +587,7 @@ export default class MoqWatch extends HTMLElement {
 		return this.controls.delay.peek();
 	}
 
+	/** @internal */
 	set latency(_value: unknown) {
 		throw new Error("moq-watch: `latency` is gone; use `delay` and `buffer`");
 	}
@@ -557,6 +597,7 @@ export default class MoqWatch extends HTMLElement {
 		return this.controls.delay.peek();
 	}
 
+	/** @internal */
 	set latencyMin(_value: unknown) {
 		throw new Error("moq-watch: `latencyMin` is gone; use `delay` and `buffer`");
 	}
@@ -585,6 +626,7 @@ export default class MoqWatch extends HTMLElement {
 		this.player.reset();
 	}
 
+	/** The catalog format to read, mirrored by the `catalog-format` attribute; undefined detects it. */
 	get catalogFormat(): CatalogFormat | undefined {
 		return this.#catalogFormat.peek();
 	}

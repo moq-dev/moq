@@ -1,7 +1,7 @@
 name: Platform
 
-# The native macOS and Windows gates run nightly on main (nightly.yml calls this)
-# and on every release PR, without path filters, so release can require their names.
+# The native macOS and Windows gates run nightly on main and on every release
+# PR (nightly.yml and release-gate.yml call this), selecting suites from the diff.
 permissions:
   contents: read
 
@@ -23,12 +23,6 @@ on:
       - "justfile"
       - "**/justfile"
       - ".github/**"
-  pull_request:
-    branches: [release]
-    # `closed` only cancels an in-flight run. `edited` runs the gates when a main
-    # PR is retargeted to release. Any edit reruns them, since a skipped rerun
-    # would post a passing context over a failed one.
-    types: [opened, synchronize, reopened, edited, closed]
   workflow_call:
     inputs:
       benchmarks:
@@ -53,10 +47,7 @@ env:
 
 jobs:
   scope:
-    # Require this check too: a failed selector otherwise skips its dependents,
-    # and GitHub accepts skipped jobs as successful required checks.
     name: Platform scope
-    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     outputs:
@@ -77,7 +68,7 @@ jobs:
         id: scope
         env:
           CI_BASE: ${{ github.event_name != 'pull_request' && '--all' || '' }}
-        run: just ci-select platform "$CI_BASE" >> "$GITHUB_OUTPUT"
+        run: just ci-select-platform "$CI_BASE" >> "$GITHUB_OUTPUT"
 
   windows:
     name: Windows

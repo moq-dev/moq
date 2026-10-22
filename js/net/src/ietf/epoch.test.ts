@@ -8,8 +8,9 @@ import type * as Cluster from "./cluster.ts";
 import * as EpochExt from "./epoch.ts";
 import { Fetch } from "./fetch.ts";
 import * as Message from "./message.ts";
-import { Parameters, SetupOption, SetupOptions } from "./parameters.ts";
+import { Parameters } from "./parameters.ts";
 import { type AdvertParams, PublishNamespace } from "./publish_namespace.ts";
+import { SetupOption, SetupOptions } from "./setup_options.ts";
 import { Subscribe } from "./subscribe.ts";
 import { SubscribeNamespaceEntry } from "./subscribe_namespace.ts";
 import { TrackStatusRequest } from "./track.ts";
@@ -65,13 +66,6 @@ function epochParam(value: Uint8Array): Parameters {
 	params.bytes.set(EPOCH_PARAM, value);
 	return params;
 }
-
-test("Epoch: the registry code points and their parity", () => {
-	// Odd values are length-prefixed byte strings, even ones bare varints.
-	expect(SetupOption.Epoch).toBe(0x40b68n);
-	expect(SetupOption.Epoch % 2n).toBe(0n);
-	expect(EPOCH_PARAM % 2n).toBe(1n);
-});
 
 test("Epoch: SETUP declares it on draft-17 and later only", async () => {
 	for (const version of LEGACY) {

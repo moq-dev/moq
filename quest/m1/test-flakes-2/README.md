@@ -1,4 +1,4 @@
-# More tests hold up under load
+# [S] More tests hold up under load
 
 ## Goal
 
@@ -22,26 +22,20 @@ Rules every child keeps:
 - A paused clock auto-advances while the runtime idles, so it can fire a
   timer before a real socket delivers. Where real sockets fight the paused
   clock, make the timers mockable or move the test off real sockets.
-
-Added 2026-10-15 (maintainer): three flakes seen while landing that day's
-merge batch, ranked by how likely each hides a product bug.
+- A mocked clock still flakes when the code jitters its timers with `rand`
+  (the draft-16 cancel race was a retry sweep jittered past a fixed settle
+  budget). Wait out the jitter's whole window, not a count of small steps.
 
 This README's own work, after the children: run `just check --all` several
-times on a loaded machine, as the first round did. moq-tokio's
-`a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
-known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
+times on a loaded machine, as the first round did.
 
-Added 2026-10-19 (maintainer): three more, the redial pair first since CI
-hit it. The same day's test cost audit added the macOS QUIC connects, and the
-redundant failover drift first: it may hide a TS export bug and failed two of
-three loaded `just check` runs.
+The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
+fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
+
+Added 2026-10-21 (maintainer): small flakes from the m0/m1 merge run, kept
+in one child.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
-- [macOS QUIC connects](/quest/m1/test-flakes-2/macos-quic-connect.md) - moq-tokio's loopback QUIC tests stop timing out on the macOS Platform job
 
 ## Related
 

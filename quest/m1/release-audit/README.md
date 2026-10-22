@@ -1,0 +1,125 @@
+# Resolve the release audit findings
+
+## Goal
+
+Resolve the newly identified correctness, resource, and performance risks from
+the 2026-10-22 release-to-main audit before the next cut. Existing quests keep
+ownership of previously tracked problems. This epic's remaining work is to
+recheck the resolved findings together on the release candidate and hand the
+evidence to the existing cut quest.
+
+## Plan
+
+The maintainer requested an extensive audit and quests for bugs, potential
+issues, and performance concerns. The comparison pins are
+[main 6369eca](https://github.com/moq-dev/moq/commit/6369eca26472e120ee20c473027c13d36994edad)
+and [release 36f392f](https://github.com/moq-dev/moq/commit/36f392f492f571454e5abc0e441ddc0168f16477).
+Their tree diff spans 3,720 files, 575,722 insertions, and 125,659 deletions.
+
+Review covered protocol/model ownership, compression, auth, relay discovery,
+QUIC/WebTransport/QMux, browser ingestion, media containers, FFI lifetimes,
+archive migration, E2EE, release-only commits, and CI/publication paths.
+This was risk-based source review with targeted reproductions, not a manual
+verification of every changed line. Each child distinguishes reproduction,
+source inference, and whether the problem is new or inherited. Priorities
+describe impact; no unsupported exploit or performance magnitude is assumed.
+No production code, public API, wire format, or package version changed in
+the audit. Implementation choices remain with each fix; prefer the existing
+ownership mechanisms and keep fixes scoped to their consumer.
+
+Validation at these pins:
+
+- Native protocol/auth/relay/JSON/stats: 3,830 passed, 18 skipped.
+- Native task/clock/QUIC/socket: 923 passed, 2 skipped; Tokio/uring:
+  656 passed, 4 skipped. A strict io_uring WebTransport echo also passed.
+- Native mux/HLS/archive/E2EE: 1,992 passed, 5 skipped.
+- Browser packages under Bun: 4,229 distinct tests passed across the initial
+  runs and targeted reruns. Initial failures were a denied socket listen and
+  two missing-libav tests; these passed after enabling loopback access and
+  building libav. Hang and watch also passed their normal per-package runs.
+  Combining the two polyfill tests in one custom Bun process polluted shared
+  WebCodecs globals; the repository isolates packages in separate processes.
+  This is not a claim that the full JS type/build/browser gate ran.
+- Dependency audit reported the four already tracked unmaintained packages
+  basic-toml, zbus_names, zvariant, and zvariant_derive, not four new advisories.
+
+Run focused regression checks and relevant benchmark sweeps after the fixes,
+then carry the candidate through the existing compatibility, package, draft,
+and all-language interop checks. This audit did not run the full platform
+matrix, real-browser WebCodecs/capture/GPU coverage, installed registry artifacts,
+or a complete public-API diff against published packages. Those proofs retain
+their existing owners. Reconcile release-only versions, changelogs, and
+backports through the documented merge sequence before the cut.
+
+The deeper pass advanced main to
+[1d43c096e0](https://github.com/moq-dev/moq/commit/1d43c096e04431bfc87d807ce47a546df8017475),
+with the same release pin. It reviewed valid-input protocol differences,
+subscription bounds, JSON/model expiry ownership, HLS/archive lifecycle,
+FFI/C cancellation, and the handwritten Python/Swift/Kotlin/Go/Dart/C++
+wrappers. Native FFI/C checks added 371 passes and two skips. The repeated
+309-test archive/HLS run passed with two skips; it is not additional distinct
+coverage over the first pass.
+
+`TMPDIR=/tmp just test interop --all` passed at the deeper pin: seven native
+interop tests and the complete configured integration harness. The harness
+covered Rust/Python/Go/C++/browser publishers against Rust, Python, Go, C++,
+Chromium, Node, Bun, C, and GStreamer consumers, permitted and denied AUTH,
+browser session refusal, CLI FETCH close, finite tails, compression, and
+partial-group drops. The initial run failed because nested temporary paths
+exceeded Unix socket limits in Go tooling and Chromium; the short-path rerun
+completed with no skips or failures. This is Linux workspace-artifact proof,
+not installed-registry or mobile/macOS/Windows validation.
+
+Targeted reproductions confirmed a finite HLS startup race, retained HLS
+server state after final drop, idle Dart stream cancellation, empty expiry
+indexes, JS IETF timestamp changes, JS datagram range violations, and OBS
+reordered-frame timestamps and missing EOF output. Each owning quest records
+the reproduction's limits. The JS datagram range defect moved from the JS
+ranges quest into [JS subscription bounds](/quest/m1/release-audit/js-subscription-bounds.md)
+on 2026-10-22; the OBS quest retains ownership of its findings. Go reservation disposal remains an investigation, and
+the security-sensitive HLS admission item is deliberately a public pointer.
+No platform-wide binding parity, full OBS runtime, fuzzing campaign, or
+network-impairment performance result is implied by these checks.
+
+## Required
+
+The 21 children comprise 17 reproduced or source-confirmed findings, three
+contract/lifetime investigations, and one security-review pointer. Each
+child records whether its behavior is new on main or inherited from release.
+
+- [Review HLS admission](/quest/m1/release-audit/hls-admission.md) - resolve the security-sensitive resource-boundary review before the cut
+- [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
+- [Bound export reorder storage](/quest/m1/release-audit/export-reorder.md) - flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
+- [Validate CMAF header fields](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count, and a zero timescale is refused
+- [Preserve fMP4 sample runs](/quest/m1/release-audit/fmp4-passthrough.md) - passthrough does not substitute gap or interleaved bytes for media samples
+- [JS honors subscription bounds](/quest/m1/release-audit/js-subscription-bounds.md) - each reader and each datagram stays inside its own subscription's group bounds, not the aggregate's
+- [Refuse partial lite groups in JS](/quest/m1/release-audit/js-partial-group.md) - a nonzero `frameStart` closes the session as a protocol violation, not a renumbered complete group
+- [Announce finite HLS imports](/quest/m1/release-audit/hls-startup.md) - a completed valid source cannot race its ready catalog and fail startup
+- [Cancel Dart stream reads](/quest/m1/release-audit/dart-cancellation.md) - listener cancellation releases pending native operations without an unrelated event
+- [Parse QMux records without copying suffixes](/quest/m1/release-audit/qmux-copy.md) - many small frames do not cause quadratic copying
+- [Release AUTH wake listeners](/quest/m1/release-audit/auth-listeners.md) - session churn does not retain one terminal promise reaction per change
+- [Report fatal watch ingestion failures](/quest/m1/release-audit/watch-errors.md) - failed audio/video reads reach the existing error output and tear down their resources
+- [Accept reordered HTTP/3 streams](/quest/m1/release-audit/webtransport-streams.md) - QPACK or a stalled header before SETTINGS does not reject or block a valid handshake
+- [Constrain auth credential redirects](/quest/m1/release-audit/auth-redirects.md) - JSON credentials cannot silently follow redirects to another origin
+- [Release finished FFI codecs](/quest/m1/release-audit/ffi-finished.md) - preserving finished tracks does not preserve drained encoders and scratch buffers
+- [Release HLS server state](/quest/m1/release-audit/hls-shutdown.md) - final server drop retires its watchers while publishers remain live
+- [Retire expiry metadata](/quest/m1/release-audit/expiry-index.md) - empty deadline entries do not accumulate with historical read budgets
+- [Preserve IETF timestamps](/quest/m1/release-audit/ietf-timestamps.md) - JS encoding uses exact same-scale conversion and rejects unsupported values before sending
+- [Settle Go reservation release](/quest/m1/release-audit/go-reservation.md) - investigate prompt allocation release through the public wrapper
+- [Settle finite HLS import](/quest/m1/release-audit/hls-finite.md) - initially ended playlists have an explicit and tested start position
+- [Settle HLS timestamp resets](/quest/m1/release-audit/hls-discontinuity.md) - unchanged-map discontinuities preserve timeline identity or are explicitly refused
+
+## Related
+
+- [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - range lists and frame offsets build on the bounds fixed here
+- [OBS video source](/quest/m2/obs-moq-video/source.md) - reproduced inherited timing and EOF defects remain with the decoder replacement owner
+- [Receive memory](/quest/m1/quic/receive-memory.md) - incomplete reliable input remains a separate connection-credit concern
+- [QPACK dependency fix](/quest/m0/web-transport-proto-0.6.3.md) - decoded header expansion is already tracked
+- [Compressed tracks](/quest/m1/compress/README.md) - mid-group widening and application migration have existing owners
+- [Archive consumer](/quest/m1/archive/consumer.md) - current producer and CLI reader still need the new-format roundtrip
+- [Measured release performance](/quest/m1/release-perf/README.md) - existing paired benchmark regressions and their confirmation runs
+- [Transport performance audit](/quest/m1/audit-perf.md) - congestion-control coverage remains outstanding
+- [Binding timestamps](/quest/m1/binding-timestamps.md) - exact timestamps across language APIs
+- [Dependency audit](/quest/m2/audit-deps.md) - existing advisory inventory
+- [Release gates](/quest/m0/ci/release-gates.md) - post-cut ruleset verification
+- [Publish and adopt](/quest/m2/release/README.md) - API/feature review, merge order, candidate checks, publication, and installed-artifact proof

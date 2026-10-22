@@ -8,14 +8,12 @@ from moq_ffi import (
     MoqAnnounceConsumer,
     MoqAnnouncedBroadcast,
     MoqAnnounceEvent,
+    MoqBroadcastPrepared,
     MoqBroadcastRequest,
     MoqOriginConfig,
     MoqOriginConsumer,
     MoqOriginDynamic,
     MoqOriginProducer,
-)
-from moq_ffi import (
-    MoqRoute as Route,
 )
 
 from ._stream import _Stream
@@ -115,13 +113,29 @@ class BroadcastRequest:
         """The requested broadcast path."""
         return self._inner.path()
 
-    def accept(self, broadcast: BroadcastProducer) -> None:
-        """Serve the request with an unannounced broadcast."""
-        self._inner.accept(broadcast._inner)
+    def prepare(self, epoch: str) -> BroadcastPrepared:
+        """Start an answer under a new epoch, hidden until published."""
+        return BroadcastPrepared(self._inner.prepare(epoch))
 
     def reject(self, error_code: int) -> None:
         """Reject the request with an application error code."""
         self._inner.reject(error_code)
+
+
+class BroadcastPrepared:
+    """A claim answer being filled before its exact route is announced."""
+
+    def __init__(self, inner: MoqBroadcastPrepared) -> None:
+        self._inner = inner
+
+    @property
+    def broadcast(self) -> BroadcastProducer:
+        """The unannounced broadcast to fill before publishing; only `publish` announces it."""
+        return BroadcastProducer._from_inner(self._inner.broadcast())
+
+    def publish(self) -> BroadcastProducer:
+        """Announce the filled broadcast and resolve waiting requesters."""
+        return BroadcastProducer._from_inner(self._inner.publish())
 
 
 class OriginDynamic(_Stream[BroadcastRequest]):
@@ -139,10 +153,6 @@ class OriginDynamic(_Stream[BroadcastRequest]):
     async def requested_broadcast(self) -> BroadcastRequest:
         """Await the next broadcast a consumer requested but that isn't published yet."""
         return BroadcastRequest(await self._inner.requested_broadcast())
-
-    def update(self, route: Route) -> None:
-        """Re-price the route in place: replace its hops and costs."""
-        self._inner.update(route)
 
     def cancel(self) -> None:
         """Stop serving and retract the route."""
@@ -211,7 +221,7 @@ class OriginProducer:
         """Create a consumer that discovers the broadcasts this origin publishes."""
         return OriginConsumer(self._inner.consume())
 
-    def dynamic(self, prefix: str, route: Route | None = None) -> OriginDynamic:
+    def dynamic(self, prefix: str) -> OriginDynamic:
         """Advertise ``prefix`` and serve the requests beneath it.
 
         A route claims ``prefix`` and every path beneath it (``""`` claims every
@@ -219,7 +229,7 @@ class OriginProducer:
         are requested. Hold the returned handle while the route should stay
         advertised.
         """
-        return OriginDynamic(self._inner.dynamic(prefix, route if route is not None else Route()))
+        return OriginDynamic(self._inner.dynamic(prefix))
 
     def create_broadcast(self, path: str) -> BroadcastProducer:
         """Create a broadcast at ``path``, returning the producer that feeds it.

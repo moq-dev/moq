@@ -64,7 +64,7 @@ export interface Config {
 	frameRate?: number;
 }
 
-// Signals the encoder reads.
+/** Signals the encoder reads. */
 export type EncoderInput = {
 	// Whether to encode this rendition. Defaults to true. When false it stops encoding but stays in the
 	// catalog with `enabled: false` and its last config, and stays registered so a subscriber still gets
@@ -119,6 +119,7 @@ export class Encoder {
 	/** The full track name of this rendition, e.g. `"video/hd"`. */
 	readonly name: string;
 
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<EncoderInput>;
 
 	/** The live-editable encoder tuning knobs (codec, dimensions, bitrate, frame rate). */
@@ -141,6 +142,7 @@ export class Encoder {
 		active: new Signal<boolean>(false),
 		stats: new Signal<Stats>({ frames: 0, bytes: 0, keyframes: 0 }),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// The output dimensions of the video in pixels.
@@ -453,6 +455,10 @@ export class Encoder {
 						try {
 							if (effect.abort.aborted) break;
 							if (encoder.state !== "configured") continue;
+							// A pending input means the codec is saturated. Keep capture live instead of
+							// growing a stale encode queue whose lateness becomes permanent catalog delay.
+							// Drop before answering a keyframe request or advancing the frame-rate cursor.
+							if (encoder.encodeQueueSize > 0) continue;
 
 							// This doesn't need to be reactive.
 							const config = this.config.peek();
@@ -828,6 +834,7 @@ export class Encoder {
 		this.#cut = true;
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#signals.close();
 	}

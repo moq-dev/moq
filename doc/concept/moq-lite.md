@@ -56,6 +56,15 @@ always a prefix. A service that serves only some of the paths beneath it
 refuses the rest as they are requested. Announcements are hints; the request is
 what decides.
 
+Inside a broadcast, a reader can list its tracks (moq-lite-07): each track
+with its fixed properties, a synced mark, then tracks as they
+come and go. Listing is discovery, not delivery: subscribe to each track you
+want, and its groups still cached upstream reach you late. A broadcast lists
+the tracks its publisher creates, never one served only on request, and a path
+served under a prefix claim has nothing to list. Like announcements, a relay
+syncs on what it holds now, so a fresh relay syncs empty and its upstream's
+tracks follow.
+
 Each route carries the chain of relay identities it passed through, which is
 how forwarding loops are caught, and a cost, which is how a subscriber picks
 among several routes to the same broadcast. It may also carry a
@@ -78,21 +87,22 @@ A path and an epoch name one broadcast. The path never changes, so
 authorization and hidden names work exactly as without one.
 
 - **One instance, one epoch.** A publisher mints an epoch per run. Replicas of
-  the same content announce that same epoch. A prefix claim, and any route
-  without an epoch, names no instance, so a relay cannot tell that a claim's
-  worker closed a path and serves it again. Such a worker keeps the path's group
-  sequence going, even when its own input starts over at 0. Otherwise a viewer
-  returning within a relay's cache window gets the old output's latest group,
-  then nothing until the new sequence passes it.
+  the same content announce that same epoch. A prefix claim names no instance:
+  its worker answers each requested path by announcing that exact path under
+  the output's own epoch. Restarting one output is then a new epoch every hop
+  sees, so a viewer returning within a relay's cache window never gets the old
+  output's groups.
 - **Newest wins.** Among routes at the same prefix, the newest epoch ranks
   first, ahead of cost, and a route without an epoch ranks last. Newest means
   the latest UUIDv7 timestamp, so hosts with skewed clocks can lose a restart
   until the old instance retracts.
 - **Same epoch resumes.** A subscription moves between routes with the same
-  epoch without a seam, continuing from the first frame it lacks. A route
-  without an epoch keeps its subscriptions until that route goes, which is how
-  a transcoder claim stays on the worker that first served it, and a track that
-  fails ends instead of resuming, so request the path again.
+  epoch without a seam, continuing from the first frame it lacks. That is a
+  floor, not a promise: groups the outage held back still arrive only while
+  the subscriber's max age covers them, so a route that dies silently, noticed
+  only at the idle timeout, costs whatever aged out meanwhile. A route
+  without an epoch keeps its subscriptions until that route goes, and a track
+  that fails ends instead of resuming, so request the path again.
 - **Another instance restarts.** A newer epoch, or, without one, another route
   winning the path, is announced as a restart. Subscriptions already open stay
   on the old instance until dropped or none of its routes remain, which ends
@@ -226,13 +236,15 @@ Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |
 | --- | --- |
-| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
+| **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
-| **Ranges** | Which groups to ask for: from a group, or a number of groups back from the latest, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |
+| **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
 This lets a finished subscription settle without waiting for missing groups.
+A reader of a reported group, including one still arriving, ends with the publisher's error, such as `OLD` or `NOT_FOUND`.
+On moq-lite 05 and 06 that code is application-specific, so every reported group ends with `NOT_FOUND` there.
 Datagram delivery stays best effort.
 
 Ranges are both a request and a filter. A subscriber reads only the groups its
@@ -240,7 +252,12 @@ own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
 served. A relay merges its subscribers' ranges into one upstream request, which
-today's wire versions carry as the single span covering them.
+today's wire versions carry as the single span covering them. A time anchor is
+resolved from the groups the serving hop holds; upstream it asks for everything
+max delay allows, and an untimed track refuses it. At the live edge, a time end
+may let one group through before its first frame shows it starts past the end:
+the first group that has yet to start is handed out without waiting for that
+frame, and the next one waits on it. A datagram is judged by its own timestamp.
 
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of
@@ -265,6 +282,24 @@ moq-transport without a `TIMESCALE` (every track on drafts 14-16), arrive
 untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
+
+A publisher refuses a group that starts before a lower one, and so does a
+moq-lite 07 receiver. Since moq-lite 05 and 06 send times look like media time,
+a receiver drops every timestamp it gets over them and the track arrives
+untimed.
+Timestamps received over moq-transport, whose peers may stamp arrival times,
+are not checked and are only passed on over moq-transport: a relay serves that
+track to moq-lite untimed.
+
+A publisher may compress a track, which pays off for repetitive data such as
+JSON and not for media. Each group's frames become one DEFLATE stream
+([moq-flate](/draft/moq-flate)), and a datagram
+compresses alone. Only the work-in-progress moq-lite 07 carries the compressed
+bytes. A relay forwards them as received and inflates each group once for every
+other subscriber, moq-transport included, so readers always see the original
+frames. Rust and JavaScript publish compressed tracks by setting `compress: true`
+on the track's info. Application writes stay synchronous and readers receive plain
+payloads; compression is useful for repetitive data, not already compressed media.
 
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning

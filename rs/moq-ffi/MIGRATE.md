@@ -10,6 +10,63 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 The record `MoqAudioEncoder::finish` returns is renamed, so its C name no longer collides with the method's.
 The wrappers' `EncoderFinish` aliases are unchanged.
 
+### JSON snapshot `delta_ratio` is `deltas`
+
+`MoqJsonSnapshotConfig::delta_ratio` is replaced by `deltas: bool` (default `true`).
+Set `deltas: false` where you set `delta_ratio: 0`.
+Snapshot groups roll on joiner demand, which the producer answers on its own: publish the track with `MoqTrackInfo::refresh` (`Some(8)` matches the old default), or its groups roll only at their caps.
+
+### Priorities are signed (#6142)
+
+`MoqTrackInfo.priority`, `MoqSubscription.priority`, `MoqFetchGroupOptions.priority`, and `MoqGroupRequest.priority()` are `i8`, higher first, and 0 is the unset midpoint.
+`MoqTrackInfo.priority` defaulted to 127 and now defaults to 0.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced` or `announced_broadcast`, instead of under its whole scope at connect.
+`MoqOriginConsumer::request_broadcast` watches nothing, so on a client it fails with `MoqError::Unroutable` for a path nothing watches, even when the relay announces it.
+Resolve the path with `announced_broadcast`, or hold `announced` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
+### `MoqContainerFormat::Fmp4` unwraps to Legacy (#6250)
+
+A container import with `MoqContainerFormat::Fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `MoqContainerFormat::Cmaf` to keep publishing CMAF.
+
+### Catalog references carry their epoch
+
+`MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `epoch: None`.
+`MoqBroadcastConsumer::resolve` takes the rendition's `epoch` after `reference`; pass it alongside, or `None` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
+
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer::finish` lets go, instead of unlisting when its producer finishes or is released.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
+### A claim answers by publishing (#5678)
+
+`MoqOriginProducer::dynamic(prefix)` takes no `MoqRoute`, and `MoqOriginDynamic::update` is gone.
+`MoqBroadcastRequest::accept` is replaced by `prepare(epoch)`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
+Mint a fresh epoch per output run with `moq_mint_epoch()`. Dropping a prepared answer unpublished refuses the request.
+
+### `MoqTrackInfo` gains `compress` (#5928)
+
+It defaults to `false` in every generated binding; a Rust struct literal adds `compress: false`.
+
+### Anchors can name a time (#6074)
+
+`MoqAnchor` gains `Time { timestamp_us }`, the group containing that presentation time, so exhaustive matches need an arm for it.
+`MoqTrackConsumer::update` now returns `Result<(), MoqError>`, failing with `TimestampMismatch` on a time anchor an untimed track can't serve.
+
+### Regenerate bindings after the API documentation update
+
+The new documentation on `MoqAudioProducer::write` and `finish` changes their
+UniFFI metadata checksums, even though their signatures and behavior are unchanged.
+Regenerate each language's bindings from the rebuilt library and update them together.
+Older generated bindings with active checksum guards reject this library during initialization.
+
 ### JSON consumers return `MoqJsonValue` (#5677)
 
 `MoqJsonSnapshotConsumer::next` and `MoqJsonStreamConsumer::next` return `MoqJsonValue { value, timestamp_us }` instead of a string; `timestamp_us` is null when untimed.

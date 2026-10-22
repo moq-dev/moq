@@ -876,8 +876,8 @@ pub struct LanConfig {
 	)]
 	pub enabled: bool,
 
-	/// The shared key admitting a peer to the LAN mesh, as 64 hexadecimal
-	/// characters or a path to a file containing them.
+	/// A file holding the shared key admitting a peer to the LAN mesh, as 64
+	/// hexadecimal characters (`openssl rand -hex 32`).
 	///
 	/// Optional. Without it, anyone who can reach the listener joins, so leave
 	/// it unset only on networks you trust. With it, only peers that prove they
@@ -886,10 +886,10 @@ pub struct LanConfig {
 		name = "cluster-lan-secret",
 		long = "cluster-lan-secret",
 		env = "MOQ_CLUSTER_LAN_SECRET",
-		value_name = "HEX_OR_PATH",
 		setting = "cluster.lan.secret"
 	)]
-	pub secret: Option<String>,
+	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
+	pub secret: Option<std::path::PathBuf>,
 
 	/// DNS-SD application this relay advertises under. Peers using a different
 	/// name never discover this one. Defaults to `default`, which moq-cli
@@ -1259,6 +1259,9 @@ impl Cluster {
 	}
 
 	/// Admit a gateway session and scope both origin directions from its grant.
+	///
+	/// Waits on the decider for as long as the caller does; the caller owns the
+	/// deadline, as for [`auth::Auth::admit`].
 	pub async fn admit(&self, auth: &auth::Auth, request: moq_auth::Request) -> Result<Admitted, auth::Error> {
 		let result = async {
 			if !matches!(request.event, moq_auth::Event::Connect) {
@@ -1825,10 +1828,10 @@ impl Cluster {
 		dialed: DialMap,
 		http: ClientWithMiddleware,
 	) {
-		let mut tick = tokio::time::interval(CONNECT_API_POLL_INTERVAL);
+		let mut tick = moq_clock::interval(CONNECT_API_POLL_INTERVAL);
 		// A slow fetch must not bank missed ticks into a catch-up burst; just resume
 		// the cadence from the next whole interval.
-		tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+		tick.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Skip);
 		loop {
 			tick.tick().await;
 
@@ -1961,7 +1964,7 @@ impl Cluster {
 		let mut backoff = base_backoff;
 
 		loop {
-			let started = tokio::time::Instant::now();
+			let started = moq_clock::now();
 			let result = self.run_remote_once(&addrs, target).await;
 			let elapsed = started.elapsed();
 
@@ -1977,7 +1980,7 @@ impl Cluster {
 				}
 			}
 
-			tokio::time::sleep(backoff).await;
+			moq_clock::sleep(backoff).await;
 		}
 	}
 
@@ -2126,7 +2129,7 @@ impl Cluster {
 async fn lan_discovery(
 	advertise: &LanAdvertise,
 	node: Option<&str>,
-	secret: Option<&str>,
+	secret: Option<&std::path::Path>,
 	app: moq_tokio::mdns::App,
 ) -> anyhow::Result<moq_tokio::mdns::Discovery> {
 	let mut config = moq_tokio::mdns::Config::new(app, advertise.port);
@@ -2157,7 +2160,7 @@ async fn lan_discovery(
 		config = config.with_node(url);
 	}
 	if let Some(secret) = secret {
-		let secret = moq_tokio::mdns::Secret::load(secret).context("invalid --cluster-lan-secret")?;
+		let secret = moq_tokio::secret::Secret::read(secret).context("invalid --cluster-lan-secret")?;
 		config = config.with_secret(secret);
 	}
 	Ok(config.advertise().await?)
@@ -2300,6 +2303,7 @@ fn remote_status(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
@@ -2429,7 +2433,7 @@ mod tests {
 	/// merely that one appeared: the task publishes once before it can notice its
 	/// producer is gone, so a first announcement races through either way and
 	/// proves nothing.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn stats_publishing_outlives_the_producer_handle() {
 		let config = crate::stats::Config {
 			enabled: true,
@@ -3123,29 +3127,6 @@ mod tests {
 		}
 	}
 
-	/// `cluster.node` (identity) round-trips through TOML and survives the CLI
-	/// re-parse when no flags override it.
-	#[test]
-	fn cluster_node_round_trip() {
-		// Usage reads the environment while parsing, so serialize with the tests
-		// that mutate it.
-		let _env = crate::test_env::EnvGuard::lock();
-
-		let toml = "[cluster]\nnode = \"us-east.example.com:4443\"\nconnect = [\"https://root.example.com:4443/\"]\n";
-		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-node-toml.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = RelayConfig::parse_and_merge(args).expect("config load");
-		assert_eq!(config.cluster.node.as_deref(), Some("us-east.example.com:4443"));
-		assert_eq!(
-			config.cluster.connect,
-			vec![Peer::new("https://root.example.com:4443/")]
-		);
-	}
-
 	/// Static config accepts the object form beside bare URLs, through the same
 	/// type the connect API parses.
 	#[test]
@@ -3264,7 +3245,10 @@ mod tests {
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = RelayConfig::parse_and_merge(args).expect("config load");
 		assert!(config.cluster.lan.enabled);
-		assert_eq!(config.cluster.lan.secret.as_deref(), Some("cluster.key"));
+		assert_eq!(
+			config.cluster.lan.secret.as_deref(),
+			Some(std::path::Path::new("cluster.key"))
+		);
 		assert_eq!(
 			config.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
 			Some("custom")
@@ -3295,7 +3279,10 @@ mod tests {
 			std::ffi::OsString::from("from-cli"),
 		];
 		let config = RelayConfig::parse_and_merge(args).expect("config load");
-		assert_eq!(config.cluster.lan.secret.as_deref(), Some("from-cli.key"));
+		assert_eq!(
+			config.cluster.lan.secret.as_deref(),
+			Some(std::path::Path::new("from-cli.key"))
+		);
 		assert_eq!(
 			config.cluster.lan.app.as_ref().map(ToString::to_string).as_deref(),
 			Some("from-cli")

@@ -3,7 +3,7 @@ import { compareName, compareNumber } from "./compare";
 import { ContainerSchema } from "./container";
 import { hexSchema } from "./hex";
 import { u8Schema, u53Schema } from "./integers";
-import { RelativeBroadcastSchema } from "./path";
+import { EpochSchema, RelativeBroadcastSchema } from "./path";
 
 // Backwards compatibility: old track schema
 const TrackSchema = z.object({
@@ -47,12 +47,53 @@ export const ColorSchema = z.object({
 /** The colour a rendition's pixels carry: H.273 code points plus static HDR metadata. */
 export type Color = z.infer<typeof ColorSchema>;
 
+/** The projection kinds this build knows. */
+const KNOWN_PROJECTIONS = ["rectilinear", "equirectangular"];
+
+/**
+ * Schema for how a rendition's picture maps onto the viewer's field of view. Absent means rectilinear.
+ *
+ * An unrecognized kind parses as `{ kind: "unknown", raw }` instead of throwing, and a consumer treats
+ * it as absent. A recognized kind only parses through its own schema, so a malformed one throws.
+ */
+export const ProjectionSchema = z.union([
+	z.discriminatedUnion("kind", [
+		// A flat picture.
+		z.object({ kind: z.literal("rectilinear") }),
+		// Longitude linear across the width and latitude down the height, the full 180 degrees,
+		// surrounding a viewer at its centre.
+		z.object({
+			kind: z.literal("equirectangular"),
+			// The degrees of longitude the picture spans, centred straight ahead. Absent means 360; VR180 is 180.
+			fov: z.optional(z.number().check(z.positive(), z.lte(360))),
+		}),
+	]),
+	z.pipe(
+		z.looseObject({
+			kind: z.string().check(
+				z.refine((kind) => !KNOWN_PROJECTIONS.includes(kind), {
+					message: "recognized projection kind must match its own schema",
+				}),
+			),
+		}),
+		z.transform((raw) => ({ kind: "unknown" as const, raw })),
+	),
+]);
+
+/** How a rendition's picture maps onto the viewer's field of view. */
+export type Projection = z.infer<typeof ProjectionSchema>;
+
 /** Schema for a single video rendition's decoder config. Mirrors WebCodecs VideoDecoderConfig. */
 export const VideoConfigSchema = z.object({
 	// Optional reference to another broadcast that publishes this track, expressed
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
 	broadcast: z.optional(RelativeBroadcastSchema),
+	// The publisher instance the reference names, when known. Absent accepts whichever instance
+	// resolves first. An epoch-aware route proving another instance fails the entry; an epochless
+	// route cannot prove one, so there it is best effort. Without `broadcast`, it names the
+	// catalog's own instance.
+	epoch: z.optional(EpochSchema),
 	// The track's name in its broadcast, when it differs from this entry's ID (its key in the
 	// catalog). Absent means the ID is the track name. Resolve it with `track`.
 	track: z.optional(z.string()),
@@ -83,6 +124,14 @@ export const VideoConfigSchema = z.object({
 
 	// The colour the decoded pixels carry, so a renderer need not guess or reparse the bitstream.
 	color: z.optional(ColorSchema),
+
+	// How the picture maps onto the viewer's field of view. Absent means rectilinear.
+	projection: z.optional(ProjectionSchema),
+
+	// How each eye's view is packed into the frame: "mono", "left-right" (left eye in the left
+	// half), or "top-bottom" (left eye in the top half). Absent means mono. Typed as a plain string
+	// so an unrecognized packing survives a republish; a consumer treats one as absent.
+	stereo: z.optional(z.string()),
 
 	// The maximum frame rate of the video in frames per second.
 	framerate: z.optional(z.number()),

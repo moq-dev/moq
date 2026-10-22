@@ -29,6 +29,8 @@ impl Handle {
 	}
 
 	/// Present a token now and on later sessions until its handle is dropped or refused.
+	///
+	/// A session that cannot send it, without AUTH, refuses it as unsupported.
 	pub async fn add(&self, token: impl Into<Bytes>) -> crate::Result<Auth> {
 		let producer = kio::Producer::<Granted>::default();
 		let state = producer.consume();
@@ -158,7 +160,8 @@ impl Auth {
 		}
 	}
 
-	/// Wait until the token is refused or its connection ends.
+	/// Wait until the token ends: `Ok` when the peer closed it without an error, otherwise its
+	/// refusal or revocation, or the connection's end.
 	pub async fn closed(&self) -> crate::Result<()> {
 		kio::wait(|waiter| self.state.poll_closed(waiter)).await;
 		match &self.state.read().error {
@@ -310,7 +313,7 @@ async fn present(
 			let attempt = async {
 				if opening.is_none() {
 					if let Some(delay) = delay {
-						tokio::time::sleep(delay).await;
+						moq_clock::sleep(delay).await;
 					}
 					let handle = session.auth();
 					let bytes = replay.bytes.clone();
@@ -352,12 +355,19 @@ async fn present(
 				Err(err) => return Err(err.into()),
 			}
 		};
-		if let Some(answered) = answered.take() {
-			let _ = answered.send(Ok(()));
-		}
 		let mut watch = token.grant();
+		// Without AUTH, moq-transport accepts a token at once for the requests that name it,
+		// but a connection's token rides no request, so nothing would send it. One the peer
+		// already ended has a grant no longer and is left to the watch below.
+		if watch.peek().is_none() && token.closed().now_or_never().is_none() {
+			return Err(moq_net::Error::Unsupported.into());
+		}
 		if let Ok(mut state) = producer.write() {
 			state.grant = watch.peek();
+		}
+		// After the grant, so `add` never returns a token that still reads none.
+		if let Some(answered) = answered.take() {
+			let _ = answered.send(Ok(()));
 		}
 		loop {
 			tokio::select! {
@@ -378,6 +388,8 @@ async fn present(
 						snapshot = next(&connection, Some((connects, true))).await?;
 						break;
 					}
+					// The peer closed it without an error: the token is over, not refused.
+					Err(moq_net::Error::Cancel) => return Ok(()),
 					Err(err) => return Err(err.into()),
 				}
 			}
@@ -389,6 +401,7 @@ async fn present(
 }
 
 #[cfg(all(test, feature = "tcp"))]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 
@@ -417,10 +430,7 @@ mod tests {
 		let client = async {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions(versions.clone())
-				.connect(
-					now,
-					crate::transport::Session::new(client, moq_net::transport::Binding::InBand),
-				)
+				.connect(now, client)
 				.await
 				.unwrap();
 			(session, AbortOnDrop::new(tokio::spawn(moq_net::time::run(driver))))
@@ -428,10 +438,7 @@ mod tests {
 		let server = async {
 			let request = moq_net::Server::new()
 				.with_versions(versions.clone())
-				.accept_request(
-					now,
-					crate::transport::Session::new(server, moq_net::transport::Binding::InBand),
-				)
+				.accept_request(now, server)
 				.await
 				.unwrap();
 			let mut requests = request.auth().requests().unwrap();

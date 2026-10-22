@@ -4,6 +4,58 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON snapshot `deltaRatio` is `deltas`
+
+`SnapshotConfig.deltaRatio` is replaced by `bool deltas` (default `true`).
+Pass `deltas: false` where you passed `deltaRatio: 0`, and drop the argument otherwise.
+Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
+
+### Priorities are signed (#6142)
+
+`TrackInfo.priority`, `Subscription.priority`, and `FetchGroupOptions.priority` take `-128..=127`, higher first, and 0 is the unset midpoint.
+`TrackInfo.priority` defaulted to 127 and now defaults to 0.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announcedBroadcast()`, instead of under its whole scope at connect.
+`requestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
+Resolve the path with `announcedBroadcast()`, or hold `announced()` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
+### `ContainerFormat.fmp4` unwraps to Legacy (#6250)
+
+A container import with `ContainerFormat.fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `ContainerFormat.cmaf` to keep publishing CMAF.
+
+### Catalog references carry their epoch
+
+`Video` and `Audio` renditions gain `epoch`, the publisher instance their `broadcast` reference names.
+`BroadcastConsumer.resolve(reference:)` requires `epoch:` too; pass the rendition's `epoch` alongside its `broadcast`, or `null` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, throw for a rendition whose broadcast is proven to serve another epoch.
+
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
+### A claim answers by publishing (#5678)
+
+`origin.dynamic_(prefix:)` takes no route, and `update` is gone.
+Replace `request.accept(broadcast:)` with `request.prepare(epoch: mintEpoch())`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
+
+### Anchors can name a time (#6074)
+
+`Anchor` gains a time variant, so exhaustive switches need a case for it.
+`TrackConsumer.update` now throws on a time anchor an untimed track can't serve.
+
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Update `moq_ffi` and its native library together; older generated guards reject the rebuilt library.
+For a custom native library, regenerate its matching Dart bindings with `just dart generate`.
+Application calls are unchanged.
+
 ### JSON consumers return `Value` (#5677)
 
 `SnapshotConsumer.next()` and `StreamConsumer.next()` return `Value` (`value`, `timestampUs`) instead of a string; `timestampUs` is null when untimed.

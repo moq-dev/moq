@@ -3,6 +3,7 @@ import { Milli } from "@moq/clock";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
@@ -20,7 +21,7 @@ import {
 } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
-import { ALPN_05, Version } from "./version.ts";
+import { ALPN_05, resolvesStart, Version } from "./version.ts";
 
 // The subscription's max delay, which is also how long it waits for a group that never arrives.
 const GRACE = Milli(100);
@@ -108,6 +109,15 @@ async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boo
 }
 
 describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (version) => {
+	test("the source start waits for SUBSCRIBE_START where it resolves the start", async () => {
+		const { reader, respond } = await subscribed(version, GRACE, { start: { included: 2 } });
+		expect(hooks.sourceStart(reader)).toBe(resolvesStart(version) ? "pending" : undefined);
+		await respond({ start: new SubscribeStart(3) });
+		await settle();
+		expect(hooks.sourceStart(reader)).toBe(3);
+		reader.close();
+	});
+
 	test("a group stream that arrives after the subscribe stream's FIN is delivered", async () => {
 		const { subscriber, reader, respond, fin } = await subscribed(version);
 		await respond({ start: new SubscribeStart(0) });
@@ -269,6 +279,27 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect((await reader.recvGroup())?.sequence).toBe(1);
 		expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
 		expect(await reader.closed).toBeNull();
+	});
+
+	// Lite-07 carries a stream error code; earlier versions an application one, so the same
+	// bytes read as NOT_FOUND there.
+	test("a SUBSCRIBE_DROP ends a group still arriving, before the FIN", async () => {
+		const { subscriber, reader, respond } = await subscribed(version, Milli(60_000));
+		await respond({ start: new SubscribeStart(0) });
+		const arriving = groupStream(subscriber, 0);
+		arriving.write("0.0");
+		const group = await reader.recvGroup();
+		expect(await group?.readString()).toBe("0.0");
+
+		await respond({ drop: new SubscribeDrop({ start: 0, end: 0, error: 70 }) });
+		const err = await group?.readString().then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(version === Version.DRAFT_07 ? StreamCode(70) : StreamCode.NotFound);
+		expect(reader.closed.peek()).toBeUndefined();
+		subscriber.close();
 	});
 
 	test("a subscription that served nothing ends at SUBSCRIBE_END", async () => {

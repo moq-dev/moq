@@ -68,7 +68,7 @@ reaches `expires` closes as `Expired` rather than `Unauthorized`, which also
 stops the reconnect loop: refresh the token, then reconnect with the new URL.
 
 **End.** Every close reports `end` with the reason, the duration, and the
-bytes sent and received.
+bytes sent and received. A shutdown waits for these reports before exiting.
 
 **The link.** `https://` presents the relay's `connect.tls` client certificate
 when one is configured, so a remote server can tell which relay is asking;
@@ -122,7 +122,8 @@ moq auth verify --key public.jwk --in alice.jwt
 moq auth serve --key public.jwk   # or --key-dir /etc/moq/keys/ or --key-set /etc/moq/keys.jwks
 ```
 
-The client dials `https://relay.example.com/rooms/123?jwt=<token>`. A
+The client dials `https://relay.example.com/rooms/123?jwt=<token>`, with one
+`jwt`: a query carrying two is refused. A
 moq-transport client can instead put the JWT in its SETUP's `AUTHORIZATION
 TOKEN` option with Token Type 0. HMAC, RSA, ECDSA, and EdDSA keys all work. A
 key can itself be **scoped** at generation (`--root`, `--publish`,
@@ -373,8 +374,9 @@ refusal. Pass the shared `moq_auth::Refusal` in `auth::Error::Refused` to
 `Admission::refuse`, using the same verified-root rule as an HTTP server.
 A fixed lease never changes; a `lease::Producer` the application keeps
 re-checks, updates, and revokes on its own clock. The relay still closes the
-session at the grant's `expires`, and an admission left unanswered for ten
-seconds is refused. `Admission::attached()` marks a token presented
+session at the grant's `expires`, and a connection whose admission is still
+unanswered at its `listen.timeout` handshake deadline is closed; a token
+presented in band is refused after ten seconds. `Admission::attached()` marks a token presented
 [in band](#in-band-renewal) for a session already admitted under the same id,
 so count sessions only on the others. Gateway accept loops can call `Cluster::admit` for the same
 scoped session as a native connection. See

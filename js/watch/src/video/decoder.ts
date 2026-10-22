@@ -32,6 +32,7 @@ import type { Source } from "./source";
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = Milli(500);
 
+/** Signals the decoder reads. */
 export type DecoderInput = {
 	/** Whether to download the video track. Defaults to true; the parent may wire it from the renderer's output. */
 	enabled: Getter<boolean>;
@@ -78,8 +79,11 @@ type DecoderOutput = {
 
 /** Downloads video from a track and decodes it into {@link VideoFrame}s with WebCodecs. */
 export class Decoder {
+	/** The wired inputs, read-only. */
 	readonly in: Readonlys<DecoderInput>;
+	/** The source picking the rendition to decode. */
 	readonly source: Source;
+	/** The clock that schedules playback. */
 	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
@@ -92,6 +96,7 @@ export class Decoder {
 		jitter: new Signal<Milli | undefined>(undefined),
 		buffered: new Signal<Container.BufferedRanges>([]),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	// The current track running, held so we can cancel it when the new track is ready.
@@ -183,7 +188,7 @@ export class Decoder {
 		// tell whether a failure's source is still selected.
 		const active: Moq.Broadcast.Consumer | undefined =
 			broadcast && track && identity && (enabled || this.#failed)
-				? broadcast.relativeBroadcast(effect, identity.broadcast)
+				? broadcast.relativeBroadcast(effect, identity.broadcast, identity.epoch)
 				: undefined;
 		const key = identity && JSON.stringify(identity);
 
@@ -383,6 +388,7 @@ export class Decoder {
 		return this.#arrivals.consume();
 	}
 
+	/** Stop and release everything this holds. */
 	close() {
 		this.#clearCurrentFrame();
 		this.#arrivals.close();
@@ -390,7 +396,7 @@ export class Decoder {
 		this.#signals.close();
 	}
 
-	// Whether the WebCodecs video decoder can play this config.
+	/** Whether the WebCodecs video decoder can play this config. */
 	static supported = supported;
 }
 
@@ -551,7 +557,15 @@ class DecoderTrack {
 
 		// Input processing - depends on container type
 		if (this.config.container.kind === "cmaf") {
-			this.#runCmaf(effect, sub, decoder);
+			effect.spawn(async () => {
+				try {
+					await this.#runCmaf(effect, sub, decoder);
+				} catch (err) {
+					if (effect.abort.aborted) return;
+					this.error.set(err instanceof Error ? err : new Error(String(err)));
+					effect.close();
+				}
+			});
 		} else {
 			this.#runLegacy(effect, sub, decoder);
 		}
@@ -639,15 +653,19 @@ class DecoderTrack {
 		});
 	}
 
-	#runCmaf(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): void {
+	async #runCmaf(effect: Effect, sub: Moq.Track.Subscriber, decoder: VideoDecoder): Promise<void> {
 		const container = this.config.container;
 		if (container.kind !== "cmaf") return;
 
+		const abort = effect.abort;
+		const Cmaf = await import("@moq/hang/cmaf");
+		if (abort.aborted) return;
+
 		const initSegment = base64ToBytes(container.init);
-		const init = Container.Cmaf.decodeInitSegment(initSegment);
+		const init = Cmaf.decodeInitSegment(initSegment);
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : init.description;
 
-		const consumer = this.#consume(effect, sub, new Container.Cmaf.Format(init));
+		const consumer = this.#consume(effect, sub, new Cmaf.Format(init));
 
 		// Combine network jitter buffer with decode buffer
 		effect.run((inner) => {
@@ -815,7 +833,8 @@ async function supported(config: Catalog.VideoConfig): Promise<boolean> {
 		description = Util.Hex.toBytes(config.description);
 	} else if (config.container.kind === "cmaf") {
 		try {
-			description = Container.Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
+			const Cmaf = await import("@moq/hang/cmaf");
+			description = Cmaf.decodeInitSegment(base64ToBytes(config.container.init)).description;
 		} catch (err) {
 			// A malformed init segment means we can't extract the codec
 			// description, so we can't probe support reliably. Reject the

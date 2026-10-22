@@ -4,6 +4,28 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### `import fmp4` and `import hls` unwrap to Legacy (#6250)
+
+Both now publish one `legacy` frame per sample instead of one `cmaf` frame per fragment.
+Add `--passthrough` to keep publishing CMAF.
+
+### `export archive` records a prefix (#6160)
+
+`moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/@<epoch>`, until the connection ends, instead of one broadcast at `<url>`.
+Point `<url>` at the root you want recordings under, and drop `--catalog-format`, which it now refuses.
+Untimed tracks record, and `--retention` works on them.
+`import archive` does not read the new layout yet; it still replays recordings made by older `moq` versions.
+
+### `--cluster-lan-secret` is a file path only (#5910)
+
+`--cluster-lan-secret`, `MOQ_CLUSTER_LAN_SECRET`, and `[cluster.lan] secret` no longer accept 64 hex characters inline.
+Write the hex to a file (`openssl rand -hex 32 > cluster.key`) and pass its path.
+
+### `--listen-timeout` bounds admission (#5765)
+
+`moq --listen` now finishes auth admission within the `--listen-timeout` handshake deadline (default `10s`, counted from the first packet) instead of a separate fixed ten seconds, so a short timeout now refuses a slow auth server sooner and `0s` waits on it forever.
+If your auth server can take longer than the handshake timeout allows, raise `--listen-timeout`.
+
 ### `--epoch` is removed (#5967)
 
 Remove `--epoch` and `MOQ_EPOCH`: `--epoch` is now an unknown flag, and `MOQ_EPOCH` is ignored.
@@ -51,10 +73,6 @@ A restarted publisher exits 1 unless `--stitch` follows it as a program switch.
 ```bash
 moq export ts --linger 10s --stitch ...
 ```
-
-### `moq export archive` refuses untimed tracks
-
-Recording a track with no timestamps fails with `Untimed`, so an archive over moq-lite before 05 or moq-transport drafts 14 to 16 fails instead of recording arrival times.
 
 ### `moq export fmp4` fixes its track set at the init segment
 

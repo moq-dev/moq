@@ -13,6 +13,10 @@ import kotlin.time.Duration.Companion.microseconds
 val ConnectionStats.rtt: Duration?
     get() = rttUs?.toLong()?.microseconds
 
+/** How long until the grant lapses, measured when it was read, or null for never. */
+val Grant.expires: Duration?
+    get() = expiresUs?.toLong()?.microseconds
+
 /** Delay before the first reconnect attempt, or null for the default. */
 val Backoff.initial: Duration?
     get() = initialUs?.toLong()?.microseconds
@@ -64,6 +68,10 @@ val AudioDecoderOutput.maxDelay: Duration?
 /** Fixed playout delay to hold ahead of the playhead, or null to estimate it from arrival timing. */
 val AudioDecoderOutput.delay: Duration?
     get() = delayUs?.toLong()?.microseconds
+
+/** How long to keep a finished broadcast: the longest max age of the tracks it holds. */
+val BroadcastFinish.linger: Duration
+    get() = lingerUs().coerceAtMost(Long.MAX_VALUE.toULong()).toLong().microseconds
 
 /** Playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far. */
 val dev.moq.audio.Consumer.delay: Duration

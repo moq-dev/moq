@@ -51,6 +51,8 @@ use datagrams::DatagramState;
 pub use datagrams::{Datagrams, SendDatagramError};
 
 mod mtud;
+#[cfg(feature = "mux")]
+pub mod mux;
 mod pacing;
 
 mod packet_builder;
@@ -237,6 +239,13 @@ pub struct Connection {
     //
     /// The number of times a PTO has been sent without receiving an ack.
     pto_count: u32,
+    /// Whether a packet from the peer has authenticated since the last ack-eliciting 1-RTT packet
+    /// went out. Kept in event order: a packet handled and one sent in the same poll share an
+    /// instant.
+    heard_since_sent: bool,
+    /// A probe timed out with the peer unheard since the packet it probed for went out, so the
+    /// path may have been down: the next packet heard brings the next probe forward.
+    probe_when_heard: bool,
 
     //
     // Congestion Control
@@ -360,6 +369,8 @@ impl Connection {
             next_bundled_ack_time: None,
 
             pto_count: 0,
+            heard_since_sent: false,
+            probe_when_heard: false,
 
             app_limited: false,
             receiving_ecn: false,
@@ -771,6 +782,15 @@ impl Connection {
                         // Clip the unused capacity out of the buffer so future packets don't
                         // overrun
                         buf_capacity = buf.len();
+
+                        // A GSO batch cannot have a datagram larger than its first, so a small
+                        // first packet caps every later one. End the batch when that cap cannot
+                        // even hold a packet header and frames; a control-only packet (a loss
+                        // probe, say) should not drag the data queued behind it into tiny
+                        // segments.
+                        if segment_size < MIN_PACKET_SPACE {
+                            break;
+                        }
 
                         // Check whether the data we planned to send will fit in the reduced segment
                         // size. If not, bail out and leave it for the next GSO batch so we don't
@@ -1403,10 +1423,17 @@ impl Connection {
     fn close_inner(&mut self, now: Instant, reason: Close) {
         let was_closed = self.state.is_closed();
         if !was_closed {
+            // A peer that never answered the handshake will not answer the close either, so
+            // only the close timer would end the connection's activity. The closing period
+            // still answers a late reply; it just no longer holds up a shutdown.
+            let unanswered = matches!(&self.state, State::Handshake(state) if !state.rem_cid_set);
             self.close_common();
             self.set_close_timer(now);
             self.close = true;
             self.state = State::Closed(state::Closed { reason });
+            if unanswered {
+                self.report_draining();
+            }
         }
     }
 
@@ -1913,8 +1940,29 @@ impl Connection {
             _ => 2,
         };
         self.spaces[space].loss_probes = self.spaces[space].loss_probes.saturating_add(count);
+        self.probe_when_heard = space == SpaceId::Data
+            && self.spaces[space]
+                .time_of_last_ack_eliciting_packet
+                .is_some()
+            && !self.heard_since_sent;
         self.pto_count = self.pto_count.saturating_add(1);
         self.set_loss_detection_timer(now);
+    }
+
+    /// Send the next probe now if the peer, silent through the last probe timeout, is heard
+    /// again ([`Self::probe_when_heard`]). The timeout doubles with each probe (RFC 9002 §6.2.1),
+    /// up to 2^[`MAX_BACKOFF_EXPONENT`] times its base, so after an outage the backed-off timer
+    /// can leave a path that is back idle for seconds.
+    /// A packet that acknowledged anything new has already reset the backoff, and one that
+    /// migrated the connection left a path with nothing in flight to probe for.
+    fn probe_on_heard(&mut self, now: Instant) {
+        if mem::take(&mut self.probe_when_heard)
+            && self.pto_count > 0
+            && self.path.in_flight.ack_eliciting > 0
+            && !self.state.is_closed()
+        {
+            self.timers.set(Timer::LossDetection, now);
+        }
     }
 
     fn detect_lost_packets(&mut self, now: Instant, pn_space: SpaceId, due_to_ack: bool) {
@@ -2682,7 +2730,15 @@ impl Connection {
                 packet.header.is_1rtt(),
             );
         }
-        self.process_decrypted_packet(now, remote, number, packet)
+        let result = self.process_decrypted_packet(now, remote, number, packet);
+        // Only a protected packet is the peer's word: anyone on the path can send a Retry or a
+        // Version Negotiation packet. One from another address, such as a probe of a new path,
+        // says nothing of the active one.
+        if number.is_some() && remote == self.path.remote {
+            self.heard_since_sent = true;
+            self.probe_on_heard(now);
+        }
+        result
     }
 
     /// Apply the state transitions that follow processing a packet
@@ -3089,7 +3145,8 @@ impl Connection {
         let mut close = None;
         let payload_len = payload.len();
         let mut ack_eliciting = false;
-        for result in frame::Iter::new(payload)? {
+        let mut frames = frame::Iter::new(payload)?;
+        while let Some((result, frame_size)) = frames.next_with_size() {
             let frame = result?;
             let span = match frame {
                 Frame::Padding => continue,
@@ -3224,19 +3281,8 @@ impl Connection {
                     );
                 }
                 Frame::StopSending(frame::StopSending { id, error_code }) => {
-                    if id.initiator() != self.side.side() {
-                        if id.dir() == Dir::Uni {
-                            debug!("got STOP_SENDING on recv-only {}", id);
-                            return Err(TransportError::STREAM_STATE_ERROR(
-                                "STOP_SENDING on recv-only stream",
-                            ));
-                        }
-                    } else if self.streams.is_local_unopened(id) {
-                        return Err(TransportError::STREAM_STATE_ERROR(
-                            "STOP_SENDING on unopened stream",
-                        ));
-                    }
-                    if let Some(reliable_size) = self.streams.received_stop_sending(id, error_code)
+                    if let Some(reliable_size) =
+                        self.streams.received_stop_sending(id, error_code)?
                     {
                         self.spaces[SpaceId::Data]
                             .pending
@@ -3316,6 +3362,14 @@ impl Connection {
                     token_store.insert(server_name, token);
                 }
                 Frame::Datagram(datagram) => {
+                    // The transport parameter limits the encoded frame size, not its heap usage.
+                    if self
+                        .config
+                        .datagram_receive_buffer_size
+                        .is_some_and(|window| frame_size > window.min(u16::MAX.into()))
+                    {
+                        return Err(TransportError::PROTOCOL_VIOLATION("oversized datagram"));
+                    }
                     if self
                         .datagrams
                         .received(datagram, &self.config.datagram_receive_buffer_size)?

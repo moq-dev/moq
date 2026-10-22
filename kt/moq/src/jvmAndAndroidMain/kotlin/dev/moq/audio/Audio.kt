@@ -12,7 +12,7 @@ typealias EncoderInput = uniffi.moq.MoqAudioEncoderInput
 typealias EncoderOutput = uniffi.moq.MoqAudioEncoderOutput
 /** The PCM layout a [Consumer] delivers, how stale a group may get, and its playout delay. */
 typealias DecoderOutput = uniffi.moq.MoqAudioDecoderOutput
-/** Interleaved PCM with its presentation timestamp. */
+/** PCM samples in the configured layout with their presentation timestamp. */
 typealias Frame = uniffi.moq.MoqAudioFrame
 /** One encoded payload from an [Encoder]. */
 typealias Packet = uniffi.moq.MoqAudioPacket

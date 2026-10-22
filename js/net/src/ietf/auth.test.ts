@@ -3,8 +3,9 @@ import { Unsupported } from "../auth.ts";
 import { SessionCode, type SessionError, StreamCode, type StreamError } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import { AuthError, AuthMessage, AuthOk, fromSetup, intoSetup } from "./auth.ts";
-import { SetupOption, SetupOptions } from "./parameters.ts";
+import { AuthError, AuthMessage, AuthOk } from "./auth.ts";
+import { fromSetup, intoSetup } from "./auth_setup.ts";
+import { SetupOption, SetupOptions } from "./setup_options.ts";
 import { Version } from "./version.ts";
 
 function patterns(...prefixes: string[]): Path.Patterns {

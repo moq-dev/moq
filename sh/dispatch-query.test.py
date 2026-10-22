@@ -50,11 +50,11 @@ class QueryTests(unittest.TestCase):
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text(file.read_text() + "\n" if file.exists() else "changed\n")
 
-    def run_query(self, job="test", base="origin/main"):
-        return subprocess.run(["bash", "sh/dispatch.sh", f"ci-{job}", base, "--query"],
+    def run_query(self, job="ci", base="origin/main"):
+        return subprocess.run(["bash", "sh/dispatch.sh", job if job == "ci" else f"ci-{job}", base, "--query"],
                               cwd=self.repo, env=self.env, text=True, capture_output=True)
 
-    def expect(self, needed, job="test", base="origin/main", rust=None):
+    def expect(self, needed, job="ci", base="origin/main", rust=None):
         result = self.run_query(job, base)
         self.assertEqual(result.returncode, 0, result.stderr)
         output = dict(line.split("=") for line in result.stdout.splitlines())
@@ -67,28 +67,25 @@ class QueryTests(unittest.TestCase):
 
     def test_quest_only_has_no_tests_but_keeps_repository_lints(self):
         self.change("quest/m1/example.md")
-        self.expect(False, rust=False)
-        self.expect(True, "check", rust=False)
+        self.expect(True, rust=False)
 
     def test_rust_cache_follows_modules_that_compile_rust(self):
-        # Path, then Check's Rust, then Test's selection and Rust.
-        for path, check, test, test_rust in (("rs/moq-net/src/lib.rs", True, True, True),
-                                             ("py/moq-rs/example.py", True, True, True),
-                                             ("js/net/src/index.ts", True, True, False),
-                                             ("kt/example.kt", True, False, False),
-                                             ("infra/moq-sh/install.sh", False, False, False),
-                                             (".github/workflows/check.yml", False, False, False)):
+        for path, rust in (("rs/moq-net/src/lib.rs", True), ("py/moq-rs/example.py", True),
+                           ("js/net/src/index.ts", True), ("kt/example.kt", True),
+                           ("infra/moq-sh/install.sh", False), (".github/workflows/check.yml", False)):
             with self.subTest(path=path):
                 self.change(path)
-                self.expect(True, "check", rust=check)
-                self.expect(test, rust=test_rust)
+                self.expect(True, rust=rust)
                 (self.repo / path).unlink()
-        self.expect(True, "check", "--all", rust=True)
         self.expect(True, base="--all", rust=True)
 
+    def test_nixpkgs_updates_check_browser_pins(self):
+        # JS selection also builds wasm, which is reflected in the Rust cache query.
+        self.change("flake.lock")
+        self.expect(True, rust=True)
+
     def test_empty_diff_keeps_repository_lints(self):
-        self.expect(False)
-        self.expect(True, "check")
+        self.expect(True)
 
     def test_selected_tests_do_not_depend_on_installed_tools(self):
         for path in ("js/net/src/index.ts", "rs/moq-net/src/lib.rs", "py/moq-rs/example.py",
@@ -113,13 +110,13 @@ class QueryTests(unittest.TestCase):
 
     def test_release_pr_base_and_merge_group_base(self):
         self.env["GITHUB_BASE_REF"] = "release"
-        self.expect(False, base="")
+        self.expect(True, base="", rust=False)
         self.change("rs/moq-net/src/lib.rs")
         self.git("add", ".")
         self.git("commit", "-qm", "queued source")
         group_base = self.git("rev-parse", "HEAD")
         self.change("quest/m1/example.md")
-        self.expect(False, base=group_base)
+        self.expect(True, base=group_base, rust=False)
         self.expect(True, base="origin/release")
 
     def test_invalid_base_fails_instead_of_reporting_no_work(self):
@@ -128,27 +125,8 @@ class QueryTests(unittest.TestCase):
         self.assertNotIn("needed=", result.stdout)
         self.assertIn("cannot resolve merge-base", result.stderr)
 
-    def test_query_and_execution_agree_on_selected_modules(self):
-        for tool in ("bun", "python3", "cargo", "wasm-bindgen", "jq", "uv"):
-            (self.bin / tool).symlink_to(shutil.which("true"))
-        just = self.bin / "just"
-        just.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >>"$CALLS"\n')
-        just.chmod(0o755)
-        self.env.update(MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
-        for path, call in (("js/net/src/index.ts", "js test"),
-                           ("rs/moq-net/src/lib.rs", "rs test-changed"),
-                           ("py/moq-rs/example.py", "py test")):
-            with self.subTest(path=path):
-                self.change(path)
-                self.expect(True)
-                subprocess.run(["bash", "sh/dispatch.sh", "ci-test", "origin/main"],
-                               cwd=self.repo, env=self.env, capture_output=True, check=True)
-                self.assertTrue((self.root / "calls").read_text().strip().startswith(call))
-                (self.root / "calls").unlink()
-                (self.repo / path).unlink()
-
     def test_execution_still_requires_dev_shell(self):
-        result = subprocess.run(["bash", "sh/dispatch.sh", "ci-test", "origin/main"],
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"],
                                 cwd=self.repo, env=self.env, text=True, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("run inside the Nix dev shell", result.stderr)
@@ -195,7 +173,7 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
 
-    def test_ci_check_leaves_default_rust_lints_to_test(self):
+    def test_ci_runs_one_lint_preamble_and_one_test_pass(self):
         for tool in ("bun", "python3", "cargo", "wasm-bindgen", "jq", "shellcheck",
                      "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix"):
             path = self.bin / tool
@@ -211,12 +189,16 @@ class QueryTests(unittest.TestCase):
             path = self.repo / "sh" / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
-        result = subprocess.run(["bash", "sh/dispatch.sh", "ci-check", "origin/main"],
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"],
                                 cwd=self.repo, env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = (self.root / "calls").read_text().splitlines()
         self.assertTrue(any(call.startswith("rs lint-changed ") for call in calls), calls)
         self.assertFalse(any(call.startswith("rs check-changed ") for call in calls), calls)
+        self.assertEqual(sum(call.startswith("rs lint-changed ") for call in calls), 1)
+        self.assertEqual(sum(call.startswith("rs test-changed ") for call in calls), 1)
+        self.assertLess(next(i for i, call in enumerate(calls) if call.startswith("rs lint-changed ")),
+                        next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")))
 
 
 def benchmark():
@@ -228,11 +210,11 @@ def benchmark():
         try:
             for index in range(count):
                 fixture.change(f"quest/m1/example-{index}.md")
-            for job in ("check", "test"):
+            for job in ("ci",):
                 samples = []
                 for _ in range(10):
                     started = time.perf_counter()
-                    fixture.expect(job == "check", job)
+                    fixture.expect(True, job)
                     samples.append((time.perf_counter() - started) * 1000)
                 print(f"{job}: {count} paths, median {statistics.median(samples):.1f} ms")
         finally:

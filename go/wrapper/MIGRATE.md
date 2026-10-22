@@ -4,6 +4,63 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON snapshot `DeltaRatio` is `Deltas`
+
+`json.SnapshotOptions.DeltaRatio *uint32` and `json.DefaultDeltaRatio` are replaced by `Deltas *bool` (nil enables deltas).
+Set `Deltas` to a pointer to `false` where you set `DeltaRatio` to a pointer to `0`, and leave it nil otherwise.
+Publish the track with a `Refresh` ratio so a joiner gets the value restated in a fresh group.
+
+### Priorities are signed (#6142)
+
+`TrackInfo.Priority`, `Subscription.Priority`, and `FetchGroupOptions.Priority` are `int8`, and `GroupRequest.Priority()` returns one.
+Higher is first and the zero value is the unset midpoint, so a `TrackInfo` that leaves `Priority` zero now gets the default rather than the least urgent priority; drop any `Priority: 127` that asked for the midpoint.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `Announced()` or `AnnouncedBroadcast()`, instead of under its whole scope at connect.
+`OriginConsumer.RequestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
+Resolve the path with `AnnouncedBroadcast()`, or hold `Announced()` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
+### `media.ContainerFormatFmp4` unwraps to Legacy (#6250)
+
+A container import with `media.ContainerFormatFmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `media.ContainerFormatCmaf` to keep publishing CMAF.
+
+### Catalog references carry their epoch
+
+`ffi.MoqVideo` and `ffi.MoqAudio` gain `Epoch`, the publisher instance their `Broadcast` reference names.
+`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, reference, epoch)`; pass the rendition's `Epoch` alongside its `Broadcast`, or `nil` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another epoch.
+
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.Finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
+### A claim answers by publishing (#5678)
+
+`OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
+Replace `request.Accept(broadcast)` with `request.Prepare(epoch)`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under that epoch and returns its producer.
+Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
+
+### `TrackInfo` gains `Compress` (#5928)
+
+A positional `TrackInfo{...}` literal adds a trailing `false`; keyed literals need no change.
+
+### Anchors can name a time (#6074)
+
+`AnchorTime` names the group containing a presentation time, and type switches over `Anchor` need a case for it.
+`TrackConsumer.Update` also fails on a time anchor an untimed track can't serve.
+
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Update generated `moq.dev/moq-ffi` sources and its bundled static libraries together,
+then rebuild the application; older generated guards reject the rebuilt library.
+Application calls are unchanged.
+
 ### JSON consumers return `*json.Timed` (#5677)
 
 `SnapshotConsumer.Next`, `StreamConsumer.Next`, and `All` return `*Timed{Value, Timestamp}` instead of the raw message; `Timestamp` is a `*time.Duration`, nil when untimed.

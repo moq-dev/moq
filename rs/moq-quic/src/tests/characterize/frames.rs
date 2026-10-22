@@ -135,6 +135,41 @@ fn stop_sending_on_unopened() {
     );
 }
 
+/// RFC 9000 section 4.6: a frame naming a stream past the advertised limit (100 of each type by
+/// default) is a STREAM_LIMIT_ERROR, whichever direction the stream has.
+#[test]
+fn stop_sending_above_stream_limit() {
+    // Within the limit, stopping a peer-initiated bidirectional stream opens it
+    let frames =
+        Frames::default().var(FrameType::STOP_SENDING, &[id(Side::Client, Dir::Bi, 50), 0]);
+    assert_eq!(server_answer(frames), None);
+
+    for dir in [Dir::Bi, Dir::Uni] {
+        let frames =
+            Frames::default().var(FrameType::STOP_SENDING, &[id(Side::Client, dir, 5000), 0]);
+        assert_eq!(
+            server_answer(frames),
+            Some(TransportErrorCode::STREAM_LIMIT_ERROR),
+            "{dir:?}"
+        );
+    }
+}
+
+#[test]
+fn max_stream_data_above_stream_limit() {
+    for dir in [Dir::Bi, Dir::Uni] {
+        let frames = Frames::default().var(
+            FrameType::MAX_STREAM_DATA,
+            &[id(Side::Client, dir, 5000), 1000],
+        );
+        assert_eq!(
+            server_answer(frames),
+            Some(TransportErrorCode::STREAM_LIMIT_ERROR),
+            "{dir:?}"
+        );
+    }
+}
+
 #[test]
 fn streams_blocked_above_limit() {
     for ty in [
@@ -435,5 +470,20 @@ fn stream_above_stream_limit() {
     assert_eq!(
         server_answer(frames),
         Some(TransportErrorCode::STREAM_LIMIT_ERROR)
+    );
+}
+
+/// A Requested Max Ack Delay of 2^14 ms or more is invalid, as for the `max_ack_delay` transport
+/// parameter; just under it is accepted
+#[test]
+fn ack_frequency_max_ack_delay_upper_bound() {
+    const LIMIT_US: u64 = (1 << 14) * 1000;
+    // Sequence, Ack-Eliciting Threshold, Requested Max Ack Delay (us), Reordering Threshold
+    let frames = Frames::default().var(FrameType::ACK_FREQUENCY, &[0, 1, LIMIT_US - 1, 1]);
+    assert_eq!(server_answer(frames), None);
+    let frames = Frames::default().var(FrameType::ACK_FREQUENCY, &[0, 1, LIMIT_US, 1]);
+    assert_eq!(
+        server_answer(frames),
+        Some(TransportErrorCode::PROTOCOL_VIOLATION)
     );
 }

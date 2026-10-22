@@ -290,6 +290,8 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// The minimum flush lateness across this catalog's renditions, which each rendition's
 	/// advertised `delay` is measured against.
 	baseline: super::estimate::Baseline,
+	/// What each media track minted under this catalog has written. See [`stats`](Self::stats).
+	sent: Arc<crate::stats::Registry<crate::stats::Sent>>,
 }
 
 // Manual Clone so a producer is cheaply clonable regardless of whether `E` is.
@@ -303,6 +305,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			max_age: self.max_age,
 			bandwidth: self.bandwidth.clone(),
 			baseline: self.baseline.clone(),
+			sent: self.sent.clone(),
 		}
 	}
 }
@@ -431,7 +434,7 @@ impl<E: CatalogExt> Producer<E> {
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
 		let mut json_config = moq_json::snapshot::Config::default();
-		json_config.delta_ratio = 0;
+		json_config.deltas = false;
 		let hang = moq_json::snapshot::Producer::new(hang_track.clone(), json_config.clone());
 
 		// The `.z` track carries the same catalog, DEFLATE-compressed. Deltas stay off for parity
@@ -470,6 +473,7 @@ impl<E: CatalogExt> Producer<E> {
 			max_age: config.max_age,
 			bandwidth: config.bandwidth,
 			baseline: Default::default(),
+			sent: Default::default(),
 		})
 	}
 
@@ -479,7 +483,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// `priority` should come from [`PRIORITY`](hang::catalog::PRIORITY) for the kind of media
 	/// the track carries. Chain [`with_timescale`](moq_net::track::Info::with_timescale) for a
 	/// container that carries the source's own scale (CMAF and Matroska both do).
-	pub fn track_info(&self, priority: u8) -> moq_net::track::Info {
+	pub fn track_info(&self, priority: i8) -> moq_net::track::Info {
 		let info = hang::container::track_info(priority);
 		match self.max_age {
 			Some(max_age) => info.with_max_age(max_age),
@@ -811,9 +815,11 @@ impl<E: CatalogExt> Producer<E> {
 	{
 		let mut catalog = self.clone();
 		let recorder = catalog.enroll(track.name(), timeline_hint)?;
+		let sent = self.sent(rendition.name());
 		let mut producer = crate::container::Producer::with_rendition(track, container, rendition)
 			.with_recorder(recorder)
-			.with_bandwidth(self.bandwidth.clone());
+			.with_bandwidth(self.bandwidth.clone())
+			.with_sent(sent);
 		if let Some(config) = config {
 			producer.set(config)?;
 		}
@@ -832,9 +838,28 @@ impl<E: CatalogExt> Producer<E> {
 	{
 		let mut catalog = self.clone();
 		let recorder = catalog.enroll(track.name(), None)?;
+		let sent = self.sent(track.name());
 		Ok(crate::container::Producer::new(track, container)
 			.with_recorder(recorder)
-			.with_bandwidth(self.bandwidth.clone()))
+			.with_bandwidth(self.bandwidth.clone())
+			.with_sent(sent))
+	}
+
+	/// The counters a track writing under catalog key `name` bumps, for one that writes its groups
+	/// by hand rather than through a [`container::Producer`](crate::container::Producer).
+	pub(crate) fn sent(&self, name: &str) -> Arc<crate::stats::Sent> {
+		self.sent.track(name)
+	}
+
+	/// What each media track minted under this catalog has written, keyed by its catalog key: the
+	/// rendition ID, or the track name for an `m2ts` or verbatim `mpegts` track.
+	///
+	/// Counters are cumulative for the life of the catalog, so a track that ended keeps its final
+	/// counts and a later track under the same key continues them, until 1,024 keys are held: then
+	/// ended tracks make way for new ones. Fold this into a
+	/// [`hang::stats::Snapshot`] on the stats interval.
+	pub fn stats(&self) -> std::collections::BTreeMap<String, hang::stats::Rendition> {
+		self.sent.sent()
 	}
 
 	/// A fresh estimator whose `delay` is measured against this catalog's other renditions.
@@ -949,10 +974,12 @@ impl<E: CatalogExt> Producer<E> {
 	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
 	/// application's own entry embedding a [`JsonConfig`](hang::catalog::JsonConfig) (see
 	/// [`IntoRendition`](super::IntoRendition)). The producer sets its `mode`, encodes the track
-	/// with its `compression`, and fills an absent `bitrate` from what it writes. A
-	/// [`delta_ratio`](crate::json::Config::delta_ratio) on `json::Config` selects the snapshot
-	/// encoder; it is not written into the catalog entry. The config is `'static` so that ratio
-	/// can be read off the builder.
+	/// with its `compression`, and fills an absent `bitrate` from what it writes. The
+	/// [`deltas`](crate::json::Config::deltas) switch on `json::Config` configures the snapshot
+	/// encoder; it is not written into the catalog entry. The config is `'static` so that switch
+	/// can be read off the builder. With deltas, create `track` with a
+	/// [`refresh`](moq_net::track::Info::refresh) ratio and drive
+	/// [`Snapshot::refresh`](crate::json::Snapshot::refresh), so joiners get a fresh group.
 	///
 	/// Errors if the entry's section already carries that name, for example an entry seeded
 	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, or if the entry
@@ -1281,6 +1308,10 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 	let mut names = BTreeSet::new();
 	let mut reference = |id: &str, config: &dyn Reference| {
 		let name = config.track(id);
+		if let Some(epoch) = config.epoch() {
+			// MSF has nowhere to name an instance, so its readers take whichever resolves first.
+			tracing::warn!(rendition = id, %epoch, "MSF cannot carry a reference epoch; advertising without it");
+		}
 		let namespace = match config.broadcast().filter(|rel| !rel.is_empty()) {
 			None => None,
 			Some(rel) => {

@@ -72,9 +72,17 @@ relay bounds a sparse FETCH only if the model can request ranges:
   has no time filter. It is part of lite-07 and must land before
   [lite-07 finalizes](/quest/m1/lite07-finalize.md), which this line gates. This amends the 09-29
   premise that ranges are group-only because a group's timestamp isn't always
-  known: timed tracks know it, and untimed ones refuse. Split out of #5929
-  (2026-10-19) into [time anchors](/quest/m1/subscribe-ranges/time-anchors.md),
-  which lands in its own PR.
+  known: timed tracks know it, and untimed ones refuse. The cache half landed in its own PR after #5929.
+  A datagram is judged on its own (maintainer, 2026-10-20): its timestamp
+  against the range's times, its sequence against the absolute and resolved
+  relative groups, never through the settle walk. Refusing time anchors on
+  datagram tracks was considered and can't work: nothing signals that a track
+  carries datagrams, and the lite draft lets a publisher send any single-frame
+  group as a datagram, including a copy of one it also streams. Datagrams stay
+  ephemeral (maintainer, 2026-10-20): a buffered datagram never indexes where
+  its group starts, so a time end settles across a sequence that arrived only
+  as a datagram, and a stream copy of that group arriving later is read even
+  if it starts past the end.
 - Ranges are frame-precise (`Position`), not whole groups. The IETF joining
   FETCH for a mid-group SUBSCRIBE's uncached prefix stays, because today's
   bridge relies on it (maintainer, 09-29).
@@ -87,14 +95,12 @@ every sequence delivered or dropped.
 
 ## Required
 
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - `Dynamic` fills misses by range, and a subscriber reads only its own ranges
+- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - `Dynamic` fills misses by range, replacing `requested_group`
+- [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity
-- [Frame bounds](/quest/m1/subscribe-ranges/frame-bounds.md) - a local subscriber reads only the frames its ranges cover
-- [Time anchors](/quest/m1/subscribe-ranges/time-anchors.md) - a range start or end may name a presentation time
 
 ## Related
 
-- [Track priority scope](/quest/m1/track-priority-scope.md) - group order within a track now follows the subscription
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age

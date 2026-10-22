@@ -1,3 +1,4 @@
+#![warn(missing_docs)]
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 //! Media muxers and demuxers for MoQ.
@@ -41,6 +42,7 @@ mod pace;
 pub mod rate;
 pub mod select;
 mod source;
+mod stats;
 pub mod timeline;
 
 pub use clock::Clock;

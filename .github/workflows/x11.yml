@@ -4,20 +4,6 @@ name: X11 capture
 # Correctness is gated; paired timings are retained without a runner-speed threshold.
 on:
   workflow_call:
-  pull_request:
-    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
-    # retargeted to release.
-    branches: [release]
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - "rs/moq-video/**"
-      - "rs/justfile"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".cargo/**"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/workflows/x11.yml"
 
 permissions:
   contents: read

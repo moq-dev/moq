@@ -13,21 +13,6 @@ permissions:
 
 on:
   workflow_call:
-  pull_request:
-    # Main PRs skip it; nightly.yml runs it on main. `edited` catches a main PR
-    # retargeted to release. `closed` is here only so merging/closing a PR
-    # cancels its in-flight run via the concurrency group below; the job itself
-    # is skipped on close.
-    branches: [release]
-    types: [opened, synchronize, reopened, edited, closed]
-    paths:
-      - "c/**"
-      - "rs/moq-ffi/**"
-      - "sh/c/**"
-      - "rs/moq-c/native-libs/**"
-      - "cpp/moq/cmake/moq-ffi.cmake"
-      - "Cargo.lock"
-      - ".github/workflows/c.yml"
 
 concurrency:
   group: c-${{ github.ref }}
@@ -36,7 +21,6 @@ concurrency:
 jobs:
   clang:
     name: C (clang)
-    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
 

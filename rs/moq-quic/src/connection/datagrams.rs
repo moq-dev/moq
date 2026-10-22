@@ -73,16 +73,12 @@ impl Datagrams<'_> {
         // We use the conservative overhead bound for any packet number, reducing the budget by at
         // most 3 bytes, so that PN size fluctuations don't cause users sending maximum-size
         // datagrams to suffer avoidable packet loss.
-        let max_size = self.conn.path.current_mtu() as usize
-            - self.conn.predict_1rtt_overhead(None)
-            - Datagram::SIZE_BOUND;
-        let limit = self
-            .conn
-            .peer_params
-            .max_datagram_frame_size?
-            .into_inner()
-            .saturating_sub(Datagram::SIZE_BOUND as u64);
-        Some(limit.min(max_size as u64) as usize)
+        let max_size = Datagram::max_payload(
+            (self.conn.path.current_mtu() as usize - self.conn.predict_1rtt_overhead(None)) as u64,
+        )?;
+        let limit =
+            Datagram::max_payload(self.conn.peer_params.max_datagram_frame_size?.into_inner())?;
+        Some(limit.min(max_size) as usize)
     }
 
     /// Receive an unreliable, unordered datagram
@@ -127,7 +123,9 @@ impl DatagramState {
         let size_with_overhead = datagram.data.len() + size_of::<Datagram>();
 
         if size_with_overhead > window {
-            return Err(TransportError::PROTOCOL_VIOLATION("oversized datagram"));
+            // A valid frame can still exceed the local memory budget because of queue metadata.
+            debug!("dropping datagram exceeding receive memory budget");
+            return Ok(false);
         }
 
         let was_empty = self.incoming.is_empty();

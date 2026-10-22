@@ -4,6 +4,39 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Stage a requested track before subscribers see it (#6111)
+
+`Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
+Disposing a `Staged` uncommitted (`using`, or `[Symbol.dispose]()`) rejects the request. `accept(info)` is unchanged and equals `stage(info).commit()`.
+
+### A frameless group is not a successor (#6111)
+
+A group followed by a frameless one is judged stale against the next group that has a frame, where the frameless group used to count.
+`Track.Producer.dropGroups(start, end, error)` marks groups `[start, end)` the peer said it skipped; a reader holding one of them rejects with `error`.
+
+### Priorities are signed (#6142)
+
+`Track.Info.priority`, `Track.Subscription.priority`, and a fetch's `priority` take `-128..=127`, higher first, and 0 is the unset midpoint; anything outside throws a `RangeError`.
+The track's default was 127, the midpoint, and the subscription's was 0, the least urgent; both are 0 now.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+The wire messages (`Lite.Subscribe`, `Lite.TrackInfo`, `Ietf.Subscribe`, ...) hold the same signed priority, mapped to the wire byte when encoded.
+
+### A dropped or cut group ends its reader with an error (#6143)
+
+A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `Track.Subscriber` saw it is now handed out, and its reads reject with the publisher's `StreamError`; before, it was skipped or ended cleanly.
+A group already held rejects the same way when the drop lands, even while its stream is still arriving.
+On lite-05 and lite-06 the code is always `StreamCode.NotFound`.
+Treat a rejected group read as the loss of that group and keep reading the track, rather than ending the subscription.
+
+### A claim answers by publishing (#5678)
+
+`Origin.Producer.dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
+Answer each `Origin.Request` with `request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its producer.
+Only `publish` announces it: `prepared.broadcast.announce()` throws.
+Call `prepared.reject(err)` to refuse instead; JS has no destructor, so an abandoned `Prepared` holds its request open.
+`Dynamic.update` and `Request.accept` are no longer part of the public API, and `accept` throws on a request from `dynamic`.
+Close the claim and claim again to change it, and close an answer's producer to end that output.
+
 ### `largest()` reports within a reader's `setGroups` bounds
 
 `Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `setGroups` or `withGroups`, where they used to ignore the bounds.
@@ -46,6 +79,9 @@ A new group or datagram raises it at frame 0 before any frame lands, and it can 
 ### A timed track refuses a group that rewinds (#5803)
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, throws `TimestampMismatch`.
+A group received over moq-lite-07 is checked the same way.
+A track received over moq-lite-05/06 arrives untimed, since its timestamps may be send times: read times from the payload, such as the hang container's, instead of the frame's `timestamp`.
+One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
 A publisher whose timeline restarts publishes a new broadcast instead.
 
 ### `Auth.Auth` is `Auth.Handle`, and `Auth.Token` is `Auth.Auth` (#5695)

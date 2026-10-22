@@ -58,13 +58,14 @@ pub use routes::{Resource, Route};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::Duration;
 
 use axum::Router;
 
 use crate::export::{Broadcaster, Config};
 
-/// How long to wait for a requested broadcast to be announced by the relay.
+/// How long to wait for the relay to say whether a requested broadcast is announced.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// HLS export HTTP server. Cheap to clone (shared inner).
@@ -75,16 +76,22 @@ pub struct Server {
 
 struct Inner {
 	origin: moq_net::origin::Consumer,
+	/// Watches the whole scope while the server lives, so a lazily discovering client
+	/// session asks its peer once rather than once per requested path, which an HTTP
+	/// client could otherwise name without bound.
+	_watch: moq_net::announce::Consumer,
 	config: Config,
 	broadcasters: Mutex<HashMap<String, Arc<Broadcaster>>>,
 }
 
 impl Server {
-	/// Build a server reading broadcasts from `origin`. Every request is served;
-	/// gate access by layering middleware onto [`router`](Self::router).
+	/// Build a server reading broadcasts from `origin`, which it watches whole while it
+	/// lives. Every request is served; gate access by layering middleware onto
+	/// [`router`](Self::router).
 	pub fn new(origin: moq_net::origin::Consumer, config: Config) -> Self {
 		Self {
 			inner: Arc::new(Inner {
+				_watch: origin.clone().with_hidden(true).announced(),
 				origin,
 				config,
 				broadcasters: Mutex::new(HashMap::new()),
@@ -98,8 +105,8 @@ impl Server {
 	}
 
 	/// Get or create the [`Broadcaster`] for `name`, resolving the broadcast from
-	/// the relay (waiting briefly for its announcement). Returns `None` if the
-	/// broadcast never shows up.
+	/// the relay. Returns `None` if the broadcast is not announced once the origin has
+	/// synced with the relay.
 	pub async fn broadcaster(&self, name: &str) -> Option<Arc<Broadcaster>> {
 		{
 			let mut broadcasters = self.inner.broadcasters.lock().unwrap();
@@ -113,14 +120,21 @@ impl Server {
 
 		// Confirm a route covers the broadcast (and it is in scope) before resolving it. The
 		// source resolves a rendition's sibling `broadcast` reference through the same origin.
-		tokio::time::timeout(RESOLVE_TIMEOUT, self.inner.origin.routed(name))
-			.await
-			.ok()
-			.flatten()?;
+		// Once the origin has synced, a path with no route is not announced, so answer now
+		// rather than wait out a publisher that has gone.
+		let mut follow = self.inner.origin.follow(name).ok()?;
+		let routed = kio::wait(|waiter| match follow.poll_next(waiter) {
+			Poll::Ready(Some(moq_net::announce::Event::End(_)) | None) => Poll::Ready(false),
+			Poll::Ready(Some(_)) => Poll::Ready(true),
+			Poll::Pending => follow.poll_synced(waiter).map(|()| false),
+		});
+		if !moq_clock::timeout(RESOLVE_TIMEOUT, routed).await.unwrap_or(false) {
+			return None;
+		}
 
 		let origin = self.inner.origin.consume();
 		// A covering dynamic route may never answer, so the request is bounded too.
-		let broadcast = tokio::time::timeout(RESOLVE_TIMEOUT, origin.request_broadcast(name, None))
+		let broadcast = moq_clock::timeout(RESOLVE_TIMEOUT, origin.request_broadcast(name, None))
 			.await
 			.map_err(|_| tracing::warn!(%name, "timed out resolving broadcast"))
 			.ok()?
@@ -181,9 +195,8 @@ mod tests {
 	}
 
 	/// Mirrors the middleware example in this module's docs, which `doctest = false`
-	/// keeps out of the compiler's reach. Paused time skips the allowed request's
-	/// RESOLVE_TIMEOUT wait for a broadcast that never arrives.
-	#[tokio::test(start_paused = true)]
+	/// keeps out of the compiler's reach.
+	#[tokio::test]
 	async fn router_middleware_gates_requests() {
 		use axum::body::Body;
 		use axum::extract::Request;
@@ -199,8 +212,8 @@ mod tests {
 			}
 		}
 
-		// An origin with no broadcasts: a request that reaches the handlers 404s after
-		// RESOLVE_TIMEOUT, so a 401 proves the middleware rejected it first.
+		// An origin with no broadcasts: a request that reaches the handlers 404s, so a 401
+		// proves the middleware rejected it first.
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
 		let app = server.router().layer(middleware::from_fn(gate));
@@ -228,7 +241,7 @@ mod tests {
 		assert_eq!(allowed.headers()[header::CACHE_CONTROL], "no-store");
 	}
 
-	#[tokio::test(start_paused = true)]
+	#[tokio::test]
 	async fn router_matches_multisegment_broadcast_when_nested() {
 		use axum::body::Body;
 		use axum::extract::Request;
@@ -252,6 +265,19 @@ mod tests {
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		// The handler adds no-store. Axum's unmatched-route 404 does not.
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+	}
+
+	/// A synced origin with no route for the path answers at once, rather than waiting out
+	/// RESOLVE_TIMEOUT for a publisher that is not there. Paused time would skip that wait,
+	/// so any elapsed time means it happened.
+	#[tokio::test(start_paused = true)]
+	async fn unannounced_broadcast_answers_without_waiting() {
+		let origin = produce_origin();
+		let server = Server::new(origin.consume(), Config::default());
+
+		let start = moq_clock::now();
+		assert!(server.broadcaster("live").await.is_none());
+		assert_eq!(start.elapsed(), Duration::ZERO);
 	}
 
 	async fn closed_broadcaster() -> Arc<Broadcaster> {

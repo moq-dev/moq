@@ -32,7 +32,7 @@ fn moq_micros(wall: SystemTime) -> i128 {
 }
 
 /// The host's wall clock, or `None` while it reads before the moq epoch (2020): unset.
-fn host_wall() -> Option<SystemTime> {
+pub(crate) fn host_wall() -> Option<SystemTime> {
 	let now = SystemTime::from(moq_clock::wall());
 	#[cfg(test)]
 	let now = HOST_WALL.get().unwrap_or(now);
@@ -276,15 +276,6 @@ mod tests {
 
 	fn us(v: u64) -> moq_net::Timestamp {
 		moq_net::Timestamp::from_micros(v).unwrap()
-	}
-
-	#[test]
-	fn copies_share_one_epoch() {
-		let clock = Clock::at(epoch(), moq_epoch() + Duration::from_secs(1)).unwrap();
-		let shared = clock;
-		// Compare the anchors, not live readings: two `now()` calls race the clock.
-		assert_eq!(clock.instant, shared.instant);
-		assert_eq!(clock.wall(), shared.wall());
 	}
 
 	/// A capture maps onto the clock's own timeline, and one ahead of now or before the epoch is

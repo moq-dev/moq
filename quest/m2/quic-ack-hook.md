@@ -49,9 +49,9 @@ everything was acknowledged, so the adapter answers from that. The trait
 method takes a byte offset, like `moq-quic` (decided 2026-10-17 on #5817);
 the starvation quest's writer counts the bytes it writes. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
 unimplemented in shipping Chrome and its `bytesAcknowledged` is at risk in the
-W3C draft. qmux over a reliable transport may treat serialization as
-acknowledgment only if the qmux quest decides that is honest; until then it
-also reports unsupported.
+W3C draft. Decided 2026-10-22 (maintainer): qmux's `poll_acked` reports
+unsupported too, since writing into TCP is not delivery; over qmux the
+histogram stays at group granularity.
 
 Tests cover: offset already acknowledged before the first poll, an offset in
 the middle of an in-flight frame, several waiters on one stream in offset
@@ -66,5 +66,3 @@ Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
 
 - [Starvation at frame granularity](/quest/m2/starvation-frames.md) - the
   moq-net consumer
-- [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - decides
-  what acknowledgment means over a reliable transport

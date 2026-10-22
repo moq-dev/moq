@@ -48,9 +48,13 @@ select_packages() {
         return
     fi
 
-    local seeds edges selected
+    local seeds benches edges selected
+    # A crate's `benches/` builds only its own bench targets, which no other crate can
+    # depend on and the test build never compiles, so it selects that crate alone
+    # (for its lint) rather than every dependent's tests.
+    benches=$(sed -n 's|^rs/\([^/]*\)/benches/.*|\1|p' "$list")
     seeds=$({
-        sed -n 's|^rs/\([^/]*\)/.*|\1|p' "$list"
+        sed -n '\|^rs/[^/]*/benches/|d; s|^rs/\([^/]*\)/.*|\1|p' "$list"
         jq -r --rawfile list "$list" '($list | split("\n")) as $paths | .packages[]
             | (.manifest_path | split("/")) as $p | select($p[-4] == "demo")
             | select(any($paths[]; startswith("demo/\($p[-3])/\($p[-2])/"))) | .name' <<<"$metadata"
@@ -74,7 +78,8 @@ select_packages() {
 			} while (grew)
 			for (name in want) if (want[name]) print name
 		}
-	' <<<"$edges" | sort -u)
+	' <<<"$edges")
+    selected=$(printf '%s\n%s\n' "$selected" "$benches" | sed '/^$/d' | sort -u)
 
     [[ -n "$selected" ]] || return 0
 
@@ -99,32 +104,9 @@ wants() {
     [[ "$packages" == ALL ]] || grep -qwE "$1" <<<"$names"
 }
 
-# The feature contract scripts are no crate, so their own diff selects
-# nothing and still has to reach the gates below.
-media_script=
-tokio_script=
-net_script=
-if [[ -f "$list" ]]; then
-    if grep -qx 'sh/rs/media-features.sh' "$list"; then media_script=1; fi
-    if grep -qx 'sh/rs/tokio-features.sh' "$list"; then tokio_script=1; fi
-    if grep -qx 'sh/rs/net-features.sh' "$list"; then net_script=1; fi
-fi
-
-# Global build inputs select ALL. Otherwise isolate permutations when their
-# owning crate changes; dependency-only diffs keep the cheaper boundary checks.
-feature_owner_changed() {
-    [[ "$packages" == ALL ]] || grep -qE "$1" "$list"
-}
-
 case "$packages" in
     "")
-        if [[ ("$action" == check* || "$action" == lint) && -n "$media_script$tokio_script$net_script" ]]; then
-            if [[ -n "$media_script" ]]; then just rs media-features --all; fi
-            if [[ -n "$tokio_script" ]]; then just rs tokio-features --all; fi
-            if [[ -n "$net_script" ]]; then just rs net-features; fi
-        else
-            echo "rs: no crates affected; skipping."
-        fi
+        echo "rs: no crates affected; skipping."
         exit 0
         ;;
     ALL) echo "rs: selecting the workspace" ;;
@@ -146,15 +128,6 @@ case "$action" in
         ;;
     check | check-test | lint)
         just rs "$action" "${flags[@]}"
-        # Workspace feature unification hides a broken moq-tokio feature set
-        # whenever any dependent enables a transport.
-        if [[ -n "$tokio_script" ]] || wants moq-tokio; then
-            args=()
-            if feature_owner_changed '^(rs/moq-tokio/|sh/rs/tokio-features\.sh$)'; then args+=(--all); fi
-            just rs tokio-features "${args[@]}"
-        fi
-        # Likewise every dependent turns moq-net's default `async` feature back on.
-        if [[ -n "$net_script" ]] || wants moq-net; then just rs net-features; fi
         # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a
         # wasm32 pass checks it. moq-mux, moq-ffi, and moq-clock ride along in that pass, and
         # nothing depends on moq-ffi, so each has to reach it on its own.
@@ -168,12 +141,6 @@ case "$action" in
         if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
         # The relay's io_uring listener, off the default feature set.
         if wants moq-relay; then just rs uring-check; fi
-        # Each media feature shape compiles on its own, about two minutes.
-        if [[ -n "$media_script" ]] || wants '(moq-video|moq-audio|moq-transcode)'; then
-            args=()
-            if feature_owner_changed '^(rs/moq-(video|audio|transcode)/|sh/rs/media-features\.sh$)'; then args+=(--all); fi
-            just rs media-features "${args[@]}"
-        fi
         ;;
     fix)
         just rs fix "${flags[@]}"
@@ -183,10 +150,13 @@ case "$action" in
         # A selection can hold nothing testable, and
         # nextest exits 4 on that; the whole workspace finding none really is wrong.
         [[ "$packages" == ALL ]] || flags+=(--no-tests=pass)
-        just rs test "${flags[@]}"
+        # CI keeps Cargo's per-crate build timings, which check.yml uploads.
+        timings=()
+        [[ "${GITHUB_ACTIONS:-}" != true ]] || timings=(--timings)
+        just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         # Tests behind the off-by-default `capture` and `play` features.
-        if wants '(moq-video|moq-audio)'; then just rs capture-test; fi
-        if wants moq-cli; then just rs play; fi
+        if wants '(moq-video|moq-audio)'; then just rs capture-test ${timings[@]+"${timings[@]}"}; fi
+        if wants moq-cli; then just rs play ${timings[@]+"${timings[@]}"}; fi
         ;;
     platform)
         # moq-gst links GStreamer via pkg-config, which the runners don't have.

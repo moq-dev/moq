@@ -101,16 +101,24 @@ pkgs.testers.runNixOSTest {
       networking.interfaces.eth0.ipv4.addresses = lib.mkForce [ ];
       virtualisation.qemu.options = [
         "-fw_cfg name=opt/io.systemd.credentials/runner-token,file=${pkgs.writeText "runner-token" "fixture"}"
+        "-device virtio-balloon-pci,free-page-reporting=on"
       ];
       systemd.services.cache-seed-fixture = {
         requiredBy = [ "github-runner-runner.service" ];
         before = [ "github-runner-runner.service" ];
         unitConfig.ConditionPathExists = "!/var/lib/cache-seeded";
         serviceConfig.Type = "oneshot";
+        # Lay out the cache and registration the way DynamicUser left them on
+        # deployed guests, owned by the nobody user they show as there.
         script = ''
-          install -d -m 0700 /var/cache/github-runner-home
-          echo seeded > /var/cache/github-runner-home/seeded
-          chmod 0600 /var/cache/github-runner-home/seeded
+          install -d -m 0700 /var/cache/private/github-runner-home /var/lib/private/github-runner/runner
+          ln -s private/github-runner-home /var/cache/github-runner-home
+          install -d /var/lib/github-runner
+          ln -s ../private/github-runner/runner /var/lib/github-runner/runner
+          echo seeded > /var/cache/private/github-runner-home/seeded
+          echo registered > /var/lib/private/github-runner/runner/.runner
+          chmod 0600 /var/cache/private/github-runner-home/seeded /var/lib/private/github-runner/runner/.runner
+          chown -R nobody:nogroup /var/cache/private/github-runner-home /var/lib/private/github-runner
           touch /var/lib/cache-seeded
         '';
       };
@@ -120,8 +128,24 @@ pkgs.testers.runNixOSTest {
         ];
         ExecStart = lib.mkForce (
           pkgs.writeShellScript "cache-probe" ''
+            set -euo pipefail
             test "$(cat "$HOME/seeded")" = seeded
+            # Java ignores $HOME and reads the passwd entry.
+            test "$(${pkgs.getent}/bin/getent passwd "$(id -u)" | cut -d: -f6)" = "$HOME"
             mkdir -p "$MBX_CACHE_DIR"
+            # Jobs execute checkout scripts and tools installed in their home.
+            for directory in "$HOME" /var/cache/github-runner-work; do
+              printf '#!${pkgs.runtimeShell}\necho executable\n' > "$directory/exec-probe"
+              chmod +x "$directory/exec-probe"
+              test "$("$directory/exec-probe")" = executable
+              # Builds such as askama's template includes join `..` to a
+              # canonical path lexically, which misses through a symlink.
+              lexical=$(realpath -s --relative-to="$directory" "$(realpath "$directory/exec-probe")")
+              test "$("$directory/$lexical")" = executable
+            done
+            # Jobs list processes and bind the IPv6 loopback.
+            command -v pgrep
+            ${pkgs.python3}/bin/python3 -c 'import socket; socket.socket(socket.AF_INET6).bind(("::1", 0))'
             ulimit -l > "$MBX_CACHE_DIR/memlock"
             if test -f "$MBX_CACHE_DIR/marker"; then
               touch "$MBX_CACHE_DIR/reused"
@@ -161,6 +185,9 @@ pkgs.testers.runNixOSTest {
     };
   };
   testScript = ''
+    import time
+    from datetime import timedelta
+
     start_all()
     with subtest("the carrier-less TAP is configured without blocking the host uplink"):
         startup.wait_for_unit("network-online.target")
@@ -227,9 +254,51 @@ pkgs.testers.runNixOSTest {
         router.wait_for_file("/tmp/udp-result")
         router.succeed("test $(cat /tmp/udp-result) = finish")
 
+    with subtest("the runner adopts the registration DynamicUser left behind"):
+        guest.succeed("test ! -L /var/lib/github-runner/runner")
+        guest.succeed("test $(cat /var/lib/github-runner/runner/.runner) = registered")
+
+    with subtest("the uplink stays IPv4-only"):
+        guest.succeed("test $(cat /proc/sys/net/ipv6/conf/eth0/disable_ipv6) = 1")
+
     with subtest("the runner inherits the hosted CI locked-memory budget"):
         guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/memlock")
         guest.succeed("test $(cat /var/cache/github-runner-home/.cache/mbx/memlock) = 65536")
+
+    with subtest("the guest reports freed pages and drops caches only between jobs"):
+        # Feature bit 5 is VIRTIO_BALLOON_F_REPORTING, negotiated only when the guest driver uses it.
+        guest.succeed("test $(cut -c6 /sys/bus/virtio/drivers/virtio_balloon/virtio*/features) = 1")
+        guest.succeed("systemd-run --unit=fake-job ${pkgs.python3}/bin/python3 -c 'import time; time.sleep(600)' Runner.Worker")
+        guest.wait_until_succeeds("pgrep -f 'Runner[.]Worker'")
+        guest.succeed("systemctl start runner-reclaim.service")
+        guest.succeed("journalctl -u runner-reclaim.service | grep -F 'keeping caches'")
+        guest.succeed("systemctl stop fake-job")
+        guest.succeed("systemctl start runner-reclaim.service")
+        guest.succeed("journalctl -u runner-reclaim.service | grep -F 'Dropped caches'")
+
+    with subtest("a job that fills memory is killed before it thrashes the disk"):
+        def sample():
+            out = guest.succeed("systemctl is-active memory-hog || true; grep '^pgpgin ' /proc/vmstat; head -1 /proc/pressure/memory")
+            state, read, pressure = out.splitlines()
+            # pgpgin counts KiB read from block devices.
+            return state, int(read.split()[1]) >> 10, pressure.split()[1]
+
+        _, read0, _ = sample()
+        guest.succeed("systemd-run --unit=memory-hog ${pkgs.python3}/bin/python3 ${./hog.py} /var/tmp/hog-inputs")
+        start = time.monotonic()
+        while True:
+            state, read, pressure = sample()
+            elapsed = time.monotonic() - start
+            print(f"memory-hog {state} after {elapsed:.0f}s: read {read - read0} MiB, memory pressure {pressure}")
+            if state != "active":
+                break
+            # The kernel's OOM killer never fires, so without earlyoom the hog
+            # re-reads its inputs from disk until the job times out.
+            assert elapsed < 60, "the guest thrashed instead of killing memory-hog"
+            time.sleep(1)
+        print(guest.succeed("journalctl -u earlyoom | grep -F 'sending SIGTERM to process'"))
+        guest.succeed("rm /var/tmp/hog-inputs")
+        router.wait_until_succeeds("${pkgs.openssh}/bin/ssh-keyscan -t ed25519 -T 5 10.231.0.2 | grep -F ssh-ed25519", timeout=timedelta(minutes=1))
 
     with subtest("local Nix and mbx storage survive runner and VM restarts"):
         guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/marker")

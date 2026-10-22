@@ -14,7 +14,8 @@
 //! the relay through a seeded [`moq_shaper`] that delays, jitters, drops,
 //! reorders, and rate-limits the path both ways (and, across a cluster, the
 //! peer link between relays too). A drill that only passes on loopback is a
-//! finding, not a flake.
+//! finding, not a flake. The impaired lane draws a fresh seed every run, a soak
+//! rather than a gate, so it is ignored here and runs nightly.
 //!
 //! `no_publisher_never_delivers` is the negative control: the same harness with
 //! nothing publishing must report failure, so a drill that passes because no
@@ -24,6 +25,7 @@
 //! drill fails when its recovery behavior is removed, and the loom/fuzz cases
 //! covering the primitives underneath.
 #![cfg(all(feature = "quic", feature = "websocket"))]
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 use std::time::Duration;
 
@@ -89,6 +91,7 @@ macro_rules! lanes {
 			}
 
 			#[tokio::test]
+			#[ignore = "a fresh shaper seed per run is a nightly soak: just test drill impaired"]
 			async fn impaired() {
 				super::$drill(super::Lane::Impaired).await
 			}
@@ -800,27 +803,29 @@ const PAYLOAD: usize = 256;
 /// stalls of #4349.
 const SETTLE: Duration = Duration::from_secs(10);
 
-/// The cross-relay drill's link: the drills' impairment behind a bottleneck a
-/// burst overruns, so its tail waits in the queue or is dropped from it. It is
+/// The cross-relay drill's link: a bottleneck a burst overruns, so its tail
+/// waits in the queue or is dropped from it. Random loss and reordering cannot
+/// establish that congestion acted, so only overflow supplies loss here. It is
 /// slower than [`credit`]'s receive window lets a sender go. The first burst
 /// is collected at ingress after setup, so scheduling cannot drain the bucket
 /// between its datagrams; its bytes exceed the burst and 50ms queue allowance
 /// before they are accounted at one instant.
 fn bursty() -> moq_shaper::Profile {
 	moq_shaper::Profile {
+		delay: Duration::from_millis(20),
 		rate: Some(moq_shaper::Rate {
 			bits_per_second: 100_000,
 			burst: 1500,
 			queue: Duration::from_millis(50),
 		}),
-		..impairment()
+		..Default::default()
 	}
 }
 
 /// QUIC credit tighter than a burst on the impaired lane: fewer concurrent
 /// streams than a burst has groups (each group is a stream, each FETCH another),
 /// and receive windows of a few groups, so senders wait on MAX_STREAMS and
-/// MAX_DATA mid-burst, over a path that loses the frames granting them.
+/// MAX_DATA mid-burst while the path is congested.
 fn credit(lane: Lane, mut quic: moq_tokio::quic::Config) -> moq_tokio::quic::Config {
 	if let Lane::Impaired = lane {
 		quic.max_streams = Some(16);
@@ -980,12 +985,17 @@ impl Flap {
 }
 
 async fn cross_cluster(lane: Lane, link: PeerLink) {
-	// The relays keep the default idle timeout. The drills' 2s one would also
-	// bound each relay's side of an impaired handshake, which can sit silent
-	// that long between the client's backed-off retransmits. So a cut peer link
-	// idles out only after `relay_idle`, which the flap's waits allow for.
+	// On the impaired path the relays keep the default idle timeout. The drills'
+	// 2s one would also bound each relay's side of an impaired handshake, which
+	// can sit silent that long between the client's backed-off retransmits.
+	// Loopback has no such silence, so its relays take the clients' tuning. A cut
+	// peer link idles out only after `relay_idle`, which the flap's waits allow for.
+	let relay_quic = || match lane {
+		Lane::Loopback => quic(),
+		Lane::Impaired => credit(lane, relay_config().quic),
+	};
 	let mut config = relay_config();
-	config.quic = credit(lane, config.quic);
+	config.quic = relay_quic();
 	let relay_idle = config.quic.resolve().idle_timeout;
 	let origin = RelayHost::start(config).await;
 	let seed = seed(lane);
@@ -1000,7 +1010,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let mut peer_url = peer.url.clone();
 	peer_url.set_path("/");
 	let mut config = relay_config();
-	config.quic = credit(lane, config.quic);
+	config.quic = relay_quic();
 	config.connect = dial();
 	// Retry forever: a give-up after a slow impaired handshake would look exactly
 	// like the never-redialed regression, and a stall still fails the drill.
@@ -1340,21 +1350,23 @@ async fn no_publisher_never_delivers(lane: Lane) {
 	.expect("subscriber connect failed");
 
 	// Short on purpose: this is the one wait that must expire, so it is the one
-	// wait that decides how long the suite spends proving a negative.
-	let quiet = Duration::from_secs(2);
+	// wait that decides how long the suite spends proving a negative. Still
+	// many round trips of either path.
+	let quiet = match lane {
+		Lane::Loopback => Duration::from_millis(300),
+		Lane::Impaired => Duration::from_secs(2),
+	};
 
 	let mut announced = subscribed.announced();
-	if let Ok(update) = tokio::time::timeout(quiet, next_update(&mut announced)).await {
+	let (update, resolved) = tokio::join!(
+		tokio::time::timeout(quiet, next_update(&mut announced)),
+		tokio::time::timeout(quiet, subscribed.routed_broadcast("live")),
+	);
+	if let Ok(update) = update {
 		let path = update.map(|(update, _)| update.prefix.to_string());
 		panic!("the announcement stream reported {path:?} with no publisher");
 	}
-
-	assert!(
-		tokio::time::timeout(quiet, subscribed.routed_broadcast("live"))
-			.await
-			.is_err(),
-		"a broadcast resolved with no publisher"
-	);
+	assert!(resolved.is_err(), "a broadcast resolved with no publisher");
 
 	drop(session);
 	drop(relay);
@@ -1373,11 +1385,22 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	}
 }
 
-/// A finite deep queue, below the media bitrate, must shed superseded groups while
-/// preserving the newest catalog snapshot. Random loss is disabled in this acceptance test.
 #[tokio::test]
 async fn ietf_subscriber_max_age_skips_bufferbloat() {
-	let version: moq_net::Version = "moq-transport-22".parse().unwrap();
+	subscriber_max_age_skips_bufferbloat("moq-transport-22").await
+}
+
+#[tokio::test]
+async fn lite_subscriber_max_age_skips_bufferbloat() {
+	subscriber_max_age_skips_bufferbloat("moq-lite-06").await
+}
+
+/// A finite deep queue, below the media bitrate, must shed superseded groups while
+/// preserving the newest catalog snapshot. Random loss is disabled in this acceptance test.
+/// On both protocols: this is the benign twin of a subscriber that stalls on purpose, so
+/// bounding what a stalled one makes the relay hold must not cost it the live edge.
+async fn subscriber_max_age_skips_bufferbloat(version: &str) {
+	let version: moq_net::Version = version.parse().unwrap();
 	let mut config = relay_config();
 	config.listen.version = vec![version];
 	let relay = RelayHost::start(config).await;

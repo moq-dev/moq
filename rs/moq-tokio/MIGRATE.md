@@ -4,6 +4,29 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### qmux sessions are qmux 0.7 (#6231)
+
+The WebSocket, TCP, TLS, and Unix socket transports run on [qmux 0.7](https://github.com/moq-dev/moq/blob/main/rs/qmux/MIGRATE.md), which implements moq-net's poll traits directly instead of going through `web_transport_trait`.
+Code that holds a `qmux::Session` from moq-tokio, such as one from the WebSocket listener's `accept`, follows qmux's migration guide.
+A WebSocket client must offer a QMux subprotocol: `websocket::accept` refuses an upgrade without one, and the legacy `webtransport` format is gone.
+
+### MoQ sessions need the `net` feature (#6132)
+
+moq-net is optional, behind the default `net` feature that every transport feature (`quic`, `websocket`, `tcp`, `uds`, `iroh`, `webrtc`) turns on.
+A build with `default-features = false` and no transport feature loses `client`, `connect`, `connection`, `listen`, `origin`, `transport`, their root re-exports (`Client`, `Connection`, `ConnectError`, `Transport`, ...), `Error::MoqNet`, `Error::Connect`, `Error::connect_error`, `Error::is_auth`, and the `moq_net` re-export.
+Enable `net`, or a transport feature, to keep them.
+
+### `mdns::Secret` is `secret::Secret`, read from a file (#5910)
+
+The 32-byte secret type moved out of `mdns` so `listen.reset.secret` shares it, and it no longer parses inline hex.
+Name it `moq_tokio::secret::Secret`.
+Replace `Secret::load(value)` with `Secret::read(path)`, which reads a file of 64 hexadecimal characters and returns `secret::Error`; replace `Secret::new(hex)` and `str::parse` with `Secret::from([u8; 32])`, decoding the hex yourself.
+
+### Dropping an unfinished send stream resets it (#5909)
+
+`quic::driver::SendStream` and `quic::web::SendStream` send `RESET_STREAM` with code 0 when dropped before `finish()`, instead of finishing implicitly.
+Call `finish()` before dropping a stream whose data should arrive whole.
+
 ### `jemalloc::tikv_jemallocator` is 0.7 (#6053)
 
 The re-exported allocator crate moved from tikv-jemallocator 0.6 to 0.7.

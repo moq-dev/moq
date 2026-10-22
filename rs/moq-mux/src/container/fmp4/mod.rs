@@ -28,7 +28,7 @@ mod export_test;
 #[cfg(test)]
 mod import_test;
 
-use std::{task::Poll, time::Duration};
+use std::time::Duration;
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, AudioConfig, VideoCodec, VideoConfig};
@@ -38,6 +38,7 @@ use moq_net::Timestamp;
 
 use crate::container::{Container, Frame};
 
+/// Fragmented MP4 parsing, muxing, and transport errors.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -49,18 +50,23 @@ pub enum Error {
 	#[error("invalid subtitle: {0}")]
 	InvalidSubtitle(&'static str),
 
+	/// Parsing or encoding an MP4 atom failed.
 	#[error("mp4: {0}")]
 	Mp4(std::sync::Arc<mp4_atom::Error>),
 
+	/// A MoQ transport operation failed.
 	#[error("moq: {0}")]
 	Moq(#[from] moq_net::Error),
 
+	/// Parsing the FLAC configuration failed.
 	#[error("flac: {0}")]
 	Flac(#[from] crate::codec::flac::Error),
 
+	/// Parsing or encoding the Opus configuration failed.
 	#[error("opus: {0}")]
 	Opus(#[from] crate::codec::opus::Error),
 
+	/// A group was opened without a keyframe.
 	#[error("missing keyframe: a group must open on a keyframe")]
 	MissingKeyframe(#[from] crate::container::MissingKeyframe),
 
@@ -72,48 +78,63 @@ pub enum Error {
 	#[error("{0}")]
 	TimestampRewind(#[from] crate::container::TimestampRewind),
 
+	/// A timestamp calculation overflowed.
 	#[error("timestamp overflow")]
 	TimestampOverflow(#[from] moq_net::TimeOverflow),
 
+	/// The fragment has no traf box.
 	#[error("no traf in moof")]
 	NoTraf,
 
+	/// The track fragment has no tfdt box.
 	#[error("no tfdt in traf")]
 	NoTfdt,
 
+	/// The presentation timestamp calculation overflowed.
 	#[error("PTS overflow")]
 	PtsOverflow,
 
+	/// The fragment has no moof box.
 	#[error("missing moof")]
 	NoMoof,
 
+	/// The fragment has no mdat box.
 	#[error("missing mdat")]
 	NoMdat,
 
+	/// The initialization segment has no moov box.
 	#[error("missing moov")]
 	NoMoov,
 
+	/// The moov box has no tracks.
 	#[error("no tracks in moov")]
 	NoTracks,
 
+	/// The moov box has multiple tracks where only one is supported.
 	#[error("multiple tracks in moov, use Trak instead")]
 	MultipleTracks,
 
+	/// The named codec cannot supply a synthesized CMAF initialization segment.
 	#[error("can't synthesize CMAF init for {0}")]
 	UnsupportedSynthesis(String),
 
+	/// The track handler declares unsupported subtitle media.
 	#[error("subtitle tracks are not supported")]
 	UnsupportedSubtitle,
 
+	/// The track handler has an unrecognized four-character code.
 	#[error("unknown track handler: {0:?}")]
 	UnknownTrackHandler([u8; 4]),
 
+	/// The sample description has no codec entry.
 	#[error("missing codec")]
 	MissingCodec,
 
+	/// The sample description has multiple codec entries.
 	#[error("multiple codecs")]
 	MultipleCodecs,
 
+	/// The sample entry has an unrecognized codec four-character code.
 	#[error("unknown codec: {0:?}")]
 	UnknownCodec(mp4_atom::FourCC),
 
@@ -121,9 +142,11 @@ pub enum Error {
 	#[error("invalid colr code point: {0}")]
 	InvalidColr(u16),
 
+	/// The sample entry declares an unsupported codec.
 	#[error("unsupported codec: {0:?}")]
 	UnsupportedCodec(Box<mp4_atom::Codec>),
 
+	/// The sample entry declares unsupported MPEG-2 media.
 	#[error("unsupported codec: MPEG2")]
 	UnsupportedMpeg2,
 
@@ -131,6 +154,7 @@ pub enum Error {
 	#[error("AAC sample entry missing DecoderSpecificInfo")]
 	MissingDecoderSpecific,
 
+	/// A second moof box arrived before the preceding fragment was complete.
 	#[error("duplicate moof")]
 	DuplicateMoof,
 
@@ -142,12 +166,15 @@ pub enum Error {
 	#[error("moov after finish")]
 	MoovAfterFinish,
 
+	/// The track fragment has no trun box.
 	#[error("missing trun")]
 	MissingTrun,
 
+	/// The track fragment has no decode-time box.
 	#[error("missing tfdt")]
 	MissingTfdt,
 
+	/// The named video codec lacks the configuration needed to synthesize a CMAF init.
 	#[error("video codec {0} needs a description (codec config record) to synthesize a CMAF init")]
 	MissingVideoDescription(String),
 
@@ -155,6 +182,7 @@ pub enum Error {
 	#[error("missing video dimensions for codec: {0}")]
 	MissingVideoDimensions(String),
 
+	/// The fragment data offset cannot address its sample data.
 	#[error("invalid data offset")]
 	InvalidDataOffset,
 
@@ -162,29 +190,49 @@ pub enum Error {
 	/// track counts in the same ticks as the media.
 	#[error("track timescale {track:?} doesn't match the CMAF mdhd timescale {mdhd:?}")]
 	TimescaleMismatch {
+		/// The timescale declared by the MoQ track, if any.
 		track: Option<moq_net::Timescale>,
+		/// The media timescale declared by the mdhd box.
 		mdhd: moq_net::Timescale,
 	},
 
+	/// The fragment references an undeclared track ID.
 	#[error("unknown track {0}")]
 	UnknownTrack(u32),
 
+	/// The first sample in the group is not a keyframe.
 	#[error("no keyframe at start of group")]
 	NoKeyframe,
 
+	/// The sample byte range extends outside the mdat payload.
 	#[error("track sample range {start}..{end} is out of bounds of mdat (len {len})")]
-	SampleRangeOutOfBounds { start: usize, end: usize, len: usize },
+	SampleRangeOutOfBounds {
+		/// The first sample byte offset in the mdat payload.
+		start: usize,
+		/// The exclusive end offset in the mdat payload.
+		end: usize,
+		/// The mdat payload length in bytes.
+		len: usize,
+	},
 
+	/// Fragment encoding was requested with no frames.
 	#[error("encode_fragment called with no frames")]
 	NoFrames,
 
+	/// The named audio codec lacks the configuration needed to synthesize a CMAF init.
 	#[error("audio codec {0} needs a description (AudioSpecificConfig) to synthesize a CMAF init")]
 	MissingAudioDescription(String),
 
 	/// An Opus catalog entry whose OpusHead contradicts its channel count.
 	#[error("Opus head has {head} channels but the catalog declares {catalog}")]
-	OpusChannelCount { catalog: u32, head: u32 },
+	OpusChannelCount {
+		/// The channel count declared by the catalog.
+		catalog: u32,
+		/// The channel count declared by the OpusHead.
+		head: u32,
+	},
 
+	/// A non-final sample has no duration, so its decode timeline cannot be recovered.
 	#[error("multi-sample fragment has a non-final sample with no duration; DTS is unrecoverable")]
 	MissingSampleDuration,
 
@@ -263,6 +311,7 @@ impl From<mp4_atom::Error> for Error {
 	}
 }
 
+/// A result using this module's error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// The media carried by a CMAF track.
@@ -283,7 +332,7 @@ impl Kind {
 	}
 
 	/// The publisher priority for this kind of media.
-	fn priority(self) -> u8 {
+	fn priority(self) -> i8 {
 		match self {
 			Self::Video => hang::catalog::PRIORITY.video,
 			Self::Audio => hang::catalog::PRIORITY.audio,
@@ -339,6 +388,7 @@ impl Wire {
 		Err(Error::NoMoov)
 	}
 
+	/// Borrow the MP4 track atom describing this wire container.
 	pub fn trak(&self) -> &mp4_atom::Trak {
 		&self.trak
 	}
@@ -389,18 +439,9 @@ impl Container for Wire {
 		)
 	}
 
-	fn poll_read(
-		&self,
-		group: &mut moq_net::group::Consumer,
-		waiter: &kio::Waiter,
-	) -> Poll<std::result::Result<Option<Vec<Frame>>, Self::Error>> {
-		use std::task::ready;
-
-		let Some(frame) = ready!(group.poll_read_frame(waiter)?) else {
-			return Poll::Ready(Ok(None));
-		};
+	fn decode(&self, frame: moq_net::frame::Frame) -> std::result::Result<Vec<Frame>, Self::Error> {
 		// CMAF carries no data track, so an object with no bytes is no marker and fails to decode.
-		Poll::Ready(Ok(Some(decode(frame.payload, frame.timestamp, self.track()?)?)))
+		decode(frame.payload, frame.timestamp, self.track()?)
 	}
 }
 
@@ -572,12 +613,7 @@ fn encode(group: &mut moq_net::group::Producer, frames: &[Frame], info: Fragment
 	let timestamp = Timestamp::new(timestamp_ticks(earliest, info.timescale)?, info.timescale)?;
 
 	let bytes = encode_fragment(info, frames)?;
-	let mut writer = group.create_frame(moq_net::frame::Info {
-		size: bytes.len() as u64,
-		timestamp: Some(timestamp),
-	})?;
-	writer.write(bytes)?;
-	writer.finish()?;
+	group.write_frame(timestamp, bytes)?;
 
 	Ok(())
 }
@@ -1880,18 +1916,11 @@ mod tests {
 		let timescale = moq_net::Timescale::MICRO;
 		let wire = Wire::new(synthesize_video_trak(1, 1_000_000, &config, None).unwrap()).unwrap();
 
-		let broadcast = moq_net::broadcast::Info::new().produce();
-		let untimed = moq_net::track::Info::default().with_timescale(None);
-		let track = broadcast.create_track("video", untimed).unwrap();
-		let mut group = track.append_group().unwrap();
 		let source = 3_600_000_000;
 		let input = [sample(source), sample(source + 66_000), sample(source + 33_000)];
 		let fragment = encode_fragment(info(1, timescale, 0), &input).unwrap();
-		group.write_frame(None, fragment).unwrap();
 
-		let Poll::Ready(Ok(Some(frames))) = wire.poll_read(&mut group.consume(), &kio::Waiter::noop()) else {
-			panic!("the fragment is ready");
-		};
+		let frames = wire.decode(moq_net::frame::Frame::new(None, fragment)).unwrap();
 		let source = u128::from(source);
 		assert_eq!(micros(&frames), [source, source + 66_000, source + 33_000]);
 	}

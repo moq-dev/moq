@@ -240,10 +240,11 @@ async fn rust_ffi() {
 		});
 		let broadcast = origin.create_broadcast("bench".into()).unwrap();
 		let timed = MoqTrackInfo {
-			priority: 127,
+			priority: 0,
 			max_age_us: None,
 			refresh: None,
 			timescale: Some(1_000_000),
+			compress: false,
 		};
 		let tracks: Vec<_> = (0..case.publishers)
 			.map(|p| broadcast.publish_track(p.to_string(), Some(timed.clone())).unwrap())

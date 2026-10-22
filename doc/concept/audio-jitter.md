@@ -91,9 +91,11 @@ observe(arrival, media):
     if media > newest:                  # a reordered frame never joins the history
         newest = media
         drop history entries with entry.media < media - WINDOW
+        if MAX_HISTORY entries are held: drop the oldest
         push (arrival, media) onto history
 
-    ref = entry in history with entry.media <= media, minimising (entry.arrival - entry.media)
+    ref = entry in history with entry.media <= media, minimising (entry.arrival - entry.media),
+          the oldest on a tie
     if there is none: return            # older than the whole window, not measured
     delay = max(0, (arrival - ref.arrival) - (media - ref.media))
 
@@ -108,10 +110,12 @@ observe(arrival, media):
     fold(nothing) for each elapsed empty interval, at most IDLE_MAX
     interval = index; peak = delay
 
-fold(bucket):
-    count += 1
-    forget = min(FORGET, count / (count + RAMP))
-    histogram = forget * histogram + (1 - forget) * (bucket or PRIOR)
+fold(bucket):                           # prior starts at 1
+    rest = 1 - FORGET * (1 - prior)     # what the decayed evidence leaves
+    fresh = min(FRESH_MAX, rest) if bucket else 0
+    histogram = FORGET * histogram + (rest - fresh - FORGET * prior) * PRIOR
+    histogram[bucket] += fresh
+    prior = rest - fresh
 
 target():
     measured = upper edge of the first bucket whose cumulative weight exceeds QUANTILE
@@ -136,6 +140,22 @@ special case, and neither does a group the relay dropped.
 `WINDOW` is also the horizon over which a build-up is visible. A queue that
 fills over ten seconds is measured as the part of it that happened in the last
 two.
+
+### Bounding the history
+
+The history holds at most `MAX_HISTORY` (8192) arrivals. The window is media
+time and the publisher chooses the timestamp rate, so without a cap a stream
+that advances a nanosecond per frame keeps every frame it sends. The cap stays
+far above the two-second window of any real track, including a 1000 fps one
+(2000 entries); a stream dense enough to reach it measures against a window
+shorter than `WINDOW` instead of growing without bound.
+
+The reference is a minimum over a prefix of the history, and the publisher
+chooses the prefix by reordering, so scanning for it lets every frame cost
+`MAX_HISTORY` comparisons. Keep the history in a structure that answers any
+prefix's minimum in logarithmic time, such as a segment tree over a ring.
+Keep the oldest entry on a tie: tied entries with a different `arrival` and
+`media` round `delay` differently.
 
 ### Reordered arrivals are measured against what came before them
 
@@ -191,10 +211,10 @@ the #3517 branch makes, and the resulting number reads plausible either way.
 ### The histogram
 
 An empirical distribution of `BUCKETS` buckets `BUCKET` wide, holding total
-weight 1. Each observation is an exponential update:
+weight 1. In steady state each observation is an exponential update:
 
 ```
-histogram = forget * histogram + (1 - forget) * x
+histogram = FORGET * histogram + (1 - FORGET) * x
 ```
 
 where `x` is all weight on the observed bucket. Weight stays normalised for
@@ -209,11 +229,25 @@ The cold start is seeded with a decaying prior, `PRIOR[i] = 0.5^(i+1)`. Its
 all targets **100 ms plus one frame**. That number is a consequence of the
 prior, not a chosen default.
 
-`RAMP` holds the forget factor below `FORGET` for the first observations, so
-early evidence overwrites the prior instead of being averaged into it. It
-reaches `FORGET` after about 116 observations, roughly a minute, and has no
-effect after that. Without it a receiver crawls toward the truth for a minute;
-with it, the corpus's evenly paced trace converges in under two seconds.
+The histogram holds that prior at weight `prior`, starting at 1, plus
+evidence. Evidence always
+decays by `FORGET`, and whatever it leaves is the prior's, of which an
+observation takes up to `FRESH_MAX`. So early evidence overwrites the prior
+instead of being averaged into it: each of the first observations takes a
+tenth of the weight, the prior is spent within about a dozen of them, and the
+corpus's evenly paced trace converges in five seconds. From then on every
+observation takes `1 - FORGET`, which is the update above.
+
+The cap keeps one interval from raising the target only to drop it again.
+NetEq instead ramps the forget factor itself, `count / (count + 2)`, which
+reaches `FORGET` after about a minute and until then decays old evidence as
+fast as the prior. On a bursty AAC path that let one late flush 6 s in carry
+14% of the histogram, raising the target by about 300 ms, and forgot it within
+5 s: playback parked to refill on the rise, skipped as much buffered audio on
+the fall, and stalled again on the next late flush. Under the cap a lone
+observation holds at most `FRESH_MAX`, twice the 95th percentile's tail, so it
+moves the target only while the prior has weight left, and for at most one
+20 s half-life.
 
 ### Reading the target
 
@@ -339,8 +373,8 @@ the safe side.
 
 A track that replaces another in the same slot and on the same broadcast path,
 such as the new name a codec change publishes under, continues the outgoing
-track's histogram and startup ramp instead of the prior. The path's arrivals
-did not change with the name; a track on another path starts from the prior.
+track's histogram, prior weight included, instead of starting over. The path's
+arrivals did not change with the name; a track on another path starts from the prior.
 Restarting would drop the target to the cold-start 100 ms at the switch, then
 raise it as the lateness is relearned, and the playout follows both moves:
 buffered audio is skipped on the drop and playback parks on each rise. Only the
@@ -364,10 +398,14 @@ can hear, so the target should rise readily and fall grudgingly, and it does:
 - **Falling** is driven by the forget factor alone, over the 20 s half-life
   above. Old mass in the tail has to decay out before the quantile can move
   down, and nothing can make it decay faster.
-- **A single bad observation does not move the target at all.** It adds at most
-  `1 - forget` weight, which past the startup ramp is 1.7%, well under the 5%
-  the 95th percentile needs. It takes a few intervals of genuine lateness before
-  the target responds, which is the correct answer to a one-off straggler.
+- **A single bad observation does not move the target on its own.** Once the
+  prior is spent it adds `1 - FORGET` weight, 1.7%, well under the 5% the 95th
+  percentile needs. It takes a few intervals of genuine lateness before the
+  target responds, which is the correct answer to a one-off straggler. A path
+  whose recent lateness already holds nearly 5% of the weight sits on the
+  boundary, so one more late interval tips it up for a fold or two. Only in
+  the first few seconds, while an observation can take up to `FRESH_MAX`, can
+  one interval move it, and then it decays like any other evidence.
 
 The #3517 branch needed an explicit rise clamp and a one-frame-per-second fall
 limiter because it had an unbounded instant-rise path that bypassed the
@@ -412,8 +450,10 @@ error is on the safe side.
 the work: after 1024 folds the retained weight is about 2e-8, so the cap changes
 no output an `f64` can represent.
 
-The startup ramp is not restarted. A receiver coming back from a pause is not
-cold, and re-converging at the base rate is correct.
+A receiver coming back from a pause is not cold: the evidence that survived
+keeps decaying at the base rate. Only the weight the prior regained is replaced
+quickly, the same way it is at cold start, since it stands for no evidence at
+all.
 
 ## Fixed targets
 
@@ -438,7 +478,7 @@ live-edge skip budget and not a buffer.
 Every value comes from WebRTC's NetEq, whose algorithm lives in
 `underrun_optimizer`, `histogram`, and `packet_arrival_history` under
 `modules/audio_coding/neteq/`, not in the `delay_manager.cc` the name suggests.
-The two exceptions are marked.
+The exceptions are marked.
 
 | Constant | Value | Origin |
 | --- | --- | --- |
@@ -448,9 +488,10 @@ The two exceptions are marked.
 | `QUANTILE` | 0.95 | NetEq's default delay histogram quantile |
 | `FORGET` | 0.983 | NetEq's underrun forget factor. The widely repeated 0.97 is a transitional value, and 0.9993 is the *reorder* factor, which the #3517 branch uses by mistake |
 | `RESAMPLE` | 500 ms | NetEq's resample interval |
-| `RAMP` | 2 | NetEq's start forget weight |
+| `FRESH_MAX` | 0.1 | Ours, twice the quantile's tail. NetEq ramps the forget factor from a start weight of 2 instead; see [the histogram](#the-histogram) |
 | `PRIOR[i]` | `0.5^(i+1)` | NetEq's histogram seed |
 | `IDLE_MAX` | 1024 intervals | Ours. A work bound with no effect on output |
+| `MAX_HISTORY` | 8192 arrivals | Ours. Bounds a rate the publisher chooses; see [Bounding the history](#bounding-the-history) |
 | Out-of-range delays | clamped, not dropped | Ours. See [the histogram](#the-histogram) |
 
 ## Implementing from this page
@@ -497,7 +538,7 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 
 | Case | Holds the implementation to |
 | --- | --- |
-| `paced` | An even sender converges to one bucket plus one frame, and the startup ramp gets it there in under two seconds |
+| `paced` | An even sender converges to one bucket plus one frame, and replacing the prior gets it there in five seconds |
 | `flush` | The measured term follows a flush span, and tracks it when the span doubles |
 | `advertised` | The advertised span floors the target instead of adding to it |
 | `buildup` | A queue filling at 2 ms per frame is measured against the fastest recent arrival |
@@ -506,6 +547,7 @@ index. Tolerance is 1e-6 ms, which the `f64` rules above make generous.
 | `idle` | A 30 s gap relaxes the histogram toward the prior |
 | `tunein` | A stale frame then the live edge 14.5 s later leaves the target near the frame duration. This is the #3517 regression |
 | `spike` | A recurring stall raises the target, and it decays once the stalls stop |
+| `straggler` | One late interval after the prior is spent leaves the target where it was |
 | `fixed` | An explicit delay ignores the arrivals entirely |
 
 `reference.ts` beside them generated the numbers. It is **not normative and not

@@ -1,7 +1,10 @@
+//! Connect to peers and manage MoQ sessions.
+
 use std::sync::Arc;
 
 use url::Url;
 
+use crate::auth::MoqAuth;
 use crate::bandwidth::MoqBandwidth;
 use crate::error::MoqError;
 use crate::ffi::Task;
@@ -277,12 +280,30 @@ pub(crate) fn parse_versions(versions: &[String]) -> Result<Vec<moq_net::Version
 		.collect()
 }
 
+/// The reconnect loop of the `connect` in flight, which [`MoqClient::failure`] reads.
+///
+/// [`Task`] runs one `connect` at a time, so one slot holds them all.
+#[cfg(not(target_arch = "wasm32"))]
+type Dialing = Arc<std::sync::Mutex<Option<moq_tokio::connection::Monitor>>>;
+
 /// Native QUIC/WebTransport client state: the configured endpoint and the wired origins.
 #[cfg(not(target_arch = "wasm32"))]
 struct Client {
 	client: moq_tokio::Client,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
+	dialing: Dialing,
+}
+
+/// Empties the [`Dialing`] slot when its `connect` resolves or is dropped.
+#[cfg(not(target_arch = "wasm32"))]
+struct DialingGuard<'a>(&'a Dialing);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for DialingGuard<'_> {
+	fn drop(&mut self) {
+		self.0.lock().unwrap().take();
+	}
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -344,6 +365,7 @@ impl Client {
 			client,
 			publish: config.publish,
 			consume: config.consume,
+			dialing: Default::default(),
 		})
 	}
 
@@ -358,6 +380,9 @@ impl Client {
 			.with_publisher(&publish.inner)
 			.with_subscriber(subscribe.inner.clone())
 			.connect(url);
+
+		*self.dialing.lock().unwrap() = Some(connection.monitor());
+		let _dialing = DialingGuard(&self.dialing);
 
 		// Wait for the first session so auth errors surface here; later drops are the
 		// connection's to ride out. `MoqClient::cancel` unblocks a dial stuck retrying.
@@ -727,6 +752,9 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>, MoqError> {
 #[derive(uniffi::Object)]
 pub struct MoqClient {
 	task: Task<Client>,
+	/// Shared with the state, which the `connect` in flight holds locked.
+	#[cfg(not(target_arch = "wasm32"))]
+	dialing: Dialing,
 }
 
 #[uniffi::export]
@@ -734,8 +762,11 @@ impl MoqClient {
 	/// Create a client from `config`, failing on any value it cannot use.
 	#[uniffi::constructor]
 	pub fn new(config: MoqClientConfig) -> Result<Arc<Self>, MoqError> {
+		let client = Client::new(config)?;
 		Ok(Arc::new(Self {
-			task: Task::new(Client::new(config)?),
+			#[cfg(not(target_arch = "wasm32"))]
+			dialing: client.dialing.clone(),
+			task: Task::new(client),
 		}))
 	}
 
@@ -750,7 +781,8 @@ impl MoqClient {
 	/// Both origin sides are always accessible via [`MoqSession::publish`] and
 	/// [`MoqSession::consume`], without the caller constructing a [`MoqOriginProducer`].
 	///
-	/// Can be cancelled by calling `cancel()`, including while the initial dial is retrying.
+	/// Can be cancelled by calling `cancel()`, including while the initial dial is retrying;
+	/// [`failure`](Self::failure) says why it is.
 	pub async fn connect(&self, url: String) -> Result<Arc<MoqSession>, MoqError> {
 		let url = Url::parse(&url)?;
 		self.task.run(|state| async move { state.connect(url).await }).await
@@ -762,6 +794,27 @@ impl MoqClient {
 	/// handle is, so this client can't dial again.
 	pub fn cancel(&self) {
 		self.task.cancel();
+	}
+
+	/// Why the pending [`connect`](Self::connect) is still dialing: the error that failed
+	/// its latest attempt, or `None` while nothing has failed or no connect is pending.
+	///
+	/// A first dial that keeps failing and retrying never resolves `connect`, so poll this
+	/// to show the reason, such as a refused dial. Giving up for good is `connect`'s error
+	/// instead. Once it returns, [`MoqSession::failure`] reports the session's reconnects. A
+	/// browser client dials once, so it is always `None`.
+	pub fn failure(&self) -> Option<MoqError> {
+		#[cfg(not(target_arch = "wasm32"))]
+		{
+			// A cancelled connect may not be dropped yet, but it no longer dials.
+			if self.task.is_cancelled() {
+				return None;
+			}
+			self.dialing.lock().unwrap().as_ref()?.failure().map(map_closed_error)
+		}
+
+		#[cfg(target_arch = "wasm32")]
+		None
 	}
 }
 
@@ -877,6 +930,7 @@ impl Accepted {
 	}
 }
 
+/// A connection that exchanges broadcasts with a peer.
 #[derive(uniffi::Object)]
 pub struct MoqSession {
 	inner: Inner,
@@ -928,11 +982,8 @@ impl MoqSession {
 			// Persistent across reconnects: `None` while disconnected, then a grant
 			// again on the next connection. Reservations survive the gap.
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => moq_net::bandwidth::Allocator::new(connection.send_bandwidth()),
-			Inner::Session(session) => session
-				.send_bandwidth()
-				.map(moq_net::bandwidth::Allocator::new)
-				.unwrap_or_else(moq_net::bandwidth::Allocator::unlimited),
+			Inner::Connection(connection) => connection.bandwidth(),
+			Inner::Session(session) => session.bandwidth(),
 		}
 	}
 
@@ -1097,6 +1148,20 @@ impl MoqSession {
 	/// an unlimited allocator, which reports `None` for every reservation.
 	pub fn bandwidth(&self) -> Arc<MoqBandwidth> {
 		self.bandwidth.clone()
+	}
+
+	/// The session's authorization: the grant its peer gave it, and more tokens to present.
+	///
+	/// Every call returns a new handle sharing the session's tokens, which tracks its own
+	/// [`grant_changed`](MoqAuth::grant_changed), so concurrent watchers each take one. A client
+	/// session's handle survives reconnects, presenting each added token again on every new
+	/// connection.
+	pub fn auth(&self) -> Arc<MoqAuth> {
+		Arc::new(MoqAuth::new(match &self.inner {
+			#[cfg(not(target_arch = "wasm32"))]
+			Inner::Connection(connection) => crate::auth::Handle::Connection(connection.auth()),
+			Inner::Session(session) => crate::auth::Handle::Session(session.auth()),
+		}))
 	}
 
 	/// Hold receive-estimate demand until the returned consumer is released.

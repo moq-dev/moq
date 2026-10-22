@@ -15,7 +15,7 @@ const PROP_TIMESTAMP: u64 = 0x10;
 
 /// Implementation limit for an object's extension (property) block, independent of the
 /// IETF draft. Checked at the length prefix, before the block is buffered.
-pub(super) const MAX_OBJECT_EXTENSIONS: usize = 64 * 1024;
+pub(crate) const MAX_OBJECT_EXTENSIONS: usize = 64 * 1024;
 
 /// The length prefix of an object's extension block, refused past [`MAX_OBJECT_EXTENSIONS`].
 #[derive(Debug)]
@@ -324,7 +324,7 @@ impl Decode<Version> for GroupHeader {
 		let publisher_priority = if flags.has_priority {
 			r.u8()?
 		} else {
-			128 // Default priority when absent
+			super::priority::ABSENT_WIRE
 		};
 
 		let result = Self {

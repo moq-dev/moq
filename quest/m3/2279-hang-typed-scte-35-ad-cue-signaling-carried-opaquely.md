@@ -30,11 +30,8 @@ independent of media GOPs.
   cue event from it. Applications that want the rest parse the bytes.
 - **The TS lanes stay.** The importer keeps the verbatim `mpegts` track for
   contribution fidelity and additionally emits the sidecar; the exporter must
-  not double-emit. Section-framed export takes its clock from the video
-  rendition today and rejects an audio-only program
-  (`scte35_without_video_export_is_rejected`); extend it to derive the clock
-  from the mapped audio rendition, or the audio-only mapping above is a
-  promise export cannot keep.
+  not double-emit: an import-to-export test with the sidecar present asserts
+  each source section is emitted exactly once, including audio-only programs.
 
 Wire and catalog schema: a new optional section, additive, so it lands on
 `main`, with `drafts/draft-lcurley-moq-hang.md` updated in the same PR as the

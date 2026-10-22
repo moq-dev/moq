@@ -89,6 +89,53 @@ impl EndpointConfig {
         self
     }
 
+    /// Derive the reset key from a random 32-byte `secret` with HKDF-SHA256, so an endpoint
+    /// restarted with the same secret resets its predecessor's connections
+    ///
+    /// Every endpoint holding the secret resets every other holder's connections, so RFC 9000
+    /// section 21.11 requires that packets for a live connection only ever reach its owner: share
+    /// it across live endpoints only behind one address that routes by connection ID.
+    ///
+    /// Also keys a [`HashedConnectionIdGenerator`] from it, since an endpoint drops packets for
+    /// connection IDs it can't validate instead of resetting them. Set
+    /// [`cid_generator`](Self::cid_generator) afterwards to use another generator; it must accept
+    /// the predecessor's IDs for the reset to reach them.
+    ///
+    /// Lowers [`min_reset_interval`](Self::min_reset_interval) to 1ms too, since a restart leaves
+    /// every peer waiting on a reset at once: 1000 a second resets 2,000 connections in 2s, where
+    /// 20ms takes 40s. A reset is always smaller than the packet that drew it, so this never
+    /// amplifies, and the limit still caps what a flood of spoofed packets can reflect.
+    #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
+    pub fn reset_secret(&mut self, secret: &[u8; 32]) -> &mut Self {
+        #[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
+        use aws_lc_rs::{hkdf, hmac};
+        #[cfg(feature = "ring")]
+        use ring::{hkdf, hmac};
+
+        struct Len(usize);
+        impl hkdf::KeyType for Len {
+            fn len(&self) -> usize {
+                self.0
+            }
+        }
+
+        let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &[]).extract(secret);
+        let reset_key = prk
+            .expand(&[b"moq-quic reset key"], hmac::HMAC_SHA256)
+            .expect("an HMAC key fits HKDF-SHA256");
+        self.reset_key = Arc::new(hmac::Key::from(reset_key));
+
+        let mut cid_key = [0; 8];
+        prk.expand(&[b"moq-quic cid key"], Len(cid_key.len()))
+            .and_then(|okm| okm.fill(&mut cid_key))
+            .expect("8 bytes fit HKDF-SHA256");
+        let cid_key = u64::from_le_bytes(cid_key);
+        self.connection_id_generator_factory =
+            Arc::new(move || Box::new(HashedConnectionIdGenerator::from_key(cid_key)));
+        self.min_reset_interval = Duration::from_millis(1);
+        self
+    }
+
     /// Maximum UDP payload size accepted from peers (excluding UDP and IP overhead).
     ///
     /// Must be greater or equal than 1200.
@@ -136,8 +183,8 @@ impl EndpointConfig {
 
     /// Minimum interval between outgoing stateless reset packets
     ///
-    /// Defaults to 20ms. Limits the impact of attacks which flood an endpoint with garbage packets,
-    /// e.g. [ISAKMP/IKE amplification]. Larger values provide a stronger defense, but may delay
+    /// Defaults to 20ms, or 1ms after [`reset_secret`](Self::reset_secret). Limits the impact of
+    /// attacks which flood an endpoint with garbage packets, e.g. [ISAKMP/IKE amplification]. Larger values provide a stronger defense, but may delay
     /// detection of some error conditions by clients. Using a [`ConnectionIdGenerator`] with a low
     /// rate of false positives in [`validate`](ConnectionIdGenerator::validate) reduces the risk
     /// incurred by a small minimum reset interval.
@@ -358,7 +405,7 @@ impl ServerConfig {
     ///
     /// This exists to allow system time to be mocked in tests, or wherever else desired.
     ///
-    /// Defaults to [`StdSystemTime`], which simply calls [`SystemTime::now()`](SystemTime::now).
+    /// Defaults to [`StdSystemTime`], which reads the ambient clock's wall time.
     pub fn time_source(&mut self, time_source: Arc<dyn TimeSource>) -> &mut Self {
         self.time_source = time_source;
         self
@@ -676,11 +723,11 @@ pub trait TimeSource: Send + Sync {
 
 /// Default implementation of [`TimeSource`]
 ///
-/// Implements `now` by calling [`SystemTime::now()`](SystemTime::now).
+/// Implements `now` by reading the ambient clock's wall time, [`moq_clock::wall()`].
 pub struct StdSystemTime;
 
 impl TimeSource for StdSystemTime {
     fn now(&self) -> SystemTime {
-        SystemTime::now()
+        moq_clock::wall().into()
     }
 }

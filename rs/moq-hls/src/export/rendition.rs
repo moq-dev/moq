@@ -98,11 +98,13 @@ struct Run {
 	/// The window [`resets`](segments::Producer::resets) during which a listed segment started
 	/// where a player can, so the master keeps advertising the rendition even once a GOP past
 	/// [`MAX_SEGMENTS`](segments::MAX_SEGMENTS) records evicts that segment. Stale once the window
-	/// is cleared (a new generation, a timeline skip or rewind, an ended sibling).
+	/// is cleared (a new generation or a timeline skip or rewind).
 	startable: Option<u64>,
 }
 
 /// The rendition's catalog config, kept whole so a [`Muxer`] can be built per request.
+// One per rendition, so the variant sizes never add up to an allocation's worth.
+#[allow(clippy::large_enum_variant)]
 enum Config {
 	Video(VideoConfig),
 	Audio(AudioConfig),
@@ -112,25 +114,47 @@ enum Config {
 /// never rebound onto whatever serves the path next.
 struct Media {
 	handle: Mutex<Handle>,
-	/// The source and reference a sibling is bound through, to re-issue a bind that failed
-	/// before it ever resolved.
-	sibling: Option<(moq_mux::Source, moq_net::path::RelativeOwned)>,
+	track: String,
+	/// The source, reference, and epoch a sibling is bound through, to re-issue a bind that
+	/// failed before it ever resolved.
+	sibling: Option<(moq_mux::Source, moq_net::path::RelativeOwned, Option<moq_net::Epoch>)>,
 }
 
 struct Handle {
 	binding: Arc<moq_mux::Binding>,
-	/// The bound sibling ended, so the rendition lists nothing more.
+	/// The query holding the track instance alive without subscribing to its media.
+	track: Option<moq_net::track::Querying>,
+	/// The bound sibling ended, so only its retained rows drain.
 	ended: bool,
 }
 
+impl Handle {
+	fn capture(&mut self, broadcast: &moq_net::broadcast::Consumer, name: &str) {
+		if self.track.is_none()
+			&& let Ok(track) = broadcast.track(name)
+		{
+			// The lookup is lazy: the query installs the instance, and reads pin to it through
+			// the query, since End may refuse any lookup made after this one.
+			self.track = Some(track.query().into_inner());
+		}
+	}
+}
+
 impl Media {
-	fn bind(source: &moq_mux::Source, rel: Option<&moq_net::path::RelativeOwned>) -> moq_mux::Result<Self> {
+	fn bind(source: &moq_mux::Source, reference: &impl hang::catalog::Reference, track: &str) -> moq_mux::Result<Self> {
+		let rel = reference.broadcast();
+		let mut handle = Handle {
+			binding: Arc::new(source.bind(rel, reference.epoch())?),
+			track: None,
+			ended: false,
+		};
+		if let Poll::Ready(Ok(broadcast)) = handle.binding.poll_broadcast(&kio::Waiter::noop()) {
+			handle.capture(&broadcast, track);
+		}
 		Ok(Self {
-			handle: Mutex::new(Handle {
-				binding: Arc::new(source.bind(rel)?),
-				ended: false,
-			}),
-			sibling: sibling(source, rel),
+			handle: Mutex::new(handle),
+			track: track.to_string(),
+			sibling: sibling(source, rel).map(|rel| (source.clone(), rel, reference.epoch().cloned())),
 		})
 	}
 
@@ -140,37 +164,33 @@ impl Media {
 		!self.handle.lock().expect("media lock poisoned").ended
 	}
 
-	/// End the window when a bound sibling has ended; return the binding listed rows belong to.
+	/// End the window when a bound sibling has ended; retain its rows and media for draining.
 	fn sync(&self, window: &segments::Producer) -> Arc<moq_mux::Binding> {
 		self.poll_sync(&kio::Waiter::noop(), window)
 	}
 
-	/// [`sync`](Self::sync), registering `waiter` to wake when the sibling resolves or ends, so a
-	/// waiter on the window learns of an end that nothing else touches the rendition for.
+	/// Register the bound broadcast's close and retain its track before new lookups are refused.
 	fn poll_sync(&self, waiter: &kio::Waiter, window: &segments::Producer) -> Arc<moq_mux::Binding> {
-		let Some((source, rel)) = &self.sibling else {
-			return self.handle.lock().expect("media lock poisoned").binding.clone();
-		};
 		let mut handle = self.handle.lock().expect("media lock poisoned");
 		let mut reissued = false;
 		loop {
 			match handle.binding.poll_broadcast(waiter) {
-				Poll::Ready(Ok(broadcast)) if !handle.ended && broadcast.poll_closed(waiter).is_ready() => {
-					// A broadcast end carries no cause, so a clean end and a replacement look the
-					// same. Either way its rows can no longer be fetched, and a new instance only
-					// comes with a new catalog instance, so the playlist ends here.
-					tracing::error!(broadcast = %rel, "rendition's sibling broadcast ended; ending its playlist");
-					handle.ended = true;
-					window.clear();
-					window.end();
+				Poll::Ready(Ok(broadcast)) => {
+					handle.capture(&broadcast, &self.track);
+					if self.sibling.is_some() && !handle.ended && broadcast.poll_closed(waiter).is_ready() {
+						// End and Restart both drain only the pinned instance. Looking its path
+						// up again could serve a replacement under the old timeline's rows.
+						handle.ended = true;
+						window.end();
+					}
 				}
-				// Binding never retries a failed request. Re-issue it, once per poll, so a sibling
-				// still being announced binds once it is, and poll the new one. Only a bind that
-				// never resolved fails, and the source pins every one that did, so this never
-				// re-resolves a sibling.
+				// Only a binding that never resolved may be reissued. The source pins every
+				// successful result, so a replacement can never answer these old rows.
 				Poll::Ready(Err(_)) if !reissued => {
 					reissued = true;
-					if let Ok(next) = source.bind(Some(rel)) {
+					if let Some((source, rel, epoch)) = &self.sibling
+						&& let Ok(next) = source.bind(Some(rel), epoch.as_ref())
+					{
 						handle.binding = Arc::new(next);
 						continue;
 					}
@@ -180,21 +200,31 @@ impl Media {
 			return handle.binding.clone();
 		}
 	}
+
+	fn poll_track(
+		&self,
+		binding: &moq_mux::Binding,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)>> {
+		let Ok(broadcast) = std::task::ready!(binding.poll_broadcast(waiter)) else {
+			return Poll::Ready(None);
+		};
+		let mut handle = self.handle.lock().expect("media lock poisoned");
+		handle.capture(&broadcast, &self.track);
+		Poll::Ready(handle.track.as_ref().map(|query| (broadcast, query.track())))
+	}
 }
 
 /// A catalog `broadcast` reference that names a different path than the catalog itself.
 fn sibling(
 	source: &moq_mux::Source,
 	rel: Option<&moq_net::path::RelativeOwned>,
-) -> Option<(moq_mux::Source, moq_net::path::RelativeOwned)> {
+) -> Option<moq_net::path::RelativeOwned> {
 	let target = source.resolve_reference(rel)?;
 	if source.resolve_reference(None).as_ref() == Some(&target) {
 		return None;
 	}
-	Some((
-		source.clone(),
-		rel.cloned().unwrap_or_else(moq_net::path::Relative::empty),
-	))
+	Some(rel.cloned().unwrap_or_else(moq_net::path::Relative::empty))
 }
 
 /// Clear the video fields that don't change how the rendition decodes or is muxed, so a config
@@ -348,6 +378,7 @@ impl Rendition {
 		section: Archive,
 		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
+		let media = Media::bind(source, config, config.track(&name))?;
 		Ok(Self {
 			name,
 			kind: Kind::Video,
@@ -365,7 +396,7 @@ impl Rendition {
 			spans: Arc::new(Spans::new()),
 			catalog: source.broadcast(),
 			watcher: Mutex::new(None),
-			media: Media::bind(source, config.broadcast.as_ref())?,
+			media,
 			run: Mutex::default(),
 			building: tokio::sync::Mutex::new(()),
 		})
@@ -380,6 +411,7 @@ impl Rendition {
 		section: Archive,
 		clock: Option<Clock>,
 	) -> moq_mux::Result<Self> {
+		let media = Media::bind(source, config, config.track(&name))?;
 		Ok(Self {
 			name,
 			kind: Kind::Audio,
@@ -397,7 +429,7 @@ impl Rendition {
 			spans: Arc::new(Spans::new()),
 			catalog: source.broadcast(),
 			watcher: Mutex::new(None),
-			media: Media::bind(source, config.broadcast.as_ref())?,
+			media,
 			run: Mutex::default(),
 			building: tokio::sync::Mutex::new(()),
 		})
@@ -412,6 +444,7 @@ impl Rendition {
 			self.section.clone(),
 			self.track_name().to_string(),
 			self.spans.clone(),
+			self.live.clone(),
 			history,
 		));
 		*self.watcher.lock().expect("watcher lock poisoned") = Some(watcher);
@@ -509,9 +542,14 @@ impl Rendition {
 		self.run().generation
 	}
 
-	/// Mark this rendition's window ended (the timeline finished or failed).
+	/// Mark this rendition's window ended (the reference timeline finished).
 	pub(crate) fn end(&self) {
 		self.live.end();
+	}
+
+	/// Fail this rendition's window with the reference timeline's `err`.
+	pub(crate) fn fail(&self, err: crate::Error) {
+		self.live.fail(err);
 	}
 
 	/// A cursor over this rendition's segments, with their media, in timeline order.
@@ -529,16 +567,19 @@ impl Rendition {
 		self.live.close();
 	}
 
-	/// Resolve once the playlist is renderable, i.e. once [`media_playlist`](Self::media_playlist)
-	/// would return `Some`. Bounding the wait is the caller's policy (the serve path wraps this
-	/// in its own timeout).
+	/// Resolve once the playlist is renderable or failed, i.e. once
+	/// [`media_playlist`](Self::media_playlist) would return `Some` or an error. Bounding the wait
+	/// is the caller's policy (the serve path wraps this in its own timeout).
 	pub async fn playable(&self) {
 		kio::wait(|waiter| self.poll_playable(waiter)).await;
 	}
 
-	/// Poll until this rendition has a renderable media playlist.
+	/// Poll until this rendition has a renderable media playlist, or a timeline failed.
 	pub(crate) fn poll_playable(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.poll_media(waiter);
+		if self.spans.poll_failed(waiter).is_ready() {
+			return Poll::Ready(());
+		}
 		self.live.poll_playable(waiter)
 	}
 
@@ -553,6 +594,10 @@ impl Rendition {
 	/// playlist with no segments confuses players, so a server should treat `None` as "not
 	/// ready" rather than serve it.
 	///
+	/// Fails with [`TimelineFailed`](crate::Error::TimelineFailed) once the reference timeline
+	/// or this rendition's own timeline failed, rather than ending a truncated playlist with
+	/// `EXT-X-ENDLIST`. A server should answer that with an uncacheable error.
+	///
 	/// The playlist names its init segment by a hash of the bytes, so it is also `None` until
 	/// the init is known. An inline-parameter-set codec (no catalog `description`) only learns
 	/// it from media: await [`init`](Self::init) first.
@@ -562,12 +607,16 @@ impl Rendition {
 	/// not replay request headers still carries a credential on its follow-up requests. It is an
 	/// argument rather than a [`Config`](super::Config) field because one broadcaster fans out
 	/// to viewers holding different tokens.
-	pub fn media_playlist(&self, query: Option<&str>) -> Option<String> {
+	pub fn media_playlist(&self, query: Option<&str>) -> Result<Option<String>> {
 		// Read the run before the rows (see `restart`).
 		let run = self.run();
-		let init = self.built_init(&run)?;
-		self.is_playable()
-			.then(|| super::render_media(&self.snapshot_as(run.generation), &init.hash, query))
+		let snapshot = self.snapshot_as(run.generation.clone())?;
+		let Some(init) = self.built_init(&run) else {
+			return Ok(None);
+		};
+		Ok(self
+			.is_playable()
+			.then(|| super::render_media(&snapshot, &init.hash, query)))
 	}
 
 	/// Render a clip playlist over a durable timeline's media time.
@@ -577,10 +626,10 @@ impl Rendition {
 	pub(crate) fn range_playlist(&self, range: super::Range, query: Option<&str>) -> Result<Option<String>> {
 		self.check_range()?;
 		let run = self.run();
+		let snapshot = self.snapshot_range(range, run.generation.clone())?;
 		let Some(init) = self.built_init(&run) else {
 			return Ok(None);
 		};
-		let snapshot = self.snapshot_range(range, run.generation)?;
 		Ok((!snapshot.segments.is_empty()).then(|| super::render_media(&snapshot, &init.hash, query)))
 	}
 
@@ -597,12 +646,16 @@ impl Rendition {
 	/// end. A range the timeline cannot fully serve fails with
 	/// [`RangeNotDurable`](crate::Error::RangeNotDurable) or
 	/// [`RangeUnavailable`](crate::Error::RangeUnavailable) rather than listing a partial clip.
+	/// A failed timeline fails it with [`TimelineFailed`](crate::Error::TimelineFailed), as in
+	/// [`media_playlist`](Self::media_playlist).
 	pub async fn playlist(&self, range: Option<super::Range>, query: Option<&str>) -> Result<Option<String>> {
 		// Refuse an unsupported range up front rather than wait for media it can never list.
 		if range.is_some() {
 			self.check_range()?;
 		}
 		self.playable().await;
+		// A failed timeline may never supply the keyframe an inline init waits for.
+		self.check()?;
 		// An inline-codec init needs a keyframe group fetched first. init() caches, so the
 		// player's follow-up GET of the init is free.
 		if self.init().await?.is_none() {
@@ -610,27 +663,68 @@ impl Rendition {
 		}
 		match range {
 			Some(range) => self.range_playlist(range, query),
-			None => Ok(self.media_playlist(query)),
+			None => self.media_playlist(query),
 		}
 	}
 
 	/// Snapshot the media playlist from the current timeline window.
 	#[cfg(test)]
 	pub(crate) fn snapshot(&self) -> Snapshot {
+		self.try_snapshot().expect("the timeline failed")
+	}
+
+	/// Snapshot the media playlist, or the error its timeline failed with.
+	#[cfg(test)]
+	pub(crate) fn try_snapshot(&self) -> Result<Snapshot> {
 		self.snapshot_as(self.generation())
 	}
 
 	/// Snapshot the media playlist from the current timeline window, labeled `generation`.
-	fn snapshot_as(&self, generation: Option<Arc<str>>) -> Snapshot {
+	fn snapshot_as(&self, generation: Option<Arc<str>>) -> Result<Snapshot> {
 		self.media.sync(&self.live);
 		let window = self.live.window();
-		// A failed timeline ends this playlist at its last resolvable segment.
-		let failed = window.segments.last().is_some_and(|row| self.is_failed(row));
+		if let Some(err) = self.failure(&window) {
+			return Err(err);
+		}
 		// An ended reference ends the playlist only once this rendition resolved every row, so a
 		// slower timeline's tail is listed before `EXT-X-ENDLIST` stops players polling.
 		let complete = self.resolved(&window.segments).count() == window.segments.len();
-		let finished = (window.ended && complete) || failed;
-		self.snapshot_from_window(window, finished, generation)
+		let finished = window.ended && complete;
+		Ok(self.snapshot_from_window(window, finished, generation))
+	}
+
+	/// Why every listing of `window` refuses: the reference timeline failed, or this rendition's
+	/// own timeline failed before covering every row it lists or will list.
+	fn failure(&self, window: &segments::Window) -> Option<crate::Error> {
+		if let Some(err) = &window.failed {
+			return Some(err.clone());
+		}
+		let failure = self.spans.failure()?;
+		// A timeline failing once the reference finished loses nothing if its records cover every
+		// row. One that failed earlier stays failed, however the reference ends.
+		(!failure.late || window.segments.iter().any(|row| self.is_failed(row))).then_some(failure.err)
+	}
+
+	/// Fail if a timeline this rendition lists failed (see [`failure`](Self::failure)).
+	fn check(&self) -> Result<()> {
+		if let Some(err) = self.live.failure() {
+			return Err(err);
+		}
+		// Only a failed own timeline needs the window to judge.
+		if self.spans.failure().is_none() {
+			return Ok(());
+		}
+		self.media.sync(&self.live);
+		match self.failure(&self.live.window()) {
+			Some(err) => Err(err),
+			None => Ok(()),
+		}
+	}
+
+	/// Whether only this rendition's own timeline failed, so the broadcast-wide listings leave it
+	/// out while its siblings stay available.
+	pub(crate) fn failed_alone(&self) -> bool {
+		self.live.failure().is_none() && self.check().is_err()
 	}
 
 	/// Whether this rendition can serve range playlists: a durable timeline followed from its start.
@@ -649,6 +743,10 @@ impl Rendition {
 	pub(super) fn snapshot_range(&self, range: super::Range, generation: Option<Arc<str>>) -> Result<Snapshot> {
 		self.media.sync(&self.live);
 		let mut window = self.live.window();
+		// A failed timeline answers its error, not a refusal of the range the client asked for.
+		if let Some(err) = self.failure(&window) {
+			return Err(err);
+		}
 		let Some(first) = window.segments.first() else {
 			if window.ended {
 				return Err(crate::Error::RangeUnavailable("the recording is empty".into()));
@@ -686,12 +784,6 @@ impl Rendition {
 			.segments
 			.first()
 			.map_or(window.discontinuity, |row| row.discontinuity);
-		// A failed timeline can never list the rest of the range, so refuse the partial clip.
-		if window.segments.last().is_some_and(|row| self.is_failed(row)) {
-			return Err(crate::Error::RangeUnavailable(
-				"timeline failed within the range".into(),
-			));
-		}
 		let resolved = self.resolved(&window.segments).count();
 		let covered =
 			resolved == window.segments.len() && window.segments.last().is_some_and(|row| row.end >= range.end);
@@ -767,6 +859,10 @@ impl Rendition {
 
 	/// Poll until [`is_advertised`](Self::is_advertised), for the master route's long-poll.
 	pub(crate) fn poll_advertised(&self, waiter: &kio::Waiter) -> Poll<()> {
+		// Its playlist answers an error, so new players start on a sibling instead.
+		if self.failed_alone() {
+			return Poll::Pending;
+		}
 		if self.kind == Kind::Audio {
 			return self.poll_playable(waiter);
 		}
@@ -811,18 +907,21 @@ impl Rendition {
 	/// This rendition's DASH representation: its master-level metadata plus its track's
 	/// timeline as `(t, d)` pairs in the timeline's own timescale (the record values
 	/// verbatim, so `$Time$` addressing resolves exactly). Empty until the init is known, as
-	/// for [`media_playlist`](Self::media_playlist).
-	pub(crate) fn representations(&self) -> Vec<mpd::Representation> {
+	/// for [`media_playlist`](Self::media_playlist), and failing like it.
+	pub(crate) fn representations(&self) -> Result<Vec<mpd::Representation>> {
 		// Read the run before the rows (see `restart`).
 		let run = self.run();
-		let Some(init) = self.built_init(&run) else {
-			return Vec::new();
-		};
 		self.media.sync(&self.live);
 		let window = self.live.window();
+		if let Some(err) = self.failure(&window) {
+			return Err(err);
+		}
+		let Some(init) = self.built_init(&run) else {
+			return Ok(Vec::new());
+		};
 		let timescale = self.timescale();
 		let complete = self.resolved(&window.segments).count() == window.segments.len();
-		let ended = (window.ended && complete) || window.segments.last().is_some_and(|row| self.is_failed(row));
+		let ended = window.ended && complete;
 		let mut periods = std::collections::BTreeMap::<moq_net::Timestamp, (String, Vec<(u64, u64)>)>::new();
 		for (row, content) in self.resolved(&window.segments) {
 			if content == Content::Gap {
@@ -846,7 +945,7 @@ impl Rendition {
 			Config::Video(_) => (self.framerate(), None, None),
 			Config::Audio(config) => (None, Some(config.sample_rate), Some(config.channel_count)),
 		};
-		periods
+		Ok(periods
 			.into_iter()
 			.map(|(period, (tag, segments))| mpd::Representation {
 				name: self.name.clone(),
@@ -866,7 +965,7 @@ impl Rendition {
 				init: init.hash.clone(),
 				generation: run.generation.clone(),
 			})
-			.collect()
+			.collect())
 	}
 
 	/// Fetch and transmux the segment of the reference tagged `tag` whose timeline `pts` is
@@ -918,12 +1017,9 @@ impl Rendition {
 		binding: &moq_mux::Binding,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<moq_net::track::Subscribing>> {
-		let Ok(broadcast) = std::task::ready!(binding.poll_broadcast(waiter)) else {
-			return Poll::Ready(None);
-		};
-		let track = broadcast.track(self.track_name()).ok();
+		let track = std::task::ready!(self.media.poll_track(binding, waiter));
 		let subscription = moq_net::track::Subscription::default().with_max_delay(FEED_MAX_DELAY);
-		Poll::Ready(track.map(|track| track.subscribe(subscription).into_inner()))
+		Poll::Ready(track.map(|(_, track)| track.subscribe(subscription).into_inner()))
 	}
 
 	/// The media track handle on `binding`, with that bound broadcast so a fetch can tell a
@@ -937,9 +1033,7 @@ impl Rendition {
 		&self,
 		binding: &moq_mux::Binding,
 	) -> Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)> {
-		let broadcast = binding.broadcast().await.ok()?;
-		let track = broadcast.track(self.track_name()).ok()?;
-		Some((broadcast, track))
+		kio::wait(|waiter| self.media.poll_track(binding, waiter)).await
 	}
 
 	/// The media track's name in its broadcast, which can differ from the rendition's ID.
@@ -953,7 +1047,8 @@ impl Rendition {
 	/// The rendition's CMAF init segment, built on first request and cached.
 	///
 	/// For inline-parameter-set codecs (no catalog `description`), the parameter sets are
-	/// resolved by fetching the newest keyframe group first.
+	/// resolved by fetching the newest keyframe group first. A bound track's retained media
+	/// remains usable after its broadcast ends or is replaced; replacement media is never read.
 	pub async fn init(&self) -> Result<Option<Bytes>> {
 		Ok(self.load_init().await?.map(|init| init.bytes.clone()))
 	}
@@ -1038,7 +1133,8 @@ impl Rendition {
 	/// Fetches every frame the segment resolves to on this rendition (an audio segment packs many
 	/// short groups) and encodes them as a single CMAF fragment. `None` when the segment isn't in
 	/// the playlist window, is a gap or not yet resolved for this rendition, or its groups already
-	/// left the relay cache.
+	/// left the relay cache. After End or Restart, only the bound instance's retained media
+	/// drains; a replacement's media is never read under these rows.
 	pub async fn segment(&self, tag: &str, segment: u64) -> Result<Option<Bytes>> {
 		self.media.sync(&self.live);
 		let Some(row) = self.live.row(tag, segment) else {
@@ -1136,6 +1232,11 @@ fn listed_tag(rows: &[segments::Row]) -> String {
 
 #[cfg(test)]
 impl Rendition {
+	/// Whether this rendition's own timeline failed, whether or not that fails its listings.
+	pub(crate) fn own_failure(&self) -> bool {
+		self.spans.failure().is_some()
+	}
+
 	/// Fetch the listed segment numbered `segment`, under the tag its rows carry.
 	pub(crate) async fn listed_segment(&self, segment: u64) -> Result<Option<Bytes>> {
 		let tag = listed_tag(&self.live.window().segments);
@@ -1169,6 +1270,7 @@ async fn watch_spans(
 	section: Archive,
 	track: String,
 	spans: Arc<Spans>,
+	live: Arc<segments::Producer>,
 	history: bool,
 ) {
 	let result: Result<()> = async {
@@ -1194,10 +1296,14 @@ async fn watch_spans(
 	match result {
 		Ok(()) => spans.end(),
 		// Never retried (the origin already rides out transient source failures), and not
-		// papered over with gaps: the rendition's playlist ends at its last record.
+		// papered over with gaps: the rendition's playlist answers the error.
 		Err(err) => {
-			tracing::error!(%track, %err, "rendition timeline failed; ending its playlist");
-			spans.fail();
+			tracing::error!(%track, %err, "rendition timeline failed; failing its playlist");
+			let err = crate::Error::TimelineFailed {
+				track,
+				source: Box::new(err),
+			};
+			spans.fail(err, live.is_ended());
 		}
 	}
 }
@@ -1323,6 +1429,68 @@ mod tests {
 		let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
 		std::mem::forget(driver);
 		producer
+	}
+
+	// End may land while capture's query installs a dynamically served track. The handle must
+	// stay on that instance rather than repeat a lookup End refuses, or its retained media is lost.
+	#[test]
+	fn capture_keeps_the_queried_track_when_end_lands_during_the_query() {
+		struct Serve {
+			broadcast: moq_net::broadcast::Producer,
+			dynamic: std::sync::Mutex<moq_net::broadcast::Dynamic>,
+			track: std::sync::Mutex<Option<moq_net::track::Producer>>,
+			// Kept alive here, since a list only holds it weakly.
+			waiter: std::sync::OnceLock<kio::Waiter>,
+		}
+		impl Serve {
+			fn poll(&self) -> Poll<moq_net::Result<moq_net::track::Request>> {
+				let waiter = self.waiter.get().expect("waiter set");
+				self.dynamic.lock().unwrap().poll_requested_track(waiter)
+			}
+		}
+		impl std::task::Wake for Serve {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				// The lookup before the query wakes us too, so poll until the request lands.
+				let Poll::Ready(Ok(request)) = self.poll() else {
+					return;
+				};
+				let mut track = request.accept(moq_net::track::Info::default());
+				track.write_frame(None, Bytes::from_static(b"retained")).unwrap();
+				self.broadcast.close();
+				*self.track.lock().unwrap() = Some(track);
+			}
+		}
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let serve = Arc::new(Serve {
+			dynamic: std::sync::Mutex::new(broadcast.dynamic()),
+			broadcast,
+			track: Default::default(),
+			waiter: Default::default(),
+		});
+		let waiter = kio::Waiter::new(std::task::Waker::from(serve.clone()));
+		assert!(serve.waiter.set(waiter).is_ok());
+		assert!(serve.poll().is_pending());
+
+		let consumer = serve.broadcast.consume();
+		let mut handle = Handle {
+			binding: Arc::new(moq_mux::Binding::new(consumer.clone())),
+			track: None,
+			ended: false,
+		};
+		handle.capture(&consumer, "video");
+		assert!(serve.track.lock().unwrap().is_some(), "the query was served");
+		assert!(consumer.track("video").is_err(), "End refuses new lookups");
+
+		let query = handle.track.as_ref().expect("the queried track is kept");
+		let mut fetch = query.track().fetch_group(0, None).into_inner();
+		let Poll::Ready(group) = kio::Task::poll(&mut fetch, &kio::Waiter::noop()) else {
+			panic!("the retained group is cached");
+		};
+		group.expect("the retained group drains after End");
 	}
 
 	#[test]

@@ -1,5 +1,3 @@
-use std::task::{Poll, ready};
-
 use crate::container::{Container as ContainerTrait, Frame, Kind, fmp4, legacy, loc};
 
 /// Runtime-dispatched wire format for a track described by a hang catalog.
@@ -101,15 +99,11 @@ impl ContainerTrait for Container {
 		}
 	}
 
-	fn poll_read(
-		&self,
-		group: &mut moq_net::group::Consumer,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+	fn decode(&self, frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 		match self {
-			Self::Legacy(kind) => legacy::Wire(*kind).poll_read(group, waiter),
-			Self::Cmaf(cmaf) => Poll::Ready(Ok(ready!(cmaf.poll_read(group, waiter))?)),
-			Self::Loc(kind) => loc::Wire(*kind).poll_read(group, waiter),
+			Self::Legacy(kind) => legacy::Wire(*kind).decode(frame),
+			Self::Cmaf(cmaf) => Ok(cmaf.decode(frame)?),
+			Self::Loc(kind) => loc::Wire(*kind).decode(frame),
 		}
 	}
 }

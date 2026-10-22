@@ -240,6 +240,7 @@ bool MoQOutput::Start()
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
 		epoch = *route.epoch;
+		dialing = client;
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
@@ -271,6 +272,11 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	auto ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
 	const int connects = static_cast<int>((*result)->connects());
 
+	// OBS and older dock paths treat connect_time_ms == 0 as "never connected".
+	// Clamp sub-millisecond connects to 1 so that sentinel stays honest. Set before
+	// the session reads as live, so nothing sees a live session that never connected.
+	connect_time_ms = ms > 0 ? ms : 1;
+
 	current->session = *result;
 	current->connected = true;
 	current->live = true;
@@ -282,15 +288,13 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		session = current->session;
+		dialing.reset();
 		recv_bandwidth = session->recv_bandwidth();
 		connected = true;
 		live = true;
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
 	}
-	// OBS and older dock paths treat connect_time_ms == 0 as "never connected".
-	// Clamp sub-millisecond connects to 1 so that sentinel stays honest.
-	connect_time_ms = ms > 0 ? ms : 1;
 
 	LOG_INFO("MoQ session connected (%d ms, connect %d): %s", ms, connects, MoQRedactUrl(current->url).c_str());
 
@@ -357,6 +361,7 @@ void MoQOutput::Fail(const std::shared_ptr<Attempt> &current, const moq::Error &
 		std::lock_guard<std::mutex> lock(mutex);
 		recv_bandwidth.reset();
 		session.reset();
+		dialing.reset();
 		connected = false;
 		live = false;
 		last_failure_code = FailureCode(error);
@@ -399,12 +404,14 @@ void MoQOutput::Reset()
 		std::lock_guard<std::mutex> lock(mutex);
 		recv_bandwidth.reset();
 		session.reset();
+		dialing.reset();
 		connected = false;
 		live = false;
 		url.clear();
 		epoch.clear();
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
+		token_refusal.clear();
 	}
 	connect_time_ms = 0;
 
@@ -530,6 +537,27 @@ void MoQOutput::RecordReconnectFailure(const std::shared_ptr<moq::Session> &curr
 	}
 }
 
+void MoQOutput::RecordDialFailure()
+{
+	std::shared_ptr<moq::Client> current;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if (!dialing)
+			return;
+		current = dialing;
+	}
+
+	// Read outside the lock: it calls into moq-ffi.
+	const auto failure = current->failure();
+
+	std::lock_guard<std::mutex> lock(mutex);
+	// A Stop(), restart, or connect while failure() ran made this one stale.
+	if (dialing != current || !failure)
+		return;
+	last_failure_code = FailureCode(*failure);
+	last_failure_reason = failure->to_string();
+}
+
 bool MoQOutput::CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
 				      ConnectionStats *out)
 {
@@ -563,11 +591,52 @@ bool MoQOutput::IsLiveSession()
 
 void MoQOutput::CopyLastFailure(int *code, std::string *reason)
 {
+	RecordDialFailure();
+
 	std::lock_guard<std::mutex> lock(mutex);
 	if (code)
 		*code = last_failure_code;
 	if (reason)
 		*reason = last_failure_reason;
+}
+
+std::string MoQOutput::TokenRefusal()
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	return token_refusal;
+}
+
+bool MoQOutput::PresentToken(const std::string &token)
+{
+	std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
+	if (!attempt || !attempt->session)
+		return false;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		token_refusal.clear();
+	}
+
+	// Replacing `presenting` cancels a presentation still in flight, which the
+	// newer token supersedes.
+	attempt->presenting = attempt->session->auth()->add(token).then(
+		worker.Executor(), Current<moq::expected<std::shared_ptr<moq::AuthToken>>>(
+					   attempt, [this](const std::shared_ptr<Attempt> &current, auto result) {
+						   if (!result) {
+							   const std::string reason = result.error().to_string();
+							   LOG_WARNING("MoQ relay refused the new publish token: %s",
+								       reason.c_str());
+							   std::lock_guard<std::mutex> lock(mutex);
+							   token_refusal = reason;
+							   return;
+						   }
+						   // The old token's grant leaves the union only after the new one joined.
+						   if (current->token)
+							   current->token->cancel();
+						   current->token = *result;
+						   LOG_INFO("MoQ relay accepted the new publish token: %s",
+							    MoQRedactUrl(current->url).c_str());
+					   }));
+	return true;
 }
 
 bool MoQOutput::TryGetVideoRate(VideoRate *out)

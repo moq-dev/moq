@@ -20,6 +20,20 @@ protocol. A publisher in Python is consumable by a subscriber in Swift.
 | [C++](/lib/cpp/) | `moq-cpp` via CMake or pkg-config | C++ apps, engines, and plugins. |
 | <img class="language-icon" src="/icons/languages/c.svg" alt="" /> [C](/lib/c/) | `moq-c` | The plain-C ABI, for C and any language with a C FFI; C++ should use the package above. |
 
+## Choose the layer
+
+| You need | Start with |
+| --- | --- |
+| A browser player or camera publisher | [@moq/watch](/lib/js/watch) and [@moq/publish](/lib/js/publish), with web components or a headless API |
+| A meeting roster and chat | [@moq/room](/lib/js/room) or [moq-room](/lib/rs/moq-room) |
+| Native media capture, encode, decode, or playback | [Rust audio](/lib/rs/moq-audio) and [video](/lib/rs/moq-video), or the media and codec layers in your language binding |
+| To import an existing media stream | [moq-mux](/lib/rs/moq-mux), or a [gateway](/bin/#gateways) if you want a ready-to-run tool |
+| State snapshots, chat logs, or other JSON data | [@moq/json](/lib/js/json), [moq-json](/lib/rs/moq-json), or your binding's [JSON layer](/lib/layers#json) |
+| Custom payloads and subscription behavior | [@moq/net](/lib/js/net) or [moq-net](/lib/rs/moq-net), also exposed by the bindings |
+
+[Examples](/setup/examples) links runnable consumers. [Layers](/lib/layers)
+maps the native binding namespaces; the language pages link API references.
+
 ## How they relate
 
 Rust is the reference implementation; every server-side tool is built on it.
@@ -45,8 +59,9 @@ how it looks in that language:
 - **Catalog extensions**: write your own section next to `video` and `audio`, and read others' back.
 - **Routes**: see which relays a broadcast came through, and advertise a cost as a standby publisher.
 - **Connection stats** and **errors** that tell an auth rejection (don't retry) from a shutdown or a transport failure.
+- **Authorization in band**: read the grant the relay sent back (the patterns this side may publish and subscribe to, and when it lapses), and present a fresh token before the current one expires, without reconnecting. It needs `moq-lite-07-wip`, which is opt-in, or moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth).
 
-C's audio decoder neither takes nor reports a playout delay.
+C's audio decoder neither takes nor reports a playout delay, and C has no in-band authorization.
 
 ## Upgrading
 

@@ -97,6 +97,9 @@ pub struct Producer<C: Container, R = ()> {
 
 	/// The catalog rendition this media producer owns, when it was created through a catalog.
 	rendition: Option<Box<dyn Rendition<R>>>,
+
+	/// The counters the catalog reports for this track, when it was created through a catalog.
+	sent: Option<std::sync::Arc<crate::stats::Sent>>,
 }
 
 trait Rendition<R>: Send {
@@ -164,6 +167,7 @@ impl<C: Container> Producer<C> {
 			estimator: crate::catalog::Estimator::new(),
 			bandwidth: None,
 			rendition: None,
+			sent: None,
 		}
 	}
 }
@@ -200,6 +204,7 @@ where
 			estimator: rendition.estimator(),
 			bandwidth: None,
 			rendition: Some(Box::new(rendition)),
+			sent: None,
 		}
 	}
 
@@ -327,6 +332,14 @@ where
 		self.publish_estimate()
 	}
 
+	/// Declare a segment boundary the source drew at `pts`: the timeline closes a record at the
+	/// first group starting at or after it, instead of pacing records by duration.
+	pub(crate) fn boundary(&mut self, pts: moq_net::Timestamp) {
+		if let Some(recorder) = self.recorder.as_mut() {
+			recorder.cut(pts);
+		}
+	}
+
 	/// Whether the next [`write`](Self::write) has to be a keyframe, i.e. no group is currently open
 	/// (at the start, or after a [`cut`](Self::cut) / [`seek`](Self::seek)).
 	///
@@ -377,6 +390,21 @@ where
 	pub fn with_bandwidth(mut self, allocator: moq_net::bandwidth::Allocator) -> Self {
 		self.bandwidth = Some(crate::catalog::Claim::new(allocator));
 		self
+	}
+
+	/// Count every frame this track writes into `sent`, which its catalog reports.
+	pub(crate) fn with_sent(mut self, sent: std::sync::Arc<crate::stats::Sent>) -> Self {
+		self.sent = Some(sent);
+		self
+	}
+
+	/// Count a written frame. Only video keyframes count as keyframes: elsewhere the bit only
+	/// marks where a group starts.
+	fn count(&self, bytes: usize, keyframe: bool) {
+		if let Some(sent) = &self.sent {
+			let keyframe = keyframe && self.container.kind() == Kind::Video;
+			sent.add(1, bytes, keyframe.into());
+		}
 	}
 
 	/// Raise the standing claim when the catalog estimate has a new peak.
@@ -475,6 +503,7 @@ where
 			// group, a timestamp that won't convert) leaves the producer usable, and the estimate's
 			// extrema never fall, so counting one would inflate the catalog for good.
 			self.estimator.write(timestamp, bytes);
+			self.count(bytes, keyframe);
 			self.observe_end(timestamp, duration);
 		} else {
 			// Buffered frames are measured on the way in instead. The flush that eventually writes
@@ -717,6 +746,10 @@ where
 		self.container.write(group, &self.buffer)?;
 		if let Some(recorder) = self.recorder.as_mut() {
 			recorder.frame(position, self.buffer[0].timestamp, self.buffer[0].keyframe);
+		}
+		// Counted only once written: an abort discards the buffer, and those frames were never sent.
+		for frame in &self.buffer {
+			self.count(frame.payload.len(), frame.keyframe);
 		}
 		self.buffer.clear();
 
@@ -1004,11 +1037,7 @@ mod tests {
 			}
 		}
 
-		fn poll_read(
-			&self,
-			_group: &mut moq_net::group::Consumer,
-			_waiter: &kio::Waiter,
-		) -> std::task::Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		fn decode(&self, _frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 			unreachable!("RejectAt is write-only")
 		}
 	}
@@ -1389,11 +1418,7 @@ mod tests {
 			Ok(())
 		}
 
-		fn poll_read(
-			&self,
-			_group: &mut moq_net::group::Consumer,
-			_waiter: &kio::Waiter,
-		) -> std::task::Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		fn decode(&self, _frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 			unreachable!("Recording is write-only")
 		}
 	}

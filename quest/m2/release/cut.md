@@ -10,7 +10,8 @@ package versions, and the release-triggered publication jobs complete.
 Follow CONTRIBUTING.md's release procedure: merge release into main first,
 then main into release using merge commits. Confirm the maintainer's cut
 instruction before executing it. Prepare the package-specific semver changes
-at that time; Rust publication remains owned by release-plz. Run candidate
+at that time; Rust publication remains owned by release-plz. `moq-rs` is
+already 0.6.0 on main and unpublished, so keep it rather than bumping again. Run candidate
 compatibility, draft, package, and all-language interop checks, and verify
 publication outcomes. Separate artifact install proofs and package-specific
 tags follow this cut. This planning PR cuts and publishes nothing.
@@ -35,3 +36,4 @@ the new `/quest/m1/README.md`, and the cut also requires both reviews. Only
 - [API-diff check](/quest/m2/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m2/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed
 - [Feature review](/quest/m2/release/feature-review.md) - every major work line since the last release was judged end to end, and its follow-ups landed
+- [Claim new npm names](/quest/m2/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package

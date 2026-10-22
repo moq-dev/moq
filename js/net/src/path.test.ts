@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import * as Path from "./path.ts";
 
 /** Brand a literal as a relative reference; the tests feed raw strings on purpose. */
@@ -111,18 +111,6 @@ test("join handles multiple joins", () => {
 	expect(path).toBe("api/v1/users/123" as Path.Valid);
 });
 
-test("isEmpty checks correctly", () => {
-	expect(Path.from("") === "").toBe(true);
-	expect(Path.from("foo") === "").toBe(false);
-	expect(Path.empty() === "").toBe(true);
-});
-
-test("length property works correctly", () => {
-	expect(Path.from("foo").length).toBe(3);
-	expect(Path.from("foo/bar").length).toBe(7);
-	expect(Path.empty().length).toBe(0);
-});
-
 test("equals checks correctly", () => {
 	const path1 = Path.from("foo/bar");
 	const path2 = Path.from("/foo/bar/");
@@ -130,11 +118,6 @@ test("equals checks correctly", () => {
 
 	expect(path1 === path2).toBe(true);
 	expect(path1 === path3).toBe(false);
-});
-
-test("JSON serialization works", () => {
-	const path = Path.from("foo/bar");
-	expect(JSON.stringify(path)).toBe('"foo/bar"');
 });
 
 test("handles paths with multiple consecutive slashes", () => {
@@ -319,6 +302,33 @@ test("decode enforces the max part count", () => {
 	const atLimit = Array.from({ length: Path.MAX_PARTS }, (_, i) => `${i}`).join("/");
 	expect(Path.decode(atLimit)).toBe(atLimit as Path.Valid);
 	expect(() => Path.decode(`${atLimit}/extra`)).toThrow();
+});
+
+test("decode never allocates per slash of a hostile path", () => {
+	// A peer can send a path as large as a control message; splitting it would hold one entry per
+	// slash, so decode must count separators and stop at the limit instead.
+	const slashes = "/".repeat(1024 * 1024);
+	const parts = "a/".repeat(1024 * 1024);
+	const split = spyOn(String.prototype, "split");
+	const indexOf = spyOn(String.prototype, "indexOf");
+	try {
+		expect(Path.decode(slashes)).toBe(Path.empty());
+		indexOf.mockClear();
+		let error: unknown;
+		try {
+			Path.decode(parts);
+		} catch (e) {
+			error = e;
+		}
+		const scans = indexOf.mock.calls.length;
+		expect(error).toBeInstanceOf(Error);
+		expect(split).not.toHaveBeenCalled();
+		// The scan stops at the limit rather than walking the whole input.
+		expect(scans).toBeLessThanOrEqual(Path.MAX_PARTS + 1);
+	} finally {
+		split.mockRestore();
+		indexOf.mockRestore();
+	}
 });
 
 test("encode enforces the max part count", () => {

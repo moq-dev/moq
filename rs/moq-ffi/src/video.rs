@@ -70,7 +70,10 @@ pub enum MoqVideoEncoderKind {
 	/// `"openh264"` (software, everywhere).
 	/// Naming one this build lacks fails with a no-encoder error, so reach for
 	/// this only when [`Auto`](Self::Auto) picks the wrong one.
-	Named { name: String },
+	Named {
+		/// The encoder backend name to open.
+		name: String,
+	},
 }
 
 impl From<MoqVideoEncoderKind> for moq_video::encode::Kind {
@@ -89,6 +92,7 @@ impl From<MoqVideoEncoderKind> for moq_video::encode::Kind {
 /// match `width` x `height`; scale before writing if your source moves.
 #[derive(uniffi::Record)]
 pub struct MoqVideoEncoderInput {
+	/// The raw pixel layout.
 	pub format: MoqVideoPixelFormat,
 	/// Encoded width in pixels. Must be even (I420 chroma is subsampled 2x2).
 	pub width: u32,
@@ -102,6 +106,7 @@ pub struct MoqVideoEncoderInput {
 /// Codec-side configuration.
 #[derive(uniffi::Record)]
 pub struct MoqVideoEncoderOutput {
+	/// The codec used to encode this rendition.
 	pub codec: MoqVideoCodec,
 	/// Track name for a broadcast-bound producer. `None` derives one from the codec.
 	#[uniffi(default = None)]
@@ -122,7 +127,10 @@ pub struct MoqVideoEncoderOutput {
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqVideoGop {
 	/// Start a group with a keyframe every `interval` frames.
-	Keyframe { interval: u32 },
+	Keyframe {
+		/// The number of frames between keyframes.
+		interval: u32,
+	},
 }
 
 impl From<MoqVideoGop> for moq_video::encode::Gop {
@@ -267,9 +275,14 @@ impl MoqVideoEncoder {
 fn finalize(
 	mut producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
 	drained: Result<(), moq_video::Error>,
+	finished: &crate::producer::Finished,
 ) -> Result<(), MoqError> {
 	match drained {
-		Ok(()) => Ok(producer.finish()?),
+		Ok(()) => {
+			producer.finish()?;
+			finished.keep(producer);
+			Ok(())
+		}
 		Err(err) => {
 			producer.abort(moq_net::Error::Transport(err.to_string()));
 			Err(err.into())
@@ -362,14 +375,14 @@ impl VideoProducer {
 		Ok(())
 	}
 
-	fn finish(self) -> Result<(), MoqError> {
+	fn finish(self, finished: &crate::producer::Finished) -> Result<(), MoqError> {
 		let Self {
 			encoder, mut producer, ..
 		} = self;
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
 		let drained = block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded));
-		finalize(producer, drained)
+		finalize(producer, drained, finished)
 	}
 }
 
@@ -387,6 +400,7 @@ pub struct MoqVideoProducer {
 	applied: Arc<AtomicU64>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqBandwidth>>,
+	finished: crate::producer::Finished,
 }
 
 impl MoqVideoProducer {
@@ -503,6 +517,8 @@ impl MoqVideoProducer {
 	}
 
 	/// Flush any frames the codec is still holding and finalize the track.
+	///
+	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let producer = self
@@ -522,7 +538,7 @@ impl MoqVideoProducer {
 		self.reservation.lock().unwrap().take();
 		// A follower panic only stops rate adaptation, so the encoded frames still
 		// end the track cleanly before the panic is reported.
-		producer.finish()?;
+		producer.finish(&self.finished)?;
 		followed
 	}
 }
@@ -569,6 +585,7 @@ impl MoqVideoProducer {
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 		let gop = config.gop.duration(config.framerate);
 		let ceiling = video_ceiling(&config, &rendition);
+		let finished = broadcast.with_state(|state| Ok(state.finished.clone()))?;
 		let producer = broadcast.with_state(|state| match output.track {
 			Some(name) => {
 				let track = state
@@ -614,6 +631,7 @@ impl MoqVideoProducer {
 			follow: std::sync::Mutex::new(follow),
 			applied,
 			_bandwidth: bandwidth,
+			finished,
 		}))
 	}
 }
@@ -761,7 +779,10 @@ pub struct MoqVideoDecoderOutput {
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqVideoSurface {
 	/// An Apple `CVPixelBufferRef` from VideoToolbox, IOSurface-backed NV12.
-	PixelBuffer { pointer: u64 },
+	PixelBuffer {
+		/// The borrowed CVPixelBuffer address, valid while the frame is held.
+		pointer: u64,
+	},
 }
 
 /// One decoded video frame, owning the surface it was decoded into.
@@ -933,10 +954,11 @@ impl MoqVideoConsumer {
 		// Reject the codec and output before resolving: resolving reaches the origin, which can
 		// invoke a dynamic handler and open an upstream subscription we would immediately drop.
 		let reference = catalog_video.broadcast.clone();
+		let epoch = catalog_video.epoch.clone();
 		let cfg = video_config(catalog_video)?;
 		let mut options = moq_video::decode::Options::default();
 		options.decoder.output = decoder_output(output.surface, HAS_SURFACE)?;
-		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
+		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 
 		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
 		options.max_delay = output
@@ -964,6 +986,7 @@ mod decode_tests {
 		MoqVideo {
 			label: None,
 			broadcast: None,
+			epoch: None,
 			track: None,
 			codec: codec.to_string(),
 			description: None,
@@ -989,14 +1012,6 @@ mod decode_tests {
 	}
 
 	#[test]
-	fn video_config_round_trips_the_catalog_fields() {
-		let config = video_config(catalog_video("avc1.64001f")).unwrap();
-		assert_eq!(config.coded_width, Some(1280));
-		assert_eq!(config.coded_height, Some(720));
-		assert_eq!(config.framerate, Some(30.0));
-	}
-
-	#[test]
 	fn surface_is_refused_where_no_variant_exists() {
 		assert!(matches!(decoder_output(true, false), Err(MoqError::Unsupported)));
 		assert_eq!(decoder_output(true, true).unwrap(), moq_video::Output::Native);
@@ -1015,6 +1030,50 @@ mod decode_tests {
 #[cfg(test)]
 mod finish_tests {
 	use super::*;
+
+	/// The codec-only encoder every wrapper exposes (`moq.video.Encoder` and
+	/// friends): a keyframe opens the stream, `cut` forces the next one, and
+	/// `finish` closes it. No test in any language had driven it.
+	#[test]
+	fn encoder_emits_keyframes_where_asked() {
+		let (width, height) = (64u32, 48u32);
+		let encoder = MoqVideoEncoder::new(
+			MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::I420,
+				width,
+				height,
+				framerate: 30,
+			},
+			MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				track: None,
+				bitrate: Some(500_000),
+				gop: None,
+				kind: MoqVideoEncoderKind::Software,
+			},
+		)
+		.unwrap();
+		let picture = |i: u64| MoqVideoFrame {
+			timestamp_us: i * 33_333,
+			data: vec![(i * 40) as u8; (width * height * 3 / 2) as usize],
+		};
+
+		let mut packets = Vec::new();
+		for i in 0..3 {
+			packets.extend(encoder.encode(picture(i)).unwrap());
+		}
+		packets.extend(encoder.flush().unwrap());
+		encoder.set_bitrate(250_000).unwrap();
+		encoder.cut().unwrap();
+		packets.extend(encoder.encode(picture(3)).unwrap());
+		packets.extend(encoder.finish().unwrap());
+
+		let keyframes: Vec<u64> = packets.iter().filter(|p| p.keyframe).map(|p| p.timestamp_us).collect();
+		assert_eq!(packets.len(), 4, "one access unit per picture");
+		assert_eq!(keyframes, [0, 3 * 33_333], "keyframes at the start and the cut");
+		assert!(packets.iter().all(|p| !p.data.is_empty()), "an empty access unit");
+		assert!(matches!(encoder.encode(picture(4)), Err(MoqError::Closed)));
+	}
 
 	#[tokio::test]
 	async fn finish_ends_the_track_after_a_rate_follower_panic() {

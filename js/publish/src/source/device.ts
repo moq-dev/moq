@@ -41,6 +41,7 @@ export class Device<Kind extends "audio" | "video"> {
 		active: new Signal<string | undefined>(undefined),
 		permission: new Signal<boolean>(false),
 	};
+	/** The derived outputs, read-only. */
 	readonly out = readonlys(this.#out);
 
 	#signals = new Effect();

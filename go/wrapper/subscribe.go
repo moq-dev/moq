@@ -48,15 +48,17 @@ func (b *BroadcastConsumer) FetchGroup(
 
 // Resolve returns the broadcast serving a catalog rendition, honoring its broadcast
 // reference: ffi.MoqVideo.Broadcast / ffi.MoqAudio.Broadcast. A nil or empty reference names this
-// broadcast, anything else names a sibling relative to it (e.g. "./source"). Call it on a
-// rendition that carries one before SubscribeTrack or FetchGroup, which take a track name rather
-// than a rendition: the rendition's Track, or its ID when nil. The rendition-based
+// broadcast, anything else names a sibling relative to it (e.g. "./source"). epoch is the same
+// rendition's Epoch: a broadcast proven to serve another instance errors instead of resolving,
+// and a route without an epoch cannot prove one, so there it is best effort. Call it on a
+// rendition that carries a reference before SubscribeTrack or FetchGroup, which take a track name
+// rather than a rendition: the rendition's Track, or its ID when nil. The rendition-based
 // media.NewTrackConsumer, media.FetchGroup, audio.Subscribe, and video.Subscribe resolve both themselves.
 //
 // Errors if this broadcast came from a local producer rather than an origin, since a
 // standalone broadcast has no sibling to name.
-func (b *BroadcastConsumer) Resolve(ctx context.Context, reference *string) (*BroadcastConsumer, error) {
-	inner, err := b.inner.Resolve(ctx, reference)
+func (b *BroadcastConsumer) Resolve(ctx context.Context, reference *string, epoch *string) (*BroadcastConsumer, error) {
+	inner, err := b.inner.Resolve(ctx, reference, epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -150,15 +152,14 @@ func (t *TrackConsumer) Info() (TrackInfo, error) {
 	return trackInfoFromFFI(info), nil
 }
 
-// Update changes this subscriber's delivery preferences. It fails only on a
-// negative MaxDelay.
+// Update changes this subscriber's delivery preferences. It fails on a
+// negative MaxDelay, or a time anchor the track can't serve.
 func (t *TrackConsumer) Update(subscription Subscription) error {
 	sub, err := subscription.ffi()
 	if err != nil {
 		return err
 	}
-	t.inner.Update(sub)
-	return nil
+	return t.inner.Update(sub)
 }
 
 // Groups ranges over groups in sequence order.

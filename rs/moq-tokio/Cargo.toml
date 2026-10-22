@@ -13,18 +13,21 @@ keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-default = ["quic", "aws-lc-rs", "websocket", "tcp", "uds"]
+default = ["net", "quic", "aws-lc-rs", "websocket", "tcp", "uds"]
+# MoQ sessions over moq-net: `Client`, `Server`, `origin`, and the `connect`, `listen`,
+# and `transport` modules. Every transport feature turns it on, since none works without it.
+net = ["dep:moq-net", "dep:web-transport-trait"]
+# The async QUIC driver alone (`quic::driver`): moq-quic on tokio, without moq-net or
+# the MoQ backend. Needs a crypto-provider feature.
+driver = ["dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash", "dep:socket2"]
 # QUIC and WebTransport over moq-quic, for `https://`, `moqt://`, and `moql://`.
 quic = [
     "_transport",
     "_certs",
-    "dep:moq-quic",
+    "driver",
     "dep:http",
     "dep:kio",
-    "dep:pin-project-lite",
-    "dep:rustc-hash",
     "dep:rustls-native-certs",
-    "dep:socket2",
     "dep:web-transport-proto",
     "dep:reqwest",
     "watch",
@@ -38,7 +41,7 @@ quic = [
 _certs = ["dep:rcgen", "dep:rustls-webpki"]
 # Private "any transport is compiled" marker. Not one to enable on its own: every
 # backend that can move bytes turns it on, and `uds` reaches it through `tcp`.
-_transport = []
+_transport = ["net"]
 # Filesystem watcher for hot-reloading on-disk TLS certs, keys, and root CAs.
 watch = ["dep:notify"]
 # Capture qlog traces (`--*-quic-qlog <DIR>`). Off by default so production
@@ -80,8 +83,8 @@ mdns-sd = { workspace = true, optional = true }
 moq-clock = { workspace = true }
 # The ICE agent behind the `webrtc` module. Private, like str0m: neither appears in this crate's API.
 moq-ice = { workspace = true, optional = true }
-moq-net = { workspace = true }
-# The QUIC state machine the `quic` module drives; the crypto-provider features pick its provider.
+moq-net = { workspace = true, optional = true }
+# The QUIC state machine `quic::driver` drives; the crypto-provider features pick its provider.
 moq-quic = { workspace = true, features = ["bloom"], optional = true }
 moq-sock = { workspace = true }
 # iroh runs on upstream noq rather than moq-quic, and re-exports only the
@@ -119,7 +122,7 @@ url = { version = "2", features = ["serde"] }
 usage-rs = { workspace = true, features = ["config"] }
 web-transport-iroh = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
-web-transport-trait = { workspace = true }
+web-transport-trait = { workspace = true, optional = true }
 x509-parser = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -147,6 +150,10 @@ rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 # rustls without a provider, as iroh builds it, so the default test build covers an
 # `http://` dial's certificate fetch with no process default installed.
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
+# Sockets a test holds or inspects: which ones the process still holds, so the
+# worker tests can prove a stopped group closed its own, and port reservations
+# that never listen, so a test needn't release a port another test could take.
+socket2 = { workspace = true, features = ["all"] }
 # A fake STUN server for the WebRTC server-reflexive candidate test.
 stun-types = { workspace = true }
 tempfile = "3"
@@ -156,7 +163,16 @@ tokio-rustls = { workspace = true }
 toml = "1.1"
 tracing-test = { workspace = true, features = ["no-env-filter"] }
 
-# Which sockets the process still holds, so the worker tests can prove a stopped
-# group closed its own without rebinding a port another test could take.
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-socket2 = { workspace = true, features = ["all"] }
+# The examples and integration tests run MoQ sessions, which a driver-only build lacks.
+[[example]]
+name = "chat"
+required-features = ["net"]
+
+[[example]]
+name = "clock"
+required-features = ["net"]
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+required-features = ["net"]

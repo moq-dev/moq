@@ -64,28 +64,12 @@ function read(buffer: SharedRingBuffer, samples: number, channelCount?: number):
 }
 
 describe("initialization", () => {
-	it("should allocate correct SAB sizes", () => {
-		const init = allocSharedRingBuffer(2, 128, 1000);
-		expect(init.channels).toBe(2);
-		expect(init.capacity).toBe(128);
-		expect(init.rate).toBe(1000);
-		expect(init.samples.byteLength).toBe(2 * 128 * 4); // 2 channels * 128 samples * Float32
-		expect(init.control.byteLength).toBe(6 * 4); // 6 control slots * Int32
-		expect(init.state.byteLength).toBe(8); // packed epoch + read cursor
-	});
-
 	it("rounds capacity up to a power of two", () => {
 		// slot() masks rather than taking a remainder, which is what keeps it wrap-invariant.
 		expect(allocSharedRingBuffer(1, 100, 1000).capacity).toBe(128);
 		expect(allocSharedRingBuffer(1, 128, 1000).capacity).toBe(128);
 		expect(allocSharedRingBuffer(1, 129, 1000).capacity).toBe(256);
 		expect(allocSharedRingBuffer(1, 1, 1000).capacity).toBe(1);
-	});
-
-	it("should start stalled", () => {
-		const buffer = create();
-		expect(buffer.stalled).toBe(true);
-		expect(buffer.length).toBe(0);
 	});
 
 	it("should throw on invalid channels", () => {

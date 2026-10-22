@@ -30,19 +30,6 @@ on:
       - "kt/settings.gradle.kts"
       - ".github/workflows/release-kt-lib.yml"
       - "sh/gh/release.sh"
-  # Main PRs skip it; nightly.yml calls it as a dry-run on main. `edited`
-  # catches a main PR retargeted to release.
-  pull_request:
-    branches: [release]
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - "kt/moq/**"
-      - "kt/gradle.properties"
-      - "kt/build.gradle.kts"
-      - "kt/settings.gradle.kts"
-      - ".github/workflows/release-kt-lib.yml"
-      - "sh/gh/release.sh"
-      - "rs/moq-ffi/build.sh"
   # Manual trigger so a wrapper bump can be published once the bindings it
   # depends on land on Maven Central (the guard below skips otherwise). Only a
   # dispatch on `release` publishes.
@@ -67,13 +54,15 @@ jobs:
   ffi-release:
     name: Check FFI publisher
     runs-on: ubuntu-latest
-    # workflow_run is privileged. Preserve the owner, push and tag gates before
-    # reading the trusted upstream checkout or allowing wrapper publication.
+    # workflow_run is privileged. Preserve the owner, same-repo, push and tag
+    # gates before reading the trusted upstream checkout or allowing wrapper
+    # publication.
     if: >-
       github.event_name != 'workflow_run' ||
       (github.repository_owner == 'moq-dev' &&
        (github.event.workflow_run.name == 'Release FFI' || github.event.workflow_run.conclusion == 'success') &&
        github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
        startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v'))
     permissions:
       contents: read
@@ -179,7 +168,8 @@ jobs:
 
   publish:
     name: Publish wrapper
-    needs: [check-version]
+    # Directly on ffi-release: its gate is what makes the head_sha checkout trusted.
+    needs: [ffi-release, check-version]
     # PRs and nightly always run (dry-run). Pushes publish only when the version is new.
     if: >-
       github.event_name == 'pull_request' || inputs.dry-run ||
@@ -227,7 +217,7 @@ jobs:
           cp dist/bindings/kotlin/uniffi/moq/moq.kt \
             kt/moq-ffi/src/jvmAndAndroidMain/kotlin/uniffi/moq/moq.kt
 
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "17"

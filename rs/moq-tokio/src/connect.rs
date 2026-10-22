@@ -479,7 +479,7 @@ failover_delay = "1s"
 	}
 }
 
-/// Whether `extensions` offers every extension, the default a config leaves out.
+/// Whether `extensions` is the default a config leaves out.
 pub(crate) fn all_extensions(extensions: &moq_net::setup::Extensions) -> bool {
 	*extensions == moq_net::setup::Extensions::default()
 }
@@ -641,7 +641,7 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// The moq-transport extensions to offer in SETUP, all by default.
+	/// The extensions to offer in SETUP, every moq-transport one by default.
 	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
 	#[usage(skip)]
 	pub extensions: moq_net::setup::Extensions,

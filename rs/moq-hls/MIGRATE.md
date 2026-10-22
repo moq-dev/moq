@@ -4,6 +4,37 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### HLS import unwraps fMP4 to Legacy (#6250)
+
+`import::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.
+Set `import::Config::passthrough` to keep publishing CMAF.
+
+### An ended playlist ends the import
+
+`import::Import::run` returns `Ok(())` once every rendition's playlist carries `EXT-X-ENDLIST` and its last segment is imported, instead of polling forever.
+Call `Import::finish` then, and keep the returned `broadcast::Finish` (or await `Finish::wait`) so subscribers still catching up drain the tail.
+
+```rust
+import.run().await?;
+import.finish()?.wait().await;
+```
+
+### A failed timeline fails its listings
+
+`export::Broadcaster::manifest` and `export::Rendition::media_playlist` return `Result<Option<String>>`.
+Answer `Err(Error::TimelineFailed { .. })` with an uncacheable error (the server router uses 500 with `Cache-Control: no-store`) instead of serving a playlist.
+`Rendition::playlist` fails the same way, including for a range it used to refuse with `Error::RangeUnavailable`.
+A failed timeline no longer ends a playlist with `EXT-X-ENDLIST` or turns the DASH manifest `static`; only a clean finish does.
+A rendition whose own timeline failed is left out of the manifest and master playlist, while its siblings keep serving.
+
+```rust
+match rendition.media_playlist(query) {
+	Ok(Some(playlist)) => { /* serve it */ }
+	Ok(None) => { /* not ready yet: 404 */ }
+	Err(err) => { /* the export failed: 5xx, no-store */ }
+}
+```
+
 ### Imports always anchor their own timebase (#5967)
 
 `import::Config::timebase` and `Error::ForeignTimebase` are removed.

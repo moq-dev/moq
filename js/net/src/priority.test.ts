@@ -6,16 +6,28 @@ import { type SendStream, Writer } from "./stream.ts";
 import { Timescale } from "./time.ts";
 import type { Subscription } from "./track.ts";
 
-// The last position that still fits below the track priority.
-const MAX_POSITION = 2 ** 44 - 1;
+// The last position that still fits below the track priorities.
+const MAX_POSITION = 2 ** 36 - 1;
 
 // The transport sends higher values first, so a track the subscriber cares about more has to
 // outrank one it cares about less, wherever their groups sit in their own queues.
 test("track priority dominates the position", () => {
 	expect(sendOrder({ priority: 2, position: 1_000_000 })).toBeGreaterThan(sendOrder({ priority: 1, position: 0 }));
-	expect(sendOrder({ priority: 255, position: MAX_POSITION })).toBeGreaterThan(
-		sendOrder({ priority: 254, position: 0 }),
+	expect(sendOrder({ priority: 127, position: MAX_POSITION })).toBeGreaterThan(
+		sendOrder({ priority: 126, position: 0 }),
 	);
+	expect(sendOrder({ priority: 0, position: 0 })).toBeGreaterThan(sendOrder({ priority: -1, position: 0 }));
+});
+
+// The publisher's priority breaks a tie at one subscriber priority, as in the Rust
+// `Priority::cmp`, but never outranks a higher subscriber priority.
+test("the publisher priority breaks subscriber ties", () => {
+	expect(sendOrder({ priority: 0, publisher: 80 })).toBeGreaterThan(sendOrder({ priority: 0, publisher: 60 }));
+	expect(sendOrder({ priority: 0, publisher: 1, position: MAX_POSITION })).toBeGreaterThan(
+		sendOrder({ priority: 0, publisher: 0, position: 0 }),
+	);
+	expect(sendOrder({ priority: 1, publisher: -128 })).toBeGreaterThan(sendOrder({ priority: 0, publisher: 127 }));
+	expect(sendOrder({ priority: 0 })).toBe(sendOrder({ priority: 0, publisher: 0 }));
 });
 
 // Position 0 is the group its subscription wants sent next, so it goes first.
@@ -33,15 +45,15 @@ test("equal priorities tie at the same position", () => {
 
 // Every send order stays a safe integer, so two distinct ranks never collapse into one.
 test("send orders stay safe integers", () => {
-	expect(sendOrder({ priority: 255, position: 0 })).toBe(-1);
-	expect(sendOrder({ priority: 0, position: MAX_POSITION })).toBe(-(2 ** 52));
-	expect(Number.isSafeInteger(sendOrder({ priority: 0, position: MAX_POSITION }))).toBe(true);
+	expect(sendOrder({ priority: 127, publisher: 127, position: 0 })).toBe(-1);
+	expect(sendOrder({ priority: -128, publisher: -128, position: MAX_POSITION })).toBe(-(2 ** 52));
+	expect(Number.isSafeInteger(sendOrder({ priority: -128, publisher: -128, position: MAX_POSITION }))).toBe(true);
 });
 
 // Protocol streams use the transport's default order of 0. Keeping every group below it
 // prevents a continuous supply of media from starving subscriptions, announcements, or probes.
 test("protocol streams outrank group data", () => {
-	expect(sendOrder({ priority: 255, position: 0 })).toBeLessThan(0);
+	expect(sendOrder({ priority: 127, publisher: 127, position: 0 })).toBeLessThan(0);
 });
 
 // A position past the space left for it must never carry into the track's bits and outrank a
@@ -50,8 +62,8 @@ test("out of range ranks stay inside their own bits", () => {
 	expect(sendOrder({ priority: 1, position: Number.MAX_SAFE_INTEGER })).toBeLessThan(
 		sendOrder({ priority: 2, position: 0 }),
 	);
-	expect(sendOrder({ priority: 300, position: 0 })).toBe(sendOrder({ priority: 255, position: 0 }));
-	expect(sendOrder({ priority: -1, position: -1 })).toBe(sendOrder({ priority: 0, position: 0 }));
+	expect(sendOrder({ priority: 300, position: 0 })).toBe(sendOrder({ priority: 127, position: 0 }));
+	expect(sendOrder({ priority: -300, position: -1 })).toBe(sendOrder({ priority: -128, position: 0 }));
 });
 
 // The ranking itself, driven directly: a subscription outlives its own serving loop, since a
@@ -130,8 +142,12 @@ test.each(["ascending", "descending"] as const)("a fill outranks its group's liv
 	priority.add(rest, 5, 2 ** 45);
 	priority.add(fill, 5, 0);
 	priority.add(other, order === "ascending" ? 4 : 6, Number.MAX_SAFE_INTEGER);
-	expect(streams[1].sendOrder).toBeGreaterThan(streams[0].sendOrder!);
-	expect(streams[2].sendOrder).toBeGreaterThan(streams[1].sendOrder!);
+	const [restOrder, fillOrder, otherOrder] = streams.map((stream) => {
+		if (stream.sendOrder === undefined) throw new Error("send order missing");
+		return stream.sendOrder;
+	});
+	expect(fillOrder).toBeGreaterThan(restOrder);
+	expect(otherOrder).toBeGreaterThan(fillOrder);
 	priority.remove(fill);
 	expect(streams[0].sendOrder).toBe(sendOrder({ priority: 7, position: 1 }));
 	priority.close();

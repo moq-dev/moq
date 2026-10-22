@@ -1,3 +1,5 @@
+//! Read broadcasts, tracks, and groups.
+
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready};
@@ -26,8 +28,9 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
+	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
-	pub priority: u8,
+	pub priority: i8,
 	/// Maximum age of a non-latest group before it is skipped, in microseconds.
 	/// `0` skips immediately; a larger value tolerates that much reordering.
 	///
@@ -49,8 +52,8 @@ pub struct MoqSubscription {
 
 /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
 ///
-/// A relative start is the first frame of its group, and a relative end includes its whole
-/// group. An absolute end is exclusive.
+/// A relative or time start is the first frame of its group, and a relative or time end
+/// includes its whole group. An absolute end is exclusive.
 #[derive(Clone, Copy, uniffi::Record)]
 pub struct MoqRange {
 	/// Where delivery starts.
@@ -64,9 +67,22 @@ pub struct MoqRange {
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum MoqAnchor {
 	/// This exact group and frame.
-	Absolute { group: u64, frame: u64 },
+	Absolute {
+		/// The absolute group sequence number.
+		group: u64,
+		/// The zero-based frame index within the group.
+		frame: u64,
+	},
 	/// The group this many before the latest, clamped to group 0: `0` is the latest group.
-	Relative { groups: u64 },
+	Relative {
+		/// The number of groups back from the live edge.
+		groups: u64,
+	},
+	/// The group containing this presentation time. An untimed track refuses it.
+	Time {
+		/// The presentation time in microseconds.
+		timestamp_us: u64,
+	},
 }
 
 /// Which of a subscription's pending groups the publisher sends first, mirroring
@@ -79,21 +95,28 @@ pub enum MoqOrder {
 	Descending,
 }
 
-impl From<MoqAnchor> for moq_net::track::Anchor {
-	fn from(anchor: MoqAnchor) -> Self {
-		match anchor {
+impl TryFrom<MoqAnchor> for moq_net::track::Anchor {
+	type Error = MoqError;
+
+	fn try_from(anchor: MoqAnchor) -> Result<Self, MoqError> {
+		Ok(match anchor {
 			MoqAnchor::Absolute { group, frame } => Self::Absolute(moq_net::track::Position { group, frame }),
 			MoqAnchor::Relative { groups } => Self::Relative(groups),
-		}
+			MoqAnchor::Time { timestamp_us } => {
+				Self::Time(moq_net::Timestamp::from_micros(timestamp_us).map_err(|_| MoqError::TimeOverflow)?)
+			}
+		})
 	}
 }
 
-impl From<MoqRange> for moq_net::track::Range {
-	fn from(range: MoqRange) -> Self {
-		Self {
-			start: range.start.into(),
-			end: range.end.map(Into::into),
-		}
+impl TryFrom<MoqRange> for moq_net::track::Range {
+	type Error = MoqError;
+
+	fn try_from(range: MoqRange) -> Result<Self, MoqError> {
+		Ok(Self {
+			start: range.start.try_into()?,
+			end: range.end.map(TryInto::try_into).transpose()?,
+		})
 	}
 }
 
@@ -110,8 +133,9 @@ impl From<MoqOrder> for moq_net::track::Order {
 #[derive(Clone, uniffi::Record)]
 pub struct MoqFetchGroupOptions {
 	/// Delivery priority for the fetch stream; higher values preempt lower ones.
+	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
-	pub priority: u8,
+	pub priority: i8,
 	/// Maximum age behind the live edge in microseconds; null uses publisher retention alone.
 	#[uniffi(default = None)]
 	pub max_delay_us: Option<u64>,
@@ -127,21 +151,29 @@ impl From<MoqFetchGroupOptions> for moq_net::group::Fetch {
 	}
 }
 
-impl From<MoqSubscription> for moq_net::track::Subscription {
-	fn from(s: MoqSubscription) -> Self {
+impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
+	type Error = MoqError;
+
+	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
 		let mut subscription = moq_net::track::Subscription::default()
 			.with_priority(s.priority)
 			.with_max_delay(std::time::Duration::from_micros(s.max_delay_us));
 		if let Some(ranges) = s.ranges {
-			subscription = subscription.with_ranges(ranges.into_iter().map(Into::into));
+			subscription = subscription.with_ranges(
+				ranges
+					.into_iter()
+					.map(TryInto::try_into)
+					.collect::<Result<Vec<_>, _>>()?,
+			);
 		}
 		if let Some(order) = s.order {
 			subscription = subscription.with_order(order.into());
 		}
-		subscription
+		Ok(subscription)
 	}
 }
 
+/// A broadcast from which tracks and groups can be read.
 #[derive(Clone, uniffi::Object)]
 pub struct MoqBroadcastConsumer {
 	pub(crate) inner: moq_net::broadcast::Consumer,
@@ -186,29 +218,35 @@ impl MoqBroadcastConsumer {
 		&self.inner
 	}
 
-	/// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
+	/// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track,
+	/// refusing one proven to serve another instance than `epoch`.
 	pub(crate) async fn resolve_inner(
 		&self,
 		reference: Option<&str>,
+		epoch: Option<&str>,
 	) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		self.driver
 			.watch(async {
 				// Normalize before testing emptiness: this is a caller-supplied string, and one made only
 				// of slashes normalizes to the empty reference, which names this broadcast.
 				let reference = reference.map(moq_net::path::Relative::new);
+				let epoch: Option<moq_net::Epoch> = epoch.map(str::parse).transpose()?;
 
-				// An absent or empty reference names the catalog's own broadcast, which we already hold.
-				// Short-circuiting also keeps a standalone broadcast usable: the common case needs no origin.
-				let Some(reference) = reference.filter(|reference| !reference.is_empty()) else {
-					return Ok(self.inner.clone());
+				let Some(origin) = self.origin.clone() else {
+					// A standalone broadcast came through no route, so it has no epoch to prove: the
+					// epoch is best effort, as on an epochless route. Only its own broadcast resolves.
+					return match reference.filter(|reference| !reference.is_empty()) {
+						None => Ok(self.inner.clone()),
+						Some(reference) => Err(MoqError::UnresolvableBroadcast {
+							reason: reference.as_str().to_string(),
+						}),
+					};
 				};
 
-				let origin = self.origin.clone().ok_or_else(|| MoqError::UnresolvableBroadcast {
-					reason: reference.as_str().to_string(),
-				})?;
-
+				// Even an empty reference goes through the source, which checks the epoch against the
+				// catalog's own broadcast.
 				let source = moq_mux::Source::new(origin, self.inner.clone());
-				Ok(source.resolve(Some(&reference)).await?)
+				Ok(source.resolve(reference.as_ref(), epoch.as_ref()).await?)
 			})
 			.await
 	}
@@ -221,18 +259,25 @@ impl MoqBroadcastConsumer {
 	/// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
 	///
 	/// `reference` is [`MoqVideo::broadcast`] / [`MoqAudio::broadcast`]: absent or empty names
-	/// this broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it on a
-	/// rendition that carries one before [`Self::subscribe_track`] or [`Self::fetch_group`], which
-	/// take a track name rather than a rendition. The rendition-based consumers
-	/// (`MoqMediaTrackConsumer::subscribe`, `MoqMediaGroupConsumer::fetch`,
-	/// `MoqVideoConsumer::subscribe`, `MoqAudioConsumer::subscribe`) resolve it themselves.
+	/// this broadcast, anything else names a sibling relative to it (e.g. `./source`). `epoch` is
+	/// the same rendition's [`MoqVideo::epoch`] / [`MoqAudio::epoch`], the publisher instance the
+	/// reference names: a broadcast proven to serve another one fails with `Mux` instead of
+	/// resolving, while a route without an epoch cannot prove one, so there it is best effort.
+	/// Call it on a rendition that carries a reference before [`Self::subscribe_track`] or
+	/// [`Self::fetch_group`], which take a track name rather than a rendition. The rendition-based
+	/// consumers (`MoqMediaTrackConsumer::subscribe`, `MoqMediaGroupConsumer::fetch`,
+	/// `MoqVideoConsumer::subscribe`, `MoqAudioConsumer::subscribe`) resolve both themselves.
 	///
 	/// Errors if this broadcast came from a local producer rather than an origin, since a
 	/// standalone broadcast has no sibling to name, and reports a sibling that exists but is not
 	/// announced yet as unroutable rather than waiting for it (see
 	/// [`MoqOriginConsumer::request_broadcast`](crate::origin::MoqOriginConsumer::request_broadcast)).
-	pub async fn resolve(&self, reference: Option<String>) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		let broadcast = self.resolve_inner(reference.as_deref()).await?;
+	pub async fn resolve(
+		&self,
+		reference: Option<String>,
+		epoch: Option<String>,
+	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		let broadcast = self.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 		Ok(Arc::new(match self.origin.clone() {
 			Some(origin) => Self::routed(broadcast, origin, self.driver.clone()),
 			None => Self {
@@ -254,7 +299,7 @@ impl MoqBroadcastConsumer {
 	) -> Result<Arc<MoqTrackConsumer>, MoqError> {
 		self.driver
 			.watch(async {
-				let subscription = subscription.map(moq_net::track::Subscription::from);
+				let subscription = subscription.map(moq_net::track::Subscription::try_from).transpose()?;
 				let track = self.inner.track(&name)?.subscribe(subscription).await?;
 				Ok(Arc::new(MoqTrackConsumer::new(track, self.driver.clone())))
 			})
@@ -501,6 +546,7 @@ async fn with_lane<R>(_lane: Guard<ReadLane>, fut: impl Future<Output = Result<R
 	fut.await
 }
 
+/// A subscribed track whose groups, frames, or datagrams can be read.
 #[derive(uniffi::Object)]
 pub struct MoqTrackConsumer {
 	shared: Arc<TrackShared>,
@@ -664,9 +710,13 @@ impl MoqTrackConsumer {
 	/// Change this subscriber's delivery preferences.
 	///
 	/// Silently ignored if the track already ended; the update is meaningless at
-	/// that point.
-	pub fn update(&self, subscription: MoqSubscription) {
-		let _ = self.control.update(subscription.into());
+	/// that point. Errors on a time anchor the track can't serve, leaving the
+	/// preferences as they were.
+	pub fn update(&self, subscription: MoqSubscription) -> Result<(), MoqError> {
+		match self.control.update(subscription.try_into()?) {
+			Ok(()) | Err(moq_net::Error::Closed) => Ok(()),
+			Err(err) => Err(err.into()),
+		}
 	}
 
 	/// Cancel all current and future reads.
@@ -687,6 +737,7 @@ impl GroupInner {
 	}
 }
 
+/// A group whose frames can be read in order.
 #[derive(uniffi::Object)]
 pub struct MoqGroupConsumer {
 	sequence: u64,

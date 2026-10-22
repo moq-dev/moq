@@ -63,7 +63,7 @@ func datagramFromFFI(d *ffi.MoqDatagram) *Datagram {
 // still allows, while an empty non-nil slice asks for nothing), and the order the
 // publisher sends pending groups in (nil for newest first).
 type Subscription struct {
-	Priority uint8
+	Priority int8
 	MaxDelay time.Duration
 	Ranges   []Range
 	Order    *Order
@@ -95,13 +95,15 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 // non-latest group is cached (nil for no limit), how many times its first frame
 // a group's later bytes may grow before a joining subscriber asks for a new group
 // (nil never asks), and the timescale in ticks per second (nil means untimed on
-// both publish and receive). A zero Priority is the least urgent; set 127 for the
-// midpoint a nil TrackInfo uses.
+// both publish and receive). Priority is higher first; the zero Priority is the
+// midpoint a nil TrackInfo uses. Compress DEFLATEs each group on the wire to peers
+// that support it; readers always see the original frames.
 type TrackInfo struct {
-	Priority  uint8
+	Priority  int8
 	MaxAge    *time.Duration
 	Refresh   *uint32
 	Timescale *uint64
+	Compress  bool
 }
 
 func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
@@ -109,11 +111,23 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 		return nil, nil
 	}
 	maxAge, err := bridge.OptionalDuration(info.MaxAge, "max age")
-	return &ffi.MoqTrackInfo{Priority: info.Priority, MaxAgeUs: maxAge, Refresh: info.Refresh, Timescale: info.Timescale}, err
+	return &ffi.MoqTrackInfo{
+		Priority:  info.Priority,
+		MaxAgeUs:  maxAge,
+		Refresh:   info.Refresh,
+		Timescale: info.Timescale,
+		Compress:  info.Compress,
+	}, err
 }
 
 func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
-	return TrackInfo{Priority: info.Priority, MaxAge: optFromMicros(info.MaxAgeUs), Refresh: info.Refresh, Timescale: info.Timescale}
+	return TrackInfo{
+		Priority:  info.Priority,
+		MaxAge:    optFromMicros(info.MaxAgeUs),
+		Refresh:   info.Refresh,
+		Timescale: info.Timescale,
+		Compress:  info.Compress,
+	}
 }
 
 // ConnectionStats holds transport metrics for a session (RTT, bandwidth, byte
@@ -143,4 +157,22 @@ func connectionStatsFromFFI(s ffi.MoqConnectionStats) ConnectionStats {
 		PacketsLost:          s.PacketsLost,
 		Version:              s.Version,
 	}
+}
+
+// Grant is what the peer lets this side do, in this side's own paths. An empty
+// pattern list grants nothing in that direction; "**" grants everything.
+type Grant struct {
+	// Publish lists the broadcast patterns this side may publish to the peer.
+	Publish []string
+	// Subscribe lists the broadcast patterns this side may subscribe to from the peer.
+	Subscribe []string
+	// Expires is how long until the grant lapses, measured when it was read, or nil for never.
+	Expires *time.Duration
+}
+
+func grantFromFFI(g *ffi.MoqGrant) *Grant {
+	if g == nil {
+		return nil
+	}
+	return &Grant{Publish: g.Publish, Subscribe: g.Subscribe, Expires: optFromMicros(g.ExpiresUs)}
 }

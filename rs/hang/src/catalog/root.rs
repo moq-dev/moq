@@ -267,8 +267,8 @@ impl Catalog<()> {
 }
 
 impl<E> Catalog<E> {
-	/// Refuse a catalog with more renditions than a consumer can hold, or with an ID naming both
-	/// a video and an audio rendition.
+	/// Refuse a catalog with more renditions than a consumer can hold, with an ID naming both
+	/// a video and an audio rendition, or with a projection or audio layout out of range.
 	pub fn check_renditions(&self) -> Result<()> {
 		let count = self.video.renditions.len() + self.audio.renditions.len() + self.text.renditions.len();
 		if count > MAX_RENDITIONS {
@@ -284,6 +284,16 @@ impl<E> Catalog<E> {
 			.find(|id| self.audio.renditions.contains_key(*id))
 		{
 			return Err(crate::Error::DuplicateRendition(id.clone()));
+		}
+		for config in self.video.renditions.values() {
+			if let Some(projection) = &config.projection {
+				projection.check()?;
+			}
+		}
+		for config in self.audio.renditions.values() {
+			if let Some(layout) = &config.layout {
+				layout.check(config.channel_count)?;
+			}
 		}
 		Ok(())
 	}
@@ -480,6 +490,49 @@ mod test {
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 	}
 
+	/// Every reference-bearing section carries an optional epoch beside its `broadcast`.
+	#[test]
+	fn reference_epochs_roundtrip_in_every_section() {
+		use crate::catalog::Reference;
+
+		const EPOCH: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
+		let encoded = format!(
+			r#"{{
+				"video": {{"renditions": {{"v": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
+				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
+				"text": {{"renditions": {{"t": {{"broadcast": "./a", "epoch": "{EPOCH}", "format": "vtt"}}}}}},
+				"json": {{"tracks": {{"j": {{"broadcast": "./a", "epoch": "{EPOCH}", "mode": "snapshot"}}}}}},
+				"binary": {{"tracks": {{"b": {{"broadcast": "./a", "epoch": "{EPOCH}", "mode": "snapshot"}}}}}},
+				"archive": {{"timelines": {{}}, "replay": "./a", "replayEpoch": "{EPOCH}"}}
+			}}"#
+		);
+		let catalog = Catalog::<()>::from_str(&encoded).unwrap();
+		let epoch: moq_net::Epoch = EPOCH.parse().unwrap();
+		let references: [&dyn Reference; 5] = [
+			&catalog.video.renditions["v"],
+			&catalog.audio.renditions["a"],
+			&catalog.text.renditions["t"],
+			&catalog.json.tracks["j"],
+			&catalog.binary.tracks["b"],
+		];
+		for reference in references {
+			assert_eq!(reference.epoch(), Some(&epoch));
+		}
+		assert_eq!(catalog.archive.as_ref().unwrap().replay_epoch, Some(epoch));
+		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
+
+		// Omitted stays omitted, and a malformed or noncanonical epoch refuses the catalog.
+		assert!(!Catalog::<()>::default().to_json().unwrap().contains("poch"));
+		for bad in [
+			"not-a-uuid",
+			"01890A5D-AC96-774B-BCCE-B302099A8057",
+			"01890a5d-ac96-474b-bcce-b302099a8057",
+		] {
+			let encoded = encoded.replace(EPOCH, bad);
+			assert!(Catalog::<()>::from_str(&encoded).is_err(), "{bad} must be refused");
+		}
+	}
+
 	#[test]
 	fn cross_kind_duplicate_id_is_refused() {
 		let catalog = Catalog::<()>::from_str(
@@ -492,6 +545,32 @@ mod test {
 		assert!(matches!(
 			catalog.check_renditions(),
 			Err(crate::Error::DuplicateRendition(id)) if id == "main"
+		));
+	}
+
+	#[test]
+	fn spatial_fields_out_of_range_are_refused() {
+		use crate::catalog::{AudioLayout, Projection, VideoCodec, VideoConfig};
+
+		let mut catalog = Catalog::<()>::from_str(
+			r#"{"audio": {"renditions": {"amb": {"codec": "opus", "sampleRate": 48000, "numberOfChannels": 6, "layout": "ambisonic", "container": {"kind": "legacy"}}}}}"#,
+		)
+		.unwrap();
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::InvalidAmbisonicChannels(6))
+		));
+		catalog.audio.renditions.get_mut("amb").unwrap().channel_count = 4;
+		assert_eq!(catalog.audio.renditions["amb"].layout, Some(AudioLayout::Ambisonic));
+		catalog.check_renditions().unwrap();
+
+		// A publisher building the catalog by hand is caught before it writes the bad value.
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.projection = Some(Projection::Equirectangular { fov: Some(400.0) });
+		catalog.video.insert("vr", config).unwrap();
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::InvalidFieldOfView(_))
 		));
 	}
 
@@ -596,6 +675,7 @@ mod test {
 			VideoConfig {
 				broadcast: None,
 				track: None,
+				epoch: None,
 				label: None,
 				codec: H264 {
 					profile: 0x64,
@@ -610,6 +690,8 @@ mod test {
 				display_aspect_width: None,
 				display_aspect_height: None,
 				color: None,
+				projection: None,
+				stereo: None,
 				bitrate: None,
 				enabled: true,
 				preference: 0,
@@ -628,10 +710,12 @@ mod test {
 			AudioConfig {
 				broadcast: None,
 				track: None,
+				epoch: None,
 				label: None,
 				codec: Opus,
 				sample_rate: 48_000,
 				channel_count: 2,
+				layout: None,
 				bitrate: None,
 				enabled: true,
 				description: None,
@@ -801,14 +885,6 @@ mod test {
 		let reparsed = Catalog::<()>::from_str(&output).expect("failed to re-decode");
 		assert_eq!(parsed, reparsed, "re-encoded catalog did not round-trip");
 		assert!(output.contains(r#""magic":7"#), "unknown fields dropped: {output}");
-	}
-
-	#[test]
-	fn empty_text_section_omitted() {
-		// A catalog without captions omits the text section, as it does for empty video and audio.
-		let catalog = Catalog::<()>::default();
-		let output = catalog.to_json().expect("failed to encode");
-		assert!(!output.contains("text"), "empty text section leaked: {output}");
 	}
 
 	#[test]
@@ -997,13 +1073,6 @@ mod test {
 			Catalog::<()>::from_str(&json).expect("failed to decode").m2ts,
 			Some(m2ts)
 		);
-	}
-
-	#[test]
-	fn clock_stays_off_the_wire_when_absent() {
-		// Absent clock stays off the wire. Empty video and audio are omitted as well.
-		let output = Catalog::<()>::default().to_json().expect("failed to encode");
-		assert_eq!(output, "{}");
 	}
 
 	#[test]

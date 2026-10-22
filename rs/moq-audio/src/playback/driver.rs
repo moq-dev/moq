@@ -5,6 +5,7 @@
 //! the hot path; they register themselves in [`Shared`] and hand their consumer
 //! straight to the mixer.
 
+use moq_clock::Instant;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 #[cfg(feature = "aec")]
@@ -12,7 +13,7 @@ use std::sync::mpsc::TrySendError;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::Thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use rand::RngExt;
@@ -777,7 +778,8 @@ impl Driver {
 		let supported = super::device::negotiate(&device)?;
 
 		let format = supported.sample_format();
-		let config: cpal::StreamConfig = supported.into();
+		let mut config = supported.config();
+		config.buffer_size = super::device::buffer_size(&device, &supported);
 		let rate = config.sample_rate;
 		let channels = config.channels as usize;
 
@@ -935,6 +937,8 @@ impl Driver {
 			}
 			// The mixer's queue is full, which takes a burst far larger than a
 			// device period. Give it a period to drain and try again.
+			// The device thread runs outside any runtime, so it blocks on the host clock.
+			#[allow(clippy::disallowed_methods)]
 			std::thread::sleep(SYNC_DELAY);
 		}
 
@@ -1006,6 +1010,7 @@ impl Driver {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use crate::playback::sink::{self, Input};

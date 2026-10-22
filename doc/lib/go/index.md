@@ -19,6 +19,7 @@ and a `Named` or `Requested` target. `NewCatalogProducer` holds its broadcast we
 catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps use `time.Duration`.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
+`TrackInfo.Compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. `@moq/net` cannot read a compressed track yet.
 `moq.dev/moq/flate` publishes opaque snapshot and stream payloads; its `Update` / `Append`
 and the JSON producers take a final `*time.Duration` timestamp argument (`nil` for untimed).
 JSON consumers return a `*Timed` holding the value and that timestamp; `SnapshotConsumer.Latest`
@@ -30,6 +31,7 @@ Share `media.NewTimebase(broadcast)` through `ContainerInit` when several import
 source timeline; omitting it keeps an independent offset. Timebases belong to one broadcast
 and do not keep it open; release the handle with `Close` on the calling goroutine.
 `NewContainerProducer` takes chunks split anywhere, so a raw byte stream needs no other importer.
+`ContainerFormatFmp4` splits each fragment into one frame per sample; `ContainerFormatCmaf` republishes it whole.
 For arrival-order reads, decode each group from `moq.TrackConsumer.RecvGroup` with
 `media.NewGroupConsumer`; frames carry container media time as they land. `media.FetchGroup`
 fetches and decodes one past group.
@@ -125,7 +127,9 @@ shows which module holds each.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `Flush(timestamp)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** `Close` each `VideoDecodedFrame` promptly, or the decoder stalls. `Resize` is best effort, so read each frame's `Width()` and `Height()`.
 - **Closing.** `client.Close()` drains for up to one second and returns an error on failure. `session.Shutdown(ctx)` does the same, and `session.Cancel(code)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
+- **Ending cleanly.** When the input ends, finish every track, then call `broadcast.Finish()`. The returned `*BroadcastFinish` keeps the broadcast announced and serving the finished tracks for `Linger()`, their longest max age, so a subscriber still catching up can drain them. `finish.Wait(ctx)` returns once the linger passes; ending `ctx`, or `finish.Close()`, closes the broadcast at once. `broadcast.Close()` stays the abrupt end.
 - **Stats.** `Session().Stats()` reports `RTT`, `EstimatedSendRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero. `Version` names the negotiated protocol, and while a client session reconnects `Session().Failure()` says why. Hold the owned `BandwidthConsumer` returned by `Session().RecvBandwidth()` to receive bandwidth estimates. `Peek()` reads the current estimate in bits per second and `Changed(ctx)` waits for a new one. Calling `Close()` on the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+- **Authorization.** On `moq-lite-07-wip` (opt in with `moq.WithVersions`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `Session().Auth().Grant()` is the `Grant` the relay sent back, nil until it answers and while a client session reconnects; `GrantChanged(ctx)` waits for the next one. `Add(ctx, token)` presents a fresh token without reconnecting, returns an `AuthToken` whose grant joins the union until `Close()`, and is presented again on every reconnect. A refusal returns the relay's code.
 - **Errors.** Read diagnostic payloads from `Reason` and structured protocol failures from `Details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 - **Track demand.** Obtain a dynamic track request’s `Demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.

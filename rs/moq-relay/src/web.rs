@@ -337,14 +337,15 @@ impl Web {
 
 	/// Close a connection that sits this long with no complete request in flight,
 	/// including one stalled in its TLS handshake or headers or idle in keep-alive,
-	/// and bound a WebSocket's MoQ SETUP after the upgrade; `None`, or a timeout past the
-	/// clock's range, waits forever. Defaults to the
+	/// bound an HTTP request's auth admission (answering 502 past it), and bound a
+	/// WebSocket's MoQ SETUP after the upgrade; `None`, or a timeout past the clock's
+	/// range, waits forever. Defaults to the
 	/// [`moq_tokio::listen::Config::resolved_timeout`] default.
 	pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
 		let state = Arc::get_mut(&mut self.state).expect("with_timeout called after routes were built");
 		// hyper adds the header timeout to the clock unchecked, so an unreachable
 		// one would panic on every connection.
-		state.timeout = timeout.filter(|timeout| std::time::Instant::now().checked_add(*timeout).is_some());
+		state.timeout = timeout.filter(|timeout| moq_clock::now().checked_add(*timeout).is_some());
 		self
 	}
 
@@ -984,11 +985,16 @@ async fn admit_http(
 	request.server_name = request_host(uri, headers);
 	request.remote = Some(remote.0);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
-	let lease = state
-		.auth
-		.admit(request)
-		.await
-		.inspect_err(|err| state.cluster.refusals.record_auth(err))?;
+	// The listener's timeout bounds admission as it bounds the request headers. An
+	// HTTP read has no handshake deadline to inherit, so the bound starts here.
+	let admit = state.auth.admit(request);
+	let lease = match state.timeout {
+		Some(timeout) => moq_clock::timeout(timeout, admit)
+			.await
+			.unwrap_or_else(|_| Err(auth::Error::Unavailable("the admission timed out".into()))),
+		None => admit.await,
+	}
+	.inspect_err(|err| state.cluster.refusals.record_auth(err))?;
 	let token = lease.token();
 	let Some(origin) = state.cluster.subscriber(token) else {
 		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
@@ -1064,11 +1070,11 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+	let deadline = moq_clock::now() + tokio::time::Duration::from_secs(30);
 
 	// The lease outlives this handler: the body streams after it returns, so the
 	// response holds the lease and ends it when the last frame is served.
-	let result = tokio::time::timeout_at(deadline, async {
+	let result = moq_clock::timeout_at(deadline, async {
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before the announce arrives.
@@ -1119,7 +1125,7 @@ async fn serve_fetch(
 /// `end` event carries the outcome.
 struct ServeGroup {
 	group: moq_net::group::Consumer,
-	deadline: tokio::time::Instant,
+	deadline: moq_clock::Instant,
 	/// Taken when the body ends, so the reason is reported once.
 	lease: Option<auth::Lease>,
 }
@@ -1130,7 +1136,7 @@ impl ServeGroup {
 			return Ok(None);
 		};
 		tokio::select! {
-			res = tokio::time::timeout_at(self.deadline, self.group.read_frame()) => match res {
+			res = moq_clock::timeout_at(self.deadline, self.group.read_frame()) => match res {
 				Ok(res) => Ok(res?.map(|frame| frame.payload)),
 				Err(_) => Err(moq_net::Error::Timeout),
 			},
@@ -1172,6 +1178,7 @@ impl IntoResponse for ServeGroup {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use rcgen::{CertificateParams, KeyPair};
@@ -1937,6 +1944,48 @@ mod tests {
 		serving.abort();
 	}
 
+	/// An HTTP read's admission is bounded by the listener's timeout, like its request
+	/// headers: a decision that never comes answers 502 once the timeout passes. Real
+	/// sockets, so this runs on the wall clock and bounds the answer from below.
+	#[tokio::test]
+	async fn an_unanswered_http_admission_is_refused_at_the_timeout() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let timeout = std::time::Duration::from_millis(200);
+		let mut config = Config::default();
+		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		// Held and never answered: the decider that never decides.
+		let (auth, _admissions) = crate::auth::Auth::embedded("test");
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+		let web = Web::new(auth, cluster, certificates, config)
+			.with_timeout(Some(timeout))
+			.bind()
+			.unwrap();
+		let http = web.addrs().http.expect("the HTTP listener is configured");
+		let routes = web.routes();
+		let serving = tokio::spawn(web.serve(routes));
+
+		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
+		let start = std::time::Instant::now();
+		tcp.write_all(b"GET /announced HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+			.await
+			.unwrap();
+
+		let mut response = Vec::new();
+		tokio::time::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut response))
+			.await
+			.expect("the unanswered admission held the request open")
+			.ok();
+		let response = String::from_utf8_lossy(&response);
+		assert!(response.starts_with("HTTP/1.1 502 "), "{response}");
+		assert!(start.elapsed() >= timeout, "refused before the timeout");
+
+		serving.abort();
+	}
+
 	/// Confirm `SetConnectionExtensions` injects the marker into request extensions
 	/// when a peer cert was presented, and leaves them untouched otherwise.
 	#[tokio::test]
@@ -2118,17 +2167,14 @@ mod tests {
 				None,
 			)
 			.await;
-			let transport = qmux::ws::Upgraded::new(socket)
-				.with_alpn("qmux-01.moq-lite-06")
-				.connect();
+			let transport = qmux::ws::Upgraded::new(socket, "qmux-01.moq-lite-06")
+				.connect()
+				.unwrap();
 			let origin = moq_tokio::origin::spawn();
 			let (session, driver) = moq_net::Client::new()
 				.with_versions("moq-lite-06".parse::<moq_net::Version>().unwrap().into())
 				.with_publisher(origin.consume())
-				.connect(
-					moq_net::time::now(),
-					moq_tokio::transport::Session::new(transport, moq_net::transport::Binding::Uri),
-				)
+				.connect(moq_net::time::now(), transport)
 				.await
 				.unwrap();
 			tokio::spawn(moq_net::time::run(driver));

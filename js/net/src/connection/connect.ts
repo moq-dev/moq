@@ -348,12 +348,12 @@ async function connectTransport(
 
 	try {
 		return await Promise.race([terminal, negotiate(url, session, wiring, setup)]);
-	} catch (cause) {
+	} catch (failure) {
 		// We refused the peer's SETUP and already closed with the code that says why.
-		if (cause instanceof ProtocolViolation) throw cause;
+		if (failure instanceof ProtocolViolation) throw failure;
 		// A session failure already guarantees a terminal close; its authoritative code
 		// must not be overwritten by the reset-only fallback while the browser delivers it.
-		cause = await sessionCause(session, cause);
+		const cause = await sessionCause(session, failure);
 		// A session shutdown can reject its SETUP stream before `closed` publishes the
 		// peer's close code. Wait briefly without closing locally, since a local clean close
 		// could overwrite that code. A reset-only peer is cleaned up after the grace period.
@@ -462,7 +462,9 @@ async function negotiate(
 		});
 	} else if (Object.values(Ietf.Version).includes(server.version as Ietf.Version)) {
 		const maxRequestId = server.parameters.getVarint(Ietf.SetupOption.MaxRequestId) ?? 0n;
-		return new Ietf.Connection({
+		// The IETF session code loads on demand, since most sessions negotiate lite.
+		const { Connection } = await import("../ietf/connection.ts");
+		return new Connection({
 			...wiring,
 			client: true,
 			url,
@@ -491,9 +493,14 @@ async function handshakeAlpn(
 	wiring: SessionProps,
 ): Promise<Established> {
 	// Spread whole, so every negotiated flag reaches the connection.
-	const setup = await exchangeSetup(session, version, "moq-lite-js", wiring);
+	// The IETF session code loads on demand, since most sessions negotiate lite; the ALPN already
+	// committed to IETF, so fetch it alongside SETUP.
+	const [setup, { Connection }] = await Promise.all([
+		exchangeSetup(session, version, "moq-lite-js", wiring),
+		import("../ietf/connection.ts"),
+	]);
 
-	return new Ietf.Connection({
+	return new Connection({
 		...wiring,
 		client: true,
 		url,
@@ -510,12 +517,16 @@ type WebTransportHash = NonNullable<WebTransportOptions["serverCertificateHashes
 
 // Strip PEM armor and base64-decode to the raw DER bytes.
 function pemToDer(pem: string): Uint8Array<ArrayBuffer> {
-	const match = pem.match(/-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----/);
-	if (!match) {
+	// indexOf rather than a lazy regex, which goes quadratic on repeated BEGIN lines without an END.
+	const begin = "-----BEGIN CERTIFICATE-----";
+	const start = pem.indexOf(begin);
+	const end = start < 0 ? -1 : pem.indexOf("-----END CERTIFICATE-----", start + begin.length);
+	const body = end < 0 ? "" : pem.slice(start + begin.length, end).replace(/\s+/g, "");
+	if (!body) {
 		throw new Error("invalid PEM certificate: missing -----BEGIN/END CERTIFICATE----- armor");
 	}
 
-	const binary = atob(match[1].replace(/\s+/g, ""));
+	const binary = atob(body);
 	const der = new Uint8Array(binary.length);
 	for (let i = 0; i < binary.length; i++) {
 		der[i] = binary.charCodeAt(i);

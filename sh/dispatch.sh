@@ -1,18 +1,10 @@
 #!/usr/bin/env bash
-# Run `just check`, `just fix`, or `just ci [check|test]` over the branch diff.
-# `--query` prints the selection instead; `ci-platform` exists only as a query.
-#
-# Usage: sh/dispatch.sh check|fix|ci|ci-check|ci-test [BASE|--all] [--query]
-#        sh/dispatch.sh ci-platform BASE|--all --query
-#
-# The branch diff is resolved once and matched against the impact map below,
-# the one place that says which paths put which module in scope. `check` is
-# `ci-check` plus `ci-test`, which the merge queue runs as parallel jobs with
-# MOQ_STRICT=1, so there is no second definition of "checked". `ci` runs both
-# halves in turn, as a contributor does before pushing.
+# Run `just check`, `just fix`, or `just ci` over one resolved branch diff.
+# `--query` prints the selection before CI installs its toolchain and caches.
+# `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
 
-usage="usage: sh/dispatch.sh check|fix|ci|ci-check|ci-test [BASE|--all] [--query], or ci-platform BASE|--all --query"
+usage="usage: sh/dispatch.sh check|fix|ci [BASE|--all] [--query], or ci-platform BASE|--all --query"
 action=${1:?$usage}
 base=${2:-}
 query=${3:-}
@@ -21,15 +13,7 @@ if [[ $# -gt 3 || (-n "$query" && "$query" != --query) || ("$action" == ci-platf
     exit 2
 fi
 case "$action" in
-    check | fix | ci-check | ci-test | ci-platform) ;;
-    ci)
-        if [[ -n "$query" ]]; then
-            echo "$usage" >&2
-            exit 2
-        fi
-        "$0" ci-check "$base"
-        exec "$0" ci-test "$base"
-        ;;
+    check | fix | ci | ci-platform) ;;
     *)
         echo "$usage" >&2
         exit 2
@@ -72,9 +56,10 @@ declare -A scope=(
     # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
     # fails a check that reads a cross-tree input this pattern misses.
     # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
-    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+    # Root Nix inputs own the browser version every npm Playwright pin matches.
+    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)'
     # Workers with lockfiles outside the Bun workspace.
-    [workers]='^(infra/apt/|infra/rpm/|infra/moq-sh/|demo/pub/|sh/js/workers\.sh$)'
+    [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
     [rs]='^(rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
@@ -110,7 +95,7 @@ declare -A scope=(
     [flake]='(^rs/|^Cargo\.(toml|lock)$|^flake\.lock$|\.nix$)'
     # ts.yml's crate filters against the closure test/ts/run.sh builds, which
     # moves only with a manifest, the lockfile, or the harness's packages.
-    [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/ts\.yml$|sh/gh/ts-paths\.py$)'
+    [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'
     [markdown]=''
     [shell]=''
     [toml]=''
@@ -177,9 +162,9 @@ declare -A tools=(
     [gh]='actionlint bun'
 )
 
-# `check` and `ci-check` share every lint; they differ in how rs compiles and
-# whether the tests run.
-verb=${action#ci-}
+# CI and the local check share one selection and one lint/test dispatch.
+verb=$action
+[[ "$verb" != ci ]] || verb=check
 
 # The modules whose run compiles Rust through Cargo, so CI restores the Rust
 # build cache only when one is selected. JS checks build @moq/wasm for its
@@ -187,13 +172,11 @@ verb=${action#ci-}
 declare -A compiles=(
     [check]='rs bench js py kt go dart c cpp obs_compile'
     [fix]='rs'
-    [test]='rs py'
 )
 
 case "$action" in
-    check | ci-check) modules=(js workers moq_sh drafts rs bench carla quest drill py kt swift go dart c cpp obs_compile obs flake ts_paths markdown shell toml nix justfile gh) ;;
+    check | ci) modules=(js workers moq_sh drafts rs bench carla quest drill py kt swift go dart c cpp obs_compile obs flake ts_paths markdown shell toml nix justfile gh) ;;
     fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
-    ci-test) modules=(js rs py) ;;
 esac
 
 selected=()
@@ -258,14 +241,49 @@ files() {
     git ls-files -z --cached --others --exclude-standard -- "$@"
 }
 
+# Each phase's wall time, printed when the run ends, pass or fail, so the slow
+# module of a check or a queue run is named without reading log timestamps.
+# GitHub Actions also gets it in the job summary.
+labels=()
+seconds=()
+current=
+began=0
+begin() {
+    current=$1
+    began=$SECONDS
+}
+finish() {
+    [[ -n "$current" ]] || return 0
+    labels+=("$current${1:+ ($1)}")
+    seconds+=("$((SECONDS - began))")
+    current=
+}
+report() {
+    finish failed
+    ((${#labels[@]})) || return 0
+    echo "$action: seconds per module" >&2
+    for i in "${!labels[@]}"; do
+        printf '%6d  %s\n' "${seconds[$i]}" "${labels[$i]}" >&2
+    done
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
+    {
+        printf '| %s module | Seconds |\n| --- | ---: |\n' "$action"
+        for i in "${!labels[@]}"; do
+            printf '| %s | %d |\n' "${labels[$i]}" "${seconds[$i]}"
+        done
+    } >>"$GITHUB_STEP_SUMMARY"
+}
+trap 'report; rm -f "$changed" "$js_changed"' EXIT
+
 for module in "${selected[@]}"; do
+    begin "$verb $module"
     case "$verb:$module" in
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # Test enforces default-feature clippy through its compile. Check keeps
-        # the other lints and distinct feature/target builds.
-        check:rs) if [[ "$action" == check ]]; then just rs check-test-changed "$rs_list"; else just rs lint-changed "$rs_list"; fi ;;
+        # The preamble keeps docs and target-specific lints; the test build
+        # below enforces default-feature clippy without a second compile.
+        check:rs) just rs lint-changed "$rs_list" ;;
         check:bench) cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring ;;
         check:quest) quest check ;;
         check:drill) just test drill-sensitivity --apply-only ;;
@@ -287,20 +305,23 @@ for module in "${selected[@]}"; do
         fix:toml) RUST_LOG=error taplo format ;;
         fix:nix) files '*.nix' | xargs -0 nixfmt ;;
         fix:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --justfile ;;
-        test:js) just js test-changed "$js_list" ;;
-        test:rs) just rs test-changed "$rs_list" ;;
         *:shell) sh/shell.sh "$verb" ;;
         *) just "$module" "$verb" ;;
     esac
+    finish
 done
 
-# The rest of `check`'s tests. rs ran its own above, and the kt, swift, go, and
-# dart checks always run theirs.
-if [[ "$action" == check ]]; then
+# The bindings run their tests in the preamble; these suites run once here.
+if [[ "$verb" == check ]]; then
     for module in "${selected[@]}"; do
         case "$module" in
+            rs | js | py) begin "test $module" ;;
+        esac
+        case "$module" in
+            rs) just rs test-changed "$rs_list" ;;
             js) just js test-changed "$js_list" ;;
             py) just py test ;;
         esac
+        finish
     done
 fi

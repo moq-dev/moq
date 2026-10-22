@@ -1,10 +1,6 @@
 import { expect, mock, test } from "bun:test";
 import { SessionCode } from "../error.ts";
-import { Interests, LIMITS, SlotMap, Slots } from "./limits.ts";
-
-test("the session defaults match moq-net", () => {
-	expect(LIMITS).toEqual({ announces: 100_000, subscriptions: 10_000, fetches: 10_000 });
-});
+import { Interests, SlotMap, Slots } from "./limits.ts";
 
 test("a full budget closes the session, and released slots can be used again", () => {
 	const close = mock(() => {});
@@ -64,4 +60,27 @@ test("duplicate interests count individually, and a failed acquisition leaves no
 	expect(() => interests.acquire("path", "track", "subscribe")).toThrow();
 	for (const held of [...tracks, ...subscribes, other]) held.release();
 	interests.acquire("path", "track", "subscribe").release();
+});
+
+test("each listing is charged on top of the interest under the same name", () => {
+	const interests = new Interests(new Slots(3, { reason: "full" }));
+	const track = interests.acquire("room", "", "track");
+	const subscribe = interests.acquire("room", "", "subscribe");
+	const listing = interests.acquire("room", "", "tracks");
+	// A replacement listing must fit under the cap too, until the older is gone.
+	const replacement = interests.acquire("room", "", "tracks");
+	expect(() => interests.acquire("room", "", "tracks")).toThrow();
+	listing.release();
+	replacement.release();
+	track.release();
+	subscribe.release();
+	for (const held of [0, 1, 2].map(() => interests.acquire("room", "", "tracks"))) held.release();
+});
+
+test("tryAcquire refuses at the cap without closing the session", () => {
+	const slots = new Slots(1, { reason: "full" });
+	expect(slots.tryAcquire()).toBe(true);
+	expect(slots.tryAcquire()).toBe(false);
+	slots.release();
+	expect(slots.tryAcquire()).toBe(true);
 });

@@ -242,7 +242,7 @@ impl Refresh {
 		self.waiting.push_back(Waiting {
 			request,
 			facts,
-			deadline: moq_clock::now() + super::ADMIT_TIMEOUT,
+			deadline: moq_clock::now() + super::ATTACH_TIMEOUT,
 		});
 		self.dispatch();
 	}
@@ -470,6 +470,7 @@ fn with_jwt(query: Option<&str>, token: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use futures::FutureExt;
@@ -523,10 +524,7 @@ mod tests {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_publisher(origin.consume())
-				.connect(
-					now,
-					moq_tokio::transport::Session::new(client, moq_net::transport::Binding::InBand),
-				)
+				.connect(now, client)
 				.await
 				.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
@@ -537,10 +535,7 @@ mod tests {
 			let request = moq_net::Server::new()
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_subscriber(origin)
-				.accept_request(
-					now,
-					moq_tokio::transport::Session::new(server, moq_net::transport::Binding::InBand),
-				)
+				.accept_request(now, server)
 				.await
 				.unwrap();
 			let lease = lease.preparing(request.auth(), request.role()).unwrap();
@@ -626,23 +621,14 @@ mod tests {
 			.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 			.with_publisher(origin.consume());
 		let connecting = async {
-			let (session, driver) = client
-				.connect(
-					now,
-					moq_tokio::transport::Session::new(client_transport, moq_net::transport::Binding::InBand),
-				)
-				.await
-				.unwrap();
+			let (session, driver) = client.connect(now, client_transport).await.unwrap();
 			(session, tokio::spawn(moq_net::time::run(driver)))
 		};
 		let refusing = async {
 			let request = moq_net::Server::new()
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_subscriber(origin)
-				.accept_request(
-					now,
-					moq_tokio::transport::Session::new(server, moq_net::transport::Binding::InBand),
-				)
+				.accept_request(now, server)
 				.await
 				.unwrap();
 			let mut changed = grant("a/**", 3000);

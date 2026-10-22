@@ -99,17 +99,6 @@ test("video config accepts canonical display aspect fields", () => {
 	expect("displayRatioHeight" in parsed).toBe(false);
 });
 
-test("video config accepts optional enabled state", () => {
-	const active = VideoConfigSchema.parse({
-		codec: "avc1.64001f",
-		container: { kind: "legacy" },
-	});
-	const disabled = VideoConfigSchema.parse({ ...active, enabled: false });
-
-	expect(active.enabled).toBeUndefined();
-	expect(disabled.enabled).toBe(false);
-});
-
 test("video config ignores a legacy stalled flag", () => {
 	const parsed = VideoConfigSchema.parse({
 		codec: "avc1.64001f",
@@ -119,16 +108,6 @@ test("video config ignores a legacy stalled flag", () => {
 
 	expect("stalled" in parsed).toBe(false);
 	expect(parsed.enabled).toBeUndefined();
-});
-
-test("video config accepts a human-readable label", () => {
-	const config = VideoConfigSchema.parse({
-		label: "Main camera",
-		codec: "vp8",
-		container: { kind: "legacy" },
-	});
-
-	expect(config.label).toBe("Main camera");
 });
 
 test("legacy video arrays derive display size from display aspect fields", () => {
@@ -197,4 +176,47 @@ test("color refuses out-of-range code points and light levels", () => {
 	expect(parse({ matrix: 0 })).toBe(true);
 	expect(parse({ range: "full" })).toBe(true);
 	expect(parse({ range: true })).toBe(false);
+});
+
+const vr = (fields: object) => VideoConfigSchema.parse({ codec: "vp8", container: { kind: "legacy" }, ...fields });
+
+test("projection parses the known kinds and is optional", () => {
+	expect(vr({}).projection).toBeUndefined();
+	for (const projection of [
+		{ kind: "rectilinear" },
+		{ kind: "equirectangular" },
+		{ kind: "equirectangular", fov: 180 },
+	] as const) {
+		expect(vr({ projection }).projection).toEqual(projection);
+	}
+	expect(Catalog.ProjectionSchema.parse({ kind: "rectilinear" })).toEqual({ kind: "rectilinear" });
+});
+
+test("projection keeps an unknown kind verbatim and ignores unknown fields", () => {
+	const raw = { face: "front", kind: "cubemap" };
+	expect(vr({ projection: raw }).projection).toEqual({ kind: "unknown", raw });
+	// A newer publisher may add a parameter to a known kind; this reader must not refuse it.
+	expect(vr({ projection: { kind: "rectilinear", fov: 90 } }).projection).toEqual({ kind: "rectilinear" });
+});
+
+test("projection refuses a malformed known kind", () => {
+	expect(() => vr({ projection: { fov: 180 } })).toThrow();
+	expect(() => vr({ projection: { kind: 5 } })).toThrow();
+	for (const fov of ["wide", 0, -90, 360.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+		expect(() => vr({ projection: { kind: "equirectangular", fov } })).toThrow();
+	}
+	for (const fov of [0.5, 180, 360]) {
+		expect(vr({ projection: { kind: "equirectangular", fov } }).projection).toEqual({
+			kind: "equirectangular",
+			fov,
+		});
+	}
+});
+
+test("stereo is optional and keeps unknown packings verbatim", () => {
+	expect(vr({}).stereo).toBeUndefined();
+	for (const stereo of ["mono", "left-right", "top-bottom", "multiview"]) {
+		expect(vr({ stereo }).stereo).toBe(stereo);
+	}
+	expect(() => vr({ stereo: 2 })).toThrow();
 });

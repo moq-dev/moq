@@ -1,0 +1,16 @@
+{
+	"name": "@moq/qmux-interop",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"check": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@moq/qmux": "workspace:*"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.4.3",
+		"@typescript/lib-dom": "npm:@types/web@^0.0.358",
+		"typescript": "7.0.2"
+	}
+}

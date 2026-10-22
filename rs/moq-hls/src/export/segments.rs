@@ -47,6 +47,8 @@ struct State {
 	discontinuity: u64,
 	/// The timeline track ended: the broadcast is over (`EXT-X-ENDLIST`).
 	ended: bool,
+	/// The reference timeline failed, so every listing refuses with this error.
+	failed: Option<crate::Error>,
 	/// Bumped whenever the window is cleared, so a latch on what it listed can tell it is stale.
 	resets: u64,
 }
@@ -188,6 +190,8 @@ pub(crate) struct Window {
 	pub segments: Vec<Row>,
 	/// Whether the timeline (and so the playlist) has ended.
 	pub ended: bool,
+	/// Why the reference timeline failed, if it did.
+	pub failed: Option<crate::Error>,
 }
 
 /// The next segment a [`Consumer`] should emit, resolved from the window.
@@ -209,6 +213,7 @@ impl State {
 			discontinuity: self.rows.front().map_or(self.discontinuity, |row| row.discontinuity),
 			segments: self.rows.iter().cloned().collect(),
 			ended: self.ended,
+			failed: self.failed.clone(),
 		}
 	}
 
@@ -239,6 +244,7 @@ impl Producer {
 				sequence: 0,
 				discontinuity: 0,
 				ended: false,
+				failed: None,
 				resets: 0,
 			}),
 		}
@@ -308,12 +314,30 @@ impl Producer {
 		self.state.read().resets
 	}
 
-	/// Mark the timeline ended (it finished, or failed): the playlist gets
-	/// `EXT-X-ENDLIST` and cursors end once drained.
+	/// Mark the timeline finished: the playlist gets `EXT-X-ENDLIST` and cursors end once
+	/// drained.
 	pub fn end(&self) {
 		if let Ok(mut state) = self.state.write() {
 			state.ended = true;
 		}
+	}
+
+	/// Mark the reference timeline failed with `err`: every listing refuses with it instead of
+	/// ending. Call [`close`](Self::close) after, so cursors end once drained.
+	pub fn fail(&self, err: crate::Error) {
+		if let Ok(mut state) = self.state.write() {
+			state.failed.get_or_insert(err);
+		}
+	}
+
+	/// Whether the timeline finished.
+	pub fn is_ended(&self) -> bool {
+		self.state.read().ended
+	}
+
+	/// Why the reference timeline failed, if it did.
+	pub fn failure(&self) -> Option<crate::Error> {
+		self.state.read().failed.clone()
 	}
 
 	/// Close the channel: no more rows will arrive. A [`Consumer`] drains the segments it
@@ -380,11 +404,12 @@ impl Producer {
 		state.ended || !state.rows.is_empty()
 	}
 
-	/// Poll until [`is_playable`](Self::is_playable), for the serve path's long-poll.
+	/// Poll until [`is_playable`](Self::is_playable) or the reference timeline failed, for the
+	/// serve path's long-poll.
 	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub fn poll_playable(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let poll = self.state.poll_ref(waiter, |state| {
-			if state.ended || !state.rows.is_empty() {
+			if state.ended || state.failed.is_some() || !state.rows.is_empty() {
 				Poll::Ready(())
 			} else {
 				Poll::Pending
@@ -488,13 +513,15 @@ impl Consumer {
 	/// frames. A segment whose groups already left the relay cache (or that is a gap for this
 	/// rendition) is skipped, resuming at the next one, rather than surfaced as an error; a real
 	/// fetch/transmux failure is returned, leaving the cursor to retry it on the next call.
+	/// A bound instance's retained media drains after End or Restart; a replacement's media
+	/// is never read under the old rows.
 	pub async fn next(&mut self) -> Result<Option<Segment>> {
 		loop {
 			let Some((row, resets)) = kio::wait(|waiter| self.poll_next(waiter)).await else {
 				return Ok(None);
 			};
 			kio::wait(|waiter| self.rendition.poll_resolved(waiter, &row)).await;
-			// The rendition's timeline failed: it ends here, like its playlist.
+			// The rendition's timeline failed: the cursor ends, and its playlist answers the error.
 			if self.rendition.is_failed(&row) {
 				return Ok(None);
 			}

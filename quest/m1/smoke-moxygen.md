@@ -2,12 +2,12 @@
 
 ## Goal
 
-Waiting on upstream Moxygen. moq-dev/smoke's Moxygen lane passes all six
+Waiting on upstream Moxygen. test/smoke's Moxygen lane passes all six
 cases through moq-relay on WebTransport and raw QUIC at draft-16, and its
 `continue-on-error` exception is removed.
 
-Check by running `just moxygen` in moq-dev/smoke, or by reading the latest
-Moxygen job there. Delete this quest once the lane passes and the exception
+Check by running `just test smoke moxygen`, or by reading the latest
+Moxygen job in the Smoke workflow. Delete this quest once the lane passes and the exception
 is gone.
 
 ## Plan
@@ -27,8 +27,9 @@ SUBSCRIPTION_FILTER parameter whose Filter Type varint is 250.
 they accept any subscribe error, including that session close; once the
 client is fixed they must still pass on a real REQUEST_ERROR.
 
-Advance it by reporting the reproducer to facebookexperimental/moxygen once
-the maintainer approves posting there; the fix is a registered default
+Reported upstream as
+[facebookexperimental/moxygen#225](https://github.com/facebookexperimental/moxygen/issues/225),
+acknowledged 2026-10-16; check it and the Smoke job. The fix is a registered default
 (Largest Object or Next Group Start) for drafts that lack LargestGroup.
 Do not accept 0xFA in moq-relay.
 

@@ -4,6 +4,8 @@ use crate::{
 	Path,
 	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 };
+#[cfg(feature = "async")]
+use crate::{StreamError, coding::StreamCodes};
 
 use super::{Message, Version};
 use crate::track::Order;
@@ -19,7 +21,7 @@ pub struct Subscribe<'a> {
 	/// Lite07+ only.
 	pub epoch: Option<crate::Epoch>,
 	pub track: Cow<'a, str>,
-	pub priority: u8,
+	pub priority: i8,
 	pub max_delay: std::time::Duration,
 	/// The minimum group to deliver (a floor). On lite-06 the wire carries the raw
 	/// sequence and `None` is interchangeable with `Some(0)`: a floor of 0 constrains
@@ -56,7 +58,7 @@ impl Message for Subscribe<'_> {
 		let broadcast = Path::decode(r, version)?;
 		let epoch = super::epoch::decode_epoch(r, version)?;
 		let track = Cow::Owned(r.string()?);
-		let priority = r.u8()?;
+		let priority = super::priority::from_wire(r.u8()?);
 
 		let (order, max_delay, start_group, end_group) = match version {
 			Version::Lite01 | Version::Lite02 => (Order::Descending, std::time::Duration::ZERO, None, None),
@@ -92,7 +94,7 @@ impl Message for Subscribe<'_> {
 		self.broadcast.encode(w, version)?;
 		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
 		w.string(&self.track)?;
-		w.u8(self.priority);
+		w.u8(super::priority::to_wire(self.priority));
 
 		match version {
 			Version::Lite01 | Version::Lite02 => {}
@@ -259,7 +261,7 @@ fn encode_frame_bounds(
 /// to [`super::TrackInfo`].
 #[derive(Clone, Debug)]
 pub struct SubscribeOk {
-	pub priority: u8,
+	pub priority: i8,
 	pub max_delay: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
@@ -269,13 +271,13 @@ impl Message for SubscribeOk {
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		match version {
 			Version::Lite01 => {
-				w.u8(self.priority);
+				w.u8(super::priority::to_wire(self.priority));
 			}
 			Version::Lite02 => {}
 			// Lite05+ never sends SUBSCRIBE_OK, but keep the field layout matching
 			// Lite03/04 so a stray future use stays well-formed.
 			_ => {
-				w.u8(self.priority);
+				w.u8(super::priority::to_wire(self.priority));
 				pad_group_order(w, version)?;
 				w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
 				w.varint_opt(self.start_group)?;
@@ -289,7 +291,7 @@ impl Message for SubscribeOk {
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 => Ok(Self {
-				priority: r.u8()?,
+				priority: super::priority::from_wire(r.u8()?),
 				max_delay: std::time::Duration::ZERO,
 				start_group: None,
 				end_group: None,
@@ -301,7 +303,7 @@ impl Message for SubscribeOk {
 				end_group: None,
 			}),
 			_ => {
-				let priority = r.u8()?;
+				let priority = super::priority::from_wire(r.u8()?);
 				skip_group_order(r, version)?;
 				let max_delay = std::time::Duration::from_millis(r.varint()?);
 				let start_group = r.varint_opt()?;
@@ -401,7 +403,9 @@ impl Message for SubscribeEnd {
 /// Lite03+ only.
 #[derive(Clone, Debug)]
 pub struct SubscribeUpdate {
-	pub priority: u8,
+	/// A join requesting this group or later, judged against the local refresh ratio.
+	pub wanted_group: Option<u64>,
+	pub priority: i8,
 	pub max_delay: std::time::Duration,
 	pub start_group: Option<u64>,
 	pub end_group: Option<u64>,
@@ -422,7 +426,7 @@ impl Message for SubscribeUpdate {
 			_ => {}
 		}
 
-		let priority = r.u8()?;
+		let priority = super::priority::from_wire(r.u8()?);
 		let order = decode_order(r, version)?;
 		let max_delay = std::time::Duration::from_millis(r.varint()?);
 		let start_group = decode_start_group(r, version)?;
@@ -434,7 +438,13 @@ impl Message for SubscribeUpdate {
 		let (start_frame, end_frame) = decode_frame_bounds(r, version, start_group, end_group)?;
 		let start_group = canonical_start_group(version, start_group, start_frame);
 
+		let wanted_group = match version.has_refresh() {
+			true => r.varint()?.checked_sub(1),
+			false => None,
+		};
+
 		Ok(Self {
+			wanted_group,
 			priority,
 			max_delay,
 			start_group,
@@ -453,7 +463,7 @@ impl Message for SubscribeUpdate {
 			_ => {}
 		}
 
-		w.u8(self.priority);
+		w.u8(super::priority::to_wire(self.priority));
 		encode_order(w, version, self.order)?;
 		w.varint(u64::try_from(self.max_delay.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
 
@@ -470,6 +480,9 @@ impl Message for SubscribeUpdate {
 			self.end_frame,
 		)?;
 
+		if version.has_refresh() {
+			w.varint_opt(self.wanted_group)?;
+		}
 		Ok(())
 	}
 }
@@ -488,9 +501,36 @@ pub struct SubscribeDrop {
 	/// The last absolute group sequence in the dropped range (inclusive).
 	pub end: u64,
 
-	/// An application-specific error code. A value of 0 indicates no error;
-	/// the groups are simply unavailable.
+	/// Why the groups were given up: a stream error code on lite-07 and later, or an
+	/// application-specific code before, where 0 means simply unavailable.
 	pub error: u64,
+}
+
+#[cfg(feature = "async")]
+impl SubscribeDrop {
+	/// Name `groups` given up with `err`, as `version` carries it.
+	pub fn new(groups: std::ops::RangeInclusive<u64>, err: &StreamError, version: Version) -> Self {
+		Self {
+			start: *groups.start(),
+			end: *groups.end(),
+			// Before lite-07 the code is the application's, so it says nothing of why.
+			error: match version.has_drop_code() {
+				true => version.encode_stream_code(err).into(),
+				false => 0,
+			},
+		}
+	}
+
+	/// The error the dropped groups' readers end with, as `version` reads the code.
+	///
+	/// Before lite-07 the code is the application's, so every drop reads as
+	/// [`StreamError::NotFound`]: the groups are not there to deliver.
+	pub fn error(&self, version: Version) -> StreamError {
+		match version.has_drop_code() {
+			true => u32::try_from(self.error).map_or(StreamError::Internal, |code| version.decode_stream_code(code)),
+			false => StreamError::NotFound,
+		}
+	}
 }
 
 impl Message for SubscribeDrop {
@@ -910,6 +950,28 @@ mod test {
 		);
 	}
 
+	/// Lite-07 carries `Wanted Group` on SUBSCRIBE_UPDATE; older versions drop it.
+	#[test]
+	fn wanted_group_roundtrips_only_on_lite07() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for wanted in [None, Some(0), Some(1), Some(u64::MAX - 1)] {
+				let update = SubscribeUpdate {
+					wanted_group: wanted,
+					priority: 0,
+					max_delay: std::time::Duration::ZERO,
+					start_group: None,
+					end_group: None,
+					start_frame: 0,
+					end_frame: None,
+					order: crate::track::Order::Descending,
+				};
+				let buf = update.encode_bytes(version).unwrap();
+				let got = crate::coding::decode_buf(&mut buf.as_ref(), version, SubscribeUpdate::decode).unwrap();
+				assert_eq!(got.wanted_group, if version.has_refresh() { wanted } else { None });
+			}
+		}
+	}
+
 	/// Lite-07 carries `Group Order` right after the priority, on SUBSCRIBE and
 	/// SUBSCRIBE_UPDATE alike, and refuses a value it does not define.
 	#[test]
@@ -927,6 +989,7 @@ mod test {
 			assert_eq!(got.order, order);
 
 			let update = SubscribeUpdate {
+				wanted_group: None,
 				priority: 3,
 				max_delay: std::time::Duration::from_millis(250),
 				start_group: None,

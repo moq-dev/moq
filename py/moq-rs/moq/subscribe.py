@@ -126,7 +126,10 @@ class TrackConsumer(_Stream[GroupConsumer]):
         return TrackInfo._from_ffi(self._inner.info())
 
     def update(self, subscription: Subscription) -> None:
-        """Change this subscriber's delivery preferences."""
+        """Change this subscriber's delivery preferences.
+
+        Raises on a time anchor the track can't serve.
+        """
         self._inner.update(subscription._ffi())
 
     def cancel(self) -> None:
@@ -164,19 +167,22 @@ class BroadcastConsumer:
         """
         return GroupConsumer(await self._inner.fetch_group(name, sequence, options))
 
-    async def resolve(self, reference: str | None) -> "BroadcastConsumer":
+    async def resolve(self, reference: str | None, epoch: str | None) -> "BroadcastConsumer":
         """Resolve a catalog rendition's ``broadcast`` reference to the broadcast
         serving its track.
 
         ``reference`` is ``catalog.video[name].broadcast`` /
         ``catalog.audio[name].broadcast``: ``None`` or empty names this broadcast,
-        anything else names a sibling relative to it (e.g. ``./source``). Call it on
-        a rendition that carries one before :meth:`subscribe_track` or :meth:`fetch_group`,
-        which take a track name rather than a rendition: the rendition's ``track``, or its
-        ID when unset. The rendition-based consumers in the media, audio, and video
-        namespaces resolve both themselves.
+        anything else names a sibling relative to it (e.g. ``./source``). ``epoch`` is
+        the same rendition's ``epoch``: a broadcast proven to serve another instance
+        raises instead of resolving, and a route without an epoch cannot prove one, so
+        there it is best effort. Call it on a rendition that carries a reference before
+        :meth:`subscribe_track` or :meth:`fetch_group`, which take a track name rather
+        than a rendition: the rendition's ``track``, or its ID when unset. The
+        rendition-based consumers in the media, audio, and video namespaces resolve
+        both themselves.
 
         Raises if this broadcast came from a local producer rather than an origin,
         since a standalone broadcast has no sibling to name.
         """
-        return BroadcastConsumer(await self._inner.resolve(reference))
+        return BroadcastConsumer(await self._inner.resolve(reference, epoch))

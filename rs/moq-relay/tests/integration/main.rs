@@ -4,6 +4,7 @@
 //! dependencies again, so add new integration tests here as a module.
 //! `drills.rs` stays apart so each drill sensitivity mutation rebuilds only
 //! the drills.
+#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod auth_embedder;
 mod auth_lifetime;
@@ -11,6 +12,7 @@ mod cluster_close;
 mod cluster_idle;
 mod cluster_unknown;
 mod connection;
+mod drain;
 mod embed;
 mod goaway_cluster;
 mod hidden_cluster;

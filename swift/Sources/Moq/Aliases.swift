@@ -24,7 +24,7 @@ public typealias VideoDecoderOutput = MoqVideoDecoderOutput
 /// One decoded video frame, owning the decoder's surface until released;
 /// `pixels(format:)` converts it to packed CPU pixels.
 public typealias VideoDecodedFrame = MoqVideoDecodedFrame
-/// The PCM layout an `AudioConsumer` decodes to, plus its max delay.
+/// The decoded PCM layout, maximum group staleness, and playout delay.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 /// A raw PCM sample format, mirroring WebCodecs `AudioData.format`.
 public typealias AudioSampleFormat = MoqFFI.MoqAudioSampleFormat
@@ -115,8 +115,8 @@ public typealias ProtocolError = MoqFFI.MoqProtocolError
 extension Subscription {
     /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is `nil`.
     public typealias Range = MoqFFI.MoqRange
-    /// Where one end of a `Range` falls: `.absolute(group:frame:)` or
-    /// `.relative(groups:)` back from the latest group.
+    /// Where one end of a `Range` falls: `.absolute(group:frame:)`, `.relative(groups:)`
+    /// back from the latest group, or `.time(timestampUs:)` for the group containing it.
     public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder
