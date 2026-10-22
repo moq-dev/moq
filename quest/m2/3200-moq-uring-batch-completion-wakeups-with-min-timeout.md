@@ -30,6 +30,7 @@ The kernel returns when `N` CQEs arrive, when `t` expires after partial progress
 - Measure a small static matrix first, then consider an adaptive target based on recent CQ batch occupancy.
 - Keep remote futex wakes and handshake/control traffic bounded by the configured minimum wait.
 - Test all three return paths: batch target reached, partial batch released by the minimum wait, and empty ring released by the application deadline.
+- The minimum wait starts at entry, not at the first completion; if it expires with nothing, the next completion returns at once. Add a sparse-arrival case so the matrix shows how little batching that leaves.
 
 #### Acceptance
 

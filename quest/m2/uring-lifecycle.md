@@ -1,0 +1,50 @@
+# [M] io_uring handles follow their worker and owner
+
+## Goal
+
+Every `moq-uring` QUIC handle fails promptly once its worker or connection
+is gone, keeps data it already received, and closes its connection when the
+last handle drops, matching the tokio backend's contract.
+
+## Plan
+
+Findings from the 2026-10-22 io_uring audit, none reachable by a peer
+against the relay (its handles live and die inside worker tasks), all
+reachable by an embedder:
+
+- Worker gone: `Inner::closed` (`rs/moq-uring/src/quic/driver/connection.rs`)
+  reads only the cached state, `Driver` has no `Drop`, and `Worker::drop`
+  drops tasks without failing them. A `Connection` or stream returned out of
+  `block_on` then pends forever on `closed` or accept while writes and
+  datagrams still succeed. The worker doc promises handles that outlive it
+  fail instead of pending; sockets and endpoints already do. Propagate
+  termination to every surviving handle and wake pending operations,
+  keeping received data readable.
+- Drop closes: decided 2026-10-22 (maintainer), match tokio. A raw
+  `Connection` closes once every connection and stream handle is gone,
+  instead of leaking until idle timeout, and `web::Session` counts live
+  streams rather than closing on its last clone. Update the `Connection`
+  doc that states the opposite.
+- Receive close at the read-ahead cap: `stream.rs` parks once the backlog
+  reaches `READ_AHEAD` before checking `closed()`, so a reset or connection
+  close (idle timeout included) behind 64 KiB of unread data never
+  surfaces. `moq-tokio/src/transport.rs` has the same cap and returns
+  Pending without registering a waker. Fix both: check terminal state
+  before the cap, keeping held credit.
+- Buffer-group ids: `next_bgid` is a per-worker `u16` allocated with
+  `expect`, before the multishot check, never returned on failed
+  registration or socket drop, so the 65,536th `Handle::udp` panics.
+  Recycle an id only once the kernel has released its buffer ring.
+- `Socket::drop` discards a failed cancel (`let _ = shared.cancel(key)`),
+  leaving an idle multishot receive holding the fd and pool until worker
+  teardown. Only an `io_uring_enter` error reaches it; surface it rather
+  than drop it.
+
+Use the existing teardown and credit integration tests' shapes; drive time
+with the manual clock for the idle-timeout case.
+
+Public API: behavior only (implicit close on drop). Wire: none.
+
+## Related
+
+- [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - requires this

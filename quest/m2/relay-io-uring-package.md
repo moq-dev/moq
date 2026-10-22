@@ -29,10 +29,21 @@ ships, not the default.
   since memlock is why #4197 touched the unit.
 - Docs: `doc/bin/relay/` says packaged Linux builds include the runtime, how
   to turn it on, and the memlock note.
+- Decided 2026-10-22 from the io_uring audit: the docs carry a capability
+  matrix of what the ring serves itself (raw QUIC and WebTransport), what a
+  ring relay still serves from the shared tokio runtime (TCP, WebSocket,
+  Unix, HTTP, iroh, outbound cluster dials), and what it refuses loudly
+  (`listen.lb_id` QUIC-LB server ids, congestion controllers beyond Loss
+  and Delay). Those refusals are recorded exceptions to parity, not
+  prerequisites, until a consumer asks.
 
 Public API: none. Wire: none.
 
 ## Required
 
+- [A failed send never fails the socket](/quest/m1/uring-send-errors.md) - one peer cannot kill a worker's connections
+- [io_uring MTU matches tokio](/quest/m1/uring-mtu.md) - `quic.mtu_discovery` honored and smaller paths reachable
+- [io_uring local address](/quest/m1/uring-local-addr.md) - multihomed wildcard binds reply from the right address
+- [io_uring handle lifecycle](/quest/m2/uring-lifecycle.md) - handles fail with their worker and close on last drop
 - [Ring drain GOAWAY](/quest/m2/uring-ring-drain.md) - closes are delivered on the ring for moq-transport too
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - a one-port config is served on the ring too

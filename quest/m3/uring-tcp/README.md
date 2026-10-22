@@ -40,6 +40,14 @@ on TCP for its lifetime.)
 Decided 2026-10-08: moved to m3. No fleet demand asks for ring TCP; the
 ablation stays the gate for the rest of the line.
 
+Decided 2026-10-22 (maintainer), from the io_uring audit: an audit proposed
+m2 full media-I/O parity on the ring with the ablation unable to veto it.
+Rejected: TCP, WebSocket, and Unix already work on a ring relay through the
+shared tokio server, and tokio stays for the control plane regardless, so
+the only payoff is performance, which the ablation decides. A port would
+also need qmux's drivers made runtime-neutral first: `rs/qmux` requires
+`Send` streams and spawns tokio tasks and timers internally.
+
 ## Required
 
 - [Ablation](/quest/m3/uring-tcp/ablation.md) - measure ring TCP against tokio

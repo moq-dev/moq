@@ -45,9 +45,14 @@ Then, only where the profile shows a cost:
   per-connection pacing. Measure on a real NIC as well as loopback, since
   `etf` needs hardware offload to be exact.
 
-Report CPU per Gbps, RSS, loss, and p99 latency via `just bench BASE` on
-Linux. The verdict names which levers ship and which qdisc, if any, relay
+Report CPU per Gbps, RSS, loss, and p99 latency on Linux: `just bench BASE`
+for tokio, and `just bench-runtime` at both revisions for the ring, since
+`just bench BASE` runs only tokio. The verdict names which levers ship and which qdisc, if any, relay
 hosts need.
+
+## Required
+
+- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - the ring half of the profile
 
 ## Related
 
