@@ -10,6 +10,11 @@ slowest test in the queue suite (37 s, past nextest's 30 s SLOW mark).
 
 ## Plan
 
+In flight as [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113)
+on its pre-move `quest/m1/test-flakes-2/redundant-failover-drift` branch.
+The m0 move did not release that ownership; continue or review the existing
+PR rather than opening a second claim.
+
 Found by the 2026-10-19 test cost audit, with the exporter's stderr captured
 on a failing run. Moved from the m1
 [load round](/quest/m1/test-flakes-2/README.md) to m0 on 2026-10-20
