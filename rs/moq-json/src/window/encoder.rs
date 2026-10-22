@@ -26,19 +26,16 @@ pub(super) const MAX_INDEX: u64 = (1 << 53) - 1;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ProducerConfig {
-	/// How much the ops in a group may cost before a fresh group is emitted.
+	/// Whether edits ride as push and pop ops in the open group.
 	///
-	/// A new group opens once the pushes and pops *already written* exceed `op_ratio` times the
-	/// size of the group's header frame. The pending op is excluded from that check, so the one that
-	/// tips the group over budget still lands: a group overshoots by at most one op before rolling.
-	/// `0` disables ops entirely, so every edit is its own single-frame group.
+	/// `false` makes every edit its own single-frame group restating the window. The window's
+	/// counterpart to [`snapshot::Config::deltas`](crate::snapshot::Config::deltas). How long a
+	/// group of ops runs is not an option: it grows until a joiner wants a fresh one, judged by the
+	/// track's [`refresh`](moq_net::track::Info::refresh) ratio, or until it reaches the frame or
+	/// byte cap.
 	///
-	/// This is the window's counterpart to
-	/// [`snapshot::Config::delta_ratio`](crate::snapshot::Config::delta_ratio), and
-	/// the same trade: a bigger ratio spends less on headers and makes a late joiner read more ops.
-	///
-	/// Defaults to `8`.
-	pub op_ratio: u32,
+	/// Defaults to `true`.
+	pub ops: bool,
 
 	/// Compress each group as one sync-flushed DEFLATE stream, so every op reuses the header and the
 	/// ops before it as context.
@@ -58,7 +55,7 @@ pub struct ProducerConfig {
 impl Default for ProducerConfig {
 	fn default() -> Self {
 		Self {
-			op_ratio: 8,
+			ops: true,
 			compression: false,
 			checkpoint_records: None,
 		}
@@ -66,9 +63,9 @@ impl Default for ProducerConfig {
 }
 
 impl ProducerConfig {
-	/// Set [`op_ratio`](Self::op_ratio) (a builder, since the struct is `#[non_exhaustive]`).
-	pub fn with_op_ratio(mut self, op_ratio: u32) -> Self {
-		self.op_ratio = op_ratio;
+	/// Set [`ops`](Self::ops) (a builder, since the struct is `#[non_exhaustive]`).
+	pub fn with_ops(mut self, ops: bool) -> Self {
+		self.ops = ops;
 		self
 	}
 
@@ -104,8 +101,9 @@ pub struct Encoded {
 
 	/// Whether this frame is a group header, which must open a new group.
 	///
-	/// The encoder decides this, never the caller: the op budget and the frame cap force a new group
-	/// independently of which edit was requested.
+	/// The encoder decides this for an edit: the group's frame and byte caps force a new group
+	/// independently of which edit was requested. A caller asks for one with
+	/// [`snapshot`](Encoder::snapshot).
 	pub keyframe: bool,
 }
 
@@ -124,6 +122,8 @@ pub struct Pending<'a, T> {
 enum Edit {
 	Push(Value),
 	Pop(u64),
+	/// A header restating the window as it is, which changes nothing.
+	Restate,
 }
 
 impl<T> std::ops::Deref for Pending<'_, T> {
@@ -160,7 +160,9 @@ impl<T> Drop for Pending<'_, T> {
 ///
 /// Frames must reach the wire in the order they were encoded, and a frame with
 /// [`keyframe`](Encoded::keyframe) set must open a new group: both the positional indices and the
-/// group-scoped DEFLATE window depend on it.
+/// group-scoped DEFLATE window depend on it. When a joiner wants a fresh group (see
+/// [`Demand::wanted`](moq_net::track::Demand::wanted)), [`snapshot`](Self::snapshot) restates the
+/// window in one.
 pub struct Encoder<T> {
 	config: ProducerConfig,
 
@@ -176,11 +178,8 @@ pub struct Encoder<T> {
 	/// The current group's DEFLATE encoder (one window per group), `Some` while compressing.
 	flate: Option<moq_flate::Encoder>,
 
-	/// Bytes of pushes and pops emitted into the current group, excluding its header frame.
-	op_bytes: u64,
-
-	/// Reference size the op budget is measured against: the current group's header frame.
-	header_len: u64,
+	/// Payload bytes emitted into the current group, header included.
+	group_bytes: u64,
 
 	/// Frames emitted into the current group, header included.
 	group_frames: usize,
@@ -205,8 +204,7 @@ impl<T> Encoder<T> {
 			offset: 0,
 			start: 0,
 			flate: None,
-			op_bytes: 0,
-			header_len: 0,
+			group_bytes: 0,
 			group_frames: 0,
 			resync: true,
 			_marker: PhantomData,
@@ -231,10 +229,26 @@ impl<T> Encoder<T> {
 	/// how the encoder recovers after an encoded frame did not reach the wire.
 	pub fn reset(&mut self) {
 		self.flate = None;
-		self.op_bytes = 0;
-		self.header_len = 0;
+		self.group_bytes = 0;
 		self.group_frames = 0;
 		self.resync = true;
+	}
+
+	/// Restate the retained window in a header, which must open a new group.
+	///
+	/// For a caller that opens groups itself: call it when a joiner wants a fresh group, such as when
+	/// [`Demand::wanted`](moq_net::track::Demand::wanted) passes the largest group written, so the
+	/// joiner reads the window without the ops before it. The frame is a [`Pending`] like any other.
+	pub fn snapshot(&mut self) -> Result<Pending<'_, T>> {
+		let bytes = Self::header(
+			&self.config,
+			self.offset,
+			self.start,
+			self.window.len(),
+			self.window.iter(),
+		)?;
+		let encoded = self.emit_header(bytes)?;
+		Ok(self.pending(encoded, Edit::Restate))
 	}
 
 	/// Apply an edit after its encoded frame reached the wire.
@@ -256,16 +270,14 @@ impl<T> Encoder<T> {
 				self.start += stored;
 				self.offset = offset;
 			}
+			Edit::Restate => {}
 		}
 	}
 
-	/// Whether the pending edit may ride as an op in the open group.
+	/// Whether the pending edit may ride as an op in the open group: ops are on and the group is
+	/// under its frame cap. The byte cap is checked once the op is encoded.
 	fn op_allowed(&self) -> bool {
-		let ratio = u64::from(self.config.op_ratio);
-		ratio != 0
-			&& self.group_frames > 0
-			&& self.group_frames < MAX_GROUP_FRAMES
-			&& self.op_bytes <= ratio * self.header_len
+		self.config.ops && self.group_frames > 0 && self.group_frames < MAX_GROUP_FRAMES
 	}
 
 	/// Reject plaintext that the paired DEFLATE decoder could not produce.
@@ -278,7 +290,7 @@ impl<T> Encoder<T> {
 		Ok(())
 	}
 
-	/// Compress an already-serialized op into the open group, charging it to the budget.
+	/// Compress an already-serialized op into the open group, counting it toward the caps.
 	fn frame(&mut self, bytes: Vec<u8>) -> Result<Encoded> {
 		Self::validate_plaintext(bytes.len(), "frame")?;
 		let payload = match self.flate.as_mut() {
@@ -286,7 +298,7 @@ impl<T> Encoder<T> {
 			None => Bytes::from(bytes),
 		};
 
-		self.op_bytes += payload.len() as u64;
+		self.group_bytes += payload.len() as u64;
 		self.group_frames += 1;
 
 		Ok(Encoded {
@@ -298,8 +310,7 @@ impl<T> Encoder<T> {
 	/// Emit an op when the header will remain cached, otherwise restate the window in a new group.
 	fn emit_op(&mut self, bytes: Vec<u8>) -> Result<Option<Encoded>> {
 		let encoded = self.frame(bytes)?;
-		let group_bytes = self.header_len.saturating_add(self.op_bytes);
-		if group_bytes > moq_net::group::MAX_CACHE_BYTES {
+		if self.group_bytes > moq_net::group::MAX_CACHE_BYTES {
 			self.reset();
 			Ok(None)
 		} else {
@@ -334,8 +345,7 @@ impl<T> Encoder<T> {
 	fn emit_header(&mut self, bytes: Vec<u8>) -> Result<Encoded> {
 		Self::validate_plaintext(bytes.len(), "header")?;
 
-		// Open a fresh per-group encoder (cold window) and compress the header as frame 0, recording
-		// its wire size as the op budget's anchor.
+		// Open a fresh per-group encoder (cold window) and compress the header as frame 0.
 		let (payload, flate) = match self.config.compression {
 			true => {
 				let mut flate = moq_flate::Encoder::new();
@@ -348,8 +358,7 @@ impl<T> Encoder<T> {
 			return Err(Error::Json("window header exceeds the group cache limit".into()));
 		}
 
-		self.header_len = payload.len() as u64;
-		self.op_bytes = 0;
+		self.group_bytes = payload.len() as u64;
 		self.group_frames = 1;
 		self.flate = flate;
 		self.resync = false;
@@ -443,7 +452,7 @@ impl<T: Serialize> Encoder<T> {
 	/// Append one record to the back of the window.
 	///
 	/// Emits a push into the open group, or a header restating the window (the new record included)
-	/// when the op budget is spent or a frame was lost.
+	/// when the group is full or a frame was lost.
 	pub fn push(&mut self, value: &T) -> Result<Pending<'_, T>> {
 		// Serialize before touching the window, so a value that can't be encoded leaves the encoder
 		// exactly as it was. Reading the record back out of its own bytes keeps the stored copy
@@ -493,7 +502,7 @@ mod test {
 
 	#[test]
 	fn an_op_that_would_evict_the_header_rolls_first() {
-		let mut encoder = Encoder::<String>::new(ProducerConfig::default().with_op_ratio(u32::MAX));
+		let mut encoder = Encoder::<String>::new(ProducerConfig::default().with_ops(true));
 		let first = "a".repeat(16 * 1024 * 1024);
 		let next = "b".repeat(15 * 1024 * 1024);
 

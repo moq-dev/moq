@@ -120,7 +120,7 @@ async fn relay_serves_every_version() {
 			for chunk in chunked.chunks(100) {
 				frame.write(bytes::Bytes::copy_from_slice(chunk)).unwrap();
 			}
-			frame.finish().unwrap();
+			let mut group = frame.finish().unwrap();
 			group
 				.write_frame(Timestamp::from_millis(3).unwrap(), bytes::Bytes::new())
 				.unwrap();

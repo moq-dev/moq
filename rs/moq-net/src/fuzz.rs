@@ -65,18 +65,12 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 			fields,
 			inflated: None,
 		};
-		let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
+		let mut frame = group.create_object(header).unwrap();
 		frame.write(payload.clone()).unwrap();
 		group = frame.finish().unwrap();
 	}
 	group.finish().unwrap();
 	(broadcast, track, group)
-}
-
-/// Declare a received track's end while the wire may still owe groups below it, as a
-/// subscriber does on SUBSCRIBE_END, for the pending-tail benchmark.
-pub fn finish_at_pending(track: &mut track::Producer, end: track::Position) -> crate::Result<()> {
-	track.finish_at_pending(end)
 }
 
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
@@ -1207,7 +1201,7 @@ pub fn seeds() -> Vec<Seed> {
 /// every declared size when the first byte lands and `Some(0)` grows every buffer with
 /// the bytes received.
 pub struct FrameRecv {
-	streams: Vec<Option<(coding::Reader<Chunks, lite::Version>, frame::ProducerOwned)>>,
+	streams: Vec<Option<(coding::Reader<Chunks, lite::Version>, frame::Producer)>>,
 	// Keeps the groups' track alive.
 	_track: track::Producer,
 	_broadcast: broadcast::Producer,
@@ -1220,6 +1214,7 @@ impl FrameRecv {
 		// Unbounded, so eviction never aborts a group mid-frame.
 		let mut info = broadcast::Info::new();
 		info.pool = cache::Pool::unbounded();
+		info.frames = budget.map(frame::Budget::new).unwrap_or_default();
 		let broadcast = info.produce();
 		let track = broadcast
 			.create_track(
@@ -1227,7 +1222,6 @@ impl FrameRecv {
 				crate::track::Info::default().with_timescale(crate::Timescale::MILLI),
 			)
 			.unwrap();
-		let budget = budget.map(frame::Budget::new).unwrap_or_default();
 		let payload = bytes::Bytes::from(vec![0u8; size]);
 
 		let streams = (0..streams)
@@ -1237,7 +1231,7 @@ impl FrameRecv {
 					size: size as u64,
 					timestamp: Some(crate::Timestamp::ZERO),
 				};
-				let frame = group.create_frame_owned(info, &budget).unwrap();
+				let frame = group.create_frame(info).unwrap();
 				let stream = Chunks {
 					payload: payload.clone(),
 					chunk,
