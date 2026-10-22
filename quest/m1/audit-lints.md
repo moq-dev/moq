@@ -59,11 +59,6 @@ workspace table per crate. Biome reports an unused `biome-ignore` as
   `cargo check` only, so an `expect` on Apple or Windows code
   (`moq-video` AVFoundation, `moq-sock`) is unverified. Run clippy there or
   confirm by reading.
-- `cargo clippy --workspace --all-features` on x86_64 reports
-  `large_enum_variant` in `moq-hls` (`export/mod.rs`, `rendition.rs`),
-  `moq-mux` (`fmp4/export.rs`, `fmp4/muxer.rs`), and `moq-rtc`
-  (`egress.rs`); CI runs that lane on aarch64, where they don't fire.
-  Decide whether to box the variant or gate the suppression on the target.
 - Python type ignores: run pyright with
   `reportUnnecessaryTypeIgnoreComment`, which m0 didn't.
 - Swift: grep and build for deprecation warnings, which m0 didn't.
@@ -79,7 +74,7 @@ workspace table per crate. Biome reports an unused `biome-ignore` as
 ### Results (m0, 2026-10-20)
 
 - Rust: workspace lints adopted, every suppression given a reason, and
-  stale ones removed: 23 `match_like_matches_macro` (now `matches!`), 27
+  stale ones removed: 27 `match_like_matches_macro` (now `matches!`), 27
   `non_camel_case_types` on `repr(C)` structs, `moq-quic`'s crate-wide
   `cognitive_complexity` and `too_many_arguments`, and stale
   `type_complexity`, `arc_with_non_send_sync`, `field_reassign_with_default`,
@@ -90,8 +85,10 @@ workspace table per crate. Biome reports an unused `biome-ignore` as
 
 ### Baselines (2026-10-20, after the m0 run)
 
-- Rust `clippy::` suppressions: 95 (78 `expect`, 9 `cfg_attr` `expect`,
-  8 `allow`). Most common: `disallowed_methods` 34, `large_enum_variant` 18.
+- Rust `clippy::` suppression attributes: 189 (168 `expect`, 12 `cfg_attr`
+  `expect`, 9 `allow`), counted 2026-10-22 after main's moq-clock move.
+  Most common: `disallowed_methods` 123, `disallowed_types` 48,
+  `large_enum_variant` 24, mostly test modules reading the host clock.
 - Rust rustc and rustdoc suppressions: 64 (49 `expect`, 15 `allow`), led by
   `non_camel_case_types` 19 on C ABI enums. `dead_code` and `unused`: 421,
   owned by the dead code audit.

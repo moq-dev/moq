@@ -89,7 +89,11 @@ pub use crate::quic::driver::send_group::{SendGroup, SendOptions};
 pub use crate::quic::driver::send_stream::{SendStream, StoppedError, WriteError};
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, clippy::disallowed_types, reason = "tests read the host clock directly")]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "tests read the host clock directly"
+)]
 mod tests;
 
 #[derive(Debug)]
