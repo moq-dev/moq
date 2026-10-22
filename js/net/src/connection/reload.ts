@@ -153,7 +153,8 @@ export class Reload {
 	 * The auth handle every session of the loop is built on, spanning reconnects.
 	 *
 	 * Each session presents every token it holds, so a route naming one keeps it across a
-	 * reconnect, and its grant follows the live session. It ends when the loop closes, and
+	 * reconnect, and its grant follows the live session. It spans URL changes too, so its
+	 * tokens go to whatever URL the loop dials next. It ends when the loop closes, and
 	 * aborting it stops the loop at its next reconnect, with the abort's error.
 	 */
 	readonly auth = new AuthHandle();

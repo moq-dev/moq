@@ -188,11 +188,13 @@ export class Connection {
 	readonly origin: Getter<Origin.Table | undefined>;
 
 	/**
-	 * The auth handle for the current URL, or undefined while disabled or URL-less.
+	 * The auth handle every session presents, or undefined while disabled or URL-less.
 	 *
 	 * Every session the connection makes presents the tokens it holds, so a route naming one
-	 * keeps it across a reconnect, and its grant follows the live session. A shared handle's
-	 * is the same one every other handle on this URL uses, since they share the session.
+	 * keeps it across a reconnect, and its grant follows the live session. A private
+	 * connection keeps one handle across URL changes, so its tokens go to the new URL, and
+	 * starts another when `versions` changes. A shared connection's is the one every other
+	 * handle on its URL uses, since they share the session.
 	 */
 	readonly auth: Getter<Auth.Handle | undefined>;
 
