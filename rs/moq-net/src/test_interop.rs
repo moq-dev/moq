@@ -5,7 +5,7 @@ use crate::coding::{Decoder, Encode, Encoder, Form, varint};
 use crate::{ietf, lite};
 
 // Runs a script with a JSON argument, returning its stdout.
-fn bun(script: &str, input: serde_json::Value) -> Vec<u8> {
+pub(crate) fn bun(script: &str, input: serde_json::Value) -> Vec<u8> {
 	let output = std::process::Command::new("bun")
 		.arg(format!("{}/../../test/interop/{script}", env!("CARGO_MANIFEST_DIR")))
 		.arg(input.to_string())
@@ -439,6 +439,7 @@ fn ietf_track_status_interop() {
 				_ => ietf::Properties {
 					unknown: Default::default(),
 					dynamic_groups: false,
+					compress: false,
 					max_cache_duration: Some(std::time::Duration::from_millis(5000)),
 					timescale: Some(crate::Timescale::MILLI),
 					// The JS track's priority 2, lower-first on the wire.

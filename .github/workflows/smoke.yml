@@ -399,6 +399,8 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
+      # Delete a Pages artifact left by an earlier run attempt.
+      actions: write
       contents: write
       pages: write
       id-token: write
@@ -422,6 +424,12 @@ jobs:
 
       - name: Commit report
         run: just publish "$RUNNER_TEMP/relay-report" "$RUNNER_TEMP/pages"
+
+      - name: Drop a stale Pages artifact
+        working-directory: .
+        run: just gh pages-clean
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Upload site
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

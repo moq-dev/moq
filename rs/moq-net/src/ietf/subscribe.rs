@@ -1402,6 +1402,7 @@ mod tests {
 			properties: Properties {
 				unknown: Default::default(),
 				dynamic_groups: false,
+				compress: false,
 				max_cache_duration: None,
 				timescale: None,
 				priority: None,
@@ -1433,6 +1434,7 @@ mod tests {
 			properties: Properties {
 				unknown: Default::default(),
 				dynamic_groups: false,
+				compress: false,
 				max_cache_duration: None,
 				timescale: None,
 				priority: None,
@@ -1463,6 +1465,7 @@ mod tests {
 			largest: None,
 			properties: Properties {
 				dynamic_groups: true,
+				compress: false,
 				..Default::default()
 			},
 		};

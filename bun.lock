@@ -28,11 +28,10 @@
         "@moq/hang": "workspace:*",
         "@moq/net": "workspace:*",
         "@moq/publish": "workspace:*",
-        "@moq/signals": "workspace:*",
         "@moq/watch": "workspace:*",
       },
       "devDependencies": {
-        "playwright": "^1.64.1",
+        "playwright": "1.64.1",
       },
     },
     "demo/boy": {
@@ -84,7 +83,6 @@
         "highlight.js": "^11.12.0",
         "open": "^11.0.4",
         "rolldown": "^1.2.13",
-        "solid-element": "^1.9.2",
         "solid-js": "^1.9.17",
         "tailwindcss": "^4.1.13",
         "typescript": "7.0.2",
@@ -169,14 +167,13 @@
       "version": "0.5.2",
       "dependencies": {
         "@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
-        "@libav.js/variant-opus-af": "^6.10.9",
         "@moq/clock": "workspace:^",
         "@moq/json": "workspace:^",
+        "@moq/libav": "workspace:^",
         "@moq/loc": "workspace:^",
         "@moq/net": "workspace:^",
         "@moq/signals": "workspace:^",
         "@svta/cml-iso-bmff": "^1.0.7",
-        "@svta/cml-utils": "^1.6.2",
         "@zod/mini": "^4.6.7",
         "zod": "^4.6.7",
       },
@@ -193,7 +190,6 @@
       "dependencies": {
         "@moq/flate": "workspace:^",
         "@moq/net": "workspace:^",
-        "@moq/signals": "workspace:^",
       },
       "devDependencies": {
         "@moq/clock": "workspace:^",
@@ -205,6 +201,17 @@
       "peerDependencies": {
         "@zod/mini": "^4.5.0",
         "zod": "^4.5.0",
+      },
+    },
+    "js/libav": {
+      "name": "@moq/libav",
+      "version": "0.1.0",
+      "dependencies": {
+        "@libav.js/types": "^6.10.9",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.4.3",
+        "typescript": "7.0.2",
       },
     },
     "js/loc": {
@@ -433,7 +440,7 @@
       },
       "devDependencies": {
         "@types/audioworklet": "^0.0.100",
-        "playwright": "^1.64.1",
+        "playwright": "1.64.1",
         "rolldown": "^1.2.13",
         "vite": "^8.3.4",
       },
@@ -456,7 +463,7 @@
         "@moq/watch": "workspace:*",
       },
       "devDependencies": {
-        "playwright": "^1.64.1",
+        "playwright": "1.64.1",
         "rolldown": "^1.2.13",
         "vite": "^8.3.4",
       },
@@ -485,7 +492,7 @@
       "devDependencies": {
         "@types/bun": "^1.4.3",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
-        "playwright": "^1.64.1",
+        "playwright": "1.64.1",
         "typescript": "7.0.2",
         "vite": "^8.3.4",
       },
@@ -515,7 +522,7 @@
       "devDependencies": {
         "@types/bun": "^1.4.3",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
-        "playwright": "^1.64.1",
+        "playwright": "1.64.1",
         "typescript": "7.0.2",
         "vite": "^8.3.4",
       },
@@ -530,7 +537,7 @@
       "devDependencies": {
         "@ubjs/core": "0.31.0-6",
         "@ubjs/wasm": "0.31.0-6",
-        "playwright": "^1.64.1",
+        "playwright": "1.64.1",
       },
     },
   },
@@ -775,9 +782,7 @@
 
     "@kixelated/libavjs-webcodecs-polyfill": ["@kixelated/libavjs-webcodecs-polyfill@0.5.5", "", { "dependencies": { "@libav.js/types": "^6.7.7", "@ungap/global-this": "^0.4.4" } }, "sha512-Q1zgnTMMQ2F7IE9ylx3C1XzVbg5vYN18jiDINO5U3kNPBOHdYuUlJsMhtBoqr1M6ocLtoiqdHmLs7tHFgrw5KA=="],
 
-    "@libav.js/types": ["@libav.js/types@6.8.8", "", {}, "sha512-Lbik/0Q3x2R8cI7mOtRgt+nUWLqGXh7UinMndmpdXSDY4YEjYyVUDsq6fxkuriL78+LCYx8frZIN1r+oDsvYCQ=="],
-
-    "@libav.js/variant-opus-af": ["@libav.js/variant-opus-af@6.10.9", "", {}, "sha512-yULJUCQIHDtwDPbT38t9pP/7EGgqwynVcOau46hZjtCe8TWMp67DTi2X0Emr2M4Ci3nzxNPf25IzO+IXSmHDBg=="],
+    "@libav.js/types": ["@libav.js/types@6.10.9", "", {}, "sha512-AdngxD/VO8OI6/w7wlJC77kuFcsSvCUuo2RuC6gGeSW2DEvbzgBo2JtFLV6UWZp/tRNZhKm6jS0Tv8gwCKBHLg=="],
 
     "@moq/audio-quality": ["@moq/audio-quality@workspace:test/audio-quality/clients/js"],
 
@@ -808,6 +813,8 @@
     "@moq/interop-native": ["@moq/interop-native@workspace:test/interop/clients/js-native"],
 
     "@moq/json": ["@moq/json@workspace:js/json"],
+
+    "@moq/libav": ["@moq/libav@workspace:js/libav"],
 
     "@moq/loc": ["@moq/loc@workspace:js/loc"],
 
@@ -1222,8 +1229,6 @@
     "comma-separated-tokens": ["comma-separated-tokens@2.0.3", "", {}, "sha512-Fu4hJdvzeylCfQPp9SGWidpzrMs7tTrlu6Vb8XGaRGck8QSNZJJp538Wrb60Lax4fPwR64ViY468OIUTbRlGZg=="],
 
     "commander": ["commander@15.0.0", "", {}, "sha512-z67u4ZhzCL/Tydu1lJARtEZYWbWaN7oYLHbsuzocr6y4N6WZAagG3RQ4FW61V1/0+jImpj293XfrcYnd1qxtPg=="],
-
-    "component-register": ["component-register@0.8.8", "", {}, "sha512-djhwcxjY+X9dacaYUEOkOm7tda8uOEDiMDigWysu3xv54M8o6XDlsjR1qt5Y8QLGiKg51fqXFIR2HUTmt9ys0Q=="],
 
     "concat-stream": ["concat-stream@2.0.0", "", { "dependencies": { "buffer-from": "^1.0.0", "inherits": "^2.0.3", "readable-stream": "^3.0.2", "typedarray": "^0.0.6" } }, "sha512-MWufYdFw53ccGjCA+Ol7XJYpAlW6/prSMzuPOTRnJGcGzuhLn4Scrz7qf6o8bROZ514ltazcIFJZevcfbo0x7A=="],
 
@@ -1744,8 +1749,6 @@
     "shiki": ["shiki@2.5.0", "", { "dependencies": { "@shikijs/core": "2.5.0", "@shikijs/engine-javascript": "2.5.0", "@shikijs/engine-oniguruma": "2.5.0", "@shikijs/langs": "2.5.0", "@shikijs/themes": "2.5.0", "@shikijs/types": "2.5.0", "@shikijs/vscode-textmate": "^10.0.2", "@types/hast": "^3.0.4" } }, "sha512-mI//trrsaiCIPsja5CNfsyNOqgAZUb6VpJA+340toL42UpzQlXpwRV9nch69X6gaUxrr9kaOOa6e3y3uAkGFxQ=="],
 
     "signal-exit": ["signal-exit@4.1.0", "", {}, "sha512-bzyZ1e88w9O1iNJbKnOlvYTrWPDl46O1bG0D3XInv+9tkPrxrN8jUUTiFlDkkmKWgn1M6CfIA13SuGqOa9Korw=="],
-
-    "solid-element": ["solid-element@1.9.2", "", { "dependencies": { "component-register": "^0.8.7" }, "peerDependencies": { "solid-js": "^1.9.14" } }, "sha512-+6bK9YGAf47lrwWyTFXUVKCkKTkof3bn6yxknHJPAE5MGSCvx4DJH1KE3ltUjIXeDWhS2gU5yjpynkH709+Xag=="],
 
     "solid-js": ["solid-js@1.9.17", "", { "dependencies": { "csstype": "^3.1.0", "seroval": "~1.6.8", "seroval-plugins": "~1.6.8" } }, "sha512-4GAmLOWPfNV8H9Jfn2LSFTpNEG6jiOKPiwd5lnLGQtehHaX6l3TOLzJqQ7mqwB/3k1Yy3zyumFVopmc/tm34ow=="],
 

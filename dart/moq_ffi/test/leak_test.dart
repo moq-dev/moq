@@ -39,7 +39,7 @@ void main() {
     final consumer = MoqBroadcastProducer().consume();
     final reference = 'x' * size;
     Future<void> call() => expectLater(
-      consumer.resolve(reference: reference),
+      consumer.resolve(reference: reference, epoch: null),
       throwsA(isA<MoqException>()),
     );
 

@@ -20,6 +20,7 @@
 	"private": true,
 	"scripts": {
 		"check": "bun run --filter='*' check",
+		"postinstall": "bun run --cwd js/libav build",
 		"fix": "bun run --filter='*' fix"
 	},
 	"type": "module",
@@ -35,6 +36,7 @@
 		"js/e2ee",
 		"js/flate",
 		"js/json",
+		"js/libav",
 		"js/hang",
 		"js/loc",
 		"js/msf",

@@ -480,6 +480,26 @@ impl StreamsState {
         self.pending.can_send(space)
     }
 
+    /// The offset just past the data received so far on `id`
+    ///
+    /// `None` if `id` cannot receive data now, such as a closed stream or our own
+    /// unidirectional one. On an ordered transport, data at any other offset is a protocol
+    /// violation.
+    #[cfg(feature = "mux")]
+    pub(crate) fn rx_offset(&self, id: StreamId) -> Option<u64> {
+        // A peer stream not opened yet starts at offset 0 too
+        if id.initiator() != self.side && id.index() >= self.next_remote[id.dir() as usize] {
+            return Some(0);
+        }
+        let recv = self.recv.get(&id)?;
+        // Present but unopened: the peer may send on it, starting at offset 0
+        Some(
+            recv.as_ref()
+                .and_then(|r| r.as_open_recv())
+                .map_or(0, |r| r.data_end),
+        )
+    }
+
     /// Whether MAX_STREAM_DATA frames could be sent for stream `id`
     pub(crate) fn can_send_flow_control(&self, id: StreamId) -> bool {
         self.recv
@@ -1192,6 +1212,7 @@ pub(super) fn get_or_insert_recv(opt: &mut Option<StreamRecv>, initial_max_data:
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
     use super::*;
     use crate::{

@@ -696,7 +696,7 @@ where
 				return Err(err);
 			}
 		};
-		if let Some(err) = refused(&accepted.properties, self.version) {
+		if let Some(err) = refused(&accepted.properties, self.version, self.peer_setup.get().await.flate) {
 			self.remove_subscribe(request_id);
 			self.cancel_subscribe(stream, request_id).await;
 			return Err(err);
@@ -765,6 +765,7 @@ where
 	) -> Result<(), Error> {
 		let key: TrackKey = (msg.track_namespace.to_owned(), msg.track_name.as_ref().into());
 		let info = accepted_info(&msg.properties, self.version);
+		let flate = self.peer_setup.get().await.flate;
 		let offer = {
 			let mut listings = self.listings.lock();
 			// Draft-18 allows one subscription per track (section 5.1); later drafts allow
@@ -787,7 +788,7 @@ where
 				}
 			} else if listings.entries.contains_key(&key) {
 				Offer::Refuse(duplicate, "already subscribed")
-			} else if let Some(err) = refused(&msg.properties, self.version) {
+			} else if let Some(err) = refused(&msg.properties, self.version, flate) {
 				Offer::Refuse(
 					request::to_code(&err, request::Kind::Publish, self.version),
 					"track properties not supported",
