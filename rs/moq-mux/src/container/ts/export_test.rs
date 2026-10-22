@@ -8100,6 +8100,49 @@ async fn synced_legs_agree_after_a_move() {
 	assert!(first == second, "the legs disagree after the move");
 }
 
+/// AAC's ADTS headers are written from the announced configuration as its frames go out, so
+/// a move to an AAC track configured differently is refused rather than framing the old
+/// track's queued frames as the new one's.
+#[tokio::test(start_paused = true)]
+async fn a_rendition_moved_to_another_aac_configuration_fails() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut old = aac_rendition(&mut broadcast, &mut catalog, "main");
+	let track = broadcast
+		.create_track("next", hang::container::track_info(hang::catalog::PRIORITY.audio))
+		.unwrap();
+	let mut next = Producer::new(track, HangContainer::Legacy(Kind::Data));
+
+	let mut export = open_export(crate::source::announced(&consumer).await)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut old, ms);
+	}
+	assert!(!drain_frames(&mut export).await.is_empty(), "the PMT went out");
+
+	{
+		let mut guard = catalog.modify().unwrap();
+		let config = guard.audio.renditions.get_mut("main").unwrap();
+		config.track = Some("next".to_string());
+		config.sample_rate = 44_100;
+	}
+	write_aac(&mut next, 200);
+	let err = tokio::time::timeout(DRAIN, async {
+		loop {
+			if let Err(err) = export.next().await {
+				break err;
+			}
+		}
+	})
+	.await
+	.expect("the export reads the catalog update");
+	assert!(err.to_string().contains("'main' moved to a track"), "{err}");
+}
+
 /// A track that leaves the catalog after the PMT is read to its own end rather than
 /// refused as a layout change. A publisher retires a rendition as its track ends, and
 /// that catalog update can land before the track's last frames and its finish do, so

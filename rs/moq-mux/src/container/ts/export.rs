@@ -996,7 +996,7 @@ impl Timing {
 	}
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Kind {
 	/// Video carries its TS stream type (H.264 = 0x1B, H.265 = 0x24).
 	Video(StreamType),
@@ -2065,45 +2065,43 @@ where
 
 	/// Move each track whose rendition the catalog moved to another track or broadcast onto it.
 	///
-	/// The PID and PMT stay as announced, so the new track must announce the same way; the codec
-	/// configuration rides in-band (parameter sets, ADTS headers) and may change. The new
+	/// The PID, PMT and lane stay as announced, and so does the kind the track's frames are
+	/// framed under as they go out, so the new track must have the same kind: an AAC track keeps
+	/// its configuration. Video parameter sets ride with each frame and may change. The new
 	/// source continues the old one ([`ExportSource::continuing`]), and the frames the old one
 	/// left held for their DTS go out first.
 	fn rebind(&mut self, catalog: &Catalog<S::Ext>) -> anyhow::Result<()> {
 		let budget = self.budget();
 		for (name, track) in self.tracks.iter_mut() {
-			let (source, kind, buffer) = if let Some(config) = catalog.video.renditions.get(name) {
+			let (source, kind) = if let Some(config) = catalog.video.renditions.get(name) {
 				if track.source.reads(&self.source, name, config) {
 					continue;
 				}
 				let source = ExportSource::for_video(&self.source, name, config, budget)?;
-				(source, video_kind(config, name)?, track.buffer)
+				(source, video_kind(config, name)?)
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
 				if track.source.reads(&self.source, name, config) {
 					continue;
 				}
-				let kind = audio_kind(config, name)?;
-				let buffer = Some(audio_buffer(config, &kind));
-				(
-					ExportSource::for_audio(&self.source, name, config, budget)?,
-					kind,
-					buffer,
-				)
+				let source = ExportSource::for_audio(&self.source, name, config, budget)?;
+				(source, audio_kind(config, name)?)
 			} else {
 				continue;
 			};
 			let Some(source) = source else {
 				continue;
 			};
+			let same = match (&kind, &track.kind) {
+				(Kind::Aac { config, .. }, Kind::Aac { config: old, .. }) => config == old,
+				(kind, old) => kind == old,
+			};
 			anyhow::ensure!(
-				kind.stream_type() == track.kind.stream_type() && kind.descriptors() == track.kind.descriptors(),
+				same,
 				"TS track layout changed after PAT/PMT was emitted: '{name}' moved to a track announced differently"
 			);
 			track.release(name, &mut self.jitter, true)?;
 			track.clock = DecodeClock::default();
 			track.source = source.continuing(&track.source);
-			track.kind = kind;
-			track.buffer = buffer;
 			track.finished = false;
 			track.subscribed = moq_clock::now();
 			// Group sequences are the old track's own, so the new track's first read opens one.
