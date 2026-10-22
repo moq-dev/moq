@@ -17,8 +17,10 @@ Environment's tag policies and secrets, and the signing key). Check it with
 Decided 2026-10-22 (maintainer):
 [#6040](https://github.com/moq-dev/moq/pull/6040) deleted `cache.yml`, so
 nothing pushes the dev shell to `nix.moq.dev`; only `release-nix.yml` pushes,
-on release tags. First measure one hosted Nightly job's dev-shell entry time.
-If it still compiles `uniffi-bindgen-go`, `uniffi-bindgen-cpp` and `quest`
+on release tags. First measure one hosted Nightly job's dev-shell entry time,
+no earlier than 2026-11-20: `cache.yml`'s last push to `nix.moq.dev` ran
+2026-10-20, and those paths serve a warm entry until the 30-day expiry
+removes them. If it still compiles `uniffi-bindgen-go`, `uniffi-bindgen-cpp` and `quest`
 (the 12-14 minute baseline below), restore a dev-shell push. Otherwise this
 narrows to release-tag substitution and Cachix retirement.
 
