@@ -88,7 +88,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
-- [Video preference in bindings](/quest/m1/ffi-video-preference.md) - every binding's video catalog record carries hang's rendition `preference`
 - [Binding encoder config](/quest/m1/binding-encoder-config.md) - binding encoders take an exact rational framerate, and the publication track name moves to options only the producers take
 - [FFI shutdown requests the drain synchronously](/quest/m1/ffi-shutdown-sync.md) - `shutdown()` becomes a sync drain request awaited with `closed()`, so a dropped future can no longer cancel
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0

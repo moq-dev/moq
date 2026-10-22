@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Video rendition preference
+
+`Media.Video` gains `preference: Int32`, defaulting to `0`. Rebuild with the matching MoqFFI package. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `Json.SnapshotProducer(deltaRatio:)` and `MoqJsonSnapshotConfig.deltaRatio` are replaced by `deltas: Bool` (default `true`).

@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Video rendition preference
+
+`MoqVideo` gains `preference: i32`. Set it to `0` in record literals to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Regenerate bindings and rebuild them with the matching native library.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `MoqJsonSnapshotConfig::delta_ratio` is replaced by `deltas: bool` (default `true`).

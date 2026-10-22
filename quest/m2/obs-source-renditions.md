@@ -57,10 +57,6 @@ Extend `cpp/obs/test/moq-source-test.cpp` with these cases:
 
 Public API: none. Wire: none.
 
-## Required
-
-- [Video preference in bindings](/quest/m1/ffi-video-preference.md) - `MoqVideo` carries `preference`, so OBS can rank by it
-
 ## Related
 
 - [OBS video source replacement](/quest/m2/obs-moq-video/source.md) - replaces the decode path; selection and identity stay in this file either way

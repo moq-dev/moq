@@ -322,6 +322,7 @@ impl Consume {
 		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
 
 		*dst = moq_video_config {
+			preference: config.preference,
 			name: rendition.as_str().as_ptr() as *const c_char,
 			name_len: rendition.len(),
 			codec: codec.as_str().as_ptr() as *const c_char,

@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Video rendition preference
+
+`moq::Video` gains `int32_t preference`. Update aggregate initializers with `0` to keep the default ranking and rebuild against the matching generated headers and native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### Priorities are signed (#6142)
 
 `TrackInfo::priority`, `Subscription::priority`, and `FetchGroupOptions::priority` are `int8_t`, and `GroupRequest::priority()` returns one.

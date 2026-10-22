@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Video rendition preference
+
+`MoqVideo` gains `preference`, defaulting to `0`. Prefer keyword construction and rebuild the generated bindings with the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### A client asks only about what it watches (#6165)
 
 On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announced_broadcast()`, instead of under its whole scope at connect.

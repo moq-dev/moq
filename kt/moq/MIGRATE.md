@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Video rendition preference
+
+`dev.moq.media.Video` gains `preference: Int`, defaulting to `0`. Update positional constructors and use the matching moq-ffi package. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio: UInt` is replaced by `deltas: Boolean` (default `true`).

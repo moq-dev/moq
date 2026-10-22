@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Video rendition preference
+
+`MoqVideo` gains `Preference int32`. Update unkeyed struct literals or use keyed fields, leaving `Preference: 0` for the default ranking. Regenerate bindings with the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
+
 ### Priorities are signed (#6142)
 
 `MoqTrackInfo.Priority`, `MoqSubscription.Priority`, `MoqFetchGroupOptions.Priority`, and `MoqGroupRequest.Priority()` are `int8`, higher first, and 0 is the unset midpoint.

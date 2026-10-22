@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Video rendition preference
+
+`moq_video_config` gains `int32_t preference`. Initialize it to `0` to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Rebuild C consumers against the matching header and library because the struct layout changes.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `moq_json_snapshot_config.delta_ratio` is replaced by `bool deltas`.
