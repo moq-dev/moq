@@ -7,7 +7,8 @@ Location `{g, 0}` as all of group g, the same way it already writes the FETCH
 request. A peer answering our whole-group FETCH with `{g, 0}` is served, not
 refused, and a peer reading our answer no longer concludes that group g+1 does
 not exist. A FETCH ending at `{2^64-1, 0}` gets the NOT_SUPPORTED that other
-multi-group ranges get, on every draft.
+multi-group ranges get, on draft 17 and later, the drafts whose encoding can
+carry it (14 to 16 cap a varint at `2^62-1`).
 
 ## Plan
 
