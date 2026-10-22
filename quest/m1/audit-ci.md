@@ -69,7 +69,7 @@ Check first (from the test cost audit's m0 run, 2026-10-19):
   was queued. Check the entry's head branch and what merged around it before
   calling it a flake.
 - Owned elsewhere: Rust advisories by
-  [the dependency audit](/quest/m1/audit-deps.md). The release toolchain now
+  [the dependency audit](/quest/m2/audit-deps.md). The release toolchain now
   links.
 - Re-running a single job in place cannot redeploy Pages: the earlier
   attempt's `github-pages` artifact remains and `deploy-pages` refuses two.
