@@ -1,4 +1,4 @@
-# [S] OBS source picks renditions by the catalog contract
+# [M] OBS source picks renditions by the catalog contract
 
 ## Goal
 
@@ -38,10 +38,25 @@ Decided with the maintainer on 2026-10-22:
   to moq-ffi until another binding consumer needs one.
 - Make `epoch` part of rendition identity for both the active and the
   pending track.
+- moq-ffi's `MoqVideo` record drops hang's `preference` today, so OBS
+  cannot rank by it. Add `preference: i32` (default 0) to `MoqVideo` in
+  `rs/moq-ffi/src/media.rs` and carry it through the Cross-Package Sync
+  bindings and docs. Every binding then sees a publisher's compatibility
+  transcode (`-1`). Decided in review of
+  [moq-dev/moq#6366](https://github.com/moq-dev/moq/pull/6366) to do this
+  in the same quest rather than a separate one.
 
-Extend `cpp/obs/test/moq-source-test.cpp` with these cases: video and audio ranking order, a
-disabled first rendition, an all-disabled section, and an epoch-only change.
-No public API or wire change.
+Extend `cpp/obs/test/moq-source-test.cpp` with these cases:
+
+- video and audio ranking order, including a preference tie-break
+- falling through from an undecodable top rendition (unsupported codec or
+  audio layout) to a playable second one
+- a disabled first rendition
+- an all-disabled section
+- an epoch-only change
+
+Public API: an additive `preference` field on every binding's video
+catalog record. Wire: none.
 
 ## Related
 
