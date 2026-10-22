@@ -44,6 +44,9 @@ tracing-log = ["tracing/log"]
 rustls-log = ["rustls?/logging"]
 # Enable qlog support
 qlog = ["dep:qlog"]
+# The sans-IO QMux connection, which runs the stream state machine over a reliable, ordered
+# transport. Driven by the `qmux` crate.
+mux = []
 # Internal (PRIVATE!) features used to aid testing.
 # Don't rely on these whatsoever. They may disappear at any time.
 
@@ -90,6 +93,8 @@ criterion = { workspace = true }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
 moq-clock = { path = "../moq-clock" }
+# The mux module's tests run in the default merge gate.
+moq-quic = { path = ".", features = ["mux"] }
 proptest = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring"] }
 stats_alloc = "0.1.10"

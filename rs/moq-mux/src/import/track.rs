@@ -27,7 +27,7 @@ fn video_hint(init: &VideoInit, default_codec: Option<hang::catalog::VideoCodec>
 /// as the moq-hang draft requires, so each frame timestamp lands on a media tick.
 fn track_info<E: CatalogExt>(
 	reserved: &crate::catalog::Reserved<E>,
-	priority: u8,
+	priority: i8,
 	container: &hang::catalog::Container,
 ) -> Result<moq_net::track::Info> {
 	let info = reserved.track_info(priority);

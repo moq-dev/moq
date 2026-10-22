@@ -29,16 +29,18 @@ public final class BroadcastConsumer: Sendable {
     /// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
     ///
     /// `reference` is `Media.Video.broadcast` / `Media.Audio.broadcast`: `nil` or empty names this
-    /// broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it on a
-    /// rendition that carries one before `subscribeTrack` or `fetchGroup`, which take a track name
-    /// rather than a rendition: the rendition's `track`, or its ID when `nil`. The
-    /// rendition-based `Media.TrackConsumer.subscribe`, `Media.GroupConsumer.fetch`,
+    /// broadcast, anything else names a sibling relative to it (e.g. `./source`). `epoch` is the
+    /// same rendition's `epoch`: a broadcast proven to serve another instance throws instead of
+    /// resolving, and a route without an epoch cannot prove one, so there it is best effort. Call
+    /// it on a rendition that carries a reference before `subscribeTrack` or `fetchGroup`, which
+    /// take a track name rather than a rendition: the rendition's `track`, or its ID when `nil`.
+    /// The rendition-based `Media.TrackConsumer.subscribe`, `Media.GroupConsumer.fetch`,
     /// `Audio.Consumer.subscribe`, and `Video.Consumer.subscribe` resolve both themselves.
     ///
     /// Throws if this broadcast came from a local producer rather than an origin, since a
     /// standalone broadcast has no sibling to name.
-    public func resolve(_ reference: String?) async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.resolve(reference: reference))
+    public func resolve(_ reference: String?, epoch: String?) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.resolve(reference: reference, epoch: epoch))
     }
 
 }

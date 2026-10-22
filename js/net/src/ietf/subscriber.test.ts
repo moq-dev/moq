@@ -867,6 +867,18 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
 });
 
+test("a consumed broadcast refuses to list its tracks rather than claim it has none", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
+	const consumer = subscriber.consume(Path.from("theirs"));
+	await expect(consumer.tracks().next()).rejects.toThrow("track listing requires moq-lite-07");
+	// A later reader asks again, and is refused again.
+	await expect(consumer.tracks().next()).rejects.toThrow("track listing requires moq-lite-07");
+	consumer.close();
+	subscriber.close();
+});
+
 /**
  * A second PUBLISH_NAMESPACE on the stream that already carries one is no longer an
  * update: it is the base draft's duplicate request, a protocol violation.
@@ -1214,9 +1226,9 @@ test("a compact END_OF_TRACK at object 5 with properties is subgroup 5, refused 
 	}
 });
 
-test("older peer without priority property inherits wire priority 128", async () => {
+test("older peer without priority property inherits the unset priority", async () => {
 	const { subscriber, track } = await subscribeTrack();
-	expect((await track.info()).priority).toBe(0xff - 128);
+	expect((await track.info()).priority).toBe(0);
 	const group = new GroupMessage({
 		trackAlias: ALIAS,
 		groupId: 3,
@@ -1225,7 +1237,7 @@ test("older peer without priority property inherits wire priority 128", async ()
 		flags: { ...groupFlags(true), hasPriority: false },
 	});
 	await subscriber.handleGroup(group, new Reader(undefined, encodeObjects([0]), VERSION));
-	expect(group.publisherPriority).toBe(128);
+	expect(group.publisherPriority).toBe(127);
 	track.close();
 });
 
@@ -1245,7 +1257,7 @@ test("an info-only lookup waits for SUBSCRIBE_OK instead of abandoning", async (
 		trackAlias: ALIAS,
 		properties: { priority: 37 },
 	}).encode(peer.writer, VERSION);
-	expect((await info).priority).toBe(0xff - 37);
+	expect((await info).priority).toBe(127 - 37);
 });
 
 test("SUBSCRIBE_OK's largest is known before any group arrives", async () => {
@@ -1339,7 +1351,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 	if (outcome === "acceptance") {
 		await peer.writer.u53(SubscribeOk.id);
 		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
-		expect(await info).toMatchObject({ priority: 127 });
+		expect(await info).toMatchObject({ priority: 0 });
 		expect(returned.closed.peek()).toBeUndefined();
 	} else {
 		jest.advanceTimersByTime(4_000);
@@ -1406,7 +1418,7 @@ test("setup abandonment closes before a queued viewer can attach", async () => {
 	const request = await Subscribe.decode(next.reader, VERSION);
 	await next.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(next.writer, VERSION);
-	expect(await info).toMatchObject({ priority: 127 });
+	expect(await info).toMatchObject({ priority: 0 });
 });
 
 test("abandonment cancels once and a late acceptance cannot capture a reused alias", async () => {
@@ -1512,7 +1524,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 		properties: { priority: 37 },
 	}).encode(peer.writer, VERSION);
 	await arriving;
-	expect((await track.info()).priority).toBe(0xff - 37);
+	expect((await track.info()).priority).toBe(127 - 37);
 	expect(group.publisherPriority).toBe(37);
 	const ordered = track.ordered();
 	expect((await ordered.nextGroup())?.sequence).toBe(3);
@@ -1525,7 +1537,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	});
 	await subscriber.handleGroup(explicit, new Reader(undefined, encodeObjects([0]), VERSION));
 	expect(explicit.publisherPriority).toBe(9);
-	expect((await track.info()).priority).toBe(0xff - 37);
+	expect((await track.info()).priority).toBe(127 - 37);
 	expect((await ordered.nextGroup())?.sequence).toBe(4);
 	ordered.close();
 	track.close();
@@ -2353,7 +2365,7 @@ for (const negotiated of [false, true]) {
 		expect(await peer.reader.u53()).toBe(SubscribeUpdate.id);
 		const update = await SubscribeUpdate.decode(peer.reader, VERSION);
 		expect(update.parameters.maxAge).toBe(negotiated ? 900 : undefined);
-		expect(update.parameters.subscriberPriority).toBe(246);
+		expect(update.parameters.subscriberPriority).toBe(127 - 9);
 		tolerant.close();
 		track.close();
 		peer.close();
@@ -2400,7 +2412,7 @@ test("a draft 16 subscription update waits for the last one's answer", async () 
 		await new RequestOk({ requestId: first.ownRequestId }).encode(peer.writer, version);
 		expect(await next).toBe(SubscribeUpdate.id);
 		const second = await SubscribeUpdate.decode(peer.reader, version);
-		expect(second.parameters.subscriberPriority).toBe(235);
+		expect(second.parameters.subscriberPriority).toBe(127 - 20);
 		higher.close();
 		highest.close();
 	} finally {

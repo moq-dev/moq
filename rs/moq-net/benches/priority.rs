@@ -21,7 +21,7 @@ const OVERFLOW_DEPTHS: [usize; 3] = [256, 1_024, 4_096];
 fn filled(depth: usize) -> (PriorityQueue, Vec<PriorityHandle>) {
 	let queue = PriorityQueue::default();
 	let handles = (0..depth)
-		.map(|group| queue.insert(Priority::new(100, 0, group as u64)))
+		.map(|group| queue.insert(Priority::new(-28, 0, group as u64)))
 		.collect();
 	(queue, handles)
 }
@@ -33,7 +33,7 @@ fn bench_insert(c: &mut Criterion) {
 			b.iter_batched_ref(
 				|| filled(depth),
 				|(queue, handles)| {
-					handles.push(queue.insert(Priority::new(u8::MAX, 0, u64::MAX)));
+					handles.push(queue.insert(Priority::new(i8::MAX, 0, u64::MAX)));
 				},
 				BatchSize::SmallInput,
 			);
@@ -45,9 +45,9 @@ fn bench_insert(c: &mut Criterion) {
 fn overflow(depth: usize) -> Vec<PriorityHandle> {
 	let queue = PriorityQueue::default();
 	let mut handles: Vec<_> = (0..255)
-		.map(|group| queue.insert(Priority::new(200, 0, group)))
+		.map(|group| queue.insert(Priority::new(72, 0, group)))
 		.collect();
-	handles.extend((255..depth as u64).map(|group| queue.insert(Priority::new(100, 0, group))));
+	handles.extend((255..depth as u64).map(|group| queue.insert(Priority::new(-28, 0, group))));
 	handles
 }
 

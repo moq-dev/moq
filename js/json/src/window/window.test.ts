@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
+import { Group, Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
 
@@ -16,7 +16,7 @@ class Live {
 	producer: Producer<Rec>;
 	consumer: Consumer<Rec>;
 	events: Event<Rec>[] = [];
-	#next?: Promise<Event<Rec> | undefined>;
+	#next?: Promise<Timed<Event<Rec>> | undefined>;
 
 	constructor(config: { opRatio?: number; compression?: boolean; checkpointRecords?: number } = {}) {
 		const track = new Track.Producer("test");
@@ -46,7 +46,7 @@ class Live {
 			]);
 			if (event === idle || event === undefined) return;
 			this.#next = undefined;
-			this.events.push(event);
+			this.events.push(event.value);
 		}
 	}
 
@@ -292,7 +292,7 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 		let group = track.appendGroup();
 		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.now() });
 		frame.commit();
-		expect(await consumer.next()).toEqual({ push: { index: 0, value: { n: 0 } } });
+		expect((await consumer.next())?.value).toEqual({ push: { index: 0, value: { n: 0 } } });
 		group.close(error);
 
 		frame = encoder.push({ n: 1 });
@@ -302,7 +302,7 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 		group.close();
 		track.close();
 
-		expect(await consumer.next()).toEqual({ push: { index: 1, value: { n: 1 } } });
+		expect((await consumer.next())?.value).toEqual({ push: { index: 1, value: { n: 1 } } });
 		expect(await consumer.next()).toBeUndefined();
 	}
 });
@@ -318,7 +318,7 @@ test("a fresh consumer adopts the current offset", async () => {
 	const consumer = new Consumer<Rec>({ track: subscriber });
 	producer.finish();
 	const events: Event<Rec>[] = [];
-	for await (const event of consumer) events.push(event);
+	for await (const event of consumer) events.push(event.value);
 
 	expect(events).toEqual([{ push: { index: 3, value: { n: 3 } } }, { push: { index: 4, value: { n: 4 } } }]);
 });
@@ -453,4 +453,53 @@ test("edits keep their timestamps, and an edit without one goes out untimed", as
 			expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(at?.as(Time.Timescale.MILLI));
 		}
 	}
+});
+
+test("events carry their frame's timestamp, and a header's restated records get the header's", async () => {
+	const at = (ms: number) => Time.Timestamp.fromMillis(ms);
+	const millis = (event: Timed<Event<Rec>> | undefined) => event?.at?.as(Time.Timescale.MILLI);
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
+	const live = new Consumer<Rec>({ track: track.subscribe() });
+	const late = track.subscribe();
+	const producer = new Producer<Rec>({ track });
+
+	producer.push({ value: { n: 1 }, at: at(100) });
+	producer.push({ value: { n: 2 }, at: at(200) });
+	producer.pop(1, at(300));
+	for (const [value, ms] of [
+		[{ push: { index: 0, value: { n: 1 } } }, 100],
+		[{ push: { index: 1, value: { n: 2 } } }, 200],
+		[{ pop: { start: 0, end: 1 } }, 300],
+	] as const) {
+		const event = await live.next();
+		expect(event?.value).toEqual(value);
+		expect(millis(event)).toBe(ms);
+	}
+
+	// A reader joining at a later group learns of the retained record from its header.
+	producer.cut();
+	producer.push({ value: { n: 3 }, at: at(400) });
+	producer.finish();
+	late.setGroups({ start: { included: 1 } });
+	const events: Timed<Event<Rec>>[] = [];
+	for await (const event of new Consumer<Rec>({ track: late })) events.push(event);
+	expect(events.map((event) => event.value)).toEqual([
+		{ push: { index: 1, value: { n: 2 } } },
+		{ push: { index: 2, value: { n: 3 } } },
+	]);
+	expect(events.map(millis)).toEqual([400, 400]);
+});
+
+test("events on an untimed track have no timestamp", async () => {
+	const track = new Track.Producer("test");
+	const consumer = new Consumer<Rec>({ track: track.subscribe() });
+	const producer = new Producer<Rec>({ track });
+	producer.push({ value: { n: 0 } });
+	producer.pop(1);
+	producer.finish();
+
+	const events: Timed<Event<Rec>>[] = [];
+	for await (const event of consumer) events.push(event);
+	expect(events.length).toBe(2);
+	expect(events.every((event) => event.at === undefined)).toBeTrue();
 });

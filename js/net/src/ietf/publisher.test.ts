@@ -74,8 +74,8 @@ async function opens(read: Promise<{ done: boolean }>, clock: Manual): Promise<b
 		},
 		() => {},
 	);
-	await clock.advanceAsync(Nano.zero);
-	await clock.advanceAsync(Nano.fromMilli(Milli(STREAM_WAIT)));
+	await clock.advance(Nano.zero);
+	await clock.advance(Nano.fromMilli(Milli(STREAM_WAIT)));
 	return opened;
 }
 
@@ -793,16 +793,16 @@ test("a group stream whose FIN never completes is reset when the group expires",
 		await closeStarted;
 		// The newest group is never stale, however long its FIN takes. Kept inside the cache's
 		// idle window: a group evicted once superseded is no longer judged.
-		await clock.advanceAsync(Nano.fromMilli(Milli(budget * 2)));
+		await clock.advance(Nano.fromMilli(Milli(budget * 2)));
 		expect(reset).toBe(false);
 
 		// Its successor presents no further, so only the wall clock since it arrived convicts
 		// group 0, after the track has ended.
 		write(1);
 		track.close();
-		await clock.advanceAsync(Nano.fromMilli(Milli(budget - 1)));
+		await clock.advance(Nano.fromMilli(Milli(budget - 1)));
 		expect(reset).toBe(false);
-		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await clock.advance(Nano.fromMilli(Milli(1)));
 		await streamReset;
 	} finally {
 		client.close();
@@ -2513,7 +2513,7 @@ test("drafts 14 to 16 apply an update and still end a subscription on UNSUBSCRIB
 			expect(await peer.reader.u53()).toBe(RequestOk.id);
 			expect((await RequestOk.decode(peer.reader, version)).requestId).toBe(2n);
 		}
-		while (track.subscription.peek()?.priority !== 245) await track.subscription.changed();
+		while (track.subscription.peek()?.priority !== 117) await track.subscription.changed();
 
 		await peer.writer.u53(Unsubscribe.id);
 		await new Unsubscribe({ requestId: 0n }).encode(peer.writer, version);
@@ -3786,14 +3786,14 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		await client.writer.write(new Uint8Array([0x02, 0, 4, 2, 1, 0x20, 10]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.priority).toBe(245);
+		expect(track.subscription.peek()?.priority).toBe(117);
 		// Only the priority changes; retention and the group range survive.
 		expect(track.subscription.peek()?.maxDelay).toBe(before?.maxDelay);
 		expect(track.subscription.peek()?.groups).toEqual(before?.groups);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.priority).toBe(245);
+		expect(track.subscription.peek()?.priority).toBe(117);
 	} finally {
 		client.close();
 		track.close();

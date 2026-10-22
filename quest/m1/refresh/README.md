@@ -16,8 +16,8 @@ Boundaries:
   themselves without a timer.
 - Joining is the only trigger. There is no explicit subscriber request; a
   decoder that lost sync rereads the cached group from its start.
-- Non-goals: flate modes, json stream mode, and importers that cannot force
-  a keyframe (CMAF, TS).
+- Non-goals: json stream mode and importers that cannot force a keyframe
+  (CMAF, TS).
 
 ## Plan
 
@@ -68,4 +68,3 @@ Work owned by this README, after the children land:
 ## Related
 
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - its dynamic-groups child is the IETF half this epic promotes
-- [JSON window timestamps](/quest/m1/json-window-timestamps.md) - touches the same window consumers

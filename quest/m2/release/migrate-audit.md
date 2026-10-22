@@ -39,9 +39,12 @@ Decided 2026-10-16 (maintainer interview):
   checks are out of scope until a missed break shows they are needed.
 - For this cut, fill every gap the report and the manual pass show in the
   matching `MIGRATE.md`. Known gaps: breaking releases cut after the
-  2026-09-23 train have no transition section yet (moq-json 0.4 -> 0.5,
-  moq-flate 0.1 -> 0.2, and possibly moq-audio and moq-video), because their
-  breaks predate the backfill's merge base.
+  2026-09-23 train have no transition section yet (moq-json 0.4 -> 0.5
+  and possibly moq-audio and moq-video), because their breaks predate the
+  backfill's merge base. The [compression migration](/quest/m1/compress/migrate.md)
+  deletes moq-flate before this cut: audit the migration from its published
+  API to ordinary tracks with `compress`, rather than promising a new
+  moq-flate transition release.
 - Compile-check the code in every `MIGRATE.md` section the cut ships against
   the candidate. Nothing else builds it.
 - Required by the cut, after m1's breaking work has landed.

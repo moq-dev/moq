@@ -645,7 +645,7 @@ async fn a_track_without_usable_info_is_not_found() {
 	archive
 		.raw(
 			&Key::info("future").unwrap(),
-			br#"{"version":3,"priority":0,"timescale":1000}"#,
+			br#"{"version":4,"priority":0,"timescale":1000}"#,
 		)
 		.await;
 
@@ -694,7 +694,7 @@ async fn timeline_tracks_are_republished_and_finished_on_request() {
 
 	let mut records = Vec::new();
 	while let Some(event) = timeline.next().await.unwrap() {
-		if let window::Event::Push { value, .. } = event {
+		if let window::Event::Push { value, .. } = event.value {
 			records.push(value.sequence);
 		}
 	}
