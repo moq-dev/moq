@@ -10,6 +10,12 @@ How to update your code for each breaking change, newest first.
 Pass `deltas = false` where you passed `deltaRatio = 0u`, and drop the argument otherwise.
 Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
 
+### Catalog references carry their epoch
+
+`Video` and `Audio` gain `epoch`, the publisher instance their `broadcast` reference names; it defaults to `null`, so only positional construction changes.
+`BroadcastConsumer.resolve(reference)` becomes `resolve(reference, epoch)`; pass the rendition's `epoch` alongside its `broadcast`, or `null` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, throw `MoqException.Mux` for a rendition whose broadcast is proven to serve another epoch.
+
 ### Finished tracks stay until the broadcast ends (#6157)
 
 A finished track now stays listed, with its catalog rendition and demand, until its broadcast ends or the new `BroadcastProducer.finish()` lets go.

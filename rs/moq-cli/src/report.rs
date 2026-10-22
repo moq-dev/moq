@@ -209,7 +209,7 @@ impl Stats {
 
 	/// Write a snapshot every interval, for as long as the import runs beside it.
 	pub async fn run(&mut self) -> Infallible {
-		let mut interval = tokio::time::interval(INTERVAL);
+		let mut interval = moq_clock::interval(INTERVAL);
 		loop {
 			interval.tick().await;
 			self.write();
@@ -309,7 +309,7 @@ impl Echo {
 				None
 			}
 		};
-		let mut interval = tokio::time::interval(INTERVAL);
+		let mut interval = moq_clock::interval(INTERVAL);
 		loop {
 			tokio::select! {
 				update = next(&mut catalog) => match update {
@@ -548,7 +548,7 @@ impl Readers {
 		};
 		let id = reader.id();
 		self.drains.spawn(async move {
-			tokio::time::sleep(DRAIN).await;
+			moq_clock::sleep(DRAIN).await;
 			(path, id)
 		});
 	}
@@ -603,6 +603,7 @@ async fn read_echo(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use tokio::io::{AsyncBufReadExt, BufReader};

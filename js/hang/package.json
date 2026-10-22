@@ -12,6 +12,7 @@
 	"sideEffects": false,
 	"exports": {
 		".": "./src/index.ts",
+		"./cmaf": "./src/cmaf/index.ts",
 		"./catalog": "./src/catalog/index.ts",
 		"./container": "./src/container/index.ts",
 		"./util": "./src/util/index.ts"
@@ -31,7 +32,6 @@
 		"@moq/net": "workspace:^",
 		"@moq/signals": "workspace:^",
 		"@svta/cml-iso-bmff": "^1.0.7",
-		"@svta/cml-utils": "^1.6.2",
 		"@zod/mini": "^4.6.7",
 		"zod": "^4.6.7"
 	},
