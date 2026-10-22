@@ -256,6 +256,30 @@ test("mutate starts from the configured initial value", async () => {
 	expect((await consumer.next())?.value).toEqual({ a: 1 });
 });
 
+// A rejected edit never reached the wire, so the next owner starts from the last value that did.
+// Carrying the rejected edit forward would fail every later publish the same way. (Mirrors the Rust
+// `a_rejected_edit_leaves_modify_at_the_last_written_value`.)
+test("a rejected mutate leaves the value at the last one written", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<Value>({ track, initial: {} });
+	producer.mutate((v) => {
+		v.video = "v1";
+	});
+
+	// Serializes past the group cache limit, so the frame cannot be published.
+	expect(() =>
+		producer.mutate((v) => {
+			v.big = "x".repeat(Group.MAX_GROUP_CACHE_BYTES + 1);
+		}),
+	).toThrow(NetError.FrameTooLarge);
+
+	producer.mutate((v) => {
+		v.scte35 = 42;
+	});
+	producer.finish();
+	expect(await drainLatest(track.subscribe())).toEqual([{ video: "v1", scte35: 42 }]);
+});
+
 test("mutate without a prior value or initial throws", () => {
 	const producer = new Producer<Value>({ track: new Track.Producer("test") });
 	expect(() => producer.mutate(() => {})).toThrow();
@@ -364,6 +388,35 @@ test("a refresh after an older update starts at the newest timestamp", async () 
 	expect(restated).toEqual([
 		[30, { n: 0 }],
 		[30, { n: 3 }],
+	]);
+});
+
+// A refresh restates the last value written, never one whose update was rejected, and the next
+// update rides as a delta against it. (Mirrors the Rust
+// `a_refresh_after_a_rejected_update_restates_the_last_written_value`.)
+test("a refresh after a rejected update restates the last written value", async () => {
+	const track = new Track.Producer("test").accept({ refresh: 1 });
+	const producer = new Producer<Value>({ track });
+	fill(producer);
+
+	// Serializes past the group cache limit, so the frame cannot be published.
+	const oversized = { big: "x".repeat(Group.MAX_GROUP_CACHE_BYTES + 1) };
+	expect(() => producer.update({ value: oversized })).toThrow(NetError.FrameTooLarge);
+
+	const joiner = track.subscribe();
+	await settle();
+	producer.update({ value: { n: 4 } });
+	producer.finish();
+	joiner.close();
+
+	expect(await structure(track.subscribe({ maxDelay: REPLAY_LATENCY }).ordered())).toEqual([4, 2]);
+	expect(await drain(track.subscribe({ maxDelay: REPLAY_LATENCY }))).toEqual([
+		{ n: 0 },
+		{ n: 1 },
+		{ n: 2 },
+		{ n: 3 },
+		{ n: 3 },
+		{ n: 4 },
 	]);
 });
 

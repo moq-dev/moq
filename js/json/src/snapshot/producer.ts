@@ -94,7 +94,8 @@ export class Producer<T> {
 		if (!frame) return;
 
 		// A throw here leaves the frame uncommitted, so the next update resynchronizes with a fresh
-		// snapshot. A delta against a snapshot no consumer ever saw would be unreadable.
+		// snapshot. A delta against a snapshot no consumer ever saw would be unreadable. The value
+		// stays the last one written, so a refresh restates that rather than the rejection.
 		this.#write(frame, at);
 		frame.commit();
 		if (at && !at.isBefore(this.#at ?? at)) this.#at = at;
@@ -159,11 +160,10 @@ export class Producer<T> {
 	 * starts from the latest value, so sections compose instead of clobbering one another. Use
 	 * {@link update} to replace the whole value instead.
 	 *
-	 * After a rejected write the current value is what the producer last *tried* to publish, which
-	 * consumers never received. That is deliberate: dropping a rejected owner's field would clobber it
-	 * for whoever edits next, which is the failure this API exists to prevent. The owner whose write
-	 * failed sees the error, and the next successful publish is a full snapshot carrying the composed
-	 * value, so consumers converge on it either way.
+	 * A rejected edit never reached the wire, so the current value stays the last one that did. The
+	 * owner whose write failed sees the error and can retry; carrying the rejected edit forward would
+	 * instead fail every later owner's publish the same way, or publish a value its owner was told
+	 * failed.
 	 */
 	mutate(fn: (value: T) => void, at?: Time.Timestamp): void {
 		// Start from the last-published value, falling back to the configured initial value. We

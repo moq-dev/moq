@@ -600,6 +600,40 @@ mod test {
 		assert_eq!(frames(&mut fresh), vec![(Some(ms(130)), json!({ "n": 3 }))]);
 	}
 
+	/// A refresh restates the last value written, never one whose update was rejected, and the next
+	/// update rides as a delta against it.
+	#[test]
+	fn a_refresh_after_a_rejected_update_restates_the_last_written_value() {
+		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
+		let (mut producer, track) = producer_on(cfg(true), timed().with_refresh(1));
+		for n in 0..=3 {
+			producer
+				.update(moq_net::Timed::from(&json!({ "n": n })).at(ms(100 + n)))
+				.unwrap();
+		}
+
+		// Untimed on a timed track, so the frame is rejected before it reaches a group.
+		assert!(matches!(
+			producer.update(&json!({ "n": 99 })),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
+
+		let mut late = producer.consume();
+		assert!(matches!(
+			producer.poll_refresh(&kio::Waiter::noop()),
+			Poll::Ready(Ok(()))
+		));
+		let mut fresh = groups(&mut late).pop().expect("the fresh group");
+		assert_eq!(fresh.sequence, 1);
+		assert_eq!(frames(&mut fresh), vec![(Some(ms(103)), json!({ "n": 3 }))]);
+
+		producer
+			.update(moq_net::Timed::from(&json!({ "n": 4 })).at(ms(104)))
+			.unwrap();
+		producer.finish().unwrap();
+		assert_eq!(drain(track).last(), Some(&json!({ "n": 4 })));
+	}
+
 	/// Without a ratio on the track, no join asks for a group, however large the deltas grow.
 	#[test]
 	fn no_ratio_never_refreshes() {
@@ -914,36 +948,25 @@ mod test {
 		assert_eq!(drain(track).last().unwrap(), &json!({ "a": 3 }));
 	}
 
-	/// A rejected frame must not erase the last-published value: `modify` seeds its editing guard from
-	/// it, so losing it makes the next edit publish a document with every other field dropped.
+	/// A rejected edit never reached the wire, so the next `modify` starts from the last value that
+	/// did: neither erased (every other field dropped) nor carrying the rejected edit, which would
+	/// fail again, or publish something its owner was told failed, under whoever edits next.
 	#[test]
-	fn a_failed_publish_keeps_the_value_for_modify() {
-		#[derive(serde::Serialize, serde::Deserialize, Default, PartialEq, Debug)]
-		struct Doc {
-			#[serde(skip_serializing_if = "Option::is_none")]
-			video: Option<String>,
-			#[serde(skip_serializing_if = "Option::is_none")]
-			scte35: Option<u32>,
-		}
+	fn a_rejected_edit_leaves_modify_at_the_last_written_value() {
+		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
+		let (mut producer, _track) = producer_on(cfg(true), timed());
+		producer
+			.mutate(Some(ms(100)), |value| *value = json!({ "video": "v1" }))
+			.unwrap();
 
-		// Every frame is rejected, so each publish fails and the encoder resynchronizes.
-		let mut producer = Producer::<Doc>::new(rejecting_track(), Config::default());
+		// Untimed on a timed track, so the frame is rejected before it reaches a group.
+		assert!(matches!(
+			producer.mutate(None, |value| value["scte35"] = json!(42)),
+			Err(crate::Error::Net(moq_net::Error::TimestampMismatch))
+		));
 
-		let mut guard = producer.modify(Some(late())).unwrap();
-		guard.video = Some("v1".to_string());
-		assert!(guard.commit().is_err());
-
-		let mut guard = producer.modify(Some(late())).unwrap();
-		guard.scte35 = Some(42);
-		assert!(guard.commit().is_err());
-
-		// The editing baseline still carries the composed value.
-		let guard = producer.modify(Some(late())).unwrap();
-		assert_eq!(
-			guard.video,
-			Some("v1".to_string()),
-			"a rejected frame erased the baseline"
-		);
+		let guard = producer.modify(Some(ms(101))).unwrap();
+		assert_eq!(*guard, json!({ "video": "v1" }));
 	}
 
 	/// Finishing takes the open group with it, so the encoder must stop emitting deltas into a group

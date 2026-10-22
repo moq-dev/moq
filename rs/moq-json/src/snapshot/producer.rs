@@ -147,12 +147,10 @@ impl<T: Serialize> Producer<T> {
 	/// so far, composed, or `T::default()` if nothing has been. Editing it through [`DerefMut`] marks
 	/// the guard dirty; when a dirty guard drops it publishes the result, a no-op if unchanged.
 	///
-	/// After a rejected frame the current value is what the producer last *tried* to publish, which
-	/// consumers never received. That is deliberate. The guard exists so independent owners can each
-	/// edit their own field without clobbering, and dropping a rejected owner's field would clobber it
-	/// for whoever edits next, which is the failure this API exists to prevent. The owner whose write
-	/// failed sees the error and can act on it; the next successful publish is a full snapshot
-	/// carrying the composed value, so consumers converge on it either way.
+	/// A rejected edit never reached the wire, so the current value stays the last one that did. The
+	/// owner whose write failed sees the error and can retry; carrying the rejected edit forward would
+	/// instead fail every later owner's publish the same way, or publish a value its owner was told
+	/// failed.
 	///
 	/// Reach for this over [`mutate`](Self::mutate) when several edits belong to one publish. The
 	/// guard holds the producer's lock for its lifetime, so independent owners are serialized: each
@@ -374,6 +372,7 @@ impl<T: Serialize> Inner<T> {
 		// A failed write drops `frame` uncommitted, which resets the encoder so the next update
 		// resynchronizes with a fresh snapshot. Most failures kill the track outright, but a rejected
 		// frame (too large) doesn't, and a delta against a snapshot no consumer ever saw is unreadable.
+		// The value stays the last one written, so a refresh restates that rather than the rejection.
 		let timestamp = payload.at;
 		track.write(timestamp, &frame)?;
 		let size = frame.payload.len();

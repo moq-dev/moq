@@ -306,6 +306,18 @@ test("a resync keeps the value for mutate", () => {
 	expect(encoder.value).toEqual({ video: "v1", scte35: 1 });
 });
 
+// A frame that never reached the wire must not become the value a refresh restates or an edit
+// starts from. (Mirrors the Rust `value_tracks_the_baseline`.)
+test("an uncommitted frame leaves the value at the last committed", () => {
+	const encoder = new Encoder<Doc>({ deltas: true });
+	commit(encoder, { a: 1, b: 1 });
+	commit(encoder, { a: 1, b: 2 });
+
+	encoder.update({ a: 1, b: 3 });
+	expect(encoder.value).toEqual({ a: 1, b: 2 });
+	expect(encoder.snapshot()?.payload).toEqual(new TextEncoder().encode(JSON.stringify({ a: 1, b: 2 })));
+});
+
 // The reconstruction is the base every later delta merges into, so handing out the live object lets
 // a caller change fields that no frame ever carried.
 test("the decoder does not expose its live reconstruction", () => {

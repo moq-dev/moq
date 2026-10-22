@@ -12,6 +12,8 @@ A group no longer rolls on a byte budget: create the track with a `refresh` rati
 Without a ratio a group rolls only at its frame and byte caps.
 An `Encoder` user restates with `encoder.snapshot()` once `demand().wanted` passes the largest group it wrote.
 
+`encoder.value` (and so `producer.mutate()`) now holds the last committed value: a rejected publish no longer carries into the next edit, so retry the edit yourself if you still want it.
+
 ### Duplicate keys are refused
 
 Every decoder throws `DuplicateKey` for a frame in which a JSON object repeats a key, where `JSON.parse` used to keep the last copy.

@@ -63,17 +63,19 @@ export interface Encoded {
 /**
  * An encoded frame the caller has not yet acknowledged writing, returned by {@link Encoder.update}.
  *
- * Write the frame, then {@link commit}. A frame that is never committed never reached the wire, so
- * the encoder resynchronizes on the next {@link Encoder.update}: it starts a fresh snapshot rather
- * than emitting deltas against a baseline no consumer received.
+ * Write the frame, then {@link commit}. The frame's value is staged until commit, so one that is
+ * never committed leaves {@link Encoder.value} at the last value that reached the wire, and the
+ * encoder resynchronizes on the next {@link Encoder.update}: it starts a fresh snapshot rather than
+ * emitting deltas against a group no consumer received.
  *
- * This is a recovery, not a rollback. Producing a delta payload advances the group's DEFLATE window
- * and that can't be undone, so a snapshot is the only sound way back. Forgetting to commit a frame
- * that *was* written is therefore merely wasteful (one redundant snapshot), never incorrect.
+ * The group state is a recovery, not a rollback. Producing a delta payload advances the group's
+ * DEFLATE window and that can't be undone, so a snapshot is the only sound way back. Forgetting to
+ * commit a frame that *was* written therefore costs one redundant snapshot and leaves the value a
+ * step behind, but never corrupts the stream.
  */
 export interface Pending extends Encoded {
 	/**
-	 * Acknowledge that the frame reached the wire, keeping the encoder's state.
+	 * Acknowledge that the frame reached the wire, applying its value to the baseline.
 	 *
 	 * Only call this once the write has actually succeeded. Committing a frame that failed to write
 	 * is the one thing that corrupts the stream.
@@ -106,8 +108,8 @@ export class Encoder<T> {
 	#compress: boolean;
 	#maxGroupBytes: number;
 
-	// The last encoded value, normalized through JSON so it matches what landed on the wire. The
-	// baseline every delta is diffed against, and `undefined` until the first snapshot.
+	// The last committed value, normalized through JSON so it matches what landed on the wire. The
+	// baseline every delta is diffed against, and `undefined` until the first snapshot commits.
 	#last?: unknown;
 
 	// Bytes emitted into the current group, snapshot included: compressed frame sizes when
@@ -140,9 +142,10 @@ export class Encoder<T> {
 	}
 
 	/**
-	 * A copy of the last encoded value, or `undefined` before the first snapshot.
+	 * A copy of the last committed value, or `undefined` before the first snapshot commits.
 	 *
-	 * Copied rather than shared: the baseline is what the next delta is diffed against, so a caller
+	 * A frame left uncommitted never reached the wire, so its value never lands here. Copied rather
+	 * than shared: the baseline is what the next delta is diffed against, so a caller
 	 * mutating it in place would make a later change look unchanged and never reach consumers.
 	 */
 	get value(): T | undefined {
@@ -170,14 +173,14 @@ export class Encoder<T> {
 	/**
 	 * Encode a new value, as a snapshot or a delta.
 	 *
-	 * Returns `undefined` when the value is unchanged from the last one encoded, so nothing needs to
-	 * be written. Otherwise the frame comes back as a {@link Pending} the caller writes and then
+	 * Returns `undefined` when the value is unchanged from the last one committed, so nothing needs
+	 * to be written. Otherwise the frame comes back as a {@link Pending} the caller writes and then
 	 * commits; leaving one uncommitted resynchronizes the encoder here, on the next call.
 	 */
 	update(value: T): Pending | undefined {
-		// The previous frame was never acknowledged, so it never reached the wire. Drop the baseline
-		// and the DEFLATE window so this value goes out as a fresh snapshot rather than as a patch
-		// against a state no consumer holds.
+		// The previous frame was never acknowledged, so it never reached the wire. Drop the DEFLATE
+		// window so this value goes out as a fresh snapshot rather than as a patch against a state no
+		// consumer holds.
 		if (this.#pending) this.reset();
 
 		const valid = this.#config.schema ? this.#config.schema.parse(value) : value;
@@ -199,9 +202,9 @@ export class Encoder<T> {
 
 		const delta = this.#delta(json);
 
-		// Compress only after the diff, and advance the baseline only once the payload exists: framing
-		// can throw, and a baseline ahead of the wire would make the next delta unreadable. Matches the
-		// Rust encoder, which completes every fallible step before mutating state.
+		// Compress only after the diff, and advance the group only once the payload exists: framing can
+		// throw. The baseline advances on commit, so it never runs ahead of the wire. Matches the Rust
+		// encoder, which completes every fallible step before mutating state.
 		if (delta) {
 			const payload = this.#frame(delta);
 
@@ -215,20 +218,18 @@ export class Encoder<T> {
 			// Compressing first advances the window, but `#snapshot` opens a fresh one, so an
 			// over-budget delta costs only the wasted compression.
 			if (this.#groupBytes + payload.length <= this.#maxGroupBytes) {
-				this.#last = json;
 				this.#groupBytes += payload.length;
 				this.#groupFrames += 1;
-				return this.#pend({ payload, keyframe: false });
+				return this.#pend({ payload, keyframe: false }, json);
 			}
 		}
 
 		const payload = this.#snapshot(new TextEncoder().encode(text));
-		this.#last = json;
-		return this.#pend({ payload, keyframe: true });
+		return this.#pend({ payload, keyframe: true }, json);
 	}
 
 	/**
-	 * Restate the last encoded value as a full snapshot, which must open a new group.
+	 * Restate the last committed value as a full snapshot, which must open a new group.
 	 *
 	 * For a caller that opens groups itself: call it when a joiner wants a fresh group, such as when
 	 * the track's `demand().wanted` passes the largest group written, so the joiner reads the value
@@ -238,11 +239,12 @@ export class Encoder<T> {
 	snapshot(): Pending | undefined {
 		if (this.#last === undefined) return undefined;
 		const payload = this.#snapshot(new TextEncoder().encode(JSON.stringify(this.#last)));
-		return this.#pend({ payload, keyframe: true });
+		return this.#pend({ payload, keyframe: true }, this.#last);
 	}
 
-	// Hand a frame to the caller, marking it unacknowledged until they commit.
-	#pend(encoded: Encoded): Pending {
+	// Hand a frame to the caller, marking it unacknowledged until they commit, when `value` becomes
+	// the baseline.
+	#pend(encoded: Encoded, value: unknown): Pending {
 		this.#pending = true;
 		const generation = ++this.#generation;
 
@@ -252,7 +254,9 @@ export class Encoder<T> {
 				// A caller that starts the next update before this frame settles has already made the
 				// encoder resynchronize around it. Acknowledging it now would clear the flag belonging to
 				// the newer frame, so a later loss of that one would go unnoticed.
-				if (this.#generation === generation) this.#pending = false;
+				if (this.#generation !== generation) return;
+				this.#pending = false;
+				this.#last = value;
 			},
 		};
 	}

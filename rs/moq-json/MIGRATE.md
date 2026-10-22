@@ -12,6 +12,8 @@ A group no longer rolls on a byte budget: create the track with `Info::refresh` 
 Without a ratio a group rolls only at its frame and byte caps.
 An `Encoder` user restates with `Encoder::snapshot()` once `Demand::wanted` passes the largest group it wrote.
 
+`Encoder::value` (and so `Producer::modify`/`mutate`) now holds the last committed value: a rejected publish no longer carries into the next edit, so retry the edit yourself if you still want it.
+
 ### Consumers return `Timed<T>` (#5677)
 
 Snapshot and stream `next` / `poll_next` return `moq_net::Timed<T>`: read `.value` for the value and `.at` for the frame's exact timestamp, `None` when untimed.
