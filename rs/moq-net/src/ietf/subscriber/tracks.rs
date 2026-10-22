@@ -656,7 +656,8 @@ where
 					track_namespace: key.0.as_path(),
 					track_name: key.1.as_ref().into(),
 					subscriber_priority: super::super::priority::to_wire(0),
-					group_order: GroupOrder::Ascending,
+					// No update can change it, so it takes the order a reader gets by default.
+					group_order: track::Order::default().into(),
 					filter: Filter::NextObject,
 					fill: None,
 					properties_wanted: true,
@@ -1504,6 +1505,11 @@ mod tests {
 			assert_eq!(id, ietf::Subscribe::ID, "{version}");
 			let msg: ietf::Subscribe = body.message(version).unwrap();
 			assert_eq!(msg.track_name, "audio", "{version}");
+			assert_eq!(
+				msg.group_order,
+				crate::track::Order::default().into(),
+				"{version}: the order a reader gets by default"
+			);
 			assert!(!msg.forward, "{version}: the SUBSCRIBE forwards");
 
 			let ok = ietf::SubscribeOk {
