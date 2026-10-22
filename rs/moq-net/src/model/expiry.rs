@@ -114,7 +114,7 @@ impl Wakes {
 			}
 			let earliest = parked.deadlines.first_key_value().map_or(u64::MAX, |(at, _)| *at);
 			self.earliest.store(earliest, Ordering::Relaxed);
-			parked.deadlines_sweep = sweep_at(parked.deadlines.len());
+			parked.deadlines_sweep = lower(parked.deadlines_sweep, parked.deadlines.len());
 		}
 		woken.iter_mut().for_each(kio::WaiterList::wake);
 	}
@@ -131,7 +131,7 @@ impl Wakes {
 			parked.deadlines.retain(|_, list| !list.is_empty());
 			// `earliest` may now be below every deadline left, which only costs the next write
 			// the lock: `presented` recomputes it.
-			parked.deadlines_sweep = lower(parked.deadlines_sweep, parked.deadlines.len());
+			parked.deadlines_sweep = sweep_at(parked.deadlines.len());
 		}
 		parked.deadlines.entry(deadline).or_default().register(waiter);
 		self.earliest.fetch_min(deadline, Ordering::Relaxed);
@@ -368,6 +368,32 @@ mod test {
 		}
 		let (media, _) = wakes.deadlines_indexed();
 		assert!(media <= 4 * HELD_SWEEP_MIN, "{media} media deadlines indexed");
+	}
+
+	/// Live reads parked on distinct deadlines sweep only as often as the index doubles, so
+	/// parking N of them costs O(N), not a sweep over every one per park.
+	#[test]
+	fn live_deadlines_sweep_amortized() {
+		let wakes = Wakes::default();
+		let now = crate::time::Instant::ZERO;
+		let mut live = Vec::new();
+		let (mut media_sweeps, mut wall_sweeps) = (0, 0);
+		for i in 0..1_024u64 {
+			{
+				let parked = wakes.parked.lock();
+				media_sweeps += usize::from(parked.deadlines.len() >= parked.deadlines_sweep);
+				wall_sweeps += usize::from(parked.wall.len() >= parked.wall_sweep);
+			}
+			let waiter = kio::Waiter::noop();
+			let budget = Duration::from_secs(1) + Duration::from_micros(i);
+			wakes.watch_deadline(Timestamp::from_secs(10).unwrap(), budget, &waiter);
+			wakes.watch_wall(now + budget, &waiter);
+			live.push(waiter);
+		}
+		assert!(
+			media_sweeps <= 8 && wall_sweeps <= 8,
+			"{media_sweeps} media and {wall_sweeps} wall sweeps"
+		);
 	}
 
 	/// Reads parked on distinct deadlines that leave before either clock reaches them do

@@ -52,6 +52,9 @@
 //! live readers and finished fetches with budgets of their own: deadlines the finished
 //! fetches left indexed show up as a slope over them.
 //!
+//! `track_fetch_park` parks one more budgeted fetch beside live readers on deadlines of their
+//! own, so a park that sweeps the whole index shows up as a slope over the readers.
+//!
 //! `track_range_demand` moves one reader between ranges nobody else holds, over readers
 //! holding a given number of distinct overlapping ranges: both axes must stay flat, since
 //! a change touches only the moved range, never the rest of the audience's.
@@ -584,6 +587,7 @@ fn bench_fanout_frame(c: &mut Criterion) {
 struct FetchBudgets {
 	_broadcast: broadcast::Producer,
 	_track: track::Producer,
+	consumer: track::Consumer,
 	open: moq_net::group::Producer,
 	/// The live fetches' waiters, which keep their deadlines registered.
 	_readers: Vec<kio::Waiter>,
@@ -604,27 +608,47 @@ impl FetchBudgets {
 		open.write_frame(Timestamp::from_secs(4).unwrap(), Bytes::from_static(b"f"))
 			.unwrap();
 
-		let consumer = track.consume();
-		// Each fetch has a budget of its own, so it indexes a deadline of its own.
-		let fetch = |i: usize| {
-			let waiter = kio::Waiter::noop();
-			let budget = Duration::from_millis(1_500) + Duration::from_micros(i as u64);
-			let options = moq_net::group::Fetch::default().with_max_delay(budget);
-			let mut pending = consumer.fetch_group(2, options);
-			assert!(matches!(kio::Task::poll(&mut *pending, &waiter), Poll::Ready(Ok(_))));
-			waiter
-		};
-		for i in 0..history {
-			drop(fetch(readers + i));
-		}
-		let readers = (0..readers).map(fetch).collect();
-		Self {
+		let mut fetched = Self {
 			_broadcast: broadcast,
+			consumer: track.consume(),
 			_track: track,
 			open,
-			_readers: readers,
+			_readers: Vec::with_capacity(readers),
+		};
+		for i in 0..history {
+			drop(fetched.fetch(readers + i));
 		}
+		fetched._readers = (0..readers).map(|i| fetched.fetch(i)).collect();
+		fetched
 	}
+
+	/// Fetch group 2 with budget `i`, distinct from every other, returning the waiter that
+	/// keeps its deadlines registered.
+	fn fetch(&self, i: usize) -> kio::Waiter {
+		let waiter = kio::Waiter::noop();
+		let budget = Duration::from_millis(1_500) + Duration::from_micros(i as u64);
+		let options = moq_net::group::Fetch::default().with_max_delay(budget);
+		let mut pending = self.consumer.fetch_group(2, options);
+		assert!(matches!(kio::Task::poll(&mut *pending, &waiter), Poll::Ready(Ok(_))));
+		waiter
+	}
+}
+
+/// One more budgeted fetch, with a budget of its own, beside `readers` live ones: parking it
+/// must not scan the deadlines the live readers hold, so a sweep per park shows up as a slope.
+fn bench_fetch_park(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_fetch_park");
+	for readers in [1, 64, 1_024] {
+		group.bench_with_input(BenchmarkId::from_parameter(readers), &readers, |b, &readers| {
+			let fetched = FetchBudgets::new(readers, 0);
+			let mut next = readers;
+			b.iter(|| {
+				next += 1;
+				fetched.fetch(next)
+			});
+		});
+	}
+	group.finish();
 }
 
 /// The write that crosses every budgeted fetch's deadline, beside live readers and the
@@ -1432,6 +1456,7 @@ criterion_group!(
 	bench_fanout_frame,
 	bench_fetch_expiry,
 	bench_fetch_budgets,
+	bench_fetch_park,
 	bench_parallel_write,
 	bench_aborted_scan,
 	bench_gc,
