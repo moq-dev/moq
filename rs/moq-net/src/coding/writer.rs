@@ -413,6 +413,24 @@ mod tests {
 				track: "video".into(),
 			})
 			.unwrap();
+		let track_info = || {
+			stats
+				.snapshot()
+				.control()
+				.into_iter()
+				.find(|(_, class, _, _)| *class == Control::TrackInfo)
+				.unwrap()
+				.2
+		};
+		let before = track_info();
+		let properties = lite::ietf::TrackProperties::default();
+		writer.buffer(&properties).unwrap();
+		assert_eq!(
+			track_info() - before,
+			properties.encode_bytes(lite::Version::Lite07).unwrap().len() as u64,
+			"negotiated track-property extensions are control bodies too"
+		);
+
 		writer
 			.buffer(&lite::SubscribeStart {
 				group: 3,
