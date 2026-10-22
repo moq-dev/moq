@@ -19,8 +19,9 @@
  *
  * @module
  */
-import { createInterface } from "node:readline/promises";
+
 import { writeFileSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";

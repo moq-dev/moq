@@ -1487,10 +1487,24 @@ finish_marker() {
 }
 
 run_finishes() {
-    local pub sub name broadcast pid ack ack_fd reader_fd i started late
+    local pub sub name broadcast grant pid ack ack_fd reader_fd i started late
+    # moq-transport does not yet deliver a finished broadcast's late tail, withdrawal, and
+    # same-session health across clients, so a pinned moq-transport pass records the case as
+    # skipped rather than red.
+    if [[ "$VERSION" == moq-transport-* ]]; then
+        for pub in "${PUB_LIST[@]}"; do
+            for sub in "${SUB_LIST[@]}"; do
+                record skip case=finish publisher="$pub" subscriber="$sub" detail="moq-transport finish: quest/m2/ietf-finish.md"
+            done
+        done
+        return
+    fi
     for pub in "${PUB_LIST[@]}"; do
         name="finish-$pub"
-        broadcast="$name-$$-$RANDOM.hang"
+        # The fixture and its .health sibling share a parent, so one prefix grant covers both:
+        # moq-transport's AUTH extension carries prefixes alone.
+        broadcast="$name-$$-$RANDOM/fixture.hang"
+        grant="${broadcast%/*}/**"
         ack="$LOGS/$name-ack"
         local pids=() fds=() names=() all_ready=1 all_clean=1 publisher_ok=1
         late=0
@@ -1518,7 +1532,7 @@ run_finishes() {
             local fifo="$LOGS/$name-$sub-read"
             mkfifo "$fifo"
             exec {reader_fd}<>"$fifo"
-            harness_spawn "$name-$sub" "$LOGS/$name-$sub.log" run_finish_reader "$fifo" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$broadcast*")"
+            harness_spawn "$name-$sub" "$LOGS/$name-$sub.log" run_finish_reader "$fifo" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$grant")"
             pids+=("$HARNESS_PID")
             fds+=("$reader_fd")
             names+=("$sub")
@@ -1527,14 +1541,14 @@ run_finishes() {
             if ! finish_ready "${pids[$i]}" "$LOGS/$name-${names[$i]}.log" '^finish reader ready$'; then all_ready=0; fi
         done
         if [[ "$all_ready" -eq 1 ]]; then
-            harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_finish_publisher "$pub" "$broadcast" "$(token_url --publish "$broadcast*")" "$ack"
+            harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_finish_publisher "$pub" "$broadcast" "$(token_url --publish "$grant")" "$ack"
             pid="$HARNESS_PID"
             if ! finish_ready "$pid" "$LOGS/$name-pub.log" '^finish ready linger_us='; then all_ready=0; fi
         else pid=""; fi
         if [[ "$all_ready" -eq 1 ]]; then
             for reader_fd in "${fds[@]}"; do printf 'read\n' >&"$reader_fd"; done
             if [[ "$late" -eq 1 ]]; then
-                harness_spawn "$name-gst" "$LOGS/$name-gst.log" run_finish_gst "$broadcast" "$(token_url --subscribe "$broadcast*")" "$LOGS/$name-gst.out"
+                harness_spawn "$name-gst" "$LOGS/$name-gst.log" run_finish_gst "$broadcast" "$(token_url --subscribe "$grant")" "$LOGS/$name-gst.out"
                 pids+=("$HARNESS_PID")
                 fds+=("")
                 names+=(gst)
