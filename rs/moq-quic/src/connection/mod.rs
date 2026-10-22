@@ -1935,9 +1935,14 @@ impl Connection {
     /// again ([`Self::probe_when_heard`]). The timeout doubles with each probe (RFC 9002 §6.2.1),
     /// up to 2^[`MAX_BACKOFF_EXPONENT`] times its base, so after an outage the backed-off timer
     /// can leave a path that is back idle for seconds.
-    /// A packet that acknowledged anything new has already reset the backoff.
+    /// A packet that acknowledged anything new has already reset the backoff, and one that
+    /// migrated the connection left a path with nothing in flight to probe for.
     fn probe_on_heard(&mut self, now: Instant) {
-        if mem::take(&mut self.probe_when_heard) && self.pto_count > 0 && !self.state.is_closed() {
+        if mem::take(&mut self.probe_when_heard)
+            && self.pto_count > 0
+            && self.path.in_flight.ack_eliciting > 0
+            && !self.state.is_closed()
+        {
             self.timers.set(Timer::LossDetection, now);
         }
     }

@@ -4037,6 +4037,59 @@ fn a_peer_heard_as_the_data_left_still_brings_the_probe_forward() {
     );
 }
 
+/// A peer heard from a new address moves the connection to a path with nothing in flight, so
+/// there is no probe to bring forward, even when a timer runs before anything is sent on it.
+#[test]
+fn a_peer_heard_on_a_new_path_brings_no_probe_forward() {
+    let _guard = subscribe();
+    let (mut pair, client_ch, server_ch) = settled_pair(Pair::default());
+    // The server's last packet is a PING whose ACK it has, so the client acknowledges nothing new.
+    pair.server_conn_mut(server_ch).ping();
+    pair.drive();
+    let s = pair
+        .server_streams(server_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+    pair.server_send(server_ch, s).write(b"hello").unwrap();
+
+    // The server's data and two probes go unheard.
+    pair.to_server.loss = 1.0;
+    pair.to_client.loss = 1.0;
+    let server_probes = |pair: &mut Pair| {
+        let stats = pair.server_conn_mut(server_ch).stats();
+        stats.frame_tx.stream + stats.frame_tx.ping + stats.frame_tx.immediate_ack
+    };
+    for _ in 0..3 {
+        let sent = server_probes(&mut pair);
+        drive_until(&mut pair, |pair| server_probes(pair) > sent);
+    }
+    pair.to_server.loss = 0.0;
+    pair.to_client.loss = 0.0;
+
+    let moved = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), pair.next_port());
+    pair.client.addr = moved;
+    pair.client_conn_mut(client_ch).ping();
+    pair.drive_client();
+    let (arrival, ecn, datagram) = pair.server.inbound.pop_front().unwrap();
+    pair.time = arrival;
+    let mut buf = Vec::new();
+    let Some(DatagramEvent::ConnectionEvent(ch, event)) = pair
+        .server
+        .endpoint
+        .handle(arrival, moved, None, ecn, datagram, &mut buf)
+    else {
+        panic!("the PING did not reach the connection");
+    };
+    // The timer runs before the PATH_CHALLENGE goes out, as when the socket is backpressured.
+    let conn = pair.server_conn_mut(ch);
+    conn.handle_event(event);
+    assert_eq!(conn.remote_address(), moved);
+    conn.handle_timeout(arrival);
+
+    pair.drive();
+    assert_eq!(pair.server_conn_mut(server_ch).remote_address(), moved);
+}
+
 /// A Version Negotiation packet carries no packet protection, so anyone on the path can send
 /// one: it is not the peer heard again, and brings no probe forward.
 #[test]
