@@ -19,9 +19,6 @@ enum Link {
 		connection: moq_tokio::Connection,
 		/// Reads live connection stats, reporting `None` while reconnecting.
 		monitor: moq_tokio::connection::Monitor,
-		/// One allocator for the session. Every `moq_session_bandwidth` handle clones
-		/// it, so they share one reservation registry.
-		bandwidth: moq_net::bandwidth::Allocator,
 	},
 	/// A server-accepted session: a single transport, `None` until SETUP completes.
 	Accepted(Option<Accepted>),
@@ -30,8 +27,6 @@ enum Link {
 struct Accepted {
 	session: moq_net::Session,
 	driver: ffi::Background,
-	/// Shared by every `moq_session_bandwidth` handle, like [`Link::Dialed`]'s.
-	bandwidth: moq_net::bandwidth::Allocator,
 }
 
 /// Everything needed to prepare a session without holding the global state lock.
@@ -100,7 +95,6 @@ impl Session {
 		let link = Link::Dialed {
 			connection: reconnect.clone(),
 			monitor: reconnect.monitor(),
-			bandwidth: moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth()),
 		};
 
 		let (task, closed) = Task::new(callback);
@@ -213,16 +207,11 @@ impl Session {
 				Err(_) => Err(moq_net::Error::Cancel.into()),
 			}
 		});
-		let bandwidth = session
-			.send_bandwidth()
-			.map(moq_net::bandwidth::Allocator::new)
-			.unwrap_or_else(moq_net::bandwidth::Allocator::unlimited);
 
 		if let Some(entry) = State::lock().session.task.get_mut(id) {
 			entry.link = Link::Accepted(Some(Accepted {
 				session: session.clone(),
 				driver: driver.clone(),
-				bandwidth,
 			}));
 		}
 
@@ -236,13 +225,14 @@ impl Session {
 		Ok(&self.task.get(id).ok_or(Error::SessionNotFound)?.link)
 	}
 
-	/// The session's bandwidth allocator. Clones share one reservation registry.
+	/// The session's bandwidth allocator. Every handle shares one reservation registry,
+	/// which the session probes for.
 	///
 	/// Errors with [`Error::Offline`] for an accepted session still in SETUP.
 	pub fn bandwidth(&self, id: Id) -> Result<moq_net::bandwidth::Allocator, Error> {
 		match self.link(id)? {
-			Link::Dialed { bandwidth, .. } => Ok(bandwidth.clone()),
-			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.bandwidth.clone()),
+			Link::Dialed { connection, .. } => Ok(connection.bandwidth()),
+			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.session.bandwidth()),
 		}
 	}
 

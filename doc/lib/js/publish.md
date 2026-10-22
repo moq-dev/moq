@@ -28,6 +28,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | Attribute | |
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
+| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-14,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Disable audio or video capture. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |

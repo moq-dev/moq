@@ -23,8 +23,9 @@ See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
   stays near one window, and a reader that falls behind gets refill or
   `Evicted`.
 - Mirror the Rust names for the streaming frame read.
-- Update `js/json`, `js/flate`, and their tests, which lean on the removed
-  constants.
+- Update `js/json` and its tests, which lean on the removed constants, and
+  the compression paths now in `js/net`. The
+  [m1 compression migration](/quest/m1/compress/migrate.md) deletes `js/flate`.
 - If [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) is adopted first,
   this shrinks to exposing the streaming read.
 

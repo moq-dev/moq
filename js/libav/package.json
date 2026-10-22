@@ -1,0 +1,32 @@
+{
+	"name": "@moq/libav",
+	"type": "module",
+	"version": "0.1.0",
+	"description": "libav.js decoding Opus and AAC, for the @moq/hang WebCodecs polyfill",
+	"license": "LGPL-2.1-or-later",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/moq-dev/moq.git",
+		"directory": "js/libav"
+	},
+	"sideEffects": false,
+	"jsr": false,
+	"exports": {
+		".": {
+			"types": "./index.d.ts",
+			"default": "./dist/libav-opus-aac-af.mjs"
+		}
+	},
+	"scripts": {
+		"build": "bun build.ts",
+		"check": "tsc --noEmit",
+		"release": "bun ../common/release.ts"
+	},
+	"dependencies": {
+		"@libav.js/types": "^6.10.9"
+	},
+	"devDependencies": {
+		"@types/bun": "^1.4.3",
+		"typescript": "7.0.2"
+	}
+}

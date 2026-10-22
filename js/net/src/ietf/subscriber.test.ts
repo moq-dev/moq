@@ -867,6 +867,18 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
 });
 
+test("a consumed broadcast refuses to list its tracks rather than claim it has none", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
+	const consumer = subscriber.consume(Path.from("theirs"));
+	await expect(consumer.tracks().next()).rejects.toThrow("track listing requires moq-lite-07");
+	// A later reader asks again, and is refused again.
+	await expect(consumer.tracks().next()).rejects.toThrow("track listing requires moq-lite-07");
+	consumer.close();
+	subscriber.close();
+});
+
 /**
  * A second PUBLISH_NAMESPACE on the stream that already carries one is no longer an
  * update: it is the base draft's duplicate request, a protocol violation.

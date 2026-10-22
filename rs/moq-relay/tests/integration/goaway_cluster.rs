@@ -516,7 +516,8 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let (_mid_a_upstream_client, mid_a_upstream) = within(
 		"MID-A connects to TOP",
 		connect_once(
-			mid_a_client.with_subscriber(mid_a_origin.clone()),
+			// An upstream link: MID-A relays for BOTTOM, so it asks TOP for everything.
+			mid_a_client.with_subscriber(mid_a_origin.clone().upstream()),
 			top_url.parse().expect("parse top url"),
 		),
 	)

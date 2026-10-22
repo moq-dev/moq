@@ -23,19 +23,20 @@ follow-up through `/quest-plan`.
 
 Narrowing a feature or reshaping an API is the maintainer's call, so those
 are proposals with a recommendation, filed as follow-ups. Unlike the [dead
-code audit](/quest/m1/audit-dead-code.md), this targets code that is used but
+code audit](/quest/m2/audit-dead-code.md), this targets code that is used but
 overbuilt.
 
 ### Check first
 
-Left from the m0 run because open work edits the same code:
+Left from the m0 run because open work edited the same code (close-tail drain
+landed in [#5762](https://github.com/moq-dev/moq/pull/5762)):
 
 - `ietf/session.rs` `start()` builds both halves twice across the draft arms,
   and the IETF publisher/subscriber constructors drifted from lite's config
-  structs. Waits on [close-tail drain](/quest/m1/close-tail-drain.md).
+  structs.
 - Lite and IETF `GroupServe` share their open, flush, and FIN-settle driver.
 - `ietf/adapter.rs` reimplements `kio::Queue`; keep a drop guard for the
-  writer. Waits on close-tail drain.
+  writer.
 
 Maintainer proposals from m0, not yet planned, each with its recommendation:
 

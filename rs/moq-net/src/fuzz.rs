@@ -117,7 +117,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 const LITE_KINDS: u8 = 22;
 
 /// How many types [`ietf_wire`] dispatches over.
-const IETF_KINDS: u8 = 40;
+const IETF_KINDS: u8 = 41;
 
 /// Split the two selector bytes off the input: a version and a type.
 fn select(data: &[u8], versions: usize) -> Option<(usize, u8, &[u8])> {
@@ -313,6 +313,26 @@ pub fn snapshot(origin: &crate::origin::Producer, prefix: &str) -> Snapshot {
 	Snapshot(origin.snapshot(prefix))
 }
 
+/// What a client session fed into an origin hears it should ask its peer about, for
+/// the interests bench.
+pub struct Interests(crate::model::Interests);
+
+/// Register as a client session fed into `origin` does.
+pub fn interests(origin: &crate::origin::Producer) -> Interests {
+	Interests(origin.interests())
+}
+
+impl Interests {
+	/// Take every change heard so far, returning how many there were.
+	pub fn drain(&self) -> usize {
+		let mut changes = 0;
+		while let std::task::Poll::Ready(Some(_)) = self.0.poll_next(&kio::Waiter::noop()) {
+			changes += 1;
+		}
+		changes
+	}
+}
+
 /// Add `n` publisher-side payload bytes on `(path, tier)`, creating the entry
 /// when the path is tracked. The stats producer bench marks a share of held
 /// paths changed this way, without a media frame. A later [`crate::stats::Registry::report`]
@@ -324,6 +344,24 @@ pub fn bump_publisher_bytes(
 	n: u64,
 ) {
 	registry.bump_publisher_bytes(path, tier, n);
+}
+
+/// An allocator's probe target as its session follows it, for the bandwidth bench.
+pub struct ProbeTarget(crate::bandwidth::Target);
+
+impl ProbeTarget {
+	/// Follow `allocator`'s target.
+	pub fn new(allocator: &crate::bandwidth::Allocator) -> Self {
+		Self(allocator.target())
+	}
+
+	/// The target in bits per second once it moved, without parking.
+	pub fn poll(&mut self) -> Option<u64> {
+		match self.0.poll_changed(&kio::Waiter::noop()) {
+			std::task::Poll::Ready(target) => Some(target.as_bps()),
+			std::task::Poll::Pending => None,
+		}
+	}
 }
 
 /// A payload-byte meter for the stats write-path benchmark.
@@ -555,7 +593,7 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		14 => roundtrip::<ietf::PublishOk, _>(rest, version),
 		15 => roundtrip::<ietf::PublishError<'static>, _>(rest, version),
 		16 => roundtrip::<ietf::PublishDone<'static>, _>(rest, version),
-		17 => roundtrip::<ietf::PublishBlocked<'static>, _>(rest, version),
+		17 => roundtrip::<ietf::PublishSkipped<'static>, _>(rest, version),
 		18 => roundtrip::<ietf::Subscribe<'static>, _>(rest, version),
 		19 => roundtrip::<ietf::SubscribeOk, _>(rest, version),
 		20 => roundtrip::<ietf::SubscribeError<'static>, _>(rest, version),
@@ -578,6 +616,7 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		37 => roundtrip::<ietf::FetchObject, _>(rest, version),
 		38 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, version),
 		39 => roundtrip::<ietf::ObjectDatagram, _>(rest, version),
+		40 => roundtrip::<ietf::SubscribeTracks<'static>, _>(rest, version),
 		_ => unreachable!("kind is taken modulo IETF_KINDS"),
 	}
 }

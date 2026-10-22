@@ -56,8 +56,8 @@ always a prefix. A service that serves only some of the paths beneath it
 refuses the rest as they are requested. Announcements are hints; the request is
 what decides.
 
-Inside a broadcast, a reader can list its tracks (moq-lite-07, Rust only so
-far): each track with its fixed properties, a synced mark, then tracks as they
+Inside a broadcast, a reader can list its tracks (moq-lite-07): each track
+with its fixed properties, a synced mark, then tracks as they
 come and go. Listing is discovery, not delivery: subscribe to each track you
 want, and its groups still cached upstream reach you late. A broadcast lists
 the tracks its publisher creates, never one served only on request, and a path
@@ -283,13 +283,23 @@ untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
 
+A publisher refuses a group that starts before a lower one, and so does a
+moq-lite 07 receiver. Since moq-lite 05 and 06 send times look like media time,
+a receiver drops every timestamp it gets over them and the track arrives
+untimed.
+Timestamps received over moq-transport, whose peers may stamp arrival times,
+are not checked and are only passed on over moq-transport: a relay serves that
+track to moq-lite untimed.
+
 A publisher may compress a track, which pays off for repetitive data such as
 JSON and not for media. Each group's frames become one DEFLATE stream
 ([moq-flate](/draft/moq-flate)), and a datagram
 compresses alone. Only the work-in-progress moq-lite 07 carries the compressed
 bytes. A relay forwards them as received and inflates each group once for every
 other subscriber, moq-transport included, so readers always see the original
-frames. Rust publishes and relays compressed tracks; js/net refuses them for now.
+frames. Rust and JavaScript publish compressed tracks by setting `compress: true`
+on the track's info. Application writes stay synchronous and readers receive plain
+payloads; compression is useful for repetitive data, not already compressed media.
 
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning

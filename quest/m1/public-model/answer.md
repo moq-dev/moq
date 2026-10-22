@@ -75,7 +75,7 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   answer source give a peer's route a public shape, and move the
   out-of-crate tests and benches onto it.
 - `origin::interest_prefixes` (both subscribers): remove the need through
-  [Rust lazy discovery](/quest/m1/lazy-discovery/rust.md), which gives Rust
+  Rust lazy discovery ([moq-dev/moq#6165](https://github.com/moq-dev/moq/pull/6165)), which gives Rust
   the origin's watched interests the way JS has them; make that public in
   both languages there or here, whichever lands second.
 - `origin::Consumer::discovery`, `includes_hidden` (IETF publisher): fold
@@ -115,11 +115,10 @@ JS items (`js/net/src/`):
 - **Blind answers** (the same loop, raised in review of #5717). Every JS
   session answers each request no route covers by subscribing on its peer:
   always, and as the only path after a peer refuses or resets discovery.
-  [Lazy discovery](/quest/m1/lazy-discovery/README.md) keeps a plain JS
+  Lazy discovery keeps a plain JS
   `request(path)` blind, so blind answering stays in JS and needs a public
   shape before the loop goes. Rust has no blind answers (decided 2026-10-20,
-  maintainer, recorded in [Rust lazy discovery](/quest/m1/lazy-discovery/rust.md)),
-  so no Rust session needs this shape.
+  maintainer), so no Rust session needs this shape.
   **Decision** (settled 2026-10-16, narrowed to JS 2026-10-20):
   - ✅ A fallback answerer, `Origin.Producer.fallback()` in JS. The name is still open: propose
     alternatives in this quest's PR before shipping it. It returns the same
@@ -187,10 +186,6 @@ JS items (`js/net/src/`):
 Tests: each public call gets a mock-time test in its language, and the
 built-in sessions move onto the public calls, so their existing suites
 cover the behavior.
-
-## Required
-
-- [Rust lazy discovery](/quest/m1/lazy-discovery/rust.md) - settles the interest and discovery items before they become public
 
 ## Related
 

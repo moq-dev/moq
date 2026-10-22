@@ -29,6 +29,7 @@ import {
 	scopeHead,
 	scopeOverlaps,
 } from "../internal.ts";
+import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
@@ -726,6 +727,8 @@ export class Subscriber {
 	#createConsume(path: Path.Valid, instance: ReturnType<BroadcastCache["instance"]>): broadcast.Consumer {
 		// moq-transport resolves metadata through SUBSCRIBE and has no one-shot group fetch here.
 		const consumer = new ConsumeBroadcast();
+		// Registered before anyone can list the broadcast, so no reader syncs on an empty answer.
+		void this.#refuseListing(wireOf(consumer).lister());
 		void (async () => {
 			for (;;) {
 				const request = await wireOf(consumer).requested();
@@ -738,15 +741,32 @@ export class Subscriber {
 		return this.#consumes.insert(path, instance, consumer);
 	}
 
+	// moq-transport lists no tracks here: refuse each listing until the broadcast closes, since an
+	// empty answer would claim the peer lists nothing.
+	async #refuseListing(lister: Lister): Promise<void> {
+		try {
+			for (;;) {
+				while (!lister.used.peek()) {
+					if (lister.ended.peek() !== undefined) return;
+					await race([Signal.race(lister.used, lister.ended)]);
+				}
+				lister.abort(new Error("track listing requires moq-lite-07 or newer"));
+			}
+		} finally {
+			lister.close();
+		}
+	}
+
 	// The adapter is gone. If the transport has already closed, that close is the
 	// error. A still-open transport, such as a GOAWAY drain, has no peer code yet,
-	// so this does not wait for it.
+	// so this does not wait for it. Either way the route failed, so a resumed track moves on.
 	async #closedSession(): Promise<Error> {
+		const closed = () => new StreamError(StreamCode.SessionClosed, { message: "session closed" });
 		const quic = this.#quic;
-		if (!quic) return new Error("session closed");
+		if (!quic) return closed();
 		return Promise.race([
 			closeError(quic),
-			new Promise<Error>((resolve) => queueMicrotask(() => resolve(new Error("session closed")))),
+			new Promise<Error>((resolve) => queueMicrotask(() => resolve(closed()))),
 		]);
 	}
 
@@ -793,7 +813,6 @@ export class Subscriber {
 		// Keep the request pending until SUBSCRIBE_OK supplies immutable track metadata.
 		// Group streams already wait on the alias, so early data stays behind this response.
 		const producer = hooks.pendingTrackProducer(request);
-		hooks.receiveTrack(producer);
 		const subscription: Subscription = { track: producer, tail: new Tail() };
 
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
@@ -1200,6 +1219,8 @@ export class Subscriber {
 			timescale: ok.properties.timescale,
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
+			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
+			unchecked: ok.properties.timescale != null,
 		});
 		if (ok.largest && ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
 			throw new RangeError("largest group exceeds safe integers");

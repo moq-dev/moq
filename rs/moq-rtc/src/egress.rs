@@ -12,7 +12,9 @@
 //! transport-agnostic.
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use moq_clock::Instant;
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, VideoCodecKind};
@@ -550,12 +552,13 @@ pub fn dispatch(rtc: &mut str0m::Rtc, request: WriteRequest, wallclock: Instant)
 		payload,
 		mid: _,
 	} = request;
-	if let Err(err) = writer.write(pt, wallclock, time, payload.to_vec()) {
+	if let Err(err) = writer.write(pt, wallclock.into_std(), time, payload.to_vec()) {
 		tracing::warn!(%err, "egress write rejected by str0m");
 	}
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
