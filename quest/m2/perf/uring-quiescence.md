@@ -42,10 +42,12 @@ must not starve the socket.
   both budgets need the same sweep.
 - Add `passes` per turn to the metrics beside `turns`.
 - Ingress fairness: a pass budget does not bound work inside one poll.
-  `Endpoint::demux` drains every queued receive, and one GRO completion can
-  carry many datagrams. Measure saturated ingress against timers, control
-  messages, and quiet connections on the same worker, and bound the demux
-  drain per turn if their latency shows it. Decided in the 2026-10-22
+  The endpoint's `Inner::poll_run` calls `poll_recv` until `Pending`, so one
+  poll drains every queued receive completion, and `Endpoint::demux` drains
+  every datagram of each, where one GRO completion can carry many. Measure
+  saturated ingress against timers, control messages, and quiet connections
+  on the same worker, and if their latency shows it, budget both the
+  completions per poll and the datagrams per turn. Decided in the 2026-10-22
   io_uring audit: a latency question, not a known starvation bug.
 
 Acceptance: turns and enters per received datagram on the chat shape

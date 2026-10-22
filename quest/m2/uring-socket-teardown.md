@@ -19,8 +19,10 @@ both are reachable by an embedder that opens a socket per dial.
   churn past the id space, and reuse.
 - `Socket::drop` discards a failed cancel (`let _ = shared.cancel(key)`),
   leaving an idle multishot receive holding the fd and pool until worker
-  teardown. Only an `io_uring_enter` error reaches it, which means the
-  ring itself is broken. `drop` cannot return it, so record it on `Shared`
+  teardown. Only an `io_uring_enter` error reaches it. `EINTR` is a
+  signal, not a broken ring, but the non-deadline `push_inner` path
+  surfaces it today, so retry it there; anything else means the ring itself
+  is broken. `drop` cannot return it, so record it on `Shared`
   and fail the worker's next turn with it, the same as any other ring
   failure, so every handle on the worker fails. Test by injecting the push
   failure.
