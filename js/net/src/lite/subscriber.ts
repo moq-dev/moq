@@ -709,7 +709,8 @@ export class Subscriber {
 				},
 			})
 			.catch(() => false);
-		if (ready === false || setup.aborted) return;
+		// The readers may have left while the wait settled, before the unused watch below is armed.
+		if (ready === false || setup.aborted || !lister.used.peek()) return;
 
 		// Armed before the first check and held to the end, so a shrink is never missed.
 		const refused = unauthorized(broadcast);

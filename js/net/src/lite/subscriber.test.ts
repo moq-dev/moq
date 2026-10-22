@@ -1512,6 +1512,41 @@ test("a listing of an epochless handle retired while its token waits never reach
 	subscriber.close();
 });
 
+test("a listing whose readers leave as its token settles never reaches the wire", async () => {
+	const { quic, streams } = fakeSession();
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => (release = resolve));
+	let ask!: () => void;
+	const asked = new Promise<void>((resolve) => (ask = resolve));
+	// Ignores `until`, so the wait settles admitted after the readers left.
+	const auth = {
+		ready: () => {
+			ask();
+			return released.then(() => true);
+		},
+	} as unknown as AuthSession;
+	const subscriber = new Subscriber(
+		quic,
+		Version.DRAFT_07,
+		HopSchema.parse(1n),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		auth,
+	);
+	const held = subscriber.consume(Path.from("room"));
+	const tracks = held.tracks();
+	await asked;
+	release();
+	tracks.close();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	expect(streams.length).toBe(0);
+	held.close();
+	subscriber.close();
+});
+
 test.each(["track", "fetch", "open"] as const)(
 	"retirement settles coalesced fetches during %s setup",
 	async (stage) => {
