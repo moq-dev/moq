@@ -3,11 +3,12 @@ This is a polyglot monorepo with Rust (server/native) and TypeScript (browser) i
 
 # Context
 
-This file is split into nested `AGENTS.md` files based on the language/situation.
+Start with [doc/setup/repository.md](doc/setup/repository.md) to locate a feature, its examples, and its tests.
+Use this checkout's source and docs for repository work; published API references may describe a different version.
 
 - Read `CONTRIBUTING.md` when dealing with PRs.
 - Read `PROMPTING.md` before instructing other agents via context, memory, plans, or reviews.
-- Read `*/AGENTS.md` if the file exists before touching a root directory.
+- Before editing, read each `AGENTS.md` along the path from the root to the file, including package-level instructions. Use `rg --files -g AGENTS.md` to find them; root-level sessions may not load nested instructions automatically.
 - `doc/` is the feature entry point, not a reference. Update it only when a change alters what a user would do; see `doc/AGENTS.md`.
 
 # Required
@@ -90,6 +91,7 @@ Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.
 
 ```bash
+just ci-select    # Report whether CI and Rust build setup are needed
 just check        # Lint, compile, and test what the branch changed
 just fix          # Auto-fix lint/formatting, same scope
 ```

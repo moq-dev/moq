@@ -31,7 +31,7 @@ fn timed() -> moq_net::track::Info {
 /// An explicitly timed raw track, whose frame API accepts microsecond timestamps.
 fn timed_info() -> MoqTrackInfo {
 	MoqTrackInfo {
-		priority: 127,
+		priority: 0,
 		max_age_us: None,
 		refresh: None,
 		timescale: Some(1_000_000),
@@ -944,7 +944,7 @@ async fn data_writes_preserve_optional_timestamps() {
 				.publish_track(
 					"data".into(),
 					Some(MoqTrackInfo {
-						priority: 127,
+						priority: 0,
 						max_age_us: None,
 						refresh: None,
 						timescale: timestamp_us.map(|_| 1_000_000),
@@ -960,7 +960,7 @@ async fn data_writes_preserve_optional_timestamps() {
 						&broadcast,
 						&track,
 						MoqJsonSnapshotConfig {
-							delta_ratio: 0,
+							deltas: false,
 							compression: false,
 						},
 					)
@@ -1082,11 +1082,11 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 async fn json_snapshot_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let config = MoqJsonSnapshotConfig {
-		delta_ratio: 8,
+		deltas: true,
 		compression: true,
 	};
 	let info = MoqTrackInfo {
-		priority: 127,
+		priority: 0,
 		max_age_us: None,
 		timescale: Some(1_000_000),
 		refresh: None,
@@ -1150,12 +1150,66 @@ async fn json_snapshot_roundtrip() {
 	assert_eq!(end, None);
 }
 
+/// An idle snapshot producer restates its value in a fresh group once a joiner would otherwise
+/// download more deltas than the track's refresh ratio allows.
+#[tokio::test]
+async fn json_snapshot_refreshes_for_a_joiner() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast
+		.publish_track(
+			"meta".into(),
+			Some(MoqTrackInfo {
+				priority: 127,
+				max_age_us: None,
+				refresh: Some(1),
+				timescale: None,
+				compress: false,
+			}),
+		)
+		.unwrap();
+	let config = MoqJsonSnapshotConfig {
+		deltas: true,
+		compression: false,
+	};
+	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
+	for n in 0..4 {
+		producer.update(format!(r#"{{"n":{n}}}"#), None).unwrap();
+	}
+
+	// The join crosses the ratio, so the producer restates the value without another update. The
+	// joiner may read the open group first or skip straight to the restatement.
+	let joiner = subscribe(&broadcast, "meta").await;
+	let refreshed = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let group = joiner.recv_group().await.unwrap().expect("expected a group");
+			if group.sequence() > 0 {
+				return group;
+			}
+		}
+	})
+	.await
+	.expect("timed out waiting for the refresh");
+	assert_eq!(refreshed.sequence(), 1);
+	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await, config).unwrap();
+	let value = tokio::time::timeout(TIMEOUT, consumer.next())
+		.await
+		.expect("timed out waiting for the restated value")
+		.unwrap()
+		.expect("expected a value");
+	assert_eq!(
+		serde_json::from_str::<serde_json::Value>(&value.value).unwrap(),
+		serde_json::json!({ "n": 3 })
+	);
+
+	producer.finish().unwrap();
+}
+
 /// JSON producers report subscriber demand through a handle, like the media and raw track producers.
 #[tokio::test]
 async fn json_demand() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let snapshot_config = MoqJsonSnapshotConfig {
-		delta_ratio: 8,
+		deltas: true,
 		compression: true,
 	};
 	let stream_config = MoqJsonStreamConfig { compression: true };
@@ -1819,14 +1873,9 @@ fn write_legacy(group: &mut moq_net::group::Producer, transport_us: u64, media_u
 }
 
 fn write_raw(group: &mut moq_net::group::Producer, transport_us: u64, payload: bytes::Bytes) {
-	let mut frame = group
-		.create_frame(moq_net::frame::Info {
-			size: payload.len() as u64,
-			timestamp: Some(moq_net::Timestamp::from_micros(transport_us).unwrap()),
-		})
+	group
+		.write_frame(moq_net::Timestamp::from_micros(transport_us).unwrap(), payload)
 		.unwrap();
-	frame.write(payload).unwrap();
-	frame.finish().unwrap();
 }
 
 /// A broadcast with one legacy-container track, and a raw consumer subscribed to it.
@@ -6805,7 +6854,7 @@ async fn json_tracks_are_advertised_in_the_catalog() {
 		&broadcast,
 		&broadcast.publish_track("status".into(), None).unwrap(),
 		MoqJsonSnapshotConfig {
-			delta_ratio: 4,
+			deltas: true,
 			compression: true,
 		},
 	)
@@ -6890,7 +6939,7 @@ async fn data_track_names_cannot_collide() {
 		&broadcast,
 		&broadcast.publish_track("state".into(), None).unwrap(),
 		MoqJsonSnapshotConfig {
-			delta_ratio: 0,
+			deltas: false,
 			compression: false,
 		},
 	)

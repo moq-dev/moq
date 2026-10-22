@@ -120,10 +120,12 @@ async fn export(format: &str, source: moq_mux::Source, stream: impl Stream, coll
 	data.freeze()
 }
 
-fn cmaf_import() -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
+/// An fMP4 importer, republishing fragments whole when `passthrough` and unwrapping their samples
+/// otherwise.
+fn cmaf_import(passthrough: bool) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve());
+	let import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
 	(catalog, import)
 }
 
@@ -191,10 +193,12 @@ fn containers(c: &mut Criterion) {
 					let data = runtime.block_on(export(format, source, stream, true));
 					drop(fixture);
 					if format == "cmaf" {
-						let (catalog, mut import) = cmaf_import();
-						import.decode(&data).unwrap();
-						import.finish().unwrap();
-						assert_eq!(catalog.snapshot().video.renditions.len(), *tracks);
+						for passthrough in [false, true] {
+							let (catalog, mut import) = cmaf_import(passthrough);
+							import.decode(&data).unwrap();
+							import.finish().unwrap();
+							assert_eq!(catalog.snapshot().video.renditions.len(), *tracks);
+						}
 						use mp4_atom::DecodeMaybe;
 						let mut cursor = std::io::Cursor::new(data.as_ref());
 						let mut fragments = 0;
@@ -219,16 +223,22 @@ fn containers(c: &mut Criterion) {
 						} else {
 							Throughput::Bytes(data.len() as u64)
 						};
-						for direction in ["import", "export"] {
+						// `unwrap` imports the same fragments one frame per sample; `import` passes them through.
+						let directions: &[&str] = match format {
+							"cmaf" => &["import", "unwrap", "export"],
+							_ => &["import", "export"],
+						};
+						for &direction in directions {
 							let mut group = c.benchmark_group(format!("{format}-{direction}-{unit}"));
 							group.throughput(throughput.clone());
 							group.bench_function(
 								BenchmarkId::new(format!("{tracks}tracks-{frames}frames"), size),
 								|b| {
-									if direction == "import" {
+									if direction != "export" {
 										if format == "cmaf" {
+											let passthrough = direction == "import";
 											b.iter_batched(
-												cmaf_import,
+												|| cmaf_import(passthrough),
 												|import| import_cmaf(import, std::hint::black_box(&data)),
 												BatchSize::PerIteration,
 											);

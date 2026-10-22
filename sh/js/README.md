@@ -31,6 +31,12 @@ fallback keeps the whole harness check. Shared dependency validation, environmen
 common helper tests continue to run. The CI setup query still uses the common
 module map, without requiring a JS toolchain before setup.
 
+The root devShell supplies Chromium and exports its Playwright version. Checks
+require every npm `playwright` dependency outside `test/smoke` to pin that exact
+version. A root `flake.nix` or `flake.lock` change selects JS checks too: when
+nixpkgs moves Playwright, update the reported manifests and regenerate `bun.lock`
+with `bun install` in the new shell. Smoke has its own flake and freshness check.
+
 Run `python3 sh/js/workspace.test.py` for graph and execution regressions. The same
 suite runs in `just gh test` nightly. To inspect work without executing it, pass
 a file containing relevant paths, one per line, to

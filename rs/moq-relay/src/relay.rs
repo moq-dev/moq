@@ -840,6 +840,7 @@ async fn serve_listening(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	#[tokio::test]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {

@@ -17,7 +17,7 @@ identity across a replaced broadcast.
 ## Plan
 
 Decided 2026-10-13 by the maintainer: RTP identity is a
-function of [TS slot identity](/quest/m2/ts-hitless.md) and the epoch, and of
+function of TS slot identity (`moq export ts --sync`) and the epoch, and of
 nothing a leg mints.
 
 - Datagrams are cut on the slot grid, so their boundaries fall at the same
@@ -54,7 +54,3 @@ epochless route is refused. Claims of ST 2022-7 compatibility cite the standard 
 RTP-level test, not TS identity.
 
 Public API: an RTP output for TS export, in the shape settled above.
-
-## Required
-
-- [Deterministic TS legs](/quest/m2/ts-hitless.md) - the slots and counters these datagrams carry

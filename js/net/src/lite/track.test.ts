@@ -53,7 +53,7 @@ test("TrackInfo for Rust's default Info matches cross-language wire bytes", asyn
 	const model = infoDefaults();
 	const info = new TrackInfo({ ...model, timescale: model.timescale ?? undefined });
 	expect(await bytes((w) => info.encode(w, Version.DRAFT_05), Version.DRAFT_05)).toEqual(
-		new Uint8Array([0x0c, 0x7f, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8]),
+		new Uint8Array([0x0c, 0x80, 0x00, 0xc0, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x43, 0xe8]),
 	);
 });
 
@@ -111,7 +111,7 @@ test("TRACK_INFO is rejected before draft-05", async () => {
 
 test("TrackInfo round-trips valid boundary metadata", async () => {
 	const info = new TrackInfo({
-		priority: 255,
+		priority: 127,
 		maxAge: Number.MAX_SAFE_INTEGER - 1,
 		timescale: Number.MAX_SAFE_INTEGER,
 	});
@@ -121,15 +121,15 @@ test("TrackInfo round-trips valid boundary metadata", async () => {
 		Version.DRAFT_05,
 	);
 	const got = await TrackInfo.decode(reader, Version.DRAFT_05);
-	expect(got.priority).toBe(255);
+	expect(got.priority).toBe(127);
 	expect(got.maxAge).toBe(Number.MAX_SAFE_INTEGER - 1);
 	expect(got.timescale).toBe(Timescale(Number.MAX_SAFE_INTEGER));
 });
 
 test("TrackInfo refuses invalid fields at construction", () => {
 	for (const fields of [
-		{ priority: 256, timescale: 1000 },
-		{ priority: -1, timescale: 1000 },
+		{ priority: 128, timescale: 1000 },
+		{ priority: -129, timescale: 1000 },
 		{ priority: 1.5, timescale: 1000 },
 		{ timescale: 0 },
 		{ timescale: -1 },

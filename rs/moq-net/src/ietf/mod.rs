@@ -21,6 +21,7 @@ pub(crate) mod epoch;
 pub(crate) mod error;
 mod fetch;
 mod filter;
+pub(crate) mod flate;
 mod goaway;
 mod group;
 pub mod hidden;
