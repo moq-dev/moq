@@ -31,6 +31,7 @@ A few common calls:
 | `moq_origin_create_broadcast` | `moq_origin_producer_create_broadcast` |
 | `moq_publish_track` | `moq_broadcast_producer_publish_track` |
 | `moq_session_connect` | `moq_client_new`, then `moq_client_connect` |
+| `moq_session_failure` | `moq_client_failure` while the first dial retries, then `moq_session_failure`; each returns the last failure as a `moq_error *`, or NULL |
 | `moq_server_listen` | `moq_server_new`, `moq_server_listen`, then `moq_server_accept` per session |
 | `moq_consume_track` | `moq_broadcast_consumer_subscribe_track`, then `moq_track_consumer_read_frame` per frame |
 

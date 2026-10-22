@@ -1,6 +1,7 @@
 /* Exercises the installed package end to end over a real QUIC session from plain C: a returned
- * error, a loopback connect, a frame read through a callback, a cancelled read, a callback
- * in flight at shutdown, and every callback run on this thread through a custom dispatcher. */
+ * error, a loopback connect, a frame read through a callback, a cancelled read, a retrying
+ * first dial's failure, a callback in flight at shutdown, and every callback run on this
+ * thread through a custom dispatcher. */
 
 /* clock_gettime and the pthread timed wait under strict C11. */
 #define _POSIX_C_SOURCE 200809L
@@ -324,7 +325,8 @@ int main(void) {
     CHECK(received);
     CHECK(received->payload.len == sizeof(hello));
     CHECK(memcmp(received->payload.data, hello, sizeof(hello)) == 0);
-    CHECK(received->timestamp_us.has_value && received->timestamp_us.value == 1000);
+    /* The default moq-lite-06 session drops received timestamps, so the track arrives untimed. */
+    CHECK(!received->timestamp_us.has_value);
     moq_frame_free(received);
     CHECK(!cancelled.done);
 
@@ -364,6 +366,32 @@ int main(void) {
     moq_track_producer_free(track);
     moq_broadcast_producer_free(broadcast);
     moq_origin_producer_free(origin);
+
+    /* A first dial that keeps failing never resolves connect, so moq_client_failure reports
+     * its last failure; the server is gone, so every dial fails. */
+    moq_client_config retry_config = moq_client_config_default();
+    retry_config.timeout_us.has_value = true;
+    retry_config.timeout_us.value = 100000;
+    retry_config.websocket.enabled.has_value = true;
+    retry_config.websocket.enabled.value = false;
+    moq_client *retrying = NULL;
+    ok(moq_client_new(&retry_config, &retrying), "client new");
+    CHECK(moq_client_failure(retrying) == NULL);
+    result dialing = {0};
+    task = moq_client_connect(retrying, url, on_session, &dialing);
+    moq_error *failure = NULL;
+    for (int waited = 0; !failure && waited < 5000; waited += 10) {
+        CHECK(!pump(&dialing.done, 10));
+        failure = moq_client_failure(retrying);
+    }
+    CHECK(failure && failure->tag == MOQ_ERROR_CONNECT);
+    moq_error_free(failure);
+    moq_client_cancel(retrying);
+    CHECK(pump(&dialing.done, 5000));
+    CHECK(dialing.error && dialing.error->tag == MOQ_ERROR_CANCELLED);
+    moq_error_free(dialing.error);
+    moq_task_free(task);
+    moq_client_free(retrying);
 
     /* A read whose frame arrives just before shutdown has its callback in flight, so it may run
      * while moq_shutdown drains the dispatcher; none may run once it returns, even as the

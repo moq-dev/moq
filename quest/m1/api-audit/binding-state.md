@@ -22,6 +22,9 @@ and Go hide the `Client`, so the first-dial failure is unreachable there.
   `MoqClient::failure` goes away.
 - Name fields after moq-tokio's `Monitor` (`presence`, not `status`).
 - Update every wrapper, OBS, and `doc/lib/*`.
+- The generated C package (`c/moq`) probes `moq_client_failure` and maps the
+  hand-written `moq_session_failure` to it in `c/moq/MIGRATE.md`; point both
+  at the state snapshot's last failure.
 
 Public API: moq-ffi, moq-c, every wrapper, OBS breaking. Wire: none.
 
