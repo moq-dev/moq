@@ -1032,13 +1032,6 @@ function reduce(patterns: Iterable<Pattern>): Pattern[] {
 	return out.sort(Pattern.compare);
 }
 
-/** The reduced union of `patterns`, throwing {@link IntersectionError} past the limit. */
-function bounded(patterns: Iterable<Pattern>): Pattern[] {
-	const out = reduce(patterns);
-	if (out.length > MAX_INTERSECTION_PATTERNS) throw new IntersectionError();
-	return out;
-}
-
 /**
  * A union of patterns, reduced so no member is contained by another.
  *
@@ -1106,7 +1099,7 @@ export class Patterns implements Iterable<Pattern> {
 	 * The paths in both unions, as one union: every member of this one intersected with
 	 * every member of `other`. See {@link Pattern.intersect}.
 	 *
-	 * Throws {@link IntersectionError} when the union grows past {@link Pattern.MAX_INTERSECTIONS} members.
+	 * Throws {@link IntersectionError} when the reduced union has more than {@link Pattern.MAX_INTERSECTIONS} members.
 	 */
 	intersect(other: Patterns): Patterns {
 		// A member inside the other union is its own intersection, and every other result it
@@ -1119,6 +1112,9 @@ export class Patterns implements Iterable<Pattern> {
 			if (theirs.contains(member)) out.push(member);
 			else rest.insert(member);
 		}
+		// Reduce whenever the pieces double, so they stay within twice the reduced union.
+		// The limit applies only at the end: a later, broader piece can absorb the rest.
+		let reduceAt = 2 * MAX_INTERSECTION_PATTERNS;
 		for (const candidate of other.#members) {
 			if (ours.contains(candidate)) {
 				out.push(candidate);
@@ -1126,12 +1122,16 @@ export class Patterns implements Iterable<Pattern> {
 			}
 			for (const member of rest.overlapping(candidate)) {
 				out.push(...member.intersect(candidate));
-				// Reduce as it grows, so the pieces held never pass twice the limit.
-				if (out.length > 2 * MAX_INTERSECTION_PATTERNS) out = bounded(out);
+				if (out.length > reduceAt) {
+					out = reduce(out);
+					reduceAt = Math.max(reduceAt, 2 * out.length);
+				}
 			}
 		}
+		out = reduce(out);
+		if (out.length > MAX_INTERSECTION_PATTERNS) throw new IntersectionError();
 		const union = new Patterns();
-		union.#members = bounded(out);
+		union.#members = out;
 		return union;
 	}
 

@@ -64,7 +64,7 @@ impl Patterns {
 	/// The paths in both unions, as one union: every member of this one intersected
 	/// with every member of `other`. See [`Pattern::intersect`].
 	///
-	/// Fails when the union grows past [`Pattern::MAX_INTERSECTIONS`] members.
+	/// Fails when the reduced union has more than [`Pattern::MAX_INTERSECTIONS`] members.
 	pub fn intersect(&self, other: &Self) -> Result<Self, IntersectionError> {
 		// A member inside the other union is its own intersection, and every other result
 		// it takes part in lies within it, so only the members left over are paired.
@@ -78,6 +78,9 @@ impl Patterns {
 				false => rest.insert(member),
 			}
 		}
+		// Reduce whenever the pieces double, so they stay within twice the reduced union.
+		// The limit applies only at the end: a later, broader piece can absorb the rest.
+		let mut reduce_at = 2 * Pattern::MAX_INTERSECTIONS;
 		for candidate in &other.0 {
 			if ours.contains(candidate) {
 				out.push(candidate.clone());
@@ -85,18 +88,13 @@ impl Patterns {
 			}
 			for member in rest.overlapping(candidate) {
 				out.extend(member.intersect(candidate)?);
-				// Reduce as it grows, so the pieces held never pass twice the limit.
-				if out.len() > 2 * Pattern::MAX_INTERSECTIONS {
-					out = Self::bounded(out)?.0;
+				if out.len() > reduce_at {
+					out = std::mem::take(&mut out).into_iter().collect::<Self>().0;
+					reduce_at = reduce_at.max(2 * out.len());
 				}
 			}
 		}
-		Self::bounded(out)
-	}
-
-	/// The reduced union of `patterns`, failing past [`Pattern::MAX_INTERSECTIONS`].
-	fn bounded(patterns: Vec<Pattern>) -> Result<Self, IntersectionError> {
-		let out: Self = patterns.into_iter().collect();
+		let out: Self = out.into_iter().collect();
 		match out.len() > Pattern::MAX_INTERSECTIONS {
 			true => Err(IntersectionError::TooManyPatterns),
 			false => Ok(out),
@@ -288,6 +286,17 @@ mod tests {
 		assert_eq!(grant.intersect(&claim).unwrap(), patterns(&["a/c", "b/c", "b/d/**"]));
 		assert!(grant.intersect(&patterns(&["x"])).unwrap().is_empty());
 		assert!(Patterns::new().intersect(&grant).unwrap().is_empty());
+	}
+
+	#[test]
+	fn intersect_limits_only_the_reduced_union() {
+		// Every `*/aN` yields its own piece, past the limit, until `x/a*` absorbs them all.
+		let grant = patterns(&["x/*"]);
+		let mut claim: Patterns = (0..=2 * Pattern::MAX_INTERSECTIONS)
+			.map(|i| pattern(&format!("*/a{i}")))
+			.collect();
+		claim.insert(pattern("x/a*"));
+		assert_eq!(grant.intersect(&claim).unwrap(), patterns(&["x/a*"]));
 	}
 
 	#[test]

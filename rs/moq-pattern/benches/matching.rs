@@ -36,50 +36,64 @@ fn matching(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Whole-union operations, swept over member count and member kind.
+/// Whole-union operations, swept over member kind and the size of each union.
 ///
 /// `AUTH_OK` carries as many patterns as the peer chooses, so none of these may grow
 /// with the product of two unions' sizes. Literals share one specificity tier; partials
-/// share another; two-tier alternates one- and two-segment literals, so every member of
-/// the upper tier meets every member of the lower one. Each operation pairs unions that
-/// never contain each other's members, so no query ends early.
+/// share another; two-tier pairs each one-segment literal with a two-segment literal
+/// under the same first segment, so the tiers meet on every shared prefix.
+///
+/// The pairwise operations sweep the held union (indexed) and the queried union
+/// independently, so a cost that follows either one shows up as its own slope. The
+/// unions never contain each other's members, so no query ends early; `covers` queries
+/// a subset of the held union so every query succeeds, which needs no more queries than
+/// members.
 fn algebra(c: &mut Criterion) {
 	let mut group = c.benchmark_group("pattern-algebra");
-	let union = |kind: &str, name: &str, count: usize| -> Vec<Pattern> {
-		(0..count)
+	let union = |kind: &str, name: &str, count: usize| -> Patterns {
+		let union: Patterns = (0..count)
 			.map(|index| match kind {
 				"literal" => format!("{name}{index:04}"),
 				"partial" => format!("{name}{index:04}*tail"),
-				_ if index % 2 == 0 => format!("{name}{index:04}"),
-				_ => format!("{name}{index:04}/x"),
+				_ if index % 2 == 0 => format!("{name}{:04}", index / 2),
+				_ => format!("{name}{:04}/x", index / 2),
 			})
-			.map(|text| text.parse().unwrap())
-			.collect()
+			.map(|text| text.parse::<Pattern>().unwrap())
+			.collect();
+		assert_eq!(union.len(), count);
+		union
 	};
-	for count in [16, 256, 4096] {
-		for kind in ["literal", "partial", "two-tier"] {
-			let inputs = union(kind, "room", count);
-			let ours: Patterns = inputs.iter().cloned().collect();
-			let theirs: Patterns = union(kind, "other", count).into_iter().collect();
-			assert_eq!(ours.len(), count);
+	for kind in ["literal", "partial", "two-tier"] {
+		for count in [16, 256, 4096] {
+			let inputs: Vec<Pattern> = union(kind, "room", count).into_iter().collect();
 			group.throughput(Throughput::Elements(count as u64));
-
 			group.bench_function(BenchmarkId::new(format!("collect-{kind}"), count), |b| {
 				b.iter(|| std::hint::black_box(inputs.iter().cloned().collect::<Patterns>().len()));
 			});
-			group.bench_function(BenchmarkId::new(format!("extend-{kind}"), count), |b| {
+		}
+		for (held, queried) in [(16, 16), (4096, 16), (16, 4096), (4096, 4096)] {
+			let ours = union(kind, "room", held);
+			let theirs = union(kind, "other", queried);
+			let sizes = format!("{held}x{queried}");
+			group.throughput(Throughput::Elements((held + queried) as u64));
+
+			group.bench_function(BenchmarkId::new(format!("extend-{kind}"), &sizes), |b| {
 				b.iter(|| {
 					let mut union = ours.clone();
 					union.extend(theirs.iter().cloned());
 					std::hint::black_box(union.len())
 				});
 			});
-			group.bench_function(BenchmarkId::new(format!("covers-{kind}"), count), |b| {
-				b.iter(|| std::hint::black_box(ours.covers(&ours)));
-			});
-			group.bench_function(BenchmarkId::new(format!("intersect-{kind}"), count), |b| {
+			group.bench_function(BenchmarkId::new(format!("intersect-{kind}"), &sizes), |b| {
 				b.iter(|| std::hint::black_box(ours.intersect(&theirs).unwrap().len()));
 			});
+			if queried <= held {
+				let subset = union(kind, "room", queried);
+				assert!(ours.covers(&subset));
+				group.bench_function(BenchmarkId::new(format!("covers-{kind}"), &sizes), |b| {
+					b.iter(|| std::hint::black_box(ours.covers(&subset)));
+				});
+			}
 		}
 	}
 	group.finish();

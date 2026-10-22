@@ -150,6 +150,16 @@ describe("vectors", () => {
 		expect(() => left.intersect(right)).toThrow(IntersectionError);
 	});
 
+	test("union intersection limits only the reduced result", () => {
+		// Every `*/aN` yields its own piece, past the limit, until `x/a*` absorbs them all.
+		const grant = new Patterns([Pattern.parse("x/*")]);
+		const claim = new Patterns(
+			Array.from({ length: 2 * Pattern.MAX_INTERSECTIONS + 1 }, (_, i) => Pattern.parse(`*/a${i}`)),
+		);
+		claim.insert(Pattern.parse("x/a*"));
+		expect(texts(grant.intersect(claim))).toEqual(["x/a*"]);
+	});
+
 	test("captures", () => {
 		for (const c of vectors.captures) {
 			const got = Pattern.parse(c.scope).captures(Pattern.parse(c.matched));
