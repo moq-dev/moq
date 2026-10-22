@@ -48,3 +48,18 @@ for (const [attribute, value, expected] of [
 		}
 	});
 }
+
+for (const [value, expected] of [
+	["moq-transport-14", ["moq-transport-14"]],
+	[" moq-lite-06 , moq-transport-22 ", ["moq-lite-06", "moq-transport-22"]],
+	["", undefined],
+	[" , ", undefined],
+	[null, undefined],
+] as const) {
+	test(`versions=${JSON.stringify(value)} offers ${JSON.stringify(expected)}`, () => {
+		const Element = require("./element").default;
+		const set = mock(() => {});
+		Element.prototype.attributeChangedCallback.call({ connection: { versions: { set } } }, "versions", "x", value);
+		expect(set).toHaveBeenCalledWith(expected);
+	});
+}

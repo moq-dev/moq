@@ -13,8 +13,8 @@ export interface ConsumerProps {
 	 * How stale a group may get before it is skipped, in milliseconds (default: 0).
 	 *
 	 * Measured as the span from the oldest buffered frame to the newest, so it bounds how long a
-	 * late group is waited for. A missing sequence also expires after this much monotonic
-	 * time blocked on it, even when the next group is a marker on a paused track.
+	 * late group is waited for. A missing sequence also expires this much monotonic time after
+	 * the first group past it arrived, even when the next group is a marker on a paused track.
 	 * The local half of the subscription's
 	 * `maxDelay`; both measure the same budget, one on the wire and one as frames are read.
 	 */
@@ -52,6 +52,9 @@ export type Read =
 
 interface Group {
 	consumer: Moq.Group.Consumer;
+	// From then on, any sequence missing below this group is late: the earliest arrival among it
+	// and the groups past it, kept on insert so a hole reads it without scanning the backlog.
+	late: Instant;
 	frames: ReceivedFrame[]; // decode order
 	empty: boolean; // no wire frame was published; empty groups mean nothing
 	media: boolean; // a decodable (non-marker) frame was buffered
@@ -105,7 +108,8 @@ export class Consumer {
 	#maxDelay: Getter<Milli>;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
-	#hole?: { sequence: number; since: Instant };
+	// When the missing sequence at the cursor became late, while one is.
+	#hole?: Instant;
 	// Presentation end (max PTS + duration) of the group we most recently advanced past, so next()'s
 	// promotion guard can tell a timeline-continuous next group from one sitting after a gap.
 	// Maintained only via #recordPresented; see its comment for the invariant.
@@ -193,6 +197,7 @@ export class Consumer {
 				// may be is the subscription's own max delay, applied before it ever reaches here.
 				const group: Group = {
 					consumer,
+					late: now(),
 					frames: [],
 					empty: true,
 					media: false,
@@ -200,8 +205,12 @@ export class Consumer {
 
 				// Insert into #groups based on the group sequence number (ascending).
 				// This is used to cancel old groups.
-				this.#groups.push(group);
-				this.#groups.sort((a, b) => a.consumer.sequence - b.consumer.sequence);
+				let index = this.#groups.findIndex((other) => other.consumer.sequence > consumer.sequence);
+				if (index === -1) index = this.#groups.length;
+				// Arrivals only move forward, so the groups below this one keep their earliest arrival.
+				const next = this.#groups.at(index);
+				if (next && next.late < group.late) group.late = next.late;
+				this.#groups.splice(index, 0, group);
 
 				// Start buffering frames from this group
 				this.#signals.spawn(this.#runGroup.bind(this, group));
@@ -527,13 +536,13 @@ export class Consumer {
 			// here matters: #checkMaxDelay would instead drop the head, the very group to play next.
 			// After track termination no missing group can arrive, so drain across any remaining gap.
 			// A missing sequence also expires on elapsed monotonic time, so timestamp-free markers
-			// behind a hole can end a paused track without more arrivals.
+			// behind a hole can end a paused track without more arrivals. It is late since a group
+			// past it arrived, not since the cursor got here: once the edge stops moving, a backlog
+			// with every other group missing would otherwise drain one budget per hole.
 			if (this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
 				if (head.consumer.sequence > this.#active) {
-					if (this.#hole?.sequence !== this.#active) {
-						this.#hole = { sequence: this.#active, since: now() };
-					}
+					this.#hole = head.late;
 					const startup = this.#start === undefined;
 					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp);
 					const empty = head.empty && head.consumer.done;
@@ -544,7 +553,7 @@ export class Consumer {
 							(this.#presentedEnd !== undefined &&
 								head.latest !== undefined &&
 								head.latest - this.#presentedEnd > maxDelay));
-					const elapsed = Instant.durationSince(now(), this.#hole.since) >= Nano.fromMicro(maxDelay);
+					const elapsed = Instant.durationSince(now(), this.#hole) >= Nano.fromMicro(maxDelay);
 					if (startup || empty || contiguous || skipHole || elapsed || ended !== undefined) {
 						if (!contiguous && !empty) {
 							this.#lost = true;
@@ -640,9 +649,9 @@ export class Consumer {
 			const abort = this.#signals.abort;
 			if (abort.aborted) return undefined;
 			let timer: Effect | undefined;
-			if (this.#hole) {
+			if (this.#hole !== undefined) {
 				timer = new Effect();
-				const since = this.#hole.since;
+				const since = this.#hole;
 				timer.run((effect) => {
 					const budget = Nano.fromMilli(effect.get(this.#maxDelay));
 					const elapsed = Instant.durationSince(now(), since);

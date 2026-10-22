@@ -7,8 +7,10 @@
 - `moq play`, given `--echo <name>`, publishes an `.echo` broadcast under each
   watched catalog's echo path and fills its feedback track with what it
   received, decoded, and played.
-- The gateway imports (`hls`, `rtmp`, `srt`, `rtc`) and `archive` take
+- The gateway imports (`hls`, `rtmp`, `srt`, `rtsp`, `rtc`) and `archive` take
   `--stats`.
+- `moq import --echo-path <path>` solicits feedback: it sets the catalog's
+  `echo` section, named apart from the viewer's `--echo <name>`.
 
 ## Plan
 
@@ -39,6 +41,11 @@
   `--echo` when it adds one: they would publish rendition IDs and per-track
   counters in plaintext beside it.
 
+- Decided 2026-10-22 (maintainer): the publisher's solicit option moved here
+  from [encoder feedback](/quest/m3/stats-encoder-feedback.md), which keeps
+  only the adaptation loop and reuses `--echo-path`.
+
 ## Related
 
 - [Encrypted native CLI](/quest/m2/e2ee/cli.md) - refuses stats and feedback on an encrypted broadcast
+- [Encoder feedback](/quest/m3/stats-encoder-feedback.md) - the adaptation loop that reads what `--echo-path` solicits

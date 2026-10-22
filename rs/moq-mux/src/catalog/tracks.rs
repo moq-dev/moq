@@ -396,7 +396,7 @@ impl<E: CatalogExt> Reserved<E> {
 
 	/// Track properties for a media track under this catalog, carrying any retention it declares.
 	/// See [`Producer::track_info`](super::Producer::track_info).
-	pub fn track_info(&self, priority: u8) -> moq_net::track::Info {
+	pub fn track_info(&self, priority: i8) -> moq_net::track::Info {
 		self.timebase.catalog.track_info(priority)
 	}
 

@@ -22,7 +22,3 @@ document that on the `announce` attribute.
 
 Public API: `@moq/publish`'s `announce` attribute and property.
 Also check `demo/web` for uses.
-
-## Closes
-
-- [#5703](https://github.com/moq-dev/moq/issues/5703) - Announce is required to be subscribed by moq-watch
