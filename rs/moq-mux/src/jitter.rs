@@ -941,6 +941,51 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		Some(item)
 	}
 
+	/// Whether `key` has a frame waiting, queued or held for a clock being acquired.
+	pub fn holds(&self, key: &K) -> bool {
+		self.peek(key).is_some()
+			|| self
+				.acquire
+				.as_ref()
+				.is_some_and(|acquire| acquire.tracks.contains_key(key))
+	}
+
+	/// Drop what is kept of `key`, a track that has ended and will send nothing more: an ended
+	/// track's lead would otherwise place every later floor, and its keys would pile up.
+	pub fn forget(&mut self, key: &K) {
+		self.tracks.remove(key);
+		self.leads.remove(key);
+		self.steer.tracks.remove(key);
+		if let Some(floor) = &mut self.steer.floor {
+			floor.tracks.remove(key);
+		}
+		self.expect.remove(key);
+	}
+
+	/// Carry everything kept of `from` over to `to`, a key nothing uses yet.
+	pub fn rekey(&mut self, from: &K, to: K) {
+		fn carry<K: Ord + Clone, V>(map: &mut BTreeMap<K, V>, from: &K, to: &K) {
+			if let Some(value) = map.remove(from) {
+				map.insert(to.clone(), value);
+			}
+		}
+		carry(&mut self.tracks, from, &to);
+		carry(&mut self.leads, from, &to);
+		carry(&mut self.steer.tracks, from, &to);
+		if let Some(floor) = &mut self.steer.floor {
+			carry(&mut floor.tracks, from, &to);
+		}
+		if let Some(acquire) = &mut self.acquire {
+			carry(&mut acquire.tracks, from, &to);
+			for (key, _) in acquire.frames.iter_mut().filter(|(key, _)| key == from) {
+				*key = to.clone();
+			}
+		}
+		if self.expect.remove(from) {
+			self.expect.insert(to);
+		}
+	}
+
 	/// When the next queued frame is due, or the acquisition under way ends.
 	#[cfg(test)]
 	pub fn next_deadline(&self) -> Option<Instant> {
