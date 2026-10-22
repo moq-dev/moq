@@ -286,7 +286,7 @@ type PesStart = (u128, Option<u128>);
 
 /// A track's key in the jitter buffer: its PID, then the order the export took it on in. A
 /// track taking over the PID of one still going out to its end is a track of its own there,
-/// and goes out after it at the same release time.
+/// and waits for that one to send everything ([`Export::take_over`]).
 type Key = (u16, u64);
 
 struct Track {
@@ -1622,6 +1622,7 @@ where
 			if let Some(out) = self.pop() {
 				return Poll::Ready(Ok(Some(out)));
 			}
+			self.take_over();
 			let ready = match self.held.take() {
 				Some(ready) => ready,
 				None => match self.jitter.poll_next(waiter) {
@@ -2051,6 +2052,9 @@ where
 							track.pid = self.pid_for(mpegts.tracks.get(name).map(|entry| entry.pid), current)?;
 							if let Some(current) = current.filter(|&current| current != track.key()) {
 								self.jitter.rekey(&current, track.key());
+								if let Some(held) = self.held.as_mut().filter(|held| held.track == current) {
+									held.track = track.key();
+								}
 							}
 							Some(track)
 						}
@@ -2207,6 +2211,24 @@ where
 	#[cfg(test)]
 	pub(super) fn buffered(&self) -> usize {
 		self.jitter.len()
+	}
+
+	/// `pid`'s access units and how long it has been quiet, as [`Self::stats`] reads them.
+	#[cfg(test)]
+	pub(super) fn liveness(&self, pid: u16) -> (u64, Option<Duration>) {
+		self.liveness.stream(pid)
+	}
+
+	/// Take the next frame due out of the jitter buffer and hold it, as a generation boundary
+	/// holds the new generation's first frame behind the old one's tail. Returns its PID.
+	#[cfg(test)]
+	pub(super) fn hold_next(&mut self) -> Option<u16> {
+		let Poll::Ready(ready) = self.jitter.poll_next(&kio::Waiter::noop()) else {
+			return None;
+		};
+		let pid = ready.track.0;
+		self.held = Some(ready);
+		Some(pid)
 	}
 
 	/// When the next queued frame is due, or the next grid slot while media is queued or
@@ -2678,6 +2700,10 @@ where
 			let track = self.tracks.remove(&name).expect("a track retiring");
 			self.jitter.forget(&track.key());
 			cleared |= track.pid == pcr_pid;
+			// A stream listed on the PID later counts its silence from its own listing.
+			if !self.tracks.values().any(|other| other.listed && other.pid == track.pid) {
+				self.liveness.retire(track.pid);
+			}
 		}
 		if cleared
 			&& !self.tracks.values().any(|track| track.pid == pcr_pid)
@@ -2688,6 +2714,36 @@ where
 		}
 		self.expect_continuous();
 		self.revise()
+	}
+
+	/// Hold each track taking over a PID in the jitter buffer until every track before it
+	/// there has ended and its last packet has gone out, so none of theirs goes out under the
+	/// PMT revised for it. Release times alone would interleave them: the new track's first
+	/// frame can be due before the tail of the one it replaces.
+	fn take_over(&mut self) {
+		let held = self.held.as_ref().map(|ready| ready.track);
+		let sending = |track: &Track| {
+			!track.finished
+				|| track.pack.is_some()
+				|| held == Some(track.key())
+				|| self.jitter.holds(&track.key())
+				|| self.schedule.holds(track.pid)
+		};
+		let waits: Vec<(Key, bool)> = self
+			.tracks
+			.values()
+			.filter(|track| !track.listed)
+			.map(|track| {
+				let behind = self
+					.tracks
+					.values()
+					.any(|other| other.pid == track.pid && other.serial < track.serial && sending(other));
+				(track.key(), behind)
+			})
+			.collect();
+		for (key, wait) in waits {
+			self.jitter.wait(&key, wait);
+		}
 	}
 
 	/// The PID the PCR rides alone under [`Self::with_sync`]: the first above the program's

@@ -143,6 +143,8 @@ pub(crate) struct Buffer<K, T> {
 	/// The next generation's frames, held while its clock is acquired.
 	acquire: Option<Acquire<K, T>>,
 	tracks: BTreeMap<K, Track<T>>,
+	/// The tracks whose frames stay queued past their deadlines ([`Buffer::wait`]).
+	waiting: BTreeSet<K>,
 	/// The latest deadline given out.
 	horizon: Option<Instant>,
 	/// The tracks an acquisition waits to hear from, bounded, so that it anchors on whichever
@@ -353,6 +355,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			previous: None,
 			acquire: None,
 			tracks: BTreeMap::new(),
+			waiting: BTreeSet::new(),
 			horizon: None,
 			expect: BTreeSet::new(),
 			released: false,
@@ -806,15 +809,26 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// in decode order, ties by track. Not in deadline order: two frames of one decode time
 	/// queued either side of a steering step can be due nanoseconds apart, which would make
 	/// the order depend on when each was read rather than on the media.
+	///
+	/// A waiting track ([`Self::wait`]) is passed over, unless it holds a generation older than
+	/// every other track's: the generations still go out in turn.
 	fn front(&self) -> Option<(Instant, &K)> {
-		self.tracks
-			.iter()
-			.filter_map(|(key, track)| {
-				let (generation, decode, deadline, _) = track.queue.front()?;
-				Some(((*generation, decode.as_nanos(), key), *deadline))
-			})
-			.min_by(|a, b| a.0.cmp(&b.0))
-			.map(|((_, _, key), deadline)| (deadline, key))
+		let front = |waiting: bool| {
+			self.tracks
+				.iter()
+				.filter(|(key, _)| self.waiting.contains(*key) == waiting)
+				.filter_map(|(key, track)| {
+					let (generation, decode, deadline, _) = track.queue.front()?;
+					Some(((*generation, decode.as_nanos(), key), *deadline))
+				})
+				.min_by(|a, b| a.0.cmp(&b.0))
+		};
+		let next = match (front(false), front(true)) {
+			(Some(next), Some(waiting)) if waiting.0.0 < next.0.0 => waiting,
+			(next, _) => next?,
+		};
+		let ((_, _, key), deadline) = next;
+		Some((deadline, key))
 	}
 
 	/// When the acquisition under way ends, unless a track starts a new group first.
@@ -954,6 +968,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// track's lead would otherwise place every later floor, and its keys would pile up.
 	pub fn forget(&mut self, key: &K) {
 		self.tracks.remove(key);
+		self.waiting.remove(key);
 		self.leads.remove(key);
 		self.steer.tracks.remove(key);
 		if let Some(floor) = &mut self.steer.floor {
@@ -981,9 +996,21 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				*key = to.clone();
 			}
 		}
+		if self.waiting.remove(from) {
+			self.waiting.insert(to.clone());
+		}
 		if self.expect.remove(from) {
 			self.expect.insert(to);
 		}
+	}
+
+	/// Keep `key`'s frames queued past their deadlines while `wait`: a track that must go out
+	/// behind another's frames, whatever their release times.
+	pub fn wait(&mut self, key: &K, wait: bool) {
+		match wait {
+			true => self.waiting.insert(key.clone()),
+			false => self.waiting.remove(key),
+		};
 	}
 
 	/// When the next queued frame is due, or the acquisition under way ends.
