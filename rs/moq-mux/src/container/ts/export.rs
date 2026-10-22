@@ -2315,10 +2315,11 @@ where
 		};
 		let pid = track.pid;
 		let place = frame.timestamp.as_nanos();
+		// Its first access unit decodes at the DTS, which a reordered picture carries ahead of its PTS.
 		let decode = pes
 			.as_ref()
-			.and_then(|pes| pes.pts)
-			.map(|pts| unwrap_pts(pts, frame.timestamp));
+			.and_then(|pes| pes.dts.or(pes.pts))
+			.map(|ticks| unwrap_pts(ticks, frame.timestamp));
 		let dolby = Dolby::described(&track.descriptors)
 			.filter(|_| matches!(track.kind, Kind::PesPacket { stream_type: 0x06 }));
 		let frames = match (&pes, decode, dolby) {
@@ -2869,6 +2870,8 @@ const PES_DTS_LEN: usize = 5;
 struct PesPacket {
 	/// Its PTS in 90 kHz ticks, as the 33-bit field carries it.
 	pts: Option<u64>,
+	/// Its DTS, likewise, where it differs from the PTS.
+	dts: Option<u64>,
 	/// Where its payload begins, past the header.
 	payload: usize,
 }
@@ -2892,6 +2895,7 @@ impl PesPacket {
 		}
 		Ok(Self {
 			pts: pes.pts,
+			dts: pes.dts,
 			payload: pes.header.len(),
 		})
 	}

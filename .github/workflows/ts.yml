@@ -72,6 +72,15 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
+      # MPEG-2 video the importer carries as whole PES: FFmpeg decodes the capture to the
+      # source's pictures, and the video passes the T-STD model.
+      - name: TS MPEG-2 video
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --mpeg2
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
       - name: TS audio-only SCTE-35
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --clockless audio-scte35
