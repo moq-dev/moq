@@ -33,7 +33,7 @@ way until a measurement justifies the flip.
   `bench/relay.sh`, 1 publisher x 256 subscribers at 60 fps of 1,200-byte
   one-frame groups, three rotated 60 s rounds on a 4-vCPU KVM host) measured:
 
-  | runtime | median relay cores | median RSS MB | steady p99 ms | skipped groups per round |
+  | runtime | median relay cores | median RSS MB | lifetime p99 ms | skipped groups per round |
   | --- | --- | --- | --- | --- |
   | shared tokio | 1.315 | 176.4 | 15-17 | 0 / 0 / 0 |
   | 2 tokio workers | 1.249 | 171.8 | 18-32 | 12 / 48 / 0 |
