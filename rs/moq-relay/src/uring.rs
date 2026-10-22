@@ -86,8 +86,8 @@ struct Serve {
 ///
 /// [`bind`](Self::bind) opens every socket, so a returned value already owns
 /// the listen address and a port conflict is an error here rather than a
-/// worker that quietly died. Nothing is served until [`serve`](Self::serve)
-/// spawns the threads.
+/// worker that quietly died. [`spawn`](Self::spawn) starts every thread, and
+/// nothing is served until [`serve`](Self::serve).
 pub struct Workers {
 	members: Vec<moq_sock::shard::Socket>,
 	addr: SocketAddr,
@@ -109,6 +109,8 @@ pub struct Workers {
 
 	threads: Vec<(u16, std::thread::JoinHandle<()>)>,
 	stops: Vec<Arc<Stop>>,
+	/// Releases each spawned worker to accept; dropped unsent, it exits instead.
+	starts: Vec<std::sync::mpsc::Sender<()>>,
 	/// A worker's fatal error, reported to whoever polls [`failed`](Self::failed).
 	failures: tokio::sync::mpsc::UnboundedReceiver<anyhow::Error>,
 	failures_tx: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
@@ -244,6 +246,7 @@ impl Workers {
 			reset_secret,
 			threads: Vec::new(),
 			stops: Vec::new(),
+			starts: Vec::new(),
 			failures,
 			failures_tx,
 			_group: group,
@@ -271,13 +274,14 @@ impl Workers {
 		self.certificates.clone()
 	}
 
-	/// Spawn the worker threads and start accepting.
+	/// Spawn the worker threads, each set up but not yet accepting.
 	///
 	/// Call from the shared runtime: it is captured as the home for
 	/// authentication and session supervision. Returns once every worker is
-	/// serving; a worker that cannot start (an old kernel, a ring failure) is
-	/// an error here rather than a thread that quietly died.
-	pub fn serve(
+	/// set up; a worker that cannot start (an old kernel, a ring failure) is
+	/// an error here rather than a thread that quietly died. Nothing accepts
+	/// until [`serve`](Self::serve), so a failure here has served nobody.
+	pub fn spawn(
 		&mut self,
 		cluster: cluster::Cluster,
 		auth: auth::Auth,
@@ -307,6 +311,7 @@ impl Workers {
 			let core = cores.get(index as usize % cores.len().max(1)).copied();
 			let stop = Arc::new(Stop::default());
 			let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+			let (start_tx, start_rx) = std::sync::mpsc::channel();
 
 			let spawn = Spawn {
 				member,
@@ -317,6 +322,7 @@ impl Workers {
 				serve: serve.clone(),
 				stop: stop.clone(),
 				ready: ready_tx,
+				start: start_rx,
 				failures: self.failures_tx.clone(),
 			};
 			let thread = std::thread::Builder::new()
@@ -340,9 +346,18 @@ impl Workers {
 
 			self.threads.push((index, thread));
 			self.stops.push(stop);
+			self.starts.push(start_tx);
 		}
 
 		Ok(())
+	}
+
+	/// Start every [`spawn`](Self::spawn)ed worker accepting.
+	pub fn serve(&mut self) {
+		for start in self.starts.drain(..) {
+			// A worker that died since setup is reported through `failed`.
+			let _ = start.send(());
+		}
 	}
 
 	/// The first worker's fatal error. Pends until one dies, which a healthy
@@ -365,6 +380,8 @@ impl Workers {
 	}
 
 	fn signal(&mut self) -> Vec<(u16, std::thread::JoinHandle<()>)> {
+		// A worker still waiting to serve exits without serving.
+		self.starts.clear();
 		for stop in &self.stops {
 			stop.stop();
 		}
@@ -461,9 +478,11 @@ struct Spawn {
 	udp: moq_uring::udp::Config,
 	serve: Serve,
 	stop: Arc<Stop>,
-	/// Reports setup back to [`Workers::serve`], which blocks on it so a
+	/// Reports setup back to [`Workers::spawn`], which blocks on it so a
 	/// worker that cannot start is an error there rather than a dead thread.
 	ready: std::sync::mpsc::Sender<anyhow::Result<()>>,
+	/// Fires on [`Workers::serve`]; closes when the group stops first.
+	start: std::sync::mpsc::Receiver<()>,
 	/// Where a fatal error goes once the worker is running.
 	failures: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
 }
@@ -492,7 +511,8 @@ fn run_worker(spawn: Spawn) {
 			let _ = failures.send(anyhow::anyhow!("io_uring worker {index} stopped on its own"));
 		}
 		// Setup failure already went back through `ready`, which is what
-		// `Workers::serve` is blocking on.
+		// `Workers::spawn` is blocking on, and a worker stopped before it
+		// served was asked to.
 		Ok(_) => {}
 	}
 }
@@ -509,6 +529,7 @@ fn serve_worker(spawn: Spawn) -> bool {
 		serve,
 		stop,
 		ready,
+		start,
 		failures,
 	} = spawn;
 	let index = member.shard().index();
@@ -551,6 +572,9 @@ fn serve_worker(spawn: Spawn) -> bool {
 		}
 	};
 	let _ = ready.send(Ok(()));
+	if start.recv().is_err() {
+		return false;
+	}
 
 	let handle = worker.handle();
 	let accept_handle = handle.clone();
@@ -926,6 +950,34 @@ mod tests {
 			matches!(err.downcast_ref(), Some(moq_tokio::Error::KeylogUnset)),
 			"{err:#}"
 		);
+	}
+
+	/// A group stopped before it serves, as when a later startup step fails, ends
+	/// the workers waiting to serve instead of hanging on their join.
+	#[tokio::test]
+	async fn a_group_stopped_before_serving_joins() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
+			&& std::env::var_os("MOQ_STRICT").is_none()
+		{
+			eprintln!("skipping io_uring relay test: {reason}");
+			return;
+		}
+
+		let mut server = moq_tokio::server::Config::default();
+		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		server.listen.tls.generate = vec!["localhost".into()];
+		let mut workers = Workers::bind(server, moq_tokio::worker::Config::new(2)).unwrap();
+		let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+		workers
+			.spawn(
+				cluster,
+				auth::Auth::refuse("test"),
+				shutdown::Observer::disabled(),
+				Default::default(),
+			)
+			.unwrap();
+		workers.shutdown().await;
 	}
 
 	/// An auth decision still pending at the drain deadline is abandoned by then.

@@ -5,6 +5,11 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### io\_uring workers start serving separately (#6245)
+
+`uring::Workers::serve(cluster, auth, shutdown, sessions)` is now `spawn` with the same arguments, which sets every worker up without accepting, followed by `serve()`, which starts them accepting.
+Install anything that must be in place before the first session (`Relay::run` installs its signal handlers) between the two.
+
 ### `Accepted` takes any transport's handshake (#6176)
 
 `Accepted` loses its transport type parameter, since `moq_net::server::Handshake` has none: write `Accepted` instead of `Accepted<S>`.
