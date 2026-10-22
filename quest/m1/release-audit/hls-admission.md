@@ -18,9 +18,11 @@ consider a release backport after validation.
 
 Planning settled from the 2026-10-22 security audit:
 
-- Absolute references resolve only when their scheme and authority equal
-  the playlist's, checked once where references resolve so every resource
-  kind shares the rule.
+- A reference is accepted only when the URL it finally resolves to has the
+  playlist's scheme and authority, whatever form the reference took
+  (absolute, network-path, or relative). Check once where references
+  resolve so every resource kind shares the rule, and cover each form in
+  the tests.
 - Every redirect hop is held to the same rule before it is followed.
 - `file:` resources are read only when the playlist itself is a `file:` URL,
   which keeps local fixtures working.
