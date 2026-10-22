@@ -77,7 +77,7 @@ Standalone backend defaults differ again; benchmark the effective settings
 of the actual consumer. These are limits, not per-connection allocations.
 Include idle connections and stalled
 readers as well as high-bandwidth, high-RTT relay links before recommending
-smaller windows. [Receive memory](/quest/m1/quic/receive-memory.md) owns budget
+smaller windows. Receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)) own budget
 correctness; settings must preserve useful bandwidth-delay product and
 failover behavior. [Keepalive](/quest/m2/quic-keep-alive.md) already owns timer
 policy. Do not add a generic tuning surface without a measured consumer.

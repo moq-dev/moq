@@ -23,7 +23,7 @@ backing or assume each slice owns a fresh allocation. Compare continued
 sharing with copying/compaction only where the workload warrants it.
 
 This covers completed reliable groups. Coordinate with
-[receive credit](/quest/m1/quic/receive-memory.md),
+receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)),
 [browser media copies](/quest/m2/performance-survey/browser-media-copies.md),
 and the [release audit](https://github.com/moq-dev/moq/pull/6311), which owns
 decoded datagrams and incomplete/reordered media storage.
