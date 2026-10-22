@@ -28,10 +28,11 @@ and a third track joins without another pair of inputs; `Sync.register`
 already keeps one jitter entry per track and grows into the handles. The
 measured target per track comes from the [Audio jitter
 target](/quest/m1/audio-jitter-target/README.md) line: each decoder registers
-its own target through `Sync.register`, and `probe` stays in `SyncInput` unread
-so that line lands on `main`. This quest folds the registrations into the
-handles and drops `probe`. `SyncInput` is a published `@moq/watch` shape, so
-this is a break.
+its own target through `Sync.register`. This quest folds the registrations
+into the handles. `SyncInput` is a published `@moq/watch` shape, so this is a
+break. [Sync.wait says what happened](/quest/m1/api-audit/sync-wait.md) lands
+first: it drops `probe` and `out.jitter` and makes the decoder-facing calls
+internal, with `wait` reporting present or skip, so the handles build on that.
 
 Recommendations for the implementation:
 

@@ -20,6 +20,7 @@ import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { liteTimescale } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { nextChange } from "../util/change.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -609,18 +610,8 @@ export class Publisher {
 		// afterwards would sleep through it, leaving the change unannounced until something
 		// unrelated moved. A grant change re-diffs the same way, withdrawing what it no longer
 		// covers and announcing what it now does.
-		// TODO Make a better helper within Signals.
-		let dispose: Dispose = () => {};
-		const arm = () =>
-			new Promise<"changed">((resolve) => {
-				const table = this.#advertised.changed(() => resolve("changed"));
-				const grant = this.#grant?.changed(() => resolve("changed"));
-				dispose = () => {
-					table();
-					grant?.();
-				};
-			});
-		let changed = arm();
+		const arm = () => nextChange(this.#advertised, this.#grant);
+		let { changed, dispose } = arm();
 
 		try {
 			// Nothing is announced before the grant it would be checked against. A local close
@@ -762,7 +753,7 @@ export class Publisher {
 				if (woke !== "changed") break;
 
 				// Re-arm before reading, so an advertise that lands while we write is not lost.
-				changed = arm();
+				({ changed, dispose } = arm());
 
 				const latest = this.#advertised.peek();
 				if (!latest) break;
