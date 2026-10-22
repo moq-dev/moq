@@ -41,8 +41,9 @@ Recommendations:
 - Budgets come from nightly runs by the rule in `budgets.json`'s note, not a
   developer machine. The native `pulse` ceilings there are provisional
   developer-host numbers; re-measure them from nightlies before enforcing.
-- [Track priority scope](/quest/m1/track-priority-scope.md) renumbers
-  priorities; assert on behavior, not on the 80 and 60 constants.
+- Priorities are signed since
+  [moq-dev/moq#6142](https://github.com/moq-dev/moq/pull/6142); assert on
+  behavior, not on the 80 and 60 constants.
 - Update the harness README's "Not covered" list, which names video.
 
 Public API: none. Wire: none.

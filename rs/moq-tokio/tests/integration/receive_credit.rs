@@ -177,7 +177,7 @@ async fn room(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consume
 }
 
 /// Subscribe to track `name` of `remote` at `priority`.
-async fn subscribe(remote: &moq_net::broadcast::Consumer, name: &str, priority: u8) -> moq_net::track::Subscriber {
+async fn subscribe(remote: &moq_net::broadcast::Consumer, name: &str, priority: i8) -> moq_net::track::Subscriber {
 	tokio::time::timeout(
 		TIMEOUT,
 		remote
@@ -192,7 +192,7 @@ async fn subscribe(remote: &moq_net::broadcast::Consumer, name: &str, priority: 
 
 impl Setup {
 	/// Subscribe to a new track at `priority`.
-	async fn subscribe(&self, name: &str, priority: u8) -> (moq_net::track::Producer, moq_net::track::Subscriber) {
+	async fn subscribe(&self, name: &str, priority: i8) -> (moq_net::track::Producer, moq_net::track::Subscriber) {
 		let track = self.broadcast.create_track(name, timed()).unwrap();
 		(track, subscribe(&self.remote, name, priority).await)
 	}
@@ -252,7 +252,7 @@ async fn read_partial(frame: &mut moq_net::frame::Consumer, bytes: usize) {
 async fn the_less_urgent_partial_frame_gives_way(version: &str, profile: Option<moq_shaper::Profile>) {
 	let setup = setup_through(version, transport(WINDOW as u64), profile).await;
 	let (low, mut low_sub) = setup.subscribe("low", 1).await;
-	let (high, mut high_sub) = setup.subscribe("high", 200).await;
+	let (high, mut high_sub) = setup.subscribe("high", 100).await;
 
 	// Three quarters of the window, held by a frame that never finishes.
 	let mut low_group = low.append_group().unwrap();
@@ -320,7 +320,7 @@ async fn bufferbloat_is_not_a_stuck_window() {
 	let payload = Bytes::from(vec![3u8; WINDOW / (2 * STREAMS)]);
 	let mut tasks = Vec::with_capacity(STREAMS);
 	for index in 0..STREAMS {
-		let (track, mut sub) = setup.subscribe(&index.to_string(), index as u8).await;
+		let (track, mut sub) = setup.subscribe(&index.to_string(), index as i8).await;
 		let payload = payload.clone();
 		tasks.push(tokio::spawn(async move {
 			for _ in 0..ROUNDS {
@@ -469,7 +469,7 @@ async fn reversed(version: &str) -> Reversed {
 
 impl Reversed {
 	/// Subscribe to a new track at `priority`.
-	async fn subscribe(&self, name: &str, priority: u8) -> (moq_net::track::Producer, moq_net::track::Subscriber) {
+	async fn subscribe(&self, name: &str, priority: i8) -> (moq_net::track::Producer, moq_net::track::Subscriber) {
 		let track = self.broadcast.create_track(name, timed()).unwrap();
 		(track, subscribe(&self.remote, name, priority).await)
 	}
@@ -553,7 +553,7 @@ async fn partial_control_requests_give_way() {
 async fn the_largest_unit_completes_under_pressure(version: &str) {
 	let setup = reversed(version).await;
 	let (low, _low_sub) = setup.subscribe("low", 1).await;
-	let (high, mut high_sub) = setup.subscribe("high", 200).await;
+	let (high, mut high_sub) = setup.subscribe("high", 100).await;
 
 	// Several groups' worth of frames that never finish, opened before and after.
 	let mut partial = Vec::new();
@@ -654,7 +654,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	tokio::spawn(moq_net::time::run(driver));
 	let remote = room(&origin).await;
 	let mut low = subscribe(&remote, "low", 1).await;
-	let mut high = subscribe(&remote, "high", 200).await;
+	let mut high = subscribe(&remote, "high", 100).await;
 
 	// Wait until three quarters of the window holds a frame that can never complete.
 	commands.write_all(b"low\n").await.unwrap();

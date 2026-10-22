@@ -157,7 +157,7 @@ fn partial_frame_gives_way() {
 			let remote = within(&handle, "the broadcast", consumer.request_broadcast("room", None))
 				.await
 				.expect("broadcast resolves");
-			let subscribe = |name: &str, priority: u8| {
+			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {
 					track
@@ -167,7 +167,7 @@ fn partial_frame_gives_way() {
 				}
 			};
 			let mut low_sub = within(&handle, "the low subscription", subscribe("low", 1)).await;
-			let mut high_sub = within(&handle, "the high subscription", subscribe("high", 200)).await;
+			let mut high_sub = within(&handle, "the high subscription", subscribe("high", 100)).await;
 
 			// Three quarters of the window, held by a frame that never finishes.
 			let mut low_group = low.append_group().expect("low group");
@@ -310,7 +310,7 @@ fn javascript_partial_frame_gives_way() {
 			let remote = within(&handle, "the broadcast", consumer.request_broadcast("room", None))
 				.await
 				.expect("broadcast resolves");
-			let subscribe = |name: &str, priority: u8| {
+			let subscribe = |name: &str, priority: i8| {
 				let track = remote.track(name).expect("track");
 				async move {
 					track
@@ -320,7 +320,7 @@ fn javascript_partial_frame_gives_way() {
 				}
 			};
 			let mut low = within(&handle, "the low subscription", subscribe("low", 1)).await;
-			let mut high = within(&handle, "the high subscription", subscribe("high", 200)).await;
+			let mut high = within(&handle, "the high subscription", subscribe("high", 100)).await;
 
 			// Wait until three quarters of the window holds a frame that can never complete.
 			commands.write_all(b"low\n").expect("command");

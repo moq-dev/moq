@@ -59,5 +59,5 @@ harness. Report peak resident bytes against the budget, evictions, and throughpu
   sets half of `MIN_RECEIVE_WINDOW`
 - [Perf](/quest/m2/perf/README.md) - the per-worker hot paths this budget must not add
   contention to
-- [Scope track priority](/quest/m1/track-priority-scope.md) - the receive rank's
+- [Broadcast fairness](/quest/m2/broadcast-fairness.md) - the receive rank's
   fairness domains
