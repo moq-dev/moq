@@ -1,8 +1,8 @@
-# [XS] The relay image runs unprivileged and builds reproducibly
+# [XS] The relay image runs unprivileged and pins its builder
 
 ## Goal
 
-The published container image runs as a non-root user, and its builder stage is pinned so the same source produces the same image.
+The published container image runs as a non-root user, and its builder image is pinned by digest, so the build tooling cannot drift under the same source.
 
 Today the final stage is `FROM scratch` with no `USER`, so the relay runs as uid 0, and the builder is `docker.io/nixos/nix:latest`.
 
