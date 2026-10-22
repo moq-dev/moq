@@ -41,10 +41,9 @@ periodic cuts, and an intact object alone do not ensure available PAT/PMT,
 codec configuration, clock context, or references for every MPTS program.
 
 The README owns the guide and integration proof for the modes present in
-m1: semantic remux and raw import/carriage. The deferred raw export quest
-extends the guide and proves its output when it lands; it does not block
-this proof. Reuse the children's fixtures and CI recipes, including their
-known-bad controls. Publish
+m1: semantic remux and raw import/carriage. Raw export and its packet-level
+proof landed in #5856; the guide covers it too. Reuse the children's
+fixtures and CI recipes, including their known-bad controls. Publish
 a coverage table linking each supported profile and loss guarantee to its
 test; unsupported or unmeasured cells stay explicit. Keep CLI instructions
 and the MPEG-TS draft consistent in each feature change.
@@ -91,7 +90,6 @@ remain with their current quests.
 - [PMT export](/quest/m1/ts-reliability/pmt-export.md) - a TS export announces each PMT revision at the next `version_number`
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
-- [Arrival stamps](/quest/m1/ts-reliability/arrival-stamps.md) - frames carry their local arrival time, so a stalled path never lets late frames out
 - [Release clock false alarms](/quest/m1/ts-reliability/release-clock-false-alarms.md) - no false jitter leap at a 500 ms delay and no false drift alarm
 
 ## Related

@@ -17,6 +17,7 @@ import {
 	TooFarBehind,
 	toStreamCode,
 } from "./error.ts";
+import { Compression } from "./flate/group.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import {
 	type DropRun,
@@ -95,6 +96,8 @@ export interface Location {
  * (resolved from the wire TRACK_INFO on lite-05+). They map 1:1 onto TRACK_INFO.
  */
 export interface Info {
+	/** Compress frame payloads per group on lite-07; other sessions receive plain frames. Defaults to false. */
+	compress?: boolean;
 	/**
 	 * Units per second for this track's frame timestamps, or omitted (`undefined` or `null`,
 	 * which mean the same) for an untimed track, whose frames and datagrams carry no timestamp.
@@ -120,7 +123,7 @@ export interface Info {
 	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`, higher first). Defaults to `127`. */
 	priority: number;
 	/**
-	 * How many times its first frame a group's later bytes may grow before a joining
+	 * How many times its first frame a group's later stored bytes may grow before a joining
 	 * subscriber asks for a new group, or omitted to never ask. A join against a newest group
 	 * whose bytes after its first frame exceed this many times the first frame moves
 	 * {@link Demand.wanted} past it, so a late joiner never downloads much more than a
@@ -170,10 +173,13 @@ export function liteTimescale(info: Info): Timescale | undefined {
 
 /** Fill in any unset {@link Info} fields with their defaults. */
 export function infoDefaults(info: Partial<Info> = {}): Info {
+	if (info.compress !== undefined && typeof info.compress !== "boolean")
+		throw new TypeError("compress must be a boolean");
 	const timescale = info.timescale == null ? undefined : Timescale(info.timescale);
 	// Only a timed track has timestamps to doubt.
 	if (info.unchecked && timescale === undefined) throw new RangeError("an untimed track can't be unchecked");
 	return {
+		compress: info.compress ?? false,
 		timescale,
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
 		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
@@ -815,6 +821,7 @@ export class Producer {
 	}
 
 	static {
+		hooks.writeDatagram = (producer, datagram, inflated) => producer.#insertDatagram(datagram, inflated);
 		sourceStart = (producer) => producer.#served && producer.#feedStart();
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
@@ -971,7 +978,10 @@ export class Producer {
 		// Anything written before accept() must match too. A mismatch closes the track, so
 		// nothing waiting on info() hangs on a half-bound cache.
 		try {
-			for (const { group } of this.#cache) hooks.bindGroupTimed(group, timed);
+			for (const { group } of this.#cache) {
+				hooks.bindGroupTimed(group, timed);
+				hooks.bindGroupCompression(group, resolved.compress ?? false);
+			}
 			for (const sink of this.#sinks) {
 				for (const datagram of sink.datagrams.peek()) {
 					if ((datagram.timestamp !== undefined) !== timed) throw new TimestampMismatch();
@@ -983,7 +993,25 @@ export class Producer {
 		}
 		this.#state.info.set(resolved);
 		// Propagate to any sink handed out before accept (the on-demand path).
-		for (const sink of this.#sinks) sink.info.set(resolved);
+		const compressed = new Map<Datagram, Datagram>();
+		for (const sink of this.#sinks) {
+			if (resolved.compress) {
+				sink.datagrams.mutate((datagrams) => {
+					for (let index = 0; index < datagrams.length; index++) {
+						const datagram = datagrams[index];
+						let stored = compressed.get(datagram);
+						if (!stored) {
+							const flate = new Compression();
+							stored = Object.assign(flate.push(datagram), { sequence: datagram.sequence });
+							flate.finish();
+							compressed.set(datagram, stored);
+						}
+						datagrams[index] = stored;
+					}
+				});
+			}
+			sink.info.set(resolved);
+		}
 		this.#updateSubscription();
 		return this;
 	}
@@ -1401,7 +1429,10 @@ export class Producer {
 	// Hold a group to this track's timedness, once the track has committed it.
 	#bind(group: GroupProducer): void {
 		const info = this.#state.info.peek();
-		if (info) hooks.bindGroupTimed(group, info.timescale != null);
+		if (info) {
+			hooks.bindGroupTimed(group, info.timescale != null);
+			hooks.bindGroupCompression(group, info.compress ?? false);
+		}
 	}
 
 	// Refuse a datagram whose timedness disagrees with this track's.
@@ -1517,7 +1548,7 @@ export class Producer {
 		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
 		this.#checkDatagram(timestamp);
 
-		this.#publishDatagram({ sequence, timestamp, payload });
+		this.#insertDatagram({ sequence, timestamp, payload });
 		return sequence;
 	}
 
@@ -1529,11 +1560,29 @@ export class Producer {
 	 * {@link appendDatagram} apply. Most origin publishers want {@link appendDatagram} instead.
 	 */
 	insertDatagram(sequence: number, timestamp: Timestamp | undefined, payload: Uint8Array) {
-		this.#writable(sequence);
-		if (payload.byteLength > MAX_DATAGRAM_BYTES) throw new Error("datagram payload too large");
-		this.#checkDatagram(timestamp);
+		this.#insertDatagram({ sequence, timestamp, payload });
+	}
 
-		this.#publishDatagram({ sequence, timestamp, payload });
+	#insertDatagram(datagram: Datagram, inflated?: number): void {
+		const { sequence, timestamp, payload } = datagram;
+		this.#writable(sequence);
+		this.#checkDatagram(timestamp);
+		if (payload.length > MAX_DATAGRAM_BYTES || (inflated ?? 0) > MAX_DATAGRAM_BYTES)
+			throw new Error("datagram payload too large");
+		if (
+			inflated !== undefined &&
+			(!Number.isSafeInteger(inflated) || inflated < 0 || !this.#state.info.peek()?.compress)
+		)
+			throw new ProtocolViolation("unexpected inflated datagram size");
+		if (this.#state.info.peek()?.compress) {
+			const flate = new Compression();
+			const frame = flate.push(datagram, inflated);
+			// A bad best-effort datagram is dropped on arrival, before any reader receives it.
+			if (inflated !== undefined) void frame.payload;
+			flate.finish();
+			datagram = Object.assign(frame, { sequence });
+		}
+		this.#publishDatagram(datagram);
 	}
 
 	/**
@@ -1556,7 +1605,7 @@ export class Producer {
 	}
 
 	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
-	// boundary it falls just before. Mirrors the Rust `finish_at_pending`.
+	// boundary it falls just before. Mirrors the Rust `finish_at` on a `received()` copy.
 	#endPending(end: Location): void {
 		const declared = this.#state.end.peek();
 		if (declared === undefined) {

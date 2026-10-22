@@ -19,11 +19,11 @@ main-thread blocking through workers, or a new preparation API.
   starting implementation. Constructor support alone is insufficient.
   Check nonfinal frame output, shared history, exact declared-size admission,
   early output-overrun refusal, cancellation, malformed input and group end.
-- Native decoding is already an avenue in the JS compression quest and size
-  audit. Coordinate with that implementation and remove only duplicated
-  conditional scope once its actual result is known. Do not redo a landed
-  native decoder. Encoder and decoder adoption may land independently if
-  each preserves the existing contract and removes worthwhile bundled code.
+- Native decoding is also an avenue in the size audit. JS compression landed
+  with a bundled pako codec in `js/net/src/flate`; coordinate with the audit
+  and remove only duplicated conditional scope. Encoder and decoder adoption
+  may land independently if each preserves the existing contract and removes
+  worthwhile bundled code.
 - Chromium 156 decoded the tested nonfinal frames before closure; this does
   not establish synchronous availability, cross-engine behavior or bounded
   allocation. Verify those properties rather than treating the experiment
@@ -39,10 +39,6 @@ main-thread blocking through workers, or a new preparation API.
   issue/status and leave this condition quest open. Any API or wire course
   change needs a new maintainer decision. Update affected docs inline;
   the compression guide owns the user-facing entry point, not a new page.
-
-## Required
-
-- [JS compression](/quest/m1/compress/js.md) - the current compressed-track model and interoperability behavior are implemented
 
 ## Related
 

@@ -5,16 +5,32 @@
 Seven scheduled nightlies on `main` after the estimator began capping how much
 weight one observation takes show the AAC `bursty` browser rows discarding
 about as much audio a minute as the Opus `bursty` rows, on both rings, and
-`test/audio-quality/budgets.json` carries every browser row's ceilings
-re-measured from them.
+the Opus `near-zero` `isolated` row holding the same 60 ms target as the
+`plain` row with no underrun episodes. `test/audio-quality/budgets.json`
+carries every browser row's ceilings re-measured from them.
 
 ## Plan
 
 Waits on the nightlies: check the `audio-quality-run` artifacts of the
 scheduled Nightly runs on `main` (`gh run download <id> -n audio-quality-run`)
 once seven have run since the change merged. Never dispatch the nightly by
-hand. Re-measure by the rule in the budgets note, and drop the note's sentence
-that budgets the AAC bursty discards against Opus's.
+hand. Re-measure by the rule in the budgets note, and drop the note's sentences
+that budget the AAC bursty discards against Opus's and the isolated row's
+one-second drops as measured.
+
+Decided 2026-10-22 (maintainer): the Opus near-zero budgets quest folded in
+here, so one pass over the same seven nightlies covers both. The cap
+([#6164](https://github.com/moq-dev/moq/pull/6164)) merged 2026-10-22T00:10Z,
+after the build flush, so post-cap nightlies are also post-flush; none had run
+yet.
+
+The near-zero stall was never the isolated ring. That row is simply the
+matrix's first, and a cold `cargo build` left about 800 MB dirty when it
+started. On the ARM runner each periodic writeback burst froze the page's main
+thread for 100 to 320 ms until the backlog drained, and the harness now
+flushes its build before the first row. If the first row still shows
+long-task clusters, compare `<tag>.longtasks.json` against the runner's disk
+activity before changing the player.
 
 The cap changed every row's startup, not only AAC bursty's: the prior is
 replaced in about five seconds instead of two, and a late interval in those
@@ -32,7 +48,3 @@ discarding several times Opus's, the remaining source is the publisher: each
 seven-frame PES flush is seven one-frame groups, delivered newest first, so the
 oldest frame of a flush waits behind every newer group on a path that cannot
 carry them together.
-
-## Related
-
-- [Opus near-zero budgets](/quest/m1/audio-jitter-target/opus-near-zero-budgets.md) - re-measures some of the same rows from nightlies; take them after the cap so one pass covers both

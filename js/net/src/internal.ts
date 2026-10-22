@@ -198,6 +198,8 @@ export interface ReadGroupFrame {
 	sequence: number;
 	/** Frame returned to the publisher. */
 	frame: Frame;
+	/** The stored slice's declared plain size, on compressed wire reads. */
+	inflated?: number;
 	/** Mark the frame delivered or deliberately skipped by the wire publisher. */
 	complete(): void;
 }
@@ -398,7 +400,7 @@ export const hooks: {
 	 * end may refine the group boundary it falls just before. Throws `ProtocolViolation` on
 	 * any other second end. Readers then hold at a hole below it until the hole fills, folds
 	 * past the grace, or the track closes, since QUIC may deliver a lower group's stream after
-	 * a higher one. Mirrors the Rust `finish_at_pending`; assigned by `track.ts`.
+	 * a higher one. Mirrors the Rust `finish_at` on a `received()` copy; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
 	// private: capability gap
@@ -509,6 +511,17 @@ export const hooks: {
 	 * Throws `TimestampMismatch` if a buffered frame already disagrees.
 	 */
 	bindGroupTimed: (group: GroupProducer, timed: boolean) => void;
+	/** Admit a datagram in its stored wire form. */
+	// private: passthrough
+	writeDatagram: (producer: Producer, datagram: Datagram, inflated?: number) => void;
+	/** Bind the group to its immutable track codec. */
+	// private: passthrough
+	bindGroupCompression: (group: GroupProducer, compressed: boolean) => void;
+	/** Admit a received stored slice without recompressing it. */
+	// private: passthrough
+	writeGroupFrame: (group: GroupProducer, frame: Frame, inflated?: number) => void;
+	/** Payload footprint including a shared inflated copy, for measurements. */
+	groupCacheBytes: (group: GroupProducer) => number;
 	/**
 	 * Cap a group at `frames` for a track end inside it, so later writes past it throw.
 	 * Throws `ProtocolViolation` if a frame at or past the cap already exists.
@@ -544,7 +557,7 @@ export const hooks: {
 	guardGroup: <T>(group: GroupConsumer, operation: () => Promise<T>) => Promise<T>;
 	// pending: /quest/m1/public-model/serve.md
 	/** Read a frame the wire publisher completes (or skips) once written. */
-	readGroupFrame: (group: GroupConsumer, from?: number) => Promise<ReadGroupFrame | undefined>;
+	readGroupFrame: (group: GroupConsumer, from?: number, compressed?: boolean) => Promise<ReadGroupFrame | undefined>;
 	/** Make an evicted mirror terminal while its track timeline still contains it. */
 	evictGroup: (group: GroupConsumer) => void;
 	/** Attach the origin advertisement of a created broadcast. */
@@ -560,6 +573,8 @@ export const hooks: {
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
 	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
+	/** Mark a broadcast handle served through a route claiming a shorter prefix: it lists nothing. */
+	stampUnlisted: (target: BroadcastConsumer) => void;
 } = {
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
@@ -660,6 +675,18 @@ export const hooks: {
 	replaceGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
+	writeDatagram: () => {
+		throw new Error("track.ts not loaded");
+	},
+	bindGroupCompression: () => {
+		throw new Error("group.ts not loaded");
+	},
+	writeGroupFrame: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupCacheBytes: () => {
+		throw new Error("group.ts not loaded");
+	},
 	bindGroupTimed: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -718,6 +745,9 @@ export const hooks: {
 		throw new Error("broadcast.ts not loaded");
 	},
 	stampEpoch: () => {
+		throw new Error("broadcast.ts not loaded");
+	},
+	stampUnlisted: () => {
 		throw new Error("broadcast.ts not loaded");
 	},
 };

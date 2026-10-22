@@ -87,7 +87,3 @@ Public API: breaking (`delta_ratio` and `op_ratio` replaced by `deltas` and
 `ops` in Rust, JS, and every binding that exposes them; `Encoder::snapshot()`
 and Rust `Producer::refresh` / `poll_refresh` added; bindings gain no refresh
 method because moq-ffi drives it internally). Wire: none.
-
-## Related
-
-- [JSON window timestamps](/quest/m1/json-window-timestamps.md) - touches the same window code

@@ -53,10 +53,13 @@ That change owns its C tests and `MIGRATE.md` entries; other API reshaping stays
 Decided 2026-10-20 (maintainer): m1 quests that change the C API
 ([exact binding timestamps](/quest/m1/binding-timestamps.md),
 [scope track priority](/quest/m1/track-priority-scope.md),
-[binding linger](/quest/m1/linger-ffi.md),
-[Rust identity enforcement](/quest/m1/catalog-identity-rs.md), and
-[dynamic subscribe ranges](/quest/m1/subscribe-ranges/dynamic.md)) Require this
+and [Rust identity enforcement](/quest/m1/catalog-identity-rs.md)) Require this
 line and land their C half on the generated package, so C users break once.
+[Dynamic subscribe ranges](/quest/m1/subscribe-ranges/dynamic.md) is the
+settled exception from its later plan in
+[moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123): if generation
+has not landed, the frozen C crate splits fills into its existing per-group
+requests internally and keeps its ABI, so that quest does not wait here.
 
 ## Required
 

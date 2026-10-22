@@ -117,7 +117,7 @@ describe("Tail", () => {
 	function tail(grace = GRACE) {
 		const clock = new Manual();
 		restore = clock.install();
-		const at = (ms: number) => clock.advance(Nano(Nano.fromMilli(Milli(ms)) - clock.now()));
+		const at = (ms: number) => clock.jump(Nano(Nano.fromMilli(Milli(ms)) - clock.now()));
 		return { at, clock, tail: new Tail({ grace: () => grace }) };
 	}
 
@@ -177,7 +177,7 @@ describe("Tail", () => {
 				settled = true;
 			});
 
-		await clock.advanceAsync(Nano.fromMilli(Milli(50)));
+		await clock.advance(Nano.fromMilli(Milli(50)));
 		expect(settled).toBe(false);
 		read();
 		await settling;

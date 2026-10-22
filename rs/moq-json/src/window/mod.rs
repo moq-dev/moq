@@ -121,6 +121,80 @@ mod test {
 	}
 
 	#[test]
+	fn events_carry_their_frames_timestamp() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", timed())
+			.unwrap();
+		let mut live = consumer(track.subscribe(None), false);
+		let mut late = track.subscribe(None);
+		let mut producer = Producer::new(track, ProducerConfig::default());
+		let at = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+
+		producer.push(moq_net::Timed::from(&rec(1)).at(at(100))).unwrap();
+		producer.push(moq_net::Timed::from(&rec(2)).at(at(200))).unwrap();
+		producer.pop(moq_net::Timed::from(1u64).at(at(300))).unwrap();
+		let events: Vec<_> = drain_timed(&mut live).into_iter().map(|e| (e.value, e.at)).collect();
+		assert_eq!(
+			events,
+			vec![
+				(
+					Event::Push {
+						index: 0,
+						value: rec(1)
+					},
+					Some(at(100))
+				),
+				(
+					Event::Push {
+						index: 1,
+						value: rec(2)
+					},
+					Some(at(200))
+				),
+				(Event::Pop(0..1), Some(at(300))),
+			]
+		);
+
+		// A reader joining at a later group learns of the retained record from its header, so it
+		// gets the header frame's time rather than the record's original push time.
+		producer.cut().unwrap();
+		producer.push(moq_net::Timed::from(&rec(3)).at(at(400))).unwrap();
+		late.set_groups(1..);
+		let mut late = consumer(late, false);
+		let events: Vec<_> = drain_timed(&mut late).into_iter().map(|e| (e.value, e.at)).collect();
+		assert_eq!(
+			events,
+			vec![
+				(
+					Event::Push {
+						index: 1,
+						value: rec(2)
+					},
+					Some(at(400))
+				),
+				(
+					Event::Push {
+						index: 2,
+						value: rec(3)
+					},
+					Some(at(400))
+				),
+			]
+		);
+	}
+
+	#[test]
+	fn untimed_events_have_no_timestamp() {
+		let (mut producer, track) = producer(ProducerConfig::default());
+		producer.push(&rec(1)).unwrap();
+		producer.pop(1).unwrap();
+		let events = drain_timed(&mut consumer(track, false));
+		assert_eq!(events.len(), 2);
+		assert!(events.iter().all(|event| event.at.is_none()));
+	}
+
+	#[test]
 	fn a_bare_publish_stays_untimed() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
@@ -187,6 +261,11 @@ mod test {
 
 	/// Drain every event currently available without blocking.
 	fn drain(consumer: &mut Consumer<Value>) -> Vec<Event<Value>> {
+		drain_timed(consumer).into_iter().map(|event| event.value).collect()
+	}
+
+	/// Drain every event currently available, with its frame timestamp.
+	fn drain_timed(consumer: &mut Consumer<Value>) -> Vec<moq_net::Timed<Event<Value>>> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(Ok(Some(event))) = consumer.poll_next(&waiter) {
