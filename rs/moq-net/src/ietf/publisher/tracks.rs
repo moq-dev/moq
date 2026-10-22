@@ -747,7 +747,7 @@ where
 		let Some(opened) = opened else {
 			return Ok(());
 		};
-		let mut stream = opened?;
+		let mut stream = super::super::request_stream::with_stats(opened?, self.stats(), self.version);
 		let allocated = kio::wait(|waiter| {
 			if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
 				return Poll::Ready(None);

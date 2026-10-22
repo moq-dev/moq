@@ -48,27 +48,18 @@ accept-loop counters per TCP listener. Payload counters accumulate for the
 node's lifetime and leave out the stats feed's own traffic. Host CPU and memory
 belong to a node exporter.
 
-`moq_relay_wire_tx_bytes_total` and `moq_relay_wire_rx_bytes_total` expose the
-existing per-session [transport counters](/concept/stats#sessions),
-summed by `tier`, including internal sessions. Compare them with payload to
-identify transport overhead and idle traffic. They keep final totals after a
-session closes and include the stats feed's transport cost. Unsupported
-transports contribute zero; no packet headers are counted.
+`moq_relay_wire_tx_bytes_total` and `moq_relay_wire_rx_bytes_total` sum the
+per-session [transport counters](/concept/stats#sessions) by `tier`, including
+internal sessions and the stats feed. Compare them with payload to spot
+transport overhead and idle traffic. Transports that do not report them
+contribute zero.
 
 `moq_relay_control_encoded_body_bytes_total` and
-`moq_relay_control_decoded_body_bytes_total` split codec body bytes by `tier`
-and bounded `class`. They identify control-message activity separately from
-transport cost. Successfully buffered encodes count even if the stream later
-fails; decodes count only consumed, complete codec values, never peeks or
-incomplete reads. Size prefixes and selectors handled within that codec value
-are included; separately coded selectors and raw media writes are excluded.
-IETF framed-body decoding counts complete framing, before request validation.
-Shared IETF replies and updates use `other` where the type ID does not identify
-the request class. IETF14-16 receives count at the physical multiplexer; virtual request readers do not count them again. Adapter-generated sends count once alongside typed request encodes.
-These counters retain closed-session totals but do not account for all
-non-payload wire traffic: transport framing, ACKs, retransmissions, and packet
-headers remain outside them. They do not change payload metering or the stats
-broadcast wire format.
+`moq_relay_control_decoded_body_bytes_total` count control-message bytes by
+`tier` and `class` (`session`, `announce`, `track_info`, `subscribe`, `fetch`,
+`probe`, `auth`, `goaway`, `other`) to spot control-heavy sessions. They leave
+out media payload and transport overhead such as framing, ACKs, and
+retransmissions.
 
 A few worth alerting on:
 

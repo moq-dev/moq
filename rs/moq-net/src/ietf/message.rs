@@ -16,7 +16,7 @@ pub(super) fn control(id: u64) -> crate::stats::Control {
 		| SubscribeNamespaceError::ID
 		| UnsubscribeNamespace::ID
 		| NamespaceDone::ID => Control::Announce,
-		TrackStatus::ID => Control::TrackInfo,
+		TrackStatus::ID | SubscribeTracks::ID | PublishSkipped::ID => Control::TrackInfo,
 		Subscribe::ID
 		| SubscribeOk::ID
 		| Unsubscribe::ID
