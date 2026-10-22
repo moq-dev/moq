@@ -41,16 +41,6 @@ func opusHead() []byte {
 	return buf
 }
 
-func TestOriginLifecycle(t *testing.T) {
-	origin := newOrigin(t)
-	_ = origin.Consume()
-	dynamic, err := origin.Dynamic("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dynamic.Cancel()
-}
-
 func TestDynamicBroadcastRequest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -150,6 +140,69 @@ func TestPublishAudioLifecycle(t *testing.T) {
 	}
 	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBroadcastFinishLingersUntilCancelled(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxAge := time.Hour
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Priority: 127, MaxAge: &maxAge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := track.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	finish, err := broadcast.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := finish.Linger(); got != time.Hour {
+		t.Fatalf("Linger = %v, want 1h", got)
+	}
+	if _, err := broadcast.Consume(); err == nil {
+		t.Fatal("Consume after Finish succeeded")
+	}
+
+	// A cancelled wait is the interrupt: it returns at once instead of lingering.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := finish.Wait(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Wait = %v, want the deadline", err)
+	}
+	finish.Close()
+}
+
+func TestBroadcastFinishWaitOnDoneContextCloses(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxAge := time.Hour
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Priority: 127, MaxAge: &maxAge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := track.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	finish, err := broadcast.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := finish.Wait(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait = %v, want cancelled", err)
+	}
+	// Closed by the cancelled wait, so a second wait fails at once instead of lingering.
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := finish.Wait(ctx); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("second Wait = %v, want closed", err)
 	}
 }
 

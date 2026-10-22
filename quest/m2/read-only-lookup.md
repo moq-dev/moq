@@ -9,9 +9,12 @@ mutates.
 
 ## Plan
 
-Found by #5091: `track_inner` (`rs/moq-net/src/model/broadcast.rs`) mutates
-the state on every lookup because `WeakCache::get` takes `&mut` to drop a
-closed entry, and that mutation wakes every watcher. That accidental wake hid
+Found by #5091: the broadcast lookup (`rs/moq-net/src/model/broadcast.rs`)
+mutates the state on every lookup because `WeakCache::get` takes `&mut` to
+drop a closed entry, and that mutation wakes every watcher. Since #5820 made
+bare track handles lazy, the lookup is `Consumer::track`, `resolve_track`
+(behind subscribe and fetch), and `peek_track`, all through
+`BroadcastState::peek` or `tracks.get` under `lock()`. That accidental wake hid
 the front's lost wake; the front loom models in `rs/moq-net/tests/loom.rs`
 now guard against it returning.
 

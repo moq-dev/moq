@@ -40,21 +40,24 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		while ((await announcements.next())?.kind !== "start") {}
 		const request = b.request(Path.from("room"));
 		while (request.active.peek() === undefined) await request.active.changed();
-		const remote = request.active.peek()!.track("data");
+		const active = request.active.peek();
+		if (!active) throw new Error("broadcast missing");
+		const remote = active.track("data");
 		expect((await remote.info()).refresh).toBe(alpn === ALPN_07_WIP ? 1 : undefined);
 		const baseline = remote.subscribe();
 		const group = producer.appendGroup();
 		group.writeFrame({ payload: new Uint8Array(3) });
 		group.writeFrame({ payload: new Uint8Array(3) });
 		const received = await baseline.recvGroup();
-		expect((await received!.readFrame())!.payload.length).toBe(3);
-		expect((await received!.readFrame())!.payload.length).toBe(3);
+		if (!received) throw new Error("group missing");
+		expect((await received.readFrame())?.payload.length).toBe(3);
+		expect((await received.readFrame())?.payload.length).toBe(3);
 		const joins = [remote.subscribe()];
 		await clock.advanceAsync(Nano(0));
 		expect(producer.demand().wanted.peek()).toBe(0);
 		updates.length = 0;
 		group.writeFrame({ payload: new Uint8Array(1) });
-		expect((await received!.readFrame())!.payload.length).toBe(1);
+		expect((await received.readFrame())?.payload.length).toBe(1);
 		for (let i = 0; i < 8; i++) joins.push(remote.subscribe());
 		await clock.advanceAsync(Nano(0));
 		if (alpn === ALPN_07_WIP) {
@@ -68,7 +71,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		await clock.advanceAsync(Nano(0));
 		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1, 1] : []);
 		for (const join of joins) join.close();
-		received!.close();
+		received.close();
 		baseline.close();
 		group.close();
 	} finally {

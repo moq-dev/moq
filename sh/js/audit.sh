@@ -4,8 +4,10 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
+# Every tracked lockfile, so a new Worker can't fall out of the audit.
 status=0
-for project in . infra/apt infra/rpm infra/moq-sh demo/pub; do
+for lock in $(git ls-files '*bun.lock'); do
+    project=$(dirname "$lock")
     echo "Auditing $project"
     (
         cd "$project"
