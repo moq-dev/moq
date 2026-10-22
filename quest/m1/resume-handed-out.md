@@ -34,7 +34,3 @@ Public API: behavior only. Wire: none.
 ## Required
 
 - [Rust resume holds a declared end](/quest/m1/resume-rust-end.md) - lands first; it edits the same reader
-
-## Related
-
-- [Resumed close](/quest/m1/resume-closed.md) - carries the JS half of this fix

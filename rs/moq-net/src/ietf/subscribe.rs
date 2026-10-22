@@ -433,6 +433,9 @@ pub struct SubscribeUpdate {
 	pub new_group: Option<u64>,
 	/// Subscriber max age in milliseconds (MoQ Timestamp), if negotiated.
 	pub max_age: Option<u64>,
+	/// FILL_PARAMETERS (0x23, draft-20+): the backfill a paused PUBLISH subscription takes as
+	/// it resumes (draft-20 section 3.6.2).
+	pub fill: Option<Fill>,
 }
 
 impl Message for SubscribeUpdate {
@@ -483,6 +486,7 @@ impl Message for SubscribeUpdate {
 					0x10 => self.forward,
 					0x20 => self.subscriber_priority,
 					0x21 => self.filter,
+					0x23 => self.fill.filter(|_| Filter::is_draft20(version)),
 					0x32 => self.new_group,
 					super::max_age::PARAMETER => self.max_age,
 				);
@@ -518,6 +522,7 @@ impl Message for SubscribeUpdate {
 					authorization_token,
 					new_group: None,
 					max_age: super::max_age::validate(max_age)?,
+					fill: None,
 				})
 			}
 			Version::Draft15 | Version::Draft16 => {
@@ -544,6 +549,7 @@ impl Message for SubscribeUpdate {
 					authorization_token: super::token::single(authorization_token)?,
 					new_group,
 					max_age: super::max_age::validate(max_age)?,
+					fill: None,
 				})
 			}
 			_ => {
@@ -552,7 +558,7 @@ impl Message for SubscribeUpdate {
 				if matches!(version, Version::Draft17) {
 					let _required_request_id_delta = r.varint()?;
 				}
-				// Nothing reads an update's FILL_PARAMETERS or Range Filters yet; they are
+				// Nothing reads an update's Range Filters yet; they are
 				// consumed so a legal update does not fail the session.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64>,
@@ -561,7 +567,7 @@ impl Message for SubscribeUpdate {
 					0x10 => forward: Option<bool>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x21 => filter: Option<Filter>,
-					0x23 => _fill: Option<Fill> where Filter::is_draft20(version),
+					0x23 => fill: Option<Fill> where Filter::is_draft20(version),
 					0x25 => _subgroup_filter: Vec<Opaque> where has_range_filters(version),
 					0x26 => _object_id_filter: Vec<Opaque> where has_range_filters(version),
 					0x27 => _priority_filter: Vec<Opaque> where has_range_filters(version),
@@ -582,6 +588,7 @@ impl Message for SubscribeUpdate {
 					authorization_token: super::token::single(authorization_token)?,
 					new_group,
 					max_age: super::max_age::validate(max_age)?,
+					fill,
 				})
 			}
 		}
@@ -649,6 +656,7 @@ mod tests {
 					filter: None,
 					authorization_token: None,
 					new_group: None,
+					fill: None,
 				};
 				let decoded: SubscribeUpdate = decode_message(&encode_message(&update, version), version).unwrap();
 				assert_eq!(decoded.max_age, max_age, "{version}");
@@ -765,6 +773,7 @@ mod tests {
 				forward: None,
 				filter: None,
 				authorization_token: None,
+				fill: None,
 			};
 			let decoded: SubscribeUpdate = decode_message(&encode_message(&update, version), version).unwrap();
 			assert_eq!(decoded.new_group, expected, "{version}: REQUEST_UPDATE");
@@ -1143,6 +1152,7 @@ mod tests {
 			forward: Some(true),
 			filter: Some(Filter::NextObject),
 			authorization_token: None,
+			fill: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -1167,6 +1177,7 @@ mod tests {
 			forward: Some(true),
 			filter: Some(Filter::NextObject),
 			authorization_token: None,
+			fill: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -1280,6 +1291,7 @@ mod tests {
 			forward: Some(true),
 			filter: Some(Filter::NextObject),
 			authorization_token: None,
+			fill: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
@@ -1532,6 +1544,7 @@ mod tests {
 			forward: Some(true),
 			filter: Some(Filter::NextObject),
 			authorization_token: None,
+			fill: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -1559,6 +1572,7 @@ mod tests {
 			forward: Some(true),
 			filter: Some(Filter::NextObject),
 			authorization_token: None,
+			fill: None,
 		};
 		let v18_msg = SubscribeUpdate { ..v17_msg.clone() };
 

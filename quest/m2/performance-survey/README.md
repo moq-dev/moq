@@ -112,7 +112,6 @@ No duplicate quest or workflow edit belongs here.
 
 ## Required
 
-- [Fragmented QUIC sends](/quest/m2/performance-survey/quic-send-fragments.md) - packetization cost under a retained fragmented flight
 - [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - polling and memory after peak task occupancy subsides
 - [Bandwidth grants](/quest/m2/performance-survey/bandwidth-grants.md) - repeated full allocation in Rust and JS
 - [Cached JS group joins](/quest/m2/performance-survey/js-cached-groups.md) - repeated sorting while replaying retained groups
