@@ -175,7 +175,6 @@ No duplicate quest or workflow edit belongs here.
 - [Fragmented QUIC sends](/quest/m2/performance-survey/quic-send-fragments.md) - packetization cost under a retained fragmented flight
 - [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - polling and memory after peak task occupancy subsides
 - [QUIC receive-state reuse](/quest/m2/performance-survey/quic-receive-reuse.md) - reassembly metadata retained by recycled completed streams
-- [UDP pool recovery](/quest/m2/performance-survey/uring-pools.md) - pool growth latency and memory after burst concurrency
 - [Cache metadata](/quest/m2/performance-survey/cache-metadata.md) - bookkeeping capacity after cached groups expire
 - [Cache backing amplification](/quest/m2/performance-survey/cache-backing.md) - small retained samples pinning large shared fragments
 - [Bandwidth grants](/quest/m2/performance-survey/bandwidth-grants.md) - repeated full allocation in Rust and JS
