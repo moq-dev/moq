@@ -26,6 +26,12 @@ lease.release();
 `transport::CloseKind` gained `Evicted`, which `Error::from_transport` maps to `Error::Evicted`.
 `transport::Stats` gained `streams_evicted()`, and `session::Stats` the matching `streams_evicted` field.
 
+### Frames carry their arrival time
+
+`frame::Frame` gains a private arrival stamp, read with `Frame::arrived()`, so it can no longer be built with a struct literal.
+Replace `Frame { timestamp, payload }` with `Frame::new(timestamp, payload)`.
+`timestamp` and `payload` stay public fields.
+
 ### A dropped or cut group ends its reader with an error (#6143)
 
 A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `track::Subscriber` saw it is now handed out, and reading it fails with the publisher's error; before, it was skipped or ended cleanly.

@@ -2,7 +2,7 @@
 
 ## Goal
 
-On the [IETF matrix](/quest/m1/interop-coverage/ietf-matrix.md), a
+On the IETF matrix (`just test interop --versions ietf`), a
 subscriber that joins mid-group receives the current group from object 0
 (a joining FETCH before draft 20, a fill from draft 20) and a standalone
 FETCH of a past group returns exactly its objects, for Rust and JS
@@ -23,5 +23,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [IETF matrix](/quest/m1/interop-coverage/ietf-matrix.md) - the matrix this case runs on
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - the JS publisher answers FETCH

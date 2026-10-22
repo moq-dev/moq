@@ -408,78 +408,19 @@ impl crate::transport::poll::SendStream for VirtualSendStream {
 
 // === Adapter Send/Recv Enums ===
 
-pub enum AdapterSend<S: crate::transport::poll::Session> {
-	Real(S::SendStream),
-	Virtual(VirtualSendStream),
-}
-
-impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for AdapterSend<S> {
-	type Error = crate::Error;
-	type Group = <S::SendStream as crate::transport::poll::SendStream>::Group;
-
-	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
-		match self {
-			Self::Real(s) => s.poll_write(cx, buf).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_write(cx, buf),
-		}
-	}
-
-	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
-		match self {
-			Self::Real(s) => s.poll_write_buf(cx, buf).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_write_buf(cx, buf),
-		}
-	}
-
-	fn set_priority(&mut self, order: i64) {
-		match self {
-			Self::Real(s) => s.set_priority(order),
-			Self::Virtual(s) => s.set_priority(order),
-		}
-	}
-
-	fn set_group(&mut self, group: &Self::Group) {
-		match self {
-			Self::Real(s) => s.set_group(group),
-			// Rides the control stream, which no group schedules.
-			Self::Virtual(_) => {}
-		}
-	}
-
-	fn finish(&mut self) -> Result<(), Self::Error> {
-		match self {
-			Self::Real(s) => s.finish().map_err(|_| crate::Error::Closed),
-			Self::Virtual(s) => s.finish(),
-		}
-	}
-
-	fn reset(&mut self, code: u32) {
-		match self {
-			Self::Real(s) => s.reset(code),
-			Self::Virtual(s) => s.reset(code),
-		}
-	}
-
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		match self {
-			Self::Real(s) => s.poll_closed(cx).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_closed(cx),
-		}
-	}
-}
-
-/// Preserve the real receive stream's registries through the shared-control adapter.
-/// Virtual streams have only local errors, while data streams still carry raw codes.
+/// A failure on an adapter stream. A real stream keeps its transport's error, so the negotiated
+/// registry decodes a peer's reset rather than mistaking it for a lost connection.
+/// Virtual streams have only local errors.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum RecvError<E: crate::transport::Error> {
+pub enum AdapterError<E: crate::transport::Error> {
 	#[error(transparent)]
 	Real(E),
 	#[error(transparent)]
 	Virtual(crate::Error),
 }
 
-impl<E: crate::transport::Error> crate::transport::Error for RecvError<E> {
+impl<E: crate::transport::Error> crate::transport::Error for AdapterError<E> {
 	fn close_kind(&self) -> crate::transport::CloseKind {
 		match self {
 			Self::Real(err) => err.close_kind(),
@@ -502,6 +443,66 @@ impl<E: crate::transport::Error> crate::transport::Error for RecvError<E> {
 	}
 }
 
+pub enum AdapterSend<S: crate::transport::poll::Session> {
+	Real(S::SendStream),
+	Virtual(VirtualSendStream),
+}
+
+impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for AdapterSend<S> {
+	type Error = AdapterError<<S::SendStream as crate::transport::poll::SendStream>::Error>;
+	type Group = <S::SendStream as crate::transport::poll::SendStream>::Group;
+
+	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		match self {
+			Self::Real(s) => s.poll_write(cx, buf).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_write(cx, buf).map_err(AdapterError::Virtual),
+		}
+	}
+
+	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
+		match self {
+			Self::Real(s) => s.poll_write_buf(cx, buf).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_write_buf(cx, buf).map_err(AdapterError::Virtual),
+		}
+	}
+
+	fn set_priority(&mut self, order: i64) {
+		match self {
+			Self::Real(s) => s.set_priority(order),
+			Self::Virtual(s) => s.set_priority(order),
+		}
+	}
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match self {
+			Self::Real(s) => s.set_group(group),
+			// Rides the control stream, which no group schedules.
+			Self::Virtual(_) => {}
+		}
+	}
+
+	fn finish(&mut self) -> Result<(), Self::Error> {
+		match self {
+			Self::Real(s) => s.finish().map_err(AdapterError::Real),
+			Self::Virtual(s) => s.finish().map_err(AdapterError::Virtual),
+		}
+	}
+
+	fn reset(&mut self, code: u32) {
+		match self {
+			Self::Real(s) => s.reset(code),
+			Self::Virtual(s) => s.reset(code),
+		}
+	}
+
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+		match self {
+			Self::Real(s) => s.poll_closed(cx).map_err(AdapterError::Real),
+			Self::Virtual(s) => s.poll_closed(cx).map_err(AdapterError::Virtual),
+		}
+	}
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum AdapterRecv<S: crate::transport::poll::Session> {
 	Real(S::RecvStream),
@@ -509,7 +510,7 @@ pub enum AdapterRecv<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for AdapterRecv<S> {
-	type Error = RecvError<<S::RecvStream as crate::transport::poll::RecvStream>::Error>;
+	type Error = AdapterError<<S::RecvStream as crate::transport::poll::RecvStream>::Error>;
 	type Lease<'a>
 		= AdapterLease<'a, S>
 	where
@@ -519,10 +520,10 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 		match self {
 			Self::Real(s) => s
 				.poll_lease(cx, want)
-				.map(|r| r.map(AdapterLease::Real).map_err(RecvError::Real)),
+				.map(|r| r.map(AdapterLease::Real).map_err(AdapterError::Real)),
 			Self::Virtual(s) => s
 				.poll_lease(cx, want)
-				.map(|r| r.map(AdapterLease::Virtual).map_err(RecvError::Virtual)),
+				.map(|r| r.map(AdapterLease::Virtual).map_err(AdapterError::Virtual)),
 		}
 	}
 
