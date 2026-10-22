@@ -202,6 +202,8 @@ const gap: Read = { kind: "gap", timestamp: Micro(0), duration: Micro(0) };
 // `reads` stands in for the container consumer, unless `live`, which reads what tests publish into
 // `producer` through real consumers instead.
 async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: readonly number[] = [], live = false) {
+	// Load the optional container before the fixture drains only reactive microtasks.
+	if (kind === "cmaf") await import("@moq/hang/cmaf");
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
 	const originalChunk = Object.getOwnPropertyDescriptor(globalThis, "EncodedVideoChunk");
 	const submitted: number[] = [];
