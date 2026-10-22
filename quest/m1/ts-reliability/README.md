@@ -125,7 +125,6 @@ remain with their current quests.
 
 - [Live PAT/PMT changes](/quest/m1/ts-reliability/pmt-lifecycle.md) - a revised PMT or PAT never leaves a track name meaning other content
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
-- [Arrival stamps](/quest/m1/ts-reliability/arrival-stamps.md) - frames carry their local arrival time, so a stalled path never lets late frames out
 - [Release clock false alarms](/quest/m1/ts-reliability/release-clock-false-alarms.md) - no false jitter leap at a 500 ms delay and no false drift alarm
 
 ## Related
