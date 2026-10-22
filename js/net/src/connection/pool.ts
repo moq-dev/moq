@@ -245,7 +245,7 @@ export class Connection {
 			if (!effect.get(this.enabled)) return;
 			const key = effect.get(href);
 			if (!key) return;
-			const versions = offered(effect, this.versions);
+			const versions = offered(effect.get(this.versions));
 			if (versions instanceof TypeError) {
 				effect.set(this.#error, versions, undefined);
 				return;
@@ -272,11 +272,18 @@ export class Connection {
 
 		const publish = props.publish ?? (owned ? origin.consume() : undefined);
 
-		// The origin spans version changes; only the loop dialing it is replaced.
-		this.#signals.run((effect) => {
-			const versions = offered(effect, this.versions);
+		// The origin spans version changes; only the loop dialing it is replaced. Each loop is built
+		// synchronously, not in an effect a microtask later, so its hold on `consume` is in place
+		// before a watcher created alongside could sync on an empty table.
+		let stop: (() => void) | undefined;
+		const start = (list: readonly string[] | undefined) => {
+			stop?.();
+			const signals = new Effect();
+			stop = () => signals.close();
+
+			const versions = offered(list);
 			if (versions instanceof TypeError) {
-				effect.set(this.#error, versions, undefined);
+				signals.run((effect) => effect.set(this.#error, versions, undefined));
 				return;
 			}
 
@@ -291,18 +298,21 @@ export class Connection {
 				delay: props.delay,
 				goaway: props.goaway,
 			});
-			effect.cleanup(() => loop.close());
+			signals.cleanup(() => loop.close());
 
-			effect.run((nested) => {
-				if (!nested.get(this.enabled) || !nested.get(href)) return;
-				nested.set(this.#origin, origin, undefined);
-				nested.set(this.#bandwidth, loop.bandwidth, undefined);
+			signals.run((effect) => {
+				if (!effect.get(this.enabled) || !effect.get(href)) return;
+				effect.set(this.#origin, origin, undefined);
+				effect.set(this.#bandwidth, loop.bandwidth, undefined);
 			});
-			effect.run((nested) => nested.set(this.#status, nested.get(loop.status), "disconnected"));
-			effect.run((nested) => nested.set(this.#established, nested.get(loop.established), undefined));
-			effect.run((nested) => nested.set(this.#probe, loop.probe, undefined));
-			effect.run((nested) => nested.set(this.#error, nested.get(loop.error), undefined));
-		});
+			signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
+			signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
+			signals.run((effect) => effect.set(this.#probe, loop.probe, undefined));
+			signals.run((effect) => effect.set(this.#error, effect.get(loop.error), undefined));
+		};
+		start(this.versions.peek());
+		this.#signals.cleanup(this.versions.subscribe(start));
+		this.#signals.cleanup(() => stop?.());
 	}
 
 	/**
@@ -385,9 +395,9 @@ export namespace Connection {
 }
 
 /** The checked copy of `versions` to dial with, or why it cannot be offered. */
-function offered(effect: Effect, versions: Getter<readonly string[] | undefined>): string[] | undefined | TypeError {
+function offered(versions: readonly string[] | undefined): string[] | undefined | TypeError {
 	try {
-		return normalizeVersions({ versions: effect.get(versions) });
+		return normalizeVersions({ versions });
 	} catch (err) {
 		if (err instanceof TypeError) return err;
 		throw err;
