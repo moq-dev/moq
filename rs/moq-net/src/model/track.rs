@@ -15802,6 +15802,7 @@ mod test {
 	}
 
 	/// A feed declared to start at group 2, with groups 2 and 3 written, read from group 0.
+	#[cfg(feature = "async")]
 	fn started_late() -> (Producer, Dynamic, Subscriber) {
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.dynamic();
@@ -15812,6 +15813,7 @@ mod test {
 		(producer, dynamic, subscriber)
 	}
 
+	#[cfg(feature = "async")]
 	fn write_filled(group: Result<group::Producer>, millis: u64) {
 		let mut group = group.unwrap();
 		group
@@ -15820,6 +15822,7 @@ mod test {
 		group.finish().unwrap();
 	}
 
+	#[cfg(feature = "async")]
 	fn drained_drops(subscriber: &mut Subscriber) -> Vec<(u64, u64)> {
 		let mut dropped = Vec::new();
 		while let Poll::Ready((range, _)) = subscriber.poll_drop(&kio::Waiter::noop()) {

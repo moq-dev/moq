@@ -1186,7 +1186,9 @@ where
 		// What an update changed while forwarding outlives a pause.
 		let applied = serve.track.subscription();
 		params.priority = crate::ietf::priority::to_wire(applied.priority);
-		params.max_age = applied.max_delay.and_then(|max_delay| max_delay.as_millis().try_into().ok());
+		params.max_age = applied
+			.max_delay
+			.and_then(|max_delay| max_delay.as_millis().try_into().ok());
 		let served = match served {
 			Ok(Some(Served::Paused)) => Served::Paused,
 			Ok(Some(served)) => {

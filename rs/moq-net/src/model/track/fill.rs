@@ -200,7 +200,7 @@ impl FillState {
 	}
 
 	/// Whether no fill is pending, queued or taken.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(super) fn is_empty(&self) -> bool {
 		self.pending.is_empty() && self.queue.is_empty() && self.covers.is_empty()
 	}
