@@ -296,13 +296,9 @@ enum Fill {
 		producer: group::Producer,
 	},
 
-	/// No join was asked for. A subgroup stream that starts mid-group passes through with
-	/// the publisher's Object IDs, since no head of ours is missing from it.
-	Unrequested,
-
-	/// No head is coming: the fill failed, the tail already claimed it, or we stopped
-	/// reading. A subgroup stream that starts mid-group is then unstitchable and gets
-	/// dropped, which degrades the join to the next group boundary.
+	/// No head is coming: none was requested, the fill failed, the tail already claimed it,
+	/// or we stopped reading. A subgroup stream that starts mid-group is then unstitchable
+	/// and gets dropped, which degrades the join to the next group boundary.
 	Done,
 
 	/// The publisher ended the subscription cleanly, so no tail is coming. Unlike
@@ -316,7 +312,7 @@ impl Fill {
 	/// Whether a head might still arrive or is waiting to be claimed, which is what makes a
 	/// subgroup stream worth peeking before its group is created.
 	fn outstanding(&self) -> bool {
-		!matches!(self, Fill::Unrequested | Fill::Done | Fill::Ended)
+		!matches!(self, Fill::Done | Fill::Ended)
 	}
 
 	/// Take the head for `sequence`, if this is one and it ends where the tail begins.
@@ -355,7 +351,7 @@ impl Fill {
 	fn install(&mut self, head: Fill) {
 		let mut head = head;
 		match self {
-			Fill::Unrequested | Fill::Done => head.cancel(),
+			Fill::Done => head.cancel(),
 			Fill::Ended => head.release(),
 			_ => *self = head,
 		}
@@ -376,9 +372,6 @@ impl Fill {
 	/// The publisher ended the subscription cleanly: release the head, and any still being
 	/// written when it lands.
 	fn end(&mut self) {
-		if matches!(self, Fill::Unrequested) {
-			return;
-		}
 		self.release();
 		*self = Fill::Ended;
 	}
@@ -387,14 +380,13 @@ impl Fill {
 	///
 	/// The group may still be open upstream, so finishing it would cut it short for good: a
 	/// rejoin could not replace the cached group, and its readers would see it end early.
-	/// A clean end already settled the head, so [`Fill::Ended`] stays, as does
-	/// [`Fill::Unrequested`]: there was never a head.
+	/// A clean end already settled the head, so [`Fill::Ended`] stays.
 	fn cancel(&mut self) {
 		match std::mem::replace(self, Fill::Done) {
 			Fill::Ready { producer, .. } => {
 				let _ = producer.abort(Error::Cancel);
 			}
-			state @ (Fill::Ended | Fill::Unrequested) => *self = state,
+			Fill::Ended => *self = Fill::Ended,
 			_ => {}
 		}
 	}
@@ -2927,7 +2919,7 @@ where
 		// and so a fill fetch stream that overtakes it finds the subscription it answers.
 		let fill = kio::Producer::new(match join.fill.is_some() || join.fetch {
 			true => Fill::Requested,
-			false => Fill::Unrequested,
+			false => Fill::Done,
 		});
 		{
 			let mut state = self.state.lock();
@@ -3869,8 +3861,8 @@ where
 	/// group FETCHes of their own. The subscribe's request id names the FETCH. The data
 	/// arrives on its own fetch stream and [`Self::recv_fill`] stitches it. A refusal or a
 	/// failed send settles the fill as [`Fill::Done`], as a failed draft-20 fill does: only
-	/// a stream that starts mid-group is lost, and a whole group still stands alone. A
-	/// malformed answer closes the session.
+	/// the head is lost, and a whole group still stands alone. A malformed answer closes
+	/// the session.
 	fn start_joining_fetch(&self, subscribe_id: RequestId, track: &track::Producer) -> Option<JoiningTask> {
 		let fill = self.state.lock().subscribes.get(&subscribe_id)?.fill.clone();
 		let track = track.clone();
@@ -4666,11 +4658,7 @@ where
 				producer.start_at(resume.frame)?;
 				return Ok(Opened::Group(producer, first.map_or(resume.frame, |first| first.id)));
 			}
-			// A settled join still drops a stream starting mid-group below: its head failed
-			// or was already claimed, whichever stream landed first.
-			if matches!(*fill.read(), Fill::Unrequested) || first.is_none_or(|first| first.id == 0) {
-				return Ok(Opened::Group(create(track)?, first.map_or(0, |first| first.id)));
-			}
+			return Ok(Opened::Group(create(track)?, first.map_or(0, |first| first.id)));
 		}
 
 		// The first object's ID delta is its absolute Object ID (see `next_object_id`).
@@ -4740,7 +4728,7 @@ where
 
 			let settled = fill.poll(waiter, |fill| match **fill {
 				Fill::Requested | Fill::Serving(_) | Fill::Active => Poll::Pending,
-				Fill::Ready { .. } | Fill::Unrequested | Fill::Done | Fill::Ended => Poll::Ready(()),
+				Fill::Ready { .. } | Fill::Done | Fill::Ended => Poll::Ready(()),
 			});
 
 			match settled {
@@ -5830,7 +5818,7 @@ fn poll_settled(settle: &mut Settle, waiter: &kio::Waiter, fill: &kio::Producer<
 fn poll_headed(fill: &kio::Producer<Fill>, waiter: &kio::Waiter) -> Poll<()> {
 	let headed = fill.poll(waiter, |fill| match **fill {
 		Fill::Requested | Fill::Serving(_) | Fill::Active => Poll::Pending,
-		Fill::Ready { .. } | Fill::Unrequested | Fill::Done | Fill::Ended => Poll::Ready(()),
+		Fill::Ready { .. } | Fill::Done | Fill::Ended => Poll::Ready(()),
 	});
 	match headed {
 		Poll::Pending => Poll::Pending,
@@ -6140,7 +6128,7 @@ mod tests {
 				..TrackState::pending(
 					"video".to_string(),
 					crate::Path::new("bcast").to_owned(),
-					kio::Producer::new(Fill::Unrequested),
+					kio::Producer::new(Fill::Done),
 				)
 			},
 		);
@@ -6797,7 +6785,7 @@ mod tests {
 							crate::track::Info::timed(),
 						),
 						Path::new(broadcast).to_owned(),
-						kio::Producer::new(Fill::Unrequested),
+						kio::Producer::new(Fill::Done),
 					),
 				);
 			}
@@ -8055,7 +8043,7 @@ mod tests {
 							crate::track::Info::timed(),
 						),
 						Path::new("broadcast").to_owned(),
-						kio::Producer::new(Fill::Unrequested),
+						kio::Producer::new(Fill::Done),
 					)
 				},
 			);
@@ -12887,7 +12875,7 @@ mod stitch_tests {
 				),
 			)
 			.unwrap();
-		let mut h = Harness::with_timescale(Fill::Unrequested, vec![script], timescale);
+		let mut h = Harness::with_timescale(Fill::Done, vec![script], timescale);
 		h.subscriber.version = ingress;
 		h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
 		let mut stream = h.stream().await.with_version(ingress);
@@ -13245,7 +13233,7 @@ mod stitch_tests {
 		for version in [Version::Draft15, Version::Draft22] {
 			for status in [END_OF_GROUP, END_OF_TRACK] {
 				let script = object_stream(version, true, &[(0, &[], None), (1, &[0x20, 7], Some(status))]);
-				let mut h = Harness::with_timescale(Fill::Unrequested, vec![script], None);
+				let mut h = Harness::with_timescale(Fill::Done, vec![script], None);
 				h.subscriber.version = version;
 				let mut stream = h.stream().await.with_version(version);
 				let result = h.subscriber.clone().recv_group(&mut stream).await;
@@ -13262,7 +13250,7 @@ mod stitch_tests {
 		let trailing: &[(u64, &[u8], Option<u64>)] = &[(0, &[], None), (1, &[0x20, 7], Some(END_OF_TRACK))];
 		for objects in [standalone, trailing] {
 			let script = object_stream(Version::Draft14, true, objects);
-			let mut h = Harness::with_timescale(Fill::Unrequested, vec![script], None);
+			let mut h = Harness::with_timescale(Fill::Done, vec![script], None);
 			h.subscriber.version = Version::Draft14;
 			let mut stream = h.stream().await.with_version(Version::Draft14);
 			let result = h.subscriber.clone().recv_group(&mut stream).await;
@@ -13317,7 +13305,7 @@ mod stitch_tests {
 			true,
 			&[(0, &[0x10, 5], None), (1, &status, Some(END_OF_GROUP))],
 		);
-		let mut h = Harness::with_timescale(Fill::Unrequested, vec![script], Some(Timescale::MILLI));
+		let mut h = Harness::with_timescale(Fill::Done, vec![script], Some(Timescale::MILLI));
 		h.subscriber.version = version;
 		let mut consumer = h.track.subscribe(None);
 		let mut stream = h.stream().await.with_version(version);
@@ -13380,7 +13368,7 @@ mod stitch_tests {
 			(&block(limit, true), None, true),
 		] {
 			let script = object_stream(version, true, &[(0, properties, status)]);
-			let mut h = Harness::with_timescale(Fill::Unrequested, vec![script], milli);
+			let mut h = Harness::with_timescale(Fill::Done, vec![script], milli);
 			h.subscriber.version = version;
 			let mut stream = h.stream().await.with_version(version);
 			let result = h.subscriber.clone().recv_group(&mut stream).await;
@@ -13438,7 +13426,7 @@ mod stitch_tests {
 	async fn passthrough_refuses_contradictory_gap_properties() {
 		for properties in [vec![0x3e, 2], vec![0x3e, 3], vec![0x3e, 1, 0, 1]] {
 			let script = object_stream(VERSION, true, &[(0, &[], None), (2, &properties, None)]);
-			let h = Harness::with_timescale(Fill::Unrequested, vec![script], None);
+			let h = Harness::with_timescale(Fill::Done, vec![script], None);
 			let mut stream = h.stream().await;
 			assert!(matches!(
 				h.subscriber.clone().recv_group(&mut stream).await,
@@ -13645,7 +13633,7 @@ mod stitch_tests {
 				let track = broadcast
 					.create_track("video", accepted_info(&Default::default(), version))
 					.unwrap();
-				let mut h = Harness::with_timescale(Fill::Unrequested, vec![], None);
+				let mut h = Harness::with_timescale(Fill::Done, vec![], None);
 				h.subscriber.version = version;
 				h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
 				let properties = if version == Version::Draft15 {
@@ -13773,7 +13761,7 @@ mod stitch_tests {
 				let track = broadcast
 					.create_track("video", accepted_info(&Default::default(), ingress))
 					.unwrap();
-				let mut h = Harness::with_timescale(Fill::Unrequested, vec![], None);
+				let mut h = Harness::with_timescale(Fill::Done, vec![], None);
 				h.subscriber.version = ingress;
 				h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
 				let mut properties = Vec::new();
@@ -13901,7 +13889,7 @@ mod stitch_tests {
 				encoder.varint(1u64).unwrap();
 				script.push(42);
 			}
-			let mut h = Harness::with_timescale(Fill::Unrequested, vec![script], None);
+			let mut h = Harness::with_timescale(Fill::Done, vec![script], None);
 			h.subscriber.version = version;
 			let mut consumer = h.track.subscribe(None);
 			let mut stream = h.stream().await.with_version(version);
@@ -13914,7 +13902,7 @@ mod stitch_tests {
 	#[moq_clock::test]
 	async fn passthrough_accepts_datagrams_past_object_zero() {
 		for version in [Version::Draft15, Version::Draft22] {
-			let mut h = Harness::with_timescale(Fill::Unrequested, vec![], None);
+			let mut h = Harness::with_timescale(Fill::Done, vec![], None);
 			h.subscriber.version = version;
 			let mut consumer = h.track.subscribe(None);
 			let bytes = ietf::ObjectDatagram {
@@ -13943,7 +13931,7 @@ mod stitch_tests {
 		crate::coding::Encoder::new(&mut bytes, VERSION.into())
 			.varint(u64::MAX)
 			.unwrap();
-		let h = Harness::new(Fill::Unrequested, vec![bytes]);
+		let h = Harness::new(Fill::Done, vec![bytes]);
 		let mut stream = h.stream().await;
 		let result = h.subscriber.clone().recv_group(&mut stream).await;
 		assert!(
@@ -13980,7 +13968,7 @@ mod stitch_tests {
 					bytes
 				})
 				.collect();
-			let mut h = Harness::with_timescale(Fill::Unrequested, scripts, None);
+			let mut h = Harness::with_timescale(Fill::Done, scripts, None);
 			h.subscriber.version = version;
 			let mut consumer = h.track.subscribe(None);
 			let mut stream = h.stream().await.with_version(version);
@@ -14011,7 +13999,7 @@ mod stitch_tests {
 		.encode(&mut crate::coding::Encoder::new(&mut refused, VERSION.into()), VERSION)
 		.unwrap();
 
-		let h = Harness::new(Fill::Unrequested, vec![refused, tail_stream(SEQUENCE, 0, &[b"ok"])]);
+		let h = Harness::new(Fill::Done, vec![refused, tail_stream(SEQUENCE, 0, &[b"ok"])]);
 		let mut consumer = h.track.subscribe(None);
 
 		let mut stream = h.stream().await;
@@ -14064,7 +14052,7 @@ mod stitch_tests {
 				compact(SEQUENCE + 1, Some(0)),
 				compact(SEQUENCE + 2, None),
 			];
-			let mut h = Harness::with_timescale(Fill::Unrequested, scripts, None);
+			let mut h = Harness::with_timescale(Fill::Done, scripts, None);
 			h.subscriber.version = version;
 			let mut consumer = h.track.subscribe(None);
 
@@ -14127,14 +14115,14 @@ mod stitch_tests {
 		// Delta 0, then a 1-byte extension block holding half of a 2-byte varint.
 		let mut stream = tail_stream(SEQUENCE, 0, &[b"ok"]);
 		stream.extend_from_slice(&[0, 1, 0x40]);
-		let h = Harness::new(Fill::Unrequested, vec![stream]);
+		let h = Harness::new(Fill::Done, vec![stream]);
 		h.dispatch_refused().await;
 	}
 
 	/// A FIN before the declared payload ends.
 	#[moq_clock::test]
 	async fn a_payload_cut_short_is_refused() {
-		let h = Harness::with_timescale(Fill::Unrequested, vec![raw_stream(SEQUENCE, &[0, 4], &[1, 2])], None);
+		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &[0, 4], &[1, 2])], None);
 		h.dispatch_refused().await;
 	}
 
@@ -14142,7 +14130,7 @@ mod stitch_tests {
 	#[moq_clock::test]
 	async fn an_oversized_frame_is_refused() {
 		let size = crate::group::MAX_CACHE_BYTES + 1;
-		let h = Harness::with_timescale(Fill::Unrequested, vec![raw_stream(SEQUENCE, &[0, size], &[])], None);
+		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &[0, size], &[])], None);
 		h.dispatch_refused().await;
 	}
 
@@ -14151,7 +14139,7 @@ mod stitch_tests {
 	async fn an_oversized_group_is_refused() {
 		// Each empty object is its delta, a zero size, and the Normal status.
 		let objects = vec![0u64; 3 * (crate::group::MAX_GROUP_FRAMES + 1)];
-		let h = Harness::with_timescale(Fill::Unrequested, vec![raw_stream(SEQUENCE, &objects, &[])], None);
+		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &objects, &[])], None);
 		h.dispatch_refused().await;
 	}
 
@@ -14159,7 +14147,7 @@ mod stitch_tests {
 	#[moq_clock::test]
 	async fn a_second_stream_for_a_group_is_refused() {
 		let whole = raw_stream(SEQUENCE, &[0, 1], &[42]);
-		let h = Harness::with_timescale(Fill::Unrequested, vec![whole.clone(), whole], None);
+		let h = Harness::with_timescale(Fill::Done, vec![whole.clone(), whole], None);
 		let mut stream = h.stream().await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 		h.dispatch_refused().await;
@@ -14199,7 +14187,7 @@ mod stitch_tests {
 				}
 				// Over-limit lengths deliberately carry no extension bytes. The objects carry
 				// no Timestamp, so the track is untimed.
-				let h = Harness::with_timescale(Fill::Unrequested, vec![script], None);
+				let h = Harness::with_timescale(Fill::Done, vec![script], None);
 				let mut consumer = h.track.subscribe(None);
 				let mut stream = h.stream().await;
 				let result = h.subscriber.clone().recv_group(&mut stream).await;
@@ -14293,7 +14281,7 @@ mod stitch_tests {
 		// The id delta, the size, and the payload, with no extension block.
 		script.extend_from_slice(&[0, 1, 42]);
 
-		let h = Harness::new(Fill::Unrequested, vec![script]);
+		let h = Harness::new(Fill::Done, vec![script]);
 		let mut stream = h.stream().await;
 		let res = h.subscriber.clone().recv_group(&mut stream).await;
 		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
@@ -14304,7 +14292,7 @@ mod stitch_tests {
 	#[moq_clock::test]
 	async fn an_end_of_track_after_a_group_ends_the_track_after_it() {
 		let h = Harness::new(
-			Fill::Unrequested,
+			Fill::Done,
 			vec![end_marker(tail_stream(SEQUENCE, 0, &[b"last"]), END_OF_TRACK)],
 		);
 		let mut consumer = h.track.subscribe(None);
@@ -14331,7 +14319,7 @@ mod stitch_tests {
 		for value in [5u64, 0, 0, END_OF_TRACK] {
 			Encoder::new(&mut marker, VERSION.into()).varint(value).unwrap();
 		}
-		let h = Harness::new(Fill::Unrequested, vec![marker]);
+		let h = Harness::new(Fill::Done, vec![marker]);
 		let mut stream = h.stream().await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 		assert_eq!(h.track.end(), Some(track::Position { group: 5, frame: 5 }));
@@ -14348,7 +14336,7 @@ mod stitch_tests {
 	async fn a_group_past_the_declared_end_aborts_the_track() {
 		use futures::FutureExt;
 
-		let mut h = Harness::new(Fill::Unrequested, vec![tail_stream(SEQUENCE, 0, &[b"late"])]);
+		let mut h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 0, &[b"late"])]);
 		h.track.finish_at(track::Position::group(SEQUENCE)).unwrap();
 		let mut stream = h.stream().await;
 
@@ -14365,7 +14353,7 @@ mod stitch_tests {
 	#[moq_clock::test]
 	async fn an_end_of_track_at_object_zero_creates_no_group() {
 		let h = Harness::new(
-			Fill::Unrequested,
+			Fill::Done,
 			vec![end_marker(tail_stream(SEQUENCE, 0, &[]), END_OF_TRACK)],
 		);
 		let mut stream = h.stream().await;
@@ -14569,7 +14557,7 @@ mod stitch_tests {
 	/// delivered the rest.
 	#[moq_clock::test]
 	async fn a_resumed_whole_group_drops_the_delivered_head() {
-		let h = Harness::new(Fill::Unrequested, vec![tail_stream(SEQUENCE, 0, &[b"0", b"1", b"2"])]).with_resume(
+		let h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 0, &[b"0", b"1", b"2"])]).with_resume(
 			track::Position {
 				group: SEQUENCE,
 				frame: 2,
@@ -14620,24 +14608,11 @@ mod stitch_tests {
 	/// A standalone subgroup tail keeps its identity while plain readers see its payload.
 	#[moq_clock::test]
 	async fn a_tail_without_a_fill_is_preserved() {
-		let h = Harness::new(Fill::Unrequested, vec![tail_stream(SEQUENCE, 2, &[b"tail-2"])]);
+		let h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 2, &[b"tail-2"])]);
 		let mut consumer = h.track.subscribe(None);
 		let mut tail = h.stream().await;
 		h.subscriber.clone().recv_group(&mut tail).await.unwrap();
 		assert_eq!(read_group(&mut consumer).await.1[0].1, b"tail-2");
-	}
-
-	/// A join whose head failed before its tail arrived drops that tail, as it does when the
-	/// tail arrives first and waits on the head: the group is lost, not delivered partial.
-	#[moq_clock::test]
-	async fn a_tail_after_a_failed_fill_is_dropped() {
-		let h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 2, &[b"tail-2"])]);
-		let mut consumer = h.track.subscribe(None);
-		h.dispatch_refused().await;
-		assert!(
-			futures::FutureExt::now_or_never(consumer.recv_group()).is_none(),
-			"no partial group"
-		);
 	}
 
 	/// Object IDs are absolute whatever FIRST_OBJECT says, and they start at 0, so a
@@ -14652,7 +14627,7 @@ mod stitch_tests {
 			"the bit is clear"
 		);
 
-		let mut h = Harness::new(Fill::Unrequested, vec![bytes]);
+		let mut h = Harness::new(Fill::Done, vec![bytes]);
 		h.subscriber.version = Version::Draft18;
 		let mut consumer = h.track.subscribe(None);
 		let mut stream = read_draft18(&h.session).await;
@@ -14677,7 +14652,7 @@ mod stitch_tests {
 		let flags = ietf::GroupFlags::decode(u64::from(bytes[0]), Version::Draft18).unwrap();
 		assert!(flags.has_end, "the header marks the group's end");
 
-		let mut h = Harness::new(Fill::Unrequested, vec![bytes]);
+		let mut h = Harness::new(Fill::Done, vec![bytes]);
 		h.subscriber.version = Version::Draft18;
 		let mut consumer = h.track.subscribe(None);
 		let mut stream = read_draft18(&h.session).await;
@@ -14702,7 +14677,7 @@ mod stitch_tests {
 		let whole = draft18_subgroup(SEQUENCE + 1, true, 0, &[b"next"]);
 		assert_eq!(u64::from(partial[0]) & ietf::GroupFlags::FIRST_OBJECT_BIT, 0);
 
-		let mut h = Harness::new(Fill::Unrequested, vec![partial, whole]);
+		let mut h = Harness::new(Fill::Done, vec![partial, whole]);
 		h.subscriber.version = Version::Draft18;
 		let mut consumer = h.track.subscribe(None);
 
@@ -14731,10 +14706,7 @@ mod stitch_tests {
 	async fn a_received_rewind_is_accepted() {
 		use futures::FutureExt;
 
-		let mut h = Harness::new(
-			Fill::Unrequested,
-			vec![draft18_subgroup(SEQUENCE, true, 0, &[b"rewound"])],
-		);
+		let mut h = Harness::new(Fill::Done, vec![draft18_subgroup(SEQUENCE, true, 0, &[b"rewound"])]);
 		h.subscriber.version = Version::Draft18;
 		// Starts past the incoming group's first object, at `timestamp(0)`.
 		let mut before = h.track.create_group((SEQUENCE - 1).into()).unwrap();
@@ -14788,7 +14760,7 @@ mod stitch_tests {
 
 	#[moq_clock::test]
 	async fn receive_drain_keeps_bound_aliases_and_ends_unknown_alias_waits() {
-		let h = Harness::new(Fill::Unrequested, vec![]);
+		let h = Harness::new(Fill::Done, vec![]);
 		let aliases = h.subscriber.state.lock().aliases.consume();
 		let mut unknown = Box::pin(resolve_track_alias(&h.subscriber.runtime, aliases.clone(), ALIAS + 1));
 		assert!(futures::poll!(unknown.as_mut()).is_pending());
@@ -14857,7 +14829,7 @@ mod stitch_tests {
 
 	#[moq_clock::test]
 	async fn receive_drain_ends_a_group_fetch_waiting_for_fetch_ok() {
-		let h = Harness::new(Fill::Unrequested, vec![fill_stream(SEQUENCE, &[b"head"])]);
+		let h = Harness::new(Fill::Done, vec![fill_stream(SEQUENCE, &[b"head"])]);
 		h.subscriber
 			.state
 			.lock()
@@ -14900,7 +14872,7 @@ mod stitch_tests {
 	/// subscription itself is delivering, so it is refused rather than written.
 	#[moq_clock::test]
 	async fn an_unsolicited_fill_is_refused() {
-		let h = Harness::new(Fill::Unrequested, vec![fill_stream(SEQUENCE, &[b"head-0"])]);
+		let h = Harness::new(Fill::Done, vec![fill_stream(SEQUENCE, &[b"head-0"])]);
 		let mut fill = h.stream().await;
 
 		assert!(matches!(
@@ -15895,8 +15867,8 @@ mod joining_fetch_tests {
 
 	/// A publisher that serves no FETCH refuses the joining FETCH. That costs the head of
 	/// the Largest group and nothing more, as a failed draft-20 fill does: the fill settles,
-	/// so a stream starting mid-group is dropped rather than parked, and the subscription
-	/// keeps delivering whole groups.
+	/// so a stream starting mid-group no longer waits on it, and the subscription keeps
+	/// delivering whole groups.
 	#[moq_clock::test]
 	async fn a_refused_fetch_joins_at_the_next_whole_group() {
 		let largest = Some(ietf::Location { group: 4, object: 1 });
