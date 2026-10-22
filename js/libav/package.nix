@@ -7,10 +7,9 @@
 # never does, so the asm.js and pthread targets would double the build and the
 # package without ever loading.
 #
-# The output is the npm package itself. The root `postinstall` copies it into
-# js/libav/dist, which both serves the workspace and is what release.ts
-# publishes: a copy, since Vite refuses to serve /nix/store, while the `result`
-# out-link beside it keeps the build from being garbage collected.
+# The output is the npm package itself. The root `postinstall` runs build.ts,
+# which copies it into js/libav/dist, the directory that serves the workspace
+# and that release.ts publishes.
 {
   lib,
   stdenv,

@@ -21,6 +21,8 @@ Most apps never import this directly: `@moq/hang`'s `Util.Libav.polyfill()` does
 bun run --cwd js/libav build
 ```
 
+Without Nix on `PATH`, as on Windows, the build unpacks the published `@moq/libav` of the same version instead, and fails if npm doesn't have that version yet.
+
 The derivation is [`package.nix`](./package.nix): libav.js v6.10.9.0 with ffmpeg 9.0, Opus 1.6.1, and emfiberthreads 1.3, compiled with the emscripten from the flake's nixpkgs.
 
 ## License
