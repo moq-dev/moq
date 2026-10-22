@@ -549,22 +549,41 @@ impl Subscribe {
 		}
 	}
 
-	/// A UDP socket bound to an ephemeral port and connected to `url`, `udp://HOST:PORT`. It is
-	/// nonblocking, and sent on directly ([`Unsent::send`]): tokio's own readiness would refuse
-	/// a send until its reactor first saw the socket writable.
+	/// A UDP socket bound to an ephemeral port and connected to `url`, `udp://HOST:PORT`, at
+	/// the first address it resolves to that takes one ([`Self::rtp_connect`]).
 	async fn rtp_socket(url: &url::Url) -> anyhow::Result<std::net::UdpSocket> {
 		let (host, port) = rtp_destination(url)?;
-		let addr = tokio::net::lookup_host((host.as_str(), port))
-			.await?
-			.next()
-			.with_context(|| format!("could not resolve {host}:{port}"))?;
-		let local: std::net::SocketAddr = match addr {
-			std::net::SocketAddr::V4(_) => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
-			std::net::SocketAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
-		};
-		let socket = tokio::net::UdpSocket::bind(local).await?;
-		socket.connect(addr).await?;
-		Ok(socket.into_std()?)
+		let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port)).await?.collect();
+		anyhow::ensure!(!addrs.is_empty(), "could not resolve {host}:{port}");
+		Self::rtp_connect(&addrs)
+			.await
+			.with_context(|| format!("could not open a UDP socket to {host}:{port}"))
+	}
+
+	/// A UDP socket connected to the first of `addrs` that takes one: a host may resolve to an
+	/// address family this one cannot reach before one it can. It is nonblocking, and sent on
+	/// directly ([`Unsent::send`]): tokio's own readiness would refuse a send until its reactor
+	/// first saw the socket writable.
+	async fn rtp_connect(addrs: &[std::net::SocketAddr]) -> std::io::Result<std::net::UdpSocket> {
+		let mut last = None;
+		for &addr in addrs {
+			let local: std::net::SocketAddr = match addr {
+				std::net::SocketAddr::V4(_) => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
+				std::net::SocketAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
+			};
+			let socket = match tokio::net::UdpSocket::bind(local).await {
+				Ok(socket) => socket,
+				Err(err) => {
+					last = Some(err);
+					continue;
+				}
+			};
+			match socket.connect(addr).await {
+				Ok(()) => return socket.into_std(),
+				Err(err) => last = Some(err),
+			}
+		}
+		Err(last.unwrap_or_else(|| std::io::ErrorKind::AddrNotAvailable.into()))
 	}
 
 	/// Write the multiplex the broadcast's `m2ts` track carries, each run of packets as its
@@ -637,5 +656,17 @@ mod tests {
 		assert_eq!(unsent.count, 1);
 		unsent.report();
 		assert_eq!((unsent.count, unsent.last.is_none()), (0, true));
+	}
+
+	/// A destination whose first address takes no socket is reached at the next it resolves to.
+	#[tokio::test]
+	async fn an_rtp_destination_tries_each_address_it_resolves_to() {
+		// Link-local, on an interface no host has.
+		let unusable: std::net::SocketAddr =
+			std::net::SocketAddrV6::new(std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), 9, 0, u32::MAX).into();
+		let reachable: std::net::SocketAddr = (std::net::Ipv4Addr::LOCALHOST, 9).into();
+		assert!(Subscribe::rtp_connect(&[unusable]).await.is_err());
+		let socket = Subscribe::rtp_connect(&[unusable, reachable]).await.unwrap();
+		assert_eq!(socket.peer_addr().unwrap(), reachable);
 	}
 }

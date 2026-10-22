@@ -224,15 +224,30 @@ where
 struct Tally {
 	/// The frame's PCR in 27 MHz ticks, and whether it flags a new time base.
 	pcr: (u64, bool),
-	/// The PID of each access unit whose packets begin in the frame.
-	units: Vec<u16>,
+	/// How many access units begin in the frame, by PID: one count each, however many slots
+	/// a withheld run folds in.
+	units: BTreeMap<u16, u64>,
 }
 
 impl Tally {
+	/// The tally of a frame whose PCR is `pcr`, an access unit on each of `units` beginning in it.
+	fn new(pcr: (u64, bool), units: impl IntoIterator<Item = u16>) -> Tally {
+		let mut tally = Tally {
+			pcr,
+			units: BTreeMap::new(),
+		};
+		for pid in units {
+			*tally.units.entry(pid).or_default() += 1;
+		}
+		tally
+	}
+
 	/// This tally followed by `later`'s, for a frame that carries both.
 	fn then(mut self, later: Tally) -> Tally {
 		self.pcr = (later.pcr.0, self.pcr.1 || later.pcr.1);
-		self.units.extend(later.units);
+		for (pid, units) in later.units {
+			*self.units.entry(pid).or_default() += units;
+		}
 		self
 	}
 }
@@ -1760,8 +1775,8 @@ where
 			self.liveness.discontinuity();
 		}
 		self.liveness.written_pcr(pcr);
-		for pid in tally.units {
-			self.liveness.delivered(pid, 1);
+		for (pid, units) in tally.units {
+			self.liveness.delivered(pid, units);
 		}
 		Some(out)
 	}
@@ -3101,10 +3116,7 @@ where
 				self.number(&mut payload);
 			}
 			let timestamp = slot_stamp(slot.index)?;
-			let tally = Tally {
-				pcr: (slot.pcr, discontinuity),
-				units: slot.units,
-			};
+			let tally = Tally::new((slot.pcr, discontinuity), slot.units);
 			if let Some(rtp) = &mut self.packetizer {
 				let mut unsure = slot.unsure;
 				if discontinuity {
@@ -3121,10 +3133,7 @@ where
 						payload: datagram,
 						keyframe: false,
 					};
-					let tally = tally.take().unwrap_or(Tally {
-						pcr: (slot.pcr, false),
-						units: Vec::new(),
-					});
+					let tally = tally.take().unwrap_or(Tally::new((slot.pcr, false), []));
 					self.queue.push_back((frame, tally));
 				}
 				self.unsent = tally;
@@ -4176,9 +4185,24 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::{
-		Buffer, DecodeClock, Dolby, Kind, PSI_INTERVAL, PesPacket, dolby_removals, due, is_complete_section, si_due,
-		slot, unwrap_pts, verbatim_buffer,
+		Buffer, DecodeClock, Dolby, Kind, PSI_INTERVAL, PesPacket, Tally, dolby_removals, due, is_complete_section,
+		si_due, slot, unwrap_pts, verbatim_buffer,
 	};
+
+	/// A withheld run folds each slot's tally into the next datagram's: however many slots it
+	/// folds in, the tally keeps one count per PID, and the latest PCR with any break flagged.
+	#[test]
+	fn a_withheld_run_tallies_one_count_per_pid() {
+		let mut tally = Tally::new((0, false), []);
+		for slot in 1..=10_000u64 {
+			tally = tally.then(Tally::new((slot, slot == 5), [0x100, 0x101, 0x100]));
+		}
+		assert_eq!(tally.pcr, (10_000, true));
+		assert_eq!(
+			tally.units.into_iter().collect::<Vec<_>>(),
+			[(0x100, 20_000), (0x101, 10_000)]
+		);
+	}
 
 	/// The same available video/audio backlog must choose the same start in either fill order.
 	#[tokio::test(start_paused = true)]
