@@ -163,7 +163,7 @@ impl ExportSource {
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = config.try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
-		let Some(request) = source.try_request(config.broadcast.as_ref()) else {
+		let Some(request) = source.try_request(config) else {
 			return Ok(None);
 		};
 
@@ -201,7 +201,7 @@ impl ExportSource {
 	) -> Result<Option<Self>, crate::Error> {
 		let media: HangContainer = config.try_into()?;
 		let description = config.description.as_ref().filter(|b| !b.is_empty()).cloned();
-		let Some(request) = source.try_request(config.broadcast.as_ref()) else {
+		let Some(request) = source.try_request(config) else {
 			return Ok(None);
 		};
 
@@ -356,7 +356,7 @@ impl ExportSource {
 		loop {
 			match ready!(self.poll_event(waiter))? {
 				Some(Event::Frame(frame)) => return Poll::Ready(Ok(Some(frame))),
-				Some(Event::GroupEnd | Event::FrameEnd { .. }) => continue,
+				Some(Event::GroupEnd | Event::FrameEnd { .. } | Event::Cut) => continue,
 				None => return Poll::Ready(Ok(None)),
 			}
 		}
@@ -441,6 +441,12 @@ impl ExportSource {
 						self.finish_ends();
 						self.open = false;
 						return Poll::Ready(Ok(Some(Event::GroupEnd)));
+					}
+					// The skip is counted with the gap the next group reads.
+					Some(Item::Cut) => {
+						self.finish_ends();
+						self.cuts += u64::from(std::mem::take(&mut self.open));
+						return Poll::Ready(Ok(Some(Event::Cut)));
 					}
 					None => {
 						self.finish_ends();

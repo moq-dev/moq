@@ -258,8 +258,9 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 	// Each representation names its init by hash, which an inline codec only learns from media.
 	broadcaster.build_inits().await;
 	match broadcaster.manifest(query) {
-		Some(manifest) => mpd(manifest),
-		None => not_found(),
+		Ok(Some(manifest)) => mpd(manifest),
+		Ok(None) => not_found(),
+		Err(err) => server_error(err),
 	}
 }
 
@@ -872,9 +873,69 @@ mod tests {
 		wait_listed(&app, "/live/master.m3u8", "video/video0/media.m3u8").await;
 	}
 
+	/// A failed timeline answers every listing, a clip included, with an uncacheable error
+	/// rather than ending it as a complete recording or refusing the range.
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_timeline_answers_an_uncacheable_error() {
+		let origin = moq_tokio::origin::spawn();
+		let mut broadcast = origin.create_broadcast("live").expect("publish");
+		broadcast.announce(Default::default()).expect("announce");
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let name = hang::timeline::default_name("video0");
+		catalog
+			.mutate(|catalog| {
+				catalog.video.renditions.insert("video0".into(), video_config());
+				let mut archive = hang::catalog::Archive::new();
+				archive
+					.timelines
+					.insert("video0".into(), hang::catalog::Timeline::new(name.clone(), 1_000));
+				archive.store = Some("https://example.com/recording/".parse().unwrap());
+				catalog.archive = Some(archive);
+			})
+			.unwrap();
+		let track = broadcast
+			.create_track(name, moq_mux::timeline::Producer::info())
+			.unwrap();
+		let mut timeline = moq_mux::timeline::Producer::new(track.clone());
+		for sequence in 0..3 {
+			let start = hang::timeline::Position::group(sequence);
+			let end = hang::timeline::Position::group(sequence + 1);
+			let record = hang::timeline::Record::new(sequence, sequence * 2_000, 2_000, start, end);
+			timeline.push(&record).unwrap();
+		}
+
+		let config = crate::export::Config {
+			history: true,
+			..Default::default()
+		};
+		let app = Server::new(origin.consume(), config).router();
+		wait_listed(&app, "/live/video/video0/media.m3u8", ".2.m4s").await;
+		assert_eq!(status(&app, "/live/manifest.mpd").await, StatusCode::OK);
+
+		drop(timeline);
+		track.abort(moq_net::Error::SessionClosed).unwrap();
+		for uri in [
+			"/live/video/video0/media.m3u8",
+			"/live/video/video0/media.m3u8?start=0&end=2",
+			"/live/manifest.mpd",
+		] {
+			let deadline = tokio::time::Instant::now() + TIMEOUT;
+			let response = loop {
+				let response = oneshot(app.clone(), uri).await;
+				if response.status() != StatusCode::OK {
+					break response;
+				}
+				assert!(tokio::time::Instant::now() < deadline, "{uri} never failed");
+				tokio::time::sleep(Duration::from_millis(50)).await;
+			};
+			assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR, "{uri}");
+			assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store", "{uri}");
+		}
+	}
+
 	/// Only the URLs the renderers emit are served: the init under its hash, segments under the
-	/// current generation.
-	#[tokio::test]
+	/// current generation. Paused, since a refused lookup waits out [`READY_TIMEOUT`].
+	#[tokio::test(start_paused = true)]
 	async fn serves_only_versioned_media_urls() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
@@ -1022,8 +1083,9 @@ mod tests {
 		.await
 		.expect("sibling resolve timed out")
 		.expect("sibling broadcast");
-		drop(media);
-		drop(media_broadcast);
+		// Only the sibling goes: the catalog keeps listing the rendition, so the request
+		// reaches the media fetch rather than missing the rendition.
+		media_broadcast.close();
 		tokio::time::timeout(TIMEOUT, remote_media.closed())
 			.await
 			.expect("sibling close timed out");
@@ -1032,7 +1094,7 @@ mod tests {
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 
-		drop((catalog, catalog_broadcast));
+		drop((catalog, catalog_broadcast, media));
 		pair.accept.abort();
 	}
 }

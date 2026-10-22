@@ -59,5 +59,4 @@ the default FFI build across Go, Kotlin and Swift.
 
 ## Related
 
-- [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed-consumer checks this reuses
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - confirms the shared build in production first

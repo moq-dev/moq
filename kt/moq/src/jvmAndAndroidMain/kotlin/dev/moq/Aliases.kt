@@ -75,6 +75,8 @@ typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
 typealias BroadcastConsumer = uniffi.moq.MoqBroadcastConsumer
 /** Receives tracks requested from a dynamically served broadcast. */
 typealias BroadcastDynamic = uniffi.moq.MoqBroadcastDynamic
+/** A cleanly ended broadcast, still announced and serving its finished tracks until its linger ends. */
+typealias BroadcastFinish = uniffi.moq.MoqBroadcastFinish
 /** The write side of a raw track: append groups of frames. */
 typealias TrackProducer = uniffi.moq.MoqTrackProducer
 /** A subscriber-requested track not yet accepted: accept it for a [TrackProducer] or abort it. */
@@ -155,6 +157,12 @@ typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
 typealias Reservation = uniffi.moq.MoqReservation
 /** A snapshot of transport connection statistics. */
 typealias ConnectionStats = uniffi.moq.MoqConnectionStats
+/** A session's authorization: the grant its peer gave it, and more tokens to present. */
+typealias Auth = uniffi.moq.MoqAuth
+/** One token presented with [Auth.add]; cancel it to withdraw the token. */
+typealias AuthToken = uniffi.moq.MoqAuthToken
+/** What the peer lets this side do: publish and subscribe patterns, and an expiry. */
+typealias Grant = uniffi.moq.MoqGrant
 /** A connection lifecycle transition reported by [Session.status]. */
 typealias ConnectionStatus = uniffi.moq.MoqConnectionStatus
 /** Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window. */

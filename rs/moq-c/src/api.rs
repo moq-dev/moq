@@ -44,6 +44,7 @@ pub struct moq_container {
 	/// The CMAF init segment (ftyp+moov), or NULL.
 	/// Read only when `kind` is `MOQ_CONTAINER_KIND_CMAF`, where it is required.
 	pub init: *const u8,
+	/// The length in bytes of `init`.
 	pub init_len: usize,
 }
 
@@ -321,10 +322,12 @@ fn container_format_from_u32(value: u32) -> Result<moq_mux::import::ContainerFor
 pub struct moq_video_config {
 	/// The name of the track, NOT NULL terminated.
 	pub name: *const c_char,
+	/// The length in bytes of `name`.
 	pub name_len: usize,
 
 	/// The codec of the track, NOT NULL terminated
 	pub codec: *const c_char,
+	/// The length in bytes of `codec`.
 	pub codec_len: usize,
 
 	/// The description of the track, or NULL if not used.
@@ -332,12 +335,14 @@ pub struct moq_video_config {
 	///   - NULL: annex.b encoded
 	///   - Non-NULL: AVCC encoded
 	pub description: *const u8,
+	/// The length in bytes of `description`.
 	pub description_len: usize,
 
 	/// The encoded width/height of the media, a hint so a decoder can size its
 	/// buffers up front. Zero means absent, which no valid dimension is, so the
 	/// two are independent: a catalog carrying only one round-trips unchanged.
 	pub coded_width: u32,
+	/// The encoded height in pixels, or zero when absent.
 	pub coded_height: u32,
 
 	/// How the track's frames are wrapped.
@@ -384,14 +389,17 @@ pub struct moq_video_properties {
 pub struct moq_audio_config {
 	/// The name of the track, NOT NULL terminated
 	pub name: *const c_char,
+	/// The length in bytes of `name`.
 	pub name_len: usize,
 
 	/// The codec of the track, NOT NULL terminated
 	pub codec: *const c_char,
+	/// The length in bytes of `codec`.
 	pub codec_len: usize,
 
 	/// The description of the track, or NULL if not used.
 	pub description: *const u8,
+	/// The length in bytes of `description`.
 	pub description_len: usize,
 
 	/// The sample rate of the track in Hz
@@ -455,6 +463,7 @@ pub struct moq_binary_config {
 pub struct moq_json_value {
 	/// The JSON document as UTF-8, NOT NULL terminated.
 	pub json: *const c_char,
+	/// The length in bytes of `json`.
 	pub json_len: usize,
 
 	/// The timestamp of the frame that carried the value in microseconds, or 0 when
@@ -472,6 +481,7 @@ pub struct moq_json_value {
 pub struct moq_frame {
 	/// The payload of the frame, or NULL/0 if the stream has ended
 	pub payload: *const u8,
+	/// The length in bytes of `payload`.
 	pub payload_size: usize,
 
 	/// The presentation timestamp of the frame in microseconds, or 0 when
@@ -492,6 +502,7 @@ pub struct moq_frame {
 pub struct moq_datagram {
 	/// The payload of the datagram, or NULL/0 if the track has ended.
 	pub payload: *const u8,
+	/// The length in bytes of `payload`.
 	pub payload_size: usize,
 
 	/// The presentation timestamp of the datagram in microseconds, or 0 when
@@ -594,9 +605,10 @@ pub struct moq_subscription {
 	/// The spans of the track to deliver, or NULL for everything `max_delay_us` still
 	/// considers fresh. A non-NULL pointer with `ranges_len` 0 asks for nothing.
 	///
-	/// A request to the publisher, aggregated across every subscriber. Reads start at the
-	/// lowest group a range starts at, and stop past the last absolute end.
+	/// A request to the publisher, aggregated across every subscriber, and this
+	/// subscription's read filter: it reads only the groups its own ranges cover.
 	pub ranges: *const moq_range,
+	/// The number of entries in `ranges`.
 	pub ranges_len: usize,
 
 	/// `moq_order` discriminant: which pending group the publisher sends first.
@@ -718,6 +730,7 @@ pub(crate) unsafe fn parse_subscription(
 pub struct moq_string {
 	/// Pointer to `len` bytes of UTF-8, NOT NULL terminated.
 	pub data: *const c_char,
+	/// The string length in bytes.
 	pub len: usize,
 }
 
@@ -732,10 +745,12 @@ pub struct moq_string {
 pub struct moq_section {
 	/// The section name, NOT NULL terminated.
 	pub name: *const c_char,
+	/// The length in bytes of `name`.
 	pub name_len: usize,
 
 	/// The section value as a JSON document, NOT NULL terminated.
 	pub json: *const c_char,
+	/// The length in bytes of `json`.
 	pub json_len: usize,
 }
 
@@ -753,6 +768,7 @@ pub struct moq_route {
 	/// Hop ids, oldest first. NULL when `hops_len` is 0. 0 is the anonymous
 	/// mark and is legal on a received chain.
 	pub hops: *const u64,
+	/// The number of entries in `hops`.
 	pub hops_len: usize,
 	/// Preference among routes covering the same prefix: lower wins.
 	pub cost: u64,
@@ -807,11 +823,13 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 pub struct moq_announce_config {
 	/// A literal path root, NOT NULL terminated. NULL when `prefix_len` is 0.
 	pub prefix: *const c_char,
+	/// The length in bytes of `prefix`.
 	pub prefix_len: usize,
 
 	/// A pattern relative to `prefix`, NOT NULL terminated, or NULL for every
 	/// path beneath it. Empty is a valid exact filter.
 	pub filter: *const c_char,
+	/// The length in bytes of `filter`.
 	pub filter_len: usize,
 
 	/// Also list hidden paths: those with a segment starting with `.` below the prefix.
@@ -840,13 +858,16 @@ pub enum moq_announce_kind {
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
 	pub prefix: *const c_char,
+	/// The length in bytes of `prefix`.
 	pub prefix_len: usize,
 
 	/// What each requested filter wildcard matched. Each string is NOT NULL terminated.
 	/// Meaningful only when `has_captures` is true; false means the route overlaps
 	/// the filter without pinning every wildcard.
 	pub captures: *const moq_string,
+	/// The number of entries in `captures`.
 	pub captures_len: usize,
+	/// Whether `captures` is present.
 	pub has_captures: bool,
 
 	/// Which event this is.
@@ -874,34 +895,42 @@ pub struct moq_connection_snapshot {
 pub struct moq_connection_stats {
 	/// Smoothed round-trip time, in microseconds.
 	pub rtt_us: u64,
+	/// Whether `rtt_us` is available in this sample.
 	pub rtt_valid: bool,
 
 	/// Estimated send bandwidth from the congestion controller, in bits per second.
 	pub estimated_send_rate_bps: u64,
+	/// Whether `estimated_send_rate_bps` is available in this sample.
 	pub estimated_send_rate_valid: bool,
 
 	/// Total bytes sent, including retransmissions and overhead.
 	pub bytes_sent: u64,
+	/// Whether `bytes_sent` is available in this sample.
 	pub bytes_sent_valid: bool,
 
 	/// Total bytes received, including duplicates and overhead.
 	pub bytes_received: u64,
+	/// Whether `bytes_received` is available in this sample.
 	pub bytes_received_valid: bool,
 
 	/// Total bytes lost (detected via retransmission or acknowledgement).
 	pub bytes_lost: u64,
+	/// Whether `bytes_lost` is available in this sample.
 	pub bytes_lost_valid: bool,
 
 	/// Total datagrams sent.
 	pub packets_sent: u64,
+	/// Whether `packets_sent` is available in this sample.
 	pub packets_sent_valid: bool,
 
 	/// Total datagrams received.
 	pub packets_received: u64,
+	/// Whether `packets_received` is available in this sample.
 	pub packets_received_valid: bool,
 
 	/// Total datagrams detected as lost.
 	pub packets_lost: u64,
+	/// Whether `packets_lost` is available in this sample.
 	pub packets_lost_valid: bool,
 }
 
@@ -1080,31 +1109,38 @@ pub struct moq_client_config {
 	/// the CLI spells them (`moq-lite-05`, `moq-transport-22`); [moq_versions]
 	/// lists what is on offer.
 	pub versions: *const moq_string,
+	/// The number of entries in `versions`.
 	pub versions_len: usize,
 
 	/// Local socket address to bind, or NULL for the wildcard address.
 	pub bind: *const c_char,
+	/// The length in bytes of `bind`.
 	pub bind_len: usize,
 
 	/// How long a dial may take before it gives up.
 	pub connect_timeout_us: u64,
+	/// Whether `connect_timeout_us` is present.
 	pub has_connect_timeout: bool,
 
 	/// Happy Eyeballs: how long before the next address is also dialed.
 	pub failover_delay_us: u64,
+	/// Whether `failover_delay_us` is present.
 	pub has_failover_delay: bool,
 
 	/// Happy Eyeballs: how long the first family waits for the AAAA answer.
 	pub resolution_delay_us: u64,
+	/// Whether `resolution_delay_us` is present.
 	pub has_resolution_delay: bool,
 
 	/// Whether the WebSocket fallback may be raced, for a UDP-blocked network.
 	/// Enabled unless you turn it off, hence the flag.
 	pub websocket_enabled: bool,
+	/// Whether `websocket_enabled` is present.
 	pub has_websocket_enabled: bool,
 
 	/// How long QUIC gets before the WebSocket fallback is also dialed.
 	pub websocket_delay_us: u64,
+	/// Whether `websocket_delay_us` is present.
 	pub has_websocket_delay: bool,
 
 	/// Accept any certificate. Development only: prefer `tls_fingerprints`,
@@ -1114,60 +1150,83 @@ pub struct moq_client_config {
 	/// Whether to trust the platform root store. Its default depends on the
 	/// backend, so it needs the flag to distinguish "off" from "unset".
 	pub tls_system_roots: bool,
+	/// Whether `tls_system_roots` is present.
 	pub has_tls_system_roots: bool,
 
 	/// Extra root certificate paths to trust.
 	pub tls_roots: *const moq_string,
+	/// The number of entries in `tls_roots`.
 	pub tls_roots_len: usize,
 
 	/// SHA-256 certificate fingerprints to pin, hex encoded. The native
 	/// equivalent of the browser's `serverCertificateHashes`.
 	pub tls_fingerprints: *const moq_string,
+	/// The number of entries in `tls_fingerprints`.
 	pub tls_fingerprints_len: usize,
 
 	/// SNI override, or NULL to use the host from the URL.
 	pub tls_host_name: *const c_char,
+	/// The length in bytes of `tls_host_name`.
 	pub tls_host_name_len: usize,
 
 	/// Client certificate and key paths for mTLS, or NULL for none.
 	pub tls_cert: *const c_char,
+	/// The length in bytes of `tls_cert`.
 	pub tls_cert_len: usize,
+	/// The client private key path for mTLS, or NULL for none.
 	pub tls_key: *const c_char,
+	/// The length in bytes of `tls_key`.
 	pub tls_key_len: usize,
 
 	/// Reconnect pacing. Each must leave a non-zero delay or retrying would
 	/// spin, which is rejected at dial.
 	pub backoff_initial_us: u64,
+	/// Whether `backoff_initial_us` is present.
 	pub has_backoff_initial: bool,
+	/// The factor by which the reconnect delay increases.
 	pub backoff_multiplier: u32,
+	/// Whether `backoff_multiplier` is present.
 	pub has_backoff_multiplier: bool,
+	/// The maximum reconnect delay in microseconds.
 	pub backoff_max_us: u64,
+	/// Whether `backoff_max_us` is present.
 	pub has_backoff_max: bool,
 	/// How long reconnection keeps trying before giving up for good.
 	pub backoff_timeout_us: u64,
+	/// Whether `backoff_timeout_us` is present.
 	pub has_backoff_timeout: bool,
 
 	/// QUIC transport tuning, all ignored by the WebSocket fallback.
 	pub quic_max_streams: u64,
+	/// Whether `quic_max_streams` is present.
 	pub has_quic_max_streams: bool,
+	/// The QUIC idle timeout in microseconds.
 	pub quic_idle_timeout_us: u64,
+	/// Whether `quic_idle_timeout_us` is present.
 	pub has_quic_idle_timeout: bool,
+	/// The QUIC keep-alive interval in microseconds.
 	pub quic_keep_alive_us: u64,
+	/// Whether `quic_keep_alive_us` is present.
 	pub has_quic_keep_alive: bool,
 	/// Generic segmentation offload and path MTU discovery. Both default to the
 	/// backend's choice, so both need their flag.
 	pub quic_gso: bool,
+	/// Whether `quic_gso` is present.
 	pub has_quic_gso: bool,
+	/// Whether QUIC may discover the path MTU.
 	pub quic_mtu_discovery: bool,
+	/// Whether `quic_mtu_discovery` is present.
 	pub has_quic_mtu_discovery: bool,
 
 	/// Congestion control family name (`loss`, `delay`, or `none`), or NULL for the backend's choice.
 	pub quic_congestion_control: *const c_char,
+	/// The length in bytes of `quic_congestion_control`.
 	pub quic_congestion_control_len: usize,
 
 	/// Directory to write qlog traces into, or NULL for none. Capture is
 	/// compile-time optional; see [moq_qlog_supported].
 	pub quic_qlog: *const c_char,
+	/// The length in bytes of `quic_qlog`.
 	pub quic_qlog_len: usize,
 
 	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
@@ -1448,19 +1507,23 @@ pub struct moq_server_config {
 	/// Address to bind, e.g. `[::]:443`, `127.0.0.1:0`, or `localhost:4443`; NULL
 	/// for `[::]:443`. A port of 0 picks one; read it back with [moq_server_addr].
 	pub bind: *const c_char,
+	/// The length in bytes of `bind`.
 	pub bind_len: usize,
 
 	/// Certificate chain paths (PEM), paired with `tls_key`.
 	pub tls_cert: *const moq_string,
+	/// The number of entries in `tls_cert`.
 	pub tls_cert_len: usize,
 
 	/// Private key paths (PEM), paired with `tls_cert`.
 	pub tls_key: *const moq_string,
+	/// The number of entries in `tls_key`.
 	pub tls_key_len: usize,
 
 	/// Hostnames to generate a self-signed certificate for. Clients must pin its
 	/// fingerprint ([moq_server_fingerprints]) or disable verification.
 	pub tls_generate: *const moq_string,
+	/// The number of entries in `tls_generate`.
 	pub tls_generate_len: usize,
 
 	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names, for
@@ -2138,6 +2201,40 @@ pub extern "C" fn moq_publish_close(broadcast: u32) -> i32 {
 	})
 }
 
+/// End a broadcast cleanly and release its handle, keeping it servable until its media is stale.
+///
+/// Finish every track first: the returned finish handle holds the tracks finished by now and
+/// keeps the broadcast announced, so a subscriber still catching up can drain them. A track still
+/// live is not held. `linger_us` receives how long to keep the handle, in microseconds: the
+/// longest max age among the held tracks, or zero. Keep it that long on your own clock, then
+/// [moq_publish_finish_close]; closing it sooner is how an interrupt ends the linger.
+///
+/// Returns a non-zero finish handle on success, or a negative code on failure.
+///
+/// # Safety
+/// - `linger_us` must be a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_finish(broadcast: u32, linger_us: *mut u64) -> i32 {
+	ffi::enter(move || {
+		let broadcast = ffi::parse_id(broadcast)?;
+		let linger_us = unsafe { linger_us.as_mut() }.ok_or(Error::InvalidPointer)?;
+		let (finish, linger) = State::lock().publish.finish(broadcast)?;
+		*linger_us = u64::try_from(linger.as_micros()).unwrap_or(u64::MAX);
+		Ok(finish)
+	})
+}
+
+/// Close a finished broadcast and release its handle, ending its linger.
+///
+/// Returns a zero on success, or a negative code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_finish_close(finish: u32) -> i32 {
+	ffi::enter(move || {
+		let finish = ffi::parse_id(finish)?;
+		State::lock().publish.finish_close(finish)
+	})
+}
+
 /// Publish one audio codec as a new media track.
 ///
 /// The track is named after the format (`0.opus`), so a subscriber finds it
@@ -2264,6 +2361,9 @@ pub extern "C" fn moq_publish_media_seek(media: u32, sequence: u64) -> i32 {
 
 /// Finish a media track, flushing any buffered frames. No more frames can be written.
 ///
+/// The broadcast keeps the finished track, catalog rendition included, until it closes or its
+/// [moq_publish_finish] linger ends, so a late subscriber can still drain it.
+///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
@@ -2387,6 +2487,9 @@ pub extern "C" fn moq_publish_container_seek(container: u32, sequence: u64) -> i
 }
 
 /// Finish every track the container publishes and release the handle.
+///
+/// The broadcast keeps the finished tracks, catalog renditions included, until it closes or its
+/// [moq_publish_finish] linger ends, so a late subscriber can still drain them.
 ///
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
@@ -2786,7 +2889,10 @@ pub unsafe extern "C" fn moq_publish_track_datagram(
 	})
 }
 
-/// Finish a raw track. No more groups or frames can be written.
+/// Finish a raw track and release its handle. No more groups or frames can be written.
+///
+/// The broadcast keeps the finished track until it closes or its [moq_publish_finish] linger
+/// ends, so a late subscriber can still drain it.
 ///
 /// Returns a zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]

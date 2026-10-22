@@ -320,6 +320,7 @@ impl SendStream {
     }
 
     /// Reset at `offset` with `code`, instead of at 0 with code 0, if dropped before `finish`
+    #[cfg(feature = "quic")]
     pub(crate) fn set_drop_reset(&mut self, offset: u64, code: VarInt) {
         self.drop_reset = (offset, code);
     }

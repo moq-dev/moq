@@ -1,3 +1,5 @@
+//! Publish, discover, and route broadcasts.
+
 use std::sync::Arc;
 
 use crate::consumer::MoqBroadcastConsumer;
@@ -112,6 +114,7 @@ pub fn moq_epoch_time_ms(epoch: String) -> Result<u64, MoqError> {
 	Ok(since.as_millis() as u64)
 }
 
+/// An origin in which broadcasts can be published.
 #[derive(uniffi::Object)]
 pub struct MoqOriginProducer {
 	inner: Origin,
@@ -130,12 +133,14 @@ impl std::ops::Deref for Origin {
 	}
 }
 
+/// An origin from which broadcasts can be discovered and requested.
 #[derive(uniffi::Object)]
 pub struct MoqOriginConsumer {
 	inner: moq_net::origin::Consumer,
 	pub(crate) driver: Background,
 }
 
+/// A stream of broadcast announcement changes.
 #[derive(uniffi::Object)]
 pub struct MoqAnnounceConsumer {
 	task: Task<Announced>,
@@ -259,14 +264,26 @@ impl From<moq_net::announce::Announce> for MoqAnnounce {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MoqAnnounceEvent {
 	/// A route now covers the prefix; the stream had none there.
-	Start { announce: MoqAnnounce },
+	Start {
+		/// The broadcast announcement affected by this event.
+		announce: MoqAnnounce,
+	},
 	/// The route covering the prefix changed hops or cost.
-	Update { announce: MoqAnnounce },
+	Update {
+		/// The broadcast announcement affected by this event.
+		announce: MoqAnnounce,
+	},
 	/// No route covers the prefix any more. Carries its last advertised route.
-	End { announce: MoqAnnounce },
+	End {
+		/// The broadcast announcement affected by this event.
+		announce: MoqAnnounce,
+	},
 	/// Another publisher instance now serves the prefix: drop what was resolved under
 	/// it and request afresh.
-	Restart { announce: MoqAnnounce },
+	Restart {
+		/// The broadcast announcement affected by this event.
+		announce: MoqAnnounce,
+	},
 }
 
 impl From<moq_net::announce::Event> for MoqAnnounceEvent {
@@ -679,6 +696,25 @@ mod supervision_tests {
 			.unwrap()
 			.announce(Default::default())
 			.unwrap();
+	}
+
+	#[tokio::test]
+	async fn a_finish_after_a_driver_panic_closes_the_broadcast() {
+		let (inner, completion, trigger) = crate::ffi::panicking_origin();
+		let origin = MoqOriginProducer::from_inner(Origin {
+			inner,
+			driver: completion.clone(),
+		});
+		let broadcast = origin.create_broadcast("retained".into()).unwrap();
+		// A dynamic handle outlives the consumed producer, so only an explicit close ends it.
+		let _dynamic = broadcast.dynamic().unwrap();
+		let consumer = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.consume();
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
+		assert!(matches!(broadcast.finish(), Err(MoqError::Task { .. })));
+		assert!(consumer.is_closed());
 	}
 
 	#[tokio::test]

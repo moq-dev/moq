@@ -880,7 +880,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 		write(2, 20_000);
 		open();
 
-		expect(String(await streamReset)).toContain("max delay budget");
+		expect(String(await streamReset)).toContain("abandoned waiting for a stream slot");
 		expect(writes).toBe(0);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(unhandled).toEqual([]);

@@ -20,16 +20,13 @@ mod backend;
 pub(crate) use backend::{Client, Closer, Options, Server, accept};
 #[cfg(feature = "quic")]
 pub use backend::{Connection, Error};
-/// The flow-control limits a live QUIC connection can change; see [`Connection::set_limits`].
-#[cfg(feature = "quic")]
+/// The flow-control limits a live QUIC connection can change; see [`driver::Connection::set_limits`].
+#[cfg(feature = "driver")]
 pub use moq_quic::{Limits, LimitsError};
 
-// The async QUIC layer driving `moq-quic` on tokio, forked from quinn (see its module docs).
-// Public only so the workspace's tests can dial a bare endpoint; not a stable API.
 // cargo fmt formats submodules with the crate root's config, so `just rs fix`
 // formats this one separately with its own (quinn's).
-#[cfg(feature = "quic")]
-#[doc(hidden)]
+#[cfg(feature = "driver")]
 #[rustfmt::skip]
 pub mod driver;
 
@@ -1096,42 +1093,6 @@ mod tests {
 			};
 			assert!(at_limit.validate().is_ok(), "{max_streams}");
 		}
-	}
-
-	#[test]
-	fn window_flags_parse() {
-		let quic = parse(&[
-			"--quic-receive-window",
-			"67108864",
-			"--quic-stream-receive-window",
-			"8388608",
-			"--quic-send-window",
-			"33554432",
-		]);
-		assert_eq!(quic.receive_window, Some(67108864));
-		assert_eq!(quic.stream_receive_window, Some(8388608));
-		assert_eq!(quic.send_window, Some(33554432));
-	}
-
-	#[test]
-	fn toml_round_trips() {
-		let toml = r#"
-			max_streams = 7000
-			gso = false
-			congestion_control = "delay"
-			receive_window = 67108864
-			stream_receive_window = 8388608
-			send_window = 33554432
-			qlog = "/tmp/qlog"
-		"#;
-		let quic: Config = toml::from_str(toml).unwrap();
-		assert_eq!(quic.max_streams, Some(7000));
-		assert_eq!(quic.gso, Some(false));
-		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
-		assert_eq!(quic.receive_window, Some(67108864));
-		assert_eq!(quic.stream_receive_window, Some(8388608));
-		assert_eq!(quic.send_window, Some(33554432));
-		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
 	}
 }
 

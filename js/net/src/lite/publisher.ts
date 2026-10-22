@@ -1095,12 +1095,13 @@ export class Publisher {
 		let startSequence: number | undefined;
 		let endSent = false;
 
-		// Drop whatever part of `[start, end)` this subscription has not been served or dropped yet.
-		const drop = async (start: number, end: number): Promise<boolean> => {
+		// Drop whatever part of `[start, end)` this subscription has not been served or dropped
+		// yet, given up with `err`.
+		const drop = async (start: number, end: number, err: Error): Promise<boolean> => {
 			if (!served) return true;
 			for (const gap of runGaps(served, start, end)) {
 				insertRun(served, gap.start, gap.end);
-				const msg = new SubscribeDrop({ start: gap.start, end: gap.end - 1, error: 0 });
+				const msg = SubscribeDrop.given(gap.start, gap.end - 1, err, this.version);
 				if (!(await controls.response(encodeSubscribeResponse(stream, { drop: msg }, this.version))))
 					return false;
 			}
@@ -1222,7 +1223,7 @@ export class Publisher {
 					case "error":
 						throw recv.error;
 					case "drop":
-						if (!(await drop(recv.start, recv.end))) return false;
+						if (!(await drop(recv.start, recv.end, recv.error))) return false;
 						continue;
 					case "idle":
 						// A start past everything the track has (a subscriber resuming just after
@@ -1272,7 +1273,8 @@ export class Publisher {
 						if (startSequence !== undefined) {
 							const end =
 								bounds.endGroup === undefined ? boundary() : Math.min(boundary(), bounds.endGroup + 1);
-							if (!(await drop(startSequence, end))) return false;
+							const unserved = new StreamError(StreamCode.NotFound, { message: "group not served" });
+							if (!(await drop(startSequence, end, unserved))) return false;
 						}
 						if (!endSent) {
 							if (!(await sendEnd())) return false;
@@ -1335,7 +1337,7 @@ export class Publisher {
 				const task = opened.then(async (writer) => {
 					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
 					if (emitRange && failed instanceof Error) {
-						pendingDrops.push(new SubscribeDrop({ start: group.sequence, end: group.sequence, error: 0 }));
+						pendingDrops.push(SubscribeDrop.given(group.sequence, group.sequence, failed, this.version));
 						drops.update((revision) => revision + 1);
 					}
 				});
@@ -1565,14 +1567,28 @@ export class Publisher {
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
 			// in the order we asked, which is oldest-first, exactly backwards for live media.
 			// Failing here drops the group and lets the next one compete for the next slot.
-			const stream = await Writer.tryOpen(this.#quic, {
-				version: this.version,
-				sendOrder: priority.rank(group.sequence, start),
-				cancel: unsubscribed,
-				waitUntilAvailable: false,
-			});
+			// Watch the group while the transport parks the open, and release that watch
+			// once the open settles. tryOpen owns resetting a slot that arrives too late.
+			const opened = Promise.withResolvers<void>();
+			let failure: Error | undefined;
+			const abandoned = hooks
+				.guardGroup(group, () => opened.promise)
+				.catch((err: unknown) => {
+					failure = error(err);
+				});
+			let stream: Writer | undefined;
+			try {
+				stream = await Writer.tryOpen(this.#quic, {
+					version: this.version,
+					sendOrder: priority.rank(group.sequence, start),
+					cancel: race([unsubscribed, abandoned]),
+					waitUntilAvailable: false,
+				});
+			} finally {
+				opened.resolve();
+			}
 			if (!stream) {
-				const failed = new Error("no stream slot");
+				const failed = failure ?? new Error("no stream slot");
 				group.close(failed);
 				return failed;
 			}

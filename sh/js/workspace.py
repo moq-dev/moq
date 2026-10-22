@@ -181,7 +181,8 @@ def run(action, plan):
         finally:
             Path(name).unlink()
     # The fallback also covers unowned inputs, including demo/pub's Worker.
-    command("bun", "biome", "check", *(["js", "bench/browser", "test", "doc", "demo"] if plan["all"] else
+    # Recommended rules default to warn, which Biome otherwise lets pass.
+    command("bun", "biome", "check", "--error-on-warnings", *(["js", "bench/browser", "test", "doc", "demo"] if plan["all"] else
                                        [p["directory"] for p in packages.values()] + ["js/common"]))
     scripts("build")
     for name in ("@moq/watch", "@moq/publish"):

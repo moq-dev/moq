@@ -271,6 +271,27 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		expect(await reader.closed).toBeNull();
 	});
 
+	// Lite-07 carries a stream error code; earlier versions an application one, so the same
+	// bytes read as NOT_FOUND there.
+	test("a SUBSCRIBE_DROP ends a group still arriving, before the FIN", async () => {
+		const { subscriber, reader, respond } = await subscribed(version, Milli(60_000));
+		await respond({ start: new SubscribeStart(0) });
+		const arriving = groupStream(subscriber, 0);
+		arriving.write("0.0");
+		const group = await reader.recvGroup();
+		expect(await group?.readString()).toBe("0.0");
+
+		await respond({ drop: new SubscribeDrop({ start: 0, end: 0, error: 70 }) });
+		const err = await group?.readString().then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+		expect(err).toBeInstanceOf(StreamError);
+		expect((err as StreamError).code).toBe(version === Version.DRAFT_07 ? StreamCode(70) : StreamCode.NotFound);
+		expect(reader.closed.peek()).toBeUndefined();
+		subscriber.close();
+	});
+
 	test("a subscription that served nothing ends at SUBSCRIBE_END", async () => {
 		const { reader, respond, fin } = await subscribed(version, Milli(60_000));
 		await respond({ end: new SubscribeEnd(0) });

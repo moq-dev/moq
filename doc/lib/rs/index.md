@@ -15,13 +15,13 @@ links cover crates awaiting their first release.
 | --- | --- |
 | [moq-net](/lib/rs/moq-net) | The pub/sub layer: sessions, origins, broadcasts, tracks, groups, frames. Transport-agnostic. |
 | [moq-pattern](https://docs.rs/moq-pattern) | Path patterns such as `room/**`. Re-exported by moq-net and moq-auth. |
-| [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebSocket, or iroh, from config or CLI flags. |
+| [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebSocket, or iroh, from config or CLI flags. Its `driver` feature alone is a tokio QUIC stack without MoQ. |
 | [moq-sock](https://docs.rs/moq-sock) | Socket binding and CPU pinning for thread-per-core listeners. |
 | [moq-ice](https://github.com/moq-dev/moq/tree/main/rs/moq-ice) | The ICE agent behind native WebRTC: drives a str0m connection over UDP, with a STUN client. |
 | [moq-uring](https://docs.rs/moq-uring) | Experimental Linux io\_uring server for moq-lite. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
-| [moq-archive](https://docs.rs/moq-archive) | Record and replay hang broadcasts on any `object_store` backend. |
+| [moq-archive](https://docs.rs/moq-archive) | Record and replay MoQ broadcasts on any `object_store` backend. |
 | [moq-video](/lib/rs/moq-video) | Native capture, hardware encode/decode (Apple, Windows, NVIDIA, VAAPI, V4L2, Android), and GPU rendering. |
 | [moq-v4l](https://docs.rs/moq-v4l) | Safe Video4Linux 2 bindings. |
 | [moq-audio](/lib/rs/moq-audio) | Microphone and speaker, Opus/PCM/AAC codecs, echo cancellation. |

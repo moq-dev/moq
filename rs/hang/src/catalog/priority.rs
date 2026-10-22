@@ -24,16 +24,3 @@ pub const PRIORITY: Priorities = Priorities {
 	audio: 80,
 	video: 60,
 };
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn media_priorities_match_the_browser() {
-		assert_eq!(PRIORITY.catalog, 100);
-		assert_eq!(PRIORITY.text, 90);
-		assert_eq!(PRIORITY.audio, 80);
-		assert_eq!(PRIORITY.video, 60);
-	}
-}

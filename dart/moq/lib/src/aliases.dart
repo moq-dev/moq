@@ -84,6 +84,10 @@ typedef BroadcastConsumer = MoqBroadcastConsumer;
 /// Receives tracks requested from a dynamically served broadcast.
 typedef BroadcastDynamic = MoqBroadcastDynamic;
 
+/// A cleanly ended broadcast, still announced and serving its finished tracks
+/// until its linger ends; close it to end the linger early.
+typedef BroadcastFinish = MoqBroadcastFinish;
+
 /// The write side of a raw track: append groups of frames.
 typedef TrackProducer = MoqTrackProducer;
 
@@ -146,6 +150,15 @@ typedef Reservation = MoqReservation;
 
 /// A snapshot of transport connection statistics.
 typedef ConnectionStats = MoqConnectionStats;
+
+/// A session's authorization: the grant its peer gave it, and more tokens to present.
+typedef Auth = MoqAuth;
+
+/// One token presented with [Auth.add]; cancel it to withdraw the token.
+typedef AuthToken = MoqAuthToken;
+
+/// What the peer lets this side do: publish and subscribe patterns, and an expiry.
+typedef Grant = MoqGrant;
 
 /// A connection lifecycle transition reported by [Session.status].
 typedef ConnectionStatus = MoqConnectionStatus;

@@ -63,11 +63,9 @@ function time(bytes: Uint8Array, decode: (bytes: Uint8Array) => unknown): number
 	return samples[2] ?? 0;
 }
 
-console.log("frame\tbytes\tJSON.parse µs\tparse µs\tratio");
+console.log("frame,bytes,json_parse_us,parse_us");
 for (const [name, bytes] of cases) {
 	const baseline = time(bytes, (bytes) => JSON.parse(decoder.decode(bytes)));
 	const strict = time(bytes, parse);
-	console.log(
-		`${name}\t${bytes.length}\t${baseline.toFixed(2)}\t${strict.toFixed(2)}\t${(strict / baseline).toFixed(2)}`,
-	);
+	console.log(`${name},${bytes.length},${baseline.toFixed(2)},${strict.toFixed(2)}`);
 }

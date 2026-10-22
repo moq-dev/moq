@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast ends or the new `BroadcastProducer.finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
@@ -13,6 +18,13 @@ Replace `request.accept(broadcast)` with `request.prepare(mintEpoch())`, which r
 
 `Anchor` gains `AnchorTime`, so exhaustive `when` expressions need a branch for it.
 `TrackConsumer.update` now throws `MoqException` on a time anchor an untimed track can't serve.
+
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Regenerate the Kotlin sources and update the native libraries in `moq-ffi` together,
+then rebuild the application; older generated guards reject the rebuilt library.
+Application calls are unchanged.
 
 ### JSON consumers emit timestamps (#5677)
 

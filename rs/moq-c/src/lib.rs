@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! C bindings for [`moq_net`].
 //!
 //! Provides a C-compatible API for real-time pub/sub over QUIC.

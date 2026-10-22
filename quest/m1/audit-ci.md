@@ -25,9 +25,9 @@ landable and too large to review alongside the rest becomes a follow-up
 through `/quest-plan`.
 
 Split from the test cost audit on 2026-10-20: this audit owns workflows and
-jobs, that one owns tests. The first run waits for the one-time
-[CI pipeline audit](/quest/m0/ci/audit.md), so it measures the one-pass
-pipeline instead of the one it replaces.
+jobs, that one owns tests. It also owns job-level build cost, which the
+one-time m0 CI pipeline audit handed over on 2026-10-21 after measuring the
+one-pass queue.
 
 Each run tables every workflow in `.github/workflows/` and every Nightly job
 with three verdicts:
@@ -43,9 +43,8 @@ with three verdicts:
   stop producing it. Each report on the Pages site owns one `gh-pages`
   directory: its workflow commits only that directory, deploys the whole
   branch, and joins the `benchmark-pages` concurrency group with
-  `queue: max`, so no deploy drops another report (decided 2026-10-20 with the
-  [interop report](/quest/m1/interop-report.md); Nightly's `benchmark-site`
-  comment still claims a single writer until the first second writer lands).
+  `queue: max`, so no deploy drops another report (decided 2026-10-20; the
+  benchmark, relay, and interop reports do, through `sh/gh/pages-publish.sh`).
 - **Cost:** runner-minutes per month by runner type, from the org billing API
   and job timings, against that signal. macOS is the scarce one (a 5-job
   concurrency cap).
@@ -69,13 +68,46 @@ Check first (from the test cost audit's m0 run, 2026-10-19):
   fixture in the entry itself, or a semantic conflict with a PR merged after it
   was queued. Check the entry's head branch and what merged around it before
   calling it a flake.
-- Owned elsewhere: release builds by
-  [release builds link](/quest/m0/release-link.md), and Rust advisories by
-  [the dependency audit](/quest/m1/audit-deps.md).
+- Owned elsewhere: Rust advisories by
+  [the dependency audit](/quest/m1/audit-deps.md). The release toolchain now
+  links.
 - Re-running a single job in place cannot redeploy Pages: the earlier
   attempt's `github-pages` artifact remains and `deploy-pages` refuses two.
   Delete the stale artifact first, or wait for the next Nightly.
 
-## Required
+Check first (from the m0 CI pipeline audit, 2026-10-21):
 
-- [CI pipeline audit](/quest/m0/ci/audit.md) - the one-time audit of the one-pass pipeline this run starts from
+- The queue runs one `just ci` job on the persistent `nix/runner` VM. Over 32
+  entries it took a median 5.5 minutes, p90 11.9, at most 24.2. Its job
+  summary lists seconds per module, and the `cargo-timings` artifact is the
+  per-crate drill-down behind that table. Re-measure from those, not from log
+  timestamps.
+- An `rs/moq-ffi` change selects every binding, and the bindings were about
+  half of the slowest entries: C++ with the OBS plugin about 4.5 minutes
+  (the generated `moq.cpp` compiles six times at `-O0`, once per consumer
+  build and standard), Dart 45 to 160 seconds, Kotlin 30 to 110 (a cold
+  Gradle daemon is 65), Go about a minute. The dispatcher runs modules one
+  after another, and most binding steps use one core of eight.
+- A core Rust change (moq-net, moq-quic, moq-tokio) spends 3 to 4.5 minutes
+  compiling the test build and 2 to 2.5 running it, plus separate builds for
+  `cargo doc` (25 to 60 s), the io_uring clippy (20 to 50 s), the wasm32
+  clippy (12 s), and the capture (30 to 36 s) and play (40 to 48 s) tests.
+- Deferred to the maintainer (coverage trade-off): fold the capture and play
+  test builds into the main test build, as the platform build already does
+  (about 75 s per core Rust entry; the non-feature arms of moq-video,
+  moq-audio and moq-cli would compile only in Nightly's Features job, and
+  openh264 in `dev` tests needs measuring first), or move both to Nightly
+  (the same saving, but the gate stops testing the device features). The
+  m0 audit recommended folding; the queue keeps both builds until decided.
+- Cold builds (release PRs, Nightly) still compile both rustls backends and
+  aws-lc-sys once per environment; the queue VM keeps those built.
+- Nightly on 2026-10-20 took about 1,450 runner-minutes (320 macOS) and was
+  red for ten causes. Features' clippy is fixed except moq-net's group bench
+  ([#6117](https://github.com/moq-dev/moq/pull/6117)), and `gh test` was fixed
+  by [#6086](https://github.com/moq-dev/moq/pull/6086). Unowned:
+  `rs audio-devices`, new on 2026-10-20, fails all five playback tests on the
+  hosted ARM runner and passes on x86_64 Linux. Owned elsewhere besides the
+  above: the Rust and JS benchmark legs by the
+  [performance audit](/quest/m1/audit-perf.md), Audio quality's budgets by
+  the [audio jitter target](/quest/m1/audio-jitter-target/README.md), and the
+  bun advisories with the Rust ones.

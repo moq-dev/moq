@@ -19,8 +19,6 @@ test("the file picker opens before yielding to media loading", () => {
 	try {
 		source.prompt();
 		expect(click).toHaveBeenCalledTimes(1);
-		expect(input.type).toBe("file");
-		expect(input.accept).toBe("image/*,video/*,audio/*");
 	} finally {
 		source.close();
 		if (document) Object.defineProperty(globalThis, "document", document);

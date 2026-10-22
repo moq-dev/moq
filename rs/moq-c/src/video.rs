@@ -106,6 +106,7 @@ pub struct moq_video_encoder_output {
 	/// Backend name, UTF-8, e.g. `"videotoolbox"`, `"nvenc"`, `"mediafoundation"`,
 	/// `"openh264"`. Read only when `kind` is `MOQ_VIDEO_ENCODER_KIND_NAMED`.
 	pub encoder: *const c_char,
+	/// The length in bytes of `encoder`.
 	pub encoder_len: usize,
 }
 
@@ -121,7 +122,9 @@ pub struct moq_video_encoder_output {
 pub struct moq_video_encoder_frame {
 	/// Presentation timestamp, in microseconds.
 	pub timestamp_us: u64,
+	/// The raw frame bytes in the configured layout.
 	pub data: *const u8,
+	/// The length in bytes of `data`.
 	pub data_size: usize,
 }
 
@@ -169,10 +172,15 @@ pub struct moq_video_decoder_output {
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_video_frame {
+	/// The presentation timestamp in microseconds.
 	pub timestamp_us: u64,
+	/// The decoded width in pixels.
 	pub width: u32,
+	/// The decoded height in pixels.
 	pub height: u32,
+	/// The raw frame bytes in the configured layout.
 	pub data: *const u8,
+	/// The length in bytes of `data`.
 	pub data_size: usize,
 }
 
@@ -274,6 +282,7 @@ pub(crate) struct VideoEncoder {
 	follow: Option<oneshot::Sender<()>>,
 	followed: Option<crate::ffi::Background>,
 	ceiling: Option<Arc<AtomicU64>>,
+	finished: crate::publish::Finished,
 }
 
 /// A delivered frame: the decoded picture, retained until its id is freed, and
@@ -347,9 +356,15 @@ pub struct DecoderOutput {
 fn finalize(
 	mut producer: moq_video::encode::Producer<moq_mux::catalog::hang::Extra>,
 	drained: Result<(), moq_video::Error>,
+	finished: &crate::publish::Finished,
 ) -> Result<(), Error> {
 	match drained {
-		Ok(()) => Ok(producer.finish()?),
+		Ok(()) => {
+			producer.finish()?;
+			// The broadcast keeps the finished track, so its finish still holds it.
+			finished.keep(producer);
+			Ok(())
+		}
 		Err(err) => {
 			producer.abort(moq_net::Error::Transport(err.to_string()));
 			Err(err.into())
@@ -410,12 +425,13 @@ impl VideoEncoder {
 			encoder,
 			mut producer,
 			followed,
+			finished,
 			..
 		} = self;
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
 		let drained = block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded));
-		finalize(producer, drained)?;
+		finalize(producer, drained, &finished)?;
 		// A follower panic only stops rate adaptation, so the track still ends
 		// cleanly before the panic is reported.
 		followed.map_or(Ok(()), |followed| followed.check())
@@ -430,17 +446,18 @@ impl Video {
 	/// a track advertised that will never carry frames.
 	pub fn publish(
 		&mut self,
-		broadcast: &moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Producer<moq_mux::catalog::hang::Extra>,
+		target: crate::publish::Target<'_>,
 		format: moq_video_pixel_format,
 		config: &moq_video::encode::Config,
 		rendition: hang::catalog::VideoConfig,
 		encoder: moq_video::encode::Sink,
 	) -> Result<Id, Error> {
-		let reserved = catalog
+		let reserved = target
+			.catalog
 			.reserve()
 			.with_timeline_hint(config.gop.duration(config.framerate));
-		let producer = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition)?;
+		let producer = moq_video::encode::Producer::new(target.producer.clone(), reserved, rendition)?;
+		let finished = target.finished.clone();
 		self.producers.insert(Shared::new(VideoEncoder {
 			encoder,
 			producer,
@@ -450,6 +467,7 @@ impl Video {
 			follow: None,
 			followed: None,
 			ceiling: None,
+			finished,
 		}))
 	}
 
@@ -521,6 +539,7 @@ impl Video {
 		self.producers.remove(id).ok_or(Error::MediaNotFound)
 	}
 
+	/// Decode a rendition and deliver frame handles to the callback.
 	pub fn consume(
 		&mut self,
 		rendition: crate::consume::Rendition<hang::catalog::VideoConfig>,
@@ -578,6 +597,7 @@ impl Video {
 		}
 	}
 
+	/// Stop decoding and release the consumer handle.
 	pub fn consume_close(&mut self, id: Id) -> Result<(), Error> {
 		self.consumer_tasks.close(id, Error::TrackNotFound)
 	}
@@ -588,6 +608,7 @@ impl Video {
 		self.frames.get(id).cloned().ok_or(Error::FrameNotFound)
 	}
 
+	/// Release a decoded frame handle.
 	pub fn frame_free(&mut self, id: Id) -> Result<(), Error> {
 		self.frames.remove(id).ok_or(Error::FrameNotFound)?;
 		Ok(())
@@ -712,16 +733,7 @@ pub unsafe extern "C" fn moq_encode_video(
 		let mut state = State::lock();
 		let allocator = bandwidth.map(|id| state.bandwidth.allocator(id)).transpose()?;
 		let State { publish, video, .. } = &mut *state;
-		let (broadcast_producer, catalog) = publish.pair_mut(broadcast)?;
-
-		let id = video.publish(
-			broadcast_producer,
-			catalog.clone(),
-			format,
-			&config,
-			rendition.clone(),
-			encoder,
-		)?;
+		let id = video.publish(publish.target(broadcast)?, format, &config, rendition.clone(), encoder)?;
 		if let Some(allocator) = allocator.as_ref() {
 			video.follow(id, allocator, video_ceiling(&config, &rendition))?;
 		}
@@ -851,6 +863,8 @@ pub extern "C" fn moq_encode_video_bitrate(producer: u32, bitrate: u64) -> i32 {
 /// Flush any frames the codec is still holding and finalize the video track.
 ///
 /// The handle is released, so nothing can be published to it afterwards.
+/// The broadcast keeps the finished track, catalog rendition included, until it closes or its
+/// `moq_publish_finish` linger ends, so a late subscriber can still drain it.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 	ffi::enter(move || {
@@ -1019,7 +1033,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_successful_drain_ends_the_track_cleanly() {
 		let (producer, mut track) = track_under_test().await;
-		finalize(producer, Ok(())).unwrap();
+		finalize(producer, Ok(()), &Default::default()).unwrap();
 		assert!(matches!(track.recv_group().await, Ok(None)), "expected a clean end");
 	}
 
@@ -1030,7 +1044,7 @@ mod tests {
 	async fn a_failed_drain_aborts_the_track() {
 		let (producer, mut track) = track_under_test().await;
 		let err = moq_video::Error::Codec(anyhow::anyhow!("the codec lost the tail"));
-		finalize(producer, Err(err)).unwrap_err();
+		finalize(producer, Err(err), &Default::default()).unwrap_err();
 
 		let Err(err) = track.recv_group().await else {
 			panic!("expected an abort, not a clean end");
@@ -1060,6 +1074,7 @@ mod tests {
 			follow: None,
 			followed: Some(followed),
 			ceiling: None,
+			finished: Default::default(),
 		};
 
 		let result = tokio::task::spawn_blocking(move || video.publish_finish())

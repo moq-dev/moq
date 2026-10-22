@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track, raw or media, now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `MoqBroadcastProducer::finish` lets go, instead of unlisting when its producer finishes or is released.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
 ### A claim answers by publishing (#5678)
 
 `MoqOriginProducer::dynamic(prefix)` takes no `MoqRoute`, and `MoqOriginDynamic::update` is gone.
@@ -19,6 +24,13 @@ It defaults to `false` in every generated binding; a Rust struct literal adds `c
 
 `MoqAnchor` gains `Time { timestamp_us }`, the group containing that presentation time, so exhaustive matches need an arm for it.
 `MoqTrackConsumer::update` now returns `Result<(), MoqError>`, failing with `TimestampMismatch` on a time anchor an untimed track can't serve.
+
+### Regenerate bindings after the API documentation update
+
+The new documentation on `MoqAudioProducer::write` and `finish` changes their
+UniFFI metadata checksums, even though their signatures and behavior are unchanged.
+Regenerate each language's bindings from the rebuilt library and update them together.
+Older generated bindings with active checksum guards reject this library during initialization.
 
 ### JSON consumers return `MoqJsonValue` (#5677)
 

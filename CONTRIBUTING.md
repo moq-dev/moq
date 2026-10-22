@@ -32,6 +32,7 @@ PRs into `main` get no cloud CI: they report **Check** as skipped, and `just ci`
 The merge queue runs Check on the PR combined with the latest `main` and the PRs queued ahead of it.
 Enqueue with `gh pr merge <number>` once the review is clean.
 Both select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
+A PR whose diff is only quest files, tests, or CI config goes to the front, since other work builds on it: `gh pr merge` has no flag for this, so use the `enqueuePullRequest` GraphQL mutation with `jump: true`.
 
 A dequeued PR means the combination failed checks, timed out, or no longer meets the ruleset.
 Read the removal reason in the PR timeline and the merge group run, fix the cause, and enqueue again.

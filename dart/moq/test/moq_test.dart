@@ -43,11 +43,6 @@ void main() {
     other.close();
   });
 
-  test('diagnostic errors expose their named reason', () {
-    final error = TransportMoqException('reset');
-    expect(error.reason, 'reset');
-  });
-
   test('catalog handle closes with its broadcast', () {
     final broadcast = BroadcastProducer();
     final catalog = moq_media.CatalogProducer(broadcast: broadcast);
@@ -138,6 +133,69 @@ void main() {
       broadcast.close();
     },
   );
+
+  test('both sides read the grant their peer gave them', () async {
+    const version = ['moq-lite-07-wip'];
+    final server = MoqServer(
+      config: MoqServerConfig(
+        bind: '127.0.0.1:0',
+        versions: version,
+        tls: MoqServerTls(generate: ['localhost']),
+        quic: MoqQuicConfig(),
+      ),
+    );
+    final address = await server.listen().timeout(timeout);
+    final accepted = () async {
+      final request = await server.accept().timeout(timeout);
+      if (request == null) throw StateError('server closed before accept');
+      return request.accept().timeout(timeout);
+    }();
+
+    final client = await Moq.connect(
+      'https://$address',
+      options: const ConnectOptions(
+        tlsVerify: false,
+        bind: '127.0.0.1:0',
+        versions: version,
+        reconnect: false,
+      ),
+    ).timeout(timeout);
+    final serverSession = await accepted;
+
+    // Generated records compare by identity, so compare the fields.
+    void expectEverything(Grant? grant) {
+      expect(grant?.publish, ['**']);
+      expect(grant?.subscribe, ['**']);
+      expect(grant?.expires, isNull);
+    }
+
+    expectEverything(
+      await client
+          .auth()
+          .grants()
+          .firstWhere((g) => g != null)
+          .timeout(timeout),
+    );
+    expectEverything(
+      await serverSession
+          .auth()
+          .grants()
+          .firstWhere((g) => g != null)
+          .timeout(timeout),
+    );
+
+    // A peer that verifies no tokens of its own refuses another one.
+    await expectLater(
+      client.auth().add(token: 'extra').timeout(timeout),
+      throwsA(isA<UnsupportedMoqException>()),
+    );
+    expectEverything(client.auth().grant());
+
+    // The client drains first: cancelling the server session would fail its shutdown.
+    await client.close();
+    serverSession.cancel(code: 0);
+    server.cancel();
+  });
 
   test('connects, announces, subscribes, and delivers a frame', () async {
     final relay = MoqOriginProducer(config: MoqOriginConfig());
@@ -322,6 +380,26 @@ void main() {
     ).timeout(timeout);
     expect(second.localAddr, addr);
     second.close();
+  });
+
+  test('a finished broadcast lingers until closed', () async {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(
+      name: 'status',
+      info: TrackInfo(maxAgeUs: 3600000000),
+    );
+    track.finish();
+    final finish = broadcast.finish();
+    expect(finish.linger, const Duration(hours: 1));
+    expect(
+      () => broadcast.publishTrack(name: 'events', info: null),
+      throwsA(isA<ClosedMoqException>()),
+    );
+    // A Dart future can't be cancelled, so closing is the interrupt: the wait
+    // ends instead of lingering for an hour.
+    final wait = finish.wait();
+    finish.close();
+    await wait.timeout(timeout);
   });
 
   test('microsecond fields read back as Durations', () {

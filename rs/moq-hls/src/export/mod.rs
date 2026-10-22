@@ -279,7 +279,14 @@ impl Broadcaster {
 	/// A disabled rendition is left out, as in the master playlist. Each representation names
 	/// its init by a hash of the bytes, so a rendition is left out until its init is known. An inline-parameter-set codec only learns it from media: await
 	/// each rendition's [`init`](Rendition::init) first.
-	pub fn manifest(&self, query: Option<&str>) -> Option<String> {
+	///
+	/// Fails with [`TimelineFailed`](crate::Error::TimelineFailed) once the reference timeline
+	/// failed, rather than turning a truncated presentation `static`. A rendition whose own
+	/// timeline failed is left out instead, and its [`Rendition`] listings fail.
+	pub fn manifest(&self, query: Option<&str>) -> crate::Result<Option<String>> {
+		if let Some(err) = self.renditions.failure() {
+			return Err(err);
+		}
 		let mut video = Vec::new();
 		let mut audio = Vec::new();
 		let mut availability_start = None;
@@ -294,7 +301,12 @@ impl Broadcaster {
 			}
 			// Without its init there is nothing to name in `initialization`; the serve path
 			// builds every init before rendering (see `build_inits`).
-			let representations = rendition.representations();
+			let representations = match rendition.representations() {
+				Ok(representations) => representations,
+				// Its own playlist answers the error, while its siblings stay listed.
+				Err(_) if rendition.failed_alone() => continue,
+				Err(err) => return Err(err),
+			};
 			match rendition.kind {
 				Kind::Video => video.extend(representations),
 				Kind::Audio => audio.extend(representations),
@@ -303,7 +315,7 @@ impl Broadcaster {
 
 		let representations = || video.iter().chain(&audio);
 		if representations().all(|rep| rep.segments.is_empty()) {
-			return None;
+			return Ok(None);
 		}
 		// Static only once every representation is final, so none stops being refreshed early.
 		let finished = representations().all(|rep| rep.ended);
@@ -311,10 +323,12 @@ impl Broadcaster {
 			// A dynamic presentation needs pts 0 anchored to the wall clock. The fallback is
 			// set whenever a record has been pushed, which listing a segment implies.
 			availability_start = availability_start.or_else(|| self.renditions.anchor());
-			availability_start?;
+			if availability_start.is_none() {
+				return Ok(None);
+			}
 		}
 
-		Some(mpd::render_manifest(
+		Ok(Some(mpd::render_manifest(
 			&mpd::Manifest {
 				availability_start,
 				publish: SystemTime::now(),
@@ -324,7 +338,7 @@ impl Broadcaster {
 				audio,
 			},
 			query,
-		))
+		)))
 	}
 
 	/// Build every rendition's init segment, so the manifest can name each by its hash. A
@@ -535,19 +549,23 @@ async fn watch_timeline(
 	history: bool,
 ) {
 	// A failed timeline is never retried: the origin already rides out transient source
-	// failures, so an error here is final. It ends every playlist like a clean finish
-	// (`EXT-X-ENDLIST`), since a window left live would freeze players with no signal.
-	let result = watch(&broadcast, &section, &reference, &renditions, history).await;
-	// A superseded watcher cannot finish the newly selected reference's windows.
-	if renditions.finish(Some(&reference)) {
-		if let Err(err) = result {
-			tracing::error!(track = %reference.2, %err, "timeline failed; ending every playlist");
+	// failures, so an error here is final. It fails every playlist rather than ending it, so a
+	// truncated recording never reads as complete, nor freezes live with no signal. A retained
+	// history reader fails them too: its rows stay listed, and it can no longer report their pops.
+	match watch(&broadcast, &section, &reference, &renditions, history).await {
+		// A superseded watcher cannot finish the newly selected reference's windows.
+		Ok(()) => {
+			renditions.finish(Some(&reference));
 		}
-	} else if let Err(err) = result {
-		// A retained history reader can no longer report pops, so its rows can't be trusted to
-		// stay fetchable.
-		tracing::error!(track = %reference.2, %err, "past reference timeline failed; retiring its segments");
-		renditions.pop(0..u64::MAX, &reference);
+		Err(err) => {
+			let err = crate::Error::TimelineFailed {
+				track: reference.2.clone(),
+				source: Box::new(err),
+			};
+			if renditions.fail(&reference, err.clone()) {
+				tracing::error!(%err, "reference timeline failed; failing every playlist");
+			}
+		}
 	}
 }
 
@@ -600,6 +618,7 @@ mod tests {
 
 	use super::*;
 
+	#[allow(clippy::large_enum_variant)]
 	enum TestConfig {
 		Video(hang::catalog::VideoConfig),
 		Audio(hang::catalog::AudioConfig),
@@ -1123,7 +1142,7 @@ mod tests {
 		.expect("rendition discovered from the catalog");
 
 		assert!(
-			rendition.media_playlist(None).is_none(),
+			rendition.media_playlist(None).unwrap().is_none(),
 			"rendition is not playable yet"
 		);
 		assert!(
@@ -1181,7 +1200,10 @@ mod tests {
 			.expect("the rendition is advertised");
 		let rendition = broadcaster.rendition(Kind::Video, "video0").unwrap();
 		let sequence = |rendition: &Rendition| {
-			let playlist = rendition.media_playlist(None).expect("the media playlist serves");
+			let playlist = rendition
+				.media_playlist(None)
+				.unwrap()
+				.expect("the media playlist serves");
 			between(&playlist, "#EXT-X-MEDIA-SEQUENCE:", "\n").to_string()
 		};
 		let before = sequence(&rendition);
@@ -1317,7 +1339,7 @@ mod tests {
 		assert!(after.segments.iter().any(|s| s.tag == old));
 		assert!(after.segments.iter().all(|s| !s.discontinuity));
 		assert_eq!(first_rendition.segment(&old, 2).await.unwrap().unwrap(), bytes);
-		let mpd = broadcaster.manifest(None).unwrap();
+		let mpd = broadcaster.manifest(None).unwrap().unwrap();
 		assert_eq!(mpd.matches("<Period ").count(), 2, "{mpd}");
 		assert!(mpd.contains("start=\"PT6.000S\""), "{mpd}");
 		assert!(
@@ -1428,9 +1450,9 @@ mod tests {
 		assert!(after.segments[1].discontinuity);
 		assert!(!after.finished);
 		broadcaster.build_inits().await;
-		let playlist = sibling.media_playlist(None).unwrap();
+		let playlist = sibling.media_playlist(None).unwrap().unwrap();
 		assert_eq!(playlist.matches("#EXT-X-DISCONTINUITY\n").count(), 1, "{playlist}");
-		let mpd = broadcaster.manifest(None).unwrap();
+		let mpd = broadcaster.manifest(None).unwrap().unwrap();
 		assert_eq!(
 			mpd.matches("<Period ").count(),
 			1,
@@ -1453,7 +1475,7 @@ mod tests {
 		})
 		.await
 		.unwrap();
-		let advanced = sibling.media_playlist(None).unwrap();
+		let advanced = sibling.media_playlist(None).unwrap().unwrap();
 		assert!(advanced.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1\n"), "{advanced}");
 		assert!(
 			!advanced.contains("#EXT-X-DISCONTINUITY\n"),
@@ -1572,9 +1594,9 @@ mod tests {
 		if resumed == 3 {
 			saw.build_inits().await;
 			after.build_inits().await;
-			let saw_playlist = saw_video1.media_playlist(None).unwrap();
+			let saw_playlist = saw_video1.media_playlist(None).unwrap().unwrap();
 			assert!(saw_playlist.contains("#EXT-X-MEDIA-SEQUENCE:4\n"), "{saw_playlist}");
-			assert_eq!(saw_playlist, after_video1.media_playlist(None).unwrap());
+			assert_eq!(saw_playlist, after_video1.media_playlist(None).unwrap().unwrap());
 		}
 	}
 
@@ -1774,10 +1796,10 @@ mod tests {
 		assert!(snapshot.segments.iter().all(|segment| !segment.discontinuity));
 	}
 
-	// A failed past reference can no longer report its pops, so its rows retire rather than
-	// staying listed after their media may be gone.
+	// A failed past reference still lists rows whose pops it can no longer report, so every
+	// listing answers the error rather than losing that prefix and still ending as complete.
 	#[tokio::test(start_paused = true)]
-	async fn a_failed_past_history_reference_retires_its_rows() {
+	async fn a_failed_past_history_reference_fails_every_listing() {
 		let (origin, broadcast, mut catalog) = durable_pair().await;
 		let (old_track, mut old) = timeline_track(&broadcast, "video0");
 		let (_new_track, mut new) = timeline_track(&broadcast, "video1");
@@ -1797,16 +1819,58 @@ mod tests {
 			.unwrap();
 		assert_eq!(numbers(&listed_under(&video1, &new_tag, 3).await), [0, 1, 2, 3]);
 		cut(old_track, old);
-		tokio::time::timeout(Duration::from_secs(5), async {
-			while video1.snapshot().media_sequence != 3 {
-				tokio::time::sleep(Duration::from_millis(10)).await;
-			}
-		})
-		.await
-		.expect("the failed reference's rows retire");
-		let snapshot = video1.snapshot();
-		assert_eq!(numbers(&snapshot), [3]);
-		assert!(!snapshot.finished, "the selected reference goes on");
+		failed(&video1).await;
+		new.push(&gop(4)).unwrap();
+		settle().await;
+		assert!(
+			video1.try_snapshot().is_err(),
+			"the selected reference cannot recover it"
+		);
+		let video0 = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		failed(&video0).await;
+		assert!(matches!(
+			broadcaster.manifest(None),
+			Err(crate::Error::TimelineFailed { .. })
+		));
+		// A clip of the history answers the failure too, rather than refusing the range.
+		let range = Range::new(Duration::ZERO, Duration::from_secs(4)).unwrap();
+		assert!(matches!(
+			video1.playlist(Some(range), None).await,
+			Err(crate::Error::TimelineFailed { .. })
+		));
+	}
+
+	// A rendition whose own timeline failed answers the error alone. Its siblings keep serving,
+	// and the broadcast-wide listings leave it out so new players start on a sibling.
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_rendition_leaves_the_manifest_and_master() {
+		let (origin, broadcast, _catalog) = durable_pair().await;
+		let (_video0_track, mut video0) = timeline_track(&broadcast, "video0");
+		let (video1_track, mut video1) = timeline_track(&broadcast, "video1");
+		for sequence in 0..4 {
+			video0.push(&gop(sequence)).unwrap();
+			video1.push(&gop(sequence)).unwrap();
+		}
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		broadcaster.advertised().await;
+		let healthy = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		let tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		listed_under(&healthy, &tag, 3).await;
+		let before = broadcaster.manifest(None).unwrap().expect("both renditions are listed");
+		assert!(before.contains("id=\"video/video1\""), "{before}");
+		assert!(broadcaster.master_playlist(None).contains("video/video1/"));
+
+		cut(video1_track, video1);
+		let broken = broadcaster.rendition(Kind::Video, "video1").unwrap();
+		failed(&broken).await;
+		assert!(broken.media_playlist(None).is_err());
+		assert!(healthy.media_playlist(None).unwrap().is_some());
+		let manifest = broadcaster.manifest(None).unwrap().expect("the sibling stays listed");
+		assert!(manifest.contains("id=\"video/video0\""), "{manifest}");
+		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
+		let master = broadcaster.master_playlist(None);
+		assert!(master.contains("video/video0/"), "{master}");
+		assert!(!master.contains("video/video1/"), "{master}");
 	}
 
 	// With every rendition disabled no reference watcher is left, so the source ending must
@@ -1988,6 +2052,7 @@ mod tests {
 		let old = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let old_playlist = old
 			.media_playlist(None)
+			.unwrap()
 			.expect("an out-of-band init renders without a fetch");
 		let old_hash = init_hash(&old_playlist).to_string();
 
@@ -2010,7 +2075,7 @@ mod tests {
 		};
 		let new_init = new.init().await.unwrap().expect("init segment");
 		let _ = tokio::time::timeout(Duration::from_secs(5), new.playable()).await;
-		let new_playlist = new.media_playlist(None).expect("playable");
+		let new_playlist = new.media_playlist(None).unwrap().expect("playable");
 		let new_hash = init_hash(&new_playlist);
 		assert_ne!(new_hash, old_hash, "different init bytes get a different URL");
 		assert_eq!(new.init_versioned(new_hash).await.unwrap(), Some(new_init));
@@ -2030,7 +2095,7 @@ mod tests {
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
-		let unversioned = rendition.media_playlist(None).expect("playable");
+		let unversioned = rendition.media_playlist(None).unwrap().expect("playable");
 		assert!(unversioned.contains("\nseg/656e3d1b.0.m4s\n"));
 
 		assert!(matches!(
@@ -2042,6 +2107,7 @@ mod tests {
 		broadcaster.set_generation(Some("run-1")).unwrap();
 		let labeled = rendition
 			.media_playlist(None)
+			.unwrap()
 			.expect("the first generation keeps the rows");
 		assert!(labeled.contains("\nseg/run-1.656e3d1b.0.m4s\n"));
 		assert!(labeled.contains("\nseg/run-1.656e3d1b.1.m4s\n"));
@@ -2050,24 +2116,24 @@ mod tests {
 			init_hash(&unversioned),
 			"the init needs no generation"
 		);
-		let manifest = broadcaster.manifest(None).expect("manifest");
+		let manifest = broadcaster.manifest(None).unwrap().expect("manifest");
 		assert!(manifest.contains("media=\"video/video0/seg/run-1.656e3d1b.t$Time$.m4s\""));
 
 		broadcaster.set_generation(Some("run-2")).unwrap();
 		assert!(
-			rendition.media_playlist(None).is_none(),
+			rendition.media_playlist(None).unwrap().is_none(),
 			"a new generation drops the old run's rows"
 		);
 
 		media.write(vp8_frame(6_000_000, true)).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
-		let restarted = rendition.media_playlist(None).expect("the new run lists");
+		let restarted = rendition.media_playlist(None).unwrap().expect("the new run lists");
 		assert!(restarted.contains("\nseg/run-2.656e3d1b.2.m4s\n"));
 		assert!(!restarted.contains("run-1"));
 
 		broadcaster.set_generation(None).unwrap();
 		assert!(
-			rendition.media_playlist(None).is_none(),
+			rendition.media_playlist(None).unwrap().is_none(),
 			"clearing the generation is a change too"
 		);
 	}
@@ -2121,7 +2187,7 @@ mod tests {
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
 		let new = rendition.init().await.unwrap().expect("init segment");
 		assert_ne!(new, old, "the new run's init is built from its own media");
-		let playlist = rendition.media_playlist(None).expect("playable");
+		let playlist = rendition.media_playlist(None).unwrap().expect("playable");
 		assert_eq!(rendition.init_versioned(init_hash(&playlist)).await.unwrap(), Some(new));
 	}
 
@@ -2178,11 +2244,11 @@ mod tests {
 
 		// Without coded dimensions VP8 learns its init from a keyframe, and the playlist names
 		// the init by hash, so nothing renders until the init is built.
-		assert!(rendition.media_playlist(None).is_none());
+		assert!(rendition.media_playlist(None).unwrap().is_none());
 		let init = rendition.init().await.unwrap().expect("init segment");
 		assert_eq!(&init[4..8], b"ftyp");
 
-		let rendered = rendition.media_playlist(None).expect("playable");
+		let rendered = rendition.media_playlist(None).unwrap().expect("playable");
 		let hash = init_hash(&rendered);
 		assert!(rendered.contains("seg/656e3d1b.0.m4s\n"));
 		assert!(rendered.contains("seg/656e3d1b.1.m4s\n"));
@@ -2190,7 +2256,10 @@ mod tests {
 		assert!(rendition.init_versioned("0000000000000000").await.unwrap().is_none());
 
 		// The same render, but carrying a credential into every child URL.
-		let signed = rendition.media_playlist(Some("jwt=abc.def")).expect("playable");
+		let signed = rendition
+			.media_playlist(Some("jwt=abc.def"))
+			.unwrap()
+			.expect("playable");
 		assert!(signed.contains(&format!("#EXT-X-MAP:URI=\"init.{hash}.mp4?jwt=abc.def\"\n")));
 		assert!(signed.contains("seg/656e3d1b.0.m4s?jwt=abc.def\n"));
 
@@ -2306,7 +2375,10 @@ mod tests {
 		let _ = tokio::time::timeout(Duration::from_secs(5), video_rendition.playable()).await;
 		let _ = tokio::time::timeout(Duration::from_secs(5), audio_rendition.playable()).await;
 
-		let manifest = broadcaster.manifest(None).expect("manifest renders once playable");
+		let manifest = broadcaster
+			.manifest(None)
+			.unwrap()
+			.expect("manifest renders once playable");
 		assert!(manifest.contains(" type=\"dynamic\""), "live broadcast is dynamic");
 		assert!(
 			manifest.contains(" availabilityStartTime=\""),
@@ -2321,7 +2393,10 @@ mod tests {
 		assert!(!manifest.contains("<S t=\"4000\""), "the live-edge group is not listed");
 
 		// A credential rides every child URL, and the init is named by its hash.
-		let signed = broadcaster.manifest(Some("jwt=abc.def")).expect("manifest renders");
+		let signed = broadcaster
+			.manifest(Some("jwt=abc.def"))
+			.unwrap()
+			.expect("manifest renders");
 		let hash = between(&signed, "initialization=\"video/video0/init.", ".mp4?jwt=abc.def\"");
 		let init = video_rendition.init().await.unwrap().expect("init segment");
 		assert_eq!(video_rendition.init_versioned(hash).await.unwrap(), Some(init));
@@ -2389,13 +2464,16 @@ mod tests {
 			snapshot.program_date_time,
 			Some(SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS))
 		);
-		let playlist = rendition.media_playlist(None).expect("playlist renders");
+		let playlist = rendition.media_playlist(None).unwrap().expect("playlist renders");
 		assert!(
 			playlist.contains("#EXT-X-PROGRAM-DATE-TIME:2020-01-01T00:00:00.000Z\n"),
 			"pts 0 maps through the root clock: {playlist}"
 		);
 
-		let manifest = broadcaster.manifest(None).expect("manifest renders once playable");
+		let manifest = broadcaster
+			.manifest(None)
+			.unwrap()
+			.expect("manifest renders once playable");
 		assert!(
 			manifest.contains(" availabilityStartTime=\"2020-01-01T00:00:00.000Z\""),
 			"the manifest anchors at the root clock: {manifest}"
@@ -2456,10 +2534,13 @@ mod tests {
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
 
 		assert_eq!(rendition.snapshot().program_date_time, None);
-		let playlist = rendition.media_playlist(None).expect("playlist renders");
+		let playlist = rendition.media_playlist(None).unwrap().expect("playlist renders");
 		assert!(!playlist.contains("PROGRAM-DATE-TIME"), "{playlist}");
 
-		let manifest = broadcaster.manifest(None).expect("manifest renders once playable");
+		let manifest = broadcaster
+			.manifest(None)
+			.unwrap()
+			.expect("manifest renders once playable");
 		assert!(
 			manifest.contains(" availabilityStartTime=\""),
 			"pts 0 is anchored even without a catalog clock"
@@ -2694,7 +2775,7 @@ mod tests {
 
 		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 		let manifest = loop {
-			let manifest = broadcaster.manifest(None).expect("manifest renders");
+			let manifest = broadcaster.manifest(None).unwrap().expect("manifest renders");
 			if manifest.contains(" type=\"static\"") {
 				break manifest;
 			}
@@ -2975,7 +3056,7 @@ mod tests {
 		);
 
 		// The same URI names the same span of content time on either rendition.
-		let rendered = audio_rendition.media_playlist(None).expect("playable");
+		let rendered = audio_rendition.media_playlist(None).unwrap().expect("playable");
 		assert!(rendered.contains("seg/656e3d1b.0.m4s\n"));
 		assert!(rendered.contains("seg/656e3d1b.1.m4s\n"));
 
@@ -4159,6 +4240,11 @@ mod tests {
 			panic!("{name} never ended");
 		}
 
+		/// Wait until `name`'s playlist fails, returning the error it answers.
+		async fn failed(&self, name: &str) -> crate::Error {
+			failed(&self.rendition(name)).await
+		}
+
 		/// Drain `name`'s recording cursor, which must end rather than park.
 		async fn drain(&self, name: &str) {
 			let mut segments = self.rendition(name).segments();
@@ -4182,14 +4268,26 @@ mod tests {
 		track.abort(moq_net::Error::SessionClosed).unwrap();
 	}
 
+	/// Wait until `rendition`'s playlist fails, returning the error it answers.
+	async fn failed(rendition: &Rendition) -> crate::Error {
+		for _ in 0..500 {
+			if let Err(err) = rendition.try_snapshot() {
+				assert!(matches!(err, crate::Error::TimelineFailed { .. }), "{err}");
+				return err;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		panic!("{} never failed", rendition.name);
+	}
+
 	fn numbers(snapshot: &playlist::Snapshot) -> Vec<u64> {
 		snapshot.segments.iter().map(|s| s.segment).collect()
 	}
 
-	// A failed rendition timeline is not retried. Its playlist ends at the last segment its
-	// records cover, rather than listing the rest as gaps, while the other renditions go on.
+	// A failed rendition timeline is not retried, and never papered over with gaps or ended as if
+	// complete: its listings answer the error, while the other renditions go on.
 	#[tokio::test(start_paused = true)]
-	async fn a_rendition_timeline_error_ends_its_playlist() {
+	async fn a_rendition_timeline_error_fails_only_its_playlist() {
 		let test = Timelines::new();
 		let (_reference, mut video0) = test.publish("video0");
 		let (track, mut video1) = test.publish("video1");
@@ -4204,29 +4302,79 @@ mod tests {
 		for sequence in 4..7 {
 			video0.push(&gop(sequence)).unwrap();
 		}
-		let failed = test.finished("video1").await;
-		assert_eq!(numbers(&failed), [0, 1, 2, 3], "the covered segments stay listed");
-		assert!(
-			failed.segments.iter().all(|s| !s.gap),
-			"nothing past the failure is a gap"
+		test.failed("video1").await;
+		let video1 = test.rendition("video1");
+		assert!(video1.media_playlist(None).is_err());
+		assert!(video1.representations().is_err());
+		// A range the failed timeline covers still answers the failure, not a refused range.
+		let range = Range::new(Duration::ZERO, Duration::from_secs(4)).unwrap();
+		assert!(matches!(
+			video1.snapshot_range(range, None),
+			Err(crate::Error::TimelineFailed { .. })
+		));
+		// Segments already listed stay fetchable while the listing refuses.
+		assert_eq!(
+			video1.listed_content(0),
+			Some(spans::Content::Frames {
+				ranges: vec![hang::timeline::Position::group(0)..hang::timeline::Position::group(1)],
+				filter: None,
+			})
 		);
 		test.drain("video1").await;
 
 		let reference = test.listed("video0", 6).await;
 		assert!(!reference.finished, "the other renditions go on");
-
-		// A range the failed timeline can never finish is refused, not frozen as a partial clip.
-		let range = Range::new(Duration::ZERO, Duration::from_secs(12)).unwrap();
-		assert!(matches!(
-			test.rendition("video1").snapshot_range(range, None),
-			Err(crate::Error::RangeUnavailable(_))
-		));
+		assert!(test.rendition("video0").representations().is_ok());
 	}
 
-	// A failed reference timeline is not retried. Every playlist ends (`EXT-X-ENDLIST`) instead
-	// of freezing live, and recording cursors end.
+	// A rendition that failed while the reference was live stays failed once the reference
+	// finishes, even when its records cover every listed row. One failing only after the
+	// reference finished loses nothing it covers, so its playlist still ends as complete.
 	#[tokio::test(start_paused = true)]
-	async fn a_reference_timeline_error_ends_every_playlist() {
+	async fn a_rendition_failure_counts_only_before_the_reference_finishes() {
+		for early in [true, false] {
+			let test = Timelines::new();
+			let (_reference, mut video0) = test.publish("video0");
+			let (track, mut video1) = test.publish("video1");
+			for sequence in 0..4 {
+				video0.push(&gop(sequence)).unwrap();
+			}
+			// video1 runs past the last listed row, so its records cover every one.
+			for sequence in 0..6 {
+				video1.push(&gop(sequence)).unwrap();
+			}
+			test.listed("video1", 3).await;
+
+			let mut publisher = Some((track, video1));
+			if early {
+				let (track, video1) = publisher.take().unwrap();
+				cut(track, video1);
+				test.failed("video1").await;
+			}
+			video0.finish().unwrap();
+			test.finished("video0").await;
+			let rendition = test.rendition("video1");
+			if let Some((track, video1)) = publisher {
+				test.finished("video1").await;
+				cut(track, video1);
+				while !rendition.own_failure() {
+					tokio::time::sleep(Duration::from_millis(10)).await;
+				}
+				let snapshot = rendition.snapshot();
+				assert!(snapshot.finished, "a covered late failure loses nothing");
+				assert_eq!(numbers(&snapshot), [0, 1, 2, 3]);
+			} else {
+				settle().await;
+				assert!(rendition.try_snapshot().is_err(), "the failure is sticky");
+				assert!(rendition.failed_alone());
+			}
+		}
+	}
+
+	// A failed reference timeline is not retried. Every playlist answers the error instead of
+	// ending as if complete or freezing live, and recording cursors end.
+	#[tokio::test(start_paused = true)]
+	async fn a_reference_timeline_error_fails_every_playlist() {
 		let test = Timelines::new();
 		let (track, mut video0) = test.publish("video0");
 		let (_track, mut video1) = test.publish("video1");
@@ -4237,18 +4385,53 @@ mod tests {
 		test.listed("video0", 3).await;
 
 		cut(track, video0);
-		assert_eq!(numbers(&test.finished("video0").await), [0, 1, 2, 3]);
-		// video1's timeline hasn't passed the last segment yet, so ending its playlist now would
-		// stop players before that segment is listed.
-		let pending = test.rendition("video1").snapshot();
-		assert_eq!(numbers(&pending), [0, 1, 2]);
-		assert!(!pending.finished, "a pending tail holds back EXT-X-ENDLIST");
-		// DASH alike: the manifest turns static only once every representation ended.
-		assert!(test.rendition("video0").representations().first().unwrap().ended);
-		assert!(!test.rendition("video1").representations().first().unwrap().ended);
-		video1.push(&gop(4)).unwrap();
-		assert_eq!(numbers(&test.finished("video1").await), [0, 1, 2, 3]);
+		for name in ["video0", "video1"] {
+			test.failed(name).await;
+			assert!(test.rendition(name).representations().is_err(), "{name}");
+		}
+		assert!(test.renditions.failure().is_some());
+		// A rendition created after the failure starts failed.
+		let late = test.join();
+		late.failed("video1").await;
 		test.drain("video0").await;
+		// The cursor still waits for the listed segment its own timeline has not passed.
+		video1.push(&gop(4)).unwrap();
+		test.drain("video1").await;
+	}
+
+	// A playlist request waiting for its first row answers a timeline that fails before one,
+	// rather than timing out as not found or, without a router's timeout, waiting forever.
+	#[tokio::test(start_paused = true)]
+	async fn a_pending_playlist_answers_a_rendition_timeline_failure() {
+		let test = Timelines::new();
+		let (_reference, _video0) = test.publish("video0");
+		let (track, video1) = test.publish("video1");
+		let video1_rendition = test.rendition("video1");
+		let pending = tokio::spawn(async move { video1_rendition.playlist(None, None).await });
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		assert!(!pending.is_finished(), "nothing is listed yet");
+
+		cut(track, video1);
+		let answer = tokio::time::timeout(Duration::from_secs(5), pending).await;
+		let err = answer.expect("the failure wakes the request").unwrap().unwrap_err();
+		assert!(matches!(err, crate::Error::TimelineFailed { .. }), "{err}");
+	}
+
+	// The same for the reference timeline, which every playlist lists.
+	#[tokio::test(start_paused = true)]
+	async fn a_pending_playlist_answers_a_reference_timeline_failure() {
+		let test = Timelines::new();
+		let (track, video0) = test.publish("video0");
+		let (_track, _video1) = test.publish("video1");
+		let video1 = test.rendition("video1");
+		let pending = tokio::spawn(async move { video1.playlist(None, None).await });
+		tokio::time::sleep(Duration::from_secs(1)).await;
+		assert!(!pending.is_finished(), "nothing is listed yet");
+
+		cut(track, video0);
+		let answer = tokio::time::timeout(Duration::from_secs(5), pending).await;
+		let err = answer.expect("the failure wakes the request").unwrap().unwrap_err();
+		assert!(matches!(err, crate::Error::TimelineFailed { .. }), "{err}");
 	}
 
 	// A range over a recording that ended without media is refused rather than reported missing.
@@ -4257,7 +4440,8 @@ mod tests {
 		let test = Timelines::new();
 		let (track, video0) = test.publish("video0");
 		let (_track, _video1) = test.publish("video1");
-		cut(track, video0);
+		drop(video0);
+		track.finish().unwrap();
 		assert!(test.finished("video1").await.segments.is_empty());
 
 		let range = Range::new(Duration::ZERO, Duration::from_secs(2)).unwrap();
@@ -4334,7 +4518,7 @@ mod tests {
 		let rendition = tokio::time::timeout(Duration::from_secs(5), async {
 			loop {
 				if let Some(rendition) = broadcaster.rendition(Kind::Video, "video0")
-					&& let Some(playlist) = rendition.media_playlist(None)
+					&& let Some(playlist) = rendition.media_playlist(None).unwrap()
 					&& sequence_of(&playlist) >= 2
 				{
 					break rendition;
@@ -4345,7 +4529,7 @@ mod tests {
 		.await
 		.expect("video0 playlist slid past its first segments");
 
-		let before = rendition.media_playlist(None).expect("playable");
+		let before = rendition.media_playlist(None).unwrap().expect("playable");
 		let sequence = sequence_of(&before);
 		assert!(sequence >= 2, "the window should have slid, got {sequence}\n{before}");
 		let tag = segments::tag(&(Kind::Video, "video0".to_string(), "video0".to_string()));
@@ -4388,7 +4572,7 @@ mod tests {
 		let mut previous = sequence;
 		let mut reloads = 0;
 		while reloads < 5 && tokio::time::Instant::now() < deadline {
-			let Some(playlist) = rendition.media_playlist(None) else {
+			let Some(playlist) = rendition.media_playlist(None).unwrap() else {
 				tokio::time::sleep(Duration::from_millis(10)).await;
 				continue;
 			};
@@ -4645,7 +4829,7 @@ mod tests {
 
 	// A malformed reference timeline fails the same way.
 	#[tokio::test(start_paused = true)]
-	async fn a_malformed_reference_timeline_ends_every_playlist() {
+	async fn a_malformed_reference_timeline_fails_every_playlist() {
 		let test = Timelines::new();
 		let (track, mut video0) = test.publish("video0");
 		video0.push(&gop(0)).unwrap();
@@ -4653,12 +4837,12 @@ mod tests {
 
 		let mut group = track.append_group().unwrap();
 		group.write_frame(moq_net::Timestamp::now(), &b"garbage"[..]).unwrap();
-		test.finished("video0").await;
-		test.finished("video1").await;
+		test.failed("video0").await;
+		test.failed("video1").await;
 	}
 
-	// A timeline subscription still waiting on its track ends with the broadcast, so nothing
-	// parks.
+	// A timeline subscription still waiting on its track fails with the broadcast, so nothing
+	// parks, and a timeline never read is not listed as an empty finished recording.
 	#[tokio::test(start_paused = true)]
 	async fn a_pending_timeline_subscription_ends_with_the_broadcast() {
 		let test = Timelines::new();
@@ -4668,7 +4852,7 @@ mod tests {
 		assert!(!test.rendition("video0").snapshot().finished);
 
 		test.broadcast.close();
-		test.finished("video0").await;
+		test.failed("video0").await;
 		test.drain("video0").await;
 	}
 

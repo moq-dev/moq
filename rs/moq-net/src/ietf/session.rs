@@ -138,7 +138,7 @@ where
 	// signal), the protocol tasks below hold the other.
 	// A moq-transport client MUST send an empty New Session URI: it cannot tell a
 	// server to open connections (draft-19 sect 10.4).
-	let (goaway_handle, goaway) = crate::goaway::Handle::new(!client);
+	let (goaway_handle, goaway) = crate::goaway::Handle::new(&runtime, !client);
 
 	// What the peer's connection credential earns by default, from the caller's real
 	// handles before the empty-half defaulting below.
@@ -267,7 +267,6 @@ where
 					let mut session = session.clone();
 					let adapter = adapter.clone();
 					let goaway = goaway.clone();
-					let runtime = runtime.clone();
 					tasks.push(async move {
 						let payload = kio::wait(|waiter| {
 							let mut cx = waiter.context();
@@ -280,9 +279,8 @@ where
 						let Some(payload) = payload else {
 							return;
 						};
-						let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
-						adapter.send_goaway(&payload.uri, timeout_ms, version);
-						crate::goaway::enforce(&runtime, &mut session, payload.timeout).await;
+						let timeout_ms = payload.goaway.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
+						adapter.send_goaway(&payload.goaway.uri, timeout_ms, version);
 					});
 				}
 				drop(tasks);
@@ -393,7 +391,6 @@ where
 				// Send SETUP and retain its writer for the session's lifetime. Only a failure
 				// ends the session; the other branches report how it closed.
 				let setup = err_only(run_setup(
-					runtime.clone(),
 					session.clone(),
 					version,
 					path,
@@ -770,7 +767,6 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 /// names the other extensions we offer.
 #[allow(clippy::too_many_arguments)]
 async fn run_setup<S: crate::transport::poll::Session>(
-	runtime: crate::time::Deadlines,
 	mut session: S,
 	version: Version,
 	path: Option<String>,
@@ -843,9 +839,9 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	.await?;
 
 	if let Some(payload) = payload {
-		let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
+		let timeout_ms = payload.goaway.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
 		let msg = ietf::GoAway {
-			new_session_uri: std::borrow::Cow::Borrowed(payload.uri.as_ref()),
+			new_session_uri: std::borrow::Cow::Borrowed(payload.goaway.uri.as_ref()),
 			timeout: timeout_ms,
 			request_id: (version == Version::Draft18).then(|| control.goaway()).transpose()?,
 		};
@@ -854,13 +850,9 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		// control-stream messages this channel otherwise carries.
 		let mut writer = writer.with_version(version);
 		writer.encode_message(&msg).await.map_err(control_stream_error)?;
-
-		let mut draining = std::pin::pin!(async {
-			crate::goaway::enforce(&runtime, &mut session, payload.timeout).await;
-			session.closed().await;
-		});
+		let mut closed = std::pin::pin!(session.closed());
 		kio::wait(|waiter| {
-			if waiter.poll_future(draining.as_mut()).is_ready() {
+			if waiter.poll_future(closed.as_mut()).is_ready() {
 				return std::task::Poll::Ready(Ok(()));
 			}
 			if writer.poll_closed(&mut waiter.context()).is_ready() {
@@ -2524,7 +2516,8 @@ mod tests {
 		}
 
 		// Held so the trigger side stays alive for as long as the loop runs.
-		let (_goaway, goaway) = crate::goaway::Handle::new(false);
+		let (_goaway, goaway) =
+			crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
 		// Without `accepted`, the peer's SETUP has not arrived yet, which is the state a
 		// group stream racing ahead of it lands in.
 		let read = accepted.is_some();
@@ -3288,7 +3281,8 @@ mod tests {
 
 			let mut session = DeadStreamSession::unis(1);
 			let recv = session.accept_uni().await.unwrap();
-			let (_handle, protocol) = crate::goaway::Handle::new(false);
+			let (_handle, protocol) =
+				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
 			let err = run_goaway(Reader::new(recv, version), version, true, protocol)
 				.await
 				.unwrap_err();
@@ -3308,7 +3302,8 @@ mod tests {
 			let mut session =
 				crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![two]);
 			let stream = std::future::poll_fn(|cx| session.poll_accept_uni(cx)).await.unwrap();
-			let (handle, protocol) = crate::goaway::Handle::new(false);
+			let (handle, protocol) =
+				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
 
 			let err = read_goaways(Reader::new(stream, version), version, true, protocol)
 				.await
@@ -3401,9 +3396,9 @@ mod tests {
 			let first = u64::from(client);
 			control.accept(RequestId(first)).unwrap();
 			control.accept(RequestId(first + 4)).unwrap();
-			let (handle, goaway_protocol) = crate::goaway::Handle::new(!client);
+			let (handle, goaway_protocol) =
+				crate::goaway::Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), !client);
 			let mut setup = std::pin::pin!(run_setup(
-				crate::time::sim(),
 				session,
 				VERSION,
 				None,

@@ -2385,6 +2385,46 @@ fn draining_is_reported_once_before_drained() {
     assert_eq!(server, expected);
 }
 
+/// A handshake the peer never answered stops being active as soon as it closes, so a shutdown
+/// need not sit out the closing period for a close nobody will answer
+#[test]
+fn unanswered_handshake_drains_at_close() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let client_ch = pair.begin_connect(client_config());
+    pair.client.drive(pair.time, pair.server.addr);
+    pair.client.outbound.clear(); // The server never hears the Initial
+
+    let now = pair.time;
+    pair.client_conn_mut(client_ch)
+        .close(now, VarInt(0), Bytes::new());
+    pair.client.drive(now, pair.server.addr);
+
+    assert!(!pair.client.outbound.is_empty(), "the close is still sent");
+    // Drained waits for the close timer, which still answers a late reply
+    assert_eq!(pair.client.lifecycle, [(client_ch, Lifecycle::Draining)]);
+}
+
+/// Once the peer has answered, a close stays active until the peer's close comes back
+#[test]
+fn answered_handshake_waits_for_peer_close() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let client_ch = pair.begin_connect(client_config());
+    pair.drive_client();
+    pair.drive_server();
+    pair.client.drive(pair.time, pair.server.addr);
+
+    let now = pair.time;
+    pair.client_conn_mut(client_ch)
+        .close(now, VarInt(0), Bytes::new());
+    pair.client.drive(now, pair.server.addr);
+    assert!(pair.client.lifecycle.is_empty());
+
+    pair.drive();
+    assert_eq!(pair.client.lifecycle[0], (client_ch, Lifecycle::Draining));
+}
+
 #[test]
 fn instant_close_1() {
     let _guard = subscribe();
