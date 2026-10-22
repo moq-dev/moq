@@ -47,6 +47,11 @@ impl<S: crate::transport::poll::RecvStream, V: StreamCodes> Reader<S, V> {
 		self
 	}
 
+	/// Where control messages read here are counted.
+	pub(crate) fn stats(&self) -> &crate::stats::Session {
+		&self.stats
+	}
+
 	/// Poll `decode` against the buffered bytes, reading more until it stops coming up
 	/// short. `consume` drops what it read; otherwise the bytes stay for the next read.
 	fn poll_with<T>(

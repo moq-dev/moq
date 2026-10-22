@@ -56,9 +56,9 @@ contribute zero.
 
 `moq_relay_control_tx_bytes_total` and `moq_relay_control_rx_bytes_total`
 count control-message bytes by `tier` and `class` (`session`, `announce`, `track_info`, `subscribe`, `fetch`,
-`probe`, `auth`, `goaway`, `other`) to spot control-heavy sessions. They leave
-out media payload and transport overhead such as framing, ACKs, and
-retransmissions.
+`probe`, `auth`, `goaway`, `other`) to spot control-heavy sessions. They
+include message size prefixes but leave out media payload and transport
+overhead such as QUIC framing, ACKs, and retransmissions.
 
 A few worth alerting on:
 

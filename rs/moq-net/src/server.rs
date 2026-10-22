@@ -252,7 +252,7 @@ impl Server {
 				// caller can scope by the advertised path. Seeded back into
 				// `start` on `ok()` so PROBE gating resolves without
 				// re-reading the (consumed) Setup Stream.
-				let client_setup = lite::accept_setup(&mut session, version).await?;
+				let client_setup = lite::accept_setup(&mut session, version, &self.stats).await?;
 				(
 					client_setup.setup.path.clone(),
 					client_setup.setup.role,
@@ -493,7 +493,7 @@ impl Server {
 		S::SendStream: MaybeSync,
 		S::RecvStream: MaybeSync,
 	{
-		let peer_setup = ietf::accept_setup(&mut session, version).await?;
+		let peer_setup = ietf::accept_setup(&mut session, version, &self.stats).await?;
 		Ok(Handshake {
 			path: peer_setup.path.clone(),
 			role: None,

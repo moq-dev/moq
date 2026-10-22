@@ -701,13 +701,14 @@ fn self_origin(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Pr
 pub async fn accept_setup<S: crate::transport::poll::Session>(
 	session: &mut S,
 	version: Version,
+	stats: &crate::stats::Session,
 ) -> Result<PeerSetup<S>, Error> {
 	let outer_version = crate::Version::Ietf(version);
 	let mut early = Vec::new();
 
 	loop {
 		let recv = session.accept_uni().await.map_err(Error::from_transport)?;
-		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version);
+		let mut reader: Reader<S::RecvStream, crate::Version> = Reader::new(recv, outer_version).with_stats(stats);
 
 		let kind = match reader.varint_peek().await {
 			Ok(kind) => kind,
@@ -1468,6 +1469,9 @@ async fn read_goaways<R: crate::transport::poll::RecvStream>(
 		}
 
 		let msg: ietf::GoAway = body.message(version)?;
+		reader
+			.stats()
+			.control(crate::stats::Control::Goaway, body.0.len() + 2, true);
 		tracing::info!(message = ?msg, "received GOAWAY");
 
 		// Draft-18 names the first of our own Request IDs it did not process: even for a
@@ -2790,7 +2794,9 @@ mod tests {
 			subgroup_header(VERSION, 7, 0).await,
 			setup,
 		]);
-		let accepted = accept_setup(&mut session, VERSION).await.expect("accept the SETUP");
+		let accepted = accept_setup(&mut session, VERSION, &Default::default())
+			.await
+			.expect("accept the SETUP");
 		assert_eq!(accepted.early.len(), 2, "both early streams are held");
 		assert!(session.log.stops().is_empty(), "stopped {:?}", session.log.stops());
 

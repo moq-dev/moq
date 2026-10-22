@@ -36,8 +36,10 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 pub async fn accept_setup<S: crate::transport::poll::Session>(
 	session: &mut S,
 	version: Version,
+	stats: &crate::stats::Session,
 ) -> Result<AcceptedSetup<S>, Error> {
 	let mut accept = SetupAccept::<S> {
+		stats: stats.clone(),
 		version,
 		pending: Vec::new(),
 		early: Vec::new(),
@@ -47,6 +49,7 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 }
 
 struct SetupAccept<S: crate::transport::poll::Session> {
+	stats: crate::stats::Session,
 	version: Version,
 	pending: Vec<Reader<S::RecvStream, Version>>,
 	early: Vec<Reader<S::RecvStream, Version>>,
@@ -56,6 +59,7 @@ struct SetupAccept<S: crate::transport::poll::Session> {
 impl<S: crate::transport::poll::Session> SetupAccept<S> {
 	fn poll(&mut self, session: &mut S, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup<S>, Error>> {
 		let Self {
+			stats,
 			version,
 			pending,
 			early,
@@ -67,7 +71,7 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		let mut accept_error = None;
 		while let Poll::Ready(stream) = session.poll_accept_uni(&mut cx) {
 			match stream {
-				Ok(stream) => pending.push(Reader::new(stream, version)),
+				Ok(stream) => pending.push(Reader::new(stream, version).with_stats(stats)),
 				Err(err) => {
 					accept_error = Some(crate::lite::error::from_transport(err));
 					break;
@@ -1090,7 +1094,7 @@ mod tests {
 			.unwrap();
 		let mut session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), setup]);
-		let accepted = accept_setup(&mut session, version).await.unwrap();
+		let accepted = accept_setup(&mut session, version, &Default::default()).await.unwrap();
 		assert_eq!(accepted.early.len(), 1);
 	}
 
@@ -1100,7 +1104,7 @@ mod tests {
 		let mut session =
 			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1], vec![1]]);
 		assert!(matches!(
-			accept_setup(&mut session, Version::Lite05).now_or_never(),
+			accept_setup(&mut session, Version::Lite05, &Default::default()).now_or_never(),
 			Some(Err(Error::ProtocolViolation))
 		));
 	}
@@ -1251,7 +1255,9 @@ mod tests {
 	async fn unknown_client_role_remains_bidirectional() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1, 4, 1, 3, 1, 3]]);
-			let setup = accept_setup(&mut transport, version).await.unwrap();
+			let setup = accept_setup(&mut transport, version, &Default::default())
+				.await
+				.unwrap();
 			assert_eq!(setup.setup.role, None);
 			let log = transport.log.clone();
 			let mut started = raw_session(transport, version, false, Some(setup));

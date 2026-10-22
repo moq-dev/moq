@@ -69,7 +69,8 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 	}
 }
 
-/// A session with neither origin still counts its control traffic under its context.
+/// A session with neither origin still counts its SETUP exchange under its context,
+/// including the client SETUP the server reads before it starts the session.
 #[moq_clock::test]
 async fn control_counts_without_origins() {
 	for version in ["moq-lite-07-wip", "moq-transport-22"] {
@@ -82,7 +83,9 @@ async fn control_counts_without_origins() {
 		let rows = registry.snapshot().control();
 		assert!(
 			rows.iter()
-				.any(|(row_tier, class, bytes)| *row_tier == tier && *class == Control::Session && bytes.tx > 0),
+				.any(|(row_tier, class, bytes)| *row_tier == tier
+					&& *class == Control::Session
+					&& bytes.tx > 0 && bytes.rx > 0),
 			"{version}: {rows:?}"
 		);
 	}

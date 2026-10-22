@@ -493,7 +493,9 @@ impl Decode<Version> for Update {
 		let size = r.u16()? as usize;
 		let mut data = r.sub(size)?;
 		// The complete frame is present; a short field inside it is malformed.
-		Self::decode_body(&mut data, version).map_err(DecodeError::complete)
+		let update = Self::decode_body(&mut data, version).map_err(DecodeError::complete)?;
+		r.control = Some(super::message::control(super::SubscribeUpdate::ID, version));
+		Ok(update)
 	}
 }
 
@@ -543,7 +545,9 @@ impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
 				refused: super::token::single(token).err().map(Into::into),
 			})
 		};
-		decode().map_err(DecodeError::complete)
+		let update = decode().map_err(DecodeError::complete)?;
+		r.control = Some(super::message::control(super::SubscribeUpdate::ID, version));
+		Ok(update)
 	}
 }
 

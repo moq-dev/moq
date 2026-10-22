@@ -9,6 +9,10 @@ pub(super) fn control(id: u64, version: Version) -> crate::stats::Control {
 	if version == Version::Draft14 && (id == TrackStatusOk::ID_14 || id == TRACK_STATUS_ERROR_14) {
 		return Control::TrackInfo;
 	}
+	// Before draft 16, 0x02 updates only a subscription; later it is the shared REQUEST_UPDATE.
+	if matches!(version, Version::Draft14 | Version::Draft15) && id == SubscribeUpdate::ID {
+		return Control::Subscribe;
+	}
 	match id {
 		PublishNamespace::ID
 		| PublishNamespaceError::ID
@@ -129,5 +133,13 @@ mod tests {
 			control(super::super::NamespaceDone::ID, Version::Draft16),
 			Control::Announce
 		);
+		assert_eq!(
+			control(super::super::SubscribeUpdate::ID, Version::Draft15),
+			Control::Subscribe
+		);
+		// Shared replies and updates identify no request class.
+		for id in [super::super::RequestOk::ID, super::super::SubscribeUpdate::ID] {
+			assert_eq!(control(id, Version::Draft16), Control::Other);
+		}
 	}
 }
