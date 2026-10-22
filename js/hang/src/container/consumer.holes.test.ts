@@ -102,3 +102,88 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 		restore();
 	}
 });
+
+test("the holes a stalled source left behind share one budget", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const track = new Track.Producer("data");
+	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+		format: new Format("data"),
+		maxDelay: Milli(100),
+	});
+	const results: Read[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const read = await consumer.next();
+			if (!read) return;
+			results.push(read);
+		}
+	})();
+	const write = (sequence: number) => {
+		const group = new Group.Producer(sequence);
+		track.writeGroup(group);
+		group.writeFrame({
+			payload: encodeFrame(new Uint8Array([1]), Micro(sequence * 10_000)),
+			timestamp: Time.Timestamp.fromMicros(sequence * 10_000),
+		});
+		group.close();
+	};
+	try {
+		write(0);
+		await flush();
+		for (const sequence of [2, 4, 6]) write(sequence);
+		await flush();
+		expect(results).toHaveLength(1);
+		await clock.advance(Nano.fromMilli(Milli(100)));
+		expect(results.map((read) => read.kind)).toEqual(["frame", "gap", "frame", "gap", "frame", "gap", "frame"]);
+	} finally {
+		consumer.close();
+		track.close();
+		await reading;
+		restore();
+	}
+});
+
+test("a hole is late from the earliest arrival past it", async () => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const track = new Track.Producer("data");
+	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+		format: new Format("data"),
+		maxDelay: Milli(100),
+	});
+	const results: Read[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const read = await consumer.next();
+			if (!read) return;
+			results.push(read);
+		}
+	})();
+	const write = (sequence: number) => {
+		const group = new Group.Producer(sequence);
+		track.writeGroup(group);
+		group.writeFrame({
+			payload: encodeFrame(new Uint8Array([1]), Micro(sequence * 10_000)),
+			timestamp: Time.Timestamp.fromMicros(sequence * 10_000),
+		});
+		group.close();
+	};
+	try {
+		write(0);
+		await flush();
+		write(4);
+		await flush();
+		await clock.advance(Nano.fromMilli(Milli(50)));
+		write(2);
+		await flush();
+		expect(results).toHaveLength(1);
+		await clock.advance(Nano.fromMilli(Milli(50)));
+		expect(results.map((read) => read.kind)).toEqual(["frame", "gap", "frame", "gap", "frame"]);
+	} finally {
+		consumer.close();
+		track.close();
+		await reading;
+		restore();
+	}
+});

@@ -5,6 +5,8 @@ out/
 pkg/
 .direnv/
 .terraform/
+# Nix out-links (js/libav keeps one as a GC root) point into the read-only store.
+result
 **/CHANGELOG.md
 
 # IETF drafts are kramdown-rfc markdown, not CommonMark; linted by `just

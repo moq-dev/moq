@@ -1,14 +1,16 @@
 import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
-import { Producer as BroadcastProducer } from "./broadcast.ts";
+import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
-import { NotFound, StreamCode, StreamError } from "./error.ts";
-import { Producer as GroupProducer } from "./group.ts";
+import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
+import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Route } from "./hop.ts";
+import type { Session as IetfSession } from "./ietf/adapter.ts";
+import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { hooks, MAX_DATAGRAMS } from "./internal.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
-import { Front } from "./resume.ts";
+import { Front, routeFailed } from "./resume.ts";
 import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
@@ -1748,3 +1750,132 @@ test.each([Milli(100), Milli(3_600_000)])(
 		}
 	},
 );
+
+test("only delivery codes are a route failing", () => {
+	// Mirrors `only_delivery_codes_are_a_route_failing` in rs/moq-net/src/model/resume.rs.
+	const delivery = [0x0, 0x1, 0x3, 0x4, 0x31];
+	const codes = [...Array.from({ length: 0x40 }, (_, code) => code), 64, 64 + 5, 0xffffffff];
+	for (const code of codes) {
+		expect([code, routeFailed(new StreamError(code as StreamCode))]).toEqual([code, delivery.includes(code)]);
+	}
+	// The session the copy came through closed: the route went with it.
+	expect(routeFailed(new SessionError(SessionCode.Internal))).toBe(true);
+	// Content that failed to parse is the group's under its name.
+	expect(routeFailed(new Error("malformed"))).toBe(false);
+});
+
+/**
+ * A route serving `source` that records the groups it is asked to fetch, through every handle the
+ * front clones from it, answering each with `answer` or as `source` would.
+ */
+function counted(source: BroadcastProducer, answer?: (sequence: number) => GroupConsumer | undefined) {
+	const asked: number[] = [];
+	class Counted extends BroadcastConsumer {
+		constructor(shared?: never) {
+			super(shared);
+			const original = wireOf(this);
+			overrideBroadcastWire(this, {
+				fetchGroup: (name, sequence, options) => {
+					asked.push(sequence);
+					const answered = answer?.(sequence);
+					return answered ? Promise.resolve(answered) : original.fetchGroup(name, sequence, options);
+				},
+			});
+		}
+
+		override clone(): Counted {
+			return new Counted(this.shareState());
+		}
+
+		static of(consumer: BroadcastConsumer): Counted {
+			return new Counted((consumer as Counted).shareState());
+		}
+	}
+	return { route: Counted.of(source.consume()), asked };
+}
+
+for (const fetched of [false, true]) {
+	test(`a verdict ends a ${fetched ? "fetched" : "read"} group once, never asking its own route again`, async () => {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const stalled = copy(a).write(0, 1, false);
+		const malformed = new StreamError(StreamCode.MalformedTrack);
+		// Once the group is read, a hostile route answers every fetch with a copy that fails the
+		// same way.
+		let hostile = false;
+		const { route, asked } = counted(a, (sequence) => {
+			if (!hostile) return undefined;
+			const copy = new GroupProducer(sequence);
+			copy.writeFrame({ payload: enc.encode(`${sequence}.0`) });
+			setTimeout(() => copy.close(malformed), 0);
+			return copy.consume();
+		});
+		const sub = front.consumer.track("seq").subscribe();
+		front.serve(route);
+		const group = fetched ? await front.consumer.track("seq").fetchGroup(0) : sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		asked.length = 0;
+		hostile = true;
+
+		stalled.close(malformed);
+		await expect(group.readFrame()).rejects.toBe(malformed);
+		await settle();
+		expect(asked).toEqual([]);
+
+		sub.close();
+		front.consumer.close();
+		a.close();
+	});
+}
+
+test("a verdict every route repeats moves to the newer route once, then ends the group", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const stalled = copy(a).write(0, 1, false);
+	const repeat = copy(b).write(0, 1, false);
+	const malformed = new StreamError(StreamCode.MalformedTrack);
+	const routeA = counted(a);
+	const routeB = counted(b);
+	front.serve(routeA.route);
+	const sub = front.consumer.track("seq").subscribe();
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+
+	front.serve(routeB.route);
+	await settle();
+	stalled.close(malformed);
+	const read = group.readFrame();
+	expect(await isPending(read)).toBe(true);
+	repeat.close(malformed);
+	await expect(read).rejects.toBe(malformed);
+	await expect(group.readFrame()).rejects.toBe(malformed);
+	expect([routeA.asked, routeB.asked]).toEqual([[], []]);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("a route whose IETF session closed before subscribing moves the track to the next route", async () => {
+	// The session went away: it has no request ID left to spend.
+	const session = { nextRequestId: async () => undefined } as unknown as IetfSession;
+	const front = new Front();
+	const b = new BroadcastProducer();
+	const tb = copy(b);
+	front.serve(new IetfSubscriber({ session }).consume(path));
+	const sub = front.consumer.track("seq").subscribe();
+	await settle();
+
+	front.serve(b.consume());
+	await settle();
+	tb.write(0);
+	expect(drain(sub)).toEqual([0]);
+
+	sub.close();
+	front.consumer.close();
+	b.close();
+});

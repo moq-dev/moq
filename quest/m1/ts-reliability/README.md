@@ -91,7 +91,6 @@ remain with their current quests.
 - [PMT export](/quest/m1/ts-reliability/pmt-export.md) - a TS export announces each PMT revision at the next `version_number`
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
-- [Arrival stamps](/quest/m1/ts-reliability/arrival-stamps.md) - frames carry their local arrival time, so a stalled path never lets late frames out
 - [Release clock false alarms](/quest/m1/ts-reliability/release-clock-false-alarms.md) - no false jitter leap at a 500 ms delay and no false drift alarm
 
 ## Related

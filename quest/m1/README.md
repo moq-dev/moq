@@ -66,7 +66,6 @@ lite-07 stream type here.
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
-- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - qmux runs in-tree over `moq-quic`'s stream state machine, returning credit for every byte, delivering its close frame, and ending an unfinished read after its buffered data once the session closes
 - [lite-07 padding](/quest/m1/lite07-padding.md) - lite-07 reserves a padding stream type that receivers read and discard, for the browser's padding probes
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
@@ -84,7 +83,6 @@ lite-07 stream type here.
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
 - [A public model](/quest/m1/public-model/README.md) - every model item a built-in session reaches is public, unnecessary, or marked deliberately private, so a custom publisher, subscriber, or relay builds from the public model alone
-- [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
 - [FETCH_OK whole group](/quest/m1/ietf-fetch-end-location.md) - on drafts 14 to 19, FETCH_OK End Object 0 means the whole group in both directions, and a FETCH ending at the maximum group is refused as unsupported
 - [Pause an IETF SUBSCRIBE](/quest/m1/ietf-subscribe-pause.md) - Forward=0 pauses a SUBSCRIBE without demand upstream and Forward=1 resumes it, instead of ending it
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
@@ -105,10 +103,8 @@ lite-07 stream type here.
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Resumed close](/quest/m1/resume-closed.md) - a resumed JS track keeps its declared end across copies, and its `closed` and `largest()` settle on a clean end
 - [Replica resume](/quest/m1/replica-resume.md) - a lagging same-epoch replica resumes with every frame exactly once and in order, on lite-07 and on moq-transport
-- [Recovery verdicts](/quest/m1/recovery-verdicts.md) - group recovery refetches only on errors a new copy can fix, so a repeating error ends the group instead of looping
 - [Rust resume holds a declared end](/quest/m1/resume-rust-end.md) - a resumed Rust track keeps a declared end across copies, dedupes flapping copies, and judges retention inside the reader's window
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
-- [Binding linger](/quest/m1/linger-ffi.md) - `moq-ffi` and every binding finish a broadcast cleanly, so subscribers drain it until its media is stale
 - [Interop finish](/quest/m1/interop-finish.md) - the interop matrix proves a clean broadcast finish across implementations
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
 - [fMP4 import unwraps to Legacy](/quest/m1/fmp4-import-unwrap.md) - fMP4 and HLS imports publish per-sample `Legacy` frames unless `--passthrough` asks for CMAF, and no first-party producer defaults to CMAF
@@ -117,10 +113,8 @@ lite-07 stream type here.
 - [moq-net compiles once](/quest/m1/net-erase-transport.md) - the session drivers stop monomorphizing per transport and per crate, saving several MiB of the relay, FFI library, `libmoq` and CLI
 - [Audio devices on ARM](/quest/m1/audio-devices-arm.md) - `just rs audio-devices` passes on the hosted ARM runner
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
-- [Interop audio delivery](/quest/m1/interop-audio.md) - every interop subscriber decodes and checks the publishers' 440 Hz tone, and the Rust publisher sends Opus
-- [AAC in the native JS fallback](/quest/m1/libav-aac.md) - Node and Bun players decode AAC, and the Rust interop publisher adds an AAC track
+- [Interop audio delivery](/quest/m1/interop-audio.md) - every interop subscriber decodes and checks the publishers' 440 Hz tone, and the Rust publisher sends Opus and AAC
 - [Native audio decode conformance](/quest/m1/audio-decode-conformance.md) - Opus and AAC decode through every moq-audio backend, moq-c, and moq-ffi is checked against known tones and clips, like moq-video's suite
-- [Playwright browsers from Nix](/quest/m1/playwright-nix.md) - every Playwright check runs on Nix's Chromium locally and in CI, with npm pinned to match
 - [Allocation-free single-range subscriber window](/quest/m1/window-alloc.md) - a one-range subscribe resolves its window without a heap allocation, recovering the join cost per-subscriber ranges added
 - [moq-net internals](/quest/m1/net-internals.md) - no per-group session clones, no transport type parameter in lite and IETF internals, and the `Local` check measured
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
