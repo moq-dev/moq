@@ -26,18 +26,12 @@ Rules every child keeps:
   (the draft-16 cancel race was a retry sweep jittered past a fixed settle
   budget). Wait out the jitter's whole window, not a count of small steps.
 
-Added 2026-10-15 (maintainer): three flakes seen while landing that day's
-merge batch, ranked by how likely each hides a product bug.
-
 This README's own work, after the children: run `just check --all` several
-times on a loaded machine, as the first round did. moq-tokio's
-`a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
-known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
+times on a loaded machine, as the first round did.
 
-Added 2026-10-19 (maintainer): three more, the redial pair first since CI
-hit it. The same day's test cost audit added the macOS QUIC connects, and the
-redundant failover drift first: it may hide a TS export bug and failed two of
-three loaded `just check` runs.
+The [redundant failover drift](/quest/m0/redundant-failover-drift.md) moved
+to m0 on 2026-10-20 (maintainer), since it may hide a TS export bug and fails
+loaded `just check` runs.
 
 Added 2026-10-20 (maintainer): three more from that day's merge batch, the
 draft-16 cancel race first since it fails on a mocked clock and so may hide
@@ -54,8 +48,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
-- [Three flakes and fresh-worktree interop](/quest/m1/test-flakes-2/three-flakes.md) - OBS stop drain, the js/net RSS test, the audio harness RTT sample, and interop's bun install
+- [OBS drain and JS allocation flakes](/quest/m1/test-flakes-2/three-flakes.md) - reproduce the OBS stop-drain failure and verify the existing RSS replacement under load
 
 ## Related
 

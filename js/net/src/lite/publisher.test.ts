@@ -3,7 +3,7 @@ import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import { fromTransport, SessionCode, StreamCode, toStreamCode } from "../error.ts";
+import { fromTransport, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks } from "../internal.ts";
@@ -772,6 +772,52 @@ test("lite draft-06: a cut group is dropped early, once", async () => {
 	}
 });
 
+// Lite-07 names why with a stream error code: the cut's own, and NOT_FOUND for what the end
+// sweep finds never served. Earlier versions carry an application code there, so 0.
+for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+	test(`lite ${version}: a SUBSCRIBE_DROP carries ${version === Version.DRAFT_07 ? "the stream error code" : "no code"}`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 0 });
+		try {
+			sub.serve(0);
+			expect(await sub.servedSequence()).toBe(0);
+			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
+
+			const cut = new GroupProducer(1);
+			sub.track.writeGroup(cut);
+			cut.close(new StreamError(StreamCode(70), { message: "cut" }));
+			const resp = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
+				1,
+				1,
+				version === Version.DRAFT_07 ? 70 : 0,
+			]);
+		} finally {
+			await sub.close();
+		}
+	});
+
+	test(`lite ${version}: the end sweep's SUBSCRIBE_DROP carries ${version === Version.DRAFT_07 ? "NOT_FOUND" : "no code"}`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 5 });
+		try {
+			sub.serve(5);
+			expect(await sub.servedSequence()).toBe(5);
+			await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, version);
+			await flush();
+			sub.track.close();
+			const codes: number[] = [];
+			for (;;) {
+				const resp = await decodeSubscribeResponseMaybe(sub.client.reader, version);
+				if (!resp) break;
+				if ("drop" in resp) codes.push(resp.drop.error);
+			}
+			expect(codes).toEqual([version === Version.DRAFT_07 ? StreamCode.NotFound : 0]);
+		} finally {
+			await sub.close();
+		}
+	});
+}
+
 // A sent datagram is accounted for, so the end sweep does not drop it, as the Rust publisher does.
 test("lite draft-06: the end sweep does not drop a sent datagram", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0 });
@@ -934,6 +980,100 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 		await sub.close();
 	}
 });
+
+// A relay receives the newest group first while its source still promises older groups.
+// START must preserve that promise, bounded by the downstream floor and first served group.
+for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+	for (const [source, expected] of [
+		[0, 2],
+		[3, 3],
+		[9, 6],
+	]) {
+		test(`lite ${version}: descending delivery resolves source start ${source} at ${expected}`, async () => {
+			const sub = await servedSubscription({ version, startGroup: 2 });
+			try {
+				hooks.startTrack(sub.track, { start: source, requested: 2 });
+				sub.serve(6);
+				expect(await sub.servedSequence()).toBe(6);
+				const response = await decodeSubscribeResponse(sub.client.reader, version);
+				if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+				expect(response.start.group).toBe(expected);
+				if (expected < 6) {
+					sub.serve(expected);
+					expect(await sub.servedSequence()).toBe(expected);
+				}
+			} finally {
+				await sub.close();
+			}
+		});
+	}
+}
+
+// A relay's group stream can beat the upstream START on its own stream. Resolving from that
+// group would give up the backlog the START still promises, so the first group waits for it.
+for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+	test(`lite ${version}: START waits for the upstream START before resolving`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 2 });
+		try {
+			hooks.startTrack(sub.track, { requested: 2 });
+			sub.serve(6);
+			await flush();
+			hooks.startTrack(sub.track, { start: 3, requested: 2 });
+			const response = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(response.start.group).toBe(3);
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+
+	// A track that closes never gets its START, so the held group must not wait for it.
+	test(`lite ${version}: a closed source releases the START it was waiting for`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 2 });
+		try {
+			hooks.startTrack(sub.track, { requested: 2 });
+			sub.serve(6);
+			await flush();
+			sub.track.close();
+			const response = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+}
+
+for (const skipped of ["failed", "stale"] as const) {
+	test(`lite draft-06: START advances past a ${skipped} group from the source`, async () => {
+		const sub = await servedSubscription({
+			version: Version.DRAFT_06,
+			startGroup: 5,
+			maxAge: skipped === "stale" ? Milli(0) : undefined,
+		});
+		try {
+			hooks.startTrack(sub.track, { start: 5, requested: 5 });
+			const group = new GroupProducer(5);
+			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
+			sub.track.writeGroup(group);
+			group.close(skipped === "failed" ? new Error("cut") : undefined);
+			if (skipped === "failed") hooks.dropTrackGroups(sub.track, 7, 8, new Error("cut"));
+			sub.serve(6);
+			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(response.start.group).toBe(6);
+			if (skipped === "failed") {
+				const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+				if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
+				expect([dropped.drop.start, dropped.drop.end]).toEqual([7, 7]);
+			}
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+}
 
 // Pre-06 an absent Group Start is the latest group. An update that drops a named floor
 // re-pins there, so a group created below it afterwards is not served.
@@ -2123,7 +2263,7 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 		write(2, 20_000);
 		open();
 
-		expect(String(await streamReset)).toContain("max delay budget");
+		expect(String(await streamReset)).toContain("abandoned waiting for a stream slot");
 		expect(writes).toBe(0);
 		await flush();
 		expect(unhandled).toEqual([]);

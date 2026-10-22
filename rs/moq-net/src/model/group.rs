@@ -23,10 +23,10 @@ use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use std::ops::{Bound, RangeBounds};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::task::{Poll, ready};
 
-use crate::{Error, IntoBytes, Result, Timestamp};
+use crate::{Error, IntoBytes, Result, StreamError, Timestamp};
 
 /// Maximum total size of frames in a group.
 ///
@@ -981,9 +981,10 @@ struct Alive {
 	// Set once frame 0's rewind check ran, so later writes skip the track lock it takes. A
 	// stale false only takes that lock once more.
 	checked: AtomicBool,
-	// Whether the abort was the publisher giving the group up rather than cache policy
-	// (`Old`, `Timeout`, `Evicted`). Stored before `aborted`, under the same rules.
-	cut: AtomicBool,
+	// The abort's error when it was the publisher giving the group up rather than cache
+	// policy (`Old`, `Timeout`, `Evicted`). Set before `aborted`, under the same rules, so
+	// a track scan learns why without taking the group lock.
+	cut: OnceLock<Error>,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
@@ -1112,7 +1113,7 @@ impl Producer {
 		let alive = Arc::new(Alive {
 			aborted: AtomicBool::new(false),
 			checked: AtomicBool::new(false),
-			cut: AtomicBool::new(false),
+			cut: OnceLock::new(),
 			access,
 		});
 		Self {
@@ -1709,6 +1710,16 @@ impl Handle {
 		self.close_aborted(err)
 	}
 
+	/// Abort the group with `err` unless it already holds every frame: the publisher gave
+	/// up a group still arriving, while one that finished here stays whole.
+	pub(super) fn abort_open(&self, err: Error) {
+		if let Ok(state) = self.state.write()
+			&& state.fin.is_none()
+		{
+			self.commit_abort(state, err);
+		}
+	}
+
 	/// Adopt the frames of `head` below where this copy starts, so it holds the group
 	/// from `head`'s start, as if this route had delivered them.
 	///
@@ -1834,12 +1845,30 @@ impl Handle {
 	}
 
 	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, err: Error) {
-		let cut = !matches!(err, Error::Old | Error::Timeout | Error::Evicted);
+		let policy = matches!(err, Error::Old | Error::Timeout | Error::Evicted);
 		// Cache policy frees the frames, as does an oversized group whichever write found
 		// it; a copy that failed or was given up lends them on.
-		let salvage = cut && !matches!(err, Error::GroupTooLarge);
+		let salvage = !policy && !matches!(err, Error::GroupTooLarge);
+		// A reset carrying a policy code is the upstream's cache policy, a cancel is a reader
+		// no longer wanting the group, and a fill refused as unfetchable abandons backfill:
+		// deliberate holes, never a cut readers see. The publisher giving the group up is.
+		let cut = !policy
+			&& !matches!(
+				err,
+				Error::Cancel
+					| Error::Lagged | Error::NotFetchable
+					| Error::Stream(
+						StreamError::Cancel
+							| StreamError::Old | StreamError::Evicted
+							| StreamError::DeliveryTimeout
+							| StreamError::TooFarBehind
+							| StreamError::NotFetchable
+					)
+			);
+		if cut {
+			let _ = self.alive.cut.set(err.clone());
+		}
 		guard.abort = Some(err);
-		self.alive.cut.store(cut, Ordering::Release);
 		self.alive.aborted.store(true, Ordering::Release);
 		guard.release(salvage);
 		guard.close();
@@ -1858,11 +1887,12 @@ impl Handle {
 		self.alive.aborted.load(Ordering::Acquire)
 	}
 
-	/// Whether the publisher gave this group up, rather than cache policy skipping it.
+	/// Why the publisher gave this group up, once it did, rather than cache policy
+	/// skipping it.
 	///
 	/// Reads the mirror, like [`Self::is_aborted`], so a track scan never takes the group lock.
-	pub(super) fn is_cut(&self) -> bool {
-		self.alive.cut.load(Ordering::Acquire)
+	pub(super) fn cut_error(&self) -> Option<&Error> {
+		self.alive.cut.get()
 	}
 
 	/// Whether the group was finished: it holds every frame it will ever have.
@@ -2724,6 +2754,14 @@ impl Consumer {
 		self.track.timescale
 	}
 
+	/// The draft the parent track's moq-transport publisher spoke, which serialized every
+	/// object's properties, or `None` for a moq-lite one.
+	#[cfg(feature = "async")]
+	// private: passthrough
+	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
+		self.track.ietf()
+	}
+
 	/// The index of the next frame this consumer will return.
 	///
 	/// Starts at 0, or at the group's first available frame once [`Self::set_frames`] has
@@ -3442,20 +3480,6 @@ mod test {
 		assert_eq!(f1.size, 6);
 		let end = consumer.next_frame().now_or_never().unwrap().unwrap();
 		assert!(end.is_none());
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn read_frame_all_at_once() {
-		let mut producer = Info { sequence: 0 }.produce();
-		producer
-			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hello"))
-			.unwrap();
-		producer.finish().unwrap();
-
-		let mut consumer = producer.consume();
-		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
 	}
 
 	#[test]

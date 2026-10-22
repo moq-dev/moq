@@ -62,7 +62,7 @@ Decided (maintainer, 2026-10-14):
   reader got the tail and fails before the fix. Cover both the buffered-tail
   case and one where a control or accept error wins the poll order. Give
   `older_lite_close_keeps_ack_drain` that reader assertion.
-- Once #5530 has landed, switch `moq_net::transport::memory`'s
+- #5530 landed the in-memory transport: switch `moq_net::transport::memory`'s
   `SendStream::poll_closed` to resolve on `finish` (delivery into the
   channel), dropping its "finished and empty" rule. Do this unless the
   memory bench (`rs/moq-net/benches/memory.rs`) shows a regression; if it
@@ -76,7 +76,10 @@ moq-tokio's `quic::web` path) for the same ordering.
 
 Public API: none. Wire: none.
 
+## Required
+
+- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - an unfinished qmux read ends after its buffered data once the session closes, which the drain relies on over qmux
+
 ## Related
 
-- [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md) - groups cut short by a session close
 - [QUIC ack hook](/quest/m2/quic-ack-hook.md) - a FIN/ack hook in the QUIC layer

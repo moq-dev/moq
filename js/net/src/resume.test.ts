@@ -101,6 +101,30 @@ async function setup() {
 	};
 }
 
+test("a routed source start follows the serving copy and its subscriber floor", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	hooks.startTrack(ta.producer, { start: 1 });
+	hooks.startTrack(tb.producer, { start: 5, requested: 3 });
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ groups: { start: { included: 3 } } });
+	try {
+		expect(hooks.sourceStart(sub)).toBe(3);
+		const subscribed = tb.producer.subscription.changed();
+		front.serve(b.consume());
+		await subscribed;
+		expect(hooks.sourceStart(sub)).toBe(5);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 test("a fork continues its open group across a route failure after its parent closes", async () => {
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
@@ -670,6 +694,40 @@ test("a recovery fetch a later route supersedes is abandoned", async () => {
 	b.close();
 	c.close();
 });
+
+// With the subscription still open, no successor, no later writes, and the fetch for the rest
+// still unanswered: whether the old route failed or only stalled.
+for (const fails of [true, false]) {
+	test(`a resumed group ends with the serving route's drop${fails ? " once its old route failed" : ""}`, async () => {
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		const stalled = ta.write(0, 1, false);
+		front.serve(a.consume());
+		const sub = front.consumer.track("seq").subscribe({ maxDelay: Milli(60_000) });
+		const group = sub.tryRecvGroup();
+		if (!group) throw new Error("expected group 0");
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		if (fails) stalled.close(new StreamError(StreamCode.SessionClosed));
+
+		front.serve(b.consume());
+		const read = group.readFrame();
+		await settle();
+		expect(await isPending(read)).toBe(true);
+		expect(tb.producer.demand().wanted.peek()).not.toBeUndefined();
+
+		const cut = new StreamError(StreamCode(70), { message: "cut" });
+		hooks.dropTrackGroups(tb.producer, 0, 1, cut);
+		await expect(read).rejects.toBe(cut);
+
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	});
+}
 
 test("track info keeps one answer across routes", async () => {
 	const front = new Front();
@@ -1384,7 +1442,7 @@ test.each(["lands", "dropped", "expired"])(
 			expect(drain(sub)).toEqual([]);
 			expect(ta.producer.demand().wanted.peek()).toBeDefined();
 
-			if (outcome === "dropped") hooks.dropTrackGroups(ta.producer, 1, 2);
+			if (outcome === "dropped") hooks.dropTrackGroups(ta.producer, 1, 2, new NotFound("group"));
 			if (outcome === "expired") await clock.advanceAsync(Nano.fromMilli(SECOND));
 			if (outcome !== "lands") {
 				// The groups drained above are released once their close settles.

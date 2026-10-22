@@ -58,19 +58,9 @@ test("Goaway: round trip on draft-05", async () => {
 	expect(decoded.uri).toBe("moql://relay.example/migrate");
 });
 
-test("Goaway: rejects draft-01", async () => {
+test.each(["DRAFT_01", "DRAFT_02", "DRAFT_03"] as const)("Goaway: rejects %s", async (version) => {
 	const msg = new Goaway("https://example.com");
-	await expect(encode(msg, Version.DRAFT_01)).rejects.toThrow(/not supported/);
-});
-
-test("Goaway: rejects draft-02", async () => {
-	const msg = new Goaway("https://example.com");
-	await expect(encode(msg, Version.DRAFT_02)).rejects.toThrow(/not supported/);
-});
-
-test("Goaway: rejects draft-03", async () => {
-	const msg = new Goaway("https://example.com");
-	await expect(encode(msg, Version.DRAFT_03)).rejects.toThrow(/not supported/);
+	await expect(encode(msg, Version[version])).rejects.toThrow(/not supported/);
 });
 
 test("Goaway: decode rejects draft-01", async () => {

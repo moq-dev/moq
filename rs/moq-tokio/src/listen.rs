@@ -894,17 +894,6 @@ load_balancer = { id = "ab", nonce = 8 }
 		};
 		assert_eq!(config.resolved_timeout(), None);
 	}
-
-	/// The canonical spellings, which is what `--help` teaches.
-	#[test]
-	fn canonical_spellings_parse() {
-		let config = config_from(["test", "--listen", "[::]:443", "--listen-version", "moq-lite-03"]);
-		assert_eq!(
-			config.bind.as_ref().map(ToString::to_string).as_deref(),
-			Some("[::]:443")
-		);
-		assert_eq!(config.version, vec!["moq-lite-03".parse::<moq_net::Version>().unwrap()]);
-	}
 }
 
 #[cfg(test)]

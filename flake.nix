@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/a5b83a3dfd14492d62011afdb3c3893fcebbcca6";
+      url = "github:kixelated/quest/a73fb295a3679ff54205af68a1a7bb8ec5bdc7af";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -158,7 +158,13 @@
             cargo-hack
             cargo-nextest
             # Source-based test coverage (`just rs coverage`).
-            cargo-llvm-cov
+            # Its LLVM test helpers must read the compiler's profile format.
+            (cargo-llvm-cov.override {
+              rustPlatform = makeRustPlatform {
+                cargo = rust-toolchain;
+                rustc = rust-toolchain;
+              };
+            })
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
             # Cargo.lock selects the matching schema version, independently of
             # nixpkgs' default wasm-bindgen-cli.

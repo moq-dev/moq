@@ -59,7 +59,7 @@ declare -A scope=(
     # Root Nix inputs own the browser version every npm Playwright pin matches.
     [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)'
     # Workers with lockfiles outside the Bun workspace.
-    [workers]='^(infra/apt/|infra/rpm/|infra/moq-sh/|demo/pub/|sh/js/workers\.sh$)'
+    [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
     [rs]='^(rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
@@ -238,7 +238,42 @@ files() {
     git ls-files -z --cached --others --exclude-standard -- "$@"
 }
 
+# Each phase's wall time, printed when the run ends, pass or fail, so the slow
+# module of a check or a queue run is named without reading log timestamps.
+# GitHub Actions also gets it in the job summary.
+labels=()
+seconds=()
+current=
+began=0
+begin() {
+    current=$1
+    began=$SECONDS
+}
+finish() {
+    [[ -n "$current" ]] || return 0
+    labels+=("$current${1:+ ($1)}")
+    seconds+=("$((SECONDS - began))")
+    current=
+}
+report() {
+    finish failed
+    ((${#labels[@]})) || return 0
+    echo "$action: seconds per module" >&2
+    for i in "${!labels[@]}"; do
+        printf '%6d  %s\n' "${seconds[$i]}" "${labels[$i]}" >&2
+    done
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
+    {
+        printf '| %s module | Seconds |\n| --- | ---: |\n' "$action"
+        for i in "${!labels[@]}"; do
+            printf '| %s | %d |\n' "${labels[$i]}" "${seconds[$i]}"
+        done
+    } >>"$GITHUB_STEP_SUMMARY"
+}
+trap 'report; rm -f "$changed" "$js_changed"' EXIT
+
 for module in "${selected[@]}"; do
+    begin "$verb $module"
     case "$verb:$module" in
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
@@ -270,15 +305,20 @@ for module in "${selected[@]}"; do
         *:shell) sh/shell.sh "$verb" ;;
         *) just "$module" "$verb" ;;
     esac
+    finish
 done
 
 # The bindings run their tests in the preamble; these suites run once here.
 if [[ "$verb" == check ]]; then
     for module in "${selected[@]}"; do
         case "$module" in
+            rs | js | py) begin "test $module" ;;
+        esac
+        case "$module" in
             rs) just rs test-changed "$rs_list" ;;
             js) just js test-changed "$js_list" ;;
             py) just py test ;;
         esac
+        finish
     done
 fi

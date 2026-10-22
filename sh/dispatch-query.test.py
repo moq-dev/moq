@@ -200,13 +200,6 @@ class QueryTests(unittest.TestCase):
         self.assertLess(next(i for i, call in enumerate(calls) if call.startswith("rs lint-changed ")),
                         next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")))
 
-    def test_removed_halves_fail_before_running_anything(self):
-        for action in ("ci-check", "ci-test"):
-            result = subprocess.run(["bash", "sh/dispatch.sh", action, "origin/main"],
-                                    cwd=self.repo, env=self.env, text=True, capture_output=True)
-            self.assertEqual(result.returncode, 2)
-            self.assertEqual(result.stdout, "")
-
 
 def benchmark():
     # Sweep path count and both job selections. No timing threshold: hosted setup

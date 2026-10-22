@@ -2385,6 +2385,46 @@ fn draining_is_reported_once_before_drained() {
     assert_eq!(server, expected);
 }
 
+/// A handshake the peer never answered stops being active as soon as it closes, so a shutdown
+/// need not sit out the closing period for a close nobody will answer
+#[test]
+fn unanswered_handshake_drains_at_close() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let client_ch = pair.begin_connect(client_config());
+    pair.client.drive(pair.time, pair.server.addr);
+    pair.client.outbound.clear(); // The server never hears the Initial
+
+    let now = pair.time;
+    pair.client_conn_mut(client_ch)
+        .close(now, VarInt(0), Bytes::new());
+    pair.client.drive(now, pair.server.addr);
+
+    assert!(!pair.client.outbound.is_empty(), "the close is still sent");
+    // Drained waits for the close timer, which still answers a late reply
+    assert_eq!(pair.client.lifecycle, [(client_ch, Lifecycle::Draining)]);
+}
+
+/// Once the peer has answered, a close stays active until the peer's close comes back
+#[test]
+fn answered_handshake_waits_for_peer_close() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let client_ch = pair.begin_connect(client_config());
+    pair.drive_client();
+    pair.drive_server();
+    pair.client.drive(pair.time, pair.server.addr);
+
+    let now = pair.time;
+    pair.client_conn_mut(client_ch)
+        .close(now, VarInt(0), Bytes::new());
+    pair.client.drive(now, pair.server.addr);
+    assert!(pair.client.lifecycle.is_empty());
+
+    pair.drive();
+    assert_eq!(pair.client.lifecycle[0], (client_ch, Lifecycle::Draining));
+}
+
 #[test]
 fn instant_close_1() {
     let _guard = subscribe();
@@ -3479,7 +3519,7 @@ fn datagram_recv_buffer_overflow() {
     assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
     assert_eq!(
         pair.client_conn_mut(client_ch).datagrams().max_size(),
-        Some(WINDOW - Datagram::SIZE_BOUND)
+        Datagram::max_payload(WINDOW as u64).map(|n| n as usize)
     );
 
     const DATA1: &[u8] = &[0xAB; (PAYLOAD_WINDOW / 3) + 1];
@@ -3532,7 +3572,10 @@ fn datagram_of_max_size_keeps_connection() {
         .datagrams()
         .max_size()
         .unwrap();
-    assert_eq!(max_size, WINDOW - Datagram::SIZE_BOUND);
+    assert_eq!(
+        max_size,
+        Datagram::max_payload(WINDOW as u64).unwrap() as usize
+    );
 
     pair.client_datagrams(client_ch)
         .send(vec![0xAB; max_size].into(), Default::default())
@@ -3551,6 +3594,30 @@ fn datagram_of_max_size_keeps_connection() {
         Some(Event::DatagramReceived)
     );
     assert_eq!(pair.server_datagrams(server_ch).recv().unwrap(), DATA);
+}
+
+/// RFC 9221's `max_datagram_frame_size` counts the frame type and length, so a 1200-byte limit
+/// (quicly's) carries a 1197-byte payload behind a 2-byte length
+#[test]
+fn datagram_max_size_fills_peer_frame_limit() {
+    let _guard = subscribe();
+    let server = ServerConfig {
+        transport: Arc::new(TransportConfig {
+            datagram_receive_buffer_size: Some(1200),
+            ..TransportConfig::default()
+        }),
+        ..server_config()
+    };
+    let mut transport = TransportConfig::default();
+    transport.initial_mtu(1452).mtu_discovery_config(None);
+    let mut client = client_config();
+    client.transport_config(Arc::new(transport));
+    let mut pair = Pair::new(Default::default(), server);
+    let (client_ch, _) = pair.connect_with(client);
+    assert_eq!(
+        pair.client_conn_mut(client_ch).datagrams().max_size(),
+        Some(1197)
+    );
 }
 
 #[test]
@@ -3598,6 +3665,29 @@ fn datagram_unsupported() {
         Err(e) => panic!("unexpected error: {e}"),
         Ok(_) => panic!("unexpected success"),
     }
+}
+
+/// RFC 9221 section 3: a `max_datagram_frame_size` of 0 means no DATAGRAM support, and no frame,
+/// not even an empty one, fits it
+#[test]
+fn datagram_zero_limit_unsupported() {
+    let _guard = subscribe();
+    let server = ServerConfig {
+        transport: Arc::new(TransportConfig {
+            datagram_receive_buffer_size: Some(0),
+            ..TransportConfig::default()
+        }),
+        ..server_config()
+    };
+    let mut pair = Pair::new(Default::default(), server);
+    let (client_ch, server_ch) = pair.connect();
+    assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
+    assert_matches!(pair.client_datagrams(client_ch).max_size(), None);
+    assert_matches!(
+        pair.client_datagrams(client_ch)
+            .send(Bytes::new(), Default::default()),
+        Err(SendDatagramError::UnsupportedByPeer)
+    );
 }
 
 #[test]

@@ -559,7 +559,7 @@ test("the pattern segment limit is immutable at runtime", () => {
 	const original = Pattern.MAX_SEGMENTS;
 	try {
 		expect(Reflect.set(Pattern, "MAX_SEGMENTS", 33)).toBe(false);
-		expect(Pattern.MAX_SEGMENTS).toBe(32);
+		expect(Pattern.MAX_SEGMENTS).toBe(original);
 		expect(errorCode(() => Pattern.parse(Array(33).fill("a").join("/")))).toBe("too-many-segments");
 	} finally {
 		Reflect.set(Pattern, "MAX_SEGMENTS", original);
