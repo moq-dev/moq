@@ -3309,6 +3309,11 @@ impl Producer {
 	/// Widen outgoing compressed ranges that cannot inflate from a cached prefix.
 	/// Only requesters call this: the original preferences keep filtering local reads,
 	/// and a server serves the frame bounds it was actually asked for.
+	///
+	/// A range kept mid-group relies on the cached prefix, so it counts as a read of that
+	/// copy and normal eviction takes it last. Nothing pins it: a prefix still lost
+	/// before its tail lands fails that group with [`Error::Lagged`], which takes a
+	/// consumer slower than the cache's turnover.
 	#[cfg_attr(
 		not(feature = "async"),
 		allow(dead_code, reason = "Only session adapters request upstream.")
@@ -3326,13 +3331,16 @@ impl Producer {
 			let Anchor::Absolute(start) = &mut range.start else {
 				continue;
 			};
-			if start.frame != 0
-				&& !state
-					.lookup
-					.get(&start.group)
-					.is_some_and(|slot| slot.copies().any(|group| group.holds_prefix(start.frame)))
-			{
-				start.frame = 0;
+			if start.frame == 0 {
+				continue;
+			}
+			let prefix = state
+				.lookup
+				.get(&start.group)
+				.and_then(|slot| slot.copies().find(|group| group.holds_prefix(start.frame)));
+			match prefix {
+				Some(group) => group.cache_refresh(),
+				None => start.frame = 0,
 			}
 		}
 	}
@@ -14238,6 +14246,52 @@ mod test {
 
 		assert!(consumer.peek_group(0).is_some(), "refreshed group survives");
 		assert!(consumer.peek_group(1).is_none(), "unread group is evicted instead");
+	}
+
+	/// Requesting a compressed tail from frame N reads the cached prefix it relies on, as a
+	/// FETCH hit does, so pressure evicts a never-read group first and the prefix stays to
+	/// seed the tail's inflater.
+	#[test]
+	fn a_requested_prefix_survives_eviction() {
+		let (producer, pool) = pooled_producer(u64::MAX);
+		let producer = Producer::new(producer.broadcast.clone(), "compressed", Info::timed().with_compress(true));
+		let consumer = producer.consume();
+		// Incompressible, so each group caches about its payload.
+		let mut seed = 1u32;
+		let mut append = || {
+			let payload: Vec<u8> = (0..3_000)
+				.map(|_| {
+					seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+					(seed >> 16) as u8
+				})
+				.collect();
+			let mut group = producer.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, payload).unwrap();
+			group.finish().unwrap();
+		};
+
+		append(); // seq 0
+		elapse(&producer, Duration::from_secs(1));
+		append(); // seq 1
+		elapse(&producer, Duration::from_secs(1));
+		let used = pool.used();
+		append(); // seq 2
+		// Room for the three groups and a little more, so each later append evicts one.
+		pool.resize(pool.used() + (pool.used() - used) / 3);
+		elapse(&producer, Duration::from_millis(500));
+
+		let start = Anchor::Absolute(Position { group: 0, frame: 1 });
+		let mut request = Subscription::default().with_ranges([Range { start, end: None }]);
+		producer.widen_compressed(&mut request);
+		assert_eq!(request.ranges[0].start, start, "a held prefix keeps the request at N");
+		elapse(&producer, Duration::from_millis(500));
+
+		append(); // seq 3
+		elapse(&producer, Duration::from_secs(1));
+		append(); // seq 4
+
+		assert!(consumer.peek_group(0).is_some(), "the requested prefix survives");
+		assert!(consumer.peek_group(1).is_none(), "an unread group is evicted instead");
 	}
 
 	/// A consumer holding an evicted group surfaces the eviction, not a hang or a
