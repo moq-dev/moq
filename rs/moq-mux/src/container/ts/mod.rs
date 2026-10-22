@@ -24,6 +24,7 @@
 //! [`Release`] writes that track back out on a fixed delay.
 
 mod adts;
+mod claims;
 mod damage;
 mod export;
 mod follower;

@@ -959,14 +959,24 @@ fn import_reports_a_silent_scte35_pid() {
 	assert_stalls(data, 0x14d, ".ts", 0x100, 2.5, 3.5);
 }
 
-/// Every elementary stream the importer carries reports a row, decoded, clock-only, and
-/// verbatim alike, and every row has delivered.
+/// Every PID reports a row: each elementary stream the importer carries, decoded, whole PES
+/// (MPEG-2 video among them) and sections alike, has delivered, and each PID no table claims
+/// (an ATSC capture's CAT, PSIP base PID and its private PIDs) counts what it dropped.
 #[test]
 fn import_reports_every_elementary_stream() {
 	for (data, rows) in [
 		(
 			&include_bytes!("test_data/kyrion_mpeg2av_ac3.ts")[..],
-			&[(0x100, ""), (0x101, ".ac3"), (0x102, ".mp2"), (0x14d, ".ts")][..],
+			&[
+				(0x0001, ""),
+				(0x100, ".ts"),
+				(0x101, ".ac3"),
+				(0x102, ".mp2"),
+				(0x14d, ".ts"),
+				(0x1fd0, ""),
+				(0x1fd1, ""),
+				(0x1ffb, ""),
+			][..],
 		),
 		(
 			&include_bytes!("test_data/scte35/bbb5s.ts")[..],
@@ -977,6 +987,11 @@ fn import_reports_every_elementary_stream() {
 		let tracks: Vec<(u16, &str)> = stats.streams.iter().map(|(&pid, s)| (pid, s.track.as_str())).collect();
 		assert_eq!(tracks, rows);
 		for (pid, stream) in &stats.streams {
+			if stream.track.is_empty() {
+				assert_eq!(stream.class, super::stats::Class::Data, "{pid:#x}: {stream:?}");
+				assert!(stream.refused > 0 && stream.units == 0, "{pid:#x}: {stream:?}");
+				continue;
+			}
 			assert!(stream.units > 0, "{pid:#x} delivered nothing: {stream:?}");
 			assert!(stream.quiet.is_some(), "{pid:#x} has no program clock: {stream:?}");
 		}

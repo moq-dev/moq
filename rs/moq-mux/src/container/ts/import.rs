@@ -37,10 +37,11 @@ use moq_net::Timestamp;
 
 /// Demuxes an MPEG-TS byte stream into a MoQ broadcast.
 ///
-/// Supports H.264 (stream type 0x1B), H.265 (0x24), ADTS AAC (0x0F), MP2
-/// (0x03/0x04), AC-3 (0x81), and E-AC-3 (0x87). LATM/LOAS AAC (0x11) is not
-/// ADTS-framed and is dropped. Each codec stream is fed to its importer, which
-/// manages the track, catalog config, and keyframe-based group boundaries.
+/// Decodes H.264 (stream type 0x1B), H.265 (0x24), ADTS AAC (0x0F), MP2
+/// (0x03/0x04), AC-3 (0x81), and E-AC-3 (0x87). Each codec stream is fed to its importer, which
+/// manages the track, catalog config, and keyframe-based group boundaries. MPEG-1/2 video
+/// (0x01/0x02) is not decoded but still paces the program: its PTS anchors the timebase while
+/// its PES ride whole as below.
 ///
 /// Partial header contents hold at most 264 bytes per PID. PES payloads and sections awaiting a
 /// timestamp share half a MoQ group's byte budget; held sections also share half its frame
@@ -48,10 +49,19 @@ use moq_net::Timestamp;
 ///
 /// Elementary streams we don't decode are carried verbatim, one MoQ track per
 /// PID, when the catalog `E` carries the [`mpegts`](super::Mpegts) section: section-framed
-/// streams (SCTE-35, marked by a program-level 'CUEI' registration descriptor, and other
-/// private sections) are reassembled as sections, and any other stream travels as whole PES
-/// packets ([`PesPacket`](super::PesPacket)). With a base `Catalog<()>` they're logged and
-/// dropped instead.
+/// streams (private sections 0x05, the ISO 13818-6 DSM-CC types 0x0A to 0x0D, and SCTE-35 0x86
+/// marked by a program-level 'CUEI' registration descriptor) are reassembled as sections, and
+/// any other stream travels as whole PES packets ([`PesPacket`](super::PesPacket)), LATM/LOAS
+/// AAC (0x11) included. A 0x86 stream without 'CUEI', which may be DTS audio or SCTE-35, is not
+/// carried. With a base `Catalog<()>` no undecoded stream is carried.
+///
+/// Every PID is accounted for. A listed stream that is not carried counts once in
+/// [`stats::Stream::refused`] with a warning, and so does each TS-scrambled packet on a carried
+/// one. Once every program the PAT lists has delivered its PMT, or let it lapse past TR 101
+/// 290's 0.5 s, a packet on a PID no table claims (the null PID aside) counts in its own row:
+/// see [`stats::Snapshot::streams`]. That holds when the PAT lists only the imported program; a
+/// [`with_program`](Self::with_program) import of a multiplex cannot tell another program's PIDs
+/// from unclaimed ones, so it leaves them to [`Programs`](super::Programs).
 ///
 /// A whole PES or section is timestamped with its placement: the program clock at its first byte,
 /// interpolated between the PCRs either side of it (ISO 13818-1 2.4.2.2) and shifted onto the
@@ -202,6 +212,11 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// The program number chosen by [`with_program`](Self::with_program). `None` imports the
 	/// multiplex's only program and refuses a PAT that lists more than one.
 	program: Option<u16>,
+	/// The PIDs no table claims, counted while the PAT lists only the imported program. `None`
+	/// under [`Programs`](super::Programs), which counts them once for the multiplex.
+	claims: Option<super::claims::Claims>,
+	/// Carried PIDs already warned about a TS-scrambled packet.
+	scrambled: HashSet<u16>,
 }
 
 impl<E: catalog::Catalog> Import<E> {
@@ -265,6 +280,12 @@ impl<E: catalog::Catalog> Import<E> {
 			last_pts: None,
 			pts: PtsUnwrap::default(),
 			program: None,
+			claims: Some(super::claims::Claims::new(if supports_mpegts {
+				catalog::SI_PIDS
+			} else {
+				&[]
+			})),
+			scrambled: HashSet::new(),
 		}
 	}
 
@@ -286,6 +307,13 @@ impl<E: catalog::Catalog> Import<E> {
 	/// this input demuxes, since the tracks are discovered rather than named by the caller.
 	pub fn with_container(mut self, container: hang::catalog::Container) -> Self {
 		self.container = container;
+		self
+	}
+
+	/// Leave the PIDs no program claims to [`Programs`](super::Programs), which reads every
+	/// program's PMT and counts them once for the multiplex.
+	pub(super) fn in_multiplex(mut self) -> Self {
+		self.claims = None;
 		self
 	}
 
@@ -320,6 +348,12 @@ impl<E: catalog::Catalog> Import<E> {
 			// Every packet paces the multiplex, null stuffing and retransmissions included.
 			if self.supports_mpegts {
 				self.mux_rate.packet();
+			}
+			// A packet flagged corrupt may carry another PID's number.
+			if pkt[1] & 0x80 == 0
+				&& let Some(claims) = &mut self.claims
+			{
+				claims.packet(pid);
 			}
 			// Every packet is graded, but only the media PIDs and the clock route on the
 			// verdict: PSI and section PIDs keep their reassemblers' own.
@@ -387,6 +421,9 @@ impl<E: catalog::Catalog> Import<E> {
 					self.liveness.pcr(pcr);
 					if let Some(now) = self.liveness.now() {
 						self.health.tick(now);
+						if let Some(claims) = &mut self.claims {
+							claims.tick(now);
+						}
 					}
 					if self.supports_mpegts {
 						let ready = self.mux_rate.ready();
@@ -401,6 +438,21 @@ impl<E: catalog::Catalog> Import<E> {
 						}
 					}
 				}
+			}
+			// TS-level scrambling hides a payload from all but a descrambler, so the semantic lane
+			// cannot carry it where the raw lane can. Its adaptation field stays clear: the clock
+			// above has read it.
+			if pkt[1] & 0x80 == 0
+				&& pkt[3] & 0xc0 != 0
+				&& let Ok(pid) = Pid::new(pid)
+				&& (self.sections.contains_key(&pid.as_u16())
+					|| self
+						.streams
+						.get(&pid)
+						.is_some_and(|stream| !matches!(stream, Stream::Ignored)))
+			{
+				self.scrambled(pid)?;
+				continue;
 			}
 			if let Some(section) = self.sections.get_mut(&pid) {
 				let unplaced = section.packet(&pkt, offset, &self.placement)?;
@@ -451,10 +503,10 @@ impl<E: catalog::Catalog> Import<E> {
 			} else if self.pmt_sections.contains_key(&pid) {
 				self.pmt_packet(pid, &pkt)?;
 			} else {
-				// PIDs we don't decode and don't carry (`Stream::Ignored`: a base catalog's
-				// undecoded streams, or an ambiguous 0x86 PID without CUEI) are dropped, as is
-				// every PID before the PSI that declares it: a live capture joins mid-stream,
-				// so PES arrive before their PMT.
+				// PIDs we don't carry (`Stream::Ignored`, counted when refused) are dropped, as is
+				// every PID no table claims (counted by `claims` above) and every PID before the
+				// PSI that declares it: a live capture joins mid-stream, so PES arrive before
+				// their PMT.
 				match self.streams.get(&pid) {
 					None | Some(Stream::Ignored) => {}
 					Some(_) => self.pes_packet(pid, &pkt, offset)?,
@@ -550,11 +602,14 @@ impl<E: catalog::Catalog> Import<E> {
 			if self.supports_mpegts {
 				self.es_descriptors.insert(es.pid.as_u16(), es.descriptors.clone());
 			}
-			// Section-framed private data is reassembled as sections, never PES-parsed:
-			// private sections (0x05) and CUEI-marked SCTE-35 (0x86). Everything else
-			// routes through ensure_stream (a decoded codec, PES-framed verbatim, or
-			// dropped).
-			if es.stream_type == 0x05 || (cuei && es.stream_type == StreamType::Dts8ChannelLosslessAudio as u8) {
+			// Section-framed data is reassembled as sections, never PES-parsed: private sections
+			// (0x05), the ISO 13818-6 DSM-CC types, each of which rides DSM-CC sections (0x0A
+			// multiprotocol encapsulation, 0x0B U-N messages and carousels, 0x0C stream
+			// descriptors, 0x0D any DSM-CC section), and CUEI-marked SCTE-35 (0x86). Everything
+			// else routes through ensure_stream (a decoded codec, whole PES, or refused).
+			if matches!(es.stream_type, 0x05 | 0x0a..=0x0d)
+				|| (cuei && es.stream_type == StreamType::Dts8ChannelLosslessAudio as u8)
+			{
 				self.ensure_section(es.pid, es.stream_type, &es.descriptors)?;
 			} else {
 				self.ensure_stream(es.pid, es.stream_type, &es.descriptors)?;
@@ -573,16 +628,9 @@ impl<E: catalog::Catalog> Import<E> {
 			}
 		}
 		self.media_clock = pmt.streams.iter().any(|es| {
-			matches!(
-				self.streams.get(&es.pid),
-				Some(
-					Stream::H264 { .. }
-						| Stream::H265 { .. }
-						| Stream::Aac(_) | Stream::Opus(_)
-						| Stream::Legacy(_)
-						| Stream::Clock
-				)
-			)
+			self.streams.get(&es.pid).is_some_and(|stream| {
+				stream.video() || matches!(stream, Stream::Aac(_) | Stream::Opus(_) | Stream::Legacy(_))
+			})
 		});
 		if let Some(pid) = self.pcr_pid {
 			let initial = self.pcr_candidates.remove(&pid);
@@ -593,6 +641,16 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		let pids: Vec<u16> = pmt.streams.iter().map(|es| es.pid.as_u16()).collect();
 		self.health.pmt_streams(&pids);
+		// The PIDs this import routes, carried or refused, which are the PMT's own once a PMT that
+		// drops a stream ends its route.
+		if let Some(claims) = &mut self.claims {
+			let routed = self
+				.streams
+				.keys()
+				.map(|pid| pid.as_u16())
+				.chain(self.sections.keys().copied());
+			claims.pmt(pmt.program_number, routed.chain(pmt.pcr_pid.map(|pid| pid.as_u16())));
+		}
 		Ok(())
 	}
 
@@ -685,7 +743,7 @@ impl<E: catalog::Catalog> Import<E> {
 				self.unclocked.insert(pid, carried);
 				return Ok(());
 			}
-			Some(Stream::Ignored)
+			Some(Stream::Ignored | Stream::Clock)
 				if self
 					.unclocked
 					.get(&pid)
@@ -718,7 +776,7 @@ impl<E: catalog::Catalog> Import<E> {
 				}
 			}
 			// Only ADTS-framed AAC (0x0F). 0x11 is LATM/LOAS, which uses a different
-			// framing and syncword, so it falls through to the ignored arm below.
+			// framing and syncword, so it rides whole like any other undecoded stream.
 			Some(StreamType::AdtsAac) => Stream::Aac(Box::new(AacStream {
 				import: None,
 				asc: bytes::Bytes::new(),
@@ -755,54 +813,35 @@ impl<E: catalog::Catalog> Import<E> {
 							import: opus::Import::new(track, self.reserve(), config)?,
 						}))
 					}
-					Err(err) => {
-						tracing::warn!(
-							pid = pid.as_u16(),
-							error = %err,
-							"unsupported Opus channel configuration, dropping"
-						);
-						Stream::Ignored
-					}
+					Err(err) => self.uncarried(
+						pid,
+						stream_type,
+						&format!("unsupported Opus channel configuration: {err:#}"),
+					),
 				}
 			}
-			Some(StreamType::Mpeg1Video | StreamType::Mpeg2Video) => Stream::Clock,
-			// A codec we don't decode, named or not. Carry it as whole PES packets when the
-			// catalog supports the `mpegts` section. 0x86 is excluded: it's ambiguous (DTS
-			// audio, or a non-conformant SCTE-35 mux without CUEI, which is sections a PES
-			// parse would abort on), so drop it rather than risk PES-parsing sections.
-			_ => {
-				if self.supports_mpegts && stream_type != StreamType::Dts8ChannelLosslessAudio as u8 {
-					if self.pcr_pid.is_none() {
-						// Nothing could place its PES, so no track is advertised.
-						tracing::warn!(
-							stream_type,
-							pid = pid.as_u16(),
-							"refused a private PES stream in a program with no PCR to place it by"
-						);
-						*self.refused.entry(pid.as_u16()).or_default() += 1;
-						self.unclocked.insert(pid, stream_type);
-						Stream::Ignored
-					} else {
-						let descriptors = descriptors.to_vec();
-						match PesPacketStream::new(
-							self.broadcast.clone(),
-							self.catalog.clone(),
-							pid.as_u16(),
-							stream_type,
-							descriptors,
-						) {
-							Ok(stream) => Stream::PesPacket(Box::new(stream)),
-							Err(err) => {
-								tracing::warn!(?err, pid = pid.as_u16(), "failed to create a PES stream, dropping");
-								Stream::Ignored
-							}
-						}
-					}
-				} else {
-					tracing::warn!(stream_type, pid = pid.as_u16(), "unsupported TS stream type, dropping");
-					Stream::Ignored
-				}
+			// 0x86 is ambiguous: DTS audio, or a non-conformant SCTE-35 mux without CUEI, which is
+			// sections a PES parse would abort on. Refuse it rather than guess.
+			_ if stream_type == StreamType::Dts8ChannelLosslessAudio as u8 => self.uncarried(
+				pid,
+				stream_type,
+				"0x86 without a CUEI registration may be DTS or SCTE-35",
+			),
+			// A codec we don't decode, named or not, MPEG-1/2 video included, rides as whole PES
+			// packets when the catalog supports the `mpegts` section.
+			_ if !self.supports_mpegts => self.uncarried(pid, stream_type, "the catalog has no mpegts section"),
+			_ if self.pcr_pid.is_none() => {
+				// Nothing could place its PES, so no track is advertised.
+				self.unclocked.insert(pid, stream_type);
+				self.uncarried(pid, stream_type, "the program has no PCR to place it by")
 			}
+			_ => Stream::PesPacket(Box::new(PesPacketStream::new(
+				self.broadcast.clone(),
+				self.catalog.clone(),
+				pid.as_u16(),
+				stream_type,
+				descriptors.to_vec(),
+			)?)),
 		};
 
 		// Clock is not a decodable track, so it doesn't initialize the importer.
@@ -815,6 +854,17 @@ impl<E: catalog::Catalog> Import<E> {
 		self.streams.insert(pid, stream);
 		self.health.restart(pid.as_u16());
 		Ok(())
+	}
+
+	/// The route of a listed stream this import does not carry, counted once as refused. MPEG-1/2
+	/// video still paces the program by its PTS.
+	fn uncarried(&mut self, pid: Pid, stream_type: u8, why: &str) -> Stream<E> {
+		*self.refused.entry(pid.as_u16()).or_default() += 1;
+		tracing::warn!(pid = pid.as_u16(), stream_type, why, "refused a listed stream");
+		match mpeg_video(stream_type) {
+			true => Stream::Clock,
+			false => Stream::Ignored,
+		}
 	}
 
 	fn legacy_stream(&self, pid: Pid, descriptor: &'static legacy::Descriptor) -> Stream<E> {
@@ -852,15 +902,12 @@ impl<E: catalog::Catalog> Import<E> {
 		self.health.restart(pid.as_u16());
 		if !self.supports_mpegts {
 			// Always route to Ignored, replacing any prior codec on this PID (a later PMT
-			// can reassign it), so a private section is never PES-parsed. Warn once.
-			let previous = self.retire_stream(pid);
-			self.streams.insert(pid, Stream::Ignored);
-			if !matches!(previous, Some(Stream::Ignored)) {
-				tracing::warn!(
-					pid = pid.as_u16(),
-					"private section stream detected without `mpegts` catalog support; dropping"
-				);
-			}
+			// can reassign it), so a private section is never PES-parsed. Counted once.
+			let stream = match self.retire_stream(pid) {
+				Some(Stream::Ignored) => Stream::Ignored,
+				_ => self.uncarried(pid, stream_type, "the catalog has no mpegts section"),
+			};
+			self.streams.insert(pid, stream);
 			return Ok(());
 		}
 		// A prior PMT may have routed this PID to Ignored; drop it so the PID has one route.
@@ -924,11 +971,11 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		let stream = &self.streams[&pid];
 
-		let is_video = matches!(stream, Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock);
+		let is_video = stream.video();
 		let is_clock = matches!(stream, Stream::Clock);
 		// Verbatim streams with no cadence (SCTE-35, DVB subtitles) are left ungraded
 		// rather than watched against an invented one.
-		if pes.pts.is_some() && !matches!(stream, Stream::PesPacket(_) | Stream::Ignored) {
+		if pes.pts.is_some() && (is_video || !matches!(stream, Stream::PesPacket(_) | Stream::Ignored)) {
 			self.health.pts(pid.as_u16(), self.liveness.now());
 		}
 		// Resolve the wrap at PES start so every elementary stream and private section shares
@@ -1054,10 +1101,7 @@ impl<E: catalog::Catalog> Import<E> {
 			return Ok(());
 		};
 
-		let batched = self
-			.streams
-			.values()
-			.any(|stream| matches!(stream, Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock));
+		let batched = self.streams.values().any(Stream::video);
 		let Some(stream) = self.streams.get_mut(&pid) else {
 			return Ok(());
 		};
@@ -1184,12 +1228,37 @@ impl<E: catalog::Catalog> Import<E> {
 		if let Some(section) = self.sections.remove(&pid.as_u16()) {
 			section.abort(moq_net::Error::Unsupported);
 		}
-		if let Some(stream) = self.retire_stream(pid) {
-			stream.abort(moq_net::Error::Unsupported);
-		}
-		self.streams.insert(pid, Stream::Ignored);
+		// MPEG-1/2 video still paces the program once its PES are refused.
+		let clock = match self.retire_stream(pid) {
+			Some(stream) => {
+				let video = stream.video();
+				stream.abort(moq_net::Error::Unsupported);
+				video
+			}
+			None => false,
+		};
+		self.streams
+			.insert(pid, if clock { Stream::Clock } else { Stream::Ignored });
 		*self.refused.entry(pid.as_u16()).or_default() += 1;
 		tracing::warn!(pid = pid.as_u16(), why, "refused an undecoded stream");
+		Ok(())
+	}
+
+	/// A TS-scrambled packet on the carried `pid`: refused, and the unit it interrupts lost with
+	/// it. The route stays, so the stream resumes once its packets are clear again.
+	fn scrambled(&mut self, pid: Pid) -> anyhow::Result<()> {
+		self.pending.remove(&pid);
+		self.headers.remove(&pid);
+		if let Some(stream) = self.streams.get_mut(&pid) {
+			stream.lost()?;
+		}
+		*self.refused.entry(pid.as_u16()).or_default() += 1;
+		if self.scrambled.insert(pid.as_u16()) {
+			tracing::warn!(
+				pid = pid.as_u16(),
+				"refusing TS-scrambled packets; carry the multiplex whole to keep them"
+			);
+		}
 		Ok(())
 	}
 
@@ -1370,6 +1439,15 @@ impl<E: catalog::Catalog> Import<E> {
 		};
 		self.pmt_sections.entry(entry.pmt_pid).or_default();
 		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.liveness.now());
+		if let Some(claims) = &mut self.claims {
+			// Alongside another program, a PID could be that program's: the count waits for a PAT
+			// listing this one alone.
+			let listed = match programs.as_slice() {
+				[_] => vec![(entry.program_number, entry.pmt_pid)],
+				_ => Vec::new(),
+			};
+			claims.pat(&listed, self.liveness.now());
+		}
 		self.record_program_identity(pat.transport_stream_id, entry)
 	}
 
@@ -1492,6 +1570,9 @@ impl<E: catalog::Catalog> Import<E> {
 				.entry(pid)
 				.or_insert_with(|| stats::Stream::new(".ts", stats::Class::Data))
 				.refused = refused;
+		}
+		if let Some(claims) = &self.claims {
+			stats::Stream::dropped(&mut streams, claims.rows());
 		}
 		for (pid, stats) in &mut streams {
 			(stats.units, stats.quiet) = self.liveness.stream(*pid);
@@ -2583,6 +2664,12 @@ fn unit_error(err: crate::Error) -> anyhow::Error {
 	}
 }
 
+/// Whether `stream_type` is MPEG-1 or MPEG-2 video, which is carried whole but still paces the
+/// program like decoded video.
+fn mpeg_video(stream_type: u8) -> bool {
+	matches!(stream_type, 0x01 | 0x02)
+}
+
 /// One elementary stream's codec importer.
 enum Stream<E: catalog::Catalog = ()> {
 	H264 {
@@ -2596,10 +2683,10 @@ enum Stream<E: catalog::Catalog = ()> {
 	Aac(Box<AacStream<E>>),
 	Opus(Box<OpusStream>),
 	Legacy(Box<LegacyStream<E>>),
-	/// A codec we don't decode, carried as whole PES (DTS audio, private PES, ...).
+	/// A codec we don't decode, carried as whole PES (MPEG-1/2 video, LATM AAC, private PES, ...).
 	PesPacket(Box<PesPacketStream<E>>),
-	/// MPEG-1/2 video we don't decode, kept only to advance the media clock.
-	/// `is_video` counts it, so never reuse this variant for audio or data.
+	/// MPEG-1/2 video this import refused to carry, kept only to advance the media clock.
+	/// [`Self::video`] counts it, so never reuse this variant for audio or data.
 	Clock,
 	Ignored,
 }
@@ -2670,6 +2757,15 @@ impl<E: catalog::Catalog> Stream<E> {
 				Ok(0)
 			}
 			Stream::Clock | Stream::Ignored => Ok(0),
+		}
+	}
+
+	/// Whether this is the program's video, decoded or not, whose pictures pace the program.
+	fn video(&self) -> bool {
+		match self {
+			Stream::H264 { .. } | Stream::H265 { .. } | Stream::Clock => true,
+			Stream::PesPacket(stream) => mpeg_video(stream.stream_type),
+			_ => false,
 		}
 	}
 
@@ -2804,7 +2900,10 @@ impl<E: catalog::Catalog> Stream<E> {
 			Stream::H264 { .. } => stats::Stream::new(".avc3", stats::Class::Video),
 			Stream::H265 { .. } => stats::Stream::new(".hev1", stats::Class::Video),
 			Stream::Opus(_) => stats::Stream::new(".opus", stats::Class::Audio),
-			Stream::PesPacket(_) => stats::Stream::new(".ts", stats::Class::Data),
+			Stream::PesPacket(stream) => match mpeg_video(stream.stream_type) {
+				true => stats::Stream::new(".ts", stats::Class::Video),
+				false => stats::Stream::new(".ts", stats::Class::Data),
+			},
 			Stream::Clock => stats::Stream::new("", stats::Class::Video),
 			Stream::Ignored => return None,
 		})
@@ -4209,7 +4308,10 @@ pub(super) mod test {
 			.unwrap();
 
 		assert!(matches!(import.streams.get(&pid), Some(super::Stream::Ignored)));
-		assert_eq!(import.stats(), before, "a PMT remap must not reset lifetime counters");
+		// A base catalog cannot carry the section route, which counts as refused.
+		let mut expected = before;
+		expected.streams.get_mut(&pid.as_u16()).unwrap().refused = 1;
+		assert_eq!(import.stats(), expected, "a PMT remap must not reset lifetime counters");
 	}
 
 	/// Build a payload-only TS packet (PID 0x0021, afc 0b01). `body` is the bytes
@@ -4486,7 +4588,7 @@ pub(super) mod test {
 		import.finish().unwrap();
 
 		assert_eq!(
-			catalog.snapshot().ext.mpegts.tracks.len(),
+			cue_tracks(&catalog.snapshot().ext.mpegts),
 			1,
 			"expected one scte35 rendition"
 		);
@@ -4547,7 +4649,7 @@ pub(super) mod test {
 			first.video.renditions.is_empty() && first.audio.renditions.is_empty(),
 			"only the extension lists a track"
 		);
-		assert_eq!(first.ext.mpegts.tracks.len(), 1, "the cue track is listed");
+		assert_eq!(cue_tracks(&first.ext.mpegts), 1, "the cue track is listed");
 	}
 
 	// The base catalog (`Catalog<()>`) can't carry cues, so a detected CUEI PID routes to
@@ -4643,14 +4745,14 @@ pub(super) mod test {
 			"upgrade drops the stale Ignored route"
 		);
 		assert_eq!(
-			catalog.snapshot().ext.mpegts.tracks.len(),
+			cue_tracks(&catalog.snapshot().ext.mpegts),
 			1,
 			"upgrade advertises the cue track"
 		);
 
 		// The importer clears its verbatim entries from the catalog when it drops, so read the
 		// track name while it is still registered.
-		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
+		let name = track_on(&catalog.snapshot().ext.mpegts, SECTION_PID);
 		import.finish().unwrap();
 		let track = consumer
 			.track(&name)
@@ -4707,7 +4809,7 @@ pub(super) mod test {
 
 		let stats = import.stats();
 		assert_eq!(stats.streams[&VIDEO].class, super::stats::Class::Video);
-		assert_eq!(stats.streams[&VIDEO].track, "");
+		assert_eq!(stats.streams[&VIDEO].track, ".ts");
 		assert!(
 			stats.streams[&VIDEO].units >= 1,
 			"the video PID delivered before it stalled"
@@ -4730,6 +4832,17 @@ pub(super) mod test {
 				_ => Err(format!("expected only the stalled video PID, got {stopped:?}")),
 			}
 		});
+	}
+
+	/// The section tracks the `mpegts` section lists, beside any whole-PES video clocking them.
+	fn cue_tracks(mpegts: &super::catalog::Mpegts) -> usize {
+		mpegts.tracks.values().filter(|track| track.verbatim.is_some()).count()
+	}
+
+	/// The track the `mpegts` section carries `pid` on.
+	fn track_on(mpegts: &super::catalog::Mpegts, pid: u16) -> String {
+		let found = mpegts.tracks.iter().find(|(_, track)| track.pid == pid);
+		found.expect("a track on the PID").0.clone()
 	}
 
 	/// A PUSI TS packet on `pid` carrying a minimal PES with `pts` (90 kHz) and a
@@ -6594,7 +6707,7 @@ pub(super) mod test {
 		let expected = 1_000_000 + (at - (2 * 188 + 10)) * 100_000 / (3 * 188);
 		import.finish().unwrap();
 
-		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
+		let name = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 		let track = consumer
 			.track(&name)
 			.unwrap()
@@ -6649,7 +6762,7 @@ pub(super) mod test {
 			let last = data.len() as u64 + 10;
 			data.extend(pcr_packet(PCR_PID, 31_050_000));
 			let (consumer, catalog, _import) = import_all(&data).unwrap();
-			let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
+			let name = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 			let frames = read_track(&consumer, &name, crate::container::Kind::Data).await;
 			let times: Vec<_> = frames.iter().map(|frame| frame.timestamp.as_micros() as u64).collect();
 			let clock = |at: u64, before: u64, ticks: u64, after: u64| {
@@ -6684,7 +6797,7 @@ pub(super) mod test {
 		data.extend(packet(true, 1, 0, &CUE));
 		let (consumer, catalog, import) = import_all(&data).unwrap();
 		assert_eq!(import.stats().streams[&0x21].unplaced, 2);
-		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
+		let name = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 		assert!(
 			read_track(&consumer, &name, crate::container::Kind::Data)
 				.await
@@ -6731,7 +6844,13 @@ pub(super) mod test {
 			"video kept importing past the dropped section PID"
 		);
 		assert!(
-			catalog.snapshot().ext.mpegts.tracks.is_empty(),
+			!catalog
+				.snapshot()
+				.ext
+				.mpegts
+				.tracks
+				.values()
+				.any(|track| track.pid == SECTION_PID),
 			"a 0x86 PID without CUEI must not be cataloged"
 		);
 	}
@@ -7299,7 +7418,7 @@ pub(super) mod test {
 		import.decode(pes_packet(PCR_PID, 90_000).as_slice()).unwrap();
 		import.decode(pcr_packet(PCR_PID, 27_000_000).as_slice()).unwrap();
 		import.finish().unwrap();
-		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
+		let name = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 		let (frames, breaks) = read_breaks(&consumer, &name, crate::container::Kind::Data).await;
 		assert_eq!(frames.len(), 3);
 		assert_eq!(
@@ -7880,10 +7999,7 @@ pub(super) mod test {
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
 			.decode(&synth_pmt(
-				&[
-					(StreamType::Mpeg2Video, 0x50),
-					(StreamType::Dts8ChannelLosslessAudio, 0x21),
-				],
+				&[(StreamType::H264, 0x50), (StreamType::Dts8ChannelLosslessAudio, 0x21)],
 				true,
 			))
 			.unwrap();
@@ -8972,7 +9088,7 @@ pub(super) mod test {
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
-			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.decode(&synth_pmt(&[(StreamType::H264, PCR_PID)], false))
 			.unwrap();
 		let waiter = kio::Waiter::noop();
 		// Each epoch carries 0.96 s of media, then a flagged PCR restarts the clock.
@@ -9598,7 +9714,7 @@ pub(super) mod test {
 				(257, 0x06, "verbatim", "pesPacket"),
 				(258, 0x05, "verbatim", "section"),
 				(259, 0x86, "dropped", "none"),
-				(260, 0x02, "dropped", "clock only"),
+				(260, 0x02, "verbatim", "pesPacket"),
 				(261, 0x0f, "track", "decoded"),
 			] {
 				if !streams.iter().any(|line| {
@@ -9716,7 +9832,7 @@ pub(super) mod test {
 			assert!(catalog.snapshot().ext.mpegts.tracks.is_empty());
 			assert!(matches!(import.streams[&pid], super::Stream::Ignored));
 			import.handle_pmt(pmt(Some(Pid::new(PCR_PID).unwrap()))).unwrap();
-			let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
+			let name = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 			let data = [
 				pcr_packet(PCR_PID, 27_000_000),
 				pes_packet(PCR_PID, 99_000),
@@ -9745,7 +9861,7 @@ pub(super) mod test {
 			);
 			assert!(catalog.snapshot().ext.mpegts.tracks.is_empty());
 			import.handle_pmt(pmt(Some(Pid::new(PCR_PID).unwrap()))).unwrap();
-			let next = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
+			let next = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 			assert_ne!(next, name, "restoring a stream publishes a new track");
 			import.finish().unwrap();
 		}
