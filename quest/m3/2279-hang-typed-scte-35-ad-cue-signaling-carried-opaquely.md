@@ -31,9 +31,7 @@ independent of media GOPs.
 - **The TS lanes stay.** The importer keeps the verbatim `mpegts` track for
   contribution fidelity and additionally emits the sidecar; the exporter must
   not double-emit: an import-to-export test with the sidecar present asserts
-  each source section is emitted exactly once. Audio-only section export is
-  owned by [clockless export](/quest/m1/ts-reliability/clockless-export.md), so the
-  audio-only mapping above is a promise export can keep.
+  each source section is emitted exactly once, including audio-only programs.
 
 Wire and catalog schema: a new optional section, additive, so it lands on
 `main`, with `drafts/draft-lcurley-moq-hang.md` updated in the same PR as the
@@ -44,7 +42,6 @@ be in it the day it ships. Cross-package sync: `rs/hang`, `js/hang`,
 ## Required
 
 - [fMP4 emsg](/quest/m3/emsg.md) - settles the shared timed-metadata contract this builds on, which needs maintainer agreement first
-- [Clockless export](/quest/m1/ts-reliability/clockless-export.md) - TS export carries sections in audio-only programs
 
 ## Related
 

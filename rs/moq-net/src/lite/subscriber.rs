@@ -77,6 +77,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	version: Version,
 	/// The peer's advertised SETUP (lite-05+), set when its Setup stream is read.
 	peer_setup: super::PeerSetup,
+	/// GROUP streams parked until the peer's SETUP says how to read their header.
+	setup_waits: Arc<atomic::AtomicUsize>,
 	/// Local policy overriding the peer's declared egress price. See `poll_link_cost`.
 	cost: Option<u64>,
 	/// Sources minted by the announce half, drained by the driver into
@@ -119,6 +121,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			next_id: Default::default(),
 			version: config.version,
 			peer_setup: config.peer_setup,
+			setup_waits: Default::default(),
 			cost: config.cost,
 			sources: kio::Queue::new(),
 			going_away: config.going_away,
@@ -638,6 +641,22 @@ impl<S: crate::transport::poll::Session> SubscriberDriver<S> {
 		self.cleanup.close();
 	}
 
+	/// Read only the closed transport's buffered uni streams. Control machines
+	/// stay owned, so their cancellation guards cannot remove subscription state.
+	pub fn poll_drain(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let closed = self.uni.poll(waiter).is_ready();
+		let _ = self.uni.children.poll(waiter);
+		// Once every remaining stream waits on a SETUP that never arrived, none of
+		// them can deliver it: the peer can open no more.
+		let stuck = self.subscriber.peer_setup.ietf().is_none()
+			&& self.uni.children.len() == self.subscriber.setup_waits.load(atomic::Ordering::Relaxed);
+		if closed && (self.uni.children.is_empty() || stuck) {
+			Poll::Ready(())
+		} else {
+			Poll::Pending
+		}
+	}
+
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut i = 0;
 		while i < self.prefixes.len() {
@@ -848,6 +867,24 @@ struct GroupRecv<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	reader: Reader<S::RecvStream, Version>,
 	state: GroupRecvState,
+	/// Held while parked on the peer's SETUP, so a drain can tell it never arrives.
+	setup_wait: Option<SetupWait>,
+}
+
+/// Counts one GROUP stream parked on the peer's SETUP for as long as it lives.
+struct SetupWait(Arc<atomic::AtomicUsize>);
+
+impl SetupWait {
+	fn new(waits: &Arc<atomic::AtomicUsize>) -> Self {
+		waits.fetch_add(1, atomic::Ordering::Relaxed);
+		Self(waits.clone())
+	}
+}
+
+impl Drop for SetupWait {
+	fn drop(&mut self) {
+		self.0.fetch_sub(1, atomic::Ordering::Relaxed);
+	}
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -875,6 +912,7 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 			subscriber,
 			reader,
 			state: GroupRecvState::Header,
+			setup_wait: None,
 		}
 	}
 
@@ -883,7 +921,12 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 			match &mut self.state {
 				GroupRecvState::Header => {
 					// Before the header, which a wait after it would lose.
-					let ietf = ready!(self.subscriber.peer_setup.poll_ietf(waiter));
+					let Poll::Ready(ietf) = self.subscriber.peer_setup.poll_ietf(waiter) else {
+						let waits = &self.subscriber.setup_waits;
+						self.setup_wait.get_or_insert_with(|| SetupWait::new(waits));
+						return Poll::Pending;
+					};
+					self.setup_wait = None;
 					let mut cx = waiter.context();
 					let hdr = ready!(self.reader.poll_decode::<lite::Group>(&mut cx))?;
 
@@ -2465,6 +2508,9 @@ mod tests {
 						let waiter = kio::Waiter::noop();
 						let mut fixtures = Vec::new();
 						for _ in 0..tracks {
+							// The sim counts ready polls per task poll to catch spinning loops, so
+							// give each track's setup, and the timed loop below, a poll of its own.
+							moq_clock::sim::yield_now().await;
 							let (track, callers, requests) = feed_batch(1_000_000..1_000_000 + held);
 							let tail = kio::Producer::new(Tail::default());
 							let sub = feed_sub(&tail).await;
@@ -2488,6 +2534,7 @@ mod tests {
 							fixtures.push((track, callers, tail, sub, scan, fetches));
 						}
 						let (track, _callers, tail, sub, scan, fetches) = &mut fixtures[0];
+						moq_clock::sim::yield_now().await;
 						#[allow(clippy::disallowed_methods)]
 						let began = std::time::Instant::now();
 						for sequence in runs * 2..runs * 2 + EVENTS {

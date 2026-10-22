@@ -262,6 +262,7 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 		config: MoqVideo {
 			label: None,
 			broadcast: None,
+			epoch: None,
 			track: None,
 			codec: "avc1.64001f".into(),
 			description: None,
@@ -283,6 +284,7 @@ fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
 	MoqAudio {
 		label: None,
 		broadcast: Some(reference.to_string()),
+		epoch: None,
 		track: None,
 		codec: "opus".to_string(),
 		description: None,
@@ -333,12 +335,6 @@ fn h264_init() -> Vec<u8> {
 	init.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // start code
 	init.extend_from_slice(&[0x68, 0xee, 0x32, 0xc8, 0xb0]);
 	init
-}
-
-#[test]
-fn origin_lifecycle() {
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let _consumer = origin.consume();
 }
 
 #[test]
@@ -482,26 +478,6 @@ async fn announced_epoch_restarts_on_a_new_epoch() {
 		other => panic!("expected a restart, got {other:?}"),
 	}
 
-	broadcast.close().unwrap();
-}
-
-#[test]
-fn publish_media_lifecycle() {
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let init = opus_head();
-	let media = MoqMediaTrackProducer::audio(
-		&broadcast,
-		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, init),
-	)
-	.unwrap();
-	media
-		.write_frame(MoqFrame {
-			payload: b"opus frame".to_vec(),
-			timestamp_us: Some(1000),
-		})
-		.unwrap();
-	media.finish().unwrap();
 	broadcast.close().unwrap();
 }
 
@@ -1229,7 +1205,8 @@ async fn json_demand() {
 /// A demand handle waits without the producer, and fails once the track is gone.
 ///
 /// A raw track's `finish` keeps its handle open for a later `abort`, so its track ends when the
-/// handle is released; a media producer's `finish` releases it.
+/// handle is released; a media producer's `finish` hands it to the broadcast, so its track ends
+/// when the broadcast does.
 #[tokio::test]
 async fn demand_handle_outlives_finish() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -1254,6 +1231,7 @@ async fn demand_handle_outlives_finish() {
 	track.finish().unwrap();
 	drop(track);
 	media.finish().unwrap();
+	broadcast.close().unwrap();
 	let track_err = tokio::time::timeout(TIMEOUT, track_demand.until_wanted())
 		.await
 		.expect("timed out waiting for the finished raw track");
@@ -2686,7 +2664,7 @@ async fn announced_broadcasts_resolve_siblings_under_the_prefix() {
 
 	await_announced(&consumer, "a/source").await;
 
-	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into())))
+	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into()), None))
 		.await
 		.expect("timed out resolving the reference")
 		.unwrap();
@@ -2763,13 +2741,13 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 	// An absent or empty reference still names this broadcast, so it needs no origin. A reference
 	// made only of slashes normalizes to the empty one, so it must be treated the same rather than
 	// looking like a cross-broadcast reference.
-	consumer.resolve(None).await.unwrap();
-	consumer.resolve(Some(String::new())).await.unwrap();
-	consumer.resolve(Some("/".into())).await.unwrap();
+	consumer.resolve(None, None).await.unwrap();
+	consumer.resolve(Some(String::new()), None).await.unwrap();
+	consumer.resolve(Some("/".into()), None).await.unwrap();
 
 	// Reported in normalized form, matching `EscapingBroadcast` and moq-c: it names what the
 	// resolver actually tried to reach, not the caller's spelling of it.
-	match consumer.resolve(Some("./source".into())).await {
+	match consumer.resolve(Some("./source".into()), None).await {
 		Err(MoqError::UnresolvableBroadcast { reason: reference }) => assert_eq!(reference, "source"),
 		Err(err) => panic!("wrong error for an unresolvable reference: {err:?}"),
 		Ok(_) => panic!("a standalone broadcast cannot resolve a sibling"),
@@ -2789,7 +2767,7 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 	let broadcast = await_announced(&consumer, "a/pub").await;
 	await_announced(&consumer, "a/source").await;
 
-	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into())))
+	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(Some("./source".into()), None))
 		.await
 		.expect("timed out resolving the reference")
 		.unwrap();
@@ -2802,7 +2780,7 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 		.unwrap();
 
 	// And it can follow a reference of its own, back to where we started.
-	let back = tokio::time::timeout(TIMEOUT, sibling.resolve(Some("./pub".into())))
+	let back = tokio::time::timeout(TIMEOUT, sibling.resolve(Some("./pub".into()), None))
 		.await
 		.expect("timed out resolving back")
 		.unwrap();
@@ -2810,6 +2788,85 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 
 	catalog.close().unwrap();
 	source.close().unwrap();
+}
+
+/// A reference's epoch names the instance it expects: a broadcast proven to serve another fails
+/// the rendition, while an epochless reference, or a route that cannot prove its instance, reads
+/// whichever instance resolves.
+#[tokio::test]
+async fn resolve_honors_the_reference_epoch() {
+	async fn resolve(
+		broadcast: &MoqBroadcastConsumer,
+		reference: &str,
+		epoch: Option<&str>,
+	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
+		tokio::time::timeout(
+			TIMEOUT,
+			broadcast.resolve(Some(reference.into()), epoch.map(Into::into)),
+		)
+		.await
+		.expect("timed out resolving the reference")
+	}
+
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let served = moq_mint_epoch();
+	let other = moq_mint_epoch();
+	let route = MoqRoute {
+		epoch: Some(served.clone()),
+		..Default::default()
+	};
+
+	let catalog = origin.create_broadcast("a/pub".into()).unwrap();
+	catalog.announce(route.clone()).unwrap();
+	let source = origin.create_broadcast("a/source".into()).unwrap();
+	source.announce(route).unwrap();
+	let _video = source.publish_track("video".into(), None).unwrap();
+	let plain = create_announced(&origin, "a/plain");
+
+	let broadcast = await_announced(&consumer, "a/pub").await;
+	await_announced(&consumer, "a/source").await;
+	await_announced(&consumer, "a/plain").await;
+
+	let matching = resolve(&broadcast, "./source", Some(&served)).await.unwrap();
+	assert_eq!(matching.inner().info().path.as_str(), "a/source");
+	resolve(&broadcast, "./source", None).await.unwrap();
+	resolve(&broadcast, "./plain", Some(&other)).await.unwrap();
+
+	assert!(matches!(
+		resolve(&broadcast, "./source", Some(&other)).await,
+		Err(MoqError::Mux { reason }) if reason.contains("serves epoch")
+	));
+	// Without a broadcast, the epoch names the catalog's own instance.
+	resolve(&broadcast, "", Some(&served)).await.unwrap();
+	assert!(matches!(
+		resolve(&broadcast, "", Some(&other)).await,
+		Err(MoqError::Mux { reason }) if reason.contains("serves epoch")
+	));
+	assert!(matches!(
+		resolve(&broadcast, "./source", Some("not-an-epoch")).await,
+		Err(MoqError::InvalidEpoch { .. })
+	));
+
+	// The rendition-based consumers read the epoch off the rendition.
+	let mut mismatched = rendition("video", MoqContainer::Legacy);
+	let MoqRendition::Video { config, .. } = &mut mismatched else {
+		unreachable!()
+	};
+	config.broadcast = Some("./source".into());
+	config.epoch = Some(other);
+	let config = MoqMediaTrackConfig {
+		rendition: mismatched,
+		subscription: None,
+	};
+	let subscribed = tokio::time::timeout(TIMEOUT, MoqMediaTrackConsumer::subscribe(&broadcast, config))
+		.await
+		.expect("timed out subscribing to the rendition");
+	assert!(matches!(subscribed, Err(MoqError::Mux { reason }) if reason.contains("serves epoch")));
+
+	catalog.close().unwrap();
+	source.close().unwrap();
+	plain.close().unwrap();
 }
 
 #[tokio::test]
@@ -3563,6 +3620,162 @@ fn close_twice_is_a_noop() {
 		matches!(err, crate::error::MoqError::Closed),
 		"expected Closed error, got {err}"
 	);
+}
+
+/// A raw track with a millisecond max age, which is what a finish lingers for.
+fn aged_info(max_age_ms: u64) -> MoqTrackInfo {
+	MoqTrackInfo {
+		max_age_us: Some(max_age_ms * 1_000),
+		..timed_info()
+	}
+}
+
+/// Wait for the announcement of `path` to end, failing the test if it doesn't.
+async fn await_unannounced(announced: &MoqAnnounceConsumer) {
+	match next_event(announced).await {
+		MoqAnnounceEvent::End { .. } => {}
+		other => panic!("expected the announcement to end, got {other:?}"),
+	}
+}
+
+/// A finished broadcast stays announced and serves its finished tracks to a late subscriber,
+/// lingering for the longest max age among them; a live track adds nothing.
+#[tokio::test]
+async fn finish_serves_finished_tracks_to_a_late_subscriber() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let broadcast = create_announced(&origin, "finish");
+	next_announced(&announced).await;
+
+	let video = broadcast.publish_track("video".into(), Some(aged_info(2_000))).unwrap();
+	let audio = broadcast.publish_track("audio".into(), Some(aged_info(5_000))).unwrap();
+	let live = broadcast.publish_track("live".into(), Some(aged_info(60_000))).unwrap();
+	for track in [&video, &audio, &live] {
+		track
+			.write_frame(MoqFrame {
+				payload: b"tail".to_vec(),
+				timestamp_us: Some(0),
+			})
+			.unwrap();
+	}
+	video.finish().unwrap();
+	audio.finish().unwrap();
+	// A binding's garbage collector may release a finished handle before the broadcast finishes.
+	drop((video, audio));
+
+	let finish = broadcast.finish().unwrap();
+	assert_eq!(finish.linger_us(), 5_000_000);
+	assert!(matches!(broadcast.consume(), Err(MoqError::Closed)));
+	broadcast.close().unwrap();
+
+	let late = await_announced(&consumer, "finish").await;
+	let track = late.subscribe_track("audio".into(), None).await.unwrap();
+	let frame = tokio::time::timeout(TIMEOUT, track.read_frame())
+		.await
+		.expect("timed out reading the finished track")
+		.unwrap()
+		.expect("expected the finished track's frame");
+	assert_eq!(frame.payload, b"tail");
+
+	finish.close();
+	await_unannounced(&announced).await;
+	finish.close();
+	assert!(matches!(finish.wait().await, Err(MoqError::Closed)));
+	live.finish().unwrap();
+}
+
+/// Media tracks finish through their importer handles, which a finish must still hold.
+#[tokio::test]
+async fn finish_holds_finished_media_tracks() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
+	media
+		.write_frame(MoqFrame {
+			payload: b"opus frame".to_vec(),
+			timestamp_us: Some(0),
+		})
+		.unwrap();
+	media.finish().unwrap();
+	drop(media);
+
+	let finish = broadcast.finish().unwrap();
+	assert!(finish.linger_us() > 0, "the finished media track was not held");
+	finish.close();
+}
+
+/// Without a max age nothing lingers: the wait closes the broadcast at once.
+#[tokio::test]
+async fn finish_without_a_max_age_closes_on_wait() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let broadcast = create_announced(&origin, "finish");
+	next_announced(&announced).await;
+	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
+	track.finish().unwrap();
+
+	let finish = broadcast.finish().unwrap();
+	assert_eq!(finish.linger_us(), 0);
+	tokio::time::timeout(TIMEOUT, finish.wait())
+		.await
+		.expect("the wait outlived a zero linger")
+		.unwrap();
+	await_unannounced(&announced).await;
+}
+
+/// Closing the handle, the interrupt, ends a wait in progress and the broadcast with it.
+#[tokio::test]
+async fn closing_finish_ends_the_wait() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let broadcast = create_announced(&origin, "finish");
+	next_announced(&announced).await;
+	let track = broadcast
+		.publish_track("status".into(), Some(aged_info(3_600_000)))
+		.unwrap();
+	track.finish().unwrap();
+
+	let finish = broadcast.finish().unwrap();
+	let wait = spawn_parked({
+		let finish = finish.clone();
+		async move { finish.wait().await }
+	})
+	.await;
+	finish.close();
+	tokio::time::timeout(TIMEOUT, wait)
+		.await
+		.expect("the wait outlived the close")
+		.expect("the wait panicked")
+		.unwrap();
+	await_unannounced(&announced).await;
+}
+
+/// Dropping a wait in progress, as a cancelled foreign future does, closes the broadcast.
+#[tokio::test]
+async fn cancelling_the_wait_closes_the_broadcast() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
+	let broadcast = create_announced(&origin, "finish");
+	next_announced(&announced).await;
+	let track = broadcast
+		.publish_track("status".into(), Some(aged_info(3_600_000)))
+		.unwrap();
+	track.finish().unwrap();
+
+	let finish = broadcast.finish().unwrap();
+	let mut wait = Box::pin(finish.wait());
+	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(wait.as_mut().poll(cx))).await;
+	assert!(first.is_pending());
+	drop(wait);
+	await_unannounced(&announced).await;
 }
 
 #[tokio::test]

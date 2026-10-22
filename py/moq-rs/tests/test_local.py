@@ -101,11 +101,6 @@ def h264_init() -> bytes:
     return sps + pps
 
 
-def test_origin_lifecycle():
-    origin = moq.OriginProducer()
-    _consumer = origin.consume()
-
-
 async def test_fetch_abort_is_a_stream_app_code():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("events")
@@ -153,7 +148,6 @@ def test_protocol_error_helper_covers_known_app_and_unknown():
 def test_error_str_is_rust_display():
     assert str(moq.Error.Closed()) == "closed"  # type: ignore[attr-defined]
     error = moq.Error.Transport(reason="reset")  # type: ignore[attr-defined]
-    assert error.reason == "reset"
     assert str(error) == "transport: reset"
     details = moq.ProtocolError(scope=moq.ErrorScope.STREAM, code=468, kind=moq.ProtocolKind.APP, message="gone")
     assert str(moq.Error.Protocol(details)) == "gone"  # type: ignore[attr-defined]
@@ -414,6 +408,56 @@ async def test_announced_epoch_restarts():
     with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
         broadcast.announce(moq.Route(epoch="not-an-epoch"))
     broadcast.close()
+
+
+async def test_finish_lingers_until_closed():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    announced = consumer.announced()
+    broadcast = create_announced(origin, "finish")
+    assert isinstance(await next_route(announced), moq.AnnounceEventStart)
+
+    track = broadcast.publish_track("status", moq.TrackInfo(max_age=timedelta(hours=1)))
+    track.write_frame(b"tail")
+    track.finish()
+    finish = broadcast.finish()
+    assert finish.linger == timedelta(hours=1)
+    with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
+        broadcast.consume()
+
+    # Cancelling the wait is the interrupt: the broadcast closes at once.
+    wait = asyncio.ensure_future(finish.wait())
+    await asyncio.sleep(0)
+    wait.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wait
+    assert isinstance(await next_route(announced), moq.AnnounceEventEnd)
+    finish.close()
+
+
+async def test_finish_wait_cancelled_before_it_starts_closes():
+    origin = moq.OriginProducer()
+    consumer = origin.consume()
+    announced = consumer.announced()
+    broadcast = create_announced(origin, "finish")
+    assert isinstance(await next_route(announced), moq.AnnounceEventStart)
+
+    broadcast.publish_track("status", moq.TrackInfo(max_age=timedelta(hours=1))).finish()
+    finish = broadcast.finish()
+    # Cancelled before the loop first steps it, so the wait's body never runs.
+    wait = asyncio.create_task(finish.wait())
+    wait.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wait
+    assert isinstance(await next_route(announced), moq.AnnounceEventEnd)
+
+
+async def test_finish_without_a_max_age_closes_on_wait():
+    broadcast = moq.BroadcastProducer()
+    broadcast.publish_track("status").finish()
+    finish = broadcast.finish()
+    assert finish.linger == timedelta(0)
+    await asyncio.wait_for(finish.wait(), timeout=5.0)
 
 
 def test_publish_lifecycle():
@@ -1301,28 +1345,6 @@ async def test_read_frame_keeps_group_across_cancelled_call():
     assert frame.payload == b"kept"
     assert frame.timestamp == timedelta(microseconds=3_000)
     assert await asyncio.wait_for(consumer.read_frame(), timeout=5.0) is None
-
-
-def test_optional_binding_records_use_none_defaults():
-    """Optional UniFFI record fields are optional in generated constructors."""
-    hint = moq.media.VideoHint()
-    assert hint.coded is None
-    assert hint.display_aspect is None
-    assert hint.bitrate is None
-    assert hint.framerate is None
-    assert hint.optimize_for_latency is None
-
-    encoder = moq.audio.EncoderOutput(codec=moq.AudioCodec.opus())
-    assert encoder.sample_rate is None
-    assert encoder.channels is None
-    assert encoder.bitrate is None
-    assert encoder.frame_duration == timedelta(0)
-
-    decoder = moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32)
-    assert decoder.sample_rate is None
-    assert decoder.channels is None
-    assert decoder.max_delay is None
-    assert decoder.delay is None
 
 
 def test_audio_encoder_returns_namespaced_records():

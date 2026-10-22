@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Catalog references carry their epoch
+
+`Media.Video` and `Media.Audio` gain `epoch`, the publisher instance their `broadcast` reference names.
+`BroadcastConsumer.resolve(_:)` becomes `resolve(_:epoch:)`; pass the rendition's `epoch` alongside its `broadcast`, or `nil` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, throw for a rendition whose broadcast is proven to serve another epoch.
+
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast closes or the new `BroadcastProducer.finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.dynamic(prefix:)` takes no route, and `OriginDynamic.update(route:)` is gone.

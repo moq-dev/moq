@@ -23,7 +23,7 @@ import { Timescale } from "./time.ts";
 import type { Limits } from "./util/limits.ts";
 import { wireOf } from "./wire.ts";
 
-// Small caps keep each case fast; util/limits.test.ts pins the real defaults.
+// Small caps keep each case fast.
 const limits: Limits = { announces: 8, subscriptions: 4, fetches: 4 };
 
 // A publisher serving one announced broadcast whose tracks are never accepted, so every

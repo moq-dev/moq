@@ -725,7 +725,8 @@ async fn a_moved_tier_retags_the_live_session() {
 /// prefix keeps flowing, a wider one brings the path back, and neither session closes.
 #[tokio::test]
 async fn a_rechecked_grant_resizes_live_sessions() {
-	for scheme in ["tcp", "ws"] {
+	// Each scheme waits out two re-check cadences, so run them side by side.
+	futures::future::join_all(["tcp", "ws"].map(|scheme| async move {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let auth = build_auth(script.spawn().await);
 		let (port, relay) = match scheme {
@@ -860,7 +861,8 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			);
 		}
 		relay.abort();
-	}
+	}))
+	.await;
 }
 
 /// A re-check that moves the root still closes the session: nothing it holds is
@@ -884,11 +886,13 @@ async fn a_moved_root_closes_live_sessions() {
 /// 403, 401, and an empty grant are all a no.
 #[tokio::test]
 async fn a_refusal_closes_live_sessions() {
-	for (label, answer) in [
+	// Each answer waits out a re-check cadence, so run them side by side.
+	let answers = [
 		("403", Answer::Status(403)),
 		("401", Answer::Status(401)),
 		("empty grant", Answer::Grant(Grant::default())),
-	] {
+	];
+	futures::future::join_all(answers.map(|(label, answer)| async move {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
 		let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
@@ -909,7 +913,8 @@ async fn a_refusal_closes_live_sessions() {
 		}
 
 		relay.abort();
-	}
+	}))
+	.await;
 }
 
 /// The one-shot HTTP routes are sessions of their own: `/announced` is admitted

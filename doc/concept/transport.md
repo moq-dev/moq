@@ -42,7 +42,7 @@ connection (`wss://`) and keep whichever wins. A small multiplexer,
 [qmux](/draft/qmux-websocket), carries MoQ streams over the socket. It works
 everywhere but cannot escape TCP head-of-line blocking, so priority and resets
 only help once bytes leave the TCP queue. The fallback is automatic in every
-client; the relay enables it with `[web.https]`. A session that lands on
+client; the relay serves it on its `[web.http]` or `[web.https]` listener. A session that lands on
 WebSocket stays there until it ends; the next connect races again.
 
 ## Raw QUIC (native)
@@ -52,8 +52,8 @@ handshake. The URL path and any `?jwt=` token travel in the MoQ `SETUP` message
 instead of a `CONNECT` request, so the server sees the same thing either way.
 On every transport, a SETUP token (moq-lite-07-wip and moq-transport) can carry
 the credential in place of the query.
-`moq-tokio` picks this automatically for `https://` URLs; use `moql://` or
-`moqt://` to force it.
+`moq-tokio` dials WebTransport for `https://` URLs; use `moql://` or `moqt://`
+for raw QUIC.
 
 ## TCP and Unix sockets (local workers)
 

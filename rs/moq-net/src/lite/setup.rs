@@ -732,13 +732,13 @@ mod tests {
 		assert_eq!(got.probe, ProbeLevel::Increase);
 	}
 
+	/// Roles, pinned to the draft. A swap still round trips against our own decoder but
+	/// breaks every other implementation.
 	#[test]
-	fn role_wire_codes() {
-		// The draft pins Publisher=1 / Subscriber=2. A swap here would still round-trip
-		// against our own decoder, but break every other implementation.
-		for (role, code) in [(Role::Publisher, 1u64), (Role::Subscriber, 2)] {
-			assert_eq!(role.to_code(), code);
-			assert_eq!(Role::from_code(code), Some(role));
+	fn role_code_points() {
+		for (role, spec) in [(Role::Publisher, 1u64), (Role::Subscriber, 2)] {
+			assert_eq!(role.to_code(), spec, "{role:?}");
+			assert_eq!(Role::from_code(spec), Some(role));
 		}
 	}
 
