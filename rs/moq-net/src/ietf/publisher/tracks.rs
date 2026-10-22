@@ -281,7 +281,7 @@ where
 			prefix: prefix.clone(),
 			forward: msg.forward,
 			params: Params {
-				priority: msg.subscriber_priority.unwrap_or(128),
+				priority: msg.subscriber_priority.unwrap_or(crate::ietf::priority::ABSENT_WIRE),
 				order: msg.group_order,
 				filter: msg.filter.unwrap_or(Filter::Unfiltered),
 				max_age: None,
@@ -512,6 +512,7 @@ where
 	) {
 		let namespace = request.prefix.join(&suffix).to_owned();
 		let absolute = self.origin.absolute(&namespace).to_owned();
+		let flate = self.peer_setup.get().await.flate;
 
 		// Resolving may wait on a route for the broadcast, which its going ends.
 		let resolved = {
@@ -655,7 +656,7 @@ where
 					}
 					// A track this draft cannot describe is skipped rather than PUBLISHed with
 					// its properties rewritten.
-					let Ok(properties) = track_properties(&info, request.properties_wanted, self.version) else {
+					let Ok(properties) = track_properties(&info, request.properties_wanted, self.version, flate) else {
 						skip(name);
 						continue;
 					};
@@ -1121,6 +1122,7 @@ where
 			range,
 			timescale,
 		)
+		.compression(self.peer_setup.get().await.flate)
 		.ranked(self.priority.clone());
 		serve.pausable = true;
 		serve.dynamic = dynamic;
@@ -1247,10 +1249,10 @@ mod tests {
 	}
 
 	fn harness(version: Version) -> Harness {
-		harness_with(version, memory::Config::default())
+		harness_with(version, memory::Config::default(), peer::Peer::default())
 	}
 
-	fn harness_with(version: Version, config: memory::Config) -> Harness {
+	fn harness_with(version: Version, config: memory::Config, declared: peer::Peer) -> Harness {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let broadcast = origin.publish("room/cam", crate::origin::Route::default()).unwrap();
 		let tracks = ["video", "audio"]
@@ -1259,7 +1261,7 @@ mod tests {
 			.collect();
 		let (session, peer) = memory::pair(config);
 		let setup = peer::PeerSetup::default();
-		setup.set(peer::Peer::default());
+		setup.set(declared);
 		let publisher = Publisher::new(
 			crate::time::sim(),
 			session.clone(),
@@ -1375,6 +1377,7 @@ mod tests {
 			authorization_token: None,
 			new_group: None,
 			max_age: None,
+			fill: None,
 		}
 	}
 
@@ -1486,6 +1489,59 @@ mod tests {
 			assert_eq!(id, ietf::PublishDone::ID, "{version}");
 			let done: ietf::PublishDone = body.message(version).unwrap();
 			assert_eq!(done.stream_count, opened, "{version}");
+		}
+	}
+
+	/// A listed compressed track is declared and served compressed only to a peer that
+	/// negotiated FLATE; any other peer gets the plain copy with no declaration.
+	#[moq_clock::test]
+	async fn a_publish_compresses_only_when_negotiated() {
+		for version in DRAFTS {
+			for flate in [false, true] {
+				let declared = peer::Peer {
+					flate,
+					..Default::default()
+				};
+				let mut h = harness_with(version, memory::Config::default(), declared);
+				let data = h
+					.broadcast
+					.create_track("data", crate::track::Info::timed().with_compress(true))
+					.unwrap();
+
+				let mut request = h.request(&listing(false)).await;
+				assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+				let mut stream = loop {
+					let mut stream = timeout(Stream::accept(&mut h.peer, version)).await.unwrap();
+					assert_eq!(stream.reader.varint().await.unwrap(), ietf::Publish::ID);
+					let body: ietf::Body = stream.reader.decode().await.unwrap();
+					let publish: ietf::Publish = body.message(version).unwrap();
+					if &*publish.track_name == "data" {
+						assert_eq!(publish.properties.compress, flate, "{version} flate={flate}");
+						break stream;
+					}
+				};
+				publish_ok(&mut stream).await;
+				send(&mut stream, &update(2, true)).await;
+				assert_eq!(next(&mut stream).await.0, ietf::RequestOk::ID, "{version}");
+
+				let payload = vec![b'a'; 1024];
+				let mut group = data.append_group().unwrap();
+				group.write_frame(crate::Timestamp::ZERO, payload.clone()).unwrap();
+				group.finish().unwrap();
+				let recv = timeout(std::future::poll_fn(|cx| h.peer.poll_accept_uni(cx)))
+					.await
+					.unwrap();
+				let mut reader = crate::coding::Reader::new(recv, version);
+				let mut bytes = Vec::new();
+				while let Some(chunk) = timeout(std::future::poll_fn(|cx| reader.poll_read_chunk(cx, 1024)))
+					.await
+					.unwrap()
+				{
+					bytes.extend_from_slice(&chunk);
+				}
+				let plain = bytes.windows(payload.len()).any(|w| w == payload);
+				assert_eq!(plain, !flate, "{version} flate={flate}: {} bytes", bytes.len());
+			}
 		}
 	}
 
@@ -1808,7 +1864,8 @@ mod tests {
 	}
 
 	async fn resume_asks_for_a_new_group(on_listing: bool) {
-		let version = Version::Draft22;
+		// Draft-22 sends no NEW_GROUP_REQUEST on SUBSCRIBE_TRACKS.
+		let version = Version::Draft21;
 		let mut h = harness(version);
 		let live = h
 			.broadcast
@@ -1993,11 +2050,12 @@ mod tests {
 		}
 	}
 
-	/// A paused listing's FILL_PARAMETERS (draft-20+) open no fill, even once a PUBLISH
-	/// resumes without its own (draft-22 section 3.4.1).
+	/// A paused listing's FILL_PARAMETERS (draft-20 and draft-21; draft-22 sends none on
+	/// SUBSCRIBE_TRACKS) open no fill, even once a PUBLISH resumes without its own
+	/// (draft-22 section 3.4.1).
 	#[moq_clock::test]
 	async fn a_listing_fill_opens_nothing() {
-		for version in [Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft20, Version::Draft21] {
 			let mut h = harness(version);
 			let video = h.tracks.remove("video").unwrap();
 			let mut group = video.append_group().unwrap();
@@ -2096,9 +2154,10 @@ mod tests {
 
 	/// From draft-20 each PUBLISH states the listing's subscription parameters, which the
 	/// subscriber otherwise takes as the defaults; earlier drafts carry them on PUBLISH_OK.
+	/// Draft-22 sends none of them on SUBSCRIBE_TRACKS.
 	#[moq_clock::test]
 	async fn a_listing_states_its_parameters_on_each_publish() {
-		for version in DRAFTS {
+		for version in DRAFTS.into_iter().filter(|version| *version != Version::Draft22) {
 			let mut h = harness(version);
 			let request = ietf::SubscribeTracks {
 				subscriber_priority: Some(7),
@@ -2182,7 +2241,7 @@ mod tests {
 				stream_buffer: 32,
 				..Default::default()
 			};
-			let mut h = harness_with(version, config);
+			let mut h = harness_with(version, config, peer::Peer::default());
 			// The REQUEST_OK stays unread, leaving no room for the REQUEST_ERROR.
 			let mut request = h.request(&listing(false)).await;
 			let (mut stream, ..) = h.publish().await;

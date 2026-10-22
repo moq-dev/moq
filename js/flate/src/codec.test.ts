@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Group } from "@moq/net";
 import { Deflate, Inflate } from "fflate";
 import { Decoder, Encoder } from "./codec.ts";
 
@@ -64,19 +65,18 @@ test("codec rejects garbage", () => {
 	expect(() => decoder.frame(new Uint8Array(64).fill(0xff))).toThrow();
 });
 
-test("codec rejects a frame that inflates past the cap", () => {
-	// A tiny slice can inflate enormously, so the decoder bounds the output as it is produced. The
-	// cap's value doesn't change that path, so use a small one instead of paying for a real bomb.
-	const slice = new Encoder().frame(new Uint8Array(1024));
-	const decoder = new Decoder({ maxFrameSize: 512 });
-	expect(() => decoder.frame(slice)).toThrow(/exceeded 512/);
-});
+test("the decoder holds its whole window to the group budget", () => {
+	// Each frame fits on its own and deflates to almost nothing; together they inflate past what a
+	// plain group can carry.
+	const half = new Uint8Array(Group.MAX_GROUP_CACHE_BYTES / 2 + 1);
+	const encoder = new Encoder();
+	const first = encoder.frame(half);
+	const second = encoder.frame(half);
+	expect(second.length).toBeLessThan(64 * 1024);
 
-test("a decoder's frame cap cannot be lifted after construction", () => {
 	const decoder = new Decoder();
-	expect(() => {
-		(decoder as { maxFrameSize: number }).maxFrameSize = Infinity;
-	}).toThrow(TypeError);
+	expect(decoder.frame(first).length).toBe(half.length);
+	expect(() => decoder.frame(second)).toThrow(/decompressed group exceeded/);
 });
 
 test("a frame larger than pako's chunk size round-trips", () => {
