@@ -16,14 +16,17 @@ when written) at start, up to 256 receive and 1024 send buffers (~80 MiB).
 A receive flood or a load spike ratchets each worker toward that ceiling.
 The worker-turn benches use 2 KiB buffers, so none measures this.
 
-Add pool capacity and occupancy to the worker metrics, then run the relay at
+Add pool capacity and occupancy to the worker metrics as gauges, then run the relay at
 production sizing on the fanout and chat shapes, sweeping connections and
 workers, and record RSS and pool capacity during and after a burst. A
 no-cost result is recorded and closes the quest.
 
 Decided 2026-10-22 from the io_uring audit.
 
-Public API: none. Wire: none.
+Public API: additive, gauge fields on the `#[non_exhaustive]`
+`moq_uring::metrics::Snapshot`, whose docs stop calling every field
+cumulative, and matching `moq_relay_uring_*` gauges on the relay's
+`/metrics`. Wire: none.
 
 ## Required
 

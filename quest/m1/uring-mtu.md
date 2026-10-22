@@ -33,8 +33,11 @@ trains still batching.
 Decided 2026-10-22 from the io_uring audit: m1, since it black-holes real
 paths.
 
-Public API: none. Wire: none. Config: `quic.mtu_discovery` works under
-`--runtime-io-uring`; update `doc/bin/relay/` if it mentions the refusal.
+Public API: additive, a `mtu_discovery: bool` field on the
+`#[non_exhaustive]` `moq_uring::quic::Transport`, named after
+`moq_tokio::quic::Resolved::mtu_discovery`. Wire: none. Config:
+`quic.mtu_discovery` works under `--runtime-io-uring`; update
+`doc/bin/relay/` if it mentions the refusal.
 
 ## Related
 
