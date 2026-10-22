@@ -600,7 +600,10 @@ async fn lagging_route_dies(version: Version) {
 		);
 	}
 	settle().await;
-	assert!(rx.try_recv().is_err(), "{version}: trailing delivery");
+	assert!(
+		matches!(rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+		"{version}: trailing delivery, or the subscription ended"
+	);
 	let _keep = (broadcast, track, group, p_a, p_b, b_w, b_r, warm, a_r, p, a, b, r, w);
 }
 

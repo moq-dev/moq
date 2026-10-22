@@ -361,7 +361,10 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 		expect(await successor.readFrame()).toBeUndefined();
 		successor.close();
 		expect(seen).toEqual(Array.from({ length: 12 }, (_, index) => `${Math.floor(index / 4)}.${index % 4}`));
+		await clock.advanceAsync(Nano(0));
 		expect(sub.tryRecvGroup()).toBeUndefined();
+		// The source is still open, so the resumed subscription must stay live.
+		expect(sub.closed.peek()).toBeUndefined();
 	} finally {
 		sub?.close();
 		warm.close();
