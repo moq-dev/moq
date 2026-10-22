@@ -1,8 +1,8 @@
-# [S] Every peer-facing decoder has a fuzz target that asserts an invariant
+# [S] The audited moq-net decoders and peer-reachable unsafe have invariant fuzz targets
 
 ## Goal
 
-Each decoder that consumes peer bytes is fuzzed with an assertion stronger than "it did not panic", and the hand-written unsafe that peer input reaches runs under Miri or a target of its own.
+The moq-net decoders the audit found uncovered are fuzzed with an assertion stronger than "it did not panic", and the hand-written unsafe that peer input reaches in `moq-c`, `moq-uring`, and `moq-sock` runs under Miri or a target of its own. Other peer-facing decoders, such as the media importers and RTMP's AMF0, are outside this quest.
 
 Today `rs/moq-net/fuzz` covers lite, IETF messages, announces, varint, path, and pattern. The gaps the audit found:
 

@@ -4,7 +4,7 @@
 
 A caption track from an untrusted publisher cannot grow a viewer's cue store, or its per-frame work, faster than the viewer plays:
 
-- `store.cues` and `store.regions` in `js/watch/src/text/renderer.ts` are bounded by the playhead window and a per-track ceiling.
+- `store.cues`, `store.regions`, and `store.clears` in `js/watch/src/text/renderer.ts` are bounded by the playhead window and a per-track ceiling.
 - A payload with many cues parses in O(n log n), not by walking and splicing per cue.
 - A cue's declared end time cannot keep it resident past a maximum duration.
 - A region no retained cue references is dropped.
@@ -16,7 +16,7 @@ Today `pruneCues` drops only cues whose end is behind the playhead, so a far-fut
 Decided 2026-10-22 from the security audit, with the maintainer:
 
 - Clamp a cue's end to its start plus a maximum cue duration, and drop cues behind the existing `PRUNE_BEHIND` horizon.
-- Prune regions that no retained cue references in the same sweep, and cap both maps, evicting oldest first. Neither cap refuses a payload; they bound what the viewer retains.
+- Prune regions that no retained cue references in the same sweep, and cap the cue, region, and clear-marker stores, evicting oldest first. Clear markers from empty frames are inserted and pruned like cues, so far-future markers neither accumulate nor splice. No cap refuses a payload; they bound what the viewer retains.
 - Sort each payload once and merge it into the store, instead of the backward walk plus splice. A per-cue binary search still splices, so it stays quadratic.
 - Keep the double-escaped `sanitizeCue` and its renderer-version test unchanged: the audit confirmed the pinned `media-captions` builds only double-quoted attributes, so the current escape set is sufficient.
 

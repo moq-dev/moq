@@ -8,7 +8,7 @@ The rules the [E2EE epic](/quest/m2/e2ee/README.md) already decided hold in ever
 - A grouped write that fails after encryption ends the group, because the transport's frame index can no longer line up with the nonce.
 - A datagram whose wire identity is out of range is dropped with the bad-datagram event, not thrown as a fatal error.
 - The AEAD operation and byte budgets are per key, shared by every consumer of that key, without retaining state for keys a relay can make the consumer derive.
-- The draft states what a relay can truncate inside a group, so an application never mistakes a short group for a complete one.
+- The draft states that a relay can truncate a group undetectably, so an application does not rely on group completeness.
 
 The Rust core already keeps the epoch unrepresentable outside the crate. The TypeScript package exports the concrete `Generation.Producer` through `export * as Generation`, and `Producer.make` is a public static that ships in the types. An app that persists an epoch and calls it twice gets two producers with independent claims, both starting at group 0 and frame 0 under the same key. The Rust grouped writer also leaves a group open after a post-encryption `write_frame` error, while the TS twin aborts.
 
