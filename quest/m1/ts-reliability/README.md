@@ -74,7 +74,7 @@ refused means an error or a counted drop.
 | DVB SI on 0x0010, 0x0011, 0x0012, 0x0014 | Preserved: snapshot track per PID and `table_id` | landed |
 | Program identity, program and ES descriptors | Preserved: descriptors follow each PMT revision; an identity change refuses | landed |
 | PMT add, remove, retype; PID reuse | Normalized without a new epoch: a changed or reused PID ends its track and continues under a fresh name, and the export rebuilds the PMT at the next `version_number`. Today `export ts --sync` ends at an added track and announces no other revision | [PMT export](/quest/m1/ts-reliability/pmt-export.md) |
-| PAT changes: moved PMT PID, programs added or removed | Normalized: followed; a removed program retires, and returns as a new epoch. Today ignored, or the whole multiplex stops | [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) |
+| PAT changes: moved PMT PID, programs added or removed | Normalized: a moved PMT is followed, and export moves it behind a PAT at the next `version_number`; under `--program all` an added program publishes, a removed one retires, and one returning publishes a new epoch. A listed program whose PMT never arrives waits, unannounced | landed |
 | Programs without video | Preserved when the PMT names a PCR PID; refused without one | landed |
 | PCR | Normalized: rebased, carried on the first video PID, else audio, else a dedicated PCR-only PID | landed |
 | Mux rate, null stuffing | Normalized: re-padded to `muxRate` while the source is CBR | landed |
@@ -89,7 +89,6 @@ remain with their current quests.
 ## Required
 
 - [PMT export](/quest/m1/ts-reliability/pmt-export.md) - synced TS legs revise their PMT identically
-- [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
 - [Release clock false alarms](/quest/m1/ts-reliability/release-clock-false-alarms.md) - no false jitter leap at a 500 ms delay and no false drift alarm
 

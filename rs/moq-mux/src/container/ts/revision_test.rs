@@ -49,6 +49,13 @@ struct Span<'a> {
 /// as a live one keeps up with the catalog, and runs to its end after the last. Returns
 /// every PMT it wrote, each run of repeats once.
 async fn reexport(spans: &[Span<'_>], intervals: u64) -> Vec<Table> {
+	let spans: Vec<_> = spans.iter().map(|span| (PMT_PID, span)).collect();
+	tables(&reexport_frames(&spans, intervals).await, PMT_PID)
+}
+
+/// [`reexport`], each span's PAT naming its PMT on the PID beside it. Returns every frame
+/// the export wrote.
+async fn reexport_frames(spans: &[(u16, &Span<'_>)], intervals: u64) -> Vec<Frame> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(
@@ -61,10 +68,10 @@ async fn reexport(spans: &[Span<'_>], intervals: u64) -> Vec<Table> {
 	let mut ticks = 1_000 * MS;
 	let mut export = None;
 	let mut frames = Vec::new();
-	for (version, span) in spans.iter().enumerate() {
+	for (version, &(pmt_pid, span)) in spans.iter().enumerate() {
 		let mut mux = Mux::default();
-		mux.pat(&[(1, PMT_PID)])
-			.pmt_at(version as u8 % 32, PMT_PID, 1, CLOCK_PID, span.streams, 0);
+		mux.pat(&[(1, pmt_pid)])
+			.pmt_at(version as u8 % 32, pmt_pid, 1, CLOCK_PID, span.streams, 0);
 		// The import publishes its catalog once it has measured the multiplex rate.
 		let intervals = if version == 0 { 75 } else { intervals };
 		for _ in 0..intervals {
@@ -103,7 +110,7 @@ async fn reexport(spans: &[Span<'_>], intervals: u64) -> Vec<Table> {
 	catalog.finish().unwrap();
 
 	drain(&mut export.unwrap(), &mut frames).await;
-	tables(&frames, PMT_PID)
+	frames
 }
 
 /// Run `export` until it waits on its source, as a live one keeps up with each catalog
@@ -222,6 +229,34 @@ fn tables(frames: &[Frame], pmt_pid: u16) -> Vec<Table> {
 		}
 	}
 	out
+}
+
+/// Every PAT in `frames` as its `version_number` and the PMT PID it names, each run of
+/// repeats once.
+fn pats(frames: &[Frame]) -> Vec<(u8, u16)> {
+	let mut out = Vec::new();
+	for pat in packets(frames).filter_map(pat) {
+		if out.last() != Some(&pat) {
+			out.push(pat);
+		}
+	}
+	out
+}
+
+/// The `version_number` and PMT PID of the PAT `packet` starts, if it starts one.
+fn pat(packet: &[u8; 188]) -> Option<(u8, u16)> {
+	if pid(packet) != 0 || packet[1] & 0x40 == 0 {
+		return None;
+	}
+	let mut at = 4;
+	if packet[3] & 0x20 != 0 {
+		at += 1 + usize::from(packet[4]);
+	}
+	let section = &packet[at + 1 + usize::from(packet[at])..];
+	Some((
+		(section[5] >> 1) & 0x1f,
+		u16::from(section[10] & 0x1f) << 8 | u16::from(section[11]),
+	))
 }
 
 /// Each table's version and streams as `(stream_type, PID)`.
@@ -1186,15 +1221,10 @@ async fn a_track_draining_keeps_only_the_program_descriptors_it_left_under() {
 	);
 }
 
-/// The PMT stays on the PID its tables went out on, whatever a later catalog records for it,
-/// so a track a later catalog records on that PID takes another.
+/// A track the catalog records on the PMT's PID as it moves the PMT takes another: the PMT
+/// still rides that PID when the track is taken on, and moves behind a new PAT after.
 #[tokio::test(start_paused = true)]
-async fn a_track_recorded_on_the_pmt_pid_after_the_catalog_moves_it_takes_another() {
-	let program = |pmt_pid: u16| super::catalog::Program {
-		transport_stream_id: 1,
-		program_number: 1,
-		pmt_pid,
-	};
+async fn a_track_recorded_on_the_pid_the_pmt_moves_from_takes_another() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(
@@ -1224,11 +1254,11 @@ async fn a_track_recorded_on_the_pmt_pid_after_the_catalog_moves_it_takes_anothe
 	catalog.finish().unwrap();
 	drain(&mut export, &mut frames).await;
 
-	assert!(tables(&frames, OWN_PMT_PID).is_empty(), "the PMT stays on its PID");
-	let tables = tables(&frames, PMT_PID);
+	assert_eq!(pats(&frames), [(0, PMT_PID), (1, OWN_PMT_PID)]);
+	let tables = tables(&frames, OWN_PMT_PID);
 	let pids: Vec<u16> = tables.last().unwrap().streams.iter().map(|es| es.1).collect();
 	assert_eq!(pids.len(), 2, "{tables:?}");
-	assert!(!pids.contains(&PMT_PID), "{tables:?}");
+	assert!(!pids.contains(&PMT_PID) && !pids.contains(&OWN_PMT_PID), "{tables:?}");
 }
 
 /// An SCTE-35 `splice_null` section.
@@ -1585,4 +1615,72 @@ async fn live<S: crate::catalog::Stream>(
 		}
 		settle(export, frames).await;
 	}
+}
+
+/// A PAT that moves the PMT before any table has gone out takes every copy queued with it:
+/// the PAT names the new PID at the version the first had, and nothing goes out on the old.
+#[tokio::test(start_paused = true)]
+async fn a_pmt_moved_before_its_tables_go_out_moves_every_copy() {
+	const MOVED_PMT_PID: u16 = 0x30;
+	let span = Span {
+		streams: &[(AUDIO, AUDIO_PID, &[])],
+	};
+	let frames = reexport_frames(&[(PMT_PID, &span), (MOVED_PMT_PID, &span)], 25).await;
+	assert_eq!(pats(&frames), vec![(0, MOVED_PMT_PID)]);
+	assert_eq!(
+		layouts(&tables(&frames, MOVED_PMT_PID)),
+		vec![(0, vec![(AUDIO, AUDIO_PID)])]
+	);
+	assert!(packets(&frames).all(|packet| pid(packet) != PMT_PID));
+}
+
+/// The program a catalog records, its PMT on `pmt_pid`.
+fn program(pmt_pid: u16) -> super::catalog::Program {
+	super::catalog::Program {
+		transport_stream_id: 1,
+		program_number: 1,
+		pmt_pid,
+	}
+}
+
+/// A catalog that moves the PMT to another PID is followed by a PAT at the next version
+/// naming it, and from then on the PMT rides the new PID alone.
+#[tokio::test(start_paused = true)]
+async fn a_moved_pmt_moves_behind_a_new_pat() {
+	const MOVED_PMT_PID: u16 = 0x30;
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID));
+	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
+	let mut frames = Vec::new();
+	let start = tokio::time::Instant::now();
+	let mut export = export_of(&consumer).await;
+	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 0, 3_000).await;
+	catalog.modify().unwrap().ext.mpegts.program = Some(program(MOVED_PMT_PID));
+	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 3_000, 6_000).await;
+	audio.finish().unwrap();
+	catalog.finish().unwrap();
+	drain(&mut export, &mut frames).await;
+
+	assert_eq!(pats(&frames), vec![(0, PMT_PID), (1, MOVED_PMT_PID)]);
+	assert_eq!(
+		layouts(&tables(&frames, MOVED_PMT_PID)),
+		vec![(0, vec![(AUDIO, AUDIO_PID)])]
+	);
+	let moved = packets(&frames)
+		.position(|packet| pat(packet) == Some((1, MOVED_PMT_PID)))
+		.expect("the PAT naming the new PID");
+	assert!(
+		packets(&frames).take(moved).all(|packet| pid(packet) != MOVED_PMT_PID),
+		"no PMT on the new PID before the PAT naming it"
+	);
+	assert!(
+		packets(&frames).skip(moved).all(|packet| pid(packet) != PMT_PID),
+		"no PMT on the old PID after the PAT that moved it"
+	);
 }

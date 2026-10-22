@@ -1091,6 +1091,8 @@ impl Kind {
 /// The program tables plus the resolved PID layout.
 struct Psi {
 	pat: Bytes,
+	/// The PAT last laid into a slot, by version and the PMT PID it names; `None` before the first.
+	pat_laid: Option<(VersionNumber, u16)>,
 	pmt: Bytes,
 	/// What `pmt` encodes, which a revision is compared with.
 	table: super::psi::Pmt,
@@ -2335,8 +2337,12 @@ where
 			// program that went out advances them again.
 			let emitted = self.psi.is_some();
 			if (!same && emitted) || self.flagged.is_some() {
-				next.version = self.version;
 				// A revision no slot laid reached no receiver: the next follows the last laid.
+				next.version = self
+					.psi
+					.as_ref()
+					.and_then(|psi| psi.pat_laid)
+					.map_or(self.version, |(version, _)| version);
 				next.pmt_version = self
 					.psi
 					.as_ref()
@@ -2486,13 +2492,18 @@ where
 		}
 	}
 
-	/// PID the PMT rides on: the source's original (preserved in the service record),
-	/// or the synthesized [`PMT_PID`] for a media-only source or an invalid (zero) value.
-	/// Once the tables are built, the one they went out on, whatever the catalog says since.
+	/// PID the PMT rides on: once the tables are built, the one they lay it on, which only
+	/// [`Self::revise`] moves; before, the catalog's ([`Self::cataloged_pmt_pid`]).
 	fn pmt_pid(&self) -> u16 {
-		if let Some(psi) = &self.psi {
-			return psi.pmt_pid;
+		match &self.psi {
+			Some(psi) => psi.pmt_pid,
+			None => self.cataloged_pmt_pid(),
 		}
+	}
+
+	/// PID the catalog gives the PMT: the source's original (preserved in the service record),
+	/// or the synthesized [`PMT_PID`] for a media-only source or an invalid (zero) value.
+	fn cataloged_pmt_pid(&self) -> u16 {
 		self.program
 			.as_ref()
 			.map(|s| s.pmt_pid)
@@ -2543,7 +2554,6 @@ where
 		// Preserve the source's program identity so the rebuilt PAT/PMT stay consistent
 		// with the carried SI; synthesize a minimal identity otherwise.
 		let pmt_pid = self.pmt_pid();
-		let transport_stream_id = self.program.as_ref().map(|s| s.transport_stream_id).unwrap_or(1);
 		let program_number = self
 			.program
 			.as_ref()
@@ -2551,14 +2561,7 @@ where
 			.filter(|&id| id != 0)
 			.unwrap_or(1);
 
-		let pat = Pat {
-			transport_stream_id,
-			version_number: self.version,
-			table: vec![ProgramAssociation {
-				program_num: program_number,
-				program_map_pid: Pid::new(pmt_pid)?,
-			}],
-		};
+		let pat = self.pat(program_number, pmt_pid)?;
 		let table = self.table(program_number, pcr_pid)?;
 
 		self.schedule.set_tables(pmt_pid);
@@ -2567,7 +2570,8 @@ where
 			self.liveness.register(track.pid);
 		}
 		let psi = Psi {
-			pat: super::psi::encode_pat(&pat)?,
+			pat,
+			pat_laid: None,
 			pmt: super::psi::encode_pmt(&table, self.pmt_version)?,
 			table,
 			laid: None,
@@ -2726,8 +2730,9 @@ where
 	}
 
 	/// Rebuild the PMT from the tracks it lists, at the next `version_number` if that changes
-	/// it, to go out with the next frame: a receiver sees an ordinary PMT revision, the PAT
-	/// unchanged. Under sync the tables stay as laid.
+	/// it, to go out with the next frame: a receiver sees an ordinary PMT revision. A PMT the
+	/// catalog's `program.pmtPid` moves goes to its new PID behind a PAT at the next
+	/// `version_number` naming it. Under sync the tables stay as laid.
 	///
 	/// Tables go out with the frame they were muxed with, and frames on different PIDs leave in
 	/// deadline order, not mux order, so every copy queued that has not started out takes the
@@ -2740,6 +2745,30 @@ where
 		};
 		let (program_number, pcr_pid) = (psi.table.program_number, psi.announced.unwrap_or(psi.pcr_pid));
 		let table = self.table(program_number, pcr_pid)?;
+		let psi = self.psi.as_ref().expect("the tables are built");
+		if let Some(pmt_pid) = self.moved_pmt(psi) {
+			match psi.pat_laid {
+				Some((version, laid)) if laid == pmt_pid => self.version = version,
+				Some((version, _)) if version == self.version => self.version.increment(),
+				_ => {}
+			}
+			let pat = self.pat(program_number, pmt_pid)?;
+			let psi = self.psi.as_mut().expect("the tables are built");
+			let from = std::mem::replace(&mut psi.pmt_pid, pmt_pid);
+			let pmt = psi.pmt.clone();
+			psi.pat = pat.clone();
+			self.schedule.set_tables(pmt_pid);
+			self.last_psi = None;
+			// A PAT and the PMT it names go out together: a copy whose PAT has started out
+			// keeps its PMT where that PAT names it.
+			let mut moved = |packets: &mut Vec<u8>, sent: usize| {
+				let at = pat_from(packets, sent);
+				retable(packets, at, Pid::PAT, Pid::PAT, &pat)?;
+				retable(packets, at, from, pmt_pid, &pmt)
+			};
+			moved(&mut self.tables, 0)?;
+			self.schedule.rewrite(&mut moved)?;
+		}
 		let psi = self.psi.as_mut().expect("the tables are built");
 		if table == psi.table {
 			return Ok(());
@@ -2753,8 +2782,43 @@ where
 		psi.table = table;
 		self.last_psi = None;
 		let (pid, pmt) = (psi.pmt_pid, psi.pmt.clone());
-		retable(&mut self.tables, 0, pid, &pmt)?;
-		self.schedule.rewrite(|packets, sent| retable(packets, sent, pid, &pmt))
+		retable(&mut self.tables, 0, pid, pid, &pmt)?;
+		self.schedule
+			.rewrite(|packets, sent| retable(packets, sent, pid, pid, &pmt))
+	}
+
+	/// The PID the catalog moved the PMT to from the one `psi` lays it on, unless something
+	/// the export lays already rides it, when the PMT stays put.
+	fn moved_pmt(&self, psi: &Psi) -> Option<u16> {
+		let pmt_pid = self.cataloged_pmt_pid();
+		if pmt_pid == psi.pmt_pid {
+			return None;
+		}
+		let taken = pmt_pid == psi.pcr_pid
+			|| self.tracks.values().any(|track| track.pid == pmt_pid)
+			|| self.si.keys().any(|(pid, _)| *pid == pmt_pid);
+		if taken {
+			tracing::warn!(
+				from = psi.pmt_pid,
+				to = pmt_pid,
+				"TS export keeps the PMT on its PID: the catalog moves it to one in use"
+			);
+			return None;
+		}
+		Some(pmt_pid)
+	}
+
+	/// The PAT naming `pmt_pid` for `program_number`, at the current `version_number`.
+	fn pat(&self, program_number: u16, pmt_pid: u16) -> anyhow::Result<Bytes> {
+		let transport_stream_id = self.program.as_ref().map(|s| s.transport_stream_id).unwrap_or(1);
+		super::psi::encode_pat(&Pat {
+			transport_stream_id,
+			version_number: self.version,
+			table: vec![ProgramAssociation {
+				program_num: program_number,
+				program_map_pid: Pid::new(pmt_pid)?,
+			}],
+		})
 	}
 
 	/// Drop each track that left the catalog once everything it sent has gone out, and with
@@ -3472,19 +3536,23 @@ where
 		Ok(())
 	}
 
-	/// Note the PMT a slot lays, which is the current one: a revision rewrites every copy that
-	/// has not started out ([`Self::revise`]). The PCR moves to the PID it names from the next
-	/// slot on.
+	/// Note the PAT and PMT a slot lays, which are the current ones: a revision rewrites every
+	/// copy that has not started out ([`Self::revise`]). The PCR moves to the PID the PMT names
+	/// from the next slot on.
 	fn note_tables(&mut self, packets: &[u8], pmt_pid: u16) {
 		let Some(psi) = self.psi.as_mut() else {
 			return;
 		};
-		let starts = packets
-			.as_chunks::<{ TsPacket::SIZE }>()
-			.0
-			.iter()
-			.any(|packet| packet_pid(packet) == pmt_pid && packet[1] & 0x40 != 0);
-		if starts
+		let packets = packets.as_chunks::<{ TsPacket::SIZE }>().0;
+		let starts = |pid: u16| {
+			packets
+				.iter()
+				.any(|packet| packet_pid(packet) == pid && packet[1] & 0x40 != 0)
+		};
+		if starts(Pid::PAT) && psi.pat_laid.is_none_or(|(version, _)| version != self.version) {
+			psi.pat_laid = Some((self.version, psi.pmt_pid));
+		}
+		if starts(pmt_pid)
 			&& psi
 				.laid
 				.as_ref()
@@ -3492,7 +3560,7 @@ where
 		{
 			psi.laid = Some((self.pmt_version, psi.table.clone()));
 		}
-		if starts
+		if starts(pmt_pid)
 			&& let Some(pid) = psi.announced
 			&& psi.table.pcr_pid.is_some_and(|named| named.as_u16() == pid)
 		{
@@ -3552,9 +3620,17 @@ fn packet_pid(packet: &[u8]) -> u16 {
 	u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])
 }
 
-/// Put `section` in place of each section on `pid` that starts at or after packet `from` of
-/// `packets`, flagging a break where the one it replaces did.
-fn retable(packets: &mut Vec<u8>, from: usize, pid: u16, section: &[u8]) -> anyhow::Result<()> {
+/// The first packet at or after `from` of `packets` that starts a PAT section, or the end.
+fn pat_from(packets: &[u8], from: usize) -> usize {
+	let packets = packets.as_chunks::<{ TsPacket::SIZE }>().0;
+	(from..packets.len())
+		.find(|&at| packet_pid(&packets[at]) == Pid::PAT && packets[at][1] & 0x40 != 0)
+		.unwrap_or(packets.len())
+}
+
+/// Put `section`, on `to`, in place of each section on `pid` that starts at or after packet
+/// `from` of `packets`, flagging a break where the one it replaces did.
+fn retable(packets: &mut Vec<u8>, from: usize, pid: u16, to: u16, section: &[u8]) -> anyhow::Result<()> {
 	let old = std::mem::take(packets);
 	let old = old.as_chunks::<{ TsPacket::SIZE }>().0;
 	let mut at = 0;
@@ -3565,7 +3641,7 @@ fn retable(packets: &mut Vec<u8>, from: usize, pid: u16, section: &[u8]) -> anyh
 			continue;
 		}
 		let flag = packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x80 != 0;
-		section_packets(packets, pid, section, flag)?;
+		section_packets(packets, to, section, flag)?;
 		while old
 			.get(at)
 			.is_some_and(|next| packet_pid(next) == pid && next[1] & 0x40 == 0)

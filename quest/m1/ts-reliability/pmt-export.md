@@ -39,7 +39,3 @@ Tests: two synced legs, joined apart, across a PMT add, remove, retype and
 descriptor change, write the same packets from the revision on, PMTs
 included; a leg that joins after a revision lays the revised PMT at the
 same `version_number`.
-
-## Related
-
-- [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a moved PMT PID reaches the export as a new PAT
