@@ -1457,6 +1457,56 @@ async fn a_single_leading_styp_still_segments_on_keyframes_in(passthrough: bool)
 	);
 }
 
+/// A muxed source joined mid-GOP keeps audio and video on the same group sequences.
+///
+/// Unwrapped video drops samples until its first sync sample, so its segment opens there, not on
+/// the skipped fragment. Counting the skipped fragment as opened rolled the next keyframe into a
+/// second segment, leaving audio one group ahead of video for the rest of the stream.
+#[tokio::test]
+async fn a_mid_gop_join_keeps_tracks_on_the_same_groups() {
+	for passthrough in [false, true] {
+		a_mid_gop_join_keeps_tracks_on_the_same_groups_in(passthrough).await;
+	}
+}
+
+async fn a_mid_gop_join_keeps_tracks_on_the_same_groups_in(passthrough: bool) {
+	let (init, (video_id, video_scale), (audio_id, audio_scale)) = bbb_init();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
+	fmp4.decode(&init).unwrap();
+
+	let snapshot = catalog.snapshot();
+	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
+	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
+	let mut video_track = consumer.track(&video_name).unwrap().subscribe(replay()).await.unwrap();
+	let mut audio_track = consumer.track(&audio_name).unwrap().subscribe(replay()).await.unwrap();
+
+	// No styp, so segments follow video keyframes; the first video fragment is mid-GOP.
+	for segment in 0..3u64 {
+		let base = segment * 1_000_000;
+		let frag = super::encode_fragment(
+			info(video_id, video_scale, segment as u32),
+			&[sample(base, segment > 0, Some(1_000_000))],
+		)
+		.unwrap();
+		fmp4.decode(&frag).unwrap();
+		let frag = super::encode_fragment(
+			info(audio_id, audio_scale, segment as u32),
+			&[sample(base, true, Some(1_000_000))],
+		)
+		.unwrap();
+		fmp4.decode(&frag).unwrap();
+	}
+	fmp4.finish().unwrap();
+
+	let video = drain_group_sequences(&mut video_track);
+	let audio = drain_group_sequences(&mut audio_track);
+	assert_eq!(audio, video, "audio and video groups line up");
+}
+
 /// One audio fragment for bbb's track 2, carrying a single sample at the track's 44100 timescale.
 ///
 /// `trun.data_offset` is left unset so the samples start at the front of the mdat, which is all

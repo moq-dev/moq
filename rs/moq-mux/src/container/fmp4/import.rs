@@ -948,7 +948,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			self.initial_reservation = None;
 
 			let new_segment = track.segment != Some(self.segment);
-			track.segment = Some(self.segment);
 			let placement = Placement {
 				offset,
 				new_segment,
@@ -956,12 +955,18 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				declared: new_segment && self.declared,
 			};
 
-			match &mut track.output {
+			let opened = match &mut track.output {
 				Output::Passthrough(passthrough) => {
 					let fragment = fragment(traf, &moof, &run, &payload, &track.defaults)?;
 					passthrough.write(fragment, &run, track.kind, placement)?;
+					true
 				}
 				output => unwrap(output, &run, &payload, track.timescale, placement)?,
+			};
+			// A video track joined mid-GOP skips samples until a sync sample, so its segment opens
+			// there; counting a skipped fragment would let the next keyframe roll a second segment.
+			if opened {
+				track.segment = Some(self.segment);
 			}
 		}
 
@@ -1247,13 +1252,15 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 }
 
 /// Write each sample of `run` as its own frame on an unwrapped track.
+///
+/// Returns whether the track now has a group open, which video lacks until its first sync sample.
 fn unwrap<E: crate::catalog::hang::CatalogExt>(
 	output: &mut Output<E>,
 	run: &Run,
 	payload: &Bytes,
 	timescale: moq_net::Timescale,
 	placement: Placement,
-) -> Result<()> {
+) -> Result<bool> {
 	let earliest = placement.offset.apply(run.earliest)?;
 	let end = placement.offset.apply(run.end)?;
 	let video = matches!(output, Output::Video(_));
@@ -1292,7 +1299,8 @@ fn unwrap<E: crate::catalog::hang::CatalogExt>(
 		}
 
 		// The fragment arrived at once, so a consumer has to buffer its whole span.
-		producer.burst(end.checked_sub(earliest)?.into())
+		producer.burst(end.checked_sub(earliest)?.into())?;
+		Ok(!producer.needs_keyframe())
 	}, _ => unreachable!("passthrough tracks write whole fragments"))
 }
 
