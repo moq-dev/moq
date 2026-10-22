@@ -45,9 +45,13 @@ noise.
   fails over mid-read, and its copy releases the route's demand once idle.
 - `stats/session-report` is accepted at O(live sessions), after a cheap fix.
   Per-label payload bytes ([#5731](https://github.com/moq-dev/moq/pull/5731))
-  match payload billing per label, such as per signing key. The drain runs
-  once a second, using under 0.01% of a core at 10,000 sessions. Deleting
-  those bytes was rejected.
+  match payload billing per label, such as per signing key. After removing
+  redundant row locking and live-session CAS, three alternating measurements
+  give 52.2 us for 10,000 sessions without wires and 388.4 us with one real
+  transport wire each. A once-per-second drain uses about 0.04% of a core
+  with those wires; the earlier under-0.01% estimate omitted their walk.
+  This remaining per-session and per-connection sampling is accepted. Deleting
+  per-label bytes was rejected.
 
 ### Release as a baseline
 
@@ -65,9 +69,9 @@ usually pays for a feature.
 | `track_gap_flush/4096` | 5.7 us | 551 us | 96x | [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) |
 | `track_gap_flush/512` | 1.8 us | 48 us | 27x | same |
 | `track_gap_flush/64` | 1.5 us | 6.2 us | 4.1x | same |
-| `stats/session-report/1000x10` | 11.0 us | 86.8 us | 7.9x | [Stats report](/quest/m1/release-perf/stats-report.md) |
+| `stats/session-report/1000x10` | 11.0 us | 86.8 us | 7.9x | accepted (above) |
 | `track_gc/idle/16384` | 11.6 ns | 73.7 ns | 6.3x | [Idle GC](/quest/m1/release-perf/gc-idle.md) |
-| `origin/resume_overlap/sequence/1r_64g_32c` | 93 us | 426 us | 4.6x | [Resume duplicates](/quest/m1/release-perf/resume-duplicates.md) |
+| `origin/resume_overlap/sequence/1r_64g_32c` | 93 us | 426 us | 4.6x | fixed in [moq-dev/moq#6292](https://github.com/moq-dev/moq/pull/6292) |
 | `session_delivery_group_cost/moq-transport-22/.../viewers=64/.../fetch` | 1.19 ms | 3.86 ms | 3.2x | accepted (above) |
 | `group_write_frames/single/8192` | 424 us | 486 us | 1.17x | [Re-check](/quest/m1/release-perf/recheck.md) |
 
@@ -99,9 +103,7 @@ outside the worktree to keep the next one.
 ## Required
 
 - [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) - an arrival and a gap flush cost O(log gaps), not O(gaps)
-- [Resume duplicates](/quest/m1/release-perf/resume-duplicates.md) - an ordered resume skips copies of an already-delivered group without consuming them
 - [Idle GC](/quest/m1/release-perf/gc-idle.md) - an idle track GC skips the wall-clock pass when nothing is due
-- [Stats report](/quest/m1/release-perf/stats-report.md) - the stats drain locks each row once and its bench counts the wire walk; per-label bytes stay, at an accepted O(live sessions)
 - [Re-check](/quest/m1/release-perf/recheck.md) - the screen-only moves are re-measured with instruction counts, and the ones that hold are fixed or accepted
 - [JS frames](/quest/m1/release-perf/js-frames.md) - the js/net frame path is no slower than release in a browser, or the gap is accepted
 

@@ -599,6 +599,18 @@ impl Subscriber {
 		}
 	}
 
+	/// Invalidate a reservation below the containing reader's past prefix.
+	pub(super) fn skip_ordered(&mut self, floor: Option<u64>) {
+		let mut reader = self.reader();
+		if reader
+			.peeked
+			.as_ref()
+			.is_some_and(|peeked| floor.is_none_or(|floor| peeked.sequence < floor))
+		{
+			reader.peeked = None;
+		}
+	}
+
 	/// Poll for the next datagram in arrival order. `delivered` decides which replaced
 	/// copies still have a group to hand out, once groups were asked for.
 	pub(super) fn poll_recv_datagram(
@@ -1135,12 +1147,18 @@ impl Reader {
 		self.groups_read = true;
 		let groups = self.groups;
 		let budget = self.mirrored.max_delay;
+		let floor = if ordered { delivered.floor() } else { Some(0) };
 		let mut lowest: Option<Candidate> = None;
 		for index in 0..self.copies.len() {
 			let copy = &mut self.copies[index];
 			// What a replaced copy holds is past the reader's budget once a newer group
 			// superseded it a full budget ago.
-			if copy.done.is_some() || copy.expired(budget, waiter) {
+			// A fully handed-out bounded copy still backs groups being read, but cannot
+			// supply another one. Keep its recovery lease without polling its empty range.
+			if copy.done.is_some()
+				|| copy.end().is_some_and(|end| delivered.covers(groups.0..end))
+				|| copy.expired(budget, waiter)
+			{
 				continue;
 			}
 			loop {
@@ -1153,6 +1171,9 @@ impl Reader {
 					}
 					Poll::Ready(Ok(sub)) => sub,
 				};
+				if ordered {
+					sub.skip_ordered(floor);
+				}
 				let res = sub.poll_peek_group(ordered, waiter);
 				match res {
 					Poll::Pending => break,
@@ -1161,10 +1182,11 @@ impl Reader {
 							let Sub::Ready(sub) = &mut self.copies[index].sub else {
 								unreachable!()
 							};
-							let _ = match ordered {
-								true => sub.poll_next_group(waiter),
-								false => sub.poll_recv_group(waiter),
-							};
+							if ordered {
+								sub.skip_ordered(sequence.checked_add(1));
+							} else {
+								let _ = sub.poll_recv_group(waiter);
+							}
 							continue;
 						}
 						if lowest.as_ref().is_none_or(|lowest| sequence <= lowest.sequence) {
@@ -2515,6 +2537,96 @@ mod test {
 				return sequences;
 			};
 			sequences.push(group.sequence);
+		}
+	}
+
+	#[test]
+	fn a_fresh_nested_reader_ends_after_its_outer_reader_already_passed_its_groups() {
+		let routes = Producer::new();
+		let outer = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&outer, HOUR);
+		for sequence in 0..4 {
+			write(&a, sequence);
+		}
+		assert_eq!(drain(&mut sub, true), [0, 1, 2, 3]);
+
+		let nested_routes = Producer::new();
+		let nested = logical(&nested_routes);
+		let b = copy();
+		for sequence in 0..4 {
+			write(&b, sequence);
+		}
+		nested_routes.serve(b.consume());
+		routes.serve(nested.consume());
+		let waiter = kio::Waiter::noop();
+		assert!(sub.poll_next_group(&waiter).is_pending());
+
+		// The nested reader has handed nothing out itself. Its containing reader's
+		// past prefix must also release the replaced copy when its serving copy ends.
+		let c = copy();
+		for sequence in 0..4 {
+			write(&c, sequence);
+		}
+		c.finish().unwrap();
+		nested_routes.serve(c.consume());
+		assert!(matches!(sub.poll_next_group(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	#[test]
+	fn ordered_replay_skips_unbounded_copies_while_a_nested_route_waits() {
+		for nested in [false, true] {
+			let routes = Producer::new();
+			let inner = logical(&routes);
+			let outer_routes = Producer::new();
+			let outer = logical(&outer_routes);
+			outer_routes.serve(inner.consume());
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(if nested { &outer } else { &inner }, HOUR);
+			sub.set_groups(..0);
+			for sequence in 0..4 {
+				write(&a, sequence);
+			}
+			assert!(
+				drain(&mut sub, true).is_empty(),
+				"subscribe the nested reader before switching"
+			);
+			let b = copy();
+			for sequence in 0..4 {
+				write(&b, sequence);
+			}
+			routes.serve(b.consume());
+			assert!(drain(&mut sub, true).is_empty());
+			let c = track::Request::new(Arc::new(broadcast::Info::default()), "video");
+			routes.serve(c.consume());
+			assert!(drain(&mut sub, true).is_empty());
+			sub.set_groups(..);
+			assert_eq!(drain(&mut sub, true), [0, 1, 2, 3], "nested={nested}");
+			{
+				let readers = routes.readers.lock().unwrap();
+				let reader = readers.iter().find_map(Weak::upgrade).unwrap();
+				let reader = reader.lock().unwrap();
+				let Sub::Ready(older) = &reader.copies[0].sub else {
+					panic!("older copy ready")
+				};
+				assert_eq!(
+					older.delivered_runs(),
+					0,
+					"duplicates were never handed out on the older copy: nested={nested}"
+				);
+			}
+			let c = c.accept(crate::track::Info::timed());
+			for sequence in 0..5 {
+				write(&c, sequence);
+			}
+			assert_eq!(drain(&mut sub, true), [4], "a newly ready copy inherits the floor");
+			c.finish().unwrap();
+			assert!(
+				matches!(sub.poll_next_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
+				"nested end propagates past covered copies"
+			);
 		}
 	}
 
