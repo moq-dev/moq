@@ -101,7 +101,7 @@ jobs:
 
       # The same matrix with every client pinned to one moq-transport draft per pass. A release
       # PR runs the oldest and newest even draft between Rust and native JS; nightly and manual
-      # runs cover every even draft and every client that can pin one.
+      # runs cover every even draft and every client.
       - name: Interop (moq-transport)
         id: interop-ietf
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
