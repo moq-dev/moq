@@ -82,7 +82,7 @@ network-impairment performance result is implied by these checks.
 
 ## Required
 
-The 19 children comprise 15 reproduced or source-confirmed findings, three
+The 18 children comprise 14 reproduced or source-confirmed findings, three
 contract/lifetime investigations, and one security-review pointer. Each
 child records whether its behavior is new on main or inherited from release.
 
@@ -90,7 +90,6 @@ child records whether its behavior is new on main or inherited from release.
 - [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
 - [Bound export reorder storage](/quest/m1/release-audit/export-reorder.md) - flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
 - [Validate CMAF header fields](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count, and a zero timescale is refused
-- [Preserve fMP4 sample runs](/quest/m1/release-audit/fmp4-passthrough.md) - passthrough does not substitute gap or interleaved bytes for media samples
 - [Announce finite HLS imports](/quest/m1/release-audit/hls-startup.md) - a completed valid source cannot race its ready catalog and fail startup
 - [Cancel Dart stream reads](/quest/m1/release-audit/dart-cancellation.md) - listener cancellation releases pending native operations without an unrelated event
 - [Parse QMux records without copying suffixes](/quest/m1/release-audit/qmux-copy.md) - many small frames do not cause quadratic copying
