@@ -34,9 +34,11 @@ Decided with the maintainer on 2026-10-22:
   `sleep_until` arm on the clock it already passes to `update`
   (`moq_net::time` or `moq_clock`) and calls `update` again with the last
   estimate. `moq_net::time` re-exports only `Instant` and `now` from
-  moq-clock, so add `sleep_until` to that re-export rather than giving moq-c
-  a direct moq-clock dependency. A shared async follower in moq-mux was
-  rejected because it would move timers into the policy.
+  moq-clock, so re-export `sleep_until` there rather than giving moq-c a
+  direct moq-clock dependency. Gate it on `feature = "async"`, like
+  `moq_net::time::run`: without that feature moq-clock has no runtime, and
+  `sleep_until` panics. A shared async follower in moq-mux was rejected
+  because it would move timers into the policy.
 - `Control` stores only `target`, `policy`, and `applied` today, so it must
   also remember the pending raise: the last clamped `desired` from `update`.
   Invariant: `deadline()` is `Some(t)` only if `update` with the same
@@ -53,11 +55,21 @@ Decided with the maintainer on 2026-10-22:
   A due deadline therefore never spins the caller's select arm. Unit-test
   each clearing case, including a scheduled raise followed by a `None`
   estimate.
+- Reaching `desired` clears the pending raise only once the caller's
+  `set_bitrate` succeeds. Every caller logs and continues on any error
+  other than `BitrateUnsupported`, so a transient failure must report back
+  to `Control`, which restores the previous target and keeps the pending
+  raise. `deadline()` then stays `Some`, no sooner than one ramp step after
+  the failure, so a quiet grant still retries and a failing encoder never
+  spins the arm. Unit-test it, and cover the quiet-grant path on each caller:
+  the final raise fails once, the grant never changes, and the encoder
+  still reaches its ceiling.
 - Fix all three callers in the same PR.
 
-Public API: additive. It adds `moq_mux::rate::Control::deadline` and a
-`sleep_until` re-export in `moq_net::time`. Add a `MIGRATE.md` entry only
-if an existing signature changes. Wire: none. Cover the
+Public API: additive. It adds `moq_mux::rate::Control::deadline`, a way to
+report a failed apply, and an async-gated `sleep_until` re-export in
+`moq_net::time`. Add a `MIGRATE.md` entry only if an existing signature
+changes. Wire: none. Cover the
 attack-then-recovery case with paused time in the moq-mux unit tests. Cover
 it again on one caller's loop to prove the timer arm wakes without a grant
 change.
