@@ -257,62 +257,81 @@ impl<'a> Node<'a> {
 
 /// Values keyed by bytes, one level per byte, so a walk along a key meets every value
 /// whose key starts it, and the level a key ends at holds every value whose key extends it.
+///
+/// The levels live in one flat list linked by position, never nested: a key may be as long
+/// as a whole message, and a chain of owned levels that long would overflow the stack when
+/// dropped.
 struct Trie<T> {
+	/// The root first; empty until the first entry.
+	levels: Vec<Level<T>>,
+}
+
+struct Level<T> {
 	value: Option<Box<T>>,
-	/// Sorted by byte.
-	children: Vec<(u8, Trie<T>)>,
+	/// Each child's byte and position, sorted by byte.
+	children: Vec<(u8, usize)>,
 }
 
 impl<T> Default for Trie<T> {
 	fn default() -> Self {
-		Self {
-			value: None,
-			children: Vec::new(),
-		}
+		Self { levels: Vec::new() }
 	}
 }
 
 impl<T> Trie<T> {
+	const ROOT: usize = 0;
+
 	fn entry(&mut self, key: impl IntoIterator<Item = u8>, init: impl FnOnce() -> T) -> &mut T {
-		let mut trie = self;
+		if self.levels.is_empty() {
+			self.levels.push(Level::new());
+		}
+		let mut at = Self::ROOT;
 		for byte in key {
-			let at = match trie.children.binary_search_by_key(&byte, |(byte, _)| *byte) {
-				Ok(at) => at,
-				Err(at) => {
-					trie.children.insert(at, (byte, Trie::default()));
-					at
+			at = match self.levels[at].children.binary_search_by_key(&byte, |(byte, _)| *byte) {
+				Ok(child) => self.levels[at].children[child].1,
+				Err(child) => {
+					let next = self.levels.len();
+					self.levels.push(Level::new());
+					self.levels[at].children.insert(child, (byte, next));
+					next
 				}
 			};
-			trie = &mut trie.children[at].1;
 		}
-		trie.value.get_or_insert_with(|| Box::new(init()))
+		self.levels[at].value.get_or_insert_with(|| Box::new(init()))
 	}
 
-	fn child(&self, byte: u8) -> Option<&Trie<T>> {
-		let at = self.children.binary_search_by_key(&byte, |(byte, _)| *byte).ok()?;
-		Some(&self.children[at].1)
+	fn child(&self, at: usize, byte: u8) -> Option<usize> {
+		let children = &self.levels[at].children;
+		let child = children.binary_search_by_key(&byte, |(byte, _)| *byte).ok()?;
+		Some(children[child].1)
 	}
 
 	/// The level `key` ends at, if any value's key starts with it.
-	fn find(&self, key: impl IntoIterator<Item = u8>) -> Option<&Trie<T>> {
-		key.into_iter().try_fold(self, |trie, byte| trie.child(byte))
+	fn find(&self, key: impl IntoIterator<Item = u8>) -> Option<usize> {
+		if self.levels.is_empty() {
+			return None;
+		}
+		key.into_iter().try_fold(Self::ROOT, |at, byte| self.child(at, byte))
 	}
 
 	/// The value keyed exactly `key`.
 	fn get(&self, key: impl IntoIterator<Item = u8>) -> Option<&T> {
-		self.find(key)?.value.as_deref()
+		self.levels[self.find(key)?].value.as_deref()
 	}
 
 	/// Visit each value whose key starts `key` and is at most `most` bytes, with its length.
 	fn above<'t>(&'t self, key: impl IntoIterator<Item = u8>, most: usize, visit: &mut impl FnMut(usize, &'t T)) {
+		if self.levels.is_empty() {
+			return;
+		}
 		let mut key = key.into_iter();
-		let mut trie = self;
+		let mut at = Self::ROOT;
 		for depth in 0..=most {
-			if let Some(value) = &trie.value {
+			if let Some(value) = &self.levels[at].value {
 				visit(depth, value);
 			}
-			match key.next().and_then(|byte| trie.child(byte)) {
-				Some(next) => trie = next,
+			match key.next().and_then(|byte| self.child(at, byte)) {
+				Some(next) => at = next,
 				None => return,
 			}
 		}
@@ -320,33 +339,48 @@ impl<T> Trie<T> {
 
 	/// Visit each value whose key starts with `key`.
 	fn below<'t>(&'t self, key: impl IntoIterator<Item = u8>, visit: &mut impl FnMut(&'t T)) {
-		let Some(trie) = self.find(key) else {
-			return;
-		};
-		// Iterative: a key may be as long as a whole message.
-		let mut stack = vec![trie];
-		while let Some(trie) = stack.pop() {
-			if let Some(value) = &trie.value {
-				visit(value);
-			}
-			stack.extend(trie.children.iter().map(|(_, child)| child));
+		if let Some(at) = self.find(key) {
+			self.subtree(at, visit);
 		}
 	}
 
 	/// Visit each value whose key starts `key` or starts with it.
 	fn related<'t>(&'t self, key: impl IntoIterator<Item = u8>, visit: &mut impl FnMut(&'t T)) {
-		let mut trie = self;
+		if self.levels.is_empty() {
+			return;
+		}
+		let mut at = Self::ROOT;
 		for byte in key {
 			// Strictly shorter keys here; the level `key` ends at holds the rest.
-			if let Some(value) = &trie.value {
+			if let Some(value) = &self.levels[at].value {
 				visit(value);
 			}
-			match trie.child(byte) {
-				Some(next) => trie = next,
+			match self.child(at, byte) {
+				Some(next) => at = next,
 				None => return,
 			}
 		}
-		trie.below([], visit);
+		self.subtree(at, visit);
+	}
+
+	fn subtree<'t>(&'t self, at: usize, visit: &mut impl FnMut(&'t T)) {
+		let mut stack = vec![at];
+		while let Some(at) = stack.pop() {
+			let level = &self.levels[at];
+			if let Some(value) = &level.value {
+				visit(value);
+			}
+			stack.extend(level.children.iter().map(|(_, child)| *child));
+		}
+	}
+}
+
+impl<T> Level<T> {
+	fn new() -> Self {
+		Self {
+			value: None,
+			children: Vec::new(),
+		}
 	}
 }
 
@@ -448,6 +482,22 @@ mod tests {
 			naive_intersect(&ours, &theirs),
 			"{ours:?} intersect {theirs:?}"
 		);
+	}
+
+	#[test]
+	fn message_sized_segments() {
+		// One segment may fill a whole message; indexing it must not recurse per byte.
+		let long = "a".repeat(65_000);
+		let half = "a".repeat(32_000);
+		let members = [
+			pattern(&long),
+			pattern(&format!("{half}*{half}")),
+			pattern(&format!("{long}/b")),
+		];
+		let set: Patterns = members.iter().cloned().collect();
+		assert_eq!(set, Patterns::from_iter([members[1].clone(), members[2].clone()]));
+		assert!(set.covers(&Patterns::from(pattern(&long))));
+		assert!(set.intersect(&Patterns::from(pattern(&format!("{half}*")))).is_ok());
 	}
 
 	#[test]
