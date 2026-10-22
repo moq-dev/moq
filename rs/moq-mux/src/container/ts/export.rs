@@ -130,10 +130,6 @@ where
 	version: VersionNumber,
 	/// The PMT's, advanced by each switch too, and by each revision of the program ([`Self::revise`]).
 	pmt_version: VersionNumber,
-	/// The newest PMT `version_number` laid into a slot, and whether the PMT section being laid
-	/// is an older one's ([`Self::null_stale_tables`]).
-	laid_pmt: Option<u8>,
-	stale_pmt: bool,
 	/// After a switch to another instance, the PIDs whose first packet is queued flagging the
 	/// break. `None` for an export that never switched.
 	flagged: Option<HashSet<u16>>,
@@ -156,9 +152,6 @@ where
 	counters: HashMap<u16, u8>,
 	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
 	program_descriptors: Vec<catalog::Descriptor>,
-	/// Those of the revisions before, which the PMT carries beside them while a track listed
-	/// under them drains ([`Self::draining`]).
-	retiring_descriptors: Vec<catalog::Descriptor>,
 	/// Transport/service identity captured on import, used to rebuild a consistent
 	/// PAT/PMT. `None` for a media-only source, so a minimal identity is synthesized.
 	program: Option<catalog::Program>,
@@ -302,6 +295,9 @@ struct Track {
 	listed: bool,
 	/// The last catalog snapshot lists it.
 	cataloged: bool,
+	/// The program descriptors the PMT carried when it left the catalog while listed, which
+	/// the PMT carries beside the current ones while it drains ([`Export::table`]).
+	left_under: Vec<catalog::Descriptor>,
 	/// The first frame, held until the program tables are built.
 	pending: Option<Pending>,
 	/// When the source was subscribed. Nothing it delivers reached the export before then,
@@ -370,6 +366,7 @@ impl Track {
 			serial: 0,
 			listed: false,
 			cataloged: true,
+			left_under: Vec::new(),
 			pending: None,
 			subscribed: moq_clock::now(),
 			latest: moq_clock::Instant::ZERO,
@@ -1092,8 +1089,8 @@ struct Psi {
 	pmt: Bytes,
 	/// What `pmt` encodes, which a revision is compared with.
 	table: super::psi::Pmt,
-	/// The PMT last written out and its version, `None` before the first.
-	written: Option<(VersionNumber, super::psi::Pmt)>,
+	/// The PMT last laid into a slot and its version, `None` before the first.
+	laid: Option<(VersionNumber, super::psi::Pmt)>,
 	pcr_pid: u16,
 	/// PID the PMT rides on: the source's original (preserved from the service
 	/// record) or the synthesized [`PMT_PID`] for a media-only source.
@@ -1386,8 +1383,6 @@ where
 			stale: HashSet::new(),
 			version: VersionNumber::default(),
 			pmt_version: VersionNumber::default(),
-			laid_pmt: None,
-			stale_pmt: false,
 			flagged: None,
 			tables: Vec::new(),
 			delay: Duration::ZERO,
@@ -1398,7 +1393,6 @@ where
 			serials: 0,
 			counters: HashMap::new(),
 			program_descriptors: Vec::new(),
-			retiring_descriptors: Vec::new(),
 			program: None,
 			si: BTreeMap::new(),
 			last_timestamp: None,
@@ -1901,17 +1895,11 @@ where
 		// error the export reports.
 		if self.psi.is_some() {
 			for (name, track) in self.tracks.iter_mut() {
-				track.cataloged = active.contains_key(name);
-			}
-			match self.draining() {
-				true => {
-					for descriptor in descriptors {
-						if !self.retiring_descriptors.contains(&descriptor) {
-							self.retiring_descriptors.push(descriptor);
-						}
-					}
+				let cataloged = active.contains_key(name);
+				if track.listed && track.cataloged && !cataloged {
+					track.left_under = descriptors.clone();
 				}
-				false => self.retiring_descriptors.clear(),
+				track.cataloged = cataloged;
 			}
 			if self.sync {
 				for name in active.keys() {
@@ -2477,7 +2465,11 @@ where
 
 	/// PID the PMT rides on: the source's original (preserved in the service record),
 	/// or the synthesized [`PMT_PID`] for a media-only source or an invalid (zero) value.
+	/// Once the tables are built, the one they went out on, whatever the catalog says since.
 	fn pmt_pid(&self) -> u16 {
+		if let Some(psi) = &self.psi {
+			return psi.pmt_pid;
+		}
 		self.program
 			.as_ref()
 			.map(|s| s.pmt_pid)
@@ -2555,7 +2547,7 @@ where
 			pat: super::psi::encode_pat(&pat)?,
 			pmt: super::psi::encode_pmt(&table, self.pmt_version)?,
 			table,
-			written: None,
+			laid: None,
 			pcr_pid,
 			pmt_pid,
 		};
@@ -2634,15 +2626,22 @@ where
 			})
 			.collect::<anyhow::Result<Vec<_>>>()?;
 
-		// Re-emit the captured program-level descriptors, and while a track drains those it was
-		// listed under: the streams of both revisions are listed until it ends, so are theirs.
-		// With none (a non-TS source), derive the SCTE-35 'CUEI' registration when a 0x86
-		// verbatim stream is present.
-		let retiring = self
-			.retiring_descriptors
+		// Re-emit the captured program-level descriptors, and while a track drains those it left
+		// the catalog under: the streams of both revisions are listed until it ends, so are
+		// theirs. A stale track ([`Self::followed`]) sends no tail. With none (a non-TS source),
+		// derive the SCTE-35 'CUEI' registration when a 0x86 verbatim stream is present.
+		let mut program_info = self.program_descriptors.clone();
+		let draining = self
+			.tracks
 			.iter()
-			.filter(|descriptor| !self.program_descriptors.contains(descriptor));
-		let program_info: Vec<_> = self.program_descriptors.iter().chain(retiring).cloned().collect();
+			.filter(|(name, track)| track.listed && !track.cataloged && !self.stale.contains(*name));
+		for (_, track) in draining {
+			for descriptor in &track.left_under {
+				if !program_info.contains(descriptor) {
+					program_info.push(descriptor.clone());
+				}
+			}
+		}
 		let program_info = if !program_info.is_empty() {
 			program_info
 		} else if listed.values().any(|t| {
@@ -2666,8 +2665,11 @@ where
 	/// it, to go out with the next frame: a receiver sees an ordinary PMT revision, the PAT
 	/// unchanged. Under sync the tables stay as laid.
 	///
-	/// A revision no frame has carried yet is replaced rather than followed, so each version
-	/// that goes out follows the one before by one, and differs from it.
+	/// Tables go out with the frame they were muxed with, and frames on different PIDs leave in
+	/// deadline order, not mux order, so every copy queued that has not started out takes the
+	/// revision too: none older can follow it. A revision before any slot laid the one before
+	/// replaces it, so each version that goes out follows the one before by one, and differs
+	/// from it.
 	fn revise(&mut self) -> anyhow::Result<()> {
 		let Some(psi) = self.psi.as_ref().filter(|_| !self.sync) else {
 			return Ok(());
@@ -2677,15 +2679,17 @@ where
 		if table == psi.table {
 			return Ok(());
 		}
-		match &psi.written {
-			Some((version, written)) if *written == table => self.pmt_version = *version,
+		match &psi.laid {
+			Some((version, laid)) if *laid == table => self.pmt_version = *version,
 			Some((version, _)) if *version == self.pmt_version => self.pmt_version.increment(),
 			_ => {}
 		}
 		psi.pmt = super::psi::encode_pmt(&table, self.pmt_version)?;
 		psi.table = table;
 		self.last_psi = None;
-		Ok(())
+		let (pid, pmt) = (psi.pmt_pid, psi.pmt.clone());
+		retable(&mut self.tables, 0, pid, &pmt)?;
+		self.schedule.rewrite(|packets, sent| retable(packets, sent, pid, &pmt))
 	}
 
 	/// Drop each track that left the catalog once everything it sent has gone out, and with
@@ -2752,9 +2756,6 @@ where
 				self.liveness.retire(track.pid);
 			}
 		}
-		if !self.draining() {
-			self.retiring_descriptors.clear();
-		}
 		if cleared
 			&& !self.tracks.values().any(|track| track.pid == pcr_pid)
 			&& let Some(pid) = self.media_clock()
@@ -2764,11 +2765,6 @@ where
 		}
 		self.expect_continuous();
 		self.revise()
-	}
-
-	/// Whether a track the PMT lists has left the catalog and is still sending its tail.
-	fn draining(&self) -> bool {
-		self.tracks.values().any(|track| track.listed && !track.cataloged)
 	}
 
 	/// Hold each track taking over a PID in the jitter buffer until every track before it
@@ -2918,14 +2914,6 @@ where
 			self.write_section(&mut out, Pid::PAT, &pat)?;
 			self.write_section(&mut out, pmt_pid, &pmt)?;
 			self.last_psi = Some(frame.timestamp);
-			let psi = self.psi.as_mut().expect("the tables are built");
-			if psi
-				.written
-				.as_ref()
-				.is_none_or(|(version, _)| *version != self.pmt_version)
-			{
-				psi.written = Some((self.pmt_version, psi.table.clone()));
-			}
 		}
 
 		// Emit each SI entry's sections verbatim. A changed snapshot (`dirty`) goes
@@ -3373,7 +3361,7 @@ where
 			}
 			// Under sync every packet was numbered where it was planned.
 			if !self.sync {
-				self.null_stale_tables(&mut payload, pmt_pid);
+				self.note_tables(&payload, pmt_pid);
 				self.number(&mut payload);
 			}
 			let frame = Frame {
@@ -3391,27 +3379,24 @@ where
 		Ok(())
 	}
 
-	/// Null each packet of a PMT section older than one already laid. Tables ride the units
-	/// muxed with them, and units on different PIDs leave in deadline order rather than mux
-	/// order, so a copy of the table a revision replaced can still be queued behind it; a
-	/// demux reading it would revert the revision.
-	fn null_stale_tables(&mut self, packets: &mut [u8], pmt_pid: u16) {
-		for packet in packets.as_chunks_mut::<{ TsPacket::SIZE }>().0 {
-			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
-			if pid != pmt_pid {
-				continue;
-			}
-			if let Some(version) = pmt_section_version(packet) {
-				// Versions count modulo 32: one up to 15 behind the newest laid is older.
-				let behind = self.laid_pmt.map(|laid| laid.wrapping_sub(version) & 0x1f);
-				self.stale_pmt = behind.is_some_and(|behind| (1..16).contains(&behind));
-				if !self.stale_pmt {
-					self.laid_pmt = Some(version);
-				}
-			}
-			if self.stale_pmt {
-				*packet = NULL_PACKET;
-			}
+	/// Note the PMT a slot lays, which is the current one: a revision rewrites every copy that
+	/// has not started out ([`Self::revise`]).
+	fn note_tables(&mut self, packets: &[u8], pmt_pid: u16) {
+		let Some(psi) = self.psi.as_mut() else {
+			return;
+		};
+		let starts = packets
+			.as_chunks::<{ TsPacket::SIZE }>()
+			.0
+			.iter()
+			.any(|packet| packet_pid(packet) == pmt_pid && packet[1] & 0x40 != 0);
+		if starts
+			&& psi
+				.laid
+				.as_ref()
+				.is_none_or(|(version, _)| *version != self.pmt_version)
+		{
+			psi.laid = Some((self.pmt_version, psi.table.clone()));
 		}
 	}
 
@@ -3460,19 +3445,33 @@ where
 	}
 }
 
-/// The `version_number` of the PMT section `packet` starts, if it starts one.
-fn pmt_section_version(packet: &[u8; TsPacket::SIZE]) -> Option<u8> {
-	if packet[1] & 0x40 == 0 {
-		return None;
+/// The PID of `packet`.
+fn packet_pid(packet: &[u8]) -> u16 {
+	u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])
+}
+
+/// Put `section` in place of each section on `pid` that starts at or after packet `from` of
+/// `packets`, flagging a break where the one it replaces did.
+fn retable(packets: &mut Vec<u8>, from: usize, pid: u16, section: &[u8]) -> anyhow::Result<()> {
+	let old = std::mem::take(packets);
+	let old = old.as_chunks::<{ TsPacket::SIZE }>().0;
+	let mut at = 0;
+	while let Some(packet) = old.get(at) {
+		at += 1;
+		if at <= from || packet_pid(packet) != pid || packet[1] & 0x40 == 0 {
+			packets.extend_from_slice(packet);
+			continue;
+		}
+		let flag = packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x80 != 0;
+		section_packets(packets, pid, section, flag)?;
+		while old
+			.get(at)
+			.is_some_and(|next| packet_pid(next) == pid && next[1] & 0x40 == 0)
+		{
+			at += 1;
+		}
 	}
-	let super::import::Payload::Bytes(payload) = super::import::payload(packet) else {
-		return None;
-	};
-	let section = payload.get(1 + usize::from(*payload.first()?)..)?;
-	match section.first() {
-		Some(&super::psi::PMT_TABLE_ID) => section.get(5).map(|byte| (byte >> 1) & 0x1f),
-		_ => None,
-	}
+	Ok(())
 }
 
 /// Packetize a PES payload into 188-byte TS packets, flagging a break in the first when `flag`.

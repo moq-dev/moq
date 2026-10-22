@@ -674,6 +674,19 @@ impl Schedule {
 		runs
 	}
 
+	/// Rewrite each queued unit's packets with `rewrite`, given how many have gone out, and find
+	/// its TBsys runs again.
+	pub fn rewrite(
+		&mut self,
+		mut rewrite: impl FnMut(&mut Vec<u8>, usize) -> anyhow::Result<()>,
+	) -> anyhow::Result<()> {
+		for unit in &mut self.units {
+			rewrite(&mut unit.packets, unit.sent)?;
+		}
+		self.remap();
+		Ok(())
+	}
+
 	/// Find each queued unit's TBsys runs again once the PIDs held to TBsys change.
 	fn remap(&mut self) {
 		let mut units = std::mem::take(&mut self.units);

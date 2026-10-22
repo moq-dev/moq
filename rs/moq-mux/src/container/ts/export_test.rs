@@ -8139,6 +8139,78 @@ async fn the_same_instance_continues_after_a_drop() {
 	same_instance_returns(false).await;
 }
 
+/// A track the returned catalog leaves out stays listed, silent on its PID, with no tail to
+/// send, so the PMT carries only the returned catalog's program descriptors, not also those the
+/// track was listed under.
+#[tokio::test(start_paused = true)]
+async fn a_track_left_out_of_a_return_keeps_no_program_descriptors() {
+	let origin = crate::source::produce_origin();
+	let epoch = moq_net::Epoch::mint();
+	let route = || moq_net::origin::Route::default().with_epoch(epoch.clone());
+	let describe = |catalog: &mut crate::catalog::Producer<tscat::Ext>, tag: u8| {
+		catalog.modify().unwrap().ext.mpegts.program_descriptors = vec![tscat::Descriptor {
+			tag,
+			data: Bytes::from_static(&[0xaa; 4]),
+		}];
+	};
+
+	let (mut broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
+	describe(&mut catalog, 0x80);
+	let mut kept = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut left = aac_rendition(&mut broadcast, &mut catalog, "b.aac");
+	let source = crate::source::resolved(&origin, "live").await;
+	let mut export = open_ts(source, crate::catalog::CatalogFormat::Hang)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	let start = tokio::time::Instant::now();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut kept, ms);
+		write_aac(&mut left, ms);
+	}
+	let mut frames = drain_frames(&mut export).await;
+	drop((broadcast, catalog, kept, left));
+	frames.extend(drain_to_end(&mut export).await.0);
+
+	tokio::time::sleep(Duration::from_secs(1)).await;
+	let (mut broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
+	describe(&mut catalog, 0x81);
+	let back = origin.consume().routed_broadcast("live").await.unwrap();
+	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
+	let mut export = export.follow(back, stream).unwrap();
+	frames.extend(drain_frames(&mut export).await);
+	let mut kept = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let resumed = start.elapsed().as_millis() as u64;
+	for ms in (resumed..resumed + 200).step_by(20) {
+		write_aac(&mut kept, ms);
+	}
+	frames.extend(drain_frames(&mut export).await);
+	describe(&mut catalog, 0x82);
+	for ms in (resumed + 200..resumed + 400).step_by(20) {
+		write_aac(&mut kept, ms);
+	}
+	frames.extend(drain_frames(&mut export).await);
+	kept.finish().unwrap();
+	catalog.finish().unwrap();
+	let (rest, end) = drain_to_end(&mut export).await;
+	frames.extend(rest);
+	end.unwrap();
+
+	let bytes: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let mut reader = TsPacketReader::new(Cursor::new(bytes));
+	let mut infos: Vec<Vec<u8>> = Vec::new();
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::Pmt(pmt)) = packet.payload {
+			let tags: Vec<u8> = pmt.program_info.iter().map(|d| d.tag).collect();
+			if infos.last() != Some(&tags) {
+				infos.push(tags);
+			}
+		}
+	}
+	assert_eq!(infos, [vec![0x80], vec![0x81], vec![0x82]]);
+}
+
 /// A returning route serves the same publisher's catalog and monotonically numbered groups.
 #[tokio::test(start_paused = true)]
 async fn a_return_keeps_catalog_and_group_history() {
