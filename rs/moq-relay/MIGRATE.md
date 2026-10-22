@@ -12,6 +12,11 @@ Convert with `SystemTime::from` at a third-party boundary, or measure since `Wal
 The session JSON still carries integer Unix seconds.
 `auth::request_for` now returns `Result<Request, auth::Error>`; propagate the result and refuse an unrepresentable certificate expiry with the existing request error instead of treating it as unbounded.
 
+### WebSocket clients must offer a QMux subprotocol (#6231)
+
+The relay answers a WebSocket upgrade with 400 when its `Sec-WebSocket-Protocol` offers none of the relay's QMux subprotocols, instead of falling back to the legacy `webtransport` format.
+Upgrade any client that still speaks only `webtransport` over WebSocket before the relay.
+
 ### io\_uring workers start serving separately (#6245)
 
 `uring::Workers::serve(cluster, auth, shutdown, sessions)` is now `spawn` with the same arguments, which sets every worker up without accepting, followed by `serve()`, which starts them accepting.

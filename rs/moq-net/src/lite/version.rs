@@ -124,6 +124,15 @@ impl Version {
 		}
 	}
 
+	/// Whether either endpoint may open a Padding Stream (0x2). Added in lite-07.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_padding(self) -> bool {
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether a subscriber may open a Tracks Stream (0x8) to list a broadcast's
 	/// tracks. Added in lite-07.
 	#[allow(clippy::match_like_matches_macro)]

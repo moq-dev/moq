@@ -24,9 +24,20 @@ The remaining public `SystemTime`s, as of
 - moq-cli and moq-bench: private wall times, which can move freely.
 
 `Wall` covers 1970 to 2554, so a catalog wall past that range is an error, as
-it already is on Windows. A third-party API on `SystemTime`, such as str0m's
-sender reports in moq-rtc, converts at its boundary with `From<Wall>` and
-`TryFrom<SystemTime>`.
+it already is on Windows. A third-party API on `SystemTime`, such as
+str0m's sender reports in moq-rtc, converts at its boundary with
+`From<Wall>` and `TryFrom<SystemTime>`.
+
+Expiries saturate instead (decided 2026-10-22, maintainer, from an external
+API audit of [#6298](https://github.com/moq-dev/moq/pull/6298)): a
+certificate `not_after` or an auth expiry past 2554 becomes the latest
+representable `Wall`, and one before 1970 becomes `Wall::UNIX_EPOCH`, so
+`tls::PeerIdentity::expiry` and the auth claims stay infallible and rcgen's
+default year-4096 certificates keep working. No representable `now` can compare differently against the
+saturated value, so this loses nothing; refusing them would turn a
+representation limit into a validity rule for valid identities. Presentation
+walls (catalogs, timelines, HLS) still refuse, since their value is shown or
+used for arithmetic, not only compared.
 
 Public API: breaking in hang, moq-mux, moq-hls, moq-quic, moq-relay, and
 moq-tokio, each with a `MIGRATE.md` entry. Wire: none.

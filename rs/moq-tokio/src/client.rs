@@ -322,9 +322,7 @@ impl Client {
 			let session = qmux::Session::connect(opened.channel, config)
 				.await
 				.map_err(crate::webrtc::Error::from)?;
-			// A data channel has no request URI, so a path would ride the SETUP; a peer link has none.
-			let transport = crate::transport::Session::new(session, moq_net::transport::Binding::InBand);
-			Ok::<_, Error>(connect_session(&self.moq, transport).await?)
+			Ok::<_, Error>(connect_session(&self.moq, session).await?)
 		};
 
 		let session = match self.timeout.is_zero() {
@@ -427,11 +425,7 @@ impl Client {
 		if url.scheme() == "tcp" {
 			let session =
 				crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay, self.resolution_delay).await?;
-			let session = connect_session(
-				&moq,
-				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
-			)
-			.await?;
+			let session = connect_session(&moq, session).await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
 		}
 
@@ -446,11 +440,7 @@ impl Client {
 				self.resolution_delay,
 			)
 			.await?;
-			let session = connect_session(
-				&moq,
-				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
-			)
-			.await?;
+			let session = connect_session(&moq, session).await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
 		}
 
@@ -459,11 +449,7 @@ impl Client {
 		#[cfg(all(feature = "uds", unix))]
 		if url.scheme() == "unix" {
 			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
-			let session = connect_session(
-				&moq,
-				crate::transport::Session::new(session, moq_net::transport::Binding::InBand),
-			)
-			.await?;
+			let session = connect_session(&moq, session).await?;
 			return Ok(Dialed::new(session, crate::Transport::Unix));
 		}
 
@@ -539,11 +525,7 @@ impl Client {
 		let alpns = self.versions.alpns();
 		let session =
 			crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns).await?;
-		let session = connect_session(
-			&self.moq,
-			crate::transport::Session::new(session, moq_net::transport::Binding::Uri),
-		)
-		.await?;
+		let session = connect_session(&self.moq, session).await?;
 		Ok(Dialed::new(session, crate::Transport::WebSocket))
 	}
 
@@ -582,11 +564,7 @@ impl Client {
 		match race_transport_connect(&url, quic, websocket).await? {
 			TransportRace::Quic(quic) => Ok(Dialed::new(connect_session(moq, quic).await?, transport)),
 			TransportRace::WebSocket(session) => {
-				let session = connect_session(
-					&self.moq,
-					crate::transport::Session::new(session, moq_net::transport::Binding::Uri),
-				)
-				.await?;
+				let session = connect_session(&self.moq, session).await?;
 				Ok(Dialed::new(session, crate::Transport::WebSocket))
 			}
 		}

@@ -5058,6 +5058,7 @@ dependencies = [
  "hex-literal",
  "lru-slab",
  "moq-clock",
+ "moq-quic",
  "proptest",
  "qlog",
  "rand 0.10.3",
@@ -5113,7 +5114,7 @@ dependencies = [
  "moq-stats",
  "moq-tokio",
  "moq-uring",
- "qmux",
+ "qmux 0.7.0",
  "rand 0.10.3",
  "rcgen 0.14.10",
  "reqwest",
@@ -5335,7 +5336,7 @@ dependencies = [
  "noq-proto",
  "notify",
  "pin-project-lite",
- "qmux",
+ "qmux 0.7.0",
  "rand 0.10.3",
  "rcgen 0.14.10",
  "reqwest",
@@ -7537,13 +7538,34 @@ dependencies = [
  "bytes",
  "futures",
  "libc",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+ "web-transport-proto",
+ "web-transport-trait",
+]
+
+[[package]]
+name = "qmux"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "kio 0.6.2",
+ "libc",
+ "moq-clock",
+ "moq-net",
+ "moq-quic",
+ "qmux 0.6.5",
+ "rustc-hash 2.1.3",
  "rustls",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.30.0",
  "tracing",
- "web-transport-proto",
  "web-transport-trait",
 ]
 

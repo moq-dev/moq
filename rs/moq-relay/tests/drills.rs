@@ -803,27 +803,29 @@ const PAYLOAD: usize = 256;
 /// stalls of #4349.
 const SETTLE: Duration = Duration::from_secs(10);
 
-/// The cross-relay drill's link: the drills' impairment behind a bottleneck a
-/// burst overruns, so its tail waits in the queue or is dropped from it. It is
+/// The cross-relay drill's link: a bottleneck a burst overruns, so its tail
+/// waits in the queue or is dropped from it. Random loss and reordering cannot
+/// establish that congestion acted, so only overflow supplies loss here. It is
 /// slower than [`credit`]'s receive window lets a sender go. The first burst
 /// is collected at ingress after setup, so scheduling cannot drain the bucket
 /// between its datagrams; its bytes exceed the burst and 50ms queue allowance
 /// before they are accounted at one instant.
 fn bursty() -> moq_shaper::Profile {
 	moq_shaper::Profile {
+		delay: Duration::from_millis(20),
 		rate: Some(moq_shaper::Rate {
 			bits_per_second: 100_000,
 			burst: 1500,
 			queue: Duration::from_millis(50),
 		}),
-		..impairment()
+		..Default::default()
 	}
 }
 
 /// QUIC credit tighter than a burst on the impaired lane: fewer concurrent
 /// streams than a burst has groups (each group is a stream, each FETCH another),
 /// and receive windows of a few groups, so senders wait on MAX_STREAMS and
-/// MAX_DATA mid-burst, over a path that loses the frames granting them.
+/// MAX_DATA mid-burst while the path is congested.
 fn credit(lane: Lane, mut quic: moq_tokio::quic::Config) -> moq_tokio::quic::Config {
 	if let Lane::Impaired = lane {
 		quic.max_streams = Some(16);

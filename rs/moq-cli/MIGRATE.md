@@ -9,6 +9,11 @@ How to update your invocation and config for each breaking change, newest first.
 `moq auth` Unix timestamp arguments and decoded token or grant times must fit 1970-2554 on every platform.
 Values before zero or after 18,446,744,073 whole Unix seconds are refused; flag names and integer-second encodings are unchanged.
 
+### `import fmp4` and `import hls` unwrap to Legacy (#6250)
+
+Both now publish one `legacy` frame per sample instead of one `cmaf` frame per fragment.
+Add `--passthrough` to keep publishing CMAF.
+
 ### `export archive` records a prefix (#6160)
 
 `moq export archive <url>` records every broadcast announced at or under `--broadcast`, each instance under `<url>/<broadcast>/@<epoch>`, until the connection ends, instead of one broadcast at `<url>`.

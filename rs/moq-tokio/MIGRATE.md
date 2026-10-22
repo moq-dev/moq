@@ -11,6 +11,12 @@ Convert with `SystemTime::from` only where a third-party API needs it.
 A certificate expiry outside the portable 1970-2554 wall range returns `Err`, while a missing or unparseable certificate still returns `Ok(None)`.
 Certificate-backed relay admission therefore refuses a leaf with an expiry beyond that range, including rcgen's default year 4096; issue certificates with a representable `notAfter` to use this policy.
 
+### qmux sessions are qmux 0.7 (#6231)
+
+The WebSocket, TCP, TLS, and Unix socket transports run on [qmux 0.7](https://github.com/moq-dev/moq/blob/main/rs/qmux/MIGRATE.md), which implements moq-net's poll traits directly instead of going through `web_transport_trait`.
+Code that holds a `qmux::Session` from moq-tokio, such as one from the WebSocket listener's `accept`, follows qmux's migration guide.
+A WebSocket client must offer a QMux subprotocol: `websocket::accept` refuses an upgrade without one, and the legacy `webtransport` format is gone.
+
 ### MoQ sessions need the `net` feature (#6132)
 
 moq-net is optional, behind the default `net` feature that every transport feature (`quic`, `websocket`, `tcp`, `uds`, `iroh`, `webrtc`) turns on.

@@ -10,6 +10,11 @@ Program date times, MPD availability and publish times, and `export::Renditions:
 Pass `moq_clock::wall()` for now, convert third-party timestamps with `Wall::try_from`, and pass `wall.into()` to formatters that take `SystemTime`.
 HLS and DASH text encodings are unchanged.
 
+### HLS import unwraps fMP4 to Legacy (#6250)
+
+`import::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.
+Set `import::Config::passthrough` to keep publishing CMAF.
+
 ### An ended playlist ends the import
 
 `import::Import::run` returns `Ok(())` once every rendition's playlist carries `EXT-X-ENDLIST` and its last segment is imported, instead of polling forever.

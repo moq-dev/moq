@@ -748,7 +748,7 @@ fn spawn_import(
 		match import.source {
 			ImportSource::Hls(hls) => {
 				warn_if_missing_format(&name);
-				tasks.spawn(hls::import(target(name), hls.playlist, epoch));
+				tasks.spawn(hls::import(target(name), hls, epoch));
 			}
 			ImportSource::Rtmp(rtmp) => {
 				if let Some(addr) = rtmp.listen {
@@ -831,6 +831,7 @@ fn spawn_export(
 			fragment_duration: stdout.fragment_duration,
 			mux_rate: stdout.mux_rate,
 			passthrough: stdout.passthrough,
+			sync: stdout.sync,
 			catalog: export.catalog_format,
 			select: export.select,
 		};
@@ -1120,6 +1121,156 @@ mod tests {
 			.now_or_never()
 			.expect("the drain returned before the lease recorded its end");
 		assert_eq!(reason, moq_auth::lease::Reason::Shutdown);
+	}
+
+	mod listen_admission {
+		use super::*;
+		use futures::FutureExt;
+		use std::time::Duration;
+
+		const TIMEOUT: Duration = Duration::from_secs(10);
+
+		struct Listening {
+			tasks: JoinSet<anyhow::Result<()>>,
+			admissions: moq_relay::auth::Admissions,
+			connection: moq_tokio::Connection,
+			consumer: moq_net::origin::Consumer,
+			_shutdown: Shutdown,
+			_broadcast: moq_net::broadcast::Producer,
+			_track: moq_net::track::Producer,
+		}
+
+		impl Listening {
+			async fn new(timeout: &str) -> Self {
+				let _ = moq_tokio::crypto::install_default();
+				let cli = Invocation::try_parse_from([
+					"moq",
+					"--listen-tcp-bind",
+					"127.0.0.1:0",
+					"--listen-timeout",
+					timeout,
+					"import",
+					"ts",
+				])
+				.unwrap();
+				let listener = cli.moq.server_config().init_streams().unwrap().listen().await.unwrap();
+				let addr = listener.tcp_local_addr().unwrap();
+				let cluster = moq_relay::cluster::Cluster::new(Default::default()).unwrap();
+				let broadcast = cluster.origin.create_broadcast("probe").unwrap();
+				broadcast.announce(Default::default()).unwrap();
+				let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+				let track = broadcast.create_track("status", info).unwrap();
+				let mut group = track.append_group().unwrap();
+				group
+					.write_frame(moq_net::Timestamp::ZERO, b"admitted".as_ref())
+					.unwrap();
+				group.finish().unwrap();
+				let (auth, admissions) = moq_relay::auth::Auth::embedded("test-cli");
+				let (trigger, observer) = moq_relay::shutdown::Observer::new(TIMEOUT);
+				let serving = Serving {
+					cluster,
+					auth,
+					directions: Directions {
+						publish: true,
+						consume: false,
+					},
+					shutdown: observer.clone(),
+					lan: false,
+					public_quic: false,
+				};
+				let mut tasks = JoinSet::new();
+				spawn_serve(&mut tasks, listener, serving);
+				let origin = moq_tokio::origin::spawn();
+				let consumer = origin.consume();
+				let mut client = moq_tokio::connect::Config::default();
+				// Only the listener's deadline may end the undecided admission.
+				client.timeout = Some(Duration::ZERO);
+				let client = client
+					.init(Default::default())
+					.unwrap()
+					.with_subscriber(origin)
+					.with_reconnect(false);
+				let connection = client.connect(format!("tcp://{addr}/").parse::<url::Url>().unwrap());
+				Self {
+					tasks,
+					admissions,
+					connection,
+					consumer,
+					_shutdown: Shutdown { trigger, observer },
+					_broadcast: broadcast,
+					_track: track,
+				}
+			}
+		}
+
+		#[tokio::test]
+		async fn an_unanswered_admission_closes_at_the_listen_deadline() {
+			let mut listening = Listening::new("1s").await;
+			let admission = listening.admissions.next().await.unwrap();
+			// Loopback establishes the request first; only admission runs on controlled time.
+			tokio::time::pause();
+			tokio::time::advance(Duration::from_millis(500)).await;
+			assert!(
+				listening.connection.closed().now_or_never().is_none(),
+				"admission ended before its deadline"
+			);
+			tokio::time::advance(Duration::from_secs(1)).await;
+			tokio::time::resume();
+			let error = tokio::time::timeout(TIMEOUT, listening.connection.closed())
+				.await
+				.unwrap()
+				.unwrap_err();
+			assert!(
+				matches!(&error, moq_tokio::Error::MoqNet(error) if moq_net::SessionError::from(error) == moq_net::SessionError::Timeout),
+				"expected the listener's timeout close, got {error:?}"
+			);
+			drop(admission);
+			listening.tasks.shutdown().await;
+		}
+
+		#[tokio::test]
+		async fn a_late_admission_within_the_deadline_or_with_zero_timeout_serves() {
+			for timeout in ["12s", "0"] {
+				let mut listening = Listening::new(timeout).await;
+				let admission = listening.admissions.next().await.unwrap();
+				tokio::time::pause();
+				// Past the former ten-second admission cap, but inside the listener's bound.
+				tokio::time::advance(Duration::from_secs(11)).await;
+				// Poll already-woken deadlines before making the decision ready.
+				tokio::task::yield_now().await;
+				assert!(
+					listening.connection.closed().now_or_never().is_none(),
+					"{timeout}: decided before the grant"
+				);
+				admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(
+					moq_auth::Pattern::all(),
+					moq_auth::Pattern::all(),
+				)));
+				tokio::time::resume();
+				let connection = tokio::time::timeout(TIMEOUT, listening.connection.clone().established())
+					.await
+					.unwrap()
+					.unwrap();
+				// Media proves the CLI admitted the session, even on a transport that establishes early.
+				let payload = tokio::time::timeout(TIMEOUT, async {
+					let broadcast = listening.consumer.routed_broadcast("probe").await.unwrap();
+					let mut track = broadcast
+						.track("status")
+						.unwrap()
+						.subscribe(None)
+						.await
+						.unwrap()
+						.ordered();
+					let mut group = track.next_group().await.unwrap().unwrap();
+					group.read_frame().await.unwrap().unwrap().payload
+				})
+				.await
+				.unwrap();
+				assert_eq!(&payload[..], b"admitted", "{timeout}: grant did not serve the media");
+				connection.close().await.unwrap();
+				listening.tasks.shutdown().await;
+			}
+		}
 	}
 
 	/// A local pipeline that dies takes the process with it, even while another one is

@@ -59,6 +59,8 @@ pub use crate::connection::{
     RttEstimator, SendDatagramError, SendGroup, SendGroups, SendOptions, SendStream,
     ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
+#[cfg(feature = "mux")]
+pub use connection::mux;
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;
 
