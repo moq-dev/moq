@@ -847,14 +847,33 @@ negotiated() {
 }
 
 failure_reason() {
-    # failure_reason <log>: the first error-looking line of a cell log, minus its
-    # timestamp/level/target prefix and the browser's [page] tag. The first error is
-    # usually the cause; later ones tend to be the teardown it triggered.
+    # failure_reason <log>: the last stage the subscriber reached, then the first
+    # error-looking line as the detail. The first error alone is often the teardown
+    # after the timeout, which hides how far the cell got. Stages come from the
+    # lines the Rust CLI, @moq/net, and the browser page already log: connected,
+    # SUBSCRIBE sent, SUBSCRIBE_OK, and a group dropped for starting mid-group.
     [[ -f "$1" ]] || return 0
-    sed 's/\x1b\[[0-9;]*m//g' "$1" |
+    local log stage track detail
+    log=$(sed 's/\x1b\[[0-9;]*m//g' "$1")
+    track=$(grep -oE 'subscribe start(ed|:).*track=[^ ]+' <<<"$log" | tail -1 | sed -E 's/.*track=//' || true)
+    if ! grep -qE 'connected version=|negotiated protocol:' <<<"$log"; then
+        stage="not connected"
+    elif [[ -z "$track" ]]; then
+        stage="connected, nothing subscribed"
+    elif grep -qE "abandoned before it was accepted|waiting for SUBSCRIBE_OK" <<<"$log" ||
+        { grep -q 'subscribe start:' <<<"$log" && ! grep -qF "track=$track" <<<"$(grep 'subscribe ok:' <<<"$log")"; }; then
+        stage="no SUBSCRIBE_OK for $track"
+    elif grep -q 'dropping a group with no head' <<<"$log"; then
+        stage="SUBSCRIBE_OK for $track, only headless groups"
+    else
+        stage="SUBSCRIBE_OK for $track, no objects"
+    fi
+    # Teardown noise once the timeout kills the client says nothing about the cause.
+    detail=$(grep -vE 'failed to read capsule|unknown capsule' <<<"$log" |
         grep -m1 -E '(^|[^a-z])(err|error|Error|ERROR|failed|Failed|timed out)([^a-z]|$)' |
         sed -E 's/^[0-9T:.-]+Z +[A-Z]+ +[a-z0-9_:]+: //; s/^\[page\] //; s/^[[:space:]]+//' |
-        tr '\t' ' ' | cut -c1-240 || true
+        tr '\t' ' ' || true)
+    echo "$stage${detail:+: $detail}" | cut -c1-240
 }
 
 log_dir() {
