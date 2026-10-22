@@ -39,12 +39,10 @@ Decided with the maintainer on 2026-10-22:
 - Make `epoch` part of rendition identity for both the active and the
   pending track.
 - moq-ffi's `MoqVideo` record drops hang's `preference` today, so OBS
-  cannot rank by it. Add `preference: i32` (default 0) to `MoqVideo` in
-  `rs/moq-ffi/src/media.rs` and carry it through the Cross-Package Sync
-  bindings and docs. Every binding then sees a publisher's compatibility
-  transcode (`-1`). Decided in review of
-  [moq-dev/moq#6366](https://github.com/moq-dev/moq/pull/6366) to do this
-  in the same quest rather than a separate one.
+  cannot rank by it until the required m1 quest adds it to every binding.
+  Decided in review of
+  [moq-dev/moq#6366](https://github.com/moq-dev/moq/pull/6366): that field
+  rides m1's breaking binding cut, and this quest only consumes it.
 
 Extend `cpp/obs/test/moq-source-test.cpp` with these cases:
 
@@ -55,10 +53,11 @@ Extend `cpp/obs/test/moq-source-test.cpp` with these cases:
 - an all-disabled section
 - an epoch-only change
 
-Public API: a new `preference` field on every binding's video catalog
-record. It changes generated record checksums, positional constructors, and
-Go unkeyed struct literals. So, like the earlier `epoch` addition, add a
-`## Unreleased` entry to each affected package's `MIGRATE.md`. Wire: none.
+Public API: none. Wire: none.
+
+## Required
+
+- [Video preference in bindings](/quest/m1/ffi-video-preference.md) - `MoqVideo` carries `preference`, so OBS can rank by it
 
 ## Related
 

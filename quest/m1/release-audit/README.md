@@ -88,7 +88,7 @@ work, because obs-moq ships on its own schedule.
 
 ## Required
 
-The 22 children comprise 18 reproduced or source-confirmed findings, three
+The children comprise reproduced or source-confirmed findings,
 contract/lifetime investigations, and one security-review pointer. Each
 child records whether its behavior is new on main or inherited from release.
 
