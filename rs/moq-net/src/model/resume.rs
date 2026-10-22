@@ -943,14 +943,10 @@ impl Reader {
 		}
 	}
 
-	/// Whether `sequence` is past the declared end, which refuses the track: another copy
+	/// Whether `at` is past the declared end, which refuses the track: another copy
 	/// contradicts the copy that declared it.
-	fn past_end(&mut self, sequence: u64) -> bool {
-		if self
-			.declared
-			.and_then(Position::final_sequence)
-			.is_some_and(|end| sequence >= end)
-		{
+	fn past_end(&mut self, at: Position) -> bool {
+		if self.declared.is_some_and(|end| at >= end) {
 			self.refused = true;
 			self.peeked = None;
 		}
@@ -1108,7 +1104,7 @@ impl Reader {
 				Poll::Pending => return Some(Poll::Pending),
 			},
 		};
-		if self.past_end(candidate.sequence) {
+		if self.past_end(Position::group(candidate.sequence)) {
 			return Some(Poll::Ready(Err(Error::ProtocolViolation)));
 		}
 		let index = self
@@ -1125,11 +1121,18 @@ impl Reader {
 		};
 		// Selection reserves the exact group, so eviction can abort that group but
 		// cannot substitute a later one and advance the logical reader past a gap.
-		let Poll::Ready(Ok(Some(group))) = result else {
+		let Poll::Ready(Ok(Some(mut group))) = result else {
 			unreachable!("the peek reserved a group")
 		};
 		assert_eq!(group.sequence, candidate.sequence, "the peek reserved this exact group");
 		self.observe(index, group.sequence);
+		// A mid-group end caps the group it falls in, as it caps a direct track's.
+		if let Some(end) = self
+			.declared
+			.filter(|end| end.frame != 0 && end.group == group.sequence)
+		{
+			group.end_at(..end.frame);
+		}
 		let group = self.hand_out(index, group);
 		Some(Poll::Ready(Ok(Some(group))))
 	}
@@ -1322,7 +1325,10 @@ impl Reader {
 						if copy.datagrams_seen.is_some_and(|seen| id <= seen) {
 							continue;
 						}
-						if self.past_end(datagram.sequence) {
+						if self.past_end(Position {
+							group: id.0,
+							frame: id.1,
+						}) {
 							return Some(Poll::Ready(Err(Error::ProtocolViolation)));
 						}
 						self.datagram = self.datagram.max(Some(id));
@@ -2040,6 +2046,28 @@ mod test {
 				Poll::Ready(Err(Error::ProtocolViolation))
 			));
 		}
+	}
+
+	/// A mid-group end another copy declared caps the group it falls in.
+	#[moq_clock::test]
+	async fn a_mid_group_end_caps_another_copys_group() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let mut a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		a.finish_at(Position { group: 4, frame: 2 }).unwrap();
+		let b = copy();
+		routes.serve(b.consume());
+		let mut group = b.create_group(group::Info { sequence: 4 }).unwrap();
+		for frame in 0..4 {
+			group.write_frame(ts(frame), b"x".as_ref()).unwrap();
+		}
+		group.finish().unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"x".to_vec()));
+		assert_eq!(read(&mut reading), Some(b"x".to_vec()));
+		assert_eq!(read(&mut reading), None);
 	}
 
 	/// An end below a group a copy handed out or holds claims other content.
