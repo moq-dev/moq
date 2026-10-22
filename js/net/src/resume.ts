@@ -340,6 +340,10 @@ class Reader implements ResumeSource {
 			copy.since = undefined;
 			copy.done = undefined;
 			copy.datagramsDone = undefined;
+			// Resume where a fresh copy would: what it buffered while replaced, below what another
+			// route already handed out, is not handed out again.
+			if (this.#newest !== undefined) copy.floor = Math.max(copy.floor ?? 0, this.#newest);
+			copy.datagramsSeen = this.#datagram;
 			this.#update(copy);
 			this.#bound(copy);
 			this.#copies.push(copy);

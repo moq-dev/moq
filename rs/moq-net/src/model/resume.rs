@@ -861,6 +861,13 @@ impl Reader {
 			copy.since = None;
 			copy.done = None;
 			copy.datagrams_done = None;
+			// Resume where a fresh copy would: what it buffered while replaced, below what
+			// another route already handed out, is not handed out again.
+			copy.floor = copy.floor.max(self.newest.map(Position::group));
+			copy.datagrams_seen = self.datagram;
+			if let (Sub::Ready(sub), Some(floor)) = (&mut copy.sub, copy.floor) {
+				sub.raise_start_to(floor.group);
+			}
 			copy.update(&self.mirrored);
 			self.copies.push(copy);
 			return;
@@ -1986,6 +1993,41 @@ mod test {
 		routes.serve(tracks[0].consume());
 		write(&tracks[0], 2);
 		assert_eq!(recv(&mut sub).sequence, 2);
+		drop(held);
+	}
+
+	/// A returning route resumes where a fresh copy would: what it buffered while replaced,
+	/// below what another route already handed out, is not handed out again.
+	#[moq_clock::test]
+	async fn a_returning_route_resumes_at_the_readers_newest() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let mut a = copy();
+		let mut b = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		let held = recv(&mut sub);
+		routes.serve(b.consume());
+		write(&b, 10);
+		write(&b, 20);
+		b.insert_datagram(25, ts(25), b"d".as_ref()).unwrap();
+		assert_eq!(drain(&mut sub, false), [10, 20]);
+		let datagram = |sub: &mut track::Subscriber| match sub.poll_recv_datagram(&kio::Waiter::noop()) {
+			Poll::Ready(datagram) => Some(datagram.unwrap().unwrap().sequence),
+			Poll::Pending => None,
+		};
+		assert_eq!(datagram(&mut sub), Some(25));
+		write(&a, 15);
+		a.insert_datagram(22, ts(22), b"d".as_ref()).unwrap();
+		assert_eq!(copies(&routes), 2, "the held group keeps the first route");
+		routes.serve(a.consume());
+		assert_eq!(drain(&mut sub, false), [] as [u64; 0]);
+		assert_eq!(datagram(&mut sub), None);
+		write(&a, 21);
+		a.insert_datagram(26, ts(26), b"d".as_ref()).unwrap();
+		assert_eq!(drain(&mut sub, false), [21]);
+		assert_eq!(datagram(&mut sub), Some(26));
 		drop(held);
 	}
 
