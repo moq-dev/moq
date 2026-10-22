@@ -38,7 +38,9 @@ mechanism wins first" step:
 - **Expired means reset.** Both moq-net publishers reset a stale group's
   stream as `Old`, even after its FIN while bytes await acknowledgment
   (`poll_expired_while_pending`), and moq-quic never resends a reset stream's
-  bytes, so probing never sends past a group's expiry. Rejected: requiring
+  bytes, so probing never sends past a group's expiry. A group the cache
+  evicted is only judged once [evicted-group staleness](/quest/m1/evicted-group-stale.md)
+  lands, so it is required, with a test that evicts a group mid-probe. Rejected: requiring
   [per-stream deadlines](/quest/m2/quic-deadline.md) first. They predict
   whether bytes can still arrive before the deadline, which tightens loss
   recovery too, but expiry itself already reaches moq-quic as a reset.
@@ -78,6 +80,7 @@ maintainer instead of falling back to it.
 ## Required
 
 - [Session send target](/quest/m1/probe-target.md) - the target this probes to and the sender hook it implements
+- [An evicted group is judged stale](/quest/m1/evicted-group-stale.md) - an evicted group's stream resets once stale, so probing never retransmits it
 
 ## Related
 

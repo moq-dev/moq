@@ -53,8 +53,10 @@ Decided with the maintainer on 2026-10-20:
   moved to m1, so Rust, FFI, and OBS publishers recover a stopped rendition in
   the next breaking release. Their rung disable needs the target and native
   probing, not padding.
-- Padding is browser-only (WebTransport in `js/net`): moq-quic is the only
-  Rust transport, so no native session needs it. lite-07 reserves its stream
+- Padding is browser-only (WebTransport in `js/net`). moq-quic with BBR3 is
+  the only native backend with a probing hook; other native backends (iroh
+  on noq, moq-quic under CUBIC) have no sender, keep `Report`, and never
+  disable a rung. lite-07 reserves its stream
   type before the cut ([lite-07 padding](/quest/m1/lite07-padding.md)), and
   the sender stays here.
 - The JS publisher's rung disable split into its own quest here, since it
