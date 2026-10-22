@@ -410,6 +410,13 @@ impl Track {
 					}
 					self.queue(name, pending, input.jitter)?;
 				}
+				// A cut takes a start group it left short now, not with the next group, which may
+				// arrive after that start was due, or with the stream's end.
+				Poll::Ready(Some(Event::Cut)) if !input.waiting_for_header => {
+					self.settle = false;
+					self.release(name, input.jitter, true)?;
+					input.jitter.cut(&self.pid, self.base.2 + self.source.cuts());
+				}
 				Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => self.settle = true,
 				Poll::Ready(Some(Event::FrameEnd { .. })) => {}
 				Poll::Ready(None) => {
@@ -419,9 +426,6 @@ impl Track {
 				Poll::Pending => {
 					if std::mem::take(&mut self.settle) && !input.waiting_for_header {
 						self.release(name, input.jitter, true)?;
-						// A cut takes a start group it left short now, not with the next group,
-						// which may arrive after that start was due.
-						input.jitter.cut(&self.pid, self.base.2 + self.source.cuts());
 					}
 					self.empty = moq_clock::now();
 					break;
