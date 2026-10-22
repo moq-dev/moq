@@ -462,7 +462,12 @@ export class Publisher {
 		const key = JSON.stringify([msg.trackNamespace, msg.trackName]);
 		const claimed = this.#session.version === Version.DRAFT_18;
 		if (claimed && this.#trackClaims.get(key) === "publish") {
-			await Message.write(request.writer, RequestError.id, new RequestError({ errorCode: 0x19, reasonPhrase: "track already PUBLISHed" }), this.#session.version);
+			await Message.write(
+				request.writer,
+				RequestError.id,
+				new RequestError({ errorCode: 0x19, reasonPhrase: "track already PUBLISHed" }),
+				this.#session.version,
+			);
 			return;
 		}
 		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
@@ -2198,7 +2203,12 @@ export class Publisher {
 				(prefix) => Path.hasPrefix(prefix, msg.prefix) || Path.hasPrefix(msg.prefix, prefix),
 			)
 		) {
-			await Message.write(request.writer, RequestError.id, new RequestError({ errorCode: 0x30, reasonPhrase: "overlapping SUBSCRIBE_TRACKS prefix" }), version);
+			await Message.write(
+				request.writer,
+				RequestError.id,
+				new RequestError({ errorCode: 0x30, reasonPhrase: "overlapping SUBSCRIBE_TRACKS prefix" }),
+				version,
+			);
 			return;
 		}
 		this.#listings.add(msg.prefix);
@@ -2461,25 +2471,30 @@ export class Publisher {
 				parameters.subscriptionFilter = subscription.filter;
 			}
 			const largest = wireOf(source).largest(name);
-			await Message.write(request.writer, Publish.id, new Publish({
-				requestId: id,
-				trackNamespace: namespace,
-				trackName: name,
-				trackAlias: id,
-				groupOrder: GroupOrder.Descending,
-				contentExists: !!largest,
-				largest: largest && { groupId: BigInt(largest.group), objectId: BigInt(largest.frame) },
-				forward: false,
-				parameters,
-				properties: subscription.propertiesWanted
-					? {
-							priority: toWire(info.priority),
-							groupOrder: Properties.DESCENDING,
-							timescale: info.timescale ?? undefined,
-							maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
-						}
-					: {},
-			}), version);
+			await Message.write(
+				request.writer,
+				Publish.id,
+				new Publish({
+					requestId: id,
+					trackNamespace: namespace,
+					trackName: name,
+					trackAlias: id,
+					groupOrder: GroupOrder.Descending,
+					contentExists: !!largest,
+					largest: largest && { groupId: BigInt(largest.group), objectId: BigInt(largest.frame) },
+					forward: false,
+					parameters,
+					properties: subscription.propertiesWanted
+						? {
+								priority: toWire(info.priority),
+								groupOrder: Properties.DESCENDING,
+								timescale: info.timescale ?? undefined,
+								maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
+							}
+						: {},
+				}),
+				version,
+			);
 			hold.signal.removeEventListener("abort", cancelled);
 			stop();
 			// Once sent, the PUBLISH survives cancellation of its listing.
@@ -2507,13 +2522,18 @@ export class Publisher {
 			let forward = !Filter.isDraft20(version) && params.forward !== false;
 			for (;;) {
 				if (!this.#gate.allows(namespace) || unlisted.peek() !== undefined) {
-					await Message.write(request.writer, PublishDone.id, new PublishDone({
-						statusCode: this.#gate.allows(namespace)
-							? PublishDoneStatus.INTERNAL_ERROR
-							: PublishDoneStatus.UNAUTHORIZED,
-						streamCount: BigInt(state.streams.opened),
-						reasonPhrase: "track no longer listed or granted",
-					}), version);
+					await Message.write(
+						request.writer,
+						PublishDone.id,
+						new PublishDone({
+							statusCode: this.#gate.allows(namespace)
+								? PublishDoneStatus.INTERNAL_ERROR
+								: PublishDoneStatus.UNAUTHORIZED,
+							streamCount: BigInt(state.streams.opened),
+							reasonPhrase: "track no longer listed or granted",
+						}),
+						version,
+					);
 					return;
 				}
 				if (forward) {
@@ -2534,11 +2554,16 @@ export class Publisher {
 							await refuseUpdate(request.writer, version, "subscribe", this.#failed(err));
 							await this.#publishFailed(request, state.streams);
 						} else {
-							await Message.write(request.writer, PublishDone.id, new PublishDone({
-								statusCode: PublishDoneStatus.INTERNAL_ERROR,
-								streamCount: BigInt(state.streams.opened),
-								reasonPhrase: "resume failed",
-							}), version);
+							await Message.write(
+								request.writer,
+								PublishDone.id,
+								new PublishDone({
+									statusCode: PublishDoneStatus.INTERNAL_ERROR,
+									streamCount: BigInt(state.streams.opened),
+									reasonPhrase: "resume failed",
+								}),
+								version,
+							);
 						}
 						return;
 					}
@@ -2562,11 +2587,18 @@ export class Publisher {
 					gate.dispose();
 				}
 				if (next === true) {
-					await Message.write(request.writer, PublishDone.id, new PublishDone({
-						statusCode: revoked.peek() ? PublishDoneStatus.UNAUTHORIZED : PublishDoneStatus.INTERNAL_ERROR,
-						streamCount: BigInt(state.streams.opened),
-						reasonPhrase: "track no longer listed or granted",
-					}), version);
+					await Message.write(
+						request.writer,
+						PublishDone.id,
+						new PublishDone({
+							statusCode: revoked.peek()
+								? PublishDoneStatus.UNAUTHORIZED
+								: PublishDoneStatus.INTERNAL_ERROR,
+							streamCount: BigInt(state.streams.opened),
+							reasonPhrase: "track no longer listed or granted",
+						}),
+						version,
+					);
 					return;
 				}
 				if (!next) return request.ended;
@@ -2627,11 +2659,16 @@ export class Publisher {
 	}
 
 	async #publishFailed(request: RequestStream, streams: StreamCount) {
-		await Message.write(request.writer, PublishDone.id, new PublishDone({
-			statusCode: PublishDoneStatus.UPDATE_FAILED,
-			streamCount: BigInt(streams.opened),
-			reasonPhrase: "update failed",
-		}), this.#session.version);
+		await Message.write(
+			request.writer,
+			PublishDone.id,
+			new PublishDone({
+				statusCode: PublishDoneStatus.UPDATE_FAILED,
+				streamCount: BigInt(streams.opened),
+				reasonPhrase: "update failed",
+			}),
+			this.#session.version,
+		);
 	}
 
 	#applyPublished(msg: Subscribe, params: Parameters) {
