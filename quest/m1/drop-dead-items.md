@@ -11,7 +11,10 @@ since [#5678](https://github.com/moq-dev/moq/pull/5678).
 ## Plan
 
 From [moq-dev/moq#6166](https://github.com/moq-dev/moq/pull/6166). Decided
-2026-10-21 with the maintainer: m2. Verify each still has no caller across
+2026-10-21 with the maintainer: m2.
+Moved to m1 on 2026-10-22 (maintainer, from an external API audit): the
+cut is breaking anyway, so this break ships with it instead of forcing
+another breaking release later. Verify each still has no caller across
 the repo, bindings included, before removing it; keep any that gained one.
 The test helper lives in `model/track.rs`, which many open PRs churn, so
 expect merge conflicts there.
