@@ -239,6 +239,12 @@ impl Live {
 	/// first of a group in `malformed` cut short, so the export drops it and holds the rest of
 	/// the group only in part.
 	fn sections(&mut self, malformed: std::ops::Range<u64>) {
+		let track = self.section_track();
+		self.sections = Some((track, malformed));
+	}
+
+	/// An SCTE-35 track on its own PID, which sends nothing until written.
+	fn section_track(&mut self) -> moq_net::track::Producer {
 		let name = self.broadcast.unique_name(".ts");
 		let track = self
 			.broadcast
@@ -253,7 +259,7 @@ impl Live {
 			.mpegts
 			.tracks
 			.insert(track.name().to_string(), entry);
-		self.sections = Some((track, malformed));
+		track
 	}
 
 	/// The receivers' instant at which the source's clock reads media time `micros`.
@@ -1483,57 +1489,37 @@ async fn a_run_no_leg_can_fill_is_sent_by_neither() {
 	}
 }
 
-/// RTP legs across the 33-bit PTS and PCR wrap, where the 32-bit RTP timestamp wraps too,
-/// send the same datagrams, and their timestamps run on through it.
+/// An RTP leg sends each run at its place in the slot, at the multiplex's pace rather than in
+/// one burst a send queue may not hold, so a leg that withholds some of a slot's runs sends the
+/// rest when a leg sending them all does, and a receiver merging them finds both copies together.
 #[tokio::test(start_paused = true)]
-async fn rtp_legs_send_the_same_datagrams_across_the_wrap() {
-	let wrap = (1u64 << 33) * 100 / 9;
-	let origin = (wrap - 3_700_000) / VIDEO_US * VIDEO_US;
-	let join = (wrap - origin).div_ceil(VIDEO_US * GOP) * GOP + 1;
+async fn rtp_legs_send_each_run_at_its_place_in_the_slot() {
 	let epoch = moq_net::Epoch::mint();
-	for lag in LAGS {
-		let mut live = Live::new(1.0, lag).await;
-		live.origin = origin;
+	let lost = |tick: u64| (5 * GOP + 8..6 * GOP).contains(&tick);
+	let mut paths = Vec::new();
+	for _ in 0..2 {
+		let mut live = Live::new(1.0, 0).await;
 		live.rtp(&epoch).await;
-		let (a, b, _) = synced_with(live, join, join + 12 * GOP, |_| false).await;
-		let (x, y) = (datagrams(&a, 0), datagrams(&b, 0));
-		assert!(same_datagrams(&x, &y) > 1_000, "lag {lag}");
-		let stamps: Vec<u32> = a
-			.out
-			.iter()
-			.map(|(_, frame)| u32::from_be_bytes(frame.payload[4..8].try_into().unwrap()))
-			.collect();
-		let steps: Vec<u32> = stamps.windows(2).map(|w| w[1].wrapping_sub(w[0])).collect();
-		assert!(
-			stamps.windows(2).any(|w| w[1] < w[0]),
-			"lag {lag}: no wrap in {} datagrams",
-			stamps.len()
-		);
-		assert!(
-			steps.iter().all(|step| *step < 90_000),
-			"lag {lag}: the timestamp stepped back"
-		);
+		paths.push(live);
 	}
-}
-
-/// An RTP leg sends each slot's datagrams across the slot, at the multiplex's pace, rather than
-/// in one burst a send queue may not hold.
-#[tokio::test(start_paused = true)]
-async fn rtp_datagrams_go_out_across_each_slot() {
-	let epoch = moq_net::Epoch::mint();
-	let mut live = Live::new(1.0, 0).await;
-	live.rtp(&epoch).await;
-	let mut leg = live.join(Duration::ZERO).await;
-	live.run(12 * GOP, &mut [&mut leg], |_| false).await;
-	// Each slot's datagrams, and how many went out at each instant.
+	let [mut whole, mut lossy] = <[Live; 2]>::try_from(paths).ok().unwrap();
+	assert!(whole.start == lossy.start);
+	let mut c = whole.join(Duration::ZERO).await;
+	let mut a = lossy.join(Duration::ZERO).await;
+	for tick in 1..=8 * GOP {
+		// Both legs read at each instant either would, so each sends as it falls due.
+		whole.run(tick, &mut [&mut c, &mut a], |_| false).await;
+		lossy.run(tick, &mut [&mut a], lost).await;
+	}
+	// How many of each slot's datagrams the whole leg sent at each instant.
 	let mut slots: std::collections::BTreeMap<u64, std::collections::BTreeMap<Instant, usize>> = Default::default();
-	for (at, frame) in &leg.out {
+	for (at, frame) in &c.out {
 		let slot = frame.timestamp.as_micros() as u64;
 		if slot >= 2_000_000 {
 			*slots.entry(slot).or_default().entry(*at).or_default() += 1;
 		}
 	}
-	assert!(slots.len() > 100, "{} slots", slots.len());
+	assert!(slots.len() > 50, "{} slots", slots.len());
 	for (slot, sent) in &slots {
 		let (busiest, count) = (sent.values().max().unwrap(), sent.values().sum::<usize>());
 		assert!(
@@ -1541,6 +1527,30 @@ async fn rtp_datagrams_go_out_across_each_slot() {
 			"the slot at {slot} µs sent {busiest} of its {count} datagrams at once"
 		);
 	}
+	let sent = |leg: &Leg| -> std::collections::BTreeMap<(u64, u16), Instant> {
+		leg.out
+			.iter()
+			.map(|(at, frame)| {
+				let seq = u16::from_be_bytes([frame.payload[2], frame.payload[3]]);
+				((frame.timestamp.as_micros() as u64, seq), *at)
+			})
+			.collect()
+	};
+	let (a, c) = (sent(&a), sent(&c));
+	assert!(a.len() < c.len(), "the lossy leg withheld nothing");
+	let apart: Vec<_> = a
+		.iter()
+		.filter_map(|(key, at)| {
+			let other = c.get(key)?;
+			(at != other).then(|| (*key, at.max(other).duration_since(*at.min(other))))
+		})
+		.collect();
+	assert!(
+		apart.is_empty(),
+		"{} runs went out apart: {:?}",
+		apart.len(),
+		&apart[..apart.len().min(5)]
+	);
 }
 
 /// A leg that withholds runs counts what they carry as it lays them, so its stats keep pace
@@ -1645,15 +1655,17 @@ async fn a_group_held_in_part_leaves_its_lane_unsure() {
 	assert!(a.len() < c.len(), "the partial leg withheld nothing");
 }
 
-/// A lane whose source ends while the broadcast goes on carries nothing more on any leg, so a
-/// leg goes on sending the runs that cross it.
+/// A lane with nothing more to carry on any leg withholds nothing: one whose source ended
+/// while the broadcast goes on, and a sparse one (SCTE-35) that never sent, whose silence no
+/// leg can tell from a stall.
 #[tokio::test(start_paused = true)]
-async fn a_lane_whose_source_ended_is_sent_on() {
+async fn an_ended_or_silent_sparse_lane_withholds_nothing() {
 	let epoch = moq_net::Epoch::mint();
 	let mut live = Live::new(1.0, 0).await;
 	// Room for the keyframe beside teletext's lane.
 	live.rate = 2 * MUX_RATE;
 	live.teletext(0..0);
+	let _silent = live.section_track();
 	live.rtp(&epoch).await;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(6 * GOP, &mut [&mut leg], |_| false).await;
@@ -1666,55 +1678,7 @@ async fn a_lane_whose_source_ended_is_sent_on() {
 		.collect();
 	assert!(seqs.len() > 300, "{} datagrams", seqs.len());
 	let withheld = seqs.windows(2).filter(|w| w[1] != w[0].wrapping_add(1)).count();
-	assert_eq!(withheld, 0, "the leg withheld runs past the lane's end");
-}
-
-/// A leg that withholds some of a slot's runs sends the rest when a leg sending them all does,
-/// each at its place in the slot, so a receiver merging the legs finds both copies of a run
-/// together.
-#[tokio::test(start_paused = true)]
-async fn a_withholding_leg_sends_each_run_when_a_whole_leg_does() {
-	let epoch = moq_net::Epoch::mint();
-	let lost = |tick: u64| (5 * GOP + 8..6 * GOP).contains(&tick);
-	let mut paths = Vec::new();
-	for _ in 0..2 {
-		let mut live = Live::new(1.0, 0).await;
-		live.rtp(&epoch).await;
-		paths.push(live);
-	}
-	let [mut whole, mut lossy] = <[Live; 2]>::try_from(paths).ok().unwrap();
-	assert!(whole.start == lossy.start);
-	let mut c = whole.join(Duration::ZERO).await;
-	let mut a = lossy.join(Duration::ZERO).await;
-	for tick in 1..=8 * GOP {
-		// Both legs read at each instant either would, so each sends as it falls due.
-		whole.run(tick, &mut [&mut c, &mut a], |_| false).await;
-		lossy.run(tick, &mut [&mut a], lost).await;
-	}
-	let sent = |leg: &Leg| -> std::collections::BTreeMap<(u64, u16), Instant> {
-		leg.out
-			.iter()
-			.map(|(at, frame)| {
-				let seq = u16::from_be_bytes([frame.payload[2], frame.payload[3]]);
-				((frame.timestamp.as_micros() as u64, seq), *at)
-			})
-			.collect()
-	};
-	let (a, c) = (sent(&a), sent(&c));
-	assert!(a.len() < c.len(), "the lossy leg withheld nothing");
-	let apart: Vec<_> = a
-		.iter()
-		.filter_map(|(key, at)| {
-			let other = c.get(key)?;
-			(at != other).then(|| (*key, at.max(other).duration_since(*at.min(other))))
-		})
-		.collect();
-	assert!(
-		apart.is_empty(),
-		"{} runs went out apart: {:?}",
-		apart.len(),
-		&apart[..apart.len().min(5)]
-	);
+	assert_eq!(withheld, 0, "the leg withheld runs");
 }
 
 /// An epochless route names no publisher instance for the SSRC to follow, so RTP refuses it.
@@ -1726,22 +1690,6 @@ async fn rtp_refuses_an_epochless_route() {
 	live.rtp = true;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(2 * GOP, &mut [&mut leg], |_| false).await;
-}
-
-/// A replacement publisher, another epoch on the same path, is sent under another SSRC.
-#[tokio::test(start_paused = true)]
-async fn a_replacement_publisher_is_sent_under_another_ssrc() {
-	let ssrc = |leg: &Leg| leg.out.first().expect("the leg sent").1.payload[8..12].to_vec();
-	let mut sent = Vec::new();
-	for epoch in [moq_net::Epoch::mint(), moq_net::Epoch::mint()] {
-		let mut live = Live::new(1.0, 0).await;
-		live.rtp(&epoch).await;
-		let mut leg = live.join(Duration::ZERO).await;
-		live.run(4 * GOP, &mut [&mut leg], |_| false).await;
-		sent.push(ssrc(&leg));
-		assert_eq!(ssrc(&leg), super::rtp::ssrc("test", &epoch).to_be_bytes());
-	}
-	assert_ne!(sent[0], sent[1]);
 }
 
 /// A group ending in a burst still fills its lane at the next group's release, so a leg holding

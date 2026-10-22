@@ -6,9 +6,10 @@
 //! each modulo its field's width, and the SSRC a hash of the broadcast's path and epoch. So two
 //! legs of one broadcast send the same datagram, headers included, for every run both render
 //! alike, and a receiver merging them (SMPTE ST 2022-7) can take each from either. A leg sends
-//! only the runs it can vouch for: one holding a position another leg may fill otherwise
-//! ([`Laid::unsure`](super::lane::Laid::unsure)) is withheld, so that leg's copy is the one
-//! that arrives.
+//! only the runs it is sure of: past the slot it joined or last jumped at, whose clock and
+//! tables flag the break where a leg laying it in turn does not, and holding no lane position
+//! another leg may fill ([`Laid::unsure`](super::lane::Laid::unsure)). The rest are withheld,
+//! so another leg's copy is the one that arrives.
 
 use std::sync::Arc;
 
@@ -32,8 +33,10 @@ const HEADER: usize = 12;
 pub(super) struct Packetizer {
 	layout: Arc<Layout>,
 	ssrc: u32,
-	/// The slot expected next: any other leaves the run in progress unfinished.
+	/// The slot expected next: any other is a jump.
 	next: Option<u128>,
+	/// The first position a run may start at: past the slot this leg joined or last jumped at.
+	from: u128,
 	run: Option<Run>,
 }
 
@@ -51,19 +54,18 @@ impl Packetizer {
 			layout,
 			ssrc,
 			next: None,
+			from: 0,
 			run: None,
 		}
 	}
 
-	/// The datagrams slot `index`'s `payload` completes and this leg can vouch for, each with
-	/// the position in the slot of its run's last packet. `unsure` lists the slot's positions,
-	/// its clock at 0, another leg may fill otherwise.
-	///
-	/// A run is sent only whole: one the leg joined in the middle of, or that a jump in the
-	/// slots cut short, is never sent, and neither is any stuffed out to a datagram's length.
+	/// The datagrams slot `index`'s `payload` completes and this leg is sure of, each with the
+	/// position in the slot of its run's last packet. `unsure` lists the slot's positions
+	/// another leg may fill otherwise.
 	pub fn push(&mut self, index: u128, payload: &[u8], unsure: &[usize]) -> Vec<(usize, Bytes)> {
 		if self.next != Some(index) {
 			self.run = None;
+			self.from = self.layout.first(index + 1);
 		}
 		self.next = Some(index + 1);
 		let first = self.layout.first(index);
@@ -77,13 +79,13 @@ impl Packetizer {
 			let at = first + position as u128;
 			let (index, offset) = (at / PACKETS as u128, at % PACKETS as u128);
 			if offset == 0 {
-				self.run = Some(Run {
+				self.run = (at >= self.from).then(|| Run {
 					index,
 					packets: Vec::with_capacity(PACKETS * TsPacket::SIZE),
 					sure: true,
 				});
 			}
-			let Some(run) = self.run.as_mut().filter(|run| run.index == index) else {
+			let Some(run) = self.run.as_mut() else {
 				continue;
 			};
 			run.packets.extend_from_slice(packet);
@@ -169,7 +171,7 @@ mod test {
 		let layout = layout();
 		let mut rtp = Packetizer::new(layout.clone(), 0x1234_5678);
 		let mut sent = Vec::new();
-		for index in 0..3 {
+		for index in 0..4 {
 			let first = layout.first(index);
 			sent.extend(
 				rtp.push(index, &slot(&layout, index), &[])
@@ -177,9 +179,10 @@ mod test {
 					.map(|(last, datagram)| (first + last as u128, datagram)),
 			);
 		}
-		// 102 packets: fourteen whole runs, and a fifteenth the next slot completes.
+		// Past the join slot, 102 packets: fourteen whole runs from run 5, and a fifteenth the
+		// next slot completes.
 		assert_eq!(sent.len(), 14);
-		for (n, (last, datagram)) in sent.iter().enumerate() {
+		for (n, (last, datagram)) in (5..).zip(&sent) {
 			assert_eq!(datagram.len(), HEADER + PACKETS * TsPacket::SIZE);
 			assert_eq!(&datagram[..2], [0x80, 33]);
 			assert_eq!(seq(datagram), n as u16);
@@ -195,34 +198,33 @@ mod test {
 		}
 	}
 
+	/// The slot a leg joins or jumps at flags the break in its clock and tables where a leg
+	/// laying it in turn does not, so no run holding a position of it is sent.
 	#[test]
-	fn a_run_joined_in_its_middle_is_not_sent() {
+	fn no_run_of_a_join_or_jump_slot_is_sent() {
 		let layout = layout();
 		let mut rtp = Packetizer::new(layout.clone(), 1);
-		// Slot 1 opens at position 34, inside run 4.
-		let sent = rtp.push(1, &slot(&layout, 1), &[]);
-		assert_eq!(sent.iter().map(|(_, d)| seq(d)).collect::<Vec<_>>(), [5, 6, 7, 8]);
-	}
-
-	#[test]
-	fn a_jump_leaves_the_run_it_cut_unsent() {
-		let layout = layout();
-		let mut rtp = Packetizer::new(layout.clone(), 1);
-		rtp.push(0, &slot(&layout, 0), &[]);
-		// Run 4 holds positions 28 to 34; slot 1, which carries position 34, never comes.
+		// Slot 1 holds positions 34 to 67; run 9 (63 to 69) runs into slot 2.
+		assert!(rtp.push(1, &slot(&layout, 1), &[]).is_empty());
 		let sent = rtp.push(2, &slot(&layout, 2), &[]);
 		assert_eq!(sent.iter().map(|(_, d)| seq(d)).collect::<Vec<_>>(), [10, 11, 12, 13]);
+		// Slot 4 jumps over slot 3: run 14 (98 to 104), cut short, is not sent either.
+		assert!(rtp.push(4, &slot(&layout, 4), &[]).is_empty());
+		let sent = rtp.push(5, &slot(&layout, 5), &[]);
+		assert_eq!(sent.iter().map(|(_, d)| seq(d)).collect::<Vec<_>>(), [25, 26, 27, 28]);
 	}
 
 	#[test]
 	fn a_run_holding_an_unsure_position_is_withheld() {
 		let layout = layout();
 		let mut rtp = Packetizer::new(layout.clone(), 1);
-		let sent = rtp.push(0, &slot(&layout, 0), &[0, 15]);
-		assert_eq!(sent.iter().map(|(_, d)| seq(d)).collect::<Vec<_>>(), [1, 3]);
-		// Position 34 opens slot 1, so its doubt reaches back into run 4.
-		let sent = rtp.push(1, &slot(&layout, 1), &[0]);
-		assert_eq!(sent.iter().map(|(_, d)| seq(d)).collect::<Vec<_>>(), [5, 6, 7, 8]);
+		rtp.push(0, &slot(&layout, 0), &[]);
+		// Positions 35 and 49, in runs 5 and 7.
+		let sent = rtp.push(1, &slot(&layout, 1), &[1, 15]);
+		assert_eq!(sent.iter().map(|(_, d)| seq(d)).collect::<Vec<_>>(), [6, 8]);
+		// Position 68 opens slot 2, so its doubt reaches back into run 9.
+		let sent = rtp.push(2, &slot(&layout, 2), &[0]);
+		assert_eq!(sent.iter().map(|(_, d)| seq(d)).collect::<Vec<_>>(), [10, 11, 12, 13]);
 	}
 
 	#[test]
@@ -231,14 +233,16 @@ mod test {
 		let mut rtp = Packetizer::new(layout.clone(), 1);
 		// A slot whose runs cross a sequence wrap, and one whose time crosses a timestamp wrap.
 		let seq_wrap = layout.slot_of(65_536 * PACKETS as u128);
-		let sent = rtp.push(seq_wrap, &slot(&layout, seq_wrap), &[]);
-		let seqs: Vec<u16> = sent.iter().map(|(_, d)| seq(d)).collect();
+		let seqs: Vec<u16> = (seq_wrap - 1..=seq_wrap)
+			.flat_map(|index| rtp.push(index, &slot(&layout, index), &[]))
+			.map(|(_, d)| seq(&d))
+			.collect();
 		assert!(seqs.windows(2).all(|w| w[1] == w[0].wrapping_add(1)), "{seqs:?}");
 		assert!(seqs.contains(&0) && seqs.contains(&u16::MAX), "{seqs:?}");
 		// 2^32 ticks at 90 kHz, in slots of 25 ms, which the PCR reaches a slot later.
 		let ts_wrap = (1u128 << 32) * 1_000 / 90 / 25;
 		let mut stamps = Vec::new();
-		for index in ts_wrap - 1..ts_wrap + 3 {
+		for index in ts_wrap - 2..ts_wrap + 3 {
 			let sent = rtp.push(index, &slot(&layout, index), &[]);
 			stamps.extend(
 				sent.iter()

@@ -178,8 +178,9 @@ where
 	/// Wakes the export when the next grid slot is due on the jitter buffer's clock.
 	slot_timer: Option<std::pin::Pin<Box<moq_clock::Sleep>>>,
 	/// Output frames ready to hand out, one per grid slot, each with what it tells
-	/// [`Self::stats`] once returned and, for a datagram, when it is due ([`Self::pace`]).
-	queue: VecDeque<(Frame, Tally, Option<moq_clock::Instant>)>,
+	/// [`Self::stats`] once returned and, for a datagram, when it is due ([`Self::pace`]). A slot
+	/// an RTP leg withholds whole queues its tally alone.
+	queue: VecDeque<(Option<Frame>, Tally, Option<moq_clock::Instant>)>,
 	/// Wakes the export when the datagram at the head of the queue is due.
 	pace_timer: Option<std::pin::Pin<Box<moq_clock::Sleep>>>,
 	/// The rate to pad the output to with null packets, in bits per second: the
@@ -224,32 +225,8 @@ where
 struct Tally {
 	/// The frame's PCR in 27 MHz ticks, and whether it flags a new time base.
 	pcr: (u64, bool),
-	/// How many access units begin in the frame, by PID: one count each, however many slots
-	/// a withheld run folds in.
-	units: BTreeMap<u16, u64>,
-}
-
-impl Tally {
-	/// The tally of a frame whose PCR is `pcr`, an access unit on each of `units` beginning in it.
-	fn new(pcr: (u64, bool), units: impl IntoIterator<Item = u16>) -> Tally {
-		let mut tally = Tally {
-			pcr,
-			units: BTreeMap::new(),
-		};
-		for pid in units {
-			*tally.units.entry(pid).or_default() += 1;
-		}
-		tally
-	}
-
-	/// This tally followed by `later`'s, for a frame that carries both.
-	fn then(mut self, later: Tally) -> Tally {
-		self.pcr = (later.pcr.0, self.pcr.1 || later.pcr.1);
-		for (pid, units) in later.units {
-			*self.units.entry(pid).or_default() += units;
-		}
-		self
-	}
+	/// The PID of each access unit whose packets begin in the frame.
+	units: Vec<u16>,
 }
 
 /// A frame read from its source.
@@ -300,10 +277,6 @@ struct Synced {
 	lane: Lane,
 	/// The release slot of the last frame planned ([`Track::plan`]).
 	released: Option<u128>,
-	/// The first position of the group this leg has held every unit of the lane from, since
-	/// its playhead last jumped or it held a group only in part: `None` while it may lack some
-	/// ([`lane::Known`]).
-	sure: Option<u128>,
 	/// The playhead's jumps when the last frame was planned ([`Pending::skip`]).
 	skip: Option<u64>,
 	/// Positions planned since the grid was last told ([`Grid::expect`]).
@@ -419,7 +392,6 @@ impl Track {
 			if let Some(sync) = &mut self.sync {
 				sync.lane.reset();
 				sync.released = None;
-				sync.sure = None;
 			}
 		}
 		let Kind::Video(stream_type) = self.kind else {
@@ -765,20 +737,13 @@ impl Track {
 		match plan {
 			Ok(placed) => {
 				lane::number(&mut packets, placed.counter);
-				if opening && sync.sure.is_none() {
-					sync.sure = placed.positions.first().copied();
-				}
 				sync.expected.extend(&placed.positions);
 				Ok(Some(Planned {
 					packets,
 					positions: placed.positions,
 				}))
 			}
-			// What the group takes here is unknown, so is the lane, until a group held whole.
-			Err(Unplaced::Partial) => {
-				sync.sure = None;
-				Ok(None)
-			}
+			Err(Unplaced::Partial) => Ok(None),
 			Err(Unplaced::Late) if matches!(self.kind, Kind::Verbatim { .. }) => {
 				tracing::warn!(track = %name, count, "verbatim unit its lane cannot carry by its deadline; dropped");
 				Ok(None)
@@ -880,11 +845,10 @@ impl Track {
 			.and_then(|ticks| Timestamp::from_scale(ticks, 90_000).ok())
 			.unwrap_or(frame.timestamp);
 		let (key, pes) = self.release_key(decode, jitter.delay(), &frame)?;
-		// A jump may have skipped units of the lane, until a group this leg holds whole.
 		if let Some(sync) = &mut self.sync
-			&& sync.skip.replace(skip) != Some(skip)
+			&& sync.skip.replace(skip).is_some_and(|last| last != skip)
 		{
-			sync.sure = None;
+			sync.lane.jump();
 		}
 		// Planned as it is read, so a frame the jitter buffer drops still moves its group on.
 		let planned = match self.sync.is_some() {
@@ -1463,11 +1427,11 @@ where
 	/// of a broadcast then send the same datagram, headers included, wherever both render the
 	/// same packets, so a receiver merging them (SMPTE ST 2022-7) can take each from either.
 	///
-	/// A leg sends a datagram only when it is sure of every packet: one where it leaves
-	/// stuffing another leg may fill, or opens its timeline or a jump, is withheld, and so is
-	/// one it joined in the middle of. Two limits remain: SI a leg missed, and a unit of a sparse
-	/// track lost with no later jump in its track, go out as stuffing where another leg has
-	/// them.
+	/// A leg sends a datagram only when it is sure of every packet: past the slot it joined or
+	/// last jumped at, and where each lane has gone past it or its source ended, so the leg
+	/// holds every unit any leg puts there. The rest are withheld, so another leg's copy is the
+	/// one that arrives. Two limits remain: SI a leg missed, and a unit of a sparse track lost
+	/// with no later jump in its track, go out as stuffing where another leg has them.
 	///
 	/// Needs [`Self::with_sync`], and a route with an epoch: the SSRC must change with the
 	/// publisher instance, and an epochless route names none. Each fails at the program tables.
@@ -1771,36 +1735,36 @@ where
 		Poll::Pending
 	}
 
-	/// Return the next queued frame, committing what it carries to the output boundary.
+	/// Return the next queued frame once it is due, committing what it carries, and what each
+	/// slot withheld before it carried, to the output boundary.
 	fn pop(&mut self, waiter: &kio::Waiter) -> Option<Frame> {
-		if let Some(&(_, _, Some(due))) = self.queue.front()
-			&& moq_clock::now() < due
-		{
-			let timer = self
-				.pace_timer
-				.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(due)));
-			if timer.deadline() != due {
-				timer.as_mut().reset(due);
+		loop {
+			if let Some(due) = self.queue.front()?.2
+				&& moq_clock::now() < due
+			{
+				let timer = self
+					.pace_timer
+					.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(due)));
+				if timer.deadline() != due {
+					timer.as_mut().reset(due);
+				}
+				if waiter.poll_future(timer.as_mut()).is_pending() {
+					return None;
+				}
 			}
-			if waiter.poll_future(timer.as_mut()).is_pending() {
-				return None;
+			let (out, tally, _) = self.queue.pop_front()?;
+			let (pcr, discontinuity) = tally.pcr;
+			if discontinuity {
+				self.liveness.discontinuity();
 			}
-		}
-		let (out, tally, _) = self.queue.pop_front()?;
-		self.emitted_epoch = self.epoch;
-		self.commit(tally);
-		Some(out)
-	}
-
-	/// Tell [`Self::stats`] what went out.
-	fn commit(&mut self, tally: Tally) {
-		let (pcr, discontinuity) = tally.pcr;
-		if discontinuity {
-			self.liveness.discontinuity();
-		}
-		self.liveness.written_pcr(pcr);
-		for (pid, units) in tally.units {
-			self.liveness.delivered(pid, units);
+			self.liveness.written_pcr(pcr);
+			for pid in tally.units {
+				self.liveness.delivered(pid, 1);
+			}
+			if let Some(out) = out {
+				self.emitted_epoch = self.epoch;
+				return Some(out);
+			}
 		}
 	}
 
@@ -2621,11 +2585,12 @@ where
 		}
 		for track in self.tracks.values_mut() {
 			let lane = layout.lane(track.pid).context("a track without a lane")?;
+			// A placed lane no receiver buffer models has no cadence: SCTE-35, a PES-packet stream.
+			let sparse = track.kind.placed() && track.buffer.is_none();
 			track.sync = Some(Synced {
 				layout: layout.clone(),
-				lane: Lane::new(lane),
+				lane: Lane::new(lane, sparse),
 				released: None,
-				sure: None,
 				skip: None,
 				expected: Vec::new(),
 			});
@@ -2634,14 +2599,9 @@ where
 		Ok(())
 	}
 
-	/// Tell the grid, before it lays a slot, what each lane holds on this leg ([`Grid::know`]).
-	///
-	/// A lane of continuous media is known from the first group held whole since its playhead
-	/// last jumped or a group was held only in part, up to the last position planned: past it,
-	/// this leg may be stalled. So is a placed one a receiver buffer models (DVB AC-3,
-	/// teletext), continuous as the jitter buffer counts it. A sparse lane cannot tell a stall
-	/// from its silence, so it is known on from that group, and so is a lane whose source
-	/// ended rather than went stale: nothing more comes for it on any leg.
+	/// Tell the grid, before it lays a slot, what each lane holds on this leg: the units it
+	/// planned, and how far it knows the lane ([`Lane::known`]). A source that ended, rather
+	/// than went stale with its broadcast, carries nothing more on any leg.
 	fn know(&mut self) {
 		let Some(grid) = self.schedule.sync() else {
 			return;
@@ -2652,10 +2612,8 @@ where
 			};
 			grid.expect(&sync.expected);
 			sync.expected.clear();
-			let from = sync.sure.unwrap_or(u128::MAX);
 			let ended = track.finished && !self.stale.contains(name);
-			let to = (!ended && (!track.kind.placed() || track.buffer.is_some())).then(|| sync.lane.end());
-			grid.know(sync.lane.index(), lane::Known { from, to });
+			grid.know(sync.lane.index(), sync.lane.known(ended));
 		}
 	}
 
@@ -3160,34 +3118,32 @@ where
 				self.number(&mut payload);
 			}
 			let timestamp = slot_stamp(slot.index)?;
-			let tally = Tally::new((slot.pcr, discontinuity), slot.units);
+			let tally = Tally {
+				pcr: (slot.pcr, discontinuity),
+				units: slot.units,
+			};
 			let pace = self.pace(slot.index);
 			if let Some(rtp) = &mut self.packetizer {
-				let mut unsure = slot.unsure;
-				if discontinuity {
-					unsure.push(0);
-				}
 				let positions = (payload.len() / TsPacket::SIZE) as u32;
 				let mut tally = Some(tally);
-				for (last, datagram) in rtp.push(slot.index, &payload, &unsure) {
+				for (last, datagram) in rtp.push(slot.index, &payload, &slot.unsure) {
 					let frame = Frame {
 						timestamp,
 						duration: None,
 						payload: datagram,
 						keyframe: false,
 					};
-					let tally = tally.take().unwrap_or(Tally::new((slot.pcr, false), []));
+					let tally = tally.take().unwrap_or(Tally {
+						pcr: (slot.pcr, false),
+						units: Vec::new(),
+					});
 					// At its last packet's place in the slot, whichever runs beside it this leg
-					// withholds.
+					// withholds, so legs send each copy together.
 					let due = pace.map(|(at, span)| at + span * last as u32 / positions);
-					self.queue.push_back((frame, tally, due));
+					self.queue.push_back((Some(frame), tally, due));
 				}
-				// A slot no datagram carries tells the stats behind the last one queued, or at once.
 				if let Some(tally) = tally {
-					match self.queue.back_mut() {
-						Some((_, last, _)) => *last = std::mem::replace(last, Tally::new((0, false), [])).then(tally),
-						None => self.commit(tally),
-					}
+					self.queue.push_back((None, tally, None));
 				}
 				continue;
 			}
@@ -3197,7 +3153,7 @@ where
 				payload: Bytes::from(payload),
 				keyframe: slot.keyframe,
 			};
-			self.queue.push_back((frame, tally, None));
+			self.queue.push_back((Some(frame), tally, None));
 		}
 		Ok(())
 	}
@@ -4237,24 +4193,9 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::{
-		Buffer, DecodeClock, Dolby, Kind, PSI_INTERVAL, PesPacket, Tally, dolby_removals, due, is_complete_section,
-		si_due, slot, unwrap_pts, verbatim_buffer,
+		Buffer, DecodeClock, Dolby, Kind, PSI_INTERVAL, PesPacket, dolby_removals, due, is_complete_section, si_due,
+		slot, unwrap_pts, verbatim_buffer,
 	};
-
-	/// A withheld run folds each slot's tally into the next datagram's: however many slots it
-	/// folds in, the tally keeps one count per PID, and the latest PCR with any break flagged.
-	#[test]
-	fn a_withheld_run_tallies_one_count_per_pid() {
-		let mut tally = Tally::new((0, false), []);
-		for slot in 1..=10_000u64 {
-			tally = tally.then(Tally::new((slot, slot == 5), [0x100, 0x101, 0x100]));
-		}
-		assert_eq!(tally.pcr, (10_000, true));
-		assert_eq!(
-			tally.units.into_iter().collect::<Vec<_>>(),
-			[(0x100, 20_000), (0x101, 10_000)]
-		);
-	}
 
 	/// The same available video/audio backlog must choose the same start in either fill order.
 	#[tokio::test(start_paused = true)]

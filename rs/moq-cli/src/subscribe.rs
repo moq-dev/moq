@@ -200,8 +200,8 @@ pub struct SubscribeArgs {
 	/// Render identical packets to every other synced export of the broadcast (TS only).
 	pub sync: bool,
 
-	/// Send the synced multiplex as RTP to this `udp://` address instead of stdout (TS only).
-	pub rtp: Option<url::Url>,
+	/// Send the synced multiplex as RTP to this UDP address instead of stdout (TS only).
+	pub rtp: Option<std::net::SocketAddr>,
 
 	/// Catalog format for track discovery (default: detect from the broadcast suffix).
 	pub catalog: Option<CatalogFormatArg>,
@@ -279,32 +279,6 @@ fn log_release(release: &moq_mux::container::ts::stats::Release, message: &'stat
 	);
 }
 
-/// The host and port of an `--rtp` destination, which must be `udp://HOST:PORT`.
-pub fn rtp_destination(url: &url::Url) -> anyhow::Result<(String, u16)> {
-	// Unechoed: credentials would land in the log.
-	anyhow::ensure!(
-		url.scheme() == "udp",
-		"--rtp takes udp://HOST:PORT, not {}://",
-		url.scheme()
-	);
-	anyhow::ensure!(
-		url.username().is_empty()
-			&& url.password().is_none()
-			&& matches!(url.path(), "" | "/")
-			&& url.query().is_none()
-			&& url.fragment().is_none(),
-		"--rtp takes udp://HOST:PORT, with no credentials, path, query or fragment"
-	);
-	let host = match url.host().with_context(|| format!("--rtp url missing a host: {url}"))? {
-		url::Host::Domain(domain) => domain.to_string(),
-		url::Host::Ipv4(ip) => ip.to_string(),
-		url::Host::Ipv6(ip) => ip.to_string(),
-	};
-	let port = url.port().context("--rtp url must include a port: udp://HOST:PORT")?;
-	anyhow::ensure!(port != 0, "--rtp takes udp://HOST:PORT, PORT not 0: {url}");
-	Ok((host, port))
-}
-
 /// The datagrams `--rtp` could not send since it last reported them, and why the last one could
 /// not.
 #[derive(Default)]
@@ -335,6 +309,20 @@ impl Unsent {
 			tracing::warn!(count, %err, "--rtp dropped datagrams it could not send");
 		}
 	}
+}
+
+/// A UDP socket bound to an ephemeral port and connected to `addr`. It is nonblocking, and sent
+/// on directly ([`Unsent::send`]): tokio's own readiness would refuse a send until its reactor
+/// first saw the socket writable.
+fn rtp_socket(addr: std::net::SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+	let local: std::net::SocketAddr = match addr {
+		std::net::SocketAddr::V4(_) => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
+		std::net::SocketAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
+	};
+	let socket = std::net::UdpSocket::bind(local)?;
+	socket.connect(addr)?;
+	socket.set_nonblocking(true)?;
+	Ok(socket)
 }
 
 impl Subscribe {
@@ -483,10 +471,10 @@ impl Subscribe {
 		if self.args.sync {
 			ts = ts.with_sync();
 		}
-		let rtp = match &self.args.rtp {
-			Some(url) => {
+		let rtp = match self.args.rtp {
+			Some(addr) => {
 				ts = ts.with_rtp();
-				Some(Self::rtp_socket(url).await?)
+				Some(rtp_socket(addr).with_context(|| format!("could not open a UDP socket to {addr}"))?)
 			}
 			None => None,
 		};
@@ -571,43 +559,6 @@ impl Subscribe {
 		}
 	}
 
-	/// A UDP socket bound to an ephemeral port and connected to `url`, `udp://HOST:PORT`, at
-	/// the first address it resolves to that takes one ([`Self::rtp_connect`]).
-	async fn rtp_socket(url: &url::Url) -> anyhow::Result<std::net::UdpSocket> {
-		let (host, port) = rtp_destination(url)?;
-		let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), port)).await?.collect();
-		anyhow::ensure!(!addrs.is_empty(), "could not resolve {host}:{port}");
-		Self::rtp_connect(&addrs)
-			.await
-			.with_context(|| format!("could not open a UDP socket to {host}:{port}"))
-	}
-
-	/// A UDP socket connected to the first of `addrs` that takes one: a host may resolve to an
-	/// address family this one cannot reach before one it can. It is nonblocking, and sent on
-	/// directly ([`Unsent::send`]): tokio's own readiness would refuse a send until its reactor
-	/// first saw the socket writable.
-	async fn rtp_connect(addrs: &[std::net::SocketAddr]) -> std::io::Result<std::net::UdpSocket> {
-		let mut last = None;
-		for &addr in addrs {
-			let local: std::net::SocketAddr = match addr {
-				std::net::SocketAddr::V4(_) => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
-				std::net::SocketAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
-			};
-			let socket = match tokio::net::UdpSocket::bind(local).await {
-				Ok(socket) => socket,
-				Err(err) => {
-					last = Some(err);
-					continue;
-				}
-			};
-			match socket.connect(addr).await {
-				Ok(()) => return socket.into_std(),
-				Err(err) => last = Some(err),
-			}
-		}
-		Err(last.unwrap_or_else(|| std::io::ErrorKind::AddrNotAvailable.into()))
-	}
-
 	/// Write the multiplex the broadcast's `m2ts` track carries, each run of packets as its
 	/// time on the source's PCR comes round.
 	async fn run_ts_passthrough(self) -> anyhow::Result<()> {
@@ -667,10 +618,9 @@ mod tests {
 	use super::*;
 
 	/// A datagram the socket refuses is counted and dropped, and the export sends on.
-	#[tokio::test]
-	async fn an_rtp_datagram_the_socket_refuses_is_counted_not_fatal() {
-		let url = url::Url::parse("udp://127.0.0.1:9").unwrap();
-		let socket = Subscribe::rtp_socket(&url).await.unwrap();
+	#[test]
+	fn an_rtp_datagram_the_socket_refuses_is_counted_not_fatal() {
+		let socket = rtp_socket((std::net::Ipv4Addr::LOCALHOST, 9).into()).unwrap();
 		let mut unsent = Unsent::default();
 		// Longer than any UDP datagram over IPv4 can be.
 		unsent.send(&socket, &[0; 70_000]);
@@ -678,17 +628,5 @@ mod tests {
 		assert_eq!(unsent.count, 1);
 		unsent.report();
 		assert_eq!((unsent.count, unsent.last.is_none()), (0, true));
-	}
-
-	/// A destination whose first address takes no socket is reached at the next it resolves to.
-	#[tokio::test]
-	async fn an_rtp_destination_tries_each_address_it_resolves_to() {
-		// Link-local, on an interface no host has.
-		let unusable: std::net::SocketAddr =
-			std::net::SocketAddrV6::new(std::net::Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1), 9, 0, u32::MAX).into();
-		let reachable: std::net::SocketAddr = (std::net::Ipv4Addr::LOCALHOST, 9).into();
-		assert!(Subscribe::rtp_connect(&[unusable]).await.is_err());
-		let socket = Subscribe::rtp_connect(&[unusable, reachable]).await.unwrap();
-		assert_eq!(socket.peer_addr().unwrap(), reachable);
 	}
 }

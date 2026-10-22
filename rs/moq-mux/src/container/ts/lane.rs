@@ -279,6 +279,11 @@ pub(super) struct Lane {
 	group: Option<Group>,
 	/// One past the last position any group took.
 	end: u128,
+	/// The first position of the first group this leg held whole since it joined or the lane
+	/// last [jumped](Self::jump): `None` until it holds one.
+	from: Option<u128>,
+	/// The lane carries units too seldom for a leg to tell a stall from silence ([`Self::known`]).
+	sparse: bool,
 	/// Groups that began behind the one before them.
 	overruns: u64,
 }
@@ -294,11 +299,14 @@ struct Group {
 }
 
 impl Lane {
-	pub fn new(lane: usize) -> Self {
+	/// Lane `lane` of its [`Layout`], `sparse` when it has no cadence to expect a unit by.
+	pub fn new(lane: usize, sparse: bool) -> Self {
 		Self {
 			lane,
 			group: None,
 			end: 0,
+			from: sparse.then_some(0),
+			sparse,
 			overruns: 0,
 		}
 	}
@@ -313,15 +321,30 @@ impl Lane {
 		self.overruns
 	}
 
-	/// One past the last position any group took.
-	pub fn end(&self) -> u128 {
-		self.end
+	/// The positions where this leg holds what every leg holds ([`Known`]).
+	///
+	/// A position is known once the lane has gone past it, its next unit planned beyond it, or
+	/// its source `ended`, from the first group held whole since the leg joined or the lane last
+	/// jumped. A sparse lane is known from the join without waiting for its next unit, which
+	/// may never come: a unit of it lost with no later jump goes out as stuffing where another
+	/// leg has it.
+	pub fn known(&self, ended: bool) -> Known {
+		Known {
+			from: self.from.unwrap_or(u128::MAX),
+			to: (!ended && !self.sparse).then_some(self.end),
+		}
+	}
+
+	/// The playhead jumped, so this leg may lack units of the lane until a group it holds whole.
+	pub fn jump(&mut self) {
+		self.from = None;
 	}
 
 	/// Forget every group, for a timeline that starts again.
 	pub fn reset(&mut self) {
 		self.group = None;
 		self.end = 0;
+		self.from = None;
 	}
 
 	/// Whether a unit of group `sequence`, its first when `opens`, would be the first its group
@@ -361,6 +384,7 @@ impl Lane {
 					sent: 0,
 					whole: false,
 				});
+				self.from = None;
 				return Err(Unplaced::Partial);
 			}
 			_ => {
@@ -386,6 +410,7 @@ impl Lane {
 		group.next = last + 1;
 		group.sent += count;
 		self.end = self.end.max(last + 1);
+		self.from.get_or_insert(positions[0]);
 		Ok(Placed { positions, counter })
 	}
 }
@@ -412,15 +437,13 @@ pub(super) struct Laid {
 	pub units: Vec<u16>,
 	/// It does not follow the slot laid before it.
 	pub jump: bool,
-	/// The positions another leg may fill otherwise: stuffing where it may carry a packet, the
-	/// tables a timeline's start lays outside their repetitions, a jump's tables, which flag
-	/// the break, and its clock.
+	/// The lane positions this leg leaves empty where another leg may carry a packet.
 	pub unsure: Vec<usize>,
 }
 
 /// The positions of a lane where this leg holds every unit the lane carries, so a position it
 /// leaves empty there is empty on every leg: from `from`, up to `to` when the lane may still
-/// carry units this leg has not read.
+/// carry units this leg has not read ([`Lane::known`]).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Known {
 	pub from: u128,
@@ -584,12 +607,12 @@ impl Grid {
 	/// from the repetition the stream carried last.
 	///
 	/// A lane position left empty is [unsure](Laid::unsure) where it was planned for a unit
-	/// that never reached it, or lies outside what this leg [knows](Self::know) of the lane.
+	/// that never reached it (the jitter buffer dropped it), or lies outside what this leg
+	/// [knows](Self::know) of the lane.
 	pub fn lay(&mut self, index: u128) -> Laid {
 		self.next = Some(index + 1);
 		let jump = self.last.is_some_and(|last| index != last + 1);
-		let repeats = Layout::repeats_tables(index);
-		let tables = repeats || jump || self.last.is_none();
+		let tables = Layout::repeats_tables(index) || jump || self.last.is_none();
 		self.last = Some(index);
 		let first = self.layout.first(index);
 		// What a restarted grid holds behind the slot it runs on from went out as stuffing.
@@ -606,9 +629,6 @@ impl Grid {
 			jump,
 			unsure: Vec::new(),
 		};
-		if jump {
-			out.unsure.push(0);
-		}
 		let emission = index / PSI_SLOTS;
 		let spacing = self.layout.spacing as u128;
 		for (position, owner) in owners.into_iter().enumerate() {
@@ -626,9 +646,6 @@ impl Grid {
 					packet[3] = (packet[3] & 0xf0) | (counter & 0x0f) as u8;
 					if packet[1] & 0x40 != 0 && packet[3] & 0x20 != 0 && packet[4] > 0 {
 						packet[5] = (packet[5] & !0x80) | u8::from(jump) << 7;
-					}
-					if !repeats || jump {
-						out.unsure.push(position);
 					}
 					packet
 				}),
@@ -739,32 +756,6 @@ mod test {
 		assert_eq!(flagged(grid.lay(6 * PSI_SLOTS)), [false, false], "a repetition");
 	}
 
-	/// Tables a jump lays on a repetition flag the break, where a leg laying that slot in turn
-	/// does not, so they are unsure there as at any jump; a repetition laid in turn is sure.
-	#[test]
-	fn a_jump_onto_a_repetition_leaves_its_tables_unsure() {
-		let layout = Arc::new(layout());
-		let positions = [layout.tables[0], layout.tables[1]];
-		let mut grid = Grid::new(layout, tables());
-		grid.lay(PSI_SLOTS + 3);
-		let laid = grid.lay(5 * PSI_SLOTS);
-		assert!(laid.jump);
-		assert!(
-			positions.iter().all(|position| laid.unsure.contains(position)),
-			"{:?}",
-			laid.unsure
-		);
-		for index in 5 * PSI_SLOTS + 1..6 * PSI_SLOTS {
-			grid.lay(index);
-		}
-		let laid = grid.lay(6 * PSI_SLOTS);
-		assert!(
-			positions.iter().all(|position| !laid.unsure.contains(position)),
-			"{:?}",
-			laid.unsure
-		);
-	}
-
 	#[test]
 	fn the_tables_repeat_on_the_absolute_grid_and_lead_a_timeline() {
 		let layout = layout();
@@ -852,8 +843,8 @@ mod test {
 	fn a_group_lays_from_its_own_anchor_whatever_came_before() {
 		let layout = layout();
 		let by = 10_000_000_000;
-		let mut whole = Lane::new(0);
-		let mut joiner = Lane::new(0);
+		let mut whole = Lane::new(0, false);
+		let mut joiner = Lane::new(0, false);
 		// Group 1, which the joiner lacks.
 		whole.plan(&layout, (1, true), start(100), by, 50).unwrap();
 		whole.plan(&layout, (1, false), start(101), by, 5).unwrap();
@@ -873,8 +864,8 @@ mod test {
 		let layout = layout();
 		// 48 kHz AAC: frames 21.3 ms apart, two to a slot now and then.
 		let frame = 1_000_000_000 * 1024 / 48_000;
-		let mut whole = Lane::new(1);
-		let mut joiner = Lane::new(1);
+		let mut whole = Lane::new(1, false);
+		let mut joiner = Lane::new(1, false);
 		let last = start(100) + 2_000_000;
 		whole.plan(&layout, (1, true), last - frame, u128::MAX, 2).unwrap();
 		whole.plan(&layout, (1, false), last, u128::MAX, 2).unwrap();
@@ -888,7 +879,7 @@ mod test {
 	#[test]
 	fn a_group_held_from_its_middle_is_not_placed() {
 		let layout = layout();
-		let mut lane = Lane::new(0);
+		let mut lane = Lane::new(0, false);
 		assert_eq!(
 			lane.plan(&layout, (1, false), start(10), u128::MAX, 2).err(),
 			Some(Unplaced::Partial)
@@ -897,13 +888,23 @@ mod test {
 			lane.plan(&layout, (1, false), start(10), u128::MAX, 2).err(),
 			Some(Unplaced::Partial)
 		);
-		assert!(lane.plan(&layout, (2, true), start(30), u128::MAX, 2).is_ok());
+		assert_eq!(lane.known(false).from, u128::MAX, "known only from a group held whole");
+		let placed = lane.plan(&layout, (2, true), start(30), u128::MAX, 2).unwrap();
+		let known = lane.known(false);
+		assert_eq!(
+			(known.from, known.to),
+			(placed.positions[0], Some(placed.positions[1] + 1))
+		);
+		assert_eq!(lane.known(true).to, None, "an ended lane is known past its end");
+		// A group held in part is a jump: the lane is unknown again until the next held whole.
+		assert!(lane.plan(&layout, (3, false), start(40), u128::MAX, 2).is_err());
+		assert_eq!(lane.known(false).from, u128::MAX);
 	}
 
 	#[test]
 	fn a_late_unit_leaves_its_positions_to_the_next() {
 		let layout = layout();
-		let mut lane = Lane::new(1);
+		let mut lane = Lane::new(1, false);
 		let at = layout.time(layout.first(11));
 		assert_eq!(
 			lane.plan(&layout, (1, true), start(10), at, 30).err(),

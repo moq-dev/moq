@@ -370,9 +370,10 @@ impl Invocation {
 					stdout.rtp.is_none() || stdout.sync,
 					"--rtp needs --sync: only a synced multiplex lays each packet where every leg does"
 				);
-				if let Some(url) = &stdout.rtp {
-					crate::subscribe::rtp_destination(url)?;
-				}
+				anyhow::ensure!(
+					stdout.rtp.is_none_or(|addr| addr.port() != 0),
+					"--rtp needs a destination port other than 0"
+				);
 				if matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265) {
 					anyhow::ensure!(
 						!export.select.no_video,
@@ -1096,7 +1097,7 @@ impl ExportSink {
 				mux_rate: args.mux_rate,
 				passthrough: args.passthrough,
 				sync: args.sync,
-				rtp: args.rtp.clone(),
+				rtp: args.rtp,
 			},
 			Self::Flv(args) => buffered(SubscribeFormat::Flv, args),
 			Self::H264(args) => container(SubscribeFormat::H264, args),
@@ -1122,7 +1123,7 @@ pub struct Stdout {
 	/// Render identical packets to every other `--sync` export of the broadcast (`ts` only).
 	pub sync: bool,
 	/// Send RTP to this address rather than write to stdout (`ts` only).
-	pub rtp: Option<url::Url>,
+	pub rtp: Option<std::net::SocketAddr>,
 }
 
 /// Staleness options for stdout sinks without a fixed release delay.
@@ -1252,13 +1253,13 @@ pub struct Transport {
 	#[usage(long, conflicts("--stitch", "--passthrough"))]
 	pub sync: bool,
 
-	/// Send the output as RTP (RFC 2250) to `udp://HOST:PORT` instead of stdout, seven TS
-	/// packets a datagram, with headers that follow from the packets' place on the multiplex
+	/// Send the output as RTP (RFC 2250) over UDP to `ADDR` (`IP:PORT`) instead of stdout, seven
+	/// TS packets a datagram, with headers that follow from the packets' place on the multiplex
 	/// and from the broadcast, so the legs of a 1+1 pair send the same datagrams for an SMPTE
 	/// ST 2022-7 receiver to merge. Needs `--sync`, and a route carrying the publisher's epoch:
 	/// moq-transport draft 17 or later, or moq-lite 07, on every hop.
-	#[usage(long, value_name = "URL", conflicts("--stitch", "--passthrough"))]
-	pub rtp: Option<url::Url>,
+	#[usage(long, value_name = "ADDR", conflicts("--stitch", "--passthrough"))]
+	pub rtp: Option<std::net::SocketAddr>,
 
 	/// The released spelling of [`Self::delay`].
 	#[usage(long = "max-age", hide = true)]
@@ -1403,52 +1404,33 @@ mod tests {
 	}
 
 	/// `export ts --rtp` sends what `--sync` renders, so it needs it and refuses what it
-	/// refuses, takes only `udp://HOST:PORT`, refused before anything dials and echoing no
-	/// credential, and leaves stdout to another stage.
+	/// refuses, takes a destination with a port, refused before anything dials, and leaves
+	/// stdout to another stage.
 	#[test]
 	fn export_ts_rtp_needs_sync_and_leaves_stdout() {
-		let parse = |args: &[&str]| {
-			let mut argv = vec![
-				"moq",
-				"export",
-				"--broadcast",
-				"b",
-				"ts",
-				"--rtp",
-				"udp://127.0.0.1:5004",
-			];
+		let parse = |rtp: &str, args: &[&str]| {
+			let mut argv = vec!["moq", "export", "--broadcast", "b", "ts", "--rtp", rtp];
 			argv.extend_from_slice(args);
 			Invocation::try_parse_from(argv)
 		};
-		let cli = parse(&["--sync"]).unwrap();
+		let cli = parse("127.0.0.1:5004", &["--sync"]).unwrap();
 		cli.validate().unwrap();
 		let Command::Export(export) = &cli.stages[0] else {
 			panic!("not an export");
 		};
-		let rtp = export.sink.stdout().unwrap().rtp.unwrap();
-		assert_eq!(rtp.as_str(), "udp://127.0.0.1:5004");
+		assert_eq!(export.sink.stdout().unwrap().rtp, Some(([127, 0, 0, 1], 5004).into()));
 		assert!(!export.sink.is_stdout());
-		let err = parse(&[]).unwrap().validate().unwrap_err();
+		let err = parse("127.0.0.1:5004", &[]).unwrap().validate().unwrap_err();
 		assert!(err.to_string().contains("--rtp needs --sync"), "{err}");
 		for flags in [&["--sync", "--stitch"][..], &["--passthrough"]] {
-			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
+			assert!(
+				parse("127.0.0.1:5004", flags).is_err(),
+				"{flags:?} must not start a run"
+			);
 		}
-		for url in [
-			"http://127.0.0.1:5004",
-			"udp://127.0.0.1",
-			"udp://127.0.0.1:0",
-			"udp://127.0.0.1:5004/5005",
-			"udp://user@127.0.0.1:5004",
-			"udp://127.0.0.1:5004?ttl=4",
-			"udp://127.0.0.1:5004#5005",
-			"http://user:secret@127.0.0.1:5004",
-			"tcp://127.0.0.1:5004?jwt=secret",
-		] {
-			let argv = ["moq", "export", "--broadcast", "b", "ts", "--sync", "--rtp", url];
-			let err = Invocation::try_parse_from(argv).unwrap().validate().unwrap_err();
-			assert!(err.to_string().contains("udp://HOST:PORT"), "{url}: {err}");
-			assert!(!format!("{err:#}").contains("secret"), "{url} echoed: {err:#}");
-		}
+		assert!(parse("127.0.0.1", &["--sync"]).is_err(), "a destination without a port");
+		let err = parse("[::1]:0", &["--sync"]).unwrap().validate().unwrap_err();
+		assert!(err.to_string().contains("port other than 0"), "{err}");
 	}
 
 	fn export(flags: &[&str]) -> Result<Invocation, ParseError> {
