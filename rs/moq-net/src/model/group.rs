@@ -1559,6 +1559,8 @@ impl Producer {
 			let inflated = frame.payload.len() as u64;
 			frame.payload = flate.deflate(&frame.payload);
 			flate.push(inflated);
+			// Readable only once compressed, so a slow DEFLATE counts against its lateness.
+			frame.arrived = super::clock::now();
 			let size = frame.payload.len() as u64;
 			// The frame already counts against the group's frames.
 			if state.would_overflow(0, size) {
