@@ -944,6 +944,25 @@ async fn a_private_stream_dropped_before_the_media_clock_refuses_the_import() {
 	assert!(end.as_ref().is_err_and(|err| err.contains("unsupported")), "{end:?}");
 }
 
+/// A PMT dropping a private stream past a lone PCR ends it as end of input would: the PES no
+/// PCR interval places is counted unplaced, and its track finishes.
+#[tokio::test(start_paused = true)]
+async fn a_private_stream_dropped_past_a_lone_pcr_counts_its_pes_unplaced() {
+	let mut feed = Feed::new(0x06, KLVA);
+	feed.pcr(1_000 * MS).picture(1_000 * MS).data(klv(0, 8));
+	let head = feed.bytes();
+	feed.mux.pmt_with(PMT_PID, 1, CLOCK_PID, &[(0x02, VIDEO_PID, &[])], 0);
+
+	let mut imported = start_import(&head);
+	let (name, _) = imported.entry().unwrap();
+	let held = reader(&imported, &name).await;
+	imported.import.decode(&feed.bytes()[head.len()..]).unwrap();
+	let (frames, end) = held.await.unwrap();
+	assert!(frames.is_empty());
+	assert!(end.is_ok(), "{end:?}");
+	assert_eq!(imported.stats().unplaced, 1);
+}
+
 /// Revisions apply by what they say, across the 5-bit `version_number` wrap: versions 30, 31,
 /// then 0 each relabel the stream and open their own track, while a repetition of any of them
 /// keeps the track it opened.

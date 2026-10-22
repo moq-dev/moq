@@ -919,15 +919,17 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// End the route on `pid` for a PMT that dropped or revised its stream, as the end of input
 	/// ends every route: the PES it began goes out, what waits on the clock is placed from the
-	/// PCRs so far (refusing the import, as end of input does, if no media timestamp anchored
-	/// it), and its track finishes and leaves the catalog.
+	/// PCRs so far or counted unplaced (refusing the import, as end of input does, if no media
+	/// timestamp anchored it), and its track finishes and leaves the catalog.
 	fn end_route(&mut self, pid: Pid) -> anyhow::Result<()> {
 		self.count_revision()?;
 		if self.headers.remove(&pid).is_some() {
 			self.damage(pid, &anyhow::anyhow!("PES header truncated by a PMT revision"))?;
 		}
 		self.flush(pid)?;
-		let generation = self.placement.generation;
+		// Released as if its timebase ended here, so a unit no later PCR will bracket for it is
+		// unplaced rather than held.
+		let generation = self.placement.generation + 1;
 		let (mut units, mut unplaced) = (0, 0);
 		// Each route stays in its map until it has finished, so a failure on the way leaves it
 		// for `abort` to end with the cause.
@@ -10051,6 +10053,34 @@ pub(super) mod test {
 		let err = import.decode(&synth_pmt(&streams[..1], true)).unwrap_err();
 		assert!(err.to_string().contains("without a media timestamp"), "{err:#}");
 		assert!(import.sections.contains_key(&0x21), "the route is left for `abort`");
+	}
+
+	/// A PMT dropping a section PID past a lone PCR ends it as end of input would: the section
+	/// no PCR interval places is counted unplaced.
+	#[test]
+	fn a_section_route_dropped_past_a_lone_pcr_counts_its_section_unplaced() {
+		const VIDEO_PID: u16 = 0x0050;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let streams = [
+			(StreamType::Mpeg2Video, VIDEO_PID),
+			(StreamType::Dts8ChannelLosslessAudio, 0x21),
+		];
+		let mut bytes = synth_pmt(&streams, true);
+		bytes.extend_from_slice(&pcr_packet(VIDEO_PID, 27_000_000));
+		bytes.extend_from_slice(&pes_packet(VIDEO_PID, 99_000));
+		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
+		bytes.extend_from_slice(&synth_pmt(&streams[..1], true));
+		import.decode(&bytes).unwrap();
+
+		let row = &import.stats().streams[&0x21];
+		assert_eq!((row.units, row.unplaced), (0, 1));
+		assert!(!import.sections.contains_key(&0x21));
 	}
 
 	/// A PID decoded as audio, then revised to private sections, then dropped, reports the
