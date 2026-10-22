@@ -33,9 +33,8 @@ ships, not the default.
   matrix of what the ring serves itself (raw QUIC and WebTransport), what a
   ring relay still serves from the shared tokio runtime (TCP, WebSocket,
   Unix, HTTP, iroh, outbound cluster dials), and what it refuses loudly
-  (`listen.lb_id` QUIC-LB server ids, congestion controllers beyond Loss
-  and Delay). Those refusals are recorded exceptions to parity, not
-  prerequisites, until a consumer asks.
+  (`listen.lb_id` QUIC-LB server ids). That refusal is a recorded exception
+  to parity, not a prerequisite, until a consumer asks.
 
 Public API: none. Wire: none.
 

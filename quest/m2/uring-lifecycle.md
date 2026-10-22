@@ -31,14 +31,6 @@ reachable by an embedder:
   surfaces. `moq-tokio/src/transport.rs` has the same cap and returns
   Pending without registering a waker. Fix both: check terminal state
   before the cap, keeping held credit.
-- Buffer-group ids: `next_bgid` is a per-worker `u16` allocated with
-  `expect`, before the multishot check, never returned on failed
-  registration or socket drop, so the 65,536th `Handle::udp` panics.
-  Recycle an id only once the kernel has released its buffer ring.
-- `Socket::drop` discards a failed cancel (`let _ = shared.cancel(key)`),
-  leaving an idle multishot receive holding the fd and pool until worker
-  teardown. Only an `io_uring_enter` error reaches it; surface it rather
-  than drop it.
 
 Use the existing teardown and credit integration tests' shapes; drive time
 with the manual clock for the idle-timeout case.
@@ -47,4 +39,5 @@ Public API: behavior only (implicit close on drop). Wire: none.
 
 ## Related
 
+- [io_uring socket teardown](/quest/m2/uring-socket-teardown.md) - the UDP socket's own resource cleanup, split off
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - requires this
