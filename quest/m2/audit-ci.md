@@ -99,6 +99,13 @@ verdicts:
 - Infrastructure flakes in the sample: DNS failures installing Nix
   (`cli-export`) and a curl exit 56 downloading BBB. Count them across nights
   before acting; one night is not a pattern.
+- `just gh test` ran only in Nightly during the m1 run, so a PR that added a
+  bench without registering it, or changed a workflow a fixture asserts,
+  merged green and reddened the next night. That happened three times in two
+  days (the setup fixture, the removed `writer` bench, and the unregistered
+  jitter and SUBSCRIBE_TRACKS benches the m1 run registered).
+  [Tooling tests gate every merge](/quest/m1/gh-test-gate.md) moves it into
+  every Check; confirm it landed.
 - Platform (macOS, Windows) now runs only in Nightly and on release PRs, not
   in the merge queue. A Windows- or macOS-only regression surfaces first in
   Nightly, as the reconnect test did.
