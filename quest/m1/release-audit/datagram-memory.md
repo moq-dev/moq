@@ -5,7 +5,7 @@
 A publisher cannot multiply a small compressed input into retained datagram
 payloads outside a shared memory budget. Cover Rust relays and JS readers,
 preserving best-effort delivery and accounting for both compressed and plain
-ownership, including payloads handed to consumers.
+payloads in library-owned queues and in-flight work.
 
 ## Plan
 
@@ -32,8 +32,11 @@ JS does not expose Rust's cache-pool API.
 
 Make datagram retention participate in explicit shared byte ownership, with
 best-effort eviction/drop under pressure and correct release on replacement,
-reader cancellation, and track shutdown. Account for aliases without double
-charging. Do not substitute an arbitrary track-count refusal. Verify through
+reader cancellation, and track shutdown. Account for library-owned aliases
+without double charging. JS exposes bare `Uint8Array` payloads, so accounting
+for arbitrary application-retained aliases would require a separate ownership
+API decision, not a guarantee this quest can make with the current surface.
+Do not substitute an arbitrary track-count refusal. Verify through
 receive paths, and benchmark retained bytes and delivery cost across both
 track count and queued datagrams, including highly compressible payloads and
 slow readers. The current consumer is relay/browser compressed datagram
