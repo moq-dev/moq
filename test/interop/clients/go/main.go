@@ -207,14 +207,22 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 		return nil
 	}
 	// Finish also finalizes the catalog. ACK never controls the real linger.
+	started := time.Now()
 	finished, err := producer.Finish()
 	if err != nil {
 		return err
 	}
 	defer finished.Close()
-	fmt.Printf("finish ready linger_us=%d\n", finished.Linger().Microseconds())
+	linger := finished.Linger()
+	if linger <= 0 {
+		return errors.New("finished media has no linger")
+	}
+	fmt.Printf("finish ready linger_us=%d\n", linger.Microseconds())
 	if err := finished.Wait(ctx); err != nil {
 		return err
+	}
+	if time.Since(started) < linger {
+		return errors.New("finish wait ended before its linger")
 	}
 	health, err := client.CreateBroadcast(broadcast + ".health")
 	if err != nil {

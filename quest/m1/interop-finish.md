@@ -18,7 +18,7 @@ in the nightly report at <https://git.moq.dev/interop/>.
 
 Public API: none. Wire: none.
 
-## Progress
+**Candidate:**
 
 The candidate in [moq-dev/moq#6307](https://github.com/moq-dev/moq/pull/6307)
 adds finish-only modes to the existing Rust, browser, native JS, C, C++, Go,
@@ -27,8 +27,10 @@ Preconnected readers begin media demand only after publication is finished;
 ten nonempty frames, natural media/catalog EOF, exact announcement END, and a
 new untimed health track on the same session are required. The publisher waits
 its actual finish linger before health; a separate FIFO only releases teardown.
+Publisher monotonic checks require a nonzero returned linger and a wait at least
+that long, measured from before handle creation.
 
-## Decisions needed
+**Remaining decision:**
 
 The goal includes GStreamer subscribers, whose current documented policy holds
 pads across whole-broadcast finish/withdrawal for a later route. Its public

@@ -12,7 +12,7 @@ struct Args {
 	url: url::Url,
 	broadcast: String,
 	version: Option<String>,
-	timeout: u64,
+	timeout: Duration,
 	frames: usize,
 	finish: bool,
 	finish_ack: Option<PathBuf>,
@@ -49,10 +49,14 @@ async fn main() -> anyhow::Result<()> {
 		url: options.remove("--url").context("missing --url")?.parse()?,
 		broadcast: options.remove("--broadcast").context("missing --broadcast")?,
 		version: options.remove("--version"),
-		timeout: options.remove("--timeout").unwrap_or_else(|| "60".into()).parse()?,
+		timeout: Duration::try_from_secs_f64(options.remove("--timeout").unwrap_or_else(|| "60".into()).parse()?)?,
 		frames: options.remove("--frames").unwrap_or_else(|| "10".into()).parse()?,
 		finish_ack: options.remove("--finish-ack").map(PathBuf::from),
 	};
+	ensure!(
+		!args.timeout.is_zero() && args.frames > 0,
+		"timeout and frames must be positive"
+	);
 	let mut config = moq_tokio::connect::Config::default();
 	if let Some(version) = &args.version {
 		config.version.push(version.parse().map_err(anyhow::Error::msg)?);
@@ -83,9 +87,13 @@ async fn main() -> anyhow::Result<()> {
 		media.finish()?;
 		catalog.finish()?;
 		broadcast.announce(Default::default())?;
+		let started = moq_clock::now();
 		let finish = broadcast.finish();
+		let linger = finish.linger();
+		ensure!(!linger.is_zero(), "finished media has no linger");
 		println!("finish ready linger_us={}", finish.linger().as_micros());
 		finish.wait().await;
+		ensure!(started.elapsed() >= linger, "finish wait ended before its linger");
 		println!("finish ended");
 		let health = origin.create_broadcast(format!("{}.health", args.broadcast))?;
 		let mut track = health.create_track("live", moq_net::track::Info::default())?;
@@ -106,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
 		let mut command = String::new();
 		stdin.read_line(&mut command).await?;
 		ensure!(command == "read\n", "finish read phase was not released");
-		tokio::time::timeout(Duration::from_secs(args.timeout), async {
+		moq_clock::timeout(args.timeout, async {
 			let mut routes = consumer.announced();
 			let broadcast = consumer.routed_broadcast(&args.broadcast).await?;
 			let mut catalogs =
@@ -122,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
 				.track(name)?
 				.subscribe(Some(
 					moq_net::track::Subscription::default()
-						.with_max_delay(Duration::from_secs(args.timeout))
+						.with_max_delay(args.timeout)
 						.with_groups(0..),
 				))
 				.await?;
@@ -147,10 +155,10 @@ async fn main() -> anyhow::Result<()> {
 					.next()
 					.await
 					.context("origin ended before broadcast withdrawal")?;
-				if let moq_net::announce::Event::End(announce) = event {
-					if announce.prefix.as_str() == args.broadcast {
-						break;
-					}
+				if let moq_net::announce::Event::End(announce) = event
+					&& announce.prefix.as_str() == args.broadcast
+				{
+					break;
 				}
 			}
 			let health = consumer.routed_broadcast(format!("{}.health", args.broadcast)).await?;

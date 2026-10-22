@@ -41,7 +41,10 @@ and catalog EOF, and the exact broadcast's announcement END. After the finish
 handle's real linger expires, the publisher announces a separate untimed health
 track. Reading its payload and clean EOF on the original session proves that
 withdrawal was not a transport shutdown. The final FIFO acknowledgement permits
-teardown only; it never ends the linger. These cells use the existing nightly
+teardown only; it never ends the linger. Each publisher also measures monotonic
+time from before creating its finish handle and refuses a zero linger or a wait
+shorter than that handle promises, without a fixed duration or tolerance.
+These cells use the existing nightly
 report records.
 
 GStreamer's persistent-watch policy keeps pads when a whole broadcast finishes.

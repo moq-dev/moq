@@ -221,10 +221,14 @@ int publish(const std::string &url, const std::string &path, const Dial &dial, c
     ok(audio->finish(), "audio finish");
     ok(media->finish(), "video finish");
     if (!finish_ack.empty()) {
+        const auto started = Clock::now();
         auto finish = ok(broadcast->finish(), "broadcast finish");
+        const auto linger = std::chrono::microseconds(finish->linger_us());
+        if (linger.count() <= 0) fail("finished media has no linger");
         std::printf("finish ready linger_us=%llu\n", static_cast<unsigned long long>(finish->linger_us()));
         std::fflush(stdout);
         ok(finish->wait().get(), "finish linger");
+        if (Clock::now() - started < linger) fail("finish wait ended before its linger");
         std::puts("finish ended");
         std::fflush(stdout);
         auto health = ok(session->publish()->create_broadcast(path + ".health"), "health broadcast");

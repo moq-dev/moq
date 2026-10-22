@@ -1297,7 +1297,6 @@ run_finishes() {
         else all_clean=0; fi
         if [[ "$all_clean" -eq 1 ]]; then
             printf 'complete\n' >&"$ack_fd"
-            # FIFO readers use EOF to finish reading the acknowledgement.
             exec {ack_fd}>&-
             harness_wait "$pid" || publisher_ok=0
             grep -qx 'finish acknowledged' "$LOGS/$name-pub.log" || publisher_ok=0

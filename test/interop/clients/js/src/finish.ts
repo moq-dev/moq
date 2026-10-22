@@ -1,5 +1,5 @@
 // Finite media fixture and finish observations for the existing browser client.
-import { Micro, Milli } from "@moq/clock";
+import { Instant, Micro, Milli, Nano, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
@@ -130,10 +130,14 @@ export function finish(
 		);
 		serving.close();
 		broadcast.announce();
+		const started = now();
 		const finishing = broadcast.finish();
+		const linger = Nano.fromMilli(finishing.linger);
+		if (linger <= 0) throw new Error("finished media has no linger");
 		state.lingerUs = finishing.linger * 1000;
 		state.ready = true;
 		await finishing.wait();
+		if (Instant.durationSince(now(), started) < linger) throw new Error("finish wait ended before its linger");
 		const health = origin.createBroadcast(Moq.Path.from(`${path}.health`));
 		const healthTrack = health.createTrack("live");
 		const group = healthTrack.appendGroup();

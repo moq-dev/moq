@@ -24,6 +24,7 @@ import json
 import math
 import struct
 import sys
+import time
 from datetime import timedelta
 
 import moq
@@ -130,9 +131,15 @@ async def publish(
         media.finish()
         if finish_ack is not None:
             # finish() also finalizes the catalog. ACK never controls the real linger.
+            started = time.monotonic_ns()
             finished = producer.finish()
-            print(f"finish ready linger_us={finished.linger // timedelta(microseconds=1)}", flush=True)
+            linger_us = finished.linger // timedelta(microseconds=1)
+            if linger_us <= 0:
+                raise RuntimeError("finished media has no linger")
+            print(f"finish ready linger_us={linger_us}", flush=True)
             await finished.wait()
+            if time.monotonic_ns() - started < linger_us * 1000:
+                raise RuntimeError("finish wait ended before its linger")
             health = client.create_broadcast(f"{broadcast}.health")
             live = health.publish_track("live")
             live.write_frame(b"session-alive")
