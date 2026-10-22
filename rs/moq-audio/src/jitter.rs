@@ -30,8 +30,8 @@ const FORGET: f64 = 0.983;
 /// Milliseconds of arrival time per resampled observation.
 const RESAMPLE: f64 = 500.0;
 
-/// Holds the forget factor below [`FORGET`] for the first observations.
-const RAMP: f64 = 2.0;
+/// The most weight one observation takes, so a lone one holds the quantile for one half-life at most.
+const FRESH_MAX: f64 = 0.1;
 
 /// Idle intervals folded at once, purely to bound the work.
 const IDLE_MAX: f64 = 1024.0;
@@ -113,8 +113,8 @@ pub(crate) struct Estimator {
 	peak: f64,
 
 	histogram: [f64; BUCKETS],
-	/// Observations folded in, which drives the cold-start ramp.
-	count: u64,
+	/// How much of the histogram is still the prior's rather than evidence.
+	prior: f64,
 }
 
 impl Estimator {
@@ -128,7 +128,7 @@ impl Estimator {
 			interval: 0.0,
 			peak: 0.0,
 			histogram: std::array::from_fn(prior),
-			count: 0,
+			prior: 1.0,
 		}
 	}
 
@@ -200,25 +200,28 @@ impl Estimator {
 		measured.max(self.advertised) + self.frame
 	}
 
-	// One observation is `h = f*h + (1-f)*x`, where x is the bucket that was observed,
-	// or the prior when the interval held no arrival at all. An idle interval therefore
-	// relaxes the estimate back toward cold start at the same time constant, rather than
-	// freezing it or renormalizing the decay away.
+	// Evidence decays by `FORGET` and the prior holds the rest, of which an observation
+	// takes up to `FRESH_MAX`, so the prior is replaced within seconds while no single
+	// interval outweighs the quantile's tail for long. Once the prior is gone this is
+	// `h = f*h + (1-f)*x`. An idle interval takes nothing, so its share returns to the
+	// prior and the estimate relaxes toward cold start at the same time constant.
 	fn fold(&mut self, bucket: Option<usize>) {
-		self.count += 1;
-		let count = self.count as f64;
-		let forget = f64::min(FORGET, count / (count + RAMP));
-		let fresh = 1.0 - forget;
+		let rest = 1.0 - FORGET * (1.0 - self.prior);
+		let fresh = if bucket.is_some() {
+			f64::min(FRESH_MAX, rest)
+		} else {
+			0.0
+		};
+		let left = rest - fresh;
+		let seed = left - FORGET * self.prior;
 
 		for (i, weight) in self.histogram.iter_mut().enumerate() {
-			*weight *= forget;
-			if bucket.is_none() {
-				*weight += fresh * prior(i);
-			}
+			*weight = FORGET * *weight + seed * prior(i);
 		}
 		if let Some(bucket) = bucket {
 			self.histogram[bucket] += fresh;
 		}
+		self.prior = left;
 	}
 }
 
@@ -272,7 +275,7 @@ pub(crate) mod tests {
 
 	/// Every case the document lists. Named rather than globbed, so a case that
 	/// goes missing fails here instead of silently shrinking the suite.
-	const CORPUS: [&str; 10] = [
+	const CORPUS: [&str; 11] = [
 		"advertised",
 		"backlog",
 		"buildup",
@@ -282,6 +285,7 @@ pub(crate) mod tests {
 		"paced",
 		"reorder",
 		"spike",
+		"straggler",
 		"tunein",
 	];
 

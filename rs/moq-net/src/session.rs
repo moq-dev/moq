@@ -216,6 +216,9 @@ impl Session {
 
 	/// Block until the transport session is closed, returning the reason.
 	///
+	/// The driver keeps draining group streams already delivered to the transport
+	/// after this resolves, so keep driving it until it completes.
+	///
 	/// A close code the peer sent is decoded through the session registry (so an auth
 	/// rejection arrives as `Error::Session(SessionError::Unauthorized)`); every peer code is
 	/// preserved as [`Error::Session`]. A close carrying no application code surfaces as
@@ -332,6 +335,7 @@ impl Session {
 		});
 
 		let supervisor = Supervisor {
+			goaway: Some(goaway.deadline(&runtime)),
 			version,
 			local_close: protocol.local_close(),
 			runtime: runtime.clone(),
@@ -374,10 +378,11 @@ impl Session {
 /// The driver's transport-facing half of a [`Session`]: it executes the
 /// handles' close requests, publishes the transport's terminal error, and
 /// samples the connection stats (including the send-bandwidth estimate) while
-/// anyone is consuming them.
+/// anyone is consuming them, and enforces GOAWAY deadlines independently of writes.
 ///
 /// Finishes once the transport reports closed; everything else is moot then.
 pub(crate) struct Supervisor<S> {
+	goaway: Option<goaway::Deadline>,
 	version: Version,
 	local_close: Arc<std::sync::atomic::AtomicBool>,
 	runtime: crate::time::Deadlines,
@@ -450,6 +455,19 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 				});
 			}
 			return Poll::Ready(());
+		}
+
+		if let Some(goaway) = &mut self.goaway
+			&& let Poll::Ready(timeout) = goaway.poll(waiter)
+		{
+			self.goaway = None;
+			if let Some(timeout) = timeout {
+				tracing::warn!(?timeout, "peer did not leave before the GOAWAY deadline; closing");
+				self.session.close(
+					self.version.session_code(&SessionError::GoawayTimeout),
+					&Error::GoawayTimeout.to_string(),
+				);
+			}
 		}
 
 		// Execute the handle-side close requests. The channel closing is the
@@ -777,7 +795,8 @@ impl Slots {
 
 	/// Take one slot until the returned guard drops, or [`Error::TooManyRequests`] at the cap.
 	///
-	/// The caller closes the session on that error: a peer past its limits loses the session.
+	/// A peer whose own request runs past its limits loses the session. A subscription we
+	/// would initiate, such as a listed track's PUBLISH, is skipped instead.
 	pub(crate) fn acquire(&self) -> Result<Slot, Error> {
 		use std::sync::atomic::Ordering;
 		let held = self

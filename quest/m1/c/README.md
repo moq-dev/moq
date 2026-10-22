@@ -41,7 +41,7 @@ The line owns the pre-cut check: every `doc/lib/c` sample and the C interop
 client build and run against the built release archive, not only in-tree.
 [Published archive proof](/quest/m2/release/c-publish.md) repeats it after
 publication; [old-crate retirement](/quest/m2/release/c-retire.md) follows
-its final notice release and is not a prerequisite of this preparation.
+that publication and is not a prerequisite of this preparation.
 
 The hand-written crate gets no more feature work: its shutdown, CMake library,
 and fetch quests were abandoned for this line, and hidden is done.
@@ -49,6 +49,14 @@ Decided in the quest audit: [claim epochs](https://github.com/moq-dev/moq/pull/5
 is a narrow correctness exception. Its existing claim API migrates with
 Rust and JS so C cannot retain the unsafe accept path while this line waits.
 That change owns its C tests and `MIGRATE.md` entries; other API reshaping stays here.
+
+Decided 2026-10-20 (maintainer): m1 quests that change the C API
+([exact binding timestamps](/quest/m1/binding-timestamps.md),
+[scope track priority](/quest/m1/track-priority-scope.md),
+[binding linger](/quest/m1/linger-ffi.md),
+[Rust identity enforcement](/quest/m1/catalog-identity-rs.md), and
+[dynamic subscribe ranges](/quest/m1/subscribe-ranges/dynamic.md)) Require this
+line and land their C half on the generated package, so C users break once.
 
 ## Required
 

@@ -7,7 +7,7 @@
  * @module
  */
 import { defineConfig } from "vite";
-import { worklet } from "../../../../js/common/vite-plugin-worklet";
+import { worklet } from "../../../../js/common/vite-plugin-worklet.ts";
 
 /** esnext keeps WebCodecs / WebTransport syntax intact for headless Chromium. */
 export default defineConfig({

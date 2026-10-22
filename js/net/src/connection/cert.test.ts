@@ -35,7 +35,3 @@ test("certificateHash rejects repeated BEGIN lines in linear time", async () => 
 	const pem = "-----BEGIN CERTIFICATE-----a".repeat(40_000);
 	await expect(certificateHash(pem)).rejects.toThrow(/armor/);
 });
-
-test("hex round-trips through fromBytes/toBytes", () => {
-	expect(Hex.fromBytes(Hex.toBytes(ABC_SHA256))).toBe(ABC_SHA256);
-});

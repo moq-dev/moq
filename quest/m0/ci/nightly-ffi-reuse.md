@@ -15,9 +15,8 @@ quest.
 ## Plan
 
 `moq-ffi-v0.4.16` (2026-10-16) was cut from a `release` without #5549, so it
-ran the per-language workflows and verified nothing here. `Shipping sizes`
-skips while the Linux release builds fail; see
-[Release builds link again](/quest/m0/release-link.md).
+ran the per-language workflows and verified nothing here. The Linux release
+toolchain now links; verify `Shipping sizes` on the next scheduled Nightly.
 
 The first scheduled Nightly after the change (run 38897397428, 2026-10-16)
 already verified the dry-run side: the nested job names match the publisher
@@ -35,7 +34,3 @@ From the first `Shipping sizes` run:
 
 - The Go static libraries keep their `release/go-lib-<target>/` history keys,
   so the comparison shows no removed or added Go entries.
-
-## Related
-
-- [Release builds link again](/quest/m0/release-link.md) - unblocks `Shipping sizes`

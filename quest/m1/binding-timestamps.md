@@ -30,9 +30,8 @@ Decided with the maintainer on 2026-10-18:
 
 - **Scope is the bindings only.** The core and JS types stay as they are.
 - **m1**, beside data consumer timestamps.
-- **Lands after #5677**, which ships the data-value timestamps with the
-  interim microsecond fields; this quest converts every site at once,
-  `MoqJsonValue` included.
+- **#5677 shipped** the data-value timestamps with the interim microsecond
+  fields; this quest converts every site at once, `MoqJsonValue` included.
 - **Shape mirrors the core:** one `{value, scale}` per value, `value` at most
   `2^62 - 1` and `scale` non-zero and at most `2^62 - 1`, matching
   `Timestamp::new` and `Timescale::new`. The FFI boundary refuses anything else with
@@ -56,6 +55,14 @@ Decided with the maintainer on 2026-10-18:
 Verification: round-trip a 90 kHz tick, a present zero, and untimed through
 moq-ffi, moq-c, C++ and every wrapper's tests; refuse scale 0, an
 out-of-range scale, and an out-of-range value; `just test interop --all`.
+
+Decided 2026-10-20 (maintainer): the moq-c half lands on the
+[generated C package](/quest/m1/c/README.md), not the frozen hand-written
+ABI, so C users break once.
+
+## Required
+
+- [Generated C bindings](/quest/m1/c/README.md) - `moq_timestamp` reaches C through the generated package, so C users break once
 
 ## Related
 

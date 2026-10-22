@@ -1,4 +1,4 @@
-// Run with `bun js/hang/bench/slow-group.ts` to measure warning traffic per catch-up.
+// Measure warning traffic and catch-up time over the groups a slow consumer skips.
 
 import { Milli } from "@moq/clock";
 import { Group, Time, Track, Varint } from "@moq/net";
@@ -6,6 +6,7 @@ import { Signal } from "@moq/signals";
 import { Consumer } from "../src/container/consumer.ts";
 import { Format } from "../src/container/legacy.ts";
 
+console.log("groups,warnings,bytes,catchup_ms");
 for (const count of [1, 16, 256, 1024]) {
 	const track = new Track.Producer("tone");
 	const maxDelay = new Signal(Milli(30_000));
@@ -35,7 +36,7 @@ for (const count of [1, 16, 256, 1024]) {
 		const started = performance.now();
 		write(count);
 		await buffered(count);
-		console.log(JSON.stringify({ groups: count, warnings, bytes, catchupMs: performance.now() - started }));
+		console.log(`${count},${warnings},${bytes},${(performance.now() - started).toFixed(3)}`);
 	} finally {
 		consumer.close();
 		track.close();

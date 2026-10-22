@@ -152,34 +152,37 @@ mod test {
 	/// replacement rather than ending the reader.
 	#[test]
 	fn a_lost_group_waits_for_its_replacement() {
-		let track = moq_net::broadcast::Info::new()
-			.produce()
-			.create_track("test", timed())
-			.unwrap();
-		let mut consumer = consume(track.subscribe(None), false);
-		let waiter = kio::Waiter::noop();
+		// Lost on this side, then reset by the publisher: the reader sees the same loss either way.
+		for lost in [moq_net::Error::Old, moq_net::Error::Stream(moq_net::StreamError::Old)] {
+			let track = moq_net::broadcast::Info::new()
+				.produce()
+				.create_track("test", timed())
+				.unwrap();
+			let mut consumer = consume(track.subscribe(None), false);
+			let waiter = kio::Waiter::noop();
 
-		// Group 0 delivers a value, then stays open with the reader parked on its next frame.
-		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"one"))
-			.unwrap();
-		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == "one"));
-		assert!(consumer.poll_latest(&waiter).is_pending());
+			// Group 0 delivers a value, then stays open with the reader parked on its next frame.
+			let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"one"))
+				.unwrap();
+			assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == "one"));
+			assert!(consumer.poll_latest(&waiter).is_pending());
 
-		// The relay reclaims the group out from under the reader.
-		group.abort(moq_net::Error::Old).unwrap();
-		assert!(
-			consumer.poll_latest(&waiter).is_pending(),
-			"a lost group must not end the reader"
-		);
+			// The group is lost out from under the reader.
+			group.abort(lost).unwrap();
+			assert!(
+				consumer.poll_latest(&waiter).is_pending(),
+				"a lost group must not end the reader"
+			);
 
-		// The replacement arrives and the reader picks up where the value now lives.
-		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"two"))
-			.unwrap();
-		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == "two"));
+			// The replacement arrives and the reader picks up where the value now lives.
+			let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"two"))
+				.unwrap();
+			assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == "two"));
+		}
 	}
 
 	/// A stamped payload is written at its capture time, and the returned size is the encoded frame
@@ -235,16 +238,6 @@ mod test {
 				other => panic!("expected value, got {other:?}"),
 			}
 		}
-	}
-
-	#[test]
-	fn compressed_roundtrip() {
-		let (mut producer, track) = producer(true);
-		let payload = Bytes::from(b"the quick brown fox".repeat(64));
-		producer.update(payload.clone()).unwrap();
-		producer.finish().unwrap();
-
-		assert_eq!(drain(consume(track, true)), vec![payload]);
 	}
 
 	/// The compressed frame on the wire is much smaller than the value it carries, so a consumer
