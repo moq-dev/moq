@@ -25,9 +25,8 @@ Settled by the maintainer on 2026-10-22 (moq-dev/moq#6278):
 - ✅ Groups cached before live are never served while idle; once live, a
   reader gets what its ranges and max delay hold, as on a cold relay.
 
-Public serving re-marks these items as pending on this quest, so apply the
-markers once it lands.
+Public serving ([moq-dev/moq#6138](https://github.com/moq-dev/moq/pull/6138), merged) re-marked these items as pending on this quest, so apply the markers now.
 
-## Required
+## Related
 
-- [Public serving](/quest/m1/public-model/serve.md) - moves the publishers' live-edge markers onto this quest
+- [Public serving](/quest/m1/public-model/serve.md) - moved the publishers' live-edge markers onto this quest
