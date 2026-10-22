@@ -27,9 +27,8 @@ a correctness bug.
   processing. This touches the stuck-check call sites in moq-quic's tests
   (about 50) and the qmux mux path that shares it.
 - Re-read the landed code first; the lease API may have moved since #5878.
-  Coordinate with the qmux receive-leasing quest from
-  [moq-dev/moq#6352](https://github.com/moq-dev/moq/pull/6352) if qmux
-  adopts leases on the same mux path.
+  Coordinate with [qmux receive leases](/quest/m2/qmux-receive-lease.md) if
+  qmux adopts leases on the same mux path.
 
 Public API: none. Wire: none.
 
