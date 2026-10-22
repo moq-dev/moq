@@ -13,7 +13,8 @@ What the code does today:
 
 - A PAT naming another PMT PID for the program adds a reassembler but never
   drops the old one, and `program.pmtPid` keeps the first.
-- `Programs` ignores a program a later PAT adds, without a warning.
+- `Programs` ignores a program a later PAT adds, without a warning. Its
+  PMT still claims its PIDs, so they show in no `ts::stats` row either.
 - Under `--program all`, a later PAT that removes one program reaches every
   per-program `Import`; the removed program's `handle_pat` errors,
   `Programs::feed` propagates it, and the whole multiplex ingest stops,
