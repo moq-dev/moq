@@ -942,6 +942,8 @@ mod ws_transport {
 			};
 
 			match message {
+				// The binding makes an empty message a no-op, unlike an empty record
+				Message::Binary(data) if data.is_empty() => continue,
 				Message::Binary(data) => {
 					if data.len() > recv_limit {
 						// Release the oversized allocation before waiting for room to
@@ -1080,6 +1082,20 @@ mod ws_transport {
 			let pending = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
 			assert!(pending.is_err(), "recv must not resolve without activity");
 
+			pump.abort();
+		}
+
+		#[tokio::test]
+		async fn skips_empty_messages() {
+			let (feed, stream) = mock_stream();
+			feed.unbounded_send(Ok(Message::Binary(Bytes::new()))).unwrap();
+			feed.unbounded_send(Ok(Message::Binary(Bytes::from_static(b"one"))))
+				.unwrap();
+			let _feed = feed;
+
+			let (tx, mut rx) = mpsc::channel(4);
+			let pump = tokio::spawn(ws_pump(stream, None, usize::MAX, tx));
+			assert_eq!(rx.recv().await.unwrap().unwrap(), Bytes::from_static(b"one"));
 			pump.abort();
 		}
 
