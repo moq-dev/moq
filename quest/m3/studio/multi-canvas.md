@@ -13,6 +13,10 @@ Each canvas publishes its own broadcast, because different content needs a
 different name. Transitions are per canvas, so a scene change cuts every
 canvas together unless the creator unlinks one.
 
+Benchmark source count against canvas count, including sparse reuse. Per-canvas
+cost must grow only with the sources that canvas uses, never with the whole
+source table.
+
 ## Required
 
 - [The studio app](/quest/m3/studio/app.md) - the single canvas this generalizes

@@ -9,10 +9,18 @@ On wasm32, moq-video gains browser backends:
   HEVC, AV1, and VP9 the browser supports.
 - **GPU import:** a `VideoFrame` becomes a wgpu texture with no CPU readback.
 
-The existing `capture::open`, `encode::Encoder`, and `decode` entry points
-work unchanged on the web.
+The `capture::open`, `encode::Encoder`, and `decode` entry points work on
+the web.
 
 ## Plan
+
+The encode and decode seams become asynchronous. Today the backend
+`encode` and `flush` return their packets synchronously, but WebCodecs
+delivers output through a callback and drains through a promise. The new
+seam submits frames, yields packets as they arrive, and flushes with
+backpressure. Browser objects are not `Send`, so these backends run on the
+browser runtime. Any change to a published entry point gets a `MIGRATE.md`
+entry.
 
 Codec support is probed at runtime. An unsupported codec fails loudly rather
 than silently picking another. Replacing js/publish's or js/watch's internals

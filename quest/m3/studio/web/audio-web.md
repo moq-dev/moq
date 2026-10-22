@@ -8,8 +8,19 @@ On wasm32, moq-audio gains browser backends:
 - **Codecs:** encode and decode Opus and AAC through WebCodecs
   `AudioEncoder` and `AudioDecoder`.
 
-The existing capture, encode, decode, and playback entry points and the
-program bus work unchanged on the web.
+The program bus and the capture, decode, and playback entry points work on
+the web.
+
+## Plan
+
+The encode and decode seams become asynchronous. Today `Backend::encode`
+returns exactly one packet per frame, synchronously, but WebCodecs queues
+work, delivers output through a callback, and drains through a promise. The
+new seam submits input, yields zero or more outputs as they arrive, and
+flushes with backpressure. It also serves pipelined platform codecs such as
+MediaCodec. Browser objects are not `Send`, so these backends run on the
+browser runtime. Any change to a published entry point gets a `MIGRATE.md`
+entry.
 
 ## Required
 
