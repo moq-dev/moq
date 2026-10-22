@@ -35,7 +35,7 @@ Decided in the 2026-10-14 planning interview:
   stripes, never a dirty frame the min-delay decoder wasn't also showing.
   This quest therefore does not wait on
   [plan-boundary](/quest/m2/intra-refresh/plan-boundary.md), only on the
-  draft amendment that permits presenting before `warmup`.
+  [warmup draft](/quest/m1/warmup-draft.md) amendment.
 - Selection is a small frame selector over the two current candidates: show
   the max-delay frame when its timestamp is at or beyond the min-delay frame's,
   so it wins ties, else the min-delay frame. Separately, never display a
@@ -82,7 +82,7 @@ Decided in the 2026-10-14 planning interview:
 
 ## Required
 
-- [Draft warmup](/quest/m2/intra-refresh/draft-warmup.md) - the hang draft permits presenting min-delay pictures before `warmup` ends
+- [Warmup draft](/quest/m1/warmup-draft.md) - the hang draft permits presenting min-delay pictures before `warmup` ends
 - [Join earlier group](/quest/m2/intra-refresh/join-earlier-group.md) - the `js/hang` opt-in the max-delay decoder joins with
 
 ## Related

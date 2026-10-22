@@ -1,4 +1,4 @@
-# Refresh: new groups on demand
+# [M] Refresh: new groups on demand
 
 ## Goal
 
@@ -60,10 +60,6 @@ Work owned by this README, after the children land:
 - A short "Refresh" section on the `doc/concept` page that covers groups:
   what the ratio means, what a publisher does on `wanted`, and how relays
   forward it. No new guide.
-
-## Required
-
-- [moq-json](/quest/m1/refresh/json.md) - snapshot and window groups roll on a qualifying join, reading the ratio from the track; `delta_ratio` and `op_ratio` become `deltas` and `ops` switches in every binding
 
 ## Related
 

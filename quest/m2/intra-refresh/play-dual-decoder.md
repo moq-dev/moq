@@ -27,4 +27,4 @@ once it catches up. Playback of renditions without `warmup` is unchanged.
 
 ## Required
 
-- [Draft warmup](/quest/m2/intra-refresh/draft-warmup.md) - the hang draft permits presenting min-delay pictures before `warmup` ends
+- [Warmup draft](/quest/m1/warmup-draft.md) - the hang draft permits presenting min-delay pictures before `warmup` ends

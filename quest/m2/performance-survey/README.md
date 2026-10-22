@@ -135,4 +135,4 @@ No duplicate quest or workflow edit belongs here.
 
 - [Performance audit](/quest/m1/audit-perf.md) - nightly regression attribution and remaining coverage
 - [Benchmark sources](/quest/m2/bench-sources.md) - publishing existing measurements to the trend table
-- [Nightly comparisons](/quest/m2/bench-ci.md) - paired nightly regression reporting
+- [Nightly comparisons](/quest/m1/bench-ci.md) - paired nightly regression reporting

@@ -1511,13 +1511,8 @@ export class Subscriber {
 					: undefined;
 			const current = track.subscription.peek();
 			if (current === undefined || (refresh === undefined && this.#sameSubscription(current, lastSent))) {
-				// Nothing new to send; wait for a change or termination.
-				const next = await race([
-					track.subscription.changed(),
-					demand.wanted.changed(),
-					edge.changed(),
-					stopped,
-				]);
+				// Each wake releases the quiet signals too, including when termination wins.
+				const next = await race([Signal.race(track.subscription, demand.wanted, edge), stopped]);
 				if (next === null) return;
 				continue;
 			}
