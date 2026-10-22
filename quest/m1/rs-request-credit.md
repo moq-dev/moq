@@ -37,3 +37,9 @@ wait on the port. Say in the PR which backends fail fast.
 
 Propose the error variant's name in the PR. Public API: one new `Error`
 variant, and possibly a `transport::poll` session method. Wire: none.
+
+Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
+order, this quest on the receive-lease shape from
+[moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878), then
+[Scope track priority](/quest/m1/track-priority-scope.md), so implementers
+rebase on one shape at a time.

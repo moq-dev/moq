@@ -5,7 +5,7 @@
 Every CI workflow and job earns its place: its results reach someone (a gate,
 a Discord alert, or a published report) at a cost proportional to that signal.
 Each one that doesn't is fixed, moved, or deleted. Individual tests stay with
-the [test cost audit](/quest/m1/audit-test-cost.md), and runner and cache
+the [test cost audit](/quest/m2/audit-test-cost.md), and runner and cache
 infrastructure with [CI cost and latency](/quest/m0/ci/README.md).
 
 ## Plan
@@ -69,7 +69,7 @@ Check first (from the test cost audit's m0 run, 2026-10-19):
   was queued. Check the entry's head branch and what merged around it before
   calling it a flake.
 - Owned elsewhere: Rust advisories by
-  [the dependency audit](/quest/m1/audit-deps.md). The release toolchain now
+  [the dependency audit](/quest/m2/audit-deps.md). The release toolchain now
   links.
 - Re-running a single job in place cannot redeploy Pages: the earlier
   attempt's `github-pages` artifact remains and `deploy-pages` refuses two.

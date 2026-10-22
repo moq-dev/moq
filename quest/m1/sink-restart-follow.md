@@ -47,9 +47,14 @@ Audit and fix the rest the same way:
 - `transcode`: its source broadcast; following means restarting the ladder
   on the new instance.
 
-Share one helper (a `moq_mux` `Source::follow`-style API per
-[reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md))
-rather than one rule per reader, built on `announced_broadcast`. Each fix
-lands with a test that replaces the publisher while the reader runs.
+Reuse `moq_mux::Source::follow` from
+[reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md),
+built on `announced_broadcast`, rather than one rule per reader (decided
+2026-10-20, maintainer). Each fix lands with a test that replaces the
+publisher while the reader runs.
 
-Public API: possibly a shared follow helper in `moq-mux`. Wire: none.
+Public API: none. Wire: none.
+
+## Required
+
+- [Reference announcements](/quest/m0/broadcast-epoch/reference-announcements.md) - owns `Source::follow`, built on moq-net's announced request

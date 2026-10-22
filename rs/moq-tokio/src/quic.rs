@@ -1127,42 +1127,6 @@ mod tests {
 			assert!(at_limit.validate().is_ok(), "{max_streams}");
 		}
 	}
-
-	#[test]
-	fn window_flags_parse() {
-		let quic = parse(&[
-			"--quic-receive-window",
-			"134217728",
-			"--quic-stream-receive-window",
-			"8388608",
-			"--quic-send-window",
-			"33554432",
-		]);
-		assert_eq!(quic.receive_window, Some(134217728));
-		assert_eq!(quic.stream_receive_window, Some(8388608));
-		assert_eq!(quic.send_window, Some(33554432));
-	}
-
-	#[test]
-	fn toml_round_trips() {
-		let toml = r#"
-			max_streams = 7000
-			gso = false
-			congestion_control = "delay"
-			receive_window = 134217728
-			stream_receive_window = 8388608
-			send_window = 33554432
-			qlog = "/tmp/qlog"
-		"#;
-		let quic: Config = toml::from_str(toml).unwrap();
-		assert_eq!(quic.max_streams, Some(7000));
-		assert_eq!(quic.gso, Some(false));
-		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
-		assert_eq!(quic.receive_window, Some(134217728));
-		assert_eq!(quic.stream_receive_window, Some(8388608));
-		assert_eq!(quic.send_window, Some(33554432));
-		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
-	}
 }
 
 #[cfg(test)]
