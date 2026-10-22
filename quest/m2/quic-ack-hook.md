@@ -61,7 +61,7 @@ stream's waiter on it is the core of the work. Three traps:
   a finished stream whose every byte was acknowledged from a reset one. The
   driver answers from how the handle saw the stream end: finished, with no
   reset or STOP_SENDING, means delivered. moq-uring's driver already records
-  that end; moq-tokio's handle tracks `finished`, and #6196 adds the reset.
+  that end; moq-tokio's handle tracks `finished` and, since #6196, the reset.
 - `moq-quic`'s `acked` panics on an offset past the data written to an
   unreset stream. The driver returns the error instead, since a panic under
   the connection lock poisons it for every handle.
