@@ -60,6 +60,8 @@ enum Alias {
 /// still remember.
 #[derive(Default)]
 struct AliasTable {
+	/// No control response can bind another alias once receive draining starts.
+	ended: bool,
 	map: HashMap<u64, Alias>,
 
 	/// Retired aliases in retirement order, so the oldest is forgotten first.
@@ -807,6 +809,7 @@ async fn resolve_track_alias(
 			// our STOP_SENDING. Discard the group now rather than waiting out the timeout
 			// for a binding that is never coming.
 			Some(Alias::Retired) => Poll::Ready(Err(Error::Cancel)),
+			None if aliases.ended => Poll::Ready(Err(Error::Cancel)),
 			None => Poll::Pending,
 		});
 		if let Poll::Ready(result) = resolved {
@@ -921,6 +924,29 @@ where
 
 	pub fn close(&self) {
 		self.state.lock().close();
+	}
+
+	/// Settle waits for control state that cannot arrive on the closed transport,
+	/// retaining known aliases and tracks until their buffered data is consumed.
+	pub fn settle_control(&self) {
+		let state = self.state.lock();
+		if let Ok(mut aliases) = state.aliases.write() {
+			aliases.ended = true;
+		}
+		for track in state.subscribes.values() {
+			if let Ok(mut fill) = track.fill.write()
+				&& matches!(*fill, Fill::Requested | Fill::Serving(_))
+			{
+				*fill = Fill::Done;
+			}
+		}
+		for fetch in state.group_fetches.values() {
+			if let Ok(mut fetch) = fetch.write()
+				&& matches!(*fetch, GroupFetch::Pending)
+			{
+				*fetch = GroupFetch::Done;
+			}
+		}
 	}
 
 	/// Leave `alias` in the state a cancelled subscription leaves behind: bound to a
@@ -2111,6 +2137,7 @@ where
 				stream
 					.writer
 					.encode(&ietf::RequestOk {
+						largest: None,
 						request_id: Some(request_id),
 						active: None,
 					})
@@ -2121,6 +2148,7 @@ where
 				stream
 					.writer
 					.encode(&ietf::RequestOk {
+						largest: None,
 						request_id: None,
 						active: None,
 					})
@@ -6054,6 +6082,7 @@ mod tests {
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
+				largest: None,
 				request_id: None,
 				active: None,
 			})
@@ -6149,6 +6178,7 @@ mod tests {
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestOk {
+					largest: None,
 					request_id: None,
 					active: None,
 				})
@@ -6231,6 +6261,7 @@ mod tests {
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestOk {
+					largest: None,
 					request_id: None,
 					active: count,
 				})
@@ -6283,6 +6314,7 @@ mod tests {
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
+				largest: None,
 				request_id: None,
 				active,
 			})
@@ -8463,6 +8495,7 @@ mod tests {
 			writer.varint(ietf::RequestOk::ID).await.unwrap();
 			writer
 				.encode(&ietf::RequestOk {
+					largest: None,
 					request_id: None,
 					active: None,
 				})
@@ -9817,6 +9850,9 @@ mod tests {
 				largest_location: None,
 				forward: true,
 				properties: ietf::Properties::default(),
+				subscriber_priority: None,
+				group_order: None,
+				filter: None,
 			};
 
 			// Errors are surfaced to the peer on the stream, not raised as a session error.
@@ -14307,6 +14343,94 @@ mod stitch_tests {
 		assert_eq!(frames.len(), 2, "the head is published as the prefix it is");
 	}
 
+	#[moq_clock::test]
+	async fn receive_drain_keeps_bound_aliases_and_ends_unknown_alias_waits() {
+		let h = Harness::new(Fill::Done, vec![]);
+		let aliases = h.subscriber.state.lock().aliases.consume();
+		let mut unknown = Box::pin(resolve_track_alias(&h.subscriber.runtime, aliases.clone(), ALIAS + 1));
+		assert!(futures::poll!(unknown.as_mut()).is_pending());
+		h.subscriber.settle_control();
+		assert!(matches!(
+			futures::FutureExt::now_or_never(unknown),
+			Some(Err(Error::Cancel))
+		));
+		assert!(matches!(resolve_track_alias(&h.subscriber.runtime, aliases, ALIAS).await, Ok(id) if id == REQUEST));
+	}
+
+	#[moq_clock::test]
+	async fn receive_drain_ends_a_fill_waiting_for_subscribe_ok() {
+		let h = Harness::new(Fill::Requested, vec![fill_stream(SEQUENCE, &[b"head"])]);
+		let mut stream = h.stream().await;
+		let mut subscriber = h.subscriber.clone();
+		let mut receiving = Box::pin(subscriber.recv_fill(&mut stream));
+		assert!(futures::poll!(receiving.as_mut()).is_pending());
+		h.subscriber.settle_control();
+		assert!(matches!(
+			futures::FutureExt::now_or_never(receiving),
+			Some(Err(Error::Unsupported))
+		));
+	}
+
+	#[moq_clock::test]
+	async fn receive_drain_ends_a_tail_waiting_for_a_missing_fill() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![tail_stream(SEQUENCE, 1, &[b"tail"])],
+		);
+		let mut stream = h.stream().await;
+		let mut subscriber = h.subscriber.clone();
+		let mut receiving = Box::pin(subscriber.recv_group(&mut stream));
+		assert!(futures::poll!(receiving.as_mut()).is_pending());
+		h.subscriber.settle_control();
+		assert!(futures::FutureExt::now_or_never(receiving).is_some());
+	}
+
+	#[moq_clock::test]
+	async fn receive_drain_preserves_a_buffered_fill_and_tail() {
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![tail_stream(SEQUENCE, 1, &[b"tail"]), fill_stream(SEQUENCE, &[b"head"])],
+		);
+		let mut consumer = h.track.subscribe(None);
+		let mut tail = h.stream().await;
+		let mut head = h.stream().await;
+		let mut tail_subscriber = h.subscriber.clone();
+		let mut head_subscriber = h.subscriber.clone();
+		let mut receiving = Box::pin(futures::future::join(
+			tail_subscriber.recv_group(&mut tail),
+			head_subscriber.recv_fill(&mut head),
+		));
+		assert!(futures::poll!(receiving.as_mut()).is_pending());
+		h.subscriber.settle_control();
+		let (tail, head) = receiving.await;
+		tail.expect("buffered tail");
+		head.expect("buffered head");
+		let (_, frames) = read_group(&mut consumer).await;
+		assert_eq!(
+			frames.iter().map(|(_, bytes)| bytes.as_slice()).collect::<Vec<_>>(),
+			vec![b"head".as_slice(), b"tail".as_slice()]
+		);
+	}
+
+	#[moq_clock::test]
+	async fn receive_drain_ends_a_group_fetch_waiting_for_fetch_ok() {
+		let h = Harness::new(Fill::Done, vec![fill_stream(SEQUENCE, &[b"head"])]);
+		h.subscriber
+			.state
+			.lock()
+			.group_fetches
+			.insert(REQUEST, kio::Producer::new(GroupFetch::Pending));
+		let mut stream = h.stream().await;
+		let mut subscriber = h.subscriber.clone();
+		let mut receiving = Box::pin(subscriber.recv_fill(&mut stream));
+		assert!(futures::poll!(receiving.as_mut()).is_pending());
+		h.subscriber.settle_control();
+		assert!(matches!(
+			futures::FutureExt::now_or_never(receiving),
+			Some(Err(Error::Unsupported))
+		));
+	}
+
 	/// A fetch stream can arrive before SUBSCRIBE_OK commits the pending track. It waits
 	/// for that response instead of looking up a producer that does not exist yet.
 	#[moq_clock::test]
@@ -16135,6 +16259,7 @@ mod new_group_tests {
 		stream
 			.writer
 			.encode(&ietf::RequestOk {
+				largest: None,
 				request_id: None,
 				active: None,
 			})

@@ -135,13 +135,16 @@ A publisher MUST NOT record 0x0000 (PAT) or 0x1FFF (null packets), which carry n
 
 `descriptors` are the track's ES-level descriptors from the PMT ({{descriptor}}), in PMT order.
 
+A publisher MUST NOT change an entry's `pid`, `descriptors`, or carriage record in place, so a track name means one elementary stream for its life.
+A stream the PMT revises ends its track and continues as a new track under a new name; one the PMT drops leaves `tracks` as its track ends, and a PID listed again later gets a new name too.
+
 `verbatim` and `pesPacket` mark a track carrying an undecoded elementary stream ({{verbatim}}).
 An entry MUST NOT carry both, and a consumer MUST refuse a catalog with one that does.
 A decoded track MAY appear here too, to preserve its `pid` and `descriptors`.
 A consumer MUST ignore an entry with no `verbatim` record, no `pesPacket` record, and no track the catalog describes, so one that predates `pesPacket` drops such a track from the stream it rebuilds.
 
 ## programDescriptors
-The PMT's program-level descriptors (`program_info`), in PMT order ({{descriptor}}).
+The PMT's program-level descriptors (`program_info`), in PMT order ({{descriptor}}), updated in place as the PMT revises them.
 
 ## program {#field-program}
 The program identity from the PAT:
@@ -158,6 +161,7 @@ type Program = {
 They are the only service-layer fields this document parses; everything else about the program stays inside the opaque `si` tables.
 
 A publisher MUST include `program` when the broadcast came from a transport stream, and omit it otherwise.
+A publisher MUST NOT change `transportStreamId` or `programNumber` in place: the carried `si` describes that service, so a source whose PAT names another ends the broadcast.
 
 ## si {#field-si}
 The standalone service information tables, keyed by the PID they ride on and then by `table_id`:
@@ -453,6 +457,7 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 - MPEG-1/2 video and LATM AAC are named among `pesPacket` streams, and the DSM-CC types 0x0A to 0x0D among section-framed `verbatim` ones. A rebuilt PAT lists the network entry when the NIT is carried.
 - A flagged PCR jump on an `m2ts` track follows hang's discontinuity marker rather than a skipped group sequence.
 - An `m2ts` track unwraps PCRs from its history, clamps extrapolated object times at a forward discontinuity, and cuts a fallback group after one second. `randomAccess` covers every published group; `muxRate` follows the measured source rate.
+- A `tracks` entry is never changed in place: a stream the PMT revises continues under a new name, and one it drops leaves the section. `programDescriptors` follows the PMT; `program`'s `transportStreamId` and `programNumber` do not change.
 
 ## draft-lcurley-moq-mpegts-00
 {:numbered="false"}

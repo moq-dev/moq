@@ -216,6 +216,9 @@ impl Session {
 
 	/// Block until the transport session is closed, returning the reason.
 	///
+	/// The driver keeps draining group streams already delivered to the transport
+	/// after this resolves, so keep driving it until it completes.
+	///
 	/// A close code the peer sent is decoded through the session registry (so an auth
 	/// rejection arrives as `Error::Session(SessionError::Unauthorized)`); every peer code is
 	/// preserved as [`Error::Session`]. A close carrying no application code surfaces as
@@ -792,7 +795,8 @@ impl Slots {
 
 	/// Take one slot until the returned guard drops, or [`Error::TooManyRequests`] at the cap.
 	///
-	/// The caller closes the session on that error: a peer past its limits loses the session.
+	/// A peer whose own request runs past its limits loses the session. A subscription we
+	/// would initiate, such as a listed track's PUBLISH, is skipped instead.
 	pub(crate) fn acquire(&self) -> Result<Slot, Error> {
 		use std::sync::atomic::Ordering;
 		let held = self
