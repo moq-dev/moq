@@ -910,7 +910,8 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// End the route on `pid` for a PMT that dropped or revised its stream, as the end of input
 	/// ends every route: the PES it began goes out, what waits on the clock is placed from the
-	/// PCRs so far, and its track finishes and leaves the catalog.
+	/// PCRs so far (refusing the import, as end of input does, if no media timestamp anchored
+	/// it), and its track finishes and leaves the catalog.
 	fn end_route(&mut self, pid: Pid) -> anyhow::Result<()> {
 		self.count_ended_route()?;
 		if self.headers.remove(&pid).is_some() {
@@ -923,7 +924,10 @@ impl<E: catalog::Catalog> Import<E> {
 			self.keep_stats(pid, Some(stats::Stream::new(".ts", stats::Class::Data)));
 			section.settle(&self.placement);
 			(units, unplaced) = section.release(&self.timebase, &self.pts, generation)?;
-			unplaced += section.held.len() as u64;
+			anyhow::ensure!(
+				section.held.is_empty(),
+				"TS sections reached a PMT revision without a media timestamp"
+			);
 			section.finish()?;
 		}
 		self.unclocked.remove(&pid);
@@ -932,7 +936,11 @@ impl<E: catalog::Catalog> Import<E> {
 				stream.settle(&self.placement);
 				let (published, dropped) = stream.release(&self.timebase, &self.pts, generation)?;
 				units += published;
-				unplaced += dropped + stream.held.len() as u64;
+				unplaced += dropped;
+				anyhow::ensure!(
+					stream.held.is_empty(),
+					"TS private PES reached a PMT revision without a media timestamp"
+				);
 			}
 			// A verbatim entry leaves with its stream; a decoded track's is recorded here.
 			if self.recorded_media.remove(&pid)
@@ -10001,6 +10009,32 @@ pub(super) mod test {
 
 		let row = &import.stats().streams[&0x21];
 		assert_eq!((row.units, row.quiet), (1, None));
+	}
+
+	/// A PMT dropping a section PID before any media timestamp anchors the clock refuses the
+	/// import, as end of input does, rather than drop the section it holds.
+	#[test]
+	fn a_section_route_dropped_before_the_media_clock_refuses_the_import() {
+		const VIDEO_PID: u16 = 0x0050;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let streams = [
+			(StreamType::Mpeg2Video, VIDEO_PID),
+			(StreamType::Dts8ChannelLosslessAudio, 0x21),
+		];
+		let mut bytes = synth_pmt(&streams, true);
+		bytes.extend_from_slice(&pcr_packet(VIDEO_PID, 27_000_000));
+		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
+		bytes.extend_from_slice(&pcr_packet(VIDEO_PID, 29_700_000));
+		import.decode(&bytes).unwrap();
+
+		let err = import.decode(&synth_pmt(&streams[..1], true)).unwrap_err();
+		assert!(err.to_string().contains("without a media timestamp"), "{err:#}");
 	}
 
 	/// A PID decoded as audio, then revised to private sections, then dropped, reports the

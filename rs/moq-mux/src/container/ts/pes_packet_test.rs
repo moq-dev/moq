@@ -919,6 +919,25 @@ async fn a_dropped_private_stream_finishes_and_its_reused_pid_opens_a_new_track(
 	assert_eq!(frames.len(), 1);
 	assert_eq!(&frames[0].payload[..], &feed.pes[2].1[..]);
 }
+
+/// A PMT dropping a private stream before any media timestamp anchors the clock refuses the
+/// import, as end of input does, rather than drop the PES it holds.
+#[test]
+fn a_private_stream_dropped_before_the_media_clock_refuses_the_import() {
+	let mut feed = Feed::new(0x06, KLVA);
+	let start = 1_000 * MS;
+	feed.pcr(start).data(klv(1, 8)).pcr(start + 40 * MS);
+	let head = feed.bytes();
+	feed.mux.pmt_with(PMT_PID, 1, CLOCK_PID, &[(0x02, VIDEO_PID, &[])], 0);
+
+	let mut imported = start_import(&head);
+	let err = imported
+		.import
+		.decode(&feed.bytes()[head.len()..])
+		.expect_err("the held PES has no media timestamp to be placed by");
+	assert!(err.to_string().contains("without a media timestamp"), "{err:#}");
+}
+
 /// Revisions apply by what they say, across the 5-bit `version_number` wrap: versions 30, 31,
 /// then 0 each relabel the stream and open their own track, while a repetition of any of them
 /// keeps the track it opened.
