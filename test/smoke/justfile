@@ -133,3 +133,16 @@ check-toolchain:
     nix develop --command just freshness
     cd clients/js && nix develop --command bun install
     cd clients/js && nix develop --command bun -e 'import {chromium} from "playwright"; const browser = await chromium.launch({channel: "chromium", headless: true}); await browser.close();'
+
+# Build this checkout's relay image and its upstream interop adapter.
+runner-build:
+    docker build --build-arg package=moq-relay -t moq-interop-relay-base:local ../..
+    docker build -f runner.Dockerfile -t moq-interop-relay:local .
+
+# Run the upstream Docker matrices touching moq-dev and render upstream HTML.
+runner upstream output:
+    python3 runner.py {{ quote(upstream) }} {{ quote(output) }}
+
+# Check dynamic matrix selection and fail-closed coverage validation.
+runner-check:
+    python3 runner.test.py

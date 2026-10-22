@@ -15,6 +15,28 @@ report generation) does.
 
 ## Plan
 
+
+Implementation checkpoint: [moq-dev/moq#6257](https://github.com/moq-dev/moq/pull/6257)
+prepares the dynamic published-image matrices and the separate artifact publisher.
+It is unfinished and must stay a draft until these conditions are met:
+
+- Upstream must distinguish setup failures from client verdicts. Today
+  `run-interop-tests.sh` returns 1 and records `status: fail` for both a
+  failed Docker Compose startup and a failed third-party test. A complete
+  summary cannot distinguish these. The checkpoint fails closed on all
+  nonzero runner exits; do not make it report-only by accepting exit 1.
+  Recommendation: an upstream summary field or distinct exit code for setup
+  failures, then accept only explicitly classified test verdicts locally.
+- Run both matrices with real Docker Compose and the source-built relay,
+  including an injected Compose startup failure and a third-party test
+  failure. This host has rootless Podman but no Compose provider.
+- Reuse the stale Pages artifact cleanup from
+  [moq-dev/moq#6207](https://github.com/moq-dev/moq/pull/6207) once available;
+  do not duplicate its helper here. Verify publishing and reruns.
+- Confirm the new directory appears in the shared Pages root after the
+  benchmark writer regenerates its directory-based index.
+
+
 Decided with the maintainer on 2026-10-21.
 
 - Reuse the runner's tooling rather than teaching `test/smoke/relays.sh` to
