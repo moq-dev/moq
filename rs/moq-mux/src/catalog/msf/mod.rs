@@ -48,6 +48,15 @@ pub enum Error {
 	#[error("MSF catalog frame is not valid UTF-8")]
 	InvalidUtf8,
 
+	/// The catalog frame is larger than a catalog may be.
+	#[error("MSF catalog frame is {size} bytes, over the {max}-byte limit")]
+	FrameTooLarge {
+		/// The frame's size in bytes.
+		size: usize,
+		/// The limit it exceeded.
+		max: usize,
+	},
+
 	/// The catalog frame cannot be decoded as an MSF catalog.
 	#[error("failed to parse MSF catalog frame")]
 	ParseFrame,

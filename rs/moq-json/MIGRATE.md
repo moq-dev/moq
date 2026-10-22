@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Snapshot consumers are bounded by default
+
+`snapshot::consumer::Config::default()` now sets `max_size` to `DEFAULT_MAX_SIZE` (4 MiB), so a compressed frame from a peer cannot reconstruct an unbounded value. A consumer that needs a larger state sets `max_size` itself, or `None` to keep only the DEFLATE frame cap.
+
 ### Consumers return `Timed<T>` (#5677)
 
 Snapshot, stream, and window `next` / `poll_next` return `moq_net::Timed<T>`: read `.value` for the value and `.at` for the frame's exact timestamp, `None` when untimed.
