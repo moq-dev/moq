@@ -5,9 +5,10 @@
 The moq-transport features moq-net exposes with the most interop bug
 history have cross-implementation tests: Rust, JS, and the bindings exchange
 hang media and exercise subgroup data, namespace discovery, late joins,
-FETCH, GOAWAY, TRACK_STATUS, datagrams, and request limits over the even
-drafts 14 through 22, and our upstream runner clients implement the
-runner's existing cases for those features.
+FETCH, GOAWAY, TRACK_STATUS, and datagrams over the even drafts 14
+through 22, and request limits over drafts 14 and 16 (later drafts have
+no MAX_REQUEST_ID). Our upstream runner clients implement the runner's
+existing cases for those features.
 
 Boundaries:
 
