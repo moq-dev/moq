@@ -123,7 +123,12 @@ struct BroadcastState {
 	// handle dropping. Every lookup after it answers `Unroutable`.
 	closing: bool,
 
-	// Set once its origin advertises a newer epoch at its path, which ends a `Finish` at once.
+	// Set by `Producer::finish`: only a finished broadcast can be superseded, since a live
+	// one serves again once the newer route at its path withdraws.
+	finished: bool,
+
+	// Set once a finished broadcast's origin advertises a newer epoch at its path, which
+	// ends its `Finish` at once.
 	superseded: bool,
 }
 
@@ -488,6 +493,14 @@ impl Producer {
 	/// interrupt ends the linger, and a newer epoch at its path ends it too; see
 	/// [`Finish::poll_closed`].
 	pub fn finish(self) -> Finish {
+		// Marked before asking the origin, so a newer epoch announced meanwhile either
+		// supersedes the finished broadcast or is in the table by the time it is asked.
+		self.state.lock().finished = true;
+		let superseded = self.alive.announcer.lock().as_ref().is_some_and(Announcer::superseded);
+		if superseded {
+			self.state.lock().superseded = true;
+		}
+
 		let tracks: Vec<track::TrackWeak> = self.state.read().tracks.values().cloned().collect();
 		// Held outside the lock: a track whose last producer drops meanwhile unlists itself
 		// under it.
@@ -1297,10 +1310,12 @@ impl Demand {
 }
 
 impl Consumer {
-	/// End any [`Finish`] of this broadcast early: its origin now advertises a newer epoch
-	/// at its path.
+	/// End the broadcast's [`Finish`] early, if it has one: its origin now advertises a
+	/// newer epoch at its path.
 	pub(super) fn supersede(&self) {
-		if !self.state.read().superseded {
+		let state = self.state.read();
+		if state.finished && !state.superseded {
+			drop(state);
 			self.state.lock().superseded = true;
 		}
 	}

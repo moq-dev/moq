@@ -2415,6 +2415,11 @@ impl Announcer {
 	pub(super) fn route(&self) -> Option<Route> {
 		self.entry.route()
 	}
+
+	/// Whether a live route at the broadcast's path carries a newer epoch.
+	pub(super) fn superseded(&self) -> bool {
+		self.entry.superseded()
+	}
 }
 
 /// The write half of an advertisement: a live claim that paths under a
@@ -2526,6 +2531,18 @@ impl AnnounceProducer {
 			auth: entry.auth.clone(),
 			via: entry.via,
 			source: entry.entered(),
+		})
+	}
+
+	/// Whether a live route at any of the entries' prefixes carries a newer epoch than theirs.
+	fn superseded(&self) -> bool {
+		let shared = self.shared.lock();
+		self.entries.iter().any(|(prefix, id)| {
+			shared
+				.routes
+				.entry(prefix, *id)
+				.and_then(|entry| entry.epoch.as_ref())
+				.is_some_and(|epoch| shared.routes.newest_epoch(prefix).is_some_and(|newest| epoch < newest))
 		})
 	}
 
@@ -4256,15 +4273,18 @@ impl RouteTable {
 		nodes.into_iter().flat_map(|node| node.entries.iter())
 	}
 
-	/// The broadcasts published exactly at `prefix` under an epoch older than the newest one
-	/// advertised there. See [`broadcast::Finish::poll_closed`].
-	fn superseded(&self, prefix: &Path) -> Vec<broadcast::Consumer> {
-		let Some(newest) = self
-			.at(prefix)
+	/// The newest epoch a live route at `prefix` carries.
+	fn newest_epoch(&self, prefix: &Path) -> Option<&Epoch> {
+		self.at(prefix)
 			.filter(|entry| entry.live())
 			.filter_map(|entry| entry.epoch.as_ref())
 			.max()
-		else {
+	}
+
+	/// The broadcasts published exactly at `prefix` under an epoch older than the newest one
+	/// advertised there. See [`broadcast::Finish::poll_closed`].
+	fn superseded(&self, prefix: &Path) -> Vec<broadcast::Consumer> {
+		let Some(newest) = self.newest_epoch(prefix) else {
 			return Vec::new();
 		};
 		self.at(prefix)
@@ -10904,6 +10924,45 @@ mod tests {
 			.unwrap();
 		wait.await.unwrap();
 		assert_eq!(moq_clock::now() - start, Duration::from_secs(5));
+	}
+
+	/// Supersession is decided when the broadcast finishes: a newer epoch that came and went
+	/// while it was live leaves its linger, and one still live cuts it at once.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_live_newer_epoch_at_finish_ends_the_linger() {
+		let producer = origin(1).produce();
+		let (older, newer) = (crate::Epoch::mint(), crate::Epoch::mint());
+		let publish = |epoch: &crate::Epoch| {
+			let broadcast = producer
+				.publish("room/alice", Route::default().with_epoch(epoch.clone()))
+				.unwrap();
+			let track = broadcast
+				.create_track("video", track::Info::timed().with_max_age(Duration::from_secs(5)))
+				.unwrap();
+			track.finish().unwrap();
+			(broadcast, track)
+		};
+
+		let (restored, _track) = publish(&older);
+		drop(publish(&newer));
+		let start = moq_clock::now();
+		restored.finish().wait().await;
+		assert_eq!(
+			moq_clock::now() - start,
+			Duration::from_secs(5),
+			"the withdrawn epoch left it"
+		);
+
+		let (cut, _track) = publish(&older);
+		let _live = publish(&newer);
+		let start = moq_clock::now();
+		cut.finish().wait().await;
+		assert_eq!(
+			moq_clock::now() - start,
+			Duration::ZERO,
+			"the live epoch ends it at once"
+		);
 	}
 
 	/// Announce cursors follow the newest epoch over a cheaper one, and deliver a
