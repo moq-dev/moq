@@ -4,10 +4,6 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Catalog references honor their epoch
-
-`moq_consume_video` and `moq_consume_audio` now fail a rendition whose catalog reference names an epoch its broadcast is proven not to serve, with `MOQ_ERROR_MUX`, instead of playing another publisher instance.
-
 ### Finished tracks stay until the broadcast ends (#6157)
 
 `moq_publish_track_finish`, `moq_publish_media_finish`, `moq_publish_container_finish`, and the encoder finishes now release the handle while the broadcast keeps the finished track listed, with its catalog rendition and demand, until `moq_publish_close` or the new `moq_publish_finish_close`.

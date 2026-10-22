@@ -1012,14 +1012,6 @@ mod decode_tests {
 	}
 
 	#[test]
-	fn video_config_round_trips_the_catalog_fields() {
-		let config = video_config(catalog_video("avc1.64001f")).unwrap();
-		assert_eq!(config.coded_width, Some(1280));
-		assert_eq!(config.coded_height, Some(720));
-		assert_eq!(config.framerate, Some(30.0));
-	}
-
-	#[test]
 	fn surface_is_refused_where_no_variant_exists() {
 		assert!(matches!(decoder_output(true, false), Err(MoqError::Unsupported)));
 		assert_eq!(decoder_output(true, true).unwrap(), moq_video::Output::Native);

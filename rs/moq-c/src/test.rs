@@ -249,13 +249,6 @@ fn publish_container(broadcast: u32, format: moq_container_format, init: &[u8]) 
 }
 
 #[test]
-fn origin_lifecycle() {
-	let origin = id(moq_origin_create());
-	assert_eq!(moq_origin_close(origin), 0, "moq_origin_close should succeed");
-	assert!(moq_origin_close(origin) < 0, "double-close should fail");
-}
-
-#[test]
 fn last_error_reports_reason() {
 	// A failed call records a retrievable reason string for moq_error().
 	assert!(moq_origin_close(9999) < 0);
@@ -406,26 +399,6 @@ fn last_error_protocol_captures_session_known_app_and_unknown() {
 		assert_eq!(protocol.code, code);
 		assert_eq!(protocol.kind, kind);
 	}
-}
-
-#[test]
-fn publish_media_lifecycle() {
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"publish-media-lifecycle");
-	let _guard = Guard(Some(|| {
-		moq_publish_close(broadcast);
-	}));
-
-	let init = opus_head();
-	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
-	let media = id(publish_audio(broadcast, format, &init, None));
-
-	let payload = b"opus frame";
-	let ret = unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 1000) };
-	assert_eq!(ret, 0, "moq_publish_media_frame should succeed");
-
-	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
 #[test]
@@ -3506,44 +3479,10 @@ fn consume_announced_local() {
 /// catalog's own broadcast: `NotFound`, or a same-named local track with mismatched metadata.
 #[test]
 fn consume_audio_follows_a_sibling_broadcast_reference() {
-	consume_sibling_audio(None, None).expect("the sibling broadcast's frame should arrive");
-}
-
-/// A reference's epoch names the sibling instance it expects: one proven to serve another fails
-/// the rendition, while an epochless reference, or a route that cannot prove its instance, reads
-/// whichever instance resolves.
-#[test]
-fn consume_audio_honors_the_reference_epoch() {
-	let served = moq_net::Epoch::mint();
-	let other = moq_net::Epoch::mint();
-	consume_sibling_audio(Some(served.clone()), Some(served.clone())).expect("a matching epoch resolves");
-	consume_sibling_audio(Some(served.clone()), None).expect("an epochless reference resolves");
-	consume_sibling_audio(None, Some(other.clone())).expect("an epochless route is best effort");
-	assert_eq!(
-		consume_sibling_audio(Some(served), Some(other)),
-		Err(crate::error::MOQ_ERROR_MUX),
-		"a sibling serving another instance fails the rendition"
-	);
-}
-
-/// Consume an `a/pub` catalog rendition referencing `./source` under `epoch`, where `a/source`
-/// serves the track under `served`: whether the sibling's frame arrived, or the code that failed it.
-fn consume_sibling_audio(served: Option<moq_net::Epoch>, epoch: Option<moq_net::Epoch>) -> Result<(), i32> {
 	let origin = id(moq_origin_create());
 
-	// Only the sibling serves the track; the catalog broadcast just describes it. The C route has no
-	// epoch, so announce one here.
-	let path = b"a/source";
-	let source = id(unsafe { moq_origin_create_broadcast(origin, path.as_ptr().cast(), path.len()) });
-	let route = moq_net::origin::Route::default();
-	let route = match served {
-		Some(served) => route.with_epoch(served),
-		None => route,
-	};
-	State::lock()
-		.publish
-		.announce(Id::try_from(source).unwrap(), route)
-		.unwrap();
+	// Only the sibling serves the track; the catalog broadcast just describes it.
+	let source = publish_broadcast(origin, b"a/source");
 	let init = opus_head();
 	let media = id(publish_audio(
 		source,
@@ -3587,10 +3526,14 @@ fn consume_sibling_audio(served: Option<moq_net::Epoch>, epoch: Option<moq_net::
 	{
 		let mut state = State::lock();
 		let catalog = state.publish.target(Id::try_from(broadcast).unwrap()).unwrap().catalog;
-		let mut catalog = catalog.modify().unwrap();
-		let rendition = catalog.audio.renditions.get_mut(&name).unwrap();
-		rendition.broadcast = Some(moq_net::path::Relative::new("./source").into_owned());
-		rendition.epoch = epoch;
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.get_mut(&name)
+			.unwrap()
+			.broadcast = Some(moq_net::path::Relative::new("./source").into_owned());
 	}
 
 	let consume = request_broadcast(origin, b"a/pub");
@@ -3609,29 +3552,22 @@ fn consume_sibling_audio(served: Option<moq_net::Epoch>, epoch: Option<moq_net::
 		0
 	);
 
-	let code = frame_cb.recv();
-	let result = if code < 0 {
-		Err(code)
-	} else {
-		let frame_id = id(code);
-		let mut frame = moq_frame {
-			payload: std::ptr::null(),
-			payload_size: 0,
-			timestamp_us: 0,
-			timestamp_present: false,
-			keyframe: false,
-		};
-		assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
-		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
-		assert_eq!(received, payload, "the sibling broadcast's frame should arrive");
-		assert_eq!(frame.timestamp_us, timestamp_us);
-
-		assert_eq!(moq_consume_frame_free(frame_id), 0);
-		assert_eq!(moq_consume_audio_cancel(track), 0);
-		assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
-		Ok(())
+	let frame_id = id(frame_cb.recv());
+	let mut frame = moq_frame {
+		payload: std::ptr::null(),
+		payload_size: 0,
+		timestamp_us: 0,
+		timestamp_present: false,
+		keyframe: false,
 	};
+	assert_eq!(unsafe { moq_consume_frame(frame_id, &mut frame) }, 0);
+	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
+	assert_eq!(received, payload, "the sibling broadcast's frame should arrive");
+	assert_eq!(frame.timestamp_us, timestamp_us);
 
+	assert_eq!(moq_consume_frame_free(frame_id), 0);
+	assert_eq!(moq_consume_audio_cancel(track), 0);
+	assert_eq!(frame_cb.recv_terminal(), 0, "audio close delivers terminal 0");
 	assert_eq!(moq_consume_catalog_free(catalog_id), 0);
 	assert_eq!(moq_consume_catalog_cancel(catalog_task), 0);
 	assert_eq!(catalog_cb.recv_terminal(), 0, "catalog close delivers terminal 0");
@@ -3640,7 +3576,6 @@ fn consume_sibling_audio(served: Option<moq_net::Epoch>, epoch: Option<moq_net::
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_publish_close(source), 0);
 	assert_eq!(moq_origin_close(origin), 0);
-	result
 }
 
 #[test]

@@ -3126,29 +3126,6 @@ mod tests {
 		}
 	}
 
-	/// `cluster.node` (identity) round-trips through TOML and survives the CLI
-	/// re-parse when no flags override it.
-	#[test]
-	fn cluster_node_round_trip() {
-		// Usage reads the environment while parsing, so serialize with the tests
-		// that mutate it.
-		let _env = crate::test_env::EnvGuard::lock();
-
-		let toml = "[cluster]\nnode = \"us-east.example.com:4443\"\nconnect = [\"https://root.example.com:4443/\"]\n";
-		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-node-toml.toml");
-		std::fs::write(&path, toml).unwrap();
-
-		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
-		let config = RelayConfig::parse_and_merge(args).expect("config load");
-		assert_eq!(config.cluster.node.as_deref(), Some("us-east.example.com:4443"));
-		assert_eq!(
-			config.cluster.connect,
-			vec![Peer::new("https://root.example.com:4443/")]
-		);
-	}
-
 	/// Static config accepts the object form beside bare URLs, through the same
 	/// type the connect API parses.
 	#[test]

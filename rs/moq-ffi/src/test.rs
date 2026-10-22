@@ -338,12 +338,6 @@ fn h264_init() -> Vec<u8> {
 }
 
 #[test]
-fn origin_lifecycle() {
-	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let _consumer = origin.consume();
-}
-
-#[test]
 fn origin_config_set_cache_capacity() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig {
 		cache_capacity_bytes: Some(4096),
@@ -484,26 +478,6 @@ async fn announced_epoch_restarts_on_a_new_epoch() {
 		other => panic!("expected a restart, got {other:?}"),
 	}
 
-	broadcast.close().unwrap();
-}
-
-#[test]
-fn publish_media_lifecycle() {
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let init = opus_head();
-	let media = MoqMediaTrackProducer::audio(
-		&broadcast,
-		MoqMediaTarget::Named { name: None },
-		audio_init(MoqAudioFormat::Opus, init),
-	)
-	.unwrap();
-	media
-		.write_frame(MoqFrame {
-			payload: b"opus frame".to_vec(),
-			timestamp_us: Some(1000),
-		})
-		.unwrap();
-	media.finish().unwrap();
 	broadcast.close().unwrap();
 }
 

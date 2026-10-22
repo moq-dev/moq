@@ -107,33 +107,28 @@ struct ConsumeBroadcast {
 	origin: Option<crate::origin::Consumer>,
 }
 
-/// The broadcast serving a rendition, honoring its catalog `broadcast` reference and `epoch`.
+/// The broadcast serving a rendition, honoring its catalog `broadcast` reference.
 ///
 /// An absent or empty reference names the catalog's own broadcast, which the caller already
 /// holds; anything else resolves against that broadcast's path through the origin, which
-/// deduplicates the subscription the catalog itself already holds. Either way a broadcast proven
-/// to serve another instance than `epoch` fails the rendition. Awaited inside the track task,
-/// never under the state lock, so `origin` is cloned out rather than borrowed.
+/// deduplicates the subscription the catalog itself already holds. Awaited inside the track
+/// task, never under the state lock, so `origin` is cloned out rather than borrowed.
 async fn resolve(
 	broadcast: moq_net::broadcast::Consumer,
 	origin: Option<crate::origin::Consumer>,
 	reference: Option<moq_net::path::RelativeOwned>,
-	epoch: Option<moq_net::Epoch>,
 ) -> Result<moq_net::broadcast::Consumer, Error> {
-	let Some(origin) = origin else {
-		// A standalone broadcast came through no route, so it has no epoch to prove: the epoch is
-		// best effort, as on an epochless route. Only its own broadcast resolves.
-		return match reference.filter(|reference| !reference.is_empty()) {
-			None => Ok(broadcast),
-			Some(reference) => Err(Error::UnresolvableBroadcast(reference.as_str().to_string())),
-		};
+	let Some(reference) = reference.filter(|reference| !reference.is_empty()) else {
+		return Ok(broadcast);
 	};
 
+	let origin = origin.ok_or_else(|| Error::UnresolvableBroadcast(reference.as_str().to_string()))?;
 	let source = moq_mux::Source::new(origin.inner, broadcast);
-	let reference = reference.as_ref().map(|reference| reference.borrow());
+	// The C ABI does not expose a reference's epoch yet, so it reads like an older reader: the
+	// first instance resolved, without the epoch's guarantee.
 	origin
 		.driver
-		.watch(async { Ok(source.resolve(reference.as_ref(), epoch.as_ref()).await?) })
+		.watch(async { Ok(source.resolve(Some(&reference.borrow()), None).await?) })
 		.await
 }
 
@@ -492,7 +487,6 @@ impl Consume {
 		// The rendition may live in a sibling broadcast, so resolve its reference rather than
 		// assuming the catalog's own broadcast serves the track.
 		let reference = config.broadcast().cloned();
-		let epoch = config.epoch().cloned();
 		let broadcast = consume.broadcast.clone();
 		let origin = consume.origin.clone();
 		let driver = origin.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
@@ -504,7 +498,7 @@ impl Consume {
 			|close| async move {
 				driver
 					.watch(async move {
-						let broadcast = resolve(broadcast, origin, reference, epoch).await?;
+						let broadcast = resolve(broadcast, origin, reference).await?;
 						let track = broadcast
 							.track(&name)?
 							.subscribe(
