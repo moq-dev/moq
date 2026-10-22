@@ -1433,7 +1433,15 @@ mod tests {
 		for flags in [&["--sync", "--stitch"][..], &["--passthrough"]] {
 			assert!(parse(flags).is_err(), "{flags:?} must not start a run");
 		}
-		for url in ["http://127.0.0.1:5004", "udp://127.0.0.1", "udp://127.0.0.1:0"] {
+		for url in [
+			"http://127.0.0.1:5004",
+			"udp://127.0.0.1",
+			"udp://127.0.0.1:0",
+			"udp://127.0.0.1:5004/5005",
+			"udp://user@127.0.0.1:5004",
+			"udp://127.0.0.1:5004?ttl=4",
+			"udp://127.0.0.1:5004#5005",
+		] {
 			let argv = ["moq", "export", "--broadcast", "b", "ts", "--sync", "--rtp", url];
 			let err = Invocation::try_parse_from(argv).unwrap().validate().unwrap_err();
 			assert!(err.to_string().contains("udp://HOST:PORT"), "{url}: {err}");

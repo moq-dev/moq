@@ -282,6 +282,15 @@ fn log_release(release: &moq_mux::container::ts::stats::Release, message: &'stat
 /// The host and port of an `--rtp` destination, which must be `udp://HOST:PORT`.
 pub fn rtp_destination(url: &url::Url) -> anyhow::Result<(String, u16)> {
 	anyhow::ensure!(url.scheme() == "udp", "--rtp takes udp://HOST:PORT: {url}");
+	// Unechoed: credentials would land in the log.
+	anyhow::ensure!(
+		url.username().is_empty()
+			&& url.password().is_none()
+			&& matches!(url.path(), "" | "/")
+			&& url.query().is_none()
+			&& url.fragment().is_none(),
+		"--rtp takes udp://HOST:PORT, with no credentials, path, query or fragment"
+	);
 	let host = match url.host().with_context(|| format!("--rtp url missing a host: {url}"))? {
 		url::Host::Domain(domain) => domain.to_string(),
 		url::Host::Ipv4(ip) => ip.to_string(),
@@ -503,16 +512,25 @@ impl Subscribe {
 			}
 		};
 		let end = loop {
-			let frame = match ts.next().await {
-				Ok(Some(frame)) => frame,
-				Ok(None) => break Ok(()),
-				Err(err) => break Err(err),
+			// Sampled on the interval whether a frame comes or not: an RTP leg withholding every
+			// run hands out none for as long as it does.
+			let due = sampled + moq_mux::container::ts::stats::Log::INTERVAL;
+			let next = tokio::select! {
+				next = ts.next() => Some(next),
+				_ = moq_clock::sleep_until(due) => None,
 			};
-			match &rtp {
-				Some(socket) => unsent.send(socket, &frame.payload),
-				None => {
-					stdout.write_all(&frame.payload).await?;
-					stdout.flush().await?;
+			if let Some(next) = next {
+				let frame = match next {
+					Ok(Some(frame)) => frame,
+					Ok(None) => break Ok(()),
+					Err(err) => break Err(err),
+				};
+				match &rtp {
+					Some(socket) => unsent.send(socket, &frame.payload),
+					None => {
+						stdout.write_all(&frame.payload).await?;
+						stdout.flush().await?;
+					}
 				}
 			}
 

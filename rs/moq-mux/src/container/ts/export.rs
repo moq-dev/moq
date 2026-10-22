@@ -178,8 +178,10 @@ where
 	/// Wakes the export when the next grid slot is due on the jitter buffer's clock.
 	slot_timer: Option<std::pin::Pin<Box<moq_clock::Sleep>>>,
 	/// Output frames ready to hand out, one per grid slot, each with what it tells
-	/// [`Self::stats`] once returned.
-	queue: VecDeque<(Frame, Tally)>,
+	/// [`Self::stats`] once returned and, for a datagram, when it is due ([`Self::pace`]).
+	queue: VecDeque<(Frame, Tally, Option<moq_clock::Instant>)>,
+	/// Wakes the export when the datagram at the head of the queue is due.
+	pace_timer: Option<std::pin::Pin<Box<moq_clock::Sleep>>>,
 	/// The rate to pad the output to with null packets, in bits per second: the
 	/// builder override when set, else the catalog's recorded multiplex rate, else
 	/// none and the output is unpadded ([`Schedule`]).
@@ -215,8 +217,6 @@ where
 	rtp: bool,
 	/// Cuts the slots into datagrams, once the lanes are laid out.
 	packetizer: Option<super::rtp::Packetizer>,
-	/// What slots no datagram carried tell [`Self::stats`], left for the next datagram.
-	unsent: Option<Tally>,
 }
 
 /// What a queued output frame tells [`Export::stats`], applied only once the frame is
@@ -1419,6 +1419,7 @@ where
 			slot_timer: None,
 			replay: false,
 			queue: VecDeque::new(),
+			pace_timer: None,
 			liveness: Default::default(),
 			video_start: None,
 			video_out: None,
@@ -1429,7 +1430,6 @@ where
 			si_slot: None,
 			rtp: false,
 			packetizer: None,
-			unsent: None,
 		}
 	}
 
@@ -1652,7 +1652,7 @@ where
 		// 4. Mux each frame the jitter buffer lets go (the first carries the buffered
 		// PAT/PMT), then lay out every grid slot whose time has come ([`Self::lay_due`]).
 		loop {
-			if let Some(out) = self.pop() {
+			if let Some(out) = self.pop(waiter) {
 				return Poll::Ready(Ok(Some(out)));
 			}
 			let ready = match self.held.take() {
@@ -1726,7 +1726,7 @@ where
 			self.flush_packs(|_, _| true)?;
 		}
 		self.lay_due(waiter)?;
-		if let Some(out) = self.pop() {
+		if let Some(out) = self.pop(waiter) {
 			return Poll::Ready(Ok(Some(out)));
 		}
 
@@ -1742,10 +1742,10 @@ where
 			if self.slot_due().is_none() {
 				self.lay(None)?;
 			}
-			if let Some(out) = self.pop() {
+			if let Some(out) = self.pop(waiter) {
 				return Poll::Ready(Ok(Some(out)));
 			}
-			if !self.schedule.is_empty() {
+			if !self.schedule.is_empty() || !self.queue.is_empty() {
 				return Poll::Pending;
 			}
 			// SI emission rides media frames, so a snapshot that arrived behind the
@@ -1767,9 +1767,28 @@ where
 	}
 
 	/// Return the next queued frame, committing what it carries to the output boundary.
-	fn pop(&mut self) -> Option<Frame> {
-		let (out, tally) = self.queue.pop_front()?;
+	fn pop(&mut self, waiter: &kio::Waiter) -> Option<Frame> {
+		if let Some(&(_, _, Some(due))) = self.queue.front()
+			&& moq_clock::now() < due
+		{
+			let timer = self
+				.pace_timer
+				.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(due)));
+			if timer.deadline() != due {
+				timer.as_mut().reset(due);
+			}
+			if waiter.poll_future(timer.as_mut()).is_pending() {
+				return None;
+			}
+		}
+		let (out, tally, _) = self.queue.pop_front()?;
 		self.emitted_epoch = self.epoch;
+		self.commit(tally);
+		Some(out)
+	}
+
+	/// Tell [`Self::stats`] what went out.
+	fn commit(&mut self, tally: Tally) {
 		let (pcr, discontinuity) = tally.pcr;
 		if discontinuity {
 			self.liveness.discontinuity();
@@ -1778,7 +1797,22 @@ where
 		for (pid, units) in tally.units {
 			self.liveness.delivered(pid, units);
 		}
-		Some(out)
+	}
+
+	/// When the datagrams of slot `index` go out: spread across the slot after the one it is laid
+	/// in ([`Self::slot_due`]), from its start, at the multiplex's pace rather than in one burst a
+	/// send queue may not hold. `None` without a delay, where no clock lays the slots.
+	fn pace(&self, index: u128) -> Option<(moq_clock::Instant, Duration)> {
+		if self.delay.is_zero() {
+			return None;
+		}
+		let at = |slot: u128| {
+			let key = slot * PCR_INTERVAL.as_nanos() + self.max_drain().as_nanos() + self.delay.as_nanos();
+			let key = Timestamp::from_micros(u64::try_from(key / 1_000).ok()?).ok()?;
+			self.jitter.at(self.generation, key)
+		};
+		let (start, end) = (at(index + 1)?, at(index + 2)?);
+		Some((start, end.saturating_duration_since(start)))
 	}
 
 	/// The trailing SI frame for end of stream: every entry's current sections,
@@ -2148,16 +2182,18 @@ where
 		self.jitter.len()
 	}
 
-	/// When the next queued frame is due, or the next grid slot while media is queued or
-	/// every source has finished and the tail runs out.
+	/// When the next queued frame is due, the next grid slot while media is queued or every
+	/// source has finished and the tail runs out, or the next datagram paced out.
 	#[cfg(test)]
 	pub(super) fn next_due(&self) -> Option<moq_clock::Instant> {
 		let finished = !self.tracks.is_empty() && self.tracks.values().all(|track| track.finished);
+		// RTP paces every slot's datagrams across it, so a slot holding nothing goes out on time too.
 		let slot = self
 			.slot_due()
-			.filter(|_| self.schedule.queued() || self.packing() || finished)
+			.filter(|_| self.packetizer.is_some() || self.schedule.queued() || self.packing() || finished)
 			.map(|(_, at)| at);
-		self.jitter.next_deadline().into_iter().chain(slot).min()
+		let paced = self.queue.front().and_then(|(_, _, due)| *due);
+		self.jitter.next_deadline().into_iter().chain(slot).chain(paced).min()
 	}
 
 	/// The discontinuity counter of the most recently returned output frame.
@@ -2317,7 +2353,6 @@ where
 			flagged.clear();
 		}
 		self.queue.clear();
-		self.unsent = None;
 		self.last_psi = None;
 		for si in self.si.values_mut() {
 			si.last_emit = None;
@@ -2597,8 +2632,10 @@ where
 	/// Tell the grid, before it lays a slot, what each lane holds on this leg ([`Grid::know`]).
 	///
 	/// A lane of continuous media is known from the first group held whole since its playhead
-	/// last jumped, up to the last position planned: past it, this leg may be stalled. A sparse
-	/// lane cannot tell a stall from its silence, so it is known on from that group.
+	/// last jumped, up to the last position planned: past it, this leg may be stalled. So is a
+	/// placed one a receiver buffer models (DVB AC-3, teletext), continuous as the jitter
+	/// buffer counts it. A sparse lane cannot tell a stall from its silence, so it is known on
+	/// from that group.
 	fn know(&mut self) {
 		let Some(grid) = self.schedule.sync() else {
 			return;
@@ -2610,7 +2647,7 @@ where
 			grid.expect(&sync.expected);
 			sync.expected.clear();
 			let from = sync.sure.unwrap_or(u128::MAX);
-			let to = (!track.kind.placed()).then(|| sync.lane.end());
+			let to = (!track.kind.placed() || track.buffer.is_some()).then(|| sync.lane.end());
 			grid.know(sync.lane.index(), lane::Known { from, to });
 		}
 	}
@@ -3117,16 +3154,16 @@ where
 			}
 			let timestamp = slot_stamp(slot.index)?;
 			let tally = Tally::new((slot.pcr, discontinuity), slot.units);
+			let pace = self.pace(slot.index);
 			if let Some(rtp) = &mut self.packetizer {
 				let mut unsure = slot.unsure;
 				if discontinuity {
 					unsure.push(0);
 				}
-				let mut tally = Some(match self.unsent.take() {
-					Some(unsent) => unsent.then(tally),
-					None => tally,
-				});
-				for datagram in rtp.push(slot.index, &payload, &unsure) {
+				let datagrams = rtp.push(slot.index, &payload, &unsure);
+				let count = datagrams.len() as u32;
+				let mut tally = Some(tally);
+				for (n, datagram) in (0..).zip(datagrams) {
 					let frame = Frame {
 						timestamp,
 						duration: None,
@@ -3134,9 +3171,16 @@ where
 						keyframe: false,
 					};
 					let tally = tally.take().unwrap_or(Tally::new((slot.pcr, false), []));
-					self.queue.push_back((frame, tally));
+					let due = pace.map(|(at, span)| at + span * n / count);
+					self.queue.push_back((frame, tally, due));
 				}
-				self.unsent = tally;
+				// A slot no datagram carries tells the stats behind the last one queued, or at once.
+				if let Some(tally) = tally {
+					match self.queue.back_mut() {
+						Some((_, last, _)) => *last = std::mem::replace(last, Tally::new((0, false), [])).then(tally),
+						None => self.commit(tally),
+					}
+				}
 				continue;
 			}
 			let frame = Frame {
@@ -3145,7 +3189,7 @@ where
 				payload: Bytes::from(payload),
 				keyframe: slot.keyframe,
 			};
-			self.queue.push_back((frame, tally));
+			self.queue.push_back((frame, tally, None));
 		}
 		Ok(())
 	}

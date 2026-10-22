@@ -52,6 +52,27 @@ const JOIN: u64 = 3 * GOP + 8;
 
 const VIDEO_PID: u16 = 0x1001;
 const AUDIO_PID: u16 = 0x1002;
+const TELETEXT_PID: u16 = 0x1010;
+
+/// A teletext PES of media time `micros`: its PTS in the fixed header teletext takes, and a
+/// stuffing data unit (ETSI EN 300 472).
+fn teletext_pes(micros: u64) -> Bytes {
+	let pts = micros * 9 / 100;
+	let mut pes = vec![0, 0, 1, 0xbd, 0, 0, 0x84, 0x80, 0x24];
+	pes.extend_from_slice(&[
+		0x21 | ((pts >> 29) & 0x0e) as u8,
+		(pts >> 22) as u8,
+		1 | ((pts >> 14) & 0xfe) as u8,
+		(pts >> 7) as u8,
+		1 | ((pts << 1) & 0xfe) as u8,
+	]);
+	pes.resize(9 + 0x24, 0xff);
+	pes.extend_from_slice(&[0x10, 0xff, 0x2c]);
+	pes.resize(pes.len() + 0x2c, 0xff);
+	let len = (pes.len() - 6) as u16;
+	pes[4..6].copy_from_slice(&len.to_be_bytes());
+	Bytes::from(pes)
+}
 
 fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 	let mut out = BytesMut::new();
@@ -65,7 +86,7 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// A live H.264 + AAC broadcast whose frames are written on the source's clock.
 struct Live {
 	broadcast: moq_net::broadcast::Producer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<super::Ext>,
 	/// Written group by group, so a group can be left open: see [`Self::run`].
 	video: moq_net::track::Producer,
 	group: Option<moq_net::group::Producer>,
@@ -73,6 +94,8 @@ struct Live {
 	stalling: bool,
 	stalled: Vec<moq_net::group::Producer>,
 	audio: Producer<HangContainer>,
+	/// A teletext track, and the video ticks its groups stall at: see [`Self::teletext`].
+	teletext: Option<(moq_net::track::Producer, std::ops::Range<u64>)>,
 	source: crate::Source,
 	/// Media time per unit of the receivers' clock: above 1 the source runs fast.
 	scale: f64,
@@ -104,7 +127,11 @@ impl Live {
 	async fn new(scale: f64, audio_lag: i64) -> Self {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<super::Ext>::default()),
+		)
+		.unwrap();
 
 		let track = broadcast
 			.create_track(
@@ -154,6 +181,7 @@ impl Live {
 			stalling: false,
 			stalled: Vec::new(),
 			audio,
+			teletext: None,
 			scale,
 			rate: MUX_RATE,
 			sync: false,
@@ -176,6 +204,30 @@ impl Live {
 		self.source = crate::source::announced_on(&self.broadcast.consume(), route).await;
 		self.sync = true;
 		self.rtp = true;
+	}
+
+	/// Send a DVB teletext PES on its own PID at each video tick, a group each, but in `gap`,
+	/// whose groups stall as [`Self::run`]'s do.
+	fn teletext(&mut self, gap: std::ops::Range<u64>) {
+		let name = self.broadcast.unique_name(".ts");
+		let track = self
+			.broadcast
+			.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut entry = super::Track::new(TELETEXT_PID);
+		entry.pes_packet = Some(super::PesPacket::new(0x06));
+		entry.descriptors.push(super::Descriptor {
+			tag: 0x56,
+			data: Bytes::from_static(&[b'e', b'n', b'g', 0x09, 0x00]),
+		});
+		self.catalog
+			.modify()
+			.unwrap()
+			.ext
+			.mpegts
+			.tracks
+			.insert(track.name().to_string(), entry);
+		self.teletext = Some((track, gap));
 	}
 
 	/// The receivers' instant at which the source's clock reads media time `micros`.
@@ -254,7 +306,7 @@ impl Live {
 
 	/// A receiver joining now.
 	async fn join(&self, every: Duration) -> Leg {
-		let mut export = super::export_test::open_export(self.source.clone())
+		let mut export = super::export_test::open_ts(self.source.clone(), crate::catalog::CatalogFormat::Hang)
 			.await
 			.unwrap()
 			.with_delay(DELAY)
@@ -336,6 +388,26 @@ impl Live {
 						)
 						.unwrap();
 				}
+				if let Some((teletext, gap)) = &mut self.teletext {
+					let mut group = teletext.append_group().unwrap();
+					if gap.contains(&tick) {
+						self.stalled.push(group);
+					} else {
+						let micros = self.origin + video;
+						HangContainer::Legacy(crate::container::Kind::Data)
+							.write(
+								&mut group,
+								&[Frame {
+									timestamp: Timestamp::from_micros(micros).unwrap(),
+									duration: None,
+									payload: teletext_pes(micros),
+									keyframe: true,
+								}],
+							)
+							.unwrap();
+						group.finish().unwrap();
+					}
+				}
 				self.tick += 1;
 			}
 			for leg in legs.iter_mut() {
@@ -379,6 +451,9 @@ impl Live {
 		self.stalled.clear();
 		self.video.finish().unwrap();
 		self.audio.finish().unwrap();
+		if let Some((teletext, _)) = &mut self.teletext {
+			teletext.finish().unwrap();
+		}
 		for leg in legs.iter_mut() {
 			leg.drain().await;
 		}
@@ -387,7 +462,7 @@ impl Live {
 
 /// One receiver: an exporter and what it rendered, with the instant each slot went out.
 struct Leg {
-	export: Export<crate::catalog::Consumer>,
+	export: Export<crate::catalog::Consumer<super::Ext>>,
 	/// How often it reads its subscription. Zero reads after every frame the source sends; a
 	/// coarser cadence stands for a receiver behind a burstier network or scheduler.
 	every: Duration,
@@ -1388,6 +1463,104 @@ async fn rtp_legs_send_the_same_datagrams_across_the_wrap() {
 	}
 }
 
+/// An RTP leg sends each slot's datagrams across the slot, at the multiplex's pace, rather than
+/// in one burst a send queue may not hold.
+#[tokio::test(start_paused = true)]
+async fn rtp_datagrams_go_out_across_each_slot() {
+	let epoch = moq_net::Epoch::mint();
+	let mut live = Live::new(1.0, 0).await;
+	live.rtp(&epoch).await;
+	let mut leg = live.join(Duration::ZERO).await;
+	live.run(12 * GOP, &mut [&mut leg], |_| false).await;
+	// Each slot's datagrams, and how many went out at each instant.
+	let mut slots: std::collections::BTreeMap<u64, std::collections::BTreeMap<Instant, usize>> = Default::default();
+	for (at, frame) in &leg.out {
+		let slot = frame.timestamp.as_micros() as u64;
+		if slot >= 2_000_000 {
+			*slots.entry(slot).or_default().entry(*at).or_default() += 1;
+		}
+	}
+	assert!(slots.len() > 100, "{} slots", slots.len());
+	for (slot, sent) in &slots {
+		let (busiest, count) = (sent.values().max().unwrap(), sent.values().sum::<usize>());
+		assert!(
+			*busiest <= 2,
+			"the slot at {slot} µs sent {busiest} of its {count} datagrams at once"
+		);
+	}
+}
+
+/// A leg that withholds runs counts what they carry as it lays them, so its stats keep pace
+/// with a leg that sends them however long it withholds.
+#[tokio::test(start_paused = true)]
+async fn an_rtp_leg_counts_what_it_withholds() {
+	let epoch = moq_net::Epoch::mint();
+	let lost = |tick: u64| (5 * GOP + 8..6 * GOP).contains(&tick);
+	let mut paths = Vec::new();
+	for _ in 0..2 {
+		let mut live = Live::new(1.0, 0).await;
+		live.rtp(&epoch).await;
+		paths.push(live);
+	}
+	let [mut whole, mut lossy] = <[Live; 2]>::try_from(paths).ok().unwrap();
+	let mut c = whole.join(Duration::ZERO).await;
+	let mut a = lossy.join(Duration::ZERO).await;
+	let units = |leg: &Leg| {
+		leg.export
+			.stats()
+			.streams
+			.get(&AUDIO_PID)
+			.map_or(0, |stream| stream.units)
+	};
+	let mut behind = 0;
+	for tick in 1..=8 * GOP {
+		whole.run(tick, &mut [&mut c], |_| false).await;
+		lossy.run(tick, &mut [&mut a], lost).await;
+		behind = behind.max(units(&c).saturating_sub(units(&a)));
+	}
+	assert!(
+		behind <= 2,
+		"the withholding leg's stats fell {behind} audio units behind"
+	);
+	assert!(
+		datagrams(&a, 0).len() < datagrams(&c, 0).len(),
+		"the lossy leg withheld nothing"
+	);
+}
+
+/// A teletext lane, which a receiver buffer models, stalls on one path for longer than the
+/// jitter buffer waits for it: that leg withholds the runs its lane may yet fill, so what it
+/// sends a leg holding the lane sends too.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_teletext_lane_is_withheld() {
+	let epoch = moq_net::Epoch::mint();
+	let mut paths = Vec::new();
+	for gap in [0..0, 5 * GOP..8 * GOP] {
+		let mut live = Live::new(1.0, 0).await;
+		// Room for the keyframe beside teletext's lane.
+		live.rate = 2 * MUX_RATE;
+		live.teletext(gap);
+		live.rtp(&epoch).await;
+		paths.push(live);
+	}
+	let [mut whole, mut lossy] = <[Live; 2]>::try_from(paths).ok().unwrap();
+	let mut c = whole.join(Duration::ZERO).await;
+	let mut a = lossy.join(Duration::ZERO).await;
+	for tick in 1..=12 * GOP {
+		whole.run(tick, &mut [&mut c], |_| false).await;
+		lossy.run(tick, &mut [&mut a], |_| false).await;
+	}
+	whole.finish(&mut [&mut c]).await;
+	lossy.finish(&mut [&mut a]).await;
+	let (a, c) = (datagrams(&a, 0), datagrams(&c, 0));
+	assert_eq!(
+		same_datagrams(&a, &c),
+		a.len(),
+		"the stalled leg sent a run the whole leg did not"
+	);
+	assert!(a.len() < c.len(), "the stalled leg withheld nothing");
+}
+
 /// An epochless route names no publisher instance for the SSRC to follow, so RTP refuses it.
 #[tokio::test(start_paused = true)]
 #[should_panic(expected = "needs a route with an epoch")]
@@ -1488,7 +1661,7 @@ async fn synced_legs_render_a_drifting_source_the_same_way() {
 #[should_panic(expected = "--sync needs a constant multiplex rate")]
 async fn sync_refuses_an_output_without_a_constant_rate() {
 	let mut live = Live::new(1.0, 0).await;
-	let export = super::export_test::open_export(live.source.clone())
+	let export = super::export_test::open_ts(live.source.clone(), crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap()
 		.with_delay(DELAY)
