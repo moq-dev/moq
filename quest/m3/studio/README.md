@@ -63,8 +63,7 @@ repository.
 ## Required
 
 - [The studio app](/quest/m3/studio/app.md) - egui studio with a minimal moq-scene and program bus: one canvas, scenes of capture, image, and MoQ sources, published to MoQ
-- [Broadcast egress library](/quest/m3/studio/egress.md) - subscribe once to a broadcast and remux to N RTMP(S) and WHIP destinations, with no transcoding
-- [Destinations](/quest/m3/studio/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders
+- [Destinations](/quest/m3/studio/destinations.md) - RTMP, RTMPS, and WHIP push with per-destination codecs and shared encoders, on a UI-free egress library a hosted service can reuse
 - [Multiple canvases](/quest/m3/studio/multi-canvas.md) - landscape and portrait canvases composite at once from shared sources
 - [Guests](/quest/m3/studio/guests.md) - remote guests and phone cameras join through a moq-room link or QR code and appear as sources
 - [Audio mixes](/quest/m3/studio/mixes.md) - per-output mixes, meters, monitoring, and sync offsets

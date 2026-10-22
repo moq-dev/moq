@@ -8,22 +8,23 @@ The full studio runs in a browser from a `/studio` page in demo/web:
 - encode and decode through WebCodecs
 - publishing over WebTransport through moq-net
 
-Browser sources are absent, and so is anything else a browser cannot reach.
-Each missing feature is hidden, not shown broken.
+Browser sources are absent. So are RTMP destinations, because a page cannot
+open raw TCP; MoQ and WHIP outputs remain. Each missing feature is hidden,
+not shown broken.
 
-This README's own work is the studio's wasm build and that page. The children
-add the browser media backends it needs.
+The children land the page as vertical slices: video first, then audio. This
+README's own work brings the page to parity with the native app for
+everything a browser can reach.
 
 ## Plan
 
 Decided 2026-10-22: a full wasm studio, not a remote control for a native
 one. Media goes through browser backends in moq-video and moq-audio, not a
 bridge to js/publish and js/watch, so frames never cross into a second media
-stack.
+stack. Each backend lands with the page slice that uses it, never ahead of
+it.
 
 ## Required
 
-- [The studio app](/quest/m3/studio/app.md) - the app being built to wasm
-- [hang and moq-mux on wasm](/quest/m3/studio/web/wasm-mux.md) - the media crates build for wasm32
-- [moq-video in the browser](/quest/m3/studio/web/video-web.md) - browser capture, WebCodecs encode and decode, and VideoFrame import into wgpu
-- [moq-audio in the browser](/quest/m3/studio/web/audio-web.md) - AudioWorklet capture and playback with WebCodecs Opus and AAC
+- [moq-video in the browser](/quest/m3/studio/web/video-web.md) - the first `/studio` page, with browser video capture, WebCodecs, and VideoFrame import into wgpu
+- [moq-audio in the browser](/quest/m3/studio/web/audio-web.md) - audio on the page through AudioWorklet and WebCodecs Opus and AAC
