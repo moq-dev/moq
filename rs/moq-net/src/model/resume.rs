@@ -739,6 +739,8 @@ struct Datagrams {
 	latest: Option<(u64, u64)>,
 	seen: BTreeSet<(u64, u64)>,
 	superseded: VecDeque<(Instant, (u64, u64))>,
+	/// The highest identity ever handed out, which a declared end must stay past.
+	newest: Option<(u64, u64)>,
 }
 
 impl Datagrams {
@@ -752,15 +754,11 @@ impl Datagrams {
 		}
 	}
 
-	/// The highest identity handed out within the budget.
-	fn newest(&self) -> Option<(u64, u64)> {
-		self.latest.max(self.seen.last().copied())
-	}
-
 	fn insert(&mut self, id: (u64, u64), at: Instant) -> bool {
 		if self.latest == Some(id) || self.seen.contains(&id) {
 			return false;
 		}
+		self.newest = self.newest.max(Some(id));
 		if let Some(previous) = self.latest.replace(id) {
 			if self.superseded.len() == super::track::MAX_DATAGRAMS
 				&& let Some((_, oldest)) = self.superseded.pop_front()
@@ -794,7 +792,7 @@ struct Reader {
 	newest: Option<u64>,
 	/// The reader's ranges resolved; see [`Reader::window`].
 	window: Window,
-	/// Identities handed out within the reader's budget, by Group and Object ID.
+	/// Identities handed out within the reader's budget, by Group and Object ID, and the highest ever.
 	datagrams: Datagrams,
 	/// The local group filter; see [`track::Subscriber::set_groups`].
 	groups: (u64, Cap),
@@ -1031,7 +1029,7 @@ impl Reader {
 			if seen(self.newest)
 				|| self
 					.datagrams
-					.newest()
+					.newest
 					.is_some_and(|(group, frame)| Position { group, frame } >= declared)
 				|| self
 					.copies
@@ -2271,6 +2269,30 @@ mod test {
 				"datagram={datagram}: {res:?}"
 			);
 		}
+	}
+
+	/// The newest datagram handed out bounds a late end after the budget forgets its identity.
+	#[moq_clock::test]
+	async fn an_end_below_an_expired_datagram_refuses_the_track() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let mut a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, Duration::from_secs(1));
+		a.insert_datagram(10, ts(10), b"d".as_ref()).unwrap();
+		assert!(sub.poll_recv_datagram(&kio::Waiter::noop()).is_ready());
+		let mut b = copy();
+		routes.serve(b.consume());
+		b.insert_datagram(1, ts(1), b"d".as_ref()).unwrap();
+		assert!(sub.poll_recv_datagram(&kio::Waiter::noop()).is_ready());
+		moq_clock::sleep(Duration::from_secs(2)).await;
+		assert!(sub.poll_recv_datagram(&kio::Waiter::noop()).is_pending());
+		assert_eq!(copies(&routes), 1);
+		b.finish_at(Position::group(5)).unwrap();
+		assert!(matches!(
+			sub.poll_finished(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::ProtocolViolation))
+		));
 	}
 
 	#[moq_clock::test]
