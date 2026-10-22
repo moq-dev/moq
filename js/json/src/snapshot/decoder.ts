@@ -1,4 +1,4 @@
-import { Decoder as Flate } from "@moq/flate";
+import { DEFAULT_MAX_FRAME_SIZE, Decoder as Flate } from "@moq/flate";
 
 import { isDeflate } from "../compression.ts";
 import { merge } from "../diff.ts";
@@ -26,6 +26,9 @@ export class Decoder<T> {
 	#flate?: Flate;
 	// The reconstructed value, `undefined` until the first snapshot.
 	#current?: unknown;
+	// Bounds the reconstructed value's size in JSON bytes: the snapshot plus every patch applied
+	// since, as a merge patch adds no more to a value than its own bytes.
+	#size = 0;
 
 	constructor(config: Pick<Config<T>, "schema" | "compression"> = {}) {
 		this.#schema = config.schema;
@@ -41,17 +44,33 @@ export class Decoder<T> {
 	snapshot(payload: Uint8Array): void {
 		// Each group is its own compressed stream, so the window starts cold here.
 		this.#flate = this.#decompress ? new Flate() : undefined;
-		this.#current = this.#parse(payload);
+		const plain = this.#inflate(payload);
+		this.#current = this.#parse(plain);
+		this.#size = plain.byteLength;
 	}
 
 	/**
 	 * Apply one of a group's later frames: an RFC 7396 merge patch against the current value.
 	 *
-	 * Throws when no snapshot has been applied yet, since a patch has nothing to apply to.
+	 * Throws when no snapshot has been applied yet, since a patch has nothing to apply to, or when
+	 * the result would outgrow the largest snapshot a producer publishes. A refused patch drops the
+	 * value until the next snapshot.
 	 */
 	delta(payload: Uint8Array): void {
 		if (this.#current === undefined) throw new MissingSnapshot();
-		this.#current = merge(this.#current, this.#parse(payload));
+		const plain = this.#inflate(payload);
+		this.#current = merge(this.#current, this.#parse(plain));
+		this.#size += plain.byteLength;
+		if (this.#size <= DEFAULT_MAX_FRAME_SIZE) return;
+
+		// The bound never shrinks on its own, so once it passes the limit measure the value itself:
+		// deletions may have freed room. That resets the bound to the real size, so the measurement
+		// repeats only after another `limit - size` bytes of patches, not per delta.
+		this.#size = new TextEncoder().encode(JSON.stringify(this.#current)).byteLength;
+		if (this.#size > DEFAULT_MAX_FRAME_SIZE) {
+			this.#current = undefined;
+			throw new Error(`reconstructed value exceeded ${DEFAULT_MAX_FRAME_SIZE} bytes`);
+		}
 	}
 
 	/**
@@ -76,9 +95,12 @@ export class Decoder<T> {
 		return this.#schema ? this.#schema.parse(this.#current) : (structuredClone(this.#current) as T);
 	}
 
-	// Decompress a frame against the group's window when compressing, then parse it as JSON.
-	#parse(payload: Uint8Array): unknown {
-		const plain = this.#flate ? this.#flate.frame(payload) : payload;
+	// Decompress a frame against the group's window when compressing.
+	#inflate(payload: Uint8Array): Uint8Array {
+		return this.#flate ? this.#flate.frame(payload) : payload;
+	}
+
+	#parse(plain: Uint8Array): unknown {
 		return JSON.parse(new TextDecoder().decode(plain));
 	}
 }

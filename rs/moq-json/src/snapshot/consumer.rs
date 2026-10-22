@@ -7,18 +7,11 @@ use serde::de::DeserializeOwned;
 use super::Decoder;
 use crate::{Compression, Result};
 
-/// The default [`Config::max_size`].
-///
-/// A peer supplies the compressed frame, so an unset limit lets a small DEFLATE frame
-/// reconstruct an unbounded value. Every catalog and metadata track this crate reads
-/// fits far below this, and a consumer that needs more sets its own.
-pub const DEFAULT_MAX_SIZE: usize = 4 * 1024 * 1024;
-
 /// Track-owning options for a [`Consumer`].
 ///
 /// Build from [`Default`] and override fields (the struct is `#[non_exhaustive]`, so new options
 /// stay additive).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct Config {
 	/// How the frames are compressed. Must match the encoder's
@@ -26,18 +19,8 @@ pub struct Config {
 	pub compression: Compression,
 
 	/// Maximum bytes in an inflated frame or the compact JSON of the reconstructed value.
-	/// Defaults to [`DEFAULT_MAX_SIZE`]; `None` keeps only the DEFLATE decoder's frame
-	/// cap and leaves state size unlimited.
+	/// Unset uses [`moq_flate::DEFAULT_MAX_FRAME_SIZE`], the largest snapshot a producer publishes.
 	pub max_size: Option<usize>,
-}
-
-impl Default for Config {
-	fn default() -> Self {
-		Self {
-			compression: Compression::None,
-			max_size: Some(DEFAULT_MAX_SIZE),
-		}
-	}
 }
 
 /// Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
@@ -168,17 +151,5 @@ impl<T: DeserializeOwned> Consumer<T> {
 		}
 		self.frames_read += 1;
 		Ok(())
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn default_config_bounds_the_reconstructed_value() {
-		// A peer picks the compressed frame, so the default must not leave the
-		// reconstructed value unlimited.
-		assert_eq!(Config::default().max_size, Some(DEFAULT_MAX_SIZE));
 	}
 }

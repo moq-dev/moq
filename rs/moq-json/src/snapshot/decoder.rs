@@ -31,7 +31,13 @@ use crate::{Error, Result};
 pub struct Decoder<T> {
 	/// Whether frames are DEFLATE-compressed, matching the encoder's config.
 	compression: bool,
-	max_size: Option<usize>,
+
+	/// Maximum bytes in an inflated frame or the reconstructed value's JSON.
+	limit: usize,
+
+	/// Bounds the reconstructed value's size in JSON bytes: the snapshot plus every patch applied
+	/// since, as a merge patch adds no more to a value than its own bytes.
+	size: usize,
 
 	/// The current group's DEFLATE decoder (one window per group), rebuilt at each snapshot.
 	flate: Option<moq_flate::Decoder>,
@@ -53,7 +59,10 @@ impl<T> Decoder<T> {
 	pub fn new(config: Config) -> Self {
 		Self {
 			compression: config.compression.is_deflate(),
-			max_size: config.max_size,
+			// Unset falls back to the largest frame a producer emits, which also caps its snapshots,
+			// so any value it can publish fits while a peer cannot grow the state without bound.
+			limit: config.max_size.unwrap_or(moq_flate::DEFAULT_MAX_FRAME_SIZE as usize),
+			size: 0,
 			flate: None,
 			plain: Vec::new(),
 			check: RefCell::new(crate::merge::CheckScratch::default()),
@@ -70,19 +79,16 @@ impl<T> Decoder<T> {
 		self.current = None;
 		// Every group starts a new DEFLATE window; enforce the budget while inflating.
 		self.flate = self.compression.then(|| {
-			moq_flate::Decoder::with_max_frame_size(self.max_size.map_or(moq_flate::DEFAULT_MAX_FRAME_SIZE, |size| {
-				(size as u64).min(moq_flate::DEFAULT_MAX_FRAME_SIZE)
-			}))
+			moq_flate::Decoder::with_max_frame_size((self.limit as u64).min(moq_flate::DEFAULT_MAX_FRAME_SIZE))
 		});
 		let inflated = self.flate.as_mut().map(|flate| flate.frame(payload)).transpose()?;
 		let plain = inflated.as_deref().unwrap_or(payload);
-		if let Some(limit) = self.max_size
-			&& plain.len() > limit
-		{
-			return Err(Error::TooLarge(limit));
+		if plain.len() > self.limit {
+			return Err(Error::TooLarge(self.limit));
 		}
 		self.current = Some(serde_json::from_slice(plain)?);
-		self.check_size()
+		self.size = plain.len();
+		Ok(())
 	}
 
 	/// Apply a merge patch, refusing frames or reconstructed state beyond the configured budget.
@@ -99,34 +105,31 @@ impl<T> Decoder<T> {
 				}
 				None => payload,
 			};
-			if let Some(limit) = self.max_size
-				&& plain.len() > limit
-			{
-				return Err(Error::TooLarge(limit));
+			if plain.len() > self.limit {
+				return Err(Error::TooLarge(self.limit));
 			}
-			crate::merge::apply_bytes(
-				self.current.as_mut().expect("a snapshot precedes any delta"),
-				plain,
-				&self.check,
-			)?;
-			self.check_size()
+			let current = self.current.as_mut().expect("a snapshot precedes any delta");
+			crate::merge::apply_bytes(current, plain, &self.check)?;
+			self.size = self.size.saturating_add(plain.len());
+			if self.size <= self.limit {
+				return Ok(());
+			}
+
+			// The bound never shrinks on its own, so once it passes the limit measure the value itself:
+			// deletions may have freed room. Counting the compact JSON resets the bound to the real
+			// size, so the walk repeats only after another `limit - size` bytes of patches, not per
+			// delta. An oversized value is dropped before anything can materialize it.
+			let mut budget = Budget(self.limit);
+			if serde_json::to_writer(&mut budget, current).is_err() {
+				return Err(Error::TooLarge(self.limit));
+			}
+			self.size = self.limit - budget.0;
+			Ok(())
 		})();
 		if result.is_err() {
 			self.current = None;
 		}
 		result
-	}
-
-	fn check_size(&mut self) -> Result<()> {
-		let Some(limit) = self.max_size else { return Ok(()) };
-		// Count the compact representation without allocating another full snapshot.
-		// A patch and the prior state are each bounded, and an oversized result is
-		// released before it can be materialized or used by another patch.
-		if serde_json::to_writer(Budget(limit), self.current.as_ref().unwrap()).is_err() {
-			self.current = None;
-			return Err(Error::TooLarge(limit));
-		}
-		Ok(())
 	}
 
 	/// The reconstructed value as raw JSON, or `None` before the first snapshot.
@@ -285,6 +288,22 @@ mod test {
 			};
 			decoder.snapshot(&bytes).unwrap();
 		}
+	}
+
+	#[test]
+	fn unset_budget_still_bounds_compressed_state() {
+		// Each frame inflates under the per-frame cap, but together they would grow the state past
+		// it, which no producer could publish as a snapshot.
+		let half = moq_flate::DEFAULT_MAX_FRAME_SIZE as usize / 2;
+		let mut decoder = Decoder::<Value>::new(consume(Compression::Deflate));
+		let mut encoder = moq_flate::Encoder::new();
+		let mut frame = |key: &str| encoder.frame(format!(r#"{{"{key}":"{}"}}"#, "x".repeat(half)).as_bytes());
+		decoder.snapshot(&frame("a")).unwrap();
+		assert!(matches!(
+			decoder.delta(&frame("b")),
+			Err(Error::TooLarge(limit)) if limit as u64 == moq_flate::DEFAULT_MAX_FRAME_SIZE
+		));
+		assert!(decoder.value().is_none());
 	}
 
 	#[test]

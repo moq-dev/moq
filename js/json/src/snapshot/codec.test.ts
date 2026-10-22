@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import { MissingSnapshot } from "../error.ts";
 import { Decoder } from "./decoder.ts";
 import { type Config, Encoder } from "./encoder.ts";
@@ -151,6 +152,22 @@ test("a delta before a snapshot throws", () => {
 });
 
 // A backlog is applied in full but materialized once: the intermediate reconstructions are stale.
+test("compressed patches cannot grow the value past the frame cap", () => {
+	// Each frame inflates under the per-frame cap, but the patches together would not.
+	const decoder = new Decoder<Doc>({ compression: "deflate" });
+	const flate = new Flate();
+	const frame = (value: Doc) => flate.frame(new TextEncoder().encode(JSON.stringify(value)));
+	const big = "x".repeat(DEFAULT_MAX_FRAME_SIZE / 2);
+
+	decoder.snapshot(frame({ a: big }));
+	// Past the running bound, but the deletion leaves the value itself small enough.
+	decoder.delta(frame({ a: null, b: big }));
+	expect(Object.keys(decoder.decode() ?? {})).toEqual(["b"]);
+
+	expect(() => decoder.delta(frame({ c: big }))).toThrow(`${DEFAULT_MAX_FRAME_SIZE}`);
+	expect(decoder.decode()).toBeUndefined();
+});
+
 test("frames apply without materializing", () => {
 	const encoder = new Encoder<Doc>({ deltaRatio: 100 });
 	const decoder = new Decoder<Doc>({});
