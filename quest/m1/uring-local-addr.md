@@ -42,7 +42,3 @@ through `moq_uring::udp::Transmit`, which callers construct by literal, so
 it gains a `src_ip: Option<IpAddr>` field and `#[non_exhaustive]` with a
 constructor in the same change, with a `rs/moq-uring/MIGRATE.md` entry.
 Wire: none.
-
-## Related
-
-- [A failed send never fails the socket](/quest/m1/uring-send-errors.md) - same socket
