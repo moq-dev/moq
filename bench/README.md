@@ -284,8 +284,9 @@ within each round, with the starting variant rotated, after one warmup round
 - `transport`: a publisher page writes 160 B through 1 MiB frames, a consumer page
   subscribes and reads them all. Connection setup and fixture generation stay
   outside the timed interval, which starts at SUBSCRIBE.
-- `cmaf`: CMAF fragment encode and decode of fixed audio (50 x 160 B) and video
-  (a 64 KiB keyframe and 29 x 4 KiB) fixtures, with no network.
+- `cmaf`: CMAF fragment decode of fixed audio (50 x 160 B) and video
+  (a 64 KiB keyframe and 29 x 4 KiB) fixtures. Fixture loading stays outside
+  the timed interval; no encoding or network runs in that interval.
 - `media`: `@moq/publish` encodes a scrolling 1280x720 canvas at 30 fps (H.264,
   2.5 Mb/s, 1 s keyframes) and `@moq/watch` plays it on a 2D canvas. After a
   warmup, a 10 s window reports published, received, decoded and presented frame
