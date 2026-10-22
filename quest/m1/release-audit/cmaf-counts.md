@@ -1,10 +1,12 @@
-# [M] Validate CMAF sample counts before materializing entries
+# [M] Validate CMAF header fields before use
 
 ## Goal
 
 An untrusted CMAF fragment cannot allocate or loop in proportion to an
-unvalidated sample count. Browser playback rejects impossible fragments
-before disproportionate work while retaining valid defaulted sample fields.
+unvalidated sample count, and an init segment with an impossible timescale is
+refused instead of producing non-finite timestamps. Browser playback rejects
+impossible input before disproportionate work while retaining valid defaulted
+sample fields.
 
 ## Plan
 
@@ -28,5 +30,14 @@ posting outside moq-dev/kixelated still needs authorization. Avoid an arbitrary
 maximum count as a replacement for input-proportional work. Cover truncated
 tables, defaulted fields, and impossible payload extents; benchmark fragment
 bytes against declared sample count. No API or wire change is expected.
+Added 2026-10-22 (maintainer) from the media audit at
+[main 1f5caa7](https://github.com/moq-dev/moq/commit/1f5caa7026bcfd8a2684da3712b384b5f74a7496),
+the same root cause in the same file: `decodeInitSegment` checks that `mdhd`
+exists but returns its `timescale` unchecked, and the fragment path divides by
+it. A checked-in fixture with only the timescale set to zero initialized and
+decoded with Infinity timestamps and durations; another case gave NaN. Refuse
+a zero timescale at initialization, and validate the other header fields the
+decoder divides or indexes by at the same boundary.
+
 The current consumer is watch CMAF ingestion. Land on main first, then
 propose a release-compatible backport for this inherited resource bug.
