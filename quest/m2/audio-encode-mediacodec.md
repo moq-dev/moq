@@ -25,5 +25,6 @@ behind the `mediacodec` feature and the encode seam.
 
 ## Required
 
+- [MediaCodec on an emulator](/quest/m2/android-mediacodec-ci.md) - the emulator lane this runtime proof runs in
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - the round-trip regression decodes through it
 - [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - owns the shared flush and zero-or-more packet encoder contract

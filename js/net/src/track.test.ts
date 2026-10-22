@@ -3162,6 +3162,32 @@ test("without a declared start, the first arrival stands in for it", async () =>
 	producer.close();
 });
 
+test("a source start follows the current requested floor after an update", async () => {
+	const producer = new TrackProducer("test");
+	const reader = producer.subscribe({ groups: { start: { included: 5 } } });
+	try {
+		hooks.startTrack(producer, { start: 6, requested: 5 });
+		expect(hooks.sourceStart(reader)).toBe(6);
+		const lower = producer.subscribe({ groups: { start: { included: 2 } } });
+		try {
+			expect(hooks.sourceStart(lower)).toBe(2);
+			expect(hooks.sourceStart(reader)).toBe(5);
+		} finally {
+			const restored = producer.subscription.changed();
+			lower.close();
+			await restored;
+		}
+		expect(hooks.sourceStart(reader)).toBe(6);
+		const raised = producer.subscription.changed();
+		reader.update({ groups: { start: { included: 9 } } });
+		await raised;
+		expect(hooks.sourceStart(reader)).toBe(9);
+	} finally {
+		reader.close();
+		producer.close();
+	}
+});
+
 // SUBSCRIBE_START answers the floor its SUBSCRIBE asked for, so it holds only while the demand
 // keeps that floor: a lowered floor owes the groups it newly asks for.
 test("a pending tail owes from SUBSCRIBE_START while the demand keeps its floor", async () => {

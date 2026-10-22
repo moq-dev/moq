@@ -49,46 +49,10 @@ a coverage table linking each supported profile and loss guarantee to its
 test; unsupported or unmeasured cells stay explicit. Keep CLI instructions
 and the MPEG-TS draft consistent in each feature change.
 
-Decided 2026-10-16 by the maintainer, for private PES timing and headers
-(#5718):
-
-- **Carriage.** A PES without a PTS is not untimed. The multiplex places
-  every byte on the program clock; only its presentation time is absent.
-  So a private PES track stays timed on the legacy container, which keeps
-  the timestamp in its payload and so survives transports without
-  net-level timestamps (IETF drafts 14-16, lite-05/06's send-time stamps),
-  and never becomes an untimed track. Each frame's timestamp is the PES's
-  source placement: the program clock at its first byte, interpolated
-  between the PCRs on either side (ISO 13818-1 2.4.2.2) and moved onto the
-  catalog clock like the media. Its payload is the whole PES packet: PTS
-  and DTS rebased, every other header byte kept, so PTS presence, special
-  stream-ID forms and optional fields round-trip without per-stream-type
-  timing rules. A PES that carries a PTS also gets placement, not its PTS,
-  as its frame timestamp; the PTS lives in the bytes.
-- **Signalling.** A new `pesPacket` member of the `mpegts.tracks` entry,
-  beside `verbatim` rather than a new `framing` value. Old consumers ignore
-  an entry with neither `verbatim` nor a described track, so a published
-  exporter silently drops these tracks (teletext, DVB subtitles, DVB AC-3,
-  KLV, unknown private types) from the rebuilt TS and its PMT, with no
-  error, instead of refusing the whole catalog. Chosen over the loud
-  refusal so old exporters keep the media and sections.
-- **Legacy `pes`.** The `pes` framing is removed, not kept for a release:
-  export refuses a catalog that names it, and the AC-3 repack goes with
-  it. So a current exporter refuses broadcasts from published importers
-  and recordings that carry private PES, and draft -01 breaks -00 there.
-  The deletion lands with the importer switch, so main never writes a
-  catalog its exporter refuses.
-- **Clock fields.** Only PTS and DTS are rebased. ESCR, `pack_header_field`,
-  TREF and PES-level scrambling refuse their stream with a warning and an
-  importer health count. TS-packet-layer details (continuity, adaptation
-  fields, packet boundaries) stay with the raw fallback.
-
-Rejected: an untimed track with a container that takes time from the net
-frame, which loses timing on those transports and in archive replay and
-needs timedness fixed before the first PES; a per-track "no PTS" flag,
-which keeps the synthesized header and misleads old exporters; and
-extrapolating placement from earlier PCRs without waiting, which is wrong
-on variable-rate multiplexes.
+Private PES (decided 2026-10-16, #5718) landed in #5832 and #5921: a
+private PES rides whole as a timed `pesPacket` track, stamped with its
+program-clock placement, and the draft -00 `pes` framing is refused. The
+guide documents that contract and the clock fields that refuse a stream.
 
 The semantic fidelity audit (2026-10-20) maps each source mechanism to its
 contract in the semantic lane. The guide's profile table starts from it;

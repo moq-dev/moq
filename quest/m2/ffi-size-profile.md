@@ -20,8 +20,9 @@ Guidance:
   everything at "s".
 - Measure what the bindings actually do: publish and subscribe throughput
   through moq-ffi on the [binding benchmark](/bench/README.md), plus
-  audio and video encode and decode. Wire the benchmark into CI, at least
-  nightly.
+  audio and video encode and decode. The binding benchmark already runs
+  nightly and feeds the [regression table](https://git.moq.dev/bench/); add the
+  "s" build as a series there.
 - If it's adopted, use a named profile (for example `[profile.ffi]`,
   inheriting release) that every binding build path selects, so the relay
   and self-builders keep opt-level 3.
