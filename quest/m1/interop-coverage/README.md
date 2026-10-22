@@ -48,5 +48,5 @@ coverage on `main` at `3ab6cbf81d`.
 
 ## Related
 
-- [Interop audit](/quest/m0/audit-interop.md) - classifies the red cells these cases produce
+- [Interop audit](/quest/m1/audit-interop.md) - classifies the red cells these cases produce
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - Moxygen's moq-test conformance through moq-relay

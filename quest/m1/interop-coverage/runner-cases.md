@@ -12,7 +12,7 @@ moq-relay.
 
 Decided with the maintainer on 2026-10-21. These cases exist in the
 runner's `docs/TEST-SPECIFICATIONS.md`, so implement them in our clients
-there rather than in-tree; the [interop audit](/quest/m0/audit-interop.md)'s
+there rather than in-tree; the [interop audit](/quest/m1/audit-interop.md)'s
 standing approval covers PRs touching the `moq-dev-*` builds.
 
 As of the runner report of 2026-10-19, moq-relay fails
