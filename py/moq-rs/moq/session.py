@@ -222,6 +222,15 @@ class Bandwidth:
         """
         return Reservation(self._inner.reserve(demand._inner, max_bps))
 
+    def set_target(self, target_bps: int | None) -> None:
+        """Probe up to ``target_bps`` instead of the sum of the reservations.
+
+        The session probes for what its reservations add up to by default, so
+        the estimate can rise to fund them. ``0`` turns probing off, and
+        ``None`` follows the reservations again.
+        """
+        self._inner.set_target(target_bps)
+
 
 class Reservation:
     """One track's standing claim on a :class:`Bandwidth`.

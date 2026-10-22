@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
-# Validate each Worker's deploy bundle without publishing or credentials.
+# Validate each Worker's lockfile and deploy bundle without publishing or
+# credentials.
 #
 # These Workers have lockfiles outside the Bun workspace, so `just js check`
-# never installs or builds them.
+# never installs or builds them. Every tracked lockfile but the workspace's is
+# one, so a new Worker can't fall out of the check; infra/mbx only drives
+# wrangler's CLI and has no bundle to build.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-for project in infra/apt infra/rpm infra/moq-sh demo/pub; do
+for lock in $(git ls-files '*bun.lock'); do
+    project=$(dirname "$lock")
+    [[ "$project" == . ]] && continue
     (
         cd "$project"
         bun install --frozen-lockfile
-        bun run deploy --dry-run
+        if [[ -f wrangler.jsonc ]]; then
+            bun run deploy --dry-run
+        fi
     )
 done
