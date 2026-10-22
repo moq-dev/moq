@@ -833,7 +833,7 @@ async function supported(config: Catalog.AudioConfig): Promise<boolean> {
 		}
 	}
 	// Install the WebCodecs polyfill before probing, since playback would decode through it where
-	// AudioDecoder is missing (Node, Bun, older browsers). A no-op wherever WebCodecs is native.
+	// AudioDecoder is missing (Node, Bun, older browsers). Loads nothing where WebCodecs audio is native.
 	await Util.Libav.polyfill();
 	const res = await AudioDecoder.isConfigSupported({
 		...config,
