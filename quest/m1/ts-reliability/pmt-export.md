@@ -9,11 +9,14 @@ around it. A track added no longer ends a synced export.
 
 ## Plan
 
-Outside `--sync`, the export follows a PMT revision: it rebuilds the PMT at
-the next `version_number` when the track set or an entry changes, drops a
-retired track's PID once its track ends, and keeps the PCR PID unless its
-track retires. A `muxRate` change in the same catalog update applies from
-the slot after the one the revised PMT starts out in.
+Outside `--sync`, the export follows a PMT revision at the next
+`version_number`: a stream joins the PMT with its first frame, and leaves
+once the catalog has dropped it and nothing of it is left to go out. A track
+recorded on the PID of a dropped stream waits for that stream to drain, and
+cuts it if it never ends. Each revision is one boundary: versions go out in
+order, no packet of a stream a revision adds goes ahead of it, and its PCR
+PID and `muxRate` take over after its last packet. The PCR keeps its PID
+unless its track retires.
 
 What `--sync` does today:
 
