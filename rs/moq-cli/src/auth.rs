@@ -186,11 +186,11 @@ enum Command {
 		#[usage(long)]
 		subscribe: Vec<Pattern>,
 
-		/// Expiration time as a unix timestamp.
+		/// Expiration time as Unix seconds within 1970-2554.
 		#[usage(long)]
 		expires: Option<UnixTimestamp>,
 
-		/// Issued-at time as a unix timestamp.
+		/// Issued-at time as Unix seconds within 1970-2554.
 		#[usage(long)]
 		issued: Option<UnixTimestamp>,
 	},

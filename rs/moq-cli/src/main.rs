@@ -192,7 +192,7 @@ impl Serving {
 		let auth_request = moq_relay::auth::request_for(&self.auth, &request);
 		// The listener's handshake deadline covers admission; `within` closes a session
 		// it gives up on with the timeout code.
-		let lease = match request.within(self.auth.admit(auth_request)).await {
+		let lease = match request.within(async { self.auth.admit(auth_request?).await }).await {
 			Err(err) => return Err(anyhow::Error::new(err).context("admission timed out")),
 			Ok(Ok(lease)) => lease,
 			Ok(Err(err)) => {

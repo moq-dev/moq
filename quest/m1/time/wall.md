@@ -31,11 +31,6 @@ sender reports in moq-rtc, converts at its boundary with `From<Wall>` and
 Public API: breaking in hang, moq-mux, moq-hls, moq-quic, moq-relay, and
 moq-tokio, each with a `MIGRATE.md` entry. Wire: none.
 
-## Related
-
-- [Time test sweep](/quest/m2/time-test-sweep.md) - the workspace-wide lint follows this
-
-## Progress
 
 Candidate: [moq-dev/moq#6298](https://github.com/moq-dev/moq/pull/6298).
 The implementation also covers auth claim/grant/certificate times and the
@@ -46,3 +41,7 @@ units are unchanged. Rust auth decoding now enforces Wall's portable range.
 The PR remains draft for the shared optional Unix-seconds serde adapter,
 fallible epoch and certificate wall views, and boundary refusal decisions.
 Keep this quest until those public API and range choices are settled.
+
+## Related
+
+- [Time test sweep](/quest/m2/time-test-sweep.md) - the workspace-wide lint follows this
