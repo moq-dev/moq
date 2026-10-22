@@ -7,7 +7,7 @@ use rustls::crypto::ring::default_provider;
 
 use std::{
     convert::TryInto,
-    future::Future,
+    future::{Future, poll_fn},
     io::{self, IoSliceMut},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     pin::{Pin, pin},
@@ -21,7 +21,7 @@ use std::{
 
 use crate::quic::driver::runtime::{AsyncUdpSocket, UdpSender, wrap_udp_socket};
 use crate::quic::driver::{Duration, Instant};
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use moq_quic::{
     ConnectionId, RandomConnectionIdGenerator,
     crypto::rustls::{QuicClientConfig, QuicServerConfig},
@@ -44,8 +44,8 @@ use tracing::{error_span, info};
 use tracing_subscriber::EnvFilter;
 
 use super::{
-    ClientConfig, Connection, Credit, Endpoint, EndpointConfig, ReadError, ReadToEndError,
-    RecvStream, SendStream, TransportConfig, VarInt,
+    ClientConfig, Connection, Endpoint, EndpointConfig, ReadError, ReadToEndError, RecvStream,
+    SendStream, TransportConfig, VarInt,
 };
 
 #[test]
@@ -2092,10 +2092,10 @@ async fn dropped_connection_cleans_up() {
     endpoint.wait_idle().await;
 }
 
-/// Held reads keep the connection window spent until their credit drops, while a stream window
-/// far smaller than it keeps replenishing; credit outlives its stream.
+/// Leases keep the connection window spent until consumed, while a stream window far smaller
+/// than it keeps replenishing; a lease outlives its stream.
 #[tokio::test]
-async fn held_reads_spend_the_connection_window() {
+async fn leases_spend_the_connection_window() {
     const WINDOW: usize = 32 * 1024;
     let _guard = subscribe();
     let mut transport = TransportConfig::default();
@@ -2112,43 +2112,102 @@ async fn held_reads_spend_the_connection_window() {
     .unwrap();
     let mut send = client.open_uni(Default::default()).await.unwrap();
     let writer = tokio::spawn(async move {
-        // The receiver walks away before this finishes.
-        let _ = send.write_all(&[7; 4 * WINDOW]).await;
+        send.write_all(&[7; WINDOW + 500]).await.unwrap();
+        send.finish().unwrap();
     });
 
     let mut recv = server.accept_uni().await.unwrap();
-    let mut buf = vec![0; WINDOW];
-    let mut held = read_held_exact(&mut recv, &mut buf).await;
-    assert_eq!(held.len(), WINDOW as u64);
+    assert_eq!(leased(&mut recv, WINDOW).await, WINDOW);
     let stats = server.stats().credit;
-    assert_eq!((stats.held, stats.available), (WINDOW as u64, 0));
+    assert_eq!((stats.leased, stats.available), (WINDOW as u64, 0));
 
     // Far below the usual update threshold, and still enough to unblock.
-    drop(held.split(100));
-    held.merge(read_held_exact(&mut recv, &mut buf[..100]).await);
-    assert_eq!(server.stats().credit.held, WINDOW as u64);
+    consume(&mut recv, 100).await;
+    assert_eq!(leased(&mut recv, WINDOW).await, WINDOW);
+    assert_eq!(server.stats().credit.leased, WINDOW as u64);
 
-    drop(held);
-    let tail = read_held_exact(&mut recv, &mut buf[..500]).await;
-    drop(recv);
-    assert_eq!(
-        server.stats().credit.held,
-        500,
-        "credit outlives its stream"
-    );
-    drop(tail);
-    assert_eq!(server.stats().credit.held, 0);
+    consume(&mut recv, WINDOW).await;
+    assert_eq!(leased(&mut recv, 400).await, 400);
+    let fin = poll_fn(|cx| recv.poll_lease(cx, 401).map_ok(|lease| lease.is_fin())).await;
+    assert!(fin.unwrap(), "the FIN ends a wait for more");
     writer.await.unwrap();
+    assert_eq!(
+        server.stats().credit.leased,
+        400,
+        "a lease outlives its stream"
+    );
+    drop(recv);
+    assert_eq!(server.stats().credit.leased, 0);
 }
 
-/// Fill `buf` with held reads, returning the credit for all of it.
-async fn read_held_exact(recv: &mut RecvStream, buf: &mut [u8]) -> Credit {
-    let mut held = recv.read_held(buf).await.unwrap().unwrap();
-    while (held.len() as usize) < buf.len() {
-        let read = held.len() as usize;
-        held.merge(recv.read_held(&mut buf[read..]).await.unwrap().unwrap());
-    }
-    held
+/// Two readers each waiting for more than the window can give both: the lower-priority stream
+/// is evicted, and the other gets the window to itself.
+#[tokio::test]
+async fn stuck_window_evicts_the_lower_priority() {
+    const WINDOW: usize = 32 * 1024;
+    let _guard = subscribe();
+    let mut transport = TransportConfig::default();
+    transport.receive_window((WINDOW as u32).into());
+    // Short of the window, so the first stream cannot keep the second from arriving.
+    transport.stream_receive_window((WINDOW as u32 / 4 * 3).into());
+    let endpoint = endpoint_with_config(transport);
+
+    let (client, server) = tokio::try_join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    )
+    .unwrap();
+    let writers = [
+        client.open_uni(Default::default()).await.unwrap(),
+        client.open_uni(Default::default()).await.unwrap(),
+    ]
+    .map(|mut send| {
+        tokio::spawn(
+            async move { send.write_all(&[7; WINDOW]).await.is_ok() && send.finish().is_ok() },
+        )
+    });
+
+    let mut low = server.accept_uni().await.unwrap();
+    let mut high = server.accept_uni().await.unwrap();
+    low.set_priority(-1);
+    high.set_priority(1);
+    let leased = tokio::join!(
+        poll_fn(|cx| low.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())),
+        poll_fn(|cx| high
+            .poll_lease(cx, WINDOW)
+            .map_ok(|lease| lease.remaining())),
+    );
+    assert_eq!(leased, (Err(ReadError::Evicted), Ok(WINDOW)));
+
+    // The peer hears of the eviction once the stream is stopped.
+    drop((low, high));
+    let [low, high] = writers;
+    assert!(
+        !low.await.unwrap(),
+        "the evicted stream's writer is stopped"
+    );
+    assert!(high.await.unwrap());
+}
+
+/// Wait until `recv` leases at least `want` bytes, returning how many it leased.
+async fn leased(recv: &mut RecvStream, want: usize) -> usize {
+    poll_fn(|cx| recv.poll_lease(cx, want).map_ok(|lease| lease.remaining()))
+        .await
+        .unwrap()
+}
+
+/// Consume the first `n` leased bytes of `recv`.
+async fn consume(recv: &mut RecvStream, n: usize) {
+    poll_fn(|cx| {
+        recv.poll_lease(cx, n).map_ok(|mut lease| {
+            lease.advance(n);
+            lease.release();
+        })
+    })
+    .await
+    .unwrap()
 }
 
 #[derive(Default)]
