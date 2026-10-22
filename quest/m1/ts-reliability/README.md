@@ -111,8 +111,8 @@ refused means an error or a counted drop.
 | Program identity, program and ES descriptors | Preserved: descriptors follow each PMT revision; an identity change refuses | landed |
 | PMT add, remove, retype; PID reuse | Normalized without a new epoch: a changed or reused PID ends its track and continues under a fresh name, and the PMT is rebuilt at the next `version_number`. Import landed; today refusal or stale PMT on export | [PMT export](/quest/m1/ts-reliability/pmt-export.md) |
 | PAT changes: moved PMT PID, programs added or removed | Normalized: followed; a removed program retires, and returns as a new epoch. Today ignored, or the whole multiplex stops | [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) |
-| Programs without video | Preserved when the PMT names a PCR PID; refused without one. Today export refuses sections without video and any program without media; import refuses a program without media | [clockless export](/quest/m1/ts-reliability/clockless-export.md) |
-| PCR | Normalized: rebased, carried on the first video PID, else audio, else a dedicated PCR-only PID; today video or audio only | [clockless export](/quest/m1/ts-reliability/clockless-export.md) |
+| Programs without video | Preserved when the PMT names a PCR PID; refused without one | landed |
+| PCR | Normalized: rebased, carried on the first video PID, else audio, else a dedicated PCR-only PID | landed |
 | Mux rate, null stuffing | Normalized: re-padded to `muxRate` while the source is CBR | landed |
 | PSI and SI repetition | Normalized: PAT/PMT every 500 ms and at keyframes, SI at DVB maxima | landed |
 | Media PES headers, TS packet layer | Normalized: rebuilt by export; the raw lane keeps them | landed |
@@ -126,9 +126,7 @@ remain with their current quests.
 
 - [PMT export](/quest/m1/ts-reliability/pmt-export.md) - a TS export announces each PMT revision at the next `version_number`
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
-- [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
-- [Clockless export](/quest/m1/ts-reliability/clockless-export.md) - TS import and export carry audio-only and data-only programs
 - [Arrival stamps](/quest/m1/ts-reliability/arrival-stamps.md) - frames carry their local arrival time, so a stalled path never lets late frames out
 - [Release clock false alarms](/quest/m1/ts-reliability/release-clock-false-alarms.md) - no false jitter leap at a 500 ms delay and no false drift alarm
 

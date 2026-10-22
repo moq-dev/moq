@@ -1860,62 +1860,185 @@ async fn export_pes_packet_roundtrip() {
 	assert_eq!(frame.payload.as_ref(), &pes[..], "the PES round-trips byte-for-byte");
 }
 
-// SCTE-35 cues are clocked on video, so the exporter rejects a cue program with no video
-// track rather than emitting cues pinned to zero.
+/// Audio and opaque data use the same program clock; a data-only program has its own PCR PID.
 #[tokio::test(start_paused = true)]
-async fn scte35_without_video_export_is_rejected() {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(
-		&mut broadcast,
-		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
-	)
-	.unwrap();
-
-	// A SCTE-35 cue track and nothing else.
-	let scte = broadcast
-		.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.video))
-		.unwrap();
-	let scte_name = scte.name().to_string();
-	{
-		let track = tscat::Track {
-			pid: 0x102,
-			descriptors: Vec::new(),
-			verbatim: Some(tscat::Verbatim::new(0x86, tscat::Framing::Section)),
-			pes_packet: None,
-		};
-		catalog.modify().unwrap().ext.mpegts.tracks.insert(scte_name, track);
-	}
-	let mut producer = Producer::new(scte, HangContainer::Legacy(crate::container::Kind::Data));
-	producer
-		.write(Frame {
-			timestamp: Timestamp::from_millis(0).unwrap(),
-			duration: None,
-			payload: Bytes::from_static(CUE),
-			keyframe: true,
-		})
-		.unwrap();
-	producer.cut(None).unwrap();
-	producer.finish().unwrap();
-
-	let mut exporter = open_ts(
-		crate::source::announced(&consumer).await,
-		crate::catalog::CatalogFormat::Hang,
-	)
-	.await
-	.unwrap();
-	let err = loop {
-		match tokio::time::timeout(DRAIN, exporter.next()).await {
-			Ok(Ok(Some(_))) => continue,
-			Ok(Ok(None)) => panic!("export completed; a cue program without video must be rejected"),
-			Ok(Err(e)) => break e,
-			Err(_) => panic!("export neither errored nor completed"),
+async fn programs_without_video_roundtrip_opaque_tracks() {
+	use super::fixture::{Flags, MS, Mux};
+	const DATA: u16 = 0x100;
+	const AUDIO: u16 = 0x101;
+	const CLOCK: u16 = 0x1ff;
+	for audio in [false, true] {
+		for pes in [false, true] {
+			let mut mux = Mux::default();
+			let mut streams = vec![(if pes { 0x06 } else { 0x05 }, DATA)];
+			if audio {
+				streams.push((0x04, AUDIO));
+			}
+			mux.pat(&[(1, 0x20)]).pmt(0x20, 1, CLOCK, &streams, 0);
+			let opaque = if pes {
+				pes_with(0xbd, 0x84, 0, &[], 0, b"opaque data")
+			} else {
+				CUE.to_vec()
+			};
+			for i in 0..8 {
+				let ticks = 1_000 * MS + i * 72 * MS;
+				mux.packet(CLOCK, Flags::pcr(ticks));
+				if audio {
+					let mut frame = vec![0xff, 0xf5, 0x18, 0xc0];
+					frame.resize(72, 0xaa);
+					let pts = ticks / 300 + 9_000;
+					let field = [
+						0x21 | ((pts >> 29) & 0x0e) as u8,
+						(pts >> 22) as u8,
+						1 | ((pts >> 14) & 0xfe) as u8,
+						(pts >> 7) as u8,
+						1 | ((pts << 1) & 0xfe) as u8,
+					];
+					mux.whole(AUDIO, &pes_with(0xc0, 0x80, 0x80, &field, 0, &frame));
+				}
+				if pes {
+					mux.whole(DATA, &opaque);
+				} else {
+					mux.section(DATA, &opaque);
+				}
+			}
+			mux.packet(CLOCK, Flags::pcr(1_000 * MS + 8 * 72 * MS));
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = crate::catalog::Producer::new(
+				&mut broadcast,
+				crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+			)
+			.unwrap();
+			let mut import = super::Import::new(broadcast, catalog.reserve());
+			import.decode(&mux.bytes()).unwrap();
+			import.finish().unwrap();
+			let original = catalog
+				.snapshot()
+				.ext
+				.mpegts
+				.tracks
+				.into_iter()
+				.find(|(_, t)| t.pid == DATA)
+				.unwrap()
+				.0;
+			assert_eq!(
+				read_frames(&consumer, &original, Kind::Data).await,
+				vec![opaque.clone(); 8]
+			);
+			let output = drain_with(
+				open_ts(
+					crate::source::announced(&consumer).await,
+					crate::catalog::CatalogFormat::Hang,
+				)
+				.await
+				.unwrap(),
+			)
+			.await;
+			assert_packet_aligned(&output);
+			let tables: Vec<u8> = output
+				.as_chunks::<188>()
+				.0
+				.iter()
+				.filter(|packet| {
+					let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+					pid == 0 || pid == 0x20
+				})
+				.flatten()
+				.copied()
+				.collect();
+			let mut reader = TsPacketReader::new(Cursor::new(tables));
+			let mut pmt = None;
+			while let Some(packet) = reader.read_ts_packet().unwrap() {
+				if let Some(TsPayload::Pmt(table)) = packet.payload {
+					pmt = Some(table);
+				}
+			}
+			let pmt = pmt.unwrap();
+			let clock = pmt.pcr_pid.unwrap().as_u16();
+			assert_ne!(clock, DATA);
+			if audio {
+				assert_eq!(clock, AUDIO);
+			} else {
+				assert!(pmt.es_info.iter().all(|es| es.elementary_pid.as_u16() != clock));
+			}
+			let mut clocks = Vec::new();
+			for packet in output.as_chunks::<188>().0 {
+				let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+				if pid == clock {
+					if !audio {
+						assert_eq!(packet[3] & 0x30, 0x20);
+					}
+					if let Some(ticks) = super::import::pcr(packet) {
+						clocks.push(ticks);
+					}
+				}
+			}
+			assert!(clocks.len() > 1);
+			assert!(
+				clocks
+					.windows(2)
+					.all(|p| p[1] - p[0] <= PCR_INTERVAL.as_nanos() as u64 * 27 / 1_000)
+			);
+			let mut broadcast2 = moq_net::broadcast::Info::new().produce();
+			let consumer2 = broadcast2.consume();
+			let catalog2 = crate::catalog::Producer::new(
+				&mut broadcast2,
+				crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+			)
+			.unwrap();
+			let mut import2 = super::Import::new(broadcast2, catalog2.reserve());
+			import2.decode(&output).unwrap();
+			import2.finish().unwrap();
+			let restored = catalog2
+				.snapshot()
+				.ext
+				.mpegts
+				.tracks
+				.into_iter()
+				.find(|(_, t)| t.pid == DATA)
+				.unwrap()
+				.0;
+			let track = consumer2
+				.track(&restored)
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+				.await
+				.unwrap();
+			let mut reader = crate::container::Consumer::new(track, HangContainer::Legacy(Kind::Data));
+			let packets = output.as_chunks::<188>().0;
+			let samples: Vec<_> = packets
+				.iter()
+				.enumerate()
+				.filter_map(|(index, packet)| super::import::pcr(packet).map(|ticks| (index as u64 * 188 + 10, ticks)))
+				.collect();
+			let mut count = 0;
+			for (index, packet) in packets.iter().enumerate() {
+				let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+				if pid != DATA || packet[1] & 0x40 == 0 {
+					continue;
+				}
+				let payload = 4 + if packet[3] & 0x20 != 0 {
+					1 + usize::from(packet[4])
+				} else {
+					0
+				};
+				let at = (index * 188 + payload + if pes { 0 } else { 1 + usize::from(packet[payload]) }) as u64;
+				let before = samples
+					.partition_point(|(offset, _)| *offset <= at)
+					.saturating_sub(1)
+					.min(samples.len() - 2);
+				let ((a, ta), (b, tb)) = (samples[before], samples[before + 1]);
+				let expected = (ta + (at - a) * (tb - ta) / (b - a)) / 27;
+				let frame = reader.read_frame().await.unwrap().unwrap();
+				assert_eq!(frame.payload.as_ref(), &opaque, "audio={audio}, pes={pes}");
+				assert_eq!(frame.timestamp.as_micros(), u128::from(expected));
+				count += 1;
+			}
+			assert_eq!(count, 8);
+			assert!(reader.read_frame().await.unwrap().is_none());
 		}
-	};
-	assert!(
-		err.to_string().contains("requires a video track"),
-		"expected a video-required rejection, got: {err}"
-	);
+	}
 }
 
 /// Subscribe to a track and read every retained frame payload it holds.
@@ -3285,7 +3408,7 @@ fn count_pid(frames: &[Frame], pid: u16) -> usize {
 }
 
 /// Count the TS packets whose adaptation field sets `discontinuity_indicator`.
-fn count_discontinuity(frames: &[Frame]) -> usize {
+pub(super) fn count_discontinuity(frames: &[Frame]) -> usize {
 	frames
 		.iter()
 		.flat_map(|f| f.payload.as_chunks::<188>().0.iter())
@@ -5312,7 +5435,7 @@ fn in_decode_order(decode: &[u64]) -> bool {
 
 /// Every PES unit, each PID in its own decode order, finishes arriving before it decodes, on
 /// the clock a receiver recovers from the PCRs. Returns how many units were judged.
-fn assert_on_time(frames: &[Frame]) -> usize {
+pub(super) fn assert_on_time(frames: &[Frame]) -> usize {
 	const WRAP: i128 = 1 << 33;
 	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 	// PCRs unwrapped from the first, which a start a window before the timeline may wrap.

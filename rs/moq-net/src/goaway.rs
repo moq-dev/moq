@@ -21,7 +21,7 @@ use std::{
 	time::Duration,
 };
 
-use crate::{Error, Result, SessionError};
+use crate::{Error, Result};
 
 /// Maximum New Session URI length, in bytes. Both wires cap it here, and a
 /// receiver treats anything longer as a protocol violation.
@@ -84,11 +84,19 @@ impl Goaway {
 	}
 }
 
+/// The send request and its deadline on the session's caller-supplied clock.
+#[derive(Clone)]
+pub(crate) struct Triggered {
+	pub goaway: Goaway,
+	pub deadline: Option<crate::time::Instant>,
+}
+
 /// Sends this session's single GOAWAY.
 ///
 /// Obtained from `Session::drain`.
 pub struct Producer {
-	trigger: kio::Producer<Option<Goaway>>,
+	trigger: kio::Producer<Option<Triggered>>,
+	runtime: crate::time::Deadlines,
 	/// Whether this side may name a redirect URI. A client may not,
 	/// since it cannot tell a server to open connections (draft-19 sect 10.4).
 	redirect: bool,
@@ -97,6 +105,8 @@ pub struct Producer {
 impl Producer {
 	/// Send the GOAWAY, consuming the handle: a session may only send one.
 	///
+	/// The timeout starts at this send on the session's caller-supplied clock,
+	/// using the latest instant handed to its driver. A later poll cannot restart it.
 	/// The session must stay driven for the message to reach the wire. With
 	/// [`Goaway::timeout`] set, the driver force-closes the session once the
 	/// deadline passes, so awaiting `Session::closed`
@@ -127,7 +137,10 @@ impl Producer {
 			if state.is_some() {
 				return Err(Error::Duplicate);
 			}
-			*state = Some(goaway);
+			let deadline = goaway
+				.timeout
+				.and_then(|timeout| self.runtime.now().checked_add(timeout));
+			*state = Some(Triggered { goaway, deadline });
 		}
 		Ok(())
 	}
@@ -242,7 +255,7 @@ impl Default for GoingAway {
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Protocol {
 	/// Awaited by the driver's send path; firing means "encode and send GOAWAY now".
-	trigger: kio::Consumer<Option<Goaway>>,
+	trigger: kio::Consumer<Option<Triggered>>,
 	/// Written by the driver's receive path when a GOAWAY is decoded.
 	received: kio::Producer<Option<Goaway>>,
 	/// Set alongside `received`; reprices this session's routes to the drain cost.
@@ -274,7 +287,7 @@ impl Protocol {
 	/// `None` if the trigger was dropped without firing (the session is closing
 	/// without a drain), so nothing should be sent.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn poll_triggered(&self, waiter: &kio::Waiter) -> Poll<Option<Goaway>> {
+	pub fn poll_triggered(&self, waiter: &kio::Waiter) -> Poll<Option<Triggered>> {
 		match self.trigger.poll(waiter, |state| match &**state {
 			Some(goaway) => Poll::Ready(goaway.clone()),
 			None => Poll::Pending,
@@ -286,66 +299,47 @@ impl Protocol {
 	}
 }
 
-/// Enforces a sent GOAWAY's deadline: closes the session once it passes.
-///
-/// The draft makes the deadline the sender's promise, not the peer's, so the
-/// driver arms this after the message hits the wire rather than making the
-/// caller hold a handle and await it.
+/// The drain deadline, watched independently of the wire's send progress.
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
-pub(crate) struct Enforce<S: crate::transport::poll::Session> {
-	session: S,
-	/// The armed deadline, or `None` when the GOAWAY carried no timeout (ready
-	/// immediately: there is nothing to enforce).
-	deadline: Option<(crate::time::Deadline, Duration)>,
+pub(crate) struct Deadline {
+	runtime: crate::time::Deadlines,
+	trigger: Option<kio::Consumer<Option<Triggered>>>,
+	armed: Option<(crate::time::Deadline, Duration)>,
 }
 
-impl<S: crate::transport::poll::Session> Enforce<S> {
+impl Deadline {
+	/// Ready with the timeout once it expires, or without one if nothing is to enforce.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn new(runtime: &crate::time::Deadlines, session: S, timeout: Option<Duration>) -> Self {
-		Self {
-			session,
-			deadline: timeout.map(|timeout| (crate::time::Deadline::after(runtime, timeout), timeout)),
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Option<Duration>> {
+		if let Some(trigger) = &self.trigger {
+			let triggered = match std::task::ready!(trigger.poll(waiter, |state| match &**state {
+				Some(triggered) => Poll::Ready(triggered.clone()),
+				None => Poll::Pending,
+			})) {
+				Ok(triggered) => triggered,
+				Err(_) => return Poll::Ready(None),
+			};
+			self.trigger = None;
+			self.armed = triggered.deadline.zip(triggered.goaway.timeout).map(|(at, timeout)| {
+				let mut deadline = crate::time::Deadline::new(&self.runtime);
+				deadline.set(Some(at));
+				(deadline, timeout)
+			});
 		}
-	}
-
-	/// Ready once the session closes on its own or the deadline passes (closing it).
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let Some((deadline, timeout)) = &mut self.deadline else {
-			return Poll::Ready(());
+		let Some((deadline, timeout)) = &mut self.armed else {
+			return Poll::Ready(None);
 		};
-
-		let mut cx = waiter.context();
-		if self.session.poll_closed(&mut cx).is_ready() {
-			return Poll::Ready(());
-		}
 		std::task::ready!(deadline.poll(waiter));
-
-		tracing::warn!(?timeout, "peer did not leave before the GOAWAY deadline; closing");
-		self.session
-			.close(SessionError::GoawayTimeout.to_code(), &Error::GoawayTimeout.to_string());
-		Poll::Ready(())
+		Poll::Ready(Some(*timeout))
 	}
-}
-
-/// Enforce a sent GOAWAY's deadline: close the session once it passes.
-///
-/// The async form of [`Enforce`], for drivers that are still `async` themselves.
-#[cfg(feature = "async")]
-pub(crate) async fn enforce<S: crate::transport::poll::Session>(
-	runtime: &crate::time::Deadlines,
-	session: &mut S,
-	timeout: Option<Duration>,
-) {
-	let mut enforce = Enforce::new(runtime, session.clone(), timeout);
-	kio::wait(|waiter| enforce.poll(waiter)).await
 }
 
 /// The halves held by the public [`crate::Session`].
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Handle {
 	/// Cloned into each [`Producer`] handed out by `crate::Session::drain`.
-	trigger: kio::Producer<Option<Goaway>>,
+	trigger: kio::Producer<Option<Triggered>>,
+	runtime: crate::time::Deadlines,
 	/// Whether this side may name a redirect URI in its own GOAWAY.
 	redirect: bool,
 	/// Handed out by `crate::Session::draining`.
@@ -357,7 +351,7 @@ impl Handle {
 	///
 	/// `redirect` is whether this side may name a URI in its own GOAWAY.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn new(redirect: bool) -> (Self, Protocol) {
+	pub fn new(runtime: &crate::time::Deadlines, redirect: bool) -> (Self, Protocol) {
 		let trigger = kio::Producer::new(None);
 		let received = kio::Producer::new(None);
 		let consumer = Consumer {
@@ -370,6 +364,7 @@ impl Handle {
 
 		let handle = Self {
 			trigger: trigger.clone(),
+			runtime: runtime.clone(),
 			redirect,
 			consumer,
 		};
@@ -389,7 +384,18 @@ impl Handle {
 	pub fn producer(&self) -> Producer {
 		Producer {
 			trigger: self.trigger.clone(),
+			runtime: self.runtime.clone(),
 			redirect: self.redirect,
+		}
+	}
+
+	/// Watch the local deadline without holding up the protocol's writes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub fn deadline(&self) -> Deadline {
+		Deadline {
+			runtime: self.runtime.clone(),
+			trigger: Some(self.trigger.consume()),
+			armed: None,
 		}
 	}
 
@@ -404,12 +410,51 @@ impl Handle {
 mod tests {
 	use super::*;
 
+	#[test]
+	fn deadline_starts_when_sent_not_when_the_handle_is_acquired() {
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::ZERO);
+		let (handle, protocol) = Handle::new(&runtime, true);
+		let producer = handle.producer();
+		let sent = crate::time::Instant::ZERO + Duration::from_secs(5);
+		runtime.advance(sent);
+		producer
+			.send(Goaway::new().with_timeout(Duration::from_secs(1)))
+			.unwrap();
+		let Poll::Ready(Some(triggered)) = protocol.poll_triggered(&kio::Waiter::noop()) else {
+			panic!("not triggered")
+		};
+		assert_eq!(triggered.deadline, Some(sent + Duration::from_secs(1)));
+	}
+
+	#[test]
+	fn delayed_polling_does_not_restart_the_deadline() {
+		for delay in [Duration::ZERO, Duration::from_millis(500), Duration::from_secs(1)] {
+			let sent = crate::time::Instant::ZERO + Duration::from_secs(5);
+			let runtime = crate::time::Deadlines::new(sent);
+			let (handle, _protocol) = Handle::new(&runtime, true);
+			handle
+				.producer()
+				.send(Goaway::new().with_timeout(Duration::from_secs(1)))
+				.unwrap();
+			let mut deadline = handle.deadline();
+			let waiter = kio::Waiter::noop();
+			runtime.advance(sent + delay);
+			if delay < Duration::from_secs(1) {
+				assert!(deadline.poll(&waiter).is_pending());
+				runtime.advance(sent + Duration::from_secs(1) - Duration::from_nanos(1));
+				assert!(deadline.poll(&waiter).is_pending());
+				runtime.advance(sent + Duration::from_secs(1));
+			}
+			assert_eq!(deadline.poll(&waiter), Poll::Ready(Some(Duration::from_secs(1))));
+		}
+	}
+
 	/// A session sends at most one GOAWAY. Handing out the handle is always
 	/// allowed, so a caller never has to ask whether the slot is free; sending
 	/// twice is what gets refused, and the first payload is the one kept.
 	#[test]
 	fn only_the_first_send_wins() {
-		let (handle, protocol) = Handle::new(true);
+		let (handle, protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
 
 		handle
 			.producer()
@@ -423,7 +468,7 @@ mod tests {
 		assert!(matches!(err, Error::Duplicate));
 
 		assert_eq!(
-			protocol.trigger.read().as_ref().map(|g| g.uri.as_str()),
+			protocol.trigger.read().as_ref().map(|g| g.goaway.uri.as_str()),
 			Some("https://first.example/"),
 			"the peer must not see a URI replaced out from under it"
 		);
@@ -433,7 +478,7 @@ mod tests {
 	/// URI is refused locally rather than getting the session closed by the peer.
 	#[test]
 	fn client_redirect_is_refused() {
-		let (handle, _protocol) = Handle::new(false);
+		let (handle, _protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
 		let err = handle
 			.producer()
 			.send(Goaway {
@@ -444,7 +489,7 @@ mod tests {
 		assert!(matches!(err, Error::ProtocolViolation));
 
 		// An empty URI ("I am going away") is still allowed.
-		let (handle, _protocol) = Handle::new(false);
+		let (handle, _protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
 		handle.producer().send(Goaway::default()).unwrap();
 	}
 
@@ -465,14 +510,14 @@ mod tests {
 	/// reaching an encoder that would frame it wrong.
 	#[test]
 	fn oversized_uri_is_refused() {
-		let (handle, _protocol) = Handle::new(true);
+		let (handle, _protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
 		let err = handle
 			.producer()
 			.send(Goaway::redirect("x".repeat(MAX_URI + 1)))
 			.unwrap_err();
 		assert!(matches!(err, Error::ProtocolViolation));
 
-		let (handle, _protocol) = Handle::new(true);
+		let (handle, _protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
 		handle
 			.producer()
 			.send(Goaway::redirect("x".repeat(MAX_URI)))
@@ -482,7 +527,7 @@ mod tests {
 	/// A second GOAWAY is a protocol violation, not something to log and discard.
 	#[test]
 	fn duplicate_is_a_protocol_violation() {
-		let (_handle, protocol) = Handle::new(true);
+		let (_handle, protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
 		protocol.record(Goaway::default()).unwrap();
 		let err = protocol.record(Goaway::default()).unwrap_err();
 		assert!(matches!(err, Error::ProtocolViolation));
@@ -492,7 +537,7 @@ mod tests {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn consumer_observes_the_recorded_goaway() {
-		let (handle, protocol) = Handle::new(true);
+		let (handle, protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
 		let consumer = handle.consumer();
 		assert_eq!(consumer.peek(), None);
 
@@ -511,7 +556,7 @@ mod tests {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn recv_resolves_when_the_session_closes() {
-		let (handle, protocol) = Handle::new(true);
+		let (handle, protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
 		let consumer = handle.consumer();
 		drop(protocol);
 		assert_eq!(consumer.recv().await, None);

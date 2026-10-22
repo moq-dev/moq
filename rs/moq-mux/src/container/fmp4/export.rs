@@ -153,6 +153,8 @@ pub struct Fragment {
 }
 
 /// A rendition's latest catalog entry.
+// One per rendition, so the variant sizes never add up to an allocation's worth.
+#[allow(clippy::large_enum_variant)]
 enum Rendition {
 	Video(VideoConfig),
 	Audio(AudioConfig),
@@ -580,6 +582,8 @@ impl<S: Stream> Export<S> {
 								}
 							}
 						}
+						// The fragment ends at the gap the next group reads.
+						Poll::Ready(Some(Event::Cut)) => {}
 						Poll::Ready(Some(Event::GroupEnd)) => {
 							if track.buffer.is_empty() {
 								continue;

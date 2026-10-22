@@ -335,6 +335,12 @@ impl Invocation {
 					"`export {sink}` reads no media to report on; remove --echo"
 				);
 			}
+			if matches!(export.sink, ExportSink::Archive(_)) {
+				anyhow::ensure!(
+					export.catalog_format.is_none(),
+					"`export archive` records every track without reading a catalog, so it takes no --catalog-format"
+				);
+			}
 			if export.echo.is_some() {
 				if export.sink.stdout().is_none()
 					&& let Some(sink) = export.sink.ignores_selection()
@@ -1001,7 +1007,7 @@ pub enum ExportSink {
 	Srt(crate::srt::ExportArgs),
 	/// WebRTC: WHIP client pushing to a remote (`--connect`) or WHEP server serving plays (`--listen`).
 	Rtc(crate::rtc::Args),
-	/// Record the broadcast into an object store until it ends.
+	/// Record every broadcast announced under `--broadcast` into an object store.
 	Archive(crate::archive::ExportArgs),
 	/// Write the broadcast's stats snapshots to stdout as JSON lines.
 	Stats,

@@ -44,11 +44,11 @@ relays *args:
 report results logs out history_url="":
     report/build.sh {{ quote(results) }} {{ quote(logs) }} {{ quote(out) }} {{ quote(history_url) }}
 
-# CI only: leaves gh-pages checked out in SITE for the Pages deploy. See report/publish.sh.
+# CI only: leaves gh-pages checked out in SITE for the Pages deploy. See sh/gh/pages-publish.sh.
 
 # Commit a built relay report to moq's gh-pages under relays/.
 publish report site:
-    report/publish.sh {{ quote(report) }} {{ quote(site) }}
+    ../../sh/gh/pages-publish.sh relays {{ quote(report) }} {{ quote(site) }}
 
 # Token interop: install moq auth in each published flavour and cross-verify.
 # The Rust `moq auth` comes from a channel (PATH); @moq/auth comes from npm,

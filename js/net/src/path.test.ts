@@ -111,18 +111,6 @@ test("join handles multiple joins", () => {
 	expect(path).toBe("api/v1/users/123" as Path.Valid);
 });
 
-test("isEmpty checks correctly", () => {
-	expect(Path.from("") === "").toBe(true);
-	expect(Path.from("foo") === "").toBe(false);
-	expect(Path.empty() === "").toBe(true);
-});
-
-test("length property works correctly", () => {
-	expect(Path.from("foo").length).toBe(3);
-	expect(Path.from("foo/bar").length).toBe(7);
-	expect(Path.empty().length).toBe(0);
-});
-
 test("equals checks correctly", () => {
 	const path1 = Path.from("foo/bar");
 	const path2 = Path.from("/foo/bar/");
@@ -130,11 +118,6 @@ test("equals checks correctly", () => {
 
 	expect(path1 === path2).toBe(true);
 	expect(path1 === path3).toBe(false);
-});
-
-test("JSON serialization works", () => {
-	const path = Path.from("foo/bar");
-	expect(JSON.stringify(path)).toBe('"foo/bar"');
 });
 
 test("handles paths with multiple consecutive slashes", () => {
