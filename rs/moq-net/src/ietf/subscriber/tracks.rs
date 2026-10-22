@@ -720,11 +720,14 @@ where
 		}))
 	}
 
-	/// Bind the alias a held subscription's PUBLISH or SUBSCRIBE_OK chose, closing the
-	/// session if it names another track.
+	/// Bind the alias a held subscription's PUBLISH or SUBSCRIBE_OK chose, paused, closing
+	/// the session if it names another track.
 	fn bind_alias(&self, request_id: RequestId, alias: u64) -> Result<(), Error> {
 		let err = match self.register_alias(request_id, alias) {
-			Ok(()) => return Ok(()),
+			Ok(()) => {
+				self.rebind_alias(request_id, Alias::Paused(request_id));
+				return Ok(());
+			}
 			Err(err) => err,
 		};
 		if matches!(err, Error::Duplicate) {
@@ -1089,6 +1092,9 @@ where
 		if let Some(fetch_id) = fetch_id {
 			state.fetches.remove(&fetch_id);
 		}
+		if let Some(alias) = state.subscribes.get(&request_id).and_then(|track| track.alias) {
+			rebind_track_alias(&state.aliases, alias, request_id, Alias::Paused(request_id));
+		}
 	}
 
 	/// Set a held subscription's Forward State with REQUEST_UPDATE.
@@ -1183,4 +1189,311 @@ pub(super) struct Resumed {
 	pub(super) owed: u64,
 	/// How a PUBLISH_DONE ended it before the resume was answered.
 	pub(super) ended: Option<Result<(), Error>>,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::model::ProduceTest as _;
+	use crate::transport::memory;
+
+	const TIMEOUT: Duration = Duration::from_secs(1);
+
+	type PeerStream = Stream<memory::Session, Version>;
+
+	/// A subscriber listing `broadcast` over a raw peer that plays the publisher.
+	struct Harness {
+		subscriber: Subscriber<memory::Session>,
+		peer: memory::Session,
+		tracks: crate::broadcast::Tracks,
+		listening: Listening<memory::Session>,
+		version: Version,
+		_broadcast: crate::broadcast::Producer,
+		_driver: moq_clock::sim::JoinHandle<()>,
+	}
+
+	async fn settle() {
+		moq_clock::sleep(Duration::from_millis(1)).await;
+	}
+
+	fn harness(version: Version) -> Harness {
+		let (session, peer) = memory::pair(memory::Config::default());
+		let (tasks, mut task_set) = TaskSet::new();
+		let driver = moq_clock::sim::spawn(async move { kio::wait(|waiter| task_set.poll(waiter)).await });
+		let subscriber = Subscriber::new(
+			crate::time::sim(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::declared(peer::Peer::default()),
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		);
+		let broadcast = crate::broadcast::Info::default().produce();
+		let lister = Arc::new(broadcast.dynamic().lister().unwrap());
+		let tracks = broadcast.consume().tracks().unwrap();
+		let listening = subscriber.listen(PathOwned::from("bcast"), lister);
+		Harness {
+			subscriber,
+			peer,
+			tracks,
+			listening,
+			version,
+			_broadcast: broadcast,
+			_driver: driver,
+		}
+	}
+
+	async fn read(stream: &mut PeerStream) -> (u64, ietf::Body) {
+		let read = async {
+			let id = stream.reader.varint().await.unwrap();
+			(id, stream.reader.decode::<ietf::Body>().await.unwrap())
+		};
+		moq_clock::timeout(TIMEOUT, read).await.expect("the subscriber sent nothing")
+	}
+
+	async fn write<M: ietf::Message + std::fmt::Debug>(stream: &mut PeerStream, id: u64, msg: &M) {
+		stream.writer.varint(id).await.unwrap();
+		stream.writer.encode(msg).await.unwrap();
+		settle().await;
+	}
+
+	/// The next listing event as `+name`, `-name`, or `synced`; `None` while pending.
+	fn event(tracks: &mut crate::broadcast::Tracks) -> Option<String> {
+		match tracks.poll_next(&kio::Waiter::noop()) {
+			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Added { name, .. }))) => Some(format!("+{name}")),
+			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Removed { name }))) => Some(format!("-{name}")),
+			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Synced))) => Some("synced".into()),
+			Poll::Ready(other) => Some(format!("{other:?}")),
+			Poll::Pending => None,
+		}
+	}
+
+	impl Harness {
+		/// Accept the SUBSCRIBE_TRACKS and establish it.
+		async fn establish(&mut self) -> PeerStream {
+			let mut stream = moq_clock::timeout(TIMEOUT, Stream::accept(&mut self.peer, self.version))
+				.await
+				.expect("no SUBSCRIBE_TRACKS")
+				.unwrap();
+			let (id, body) = read(&mut stream).await;
+			assert_eq!(id, ietf::SubscribeTracks::ID);
+			let msg: ietf::SubscribeTracks = body.message(self.version).unwrap();
+			assert_eq!(msg.prefix.as_str(), "bcast");
+			assert!(!msg.forward, "the listing asks for every track's objects");
+			let ok = ietf::RequestOk {
+				request_id: None,
+				active: None,
+				largest: None,
+			};
+			write(&mut stream, ietf::RequestOk::ID, &ok).await;
+			assert_eq!(event(&mut self.tracks).as_deref(), Some("synced"));
+			stream
+		}
+
+		/// PUBLISH `name` paused, returning the stream once the subscriber holds it.
+		async fn publish(&mut self, name: &str, request_id: u64) -> PeerStream {
+			let (stream, id, _) = self.offer("bcast", name, request_id).await;
+			assert!(
+				[ietf::RequestOk::ID, ietf::PublishOk::ID].contains(&id),
+				"PUBLISH refused: {id:#x}"
+			);
+			stream
+		}
+
+		/// PUBLISH `name` in `namespace` paused, returning the answer.
+		async fn offer(&mut self, namespace: &str, name: &str, request_id: u64) -> (PeerStream, u64, ietf::Body) {
+			let mut stream = Stream::open(&mut self.peer, self.version).await.unwrap();
+			let publish = ietf::Publish {
+				request_id: RequestId(request_id),
+				track_namespace: Path::new(namespace),
+				track_name: name.into(),
+				track_alias: request_id,
+				largest_location: None,
+				forward: false,
+				properties: ietf::Properties::default(),
+				subscriber_priority: None,
+				group_order: None,
+				filter: None,
+			};
+			stream.writer.varint(ietf::Publish::ID).await.unwrap();
+			stream.writer.encode(&publish).await.unwrap();
+
+			let mut ours = Stream::accept(&mut self.subscriber.session.clone(), self.version)
+				.await
+				.unwrap();
+			let id = ours.reader.varint().await.unwrap();
+			assert_eq!(id, ietf::Publish::ID);
+			let body: ietf::Body = ours.reader.decode().await.unwrap();
+			let mut subscriber = self.subscriber.clone();
+			let version = self.version;
+			moq_clock::sim::spawn(async move {
+				let msg: ietf::Publish = body.message(version).unwrap();
+				let _ = subscriber.serve_publish(ours, msg).await;
+			});
+			let (id, body) = read(&mut stream).await;
+			(stream, id, body)
+		}
+	}
+
+	/// The error code a refused PUBLISH answered with.
+	fn refusal(id: u64, body: &ietf::Body, version: Version) -> u64 {
+		assert_eq!(id, ietf::RequestError::ID, "accepted");
+		body.message::<ietf::RequestError>(version).unwrap().error_code
+	}
+
+	/// A PUBLISH no listing asked for stays refused, and one for a track already held is
+	/// redundant: DUPLICATE_SUBSCRIPTION on draft-18, which allows one subscription per
+	/// track, and UNINTERESTED after.
+	#[moq_clock::test]
+	async fn an_unasked_or_redundant_publish_is_refused() {
+		for (version, duplicate) in [(Version::Draft18, 0x19), (Version::Draft19, 0x20)] {
+			let mut h = harness(version);
+			let _listing = h.establish().await;
+			let (_, id, body) = h.offer("other", "video", 1).await;
+			assert_eq!(refusal(id, &body, version), 0x3, "{version}: unsolicited");
+			let _video = h.publish("video", 3).await;
+			let (_, id, body) = h.offer("bcast", "video", 5).await;
+			assert_eq!(refusal(id, &body, version), duplicate, "{version}: redundant");
+		}
+	}
+
+	/// A PUBLISH_DONE with TRACK_ENDED removes the track; INTERNAL_ERROR, which our own
+	/// answerer sends once a track is no longer listed, does too (decided 2026-10-22).
+	#[moq_clock::test]
+	async fn a_track_ended_publish_removes_the_track() {
+		for status in [ietf::PublishDoneStatus::TrackEnded, ietf::PublishDoneStatus::InternalError] {
+			let version = Version::Draft22;
+			let mut h = harness(version);
+			let _listing = h.establish().await;
+			let mut video = h.publish("video", 1).await;
+			assert_eq!(event(&mut h.tracks).as_deref(), Some("+video"));
+
+			let done = ietf::PublishDone {
+				request_id: None,
+				status_code: status.code(version),
+				stream_count: 0,
+				reason_phrase: "".into(),
+			};
+			write(&mut video, ietf::PublishDone::ID, &done).await;
+			assert_eq!(event(&mut h.tracks).as_deref(), Some("-video"), "{status:?}");
+			assert!(h.listening.poll_failed(&kio::Waiter::noop()).is_pending());
+		}
+	}
+
+	/// Any other PUBLISH_DONE fails the listing rather than hide a track that may be live.
+	#[moq_clock::test]
+	async fn another_publish_done_fails_the_listing() {
+		let version = Version::Draft22;
+		let mut h = harness(version);
+		let _listing = h.establish().await;
+		let mut video = h.publish("video", 1).await;
+		assert_eq!(event(&mut h.tracks).as_deref(), Some("+video"));
+
+		let done = ietf::PublishDone {
+			request_id: None,
+			status_code: ietf::PublishDoneStatus::Unauthorized.code(version),
+			stream_count: 0,
+			reason_phrase: "".into(),
+		};
+		write(&mut video, ietf::PublishDone::ID, &done).await;
+		assert!(matches!(
+			h.listening.poll_failed(&kio::Waiter::noop()),
+			Poll::Ready(Error::Unauthorized)
+		));
+	}
+
+	/// A skipped track is listed through a paused SUBSCRIBE of ours, once it answers.
+	#[moq_clock::test]
+	async fn a_skipped_track_lists_once_its_paused_subscribe_answers() {
+		for version in [Version::Draft18, Version::Draft22] {
+			let mut h = harness(version);
+			let mut listing = h.establish().await;
+			let skipped = ietf::PublishSkipped {
+				suffix: Path::new(""),
+				track_name: "audio".into(),
+			};
+			write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;
+			assert_eq!(event(&mut h.tracks), None, "{version}: listed before it answered");
+
+			let mut stream = moq_clock::timeout(TIMEOUT, Stream::accept(&mut h.peer, version))
+				.await
+				.expect("no paused SUBSCRIBE")
+				.unwrap();
+			let (id, body) = read(&mut stream).await;
+			assert_eq!(id, ietf::Subscribe::ID, "{version}");
+			let msg: ietf::Subscribe = body.message(version).unwrap();
+			assert_eq!(msg.track_name, "audio", "{version}");
+			assert!(!msg.forward, "{version}: the SUBSCRIBE forwards");
+
+			let ok = ietf::SubscribeOk {
+				request_id: None,
+				track_alias: 3,
+				largest: None,
+				properties: ietf::Properties {
+					timescale: Some(crate::Timescale::MILLI),
+					..Default::default()
+				},
+			};
+			write(&mut stream, ietf::SubscribeOk::ID, &ok).await;
+			assert_eq!(event(&mut h.tracks).as_deref(), Some("+audio"), "{version}");
+		}
+	}
+
+	/// A refused paused SUBSCRIBE fails the listing.
+	#[moq_clock::test]
+	async fn a_refused_paused_subscribe_fails_the_listing() {
+		let version = Version::Draft22;
+		let mut h = harness(version);
+		let mut listing = h.establish().await;
+		let skipped = ietf::PublishSkipped {
+			suffix: Path::new(""),
+			track_name: "audio".into(),
+		};
+		write(&mut listing, ietf::PublishSkipped::ID, &skipped).await;
+		let mut stream = moq_clock::timeout(TIMEOUT, Stream::accept(&mut h.peer, version))
+			.await
+			.expect("no paused SUBSCRIBE")
+			.unwrap();
+		let _ = read(&mut stream).await;
+		let refused = ietf::RequestError {
+			request_id: None,
+			error_code: 0x3,
+			reason_phrase: "".into(),
+			retry_interval: 0,
+		};
+		write(&mut stream, ietf::RequestError::ID, &refused).await;
+		assert!(matches!(
+			h.listening.poll_failed(&kio::Waiter::noop()),
+			Poll::Ready(Error::Unsupported)
+		));
+	}
+
+	/// Dropping the listing cancels its SUBSCRIBE_TRACKS: FIN on draft-18, RESET_STREAM from
+	/// draft-19, where a FIN is no cancel. The held PUBLISHes are let go with it.
+	#[moq_clock::test]
+	async fn dropping_the_listing_cancels_it() {
+		for version in [Version::Draft18, Version::Draft19] {
+			let mut h = harness(version);
+			let mut listing = h.establish().await;
+			let mut video = h.publish("video", 1).await;
+			drop(h.listening);
+			settle().await;
+			let ended = moq_clock::timeout(TIMEOUT, listing.reader.varint_maybe())
+				.await
+				.expect("the listing stayed open");
+			match version {
+				Version::Draft18 => assert!(matches!(ended, Ok(None)), "{version}: {ended:?}"),
+				_ => assert!(ended.is_err(), "{version}: {ended:?}"),
+			}
+			let ended = moq_clock::timeout(TIMEOUT, video.reader.varint_maybe())
+				.await
+				.expect("the PUBLISH stayed held");
+			assert!(!matches!(ended, Ok(Some(_))), "{version}: {ended:?}");
+		}
+	}
 }

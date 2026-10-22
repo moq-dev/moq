@@ -56,6 +56,24 @@ enum Alias {
 	/// promptly is what bounds the exposure, since it caps the arrival window at a round
 	/// trip rather than leaving it open for the life of the session.
 	Retired,
+
+	/// A paused subscription a listing holds: the alias stays its own, but a group carrying
+	/// it is refused rather than buffered, since nothing reads the track.
+	Paused(RequestId),
+
+	/// A paused subscription resuming, whose REQUEST_UPDATE is not answered yet. Its groups
+	/// can overtake the answer, so they wait on it as they would on a SUBSCRIBE_OK.
+	Resuming(RequestId),
+}
+
+impl Alias {
+	/// The subscription holding the alias, if any.
+	fn holder(self) -> Option<RequestId> {
+		match self {
+			Self::Active(id) | Self::Paused(id) | Self::Resuming(id) => Some(id),
+			Self::Retired => None,
+		}
+	}
 }
 
 /// The aliases a remote publisher has bound on this session, plus the cancelled ones we
@@ -90,7 +108,10 @@ fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 			table.retired.retain(|&retired| retired != alias);
 			Ok(())
 		}
-		Entry::Occupied(entry) if *entry.get() == Alias::Active(request_id) => Ok(()),
+		Entry::Occupied(mut entry) if entry.get().holder() == Some(request_id) => {
+			entry.insert(Alias::Active(request_id));
+			Ok(())
+		}
 		Entry::Occupied(_) => Err(Error::Duplicate),
 		Entry::Vacant(entry) => {
 			entry.insert(Alias::Active(request_id));
@@ -117,6 +138,19 @@ pub(super) fn is_protocol_violation(err: &Error) -> bool {
 	)
 }
 
+/// Move `alias` to `to` (paused, resuming, or active again), unless another subscription
+/// than `request_id` holds it.
+fn rebind_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId, to: Alias) {
+	let Ok(mut aliases) = aliases.write() else {
+		return;
+	};
+	if let Some(held) = aliases.map.get_mut(&alias)
+		&& held.holder() == Some(request_id)
+	{
+		*held = to;
+	}
+}
+
 /// Retire an alias, so groups still in flight for it are dropped promptly rather than
 /// reported as unknown (draft-19 section 11.1).
 ///
@@ -128,7 +162,7 @@ fn retire_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId)
 	};
 	let table = &mut *aliases;
 
-	if table.map.get(&alias) != Some(&Alias::Active(request_id)) {
+	if table.map.get(&alias).and_then(|held| held.holder()) != Some(request_id) {
 		return;
 	}
 
@@ -814,8 +848,10 @@ async fn resolve_track_alias(
 			// our STOP_SENDING. Discard the group now rather than waiting out the timeout
 			// for a binding that is never coming.
 			Some(Alias::Retired) => Poll::Ready(Err(Error::Cancel)),
-			None if aliases.ended => Poll::Ready(Err(Error::Cancel)),
-			None => Poll::Pending,
+			// Nothing reads a paused subscription, so its groups are refused.
+			Some(Alias::Paused(_)) => Poll::Ready(Err(Error::Cancel)),
+			Some(Alias::Resuming(_)) | None if aliases.ended => Poll::Ready(Err(Error::Cancel)),
+			Some(Alias::Resuming(_)) | None => Poll::Pending,
 		});
 		if let Poll::Ready(result) = resolved {
 			return Poll::Ready(result.unwrap_or(Err(Error::Cancel)));
@@ -1067,11 +1103,19 @@ where
 		Ok(())
 	}
 
+	/// Move the alias the subscription with `request_id` is bound to into `to`.
+	fn rebind_alias(&self, request_id: RequestId, to: Alias) {
+		let state = self.state.lock();
+		if let Some(alias) = state.subscribes.get(&request_id).and_then(|track| track.alias) {
+			rebind_track_alias(&state.aliases, alias, request_id, to);
+		}
+	}
+
 	/// Whether the subscription already holding `alias` is for the same full track name as
 	/// `request_id`, making the repeat legal sharing rather than a collision.
 	fn alias_names_same_track(&self, state: &State, alias: u64, request_id: RequestId) -> bool {
 		let aliases = state.aliases.read();
-		let Some(Alias::Active(holder)) = aliases.map.get(&alias).copied() else {
+		let Some(holder) = aliases.map.get(&alias).and_then(|held| held.holder()) else {
 			return false;
 		};
 
@@ -2914,8 +2958,9 @@ where
 			.filter(|_| super::subscribe::has_new_group_request(self.version));
 		let written = match &held {
 			// Resume the held subscription: its group order is the one it was made with,
-			// since no update can change it.
+			// since no update can change it. Its groups wait on the answer from here.
 			Some(held) => {
+				self.rebind_alias(request_id, Alias::Resuming(request_id));
 				let forward = tracks::Forward {
 					forward: true,
 					filter: Some(join.filter),
@@ -3241,9 +3286,9 @@ where
 		}
 		self.entry_info(&key, request_id, track.info());
 		// A resumed subscription stays bound to the alias it was held with.
-		if held.is_none()
-			&& let Err(err) = self.register_alias(request_id, alias)
-		{
+		if held.is_some() {
+			self.rebind_alias(request_id, Alias::Active(request_id));
+		} else if let Err(err) = self.register_alias(request_id, alias) {
 			if matches!(err, Error::Duplicate) {
 				tracing::warn!(track_alias = %alias, "publisher reused a live track alias for another track");
 				self.session.close(

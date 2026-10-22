@@ -211,11 +211,212 @@ async fn a_reader_resumes_the_held_publish() {
 		group.finish().unwrap();
 		let got = loop {
 			match read(&mut sub).await {
-				Some((sequence, payload)) if sequence < 1 => continue,
+				Some((sequence, _)) if sequence < 1 => continue,
 				got => break got,
 			}
 		};
 		assert_eq!(got, Some((1, b"second".to_vec())), "{version}");
 		assert_eq!(subscribes(&pair), 0, "{version}");
+	}
+}
+
+/// A reader joining a listed track mid-group gets the objects already published in it: on
+/// drafts 18 and 19, whose filters deliver nothing already published, through a Joining
+/// FETCH on the held PUBLISH's Request ID, and from draft-20 through the resume's fill.
+#[moq_clock::test]
+async fn a_join_gets_the_current_groups_head() {
+	for version in DRAFTS {
+		let publisher = produce_origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let video = broadcast.create_track("video", None).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+
+		let (subscriber, pair) = connect(&publisher, version).await;
+		let remote = resolve(&subscriber, "bcast").await;
+		let mut tracks = remote.tracks().unwrap();
+		assert_eq!(next(&mut tracks).await, "synced", "{version}");
+		assert_eq!(next(&mut tracks).await, "+video", "{version}");
+
+		let mut group = video.create_group(moq_net::group::Info { sequence: 5 }).unwrap();
+		group.write_frame(None, &b"head"[..]).unwrap();
+
+		let mut sub = moq_clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(None))
+			.await
+			.expect("subscribe timeout")
+			.expect("subscribe");
+		moq_clock::timeout(TIMEOUT, support::wanted(video.demand()))
+			.await
+			.expect("never resumed")
+			.unwrap();
+		moq_clock::sleep(Duration::from_millis(10)).await;
+		group.write_frame(None, &b"tail"[..]).unwrap();
+		group.finish().unwrap();
+
+		let mut joined = moq_clock::timeout(TIMEOUT, sub.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap()
+			.expect("the joined group");
+		assert_eq!(joined.sequence, 5, "{version}");
+		let mut frames = Vec::new();
+		while let Some(frame) = moq_clock::timeout(TIMEOUT, joined.read_frame())
+			.await
+			.expect("frame timeout")
+			.unwrap()
+		{
+			frames.push(frame.payload.to_vec());
+		}
+		assert_eq!(frames, [b"head".to_vec(), b"tail".to_vec()], "{version}");
+		assert_eq!(subscribes(&pair), 0, "{version}");
+	}
+}
+
+/// A nested listing reuses the broader SUBSCRIBE_TRACKS and filters locally: the peer
+/// would refuse an overlapping prefix.
+#[moq_clock::test]
+async fn a_nested_listing_reuses_the_broader_one() {
+	for version in DRAFTS {
+		let publisher = produce_origin(1);
+		let outer = publisher.create_broadcast("a").unwrap();
+		let _x = outer.create_track("x", None).unwrap();
+		outer.announce(Default::default()).unwrap();
+		let inner = publisher.create_broadcast("a/b").unwrap();
+		let _y = inner.create_track("y", None).unwrap();
+		inner.announce(Default::default()).unwrap();
+
+		let (subscriber, _pair) = connect(&publisher, version).await;
+		let mut outer_tracks = resolve(&subscriber, "a").await.tracks().unwrap();
+		assert_eq!(next(&mut outer_tracks).await, "synced", "{version}");
+		assert_eq!(next(&mut outer_tracks).await, "+x", "{version}");
+		// The broader request holds `a/b`'s tracks already, so they list before syncing.
+		let mut inner_tracks = resolve(&subscriber, "a/b").await.tracks().unwrap();
+		assert_eq!(next(&mut inner_tracks).await, "+y", "{version}");
+		assert_eq!(next(&mut inner_tracks).await, "synced", "{version}");
+
+		let _z = inner.create_track("z", None).unwrap();
+		assert_eq!(next(&mut inner_tracks).await, "+z", "{version}");
+		assert!(quiet(&mut outer_tracks).await, "{version}: a nested track listed in its parent");
+	}
+}
+
+/// A broader listing replaces the nested requests only once the peer has closed them, so it
+/// is never refused as overlapping, and the nested listings keep what they listed.
+#[moq_clock::test]
+async fn a_broader_listing_replaces_the_nested_ones() {
+	for version in DRAFTS {
+		let publisher = produce_origin(1);
+		let mut held = Vec::new();
+		let mut broadcasts = Vec::new();
+		for path in ["a/b", "a/c", "a"] {
+			let broadcast = publisher.create_broadcast(path).unwrap();
+			held.push(broadcast.create_track("t", None).unwrap());
+			broadcast.announce(Default::default()).unwrap();
+			broadcasts.push(broadcast);
+		}
+
+		let (subscriber, _pair) = connect(&publisher, version).await;
+		let mut nested = Vec::new();
+		for path in ["a/b", "a/c"] {
+			let mut tracks = resolve(&subscriber, path).await.tracks().unwrap();
+			assert_eq!(next(&mut tracks).await, "synced", "{version}");
+			assert_eq!(next(&mut tracks).await, "+t", "{version}: {path}");
+			nested.push(tracks);
+		}
+
+		let mut outer = resolve(&subscriber, "a").await.tracks().unwrap();
+		assert_eq!(next(&mut outer).await, "synced", "{version}");
+		assert_eq!(next(&mut outer).await, "+t", "{version}");
+		for tracks in &mut nested {
+			assert!(quiet(tracks).await, "{version}: a nested listing changed");
+		}
+
+		// The broader request lists what follows in the nested broadcasts too.
+		held.push(broadcasts[0].create_track("u", None).unwrap());
+		assert_eq!(next(&mut nested[0]).await, "+u", "{version}");
+	}
+}
+
+/// A PUBLISH for a track we already SUBSCRIBEd is redundant: the SUBSCRIBE lists the track
+/// and keeps carrying its data. Draft-18 skips it instead, which lists it the same way.
+#[moq_clock::test]
+async fn a_subscribed_track_is_listed_through_its_subscribe() {
+	for version in DRAFTS {
+		let publisher = produce_origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let video = broadcast.create_track("video", None).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+
+		let (subscriber, pair) = connect(&publisher, version).await;
+		let remote = resolve(&subscriber, "bcast").await;
+		let mut sub = moq_clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(None))
+			.await
+			.expect("subscribe timeout")
+			.expect("subscribe");
+		moq_clock::timeout(TIMEOUT, support::wanted(video.demand()))
+			.await
+			.expect("never subscribed")
+			.unwrap();
+		assert_eq!(subscribes(&pair), 1, "{version}");
+
+		let mut tracks = remote.tracks().unwrap();
+		assert_eq!(next(&mut tracks).await, "synced", "{version}");
+		assert_eq!(next(&mut tracks).await, "+video", "{version}");
+
+		let mut group = video.append_group().unwrap();
+		group.write_frame(None, &b"live"[..]).unwrap();
+		group.finish().unwrap();
+		assert_eq!(read(&mut sub).await, Some((0, b"live".to_vec())), "{version}");
+		assert!(quiet(&mut tracks).await, "{version}");
+		assert_eq!(subscribes(&pair), 1, "{version}");
+	}
+}
+
+/// Each held PUBLISH counts against the session's `announces` cap, as a lite listed track
+/// does: past it, the PUBLISH is refused and the listing reset rather than left short, and
+/// the session stays.
+#[moq_clock::test]
+async fn a_listing_past_the_announces_cap_is_reset() {
+	for version in DRAFTS {
+		let publisher = produce_origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		const CAP: usize = 10;
+		let _tracks: Vec<_> = (0..CAP)
+			.map(|i| broadcast.create_track(format!("t{i}"), None).unwrap())
+			.collect();
+		broadcast.announce(Default::default()).unwrap();
+
+		let mut limits = moq_net::session::Limits::default();
+		limits.announces = CAP;
+		let subscriber = produce_origin(2);
+		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+		options.client_publish = Some(publisher.consume());
+		options.server_subscribe = Some(subscriber.clone());
+		options.server_limits = Some(limits);
+		let pair = connect_mock(options).await;
+
+		let remote = resolve(&subscriber, "bcast").await;
+		let mut listing = remote.tracks().unwrap();
+		assert_eq!(next(&mut listing).await, "synced", "{version}");
+		// The announcement holds a slot too, so not every track fits.
+		let mut added = 0;
+		let end = loop {
+			match next(&mut listing).await {
+				event if event.starts_with('+') => added += 1,
+				event => break event,
+			}
+		};
+		assert!(added < CAP, "{version}: listed {added} tracks under a cap of {CAP}");
+		assert_eq!(
+			end,
+			format!("error: {}", moq_net::Error::TooManyRequests),
+			"{version}"
+		);
+
+		assert!(
+			moq_clock::timeout(Duration::from_millis(100), pair.server.closed())
+				.await
+				.is_err(),
+			"{version}: the session closed"
+		);
 	}
 }
