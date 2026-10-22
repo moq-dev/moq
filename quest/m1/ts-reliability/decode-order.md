@@ -48,8 +48,12 @@ Decided 2026-10-22 by the maintainer, after the TS root-cause audit:
   `sps_max_num_reorder_pics`.
 - DTS shifts by slots, not by a time: the nth frame of a group decodes at the
   group's (n - `reorder`)th presentation slot, which no frame still to come
-  can precede. The group's first `reorder` frames extrapolate below the
-  keyframe's slot at the group's own slot spacing. Rejected: a delay of
+  can precede. The group's first `reorder` frames step one 90 kHz tick apart
+  up to the keyframe's slot: the clock cannot know the group's spacing until
+  frames it may not hold have arrived (`references_far_apart_keep_their_slots`),
+  and one tick needs no spacing, keeps DTS increasing within a group and
+  across groups without history, holds no frame past `reorder`, and only
+  relaxes those frames' delivery deadlines (found in review). Rejected: a delay of
   `reorder` times a frame period, since the catalog `framerate` may change in
   place and two exporters would build different clocks (found in review), and
   freezing the rate or requiring an SPS fixed rate, which both add a rule
