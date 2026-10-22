@@ -7337,6 +7337,7 @@ mod serve_tests {
 					forward: Some(forward),
 					filter: None,
 					authorization_token: None,
+					fill: None,
 				}
 				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
 				.unwrap();
@@ -7455,6 +7456,7 @@ mod serve_tests {
 			forward: None,
 			filter: None,
 			authorization_token: None,
+			fill: None,
 		}
 		.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
 		.unwrap();
@@ -7651,6 +7653,7 @@ mod serve_tests {
 					forward: Some(true),
 					filter: None,
 					authorization_token: None,
+					fill: None,
 				}
 				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
 				.unwrap();
@@ -11669,6 +11672,7 @@ mod serve_tests {
 			forward: Some(true),
 			filter: None,
 			authorization_token: Some(request_token()),
+			fill: None,
 		};
 		writer.varint(ietf::SubscribeUpdate::ID).await.unwrap();
 		writer.encode(&msg).await.unwrap();
@@ -11983,6 +11987,7 @@ mod serve_tests {
 			forward: Some(true),
 			filter: None,
 			authorization_token: Some(request_token()),
+			fill: None,
 		};
 		writer.varint(ietf::SubscribeUpdate::ID).await.unwrap();
 		writer.encode(&msg).await.unwrap();
@@ -12010,6 +12015,7 @@ mod serve_tests {
 			forward: Some(true),
 			filter: None,
 			authorization_token: None,
+			fill: None,
 		};
 		writer.varint(ietf::SubscribeUpdate::ID).await.unwrap();
 		writer.encode(&msg).await.unwrap();

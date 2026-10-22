@@ -37,6 +37,12 @@ test-group = "io-uring"
 filter = "package(moq-ffi) & test(=bench::benchmark_ffi)"
 slow-timeout = { period = "60s" }
 
+# The receive-window benchmark sweeps a grid twice, once through a bottleneck
+# whose rate bounds how fast a run can go, so it outlasts the hang budget.
+[[profile.default.overrides]]
+filter = "package(moq-tokio) & test(=receive_credit::benchmark_receive_windows)"
+slow-timeout = { period = "60s", terminate-after = 5 }
+
 [test-groups]
 io-uring = { max-threads = 4 }
 

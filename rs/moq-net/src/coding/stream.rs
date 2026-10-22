@@ -72,10 +72,9 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	{
 		let mut writer = Writer::new(send, version.clone());
 		writer.set_priority(CONTROL_SEND_ORDER.into());
-		Self {
-			writer,
-			reader: Reader::new(recv, version),
-		}
+		let mut reader = Reader::new(recv, version);
+		reader.set_priority(crate::priority::RECV_CONTROL);
+		Self { writer, reader }
 	}
 
 	pub(crate) fn with_stats(self, stats: &crate::stats::Session) -> Self {
