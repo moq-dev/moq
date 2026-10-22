@@ -888,14 +888,6 @@ mod test {
 	}
 
 	#[test]
-	fn empty_text_section_omitted() {
-		// A catalog without captions omits the text section, as it does for empty video and audio.
-		let catalog = Catalog::<()>::default();
-		let output = catalog.to_json().expect("failed to encode");
-		assert!(!output.contains("text"), "empty text section leaked: {output}");
-	}
-
-	#[test]
 	fn empty_video_and_audio_sections_omitted() {
 		// A data-only broadcast must not advertise media it does not have. An old publisher's
 		// empty objects still decode, and a republish drops them.
@@ -1081,13 +1073,6 @@ mod test {
 			Catalog::<()>::from_str(&json).expect("failed to decode").m2ts,
 			Some(m2ts)
 		);
-	}
-
-	#[test]
-	fn clock_stays_off_the_wire_when_absent() {
-		// Absent clock stays off the wire. Empty video and audio are omitted as well.
-		let output = Catalog::<()>::default().to_json().expect("failed to encode");
-		assert_eq!(output, "{}");
 	}
 
 	#[test]

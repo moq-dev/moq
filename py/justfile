@@ -95,4 +95,4 @@ package:
 docs:
     rm -rf dist/docs
     uv run --isolated --locked --only-group docs \
-        sphinx-build -b html moq-rs/docs dist/docs
+        sphinx-build -b html -W --keep-going moq-rs/docs dist/docs

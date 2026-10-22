@@ -47,11 +47,12 @@ Audit and fix the rest the same way:
 - `transcode`: its source broadcast; following means restarting the ladder
   on the new instance.
 
-Share `moq_mux::Follow::new(origin, path, None)` rather than one rule per
+Share `moq_mux::Follow::new(origin, path, None)` (decided 2026-10-20,
+maintainer: no reader hand-rolls its own follow loop) rather than one rule per
 reader: it yields `Followed::Start` for each instance serving the path and
 `Followed::End` once the one handed out stops serving. Build a
 `moq_mux::Source` from each started instance, so its siblings follow through
 `Source::follow` and its exporters pin through `Source::bind`. Each fix lands
 with a test that replaces the publisher while the reader runs.
 
-Public API: none beyond `moq_mux::Follow`. Wire: none.
+Public API: none. Wire: none.

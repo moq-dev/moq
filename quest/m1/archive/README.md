@@ -4,9 +4,9 @@
 
 `moq-archive` stores every track of every broadcast under a path prefix into
 any `object_store::ObjectStore` and serves a stored broadcast back as an
-ordinary broadcast, with no catalog dependency. `archive::Producer` finds
-broadcasts by ANNOUNCE, their tracks by TRACKS, and records each through its
-own SUBSCRIBE; `archive::Consumer` serves a stored prefix, which a
+ordinary broadcast, with no catalog dependency. A host finds
+broadcasts by ANNOUNCE and runs one `archive::Producer` per broadcast, which
+finds its tracks by TRACKS and records each through its own SUBSCRIBE; `archive::Consumer` serves a stored prefix, which a
 host publishes at a path of its choosing. Track, group, and frame structure and
 payloads survive byte for byte, so any consumer of the live broadcast, HLS
 included, works on the stored one.
