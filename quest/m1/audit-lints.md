@@ -38,13 +38,14 @@ own deprecated exports or hidden CLI spellings is a breaking change with a
 
 ### What the m0 run left in place
 
-Every workspace crate sets `lints.workspace = true`, and the root
-`[workspace.lints]` enables `clippy::allow_attributes_without_reason`, so a
+Every workspace crate but `moq-quic` sets `lints.workspace = true`, and the
+root `[workspace.lints]` enables `clippy::allow_attributes_without_reason`, so a
 suppression without a reason fails clippy. Unconditional suppressions are
 `#[expect(..., reason = "...")]`, so a stale one fails as
-`unfulfilled_lint_expectations`. A crate needing extra lints sets them as
-crate attributes (`moq-quic/src/lib.rs`), since Cargo can't extend the
-workspace table per crate. Biome reports an unused `biome-ignore` as
+`unfulfilled_lint_expectations`. A crate needing extra lints gets its own
+manifest `[lints]` tables that repeat that rule (`moq-quic/Cargo.toml`), since
+Cargo can't extend the workspace table per crate and crate attributes skip
+benches and examples. Biome reports an unused `biome-ignore` as
 `suppressions/unused`, and ruff selects `RUF100` (root and
 `demo/carla/sim`). This run only reviews what those gates can't see.
 
