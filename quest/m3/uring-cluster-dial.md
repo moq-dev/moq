@@ -20,10 +20,11 @@ Measure first with a prototype dialing a fixed address from a worker:
 CPU per Gbps and latency on the relay-to-relay fanout shape, ring against
 tokio, swept over links and subscribers.
 
-Decided 2026-10-22 (maintainer), from the io_uring audit: the ring's media
-I/O beyond QUIC stays measure-gated. Iroh and WebRTC data channels stay on
-tokio, and TCP, WebSocket, and Unix keep working on uring relays through the
-shared tokio server.
+Decided 2026-10-22 (maintainer), from the io_uring audit: cluster dials
+stay measure-gated. Iroh and WebRTC data channels stay on tokio. TCP and
+WebSocket move onto the workers through
+[Stream transports](/quest/m2/perf/stream/README.md), which its own
+decision exempts from a gate.
 
 Public API: none until the port. Wire: none.
 
@@ -33,4 +34,4 @@ Public API: none until the port. Wire: none.
 
 ## Related
 
-- [Stream sessions on the ring](/quest/m3/uring-tcp/README.md) - the TCP half, gated the same way
+- [Stream transports](/quest/m2/perf/stream/README.md) - the TCP and WebSocket half, ported in m2

@@ -70,6 +70,11 @@ the default tokio runtime is the largest measured cost, and the lock-wait
 recipe it needs has shipped. It stays in m2, since m1 defers general
 optimization.
 
+Decided 2026-10-22: the WebSocket and TCP stream transports join this line
+as the [Stream transports](/quest/m2/perf/stream/README.md) epic, ranked
+second, and the io_uring TCP line moves in from m3. io_uring pays far more
+for TCP than for UDP, so it no longer waits on fleet demand.
+
 Decided 2026-10-22 from the io_uring audit: `just bench BASE` and
 `just bench-profile` run only tokio, so an io_uring quest measures with
 `just bench-runtime` at both revisions on the same host and worker count,
@@ -78,6 +83,7 @@ and profiles through [Profile the io_uring workers](/quest/m2/perf/uring-profile
 ## Required
 
 - [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter, per-thread spikes, and an append-only log
+- [Stream transports](/quest/m2/perf/stream/README.md) - qmux drives its own WebSocket and TCP sockets in one task, measured end to end, then serves them from the io_uring workers
 - [Relay allocations](/quest/m2/perf/relay-allocs.md) - fewer allocations per delivered frame, starting with per-stream session clones
 - [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - `just bench-profile` profiles `io-uring-workers` too, so ring quests stop working around a tokio-only recipe
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
