@@ -17,7 +17,3 @@ when the patch goes.
 Decided 2026-10-22 (maintainer): fix it in the fork only; post nothing upstream.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Interop audio delivery](/quest/m1/interop-audio.md) - found it and carries the interim patch
