@@ -143,6 +143,31 @@ opened landed on another one, such as a client silently falling back to
 moq-lite. The relay names no client, so a fallback fails the round rather than
 one cell. The tails check their own connections, so a fallback fails the lane.
 
+The in-tree control lanes also run with `--tail`:
+
+- Four untimed 900-byte datagrams cross the relay in both directions between Rust
+  and each native JS runtime. The subscriber acknowledges resolved metadata before
+  sending begins, then acknowledges each packet, so this checks framing and bytes
+  rather than best-effort burst capacity. The publisher stays open until the read is
+  acknowledged, keeping a reliable track end from overtaking the datagrams.
+- A JS wire requester gets the Rust publisher's exact largest location through
+  TRACK_STATUS on every draft. From draft 18, Rust also queries the JS publisher's
+  non-default priority before subscribing, when the answer can describe a track.
+- On drafts 14 and 16, a JS publisher advertises one usable track slot beyond namespace discovery, holds the first
+  Rust subscription open through a data round trip while a second is queued, and
+  grants credit when the first is cancelled. Sending the second without waiting
+  violates the peer adapter's live-request limit.
+- On drafts 18, 20, and 22, a Rust GOAWAY names a second WebSocket endpoint serving
+  the same publisher epoch. The JS reconnect loop retains its reader across the
+  move. A separate read through the replacement proves it serves data before the
+  original transport is cut; only the replacement can deliver the final group.
+  Drafts 14 and 16 cannot carry epochs and require an application restart, so this
+  retained-reader lane does not claim to cover them.
+
+The standalone control endpoints use OS-assigned ports and production QMux,
+SETUP codecs, and request adapters. They verify their negotiated version directly.
+The datagram and query lanes through moq-relay use its usual version-log check.
+
 Some cases change shape on moq-transport:
 
 - moq-net subscribes there from the largest group, not from a requested range,

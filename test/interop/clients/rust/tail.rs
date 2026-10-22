@@ -30,22 +30,27 @@ fn write(track: &mut moq_net::track::Producer, drop: bool) -> anyhow::Result<()>
 	Ok(())
 }
 
-#[tokio::main]
+// Keep metadata acceptance and alias registration in one task turn, before the
+// subscriber acknowledges readiness to the harness.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
 	let args: Vec<_> = std::env::args().collect();
 	ensure!(
 		(4..=6).contains(&args.len()),
-		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached]]"
+		"usage: interop-tail publish|subscribe URL BROADCAST [VERSION [drop|join|cached|datagram|status]]"
 	);
 	let url: url::Url = args[2].parse()?;
 	let mode = args.get(5).map(String::as_str);
 	ensure!(
-		matches!(mode, None | Some("drop" | "join" | "cached")),
+		matches!(mode, None | Some("drop" | "join" | "cached" | "datagram" | "status")),
 		"unknown mode: {mode:?}"
 	);
 	let drop = mode == Some("drop");
-	let join = mode == Some("join");
+	let join = matches!(mode, Some("join" | "status"));
 	let cached = mode == Some("cached");
+	let datagram = mode == Some("datagram");
+	let status = mode == Some("status");
+	let mut commands = tokio::io::BufReader::new(tokio::io::stdin()).lines();
 	let mut config = moq_tokio::connect::Config::default();
 	// An empty version offers the defaults, so a mode can follow it.
 	if let Some(version) = args.get(4).filter(|version| !version.is_empty()) {
@@ -60,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
 			let broadcast = origin.create_broadcast(&args[3])?;
 			let mut track = broadcast.create_track(
 				"tail",
-				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+				moq_net::track::Info::default().with_timescale((!datagram).then_some(moq_net::Timescale::MILLI)),
 			)?;
 			broadcast.announce(Default::default())?;
 			if cached {
@@ -75,15 +80,29 @@ async fn main() -> anyhow::Result<()> {
 			if !cached {
 				let mut demand = track.demand();
 				while demand.wanted_changed().await?.is_none() {}
-				write(&mut track, drop)?;
+				if datagram {
+					// Keep the track open until the harness acknowledges: a reliable end
+					// must not overtake best-effort datagrams on their independent channel.
+					for sequence in 0..GROUPS {
+						ensure!(
+							commands.next_line().await?.as_deref() == Some(&format!("datagram {sequence}")),
+							"missing datagram command"
+						);
+						track.append_datagram(None, vec![sequence as u8; 900])?;
+					}
+				} else {
+					write(&mut track, drop)?;
+				}
 			}
 			// A finished track is not a drained transport. Keep the session alive
 			// until the harness confirms the subscriber checked every byte and EOF.
-			let mut ack = String::new();
-			tokio::io::BufReader::new(tokio::io::stdin())
-				.read_line(&mut ack)
-				.await?;
-			ensure!(ack == "clean end\n", "reader did not acknowledge a clean end");
+			ensure!(
+				commands.next_line().await?.as_deref() == Some("clean end"),
+				"reader did not acknowledge a clean end"
+			);
+			if datagram {
+				track.finish()?;
+			}
 			broadcast.close();
 			session.close().await?;
 			eprintln!("tail acknowledged");
@@ -97,10 +116,40 @@ async fn main() -> anyhow::Result<()> {
 				.established()
 				.await?;
 			let broadcast = consumer.routed_broadcast(&args[3]).await?;
+			let remote = broadcast.track("tail")?;
+			if status {
+				// Query before subscribing so draft-18+ must use TRACK_STATUS,
+				// rather than learn metadata from SUBSCRIBE_OK as a side effect.
+				let info = remote.query().await?;
+				ensure!(info.timescale.is_none(), "IETF track should be untimed");
+				ensure!(info.priority == 2, "TRACK_STATUS lost publisher priority");
+				eprintln!("track status answered");
+				session.close().await?;
+				client.close().await;
+				return Ok(());
+			}
 			let options = moq_net::track::Subscription::default()
 				.with_max_delay(Duration::from_secs(if drop { 60 } else { 5 }))
 				.with_groups(0..);
-			let mut track = broadcast.track("tail")?.subscribe(Some(options)).await?;
+			let mut track = remote.subscribe(Some(options)).await?;
+			if datagram {
+				println!("datagram ready");
+				for sequence in 0..GROUPS {
+					let frame = track.recv_datagram().await?.context("missing datagram")?;
+					ensure!(frame.sequence == sequence, "wrong datagram sequence");
+					ensure!(frame.payload.len() == 900, "truncated datagram");
+					ensure!(
+						frame.payload.iter().all(|byte| *byte == sequence as u8),
+						"corrupt datagram"
+					);
+					ensure!(frame.timestamp.is_none(), "unexpected IETF timestamp");
+					println!("datagram {sequence}");
+				}
+				eprintln!("datagram clean groups=0,1,2,3 bytes=3600");
+				session.close().await?;
+				client.close().await;
+				return Ok(());
+			}
 			let mut seen = Vec::new();
 			while let Some(mut group) = track.recv_group().await? {
 				let sequence = group.sequence;

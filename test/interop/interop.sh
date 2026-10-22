@@ -370,6 +370,18 @@ plan_pass() {
         needs "$runtime" || continue
         record "not run" case=tail publisher=rust subscriber="$runtime"
         record "not run" case=tail publisher="$runtime" subscriber=rust
+        if [[ "$VERSION" == moq-transport-* ]]; then
+            record "not run" case=datagram publisher=rust subscriber="$runtime"
+            record "not run" case=datagram publisher="$runtime" subscriber=rust
+            record "not run" case="wire track status" publisher=rust subscriber="$runtime"
+            case "$VERSION" in
+                moq-transport-14 | moq-transport-16) record "not run" case="request credit" publisher="$runtime" subscriber=rust ;;
+                *)
+                    record "not run" case="track status" publisher="$runtime" subscriber=rust
+                    record "not run" case=goaway publisher=rust subscriber="$runtime"
+                    ;;
+            esac
+        fi
     done
     [[ "$VERSION" == auto ]] && needs js-native-node || return 0
     for version in "${DROP_VERSIONS[@]}"; do
@@ -447,7 +459,7 @@ build_relay_cli() {
         exit 1
     }
     if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 ]]; then
-        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail)
+        (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli --example interop-tail --example interop-control --example interop-goaway)
     fi
     [[ -n "$RELAY" ]] || RELAY="$TARGET_BASE/$PROFILE/moq-relay"
     # The `moq-cli` crate ships its binary as `moq` (a `[[bin]]` override).
@@ -1235,9 +1247,17 @@ run_tail_publisher() {
     run_tail_client "$@" <"$fifo" 9>&-
 }
 
+# shellcheck disable=SC2329  # invoked indirectly via harness_spawn
+run_tail_subscriber() {
+    local fifo="$1"
+    shift
+    run_tail_client "$@" >"$fifo" 8>&-
+}
+
 run_tail_pair() {
-    local pub="$1" sub="$2" name="tail-$1-$2" pid subscriber_pid started=$SECONDS from version read
-    local fifo="$LOGS/tail-ack" broadcast="tail-$1-$2-$$-$RANDOM" mode="" want='tail clean end=4 groups=0,1,2,3 bytes=1048576'
+    local pub="$1" sub="$2" kind="${3:-tail}" pid subscriber_pid started=$SECONDS from version read
+    local name="${kind// /-}-$1-$2"
+    local fifo="$LOGS/tail-ack" broadcast="$name-$$-$RANDOM" mode="" want='tail clean end=4 groups=0,1,2,3 bytes=1048576'
     version=$(pinned_version)
     # moq-net subscribes over moq-transport from the largest group, which can be past group 0 by
     # the time the relay answers, so the reader takes any contiguous run through the last group.
@@ -1245,7 +1265,14 @@ run_tail_pair() {
         mode="join"
         want='tail join clean end=4 groups=[0-3](,[0-3])*'
     fi
-    local cell=(case=tail publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
+    if [[ "$kind" == datagram ]]; then
+        mode=datagram
+        want='datagram clean groups=0,1,2,3 bytes=3600'
+    elif [[ "$kind" == "track status" ]]; then
+        mode=status
+        want="track status answered"
+    fi
+    local cell=(case="$kind" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
     if is_broken "$pub" || is_broken "$sub"; then
         echo "  FAIL  tail $pub -> $sub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
@@ -1259,18 +1286,36 @@ run_tail_pair() {
     # Each side's token grants this broadcast alone, like a media round's.
     harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" "$mode"
     pid="$HARNESS_PID"
-    harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
-    subscriber_pid="$HARNESS_PID"
+    if [[ "$mode" == datagram ]]; then
+        # Subscription metadata, on the clients' serialized task runtimes, confirms the alias is bound. An acknowledgement
+        # per datagram avoids testing a best-effort receive buffer's burst capacity.
+        mkfifo "$LOGS/datagram-ack"
+        exec 8<>"$LOGS/datagram-ack"
+        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_subscriber "$LOGS/datagram-ack" "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
+        subscriber_pid="$HARNESS_PID"
+        local ack sequence
+        if read -r -t "$TIMEOUT" ack <&8 && [[ "$ack" == "datagram ready" ]]; then
+            for sequence in 0 1 2 3; do
+                printf 'datagram %s\n' "$sequence" >&9
+                read -r -t "$TIMEOUT" ack <&8 && [[ "$ack" == "datagram $sequence" ]] || break
+            done
+        fi
+        exec 8>&-
+        rm "$LOGS/datagram-ack"
+    else
+        harness_spawn "$name-sub" "$LOGS/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" "$version" "$mode"
+        subscriber_pid="$HARNESS_PID"
+    fi
     harness_wait "$subscriber_pid" || true
     # Like run_native, a verified data result survives the NAPI addon's exit crash.
-    if read=$(grep -xE "$want" "$LOGS/$name-sub.log"); then
+    if read=$(grep -xE "$want" "$LOGS/$name-sub.log") && { [[ "$mode" != status ]] || grep -qx "track status answered" "$LOGS/$name-sub.log"; }; then
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
         if [[ -n "$version" ]] && ! check_versions "tail $pub -> $sub" "$from" "$version"; then
             record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="a relay connection negotiated another version"
             overall=1
         elif grep -qx 'tail acknowledged' "$LOGS/$name-pub.log"; then
-            echo "  PASS  tail $pub -> $sub (${read#tail })"
+            echo "  PASS  $kind $pub -> $sub (${read#tail })"
             record pass "${cell[@]}" seconds=$((SECONDS - started))
         else
             echo "  FAIL  tail $pub -> $sub (publisher did not acknowledge)"
@@ -1458,6 +1503,31 @@ run_matrix() {
     fi
 }
 
+# Standalone control peers use the same pinned draft, with OS-assigned endpoint ports.
+run_control_case() {
+    local runtime="$1" kind="$2" version name="$2-$1" started=$SECONDS
+    local cell=(case="$kind" publisher=rust subscriber="$runtime" log="$LOGS/$name.log")
+    version=$(pinned_version)
+    local command=("$TARGET_BASE/$PROFILE/examples/interop-control" "$kind" "$version" "${runtime##*-}")
+    case "$kind" in
+        status) cell=(case="wire track status" publisher=rust subscriber="$runtime" log="$LOGS/$name.log") ;;
+        credit) cell=(case="request credit" publisher="$runtime" subscriber=rust log="$LOGS/$name.log") ;;
+        goaway) command=("$TARGET_BASE/$PROFILE/examples/interop-goaway" "$version" "${runtime##*-}") ;;
+    esac
+    if is_broken "$runtime"; then
+        record fail "${cell[@]}" detail="client unavailable"
+        overall=1
+    elif timeout -k 3 "$TIMEOUT" "${command[@]}" >"$LOGS/$name.log" 2>&1; then
+        echo "  PASS  $kind rust <-> $runtime"
+        record pass "${cell[@]}" seconds=$((SECONDS - started))
+    else
+        echo "  FAIL  $kind rust <-> $runtime"
+        record fail "${cell[@]}" seconds=$((SECONDS - started)) detail="control peer failed"
+        cat "$LOGS/$name.log"
+        overall=1
+    fi
+}
+
 # This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
 run_tails() {
     local runtime
@@ -1469,6 +1539,18 @@ run_tails() {
         if needs "$runtime"; then
             run_tail_pair rust "$runtime"
             run_tail_pair "$runtime" rust
+            if [[ "$VERSION" == moq-transport-* ]]; then
+                run_tail_pair rust "$runtime" datagram
+                run_tail_pair "$runtime" rust datagram
+                run_control_case "$runtime" status
+                case "$VERSION" in
+                    moq-transport-14 | moq-transport-16) run_control_case "$runtime" credit ;;
+                    *)
+                        run_tail_pair "$runtime" rust "track status"
+                        run_control_case "$runtime" goaway
+                        ;;
+                esac
+            fi
         fi
     done
     # The drop lanes pin their own lite versions.
