@@ -67,6 +67,14 @@ Later, at lower priority: watch and HLS export consumer coverage for in-band
 resolution changes, rendition switches, reconnects, and late joiners against
 the contract.
 
+Decided 2026-10-20 (maintainer): the moq-c half lands on the
+[generated C package](/quest/m1/c/README.md), not the frozen hand-written
+ABI, so C users break once.
+
+## Required
+
+- [Generated C bindings](/quest/m1/c/README.md) - the moq-c config re-declaration fix lands on the generated package, not the frozen hand-written ABI
+
 ## Related
 
 - [Broadcast archives](/quest/m1/archive/README.md) - an archived catalog describes every stored group by the identity contract

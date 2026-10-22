@@ -1,9 +1,9 @@
-# [S] NVIDIA tests run on real hardware
+# [M] NVIDIA tests gate the merge queue on real hardware
 
 ## Goal
 
-The NVDEC, NVENC, and CUDA tests run nightly on real NVIDIA hardware instead
-of passing without a GPU on hosted runners, and a local
+The NVDEC, NVENC, and CUDA tests gate the merge queue on real NVIDIA
+hardware instead of passing without a GPU on hosted runners, and a local
 `just rs nvidia` runs them against the host driver instead of silently
 skipping inside the Nix shell.
 
@@ -43,15 +43,20 @@ skipping inside the Nix shell.
   `vulkan_cuda_auto_external_encode` must pass its per-plane pixel checks
   against the CPU reference for both renditions, RGBA and BGRA, through
   NVENC and CUDA external-image import (the verification #4975 deferred here).
-- Nightly: a job in `.github/workflows/nightly.yml` runs `nix develop
-  --command just rs nvidia`, a recipe and not a script path, like every other
-  workflow step: only `schedule` and `workflow_dispatch`, gated to
-  `refs/heads/main`, never `pull_request`, with read-only `permissions`.
-- Open: where the GPU tests run. The self-hosted host this quest planned on
-  was dropped on 2026-10-13 with self-hosted CI. Recommendation: a
-  GitHub-hosted Linux GPU larger runner for the nightly job, measured for
-  cost, since larger runners bill even on public repositories; local
-  `just rs nvidia` runs cover development until then.
+- Merge queue: a `merge_group` job in `.github/workflows/check.yml` (or
+  `video.yml`) runs `nix develop --command just rs nvidia`, a recipe and not
+  a script path, like every other workflow step, on a self-hosted runner VM
+  labeled for the NVIDIA host. Scope it like the other queue jobs: run when
+  the queue's diff touches moq-video, moq-nvenc, or what they depend on.
+  Read-only `permissions`, never `pull_request`.
+- Decided 2026-10-20 (maintainer): GPU tests gate in the merge queue on the
+  NVIDIA card, because they gate correctness, not trends. The runner is a
+  persistent VM from the `github-runner-vm` module (#6040,
+  `nix/runner/README.md`). That module has no GPU passthrough today: add
+  VFIO passthrough of the NVIDIA card to the guest, with the driver in the
+  guest, and keep the runner registered only to this repository with
+  approval required for every external contributor's workflow, as the
+  README requires.
 
 Public API: none. Wire: none.
 

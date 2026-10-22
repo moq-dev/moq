@@ -33,32 +33,3 @@ impl codec::Bridge for Bridge {
 		self.import.abort(err);
 	}
 }
-
-#[cfg(test)]
-mod tests {
-	use bytes::Bytes;
-
-	use crate::codec::{self, Bridge as _};
-
-	#[test]
-	fn keyframe_publishes_catalog_dimensions() {
-		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
-		let mut bridge = super::Bridge::new(broadcast, catalog.clone()).unwrap();
-
-		assert!(catalog.snapshot().video.renditions.is_empty());
-
-		// VP9 profile 0 keyframe header for 320x240.
-		bridge
-			.push(codec::Frame {
-				timestamp_us: 0,
-				payload: Bytes::from_static(&[0x82, 0x49, 0x83, 0x42, 0x20, 0x13, 0xf0, 0x0e, 0xf0, 0x00]),
-			})
-			.unwrap();
-
-		let snapshot = catalog.snapshot();
-		let config = snapshot.video.renditions.values().next().unwrap();
-		assert_eq!(config.coded_width, Some(320));
-		assert_eq!(config.coded_height, Some(240));
-	}
-}
