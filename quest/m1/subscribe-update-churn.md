@@ -21,10 +21,12 @@ after a five-second warmup:
 | Chromium fake camera | video | 6 | 0 |
 
 To check, publish a physical camera and microphone from `moq.dev/publish`, then
-watch that broadcast from another tab or device. In the publisher tab's
-DevTools console, enable the Verbose level and filter on `subscribe update:`;
-`js/net`'s Lite publisher logs one line per received update with its track.
-After the first few seconds, count lines per track for a minute.
+watch that broadcast from another tab or device. In the viewer tab's DevTools
+console, enable the Verbose level and filter on `subscribe update: id=`;
+`js/net`'s Lite subscriber logs one line per written update with its track.
+The publisher's own `subscribe update:` line can undercount, since it
+coalesces updates decoded while its serving loop is busy. After the first few
+seconds, count lines per track for a minute.
 
 - Quiet (no steady stream of lines): delete this quest and its
   [m1](/quest/m1/README.md) entry.
