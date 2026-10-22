@@ -553,11 +553,16 @@ mod test {
 
 	#[test]
 	fn consumer_resumes_at_a_checkpoint_after_losing_a_group() {
+		// Each loss as this side raises it, then as a publisher's reset carries it.
 		for err in [
 			moq_net::Error::Old,
 			moq_net::Error::Lagged,
 			moq_net::Error::Evicted,
 			moq_net::Error::GroupTooLarge,
+			moq_net::Error::Stream(moq_net::StreamError::Old),
+			moq_net::Error::Stream(moq_net::StreamError::TooFarBehind),
+			moq_net::Error::Stream(moq_net::StreamError::Evicted),
+			moq_net::Error::Stream(moq_net::StreamError::GroupTooLarge),
 		] {
 			let track = moq_net::broadcast::Info::new()
 				.produce()

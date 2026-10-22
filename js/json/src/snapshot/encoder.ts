@@ -9,10 +9,6 @@ import { deepEqual, diff } from "../diff.ts";
 // well below the per-group frame cap so a late joiner can always read the snapshot at frame 0.
 const MAX_DELTA_FRAMES = 256;
 
-// Bytes a group may hold before it rolls when {@link Config.maxGroupBytes} is left unset: moq-net's
-// per-group cache limit. Not re-exported from the package entrypoint; a test pins it to that limit.
-export const DEFAULT_MAX_GROUP_BYTES = Group.MAX_GROUP_CACHE_BYTES;
-
 /** Options shared by an {@link Encoder} and the {@link Producer} that wraps one. */
 export interface Config<T> {
 	// Encode changes as deltas (merge patches) against the group's snapshot. `false` encodes every
@@ -140,7 +136,7 @@ export class Encoder<T> {
 	constructor(config: Config<T> = {}) {
 		this.#config = config;
 		this.#compress = isDeflate(config.compression);
-		this.#maxGroupBytes = config.maxGroupBytes ?? DEFAULT_MAX_GROUP_BYTES;
+		this.#maxGroupBytes = config.maxGroupBytes ?? Group.MAX_GROUP_CACHE_BYTES;
 	}
 
 	/**

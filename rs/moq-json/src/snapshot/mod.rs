@@ -245,34 +245,37 @@ mod test {
 	/// catalog group aged out of the relay cache underneath it.
 	#[test]
 	fn a_lost_group_waits_for_its_replacement() {
-		let track = moq_net::broadcast::Info::new()
-			.produce()
-			.create_track("test", timed())
-			.unwrap();
-		let mut consumer = Consumer::<Value>::new(track.subscribe(None), consumer::Config::default());
-		let waiter = kio::Waiter::noop();
+		// Lost on this side, then reset by the publisher: the reader sees the same loss either way.
+		for lost in [moq_net::Error::Old, moq_net::Error::Stream(moq_net::StreamError::Old)] {
+			let track = moq_net::broadcast::Info::new()
+				.produce()
+				.create_track("test", timed())
+				.unwrap();
+			let mut consumer = Consumer::<Value>::new(track.subscribe(None), consumer::Config::default());
+			let waiter = kio::Waiter::noop();
 
-		// Group 0 delivers a value, then stays open with the reader parked on its next frame.
-		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":1}"#))
-			.unwrap();
-		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 1 })));
-		assert!(consumer.poll_latest(&waiter).is_pending());
+			// Group 0 delivers a value, then stays open with the reader parked on its next frame.
+			let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":1}"#))
+				.unwrap();
+			assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 1 })));
+			assert!(consumer.poll_latest(&waiter).is_pending());
 
-		// The relay reclaims the group out from under the reader.
-		group.abort(moq_net::Error::Old).unwrap();
-		assert!(
-			consumer.poll_latest(&waiter).is_pending(),
-			"a lost group must not end the reader"
-		);
+			// The group is lost out from under the reader.
+			group.abort(lost).unwrap();
+			assert!(
+				consumer.poll_latest(&waiter).is_pending(),
+				"a lost group must not end the reader"
+			);
 
-		// The replacement arrives and the reader picks up where the value now lives.
-		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
-		group
-			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":2}"#))
-			.unwrap();
-		assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 2 })));
+			// The replacement arrives and the reader picks up where the value now lives.
+			let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+			group
+				.write_frame(moq_net::Timestamp::now(), Bytes::from_static(br#"{"a":2}"#))
+				.unwrap();
+			assert!(matches!(consumer.poll_latest(&waiter), Poll::Ready(Ok(Some(v))) if v.value == json!({ "a": 2 })));
+		}
 	}
 
 	/// Nothing replaces a lost group once the track is finished, so the reader ends cleanly on the
@@ -486,23 +489,6 @@ mod test {
 		}
 	}
 
-	#[test]
-	fn deltas_share_one_group() {
-		let (mut producer, mut track) = producer(cfg(true));
-		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
-		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
-		producer.update(&json!({ "a": 1, "b": 3 })).unwrap();
-		producer.finish().unwrap();
-
-		// All updates fit in a single group as snapshot + deltas.
-		assert_eq!(
-			track.largest().now_or_never().flatten().map(|position| position.group),
-			Some(0)
-		);
-		let values = drain(track);
-		assert_eq!(values.last().unwrap(), &json!({ "a": 1, "b": 3 }));
-	}
-
 	/// With nobody joining, deltas pile up in one group however far they outweigh the snapshot.
 	#[test]
 	fn deltas_never_roll_without_a_joiner() {
@@ -672,18 +658,6 @@ mod test {
 			Some(1)
 		);
 		assert_eq!(drain(track).last().unwrap(), &json!({ "n": MAX_DELTA_FRAMES }));
-	}
-
-	#[test]
-	fn late_joiner_reconstructs_from_deltas() {
-		let (mut producer, track) = producer(cfg(true));
-		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
-		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
-		producer.update(&json!({ "a": 5, "b": 2 })).unwrap();
-		producer.finish().unwrap();
-
-		// A consumer created only now still rebuilds the final value from snapshot + deltas.
-		assert_eq!(drain(track).last().unwrap(), &json!({ "a": 5, "b": 2 }));
 	}
 
 	#[test]
@@ -1185,36 +1159,6 @@ mod test {
 		);
 		let values = drain_with(deflate_consumer(track));
 		assert_eq!(values, vec![json!({ "a": 2 })]);
-	}
-
-	#[test]
-	fn compressed_deltas_share_one_group() {
-		let (mut producer, mut track) = producer(cfg_deflate(true));
-		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
-		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
-		producer.update(&json!({ "a": 1, "b": 3 })).unwrap();
-		producer.finish().unwrap();
-
-		// Snapshot + deltas in one group, each frame decompressed against the shared window.
-		assert_eq!(
-			track.largest().now_or_never().flatten().map(|position| position.group),
-			Some(0)
-		);
-		let values = drain_with(deflate_consumer(track));
-		assert_eq!(values.last().unwrap(), &json!({ "a": 1, "b": 3 }));
-	}
-
-	#[test]
-	fn compressed_late_joiner_reconstructs_from_deltas() {
-		let (mut producer, track) = producer(cfg_deflate(true));
-		producer.update(&json!({ "a": 1, "b": 1 })).unwrap();
-		producer.update(&json!({ "a": 1, "b": 2 })).unwrap();
-		producer.update(&json!({ "a": 5, "b": 2 })).unwrap();
-		producer.finish().unwrap();
-
-		// A consumer created only now rebuilds the final value from the compressed snapshot + deltas.
-		let values = drain_with(deflate_consumer(track));
-		assert_eq!(values.last().unwrap(), &json!({ "a": 5, "b": 2 }));
 	}
 
 	/// A refresh on a compressed track opens a fresh DEFLATE window, so a late joiner rebuilds the

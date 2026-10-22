@@ -3,7 +3,7 @@ import { Decoder } from "../src/snapshot/decoder.ts";
 import { Encoder } from "../src/snapshot/encoder.ts";
 
 const updates = 256;
-console.log("keys\tchanged\tcompression\tms/update");
+console.log("keys,changed,compression,ms_per_update");
 for (const keys of [1, 10, 100, 1000]) {
 	for (const changed of new Set([1, Math.min(10, keys)])) {
 		for (const compression of ["none", "deflate"] as const) {
@@ -28,7 +28,7 @@ for (const keys of [1, 10, 100, 1000]) {
 				samples.push((performance.now() - start) / updates);
 			}
 			samples.sort((a, b) => a - b);
-			console.log(`${keys}\t${changed}\t${compression}\t${samples[1]?.toFixed(6)}`);
+			console.log(`${keys},${changed},${compression},${samples[1]?.toFixed(6)}`);
 		}
 	}
 }

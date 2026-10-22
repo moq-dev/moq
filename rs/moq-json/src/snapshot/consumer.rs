@@ -124,12 +124,17 @@ impl<T: DeserializeOwned> Consumer<T> {
 					advanced = Some(frame.timestamp);
 				}
 				Poll::Ready(Ok(None)) => self.group = None,
-				Poll::Ready(Err(
-					err @ (moq_net::Error::Old
-					| moq_net::Error::Evicted
-					| moq_net::Error::Lagged
-					| moq_net::Error::GroupTooLarge),
-				)) => {
+				// Judged by stream code, so a group the publisher reset as old is the same loss as
+				// one this side dropped.
+				Poll::Ready(Err(err))
+					if matches!(
+						moq_net::StreamError::from(&err),
+						moq_net::StreamError::Old
+							| moq_net::StreamError::Evicted
+							| moq_net::StreamError::TooFarBehind
+							| moq_net::StreamError::GroupTooLarge
+					) =>
+				{
 					// A later group starts a fresh snapshot and compression window.
 					tracing::warn!(track = self.track.name(), group = group.sequence, error = ?err,
 						"snapshot group lost; waiting for a newer one");

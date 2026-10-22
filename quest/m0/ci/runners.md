@@ -27,7 +27,17 @@ against the new baseline.
   runners plus the R2 caches.
 - Measure queue wall time per entry and cost per merged PR on each candidate.
 
+Measured by the CI pipeline audit (2026-10-21): since 2026-10-20 the queue
+runs on the persistent `nix/runner` VM (`MOQ_QUEUE_RUNNER`, 8 cores) with
+mbx's local store, so `target/` persists and a checkout rewrites only the
+changed files. A `moq-quic` change recompiled only its dependents. Over 32
+one-pass entries, the job took a median 5.5 minutes, p75 8.5, p90 11.9, and
+at most 24.2 (every module selected), against 21 minutes for queue run
+[39471110155](https://github.com/moq-dev/moq/actions/runs/39471110155) on a
+hosted runner before the one pass. Queue waits fell to seconds once Check and
+Test merged into one job. The job summary now lists seconds per module, and
+the Rust test builds upload Cargo's `--timings` reports.
+
 ## Required
 
-- [CI pipeline audit](/quest/m0/ci/audit.md) - removes the waste first
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - the hosted baseline's cache

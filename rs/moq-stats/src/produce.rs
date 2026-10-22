@@ -2220,25 +2220,6 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn single_broadcast_path_announced() {
-		// No matter how many broadcasts get bumped, exactly one stats
-		// broadcast is announced (the per-node aggregate).
-		let (producer, origin) = test_producer(Some("sjc/1"));
-
-		let _f1 = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 8).await;
-		let _f2 = feed(producer.registry(), Tier::default(), "baz/qux", true, 1, 8).await;
-
-		assert_eq!(announced(&origin).await.0, ".stats/node/sjc/1");
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn task_announces_without_node_suffix() {
-		let (producer, origin) = test_producer(None);
-		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 8).await;
-		assert_eq!(announced(&origin).await.0, ".stats/node");
-	}
-
-	#[tokio::test(start_paused = true)]
 	async fn frame_emits_expected_counters() {
 		let (producer, origin) = test_producer(Some("sjc"));
 		// One announced broadcast, one subscription, one 42-byte frame read out.

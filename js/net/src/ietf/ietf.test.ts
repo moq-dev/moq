@@ -1544,10 +1544,12 @@ test("Parameters v18 wire is identical to v17 (no count prefix, delta encoded ke
 	expect(Array.from(await v18)).toEqual(Array.from(await v17));
 });
 
-test("SubscribeNamespace: message IDs", () => {
-	// 0x11 through draft-17 (legacy), renumbered to 0x50 in draft-18 (#1542).
-	expect(SubscribeNamespace.SubscribeNamespaceLegacy.id).toBe(0x11);
-	expect(SubscribeNamespace.SubscribeNamespace.id).toBe(0x50);
+test("SubscribeNamespace: message IDs match the draft registries", () => {
+	// 0x11 through draft-17, renumbered to 0x50 in draft-18.
+	expect({
+		legacy: SubscribeNamespace.SubscribeNamespaceLegacy.id,
+		current: SubscribeNamespace.SubscribeNamespace.id,
+	}).toEqual({ legacy: 0x11, current: 0x50 });
 });
 
 test("SubscribeNamespace: decode rejects the wrong draft version", async () => {
