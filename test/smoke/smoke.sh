@@ -851,7 +851,8 @@ failure_reason() {
     # error-looking line as the detail. The first error alone is often the teardown
     # after the timeout, which hides how far the cell got. Stages come from the
     # lines the Rust CLI, @moq/net, and the browser page already log: connected,
-    # SUBSCRIBE sent, SUBSCRIBE_OK, and a group dropped for starting mid-group.
+    # SUBSCRIBE sent, SUBSCRIBE_OK (not logged by the Rust CLI at INFO), and a group
+    # dropped for starting mid-group.
     [[ -f "$1" ]] || return 0
     local log stage track detail
     log=$(sed 's/\x1b\[[0-9;]*m//g' "$1")
@@ -863,10 +864,15 @@ failure_reason() {
     elif grep -qE "abandoned before it was accepted|waiting for SUBSCRIBE_OK" <<<"$log" ||
         { grep -q 'subscribe start:' <<<"$log" && ! grep -qF "track=$track" <<<"$(grep 'subscribe ok:' <<<"$log")"; }; then
         stage="no SUBSCRIBE_OK for $track"
-    elif grep -q 'dropping a group with no head' <<<"$log"; then
-        stage="SUBSCRIBE_OK for $track, only headless groups"
     else
-        stage="SUBSCRIBE_OK for $track, no objects"
+        # The Rust CLI logs SUBSCRIBE_OK only at DEBUG, so at INFO its acceptance is unknown.
+        local ok="SUBSCRIBE_OK for $track"
+        grep -qE 'subscribe start:|received subscribe ok' <<<"$log" || ok="SUBSCRIBE for $track, no SUBSCRIBE_OK logged"
+        if grep -q 'dropping a group with no head' <<<"$log"; then
+            stage="$ok, only headless groups"
+        else
+            stage="$ok, no objects"
+        fi
     fi
     # Teardown noise once the timeout kills the client says nothing about the cause.
     detail=$(grep -vE 'failed to read capsule|unknown capsule' <<<"$log" |
