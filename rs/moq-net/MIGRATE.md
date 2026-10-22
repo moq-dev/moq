@@ -125,7 +125,9 @@ let rate = bandwidth.as_ref().and_then(|b| b.peek());
 ### A timed track refuses a group that rewinds (#5803)
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, fails with `TimestampMismatch`; `@moq/net` throws it the same way.
-Received groups are accepted as is, since their timestamps may be send times.
+A group received over moq-lite-07 is checked the same way.
+A track received over moq-lite-05/06 arrives untimed, since its timestamps may be send times: read times from the payload, such as the hang container's, instead of `frame::Frame::timestamp`.
+One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
 A publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that resets decode times, publishes a new broadcast instead.
 
 ### `broadcast::Producer::finish` is back, and lingers (#5795)

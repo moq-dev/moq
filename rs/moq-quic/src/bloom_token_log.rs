@@ -253,6 +253,7 @@ const DEFAULT_MAX_BYTES: usize = 10 << 20;
 const DEFAULT_EXPECTED_HITS: u64 = 1_000_000;
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod test {
     use super::*;
     use rand::prelude::*;

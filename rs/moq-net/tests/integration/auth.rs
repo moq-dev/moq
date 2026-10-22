@@ -70,6 +70,7 @@ cases!(
 	a_live_subscription_survives_union_renewal,
 	a_grant_update_too_large_for_one_message_is_unsupported,
 	nothing_outside_the_grant_reaches_the_peer,
+	a_broadcast_received_from_the_peer_is_not_ours_to_check,
 );
 
 /// Run each case on moq-transport alone, whose namespace prefixes cannot carry every
@@ -1425,6 +1426,42 @@ async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 			pair.server.closed().await,
 			Error::Session(SessionError::Unauthorized)
 		));
+	})
+	.await
+	.expect("timed out");
+}
+
+/// One origin both publishing and consuming holds what the peer sent us, which is not a
+/// publication of ours: only what we publish is judged against the grant.
+async fn a_broadcast_received_from_the_peer_is_not_ours_to_check(version: &'static str) {
+	within(async {
+		let local = produce_origin(2);
+		let relay = produce_origin(1);
+		let remote = relay.create_broadcast("remote/x").unwrap();
+		remote.announce(Default::default()).unwrap();
+
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(local.clone()),
+			client_subscribe: Some(local.clone()),
+			server_publish: Some(relay.clone()),
+			server_subscribe: Some(relay.scope("", &patterns(&["local"])).unwrap()),
+			..Default::default()
+		})
+		.await;
+		assert_eq!(granted(&pair.client).await, grant(&["local"], &[""]));
+
+		wait_announced(&local.consume(), "remote/x", true).await;
+
+		// The first broadcast refused is the one we published, not the one we received.
+		let bad = local.create_broadcast("bad/x").unwrap();
+		bad.announce(Default::default()).unwrap();
+		assert!(matches!(
+			pair.server.closed().await,
+			Error::Session(SessionError::Unauthorized)
+		));
+		let (_, reason) = pair.client_transport.close_reason().expect("closed");
+		assert_eq!(reason, "unauthorized: bad/x");
 	})
 	.await
 	.expect("timed out");
