@@ -783,7 +783,7 @@ function decodeWebTransport(buffer: Uint8Array): Any {
 		return {
 			type: "stream",
 			id,
-			data: buffer,
+			data: own(buffer),
 			fin: frameType === 0x09,
 		};
 	}
