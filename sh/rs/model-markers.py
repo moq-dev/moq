@@ -55,14 +55,16 @@ def marker(path, index, line, private):
 	return True
 
 
-STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+# Strings and comments, whose delimiters don't nest with the attribute's.
+OPAQUE = re.compile(r'"(?:[^"\\]|\\.)*"|//[^\n]*|/\*.*?\*/', re.S)
 
 
 def wrapped(lines, end):
 	"""The opening line of the attribute rustfmt wrapped to close on `lines[end]`, or None.
 
 	The attribute's own bracket must close exactly at the end, so code that merely ends
-	in `)]`, like `)];`, never borrows an earlier attribute and its marker.
+	in `)]`, like `)];`, never borrows an earlier attribute and its marker. Strings and
+	comments are masked first, since their delimiters don't count.
 	"""
 	if lines[end].strip() != ")]":
 		return None
@@ -71,7 +73,7 @@ def wrapped(lines, end):
 			break
 	else:
 		return None
-	text = STRING.sub('""', "\n".join(lines[start : end + 1]).strip())
+	text = OPAQUE.sub(" ", "\n".join(lines[start : end + 1])).strip()
 	depth = 0
 	for i, c in enumerate(text):
 		if c in "([{":
