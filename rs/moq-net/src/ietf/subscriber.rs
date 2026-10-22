@@ -3485,7 +3485,7 @@ where
 						break true;
 					}
 					End::Done(res) => {
-						ended = Some(tracks::unlisted(res.as_ref().map(|_| ()).map_err(Clone::clone)));
+						ended = Some(res.as_ref().map(|_| ()).map_err(Clone::clone));
 						match res {
 							Ok(count) => {
 								tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscribe complete");

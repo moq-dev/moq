@@ -94,14 +94,13 @@ async fn read(sub: &mut moq_net::track::Subscriber) -> Option<(u64, Vec<u8>)> {
 	Some((group.sequence, frame.payload.to_vec()))
 }
 
-/// The listing syncs at once, then lists the peer's tracks and their changes: a track the
-/// peer stops listing is removed, as its PUBLISH ends.
+/// The listing syncs at once, then lists the peer's tracks as they appear.
 #[moq_clock::test]
 async fn an_ietf_session_lists_its_peers_tracks() {
 	for version in DRAFTS {
 		let publisher = produce_origin(1);
 		let broadcast = publisher.create_broadcast("bcast").unwrap();
-		let a = broadcast.create_track("a", None).unwrap();
+		let _a = broadcast.create_track("a", None).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
 		let (subscriber, _pair) = connect(&publisher, version).await;
@@ -112,8 +111,6 @@ async fn an_ietf_session_lists_its_peers_tracks() {
 
 		let _b = broadcast.create_track("b", None).unwrap();
 		assert_eq!(next(&mut tracks).await, "+b", "{version}");
-		drop(a);
-		assert_eq!(next(&mut tracks).await, "-a", "{version}");
 		assert!(quiet(&mut tracks).await, "{version}");
 	}
 }
@@ -420,5 +417,47 @@ async fn a_listing_past_the_announces_cap_is_reset() {
 				.is_err(),
 			"{version}: the session closed"
 		);
+	}
+}
+
+/// Only TRACK_ENDED removes a listed track. Our answerer cannot tell a track that finished
+/// from one that left the listing and may go on elsewhere, so it ends either's PUBLISH in
+/// error: the listing fails loudly instead of removing the track quietly, and a reader
+/// listing again sees what is still listed.
+#[moq_clock::test]
+async fn an_unlisted_track_fails_the_listing() {
+	for finish in [false, true] {
+		for version in DRAFTS {
+			let publisher = produce_origin(1);
+			let broadcast = publisher.create_broadcast("bcast").unwrap();
+			let a = broadcast.create_track("a", None).unwrap();
+			let _b = broadcast.create_track("b", None).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+
+			let (subscriber, _pair) = connect(&publisher, version).await;
+			let remote = resolve(&subscriber, "bcast").await;
+			let mut tracks = remote.tracks().unwrap();
+			assert_eq!(next(&mut tracks).await, "synced", "{version}");
+			let mut listed = vec![next(&mut tracks).await, next(&mut tracks).await];
+			listed.sort();
+			assert_eq!(listed, ["+a", "+b"], "{version}");
+
+			match finish {
+				true => {
+					a.finish().unwrap();
+					drop(a);
+				}
+				false => {
+					let _ = a.abort(moq_net::Error::Cancel);
+				}
+			}
+			let failed = next(&mut tracks).await;
+			assert!(failed.starts_with("error:"), "{version} finish={finish}: {failed}");
+
+			let mut again = remote.tracks().unwrap();
+			assert_eq!(next(&mut again).await, "synced", "{version}");
+			assert_eq!(next(&mut again).await, "+b", "{version}");
+			assert!(quiet(&mut again).await, "{version}");
+		}
 	}
 }

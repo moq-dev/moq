@@ -3,7 +3,7 @@
 //! A listed broadcast sends SUBSCRIBE_TRACKS with FORWARD=0, and each track it lists is
 //! one paused subscription held for the session: the PUBLISH the peer answers with,
 //! accepted paused, or for a track the peer skips, a SUBSCRIBE we open paused. That
-//! subscription is both the listing entry, removed by its PUBLISH_DONE with TRACK_ENDED,
+//! subscription is both the listing entry, removed only by its PUBLISH_DONE with TRACK_ENDED,
 //! and the track's upstream copy: a reader resumes it with REQUEST_UPDATE and pauses it
 //! again once the last one leaves, rather than opening a second subscription.
 //!
@@ -23,18 +23,16 @@ use crate::ietf::request_stream::{self, Framed, Messages};
 /// A listed track, by its namespace and name.
 pub(super) type TrackKey = (PathOwned, Arc<str>);
 
-/// How a PUBLISH_DONE ending `end` leaves the listing: TRACK_ENDED removes the track, and
-/// so does INTERNAL_ERROR, which is what our own answerer sends once a track is no longer
-/// listed (PUBLISH_DONE registers no DOES_NOT_EXIST). Any other status fails the listing,
-/// so it asks again rather than hide a track that may still be live.
-pub(super) fn unlisted(end: Result<(), Error>) -> Result<(), Error> {
-	match end {
-		Err(Error::Remote(code))
-			if u64::from(code) == ietf::PublishDoneStatus::InternalError.code(Version::Draft18) =>
-		{
-			Ok(())
-		}
-		end => end,
+/// How a PUBLISH_DONE leaves the listing: only TRACK_ENDED removes the track. Any other
+/// status, INTERNAL_ERROR included, fails the listing, so it asks again rather than hide a
+/// track that may still be live.
+fn listing_end(done: &ietf::PublishDone, version: Version) -> Result<(), Error> {
+	match done.status_code == ietf::PublishDoneStatus::TrackEnded.code(version) {
+		true => Ok(()),
+		false => Err(done
+			.end(version)
+			.err()
+			.unwrap_or(Error::Remote(u32::try_from(done.status_code).unwrap_or(u32::MAX)))),
 	}
 }
 
@@ -955,11 +953,10 @@ where
 						upstream.owed -= 1;
 					}
 					ietf::PublishDone::ID => {
-						break unlisted(
-							body.message::<ietf::PublishDone>(self.version)
-								.map_err(|err| upstream.messages.failed(err.into()))
-								.and_then(|done| done.end(self.version)),
-						);
+						break body
+							.message::<ietf::PublishDone>(self.version)
+							.map_err(|err| upstream.messages.failed(err.into()))
+							.and_then(|done| listing_end(&done, self.version));
 					}
 					_ => break Err(upstream.messages.failed(Error::UnexpectedMessage)),
 				},
@@ -1185,8 +1182,8 @@ where
 				}
 				ietf::PublishDone::ID => {
 					let done = body.message::<ietf::PublishDone>(self.version)?;
-					let end = done.end(self.version);
-					held.ended = Some(unlisted(end.clone()));
+					let end = listing_end(&done, self.version);
+					held.ended = Some(end.clone());
 					return Err(end.err().unwrap_or(Error::NotFound));
 				}
 				_ => return Err(Error::UnexpectedMessage),
@@ -1392,15 +1389,35 @@ mod tests {
 		}
 	}
 
-	/// A PUBLISH_DONE with TRACK_ENDED removes the track; INTERNAL_ERROR, which our own
-	/// answerer sends once a track is no longer listed, does too (decided 2026-10-22).
+	/// A PUBLISH_DONE with TRACK_ENDED removes the track, and the listing stands.
 	#[moq_clock::test]
 	async fn a_track_ended_publish_removes_the_track() {
-		for status in [
-			ietf::PublishDoneStatus::TrackEnded,
-			ietf::PublishDoneStatus::InternalError,
+		let version = Version::Draft22;
+		let mut h = harness(version);
+		let _listing = h.establish().await;
+		let mut video = h.publish("video", 1).await;
+		assert_eq!(event(&mut h.tracks).as_deref(), Some("+video"));
+
+		let done = ietf::PublishDone {
+			request_id: None,
+			status_code: ietf::PublishDoneStatus::TrackEnded.code(version),
+			stream_count: 0,
+			reason_phrase: "".into(),
+		};
+		write(&mut video, ietf::PublishDone::ID, &done).await;
+		assert_eq!(event(&mut h.tracks).as_deref(), Some("-video"));
+		assert!(h.listening.poll_failed(&kio::Waiter::noop()).is_pending());
+	}
+
+	/// Any other PUBLISH_DONE, INTERNAL_ERROR included, fails the listing rather than hide a
+	/// track that may be live.
+	#[moq_clock::test]
+	async fn another_publish_done_fails_the_listing() {
+		let version = Version::Draft22;
+		for (status, expected) in [
+			(ietf::PublishDoneStatus::Unauthorized, Error::Unauthorized),
+			(ietf::PublishDoneStatus::InternalError, Error::Remote(0)),
 		] {
-			let version = Version::Draft22;
 			let mut h = harness(version);
 			let _listing = h.establish().await;
 			let mut video = h.publish("video", 1).await;
@@ -1413,31 +1430,11 @@ mod tests {
 				reason_phrase: "".into(),
 			};
 			write(&mut video, ietf::PublishDone::ID, &done).await;
-			assert_eq!(event(&mut h.tracks).as_deref(), Some("-video"), "{status:?}");
-			assert!(h.listening.poll_failed(&kio::Waiter::noop()).is_pending());
+			match h.listening.poll_failed(&kio::Waiter::noop()) {
+				Poll::Ready(err) => assert_eq!(err.to_string(), expected.to_string(), "{status:?}"),
+				Poll::Pending => panic!("{status:?}: the listing stood"),
+			}
 		}
-	}
-
-	/// Any other PUBLISH_DONE fails the listing rather than hide a track that may be live.
-	#[moq_clock::test]
-	async fn another_publish_done_fails_the_listing() {
-		let version = Version::Draft22;
-		let mut h = harness(version);
-		let _listing = h.establish().await;
-		let mut video = h.publish("video", 1).await;
-		assert_eq!(event(&mut h.tracks).as_deref(), Some("+video"));
-
-		let done = ietf::PublishDone {
-			request_id: None,
-			status_code: ietf::PublishDoneStatus::Unauthorized.code(version),
-			stream_count: 0,
-			reason_phrase: "".into(),
-		};
-		write(&mut video, ietf::PublishDone::ID, &done).await;
-		assert!(matches!(
-			h.listening.poll_failed(&kio::Waiter::noop()),
-			Poll::Ready(Error::Unauthorized)
-		));
 	}
 
 	/// A skipped track is listed through a paused SUBSCRIBE of ours, once it answers.
