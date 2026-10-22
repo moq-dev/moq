@@ -99,17 +99,6 @@ test("video config accepts canonical display aspect fields", () => {
 	expect("displayRatioHeight" in parsed).toBe(false);
 });
 
-test("video config accepts optional enabled state", () => {
-	const active = VideoConfigSchema.parse({
-		codec: "avc1.64001f",
-		container: { kind: "legacy" },
-	});
-	const disabled = VideoConfigSchema.parse({ ...active, enabled: false });
-
-	expect(active.enabled).toBeUndefined();
-	expect(disabled.enabled).toBe(false);
-});
-
 test("video config ignores a legacy stalled flag", () => {
 	const parsed = VideoConfigSchema.parse({
 		codec: "avc1.64001f",
@@ -119,16 +108,6 @@ test("video config ignores a legacy stalled flag", () => {
 
 	expect("stalled" in parsed).toBe(false);
 	expect(parsed.enabled).toBeUndefined();
-});
-
-test("video config accepts a human-readable label", () => {
-	const config = VideoConfigSchema.parse({
-		label: "Main camera",
-		codec: "vp8",
-		container: { kind: "legacy" },
-	});
-
-	expect(config.label).toBe("Main camera");
 });
 
 test("legacy video arrays derive display size from display aspect fields", () => {

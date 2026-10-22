@@ -366,6 +366,7 @@ pub struct MoqAudioProducer {
 	reservation: std::sync::Mutex<Option<Arc<MoqReservation>>>,
 	/// Held so the reservation's registry outlives extra bandwidth handles.
 	_bandwidth: Option<Arc<MoqBandwidth>>,
+	finished: crate::producer::Finished,
 }
 
 impl MoqAudioProducer {
@@ -413,11 +414,14 @@ impl MoqAudioProducer {
 	}
 
 	/// Drain the encoder and finish the audio track.
+	///
+	/// The broadcast keeps the finished track until it ends, so its finish still holds it.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		let mut producer = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
 		self.reservation.lock().unwrap().take();
 		producer.finish()?;
+		self.finished.keep(producer);
 		Ok(())
 	}
 }
@@ -471,9 +475,10 @@ impl MoqAudioProducer {
 			options.bandwidth = bandwidth.allocator().clone();
 		}
 
-		let producer = broadcast.with_state(|state| {
-			moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)
-				.map_err(Into::into)
+		let (producer, finished) = broadcast.with_state(|state| {
+			let producer =
+				moq_audio::encode::Producer::new(&mut state.broadcast, state.catalog.clone(), input, &options)?;
+			Ok((producer, state.finished.clone()))
 		})?;
 
 		// Producer::new does not reserve today (only capture does), so the
@@ -487,6 +492,7 @@ impl MoqAudioProducer {
 			inner: std::sync::Mutex::new(Some(producer)),
 			reservation: std::sync::Mutex::new(reservation),
 			_bandwidth: bandwidth,
+			finished,
 		}))
 	}
 }

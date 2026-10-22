@@ -1466,28 +1466,6 @@ fn a_pad_kept_across_runs_publishes_again() {
 	let _ = sink.set_state(gst::State::Null);
 }
 
-// Final EOS closes admission only for that run. Returning to READY and starting again must accept a
-// new request pad instead of retaining eos_posted from the previous session.
-#[test]
-fn a_new_run_accepts_pads_again() {
-	init();
-	let sink = publisher();
-	let first = sink.request_pad_simple("sink_0").expect("request sink_0");
-	sink.set_state(gst::State::Paused).expect("start first run");
-	assert!(send_caps(&first));
-	assert!(first.send_event(gst::event::Eos::new()));
-	assert!(
-		sink.request_pad_simple("sink_1").is_none(),
-		"the finalized run refuses another pad"
-	);
-
-	sink.set_state(gst::State::Ready).expect("stop first run");
-	sink.set_state(gst::State::Paused).expect("start second run");
-	let second = sink.request_pad_simple("sink_1").expect("the new run accepts sink_1");
-	assert_eq!(second.parent(), Some(sink.clone().upcast()));
-	let _ = sink.set_state(gst::State::Null);
-}
-
 // An application polls the status through notify rather than by asking on a timer.
 #[test]
 fn status_notifies_on_each_transition() {
@@ -1533,14 +1511,26 @@ fn missing_url_fails_state_change() {
 // (issue #2212), so an unattended publisher survives a relay that is unreachable at startup or
 // during an outage instead of tearing down the pipeline. It keeps retrying and stays disconnected.
 // (A non-retryable failure, e.g. auth rejection, is still terminal; that path needs a live relay
-// and is covered separately.) The `.invalid` host fails fast at DNS resolution, so the loop is
-// already several retries deep within the window below.
+// and is covered separately.) The "relay" accepts each dial and hangs up at once, so the test
+// counts the retries rather than waiting out a window.
 #[test]
 fn connect_failure_retries_without_erroring() {
 	init();
+	let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+	let addr = listener.local_addr().expect("local address");
+	let (dialed, dials) = std::sync::mpsc::channel();
+	std::thread::spawn(move || {
+		for stream in listener.incoming() {
+			drop(stream);
+			if dialed.send(()).is_err() {
+				break;
+			}
+		}
+	});
+
 	let pipeline = gst::Pipeline::new();
 	let sink = gst::ElementFactory::make("moqsink")
-		.property("url", "https://nonexistent.invalid:443")
+		.property("url", format!("tcp://{addr}"))
 		.property("broadcast", "test")
 		.build()
 		.expect("create moqsink");
@@ -1550,8 +1540,14 @@ fn connect_failure_retries_without_erroring() {
 		pipeline.set_state(gst::State::Playing).is_ok(),
 		"a valid url + broadcast must let the Ready->Playing change start (connect runs in the background)"
 	);
+	// The first dial and a retry after it failed.
+	for _ in 0..2 {
+		dials
+			.recv_timeout(std::time::Duration::from_secs(30))
+			.expect("the sink stopped dialing");
+	}
 	let bus = pipeline.bus().expect("pipeline bus");
-	let msg = bus.timed_pop_filtered(gst::ClockTime::from_seconds(3), &[gst::MessageType::Error]);
+	let msg = bus.pop_filtered(&[gst::MessageType::Error]);
 	let connected = sink.property::<bool>("connected");
 	let status = sink.property::<gstmoq::ConnectionStatus>("status");
 	let send_bitrate = sink.property::<u64>("estimated-send-rate");

@@ -10,6 +10,11 @@ Allow your bundler to emit and serve the dynamic `@moq/hang/cmaf` chunk when usi
 Legacy and LOC playback do not download it; player calls and catalog formats are unchanged.
 Replace access through `Watch.Hang.Container.Cmaf` with an import from `@moq/hang/cmaf`.
 
+### A cleanly ended catalog keeps playing
+
+When the catalog track ends cleanly, the player keeps its catalog and `"live"` status until the broadcast closes or is withdrawn, instead of going `"offline"` at once.
+Wait for `Broadcast.out.status` to report `"offline"` to learn that a finished broadcast ended, not for the catalog to clear.
+
 ### A newer catalog reports `unsupported`
 
 Handle `"unsupported"` in `Broadcast.out.status` by asking the viewer to update their player.

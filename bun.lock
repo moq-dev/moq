@@ -181,7 +181,7 @@
       },
       "devDependencies": {
         "@types/bun": "^1.4.3",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.350",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
         "typescript": "7.0.2",
       },
@@ -268,7 +268,7 @@
       "devDependencies": {
         "@types/bun": "^1.4.3",
         "@types/node": "^26.6.4",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.350",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
         "typescript": "7.0.2",
       },
@@ -285,7 +285,7 @@
       },
       "devDependencies": {
         "@types/bun": "^1.4.3",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.350",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
         "typescript": "7.0.2",
       },
@@ -314,7 +314,7 @@
       "devDependencies": {
         "@types/audioworklet": "^0.0.100",
         "@types/bun": "^1.4.3",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.350",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
         "rolldown": "^1.2.13",
         "typescript": "7.0.2",
@@ -329,7 +329,7 @@
       },
       "devDependencies": {
         "@types/bun": "^1.4.3",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.350",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
         "typescript": "7.0.2",
       },
@@ -349,7 +349,7 @@
       "devDependencies": {
         "@types/audioworklet": "^0.0.100",
         "@types/bun": "^1.4.3",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.350",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
         "typescript": "7.0.2",
         "vite": "^8.3.4",
@@ -388,7 +388,7 @@
       },
       "devDependencies": {
         "@types/bun": "^1.4.3",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.350",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
         "typescript": "7.0.2",
       },
@@ -413,7 +413,7 @@
       "devDependencies": {
         "@types/audioworklet": "^0.0.100",
         "@types/bun": "^1.4.3",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.350",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "rimraf": "^6.1.3",
         "rolldown": "^1.2.13",
         "typescript": "7.0.2",
@@ -483,7 +483,7 @@
       },
       "devDependencies": {
         "@types/bun": "^1.4.3",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.350",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "playwright": "^1.64.0",
         "typescript": "7.0.2",
         "vite": "^8.3.4",
@@ -496,7 +496,7 @@
       },
       "devDependencies": {
         "@types/bun": "^1.4.3",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.350",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "typescript": "7.0.2",
       },
     },
@@ -513,7 +513,7 @@
       },
       "devDependencies": {
         "@types/bun": "^1.4.3",
-        "@typescript/lib-dom": "npm:@types/web@^0.0.350",
+        "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "playwright": "^1.64.0",
         "typescript": "7.0.2",
         "vite": "^8.3.4",
@@ -1064,7 +1064,7 @@
 
     "@types/web-bluetooth": ["@types/web-bluetooth@0.0.21", "", {}, "sha512-oIQLCGWtcFZy2JW77j9k8nHzAOpqMHLQejDA48XXMWH6tjCQHz5RCFz1bzsmROyL6PUm+LLnUiI4BCn221inxA=="],
 
-    "@typescript/lib-dom": ["@types/web@0.0.350", "", {}, "sha512-XFISASo1wPsKKtI5v1nJ51YuZYkjUE9kduDFpfHCOKEMbHtRLHX0k3V3bpBeQx2L1VvcxTIECHvC3r3Rfmu0YA=="],
+    "@typescript/lib-dom": ["@types/web@0.0.358", "", {}, "sha512-mNaTgu3PxD0NY0QTpMSFcs+BurApADI/h0oK/sKzkzobGw9F/GpAM4x3Vreul/EAsgm5I8uKzMnuSazZ1qHjgw=="],
 
     "@typescript/typescript-aix-ppc64": ["@typescript/typescript-aix-ppc64@7.0.2", "", { "os": "aix", "cpu": "ppc64" }, "sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ=="],
 
@@ -1436,7 +1436,7 @@
 
     "markdown-extensions": ["markdown-extensions@2.0.0", "", {}, "sha512-o5vL7aDWatOTX8LzaS1WMoaoxIiLRQJuIKKe2wAw6IeULDHaqbiqiggmx+pKvZDb1Sj+pE46Sn1T7lCqfFtg1Q=="],
 
-    "markdown-it": ["markdown-it@14.3.2", "", { "dependencies": { "argparse": "^2.0.1", "entities": "^4.5.0", "linkify-it": "^5.0.2", "mdurl": "^2.0.0", "punycode.js": "^2.3.1", "uc.micro": "^2.1.0" }, "bin": { "markdown-it": "bin/markdown-it.mjs" } }, "sha512-sHHjZ5fJKlgrG4qns2YwVcdNep35h5fERrfkD2YNsb9UFk0UIHarbiTaHKVMlPuWAoiilyK8Fv/jAm11slsY7Q=="],
+    "markdown-it": ["markdown-it@14.3.3", "", { "dependencies": { "argparse": "^2.0.1", "entities": "^4.5.0", "linkify-it": "^5.0.2", "mdurl": "^2.0.0", "punycode.js": "^2.3.1", "uc.micro": "^2.1.0" }, "bin": { "markdown-it": "bin/markdown-it.mjs" } }, "sha512-L//tDAkjTjJCU6pBUSBTgs3Kg4InVaZuUZog/b6V12UKhcDQ7S78877ibbCanRExwPuYP1CZD7Gd2dxSy1GXRg=="],
 
     "markdown-title": ["markdown-title@1.0.2", "", {}, "sha512-MqIQVVkz+uGEHi3TsHx/czcxxCbRIL7sv5K5DnYw/tI+apY54IbPefV/cmgxp6LoJSEx/TqcHdLs/298afG5QQ=="],
 

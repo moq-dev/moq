@@ -185,6 +185,9 @@ pkgs.testers.runNixOSTest {
     };
   };
   testScript = ''
+    import time
+    from datetime import timedelta
+
     start_all()
     with subtest("the carrier-less TAP is configured without blocking the host uplink"):
         startup.wait_for_unit("network-online.target")
@@ -272,6 +275,30 @@ pkgs.testers.runNixOSTest {
         guest.succeed("systemctl stop fake-job")
         guest.succeed("systemctl start runner-reclaim.service")
         guest.succeed("journalctl -u runner-reclaim.service | grep -F 'Dropped caches'")
+
+    with subtest("a job that fills memory is killed before it thrashes the disk"):
+        def sample():
+            out = guest.succeed("systemctl is-active memory-hog || true; grep '^pgpgin ' /proc/vmstat; head -1 /proc/pressure/memory")
+            state, read, pressure = out.splitlines()
+            # pgpgin counts KiB read from block devices.
+            return state, int(read.split()[1]) >> 10, pressure.split()[1]
+
+        _, read0, _ = sample()
+        guest.succeed("systemd-run --unit=memory-hog ${pkgs.python3}/bin/python3 ${./hog.py} /var/tmp/hog-inputs")
+        start = time.monotonic()
+        while True:
+            state, read, pressure = sample()
+            elapsed = time.monotonic() - start
+            print(f"memory-hog {state} after {elapsed:.0f}s: read {read - read0} MiB, memory pressure {pressure}")
+            if state != "active":
+                break
+            # The kernel's OOM killer never fires, so without earlyoom the hog
+            # re-reads its inputs from disk until the job times out.
+            assert elapsed < 60, "the guest thrashed instead of killing memory-hog"
+            time.sleep(1)
+        print(guest.succeed("journalctl -u earlyoom | grep -F 'sending SIGTERM to process'"))
+        guest.succeed("rm /var/tmp/hog-inputs")
+        router.wait_until_succeeds("${pkgs.openssh}/bin/ssh-keyscan -t ed25519 -T 5 10.231.0.2 | grep -F ssh-ed25519", timeout=timedelta(minutes=1))
 
     with subtest("local Nix and mbx storage survive runner and VM restarts"):
         guest.wait_for_file("/var/cache/github-runner-home/.cache/mbx/marker")

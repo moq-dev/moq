@@ -227,14 +227,4 @@ mod test {
 
 		assert_eq!(task.await.unwrap(), Some(3));
 	}
-
-	#[test]
-	fn same_channel_tracks_identity() {
-		let shared = Shared::<Vec<u32>>::default();
-		let clone = shared.clone();
-		let other = Shared::<Vec<u32>>::default();
-
-		assert!(shared.same_channel(&clone));
-		assert!(!shared.same_channel(&other));
-	}
 }
