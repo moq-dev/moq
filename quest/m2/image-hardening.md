@@ -10,11 +10,12 @@ Today the final stage is `FROM scratch` with no `USER`, so the relay runs as uid
 
 Decided 2026-10-22 from the security audit, with the maintainer:
 
-- Add a dedicated non-root user and `USER` to the final stage. The binary needs no privileged port at runtime; the documented deployments bind 443 inside a network namespace that maps it.
+- Add a dedicated non-root user and `USER` to the final stage.
+- `rs/moq-relay/fly.toml` binds 443 directly (`MOQ_LISTEN` and `internal_port`), which an unprivileged process cannot. Prefer moving that deployment to an unprivileged internal port behind the same public 443, if Fly's UDP forwarding allows it; otherwise grant `CAP_NET_BIND_SERVICE` explicitly.
 - Pin the builder image by digest, with the version named in a comment so a bump is a one-line diff.
 - Leave release signing out of scope. The installer still trusts TLS and a same-origin checksum; changing that needs its own decision about a signing key and who holds it.
 
-Tests: the image builds and the entrypoint runs as the unprivileged user.
+Tests: the image builds, the entrypoint runs as the unprivileged user, and the Fly listen configuration starts under it.
 
 Public API: none. Wire: none.
 

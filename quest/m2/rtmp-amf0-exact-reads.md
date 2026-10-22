@@ -11,7 +11,7 @@ Today `rs/moq-rtmp/src/rml/amf0/deserialization.rs` allocates the declared lengt
 Decided 2026-10-22 from the security audit, with the maintainer:
 
 - Use `read_exact` at both sites.
-- Test the audit's payload: string marker, declared length 16, one byte present, which must error rather than yield a padded value.
+- Test both sites: the audit's string payload (string marker, declared length 16, one byte present), and an object whose property name declares more bytes than remain. Each must error rather than yield a padded value.
 
 The RTMP listener is unauthenticated by design, so this is reachable by anyone who can reach the port.
 
