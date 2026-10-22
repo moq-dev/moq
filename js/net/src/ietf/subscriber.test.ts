@@ -1288,15 +1288,15 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 	const subscriber = new Subscriber({ session });
 	const opening = spyOn(session, "openBi");
 	const broadcast = subscriber.consume(Path.from("room"));
-	const pending = hooks.pendingTrackProducer;
+	const make = hooks.makeRequest;
 	let returned: track.Subscriber | undefined;
 	const resumed = Promise.withResolvers<void>();
 	const waiting = Promise.withResolvers<void>();
 	const unwanted = demandUtil.unwanted;
 	const unwantedSpy = spyOn(demandUtil, "unwanted");
-	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
-		const producer = pending(request);
-		const demand = producer.demand();
+	const captured = spyOn(hooks, "makeRequest").mockImplementationOnce((options) => {
+		const request = make(options);
+		const demand = request.demand();
 		let returnedOnce = false;
 		unwantedSpy.mockImplementation(async (watched) => {
 			if (watched !== demand) return unwanted(watched);
@@ -1319,7 +1319,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 				return used;
 			});
 		});
-		return producer;
+		return request;
 	});
 	const first = broadcast.track("video").subscribe();
 	// Restore real timers even if an injection promise outlives the test.
@@ -1366,13 +1366,13 @@ test("setup abandonment closes before a queued viewer can attach", async () => {
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 	const broadcast = subscriber.consume(Path.from("room"));
-	const pending = hooks.pendingTrackProducer;
+	const make = hooks.makeRequest;
 	const resumed = Promise.withResolvers<track.Subscriber>();
 	const unwanted = demandUtil.unwanted;
 	const unwantedSpy = spyOn(demandUtil, "unwanted");
-	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
-		const producer = pending(request);
-		const demand = producer.demand();
+	const captured = spyOn(hooks, "makeRequest").mockImplementationOnce((options) => {
+		const request = make(options);
+		const demand = request.demand();
 		unwantedSpy.mockImplementationOnce(async (watched) => {
 			await unwanted(watched);
 			const peek = demand.wanted.peek.bind(demand.wanted);
@@ -1388,7 +1388,7 @@ test("setup abandonment closes before a queued viewer can attach", async () => {
 				return used;
 			});
 		});
-		return producer;
+		return request;
 	});
 	const first = broadcast.track("video").subscribe();
 	let returned: track.Subscriber | undefined;
@@ -1433,13 +1433,19 @@ test("abandonment cancels once and a late acceptance cannot capture a reused ali
 	peer.reader.version = version;
 	peer.writer.version = version;
 	const broadcast = subscriber.consume(Path.from("room"));
-	const pending = hooks.pendingTrackProducer;
-	let producer: track.Producer | undefined;
+	const make = hooks.makeRequest;
 	let oldRequest: track.Request | undefined;
-	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
+	// The error the abandoned request is rejected with.
+	const rejected = Promise.withResolvers<Error | undefined>();
+	const captured = spyOn(hooks, "makeRequest").mockImplementationOnce((options) => {
+		const request = make(options);
+		const reject = request.reject.bind(request);
+		spyOn(request, "reject").mockImplementation((err) => {
+			rejected.resolve(err);
+			reject(err);
+		});
 		oldRequest = request;
-		producer = pending(request);
-		return producer;
+		return request;
 	});
 	const decoded = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
@@ -1455,13 +1461,13 @@ test("abandonment cancels once and a late acceptance cannot capture a reused ali
 	try {
 		expect(await peer.reader.u53()).toBe(Subscribe.id);
 		const request = await Subscribe.decode(peer.reader, version);
-		if (!producer || !oldRequest) throw new Error("missing pending track");
+		if (!oldRequest) throw new Error("missing pending track");
 		const accepted = spyOn(oldRequest, "accept");
 		await peer.writer.u53(SubscribeOk.id);
 		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
 		await decoded.promise;
 		first.close();
-		expect(await producer.closed).toBeInstanceOf(Error);
+		expect(await rejected.promise).toBeInstanceOf(Error);
 		expect(await peer.reader.u53()).toBe(Unsubscribe.id);
 		expect((await Unsubscribe.decode(peer.reader, version)).requestId).toBe(request.requestId);
 
