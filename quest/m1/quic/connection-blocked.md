@@ -29,8 +29,9 @@ sit on the same connection-blocked path in
   `limit == 0` before `Send::write` can look at `stop_reason`. Check for
   terminal stream state before connection-level flow control.
 - Regression tests go in the existing `state.rs` unit tests. One test
-  cancels many streams under zero connection credit and asserts that the
-  blocked set stays empty. The other sends STOP_SENDING on one stream while
+  writes to many streams under zero connection credit, each write returning
+  `Blocked`, then resets and frees those streams and asserts that the blocked
+  set is empty. The other sends STOP_SENDING on one stream while
   another holds the connection window, and asserts that the write returns
   `Stopped`.
 
