@@ -18,6 +18,7 @@ import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts"
 import type * as Cluster from "./cluster.ts";
 import { toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
+import * as Message from "./message.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { toWire } from "./priority.ts";
@@ -453,7 +454,7 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 });
 
 // Legal requests we don't serve are refused NOT_SUPPORTED one at a time.
-test("FETCH and a non-forwarding SUBSCRIBE get NOT_SUPPORTED", async () => {
+test("FETCH gets NOT_SUPPORTED", async () => {
 	const refusal = async (version: IetfVersion, run: (pub: Publisher, stream: Stream) => Promise<void>) => {
 		const pair = createMockTransportPair(ALPN.DRAFT_19);
 		const session = new NativeSession(pair.server, version, true);
@@ -479,21 +480,6 @@ test("FETCH and a non-forwarding SUBSCRIBE get NOT_SUPPORTED", async () => {
 		// FETCH_ERROR on draft-14, REQUEST_ERROR after; the code follows the Length and any Request ID.
 		expect(fetch[0]).toBe(version === Version.DRAFT_14 ? 0x19 : 0x05);
 		expect(fetch[version <= Version.DRAFT_16 ? 4 : 3]).toBe(0x3);
-
-		const paused = await refusal(version, (pub, stream) =>
-			pub.runSubscribe(
-				new Subscribe({
-					requestId: 7n,
-					trackNamespace: Path.from("test"),
-					trackName: "video",
-					subscriberPriority: 0,
-					forward: false,
-				}),
-				stream,
-			),
-		);
-		expect(paused[0]).toBe(0x05);
-		expect(paused[version <= Version.DRAFT_16 ? 4 : 3]).toBe(0x3);
 	}
 });
 
@@ -3919,7 +3905,9 @@ test("unsupported REQUEST_UPDATE is refused and ends with UPDATE_FAILED", async 
 		}),
 	);
 	try {
-		await client.writer.write(new Uint8Array([0x02, 0, 4, 2, 1, 0x10, 0]));
+		const parameters = new Parameters();
+		parameters.subscriptionFilter = { kind: "nextObject" };
+		await sendUpdate(client, fx.version, 2n, parameters);
 		expect(await client.reader.u53()).toBe(RequestError.id);
 		const refusal = await RequestError.decode(client.reader, fx.version);
 		expect(refusal.errorCode).toBe(0x03);
@@ -3930,6 +3918,108 @@ test("unsupported REQUEST_UPDATE is refused and ends with UPDATE_FAILED", async 
 		client.close();
 		track.close();
 		fx.close();
+	}
+});
+
+/** Send a subscription's REQUEST_UPDATE carrying `parameters` as its own Request ID `id`. */
+async function sendUpdate(client: Stream, version: IetfVersion, id: bigint, parameters: Parameters) {
+	if (version <= Version.DRAFT_16) {
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 0n, ownRequestId: id, parameters }).encode(client.writer, version);
+		return;
+	}
+	await client.writer.u53(0x02);
+	await Message.encode(client.writer, async (body) => {
+		await body.u62(id);
+		await parameters.encode(body, version);
+	});
+}
+
+/** Pause or resume a subscription, returning the REQUEST_OK that answers it. */
+async function forwardUpdate(client: Stream, version: IetfVersion, id: bigint, forward: boolean) {
+	const parameters = new Parameters();
+	parameters.forward = forward;
+	await sendUpdate(client, version, id, parameters);
+	expect(await client.reader.u53()).toBe(RequestOk.id);
+	return RequestOk.decode(client.reader, version);
+}
+
+test("a SUBSCRIBE pauses without demand and resumes at the live edge", async () => {
+	const fx = fixture(V20);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	writeGroup(track, 1);
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+			filter: { kind: "nextObject" },
+		}),
+	);
+	try {
+		await forwardUpdate(client, V20, 2n, false);
+		while (track.subscription.peek() !== undefined) await track.subscription.changed();
+		writeGroup(track, 1);
+
+		const resumed = await forwardUpdate(client, V20, 4n, true);
+		expect(resumed.parameters.largest).toEqual({ groupId: 1n, objectId: 0n });
+		writeGroup(track, 1);
+		// Joining after group 1's only object, which came while paused, skips it.
+		const served: ServedGroup[] = [];
+		while (served.at(-1)?.sequence !== 2) {
+			const stream = await nextUni(fx.uni);
+			if (!stream) throw new Error("the resumed subscription served nothing");
+			served.push(await readGroup(stream));
+		}
+		expect(served.flatMap((group) => group.objects.map((object) => object.payload))).toEqual(["2.0"]);
+
+		// Paused again, only the broadcast ending ends it, in error: a paused track's end is unobservable.
+		await forwardUpdate(client, V20, 6n, false);
+		fx.broadcast.close();
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		const done = await PublishDone.decode(client.reader, V20);
+		expect(done.statusCode).toBe(0x0);
+		expect(done.streamCount).toBe(BigInt(served.length));
+	} finally {
+		client.close();
+		track.close();
+		fx.close();
+	}
+});
+
+test("an initially paused SUBSCRIBE holds no demand until it resumes", async () => {
+	for (const version of [Version.DRAFT_16, V20]) {
+		const fx = fixture(version);
+		// Served on request, so a released track closes and a resume asks for it again.
+		const answer = async () => {
+			const request = await wireOf(fx.broadcast).requested();
+			if (!request) throw new Error("no track was requested");
+			return request.accept({ timescale: Timescale.MILLI });
+		};
+		const first = answer();
+		const { client, ok } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 0n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 128,
+				forward: false,
+			}),
+		);
+		try {
+			expect(ok.largest).toBeUndefined();
+			await (await first).closed;
+			const second = answer();
+			const resumed = await forwardUpdate(client, version, 2n, true);
+			expect(resumed.requestId).toBe(version === Version.DRAFT_16 ? 2n : undefined);
+			expect((await second).subscription.peek()).toBeDefined();
+		} finally {
+			client.close();
+			fx.close();
+		}
 	}
 });
 

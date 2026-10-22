@@ -262,15 +262,32 @@ interface RunGroup {
 /** How many data streams a subscription opened, fill streams included. */
 type StreamCount = { opened: number; terminalSent?: boolean };
 
-/** A PUBLISH's state across every pause and resume. */
-interface Published {
+/** A pausable subscription's state across every pause and resume. */
+interface Pausable {
 	streams: StreamCount;
-	unlisted: Once<true>;
-	answer: boolean;
+	/** A PUBLISH ends once its track is no longer listed. */
+	unlisted?: Once<true>;
+	/** Whether SUBSCRIBE_OK or PUBLISH already went out. */
+	acked: boolean;
+	/** The update a resume answers with REQUEST_OK, if one asked: its own Request ID on drafts 15 and 16. */
+	answer?: { requestId?: bigint };
 }
 
-/** Stop forwarding without ending the subscription. */
-class Paused extends Error {}
+/** A decoded subscription REQUEST_UPDATE, with its own Request ID on drafts 15 and 16. */
+interface Update {
+	params: Parameters;
+	requestId?: bigint;
+}
+
+/** Stop forwarding without ending the subscription, naming the pausing update on drafts 15 and 16. */
+class Paused extends Error {
+	readonly requestId?: bigint;
+
+	constructor(requestId?: bigint) {
+		super("paused");
+		this.requestId = requestId;
+	}
+}
 
 /** What {@link Publisher.runFill} needs to serve one subscription's backfill. */
 interface RunFill {
@@ -471,7 +488,7 @@ export class Publisher {
 		}
 		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
 		// once. A peer past the cap loses the session.
-		const charged = msg.forward && !msg.rangeFilters && this.#gate.allows(msg.trackNamespace);
+		const charged = !msg.rangeFilters && this.#gate.allows(msg.trackNamespace);
 		if (charged) this.#subscriptions.acquire();
 		if (claimed) this.#trackClaims.set(key, ((this.#trackClaims.get(key) as number | undefined) ?? 0) + 1);
 		try {
@@ -487,7 +504,6 @@ export class Publisher {
 	}
 
 	async #serveSubscribe(msg: Subscribe, request: RequestStream) {
-		const version = this.#session.version;
 		const name = msg.trackNamespace;
 		let broadcast: broadcast.Consumer | undefined;
 		let refusal: Refusal | undefined;
@@ -499,24 +515,13 @@ export class Publisher {
 		const cancel = new StreamError(StreamCode.Cancel, { message: "cancel" });
 		void request.ended.then(() => left.abort(cancel));
 
-		// Legal requests we can't honor are refused one at a time. A subscription that
-		// forwards nothing is only useful to a subscriber that later turns forwarding on,
-		// and serving a Range Filter unfiltered would deliver objects it excluded.
+		// Serving a Range Filter unfiltered would deliver objects the subscriber excluded.
 		// An instance never comes back, so a request pinned to a gone one is missing, not
 		// worth waiting for.
 		const rendezvous = msg.rendezvous && msg.epoch === undefined;
 
-		const unsupported = !msg.forward
-			? "FORWARD=0 not supported"
-			: msg.rangeFilters
-				? "range filters not supported"
-				: undefined;
-
-		if (unsupported) {
-			refusal = {
-				condition: msg.rangeFilters && msg.forward ? "invalid_filter" : "not_supported",
-				reasonPhrase: unsupported,
-			};
+		if (msg.rangeFilters) {
+			refusal = { condition: "invalid_filter", reasonPhrase: "range filters not supported" };
 		} else if (!this.#gate.allows(name)) {
 			// Serve only what our grant lets us publish. Checked before resolving, so a denied
 			// request never reaches the origin.
@@ -540,57 +545,292 @@ export class Publisher {
 		}
 		if (!broadcast) return;
 
-		const priority = fromWire(msg.subscriberPriority);
-		const order = msg.groupOrder;
+		// The broadcast resolved, so only a vanished route still means a missing publisher; a
+		// missing track is the publisher's answer.
+		const missing = async (err: unknown) => {
+			const failed = error(err);
+			if (
+				!(failed instanceof StreamError) ||
+				(failed.code !== StreamCode.NotFound && failed.code !== StreamCode.Unroutable)
+			)
+				throw err;
+			await request.refuse("subscribe", {
+				...this.#failed(err, rendezvous && failed.code === StreamCode.Unroutable),
+				requestId: msg.requestId,
+			});
+		};
+
+		const state: Pausable = { streams: { opened: 0 }, acked: false };
+		if (msg.forward) {
+			const track = this.#subscribeTrack(broadcast, msg);
+			let paused: Paused | undefined;
+			try {
+				let info: Info;
+				try {
+					info = await untilAborted(track.info(), left.signal);
+				} catch (err) {
+					await missing(err);
+					return;
+				}
+				paused = await this.#forward({ msg, request, track, info, paused: state });
+			} finally {
+				track.close();
+			}
+			if (!paused) return;
+			await this.#answerPause(request, paused);
+		} else {
+			// Resolving the track's properties asks for no groups, and the lookup lets go once
+			// answered, so a paused request holds no upstream demand.
+			const lookup = new AbortController();
+			const leave = () => lookup.abort(left.signal.reason);
+			left.signal.addEventListener("abort", leave, { once: true });
+			let info: Info;
+			try {
+				info = await wireOf(broadcast).resolveTrackInfo(msg.trackName, lookup.signal);
+			} catch (err) {
+				await missing(err);
+				return;
+			} finally {
+				left.signal.removeEventListener("abort", leave);
+				lookup.abort();
+			}
+			await this.#subscribeOk(request, msg, info, undefined);
+			state.acked = true;
+		}
+		await this.#pausedSubscribe({ msg, request, broadcast, state, left: left.signal });
+	}
+
+	/** Subscribe to `msg`'s track as its parameters stand, joining at the live edge. */
+	#subscribeTrack(broadcast: broadcast.Consumer, msg: Subscribe): TrackSubscriber {
 		// A range that resolves without the live edge has a fixed start, which is no join:
 		// bound the subscription before subscribing so the refresh ratio never judges it.
-		const fixed = subscribeRange(msg, {}, version);
-		const track = wireOf(broadcast).subscribe(msg.trackName, {
-			priority,
-			order,
+		const fixed = subscribeRange(msg, {}, this.#session.version);
+		return wireOf(broadcast).subscribe(msg.trackName, {
+			priority: fromWire(msg.subscriberPriority),
+			order: msg.groupOrder,
 			// An absent budget preserves everything retained by the producer.
 			maxDelay: Milli(msg.maxAge ?? Varint.MAX_U53),
 			groups: fixed.start ? rangeGroups(fixed) : undefined,
 		});
+	}
 
-		try {
-			let info: Awaited<ReturnType<TrackSubscriber["info"]>>;
+	/** Answer a pause once every data stream closed. Draft 14 answers no update. */
+	async #answerPause(request: RequestStream, paused: Paused) {
+		const version = this.#session.version;
+		if (version === Version.DRAFT_14) return;
+		await request.writer.u53(RequestOk.id);
+		await new RequestOk({ requestId: paused.requestId }).encode(request.writer, version);
+	}
+
+	/**
+	 * Hold a paused SUBSCRIBE without upstream demand until an update resumes it at the live
+	 * edge, or it ends. Its track's end is unobservable without demand: the broadcast ending
+	 * ends it in error, and a resume learns what became of the track.
+	 */
+	async #pausedSubscribe({
+		msg,
+		request,
+		broadcast,
+		state,
+		left,
+	}: {
+		msg: Subscribe;
+		request: RequestStream;
+		broadcast: broadcast.Consumer;
+		state: Pausable;
+		left: AbortSignal;
+	}) {
+		const version = this.#session.version;
+		// A SUBSCRIBE's fill covers only its first subscription.
+		msg.fill = undefined;
+		const done = async (statusCode: number, reasonPhrase: string) => {
+			await request.writer.u53(PublishDone.id);
+			await new PublishDone({
+				requestId:
+					version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+						? msg.requestId
+						: undefined,
+				statusCode,
+				streamCount: BigInt(state.streams.opened),
+				reasonPhrase,
+			}).encode(request.writer, version);
+		};
+		const ended = request.ended.then(() => "ended" as const);
+		const closed = Promise.resolve(broadcast.closed).then(() => "closed" as const);
+		// The requester sent its last message, which ends the request only where FIN cancels.
+		let finished = false;
+		for (;;) {
+			const revoked = new Once<"revoked">();
+			const watch = this.#gate.watch(msg.trackNamespace, () => revoked.set("revoked"));
+			if (watch.revoked()) revoked.set("revoked");
+			let next: Framed | undefined | "ended" | "closed" | "revoked";
 			try {
-				info = await untilAborted(track.info(), left.signal);
-			} catch (err) {
-				const failed = error(err);
-				if (
-					!(failed instanceof StreamError) ||
-					(failed.code !== StreamCode.NotFound && failed.code !== StreamCode.Unroutable)
-				)
-					throw err;
-				// The broadcast resolved, so only a vanished route still means a missing publisher;
-				// a missing track is the publisher's answer.
-				await request.refuse("subscribe", {
-					...this.#failed(err, rendezvous && failed.code === StreamCode.Unroutable),
-					requestId: msg.requestId,
-				});
-				return;
+				next = await race([...(finished ? [] : [request.next()]), ended, closed, revoked]);
+			} finally {
+				watch.dispose();
 			}
-			await this.#forward({ msg, request, track, info });
-		} finally {
-			track.close();
+			if (next === "ended") return;
+			if (next === "revoked") return done(PublishDoneStatus.UNAUTHORIZED, "not granted");
+			// Whether the track completed is unknown, so never TRACK_ENDED.
+			if (next === "closed") return done(PublishDoneStatus.INTERNAL_ERROR, "broadcast ended");
+			if (next === undefined) {
+				finished = true;
+				continue;
+			}
+
+			let update: Update;
+			try {
+				update = await this.#subscribeUpdate(request, next);
+			} catch (err) {
+				if (!(err instanceof UpdateFailed)) throw err;
+				// Draft 14 registers no UPDATE_FAILED.
+				return done(
+					version === Version.DRAFT_14 ? PublishDoneStatus.INTERNAL_ERROR : PublishDoneStatus.UPDATE_FAILED,
+					"update failed",
+				);
+			}
+			const { params, requestId } = update;
+			msg.subscriberPriority = params.subscriberPriority ?? msg.subscriberPriority;
+			msg.maxAge = params.maxAge ?? msg.maxAge;
+			const answer = version === Version.DRAFT_14 ? undefined : { requestId };
+			if (params.forward !== true) {
+				if (answer) {
+					await request.writer.u53(RequestOk.id);
+					await new RequestOk(answer).encode(request.writer, version);
+				}
+				continue;
+			}
+
+			state.answer = answer;
+			const track = this.#subscribeTrack(broadcast, msg);
+			let paused: Paused | undefined;
+			try {
+				let info: Info;
+				try {
+					info = await untilAborted(track.info(), left);
+				} catch (err) {
+					if (left.aborted) return;
+					if (!answer) return done(PublishDoneStatus.INTERNAL_ERROR, "resume failed");
+					await refuseUpdate(request.writer, version, "subscribe", { ...this.#failed(err), ...answer });
+					return done(PublishDoneStatus.UPDATE_FAILED, "resume failed");
+				}
+				paused = await this.#forward({ msg, request, track, info, paused: state });
+			} finally {
+				track.close();
+			}
+			if (!paused) return;
+			await this.#answerPause(request, paused);
 		}
 	}
 
+	/**
+	 * Decode a subscription's REQUEST_UPDATE, refusing one this publisher cannot apply with
+	 * {@link UpdateFailed}. Returns its own Request ID on drafts 15 and 16 for the answer.
+	 */
+	async #subscribeUpdate(request: RequestStream, framed: Framed): Promise<Update> {
+		const version = this.#session.version;
+		if (framed.type !== 0x02)
+			throw new ProtocolViolation(`unexpected message on a subscription: 0x${framed.type.toString(16)}`);
+		const refused = async (
+			condition: "not_supported" | "malformed_auth_token",
+			reasonPhrase: string,
+			requestId: bigint | undefined,
+		) => {
+			await refuseUpdate(request.writer, version, "subscribe", {
+				requestId,
+				condition,
+				reasonPhrase,
+			});
+			return new UpdateFailed();
+		};
+		let requestId: bigint | undefined;
+		let params: Parameters;
+		try {
+			if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
+				// The adapter already spent the update's own Request ID.
+				const update = await SubscribeUpdate.decode(framed.reader, version);
+				requestId = update.ownRequestId;
+				params = update.parameters;
+			} else {
+				params = await this.#subscriptionUpdate(framed);
+			}
+		} catch (err) {
+			// Section 8.9 rejects the update, which says more than that we do not support it.
+			if (err instanceof MalformedAuthToken)
+				throw await refused("malformed_auth_token", err.message, err.requestId);
+			throw malformed(err, "REQUEST_UPDATE");
+		}
+		if (params.trackPropertyFilter)
+			throw new ProtocolViolation("TRACK_PROPERTY_FILTER is only allowed on SUBSCRIBE_TRACKS updates");
+		const unsupported =
+			params.subscriptionFilter !== undefined ||
+			params.bytes.size > 0 ||
+			params.rangeFilters ||
+			[...params.vars.keys()].some(
+				(key) => key !== MAX_AGE_PARAMETER && key !== 0x02n && key !== 0x06n && key !== 0x10n && key !== 0x20n,
+			);
+		if (unsupported) throw await refused("not_supported", "REQUEST_UPDATE parameters not supported", requestId);
+		return { params, requestId };
+	}
+
+	/** Acknowledge `msg` with SUBSCRIBE_OK, naming `largest` when the track has content. */
+	async #subscribeOk(request: RequestStream, msg: Subscribe, info: Info, largest: Location | undefined) {
+		const version = this.#session.version;
+		await request.writer.u53(SubscribeOk.id);
+		const ok = new SubscribeOk({
+			requestId:
+				version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
+					? msg.requestId
+					: undefined,
+			trackAlias: msg.requestId,
+			// Required once the track has content; a fill-requesting subscriber sizes its
+			// backfill against this. Below draft-20 round it down to the start of its
+			// group, matching what the subscription serves there: a draft-20 subscriber
+			// recovers a group's head with a FILL, which we serve, while older drafts
+			// recover it with a joining FETCH, which we do not, so naming a mid-group
+			// start would strand them.
+			largest:
+				largest &&
+				(Filter.isDraft20(version)
+					? { groupId: largest.group, objectId: largest.object }
+					: { groupId: largest.group, objectId: 0n }),
+			properties: msg.propertiesWanted
+				? // TIMESCALE is what opts the track into timestamps, on drafts that can
+					// send it.
+					{
+						// An untimed track declares none, so it stays untimed downstream.
+						timescale: info.timescale ?? undefined,
+						priority: toWire(info.priority),
+						// Through draft-15 this restates the order the subscription is served
+						// in. Later drafts carry the publisher's default instead, newest first.
+						groupOrder:
+							(version === Version.DRAFT_14 || version === Version.DRAFT_15) &&
+							msg.groupOrder === "ascending"
+								? GroupOrder.Ascending
+								: Properties.DESCENDING,
+						maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
+					}
+				: // INCLUDE_PROPERTIES=0. The block stays present but empty, which also means
+					// the track opts out of timestamps for this subscriber.
+					{},
+		});
+		await ok.encode(request.writer, version);
+	}
+
+	/** Forward until the subscription ends, or until an update pauses it: that pause is returned. */
 	async #forward({
 		msg,
 		request,
 		track,
 		info,
-		published,
+		paused,
 	}: {
 		msg: Subscribe;
 		request: RequestStream;
 		track: TrackSubscriber;
-		info: Awaited<ReturnType<TrackSubscriber["info"]>>;
-		published?: Published;
-	}) {
+		info: Info;
+		paused: Pausable;
+	}): Promise<Paused | undefined> {
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
 		const priority = fromWire(msg.subscriberPriority);
@@ -640,55 +880,15 @@ export class Publisher {
 					? track.fork({ priority, order, maxDelay: Milli(Varint.MAX_U53) })
 					: undefined;
 
-			if (published) {
-				if (published.answer) {
-					const parameters = new Parameters();
-					if (edge.largest)
-						parameters.largest = { groupId: edge.largest.group, objectId: edge.largest.object };
-					await request.writer.u53(RequestOk.id);
-					await new RequestOk({ parameters }).encode(request.writer, version);
-				}
-			} else {
-				// Send SUBSCRIBE_OK
-				await request.writer.u53(SubscribeOk.id);
-				const ok = new SubscribeOk({
-					requestId:
-						version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16
-							? msg.requestId
-							: undefined,
-					trackAlias: msg.requestId,
-					// Required once the track has content; a fill-requesting subscriber sizes its
-					// backfill against this. Below draft-20 round it down to the start of its
-					// group, matching what the subscription serves there: a draft-20 subscriber
-					// recovers a group's head with a FILL, which we serve, while older drafts
-					// recover it with a joining FETCH, which we do not, so naming a mid-group
-					// start would strand them.
-					largest:
-						edge.largest &&
-						(Filter.isDraft20(version)
-							? { groupId: edge.largest.group, objectId: edge.largest.object }
-							: { groupId: edge.largest.group, objectId: 0n }),
-					properties: msg.propertiesWanted
-						? // TIMESCALE is what opts the track into timestamps, on drafts that can
-							// send it.
-							{
-								// An untimed track declares none, so it stays untimed downstream.
-								timescale: info.timescale ?? undefined,
-								priority: publisherPriority,
-								// Through draft-15 this restates the order the subscription is served
-								// in. Later drafts carry the publisher's default instead, newest first.
-								groupOrder:
-									(version === Version.DRAFT_14 || version === Version.DRAFT_15) &&
-									order === "ascending"
-										? GroupOrder.Ascending
-										: Properties.DESCENDING,
-								maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
-							}
-						: // INCLUDE_PROPERTIES=0. The block stays present but empty, which also means
-							// the track opts out of timestamps for this subscriber.
-							{},
-				});
-				await ok.encode(request.writer, version);
+			if (!paused.acked) {
+				await this.#subscribeOk(request, msg, info, edge.largest);
+				paused.acked = true;
+			} else if (paused.answer) {
+				// The resuming update learns where the subscription now joins.
+				const parameters = new Parameters();
+				if (edge.largest) parameters.largest = { groupId: edge.largest.group, objectId: edge.largest.object };
+				await request.writer.u53(RequestOk.id);
+				await new RequestOk({ ...paused.answer, parameters }).encode(request.writer, version);
 			}
 			console.debug(`publish ok: broadcast=${name} track=${track.name}`);
 
@@ -700,78 +900,25 @@ export class Publisher {
 			const unsubscribed = new Promise<void>((resolve) => {
 				unsubscribe = resolve;
 			});
-			const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
 			const updates = (async () => {
 				for (;;) {
 					const framed = await request.next();
 					// The requester sent its last message, which ends the request only where FIN cancels.
 					if (framed === undefined) return request.ended;
-					if (framed.type !== 0x02)
-						throw new ProtocolViolation(
-							`unexpected message on a subscription: 0x${framed.type.toString(16)}`,
-						);
-					// Drafts 15 and 16 name the update's own Request ID.
-					const refused = async (
-						condition: "not_supported" | "malformed_auth_token",
-						reasonPhrase: string,
-						requestId: bigint | undefined,
-					) => {
-						await refuseUpdate(request.writer, version, "subscribe", {
-							requestId,
-							condition,
-							reasonPhrase,
-						});
-						return new UpdateFailed();
-					};
-					let ownRequestId: bigint | undefined;
-					let params: Parameters;
-					try {
-						if (legacy) {
-							// The adapter already spent the update's own Request ID.
-							const update = await SubscribeUpdate.decode(framed.reader, version);
-							ownRequestId = update.ownRequestId;
-							params = update.parameters;
-						} else {
-							params = await this.#subscriptionUpdate(framed);
-						}
-					} catch (err) {
-						// Section 8.9 rejects the update, which says more than that we do not support it.
-						if (err instanceof MalformedAuthToken)
-							throw await refused("malformed_auth_token", err.message, err.requestId);
-						throw malformed(err, "REQUEST_UPDATE");
-					}
-					if (params.trackPropertyFilter)
-						throw new ProtocolViolation(
-							"TRACK_PROPERTY_FILTER is only allowed on SUBSCRIBE_TRACKS updates",
-						);
-					const unsupported =
-						(!published && params.forward === false) ||
-						params.subscriptionFilter !== undefined ||
-						params.bytes.size > 0 ||
-						params.rangeFilters ||
-						[...params.vars.keys()].some(
-							(key) =>
-								key !== MAX_AGE_PARAMETER &&
-								key !== 0x02n &&
-								key !== 0x06n &&
-								key !== 0x10n &&
-								key !== 0x20n,
-						);
-					if (unsupported)
-						throw await refused("not_supported", "REQUEST_UPDATE parameters not supported", ownRequestId);
+					const { params, requestId } = await this.#subscribeUpdate(request, framed);
 					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
 						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
 					if (params.maxAge !== undefined)
 						track.update({ ...track.subscription.peek(), maxDelay: Milli(params.maxAge) });
-					if (published) {
-						msg.subscriberPriority = toWire(track.subscription.peek()?.priority ?? 0);
-						msg.maxAge = params.maxAge ?? msg.maxAge;
-						if (params.forward === false) throw new Paused();
-					}
+					// What an update changed while forwarding outlives a pause.
+					msg.subscriberPriority = toWire(track.subscription.peek()?.priority ?? 0);
+					msg.maxAge = params.maxAge ?? msg.maxAge;
+					// Every data stream closes before the pause is answered.
+					if (params.forward === false) throw new Paused(requestId);
 					if (version === Version.DRAFT_14) continue;
 					await request.writer.u53(RequestOk.id);
-					await new RequestOk({ requestId: ownRequestId }).encode(request.writer, version);
+					await new RequestOk({ requestId }).encode(request.writer, version);
 				}
 			})();
 			const requestEnded = race([updates, request.ended]);
@@ -786,7 +933,7 @@ export class Publisher {
 			// Every group started, until its stream finishes or resets, and the data streams
 			// opened for PUBLISH_DONE to report.
 			const groups = new Set<Promise<void>>();
-			const streams: StreamCount = published?.streams ?? { opened: 0 };
+			const streams = paused.streams;
 			// One ranking for the whole subscription, shared by every group and the fill.
 			const ranked = new Priority(track, info.priority);
 			ranking = ranked;
@@ -861,7 +1008,7 @@ export class Publisher {
 					Promise.all([serving, filling]).then(() => served),
 					requestEnded,
 					revoked,
-					...(published ? [published.unlisted] : []),
+					...(paused.unlisted ? [paused.unlisted] : []),
 				]);
 				if (end === true) throw new NotFound("track no longer listed");
 				if (end === "revoked") {
@@ -872,7 +1019,8 @@ export class Publisher {
 				ended = end === served;
 			} catch (err: unknown) {
 				publishError = error(err);
-				if (published) {
+				// Stop forwarding at once: a pause answers only after every data stream closed.
+				if (paused.unlisted || publishError instanceof Paused) {
 					unsubscribe();
 					track.close();
 				}
@@ -890,7 +1038,7 @@ export class Publisher {
 			if (publishError instanceof Paused) {
 				track.close();
 				await Promise.all(groups);
-				return true;
+				return publishError;
 			}
 
 			// Draft 14 on has no end location in PUBLISH_DONE: an END_OF_TRACK object is what
@@ -970,7 +1118,7 @@ export class Publisher {
 			// #runFill closes it itself on every path it reaches.
 			cache?.close();
 		}
-		return false;
+		return undefined;
 	}
 
 	/**
@@ -2506,7 +2654,7 @@ export class Publisher {
 			hold.signal.removeEventListener("abort", cancelled);
 			stop();
 			// Once sent, the PUBLISH survives cancellation of its listing.
-			const state: Published = { streams: { opened: 0 }, unlisted, answer: false };
+			const state: Pausable = { streams: { opened: 0 }, unlisted, acked: true };
 			const answer = await untilAborted(request.next(), hold.signal);
 			if (!answer) throw new ProtocolViolation("PUBLISH ended without an answer");
 			if (answer.type === RequestError.id) {
@@ -2572,11 +2720,10 @@ export class Publisher {
 						request,
 						track,
 						info: ready,
-						published: state,
+						paused: state,
 					});
 					if (!paused) return;
-					await request.writer.u53(RequestOk.id);
-					await new RequestOk({}).encode(request.writer, version);
+					await this.#answerPause(request, paused);
 					forward = false;
 				}
 				const revoked = new Once<true>();
@@ -2624,7 +2771,7 @@ export class Publisher {
 				}
 				this.#applyPublished(subscription, update);
 				forward = update.forward === true;
-				state.answer = forward;
+				state.answer = forward ? {} : undefined;
 				if (!forward) {
 					await request.writer.u53(RequestOk.id);
 					await new RequestOk({}).encode(request.writer, version);

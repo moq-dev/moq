@@ -31,8 +31,7 @@ pub struct Subscribe<'a> {
 	pub fill: Option<Fill>,
 	/// Whether the subscriber wants Track Properties on the response (draft-20).
 	pub properties_wanted: bool,
-	/// Whether Objects are forwarded (FORWARD). We only serve forwarding subscriptions,
-	/// so a subscriber that asks for none is refused.
+	/// Whether Objects are forwarded (FORWARD); a paused subscription forwards none until resumed.
 	pub forward: bool,
 	/// Whether RENDEZVOUS_TIMEOUT asks to wait for a missing publisher; never sent.
 	pub rendezvous: bool,
