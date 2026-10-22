@@ -81,6 +81,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
+- [Connection-blocked writers end cleanly](/quest/m1/quic-connection-blocked.md) - an ended stream leaves the blocked-writer list, and STOP_SENDING surfaces under exhausted connection credit
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
