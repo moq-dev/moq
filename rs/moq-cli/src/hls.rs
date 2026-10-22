@@ -49,7 +49,8 @@ pub struct ExportArgs {
 }
 
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
-/// announced under `epoch`.
+/// announced under `epoch`. Once the playlist ends, serve the finished broadcast until its
+/// media is stale.
 pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoch) -> anyhow::Result<()> {
 	let ImportTarget {
 		origin,
@@ -76,21 +77,30 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 
 	importer.init().await?;
 	notify_ready();
-	let run = importer.run();
-	tokio::pin!(run);
-	tokio::select! {
-		res = &mut run => {
-			res?;
-			anyhow::bail!("the playlist ended before it declared a track");
+	{
+		let run = importer.run();
+		tokio::pin!(run);
+		tokio::select! {
+			res = &mut run => {
+				res?;
+				anyhow::bail!("the playlist ended before it declared a track");
+			}
+			catalog = listed.next() => {
+				anyhow::ensure!(catalog?.is_some(), "the playlist ended before it declared a track");
+				producer
+					.announce(moq_net::origin::Route::default().with_epoch(epoch))
+					.context("failed to announce broadcast")?;
+			}
 		}
-		catalog = listed.next() => {
-			anyhow::ensure!(catalog?.is_some(), "the playlist ended before it declared a track");
-			producer
-				.announce(moq_net::origin::Route::default().with_epoch(epoch))
-				.context("failed to announce broadcast")?;
-		}
+		run.await?;
 	}
-	Ok(run.await?)
+
+	// The playlist ended: serve the finished broadcast until its media is stale, so
+	// subscribers still catching up drain the tail. An interrupt drops it at once.
+	let finish = importer.finish()?;
+	tracing::info!(linger = ?finish.linger(), "playlist ended; serving the finished broadcast until its media is stale");
+	finish.wait().await;
+	Ok(())
 }
 
 fn playlist_url(playlist: &str) -> anyhow::Result<Url> {

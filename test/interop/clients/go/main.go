@@ -11,9 +11,8 @@
 //	ffmpeg ... -f h264 - | go-interop publish --url http://localhost:4443 --broadcast b.hang
 //	go-interop subscribe --url http://localhost:4443 --broadcast b.hang --timeout 20
 //
-// --auth-version offers only that version, one that carries AUTH: the client waits
-// for the grant the relay sends and prints it as an `auth granted` line before it
-// starts.
+// --version offers only that version. --grant waits for the grant the relay sends
+// over AUTH and prints it as an `auth granted` line before the client starts.
 package main
 
 import (
@@ -79,15 +78,23 @@ func publishTone(ctx context.Context, audio *moqaudio.Producer) {
 	}
 }
 
-// dial connects to url. With an authVersion, it offers only that version and waits
-// for the relay's grant, printing it in the Rust client's `auth granted` shape.
-func dial(ctx context.Context, url, authVersion string, timeout time.Duration) (*moq.Client, error) {
-	opts := []moq.ClientOption{moq.WithTLSVerify(false)}
-	if authVersion != "" {
-		opts = append(opts, moq.WithVersions(authVersion))
+// dialOptions are the session flags both roles share.
+type dialOptions struct {
+	// version, when set, is the only version offered.
+	version string
+	// grant waits for the relay's grant and prints it.
+	grant bool
+}
+
+// dial connects to url, printing the relay's grant in the Rust client's
+// `auth granted` shape when asked.
+func dial(ctx context.Context, url string, opts dialOptions, timeout time.Duration) (*moq.Client, error) {
+	options := []moq.ClientOption{moq.WithTLSVerify(false)}
+	if opts.version != "" {
+		options = append(options, moq.WithVersions(opts.version))
 	}
-	client, err := moq.Dial(ctx, url, opts...)
-	if err != nil || authVersion == "" {
+	client, err := moq.Dial(ctx, url, options...)
+	if err != nil || !opts.grant {
 		return client, err
 	}
 
@@ -114,8 +121,8 @@ func patterns(list []string) string {
 	return string(out)
 }
 
-func publish(ctx context.Context, url, broadcast, authVersion string, timeout time.Duration) error {
-	client, err := dial(ctx, url, authVersion, timeout)
+func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeout time.Duration) error {
+	client, err := dial(ctx, url, opts, timeout)
 	if err != nil {
 		return err
 	}
@@ -216,11 +223,11 @@ func catalogWithVideo(ctx context.Context, consumer *moq.BroadcastConsumer) (*mo
 	}
 }
 
-func subscribe(ctx context.Context, url, broadcast, authVersion string, timeout time.Duration) error {
+func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	client, err := dial(ctx, url, authVersion, timeout)
+	client, err := dial(ctx, url, opts, timeout)
 	if err != nil {
 		return err
 	}
@@ -274,7 +281,7 @@ func subscribe(ctx context.Context, url, broadcast, authVersion string, timeout 
 
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: go-interop publish|subscribe --url URL --broadcast PATH [--timeout SECONDS] [--auth-version V]")
+		return errors.New("usage: go-interop publish|subscribe --url URL --broadcast PATH [--timeout SECONDS] [--version V] [--grant]")
 	}
 	role := os.Args[1]
 
@@ -282,7 +289,8 @@ func run() error {
 	url := flags.String("url", "", "relay URL")
 	broadcast := flags.String("broadcast", "", "broadcast path")
 	timeout := flags.Float64("timeout", 20, "seconds to wait for data")
-	authVersion := flags.String("auth-version", "", "offer only this version, which carries AUTH, and print the grant")
+	version := flags.String("version", "", "offer only this version")
+	grant := flags.Bool("grant", false, "wait for the grant the relay sends over AUTH and print it")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		return err
 	}
@@ -296,11 +304,12 @@ func run() error {
 	}
 	wait := time.Duration(*timeout * float64(time.Second))
 	ctx := context.Background()
+	opts := dialOptions{version: *version, grant: *grant}
 	switch role {
 	case "publish":
-		return publish(ctx, *url, *broadcast, *authVersion, wait)
+		return publish(ctx, *url, *broadcast, opts, wait)
 	case "subscribe":
-		return subscribe(ctx, *url, *broadcast, *authVersion, wait)
+		return subscribe(ctx, *url, *broadcast, opts, wait)
 	default:
 		return fmt.Errorf("unknown role %q", role)
 	}
