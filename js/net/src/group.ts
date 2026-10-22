@@ -588,9 +588,10 @@ export class Consumer {
 	/**
 	 * Settles with a `StreamError` of code `Old` once the subscription's `maxDelay` gives up
 	 * on this group, even after every frame was read or the group closed: a publisher still
-	 * writing or draining it races its writes against this and abandons the stream once it
-	 * settles. Peek it synchronously (`undefined` while within budget), or race it, which
-	 * stops watching the budget once the race ends.
+	 * writing or draining it races its writes against this, and against {@link closed}
+	 * settling with an error, and abandons the stream once either does. Peek it synchronously
+	 * (`undefined` while within budget), or race it, which stops watching the budget once the
+	 * race ends.
 	 */
 	get expired(): GetPromise<Error> {
 		this.#expired ??= new Expired(
@@ -631,7 +632,6 @@ export class Consumer {
 			if (group.#closed?.peek() instanceof Error && group.#verdict.peek() === undefined)
 				group.#closed = undefined;
 		};
-		hooks.guardGroup = (group, operation) => group.#guard(operation);
 		hooks.evictGroup = (group) => {
 			group.#evict();
 		};
@@ -654,40 +654,6 @@ export class Consumer {
 		});
 		if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
 		return true;
-	}
-
-	// Takes a thunk rather than a started promise, so a group already past its budget
-	// never begins the operation: an abandoned one would reject later with no handler.
-	#guard<T>(operation: () => Promise<T>): Promise<T> {
-		this.#expire();
-		if (this.#terminal) return Promise.reject(this.#terminal);
-		const expiry = this.#expiry;
-		if (!expiry) return operation();
-
-		return new Promise<T>((resolve, reject) => {
-			let settled = false;
-			const disposes: Dispose[] = [];
-			const finish = (fn: () => void) => {
-				if (settled) return;
-				settled = true;
-				for (const dispose of disposes) dispose();
-				fn();
-			};
-			const check = () => {
-				this.#expire();
-				if (this.#terminal) {
-					const error = this.#terminal;
-					finish(() => reject(error));
-				}
-			};
-
-			for (const changed of expiry.changed) disposes.push(changed.subscribe(check));
-			operation().then(
-				(value) => finish(() => resolve(value)),
-				(error: unknown) => finish(() => reject(error)),
-			);
-			check();
-		});
 	}
 
 	#evict() {

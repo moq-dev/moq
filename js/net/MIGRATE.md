@@ -31,7 +31,8 @@ const recv = subscriber.tryRecvGroup();
 const group = recv.kind === "group" ? recv.group : undefined;
 ```
 
-`Track.Ordered.tryNextGroup()`, `Track.finalSequence(end)`, `Track.Consumer.info({ hold })`, and `Group.Consumer.expired` are new; a custom publisher races its writes against `expired` and resets the stream once it settles.
+`Track.Ordered.tryNextGroup()`, `Track.finalSequence(end)`, `Track.Consumer.info({ hold })`, and `Group.Consumer.expired` are new.
+A custom publisher races its writes against `expired` and against `closed` settling with an error (an eviction, or an aborted copy no route continues), and resets the stream once either does.
 
 ### A dropped or cut group ends its reader with an error (#6143)
 

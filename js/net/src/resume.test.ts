@@ -1550,6 +1550,58 @@ test.each(["lands", "dropped", "expired"])(
 	},
 );
 
+test("a group read whole still expires once the reader lets go of its copy", async () => {
+	const { clock, restore } = manual();
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: SECOND });
+	try {
+		ta.write(0);
+		const group = taken(sub.tryRecvGroup());
+		if (!group) throw new Error("expected group 0");
+		// Read whole and released, as a publisher does before it drains the stream it wrote it to.
+		expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+		expect(await group.readFrame()).toBeUndefined();
+		group.close();
+
+		front.serve(b.consume());
+		await settle();
+		tb.write(2);
+		expect(drain(sub)).toEqual([2]);
+		// Its successor lands on the replaced copy, starting the budget there.
+		const half = Nano.fromMilli(Milli(SECOND / 2));
+		await clock.advanceAsync(half);
+		ta.write(1);
+		drain(sub);
+
+		let expired: Error | undefined;
+		void group.expired.then((err) => {
+			expired = err;
+		});
+		// A budget after the swap, the next read lets go of the replaced copy, closing its subscription.
+		await clock.advanceAsync(half);
+		expect(drain(sub)).toEqual([]);
+		await settle();
+		expect(ta.producer.demand().wanted.peek()).toBeUndefined();
+		expect(expired).toBeUndefined();
+
+		await clock.advanceAsync(half);
+		await settle();
+		expect(expired).toBeInstanceOf(StreamError);
+		expect((expired as StreamError).code).toBe(StreamCode.Old);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+		restore();
+	}
+});
+
 test("an ordered reader keeps no copy for a group it passed", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

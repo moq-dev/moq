@@ -103,7 +103,7 @@ Work owned by this README, after the children land:
 
 - [Claim request type](/quest/m1/public-model/claim-request-type.md) - accepting an application claim's request fails to compile instead of panicking
 - [Public ingest](/quest/m1/public-model/ingest.md) - a custom subscriber writes received groups, frames, starts, and ends into a track through public calls
-- [Public group abandonment and JS feed start](/quest/m1/public-model/serve.md) - a custom Rust publisher parked on its transport learns when to give up on a group, and a JS one where the feed starts, the last serving items left
+- [Public JS feed start](/quest/m1/public-model/serve.md) - a custom JS publisher learns where the source's feed starts, the last serving item left
 - [Public routes and answering](/quest/m1/public-model/answer.md) - a custom relay ingests routes, answers broadcast and track requests on demand, and advertises without echoing a peer's routes back
 - [Public model after ranges, handover, and the JS tail](/quest/m1/public-model/deferred.md) - fetch and track-info answering, the cache peeks, JS `fork`/`mirror`, and JS `endTrack`, once the quests that reshape them land
 

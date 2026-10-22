@@ -19,6 +19,7 @@ import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { finalSequence } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { untilGivenUp } from "../util/given_up.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -1613,11 +1614,9 @@ export class Publisher {
 			// once the open settles. tryOpen owns resetting a slot that arrives too late.
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
-			const abandoned = hooks
-				.guardGroup(group, () => opened.promise)
-				.catch((err: unknown) => {
-					failure = error(err);
-				});
+			const abandoned = untilGivenUp(group, () => opened.promise).then((stop) => {
+				failure = stop;
+			});
 			let stream: Writer | undefined;
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
@@ -1652,11 +1651,11 @@ export class Publisher {
 		// This model holds whole groups, so frame `startFrame` is always reachable unless
 		// the group ends first. Declaring it up front keeps the stream self-describing.
 		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
-		// The subscription's budget may give up on the group mid-write, which abandons the stream.
-		// A group already past it never starts the write.
+		// The subscription's budget, or an eviction of what is left to read, may give up on the
+		// group mid-write, which abandons the stream. A group already given up never starts the write.
 		const write = async (op: () => Promise<unknown>) => {
-			const expired = group.expired.peek() ?? (await race([op().then(() => undefined), group.expired]));
-			if (expired !== undefined) throw expired;
+			const stop = await untilGivenUp(group, op);
+			if (stop) throw stop;
 		};
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
 		// a finished group's stream being ranked.

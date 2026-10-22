@@ -1746,6 +1746,10 @@ export class Subscriber {
 		revision: new Signal(0),
 		at: Number.POSITIVE_INFINITY,
 	};
+	// When each group the timeline held at close arrived, failed ones left out. A group handed
+	// out earlier can outlive this subscriber, as one a resumed reader still writes from a copy
+	// it let go of, and its budget still runs from its successor's arrival.
+	#arrivals?: { sequence: number; arrived: Instant }[];
 
 	#drift(): Drift {
 		const { end } = this.#cursor.peek();
@@ -1808,22 +1812,30 @@ export class Subscriber {
 	//
 	// The wall clock judges it too: a group is also stale once its successor arrived a full
 	// budget ago, so a peer whose timestamps stop advancing, an untimed track, or an empty
-	// successor that never presents cannot pin a superseded group. The successor is re-read,
-	// not latched, like the reach. The newest group has no successor, so neither clock ever
+	// successor that never presents cannot pin a superseded group. While open, the successor is
+	// re-read, not latched, like the reach. The newest group has no successor, so neither clock ever
 	// convicts it. `wake` arms a timer for the wall deadline, for a held read that waits on it.
 	#isStale(group: GroupConsumer, drift: Drift, wake = false): boolean {
-		if (this.#state.timeline[timelineIndex(this.#state.timeline, group.sequence)] !== group) return false;
+		const timeline = this.#state.timeline;
+		if (!this.#arrivals && timeline[timelineIndex(timeline, group.sequence)] !== group) return false;
 		return this.#staleAt(group.sequence, drift, wake);
 	}
 
 	// The drift verdict for `sequence` by its successor alone, whether or not this track holds it.
+	// Once closed, only the wall clock judges it, from the arrivals kept at close.
 	#staleAt(sequence: number, drift: Drift, wake = false): boolean {
-		const successor = this.#successor(sequence, drift.end);
-		if (!successor) return false;
+		const successor = this.#arrivals ? undefined : this.#successor(sequence, drift.end);
+		const arrived = successor
+			? hooks.groupArrived(successor)
+			: this.#arrivals?.find(
+					(entry) => entry.sequence > sequence && (drift.end === undefined || entry.sequence < drift.end),
+				)?.arrived;
+		if (arrived === undefined) return false;
 		// Plain arithmetic: an unenforced budget is infinite, which no duration brand holds.
-		const deadline = hooks.groupArrived(successor) + drift.budget * 1_000_000;
+		const deadline = arrived + drift.budget * 1_000_000;
 		if (now() >= deadline) return true;
 		if (wake) this.#wakeAt(deadline);
+		if (!successor) return false;
 
 		const reach = hooks.groupTimestamp(successor)?.asMillis();
 		return (
@@ -2192,6 +2204,13 @@ export class Subscriber {
 
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */
 	close(abort?: Error) {
+		if (!this.#closed) {
+			const arrivals = this.#state.timeline.filter((group) => !(group.closed.peek() instanceof Error));
+			this.#arrivals = arrivals.map((group) => ({
+				sequence: group.sequence,
+				arrived: hooks.groupArrived(group),
+			}));
+		}
 		this.#closed = true;
 		// Settle if we're first (the producer may already have); either way drop anything
 		// still buffered. Groups parked at the withRange cap deliberately outlive a clean
@@ -2208,6 +2227,8 @@ export class Subscriber {
 		this.#state.timeline.length = 0;
 		this.#wall.timer?.abort();
 		this.#wall.timer = undefined;
+		// A deadline kept in #arrivals may still arm a wakeup.
+		this.#wall.at = Number.POSITIVE_INFINITY;
 	}
 
 	/**

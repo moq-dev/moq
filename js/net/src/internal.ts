@@ -499,9 +499,6 @@ export const hooks: {
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
 	/** Carry a handed-out group across its logical track's route changes. */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
-	// pending: /quest/m1/public-model/serve.md
-	/** Start a group operation unless the handed-out group has expired, and stop it if the group expires mid-flight. */
-	guardGroup: <T>(group: GroupConsumer, operation: () => Promise<T>) => Promise<T>;
 	/** Make an evicted mirror terminal while its track timeline still contains it. */
 	evictGroup: (group: GroupConsumer) => void;
 	/** Attach the origin advertisement of a created broadcast. */
@@ -651,9 +648,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
-		throw new Error("group.ts not loaded");
-	},
-	guardGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	evictGroup: () => {

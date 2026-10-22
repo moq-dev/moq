@@ -32,6 +32,7 @@ import { Timescale } from "../time.ts";
 import type { Groups, Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
+import { untilGivenUp } from "../util/given_up.ts";
 import { LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
@@ -908,11 +909,9 @@ export class Publisher {
 			// once the open settles. tryOpen owns resetting a slot that arrives too late.
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
-			const abandoned = hooks
-				.guardGroup(group, () => opened.promise)
-				.catch((err: unknown) => {
-					failure = error(err);
-				});
+			const abandoned = untilGivenUp(group, () => opened.promise).then((stop) => {
+				failure = stop;
+			});
 			let stream: Writer | undefined;
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
@@ -953,11 +952,11 @@ export class Publisher {
 				},
 			});
 
-			// The subscription's budget may give up on the group mid-write, which abandons the stream.
-			// A group already past it never starts the write.
+			// The subscription's budget, or an eviction of what is left to read, may give up on the
+			// group mid-write, which abandons the stream. A group already given up never starts the write.
 			const write = async (op: () => Promise<unknown>) => {
-				const expired = group.expired.peek() ?? (await race([op().then(() => undefined), group.expired]));
-				if (expired !== undefined) throw expired;
+				const stop = await untilGivenUp(group, op);
+				if (stop) throw stop;
 			};
 
 			try {
@@ -1004,6 +1003,9 @@ export class Publisher {
 				}
 
 				stream.close();
+				// The stream holds every byte it owes, so frames past a range's end failing upstream
+				// can no longer give it up: release the read, leaving the budget.
+				group.close();
 				// Its bytes still hold the connection until acknowledged, so a group gone stale
 				// meanwhile is reset like one still serving, as the Rust `GroupServe` does. Awaited
 				// even without a marker: PUBLISH_DONE waits on this group, so the track, whose

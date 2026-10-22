@@ -4281,6 +4281,22 @@ enum Rank<G> {
 	Queue(PriorityHandle),
 }
 
+/// Why to stop writing `group` while the transport parks it: the subscription's budget gave
+/// it up, or the frames this cursor has yet to read are gone with no route to continue them.
+/// A clean finish is no reason.
+///
+/// Waking on every frame written to a parked group costs what a reader parked at the live
+/// edge already pays: each of its pending reads judges the budget too.
+fn poll_given_up(group: &mut group::Consumer, waiter: &kio::Waiter) -> Option<Error> {
+	if group.poll_expired(waiter) {
+		return Some(Error::Old);
+	}
+	match group.poll_finished(waiter) {
+		Poll::Ready(Err(err)) => Some(err),
+		_ => None,
+	}
+}
+
 /// Serves one group on its own unidirectional stream: the header, then every
 /// frame, applying queue and SUBSCRIBE_UPDATE priority changes as they land.
 struct GroupServe<S: crate::transport::poll::Session> {
@@ -4367,7 +4383,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		if !matches!(self.state, GroupState::Open) {
 			return Poll::Ready(Ok(()));
 		}
-		if let Some(err) = self.group.poll_abandoned(waiter, false) {
+		if let Some(err) = poll_given_up(&mut self.group, waiter) {
 			self.settle_open(false);
 			self.state = GroupState::Done;
 			return Poll::Ready(Err(err));
@@ -4488,10 +4504,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 								// Parking on the transport is the one stall the group cursor cannot
 								// see, and the only place a served group applies the drift budget:
 								// flow control must not pin a stream that has gone stale, or one
-								// whose unread rest the cache evicted. `true` because the transport
-								// still owns bytes the cursor has released.
+								// whose unread rest the cache evicted.
 								Poll::Pending => {
-									if let Some(err) = self.group.poll_abandoned(waiter, true) {
+									if let Some(err) = poll_given_up(&mut self.group, waiter) {
 										break 'serve Err(err);
 									}
 									return Poll::Pending;
@@ -4508,10 +4523,9 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 									// Parking on the transport is the one stall the group cursor cannot
 									// see, and the only place a served group applies the drift budget:
 									// flow control must not pin a stream that has gone stale, or one
-									// whose unread rest the cache evicted. `true` because the transport
-									// still owns bytes the cursor has released.
+									// whose unread rest the cache evicted.
 									Poll::Pending => {
-										if let Some(err) = self.group.poll_abandoned(waiter, true) {
+										if let Some(err) = poll_given_up(&mut self.group, waiter) {
 											break 'serve Err(err);
 										}
 										return Poll::Pending;

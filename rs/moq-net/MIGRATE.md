@@ -17,7 +17,10 @@ subscriber.set_groups(5..);
 let subscriber = subscriber.with_range(5..);
 ```
 
+`group::Consumer::finished` (and `poll_finished`) now ends cleanly once a `with_range` frame cap is reached, where it waited for the group itself to end, as reads already do.
+
 A custom publisher can now reach what the built-in ones use: `track::Subscriber::poll_start`, `track::Subscriber::poll_drop`, `group::Consumer::poll_expired`, `subscription::Position::final_sequence`, and `Subscription::{start, end, with_start, with_end}` for the covering span.
+It gives up on a group it is still writing once `poll_expired` is true, or `poll_finished` fails because the frames it has yet to read are gone.
 
 ### A dropped or cut group ends its reader with an error (#6143)
 
