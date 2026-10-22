@@ -25,7 +25,10 @@ landed the fields.
   recenter or rotate the video.
 - Refuse what the catalog cannot describe, since an absent field claims flat
   video or plain channels: a cubemap or mesh projection, so Google's
-  mesh-based VR180 is refused until the catalog has a mesh kind. For Opus
+  mesh-based VR180 is refused until the catalog has a mesh kind. The same
+  goes for any stereo packing or eye order beyond mono, left-right, and
+  top-bottom (such as `st3d` right-left, or a Matroska right-eye-first,
+  interleaved, or anaglyph `StereoMode`), each with a fixture. For Opus
   family 2, RFC 8486 allows `(1 + n)^2 + 2j` channels with `j` 0 or 1; only
   `j = 0` with `n` of at least 1 (4, 9, 16, ... channels) maps to
   `ambisonic`, and zeroth order or a non-diegetic stereo pair (1, 3, 6, 11,
