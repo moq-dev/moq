@@ -410,7 +410,7 @@ The current workflow has changed since this sample, including removal of WebKit.
 | JS Audit and Rust Audit | Advisory findings, including webpki roots. [6169](https://github.com/moq-dev/moq/pull/6169) has since merged; it records upstream-blocked advisories separately. No ignore was added here. |
 | Tests (gate) | Unresolved quest link to the old ts-health-stats path, not the R2 warnings earlier in the log. The current quest tree passes. |
 | Tests (gh test) | A stale queue fixture expected a removed Smoke pull_request branch filter. Main fixed that fixture. Running the current suite exposed two further stale assertions fixed in this PR. |
-| Fuzz (connection) | Assertion `buf_capacity - buf.len() >= MIN_PACKET_SPACE` in connection transmit. Log includes crash `5783f2303d2a75af7f12d1798db7b62d651ab54a`. [6007](https://github.com/moq-dev/moq/pull/6007) changed datagram sizing after this night; the exact captured input still panics on main `766934221b` in this audit. The bytes and reproduction command are preserved below; do not suppress or stop fuzzing. |
+| Fuzz (connection) | Assertion `buf_capacity - buf.len() >= MIN_PACKET_SPACE` in connection transmit, crash `5783f2303d2a75af7f12d1798db7b62d651ab54a`. Fixed by [6279](https://github.com/moq-dev/moq/pull/6279) with that input as its regression. |
 | Tests (rs loom) | `a_front_sees_a_reader_return` exceeded Loom model branches. The prior parked-reader fix predates this night. The documented current-main Loom rerun was not completed: the preliminary stricter nextest build emitted existing cfg(loom) dead-code warnings and spent over six minutes compiling; the documented recipe then waited on that same worktree build lock. Those redundant validation compilers were stopped, and no model bound was changed. Do not call the historical runtime failure confirmed on current main. |
 | Features (rs features) | `moq-mux` fMP4 Rendition and Kind large-enum lints. The existing [lint audit](https://github.com/moq-dev/moq/pull/6159) discusses related feature/platform warnings; it does not establish that these sampled ARM failures are fixed. |
 | Rust benchmark tests | `benchmark_feed_fetch_wakes` exceeds the cooperative Ready-poll limit. [6112](https://github.com/moq-dev/moq/pull/6112) and the performance audit track the benchmark; no timing or correctness criterion was weakened here. |
@@ -427,7 +427,7 @@ quests retain those conditions.
 - Treat unavailable exact per-workflow monthly attribution as a measurement limit,
   not a completion gate. Billing totals, measured job costs, invocation counts and
   retained failure links are recorded separately rather than multiplied blindly.
-- Replay historical connection-fuzz, Loom and feature-only lint failures on current
+- Replay historical Loom and feature-only lint failures on current
   main before classifying them as current failures, coordinating with existing owners. Protocol or model changes large
   enough to review independently need a maintainer-approved split, as this Plan allows.
 - Rust/JS coverage, browser baseline and browser benchmark comparisons now reach
@@ -446,50 +446,12 @@ quests retain those conditions.
 - Finish this run before creating its already-decided m2 recurrence successor. No m2
   quest has been claimed or started by this audit.
 
-#### Confirmed current-main connection crash
+#### Connection fuzz crash: fixed
 
-The exact 847-byte Nightly input still panics at `connection/mod.rs:833` on
-main `766934221b`, after [6007](https://github.com/moq-dev/moq/pull/6007).
-The existing stable regression harness failed in 6 ms with
-`buf_capacity - buf.len() >= MIN_PACKET_SPACE`.
-The input below preserves the captured bytes; it is not an ignored or unwired test.
-
-Decode the Base64 into a temporary file under
-`rs/moq-quic/fuzz/regressions/connection/`, then run:
-
-```sh
-nix develop --command just rs test -p moq-quic --lib -E 'test(=fuzz::tests::regressions)'
-```
-
-Remove that temporary fixture afterward so it does not turn unrelated checks red.
-The current audit changes do not alter the transmit code.
-
-```base64
-f28szbI/KruFtNjgH59GRVHLRPi/HdPlqyq7e2kCAAAAAAAAAAAAAAAAAAAAAB++yBSxix1MPqp8
-7EEAfgS/CphFO3WqKYLsBogsUut+sjK0Y1gSMzElF0pRwnHZgbqZoN+CdOSI/FjgYyDjLyjLGt43
-I+yCMj1SI/wfPNQuSfMAAAAAAAAAAAAAAACI/FjgYyDjLyjLGt43I+yCMj1SpRSGL0VUSOy+kLhU
-LIUpupobpH86EU60pNc4j6L2Ftl0+pT9oZOn7vjH38kUm6CHnDJuYBe8YBvJf8eioVkvIXjHdoGg
-LZl5WjW795tTH1YD8PaLQilFPbm5J2DPz6vMkPsym7zWBMq/AIEG2AagcFcq8gkjtZeb7+hyjSjX
-wiZOqf/mzeCC6+jqnUtlAfAbY04BHDp1AAAAAB++yBSxix1MPqp87EEAfgS/CphFO3WqKYLsBogs
-Uut+sjK0Y1gSMzElF0pRwnHZgbqZoN+CdOSI/FjgYyDjLyjLGt43I+yCMj1SI/wfPNQuSfMAAAAA
-AAAAAAAAAACI/FjgYyDjLyjLGt43I+yCMj1SpRSGL0VUSOy+kLhULIUpupobpH86EU60pNc4j6L2
-Ftl0+pT9oZOn7vjH38kUm6CHnDJuYBe8YBvJf8eioVkvIXjHdoGgLZl5WjW795tTH1YD8PaLQilF
-Pbm5J2DPz6vMkPsym7zWBMq/AIEG2AagcFcq8gkjtZeb7+hyjSjXwiZOqf/mzeCC6+jqnUtlAfAb
-Y04BHDp1kNn08VULWNA5ieObpCN+iKaQ6xYOqB6T3l9g086IMDbgSkKMbOT+1oCeM1+MtuIWVUQn
-LbXC7l+ptetp1PjTvqOU40K6ZGFH0mf24HU6McxvWrK87J3sTTeaE/ar1aKiDpocC1kn4uWPNUvm
-TvHuapL4BW8H3FBO5RQBT0s6MDxDLXRl2ma1HKqAbuTsoaRDlN+wIdTcz9LLhITK/CBr0Jnj5dzg
-taeHHdl0dLT2MEjbHsDaIaxKQEVH0RAS7SNZYMyiF7oRMMIqOdh1SN6GD9K0NSnT4iICCQGwv3mj
-c2yNfrduwiW3TdVlRTa130FAR/Z8nylU+60HVNfu12efoFfy5dJA1oj8WOBj/8kgGg==
-```
-
-Scope choice for the maintainer:
-
-1. Recommended: a dedicated m0 fix quest/PR with the exact input and source fix.
-   Protocol transmit changes are independently reviewable from workflow reporting.
-2. Broaden this audit PR to include the transmit fix and boundary tests.
-
-Neither course has been started. The audit remains a draft until this frontier
-is settled; do not weaken the fuzzer or add a disconnected ignored test.
+[moq-dev/moq#6279](https://github.com/moq-dev/moq/pull/6279) fixed the
+connection transmit panic (`buf_capacity - buf.len() >= MIN_PACKET_SPACE`) with
+the exact 847-byte Nightly input (SHA-1 `5783f2303d2a75af7f12d1798db7b62d651ab54a`)
+as its regression. The scope decision this audit raised is settled.
 
 #### Local validation and ownership
 
