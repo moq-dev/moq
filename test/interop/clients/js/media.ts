@@ -309,13 +309,15 @@ async function observe(
 	label: string,
 ): Promise<{ samples: Sample[]; grade: (checks?: () => void) => Promise<void> }> {
 	const host = watchHost(label);
+	const start = Date.now();
 	const samples = await collect(player, playerErrors, WINDOW_MS);
+	const bounds = { start, end: Date.now() };
 	const grade = async (checks?: () => void) => {
 		try {
 			checks?.();
 			assertMedia(samples, label);
 		} catch (err) {
-			await explainStalls(player, samples, label, host);
+			await explainStalls(player, bounds, label, host);
 			throw err;
 		} finally {
 			host?.process.kill();
@@ -367,41 +369,36 @@ function processName(command: string): string {
  */
 async function explainStalls(
 	player: Page,
-	samples: Sample[],
+	bounds: { start: number; end: number },
 	label: string,
 	host: ReturnType<typeof watchHost>,
 ): Promise<void> {
 	// The window has already failed, so a plain evaluate's user activation can no longer skew it, and
-	// unlike `inspect` it reads a non-Chromium player too. Each page reports on its own, so one that
-	// cannot be read leaves the other's evidence intact.
-	const origin = await player.evaluate(() => performance.timeOrigin).catch(() => undefined);
-	if (origin === undefined) {
-		console.error(`  ${label}: long animation frames unavailable: the player cannot be read`);
-	} else {
-		const start = origin + (samples[0]?.at ?? 0);
-		const end = origin + (samples[samples.length - 1]?.at ?? 0);
-		for (const [name, page] of [
-			["player", player],
-			["fixture", fixturePage],
-		] as const) {
-			if (!page) continue;
-			try {
-				const frames = await page.evaluate(
-					({ key, from, to }) =>
-						((globalThis as unknown as Record<string, LongFrame[] | undefined>)[key] ?? []).filter(
-							(frame) => frame.at + frame.duration >= from && frame.at <= to,
-						),
-					{ key: LONG_FRAMES, from: start, to: end },
+	// unlike `inspect` it reads a non-Chromium player too. The bounds come from the driver's clock,
+	// which the pages' epoch timestamps share, so each page reports on its own and one that cannot be
+	// read leaves the other's evidence intact.
+	const { start, end } = bounds;
+	for (const [name, page] of [
+		["player", player],
+		["fixture", fixturePage],
+	] as const) {
+		if (!page) continue;
+		try {
+			const frames = await page.evaluate(
+				({ key, from, to }) =>
+					((globalThis as unknown as Record<string, LongFrame[] | undefined>)[key] ?? []).filter(
+						(frame) => frame.at + frame.duration >= from && frame.at <= to,
+					),
+				{ key: LONG_FRAMES, from: start, to: end },
+			);
+			console.error(`  ${label}: ${name} long animation frames: ${frames.length}`);
+			for (const frame of frames) {
+				console.error(
+					`    +${((frame.at - start) / 1000).toFixed(2)}s ${frame.duration}ms (blocking ${frame.blocking}ms) ${frame.scripts}`,
 				);
-				console.error(`  ${label}: ${name} long animation frames: ${frames.length}`);
-				for (const frame of frames) {
-					console.error(
-						`    +${((frame.at - start) / 1000).toFixed(2)}s ${frame.duration}ms (blocking ${frame.blocking}ms) ${frame.scripts}`,
-					);
-				}
-			} catch (err) {
-				console.error(`  ${label}: ${name} long animation frames unavailable: ${err}`);
 			}
+		} catch (err) {
+			console.error(`  ${label}: ${name} long animation frames unavailable: ${err}`);
 		}
 	}
 
