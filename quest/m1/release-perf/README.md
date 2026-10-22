@@ -39,9 +39,13 @@ noise.
   [FETCH fan-out](/quest/m1/release-perf/fetch-fanout.md) owns it.
 - `stats/session-report` is accepted at O(live sessions), after a cheap fix.
   Per-label payload bytes ([#5731](https://github.com/moq-dev/moq/pull/5731))
-  match payload billing per label, such as per signing key. The drain runs
-  once a second, using under 0.01% of a core at 10,000 sessions. Deleting
-  those bytes was rejected.
+  match payload billing per label, such as per signing key. After removing
+  redundant row locking and live-session CAS, three alternating measurements
+  give 52.2 us for 10,000 sessions without wires and 388.4 us with one real
+  transport wire each. A once-per-second drain uses about 0.04% of a core
+  with those wires; the earlier under-0.01% estimate omitted their walk.
+  This remaining per-session and per-connection sampling is accepted. Deleting
+  per-label bytes was rejected.
 
 ### Release as a baseline
 
