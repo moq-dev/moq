@@ -30,8 +30,19 @@ pub struct ImportTarget {
 	pub bandwidth: moq_net::bandwidth::Allocator,
 }
 
-/// Notify systemd (if any) that the endpoint is up.
+/// Set once the process takes a shutdown signal: it is draining from then on, not starting.
+static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record that the process is shutting down, so no endpoint reports ready after it.
+pub fn stop() {
+	STOPPING.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Notify systemd (if any) that the endpoint is up, unless the process is shutting down.
 pub fn notify_ready() {
+	if STOPPING.load(std::sync::atomic::Ordering::Relaxed) {
+		return;
+	}
 	#[cfg(unix)]
 	let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 }
