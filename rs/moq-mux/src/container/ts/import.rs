@@ -929,8 +929,9 @@ impl<E: catalog::Catalog> Import<E> {
 		self.flush(pid)?;
 		let generation = self.placement.generation;
 		let (mut units, mut unplaced) = (0, 0);
-		if let Some(mut section) = self.sections.remove(&pid.as_u16()) {
-			self.keep_stats(pid, Some(stats::Stream::new(".ts", stats::Class::Data)));
+		// Each route stays in its map until it has finished, so a failure on the way leaves it
+		// for `abort` to end with the cause.
+		if let Some(section) = self.sections.get_mut(&pid.as_u16()) {
 			section.settle(&self.placement);
 			(units, unplaced) = section.release(&self.timebase, &self.pts, generation)?;
 			anyhow::ensure!(
@@ -939,9 +940,12 @@ impl<E: catalog::Catalog> Import<E> {
 			);
 			section.finish()?;
 		}
+		if self.sections.remove(&pid.as_u16()).is_some() {
+			self.keep_stats(pid, Some(stats::Stream::new(".ts", stats::Class::Data)));
+		}
 		self.unclocked.remove(&pid);
-		if let Some(mut stream) = self.streams.remove(&pid) {
-			if let Stream::PesPacket(stream) = &mut stream {
+		if let Some(stream) = self.streams.get_mut(&pid) {
+			if let Stream::PesPacket(stream) = &mut *stream {
 				stream.settle(&self.placement);
 				let (published, dropped) = stream.release(&self.timebase, &self.pts, generation)?;
 				units += published;
@@ -959,6 +963,8 @@ impl<E: catalog::Catalog> Import<E> {
 				mpegts.tracks.remove(&name);
 			}
 			units += stream.finish()?;
+		}
+		if let Some(stream) = self.streams.remove(&pid) {
 			// Finishing can publish a held frame, which its counters then include.
 			self.keep_stats(pid, stream.stats());
 		}
@@ -10044,6 +10050,7 @@ pub(super) mod test {
 
 		let err = import.decode(&synth_pmt(&streams[..1], true)).unwrap_err();
 		assert!(err.to_string().contains("without a media timestamp"), "{err:#}");
+		assert!(import.sections.contains_key(&0x21), "the route is left for `abort`");
 	}
 
 	/// A PID decoded as audio, then revised to private sections, then dropped, reports the
