@@ -19,6 +19,9 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// The runtime that arms the session's timers.
 	pub runtime: crate::time::Deadlines,
 
+	/// Where the session's control traffic is counted, even with neither origin set.
+	pub stats: crate::stats::Session,
+
 	pub session: S,
 
 	/// The bidi SETUP stream (draft-14 through draft-16 only). Draft-17+ passes `None`
@@ -115,6 +118,7 @@ where
 {
 	let Config {
 		runtime,
+		stats,
 		mut session,
 		setup,
 		request_id_max,
@@ -206,12 +210,6 @@ where
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
-		let stats = publish
-			.as_ref()
-			.map(|origin| origin.stats())
-			.or_else(|| subscribe.as_ref().map(|origin| origin.stats()))
-			.cloned()
-			.unwrap_or_default();
 		let publish = publish.unwrap_or_else(|| {
 			origin::Producer::empty(Hop::random())
 				.consume()
@@ -1325,7 +1323,7 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 			stream.reader = stream.reader.with_stats(publisher.stats());
 			publisher
 				.stats()
-				.control(super::message::control(id), data.0.len() + 2, true);
+				.control(super::message::control(id, version), data.0.len() + 2, true);
 		}
 		if !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 			&& matches!(
@@ -1585,6 +1583,7 @@ mod tests {
 					let log = session.log.clone();
 					let (driver, _) = start(Config {
 						runtime: crate::time::sim(),
+						stats: Default::default(),
 						session,
 						setup: None,
 						request_id_max: None,
@@ -1640,6 +1639,7 @@ mod tests {
 				let log = session.log.clone();
 				let (driver, _) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -1686,6 +1686,7 @@ mod tests {
 				let log = session.log.clone();
 				let (driver, _) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -1781,6 +1782,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -1844,6 +1846,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -1917,6 +1920,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: Some(setup),
 			request_id_max: None,
@@ -2005,6 +2009,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2108,6 +2113,7 @@ mod tests {
 		let handle = crate::auth::Handle::ietf(true);
 		let (driver, goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2192,6 +2198,7 @@ mod tests {
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2288,6 +2295,7 @@ mod tests {
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2377,6 +2385,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2420,6 +2429,7 @@ mod tests {
 
 			let (driver, _goaway) = start(Config {
 				runtime: crate::time::sim(),
+				stats: Default::default(),
 				session,
 				setup: None,
 				request_id_max: None,
@@ -2687,6 +2697,7 @@ mod tests {
 	fn bidi_driver(session: crate::lite::test_transport::ScriptedSession, publish: Option<origin::Consumer>) -> Driver {
 		start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2830,6 +2841,7 @@ mod tests {
 				let log = session.log.clone();
 				let (driver, _goaway) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -2898,6 +2910,7 @@ mod tests {
 				let log = session.log.clone();
 				let (driver, _goaway) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -3000,6 +3013,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: Some(setup),
 			request_id_max: None,
@@ -3122,6 +3136,7 @@ mod tests {
 				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 				let (driver, _goaway) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup,
 					request_id_max: None,
@@ -3353,6 +3368,7 @@ mod tests {
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -3455,6 +3471,7 @@ mod tests {
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,

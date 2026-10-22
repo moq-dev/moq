@@ -147,7 +147,7 @@ impl Decode<Version> for FollowUp {
 		let id = r.varint()?;
 		let update = id == super::SubscribeUpdate::ID;
 		let body = super::Body::decode(r, version)?;
-		r.control = Some(super::message::control(id));
+		r.control = Some(super::message::control(id, version));
 		Ok(match update {
 			true => Self::Update(body),
 			false => Self::End,
@@ -164,7 +164,7 @@ impl Decode<Version> for Framed {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = r.varint()?;
 		let body = super::Body::decode(r, version)?;
-		r.control = Some(super::message::control(id));
+		r.control = Some(super::message::control(id, version));
 		Ok(Self(id, body))
 	}
 }

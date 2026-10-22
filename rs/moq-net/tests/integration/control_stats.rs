@@ -68,3 +68,22 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 		);
 	}
 }
+
+/// A session with neither origin still counts its control traffic under its context.
+#[moq_clock::test]
+async fn control_counts_without_origins() {
+	for version in ["moq-lite-07-wip", "moq-transport-22"] {
+		let registry = Registry::new(Default::default());
+		let tier = Tier::new("internal");
+		let mut options = MockConnectOptions::new(version.parse().unwrap());
+		options.server_stats = registry.tier(tier.clone()).session("");
+		let _pair = connect_mock(options).await;
+		moq_clock::sleep(std::time::Duration::from_millis(100)).await;
+		let rows = registry.snapshot().control();
+		assert!(
+			rows.iter()
+				.any(|(row_tier, class, encoded, _)| *row_tier == tier && *class == Control::Session && *encoded > 0),
+			"{version}: {rows:?}"
+		);
+	}
+}

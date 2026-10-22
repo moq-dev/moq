@@ -145,6 +145,9 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// The runtime that arms the session's timers.
 	pub runtime: crate::time::Deadlines,
 
+	/// Where the session's control traffic is counted, even with neither origin set.
+	pub stats: crate::stats::Session,
+
 	/// Whether we dialed the session. Only the dialing side aborts on a publication
 	/// its grant does not cover: a server's publish origin is everything the peer
 	/// may read, not what it intends to push.
@@ -200,6 +203,7 @@ where
 {
 	let Config {
 		runtime,
+		stats,
 		client,
 		session,
 		setup_stream,
@@ -253,12 +257,6 @@ where
 	// An unset half gets an empty origin: an empty publish origin announces nothing
 	// (and answers the peer's announce-interest with an empty set), and an empty
 	// subscribe origin issues no ANNOUNCE_PLEASE.
-	let stats = publish
-		.as_ref()
-		.map(|origin| origin.stats())
-		.or_else(|| subscribe.as_ref().map(|origin| origin.stats()))
-		.cloned()
-		.unwrap_or_default();
 	let publish = publish.unwrap_or_else(|| {
 		origin::Producer::empty(Hop::random())
 			.consume()
@@ -884,6 +882,7 @@ mod tests {
 
 		let start = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
 			session: transport,
@@ -916,6 +915,7 @@ mod tests {
 			let log = transport.log.clone();
 			let start = start(Config {
 				runtime: crate::time::sim(),
+				stats: Default::default(),
 				client: false,
 				limits: Default::default(),
 				session: transport,
@@ -1002,6 +1002,7 @@ mod tests {
 		let log = transport.log.clone();
 		let start = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
 			session: transport,
@@ -1071,6 +1072,7 @@ mod tests {
 				let log = session.log.clone();
 				let mut started = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup_stream: None,
 					publish: None,
@@ -1125,6 +1127,7 @@ mod tests {
 				let log = session.log.clone();
 				let mut started = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup_stream: None,
 					publish: None,
@@ -1157,6 +1160,7 @@ mod tests {
 	) -> SessionStart<ScriptedSession> {
 		start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			client,
 			session: transport,
 			setup_stream: None,

@@ -2,9 +2,13 @@ use crate::coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder};
 
 use super::Version;
 
-pub(super) fn control(id: u64) -> crate::stats::Control {
+pub(super) fn control(id: u64, version: Version) -> crate::stats::Control {
 	use super::*;
 	use crate::stats::Control;
+	// Draft 14 reuses later drafts' NAMESPACE_DONE type for TRACK_STATUS_OK.
+	if version == Version::Draft14 && (id == TrackStatusOk::ID_14 || id == TRACK_STATUS_ERROR_14) {
+		return Control::TrackInfo;
+	}
 	match id {
 		PublishNamespace::ID
 		| PublishNamespaceError::ID
@@ -50,7 +54,7 @@ impl<T: Message> Encode<Version> for T {
 		let prefix = w.prefix_u16();
 		self.encode_msg(w, version)?;
 		w.fill(prefix)?;
-		w.control = Some(control(T::ID));
+		w.control = Some(control(T::ID, version));
 		Ok(())
 	}
 }
@@ -104,8 +108,26 @@ impl<T: Message> Decode<Version> for T {
 			Err(err) => tracing::warn!(%err, "decode failed"),
 		}
 		if result.is_ok() {
-			r.control = Some(control(T::ID));
+			r.control = Some(control(T::ID, version));
 		}
 		result
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::stats::Control;
+
+	/// Draft 14's track-status replies reuse type IDs later drafts give other classes.
+	#[test]
+	fn draft14_track_status_ids_are_track_info() {
+		for id in [super::super::TrackStatusOk::ID_14, super::super::TRACK_STATUS_ERROR_14] {
+			assert_eq!(control(id, Version::Draft14), Control::TrackInfo);
+		}
+		assert_eq!(
+			control(super::super::NamespaceDone::ID, Version::Draft16),
+			Control::Announce
+		);
 	}
 }

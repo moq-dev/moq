@@ -944,7 +944,7 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		msg.encode(&mut encoder, version)?;
 		let selector = crate::coding::varint::size(T::ID, version.into()).map_err(crate::coding::EncodeError::from)?;
 		self.stats
-			.control(super::message::control(T::ID), raw.len() - selector, false);
+			.control(super::message::control(T::ID, version), raw.len() - selector, false);
 		if !self.shared.control.push(raw.into()) {
 			tracing::debug!("control stream closed; message not sent");
 		}
@@ -999,7 +999,7 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 				.0;
 
 			self.stats
-				.control(super::message::control(type_id), body.len() + 2, true);
+				.control(super::message::control(type_id, self.version), body.len() + 2, true);
 
 			// Reconstruct raw message bytes: [type_id][size][body]
 			let raw = encode_raw(type_id, &body, self.version);

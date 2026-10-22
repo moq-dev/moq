@@ -176,6 +176,7 @@ impl Server {
 
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
+			stats: self.stats.clone(),
 			client: false,
 			limits: self.limits,
 			session: session.clone(),
@@ -626,6 +627,7 @@ where
 			// for GOAWAY. A server never advertises a path, hence `None`.
 			let (protocol, goaway) = ietf::start(ietf::Config {
 				runtime: runtime.clone(),
+				stats: server.stats.clone(),
 				limits: server.limits,
 				session: session.clone(),
 				setup: None,
@@ -737,6 +739,7 @@ where
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
 					let start = lite::start(lite::Config {
 						runtime: runtime.clone(),
+						stats: server.stats.clone(),
 						client: false,
 						limits: server.limits,
 						session: session.clone(),
@@ -762,6 +765,7 @@ where
 					// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
 					let (protocol, goaway) = ietf::start(ietf::Config {
 						runtime: runtime.clone(),
+						stats: server.stats.clone(),
 						limits: server.limits,
 						session: session.clone(),
 						setup: Some(stream),
