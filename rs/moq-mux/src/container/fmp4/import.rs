@@ -1221,12 +1221,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			self.estimator.cut(Some(timestamp));
 		}
 		let fragment_len = fragment.len();
-		let mut frame = group.create_frame(moq_net::frame::Info {
-			size: fragment_len as u64,
-			timestamp: Some(timestamp),
-		})?;
-		frame.write(fragment)?;
-		frame.finish()?;
+		group.write_frame(timestamp, fragment)?;
 
 		// Only once published, so a rejected fragment is never indexed. Audio is always
 		// independently decodable; video says whether this fragment really begins on an IDR,

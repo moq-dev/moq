@@ -6,7 +6,7 @@ use std::{
 	collections::{BTreeSet, HashMap, HashSet, VecDeque},
 	fmt,
 	sync::Arc,
-	sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+	sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 	task::{Context, Poll, Wake, Waker, ready},
 	time::Duration,
 };
@@ -1776,6 +1776,10 @@ pub struct Producer {
 
 	// The clock advanced by the origin driver.
 	timers: Deadlines,
+
+	// What the frames written through this handle may allocate up front, shared by every
+	// broadcast it creates.
+	frames: super::frame::Budget,
 }
 
 impl Producer {
@@ -1803,6 +1807,7 @@ impl Producer {
 			preference: Preference::default(),
 			tasks,
 			timers: timers.clone(),
+			frames: Default::default(),
 		};
 		let driver = Driver {
 			state: DriverState {
@@ -1814,6 +1819,15 @@ impl Producer {
 			pool,
 		};
 		(producer, driver)
+	}
+
+	/// Give this handle a frame budget of its own, so what one session allocates up front
+	/// never crowds out another's.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// private: tuning
+	pub(crate) fn with_own_frames(mut self) -> Self {
+		self.frames = Default::default();
+		self
 	}
 
 	/// The ingress stats context this handle was tagged with.
@@ -1912,6 +1926,7 @@ impl Producer {
 			preference: Preference::default(),
 			tasks,
 			timers: Deadlines::new(Instant::ZERO),
+			frames: Default::default(),
 		}
 	}
 
@@ -1990,6 +2005,7 @@ impl Producer {
 			cache_duration: self.cache_duration,
 			path: full,
 			epoch: None,
+			frames: self.frames.clone(),
 		};
 		let source = info.produce().with_stats(ingress.clone());
 		let entry = announcing.announce(
@@ -2031,6 +2047,7 @@ impl Producer {
 			cache_duration: self.cache_duration,
 			path: full,
 			epoch: None,
+			frames: self.frames.clone(),
 		}
 		.produce()
 		.with_stats(ingress)
@@ -2191,6 +2208,7 @@ impl Producer {
 			preference: self.preference,
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
+			frames: self.frames.clone(),
 		})
 	}
 
@@ -2820,29 +2838,11 @@ struct Asked {
 	sub: Option<kio::Pending<track::Subscribing>>,
 }
 
-/// Queues just the logical track whose watched resource changed.
-struct TrackReady {
-	name: Arc<str>,
-	queue: kio::Queue<Arc<str>>,
-	queued: AtomicBool,
-}
-
-impl Wake for TrackReady {
-	fn wake(self: Arc<Self>) {
-		self.wake_by_ref();
-	}
-
-	fn wake_by_ref(self: &Arc<Self>) {
-		if !self.queued.swap(true, Ordering::AcqRel) {
-			let _ = self.queue.try_push(self.name.clone());
-		}
-	}
-}
-
 /// The driver's side of one logical track: the handles behind the names the
 /// machine uses.
 struct TrackIo {
-	ready: Arc<TrackReady>,
+	/// Queues just this track when a resource it watches changes.
+	ready: Arc<crate::util::QueueWake<Arc<str>>>,
 	park: kio::Park,
 	/// The logical track, until the first copy says what it is.
 	request: Option<track::Request>,
@@ -3516,7 +3516,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			}
 			while let Poll::Ready(Ok(name)) = ready.poll_pop(waiter) {
 				let Some(io) = tracks.get_mut(&name) else { continue };
-				io.ready.queued.store(false, Ordering::Release);
+				io.ready.popped();
 				let waker = Waker::from(io.ready.clone());
 				let waiter = io.park.hold(&Context::from_waker(&waker));
 				let step = (|| {
@@ -3597,11 +3597,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 		let event = match step {
 			Step::Assigned(request) => {
 				let name: Arc<str> = request.name().into();
-				let track_ready = Arc::new(TrackReady {
-					name: name.clone(),
-					queue: ready.clone(),
-					queued: AtomicBool::new(false),
-				});
+				let track_ready = crate::util::QueueWake::new(name.clone(), ready.clone());
 				track_ready.wake_by_ref();
 				tracks.insert(
 					name.clone(),
@@ -4172,6 +4168,10 @@ impl Drop for Interests {
 }
 
 /// One change to what a session asks its peer about; see [`Interests`].
+#[cfg_attr(
+	not(feature = "async"),
+	expect(dead_code, reason = "only async sessions consume discovery changes")
+)]
 // pending: /quest/m1/public-model/answer.md
 pub(crate) struct InterestChange {
 	/// The prefix, relative to the session's root.
@@ -6370,6 +6370,8 @@ impl Consumer {
 			cache_duration: self.cache_duration,
 			path: absolute.clone(),
 			epoch: None,
+			// A front reads its routes' copies, so it writes no frames of its own.
+			frames: Default::default(),
 		});
 		let request = kio::Producer::<PendingFront>::default();
 		let consumer = request.consume();
@@ -6990,6 +6992,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	use crate::model::test_tracing::count_drop_warnings;
 	use futures::FutureExt;
+	use std::sync::atomic::AtomicBool;
 
 	fn origin(id: u64) -> Hop {
 		Hop::new(id).unwrap()
@@ -7036,11 +7039,7 @@ mod tests {
 			let weak = request.weak();
 			let accepted = request.routes(routes.consume()).accept(None);
 			let mut io = TrackIo {
-				ready: Arc::new(TrackReady {
-					name: "catalog.json".into(),
-					queue: kio::Queue::new(),
-					queued: AtomicBool::new(false),
-				}),
+				ready: crate::util::QueueWake::new("catalog.json".into(), kio::Queue::new()),
 				park: Default::default(),
 				request: None,
 				accepted: Some(accepted),
@@ -8824,7 +8823,7 @@ mod tests {
 			.await
 			.expect("the front asked the source")
 			.expect("request");
-		let source = request.resolving_start().accept(crate::track::Info::timed());
+		let source = request.request_start(None).accept(crate::track::Info::timed());
 		let mut group = source.create_group(0u64.into()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"snapshot".as_ref()).unwrap();
 		group.finish().unwrap();
@@ -9256,7 +9255,7 @@ mod tests {
 				serving.lock().unwrap().push(group);
 			}
 		});
-		let mut next = request.resolving_start().accept(crate::track::Info::timed());
+		let mut next = request.request_start(None).accept(crate::track::Info::timed());
 		next.start_at(0).unwrap();
 		let mut next_group = next.create_group(0u64.into()).unwrap();
 		next_group.start_at(2).unwrap();

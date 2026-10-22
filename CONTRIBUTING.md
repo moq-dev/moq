@@ -1,3 +1,12 @@
+# Getting oriented
+
+Use the [repository map](doc/setup/repository.md) to find the implementation
+and the [development guide](doc/setup/dev.md) for setup and checks.
+[Examples](doc/setup/examples.md), [test harnesses](test/README.md), and
+[benchmarks](bench/README.md) provide focused starting points.
+Agents should also read [AGENTS.md](AGENTS.md) and the instructions nested
+under the files they change.
+
 # Commits
 
 PRs into `main` are squash-merged through the merge queue, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
