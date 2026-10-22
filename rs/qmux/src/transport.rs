@@ -139,7 +139,7 @@ mod stream_transport {
 	pub struct StreamWriter<T> {
 		writer: BufWriter<tokio::io::WriteHalf<T>>,
 		version: Version,
-		reader_task: JoinHandle<()>,
+		reader_task: Option<JoinHandle<()>>,
 		_reader_lifetime: Arc<ReaderTask>,
 	}
 
@@ -178,7 +178,7 @@ mod stream_transport {
 				writer: StreamWriter {
 					writer: BufWriter::new(write),
 					version,
-					reader_task,
+					reader_task: Some(reader_task),
 					_reader_lifetime: reader_lifetime.clone(),
 				},
 				reader: StreamReader {
@@ -243,7 +243,11 @@ mod stream_transport {
 		async fn close(&mut self) -> Result<(), Error> {
 			self.writer.shutdown().await?;
 			// Closing a TCP socket with unread peer data can reset it and discard our close.
-			(&mut self.reader_task).await.map_err(std::io::Error::other)?;
+			if let Some(task) = self.reader_task.as_mut() {
+				let result = task.await;
+				self.reader_task = None;
+				result.map_err(std::io::Error::other)?;
+			}
 			Ok(())
 		}
 	}
@@ -258,8 +262,8 @@ mod stream_transport {
 	}
 
 	/// Reader task: pull complete frames off the wire and ship them through `tx`.
-	/// On parse error, send the error and exit. If `tx` is closed (the transport
-	/// was dropped), drain the peer until EOF so the writer can close gracefully.
+	/// After a parse error or receiver drop, drain the peer until EOF so the writer
+	/// can close gracefully.
 	async fn reader_loop<R: AsyncRead + Unpin>(
 		mut reader: BufReader<R>,
 		version: Version,
@@ -272,13 +276,11 @@ mod stream_transport {
 				false => recv_qmux00_frame(&mut reader).await,
 			};
 			let stop = result.is_err();
-			if tx.send(result).await.is_err() {
+			if tx.send(result).await.is_err() || stop {
+				drop(tx);
 				// The session no longer reads records, but the peer can still be finishing
 				// its send half. Discard without buffering; the writer owns cancellation.
 				let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
-				return;
-			}
-			if stop {
 				return;
 			}
 		}
@@ -482,8 +484,7 @@ mod stream_transport {
 				let (mut writer, reader) = Stream::new(stream, version, 16 * 1024).split();
 				drop(reader);
 
-				let close = writer.close();
-				tokio::pin!(close);
+				let mut close = Box::pin(writer.close());
 				let mut extra = [0];
 				tokio::select! {
 					biased;
@@ -495,8 +496,31 @@ mod stream_transport {
 				// pipe holds proves the receiver is draining it rather than merely staying alive.
 				peer.write_all(&[0; 1024]).await.expect("drain peer data");
 				peer.shutdown().await.expect("peer FIN");
-				close.await.expect("graceful close");
+				close.as_mut().await.expect("graceful close");
+				drop(close);
+				writer.close().await.expect("already closed");
 			}
+		}
+
+		#[tokio::test(start_paused = true)]
+		async fn a_framing_error_still_drains_peer_data_during_close() {
+			let (stream, mut peer) = tokio::io::duplex(64);
+			let (mut writer, mut reader) = Stream::new(stream, Version::QMux02, 4).split();
+			peer.write_all(&[5]).await.expect("oversized record header");
+			assert!(matches!(reader.recv().await, Err(Error::FrameTooLarge)));
+			drop(reader);
+
+			let close = writer.close();
+			tokio::pin!(close);
+			let mut extra = [0];
+			tokio::select! {
+				biased;
+				result = &mut close => panic!("closed before the malformed peer finished: {result:?}"),
+				result = peer.read(&mut extra) => assert_eq!(result.unwrap(), 0),
+			}
+			peer.write_all(&[0; 1024]).await.expect("drain malformed peer data");
+			peer.shutdown().await.expect("peer FIN");
+			close.await.expect("graceful close");
 		}
 
 		#[tokio::test(start_paused = true)]
