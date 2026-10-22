@@ -37,6 +37,31 @@ fixtures) with the whole-group reading, and add a subscriber case for a
 Document the pre-draft-20 FETCH_OK meaning next to the draft-20 line in
 `doc/concept/standard.md`.
 
+The candidate implements all three sides and reproduces all three failures
+before the fix. Whole-group and legacy FETCH_OK answers are tested with and
+without End Of Track on drafts 14-19; drafts 20-22 retain inclusive answers.
+The numeric-limit range test covers both a missing single group and an
+unsupported multi-group request on every draft. JavaScript still refuses
+FETCH, with decoder coverage for the maximum whole-group range. The migration
+note, standard documentation and IETF extension draft are synchronized.
+
+Compatibility still needs confirmation. The versioned plan above excludes
+released/current moq-net IETF pairings, while the repository asks for
+published-wire compatibility. Also, `just test interop --all` runs the
+in-tree language matrix, not moxygen. At upstream moxygen commit
+`fcc97fc53d561f6ff4c654026824e2c47d55733e`,
+[`MoQTestClient::validateFetchOk`](https://github.com/facebookexperimental/moxygen/blob/fcc97fc53d561f6ff4c654026824e2c47d55733e/moxygen/moqtest/MoQTestClient.cpp#L1201)
+strictly compares the answer to
+[`fetchEndLocation`](https://github.com/facebookexperimental/moxygen/blob/fcc97fc53d561f6ff4c654026824e2c47d55733e/moxygen/moqtest/Utils.cpp#L401),
+which still widens whole-group Object 0 to the next group. For a draft-18
+track with groups 0-4 and objects 0-1, a request ending `{2,0}` sends bytes
+`02 00`; the candidate replies `02 00`. Moxygen's parser and fetch handle
+keep `{2,0}`, while its separate expectation helper produces `{3,0}`, so
+moqtest marks a semantic failure. This is a validator conflict, not evidence
+of a live FETCH delivery failure. Confirm the all-at-once compatibility exception for this
+candidate, or choose a staged publisher rollout; do not claim the in-tree
+matrix proves moxygen FETCH compatibility. The PR stays draft for that choice.
+
 Public API: none. Wire: drafts 14 to 19 FETCH_OK End Location changes from
 `{g+1, 0}` to `{g, 0}` for a whole group.
 

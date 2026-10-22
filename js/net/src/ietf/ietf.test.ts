@@ -2119,6 +2119,42 @@ test("Subscribe draft-22: Next Object is 0x21 0x05", async () => {
 	expect(await encodeVersioned(msg, Version.DRAFT_22)).toEqual(body);
 });
 
+// The refusal decoder must consume a legal whole-group range at each wire's limit
+// without widening End Group and overflowing it. JS still refuses all FETCH requests.
+test("Fetch: a whole End Group at the numeric limit decodes for refusal", async () => {
+	for (const version of [
+		Version.DRAFT_14,
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+	] as const) {
+		const legacy = version <= Version.DRAFT_16;
+		const maximum = legacy ? (1n << 62n) - 1n : (1n << 64n) - 1n;
+		const group = legacy ? Varint.encode(maximum) : Varint.encodeLeadingOnes(maximum);
+		const body = framed([
+			0x01, // Request ID
+			...(version === Version.DRAFT_17 ? [0x00] : []), // Required Request ID Delta
+			...(version === Version.DRAFT_14 ? [0x80, 0x01] : []), // Priority and order
+			0x01, // Standalone
+			0x01,
+			0x04,
+			...new TextEncoder().encode("live"),
+			0x05,
+			...new TextEncoder().encode("video"),
+			0x00,
+			0x02, // Start Group/Object
+			...group,
+			0x00, // The whole End Group
+			0x00, // Parameters
+		]);
+		const decoded = await decodeVersioned(body, Fetch.decode, version);
+		expect(decoded.requestId).toBe(1n);
+		expect(decoded.trackNamespace).toBe(Path.from("live"));
+	}
+});
+
 // The tagged forms through draft-19, with a token.
 test("Fetch v15: decodes a joining FETCH", async () => {
 	const body = framed([
