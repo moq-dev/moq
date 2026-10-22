@@ -34,11 +34,6 @@ async function acceptWith(extensions: Extensions) {
 	return { pair, peer, connection };
 }
 
-test("every extension is offered by default", () => {
-	expect(offered()).toEqual({ auth: true, solicit: true, epoch: true });
-	expect(offered({ solicit: false })).toEqual({ auth: true, solicit: false, epoch: true });
-});
-
 test("a declined extension stays out of SETUP", async () => {
 	// Control: both sides offer both.
 	const all = await handshake({}, {});

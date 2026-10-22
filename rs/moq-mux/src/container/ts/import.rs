@@ -55,8 +55,9 @@ use moq_net::Timestamp;
 ///
 /// A whole PES or section is timestamped with its placement: the program clock at its first byte,
 /// interpolated between the PCRs either side of it (ISO 13818-1 2.4.2.2) and shifted onto the
-/// catalog clock as the media is. It waits for the PCR after it, and for a PTS on any stream to
-/// anchor the timebase, within the staging bound below; one that starts past the last PCR before a
+/// catalog clock as the media is. It waits for the PCR after it, and for the first media PTS
+/// to anchor the timebase, or the first PCR when the PMT declares no media stream, within the
+/// staging bound below; one that starts past the last PCR before a
 /// clock break or the end of input is extrapolated from the last two. One before the first PCR,
 /// or with no interval to extrapolate from, is dropped and counted in
 /// [`stats::Stream::unplaced`]. A section's SCTE-35 splice times absorb the media's offset in
@@ -82,13 +83,14 @@ use moq_net::Timestamp;
 /// The selected container applies only to decoded media renditions. Verbatim tracks in the
 /// `mpegts` catalog section continue to use the legacy Hang container.
 ///
-/// PTS values follow the program's timestamp history across their 33-bit wrap.
+/// PTS values follow the program's timestamp history across their 33-bit wrap,
+/// including the PCR history before a data-only program gains media.
 pub struct Import<E: catalog::Catalog = ()> {
 	broadcast: moq_net::broadcast::Producer,
 	catalog: crate::catalog::Producer<E>,
 	container: hang::catalog::Container,
 
-	/// Held until the first PES anchors the clock, so the catalog is withheld from the broadcast
+	/// Held until the first media PTS or data-only PCR anchors the clock, withholding the catalog
 	/// until every stream in the initial program has reserved its rendition and the root `clock` is
 	/// final. A one-shot muxer (fMP4, TS re-export) sees the complete track list in the first
 	/// snapshot rather than a half-converged one. See [`Reserved`](crate::catalog::Reserved).
@@ -102,7 +104,10 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// The newest 90 kHz PTS of the current time base counted into `held`.
 	held_edge: Option<u64>,
 
-	/// The program's timestamp base: the first PES with a PTS anchors it, and every PTS shifts by
+	/// Whether the current PMT declares a media stream that can anchor the program clock.
+	media_clock: bool,
+
+	/// The program's timestamp base: the first media PTS, or a data-only PCR, anchors it; every PTS shifts by
 	/// its offset onto the catalog clock.
 	timebase: crate::catalog::Timebase<E>,
 
@@ -117,6 +122,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	streams: HashMap<Pid, Stream<E>>,
 	/// Counters from routes a later PMT replaced, keyed by PID.
 	retired_stats: BTreeMap<u16, stats::Stream>,
+	/// Stream revisions applied so far; see [`Self::MAX_REVISIONS`].
+	revisions: usize,
 	/// Damaged packets, PES, or access units refused, cumulative across PID remaps.
 	damaged: BTreeMap<u16, u64>,
 	damage_log: super::damage::Log,
@@ -147,6 +154,9 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// discontinuity only here; on any other PID it says nothing but that the
 	/// continuity counter jumped ([`Continuation::Broken`]).
 	pcr_pid: Option<Pid>,
+	/// Latest valid PCR on each PID before a PMT names the clock. Exporters may lead
+	/// their first PAT/PMT with PCR; the 13-bit PID namespace bounds this table.
+	pcr_candidates: HashMap<Pid, Sample>,
 	/// The multiplex rate measured off the PCR PID, recorded in the `mpegts` section
 	/// while the source holds one. Only fed with `mpegts` catalog support.
 	mux_rate: super::mux_rate::Meter,
@@ -174,9 +184,12 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// Decoded media PIDs already recorded into `mpegts.tracks`, so the reconcile in
 	/// [`Self::flush`] runs once per track rather than on every frame.
 	recorded_media: HashSet<Pid>,
-	/// Whether the PMT program-level descriptors have been recorded yet (set once;
-	/// PMT `program_info` is stable for the program's life).
-	program_recorded: bool,
+	/// The program-level descriptors the catalog advertises, rewritten in place as the PMT
+	/// revises them.
+	program_info: Vec<catalog::Descriptor>,
+	/// What the PMT in force says of each PID it lists, so a revision that says otherwise ends
+	/// the route rather than carrying the new stream under the old name.
+	listed: HashMap<Pid, Listing>,
 	/// Reassemblers for the standalone SI PIDs ([`catalog::SI_PIDS`]), keyed by PID, so
 	/// the service layer survives the round-trip. Only populated with `mpegts` catalog
 	/// support.
@@ -184,9 +197,10 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// The SI store: buffers each sub-table to a complete generation, publishes the
 	/// per-`(PID, table_id)` snapshot tracks, and advertises them in the catalog.
 	si: super::si::Capture<E>,
-	/// Whether the service identity (TSID/service_id/PMT PID) has been captured from
-	/// the PAT into the catalog service record yet (set once; the PAT is stable).
-	identity_recorded: bool,
+	/// The `(transport_stream_id, program_number)` the first PAT named, also captured into the
+	/// catalog service record with the PMT PID. A PAT naming another refuses the import: the
+	/// carried SI describes this one.
+	identity: Option<(u16, u16)>,
 	/// Latest video PTS, used to timestamp service-information snapshots.
 	last_pts: Option<Timestamp>,
 	/// The program's PTS history, which picks each value's 33-bit wrap.
@@ -206,7 +220,12 @@ impl<E: catalog::Catalog> Import<E> {
 		// Sample the real catalog once at construction, not E::default(): an extension
 		// may carry the section by value, and a snapshot clones under the mutex (no publish).
 		let mut snapshot = catalog.snapshot();
-		let supports_mpegts = snapshot.ext.mpegts_mut().is_some();
+		let mpegts = snapshot.ext.mpegts_mut();
+		let supports_mpegts = mpegts.is_some();
+		// What the catalog already advertises, so the first PMT republishes only a difference.
+		let program_info = mpegts
+			.map(|mpegts| std::mem::take(&mut mpegts.program_descriptors))
+			.unwrap_or_default();
 		if supports_mpegts {
 			catalog.count_ext_tracks(|ext: &mut E| ext.mpegts_mut().is_some_and(|mpegts| mpegts.has_track()));
 		}
@@ -216,6 +235,7 @@ impl<E: catalog::Catalog> Import<E> {
 			broadcast,
 			catalog,
 			container,
+			media_clock: false,
 			timebase: reserved.timebase(),
 			initial_reservation: Some(reserved),
 			mux_rate_reservation,
@@ -226,6 +246,7 @@ impl<E: catalog::Catalog> Import<E> {
 			crc_errors: BTreeMap::new(),
 			streams: HashMap::new(),
 			retired_stats: BTreeMap::new(),
+			revisions: 0,
 			damaged: BTreeMap::new(),
 			damage_log: Default::default(),
 			liveness: Liveness::default(),
@@ -239,6 +260,7 @@ impl<E: catalog::Catalog> Import<E> {
 			staging: Arc::default(),
 			health: Health::default(),
 			pcr_pid: None,
+			pcr_candidates: HashMap::new(),
 			mux_rate: Default::default(),
 			published: false,
 			initialized: false,
@@ -248,10 +270,11 @@ impl<E: catalog::Catalog> Import<E> {
 			supports_mpegts,
 			es_descriptors: HashMap::new(),
 			recorded_media: HashSet::new(),
-			program_recorded: false,
+			program_info,
+			listed: HashMap::new(),
 			si_sections: HashMap::new(),
 			si,
-			identity_recorded: false,
+			identity: None,
 			last_pts: None,
 			pts: PtsUnwrap::default(),
 			program: None,
@@ -336,6 +359,20 @@ impl<E: catalog::Catalog> Import<E> {
 				self.damage(pid, &anyhow::anyhow!("malformed TS adaptation field"))?;
 				continue;
 			}
+			if self.pcr_pid.is_none()
+				&& pid != 0x1fff
+				&& pkt[1] & 0x80 == 0
+				&& adaptation_valid(&pkt)
+				&& let Some(ticks) = pcr(&pkt)
+			{
+				self.pcr_candidates.insert(
+					Pid::new(pid)?,
+					Sample {
+						at: offset + PCR_OFFSET,
+						ticks,
+					},
+				);
+			}
 			// Read the clock's own flag before routing, so the break lands between the media
 			// either side of it. The PCR PID can be a dedicated one nothing below routes, and
 			// the flag rides an adaptation-only packet as readily as a payload one.
@@ -344,6 +381,15 @@ impl<E: catalog::Catalog> Import<E> {
 			// out of it would break every track in the program on line noise.
 			if self.pcr_pid.is_some_and(|p| p.as_u16() == pid) && pkt[1] & 0x80 == 0 {
 				if discontinuity_indicator(&pkt) {
+					// A PES this packet starts ends the one before it on its PID whole, on the old
+					// clock; only the other PIDs' are cut short by the break. An adaptation-only
+					// packet starts none whatever its PUSI says, as `pes_packet` treats it.
+					if pkt[1] & 0x40 != 0
+						&& matches!(payload(&pkt), Payload::Bytes(_))
+						&& let Ok(pid) = Pid::new(pid)
+					{
+						self.flush(pid)?;
+					}
 					self.timebase_break()?;
 					// The new timebase starts with the PCR the flag rides, if it rides one.
 					if let Some(pcr) = pcr(&pkt) {
@@ -480,6 +526,10 @@ impl<E: catalog::Catalog> Import<E> {
 		if self.program.is_some_and(|program| program != pmt.program_number) {
 			return Ok(());
 		}
+		let mut seen = HashSet::new();
+		if let Some(es) = pmt.streams.iter().find(|es| !seen.insert(es.pid)) {
+			anyhow::bail!("the PMT lists PID {} twice", es.pid.as_u16());
+		}
 		// Which PID speaks for the program clock, so a `discontinuity_indicator` there
 		// can be read as a timebase reset rather than a counter jump.
 		if self.pcr_pid != pmt.pcr_pid {
@@ -501,14 +551,44 @@ impl<E: catalog::Catalog> Import<E> {
 			.iter()
 			.any(|d| d.tag == 0x05 && d.data.len() >= 4 && &d.data[0..4] == b"CUEI");
 
-		// Record the program-level descriptors once (PMT program_info is stable);
-		// export re-emits them verbatim, including the original CUEI.
-		if self.supports_mpegts && !self.program_recorded && !pmt.program_info.is_empty() {
+		// Record the program-level descriptors as the PMT revises them; export re-emits them
+		// verbatim, including the original CUEI.
+		if self.supports_mpegts && self.program_info != pmt.program_info {
+			self.count_revision()?;
 			if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
 				mpegts.program_descriptors = pmt.program_info.clone();
 			}
-			self.program_recorded = true;
+			self.program_info = pmt.program_info.clone();
 		}
+
+		// A stream the PMT no longer lists, or lists as something else, ends here, so every
+		// track name keeps meaning one elementary stream; a revised one opens under a new name.
+		let listed: HashMap<Pid, Listing> = pmt
+			.streams
+			.iter()
+			.map(|es| {
+				let listing = Listing {
+					stream_type: es.stream_type,
+					descriptors: es.descriptors.clone(),
+					sections: section_framed(es.stream_type, cuei),
+				};
+				(es.pid, listing)
+			})
+			.collect();
+		let mut ended: Vec<Pid> = self
+			.listed
+			.iter()
+			.filter(|(pid, listing)| listed.get(pid) != Some(listing))
+			.map(|(&pid, _)| pid)
+			.collect();
+		ended.sort_by_key(Pid::as_u16);
+		for pid in ended {
+			self.end_route(pid)?;
+			if !listed.contains_key(&pid) {
+				tracing::info!(pid = pid.as_u16(), "TS elementary stream left the PMT");
+			}
+		}
+		self.listed = listed;
 
 		for es in &pmt.streams {
 			let before = self.route(es.pid);
@@ -517,11 +597,10 @@ impl<E: catalog::Catalog> Import<E> {
 			if self.supports_mpegts {
 				self.es_descriptors.insert(es.pid.as_u16(), es.descriptors.clone());
 			}
-			// Section-framed private data is reassembled as sections, never PES-parsed:
-			// private sections (0x05) and CUEI-marked SCTE-35 (0x86). Everything else
-			// routes through ensure_stream (a decoded codec, PES-framed verbatim, or
-			// dropped).
-			if es.stream_type == 0x05 || (cuei && es.stream_type == StreamType::Dts8ChannelLosslessAudio as u8) {
+			// Section-framed private data is reassembled as sections, never PES-parsed.
+			// Everything else routes through ensure_stream (a decoded codec, PES-framed
+			// verbatim, or dropped).
+			if section_framed(es.stream_type, cuei) {
 				self.ensure_section(es.pid, es.stream_type, &es.descriptors)?;
 			} else {
 				self.ensure_stream(es.pid, es.stream_type, &es.descriptors)?;
@@ -537,6 +616,25 @@ impl<E: catalog::Catalog> Import<E> {
 					carriage,
 					"TS elementary stream"
 				);
+			}
+		}
+		self.media_clock = pmt.streams.iter().any(|es| {
+			matches!(
+				self.streams.get(&es.pid),
+				Some(
+					Stream::H264 { .. }
+						| Stream::H265 { .. }
+						| Stream::Aac(_) | Stream::Opus(_)
+						| Stream::Legacy(_)
+						| Stream::Clock
+				)
+			)
+		});
+		if let Some(pid) = self.pcr_pid {
+			let initial = self.pcr_candidates.remove(&pid);
+			self.pcr_candidates.clear();
+			if let Some(sample) = initial {
+				self.place_pcr(sample.ticks, sample.at - PCR_OFFSET)?;
 			}
 		}
 		let pids: Vec<u16> = pmt.streams.iter().map(|es| es.pid.as_u16()).collect();
@@ -837,13 +935,101 @@ impl<E: catalog::Catalog> Import<E> {
 	fn retire_stream(&mut self, pid: Pid) -> Option<Stream<E>> {
 		self.unclocked.remove(&pid);
 		let stream = self.streams.remove(&pid)?;
-		if let Some(current) = stream.stats() {
+		self.keep_stats(pid, stream.stats());
+		Some(stream)
+	}
+
+	/// Keep a retired route's counters for this importer, naming it the PID's latest route.
+	fn keep_stats(&mut self, pid: Pid, current: Option<stats::Stream>) {
+		if let Some(current) = current {
 			self.retired_stats
 				.entry(pid.as_u16())
 				.and_modify(|retired| retired.merge(&current))
 				.or_insert(current);
 		}
-		Some(stream)
+	}
+
+	/// Stream revisions one import may apply: routes ended or refused, and program descriptor
+	/// changes. A route that reopens takes a fresh track name, which the broadcast reserves for
+	/// its whole life, and each revision republishes the catalog to every viewer, so a source that
+	/// keeps revising its PMT would otherwise grow the broadcast and churn its viewers without
+	/// bound. Under 10 MB of reserved names; a feed revising its PMT 50 times a day would take
+	/// years to reach it.
+	const MAX_REVISIONS: usize = 65_536;
+
+	/// Count a revision, refusing the import once its source has churned through
+	/// [`Self::MAX_REVISIONS`].
+	fn count_revision(&mut self) -> anyhow::Result<()> {
+		self.revisions += 1;
+		anyhow::ensure!(
+			self.revisions <= Self::MAX_REVISIONS,
+			"the TS source revised its streams {} times, more than an import accepts",
+			Self::MAX_REVISIONS
+		);
+		Ok(())
+	}
+
+	/// End the route on `pid` for a PMT that dropped or revised its stream, as the end of input
+	/// ends every route: the PES it began goes out, what waits on the clock is placed from the
+	/// PCRs so far or counted unplaced (refusing the import, as end of input does, if no media
+	/// timestamp anchored it), and its track finishes and leaves the catalog.
+	fn end_route(&mut self, pid: Pid) -> anyhow::Result<()> {
+		self.count_revision()?;
+		if self.headers.remove(&pid).is_some() {
+			self.damage(pid, &anyhow::anyhow!("PES header truncated by a PMT revision"))?;
+		}
+		self.flush(pid)?;
+		// Released as if its timebase ended here, so a unit no later PCR will bracket for it is
+		// unplaced rather than held.
+		let generation = self.placement.generation + 1;
+		let (mut units, mut unplaced) = (0, 0);
+		// Each route stays in its map until it has finished, so a failure on the way leaves it
+		// for `abort` to end with the cause.
+		if let Some(section) = self.sections.get_mut(&pid.as_u16()) {
+			section.settle(&self.placement);
+			(units, unplaced) = section.release(&self.timebase, &self.pts, generation)?;
+			anyhow::ensure!(
+				section.held.is_empty(),
+				"TS sections reached a PMT revision without a media timestamp"
+			);
+			section.finish()?;
+		}
+		if self.sections.remove(&pid.as_u16()).is_some() {
+			self.keep_stats(pid, Some(stats::Stream::new(".ts", stats::Class::Data)));
+		}
+		self.unclocked.remove(&pid);
+		if let Some(stream) = self.streams.get_mut(&pid) {
+			if let Stream::PesPacket(stream) = &mut *stream {
+				stream.settle(&self.placement);
+				let (published, dropped) = stream.release(&self.timebase, &self.pts, generation)?;
+				units += published;
+				unplaced += dropped;
+				anyhow::ensure!(
+					stream.held.is_empty(),
+					"TS private PES reached a PMT revision without a media timestamp"
+				);
+			}
+			// A verbatim entry leaves with its stream; a decoded track's is recorded here.
+			if self.recorded_media.remove(&pid)
+				&& let Some(name) = stream.media_track_name()
+				&& let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut()
+			{
+				mpegts.tracks.remove(&name);
+			}
+			units += stream.finish()?;
+		}
+		if let Some(stream) = self.streams.remove(&pid) {
+			// Finishing can publish a held frame, which its counters then include.
+			self.keep_stats(pid, stream.stats());
+		}
+		if unplaced > 0 {
+			*self.unplaced.entry(pid.as_u16()).or_default() += unplaced;
+		}
+		self.published |= units > 0;
+		self.liveness.delivered(pid.as_u16(), units);
+		self.liveness.retire(pid.as_u16());
+		self.es_descriptors.remove(&pid.as_u16());
+		Ok(())
 	}
 
 	/// Open the PES whose header `pes` begins where `span` says, if any PCR came before it.
@@ -1051,6 +1237,17 @@ impl<E: catalog::Catalog> Import<E> {
 			// old timebase, and the new one starts here.
 			self.settle_placement()?;
 		}
+		if !self.media_clock {
+			// PCR and PTS share one era. Advance it from PCR while no media can do so,
+			// including across a wrap before a later PMT adds a media stream.
+			self.pts.unwrap(raw / 300);
+			let ticks = u64::try_from(self.pts.pcr(raw))?;
+			self.timebase.anchor(Timestamp::from_scale(ticks, PCR_HZ)?)?;
+			self.initial_reservation = None;
+			if self.mux_rate_reservation.is_some() {
+				self.hold_media(raw / 300);
+			}
+		}
 		let sample = self.placement.pcr(raw, offset + PCR_OFFSET);
 		let generation = self.placement.generation;
 		// A PES still assembling its header is bracketed too, so the first PCR past its start
@@ -1116,6 +1313,8 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Refuse the undecoded stream on `pid` rather than carry it altered: its track ends with an
 	/// error and leaves the catalog, and the PID is dropped from here on.
 	fn refuse(&mut self, pid: Pid, why: &str) -> anyhow::Result<()> {
+		// A PMT that keeps losing and regaining its PCR reopens the stream each time.
+		self.count_revision()?;
 		self.pending.remove(&pid);
 		self.headers.remove(&pid);
 		if let Some(section) = self.sections.remove(&pid.as_u16()) {
@@ -1285,8 +1484,9 @@ impl<E: catalog::Catalog> Import<E> {
 	/// Pick the imported program from a whole PAT and learn its PMT PID, so `decode`
 	/// reassembles that PMT and no other.
 	///
-	/// Every PAT is checked, so a program added mid-stream ends an unselected import, and a
-	/// selected program that disappears ends a selected one; media already published stays.
+	/// Every PAT is checked, so a program added mid-stream ends an unselected import, a
+	/// selected program that disappears ends a selected one, and a PAT naming the program under
+	/// another identity ends either; media already published stays.
 	pub(super) fn handle_pat(&mut self, pat: &psi::Pat) -> anyhow::Result<()> {
 		// program_number 0 is the network PID association, not a program.
 		let programs: Vec<_> = pat.programs.iter().filter(|entry| entry.program_number != 0).collect();
@@ -1305,15 +1505,29 @@ impl<E: catalog::Catalog> Import<E> {
 				_ => return Err(MultipleProgramsError { programs: numbers() }.into()),
 			},
 		};
+		let identity = (pat.transport_stream_id, entry.program_number);
+		if let Some((transport_stream_id, program_number)) = self.identity
+			&& (transport_stream_id, program_number) != identity
+		{
+			anyhow::bail!(
+				"the PAT changed the program's identity from transport_stream_id {transport_stream_id} program {program_number} to transport_stream_id {} program {}, which the carried service information does not describe",
+				identity.0,
+				identity.1
+			);
+		}
 		self.pmt_sections.entry(entry.pmt_pid).or_default();
 		self.health.pmt_pids(&[entry.pmt_pid.as_u16()], self.liveness.now());
-		self.record_program_identity(pat.transport_stream_id, entry)
+		if self.identity.is_none() {
+			self.identity = Some(identity);
+			self.record_program_identity(pat.transport_stream_id, entry)?;
+		}
+		Ok(())
 	}
 
 	/// Capture the transport/service identity (TSID, service number, PMT PID) from the
-	/// PAT into the catalog service record, once. No-op without `mpegts` support.
+	/// PAT into the catalog service record. No-op without `mpegts` support.
 	fn record_program_identity(&mut self, transport_stream_id: u16, entry: &psi::Association) -> anyhow::Result<()> {
-		if !self.supports_mpegts || self.identity_recorded {
+		if !self.supports_mpegts {
 			return Ok(());
 		}
 		if let Some(mpegts) = self.catalog.modify()?.ext.mpegts_mut() {
@@ -1322,7 +1536,6 @@ impl<E: catalog::Catalog> Import<E> {
 			program.program_number = entry.program_number;
 			program.pmt_pid = entry.pmt_pid.as_u16();
 		}
-		self.identity_recorded = true;
 		Ok(())
 	}
 
@@ -1486,6 +1699,22 @@ pub struct MultipleProgramsError {
 
 fn list_programs(programs: &[u16]) -> String {
 	programs.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
+}
+
+/// What a PMT says of one elementary stream. A route lasts as long as its PID's listing does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Listing {
+	stream_type: u8,
+	descriptors: Vec<catalog::Descriptor>,
+	/// Reassembled as sections: [`section_framed`] under the program descriptors it came with.
+	sections: bool,
+}
+
+/// Whether a stream of `stream_type` carries sections rather than PES: private sections (0x05),
+/// and SCTE-35 (0x86) in a program whose descriptors carry the 'CUEI' registration. 0x86 is also
+/// a DTS audio type, so without it the stream is not read as cues.
+fn section_framed(stream_type: u8, cuei: bool) -> bool {
+	stream_type == 0x05 || (cuei && stream_type == StreamType::Dts8ChannelLosslessAudio as u8)
 }
 
 // Match the raw TS accumulator: half a MoQ group bounds one program's staged input.
@@ -2154,6 +2383,8 @@ pub(super) struct Liveness {
 	/// Per PID: access units delivered, and `elapsed` at the last one, or at registration.
 	/// Kept per PID rather than per route, so a PMT remap carries it like `retired_stats`.
 	streams: HashMap<u16, (u64, u64)>,
+	/// PIDs the PMT stopped listing: their counts stay, but they are not quiet.
+	retired: HashSet<u16>,
 }
 
 impl Liveness {
@@ -2196,7 +2427,17 @@ impl Liveness {
 	/// The PMT declared `pid`. Its silence counts from here until it delivers.
 	pub(super) fn register(&mut self, pid: u16) {
 		let now = self.elapsed.unwrap_or(0);
-		self.streams.entry(pid).or_insert((0, now));
+		let entry = self.streams.entry(pid).or_insert((0, now));
+		if self.retired.remove(&pid) {
+			entry.1 = now;
+		}
+	}
+
+	/// The route on `pid` ended. Until a PMT declares it again it is not silent, only gone.
+	pub(super) fn retire(&mut self, pid: u16) {
+		if self.streams.contains_key(&pid) {
+			self.retired.insert(pid);
+		}
 	}
 
 	/// `pid` delivered `units` access units just now.
@@ -2216,6 +2457,9 @@ impl Liveness {
 		let Some(&(units, last)) = self.streams.get(&pid) else {
 			return (0, None);
 		};
+		if self.retired.contains(&pid) {
+			return (units, None);
+		}
 		let quiet = self
 			.elapsed
 			.map(|now| std::time::Duration::from_nanos((now - last) * 1_000 / 27));
@@ -7245,6 +7489,39 @@ pub(super) mod test {
 		);
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn data_only_pcr_era_is_shared_with_media_added_later() {
+		use super::super::catalog::Ext;
+		use super::super::fixture::{Flags, MS, Mux, WRAP};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let mut mux = Mux::default();
+		mux.pat(&[(1, 0x20)])
+			.pmt(0x20, 1, PCR_PID, &[(0x05, 0x21)], 0)
+			.packet(PCR_PID, Flags::pcr(WRAP - 40 * MS))
+			.section(0x21, &CUE)
+			.packet(PCR_PID, Flags::pcr(40 * MS));
+		import.decode(&mux.bytes()).unwrap();
+		assert!(import.timebase.offset().is_some());
+		assert!(!import.media_clock);
+		let mut mux = Mux::default();
+		mux.pmt(0x20, 1, PCR_PID, &[(0x02, 0x100), (0x05, 0x21)], 0)
+			.pes(0x100, Flags::default(), 9_000)
+			.fill(0x100, 1);
+		import.decode(&mux.bytes()).unwrap();
+		assert!(import.media_clock);
+		assert_eq!(
+			import.last_pts.unwrap(),
+			Timestamp::from_scale((1 << 33) + 9_000, 90_000).unwrap()
+		);
+		import.finish().unwrap();
+	}
+
 	#[test]
 	fn sections_without_a_media_anchor_follow_whole_pes_handling() {
 		use crate::catalog::hang::Catalog;
@@ -8405,6 +8682,35 @@ pub(super) mod test {
 		);
 	}
 
+	/// A flagged clock break that sets PUSI on an adaptation-only packet starts no PES, so it
+	/// proves nothing whole: the unbounded picture open across it is cut short and dropped.
+	#[test]
+	fn flagged_break_without_payload_drops_the_open_picture() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let unbounded = |cc, pts, keyframe| {
+			let mut packet = video_pes(VIDEO, cc, pts, None, &annexb_au(keyframe));
+			let start = 5 + usize::from(packet[4]);
+			packet[start + 4..start + 6].fill(0);
+			packet
+		};
+		let mut data = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+		data.extend(unbounded(0, 90_000, true));
+		data.extend(unbounded(1, 90_000 + FRAME, false));
+		let mut flagged = clock_break_packet(VIDEO);
+		flagged[1] |= 0x40;
+		flagged[3] |= 1;
+		data.extend(flagged);
+		import.decode(&data).unwrap();
+		import.finish().unwrap();
+		assert_eq!(
+			import.stats().streams[&VIDEO].units,
+			1,
+			"only the keyframe the second start proved whole"
+		);
+	}
+
 	/// A malformed unbounded PES drained at EOF is still refused and counted.
 	#[test]
 	fn damaged_final_access_unit_is_refused() {
@@ -8878,7 +9184,7 @@ pub(super) mod test {
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
-			.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, PCR_PID)], false))
+			.decode(&synth_pmt(&[(StreamType::Mpeg1Audio, PCR_PID)], false))
 			.unwrap();
 		let window = |import: &mut super::Import<Ext>, stuffing: usize| {
 			for i in 0..=50 {
@@ -8894,7 +9200,7 @@ pub(super) mod test {
 		// A full window before any PES, then a break, then the first PES.
 		window(&mut import, 99);
 		import.decode(&flag_discontinuity(pcr_packet(PCR_PID, 0))).unwrap();
-		import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
+		import.decode(&mp2_pes(PCR_PID, 0, 90_000, [0xaa, 0xbb])).unwrap();
 		assert!(
 			updates.poll_next(&waiter).is_pending(),
 			"the catalog published on a voided measurement"
@@ -9656,5 +9962,473 @@ pub(super) mod test {
 		assert_eq!(import.stats().streams[&0x104].refused, 1, "refused once, not per PMT");
 		import.handle_pmt(pmt(StreamType::H264 as u8)).unwrap();
 		assert!(matches!(import.streams[&pid], super::Stream::H264 { .. }));
+	}
+
+	/// A PMT that changes a decoded stream's ES descriptors, here an audio language retag,
+	/// finishes its track: its rendition and `mpegts` entry leave the catalog, and the next PES
+	/// opens a rendition under a new name whose entry records the revised descriptors.
+	#[test]
+	fn a_relabelled_decoded_stream_reopens_under_a_new_name() {
+		use crate::container::ts::psi::{Es, Pmt};
+		const AUDIO_PID: u16 = 0x0061;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pmt = |language: &'static [u8]| Pmt {
+			program_number: 1,
+			pcr_pid: Some(Pid::new(AUDIO_PID).unwrap()),
+			program_info: Vec::new(),
+			streams: vec![Es {
+				stream_type: MP2,
+				pid: Pid::new(AUDIO_PID).unwrap(),
+				descriptors: vec![super::catalog::Descriptor {
+					tag: 0x0a,
+					data: bytes::Bytes::from_static(language),
+				}],
+			}],
+		};
+		let language = |catalog: &crate::catalog::hang::Catalog<Ext>, name: &str| {
+			catalog.ext.mpegts.tracks[name].descriptors[0].data.clone()
+		};
+
+		import.handle_pmt(pmt(b"eng\0")).unwrap();
+		// The legacy path publishes once a later PES confirms the frames before it.
+		import.decode(&mp2_pes(AUDIO_PID, 0, 90_000, [0xAA, 0xBB])).unwrap();
+		import.decode(&mp2_pes(AUDIO_PID, 1, 180_000, [0xAA, 0xBB])).unwrap();
+		let before = catalog.snapshot();
+		let old = before
+			.audio
+			.renditions
+			.keys()
+			.next()
+			.expect("the MP2 rendition")
+			.clone();
+		assert_eq!(language(&before, &old).as_ref(), b"eng\0");
+
+		import.handle_pmt(pmt(b"fra\0")).unwrap();
+		let between = catalog.snapshot();
+		assert!(
+			between.audio.renditions.is_empty(),
+			"the old rendition left the catalog"
+		);
+		assert!(between.ext.mpegts.tracks.is_empty(), "the old entry left the catalog");
+
+		import.decode(&mp2_pes(AUDIO_PID, 2, 270_000, [0xCC, 0xDD])).unwrap();
+		import.decode(&mp2_pes(AUDIO_PID, 3, 360_000, [0xCC, 0xDD])).unwrap();
+		let after = catalog.snapshot();
+		let new = after
+			.audio
+			.renditions
+			.keys()
+			.next()
+			.expect("the relabelled rendition")
+			.clone();
+		assert_ne!(new, old);
+		assert_eq!(language(&after, &new).as_ref(), b"fra\0");
+		import.finish().unwrap();
+	}
+
+	/// The program descriptors follow each PMT revision in place, and adding or removing the
+	/// 'CUEI' registration reroutes the 0x86 PID: carried as cues under it, dropped without it,
+	/// and carried under a new name when it returns.
+	#[test]
+	fn program_descriptors_follow_the_pmt_and_reroute_the_cue_pid() {
+		use crate::container::ts::psi::{Es, Pmt};
+		const CUE_PID: u16 = 0x0021;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let descriptor = |tag, data: &'static [u8]| super::catalog::Descriptor {
+			tag,
+			data: bytes::Bytes::from_static(data),
+		};
+		let pmt = |program_info: Vec<super::catalog::Descriptor>| Pmt {
+			program_number: 1,
+			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
+			program_info,
+			streams: vec![
+				Es {
+					stream_type: StreamType::Mpeg2Video as u8,
+					pid: Pid::new(PCR_PID).unwrap(),
+					descriptors: Vec::new(),
+				},
+				Es {
+					stream_type: StreamType::Dts8ChannelLosslessAudio as u8,
+					pid: Pid::new(CUE_PID).unwrap(),
+					descriptors: Vec::new(),
+				},
+			],
+		};
+		let cues = || {
+			let tracks = catalog.snapshot().ext.mpegts.tracks;
+			tracks
+				.into_iter()
+				.find(|(_, track)| track.pid == CUE_PID)
+				.map(|(name, _)| name)
+		};
+
+		let cuei = vec![descriptor(0x05, b"CUEI")];
+		import.handle_pmt(pmt(cuei.clone())).unwrap();
+		assert_eq!(catalog.snapshot().ext.mpegts.program_descriptors, cuei);
+		let first = cues().expect("cues under CUEI");
+
+		let private = vec![descriptor(0x80, &[0xaa, 0xbb])];
+		import.handle_pmt(pmt(private.clone())).unwrap();
+		assert_eq!(catalog.snapshot().ext.mpegts.program_descriptors, private);
+		assert_eq!(cues(), None, "without CUEI the PID is not cues");
+		assert!(matches!(
+			import.streams.get(&Pid::new(CUE_PID).unwrap()),
+			Some(super::Stream::Ignored)
+		));
+
+		import.handle_pmt(pmt(cuei.clone())).unwrap();
+		assert_eq!(catalog.snapshot().ext.mpegts.program_descriptors, cuei);
+		let second = cues().expect("cues under CUEI again");
+		assert_ne!(second, first, "the returning cue stream gets a new name");
+
+		import.handle_pmt(pmt(Vec::new())).unwrap();
+		assert!(catalog.snapshot().ext.mpegts.program_descriptors.is_empty());
+	}
+
+	/// A PAT that names the program under another `transport_stream_id`, or a single-program
+	/// import's PAT naming another program, refuses the import: the carried SI describes the
+	/// first. A repeated PAT does not.
+	#[test]
+	fn a_pat_naming_another_identity_refuses_the_import() {
+		use crate::container::ts::psi::{Association, Pat};
+		let pat = |transport_stream_id, program_number| Pat {
+			transport_stream_id,
+			programs: vec![Association {
+				program_number,
+				pmt_pid: Pid::new(0x20).unwrap(),
+			}],
+		};
+		for (selected, transport_stream_id, program_number) in [(None, 2, 1), (None, 1, 2), (Some(1), 2, 1)] {
+			let (_catalog, import) = psi_import();
+			let mut import = match selected {
+				Some(program) => import.with_program(program),
+				None => import,
+			};
+			import.handle_pat(&pat(1, 1)).unwrap();
+			import.handle_pat(&pat(1, 1)).unwrap();
+			let err = import
+				.handle_pat(&pat(transport_stream_id, program_number))
+				.expect_err("another identity is refused");
+			assert!(err.to_string().contains("identity"), "{err:#}");
+		}
+	}
+
+	/// A section-framed PID the PMT drops keeps its stats row, so what it delivered stays counted.
+	#[test]
+	fn a_dropped_section_route_keeps_its_stats_row() {
+		const VIDEO_PID: u16 = 0x0050;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let streams = [
+			(StreamType::Mpeg2Video, VIDEO_PID),
+			(StreamType::Dts8ChannelLosslessAudio, 0x21),
+		];
+		let mut bytes = synth_pmt(&streams, true);
+		bytes.extend_from_slice(&pcr_packet(VIDEO_PID, 27_000_000));
+		bytes.extend_from_slice(&pes_packet(VIDEO_PID, 99_000));
+		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
+		bytes.extend_from_slice(&pcr_packet(VIDEO_PID, 29_700_000));
+		bytes.extend_from_slice(&synth_pmt(&streams[..1], true));
+		import.decode(&bytes).unwrap();
+
+		let row = &import.stats().streams[&0x21];
+		assert_eq!((row.units, row.quiet), (1, None));
+	}
+
+	/// A PMT dropping a section PID before any media timestamp anchors the clock refuses the
+	/// import, as end of input does, rather than drop the section it holds.
+	#[test]
+	fn a_section_route_dropped_before_the_media_clock_refuses_the_import() {
+		const VIDEO_PID: u16 = 0x0050;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let streams = [
+			(StreamType::Mpeg2Video, VIDEO_PID),
+			(StreamType::Dts8ChannelLosslessAudio, 0x21),
+		];
+		let mut bytes = synth_pmt(&streams, true);
+		bytes.extend_from_slice(&pcr_packet(VIDEO_PID, 27_000_000));
+		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
+		bytes.extend_from_slice(&pcr_packet(VIDEO_PID, 29_700_000));
+		import.decode(&bytes).unwrap();
+
+		let err = import.decode(&synth_pmt(&streams[..1], true)).unwrap_err();
+		assert!(err.to_string().contains("without a media timestamp"), "{err:#}");
+		assert!(import.sections.contains_key(&0x21), "the route is left for `abort`");
+	}
+
+	/// A PMT dropping a section PID past a lone PCR ends it as end of input would: the section
+	/// no PCR interval places is counted unplaced.
+	#[test]
+	fn a_section_route_dropped_past_a_lone_pcr_counts_its_section_unplaced() {
+		const VIDEO_PID: u16 = 0x0050;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let streams = [
+			(StreamType::Mpeg2Video, VIDEO_PID),
+			(StreamType::Dts8ChannelLosslessAudio, 0x21),
+		];
+		let mut bytes = synth_pmt(&streams, true);
+		bytes.extend_from_slice(&pcr_packet(VIDEO_PID, 27_000_000));
+		bytes.extend_from_slice(&pes_packet(VIDEO_PID, 99_000));
+		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
+		bytes.extend_from_slice(&synth_pmt(&streams[..1], true));
+		import.decode(&bytes).unwrap();
+
+		let row = &import.stats().streams[&0x21];
+		assert_eq!((row.units, row.unplaced), (0, 1));
+		assert!(!import.sections.contains_key(&0x21));
+	}
+
+	/// A PID decoded as audio, then revised to private sections, then dropped, reports the
+	/// section route it ended on.
+	#[test]
+	fn a_dropped_route_reports_the_route_it_ended_on() {
+		use crate::container::ts::psi::{Es, Pmt};
+		const AUDIO_PID: u16 = 0x0062;
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pmt = |streams: &[u8]| Pmt {
+			program_number: 1,
+			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
+			program_info: Vec::new(),
+			streams: streams
+				.iter()
+				.map(|&stream_type| Es {
+					stream_type,
+					pid: Pid::new(AUDIO_PID).unwrap(),
+					descriptors: Vec::new(),
+				})
+				.collect(),
+		};
+
+		import.handle_pmt(pmt(&[MP2])).unwrap();
+		import.decode(&mp2_pes(AUDIO_PID, 0, 90_000, [0xAA, 0xBB])).unwrap();
+		import.decode(&mp2_pes(AUDIO_PID, 1, 180_000, [0xAA, 0xBB])).unwrap();
+		import.handle_pmt(pmt(&[0x05])).unwrap();
+		import.handle_pmt(pmt(&[])).unwrap();
+
+		let row = &import.stats().streams[&AUDIO_PID];
+		assert_eq!((row.track.as_str(), row.class), (".ts", super::stats::Class::Data));
+	}
+
+	/// Ending a self-describing audio route drains the frame it held for a successor, and its
+	/// counters include that frame.
+	#[test]
+	fn a_dropped_audio_route_counts_the_frame_its_end_drains() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pmt = |streams: Vec<Es>| Pmt {
+			program_number: 1,
+			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
+			program_info: Vec::new(),
+			streams,
+		};
+		let audio = Es {
+			stream_type: MP2,
+			pid: Pid::new(PCR_PID).unwrap(),
+			descriptors: Vec::new(),
+		};
+
+		// The second frame spans two PES, so it begins in a carried tail and is held for a
+		// successor header that never comes.
+		let (mut head, second) = (mp2_frame(0xAA), mp2_frame(0xBB));
+		head.extend_from_slice(&second[..36]);
+		import.handle_pmt(pmt(vec![audio])).unwrap();
+		import.decode(&audio_pes_packet(PCR_PID, 0, 90_000, &head)).unwrap();
+		import
+			.decode(&audio_pes_packet(PCR_PID, 1, 92_160, &second[36..]))
+			.unwrap();
+		assert_eq!(import.stats().streams[&PCR_PID].unconfirmed, 0);
+		import.handle_pmt(pmt(Vec::new())).unwrap();
+
+		assert_eq!(import.stats().streams[&PCR_PID].unconfirmed, 1);
+	}
+
+	/// A PMT listing one PID twice is malformed, so it refuses the import rather than pick an
+	/// entry to route by.
+	#[test]
+	fn a_pmt_listing_a_pid_twice_refuses_the_import() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let (_catalog, mut import) = psi_import();
+		let es = |stream_type| Es {
+			stream_type,
+			pid: Pid::new(0x0062).unwrap(),
+			descriptors: Vec::new(),
+		};
+		let pmt = Pmt {
+			program_number: 1,
+			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
+			program_info: Vec::new(),
+			streams: vec![es(0x06), es(0x15)],
+		};
+		let err = import.handle_pmt(pmt).expect_err("a PID listed twice is refused");
+		assert!(err.to_string().contains("twice"), "{err:#}");
+	}
+
+	/// Every ended route leaves its track name reserved, so a source that keeps revising its PMT
+	/// is refused once it has applied as many revisions as an import accepts.
+	#[test]
+	fn pmt_churn_past_the_revision_bound_refuses_the_import() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let (_catalog, mut import) = psi_import();
+		let pmt = |streams: &[u8]| Pmt {
+			program_number: 1,
+			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
+			program_info: Vec::new(),
+			streams: streams
+				.iter()
+				.map(|&stream_type| Es {
+					stream_type,
+					pid: Pid::new(0x0062).unwrap(),
+					descriptors: Vec::new(),
+				})
+				.collect(),
+		};
+		import.handle_pmt(pmt(&[0x06])).unwrap();
+		import.revisions = super::Import::<()>::MAX_REVISIONS - 1;
+
+		import
+			.handle_pmt(pmt(&[0x15]))
+			.expect("the last revision within the bound");
+		let err = import.handle_pmt(pmt(&[])).expect_err("one revision past the bound");
+		assert!(err.to_string().contains("revised"), "{err:#}");
+	}
+
+	/// A PMT that keeps dropping and restoring its PCR reopens the stream each time, so its
+	/// refusals count toward the same bound.
+	#[test]
+	fn pcr_churn_past_the_revision_bound_refuses_the_import() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pmt = |pcr_pid: Option<u16>| Pmt {
+			program_number: 1,
+			pcr_pid: pcr_pid.map(|pid| Pid::new(pid).unwrap()),
+			program_info: Vec::new(),
+			streams: vec![Es {
+				stream_type: 0x06,
+				pid: Pid::new(0x0062).unwrap(),
+				descriptors: Vec::new(),
+			}],
+		};
+		import.handle_pmt(pmt(Some(PCR_PID))).unwrap();
+		import.revisions = super::Import::<Ext>::MAX_REVISIONS;
+
+		let err = import.handle_pmt(pmt(None)).expect_err("a refusal past the bound");
+		assert!(err.to_string().contains("revised"), "{err:#}");
+	}
+
+	/// Each program descriptor change republishes the catalog without ending a route, so it
+	/// counts toward the same bound.
+	#[test]
+	fn descriptor_churn_past_the_revision_bound_refuses_the_import() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pmt = |data: &'static [u8]| Pmt {
+			program_number: 1,
+			pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
+			program_info: vec![super::catalog::Descriptor {
+				tag: 0x80,
+				data: bytes::Bytes::from_static(data),
+			}],
+			streams: vec![Es {
+				stream_type: StreamType::Mpeg2Video as u8,
+				pid: Pid::new(PCR_PID).unwrap(),
+				descriptors: Vec::new(),
+			}],
+		};
+		import.handle_pmt(pmt(&[0xaa])).unwrap();
+		import.revisions = super::Import::<Ext>::MAX_REVISIONS - 1;
+
+		import
+			.handle_pmt(pmt(&[0xbb]))
+			.expect("the last revision within the bound");
+		let err = import
+			.handle_pmt(pmt(&[0xaa]))
+			.expect_err("one revision past the bound");
+		assert!(err.to_string().contains("revised"), "{err:#}");
+	}
+
+	/// The first PMT records its program descriptors over whatever the catalog held, even when it
+	/// carries none.
+	#[test]
+	fn the_first_pmt_records_its_program_descriptors_even_when_empty() {
+		use crate::container::ts::psi::{Es, Pmt};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		catalog.modify().unwrap().ext.mpegts.program_descriptors = vec![super::catalog::Descriptor {
+			tag: 0x80,
+			data: bytes::Bytes::from_static(&[0xaa]),
+		}];
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		import
+			.handle_pmt(Pmt {
+				program_number: 1,
+				pcr_pid: Some(Pid::new(PCR_PID).unwrap()),
+				program_info: Vec::new(),
+				streams: vec![Es {
+					stream_type: StreamType::Mpeg2Video as u8,
+					pid: Pid::new(PCR_PID).unwrap(),
+					descriptors: Vec::new(),
+				}],
+			})
+			.unwrap();
+
+		assert!(catalog.snapshot().ext.mpegts.program_descriptors.is_empty());
 	}
 }

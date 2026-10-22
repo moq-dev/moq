@@ -11,14 +11,6 @@ on:
   # Dry-run: check the source package, publish nothing. Only a tag push
   # publishes, so nightly.yml calls this on main in place of main PRs.
   workflow_call:
-  # `edited` catches a main PR retargeted to release.
-  pull_request:
-    branches: [release]
-    types: [opened, synchronize, reopened, edited]
-    paths:
-      - ".github/workflows/release-dart.yml"
-      - "dart/moq/**"
-      - "sh/dart/**"
 
 permissions:
   contents: read

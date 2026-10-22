@@ -8,7 +8,7 @@ Existing plaintext operation remains the default; an explicit application creden
 
 ## Plan
 
-- Integrate the TypeScript E2EE layer before the existing Hang publish and after the existing Hang subscribe boundaries, keeping codec selection, synchronization, and rendering in the post-decryption pipelines.
+- Hand `@moq/publish` and `@moq/watch` an encrypted broadcast through the [`@moq/net` interfaces](/quest/m2/net-wrap/js.md), keeping codec selection, synchronization, and rendering in the post-decryption pipelines.
 - Accept keys through a programmatic property/API only, never an HTML attribute, URL, persistent browser storage, analytics event, or log. Clear owned secret bytes when the component is replaced or disconnected; do not make extractability a hidden requirement.
 - Derive the invariant opaque broadcast path from the semantic name and
   resolve that path, taking the selected epoch from its route. On a wire

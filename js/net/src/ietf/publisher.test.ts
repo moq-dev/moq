@@ -56,6 +56,39 @@ const CLUSTER = { cluster: true, epoch: false };
 /** How long to wait for a stream before calling it absent, which is how a regression reports. */
 const STREAM_WAIT = 1000;
 
+/** A manual clock, installed until disposed. */
+function manual(): Manual & Disposable {
+	const clock = new Manual();
+	return Object.assign(clock, { [Symbol.dispose]: clock.install() });
+}
+
+/**
+ * Whether `read` yields a stream once pending work has armed its timers and {@link STREAM_WAIT}
+ * has passed on `clock`, which fires any retry that would open one.
+ */
+async function opens(read: Promise<{ done: boolean }>, clock: Manual): Promise<boolean> {
+	let opened = false;
+	read.then(
+		(next) => {
+			opened = !next.done;
+		},
+		() => {},
+	);
+	await clock.advance(Nano.zero);
+	await clock.advance(Nano.fromMilli(Milli(STREAM_WAIT)));
+	return opened;
+}
+
+/** Expect the publisher to open no bidirectional stream within {@link STREAM_WAIT} on `clock`. */
+async function noStream(transport: WebTransport, clock: Manual): Promise<void> {
+	const reader = transport.incomingBidirectionalStreams.getReader();
+	try {
+		expect(await opens(reader.read(), clock)).toBe(false);
+	} finally {
+		reader.releaseLock();
+	}
+}
+
 /** Long enough for the publish to reach the announce loop's signal. */
 const SETTLE = 5;
 
@@ -760,16 +793,16 @@ test("a group stream whose FIN never completes is reset when the group expires",
 		await closeStarted;
 		// The newest group is never stale, however long its FIN takes. Kept inside the cache's
 		// idle window: a group evicted once superseded is no longer judged.
-		await clock.advanceAsync(Nano.fromMilli(Milli(budget * 2)));
+		await clock.advance(Nano.fromMilli(Milli(budget * 2)));
 		expect(reset).toBe(false);
 
 		// Its successor presents no further, so only the wall clock since it arrived convicts
 		// group 0, after the track has ended.
 		write(1);
 		track.close();
-		await clock.advanceAsync(Nano.fromMilli(Milli(budget - 1)));
+		await clock.advance(Nano.fromMilli(Milli(budget - 1)));
 		expect(reset).toBe(false);
-		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await clock.advance(Nano.fromMilli(Milli(1)));
 		await streamReset;
 	} finally {
 		client.close();
@@ -847,7 +880,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 		write(2, 20_000);
 		open();
 
-		expect(String(await streamReset)).toContain("max delay budget");
+		expect(String(await streamReset)).toContain("abandoned waiting for a stream slot");
 		expect(writes).toBe(0);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(unhandled).toEqual([]);
@@ -1144,6 +1177,7 @@ test("a covering route's claim is compared relative to the served root", async (
  * uninterested) into a request every few seconds for the life of the session.
  */
 test("a refusal that forbids retrying is not retried", async () => {
+	using clock = manual();
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const { pub, origin } = publisher(pair.server);
 	publish(origin, Path.from("lonely"));
@@ -1156,7 +1190,7 @@ test("a refusal that forbids retrying is not retried", async () => {
 	await declinePublishNamespace(stream, 0n);
 
 	// Well past the retry the loop would otherwise take.
-	expect(await nextStream(pair.client)).toBeUndefined();
+	await noStream(pair.client, clock);
 
 	origin.close();
 });
@@ -2368,6 +2402,7 @@ test.each([
 	["an unchanged price with Cluster", HopSchema.parse(9n)],
 	["any re-price without Cluster", undefined],
 ])("%s sends nothing", async (_, peer) => {
+	using clock = manual();
 	const self: Hop = HopSchema.parse(7n);
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const { pub, origin } = publisher(pair.server, { cluster: { self, peer } });
@@ -2383,7 +2418,7 @@ test.each([
 	await acceptPublishNamespace(stream);
 
 	broadcast.announce({ cost: peer === undefined ? 8n : 4n });
-	expect(await nextStream(pair.client)).toBeUndefined();
+	await noStream(pair.client, clock);
 
 	origin.close();
 });
@@ -2478,7 +2513,7 @@ test("drafts 14 to 16 apply an update and still end a subscription on UNSUBSCRIB
 			expect(await peer.reader.u53()).toBe(RequestOk.id);
 			expect((await RequestOk.decode(peer.reader, version)).requestId).toBe(2n);
 		}
-		while (track.subscription.peek()?.priority !== 245) await track.subscription.changed();
+		while (track.subscription.peek()?.priority !== 117) await track.subscription.changed();
 
 		await peer.writer.u53(Unsubscribe.id);
 		await new Unsubscribe({ requestId: 0n }).encode(peer.writer, version);
@@ -2761,6 +2796,7 @@ async function readFill(stream: ReadableStream<Uint8Array>): Promise<ServedFill>
  * claim END_OF_GROUP, or the subscriber would think the group ended at the cap.
  */
 test("draft-20: an absolute filter trims the range it serves", async () => {
+	using clock = manual();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	for (let i = 0; i < 4; i++) writeGroup(track, 3);
@@ -2807,7 +2843,7 @@ test("draft-20: an absolute filter trims the range it serves", async () => {
 		});
 
 		// Groups 0 and 3 are outside the range, so nothing more is opened.
-		expect(await nextUni(fx.uni)).toBeUndefined();
+		expect(await opens(fx.uni.read(), clock)).toBe(false);
 	} finally {
 		fx.close();
 		client.close();
@@ -3010,6 +3046,7 @@ test("draft-20: a fill spanning several groups resets its stream", async () => {
 
 /** A fill against a track with nothing published has an empty range: no stream is owed. */
 test("draft-20: an empty track opens no fill stream", async () => {
+	using clock = manual();
 	const fx = fixture();
 	fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
@@ -3027,7 +3064,7 @@ test("draft-20: an empty track opens no fill stream", async () => {
 
 	try {
 		expect(ok.largest).toBeUndefined();
-		expect(await nextUni(fx.uni)).toBeUndefined();
+		expect(await opens(fx.uni.read(), clock)).toBe(false);
 	} finally {
 		fx.close();
 		client.close();
@@ -3336,6 +3373,7 @@ test("draft-20: an inline terminal reset after its FIN falls back to a standalon
  * and PUBLISH_DONE would never go out.
  */
 test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DONE", async () => {
+	using clock = manual();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1); // group 0, the whole requested range
@@ -3369,7 +3407,7 @@ test("draft-20: a clean close past a bounded filter's end still sends PUBLISH_DO
 		const end = await nextUni(fx.uni);
 		if (!end) throw new Error("the track's end was never marked");
 		expect(await readEndOfTrack(end)).toBe(2);
-		expect(await nextUni(fx.uni)).toBeUndefined();
+		expect(await opens(fx.uni.read(), clock)).toBe(false);
 	} finally {
 		fx.close();
 		client.close();
@@ -3495,6 +3533,51 @@ test("draft-20: a fill works on a dynamically requested track", async () => {
 		client.close();
 	}
 });
+
+// A failed group stream must release that group while the subscription serves later ones.
+// Chromium can throw synchronously after closure; other transports reject their open promise.
+for (const synchronous of [true, false]) {
+	test(`a ${synchronous ? "thrown" : "rejected"} group open does not escape the subscription`, async () => {
+		using clock = manual();
+		const fx = fixture();
+		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const attempted = Promise.withResolvers<void>();
+		const failure = new Error("stream opening failed");
+		const create = spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(() => {
+			attempted.resolve();
+			if (synchronous) throw failure;
+			return Promise.reject(failure);
+		});
+		const { client } = await runSubscribe(
+			fx,
+			new Subscribe({
+				requestId: 7n,
+				trackNamespace: Path.from("test"),
+				trackName: "video",
+				subscriberPriority: 0,
+				filter: { kind: "absolute", startGroup: 0n, startObject: 0n },
+			}),
+		);
+
+		try {
+			writeGroup(track, 1);
+			await attempted.promise;
+			await clock.advance(Nano.zero);
+			writeGroup(track, 1);
+
+			const next = await fx.uni.read();
+			if (next.done) throw new Error("subscription ended after its first group failed");
+			const served = await readGroup(next.value);
+			expect(served.sequence).toBe(1);
+			expect(served.objects).toEqual([{ id: 0, payload: "1.0" }]);
+			expect(create).toHaveBeenCalledTimes(2);
+		} finally {
+			client.close();
+			fx.close();
+			await clock.advance(Nano.zero);
+		}
+	});
+}
 
 // PUBLISH_DONE MUST wait until every stream the subscription will open is closed, so its
 // Stream Count is final. A group still queued for a stream slot when the track ends is one.
@@ -3748,14 +3831,14 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		await client.writer.write(new Uint8Array([0x02, 0, 4, 2, 1, 0x20, 10]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.priority).toBe(245);
+		expect(track.subscription.peek()?.priority).toBe(117);
 		// Only the priority changes; retention and the group range survive.
 		expect(track.subscription.peek()?.maxDelay).toBe(before?.maxDelay);
 		expect(track.subscription.peek()?.groups).toEqual(before?.groups);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.priority).toBe(245);
+		expect(track.subscription.peek()?.priority).toBe(117);
 	} finally {
 		client.close();
 		track.close();

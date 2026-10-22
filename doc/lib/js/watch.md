@@ -29,6 +29,7 @@ in sync at the latency you ask for.
 | Attribute | |
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
+| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-14,moq-lite-06`. Every stable version by default. |
 | `paused`, `muted`, `volume` | The usual player controls. |
 | `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint video as it decodes, with no audio. |
 | `buffer` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
@@ -56,7 +57,9 @@ and the player does not ask again until it is pointed elsewhere or re-enabled.
 
 The broadcast's announcement is its online signal: the player starts when a
 route serving the name is announced, goes `offline` when none is left, and
-waits for one to return for as long as it is mounted. When the exact route
+waits for one to return for as long as it is mounted. A catalog track that
+ends cleanly keeps playing until the broadcast ends, so a viewer drains a
+finished broadcast's tail. When the exact route
 ends while a covering prefix still serves the name, it moves to the prefix. A
 name outside the origin's scope is an `error`. A restarted publisher at the same name is followed at
 once, with a fresh catalog, and video, audio, and the clock start over on its

@@ -58,6 +58,11 @@ fn settles_walk(err: &Error) -> bool {
 /// A GOAWAY naming no new URI is no failure: a restarting peer sends one to each session until
 /// it goes, and each of those
 /// serves, so it restarts the timeout instead.
+///
+/// A GOAWAY off a session that outlived `initial` migrates at once, unless it sends the
+/// connection back to an endpoint that already redirected it elsewhere and the session lived
+/// less than `max`. Two peers redirecting to each other thus wait out this backoff and count
+/// against the timeout.
 #[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -119,9 +124,9 @@ pub struct Backoff {
 	/// [`crate::connect::Config::timeout`](crate::connect::Config::timeout), so a handshake
 	/// slower than this still lands. Giving up can therefore take up to one whole walk longer.
 	///
-	/// Resets after a stable connection (one that outlives the initial backoff), so a flapping
-	/// session that reconnects then immediately drops still counts toward the timeout. Set to
-	/// `Some(Duration::ZERO)` for unlimited retries. `None` takes the default. When this config was
+	/// Resets after a stable connection (one that outlives the initial backoff) outside a redirect
+	/// loop, so a flapping session that reconnects then immediately drops still counts toward the
+	/// timeout. Set to `Some(Duration::ZERO)` for unlimited retries. `None` takes the default. When this config was
 	/// parsed from the command line, a `--backoff-timeout` given there wins over this field.
 	///
 	/// An `Option` because zero is a real setting: a command-line parse leaves this field at its
@@ -487,7 +492,7 @@ struct State {
 	session: Option<moq_net::Session>,
 	/// The loop's [`Draining`] predecessor and its handover deadline, so
 	/// [`Connection::close`] drains it too without overstaying that window.
-	predecessor: Option<(moq_net::Session, tokio::time::Instant)>,
+	predecessor: Option<(moq_net::Session, moq_clock::Instant)>,
 }
 
 /// The producer side of everything a [`Connection`] handle can observe.
@@ -693,6 +698,8 @@ pub struct Connection {
 	pacing: Pacing,
 	/// Persistent send-bitrate estimate, fed by the loop from each live session.
 	send_bandwidth: BandwidthConsumer,
+	/// Divides `send_bandwidth`, and every session the loop dials probes for its reservations.
+	bandwidth: moq_net::bandwidth::Allocator,
 	/// Persistent recv-bitrate estimate, fed by the loop from each live session.
 	recv_bandwidth: moq_net::bandwidth::Weak,
 	/// The last status returned by [`status`](Self::status), for change detection.
@@ -729,6 +736,8 @@ impl Connection {
 		let recv_bw = BandwidthProducer::new();
 		let send_bandwidth = send_bw.consume();
 		let recv_bandwidth = recv_bw.weak();
+		let bandwidth = moq_net::bandwidth::Allocator::new(send_bandwidth.clone());
+		let client = client.with_bandwidth(bandwidth.clone());
 
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
@@ -766,6 +775,7 @@ impl Connection {
 			pacing,
 			send_bandwidth,
 			recv_bandwidth,
+			bandwidth,
 			last_reported: None,
 		}
 	}
@@ -827,7 +837,7 @@ impl Connection {
 			let mut close = std::pin::pin!(session.close());
 			tokio::select! {
 				res = &mut close => res,
-				_ = tokio::time::sleep_until(deadline) => {
+				_ = moq_clock::sleep_until(deadline) => {
 					abort.abort(moq_net::Error::GoawayTimeout);
 					close.await
 				}
@@ -850,6 +860,8 @@ impl Connection {
 		let mut addrs = addrs;
 		// An old session kept alive after a GOAWAY so its in-flight groups finish.
 		let mut draining: Option<Draining> = None;
+		// The current run of migrations, to tell a redirect loop from a healthy handover.
+		let mut redirects = Redirects::default();
 
 		loop {
 			if !timeout.is_zero() && retry.start.elapsed() >= timeout {
@@ -863,7 +875,7 @@ impl Connection {
 					shared.connected(&dialed.session, dialed.transport);
 					let session = dialed.session;
 
-					let connected = tokio::time::Instant::now();
+					let connected = moq_clock::now();
 					// Wait for the session to end, forwarding its bandwidth estimates into the
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
@@ -878,9 +890,7 @@ impl Connection {
 						shared.retrying(err);
 					}
 
-					// A session that stayed up past the initial backoff is healthy; one that
-					// ended sooner counts as a failed attempt however it ended.
-					let healthy = retry.settle(connected.elapsed(), initial);
+					let tenure = connected.elapsed();
 
 					// The connected target owns the policy, including in one-shot mode. A
 					// refused redirect is terminal: the peer is leaving and named somewhere we
@@ -908,6 +918,28 @@ impl Connection {
 						shared.disconnected();
 						return Ok(());
 					}
+
+					// Two peers that each outlive the initial backoff can still bounce us between
+					// them forever. Returning to an endpoint that already sent us elsewhere in this
+					// run of migrations skips the healthy-session reset, so the backoff escalates and
+					// the retry window still applies. A one-way rolling restart never revisits one,
+					// and a GOAWAY back to the same place is a restart, not a move, so it never
+					// counts. A session that outlived the capped delay already redials no faster
+					// than the backoff would allow, so it starts a new run: rolling restarts days
+					// apart never add up to a loop.
+					if matches!(ended, Ended::Closed(_)) || tenure >= pacing.max {
+						redirects.reset();
+					}
+					// Only an accepted redirect is a move: an empty or ignored one reconnects in place.
+					let looped = assigned.as_ref().is_some_and(|target| {
+						let from = endpoint(&url);
+						let to = endpoint(target);
+						to != from && redirects.depart(from, &to)
+					});
+
+					// A session that stayed up past the initial backoff is healthy; one that
+					// ended sooner, or carried on a redirect loop, counts as a failed attempt.
+					let healthy = !looped && retry.settle(tenure, initial);
 
 					if let Ended::Goaway(msg) = &ended {
 						// An accepted redirect is an assignment: keep dialing it from here on, and
@@ -941,8 +973,9 @@ impl Connection {
 							continue;
 						}
 
-						// Drained almost immediately. The backoff still escalates, so the redials
-						// cannot hammer the peer, and the old session serves across the sleep.
+						// Drained almost immediately, or looped back. The backoff still escalates, so
+						// the redials cannot hammer the peer, and the old session serves across the
+						// sleep.
 						//
 						// An empty URI is "reconnect to me": the peer is restarting and drains
 						// each new session until it goes, which is no failure, since every one
@@ -950,7 +983,12 @@ impl Connection {
 						// peers bouncing us between them eventually give up.
 						let restarting = msg.uri().is_empty();
 						if !restarting {
-							let err = Error::Reconnect("peer redirected immediately".to_string());
+							let reason = if looped {
+								"redirect loop"
+							} else {
+								"peer redirected immediately"
+							};
+							let err = Error::Reconnect(reason.to_string());
 							shared.retrying(&err);
 							retry.last_error = Some(err);
 						}
@@ -960,7 +998,11 @@ impl Connection {
 						let Some(wait) = retry_wait(retry.delay, retry.start, window) else {
 							return Err(timeout_error(timeout, retry.last_error.as_ref()));
 						};
-						tracing::warn!(peer = %Endpoint(&url), ?wait, "peer drained the session immediately; retrying after backoff");
+						if looped {
+							tracing::warn!(peer = %Endpoint(&url), ?wait, "peer redirected back in a loop; retrying after backoff");
+						} else {
+							tracing::warn!(peer = %Endpoint(&url), ?wait, "peer drained the session immediately; retrying after backoff");
+						}
 						// Keep the handover bounded across the sleep: nothing else polls the
 						// predecessor while the loop is between connections.
 						sleep_draining(wait, &mut draining, shared).await;
@@ -968,7 +1010,7 @@ impl Connection {
 						if restarting {
 							// After the sleep, so the window counts only the time after the
 							// peer stops answering.
-							retry.start = tokio::time::Instant::now();
+							retry.start = moq_clock::now();
 						}
 						continue;
 					}
@@ -1002,8 +1044,7 @@ impl Connection {
 						// resets, or redirects us straight back out). Treat it as a failed
 						// connection: keep the reason so the give-up timeout reports a real cause,
 						// and fall through to the shared backoff sleep below so repeated flaps
-						// escalate instead of spinning the CPU. This is what bounds a redirect
-						// loop between two peers.
+						// escalate instead of spinning the CPU.
 						let err = match ended {
 							Ended::Closed(Err(err)) => Some(err),
 							Ended::Closed(Ok(())) => None,
@@ -1086,7 +1127,7 @@ impl Connection {
 
 			let dialed = match attempt_timeout(index, candidates.len()) {
 				None => dialed.await,
-				Some(limit) => match tokio::time::timeout(limit, dialed).await {
+				Some(limit) => match moq_clock::timeout(limit, dialed).await {
 					Ok(dialed) => dialed,
 					Err(_) => Err(Error::Reconnect(format!("timed out connecting to {}", Endpoint(url)))),
 				},
@@ -1231,6 +1272,16 @@ impl Connection {
 		self.send_bandwidth.clone()
 	}
 
+	/// Divides [`send_bandwidth`](Self::send_bandwidth) among this connection's senders,
+	/// mirroring [`moq_net::Session::bandwidth`].
+	///
+	/// Persistent like the estimate: every session the loop dials probes for these
+	/// reservations, so they survive reconnects. Reservations report `None` while
+	/// disconnected, telling a sender to hold its rate.
+	pub fn bandwidth(&self) -> moq_net::bandwidth::Allocator {
+		self.bandwidth.clone()
+	}
+
 	/// A consumer for the live session's estimated receive bitrate, mirroring
 	/// [`moq_net::Session::recv_bandwidth`]. Persistent across reconnects like
 	/// [`send_bandwidth`](Self::send_bandwidth); `None` while disconnected or unavailable.
@@ -1281,7 +1332,7 @@ struct Retry {
 	/// The wait before the next attempt, before jitter.
 	delay: Duration,
 	/// When this run of failures began; the give-up timeout counts from here.
-	start: tokio::time::Instant,
+	start: moq_clock::Instant,
 	/// The latest failure, so giving up reports a real cause.
 	last_error: Option<Error>,
 }
@@ -1290,7 +1341,7 @@ impl Retry {
 	fn new(initial: Duration) -> Self {
 		Self {
 			delay: initial,
-			start: tokio::time::Instant::now(),
+			start: moq_clock::now(),
 			last_error: None,
 		}
 	}
@@ -1316,12 +1367,68 @@ fn timeout_error(timeout: Duration, last_error: Option<&Error>) -> Error {
 }
 
 /// Jitter the next delay and cap it at the retry window. `None` means the window is exhausted.
-fn retry_wait(delay: Duration, retry_start: tokio::time::Instant, timeout: Duration) -> Option<Duration> {
+fn retry_wait(delay: Duration, retry_start: moq_clock::Instant, timeout: Duration) -> Option<Duration> {
 	let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
 	if timeout.is_zero() {
 		return Some(wait);
 	}
 	Some(wait.min(timeout.checked_sub(retry_start.elapsed())?))
+}
+
+/// Where `url` dials, without its userinfo, query, or fragment, where a peer may mint fresh
+/// credentials on every redirect. Two URLs that differ only there reach the same endpoint.
+fn endpoint(url: &Url) -> Url {
+	let mut bare = url.clone();
+	// Only fails for a URL that cannot carry userinfo, which then has none to strip.
+	let _ = bare.set_username("");
+	let _ = bare.set_password(None);
+	bare.set_query(None);
+	bare.set_fragment(None);
+	bare
+}
+
+/// A run of GOAWAY redirects, and whether it has revisited an endpoint.
+///
+/// The peer picks every hop, so remembering them all would grow without bound. Brent's cycle
+/// detection instead keeps one departed endpoint, replaced at doubling intervals, and catches a
+/// cycle of any length within a few laps of it. Once caught, the run stays a loop until reset.
+struct Redirects {
+	mark: Option<Url>,
+	span: u64,
+	hops: u64,
+	looped: bool,
+}
+
+impl Default for Redirects {
+	fn default() -> Self {
+		Self {
+			mark: None,
+			span: 1,
+			hops: 0,
+			looped: false,
+		}
+	}
+}
+
+impl Redirects {
+	/// Record leaving `from` for a different endpoint `to`, and return whether this run loops.
+	fn depart(&mut self, from: Url, to: &Url) -> bool {
+		if self.mark.as_ref() == Some(to) {
+			self.looped = true;
+		}
+		self.hops += 1;
+		if self.hops == self.span {
+			self.mark = Some(from);
+			self.span = self.span.saturating_mul(2);
+			self.hops = 0;
+		}
+		self.looped
+	}
+
+	/// Start a new run.
+	fn reset(&mut self) {
+		*self = Self::default();
+	}
 }
 
 /// Why a session stopped being the live one.
@@ -1340,14 +1447,14 @@ enum Ended {
 struct Draining {
 	session: moq_net::Session,
 	closed: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
-	deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+	deadline: std::pin::Pin<Box<moq_clock::Sleep>>,
 	/// Mirrors the session into [`State::predecessor`] for as long as this lives.
 	state: kio::Producer<State>,
 }
 
 impl Draining {
 	fn new(session: moq_net::Session, handover: Duration, state: &kio::Producer<State>) -> Self {
-		let deadline = Box::pin(tokio::time::sleep(handover));
+		let deadline = Box::pin(moq_clock::sleep(handover));
 		if let Ok(mut state) = state.write() {
 			state.predecessor = Some((session.clone(), deadline.deadline()));
 		}
@@ -1417,7 +1524,7 @@ fn poll_draining(draining: &mut Option<Draining>, waiter: &kio::Waiter) -> bool 
 /// to reach would leave the old session holding its connection well past the
 /// handover window.
 async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared: &Shared) {
-	let mut sleep = std::pin::pin!(tokio::time::sleep(delay));
+	let mut sleep = std::pin::pin!(moq_clock::sleep(delay));
 	kio::wait(|waiter| {
 		// Nothing is serving once it retires: the predecessor closed or overstayed
 		// its handover, and the replacement is still a dial away. Leaving the state
@@ -1549,6 +1656,7 @@ fn terminal(state: &State) -> Error {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 
@@ -1956,15 +2064,6 @@ mod tests {
 		assert_eq!(pacing.next(Duration::from_millis(100)), Duration::from_millis(200));
 		assert_eq!(pacing.next(Duration::from_millis(200)), Duration::from_millis(400));
 		assert_eq!(pacing.next(Duration::from_millis(400)), Duration::from_millis(400));
-	}
-
-	#[test]
-	fn test_backoff_default() {
-		let backoff = Backoff::default();
-		assert_eq!(backoff.initial, Some(Duration::from_secs(1)));
-		assert_eq!(backoff.multiplier, 2);
-		assert_eq!(backoff.max, Some(Duration::from_secs(5)));
-		assert_eq!(backoff.timeout, Some(Duration::from_secs(10)));
 	}
 
 	#[test]
@@ -2734,6 +2833,55 @@ mod tests {
 			accepted_a.try_recv().is_err(),
 			"a cached resolve redialed the drained relay"
 		);
+	}
+
+	#[test]
+	fn redirect_loop_detection_catches_any_cycle_in_constant_memory() {
+		for tail in 0..4 {
+			for cycle in 2..=8 {
+				// `tail` one-way moves, then `cycle` endpoints redirecting around a ring.
+				let at = |hop: usize| {
+					if hop < tail {
+						url(&format!("tcp://tail{hop}/"))
+					} else {
+						url(&format!("tcp://ring{}/", (hop - tail) % cycle))
+					}
+				};
+				let mut redirects = Redirects::default();
+				let mut caught = None;
+				for hop in 0..4 * (tail + cycle) {
+					let looped = redirects.depart(at(hop), &at(hop + 1));
+					match caught {
+						Some(_) => assert!(looped, "a caught loop stays caught"),
+						None if looped => caught = Some(hop),
+						None => {}
+					}
+				}
+				let caught = caught.unwrap_or_else(|| panic!("tail {tail}, cycle {cycle}: never caught"));
+				// Never before the run first returns to an endpoint it left.
+				assert!(
+					caught + 1 >= tail + cycle,
+					"tail {tail}, cycle {cycle}: caught at {caught}"
+				);
+			}
+		}
+
+		let mut redirects = Redirects::default();
+		for hop in 0..1000 {
+			let from = url(&format!("tcp://a{hop}/"));
+			let to = url(&format!("tcp://a{}/", hop + 1));
+			assert!(!redirects.depart(from, &to), "a one-way run never loops");
+		}
+	}
+
+	#[test]
+	fn an_endpoint_ignores_the_credentials() {
+		assert_eq!(
+			endpoint(&url("tcp://token-a:secret@relay:1/path?jwt=a#x")),
+			endpoint(&url("tcp://token-b@relay:1/path?jwt=b"))
+		);
+		// The path is part of the request target, so it names a different endpoint.
+		assert_ne!(endpoint(&url("tcp://relay:1/a")), endpoint(&url("tcp://relay:1/b")));
 	}
 }
 

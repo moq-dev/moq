@@ -146,6 +146,9 @@ impl<T: ObjectStore> Store<T> {
 	}
 
 	/// Create `.info`, or accept an existing object with the same parsed properties.
+	///
+	/// An existing recording in an older format is refused with [`Error::Version`]: a reader
+	/// still reads it, but nothing appends to it.
 	pub async fn put_info(&self, track: &str, info: &Info) -> Result<Key> {
 		let key = Key::info(track)?;
 		let path = self.path(&key)?;
@@ -155,6 +158,9 @@ impl<T: ObjectStore> Store<T> {
 			Create::Exists => {
 				let existing = self.get_bytes(&path).await?;
 				let parsed = Info::decode(&existing)?;
+				if parsed.version != info.version {
+					return Err(Error::Version(parsed.version));
+				}
 				if parsed.priority != info.priority {
 					return Err(Error::Priority {
 						existing: parsed.priority,
@@ -165,12 +171,6 @@ impl<T: ObjectStore> Store<T> {
 					return Err(Error::TimescaleMismatch {
 						existing: parsed.timescale,
 						intended: info.timescale,
-					});
-				}
-				if parsed.epoch != info.epoch {
-					return Err(Error::EpochMismatch {
-						existing: parsed.epoch,
-						intended: info.epoch.clone(),
 					});
 				}
 				Ok(key)
@@ -198,15 +198,13 @@ impl<T: ObjectStore> Store<T> {
 		Object::decode(self.get_bytes(&path).await?, timed)
 	}
 
-	/// Each recorded track's timeline track, found by listing the track directories a [`Writer`]
-	/// creates: a timeline is named by [`hang::timeline::default_name`]. One listing of the
+	/// Each recorded track's timeline track, found by listing the recording's track directories:
+	/// a timeline is named by [`hang::timeline::default_name`]. One listing of the
 	/// prefix's directories plus a HEAD per timeline, so following a long recording doesn't list
 	/// its objects. A timeline whose `.info` isn't stored yet, such as one still enrolling, is left
 	/// out until it is.
 	///
 	/// For replaying a recording without its catalog; a catalog's `archive` entry names the same map.
-	///
-	/// [`Writer`]: crate::Writer
 	pub async fn timelines(&self) -> Result<std::collections::BTreeMap<String, String>> {
 		let listed = self.inner.list_with_delimiter(self.list_path(None).as_ref()).await?;
 		let mut timelines = std::collections::BTreeMap::new();
@@ -417,7 +415,7 @@ mod tests {
 			.inner()
 			.put(
 				&path,
-				br#"{ "timescale": 1000, "priority": 1, "version": 2 }"#.as_ref().into(),
+				br#"{ "timescale": 1000, "priority": 1, "version": 3 }"#.as_ref().into(),
 			)
 			.await
 			.unwrap();
@@ -428,7 +426,7 @@ mod tests {
 			.bytes()
 			.await
 			.unwrap();
-		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 1, "version": 2 }"#);
+		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 1, "version": 3 }"#);
 	}
 
 	#[tokio::test]
@@ -441,8 +439,11 @@ mod tests {
 				&br#"{"version":1,"priority":0,"timescale":1000}"#[..],
 				(|err| matches!(err, Error::Version(1))) as fn(&Error) -> bool,
 			),
+			("v2", br#"{"version":2,"priority":128,"timescale":1000}"#, |err| {
+				matches!(err, Error::Version(2))
+			}),
 			("junk", b"not json", |err| matches!(err, Error::Json(_))),
-			("zero", br#"{"version":2,"priority":0,"timescale":0}"#, |err| {
+			("zero", br#"{"version":3,"priority":0,"timescale":0}"#, |err| {
 				matches!(err, Error::Timescale(0))
 			}),
 		] {

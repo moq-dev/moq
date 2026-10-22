@@ -19,15 +19,16 @@ estimate.
 
 Decided with the maintainer on 2026-10-17: this joined the
 [probe epic](/quest/m2/probe/README.md). [Players](/quest/m2/probe/players.md)
-set the viewer target, the [session](/quest/m2/probe/target.md) sends it as
+set the viewer target, the [session](/quest/m2/probe/viewer-target.md) sends it as
 its PROBE target, and the relay's sender probes the downlink up to it; this
 quest makes selection act on the estimate that rises. The relay runs
-moq-quic, so it requires [native probing](/quest/m2/probe/native.md); if that
-ends in a measured no-go, require [padding](/quest/m2/probe/padding.md)
-instead rather than leaving this blocked.
+moq-quic, so it requires [native probing](/quest/m1/probe-native.md). If that
+ends in a measured no-go, take this back to the maintainer rather than
+leaving it blocked: [padding](/quest/m2/probe/padding.md) is browser-only
+since 2026-10-20, so the relay has no other sender.
 
 Selection reads its broadcast's viewer grant from the
-[target](/quest/m2/probe/target.md) quest, not the connection's whole
+[viewer targets](/quest/m2/probe/viewer-target.md) quest, not the connection's whole
 `estimatedRecvRate`, so several watchers on one pooled connection don't each
 select against the full downlink (decided with the maintainer on 2026-10-19).
 
@@ -38,8 +39,8 @@ and audio, or selection stops discounting a probed estimate.
 
 ## Required
 
-- [Session probe target](/quest/m2/probe/target.md) - the viewer handle the session sends as its PROBE target
-- [Native probing](/quest/m2/probe/native.md) - the relay validates headroom above the media it sends
+- [Viewer targets](/quest/m2/probe/viewer-target.md) - the viewer handle the session sends as its PROBE target, and the relay probing up to it
+- [Native probing](/quest/m1/probe-native.md) - the relay validates headroom above the media it sends
 - [Players set viewer targets](/quest/m2/probe/players.md) - `@moq/watch` asks for its highest enabled rendition
 
 ## Closes

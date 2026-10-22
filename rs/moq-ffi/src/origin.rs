@@ -497,7 +497,9 @@ impl MoqOriginConsumer {
 	/// cancel.
 	///
 	/// Calling this straight after connecting therefore races the session's announcements
-	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first.
+	/// and can report a live broadcast as unroutable. Await `announced_broadcast` first. A
+	/// moq-lite client only asks the relay about paths something watches, through `announced`
+	/// or `announced_broadcast`, so a path nothing watches stays unroutable.
 	pub async fn request_broadcast(&self, path: String) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let broadcast = self
 			.driver
@@ -696,6 +698,25 @@ mod supervision_tests {
 			.unwrap()
 			.announce(Default::default())
 			.unwrap();
+	}
+
+	#[tokio::test]
+	async fn a_finish_after_a_driver_panic_closes_the_broadcast() {
+		let (inner, completion, trigger) = crate::ffi::panicking_origin();
+		let origin = MoqOriginProducer::from_inner(Origin {
+			inner,
+			driver: completion.clone(),
+		});
+		let broadcast = origin.create_broadcast("retained".into()).unwrap();
+		// A dynamic handle outlives the consumed producer, so only an explicit close ends it.
+		let _dynamic = broadcast.dynamic().unwrap();
+		let consumer = broadcast.state.lock().unwrap().as_ref().unwrap().broadcast.consume();
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(completion.finished().await, Err(MoqError::Task { .. })));
+		assert!(matches!(broadcast.finish(), Err(MoqError::Task { .. })));
+		assert!(consumer.is_closed());
 	}
 
 	#[tokio::test]

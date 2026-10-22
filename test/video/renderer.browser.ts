@@ -4,7 +4,7 @@
  * paints through Canvas2D. Once against the renderer directly and once through `<moq-publish>`,
  * which swaps its own canvas.
  *
- * Not `*.test.ts`: plain `bun test` runs lack Playwright Chromium, which `just test video` installs.
+ * Not `*.test.ts`: `just test video` launches the Chromium provided by the root devShell.
  *
  * @module
  */

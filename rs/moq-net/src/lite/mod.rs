@@ -20,6 +20,7 @@ pub(crate) mod ietf;
 mod info;
 pub mod message;
 mod parameters;
+pub(crate) mod priority;
 mod probe;
 #[cfg(feature = "async")]
 mod publisher;

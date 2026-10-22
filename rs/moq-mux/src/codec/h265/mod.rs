@@ -50,6 +50,20 @@ fn hvc1_is_keyframe(data: &[u8], length_size: usize) -> bool {
 		.any(|nal| nal.first().is_some_and(|header| is_irap(split::nal_unit_type(*header))))
 }
 
+/// Whether an hvc1-shaped (length-prefixed) access unit is a RADL picture: one that leads its
+/// IRAP but references only it, so it decodes wherever that IRAP does (H.265 8.1.2).
+pub(crate) fn hvc1_is_radl(data: &[u8], length_size: usize) -> bool {
+	let Ok(nals) = crate::codec::annexb::length_prefixed_nals(data, length_size) else {
+		return false;
+	};
+	// RADL_N and RADL_R; types below 32 are slices.
+	let mut slices = (nals.map_while(std::result::Result::ok))
+		.filter_map(|nal| nal.first().map(|header| (header >> 1) & 0x3f))
+		.filter(|kind| *kind < 32)
+		.peekable();
+	slices.peek().is_some() && slices.all(|kind| matches!(kind, 6 | 7))
+}
+
 /// True for the IRAP (intra random access point) NAL types, the ones that open a group.
 /// HEVC random access is broader than H.264's single IDR type.
 pub(crate) fn is_irap(nal_type: NALUnitType) -> bool {
@@ -285,15 +299,19 @@ pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::cat
 /// and the picture period when the VUI's HRD parameters fix the picture rate within the CVS
 /// (ITU-T H.265 E.3.2).
 ///
-/// `None` when the SPS fails to parse.
+/// `None` when the SPS declares more than
+/// [`Reorder::MAX_DEPTH`](crate::codec::video::Reorder::MAX_DEPTH), or fails to parse.
 pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
+	use crate::codec::video::Reorder;
+
 	let sps = SpsNALUnit::parse(&mut &nal[..]).ok()?;
 	let highest = sps.rbsp.sps_max_sub_layers_minus1 as usize;
 	let reorder = &sps.rbsp.sub_layer_ordering_info.sps_max_num_reorder_pics;
 	let depth = *reorder.get(highest).or(reorder.last())?;
-	Some(crate::codec::video::Reorder {
-		depth: u32::try_from(depth).ok()?,
+	Some(Reorder {
+		depth: u32::try_from(depth).ok().filter(|depth| *depth <= Reorder::MAX_DEPTH)?,
 		period: sps_period(&sps.rbsp),
+		fields: false,
 	})
 }
 

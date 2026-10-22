@@ -8,8 +8,8 @@ description: SRT contribution and playback
 `moq import srt` accepts SRT pushes (`--listen`) or pulls from a remote SRT
 source (`--connect`); `moq export srt` serves SRT to players or pushes to a
 remote. The payload is MPEG-TS, so the same codecs and behavior as
-[`import ts`](/bin/cli) apply: H.264/H.265 video and AAC, MP2, AC-3, or E-AC-3
-audio. A damaged unit is dropped and the session stays up; video resumes at its
+[`import ts`](/bin/cli) apply: H.264/H.265 video and AAC, MP2, AC-3, E-AC-3, or
+Opus audio. A damaged unit is dropped and the session stays up; video resumes at its
 next keyframe, freezing for up to one GOP.
 
 ```bash

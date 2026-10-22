@@ -366,6 +366,45 @@ harness_reap_all() {
     done
 }
 
+# ── results ─────────────────────────────────────────────────────────────────
+
+# Record one case's outcome: `harness_result <outcome> suite=S case=C [field=value...]`.
+#
+# Appends a JSON line to MOQ_TEST_RESULTS when it is set, and does nothing otherwise. The
+# fields are publisher, subscriber, transport, version (empty when the case has no such
+# axis, `auto` when the clients negotiate it), seconds, detail (why it failed), and log (a
+# file in this run's directory, recorded relative to the run root so it names the file
+# inside an uploaded copy of that root). The outcome is pass, fail, skip, or `not run`.
+#
+# A harness first records every case it will run as `not run`, before any shared setup, and
+# a later record for the same case replaces it. A run that dies in setup or mid-suite then
+# still names every case it never reached, instead of leaving them out of the report.
+harness_result() {
+    [[ -n "${MOQ_TEST_RESULTS:-}" ]] || return 0
+    python3 -I - "$MOQ_TEST_RESULTS" "$(dirname "$HARNESS_RUN")" "$@" <<'PY'
+import json, os, sys
+path, root, outcome, *fields = sys.argv[1:]
+if outcome not in ("pass", "fail", "skip", "not run"):
+    sys.exit(f"harness_result: unknown outcome {outcome!r}")
+record = {"suite": "", "case": "", "publisher": "", "subscriber": "", "transport": "", "version": "",
+          "outcome": outcome, "seconds": None, "detail": "", "log": ""}
+for field in fields:
+    key, sep, value = field.partition("=")
+    if not sep or key not in record or key == "outcome":
+        sys.exit(f"harness_result: unknown field {field!r}")
+    record[key] = value
+if not record["suite"] or not record["case"]:
+    sys.exit("harness_result: suite and case are required")
+if record["seconds"] is not None:
+    record["seconds"] = int(record["seconds"])
+if record["log"]:
+    record["log"] = os.path.relpath(record["log"], root)
+os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+with open(path, "a") as out:
+    out.write(json.dumps(record) + "\n")
+PY
+}
+
 # ── teardown ────────────────────────────────────────────────────────────────
 
 # Release everything this run owns: `harness_finish [status]`, where the status

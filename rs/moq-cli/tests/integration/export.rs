@@ -2,6 +2,9 @@
 //! publisher instance leaving and coming back, switches to a replacement only when asked, and
 //! exits with the verdict of the broadcast's last end. The other formats fail once the route
 //! they read dies.
+//!
+//! Each test spawns `moq` processes that feed clips and wait out lingers in real time, tens of
+//! seconds between them, so they are ignored here and run nightly as `just rs cli-export`.
 #![cfg(unix)]
 
 use std::io::Cursor;
@@ -309,6 +312,7 @@ fn adaptation_flags(packet: &[u8]) -> Option<u8> {
 }
 
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn a_clean_finish_exits_zero_once_the_linger_expires() {
 	let relay = relay().await;
 	let mut export = export(&relay, "1s");
@@ -333,6 +337,7 @@ async fn a_clean_finish_exits_zero_once_the_linger_expires() {
 }
 
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn a_drop_exits_one_once_the_linger_expires() {
 	let relay = relay().await;
 	let mut export = export(&relay, "1s");
@@ -352,6 +357,7 @@ async fn a_drop_exits_one_once_the_linger_expires() {
 
 /// An export that fails on its own, with the broadcast still up, has no return to wait for.
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn an_export_failure_with_the_broadcast_up_exits_without_lingering() {
 	let relay = relay().await;
 	let export = export(&relay, "20s");
@@ -425,6 +431,7 @@ async fn interrupted(export: &mut Export, publisher: (Child, JoinHandle<ChildStd
 /// A restarted publisher is another instance, so the export does not splice it in: it exits 1
 /// as soon as the replacement shows up, naming the flag that would follow it.
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn a_restarted_publisher_exits_one_without_stitch() {
 	let relay = relay().await;
 	let mut export = export_with(&relay, &[], &["--linger", "20s"]);
@@ -458,9 +465,10 @@ async fn a_restarted_publisher_exits_one_without_stitch() {
 /// With `--stitch`, a restarted publisher is a full program switch: a new PAT version, and
 /// every PID's first packet flagging the break.
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
 	let relay = relay().await;
-	let mut export = export_with(&relay, &[], &["--linger", "10s", "--stitch"]);
+	let mut export = export_with(&relay, &[], &["--linger", "4s", "--stitch"]);
 	let output = export.output.clone();
 	let mark = interrupted(&mut export, import(&relay)).await;
 
@@ -496,6 +504,7 @@ async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
 /// One publisher reconnects within the linger, continuing its capture under the same epoch
 /// and program before delivering a clean final finish.
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn the_same_instance_within_the_linger_continues() {
 	let relay = relay().await;
 	let epoch = moq_net::Epoch::mint();
@@ -520,7 +529,7 @@ async fn the_same_instance_within_the_linger_continues() {
 		.with_reconnect(false);
 	let url: url::Url = relay.url.parse().unwrap();
 	let connection = client.connect(url.clone()).established().await.unwrap();
-	let mut export = export_with(&relay, &lite07, &["--linger", "10s"]);
+	let mut export = export_with(&relay, &lite07, &["--linger", "4s"]);
 	let output = export.output.clone();
 
 	// Continue one capture across a transport loss. Replaying its beginning in a fresh
@@ -660,17 +669,20 @@ async fn a_standby_before_its_tracks(global: &[&str], format: Format) {
 }
 
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn a_standby_before_its_pmt_leaves_the_exports_running() {
 	a_standby_before_its_tracks(&[], TS).await;
 }
 
 /// lite-07 carries the epoch, so this is the version on which the relay queries the standby.
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn a_standby_before_its_pmt_leaves_the_exports_running_on_lite_07() {
 	a_standby_before_its_tracks(&["--connect-version", LITE_07], TS).await;
 }
 
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn a_standby_before_its_init_segment_leaves_the_fmp4_exports_running_on_lite_07() {
 	a_standby_before_its_tracks(&["--connect-version", LITE_07], FMP4).await;
 }
@@ -678,6 +690,7 @@ async fn a_standby_before_its_init_segment_leaves_the_fmp4_exports_running_on_li
 /// Subscriptions are sticky: a replacement announced while the old publisher stays up leaves
 /// the export on the old one until it ends, and only then exits 1.
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn an_old_publisher_that_stays_up_keeps_the_export() {
 	let relay = relay().await;
 	let lite07 = ["--connect-version", LITE_07];
@@ -757,6 +770,7 @@ async fn import_announced(relay: &Relay, format: Format) -> (Child, JoinHandle<C
 /// interrupted as soon as the replacement has announced, so the relay is usually still
 /// holding the replacement's restart.
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn a_replaced_publisher_dying_fails_an_fmp4_export() {
 	let relay = relay().await;
 	let mut export = export_as(&relay, &[], FMP4, &[]);
@@ -834,9 +848,19 @@ fn redundant_feed() -> (tokio::sync::mpsc::UnboundedSender<ChildStdin>, JoinHand
 	(add, task)
 }
 
-/// Start an importer of the live source on lite-07, with `flags` for `import ts`.
+/// Start an importer of the live source on lite-07, with `flags` for `import ts`. A killed
+/// importer sends no close, so the relay keeps its route until the QUIC idle timeout: a short
+/// one, as a redundant ingest would run, keeps that outage to seconds.
 fn redundant_import(relay: &Relay, feed: &tokio::sync::mpsc::UnboundedSender<ChildStdin>, flags: &[&str]) -> Child {
-	let mut child = moq(relay, &["--connect-version", LITE_07])
+	let global = [
+		"--connect-version",
+		LITE_07,
+		"--quic-idle-timeout",
+		"2s",
+		"--quic-keep-alive",
+		"500ms",
+	];
+	let mut child = moq(relay, &global)
 		.args(["import", "--max-age", "10s", "ts"])
 		.args(flags)
 		.stdin(Stdio::piped())
@@ -848,12 +872,14 @@ fn redundant_import(relay: &Relay, feed: &tokio::sync::mpsc::UnboundedSender<Chi
 
 /// Each replacement is one program switch, including an older still-live importer's return.
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn redundant_importers_switch_to_the_survivor_and_back_on_lite_07() {
 	redundant_failover(false).await;
 }
 
 /// The same behind a rate limit below the media's, over a deep but finite queue.
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn redundant_importers_switch_through_bufferbloat_on_lite_07() {
 	redundant_failover(true).await;
 }
@@ -912,7 +938,10 @@ async fn redundant_failover(bufferbloat: bool) {
 		for export in &mut exports {
 			tokio::time::timeout(TIMEOUT, async {
 				loop {
-					assert!(export.child.try_wait().unwrap().is_none(), "stitching export exited");
+					if export.child.try_wait().unwrap().is_some() {
+						let errors = (&mut export.stderr).await.expect("collect exporter stderr");
+						panic!("stitching export exited: {errors}");
+					}
 					if packets(&export.output.lock().unwrap())
 						.filter_map(|packet| pat_version(packet))
 						.any(|v| v == version)
@@ -999,6 +1028,7 @@ async fn next_epoch(announced: &mut moq_net::announce::Follow) -> moq_net::Epoch
 /// `export ts --passthrough` follows no restart: it stays on the passthrough importer it
 /// resolved while a backup on its own epoch starts, and ends once that importer goes.
 #[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
 async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	let relay = relay().await;
 	let mut announced = relay.origin.follow("demo").unwrap();

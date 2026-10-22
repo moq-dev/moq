@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { GRACE } from "../ledger.ts";
@@ -132,8 +132,9 @@ test("a group read across PUBLISH_DONE is delivered whole", async () => {
 });
 
 test("a Stream Count of 0 is a hint, so a late stream within the grace is still delivered", async () => {
+	const clock = new Manual();
+	using _clock = { [Symbol.dispose]: clock.install() };
 	const { subscriber, reader, done } = await subscribed();
-	const started = performance.now();
 	await done(TRACK_ENDED, 0n);
 
 	const late = groupStream(subscriber, 0);
@@ -141,9 +142,17 @@ test("a Stream Count of 0 is a hint, so a late stream within the grace is still 
 	late.finish();
 
 	expect(await readAll(await reader.recvGroup())).toEqual(["0.0"]);
-	expect(await reader.recvGroup()).toBeUndefined();
+
+	// The track stays open for another late stream until the grace runs out.
+	let ended = false;
+	const next = reader.recvGroup().finally(() => {
+		ended = true;
+	});
+	await clock.advance(Nano.fromMilli(Milli(GRACE - 1)));
+	expect(ended).toBe(false);
+	await clock.advance(Nano.fromMilli(Milli(1)));
+	expect(await next).toBeUndefined();
 	expect(await reader.closed).toBeNull();
-	expect(performance.now() - started).toBeGreaterThanOrEqual(GRACE - 5);
 });
 
 test("a PUBLISH_DONE with an error status aborts the track", async () => {

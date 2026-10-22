@@ -16,6 +16,9 @@ import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { Stream, Writer } from "../src/stream.ts";
 
+// Keep protocol diagnostics out of the measured CSV on stdout.
+console.debug = console.error;
+
 const routeCounts = [8, 32, 128];
 const observerCounts = [1, 8, 32];
 const updates = 32;
@@ -98,6 +101,36 @@ for (const trackCount of [8, 32, 128]) {
 		);
 		for (const dispose of disposes) dispose();
 		for (const track of tracks) track.close();
+		broadcast.close();
+	}
+}
+
+// One created and removed track reaches every listing, however many tracks the broadcast holds.
+const listed = 256;
+console.log("tracks,listings,create_remove_and_read_us");
+for (const trackCount of [8, 128, 1024]) {
+	for (const listingCount of [1, 8, 32]) {
+		const broadcast = new BroadcastProducer();
+		for (let index = 0; index < trackCount; index++) broadcast.createTrack(`held-${index}`);
+		const listings = Array.from({ length: listingCount }, () => broadcast.consume().tracks());
+		// Past each listing's initial set and SYNCED.
+		for (const listing of listings) {
+			for (let index = 0; index <= trackCount; index++) await listing.next();
+		}
+		const start = performance.now();
+		for (let index = 0; index < listed; index++) {
+			broadcast.createTrack(`new-${index}`);
+			for (const listing of listings) {
+				const event = await listing.next();
+				if (event?.kind !== "added" || event.name !== `new-${index}`) throw new Error("listing missed a track");
+			}
+			broadcast.removeTrack(`new-${index}`);
+			for (const listing of listings) {
+				if ((await listing.next())?.kind !== "removed") throw new Error("listing missed a removal");
+				checksum++;
+			}
+		}
+		console.log(`${trackCount},${listingCount},${(((performance.now() - start) * 1000) / listed).toFixed(1)}`);
 		broadcast.close();
 	}
 }
