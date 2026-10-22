@@ -723,7 +723,7 @@ export class Publisher {
 			const groups = new Set<Promise<void>>();
 			const streams: StreamCount = { opened: 0 };
 			// One ranking for the whole subscription, shared by every group and the fill.
-			const ranked = new Priority(track);
+			const ranked = new Priority(track, info.priority);
 			ranking = ranked;
 
 			// Serve groups until the track ends or the requester cancels.

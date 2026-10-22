@@ -37,7 +37,7 @@ variant, and possibly a `transport::poll` session method. Wire: none.
 
 Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
 order, [receive memory](/quest/m1/quic/receive-memory.md) first, then this
-quest, then [Scope track priority](/quest/m1/track-priority-scope.md), so
+quest, then the send domain in [broadcast fairness](/quest/m2/broadcast-fairness.md), so
 implementers rebase on one shape at a time.
 
 ## Required

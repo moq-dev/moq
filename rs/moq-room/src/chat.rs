@@ -14,7 +14,7 @@ use std::{
 /// Name of the track carrying the chat window.
 pub const TRACK: &str = "chat";
 /// Delivery priority, below audio and video.
-pub const PRIORITY: u8 = 10;
+pub const PRIORITY: i8 = 10;
 /// How long a published message stays in the window.
 pub const HISTORY: Duration = Duration::from_secs(10);
 /// A message entering, leaving, or missed from the window.

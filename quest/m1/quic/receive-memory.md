@@ -26,7 +26,7 @@ Decided 2026-10-20 (maintainer): three quests break moq-net's
 `transport::poll` traits, so they land in order and each rebases its trait
 change on the last: this quest first, then
 [Rust request credit](/quest/m1/rs-request-credit.md), then
-[Scope track priority](/quest/m1/track-priority-scope.md).
+the send domain in [broadcast fairness](/quest/m2/broadcast-fairness.md).
 
 That primitive landed as a provisional seam to finalize here: both native
 drivers' receive streams have a copying `poll_read_held` that yields a
@@ -115,5 +115,5 @@ separate guide quest is needed.
 ## Related
 
 - [Unbounded groups](/quest/m2/unbounded-groups/README.md) - removes the frame cap; frame payload credit becomes per segment
-- [Scope track priority](/quest/m1/track-priority-scope.md) - broadcast fairness domains and subscription priority semantics
+- [Broadcast fairness](/quest/m2/broadcast-fairness.md) - broadcast fairness domains on the same sessions
 - [QUIC bitrate caps](/quest/m2/rate-quic.md) - pace credit grants inside the independently bounded memory allowance

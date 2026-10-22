@@ -40,9 +40,9 @@ use std::{
 	time::Duration,
 };
 
-// The higher-first midpoint. IETF flips priority (lower first), so this goes out as 128, the
-// draft's usual publisher priority, while moq-lite carries 127 as written: one urgency on both.
-const DEFAULT_PRIORITY: u8 = 127;
+// The unset priority, the midpoint of the signed range. It goes out as byte 128 on moq-lite
+// and 127 on IETF, which flips priority (lower first): one urgency on both.
+const DEFAULT_PRIORITY: i8 = 0;
 
 /// Maximum number of datagrams retained in the per-track send buffer.
 ///
@@ -133,10 +133,11 @@ pub struct Info {
 	/// `2^53 - 1` milliseconds to no limit for older JavaScript readers. Sub-millisecond precision is truncated
 	/// (`Duration::as_millis`) at encode time.
 	pub max_age: Option<Duration>,
-	/// The publisher's priority for this track, used only to break ties between
-	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
-	/// Higher is more urgent. Defaults to 127, the midpoint.
-	pub priority: u8,
+	/// The publisher's priority for this track, higher first, defaulting to 0.
+	///
+	/// It breaks ties between subscriptions of equal subscriber priority. Reported in
+	/// TRACK_INFO (Lite05+).
+	pub priority: i8,
 	/// Whether frames are DEFLATE compressed per group, so later frames compress against
 	/// earlier ones in the same group. Defaults to `false`.
 	///
@@ -209,8 +210,8 @@ impl Info {
 		self
 	}
 
-	/// Set the publisher's tie-break priority, returning `self` for chaining.
-	pub fn with_priority(mut self, priority: u8) -> Self {
+	/// Set the publisher's priority, returning `self` for chaining.
+	pub fn with_priority(mut self, priority: i8) -> Self {
 		self.priority = priority;
 		self
 	}
@@ -714,7 +715,7 @@ pub(super) type FetchState = Requests<u64, PendingFetch>;
 /// One fetch attempt for a sequence, shared by every [`Fetching`] that joined it.
 pub(super) struct PendingFetch {
 	// The most demanding delivery priority across the joined fetches.
-	priority: u8,
+	priority: i8,
 
 	// The most tolerant reader budget. None is unbounded and therefore dominates.
 	max_delay: Option<Duration>,
@@ -2561,7 +2562,7 @@ impl Producer {
 	#[cfg(test)]
 	#[cfg(feature = "async")]
 	// private: test
-	pub(crate) fn publisher_priority(&self) -> u8 {
+	pub(crate) fn publisher_priority(&self) -> i8 {
 		self.info.priority
 	}
 
@@ -3880,7 +3881,7 @@ impl Demand {
 	}
 
 	/// The publisher's tie-break priority, as set in [`Info::priority`].
-	pub(super) fn priority(&self) -> u8 {
+	pub(super) fn priority(&self) -> i8 {
 		// Always Some once the track exists; a closed one reads its last value.
 		self.state
 			.read()
@@ -4727,7 +4728,7 @@ impl group::Request {
 	}
 
 	/// The delivery priority the consumer requested for this group.
-	pub fn priority(&self) -> u8 {
+	pub fn priority(&self) -> i8 {
 		self.priority
 	}
 
@@ -4879,7 +4880,7 @@ pub struct Fetching {
 	// rather than a short answer.
 	frame_start: u64,
 	// This caller's priority, for a fetch that moves to a front's routes.
-	priority: u8,
+	priority: i8,
 	// This caller's own age cap. None means only the publisher's max age.
 	max_delay: Option<Duration>,
 	// The attempt this fetch joined; `None` on a cache hit, or when no handler
