@@ -400,18 +400,16 @@ impl Lookup {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<moq_net::broadcast::Consumer, moq_net::Error>> {
 		if self.request.is_none() {
 			if let Some(watch) = &mut self.watch {
-				// Ask as soon as any session reports a route: waiting for every session to
-				// sync would let one that never answers hold the lookup up. Synced only
-				// concludes that none serves the path, once every queued event is read.
-				let mut routed = false;
-				loop {
-					match watch.poll_next(waiter) {
-						Poll::Ready(Some(moq_net::announce::Event::End(_))) => routed = false,
-						Poll::Ready(Some(_)) => routed = true,
-						Poll::Ready(None) | Poll::Pending => break,
-					}
+				// Ask as soon as any session reports anything at the path: waiting for every
+				// session to sync would let one that never answers hold the lookup up. An
+				// `End` may name a covering prefix while the exact route stays, so the request
+				// resolves against the table rather than the events. Synced only concludes
+				// that none serves the path, once every queued event is read.
+				let mut heard = false;
+				while let Poll::Ready(Some(_)) = watch.poll_next(waiter) {
+					heard = true;
 				}
-				if !routed {
+				if !heard {
 					ready!(watch.poll_synced(waiter));
 				}
 			}
