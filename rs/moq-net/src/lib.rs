@@ -87,6 +87,8 @@ pub mod auth;
 mod client;
 mod coding;
 #[cfg(feature = "async")]
+mod discovery;
+#[cfg(feature = "async")]
 mod driver;
 mod epoch;
 mod error;
@@ -97,6 +99,7 @@ pub mod goaway;
 #[doc(hidden)]
 pub mod fuzz;
 mod ietf;
+mod ledger;
 mod lite;
 mod model;
 pub mod path;

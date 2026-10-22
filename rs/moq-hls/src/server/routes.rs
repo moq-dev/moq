@@ -1048,6 +1048,71 @@ mod tests {
 		pair.accept.abort();
 	}
 
+	/// The server watches its whole scope, so a lookup rides one request to the peer
+	/// rather than opening its own for every path an HTTP client names.
+	#[tokio::test]
+	async fn lookups_ride_the_servers_scope_watch() {
+		let pair = lite_pair().await;
+		let other = pair.pub_origin.create_broadcast("room/other").expect("other");
+		other.announce(Default::default()).expect("announce other");
+
+		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
+		let missing = tokio::time::timeout(TIMEOUT, server.broadcaster("room/missing"))
+			.await
+			.expect("lookup timed out");
+		assert!(missing.is_none());
+
+		// Nothing watches `room/other` on its own, yet the synced lookup already discovered it.
+		pair.sub_origin
+			.consume()
+			.request_broadcast("room/other", None)
+			.await
+			.expect("discovered through the scope watch");
+
+		drop(other);
+		pair.accept.abort();
+	}
+
+	/// A client asks its peer only about watched paths, so a sibling no listing covers is
+	/// asked about before it is requested, on every lite version, including those whose
+	/// announce stream marks no initial set.
+	#[tokio::test]
+	async fn a_sibling_resolves_through_a_client_session() {
+		for version in [
+			"moq-lite-01",
+			"moq-lite-02",
+			"moq-lite-03",
+			"moq-lite-04",
+			"moq-lite-05",
+			"moq-lite-06",
+			"moq-lite-07-wip",
+		] {
+			let pair = lite_pair_on(version, moq_net::origin::Config::default()).await;
+			let catalog = pair.pub_origin.create_broadcast("room/live").expect("catalog");
+			catalog.announce(Default::default()).expect("announce catalog");
+			let media = pair.pub_origin.create_broadcast("room/source").expect("media");
+			media.announce(Default::default()).expect("announce media");
+
+			let origin = pair.sub_origin.consume();
+			let broadcast = tokio::time::timeout(TIMEOUT, origin.routed_broadcast("room/live"))
+				.await
+				.expect("catalog resolve timed out")
+				.expect("catalog broadcast");
+			let source = moq_mux::Source::new(origin, broadcast);
+			let sibling = tokio::time::timeout(
+				TIMEOUT,
+				source.resolve(Some(&moq_net::path::Relative::new("./source")), None),
+			)
+			.await
+			.expect("sibling resolve timed out")
+			.unwrap_or_else(|err| panic!("{version}: sibling broadcast: {err}"));
+			assert!(!sibling.is_closed(), "{version}");
+
+			drop((catalog, media));
+			pair.accept.abort();
+		}
+	}
+
 	#[tokio::test]
 	async fn a_disconnected_sibling_publisher_answers_404() {
 		let pair = lite_pair().await;
@@ -1077,13 +1142,11 @@ mod tests {
 		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
 		wait_listed(&app, "/room/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
 
-		let remote_media = tokio::time::timeout(
-			TIMEOUT,
-			pair.sub_origin.consume().request_broadcast("room/source", None),
-		)
-		.await
-		.expect("sibling resolve timed out")
-		.expect("sibling broadcast");
+		// Waited on rather than requested once: a client only asks about what it watches.
+		let remote_media = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().routed_broadcast("room/source"))
+			.await
+			.expect("sibling resolve timed out")
+			.expect("sibling broadcast");
 		// Only the sibling goes: the catalog keeps listing the rendition, so the request
 		// reaches the media fetch rather than missing the rendition.
 		media_broadcast.close();

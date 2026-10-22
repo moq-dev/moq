@@ -85,7 +85,7 @@ enum TrackKind {
 impl TrackKind {
 	/// The publisher priority for this kind of media, so audio isn't stuck behind a
 	/// video backlog on a busy connection.
-	fn priority(&self) -> u8 {
+	fn priority(&self) -> i8 {
 		match self {
 			Self::Video => hang::catalog::PRIORITY.video,
 			Self::Audio => hang::catalog::PRIORITY.audio,

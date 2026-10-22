@@ -32,6 +32,14 @@ ignored; its guide says what replaces it.
 
 These land with the next breaking release.
 
+- **The default priority byte moves again.** Priorities are signed in every
+  API, -128 to 127 with 0 unset, so nobody has to know that 127 is the middle
+  of a byte. The wire keeps one byte and one urgency on both protocols, so an
+  unset priority now goes out as 128 on moq-lite (was 127) and 127 on
+  moq-transport (was 128); the previous release moved it to match moxygen.
+  hang's media priorities now sit above that default rather than below it.
+  Mixed versions only differ in how an unset priority ranks against a set one,
+  so upgrade publishers and players in either order.
 - **WebSocket needs a QMux subprotocol** (#6231). Relays answer a WebSocket
   upgrade that offers no `qmux-NN` subprotocol with 400 instead of falling back
   to the legacy `webtransport` format, so upgrade such clients before relays.

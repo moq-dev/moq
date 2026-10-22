@@ -2,11 +2,14 @@
 
 ## Goal
 
-The work in flight now, in two independent tracks. Relay hardening: legal
-moq-transport input never fails a session in current interop coverage, every resource a peer can make the relay hold is bounded by what
-it sent or by a budget, and no peer input panics the process. Identity: nothing treats who published a route as what it carries; a path and
-the epoch on its route are the only content identity, and every first-party
-publisher that can restart mints a fresh epoch, so #4741 stalls nobody.
+The work in flight now. Relay hardening: legal moq-transport input never fails
+a session in current interop coverage, every resource a peer can make the
+relay hold is bounded by what it sent or by a budget, and no peer input panics
+the process. Identity: nothing treats who published a route as what it
+carries; a path and the epoch on its route are the only content identity, and
+every first-party publisher that can restart mints a fresh epoch, so #4741
+stalls nobody. Alongside them: fixes for the `release` line, CI cost, and the
+recurring audits.
 
 ## Plan
 
@@ -26,7 +29,7 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 Identity: the [broadcast epoch](/quest/m0/broadcast-epoch/README.md) line
 gates the next release (decided 2026-10-03:
 #4741 resumes an un-epoched republish into the old broadcast and stalls its
-viewers). #4741 can merge to main, but no release ships until first-party
+viewers). #4741 is on main, but no release ships until first-party
 publishers mint epochs. Backport patches cut from `release` don't carry
 #4741 and aren't gated (decided 2026-10-08).
 
@@ -44,6 +47,5 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 - [Release fixed delay](/quest/m0/release-fixed-delay.md) - a fixed latency on `release`, which moq.dev runs, ignores the catalog's jitter and delay as `main` already does
 - [Release resubscribe hang](/quest/m0/release-resubscribe-hang.md) - a moq-lite-06 subscription that closes and reopens on `release` is proven to reach the relay, or the hang is fixed and backported
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in the merge queue as one `just ci` pass, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
-- [Simplification audit](/quest/m0/audit-simplify.md) - overbuilt code and APIs are collapsed, merged, or narrowed into a net simpler whole
 - [Lint override and deprecation audit](/quest/m0/audit-lints.md) - every lint suppression is still needed and says why, nothing calls a deprecated API, and stale Rust overrides fail the build
 - [Interop audit](/quest/m0/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down

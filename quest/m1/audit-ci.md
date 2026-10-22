@@ -103,12 +103,15 @@ Check first (from the m0 CI pipeline audit, 2026-10-21):
 - Cold builds (release PRs, Nightly) still compile both rustls backends and
   aws-lc-sys once per environment; the queue VM keeps those built.
 - Nightly on 2026-10-20 took about 1,450 runner-minutes (320 macOS) and was
-  red for ten causes. Features' clippy is fixed except moq-net's group bench
-  ([#6117](https://github.com/moq-dev/moq/pull/6117)), and `gh test` was fixed
-  by [#6086](https://github.com/moq-dev/moq/pull/6086). Unowned:
-  `rs audio-devices`, new on 2026-10-20, fails all five playback tests on the
-  hosted ARM runner and passes on x86_64 Linux. Owned elsewhere besides the
-  above: the Rust and JS benchmark legs by the
+  red for ten causes. Features' clippy was fixed by
+  [#6117](https://github.com/moq-dev/moq/pull/6117) (its 2026-10-21 failure
+  is in tests). `gh test` failed again on 2026-10-21 after
+  [#6086](https://github.com/moq-dev/moq/pull/6086), then
+  [#6154](https://github.com/moq-dev/moq/pull/6154) removed the assertion.
+  `rs audio-devices` failed all five playback tests on the hosted ARM runner
+  on 2026-10-20 and passed on the 2026-10-21 Nightly; it is owned by
+  [Audio devices on ARM](/quest/m1/audio-devices-arm.md). Owned elsewhere
+  besides the above: the Rust and JS benchmark legs by the
   [performance audit](/quest/m1/audit-perf.md), Audio quality's budgets by
   the [audio jitter target](/quest/m1/audio-jitter-target/README.md), and the
   bun advisories with the Rust ones.
