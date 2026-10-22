@@ -83,3 +83,4 @@ publishers expose for it. Wire: none; `enabled` already exists.
 - [Ladder controller](/quest/m3/ladder/controller.md) - the same rung disable for generated transcode ladders
 - [OBS multitrack](/quest/m2/obs-multitrack.md) - OBS's native multitrack encoders as the renditions this disables
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - the viewer side of moving between renditions as capacity changes
+- [Closed rung disable](https://github.com/moq-dev/moq/pull/5850) - reference code from before the 2026-10-20 split, closed as superseded

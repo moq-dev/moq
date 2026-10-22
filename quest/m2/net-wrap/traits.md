@@ -60,3 +60,10 @@ the methods exactly as moq-net has them today.
   to `MIGRATE.md`.
 
 Public API: new moq-net traits, plus the hidden test-wrapper feature. Wire: none.
+
+Decided 2026-10-22 (maintainer): the traits break moq-net's public API, so
+they wait for the breaking release cut.
+
+## Required
+
+- [Breaking release cut](/quest/m2/release/cut.md) - the traits land after the cut that ships m1's breaks

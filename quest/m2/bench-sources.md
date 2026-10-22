@@ -1,4 +1,4 @@
-# [M] Benchmark sources
+# [S] Benchmark sources
 
 ## Goal
 
@@ -14,12 +14,12 @@ benchmark's JSON and the "Rust benchmark tests", "Rust bench targets" and "JS
 benchmarks" nightly jobs, converted to the history input format where they
 don't already emit one.
 
-- Most Rust Criterion targets run with `-- --test`, which measures nothing.
-  Switch the charted targets to a measuring mode (or add a measurement pass),
-  weighing the added nightly runtime.
-- The "Rust benchmark tests" job is not recorded yet: its nextest benchmarks
-  print no structured measurements.
-- Check each JS bench reports a measurement before recording it.
+The binding benchmark, the Rust bench targets, and the JS benchmarks already
+feed the table, measuring
+([#5759](https://github.com/moq-dev/moq/pull/5759)). What remains:
+
+- The "Rust benchmark tests" (`rust-test`) job is not recorded yet: its
+  nextest benchmarks print no structured measurements.
 - Nightly size history (today a 45-day artifact) is a natural extra series
   if it fits cheaply.
 - The relay load benches (`bench-audio`, `bench-profile`) and the

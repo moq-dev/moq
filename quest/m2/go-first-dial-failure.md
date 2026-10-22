@@ -15,8 +15,6 @@ failure accessor; add it the way the other wrappers expose it.
 [moq-dev/moq#6170](https://github.com/moq-dev/moq/pull/6170) found that
 `doc/lib/kt/index.md` and `doc/lib/dart/index.md` say `client.failure()`
 while their examples only use `Moq.connect`, which never hands back a
-`Client` before connecting. Align that wording once the auth binding PR that
-also touches those pages has landed (the linger one did in
-[moq-dev/moq#6157](https://github.com/moq-dev/moq/pull/6157)).
+`Client` before connecting. Align that wording.
 
 Public API: Go additive. Wire: none.

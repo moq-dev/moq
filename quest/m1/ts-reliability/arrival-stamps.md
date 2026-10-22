@@ -40,3 +40,8 @@ Decided by the maintainer on 2026-10-20 (`/quest-plan`):
 - **Rust only**: the only consumer is the Rust TS export. `@moq/net` mirrors
   it when a JS consumer needs it.
 - The stamp reads the ambient `moq_clock`, so simulated tests control it.
+
+Decided 2026-10-22 (maintainer): once
+[#6113](https://github.com/moq-dev/moq/pull/6113) lands, the container
+consumer's hole budget is anchored on the stamped arrivals too, so the export
+has one notion of arrival.

@@ -18,8 +18,9 @@ But Nightly
 (2026-10-21, before #6175 merged) already passed all five on
 `ubuntu-24.04-arm`, after the 2026-10-20 failure, with no moq-audio change
 between. So a green nightly alone does not prove #6175 fixed it: the failure
-may be intermittent. Reproduce on ARM and fix the cause, not the timing,
-before deleting this quest.
+may be intermittent. Decided 2026-10-22 (maintainer): delete this quest only
+after three consecutive green Nightlies on ARM; on another failure, reproduce
+on ARM and fix the cause, not the timing.
 
 Public API: none. Wire: none.
 
