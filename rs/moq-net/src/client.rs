@@ -621,7 +621,7 @@ mod tests {
 
 		/// What the session last handed the sender, in bits per second.
 		fn probe_target(&self) -> u64 {
-			self.probe.as_ref().expect("built with_probe").target()
+			self.probe.as_ref().expect("built with_probe").target().as_bps()
 		}
 
 		fn set_bytes_sent(&self, bytes: Option<u64>) {

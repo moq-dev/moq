@@ -539,7 +539,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 
 		if let Some((probe, target)) = &mut self.probe {
 			while let Poll::Ready(target) = target.poll_changed(waiter) {
-				probe.set_target(target.as_bps());
+				probe.set_target(target);
 			}
 		}
 

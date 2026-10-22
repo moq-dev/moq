@@ -1198,6 +1198,7 @@ mod tests {
 	/// being added, moved, released, or pruned with its track, waking the session
 	/// that follows it.
 	#[test]
+	#[cfg(feature = "async")]
 	fn the_target_sums_every_reservation() {
 		let allocator = Allocator::unlimited();
 		let mut target = allocator.target();

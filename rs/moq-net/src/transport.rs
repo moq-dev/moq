@@ -107,14 +107,14 @@ impl Probe {
 		Self::default()
 	}
 
-	/// The rate to probe up to, in bits per second; zero means don't probe.
-	pub fn target(&self) -> u64 {
-		self.0.load(std::sync::atomic::Ordering::Relaxed)
+	/// The rate to probe up to; zero means don't probe.
+	pub fn target(&self) -> crate::bandwidth::Rate {
+		crate::bandwidth::Rate::from_bps(self.0.load(std::sync::atomic::Ordering::Relaxed))
 	}
 
-	/// Set the rate to probe up to, in bits per second.
-	pub fn set_target(&self, bps: u64) {
-		self.0.store(bps, std::sync::atomic::Ordering::Relaxed);
+	/// Set the rate to probe up to.
+	pub fn set_target(&self, rate: crate::bandwidth::Rate) {
+		self.0.store(rate.as_bps(), std::sync::atomic::Ordering::Relaxed);
 	}
 }
 
