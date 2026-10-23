@@ -161,6 +161,12 @@ const MIN_RATE = 0.5;
  */
 const MAX_SKEW_STEPS = 1;
 
+/** Whether a sample plays the picture's own tone: audible, and within the tolerated skew of the frame it shows. */
+const playsInSync = (s: Sample) =>
+	s.frameId !== undefined &&
+	s.toneStep !== undefined &&
+	Math.abs(Pattern.stepSkew(s.toneStep, Pattern.expectedStep(s.frameId))) <= MAX_SKEW_STEPS;
+
 const percentile = (values: number[], p: number) => {
 	if (values.length === 0) return Number.NaN;
 	const sorted = [...values].sort((a, b) => a - b);
@@ -1105,8 +1111,8 @@ try {
 				const switched = await waitForState(watch, watchErrors, {
 					deadline: ready + SWITCH_MS,
 					assertion: "live replacement plays",
-					description: `the new run within ${SWITCH_MS}ms while its incumbent stays open`,
-					predicate: (s) => s.generation === 1 && !s.audioStalled,
+					description: `the new run's picture and synchronized tone within ${SWITCH_MS}ms while its incumbent stays open`,
+					predicate: (s) => s.generation === 1 && !s.audioStalled && playsInSync(s),
 				});
 				const replacementMs = Date.now() - ready;
 				if (version !== "moq-lite-06")
@@ -1127,8 +1133,8 @@ try {
 				const back = await waitForState(watch, watchErrors, {
 					deadline: withdrawn + SWITCH_MS,
 					assertion: "live incumbent fallback plays",
-					description: `the still-live older run within ${SWITCH_MS}ms of the newest withdrawing`,
-					predicate: (s) => s.generation === 0 && !s.audioStalled,
+					description: `the still-live older run's picture and synchronized tone within ${SWITCH_MS}ms of the newest withdrawing`,
+					predicate: (s) => s.generation === 0 && !s.audioStalled && playsInSync(s),
 				});
 				const fallbackMs = Date.now() - withdrawn;
 				check(back.broadcastEpoch === first.broadcastEpoch, "fallback keeps incumbent identity", () =>

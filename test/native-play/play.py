@@ -3,6 +3,7 @@
 import argparse
 import array
 from contextlib import ExitStack
+from datetime import datetime
 import json
 import math
 import os
@@ -32,6 +33,8 @@ MONITOR_LATENCY_MS = 20
 SWITCH_S = (2 * 300 + 5 + 20 + DELAY_MS + MONITOR_LATENCY_MS + 2 * WINDOW_MS) / 1000
 # Cold start and setup are not part of the switch; this only stops a hang.
 SETUP_S = 30
+# A tracing line's leading UTC timestamp, past any color codes, on a line logging the connection.
+CONNECTED = re.compile(rb"^(?:\x1b\[[0-9;]*m)*(\S+Z)\b.*\bconnected\b", re.MULTILINE)
 
 
 def stop(child):
@@ -90,7 +93,8 @@ def run():
             pending.clear()
 
         def publisher(name, hz, live):
-            """Start a tone publisher and return once it is connected with media to send."""
+            """Start a tone publisher; once it is connected with media to send, return its
+            processes and the monotonic time its log stamped the connection."""
             deadline = time.monotonic() + SETUP_S
             encoded = spawn(name + "-encoder", [
                 "ffmpeg", "-hide_banner", "-v", "error", "-re", "-f", "lavfi",
@@ -115,11 +119,13 @@ def run():
             encoded.stdout.close()
             encoded.stdout = None
             started.append((imported, f"{name} publisher"))
-            while not re.search(rb"\bconnected\b", log.read_bytes()):
+            while not (connected := CONNECTED.search(log.read_bytes())):
                 if time.monotonic() >= deadline:
                     raise RuntimeError(f"{name}: publisher did not connect; see {log.name}")
                 drain(deadline, live + started)
-            return started
+            # The log's own stamp, so the driver's polling never extends the switch budget.
+            stamp = datetime.fromisoformat(connected[1].decode()).timestamp()
+            return started, time.monotonic() - (time.time() - stamp)
 
         def hear(hz, phase, seconds, live):
             """Wait for a judge window of the tone, failing after `seconds`."""
@@ -144,7 +150,7 @@ def run():
                                f"rejected windows {rejected}; see the player log")
 
         for version in VERSIONS:
-            first = publisher(version + "-first", 440, [])
+            first, _ = publisher(version + "-first", 440, [])
             player = spawn(version + "-player", [
                 args.moq, "--connect", args.url, "--connect-version", version,
                 "--broadcast", "tone.hang", "play", "--no-video", "--delay", f"{DELAY_MS}ms",
@@ -152,10 +158,9 @@ def run():
             live = first + [(player, f"{version} player")]
             hear(440, f"{version}-initial", SETUP_S, live)
 
-            second = publisher(version + "-replacement", 880, live)
+            second, started = publisher(version + "-replacement", 880, live)
             flush(live + second)
-            started = time.monotonic()
-            replaced = hear(880, f"{version}-replacement", SWITCH_S, live + second)
+            replaced = hear(880, f"{version}-replacement", started + SWITCH_S - time.monotonic(), live + second)
             replacement_ms = (time.monotonic() - started) * 1000
 
             # Closing only B must reveal the still-live A, without restarting the player.
