@@ -166,7 +166,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [Peer count bounds](/quest/m1/peer-count-bounds.md) - namespace interests, a legacy announce list, a WebSocket upgrade, and public HTTP admission are bounded by what the peer sent or by an existing budget
 - [Caption store bounds](/quest/m1/caption-store-bounds.md) - a hostile caption track cannot grow a viewer's cue and region store or its per-frame work without bound
 - [Auth contract](/quest/m1/auth-contract.md) - the auth server receives the certificate-selecting SNI, documented as client-chosen, and a certificate grants nothing alone
-- [Nightly benchmark regressions](/quest/m1/bench-ci.md) - each nightly compares the Rust Criterion benches against the previous nightly's commit on the same hosted runner, publishes it to the git.moq.dev report, and alerts on a regression
+- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [Interop audit](/quest/m1/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down
 
 ## Related

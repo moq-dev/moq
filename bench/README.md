@@ -398,15 +398,15 @@ The table includes these measurements:
   same host, including for throughput, where the ratio is Rust/wrapper.
 - Rust Criterion mean ns per iteration; the history also keeps the confidence interval.
   The `net-cpu` source and the moq-quic targets time thread CPU; the others
-  time elapsed time. The Rust bench targets job measures them with a short warmup
+  time elapsed time. The Rust bench target jobs measure them with a short warmup
   and Criterion's quick mode. Per-group benchmark settings can override the default warmup. Quick estimates
-  trade precision for nightly runtime; use full paired runs to assess a change.
+  trade precision for nightly runtime; the paired comparison below assesses a change.
 - JS benchmark CSV time columns (`ns`, `us`, `ms`, and their per-operation
   variants) and `size_bytes` columns, retaining every other column as a workload
   dimension in each series name.
 
-Hosted runners vary across nights, so a flag prompts a paired local run rather
-than proving a regression. Binding ratios compare languages within one run.
+Hosted runners vary across nights, so a trend flag prompts a look at the paired
+comparison rather than proving a regression. Binding ratios compare languages within one run.
 Malformed, empty, nonfinite, or duplicate measurements fail validation. The
 nightly artifacts retain the reports, raw JS output, and each Criterion run's
 metadata and estimates for 45 days. Relay load, audio quality, and the Rust
@@ -445,4 +445,39 @@ within a source; dimensions belong in the name. Supported units are `ns`, `us`,
 `ops/s`, and `frames/s`. Optional `range` and `extra` fields retain uncertainty
 and context. Validate and split sources into cost and throughput histories with
 `just gh benchmark-report prepare INPUT_DIRECTORY OUTPUT_DIRECTORY`; extending
-the table requires no new renderer or data branch.
+the table requires no new renderer or data branch. A source's `paired.json`, as
+`just gh benchmark-report rust` writes for a paired run, joins the paired comparison.
+
+### Paired comparison
+
+Each Nightly's Rust bench groups (`rust-bench`, `rust-shared`, `rust-extra` and
+`rust-uring`) also build the previous scheduled Nightly's commit beside their
+own, on the same runner, so night-to-night runner variance drops out. Each
+built target runs once per side in the trend's quick mode, alternating which
+side goes first; the current side is the trend point. A case more than 10%
+slower in that screen reruns, worst first and at most 20 per group, in three
+alternating rounds with the BASE comparison's settings (1 s warmup, 2 s
+measurement, 30 samples). A case whose rounds are all slower with a median
+beyond 10% is a confirmed regression and fails its job after the upload, so the
+Alert workflow posts the failed Nightly. A target the base cannot build or run
+fails the job too, rather than passing uncompared; a bench target the base does
+not have yet is only reported as new. The threshold is a starting point until
+A/A runs on the hosted runner measure its noise floor.
+
+The table page shows tonight's comparison above the trend: confirmed
+regressions, targets not compared, cases faster in the screen, slowdowns the
+rounds rejected or the budget skipped, and the rest. `bench/paired.json` on the
+site holds every case. A dispatched Nightly's `bench-base` input compares
+against another revision; its own commit gives an A/A run.
+
+Reproduce a paired group locally against any revision; `previous-nightly`
+resolves the last scheduled Nightly's commit through `gh`:
+
+```bash
+nix develop --command env MOQ_BENCH_BASE=previous-nightly just gh nightly rust-bench
+nix develop --command just gh benchmark-report gate target/bench/nightly/rust-bench
+```
+
+Each run's evidence directory keeps both builds' estimates (`criterion` and
+`criterion-base`), the confirmation rounds under `confirm/`, and the run's
+`paired.json`.

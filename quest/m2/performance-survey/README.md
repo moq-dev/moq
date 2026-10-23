@@ -198,4 +198,4 @@ No duplicate quest or workflow edit belongs here.
 
 - [Performance audit](/quest/m2/audit-perf.md) - nightly regression attribution and remaining coverage
 - [Benchmark sources](/quest/m2/bench-sources.md) - publishing existing measurements to the trend table
-- [Nightly comparisons](/quest/m1/bench-ci.md) - paired nightly regression reporting
+- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - noise floor of the paired nightly regression report

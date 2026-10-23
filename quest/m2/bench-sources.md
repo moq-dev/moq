@@ -26,7 +26,8 @@ don't already emit one.
 - The relay load benches (`bench-audio`, `bench-profile`) and the
   audio-quality job's benchmarks can join later through the same input
   format.
-- [Nightly benchmark regression report](/quest/m1/bench-ci.md) records its nightly
-  Criterion history on the same `gh-pages` branch instead of creating its own.
+- The paired nightly comparison publishes beside the table from the same
+  `gh-pages` branch (`bench/paired.json`); a new Rust source joins it through
+  `just gh benchmark-report rust`.
 
 Public API: none. Wire: none.

@@ -78,9 +78,9 @@ did not move.
 
 - History: compare at least five nights by commit, now that it exists. Nightly
   stores every series on `gh-pages` (`bench/costs`, `bench/rates`); re-runs add
-  duplicate points for one commit. Read the
-  [nightly benchmark regression report](/quest/m1/bench-ci.md)'s paired flags
-  instead of raw history once it lands. The first JS series (841) appeared on
+  duplicate points for one commit. Read the paired comparison on the table
+  page instead of raw history, once
+  [its calibration](/quest/m1/bench-ci.md) lands. The first JS series (841) appeared on
   Oct 22, and Dart still needs a recheck against the bindings history.
 - The per-group write cost above, then the resume reader: at 16 single-frame
   groups `track::Subscriber::poll_group` is 44% of the Annex B export
@@ -166,9 +166,9 @@ Single-axis fan-out benches to widen: `session_delivery_paced` (viewers only),
 
 Fan-out paths need a sweep over both axes (AGENTS.md). JS perf is judged in a
 browser, not node or bun. Benchmarks never gate the merge queue (decided
-2026-10-20, maintainer): each Nightly compares them into the git.moq.dev
-report, which the [nightly benchmark regression report](/quest/m1/bench-ci.md)
-owns; don't duplicate it.
+2026-10-20, maintainer): each Nightly compares them in the git.moq.dev
+report's [paired comparison](/bench/README.md#paired-comparison); don't
+duplicate it.
 
 ## Required
 
