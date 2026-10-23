@@ -82,7 +82,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
-- [A failed send never fails the io_uring socket](/quest/m1/uring-send-errors.md) - a send error costs one packet or destination, never every connection on the worker
 - [io_uring MTU matches tokio](/quest/m1/uring-mtu.md) - a 1200-byte floor and `quic.mtu_discovery` honored, so the ring stops black-holing smaller paths
 - [io_uring replies from the address it was reached on](/quest/m1/uring-local-addr.md) - packet info in and out, so multihomed wildcard binds work
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
@@ -101,13 +100,11 @@ tracks, so per-group stats stop costing cluster announces.
 - [Pause an IETF SUBSCRIBE](/quest/m1/ietf-subscribe-pause.md) - Forward=0 pauses a SUBSCRIBE without demand upstream and Forward=1 resumes it, instead of ending it
 - [A listing says whether a removed track finished](/quest/m1/listing-end-reason.md) - a listing removal carries whether the track finished, at every hop, so the IETF answerer ends a finished track's PUBLISH with TRACK_ENDED and a Rust-to-Rust IETF listing removes it without a reset
 - [Compressed tracks](/quest/m1/compress/README.md) - a track flagged `compress` is DEFLATEd per group by moq-net, forwarded compressed, and inflated once on the relay for peers that cannot signal it; `catalog.json.z` and moq-flate go away
-- [lite-06 max sequence](/quest/m1/lite06-max-sequence.md) - group sequence 2^62-1 reaches a lite-06 subscriber or is refused loudly, instead of vanishing
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [A public model](/quest/m1/public-model/README.md) - every model item a built-in session reaches is public, unnecessary, or marked deliberately private, so a custom publisher, subscriber, or relay builds from the public model alone
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break has its MIGRATE entry
-- [FETCH_OK whole group](/quest/m1/ietf-fetch-end-location.md) - on drafts 14 to 19, FETCH_OK End Object 0 means the whole group in both directions, and a FETCH ending at the maximum group is refused as unsupported
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
@@ -121,7 +118,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Audio playout memory](/quest/m1/audio-playout-memory.md) - a catalog's advertised jitter or delay cannot size decoded PCM; the lookahead stays encoded
 - [AAC alias classification](/quest/m1/aac-he-alias.md) - every accepted AAC spelling gets the right frame duration from one classification
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
-- [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence, and the media fixture's cold-start audio-tone flake is fixed at its cause
 - [Signals notify on every structural change](/quest/m1/signals-equality.md) - a renamed `undefined` key or a changed sparse array length notifies, checked by a fast-check model of the notification contract
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [qmux local lifecycle](/quest/m1/qmux-local-lifecycle.md) - an abort blocked on send credit resets at once, and a close behind a backed-up socket still sends APPLICATION_CLOSE
@@ -129,11 +125,9 @@ tracks, so per-group stats stop costing cluster announces.
 - [Stream sockets disable Nagle](/quest/m1/tcp-nodelay.md) - every qmux TCP, TLS, and WebSocket socket, accepted or dialed, sets `TCP_NODELAY`
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Replica resume](/quest/m1/replica-resume.md) - a lagging same-epoch replica resumes with every frame exactly once and in order, on lite-07 and on moq-transport
-- [Rust resume holds a declared end](/quest/m1/resume-rust-end.md) - a resumed Rust track keeps a declared end across copies, dedupes flapping copies, and judges retention inside the reader's window
 - [Rust resume checks compression](/quest/m1/resume-compress.md) - a same-epoch route copy with a different `compress` is refused instead of corrupting framing
 - [Rust resume backs single-route groups](/quest/m1/resume-handed-out.md) - a group first read from one route keeps the later copy that holds it, with a passthrough benchmark
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
-- [Interop finish](/quest/m1/interop-finish.md) - the interop matrix proves a clean broadcast finish across implementations
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
 - [HLS cursor failure](/quest/m1/hls-segments-failure.md) - the export segment cursor returns a failed timeline as an error after draining, so a truncated recording never looks complete
 - [Track live signal](/quest/m1/track-live.md) - a reader can wait for its track's feed to be live, so a player skips old cached groups while a fresh upstream subscription starts
@@ -161,6 +155,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [Drop dead items](/quest/m1/drop-dead-items.md) - the audit's uncalled public items and test helpers are removed
 - [Warmup in the hang draft](/quest/m1/warmup-draft.md) - the draft lets a dual-decoder consumer present before `warmup`, matching the shipping `decode::Consumer`
 - [API-diff check](/quest/m1/api-diff.md) - a recipe diffs every published package's API against its last release, run on PRs into release and against main before the cut
+- [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - moq-transport sessions ask for announcements only under watched prefixes, starting with UNSUBSCRIBE_NAMESPACE on d14/15
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over the even drafts 14 to 22
 - [Runner nightly](/quest/m1/interop-runner-nightly.md) - a nightly job runs the upstream interop runner against our relay and clients, so newly registered implementations with a published image are tested without a change here
 - [One Annex-B exporter](/quest/m1/annexb-export.md) - H.264 and H.265 Annex-B export share one private lifecycle, which also follows a rebound rendition
@@ -174,6 +169,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [Auth contract](/quest/m1/auth-contract.md) - the auth server receives the certificate-selecting SNI, documented as client-chosen, and a certificate grants nothing alone
 - [Nightly benchmark regressions](/quest/m1/bench-ci.md) - each nightly compares the Rust Criterion benches against the previous nightly's commit on the same hosted runner, publishes it to the git.moq.dev report, and alerts on a regression
 - [Performance audit](/quest/m1/audit-perf.md) - benchmarks that regressed since the m0 run are explained, fixed, or planned, and unbenched hot paths get coverage
+- [Interop audit](/quest/m1/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down
 
 ## Related
 
