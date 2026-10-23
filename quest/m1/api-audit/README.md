@@ -80,7 +80,9 @@ Rejected in planning:
 - [Derived origins borrow](/quest/m1/api-audit/derived-origin-close.md) - closing a JS `scope()` or `withPreference()` handle releases only that handle
 - [Wrapper config names](/quest/m1/api-audit/wrapper-config.md) - Python, Go, and Dart client options use the FFI's names and nesting
 - [One decode read](/quest/m1/api-audit/decode-read.md) - audio and video decoders yield the same `Frame`, `Gap`, `End` read as moq-mux containers
+- [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
 - [Media surface trim](/quest/m1/api-audit/media-trim.md) - media crate items with no consumer go private, and Rust/JS media names agree
+- [One frame rate name](/quest/m1/api-audit/frame-rate.md) - core `moq_video::Rate` becomes `FrameRate`, as the bindings name it
 - [CLI and gst flags](/quest/m1/api-audit/cli-flags.md) - one flag name per meaning across CLI subcommands and gst elements, and `linger` means one thing
 - [qmux shape](/quest/m1/api-audit/qmux-shape.md) - qmux binds framing at connect, shares flow-control names with moq-tokio, and JS drops the legacy wire
 - [Transport config](/quest/m1/api-audit/transport-config.md) - moq-tokio and moq-quic configs have one meaning for unset, enums for modes, no order-dependent setters, and no leftover features
