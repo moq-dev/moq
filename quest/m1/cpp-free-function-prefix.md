@@ -26,4 +26,4 @@ no upgrade note. Public API: C++ only, `moq::moq_*` free functions are gone.
 
 ## Related
 
-- [Hard-fork the binding generator](/quest/m2/uniffi-fork.md) - where the generator option will live once the fork moves
+- [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - where the generator option will live once the fork moves into kixelated/rust2
