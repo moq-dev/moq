@@ -111,15 +111,15 @@ fn encode_prefixes(patterns: &Patterns, w: &mut Encoder<'_>) -> Result<(), Encod
 
 fn decode_prefixes(r: &mut Decoder<'_>) -> Result<Patterns, DecodeError> {
 	let count = r.varint()?;
-	let mut patterns = Patterns::new();
 	// No preallocation: the count is peer-controlled, and the message size limit bounds
 	// how many prefixes actually fit.
+	let mut patterns = Vec::new();
 	for _ in 0..count {
 		let prefix = decode_namespace(r)?;
-		let pattern = Pattern::subtree(prefix.as_str()).map_err(|_| DecodeError::InvalidValue)?;
-		patterns.insert(pattern);
+		patterns.push(Pattern::subtree(prefix.as_str()).map_err(|_| DecodeError::InvalidValue)?);
 	}
-	Ok(patterns)
+	// Reduce once, so a peer's count never turns into quadratic work.
+	Ok(patterns.into_iter().collect())
 }
 
 impl Message for AuthOk {

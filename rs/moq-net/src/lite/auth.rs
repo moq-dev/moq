@@ -59,9 +59,9 @@ fn encode_patterns(patterns: &Patterns, w: &mut Encoder<'_>) -> Result<(), Encod
 
 fn decode_patterns(r: &mut Decoder<'_>) -> Result<Patterns, DecodeError> {
 	let count = r.varint()?;
-	let mut patterns = Patterns::new();
 	// No preallocation: the count is peer-controlled, and the message size limit
 	// is what bounds how many patterns actually fit.
+	let mut patterns = Vec::new();
 	for _ in 0..count {
 		let text = r.string()?;
 		let pattern = Pattern::try_from(text.as_str()).map_err(|_| DecodeError::InvalidValue)?;
@@ -69,9 +69,10 @@ fn decode_patterns(r: &mut Decoder<'_>) -> Result<Patterns, DecodeError> {
 		if pattern.as_str() != text {
 			return Err(DecodeError::InvalidValue);
 		}
-		patterns.insert(pattern);
+		patterns.push(pattern);
 	}
-	Ok(patterns)
+	// Reduce once, so a peer's count never turns into quadratic work.
+	Ok(patterns.into_iter().collect())
 }
 
 impl Message for AuthOk {
