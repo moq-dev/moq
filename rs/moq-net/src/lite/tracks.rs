@@ -9,6 +9,7 @@ use super::{Message, TrackInfo, Version, message::MAX_MESSAGE_SIZE, message::dec
 
 const TRACKS_ADD: u64 = 0x0;
 const TRACKS_REMOVE: u64 = 0x1;
+const TRACKS_FINISH: u64 = 0x2;
 // The same event the announce stream marks its initial set with.
 const SYNCED: u64 = 0x4;
 
@@ -49,8 +50,11 @@ impl Message for Tracks<'_> {
 pub enum TracksEvent<'a> {
 	/// TRACKS_ADD: a listed track, with the TRACK_INFO a Track Stream would answer.
 	Added { name: Cow<'a, str>, info: TrackInfo },
-	/// TRACKS_REMOVE: a track named by an earlier TRACKS_ADD is no longer listed.
+	/// TRACKS_REMOVE: a track named by an earlier TRACKS_ADD is no longer listed, unfinished.
 	Removed { name: Cow<'a, str> },
+	/// TRACKS_FINISH: a track named by an earlier TRACKS_ADD is no longer listed because it
+	/// finished.
+	Finished { name: Cow<'a, str> },
 	/// SYNCED: every track this hop listed when the stream opened, and still lists, was sent.
 	Synced,
 }
@@ -64,6 +68,7 @@ impl Encode<Version> for TracksEvent<'_> {
 		w.varint(match self {
 			Self::Added { .. } => TRACKS_ADD,
 			Self::Removed { .. } => TRACKS_REMOVE,
+			Self::Finished { .. } => TRACKS_FINISH,
 			Self::Synced => SYNCED,
 		})?;
 		let prefix = w.prefix_varint();
@@ -72,7 +77,7 @@ impl Encode<Version> for TracksEvent<'_> {
 				w.string(name)?;
 				info.encode(w, version)?;
 			}
-			Self::Removed { name } => w.string(name)?,
+			Self::Removed { name } | Self::Finished { name } => w.string(name)?,
 			Self::Synced => {}
 		}
 		if w.since(&prefix) > MAX_MESSAGE_SIZE {
@@ -100,6 +105,9 @@ impl Decode<Version> for TracksEvent<'_> {
 					info: TrackInfo::decode(&mut body, version)?,
 				},
 				TRACKS_REMOVE => Self::Removed {
+					name: Cow::Owned(body.string()?),
+				},
+				TRACKS_FINISH => Self::Finished {
 					name: Cow::Owned(body.string()?),
 				},
 				SYNCED => Self::Synced,
@@ -149,6 +157,10 @@ mod test {
 		assert_eq!(got.timescale, Some(Timescale::MICRO));
 		assert!(got.compress);
 
+		let TracksEvent::Finished { name } = roundtrip(&TracksEvent::Finished { name: "audio".into() }) else {
+			panic!("expected TRACKS_FINISH");
+		};
+		assert_eq!(name, "audio");
 		let TracksEvent::Removed { name } = roundtrip(&TracksEvent::Removed { name: "video".into() }) else {
 			panic!("expected a removal");
 		};
@@ -167,7 +179,7 @@ mod test {
 	#[test]
 	fn an_unknown_event_is_refused() {
 		assert!(matches!(
-			TracksEvent::decode_slice(&[0x02, 0x00], Version::Lite07),
+			TracksEvent::decode_slice(&[0x03, 0x00], Version::Lite07),
 			Err(DecodeError::InvalidValue)
 		));
 	}

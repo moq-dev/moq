@@ -1256,12 +1256,12 @@ mod test {
 	#[test]
 	fn rejected_field_names_its_path() {
 		#[derive(serde::Deserialize)]
-		#[allow(dead_code)]
+		#[allow(dead_code, reason = "the test only checks that deserializing fails")]
 		struct Inner {
 			count: u8,
 		}
 		#[derive(serde::Deserialize)]
-		#[allow(dead_code)]
+		#[allow(dead_code, reason = "the test only checks that deserializing fails")]
 		struct Outer {
 			inner: Inner,
 		}

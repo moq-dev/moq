@@ -1187,7 +1187,7 @@ pub enum MoqRendition {
 
 impl MoqRendition {
 	/// Split into the broadcast reference and its epoch, the track name, and the container.
-	fn into_parts(self) -> (Option<String>, Option<String>, String, MoqContainer) {
+	pub(crate) fn into_parts(self) -> (Option<String>, Option<String>, String, MoqContainer) {
 		let (id, broadcast, epoch, track, container) = match self {
 			Self::Video { id, config } => (id, config.broadcast, config.epoch, config.track, config.container),
 			Self::Audio { id, config } => (id, config.broadcast, config.epoch, config.track, config.container),

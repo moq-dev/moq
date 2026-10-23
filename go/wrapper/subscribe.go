@@ -46,19 +46,20 @@ func (b *BroadcastConsumer) FetchGroup(
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// Resolve returns the broadcast serving a catalog rendition, honoring its broadcast
-// reference: ffi.MoqVideo.Broadcast / ffi.MoqAudio.Broadcast. A nil or empty reference names this
-// broadcast, anything else names a sibling relative to it (e.g. "./source"). epoch is the same
-// rendition's Epoch: a broadcast proven to serve another instance errors instead of resolving,
-// and a route without an epoch cannot prove one, so there it is best effort. Call it on a
-// rendition that carries a reference before SubscribeTrack or FetchGroup, which take a track name
-// rather than a rendition: the rendition's Track, or its ID when nil. The rendition-based
-// media.NewTrackConsumer, media.FetchGroup, audio.Subscribe, and video.Subscribe resolve both themselves.
+// Resolve returns the broadcast serving a catalog rendition, built with
+// media.VideoRendition or media.AudioRendition. The rendition's Broadcast reference, nil or
+// empty, names this broadcast; anything else names a sibling relative to it (e.g. "./source").
+// Its Epoch is the publisher instance the reference names: a broadcast proven to serve another
+// instance errors instead of resolving, and a route without an epoch cannot prove one, so there
+// it is best effort. Call it on a rendition that carries a reference before SubscribeTrack or
+// FetchGroup, which take a track name rather than a rendition: the rendition's Track, or its ID
+// when nil. The rendition-based media.NewTrackConsumer, media.FetchGroup, audio.Subscribe, and
+// video.Subscribe resolve it themselves.
 //
 // Errors if this broadcast came from a local producer rather than an origin, since a
 // standalone broadcast has no sibling to name.
-func (b *BroadcastConsumer) Resolve(ctx context.Context, reference *string, epoch *string) (*BroadcastConsumer, error) {
-	inner, err := b.inner.Resolve(ctx, reference, epoch)
+func (b *BroadcastConsumer) Resolve(ctx context.Context, rendition ffi.MoqRendition) (*BroadcastConsumer, error) {
+	inner, err := b.inner.Resolve(ctx, rendition)
 	if err != nil {
 		return nil, err
 	}
