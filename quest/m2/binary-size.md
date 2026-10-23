@@ -13,8 +13,9 @@ Decided 2026-10-20 in planning:
 
 - **500 KB, repository-wide.** Git keeps every version of a binary forever,
   so the cap protects history size for everyone who clones. It applies to the
-  whole tree, not only `site/`, since a fixture or doc image bloats history
-  just as much. 1 MB and 250 KB were rejected as too loose and too strict.
+  whole tree, since a fixture or doc image bloats history like any other.
+  Planned for moq.dev's move into this repository; kept on its own when the
+  move was dropped 2026-10-23. 1 MB and 250 KB were rejected as too loose and too strict.
 - **Only files the PR adds or grows.** A file is flagged when its new size is
   over the cap and it is new or larger than on the base. Shrinking or
   touching an existing oversized file passes. Every tracked file was rejected
