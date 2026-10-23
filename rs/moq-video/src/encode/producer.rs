@@ -573,17 +573,28 @@ impl CaptureSource for DeviceSource {
 #[cfg(feature = "capture")]
 type RateControl = Option<(moq_net::bandwidth::Consumer, rate::Control)>;
 
-/// Wait for the next bandwidth estimate, or forever when rate control is off or
-/// finished. Cancel-safe: [`Consumer::changed`](moq_net::bandwidth::Consumer::changed)
+/// Wait for the next bandwidth estimate, or for the policy's deadline to feed the
+/// current one again, or forever when rate control is off or finished.
+///
+/// Cancel-safe: [`Consumer::changed`](moq_net::bandwidth::Consumer::changed)
 /// only reads shared state, so losing this race to a frame drops no estimate,
 /// it just re-reads the latest one next time round.
 #[cfg(feature = "capture")]
 async fn next_estimate(rate: &mut RateControl) -> Option<Option<moq_net::bandwidth::Rate>> {
-	match rate {
-		Some((bandwidth, _)) => bandwidth.changed().await.ok(),
-		// Retired: park this arm forever so `select!` ignores it.
-		None => std::future::pending().await,
+	// Retired: park this arm forever so `select!` ignores it.
+	let Some((bandwidth, control)) = rate else {
+		return std::future::pending().await;
+	};
+	// A raise climbs over several updates, and a settled grant sends no change
+	// to climb on.
+	if let Some(at) = control.deadline() {
+		tokio::select! {
+			estimate = bandwidth.changed() => return estimate.ok(),
+			() = moq_net::time::sleep_until(at) => {}
+		}
+		return Some(bandwidth.peek());
 	}
+	bandwidth.changed().await.ok()
 }
 
 /// Feed an estimate through the policy and retune the encoder if it moved.
@@ -618,10 +629,12 @@ async fn apply_estimate(
 			tracing::warn!(encoder = name, "encoder cannot follow the bandwidth estimate");
 			*rate = None;
 		}
-		// A transient failure: keep the policy running so the next change retries.
-		// The policy already moved its target, so a persistent failure just means
-		// the encoder trails it; that's better than giving up on the first blip.
-		Err(err) => tracing::warn!(error = %err, bitrate = bitrate.as_bps(), "failed to adjust encoder bitrate"),
+		// A transient failure: the policy takes the target back and retries it at
+		// its deadline, so a quiet grant still recovers.
+		Err(err) => {
+			tracing::warn!(error = %err, bitrate = bitrate.as_bps(), "failed to adjust encoder bitrate");
+			control.failed(moq_net::time::now());
+		}
 	}
 }
 
@@ -1886,6 +1899,64 @@ mod tests {
 				res = &mut run => panic!("the capture ended after a refused cut: {res:?}"),
 				() = until(|| probe::take().iter().any(|(event, _)| *event == "encode")) => {}
 			}
+		}
+	}
+
+	/// Rate control against the probe backend, which logs every bitrate it accepts.
+	#[cfg(feature = "capture")]
+	mod rate_control {
+		use std::time::Duration;
+
+		use moq_net::bandwidth::Rate;
+
+		use super::*;
+		use crate::encode::backend::probe;
+
+		/// After congestion clears, the encoder climbs back to its ceiling although the grant
+		/// never changes again, and a failed step is retried rather than waiting for one.
+		#[tokio::test(start_paused = true)]
+		// The guard only keeps other tests out of the process-wide probe log, and this runtime has
+		// one thread, so holding it across an await blocks nothing.
+		#[allow(clippy::await_holding_lock)]
+		async fn a_quiet_grant_still_recovers_the_ceiling() {
+			let _probe = probe::exclusive();
+			let ceiling = Rate::from_mbps(4);
+			let mut config = encoder::Config::new(320, 240, crate::Rate::new(30, 1).unwrap());
+			config.kind = encoder::Kind::Named(probe::NAME.into());
+			config.bitrate = Some(ceiling);
+			let mut sink = Sink::open(&config).await.unwrap();
+
+			let estimate = moq_net::bandwidth::Producer::new();
+			let mut rate = Some((estimate.consume(), rate::Control::new(rate::Policy::new(ceiling))));
+
+			estimate.set(Some(Rate::from_mbps(1))).unwrap();
+			let next = next_estimate(&mut rate).await;
+			apply_estimate(&mut sink, &mut rate, next).await;
+
+			// The last grant change: the link recovers a second later.
+			tokio::time::advance(Duration::from_secs(1)).await;
+			estimate.set(Some(ceiling)).unwrap();
+			probe::refuse_once(ceiling.as_bps());
+
+			// A minute without a wake is far past anything the ramp still needs.
+			while let Ok(next) = tokio::time::timeout(Duration::from_secs(60), next_estimate(&mut rate)).await {
+				apply_estimate(&mut sink, &mut rate, next).await;
+			}
+			let bitrates = probe::bitrates();
+			assert_eq!(bitrates.first(), Some(&1_000_000), "{bitrates:?}");
+			assert_eq!(
+				bitrates.last(),
+				Some(&ceiling.as_bps()),
+				"the ramp stalled: {bitrates:?}"
+			);
+			assert!(
+				probe::take()
+					.iter()
+					.filter(|(event, _)| *event == "set_bitrate")
+					.count() > bitrates.len()
+			);
+			let (_, control) = rate.expect("a transient failure keeps rate control running");
+			assert_eq!(control.deadline(), None, "settled at the ceiling");
 		}
 	}
 }

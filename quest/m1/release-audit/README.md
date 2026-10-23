@@ -106,7 +106,6 @@ child records whether its behavior is new on main or inherited from release.
 - [Report fatal watch ingestion failures](/quest/m1/release-audit/watch-errors.md) - failed audio/video reads reach the existing error output and tear down their resources
 - [Accept reordered HTTP/3 streams](/quest/m1/release-audit/webtransport-streams.md) - QPACK or a stalled header before SETTINGS does not reject or block a valid handshake
 - [Constrain auth credential redirects](/quest/m1/release-audit/auth-redirects.md) - JSON credentials cannot silently follow redirects to another origin
-- [Finish bitrate recovery](/quest/m1/release-audit/rate-recovery.md) - a quiet bandwidth grant no longer strands moq-video, moq-ffi, and moq-c encoders partway up the ramp
 - [Release finished FFI codecs](/quest/m1/release-audit/ffi-finished.md) - preserving finished tracks does not preserve drained encoders and scratch buffers
 - [Release HLS server state](/quest/m1/release-audit/hls-shutdown.md) - final server drop retires its watchers while publishers remain live
 - [Retire expiry metadata](/quest/m1/release-audit/expiry-index.md) - empty deadline entries do not accumulate with historical read budgets

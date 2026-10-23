@@ -54,8 +54,8 @@ impl Rate {
 
 	/// This rate scaled by `factor`, saturating at both ends.
 	///
-	/// For the fractional arithmetic rate control does (a ramp allowance, a hysteresis
-	/// band) without spreading `as` casts across the callers.
+	/// For fractional arithmetic, such as halving a rate, without spreading `as`
+	/// casts across the callers.
 	pub fn scaled(self, factor: f64) -> Self {
 		let scaled = self.0 as f64 * factor.max(0.0);
 		if scaled >= u64::MAX as f64 {
