@@ -148,7 +148,8 @@ impl Decode<Version> for FollowUp {
 		let update = id == super::SubscribeUpdate::ID;
 		let start = r.position();
 		let body = super::Body::decode(r, version)?;
-		r.control = Some((super::message::control(id, version), start));
+		r.control = Some(super::message::control(id, version));
+		r.uncounted = start;
 		Ok(match update {
 			true => Self::Update(body),
 			false => Self::End,
@@ -166,7 +167,8 @@ impl Decode<Version> for Framed {
 		let id = r.varint()?;
 		let start = r.position();
 		let body = super::Body::decode(r, version)?;
-		r.control = Some((super::message::control(id, version), start));
+		r.control = Some(super::message::control(id, version));
+		r.uncounted = start;
 		Ok(Self(id, body))
 	}
 }
@@ -191,6 +193,7 @@ impl<T: Decode<Version>> Decode<Version> for Next<T> {
 			let mut peek = r.clone();
 			if peek.varint()? == super::GoAway::ID {
 				*r = peek;
+				r.uncounted = r.position();
 				let msg = super::GoAway::decode(r, version)?;
 				// Draft-18's Request ID belongs on the control stream only.
 				if msg.request_id.is_some() {
@@ -497,7 +500,8 @@ impl Decode<Version> for Update {
 		let mut data = r.sub(size)?;
 		// The complete frame is present; a short field inside it is malformed.
 		let update = Self::decode_body(&mut data, version).map_err(DecodeError::complete)?;
-		r.control = Some((super::message::control(super::SubscribeUpdate::ID, version), start));
+		r.control = Some(super::message::control(super::SubscribeUpdate::ID, version));
+		r.uncounted = start;
 		Ok(update)
 	}
 }
@@ -550,7 +554,8 @@ impl<const TRACKS: bool> Decode<Version> for NamespaceUpdate<TRACKS> {
 			})
 		};
 		let update = decode().map_err(DecodeError::complete)?;
-		r.control = Some((super::message::control(super::SubscribeUpdate::ID, version), start));
+		r.control = Some(super::message::control(super::SubscribeUpdate::ID, version));
+		r.uncounted = start;
 		Ok(update)
 	}
 }

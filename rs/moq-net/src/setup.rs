@@ -106,7 +106,7 @@ impl Encode<Version> for Setup {
 
 impl Decode<Version> for Setup {
 	fn decode(r: &mut Decoder<'_>, v: Version) -> Result<Self, DecodeError> {
-		r.control = Some((crate::stats::Control::Session, r.position()));
+		r.control = Some(crate::stats::Control::Session);
 		Self::check_version(v);
 		let kind = r.varint()?;
 		if kind != SETUP_V17 {
@@ -176,7 +176,7 @@ impl Client {
 impl Decode<Version> for Client {
 	/// Decode a client setup message (draft-14 through draft-16 only).
 	fn decode(r: &mut Decoder<'_>, v: Version) -> Result<Self, DecodeError> {
-		r.control = Some((crate::stats::Control::Session, r.position()));
+		r.control = Some(crate::stats::Control::Session);
 		let kind = r.u8()?;
 		if kind != CLIENT_SETUP {
 			return Err(DecodeError::InvalidValue);
@@ -290,7 +290,7 @@ impl Encode<Version> for Server {
 impl Decode<Version> for Server {
 	/// Decode a server setup message (draft-14 through draft-16 only).
 	fn decode(r: &mut Decoder<'_>, v: Version) -> Result<Self, DecodeError> {
-		r.control = Some((crate::stats::Control::Session, r.position()));
+		r.control = Some(crate::stats::Control::Session);
 		let kind = r.u8()?;
 		if kind != SERVER_SETUP {
 			return Err(DecodeError::InvalidValue);

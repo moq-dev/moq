@@ -126,7 +126,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 				let need = match decode(&mut r) {
 					Ok(value) => {
 						let used = buf.len() - r.remaining();
-						let control = r.control;
+						let control = r.control.map(|class| (class, used - r.uncounted));
 						self.want = 0;
 						if self.scratch.capacity() > SCRATCH_KEEP {
 							self.scratch = Vec::new();
@@ -134,8 +134,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 						if consume {
 							// Counted only once the bytes are released, so a peek or a retry
 							// after a short read never counts the same message twice.
-							if let Some((class, start)) = control {
-								self.stats.control(class, used - start, true);
+							if let Some((class, size)) = control {
+								self.stats.control(class, size, true);
 							}
 							lease.advance(used);
 							lease.release();
@@ -533,13 +533,34 @@ mod tests {
 		assert!(matches!(reader.poll_decode::<lite::Probe>(&mut cx), Poll::Ready(Ok(_))));
 		assert_eq!(counted(), probes(2));
 
+		// A wrapped message counts its type too, as the sender's one encode does.
+		let reply = lite::AuthReply::Error(lite::AuthError {
+			code: 1,
+			reason: "no".into(),
+		});
+		let reply: &'static [u8] = reply.encode_bytes(version).unwrap().to_vec().leak();
+		reader.stream.get_mut().chunks.push_back(reply);
+		assert!(matches!(
+			reader.poll_decode::<lite::AuthReply>(&mut cx),
+			Poll::Ready(Ok(_))
+		));
+		let auth = (
+			Tier::default(),
+			Control::Auth,
+			Bytes {
+				tx: 0,
+				rx: reply.len() as u64,
+			},
+		);
+		assert_eq!(counted(), [vec![auth.clone()], probes(2)].concat());
+
 		// A body cut short inside its declared size is malformed, and never counted.
 		reader.stream.get_mut().chunks.push_back(&[1, 0x80]);
 		assert!(matches!(
 			reader.poll_decode::<lite::Probe>(&mut cx),
 			Poll::Ready(Err(_))
 		));
-		assert_eq!(counted(), probes(2));
+		assert_eq!(counted(), [vec![auth], probes(2)].concat());
 	}
 
 	/// STOP_SENDING refuses a stream, so it must carry a stream code. Reusing the session

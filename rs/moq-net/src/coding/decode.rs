@@ -141,9 +141,11 @@ pub struct Decoder<'a> {
 	len: usize,
 	/// See [`Self::need`].
 	need: usize,
-	/// The control message read, and the [`Self::position`] it began at, counted once the
-	/// read is consumed. A type selector before it is not part of the message.
-	pub(crate) control: Option<(crate::stats::Control, usize)>,
+	/// The control message read, counted once the read is consumed.
+	pub(crate) control: Option<crate::stats::Control>,
+	/// Leading bytes left out of the `control` count: a type selector the sender writes
+	/// apart from the message, and so never counts.
+	pub(crate) uncounted: usize,
 }
 
 impl<'a> Decoder<'a> {
@@ -156,6 +158,7 @@ impl<'a> Decoder<'a> {
 			len: buf.len(),
 			need: 0,
 			control: None,
+			uncounted: 0,
 		}
 	}
 

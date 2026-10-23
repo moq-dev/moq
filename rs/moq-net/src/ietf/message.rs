@@ -96,7 +96,6 @@ impl Body {
 
 impl<T: Message> Decode<Version> for T {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
-		let start = r.position();
 		let size = r.u16()? as usize;
 		let mut body = r.sub(size)?;
 
@@ -113,7 +112,7 @@ impl<T: Message> Decode<Version> for T {
 			Err(err) => tracing::warn!(%err, "decode failed"),
 		}
 		if result.is_ok() {
-			r.control = Some((control(T::ID, version), start));
+			r.control = Some(control(T::ID, version));
 		}
 		result
 	}
