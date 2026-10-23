@@ -35,10 +35,9 @@ pub enum Read {
 	},
 	/// The publisher stopped its encoder: it paused, switched source, or finished.
 	///
-	/// Every sample decoded before the marker precedes it. Frames that follow and start
-	/// before `end` are the stopped encoder's codec drain, already trimmed at `end`; the
-	/// first frame at or past `end` comes from a fresh encoder, since a timeline only
-	/// moves forward.
+	/// Frames that follow and start before `end` are the stopped encoder's remaining
+	/// media: its codec drain, trimmed at `end`, and the resampler's tail. The first frame
+	/// at or past `end` comes from a fresh encoder, since a timeline only moves forward.
 	End {
 		/// Where the stopped encoder's media stops.
 		end: moq_net::Timestamp,
@@ -327,14 +326,11 @@ impl Consumer {
 					self.ready.push_back(Read::Gap { timestamp, duration });
 					continue;
 				}
-				// What the resampler holds arrived before the marker, so it comes out ahead
-				// of the end now rather than when a fresh encoder resumes, which also keeps
-				// it clear of an `end` stamped short of the media.
+				// The resampler keeps running: the stopped encoder's final packets follow in
+				// the marker's group and continue its media. What it still holds comes out
+				// after the end, starting before it, once a fresh encoder or the track's end
+				// drains it.
 				Some(Encoded::End { group, end }) => {
-					if let Some(frame) = self.drain()? {
-						self.ready.push_back(Read::Frame(frame));
-					}
-					self.spans.clear();
 					self.end = Some(end);
 					self.end_group = group;
 					self.frames_decoded = 0;
@@ -1172,10 +1168,10 @@ mod tests {
 		assert_eq!(reads, ["frame 0", "frame 20000", "gap 40000+460000", "frame 500000"]);
 	}
 
-	/// What the resampler holds when a marker arrives comes out ahead of the end, so
-	/// nothing after the end belongs to the stopped encoder unless it starts before `end`.
+	/// What the resampler holds at a marker comes out after the end, starting before it,
+	/// and ahead of the fresh encoder's first frame at or past it.
 	#[tokio::test]
-	async fn a_marker_drains_the_resampler_ahead_of_its_end() {
+	async fn a_resampler_tail_after_an_end_starts_before_it() {
 		tokio::time::pause();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -1227,18 +1223,15 @@ mod tests {
 			}
 		}
 		let end = ended.expect("the marker reads as an end");
-		assert_eq!(
-			before.len(),
-			2,
-			"the stopped encoder's body and resampler tail: {before:?}"
-		);
 		assert!(
 			before.iter().all(|timestamp| *timestamp < end),
 			"{before:?} past {end:?}"
 		);
-		assert!(!after.is_empty(), "a later group opens a fresh decoded timeline");
+		let tail = after.iter().take_while(|timestamp| **timestamp < end).count();
+		assert_eq!(tail, 1, "the stopped encoder's resampler tail leads: {after:?}");
+		assert!(after.len() > tail, "a later group opens a fresh decoded timeline");
 		assert!(
-			after.iter().all(|timestamp| *timestamp >= end),
+			after[tail..].iter().all(|timestamp| *timestamp >= end),
 			"{after:?} before {end:?}"
 		);
 	}

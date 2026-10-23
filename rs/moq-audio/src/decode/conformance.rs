@@ -218,8 +218,12 @@ async fn consumer_preserves_reference_samples_and_timeline() {
 		let mut pcm = Vec::new();
 		let mut first = None;
 		while let Some(read) = decoder.read().await.unwrap() {
-			if let decode::Read::Frame { frame, discontinuity } = read {
-				assert_eq!(discontinuity, 0, "{}: unexpected discontinuity", vector.name);
+			assert!(
+				!matches!(read, decode::Read::Gap { .. }),
+				"{}: unexpected gap",
+				vector.name
+			);
+			if let decode::Read::Frame(frame) = read {
 				let start = *first.get_or_insert(frame.timestamp);
 				let elapsed = Duration::from_secs_f64(pcm.len() as f64 / vector.channels as f64 / vector.rate as f64);
 				let actual = Duration::from(frame.timestamp)
