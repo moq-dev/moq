@@ -48,9 +48,6 @@ Decided by the maintainer on 2026-10-17:
 
 Guidance:
 
-- `moq-hls` history mode becomes explicit configuration only: today the
-  catalog's `store` marks a timeline durable (`durable` in
-  `rs/moq-hls/src/export/mod.rs`).
 - Fold in the old README's fix: `moq-mux`'s consumer refuses a record whose
   `sequence` differs from its window index, as its `Producer::resume` already
   does

@@ -65,8 +65,10 @@ Guidance:
   `track::Dynamic` handler resolves a `Time(pts)` end by picking the object
   from the key listing, then the group containing pts from that object's
   group timestamps, whichever quest lands second.
-- Move `rs/moq-hls/src/export/archive_tests.rs` onto a consumer broadcast with
-  its archived catalog, deleting the hand-built catalog.
+- Cover HLS export over a consumer broadcast with its archived catalog:
+  playlists read only the timelines, and a segment GETs only its own
+  rendition's objects. The Reader-based `moq-hls` archive tests went with
+  `moq-archive`'s public segment API.
 - Update `doc/bin/cli.md` and `doc/bin/hls.md` inline with an export, import,
   and HLS example.
 

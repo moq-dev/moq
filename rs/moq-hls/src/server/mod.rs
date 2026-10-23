@@ -30,7 +30,8 @@
 //!
 //! An embedder that authorizes each request itself (a token scoping the broadcast, a
 //! stats-metered origin per tenant) skips the router instead: parse the path with
-//! [`Route::parse`], check [`Route::broadcast`], rewrite it relative to the scope, and
+//! [`Route::parse`](crate::export::Route::parse), check
+//! [`Route::broadcast`](crate::export::Route::broadcast), rewrite it relative to the scope, and
 //! answer with [`Server::respond`] on a `Server` built from that scope's origin. The
 //! decoded broadcast is what a policy should check.
 //!
@@ -53,8 +54,6 @@
 //! ```
 
 mod routes;
-
-pub use routes::{Resource, Route};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
