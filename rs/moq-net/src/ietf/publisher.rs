@@ -852,6 +852,10 @@ where
 			return Advert::Some(ietf::AdvertParams { cluster: None, epoch });
 		}
 
+		if route.hops.len() >= self.origin.max_hops().get() {
+			return Advert::None;
+		}
+
 		let cost = route.cost.value();
 		// Our own Hop ID is always the last entry, so the peer reconstructs the full
 		// path. A chain with no room left is a loop in all but name.

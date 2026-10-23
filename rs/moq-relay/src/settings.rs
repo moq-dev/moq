@@ -79,6 +79,9 @@ struct Cluster {
 	#[usage(env = "MOQ_CLUSTER_ID", cli("--cluster-id"))]
 	id: Option<u64>,
 
+	#[usage(env = "MOQ_CLUSTER_MAX_HOPS", cli("--cluster-max-hops"))]
+	max_hops: Option<usize>,
+
 	#[usage(env = "MOQ_CLUSTER_CONNECT", cli("--cluster-connect"), parse = "list_by_comma")]
 	connect: Option<Vec<String>>,
 

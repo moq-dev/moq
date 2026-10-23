@@ -276,6 +276,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		auth: Option<crate::auth::Handle>,
 	) -> Result<(), Error> {
 		let mut run = AnnounceRun::new(crate::PathOwned::default(), self_origin, version);
+		run.max_hops = origin.max_hops();
 		run.auth = auth.map(|handle| {
 			crate::auth::Gate::new(handle, crate::Path::empty().to_owned(), crate::auth::Direction::Publish)
 		});
@@ -962,6 +963,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		};
 		let announced = origin.announced();
 		let mut run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
+		run.max_hops = origin.max_hops();
 		run.auth = Some(crate::auth::Gate::new(
 			self.shared.auth.clone(),
 			run.prefix.clone(),
@@ -978,6 +980,7 @@ struct AnnounceRun {
 	// matches paths relative to the origin's root.
 	prefix: crate::PathOwned,
 	self_origin: Hop,
+	max_hops: origin::HopLimit,
 	version: Version,
 	// Lite06+: announce ids. Every `active` we send implicitly assigns the next
 	// per-stream ordinal, and `ended` references the id instead of repeating the
@@ -1022,6 +1025,7 @@ impl AnnounceRun {
 		Self {
 			prefix,
 			self_origin,
+			max_hops: origin::HopLimit::default(),
 			version,
 			encoder: lite::AnnounceEncoder::new(version),
 			live: HashMap::new(),
@@ -1166,6 +1170,12 @@ impl AnnounceRun {
 		// filters these on receive, so this is defensive.
 		if self.self_origin != Hop::UNKNOWN && hops.contains(&self.self_origin) {
 			tracing::debug!(route = %absolute, "dropping reflected route");
+			return None;
+		}
+
+		// Count our stamp even when AnnounceOk makes the receiver append it.
+		if !matches!(self.version, Version::Lite01 | Version::Lite02) && hops.len() >= self.max_hops.get() {
+			tracing::debug!(route = %absolute, "dropping announce beyond hop limit");
 			return None;
 		}
 

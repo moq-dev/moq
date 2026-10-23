@@ -102,6 +102,14 @@ pub struct Config {
 	/// detection and shortest-path routing.
 	pub hop: Hop,
 
+	/// Longest hop path a session using this origin accepts or forwards (default 32).
+	///
+	/// Applies to moq-lite-03+ hop paths and the negotiated MoQ Cluster extension on
+	/// moq-transport. A forwarded path counts this origin's own hop too, including
+	/// when the receiving peer reconstructs that hop from the announce handshake.
+	/// Protocols without a hop path cannot reveal or bound the depth they hide.
+	pub max_hops: HopLimit,
+
 	/// The cache pool broadcasts under this origin charge their groups into. It flows
 	/// down the ownership chain (origin -> broadcast -> track -> group): a track opens
 	/// an account against it, and its groups charge through that. It has no byte target
@@ -158,6 +166,7 @@ impl Default for Config {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 		Self {
 			hop: Hop::random(),
+			max_hops: HopLimit::default(),
 			pool,
 			cache_duration: Duration::MAX,
 			update_hold: DEFAULT_UPDATE_HOLD,
@@ -212,6 +221,32 @@ impl<V> Decode<V> for Hop {
 /// diameter; appending past this limit returns [`InvalidHop::TooMany`] rather than
 /// silently truncating.
 pub(super) const MAX_HOPS: usize = 32;
+
+/// The longest advertised hop path an origin accepts or forwards, from 1 to 32.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HopLimit(usize);
+
+impl HopLimit {
+	/// A hop-path cap from 1 to 32, or `None` outside that range.
+	pub const fn new(max: usize) -> Option<Self> {
+		if max == 0 || max > MAX_HOPS {
+			None
+		} else {
+			Some(Self(max))
+		}
+	}
+
+	/// The maximum number of hops in an advertised path.
+	pub const fn get(self) -> usize {
+		self.0
+	}
+}
+
+impl Default for HopLimit {
+	fn default() -> Self {
+		Self(MAX_HOPS)
+	}
+}
 
 /// Bounded, loop-free list of [`Hop`] entries: the hop chain of a broadcast.
 ///
@@ -1738,6 +1773,7 @@ pub struct Producer {
 	// Identity for this origin. Appended to route hops when re-announcing so
 	// downstream relays can detect loops and prefer the shortest path.
 	hop: Hop,
+	max_hops: HopLimit,
 
 	// The absolute patterns this handle may publish under.
 	scope: OriginScope,
@@ -1797,6 +1833,7 @@ impl Producer {
 		let pool = config.pool.clone();
 		let producer = Self {
 			hop: config.hop,
+			max_hops: config.max_hops,
 			scope: scope.clone(),
 			root: PathOwned::default(),
 			shared: shared.clone(),
@@ -1890,6 +1927,7 @@ impl Producer {
 	pub fn config(&self) -> Config {
 		Config {
 			hop: self.hop,
+			max_hops: self.max_hops,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			update_hold: self.shared.lock().update_hold,
@@ -1899,6 +1937,13 @@ impl Producer {
 	/// This origin's hop identity.
 	pub fn hop(&self) -> Hop {
 		self.hop
+	}
+
+	// Sessions enforce the policy configured once on the origin.
+	// private: tuning
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn max_hops(&self) -> HopLimit {
+		self.max_hops
 	}
 
 	/// A producer with *no* allowed prefixes: it can't publish anything and
@@ -1914,6 +1959,7 @@ impl Producer {
 		Self {
 			hop,
 			scope: OriginScope::empty(),
+			max_hops: HopLimit::default(),
 			root: PathOwned::default(),
 			shared: SendCell::new(kio::Shared::new(OriginState::new(
 				DEFAULT_UPDATE_HOLD,
@@ -2198,6 +2244,7 @@ impl Producer {
 		let scope = self.scope.narrow(&rooted).ok_or(Error::Unauthorized)?;
 		Ok(Producer {
 			hop: self.hop,
+			max_hops: self.max_hops,
 			scope,
 			root,
 			shared: self.shared.clone(),
@@ -5788,6 +5835,7 @@ impl Consume<track::Consumer> for track::Consumer {
 pub struct Consumer {
 	// Identity of the origin this consumer was derived from.
 	hop: Hop,
+	max_hops: HopLimit,
 	scope: OriginScope,
 
 	// A prefix that is automatically stripped from all paths.
@@ -5836,6 +5884,7 @@ impl Consumer {
 	fn from_producer(producer: &Producer, stats: stats::Session) -> Self {
 		Self {
 			hop: producer.hop,
+			max_hops: producer.max_hops,
 			scope: producer.scope.clone(),
 			root: producer.root.clone(),
 			shared: producer.shared.clone(),
@@ -5856,6 +5905,13 @@ impl Consumer {
 	/// This origin's hop identity.
 	pub fn hop(&self) -> Hop {
 		self.hop
+	}
+
+	// Sessions enforce the policy configured once on the origin.
+	// private: tuning
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn max_hops(&self) -> HopLimit {
+		self.max_hops
 	}
 
 	/// A clone that never serves the given peer its own data: routes whose hop
@@ -6989,6 +7045,25 @@ impl ProduceTest for Hop {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn hop_limit_refuses_values_outside_the_wire_bound() {
+		for invalid in [0, 33, usize::MAX] {
+			assert_eq!(HopLimit::new(invalid), None);
+		}
+		for valid in [1, 6, 32] {
+			assert_eq!(HopLimit::new(valid).unwrap().get(), valid);
+		}
+		assert_eq!(HopLimit::default().get(), 32);
+		let config = Config {
+			max_hops: HopLimit::new(6).unwrap(),
+			..Default::default()
+		};
+		let (producer, _driver) = Producer::new(config);
+		let scoped = producer.scope("room", &Patterns::from(Pattern::all())).unwrap();
+		assert_eq!(scoped.config().max_hops.get(), 6);
+		assert_eq!(scoped.consume().max_hops().get(), 6);
+	}
 	#[cfg(feature = "async")]
 	use crate::model::test_tracing::count_drop_warnings;
 	use futures::FutureExt;
