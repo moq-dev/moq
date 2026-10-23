@@ -508,7 +508,7 @@ impl Track {
 						}
 						Some(_) => self.clock.discard(),
 					}
-					input.jitter.cut(&self.pid, self.base.2 + self.source.cuts());
+					input.jitter.cut(&name.to_owned(), self.base.2 + self.source.cuts());
 				}
 				Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => self.settle = self.sync.is_none(),
 				Poll::Ready(Some(Event::FrameEnd { .. })) => {}
