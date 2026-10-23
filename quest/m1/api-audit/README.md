@@ -63,7 +63,7 @@ Rejected in planning:
   `close` collides with `AutoCloseable`, and no single verb fits every
   language's reserved names.
 - A follow policy enum folding `linger` and `stitch`: one name per meaning
-  ([CLI flags](/quest/m1/api-audit/cli-flags.md)) fixes the confusion more
+  ([moq-dev/moq#6522](https://github.com/moq-dev/moq/pull/6522)) fixes the confusion more
   cheaply.
 
 ## Required
@@ -85,7 +85,7 @@ Rejected in planning:
 - [One decode read](/quest/m1/api-audit/decode-read.md) - audio and video decoders yield the same `Frame`, `Gap`, `End` read as moq-mux containers
 - [Watch and publish trim](/quest/m1/api-audit/watch-trim.md) - the clock is re-exported, unused watch outputs are gone, and derived publish state is read-only
 - [Media surface trim](/quest/m1/api-audit/media-trim.md) - media crate items with no consumer go private, and Rust/JS media names agree
-- [CLI and gst flags](/quest/m1/api-audit/cli-flags.md) - one flag name per meaning across CLI subcommands and gst elements, and `linger` means one thing
+- [Pinned consumers adopt the CLI flag names](/quest/m1/api-audit/cli-flags-consumers.md) - pinned downstream deployments move past the flag rename and use its spellings
 - [qmux shape](/quest/m1/api-audit/qmux-shape.md) - qmux binds framing at connect, shares flow-control names with moq-tokio, and JS drops the legacy wire
 - [Transport config](/quest/m1/api-audit/transport-config.md) - moq-tokio and moq-quic configs have one meaning for unset, enums for modes, no order-dependent setters, and no leftover features
 - [Relay config](/quest/m1/api-audit/relay-config.md) - moq-relay and its embedders load config through one path that refuses old spellings, under names that do not collide
