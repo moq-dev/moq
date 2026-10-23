@@ -120,12 +120,15 @@ fn partial_frame_gives_way() {
 			.expect("quic accept");
 		let (session, driver) = moq_net::Server::new()
 			.with_publisher(&pub_origin)
-			.accept_lite(
+			.accept(
 				moq_net::time::Instant::now(),
-				moq_uring::transport::Session::new(quic::web::Session::raw(conn), moq_net::transport::Binding::InBand),
+				moq_uring::transport::Local::new(moq_uring::transport::Session::new(
+					quic::web::Session::raw(conn),
+					moq_net::transport::Binding::InBand,
+				)),
 			)
 			.await
-			.expect("accept_lite");
+			.expect("accept");
 		let _ = server_handle.run(driver).await;
 		session.closed().await;
 	});
@@ -136,15 +139,15 @@ fn partial_frame_gives_way() {
 			let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 			let (session, driver) = moq_net::Client::new()
 				.with_subscriber(sub.clone())
-				.connect_lite(
+				.connect(
 					moq_net::time::Instant::now(),
-					moq_uring::transport::Session::new(
+					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 						quic::web::Session::raw(conn),
 						moq_net::transport::Binding::InBand,
-					),
+					)),
 				)
 				.await
-				.expect("connect_lite");
+				.expect("connect");
 			let task_handle = handle.clone();
 			handle.spawn(async move {
 				let _ = task_handle.run(driver).await;
@@ -292,9 +295,12 @@ fn javascript_partial_frame_gives_way() {
 				.expect("respond");
 			let (session, driver) = moq_net::Server::new()
 				.with_subscriber(sub.clone())
-				.accept_lite(
+				.accept(
 					moq_net::time::Instant::now(),
-					moq_uring::transport::Session::new(session, moq_net::transport::Binding::Uri),
+					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
+						session,
+						moq_net::transport::Binding::Uri,
+					)),
 				)
 				.await
 				.expect("accept");

@@ -11,7 +11,7 @@
 /// same group and coalesce into it.
 ///
 /// There is no spacing between cuts: the refresh ratio already rate-limits joins by the bytes
-/// a group holds, and a floor would let a joiner download well past that ratio.
+/// a group holds, and a floor would let a group grow well past that ratio.
 pub(super) struct Cuts {
 	/// The request count already accounted for.
 	requests: u64,
