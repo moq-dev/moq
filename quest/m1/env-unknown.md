@@ -2,10 +2,11 @@
 
 ## Goal
 
-`moq-relay`, `moq`, and `moq-bench` exit at startup, naming the variable,
-when the environment holds a `MOQ_*` variable the binary does not read. A
-deployment (Docker, systemd, NixOS) that sets a stale or misspelled name
-fails loudly instead of silently running on defaults.
+Every binary that reads `MOQ_*` variables (`moq-relay`, `moq`, `moq-bench`,
+`moq-boy`) exits at startup, naming the variable, when the environment holds
+a `MOQ_*` variable the binary does not read. A deployment (Docker, systemd,
+NixOS) that sets a stale or misspelled name fails loudly instead of silently
+running on defaults.
 
 ## Plan
 
