@@ -4,7 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Connection state
+
 Generated connection APIs now expose `MoqConnectionState` and `MoqConnectionPhase`, with `state()` and revision-based `state_changed(after)` instead of status, connect-count, and failure polls. Native connect returns before its first dial completes. Regenerate bindings from the matching Rust metadata.
+
+### Native futures support operation cancellation
+
+Generated async calls return `UniffiRustFuture<T>`, which implements `Future<T>` and adds `Future<void> cancel()`.
+Existing `await` and `Future<T>` assignments work unchanged; custom implementations of generated interfaces must return the new type.
+Direct callers of `uniffiRustCallAsync` must pass the native cancel function before the free function.
+Keep the original call to cancel it: futures returned by `then`, `timeout`, and other `Future` combinators do not propagate cancellation.
+`cancel()` is idempotent and waits for native cleanup without closing the object that started the call.
+The original future throws `UniffiCancelledException` if cancellation wins; a result already ready can still win the race.
+Regenerate with the patched generator from `nix develop` and `just dart generate`; native symbols and UniFFI checksums are unchanged.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 

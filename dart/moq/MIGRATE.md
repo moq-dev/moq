@@ -4,7 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Connection state
+
 `Moq.connect` returns a connecting native session. Replace status, connect-count, and failure polls with `session.state()` and `session.stateChanged(after: state.revision)`. `ConnectionState` carries `phase`, `connects`, `failure`, and `version`; `ConnectionPhase` replaces `ConnectionStatus`.
+
+### Cancelling a stream cancels its pending read
+
+`await subscription.cancel()` on announcements, authorization grants, and server requests now waits for the pending native operation to release, even when no event arrives.
+Announcement subscriptions still own and release their cursor; cancelling a grant or request subscription keeps its shared `Auth` or `Server` usable.
+The generated async methods now return `UniffiRustFuture<T>`, a `Future<T>` with `cancel()`; existing `await` and `Future<T>` assignments work unchanged.
+Custom implementations of generated interfaces must return `UniffiRustFuture<T>` instead of a plain `Future<T>`.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
