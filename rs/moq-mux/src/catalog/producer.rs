@@ -568,6 +568,11 @@ impl<E: CatalogExt> Producer<E> {
 		take(&self.current).clock
 	}
 
+	/// The config `name` holds in `C`'s section, cloned without copying the rest of the catalog.
+	pub(super) fn config<C: super::RenditionConfig<E>>(&self, name: &str) -> Option<C> {
+		C::get_mut(&mut take(&self.current).catalog, name).cloned()
+	}
+
 	/// Anchor a timebase on its first timestamp `pts`, which happened at `wall` (or arrived now),
 	/// returning the timebase's offset.
 	///

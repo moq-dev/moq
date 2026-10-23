@@ -3275,6 +3275,9 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							if io.staged.as_ref().is_some_and(|asked| asked.source == source) {
 								io.staged = None;
 							}
+							// Any source leaving is rare: drop every parked shortcut rather
+							// than track which source each came from.
+							io.routes.unpark();
 						}
 					}
 					Action::Resolve => {
@@ -12303,6 +12306,69 @@ mod tests {
 		.await;
 		assert!(outcome.is_ok(), "the returning reader waits on a copy the park dropped");
 		drop(upstream);
+	}
+
+	/// The reader leaves, parking the track. A fetch of a whole group the parked copy
+	/// caches answers at once, without the front serving the copy again; an open group
+	/// still waits on the front, and is served once the copy is back.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_parked_track_serves_whole_groups_from_its_copy() {
+		let (producer, _server, _upstream, old, subscription) = remote_front().await;
+		let resolved = producer.consume().request_broadcast("room/alice", None).await.unwrap();
+		let mut open = old.append_group().unwrap();
+		open.write_frame(crate::Timestamp::ZERO, b"open".as_ref()).unwrap();
+		drop(subscription);
+		moq_clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+			.await
+			.expect("parked")
+			.expect("open");
+
+		let track = resolved.track("video").unwrap();
+		let mut whole = track
+			.fetch_group(0, None)
+			.now_or_never()
+			.expect("a whole group needs no front")
+			.unwrap();
+		assert_eq!(&whole.read_frame().await.unwrap().unwrap().payload[..], b"before");
+
+		let mut fetching = track.fetch_group(1, None);
+		assert!(
+			(&mut fetching).now_or_never().is_none(),
+			"an open group needs the route"
+		);
+		open.finish().unwrap();
+		let mut group = fetching.await.unwrap();
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"open");
+	}
+
+	/// A new source takes over a parked track: a whole group its old copy caches is no
+	/// longer served from that copy, but asked of the new route, which lacks it.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_new_source_unparks_the_old_copy() {
+		let (producer, _server, _upstream, old, subscription) = remote_front().await;
+		let resolved = producer.consume().request_broadcast("room/alice", None).await.unwrap();
+		drop(subscription);
+		moq_clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+			.await
+			.expect("parked")
+			.expect("open");
+
+		let newcomer = producer
+			.publish("room/alice", Route::default().with_epoch(epoch()))
+			.unwrap();
+		let _video = newcomer.create_track("video", crate::track::Info::timed()).unwrap();
+		for _ in 0..10 {
+			moq_clock::sim::yield_now().await;
+		}
+
+		let mut fetching = resolved.track("video").unwrap().fetch_group(0, None);
+		assert!(
+			(&mut fetching).now_or_never().is_none(),
+			"served from the detached copy"
+		);
+		assert!(matches!(fetching.await, Err(Error::NotFound)));
 	}
 
 	/// A newer local source's copy of "video" is refused for its metadata while the

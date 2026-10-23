@@ -433,7 +433,8 @@ fn bench_wall(c: &mut Criterion) {
 			group.throughput(Throughput::Elements(1));
 			group.bench_function(BenchmarkId::new("idle", &id), |b| {
 				let aged = Aged::new(tracks, groups);
-				b.iter(|| black_box(aged.pool.gc(aged.now, &kio::Waiter::noop())));
+				let waiter = kio::Waiter::noop();
+				b.iter(|| black_box(aged.pool.gc(aged.now, &waiter)));
 			});
 			// Re-polling one parked read re-arms its deadline.
 			group.bench_function(BenchmarkId::new("repoll", &id), |b| {
@@ -472,7 +473,18 @@ fn bench_gc(c: &mut Criterion) {
 		group.throughput(Throughput::Elements(1));
 		group.bench_with_input(BenchmarkId::new("idle", tracks), &tracks, |b, &tracks| {
 			let swept = Swept::new(tracks);
-			b.iter(|| black_box(swept.pool.gc(swept.now, &kio::Waiter::noop())));
+			let waiter = kio::Waiter::noop();
+			b.iter(|| black_box(swept.pool.gc(swept.now, &waiter)));
+		});
+		// Also advance supplied time, so reusing an identical instant cannot hide clock work.
+		group.bench_with_input(BenchmarkId::new("advancing", tracks), &tracks, |b, &tracks| {
+			let swept = Swept::new(tracks);
+			let mut now = swept.now;
+			let waiter = kio::Waiter::noop();
+			b.iter(|| {
+				now += Duration::from_nanos(1);
+				black_box(swept.pool.gc(now, &waiter))
+			});
 		});
 		// A due pass, stepping one sweep interval per call.
 		group.throughput(Throughput::Elements(tracks as u64));
@@ -480,9 +492,10 @@ fn bench_gc(c: &mut Criterion) {
 			let swept = Swept::new(tracks);
 			let interval = cache::DEFAULT_EXPIRY / 2;
 			let mut now = swept.now;
+			let waiter = kio::Waiter::noop();
 			b.iter(|| {
 				now += interval;
-				black_box(swept.pool.gc(now, &kio::Waiter::noop()))
+				black_box(swept.pool.gc(now, &waiter))
 			});
 		});
 	}

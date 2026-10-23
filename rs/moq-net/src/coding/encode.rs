@@ -59,12 +59,17 @@ pub trait Encode<V> {
 pub struct Encoder<'a> {
 	buf: &'a mut Vec<u8>,
 	form: Form,
+	pub(crate) control: Option<crate::stats::Control>,
 }
 
 impl<'a> Encoder<'a> {
 	/// Append to `buf`, with varints in the given form.
 	pub fn new(buf: &'a mut Vec<u8>, form: Form) -> Self {
-		Self { buf, form }
+		Self {
+			buf,
+			form,
+			control: None,
+		}
 	}
 
 	/// The varint form this encoder writes.

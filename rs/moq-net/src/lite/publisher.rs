@@ -237,6 +237,7 @@ where
 		loop {
 			match Stream::poll_accept(&mut self.accept, self.shared.version, &mut cx) {
 				Poll::Ready(Ok(stream)) => {
+					let stream = stream.with_stats(self.shared.origin.stats());
 					self.children.push(Control {
 						shared: self.shared.clone(),
 						runtime: self.runtime.clone(),
@@ -291,6 +292,10 @@ struct Control<S: crate::transport::poll::Session> {
 	state: ControlState<S>,
 }
 
+#[expect(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk"
+)]
 enum ControlState<S: crate::transport::poll::Session> {
 	/// Reading the stream's type.
 	Start {
@@ -1957,7 +1962,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 		crate::ietf::flate::egress(&info, shared.version.has_compression())?;
 
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise).
-		writer.buffer(&lite::TrackInfo::serve(&info, shared.version))?;
+		writer.buffer(&lite::TrackInfo::serve(&info, shared.version, ietf))?;
 		if ietf {
 			writer.buffer(&lite::ietf::TrackProperties(info.properties.clone()))?;
 		}
@@ -2014,7 +2019,9 @@ impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
 		let event = match ready!(self.tracks.poll_next(waiter))? {
 			Some(crate::broadcast::TracksEvent::Added { name, info }) => lite::TracksEvent::Added {
 				name: name.to_string().into(),
-				info: lite::TrackInfo::serve(&info, shared.version),
+				// Untimed even to an extension peer: TRACKS_ADD has no TRACK_PROPERTIES to
+				// carry the unchecked provenance, so a relay would re-list it as native lite.
+				info: lite::TrackInfo::serve(&info, shared.version, false),
 			},
 			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
 				name: name.to_string().into(),
@@ -2128,7 +2135,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					// `None` omits the per-frame timestamp prefix: an untimed track on
 					// Lite07+, or any track before Lite05 (whose frames still carry
 					// timestamps in the model, just not on this wire).
-					let stamp = Stamp::new(shared.version, track.info().lite_timescale());
+					let stamp = Stamp::new(shared.version, track.info().lite_timescale(ietf));
 
 					// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties
 					// live in TRACK_INFO, and the resolved range arrives as
@@ -2305,7 +2312,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 					group.end_at(msg.end_frame.map_or(Bound::Unbounded, Bound::Included));
 
 					// Matches the timescale TRACK_INFO declared for the track.
-					let stamp = Stamp::new(shared.version, group.lite_timescale());
+					let stamp = Stamp::new(shared.version, group.lite_timescale(ietf));
 					// And its compression, which a lite-07 peer receives as stored.
 					if shared.version.has_compression() {
 						group = group.compressed();
@@ -3417,10 +3424,6 @@ fn buffer_zigzag_delta<W: crate::transport::poll::SendStream>(
 /// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
 /// best-effort datagram to forward, the track declaring its exclusive final sequence, or
 /// the track finishing (the live edge having reached that boundary).
-#[expect(
-	clippy::large_enum_variant,
-	reason = "a `group::Consumer` carries an inline frame prefetch, so the `Group` variant dwarfs the others. This is a transient, one-at-a-time return value, so the padding is never held in bulk; boxing would only add a per-group allocation"
-)]
 enum Recv {
 	Group(group::Consumer),
 	Datagram(crate::model::datagram::Stored),
@@ -4836,15 +4839,20 @@ mod serve_group_test {
 		let sent = Timestamp::from(runtime.now()).value();
 		let checked = track::Info::timed();
 		let unchecked = track::Info {
-			unchecked: true,
+			properties: Some(std::sync::Arc::new(crate::model::object::TrackProperties {
+				version: crate::ietf::Version::Draft22,
+				values: Vec::new(),
+			})),
 			..track::Info::timed()
 		};
 
-		let stamp = Stamp::new(Version::Lite06, checked.lite_timescale()).unwrap();
+		let stamp = Stamp::new(Version::Lite06, checked.lite_timescale(false)).unwrap();
 		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), stamped.value());
-		let stamp = Stamp::new(Version::Lite06, unchecked.lite_timescale()).unwrap();
+		let stamp = Stamp::new(Version::Lite06, unchecked.lite_timescale(false)).unwrap();
 		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), sent);
-		assert!(Stamp::new(Version::Lite07, unchecked.lite_timescale()).is_none());
+		assert!(Stamp::new(Version::Lite07, unchecked.lite_timescale(false)).is_none());
+		let stamp = Stamp::new(Version::Lite07, unchecked.lite_timescale(true)).unwrap();
+		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), stamped.value());
 	}
 
 	#[moq_clock::test]

@@ -19,6 +19,7 @@ import {
 } from "./error.ts";
 import { Compression } from "./flate/group.ts";
 import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
+import type { IetfVersion } from "./ietf/version.ts";
 import {
 	type DropRun,
 	dropAt,
@@ -130,15 +131,9 @@ export interface Info {
 	 * snapshot or keyframe. `0` asks on any join after a delta. An integer in `0..2^32`.
 	 */
 	refresh?: number;
-	/**
-	 * Whether this timed track's timestamps arrived over moq-transport, whose peers may stamp
-	 * arrival times, so no group is checked for a rewind. A moq-lite hop serves the track
-	 * untimed, since its receivers check every timestamp. Mirrors the Rust
-	 * `track::Info::unchecked`.
-	 *
-	 * @internal
-	 */
-	unchecked?: boolean;
+	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
+	// private: passthrough
+	ietf?: IetfVersion;
 }
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
@@ -166,9 +161,9 @@ function priorityValue(value: number): number {
 }
 
 // private: passthrough
-/** The timescale a moq-lite hop serves a track at: none for an {@link Info.unchecked} one. @internal */
+/** The timescale a moq-lite hop serves a track at: none for an {@link Info.ietf} one. @internal */
 export function liteTimescale(info: Info): Timescale | undefined {
-	return info.unchecked ? undefined : (info.timescale ?? undefined);
+	return info.ietf === undefined ? (info.timescale ?? undefined) : undefined;
 }
 
 /** Fill in any unset {@link Info} fields with their defaults. */
@@ -176,15 +171,13 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 	if (info.compress !== undefined && typeof info.compress !== "boolean")
 		throw new TypeError("compress must be a boolean");
 	const timescale = info.timescale == null ? undefined : Timescale(info.timescale);
-	// Only a timed track has timestamps to doubt.
-	if (info.unchecked && timescale === undefined) throw new RangeError("an untimed track can't be unchecked");
 	return {
 		compress: info.compress ?? false,
 		timescale,
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
 		priority: priorityValue(info.priority ?? DEFAULT_PRIORITY),
 		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
-		...(info.unchecked ? { unchecked: true } : {}),
+		...(info.ietf === undefined ? {} : { ietf: info.ietf }),
 	};
 }
 
@@ -1500,9 +1493,9 @@ export class Producer {
 		this.#publish(group, start, late);
 	}
 
-	// Whether this track's timestamps may rewind (see {@link Info.unchecked}).
+	// Whether this track's timestamps may rewind (see {@link Info.ietf}).
 	#unchecked(): boolean {
-		return this.#state.info.peek()?.unchecked === true;
+		return this.#state.info.peek()?.ietf !== undefined;
 	}
 
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
@@ -1846,19 +1839,23 @@ export class Subscriber {
 		const { end } = this.#cursor.peek();
 		const timeline = this.#state.timeline;
 		let presentation: { sequence: number; timestamp: Timestamp } | undefined;
-		// The edge wants the newest content that exists, so it takes the newest
-		// stamped group's latest frame: walk back from the cap to the first one.
-		for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
-			const group = timeline[i];
-			if (group.closed.peek() instanceof Error) continue;
-			const timestamp = hooks.groupTimestamp(group);
-			if (timestamp === undefined) continue;
-			presentation = { sequence: group.sequence, timestamp: hooks.groupLatest(group) ?? timestamp };
-			break;
+		const info = this.#state.info.peek();
+		// An accepted untimed track cannot contain a presentation timestamp.
+		if (info === undefined || info.timescale != null) {
+			// The edge wants the newest content that exists, so it takes the newest
+			// stamped group's latest frame: walk back from the cap to the first one.
+			for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
+				const group = timeline[i];
+				if (group.closed.peek() instanceof Error) continue;
+				const timestamp = hooks.groupTimestamp(group);
+				if (timestamp === undefined) continue;
+				presentation = { sequence: group.sequence, timestamp: hooks.groupLatest(group) ?? timestamp };
+				break;
+			}
 		}
 
 		const requested = this.#fetchBudget ?? this.#state.update.peek()?.maxDelay ?? 0;
-		const retained = this.#state.info.peek()?.maxAge;
+		const retained = info?.maxAge;
 		return {
 			budget: retained === undefined ? requested : Math.min(requested, retained),
 			presentation,

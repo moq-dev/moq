@@ -177,6 +177,11 @@ impl Broadcaster {
 		self.broadcast.closed().await;
 	}
 
+	/// [`closed`](Self::closed), polled: ready once the source broadcast closes.
+	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+		self.broadcast.poll_closed(waiter)
+	}
+
 	/// Look up a rendition by kind and name. Video and audio are separate axes, so a
 	/// video and an audio rendition may share a name without colliding. A rendition is found
 	/// only once the catalog advertises its own timeline.
