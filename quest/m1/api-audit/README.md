@@ -90,7 +90,6 @@ Rejected in planning:
 - [Auth and clock names](/quest/m1/api-audit/auth-clock-names.md) - refusal and reason types have distinct names, and the Rust and JS clocks mirror each other
 - [Session-only items stay private](/quest/m1/api-audit/model-private.md) - model items only the built-in sessions use are private
 - [Only sessions accept a request](/quest/m1/api-audit/claim-request-type.md) - accepting an application claim's request fails to compile, and the peer-route hatches are crate-private
-- [One range setter](/quest/m1/api-audit/serve.md) - `with_range` replaces seven cursor setters and nothing else of the serving cursor goes public
 - [A request's source enforces its validity](/quest/m1/api-audit/answer.md) - a stale source refuses new track requests by itself, with no public additions
 - [moq-transport stays private](/quest/m1/api-audit/ietf-private.md) - no public moq-net item exists only for moq-transport, and a client names its request target once as a URL
 - [One lifecycle vocabulary](/quest/m1/api-audit/lifecycle.md) - finish, abort, closed, and close mean one thing on every handle, and Rust and JS observers fire alike
