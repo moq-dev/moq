@@ -18,8 +18,8 @@ Things to look out for:
   each client decodes every rendition it is offered, or the harness asks for one
   by name per pass.
 - ffmpeg's AAC encoder adds priming samples; a decoder that ignores them shifts
-  the tone without a gap, which the check does not see (it does not anchor
-  phase to timestamps).
+  the tone without a gap, which `tone.py --phase` catches where `interop.sh`'s
+  `phase_checked` allows it. Check the AAC pairs it should cover actually pass.
 
 Public API: none expected. Wire: none.
 

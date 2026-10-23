@@ -169,11 +169,10 @@ impl Config {
 
 /// Number of 48 kHz samples in an Opus packet, read from its TOC byte (RFC 6716 §3.1).
 ///
-/// MPEG-TS aggregates several Opus packets into one PES, so the importer advances each
-/// packet's timestamp by this. Opus timing is always reckoned at 48 kHz regardless of the
-/// encoder's internal bandwidth. Returns `None` for an empty packet, a code-3 packet
-/// missing its frame-count byte, or a packet outside the 1 frame and 120 ms RFC 6716 allows.
-pub(crate) fn packet_samples(packet: &[u8]) -> Option<u32> {
+/// Opus timing is always reckoned at 48 kHz regardless of the encoder's internal bandwidth.
+/// Returns `None` for an empty packet, a code-3 packet missing its frame-count byte, or a
+/// packet outside the 1 frame and 120 ms RFC 6716 allows.
+pub fn packet_samples(packet: &[u8]) -> Option<u32> {
 	let toc = *packet.first()?;
 	let frames = match toc & 0b11 {
 		0 => 1,

@@ -11,7 +11,8 @@
 #
 # It stands up a moq-relay, then for each publisher language publishes an H.264
 # broadcast with an Opus tone per audio channel, and confirms every subscriber sees
-# video and decodes that tone, contiguous, before the timeout (tone.py judges the
+# video and decodes that tone, contiguous and in phase with its timestamps (see
+# phase_checked), before the timeout (tone.py judges the
 # decode; the browser judges its own playback). A publisher with its channels'
 # tones swapped must then fail every subscriber's check. The browser subscriber
 # also verifies rendered WebCodecs output and player pause/resume, then that a
@@ -348,6 +349,14 @@ publisher_tone() {
 }
 # The wrong-tone control's publisher sends the stereo tone with its channels swapped.
 SWAPPED_TONE="660,440"
+# phase_checked <round> <subscriber>: whether tone.py also holds the tone's phase to the decode's
+# timestamps, which fails a misapplied pre-skip. Every publisher's tone starts at timestamp zero
+# except the browser's, whose capture clock is not tied to its WAV. The native-JS subscriber hands
+# WebCodecs raw Opus without the OpusHead, as the player does, which keeps the pre-skip for the
+# player to trim, and its libav fallback stamps milliseconds.
+phase_checked() {
+    [[ "$1" != js* && "$2" != js-native-* ]]
+}
 
 # Record a case for the CI report: `record <outcome> case=C [field=value...]` (see
 # harness_result). Every session in a case dials the same relay with each client's own
@@ -1263,7 +1272,9 @@ run_cell() {
     run_subscriber "$sub" "$broadcast" "$url" "$decoded" "$tone" || status=$?
     # The browser judges the tone in its page; every other subscriber leaves its decode here.
     if [[ "$status" -eq 0 && "$AUDIO" -eq 1 && "$sub" != js ]]; then
-        python3 "$INTEROP_DIR/tone.py" --tone "$tone" "$decoded" || status=$?
+        local phase=()
+        if phase_checked "$pub" "$sub"; then phase=(--phase); fi
+        python3 "$INTEROP_DIR/tone.py" --tone "$tone" ${phase[@]+"${phase[@]}"} "$decoded" || status=$?
     fi
     echo "$((SECONDS - started))" >"$LOGS/$pub-$sub.secs"
     return "$status"

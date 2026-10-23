@@ -8,10 +8,14 @@ subscriber decodes its first --audio-ms of audio to two files under one prefix:
 
 This checks the layout matches the tone list, the frames are contiguous in time, and each channel
 carries its own tone, using a Goertzel filter at that channel's frequency. A garbled decode (wrong
-channel order or sample rate), silence, or a timestamp gap fails. A misapplied pre-skip does
-not: it only shifts a steady tone's phase, which this does not anchor to the timestamps.
+channel order or sample rate), silence, or a timestamp gap fails.
 
-    python3 tone.py --tone 440,660 /run/rust-python-audio
+Every publisher's tone starts at timestamp zero, so the sample decoded at timestamp t carries phase
+2πft. With --phase, each channel's tone must hold that phase, which fails a decoder that keeps or
+drops the wrong number of priming samples (Opus pre-skip, AAC priming): that only shifts a steady
+tone in time. Pass it only where the publisher's and subscriber's timestamps are precise enough.
+
+    python3 tone.py --tone 440,660 --phase /run/rust-python-audio
 
 Prints one `audio ok:` line, or `audio check failed: <why>` and exits 1.
 """
@@ -55,13 +59,28 @@ def goertzel_share(samples, rate, hz):
     return 2 * power / (len(samples) * energy)
 
 
+def offset_us(samples, times, hz):
+    """How far ahead of its timestamps the tone `sin(2πft)` runs, in microseconds.
+
+    Only defined modulo the tone's period, so the result is the nearest offset: within half a
+    period either way."""
+    omega = 2 * math.pi * hz
+    re = im = 0.0
+    for x, t in zip(samples, times):
+        re += x * math.cos(omega * t)
+        im -= x * math.sin(omega * t)
+    # sin(ω(t + d)) correlates with e^{-iωt} at phase ωd - π/2.
+    phase = math.remainder(math.atan2(im, re) + math.pi / 2, 2 * math.pi)
+    return phase / omega * 1_000_000
+
+
 def dominant_hz(samples, rate):
     """The strongest frequency in 20 Hz steps, to say what a failing channel carries instead."""
     probe = samples[: rate // 10]
     return max(range(100, 4000, 20), key=lambda hz: goertzel_share(probe, rate, hz))
 
 
-def check(prefix, tones):
+def check(prefix, tones, phase=False):
     lines = Path(f"{prefix}.txt").read_text().split("\n")
     try:
         rate, channels = (int(v) for v in lines[0].split())
@@ -88,7 +107,9 @@ def check(prefix, tones):
         raise Failure(f"only {total * 1000 // rate}ms decoded, need {SKIP_MS + WINDOW_MS}ms")
     samples = struct.unpack(f"<{total * channels}f", pcm)
 
-    shares = []
+    # Each judged sample's time, for --phase: its frame's timestamp plus its place in the frame.
+    times = [ts / 1_000_000 + n / rate for ts, count in frames for n in range(count)][skip:] if phase else None
+    judged = []
     for channel, hz in enumerate(tones):
         data = samples[skip * channels + channel :: channels]
         rms = math.sqrt(sum(x * x for x in data) / len(data))
@@ -100,21 +121,33 @@ def check(prefix, tones):
                 f"wrong tone: channel {channel} carries ~{dominant_hz(data, rate)} Hz, not {hz} Hz "
                 f"({share:.2f} of its energy at {hz} Hz)"
             )
-        shares.append((share, rms))
+        result = f"{hz} Hz {share:.2f} (rms {rms:.2f}"
+        if times:
+            offset = offset_us(data, times, hz)
+            # Within a sample: a clean decode measures a few microseconds off, while Opus's usual
+            # 312-sample pre-skip, kept or trimmed twice, moves a 440 Hz tone 318us. Only a miscount
+            # of whole periods (2273us at 440 Hz, 4545us across 440 and 660 Hz) would hide.
+            if abs(offset) > 1_000_000 / rate:
+                raise Failure(
+                    f"tone off its timestamps: channel {channel}'s {hz} Hz is {offset:+.0f}us out "
+                    f"(a misapplied pre-skip or priming?)"
+                )
+            result += f", {offset:+.0f}us"
+        judged.append(result + ")")
 
     window = (total - skip) * 1000 // rate
-    summary = ", ".join(f"{hz} Hz {share:.2f} (rms {rms:.2f})" for hz, (share, rms) in zip(tones, shares))
-    return f"{channels} ch @ {rate} Hz, {window}ms judged, {len(frames)} contiguous frames: {summary}"
+    return f"{channels} ch @ {rate} Hz, {window}ms judged, {len(frames)} contiguous frames: {', '.join(judged)}"
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--tone", required=True, help="comma-separated frequency of each channel, in Hz")
+    parser.add_argument("--phase", action="store_true", help="also require each tone's phase to match the timestamps")
     parser.add_argument("prefix", help="the subscriber's --audio-out prefix")
     args = parser.parse_args()
     tones = [int(hz) for hz in args.tone.split(",")]
     try:
-        print(f"audio ok: {check(args.prefix, tones)}")
+        print(f"audio ok: {check(args.prefix, tones, args.phase)}")
     except (Failure, OSError) as err:
         print(f"audio check failed: {err}")
         sys.exit(1)

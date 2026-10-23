@@ -28,8 +28,12 @@ Go, and C++, `moq-c` for C, `decodebin` on `audio_0` for GStreamer, and
 600 ms of PCM and frame timestamps for [`tone.py`](tone.py), which requires the
 publisher's channel count, contiguous timestamps, and each channel's tone carrying
 most of its energy by a Goertzel filter. A garbled decode (wrong channel order or
-sample rate), silence, or a timestamp gap fails the cell; a misapplied pre-skip only
-shifts the tone's phase, which this does not check. The browser
+sample rate), silence, or a timestamp gap fails the cell. Each publisher's tone
+starts at timestamp zero, so `--phase` also holds every tone to its timestamps
+within a sample, which fails a decoder that keeps or drops the wrong number of
+priming samples (Opus pre-skip). It skips the browser publisher, whose capture
+clock is not tied to its WAV, and the native-JS subscriber, which leaves the
+pre-skip to the player as WebCodecs does and stamps milliseconds. The browser
 runs the same filter on each channel of the player's audio graph. A negative control
 then has the Rust CLI swap its channels' tones, and every subscriber must refuse it
 as the wrong tone, not fail some other way. `interop.sh` is the one place the tones are chosen.
