@@ -2,6 +2,7 @@
 use crate::Result;
 use crate::catalog::{Audio, Binary, Json, PRIORITY, Text, Video};
 use serde::de::DeserializeOwned;
+use std::str::FromStr;
 
 /// Maximum number of video, audio, and text renditions accepted in one catalog update.
 pub const MAX_RENDITIONS: usize = 64;
@@ -335,6 +336,18 @@ impl<E> Catalog<E> {
 	}
 }
 
+impl<E: DeserializeOwned + Default> FromStr for Catalog<E> {
+	type Err = crate::Error;
+
+	/// Parse a catalog from a string.
+	///
+	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
+	/// needs a newer moq-hang draft than this crate reads.
+	fn from_str(s: &str) -> Result<Self> {
+		Self::from_slice(s.as_bytes())
+	}
+}
+
 impl<E: DeserializeOwned + Default> Catalog<E> {
 	/// Subscribe to catalog updates on a broadcast.
 	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer) -> Result<super::Consumer<E>> {
@@ -343,18 +356,6 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 			.subscribe(Catalog::default_subscription())
 			.await?;
 		Ok(super::Consumer::new(track))
-	}
-
-	/// Parse a catalog from a string.
-	///
-	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
-	/// needs a newer moq-hang draft than this crate reads.
-	#[expect(
-		clippy::should_implement_trait,
-		reason = "public inherent parser; switching to `FromStr` is a breaking change"
-	)]
-	pub fn from_str(s: &str) -> Result<Self> {
-		Self::from_slice(s.as_bytes())
 	}
 
 	/// Parse a catalog from a slice of bytes.

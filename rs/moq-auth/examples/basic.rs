@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
 	println!("  subscribe: {:?}", permissions.subscribe);
 
 	// Load the key back from its serialized form.
-	let loaded = moq_auth::Key::from_str(&key_str)?;
+	let loaded: moq_auth::Key = key_str.parse()?;
 	let also_verified = loaded.verify(&token)?;
 	assert_eq!(also_verified.root, verified.root);
 	println!("\nKey round-trip successful!");

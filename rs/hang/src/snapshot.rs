@@ -73,6 +73,7 @@ impl<'de> DeserializeAs<'de, moq_clock::Wall> for Wall {
 mod tests {
 	use super::*;
 	use crate::{Catalog, echo, stats};
+	use std::str::FromStr;
 
 	fn roundtrip<T>(input: &str)
 	where
