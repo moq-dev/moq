@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `BroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel it.
+
 ### Priorities are signed (#6142)
 
 `TrackInfo::priority`, `Subscription::priority`, and `FetchGroupOptions::priority` are `int8_t`, and `GroupRequest::priority()` returns one.
@@ -27,6 +32,12 @@ Pass the new `moq::ContainerFormat::kCmaf` to keep publishing CMAF.
 `Video` and `Audio` gain `epoch`, the publisher instance their `broadcast` reference names, right after `broadcast`; positional initializers shift by one.
 `BroadcastConsumer::resolve(reference)` becomes `resolve(reference, epoch)`; pass the rendition's `epoch` alongside its `broadcast`, or `std::nullopt` to resolve whichever instance answers.
 Resolving, and the rendition-based consumers, fail with `moq::Error::kMux` for a rendition whose broadcast is proven to serve another epoch.
+
+### Timestamps stop at 2^61 - 1 microseconds (#6168)
+
+Writing a frame, or any other call that takes a timestamp, fails with `TimeOverflow` past `2^61 - 1` microseconds instead of `2^62 - 1`, the most moq-lite-05/06 can carry.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
