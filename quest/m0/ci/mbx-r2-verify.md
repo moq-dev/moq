@@ -2,11 +2,7 @@
 
 ## Goal
 
-Condition: the `mbx-moq-dev` bootstrap in `infra/README.md` is complete and
-scheduled Nightly runs on `main` have built Rust since. Check it with
-`gh run list --workflow nightly.yml --branch main`.
-
-Then confirm the cache earns its keep for the hosted jobs that still use R2
+Confirm the cache earns its keep for the hosted jobs that still use R2
 (Nightly on `main`, release pull requests, and the macOS and Windows jobs),
 and record the numbers in the PR that closes this:
 
@@ -22,6 +18,9 @@ and record the numbers in the PR that closes this:
 - Bucket size and request counts after a month, against the 30-day expiry in
   `infra/mbx/lifecycle.json`. Shorten or lengthen it from that.
 
+Use scheduled Nightly runs on `main` only (`gh run list --workflow
+nightly.yml --branch main`), never a dispatch on a branch.
+
 ## Plan
 
 Decided 2026-10-22 (maintainer): narrowed to hosted jobs. Since
@@ -29,37 +28,34 @@ Decided 2026-10-22 (maintainer): narrowed to hosted jobs. Since
 self-hosted `moq-queue` runner with mbx's local store, so it neither reads nor
 writes R2.
 
-Verification checkpoint, 2026-10-21 (Pacific):
+Evidence so far, from the platform jobs of scheduled Nightlies
+[39600361153](https://github.com/moq-dev/moq/actions/runs/39600361153)
+(2026-10-21, mbx 1.25.0),
+[39779729461](https://github.com/moq-dev/moq/actions/runs/39779729461)
+(2026-10-22, 1.25.0) and
+[39951870847](https://github.com/moq-dev/moq/actions/runs/39951870847)
+(2026-10-23, 1.26.0):
 
-- Hosted R2 measurements below come from scheduled Nightly
-  [39600361153](https://github.com/moq-dev/moq/actions/runs/39600361153).
-- [Windows](https://github.com/moq-dev/moq/actions/runs/39600361153/job/119223136733)
-  and [macOS](https://github.com/moq-dev/moq/actions/runs/39600361153/job/119223136736)
-  both report a compatible R2 namespace and `configured read-write, effective
-  read-write`. This proves credentials and policy, not cache reuse.
-- macOS repeatedly refuses task manifest
-  `a90076a403e4add7587d176ba0f95ec1b79b991c730c07b9b9602c4662a627f4`:
-  `remote cache action manifest declared 17204435 bytes, over the 16777216
-  byte limit`. All eleven object-cache summaries report `0 B downloaded`;
-  they include local hits and remote failures. The platform job succeeds,
-  but this run does not establish remote reuse or a timing improvement.
-- The pinned mbx 1.25.0 bounds remote JSON at 16 MiB in
-  [`mbx-cache-core/src/lib.rs`](https://github.com/jdx/mr-boxington/blob/v1.25.0/crates/mbx-cache-core/src/lib.rs#L88).
-  Its [prediction pruning](https://github.com/jdx/mr-boxington/blob/v1.25.0/crates/mbx-cache-core/src/agent/manifest.rs#L81)
-  bounds entry count, so a manifest can still exceed the serialized-byte
-  limit. Fix producer sizing upstream before treating these results as a
-  cache pass; preserve the reader's bound rather than raising it to fit one
-  observed payload. Confirm the saved manifest before attributing every
-  remote miss to this refusal.
-- No open upstream issue or PR identified this failure on 2026-10-21.
-  [mbx 1.26.0](https://github.com/jdx/mr-boxington/releases/tag/v1.26.0)
-  does not list a manifest fix. Posting to `jdx/mr-boxington` needs maintainer
-  approval under this repository's external-post policy; no report was sent.
+- The bootstrap is done: Windows and macOS report `configured read-write,
+  effective read-write`. That proves credentials and policy, not reuse.
+- macOS refuses task manifests written past the reader's 16 MiB bound
+  (`a90076a4...` at 17204435 bytes, then `5cb8fb79...` and `b0310ce4...`), so
+  those tasks get no remote predictions. No macOS summary downloads more than
+  15 KiB. Reported as
+  [jdx/mr-boxington#792](https://github.com/jdx/mr-boxington/issues/792) and
+  fixed by [jdx/mr-boxington#798](https://github.com/jdx/mr-boxington/pull/798),
+  which keeps the read bound and caps the writer instead. No release carries
+  it yet; [the bump](/quest/m0/ci/mbx-bump.md) takes it.
+- Windows logs no refusal but still no reuse. Its first build reports 0 hits
+  and 1084 of 1091 compilations "not looked up" for want of a matching
+  prediction on 2026-10-22, after a 1.25.0 Nightly wrote the day before, and
+  1091 of 1098 on 1.26.0. The manifest fix does not explain this. If it
+  persists after the bump, find why before timing builds.
+- No release pull request has run with the R2 cache yet.
 
-Remaining verification: remote hits across consecutive hosted Nightlies,
-release PR read-only policy, a comparable before/after build measurement,
-and bucket/request/expiry measurements after a full month. Keep this quest
-until those observations and the manifest failure are resolved.
+## Required
+
+- [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the pin
 
 ## Related
 
