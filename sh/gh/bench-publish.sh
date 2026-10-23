@@ -16,13 +16,14 @@ case ${1:-} in
         fi
         ;;
     finish)
-        if [[ $# != 2 ]]; then
-            echo 'usage: benchmark-publish finish DIRECTORY' >&2
+        if [[ $# != 3 ]]; then
+            echo 'usage: benchmark-publish finish DIRECTORY PAIRED' >&2
             exit 2
         fi
+        paired=$(realpath "$3")
         git worktree add "$2" gh-pages
         # The checkout is the nightly's commit; a source without a point for it failed tonight.
-        just gh benchmark-report index "$2" --commit "$(git rev-parse HEAD)"
+        just gh benchmark-report index "$2" --commit "$(git rev-parse HEAD)" --paired "$paired"
         git -C "$2" add index.html .nojekyll bench
         if ! git -C "$2" diff --cached --quiet; then
             git -C "$2" -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com \
@@ -31,7 +32,7 @@ case ${1:-} in
         git -C "$2" push origin HEAD:gh-pages
         ;;
     *)
-        echo 'usage: benchmark-publish {init|finish DIRECTORY}' >&2
+        echo 'usage: benchmark-publish {init|finish DIRECTORY PAIRED}' >&2
         exit 2
         ;;
 esac

@@ -201,7 +201,9 @@ impl<S: ObjectStore> Producer<S> {
 					// Only fails once closed, which happens when the listing ends.
 					let _ = queue.try_push(info);
 				}
-				Event::Listed(Ok(Some(TracksEvent::Synced | TracksEvent::Removed { .. }))) => {}
+				Event::Listed(Ok(Some(
+					TracksEvent::Synced | TracksEvent::Removed { .. } | TracksEvent::Finished { .. },
+				))) => {}
 				Event::Listed(Ok(None)) => {
 					listing = None;
 					for queue in queues.values() {

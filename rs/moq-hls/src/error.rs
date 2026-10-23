@@ -144,6 +144,16 @@ pub enum Error {
 		/// Why the timeline failed.
 		source: Box<Error>,
 	},
+
+	/// Import refused a rendition whose timestamps went backwards, such as a reset at an
+	/// `EXT-X-DISCONTINUITY` under the same init segment. A restarted source is a new broadcast.
+	#[error("rendition {rendition} rewound its timestamps; HLS import refuses a timestamp reset: {source}")]
+	Rewind {
+		/// The rendition's label.
+		rendition: String,
+		/// The rewind the importer refused.
+		source: moq_mux::Error,
+	},
 }
 
 impl Error {

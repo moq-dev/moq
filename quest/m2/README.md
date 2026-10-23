@@ -27,7 +27,8 @@ ranked just below deterministic TS legs, which it requires.
 - [moq.dev in the monorepo](/quest/m2/site/README.md) - moq.dev, moq.pub, and moq.watch build from `site/` against the in-tree packages, behind a cap on committed binary size
 - [Hand-drawn blog art as SVG](/quest/m2/site-svg.md) - the blog's hand-drawn PNGs become transparent palette SVGs, covers rasterized for social cards at build
 - [P2P](/quest/m2/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
-- [Hard-fork the binding generator](/quest/m2/uniffi-fork.md) - one moq-dev repo holds the chosen generator's core and every language backend, released under one tag and one pin
+- [rust2 publishes its UniFFI fork](/quest/m2/rust2-uniffi.md) - waiting on kixelated/rust2 to import UniFFI and moq's generators and publish them
+- [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - moq-ffi and every wrapper build from kixelated/rust2's fork under one pin, and moq's generator code is deleted
 - [Benchmark sources](/quest/m2/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
 - [Link the benchmark trends](/quest/m2/bench-site-doc.md) - the docs point language choosers at the regression table
 - [Payload bytes](/quest/m2/ffi-bytes.md) - payloads cross the FFI in one bulk copy, proven on the binding benchmark in every wrapper
@@ -102,7 +103,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Bindings size profile](/quest/m2/ffi-size-profile.md) - a benchmark decides whether the moq-ffi builds ship at opt-level "s", which halves the dylib
 - [The catalog publish path compiles once](/quest/m2/catalog-publish-once.md) - the catalog producer and its JSON diff codegen in `moq-mux` instead of once per importer crate, about 1 MiB of the CLI
 - [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md) - returned payloads reach the host without a copy, if the payload numbers justify it
-- [Namespaced external types](/quest/m2/uniffi-namespaces.md) - the UniFFI fork lets two crates export the same type name, reopening the per-layer crate split
 - [crates.io trusts the workflow](/quest/m2/crates-trusted-publisher.md) - maintainer action: every published crate gets a trusted publisher for `release-rs.yml`
 - [Rust releases publish through OIDC](/quest/m2/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
 - [Go module proxy](/quest/m2/go-module-proxy.md) - `moq.dev/moq-ffi` ships from a static GOPROXY we host, so its staticlibs stop growing git history by ~61 MiB per release
@@ -135,6 +135,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Deterministic H.265 TS legs](/quest/m2/ts-hitless-h265.md) - H.265's buffering period gets the same group anchor as H.264
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - two legs send identical RTP packets, headers included, so an ST 2022-7 receiver can merge them
 - [Old tail across a restart](/quest/m2/ts-sync-restart-tail.md) - both `--sync` legs send the old timeline's tail up to a restart, so an ST 2022-7 merge has no hole there
+- [Paced gap after a restart](/quest/m2/ts-restart-gap-burst.md) - a forward restart within the minute no longer sends every gap slot in one burst
 - [moqsrc A/V sync](/quest/m2/moqsrc-av-sync.md) - a nightly test measures A/V skew from `moqsrc` through clock-synced sinks
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
 - [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps
@@ -219,6 +220,7 @@ ranked just below deterministic TS legs, which it requires.
 - [JS IETF request streams](/quest/m2/js-request-stream.md) - `RequestStream` owns deadlines and cancellation, and TRACK trailing bytes close the session like Rust
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case runs on every even moq-transport draft instead of being skipped
 - [Join after a quick finish](/quest/m2/ietf-join-after-finish.md) - a pre-draft-20 joining FETCH that arrives after its subscription finished is still answered, within a bound the peer already negotiates
+- [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) - the JS publisher honors Largest Object before draft 20 and serves the head on a joining FETCH, as the Rust publisher does
 - [ashpd uses maintained D-Bus crates](/quest/m2/ashpd-maintained.md) - wait for a stable zbus 6 port, then remove the portal dependency exceptions
 - [Askama uses a maintained TOML parser](/quest/m2/askama-maintained.md) - wait for a stable parser migration, then remove the generator dependency exception
 - [Dependency and alternatives audit](/quest/m2/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
@@ -231,3 +233,4 @@ ranked just below deterministic TS legs, which it requires.
 - [Quest tree audit](/quest/m2/audit-quests.md) - repeat the whole-tree audit after the release ships, against the m1 baseline
 - [CI workflow audit](/quest/m2/audit-ci.md) - repeat the per-workflow and per-job review after the release ships, against the m1 baselines
 - [Performance audit](/quest/m2/audit-perf.md) - benchmarks that regressed since the m1 run are explained, fixed, or planned, and unbenched hot paths get coverage
+- [Upstream unknown-env option in usage-rs](/quest/m2/usage-unknown-env.md) - jdx/usage refuses unknown prefixed env vars, replacing the moq-tokio helper
