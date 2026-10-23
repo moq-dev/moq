@@ -102,3 +102,6 @@ required-features = ["quic"]
 [[bench]]
 name = "timers"
 harness = false
+
+[lints]
+workspace = true

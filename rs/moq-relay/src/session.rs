@@ -153,7 +153,7 @@ pub struct Filter {
 	pub remote: Option<Remote>,
 	/// The relay's local socket, exact including port.
 	pub local: Option<SocketAddr>,
-	/// SNI or the host the client addressed.
+	/// The SNI that selected the relay's certificate; sessions without one never match.
 	pub server_name: Option<String>,
 	/// Negotiated application protocol.
 	pub alpn: Option<String>,
@@ -428,7 +428,7 @@ pub struct View {
 	pub remote: Option<SocketAddr>,
 	/// The relay's socket address the session arrived on.
 	pub local: Option<SocketAddr>,
-	/// The SNI the client presented.
+	/// The SNI that selected the relay's certificate.
 	pub server_name: Option<String>,
 	/// The negotiated application protocol.
 	pub alpn: Option<String>,
@@ -476,7 +476,7 @@ pub struct Nudged {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::time::Duration;

@@ -11,11 +11,11 @@ public final class Bandwidth: Sendable {
 
         init(_ ffi: MoqBandwidthConsumer) { self.ffi = ffi }
 
-        /// Read the current estimate, or nil while unavailable.
-        public func peek() -> UInt64? { ffi.peek() }
+        /// The current estimate, or nil while unavailable.
+        public func rate() -> UInt64? { ffi.rate() }
 
-        /// Wait for the estimate to change, throwing when its producer closes.
-        public func changed() async throws -> UInt64? { try await ffi.changed() }
+        /// Wait for the estimate to change and return the new rate, throwing when its producer closes.
+        public func rateChanged() async throws -> UInt64? { try await ffi.rateChanged() }
 
         /// Release this consumer's demand, including a pending wait.
         public func cancel() { ffi.cancel() }
@@ -33,14 +33,6 @@ public final class Bandwidth: Sendable {
     /// ever send. Drop the reservation to hand the room back.
     public func reserve(demand: TrackDemand, maxBps: UInt64) -> Reservation {
         Reservation(ffi.reserve(demand: demand.ffi, maxBps: maxBps))
-    }
-
-    /// Probe up to `targetBps` instead of the sum of the reservations.
-    ///
-    /// The session probes for what its reservations add up to by default, so the estimate can rise to fund them. `0` turns
-    /// probing off, and `nil` follows the reservations again.
-    public func setTarget(_ targetBps: UInt64?) {
-        ffi.setTarget(targetBps: targetBps)
     }
 }
 

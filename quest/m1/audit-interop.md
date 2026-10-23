@@ -86,7 +86,11 @@ Waiting on others:
   (closes on a request before SETUP completes),
   [meetecho/imquic#42](https://github.com/meetecho/imquic/issues/42) and
   [Eyevinn/moqlivemock#157](https://github.com/Eyevinn/moqlivemock/issues/157)
-  (interop clients drop the URL path), plus moxygen's filter type 250
+  (interop clients drop the URL path),
+  [meetecho/imquic#43](https://github.com/meetecho/imquic/issues/43)
+  (drops a data stream whose header spans reads; owned by
+  [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md)),
+  plus moxygen's filter type 250
   ([facebookexperimental/moxygen#225](https://github.com/facebookexperimental/moxygen/issues/225)),
   which also fails moqx's client against our relay.
 - The JS publisher refuses every FETCH, so every relay that fills a late

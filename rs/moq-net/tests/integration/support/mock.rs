@@ -642,8 +642,7 @@ impl poll::Session for MockSession {
 	}
 }
 
-// Only some test binaries steer delivery.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "only some test binaries steer delivery")]
 impl MockSession {
 	/// Writes that parked on the in-memory stream's byte window.
 	pub fn blocked_writes(&self) -> usize {

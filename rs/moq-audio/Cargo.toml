@@ -141,3 +141,6 @@ objc2-screen-capture-kit = { workspace = true, features = ["SCStream", "SCSharea
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+
+[lints]
+workspace = true

@@ -39,8 +39,13 @@ criterion = { workspace = true }
 futures = { workspace = true }
 # Decodes the OpusHead the sink publishes, so the surround regression checks playback.
 moq-audio = { path = "../moq-audio", default-features = false }
+# Runs the tests that need a variable set or unset in a child process given it.
+test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
 name = "catalog"
 harness = false
+
+[lints]
+workspace = true

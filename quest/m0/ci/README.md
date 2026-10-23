@@ -81,8 +81,8 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Require the release gate](/quest/m0/ci/release-gates.md) - condition: the next cut carries `release-gate.yml`; then release PRs require it
-- [One test filter per line](/quest/m0/ci/interop-filter-lines.md) - parallel interop filter additions to `test/justfile` rarely conflict
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
-- [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - condition: the maintainer bootstrap; then measure the hosted Nightly jobs' hits, restore time, and expiry
+- [Bump to the manifest fix](/quest/m0/ci/mbx-bump.md) - condition: an mbx release contains jdx/mr-boxington#798; then bump the Rust cache's pin
+- [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - measure the hosted Nightly jobs' hits, restore time, and expiry once the bump lands
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm CI and releases use `nix.moq.dev` and retire Cachix
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the first `moq-ffi-v*` tag that runs `Release FFI`, and a `Shipping sizes` run; verify the wrappers and size keys

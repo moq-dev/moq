@@ -180,6 +180,38 @@ opened landed on another one, such as a client silently falling back to
 moq-lite. The relay names no client, so a fallback fails the round rather than
 one cell. The tails check their own connections, so a fallback fails the lane.
 
+The in-tree control lanes also run with `--tail`:
+
+- Four untimed 900-byte datagrams cross the relay in both directions between Rust
+  and each native JS runtime. The subscriber acknowledges resolved metadata before
+  sending begins, then acknowledges each packet, so this checks framing and bytes
+  rather than best-effort burst capacity. The publisher stays open until the read is
+  acknowledged, keeping a reliable track end from overtaking the datagrams.
+- A JS wire requester gets the Rust publisher's exact largest location through
+  TRACK\_STATUS on every draft. From draft 18, Rust also queries the JS publisher's
+  non-default priority before subscribing, when the answer can describe a track.
+- On drafts 14 and 16, a JS publisher advertises one usable track slot beyond namespace discovery, holds the first
+  Rust subscription open through a data round trip while a second is queued, and
+  grants credit when the first is cancelled. Sending the second without waiting
+  violates the peer adapter's live-request limit. A JS subscriber runs the same
+  held-first/queued-second exchange over QMux against a controlled JS peer, whose
+  grant and replenishment codecs are also exercised by the Rust subscriber.
+- On drafts 18, 20, and 22, a Rust GOAWAY names a second WebSocket endpoint serving
+  the same publisher epoch. The JS reconnect loop retains its reader across the
+  move. A separate read through the replacement proves it serves data before the
+  original transport is cut; only the replacement can deliver the final group.
+  The reverse JS-server-to-Rust-client case uses a marker broadcast excluded from
+  the old endpoint's scope, then cuts that endpoint before publishing the final
+  group. Both directions use the original publisher stream.
+- Drafts 14 and 16 carry no epoch, so nothing proves the replacement is the same
+  publisher. The same GOAWAY lanes there check that the held reader ends with the
+  original transport instead, and that requesting the path again subscribes
+  through the new URI and reads the final group.
+
+The standalone control endpoints use OS-assigned ports and production QMux,
+SETUP codecs, and request adapters. They verify their negotiated version directly.
+The datagram and query lanes through moq-relay use its usual version-log check.
+
 Some cases change shape on moq-transport:
 
 - moq-net subscribes there from the largest group, not from a requested range,
@@ -263,11 +295,18 @@ The relay is anonymous here, since released binaries may predate AUTH; the
 default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
 publishers feed current readers, through both relay sources. Each reader is its
-own lane, `media-rust` and `media-js-native-node`. Rust exports must
-decode to a video frame through ffmpeg. The JS reader is
-`compat/client.ts`, not the interop subscriber, whose API follows the
-checkout. One copy runs against each package set, using only API both have,
-and it reconstructs the catalog and decodes the container.
+own lane, `media-rust` and `media-js-native-node`. Each Rust CLI publishes the
+stereo interop tone from fragmented MP4 (released CLIs publish it as CMAF), and
+every reader must decode both a video frame and the tone, which `tone.py`
+judges as in the matrix: a garbled decode, a missing audio rendition, or a
+timestamp gap fails the lane, and the swapped-tone control must fail it. Rust
+exports decode through ffmpeg, which also logs each decoded audio frame's
+timestamp. The JS reader is `compat/client.ts`, not the interop subscriber,
+whose API follows the checkout. One copy runs against each package set, using
+only API both have: it reconstructs the catalog, decodes the container, and
+decodes audio through `@moq/hang`'s libav fallback. It copies samples in the
+decoder's own layout, since the released fallback garbles every channel past
+the first when converting to planar. The FETCH lanes keep a video-only publisher.
 Before cross-version sessions, current and released media controls each run
 with their own relay, publisher, and Rust/JS readers on moq-lite-06. These
 controls always run, including when a planned break skips cross-version lanes,

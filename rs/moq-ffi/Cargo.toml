@@ -93,6 +93,8 @@ web-transport-wasm = { workspace = true }
 [dev-dependencies]
 # One non-codec test blocks on a future; the main dep is `video`-only.
 pollster = { workspace = true }
+# Runs the key log tests with `SSLKEYLOGFILE` set or unset, in a child process.
+test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["test-util"] }
 web-transport-trait = { workspace = true }
 
@@ -104,3 +106,6 @@ moq-video = { path = "../moq-video", features = ["openh264"] }
 [target.'cfg(unix)'.dev-dependencies]
 # Process CPU time for the benchmark's baselines.
 libc = { workspace = true }
+
+[lints]
+workspace = true

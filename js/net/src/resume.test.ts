@@ -2098,6 +2098,35 @@ test("an end a replaced copy declared holds once the copy is let go in the same 
 	b.close();
 });
 
+test("a replaced copy whose session closed locally binds no end", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	await settle();
+	ta.write(0);
+	await settle();
+	expect(drain(sub)).toEqual([0]);
+
+	front.serve(b.consume());
+	await settle();
+	// A clean close would declare an end at group 1, refusing b's next group.
+	hooks.releaseTrack(ta.producer);
+	tb.write(1);
+	await settle();
+	expect(drain(sub)).toEqual([1]);
+	expect(sub.end()).toBeUndefined();
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
 test("largest ends once the serving copy reaches its end, with the front still open", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -2426,7 +2455,7 @@ test("a group past the declared end on another copy is refused", async () => {
 
 test.each([
 	["fails", (answer: Lister) => answer.abort(new Error("old route failed"))],
-	["ends", (answer: Lister) => answer.finish()],
+	["ends", (answer: Lister) => answer.end()],
 	["changes", (answer: Lister) => answer.add("gone", { priority: 0 })],
 ])("a listing follows the source that took over as the old one's listing %s", async (_, end) => {
 	const front = new Front();

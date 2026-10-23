@@ -64,6 +64,10 @@ Decided 2026-10-15: keep this proof in m1 with the existing playback and
 A/V clock work. The estimator defaults on; deferring watch-worker does not
 defer validation of the current player.
 
+## Required
+
+- [One audio ring](/quest/m1/watch-audio-one-ring.md) - removes the SharedArrayBuffer ring, so this is written once against the postMessage ring
+
 ## Related
 
 - [A/V clock](/quest/m1/av-clock.md) - reshapes `SyncInput` around the per-track target this line produces

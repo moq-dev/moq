@@ -281,6 +281,8 @@ export interface Expiry {
  * touches it. The counterpart of the Rust `resume::Recover`.
  */
 export interface GroupRecover {
+	/** Release the route held by this group when its consumer closes. */
+	close?(): void;
 	/**
 	 * Whether to look past the copy being read: it failed with `failed` and that is no verdict
 	 * on the group, or (with none) it stalled while a newer route serves.
@@ -405,6 +407,13 @@ export const hooks: {
 	 * a higher one. Mirrors the Rust `finish_at` on a `received()` copy; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
+	// pending: /quest/m1/public-model/deferred.md
+	/**
+	 * End a wire subscription's copy cleanly without declaring an end, for a session closed
+	 * locally: a dead route, not finished content, so a resumed reader's replacement route
+	 * continues past it. Mirrors the Rust `close` on a `received()` copy; assigned by `track.ts`.
+	 */
+	releaseTrack: (producer: Producer) => void;
 	// private: capability gap
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Location | undefined>;
@@ -584,6 +593,9 @@ export const hooks: {
 	stampUnlisted: (target: BroadcastConsumer) => void;
 } = {
 	endTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	releaseTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
 	producerLargest: () => {
@@ -810,10 +822,16 @@ export function compareRoutes(a: Route, b: Route): number {
 	);
 }
 
-/** Order same-prefix routes by preference, hop count, and the origin's stable spread hash. */
-export function compareRouteCandidates(path: Path.Valid, a: Route, b: Route): number {
+/**
+ * Order routes at `prefix` resolving `path` by preference, hop count, and the stable spread
+ * hash. The hash only spreads a prefix's paths: at the prefix itself a tie is left for the
+ * newest to win, so a publisher that reconnects under a new hop takes over from its lingering
+ * session at once, matching `route_order` in rs/moq-net for routes a node did not get from a
+ * cluster peer, which is every route here.
+ */
+export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: Route, b: Route): number {
 	const order = compareRoutes(a, b) || a.hops.length - b.hops.length;
-	if (order !== 0) return order;
+	if (order !== 0 || path === prefix) return order;
 	const ha = spreadHash(path, a.hops);
 	const hb = spreadHash(path, b.hops);
 	return ha < hb ? -1 : ha > hb ? 1 : 0;

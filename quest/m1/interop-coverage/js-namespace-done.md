@@ -17,8 +17,3 @@ processes pass, so suspect state the two `js/net` sessions share in one
 process before suspecting the relays. A fix in `js/net` gets a test there.
 
 Public API: unknown until the cause is found. Wire: none expected.
-
-## Related
-
-- [Runner cases](/quest/m1/interop-coverage/runner-cases.md) - lands the
-  client case this cell runs
