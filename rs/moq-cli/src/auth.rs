@@ -469,7 +469,12 @@ impl Serve {
 				}
 			}
 		}
-		let rules = |publish: &[Pattern], subscribe: &[Pattern]| Permissions::new(publish.to_vec(), subscribe.to_vec());
+		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
+			Permissions::new(
+				publish.iter().cloned().collect::<moq_auth::Patterns>(),
+				subscribe.iter().cloned().collect::<moq_auth::Patterns>(),
+			)
+		};
 		let mut policy = Policy::default();
 		policy.keys = match (&self.key, &self.key_dir, &self.key_set) {
 			(Some(key), _, _) => Some(Keys::File(key.clone())),

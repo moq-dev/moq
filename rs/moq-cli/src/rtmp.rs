@@ -151,8 +151,8 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 
 	let client = Client::connect(addr, &app)
 		.await?
-		.with_import_max_age(target.max_age)
-		.with_import_bandwidth(target.bandwidth);
+		.with_max_age(target.max_age)
+		.with_bandwidth(target.bandwidth);
 	Ok(client.pull(&key, &target.origin, name).await?)
 }
 
@@ -175,7 +175,7 @@ pub async fn connect_export(
 	tracing::info!(%addr, %app, %name, "RTMP client pushing");
 	notify_ready();
 
-	let client = Client::connect(addr, &app).await?.with_export_max_delay(max_delay);
+	let client = Client::connect(addr, &app).await?.with_max_delay(max_delay);
 	Ok(client.publish(&key, origin, &name).await?)
 }
 

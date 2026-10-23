@@ -2392,7 +2392,9 @@ mod tests {
 	#[test]
 	fn the_environment_cannot_ask_for_a_moq_side() {
 		let url = "https://relay.example.com";
-		let _env = crate::test_env::EnvGuard::set(&[("MOQ_CONNECT", url)]);
+		if !test_env::Env::default().set("MOQ_CONNECT", url).isolate() {
+			return;
+		}
 
 		let ambient = Invocation::try_parse_from(["moq", "auth", "generate"]).expect("parse");
 		assert!(

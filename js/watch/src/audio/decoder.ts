@@ -476,12 +476,15 @@ export class Decoder {
 			};
 			decoder.configure(decoderConfig);
 
+			// The newest frame sent to the decoder since it was last reset.
+			let newest: Micro | undefined;
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
 				if (this.#onRead(next)) {
 					decoder.reset();
 					decoder.configure(decoderConfig);
+					newest = undefined;
 				}
 				if (next.kind === "gap") this.#arrivals.write(gap(next));
 				if (next.kind !== "frame") continue;
@@ -489,7 +492,7 @@ export class Decoder {
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
-				const late = this.sync.received(timestamp, "audio", frame.arrival);
+				const late = this.sync.received(timestamp, frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
@@ -498,6 +501,13 @@ export class Decoder {
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
+
+				// Decode in timestamp order. A subscription's head groups arrive after the live edge served
+				// alongside them, and the ring, anchored at the first decoded frame, cannot place audio
+				// before it. Chrome's AudioDecoder would also stamp every later output from its first
+				// input, shifting the rest of the track by the reorder and overflowing a buffered ring.
+				if (newest !== undefined && frame.timestamp < newest) continue;
+				newest = frame.timestamp;
 
 				const ring = await this.#ready(effect);
 				if (!ring) break;
@@ -570,6 +580,8 @@ export class Decoder {
 			};
 			decoder.configure(decoderConfig);
 
+			// The newest frame sent to the decoder since it was last reset.
+			let newest: Micro | undefined;
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
@@ -578,13 +590,14 @@ export class Decoder {
 				if (this.#onRead(next)) {
 					decoder.reset();
 					decoder.configure(decoderConfig);
+					newest = undefined;
 				}
 				if (next.kind === "gap") this.#arrivals.write(gap(next));
 				if (next.kind !== "frame") continue;
 				const { frame } = next;
 
 				const timestamp = Milli.fromMicro(frame.timestamp);
-				const late = this.sync.received(timestamp, "audio", frame.arrival);
+				const late = this.sync.received(timestamp, frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
@@ -593,6 +606,13 @@ export class Decoder {
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
+
+				// Decode in timestamp order. A subscription's head groups arrive after the live edge served
+				// alongside them, and the ring, anchored at the first decoded frame, cannot place audio
+				// before it. Chrome's AudioDecoder would also stamp every later output from its first
+				// input, shifting the rest of the track by the reorder and overflowing a buffered ring.
+				if (newest !== undefined && frame.timestamp < newest) continue;
+				newest = frame.timestamp;
 
 				const ring = await this.#ready(effect);
 				if (!ring) break;
