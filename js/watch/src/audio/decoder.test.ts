@@ -326,15 +326,36 @@ it("decodes an audio packet inside a group after a gap", async () => {
 	}
 });
 
-// A subscription's head arrives newest-first. Chrome's AudioDecoder stamps every output from its
-// first input, so decoding the older frames after it shifts the rest of the track.
+// A subscription's head arrives newest-first, one group per frame. Chrome's AudioDecoder stamps every
+// output from its first input, so decoding the older frames after it shifts the rest of the track.
 for (const cmaf of [false, true]) {
-	it(`decodes a ${cmaf ? "CMAF" : "legacy"} subscription head in timestamp order`, async () => {
+	it(`decodes a ${cmaf ? "CMAF" : "legacy"} buffered subscription head in timestamp order`, async () => {
 		const playback = await play(Milli(100), true, cmaf);
+		try {
+			for (const ms of [140, 120, 100, 80, 60, 40, 20, 0]) {
+				frameTimestamp = (ms - 20) * 1000;
+				playback.push({ ...frame(), group: ms / 20 });
+				await microtasks();
+			}
+			expect(playback.inserted()).toEqual([]);
+
+			// The live edge moves on, so the head is complete and plays from its oldest frame.
+			frameTimestamp = 140_000;
+			playback.push({ ...frame(), group: 8 });
+			await microtasks();
+			expect(playback.inserted()).toEqual([0, 20_000, 40_000, 60_000, 80_000, 100_000]);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+
+	it(`skips a ${cmaf ? "CMAF" : "legacy"} live subscription head older than its live edge`, async () => {
+		const playback = await play(Milli(100), false, cmaf);
 		try {
 			for (const ms of [140, 120, 100, 80, 60, 40, 20, 0, 160]) {
 				frameTimestamp = (ms - 20) * 1000;
-				playback.push(frame());
+				playback.push({ ...frame(), group: ms / 20 });
 				await microtasks();
 			}
 			expect(playback.inserted()).toEqual([140_000, 160_000]);
