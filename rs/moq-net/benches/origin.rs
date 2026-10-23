@@ -14,6 +14,10 @@
 //! session's grant, and a narrowing wakes each one. The baseline is a session
 //! that never narrows.
 //!
+//! A withdrawal wave is swept over the broadcasts it withdraws and the cursors
+//! polling through it, and a route churning beneath an unchanged winner over the
+//! table and its cursors.
+//!
 //! An equal-cost pool is swept the same way, over its members and the paths it
 //! already serves, and over those paths and the cursors watching the pool.
 //!
@@ -176,6 +180,99 @@ fn bench_withdraw(c: &mut Criterion) {
 				BatchSize::LargeInput,
 			);
 		});
+	}
+	group.finish();
+}
+
+/// Two peers carry the same `broadcasts` of one publisher, and both withdraw them
+/// a broadcast at a time, every cursor polled after each withdrawal as a session's
+/// task would be. The first peer's withdrawals queue held updates; the second's, in
+/// the opposite order, make each ready behind the held rest. A poll that walks what
+/// it holds back shows up as a slope over broadcasts, multiplied by the cursors.
+fn bench_withdraw_wave(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/withdraw_wave");
+	group.sample_size(10);
+	let epoch: Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
+	// One epoch, so the winner moving between the peers is an update, which is held.
+	let route = |chain: &[u64]| {
+		let mut hops = Hops::new();
+		for &hop in chain {
+			hops.push(Hop::new(hop).unwrap()).unwrap();
+		}
+		origin::Route::default().with_epoch(epoch.clone()).with_hops(hops)
+	};
+	for broadcasts in [1_000, 10_000] {
+		for subscribers in [1, 20, 100] {
+			let id = BenchmarkId::from_parameter(format!("{broadcasts}b_{subscribers}s"));
+			group.throughput(Throughput::Elements((2 * broadcasts * subscribers) as u64));
+			group.bench_function(id, |b| {
+				b.iter_batched(
+					|| {
+						let (producer, mut driver) = origin::Producer::new(origin::Config::default());
+						// The holds read the driver's last clock reading, which stays put below.
+						driver
+							.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
+							.unwrap();
+						let near: Vec<_> = (0..broadcasts)
+							.map(|i| producer.dynamic_route(format!("room/{i}"), route(&[9, 2])).unwrap())
+							.collect();
+						let far: Vec<_> = (0..broadcasts)
+							.map(|i| producer.dynamic_route(format!("room/{i}"), route(&[9, 3, 4])).unwrap())
+							.collect();
+						let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
+						for cursor in &mut cursors {
+							while cursor.try_next().is_some() {}
+						}
+						(producer, driver, near, far, cursors)
+					},
+					|(producer, driver, near, far, mut cursors)| {
+						for route in near {
+							drop(route);
+							for cursor in &mut cursors {
+								assert!(cursor.try_next().is_none(), "the update is held");
+							}
+						}
+						for route in far.into_iter().rev() {
+							drop(route);
+							for cursor in &mut cursors {
+								cursor.try_next().expect("retract delivered");
+							}
+						}
+						(producer, driver, cursors)
+					},
+					BatchSize::LargeInput,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
+/// A route that never wins arriving at one broadcast's prefix and leaving again,
+/// with `broadcasts` in the table and `subscribers` cursors watching. Each change
+/// revisits every cursor presenting the prefix and finds its winner unchanged,
+/// so a cost per cursor shows up as a slope over subscribers, and one per route
+/// in the table as a slope over broadcasts.
+fn bench_route_churn(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/route_churn");
+	for broadcasts in [1_000, 10_000] {
+		for subscribers in [1, 20, 100] {
+			let id = BenchmarkId::from_parameter(format!("{broadcasts}b_{subscribers}s"));
+			group.bench_function(id, |b| {
+				let (producer, _driver) = origin::Producer::new(origin::Config::default());
+				let _routes: Vec<_> = (0..broadcasts)
+					.map(|i| producer.dynamic_route(format!("room/{i}"), peer_route(1, 1)).unwrap())
+					.collect();
+				let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
+				for cursor in &mut cursors {
+					while cursor.try_next().is_some() {}
+				}
+				b.iter(|| drop(producer.dynamic_route("room/0", peer_route(2, 5)).unwrap()));
+				for cursor in &mut cursors {
+					assert!(cursor.try_next().is_none(), "the winner is unchanged");
+				}
+			});
+		}
 	}
 	group.finish();
 }
@@ -1310,7 +1407,7 @@ fn bench_copy_walk(c: &mut Criterion) {
 
 /// `(readers, retained, routes)` for [`bench_resume_overlap`]: readers of one track,
 /// the groups every route holds, and the routes it swapped through.
-const RESUME_OVERLAP: [(usize, usize, usize); 15] = [
+const RESUME_OVERLAP: [(usize, usize, usize); 17] = [
 	(1, 1, 1),
 	(1, 64, 1),
 	(32, 64, 1),
@@ -1326,6 +1423,8 @@ const RESUME_OVERLAP: [(usize, usize, usize); 15] = [
 	(1, 64, 8),
 	(1, 64, 32),
 	(32, 64, 8),
+	(32, 64, 32),
+	(256, 64, 8),
 ];
 
 /// A track that swapped through its routes while its readers' local cap held every
@@ -1507,6 +1606,8 @@ criterion_group!(
 	bench_announce,
 	bench_pending_churn,
 	bench_withdraw,
+	bench_withdraw_wave,
+	bench_route_churn,
 	bench_announce_mounted,
 	bench_announce_fleet,
 	bench_announce_duplicate,

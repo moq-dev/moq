@@ -42,7 +42,6 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [A failed send never fails the socket](/quest/m1/uring-send-errors.md) - one peer cannot kill a worker's connections
 - [io_uring MTU matches tokio](/quest/m1/uring-mtu.md) - `quic.mtu_discovery` honored and smaller paths reachable
 - [io_uring local address](/quest/m1/uring-local-addr.md) - multihomed wildcard binds reply from the right address
 - [io_uring handle lifecycle](/quest/m2/uring-lifecycle.md) - handles fail with their worker and close on last drop

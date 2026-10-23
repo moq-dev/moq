@@ -1,4 +1,4 @@
-import { Reader, Writer } from "../stream.ts";
+import { concat, encodeVarint, Reader, Writer } from "../stream.ts";
 import { decodeError } from "../util/decode_error.ts";
 
 /**
@@ -7,55 +7,20 @@ import { decodeError } from "../util/decode_error.ts";
  */
 export const MAX_MESSAGE_SIZE = 0xffff;
 
-// Encodes a message with a varint size prefix, refusing a body the peer would reject. A type
-// `id` is written only once the body fits, so a refused message leaves nothing on the stream.
+// Encodes a message with a varint size prefix, refusing a body the peer would reject. The whole
+// message, type `id` included, goes out in one write, so a refused one leaves nothing on the stream.
 export async function encode(
 	writer: Writer,
 	f: (w: Writer) => Promise<void>,
 	{ id, max = MAX_MESSAGE_SIZE }: { id?: number; max?: number } = {},
 ) {
-	let scratch = new Uint8Array();
-
-	const temp = new Writer(
-		new WritableStream({
-			write(chunk: Uint8Array) {
-				const needed = scratch.byteLength + chunk.byteLength;
-				if (needed > scratch.buffer.byteLength) {
-					// Resize the buffer to the needed size.
-					const capacity = Math.max(needed, scratch.buffer.byteLength * 2);
-					const newBuffer = new ArrayBuffer(capacity);
-					const newScratch = new Uint8Array(newBuffer, 0, needed);
-
-					// Copy the old data into the new buffer.
-					newScratch.set(scratch);
-
-					// Copy the new chunk into the new buffer.
-					newScratch.set(chunk, scratch.byteLength);
-
-					scratch = newScratch;
-				} else {
-					// Copy chunk data into buffer
-					scratch = new Uint8Array(scratch.buffer, 0, needed);
-					scratch.set(chunk, needed - chunk.byteLength);
-				}
-			},
-		}),
-		writer.version,
-	);
-
-	await f(temp);
-	temp.close();
-	await temp.closed;
-
-	if (scratch.byteLength > max) {
-		throw new Error(`message too large: ${scratch.byteLength} bytes (max ${max})`);
+	const body = await Writer.collect(writer.version, f);
+	if (body.byteLength > max) {
+		throw new Error(`message too large: ${body.byteLength} bytes (max ${max})`);
 	}
 
-	if (id !== undefined) await writer.u53(id);
-	await writer.u53(scratch.byteLength);
-	if (scratch.byteLength > 0) {
-		await writer.write(scratch);
-	}
+	const size = encodeVarint(body.byteLength, writer.version);
+	await writer.write(concat(id === undefined ? [size, body] : [encodeVarint(id, writer.version), size, body]));
 }
 
 // Reads a message with a varint size prefix, refusing an oversized body before reading it.

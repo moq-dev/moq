@@ -520,8 +520,6 @@ fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info
 		version,
 		values: properties.unknown.clone(),
 	}));
-	// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
-	info.unchecked = info.timescale.is_some();
 	info
 }
 
@@ -1144,6 +1142,10 @@ where
 		Some(track)
 	}
 
+	pub(super) fn stats(&self) -> &crate::stats::Session {
+		self.origin.stats()
+	}
+
 	/// Send SUBSCRIBE_NAMESPACE for one prefix on a bidi stream.
 	/// The caller is responsible for opening the appropriate stream type
 	/// (virtual for v14/v15, real bidi for v16+), one per prefix.
@@ -1161,6 +1163,11 @@ where
 		prefix: PathOwned,
 		snapshot: crate::model::Snapshot,
 	) -> Result<(), Error> {
+		stream = if self.version == Version::Draft16 {
+			stream.with_stats(self.origin.stats())
+		} else {
+			super::request_stream::with_stats(stream, self.origin.stats(), self.version)
+		};
 		// Hidden namespaces are requested too, as on moq-lite: the session mirrors the
 		// peer into the origin and each local reader opts in on its own. The parameter
 		// fails decoding at a peer that doesn't know it, so it waits on the peer's SETUP
@@ -2885,7 +2892,7 @@ where
 				})
 				.await
 				{
-					Ok(stream) => stream,
+					Ok(stream) => super::request_stream::with_stats(stream, self.origin.stats(), self.version),
 					Err(err) => {
 						target.fail(err);
 						return None;
@@ -3897,6 +3904,7 @@ where
 					Stream::poll_open(&mut opening, this.version, &mut waiter.context())
 				})
 				.await?;
+				stream = super::request_stream::with_stats(stream, this.origin.stats(), this.version);
 				let mut timeout = crate::time::Deadline::after(&this.runtime, Control::REQUEST_ID_TIMEOUT);
 				let fetch_id = kio::wait(|waiter| {
 					validity.check(waiter)?;
@@ -4098,6 +4106,7 @@ where
 				return None;
 			}
 		};
+		stream = super::request_stream::with_stats(stream, self.origin.stats(), self.version);
 		let mut timeout = crate::time::Deadline::after(&self.runtime, Control::REQUEST_ID_TIMEOUT);
 		let request_id = match kio::wait(|waiter| {
 			if gate.poll_denied(waiter).is_ready() {
@@ -5194,6 +5203,7 @@ where
 			Ok(stream) => stream,
 			Err(err) => return request.reject(err),
 		};
+		stream = super::request_stream::with_stats(stream, self.origin.stats(), self.version);
 		let mut timeout = crate::time::Deadline::after(&self.runtime, Control::REQUEST_ID_TIMEOUT);
 		let fetch_id = match kio::wait(|waiter| {
 			validity.check(waiter)?;
@@ -8172,13 +8182,8 @@ mod tests {
 				"SUBSCRIBE_OK priority must be committed before alias registration"
 			);
 			// The answer's largest is known before any group arrives.
-			let mut reader = track.producer.clone().unwrap();
-			let reported = match reader.poll_largest(&kio::Waiter::noop()) {
-				Poll::Ready(reported) => reported,
-				Poll::Pending => None,
-			};
 			assert_eq!(
-				reported,
+				track.producer.as_ref().unwrap().largest(),
 				largest.map(|largest| track::Position {
 					group: largest.group,
 					frame: 0,
@@ -12857,7 +12862,7 @@ mod stitch_tests {
 	}
 
 	/// Relay `script` through a track the ingress times in `timescale`, which the cache
-	/// normalizes to microseconds like [`accepted_info`], via one relay or two joined by a
+	/// retains on the publisher's grid like [`accepted_info`], via one relay or two joined by a
 	/// moq-lite `hop`.
 	async fn relay_passthrough_via(
 		script: Vec<u8>,
@@ -13045,15 +13050,15 @@ mod stitch_tests {
 
 	/// A relayed Timestamp leaves in the units the publisher declared: the cache holds the
 	/// track on the publisher's grid, so a copy of the same instance over another route
-	/// matches it. A moq-lite hop serves the unchecked track untimed, so the Timestamp
-	/// stops there and the other property survives.
+	/// matches it, including across a moq-lite hop that negotiated the `ietf` extension.
 	#[moq_clock::test]
 	async fn passthrough_keeps_the_publishers_timestamp_units() {
 		let version = Version::Draft22;
 		// Timestamp 42 (ms), then an unknown property that must survive beside it.
 		let properties = [0x10, 42, 0x70, 7];
 		let script = object_stream(version, true, &[(0, &properties, None)]);
-		for (hop, timestamp) in [(false, Timestamp::new(42, Timescale::MILLI).ok()), (true, None)] {
+		for hop in [false, true] {
+			let timestamp = Timestamp::new(42, Timescale::MILLI).ok();
 			let (bytes, log) =
 				relay_passthrough_via(script.clone(), version, version, None, Some(Timescale::MILLI), hop).await;
 			assert!(log.resets().is_empty(), "hop: {hop}");
