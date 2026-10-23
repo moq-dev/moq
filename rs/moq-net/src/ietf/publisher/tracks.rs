@@ -758,7 +758,7 @@ where
 		let Some(opened) = opened else {
 			return Ok(());
 		};
-		let mut stream = opened?;
+		let mut stream = super::super::request_stream::with_stats(opened?, self.stats(), self.version);
 		let allocated = kio::wait(|waiter| {
 			if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
 				return Poll::Ready(None);
@@ -902,7 +902,7 @@ where
 					)
 					.await
 				{
-					Ok(Served::Paused) => {
+					Ok(Served::Paused(_)) => {
 						self.pause_join(join.as_ref());
 						self.write_request_ok(&mut stream.writer, request_id, None).await?;
 						// Unlisted while it forwarded: it ends now that it is idle.
@@ -1014,7 +1014,7 @@ where
 
 	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
 	/// unless the subscription forwards.
-	fn pause_join(&self, join: Option<&Join<GroupOf<S>>>) {
+	pub(super) fn pause_join(&self, join: Option<&Join<GroupOf<S>>>) {
 		if let Some(join) = join {
 			join.joins.lock().insert(join.request_id, Some(Joined::Empty));
 		}
@@ -1134,7 +1134,6 @@ where
 		)
 		.compression(self.peer_setup.get().await.flate)
 		.ranked(self.priority.clone());
-		serve.pausable = true;
 		serve.dynamic = dynamic;
 		if let Some(value) = how.new_group {
 			serve.request_new_group(value);
