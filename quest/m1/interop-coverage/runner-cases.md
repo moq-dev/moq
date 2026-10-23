@@ -51,9 +51,9 @@ from the stale client image. Rebuilt from the runner's current source, it
 passes against moxygen and Cloudflare draft-18. Cloudflare draft-14 has no
 SUBSCRIBE_NAMESPACE, so that cell is unsupported.
 
-Two moq-dev-js cells from the runs for #173 still fail, with causes not
-yet found:
+Two moq-dev-js cells from the runs for #173 still fail:
 [JS namespace lifecycle in one process](/quest/m1/interop-coverage/js-namespace-done.md)
-and [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md).
+and [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md),
+where imquic drops a subgroup header split across stream reads.
 
 Public API: none. Wire: none.
