@@ -227,7 +227,6 @@ fn resolve_symbol(lock: &std::sync::OnceLock<usize>, name: &std::ffi::CStr) -> O
 
 // Adapted from https://github.com/apple-oss-distributions/xnu/blob/8d741a5de7ff4191bf97d57b9f54c2f6d4a15585/bsd/sys/socket_private.h
 #[repr(C)]
-#[expect(non_camel_case_types, reason = "mirrors xnu's `msghdr_x`")]
 pub(crate) struct msghdr_x {
     pub msg_name: *mut libc::c_void,
     pub msg_namelen: libc::socklen_t,
