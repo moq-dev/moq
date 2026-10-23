@@ -142,3 +142,6 @@ harness = false
 [[bench]]
 name = "http_auth"
 harness = false
+
+[lints]
+workspace = true

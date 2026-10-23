@@ -100,6 +100,10 @@ pub enum Error {
 	#[error("MKV track layout changed after header was emitted: track '{0}' added")]
 	HeaderAddedTrack(String),
 
+	/// The named rendition moved to a track the header's TrackEntry does not describe.
+	#[error("MKV track '{0}' moved to a track whose codec configuration differs from the header's")]
+	TrackChanged(String),
+
 	/// The named CMAF track cannot be exported as MKV.
 	#[error("MKV export does not support CMAF {kind} track '{name}'")]
 	UnsupportedCmafTrack {

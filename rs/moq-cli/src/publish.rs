@@ -272,9 +272,13 @@ fn ts_import(
 	Ok((import, catalog))
 }
 
-// Exactly one Source exists per process, so the size gap between the small
-// Stream variant and the larger Capture config is irrelevant.
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(
+	feature = "capture",
+	expect(
+		clippy::large_enum_variant,
+		reason = "exactly one Source exists per process, so the gap between Stream and the larger Capture config is irrelevant"
+	)
+)]
 enum Source {
 	/// Decode a container read from stdin.
 	Stream {
@@ -788,7 +792,11 @@ impl CaptureArgs {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 pub(crate) mod tests {
 	use std::time::Duration;
 
@@ -1038,7 +1046,13 @@ pub(crate) mod tests {
 		broadcast.announce(Default::default()).unwrap();
 		settle().await;
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1115,7 +1129,13 @@ pub(crate) mod tests {
 			Default::default(),
 		)
 		.unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1225,7 +1245,13 @@ pub(crate) mod tests {
 				Default::default(),
 			)
 			.unwrap();
-			#[allow(irrefutable_let_patterns)]
+			#[cfg_attr(
+				not(feature = "capture"),
+				expect(
+					irrefutable_let_patterns,
+					reason = "`Source::Capture` exists only with the capture feature"
+				)
+			)]
 			let Source::Stream { decoder, .. } = &mut publish.source else {
 				panic!("expected a stream source");
 			};
@@ -1375,7 +1401,13 @@ pub(crate) mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1433,7 +1465,13 @@ pub(crate) mod tests {
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1469,7 +1507,13 @@ pub(crate) mod tests {
 			let input = tokio::fs::File::open(file.path()).await.unwrap();
 			let broadcast = moq_net::broadcast::Info::new().produce();
 			let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-			#[allow(irrefutable_let_patterns)]
+			#[cfg_attr(
+				not(feature = "capture"),
+				expect(
+					irrefutable_let_patterns,
+					reason = "`Source::Capture` exists only with the capture feature"
+				)
+			)]
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
@@ -1493,7 +1537,13 @@ pub(crate) mod tests {
 		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1525,7 +1575,13 @@ pub(crate) mod tests {
 		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
@@ -1578,7 +1634,13 @@ pub(crate) mod tests {
 			let mut announced = consumer.announced();
 			let broadcast = origin.create_broadcast("demo").unwrap();
 			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
-			#[allow(irrefutable_let_patterns)]
+			#[cfg_attr(
+				not(feature = "capture"),
+				expect(
+					irrefutable_let_patterns,
+					reason = "`Source::Capture` exists only with the capture feature"
+				)
+			)]
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
@@ -1645,7 +1707,13 @@ pub(crate) mod tests {
 			.subscribe(None)
 			.await
 			.unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("stream source");
 		};
@@ -1674,7 +1742,13 @@ pub(crate) mod tests {
 			let mut announced = origin.consume().announced();
 			let broadcast = origin.create_broadcast("demo").unwrap();
 			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
-			#[allow(irrefutable_let_patterns)]
+			#[cfg_attr(
+				not(feature = "capture"),
+				expect(
+					irrefutable_let_patterns,
+					reason = "`Source::Capture` exists only with the capture feature"
+				)
+			)]
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
@@ -1787,7 +1861,13 @@ pub(crate) mod tests {
 	fn a_multiplex_is_refused_with_the_programs_and_the_flag() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
-		#[allow(irrefutable_let_patterns)]
+		#[cfg_attr(
+			not(feature = "capture"),
+			expect(
+				irrefutable_let_patterns,
+				reason = "`Source::Capture` exists only with the capture feature"
+			)
+		)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};

@@ -124,7 +124,7 @@ pub struct ParseError {
 
 impl ParseError {
 	/// The broad failure category.
-	#[cfg_attr(not(test), allow(dead_code))]
+	#[cfg_attr(not(test), allow(dead_code, reason = "only tests use it"))]
 	pub fn kind(&self) -> ParseErrorKind {
 		self.kind
 	}

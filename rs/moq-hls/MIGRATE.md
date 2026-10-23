@@ -33,6 +33,12 @@ import.run().await?;
 import.finish()?.wait().await;
 ```
 
+### A timestamp rewind ends the import (#6426)
+
+`import::Import::init` and `run` fail with the new `Error::Rewind` when a rendition's timestamps go backwards, such as a reset at an `EXT-X-DISCONTINUITY` under the same `EXT-X-MAP`.
+`run` used to retry it, then evict the rendition and rejoin it as fresh tracks.
+Treat the error as final and import the restarted source as a new broadcast.
+
 ### A failed timeline fails its listings
 
 `export::Broadcaster::manifest` and `export::Rendition::media_playlist` return `Result<Option<String>>`.

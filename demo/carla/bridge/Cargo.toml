@@ -35,3 +35,6 @@ tracing = { workspace = true }
 # The stand-in producer: a native Vulkan renderer that hands the bridge
 # exportable slots exactly the way the CARLA plugin does.
 ash = { workspace = true }
+
+[lints]
+workspace = true

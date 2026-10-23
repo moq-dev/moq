@@ -30,3 +30,6 @@ tracing = { workspace = true }
 hang = { path = "../hang" }
 srt-protocol = "0.4"
 tracing-test = { workspace = true, features = ["no-env-filter"] }
+
+[lints]
+workspace = true
