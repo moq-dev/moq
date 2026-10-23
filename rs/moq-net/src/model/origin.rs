@@ -461,8 +461,9 @@ pub struct Route {
 
 	/// What pulling content via this route costs, accumulated per link: lower wins
 	/// among routes of the same anonymity, with ties broken by a broadcast published
-	/// on this origin, then hop length, then a deterministic hash, and finally the
-	/// most recently announced route. See [`Cost`].
+	/// on this origin, then hop length, then a deterministic hash (except for a route
+	/// that entered here, at its own path), and finally the most recently announced
+	/// route. See [`Cost`].
 	pub cost: Cost,
 
 	/// The credential the request advertising this route carries, from
@@ -618,13 +619,18 @@ fn fnv_key(name: &str, origins: impl IntoIterator<Item = Hop>) -> u64 {
 /// cost, then a broadcast published on this origin (it serves what is here, not a
 /// claim that has to ask), then the shortest hop chain, then a deterministic hash
 /// of `path` and the chain so every node converges on the same winner, and finally
-/// the newest announcement, so a reconnect under an otherwise identical route wins
-/// the moment it lands instead of after the transport retires the old session.
+/// the newest announcement, so a reconnect wins the moment it lands instead of after
+/// the transport retires the old session.
 ///
 /// `path` is what is being resolved: the requested path for a request, the prefix
 /// itself for an advertisement. Keying the hash on the requested path is what
 /// spreads equal-cost advertisers of one prefix: each path picks its own winner
 /// from the pool, rather than every path under the prefix hashing alike.
+///
+/// A route that entered here for exactly `path` is not hashed: no other node ranks
+/// it, so convergence does not need the hash, and a restarted publisher announces
+/// under a new first hop, so a hash would keep its dead session winning half the
+/// time until the transport times out.
 #[allow(clippy::type_complexity)]
 fn route_order<'a>(
 	path: &Path,
@@ -646,7 +652,10 @@ fn route_order<'a>(
 		entry.cost,
 		!entry.local,
 		entry.hops.len(),
-		fnv_key(path.as_str(), entry.hops.iter().copied()),
+		match entry.link == Link::Local && entry.prefix == *path {
+			true => 0,
+			false => fnv_key(path.as_str(), entry.hops.iter().copied()),
+		},
 		Reverse(entry.id),
 	)
 }
@@ -8002,13 +8011,13 @@ mod tests {
 		}
 	}
 
-	/// An epochless replacement at equal cost and chain length on a chain whose hash
-	/// loses competes with the lingering old route: nothing restarts and requests stay
-	/// on the old route until it is withdrawn, then consumers restart and a re-request
-	/// lands on the replacement.
+	/// An epochless replacement from a cluster peer at equal cost and chain length, on a
+	/// chain whose hash loses, competes with the lingering old route: nothing restarts and
+	/// requests stay on the old route until it is withdrawn, then consumers restart and a
+	/// re-request lands on the replacement. Every node ranks peer routes alike.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	async fn an_equal_cost_replacement_waits_for_the_old_route() {
+	async fn an_equal_cost_peer_replacement_waits_for_the_old_route() {
 		// Pinned in `spread_hash_matches_js`: hop 11 hashes below hop 10 for this path.
 		// Restarts are delivered at once: the hold is not what this checks.
 		let producer = Config {
@@ -8018,12 +8027,13 @@ mod tests {
 		.produce();
 		let consumer = producer.consume();
 		let mut announced = consumer.announced();
-		let old = producer
+		let peer = producer.clone().peer();
+		let old = peer
 			.dynamic_route("pool/job-0", Route::default().with_hops(hops(&[11])))
 			.unwrap();
 		announced.expect_next_active("pool/job-0").await;
 
-		let new = producer
+		let new = peer
 			.dynamic_route("pool/job-0", Route::default().with_hops(hops(&[10])))
 			.unwrap();
 		announced.assert_next_wait();
@@ -8044,6 +8054,39 @@ mod tests {
 		request.accept(&second);
 		let replaced = pending.await.expect("the replacement resolves");
 		assert!(!replaced.is_clone(&resolved));
+	}
+
+	/// A publisher that restarts while its old session lingers announces its own path under
+	/// a new first hop. The restart takes over at once whichever chain hashes lower, so new
+	/// requests never wait on the old session.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn an_equal_cost_local_replacement_takes_over_at_once() {
+		for (old_hop, new_hop) in [(11, 10), (10, 11)] {
+			let producer = Config {
+				update_hold: Duration::ZERO,
+				..Config::new(origin(1))
+			}
+			.produce();
+			let consumer = producer.consume();
+			let mut announced = consumer.announced();
+			let _old = producer
+				.dynamic_route("pool/job-0", Route::default().with_hops(hops(&[old_hop])))
+				.unwrap();
+			announced.expect_next_active("pool/job-0").await;
+
+			let new = producer
+				.dynamic_route("pool/job-0", Route::default().with_hops(hops(&[new_hop])))
+				.unwrap();
+			assert_eq!(
+				announced.expect_next_restarted("pool/job-0").await.hops,
+				hops(&[new_hop])
+			);
+
+			let pending = consumer.request_broadcast("pool/job-0", None);
+			queued(&new).await.accept(broadcast::Info::new().produce());
+			pending.await.expect("the replacement resolves");
+		}
 	}
 
 	/// An origin delivering restarts at once, and a way to claim `prefix` with a
