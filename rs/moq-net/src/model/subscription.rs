@@ -111,10 +111,10 @@ pub enum Order {
 /// and again whenever the subscriber replaces its ranges. Before any group exists a
 /// relative anchor resolves at the first one, so [`Range::live`] starts there.
 ///
-/// No published wire carries either yet: upstream, a relative or time start is no floor,
-/// the same request as [`Range::oldest`], and a relative or time end is no end. Behind a
-/// moq-transport upstream, which joins without a floor at the live group, `Relative(n)..`
-/// starts there.
+/// No wire carries either upstream yet, beyond the live and oldest starts it spells with
+/// no floor ([`Range::live`] and [`Range::oldest`]). A track copy received over a session
+/// refuses any other relative or time anchor with [`Error::Unsupported`](crate::Error::Unsupported)
+/// on read, rather than resolve it against the partial cache it holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Anchor {
 	/// This exact position.
@@ -184,6 +184,17 @@ impl Range {
 			},
 			end: end.map(|end| Anchor::Absolute(Position::group(end))),
 		}
+	}
+
+	/// Whether a wire without ranges carries this range upstream: absolute anchors, and
+	/// the live and oldest starts it spells with no floor.
+	pub(super) fn is_wire(&self) -> bool {
+		let start = match self.start {
+			Anchor::Absolute(_) => true,
+			Anchor::Relative(back) => back == 0 || back == u64::MAX,
+			Anchor::Time(_) => false,
+		};
+		start && matches!(self.end, None | Some(Anchor::Absolute(_)))
 	}
 
 	/// Whether this range certainly delivers nothing, wherever the latest group lands.

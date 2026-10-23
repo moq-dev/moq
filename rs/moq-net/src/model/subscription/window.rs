@@ -27,6 +27,12 @@ pub(in crate::model) trait Holdings {
 	/// Whether the track carries timestamps at all.
 	fn timed(&self) -> bool;
 
+	/// Whether the groups are a copy received over a wire, which asks upstream only for
+	/// what [`Range::is_wire`] covers, so any other anchor can't resolve here.
+	fn received(&self) -> bool {
+		false
+	}
+
 	/// Where `pts` falls among the groups with a known start.
 	fn containing(&self, pts: Timestamp) -> Containing;
 
@@ -311,7 +317,8 @@ impl TimeEnd {
 impl Window {
 	/// Resolve `ranges`, counting relative anchors back from `latest`.
 	///
-	/// Refuses a time anchor on an untimed track with [`Error::TimestampMismatch`].
+	/// Refuses a time anchor on an untimed track with [`Error::TimestampMismatch`], and an
+	/// anchor a received copy's wire drops with [`Error::Unsupported`].
 	pub fn new(ranges: &[Range], latest: Option<u64>, holdings: &impl Holdings) -> Result<Self> {
 		let mut window = Self {
 			ranges: ranges.to_vec(),
@@ -530,6 +537,9 @@ impl Window {
 				.any(|range| time(Some(range.start)) || time(range.end))
 		{
 			return Err(Error::TimestampMismatch);
+		}
+		if holdings.received() && !self.ranges.iter().all(Range::is_wire) {
+			return Err(Error::Unsupported);
 		}
 		self.spans.clear();
 		self.pending = false;

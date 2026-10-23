@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Subscription max delay is optional
+
+`Subscription.maxDelayUs` is `int?` and `Subscription.maxDelay` is `Duration?`, and `null` (the default) keeps moq-net's default of zero, which skips a superseded group at once.
+Explicit values are unchanged; code reading them back handles `null`.
+
+### Relative and time ranges are refused over a session
+
+No wire carries a relative or time range anchor upstream yet. A track received over a session used to resolve one against the groups it happened to hold, which silently read from the live edge or the wrong groups; reading it now fails with an unsupported error.
+This covers a relative start other than the live (`0`) and oldest starts, a time start, and a relative or time end.
+Ask for absolute groups over a session, or resolve the anchor where the track is published.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.

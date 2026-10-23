@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Relative and time ranges are refused over a session
+
+No wire carries a relative or time range anchor upstream yet. A track received over a session used to resolve one against the groups it happened to hold, which silently read from the live edge or the wrong groups; reading it now fails with `Error::Unsupported`.
+This covers a relative start other than the live (`0`) and oldest starts, a time start, and a relative or time end.
+Ask for absolute groups over a session, or resolve the anchor where the track is published.
+
+### `Subscriber::floor` and `next_in_range` honor `set_groups`
+
+Both now return at least the start set by `Subscriber::set_groups`, so a reader waiting on each group in sequence no longer waits on groups the local floor withholds.
+Drop any `max` against your own `set_groups` start.
+
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
 On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.

@@ -7172,8 +7172,10 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			true => request.request_start(None),
 			false => request,
 		};
-		let serving = request.accept(info);
+		// Marked received before any reader sees it, so none resolves an anchor this wire dropped.
+		let serving = request.stage(info);
 		serving.received();
+		let serving = serving.commit();
 		Self {
 			largest: None,
 			demand: serving.demand(),

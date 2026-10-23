@@ -1313,6 +1313,10 @@ impl Reader {
 					}
 					Poll::Ready(Ok(sub)) => sub,
 				};
+				// The reader's own ranges, which no copy of this route serves either.
+				if let Some(err) = sub.refused() {
+					return Some(Poll::Ready(Err(err)));
+				}
 				if ordered {
 					sub.skip_ordered(floor);
 				}
@@ -1462,6 +1466,9 @@ impl Reader {
 					}
 					Poll::Ready(Ok(sub)) => sub,
 				};
+				if let Some(err) = sub.refused() {
+					return Some(Poll::Ready(Err(err)));
+				}
 				match sub.poll_recv_wire_datagram(waiter) {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(datagram))) => {

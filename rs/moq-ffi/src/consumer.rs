@@ -31,13 +31,14 @@ pub struct MoqSubscription {
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age of a non-latest group before it is skipped, in microseconds.
-	/// `0` skips immediately; a larger value tolerates that much reordering.
+	/// Maximum age of a non-latest group before it is skipped, in microseconds, or null
+	/// for moq-net's default: `0`, which skips immediately. A larger value tolerates that
+	/// much reordering.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	#[uniffi(default = 0)]
-	pub max_delay_us: u64,
+	#[uniffi(default = None)]
+	pub max_delay_us: Option<u64>,
 	/// The spans of the track to deliver, or null for everything `max_delay_us` still
 	/// considers fresh. An empty list asks for nothing.
 	///
@@ -155,9 +156,10 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 	type Error = MoqError;
 
 	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
-		let mut subscription = moq_net::track::Subscription::default()
-			.with_priority(s.priority)
-			.with_max_delay(std::time::Duration::from_micros(s.max_delay_us));
+		let mut subscription = moq_net::track::Subscription::default().with_priority(s.priority);
+		if let Some(max_delay) = s.max_delay_us {
+			subscription = subscription.with_max_delay(std::time::Duration::from_micros(max_delay));
+		}
 		if let Some(ranges) = s.ranges {
 			subscription = subscription.with_ranges(
 				ranges
