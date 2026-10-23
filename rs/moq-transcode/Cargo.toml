@@ -54,3 +54,6 @@ moq-video = { path = "../moq-video", features = ["openh264"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 url = { workspace = true }
 usage-rs = { workspace = true }
+
+[lints]
+workspace = true

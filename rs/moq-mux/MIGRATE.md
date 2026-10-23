@@ -10,6 +10,11 @@ How to update your code for each breaking change, newest first.
 Pass `moq_clock::wall()` for the current wall, use `Wall::try_from(system_time)?` for a third-party timestamp, and convert returned values with `SystemTime::from` only at a third-party boundary.
 The portable wall range is 1970-2554; catalog encodings are unchanged.
 
+### Passthrough fMP4 refuses a rewound group as `TimestampRewind` (#6426)
+
+A passthrough `container::fmp4::Import` refuses a group that starts below the previous one with `Error::TimestampRewind` before opening it, as an unwrapped track does, instead of `Error::Moq(moq_net::Error::TimestampMismatch)` from a group it already opened.
+Match `TimestampRewind` where you matched `TimestampMismatch`.
+
 ### `Source` waits for a sibling's first announcement (#6254)
 
 `Source::bind`, `resolve`, and `subscribe_track` now wait for a sibling nothing announces yet instead of failing with `Unroutable`, and keep the first instance they resolve: once it goes, they answer that ended broadcast rather than waiting for the next.

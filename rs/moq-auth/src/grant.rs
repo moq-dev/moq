@@ -50,7 +50,8 @@ pub struct Grant {
 	pub label: Option<String>,
 
 	/// The session is a cluster peer (another relay): what it announces entered
-	/// the cluster elsewhere, not here.
+	/// the cluster elsewhere, not here, and it discovers hidden routes without
+	/// asking, for peers that predate the opt-in. A client certificate alone is not.
 	#[serde(skip_serializing_if = "std::ops::Not::not")]
 	pub peer: bool,
 

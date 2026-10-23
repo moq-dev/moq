@@ -349,7 +349,10 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 	///
 	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
 	/// needs a newer moq-hang draft than this crate reads.
-	#[allow(clippy::should_implement_trait)]
+	#[expect(
+		clippy::should_implement_trait,
+		reason = "public inherent parser; switching to `FromStr` is a breaking change"
+	)]
 	pub fn from_str(s: &str) -> Result<Self> {
 		Self::from_slice(s.as_bytes())
 	}

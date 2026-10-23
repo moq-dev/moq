@@ -8302,7 +8302,6 @@ pub(super) mod test {
 
 	/// Import `data` with an `mpegts` catalog, failing on any import error. The importer is
 	/// returned to keep its renditions in the catalog.
-	#[allow(clippy::type_complexity)]
 	fn import_all(
 		data: &[u8],
 	) -> anyhow::Result<(

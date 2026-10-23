@@ -216,6 +216,22 @@ pub enum Redirect {
 	Ignore,
 }
 
+/// What to do when a peer's GOAWAY names no URI, meaning it is restarting where we reached it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Restart {
+	/// Redial the same addresses at once while the drained session keeps serving. Right for
+	/// an address that can lead to another node, such as a fleet name a fresh resolve moves
+	/// off the drained one. The default.
+	#[default]
+	Redial,
+	/// Keep serving on the drained session until the peer closes it, then reconnect as after
+	/// any drop. Right for an address that names one node, where a redial only reaches the
+	/// draining process again. The peer must close the session itself, as a relay does at
+	/// its drain deadline.
+	Wait,
+}
+
 impl Redirect {
 	/// The URL a GOAWAY assigns. `Ok(None)` keeps the current address list (the
 	/// peer named no URI, or the policy ignores a URI it could parse), `Ok(Some)`
@@ -879,7 +895,7 @@ impl Connection {
 					// Wait for the session to end, forwarding its bandwidth estimates into the
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
-					let ended = run_session(shared, &session, &mut draining).await;
+					let ended = run_session(shared, &session, &mut draining, client.restart).await;
 					// Before any status moves, so a watcher woken by `Disconnected` finds why. Only
 					// a retry has a reason to report; a session that ends the loop reports through
 					// `closed` instead.
@@ -1545,10 +1561,19 @@ async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared
 /// One `poll_*` step drives it all: [`poll_forward`] mirrors each kio bandwidth estimate, the
 /// GOAWAY consumer is a kio channel, and the transport's close future (the one non-kio source) is
 /// polled through the waiter's own waker.
-async fn run_session(shared: &Shared, session: &moq_net::Session, draining: &mut Option<Draining>) -> Ended {
+///
+/// Under [`Restart::Wait`] a GOAWAY naming no URI does not end the wait: the session serves on
+/// until it closes.
+async fn run_session(
+	shared: &Shared,
+	session: &moq_net::Session,
+	draining: &mut Option<Draining>,
+	restart: Restart,
+) -> Ended {
 	let mut send = session.send_bandwidth();
 	let mut recv = RecvBandwidth::default();
-	let goaway = session.draining();
+	// Dropped once a restart is waited out: it is a latch, so it would keep firing.
+	let mut goaway = Some(session.draining());
 	let closed = session.closed();
 	tokio::pin!(closed);
 
@@ -1568,8 +1593,13 @@ async fn run_session(shared: &Shared, session: &moq_net::Session, draining: &mut
 		// accepting requests and waits for us to leave, so ignoring it is how both
 		// sides end up waiting on each other forever. The caller ends the connection
 		// instead: asked to leave, with no way to migrate, leaving is the answer.
-		if let Poll::Ready(Ok(msg)) = goaway.poll(waiter) {
-			return Poll::Ready(Ended::Goaway(msg));
+		if let Some(Poll::Ready(Ok(msg))) = goaway.as_ref().map(|goaway| goaway.poll(waiter)) {
+			if restart == Restart::Wait && msg.uri().is_empty() {
+				tracing::info!("peer is restarting; serving until it closes the session");
+				goaway = None;
+			} else {
+				return Poll::Ready(Ended::Goaway(msg));
+			}
 		}
 
 		waiter
@@ -1656,7 +1686,11 @@ fn terminal(state: &State) -> Error {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 
@@ -2833,6 +2867,61 @@ mod tests {
 			accepted_a.try_recv().is_err(),
 			"a cached resolve redialed the drained relay"
 		);
+	}
+
+	/// Under [`Restart::Wait`] an empty-URI GOAWAY changes nothing while the peer keeps
+	/// the session: no migration and no redial. Its close then reconnects like any drop.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_waited_restart_redials_only_once_the_session_closes() {
+		use futures::FutureExt;
+		const WAIT: Duration = Duration::from_secs(10);
+
+		let origin = crate::origin::spawn();
+		let (addr, mut accepted, _task) = serve(origin.clone()).await;
+
+		let subscriber = crate::origin::spawn();
+		let mut config = crate::connect::Config::default();
+		config.backoff.initial = Some(MIN_BACKOFF);
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_subscriber(subscriber.clone())
+			.with_restart(Restart::Wait);
+		let mut connection = client.connect(url(&format!("tcp://{addr}/")));
+		let status = tokio::time::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Connected);
+		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+
+		session.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+
+		// A broadcast announced after the GOAWAY still arrives: the drained session serves.
+		let late = origin.create_broadcast("late").unwrap();
+		late.announce(Default::default()).unwrap();
+		tokio::time::timeout(WAIT, subscriber.consume().routed("late"))
+			.await
+			.expect("the drained session stopped serving")
+			.unwrap();
+		assert!(
+			connection.draining().and_then(|goaway| goaway.peek()).is_some(),
+			"the GOAWAY never arrived"
+		);
+		assert_eq!(
+			connection.status().now_or_never().transpose().unwrap(),
+			None,
+			"the loop left the session"
+		);
+		assert!(accepted.try_recv().is_err(), "redialed while the session served");
+
+		session.abort(moq_net::Error::GoawayTimeout);
+		let status = tokio::time::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Disconnected);
+		let status = tokio::time::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Connected);
+		tokio::time::timeout(WAIT, accepted.recv())
+			.await
+			.expect("never redialed after the close")
+			.unwrap();
 	}
 
 	#[test]

@@ -37,7 +37,10 @@ pub struct Request {
 	/// The relay's socket address the session arrived on, absent likewise.
 	pub local: Option<SocketAddr>,
 
-	/// The SNI the client presented, when the transport carried TLS.
+	/// The SNI that selected the relay's certificate, absent without TLS or SNI.
+	///
+	/// The client picks it among the names the relay serves, so a hostname-scoped
+	/// server binds the tenant to the credential, not to this alone.
 	pub server_name: Option<String>,
 
 	/// The negotiated application protocol, including the moq version.

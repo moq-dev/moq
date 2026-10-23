@@ -361,7 +361,10 @@ fn decode_unix_secs<B: Buf>(buf: &mut B) -> Option<Wall> {
 /// Stateless reset token
 ///
 /// Used for an endpoint to securely communicate that it has lost state for a connection.
-#[allow(clippy::derived_hash_with_manual_eq)] // Custom PartialEq impl matches derived semantics
+#[expect(
+    clippy::derived_hash_with_manual_eq,
+    reason = "custom PartialEq impl matches derived semantics"
+)]
 #[derive(Debug, Copy, Clone, Hash)]
 pub(crate) struct ResetToken([u8; RESET_TOKEN_SIZE]);
 
