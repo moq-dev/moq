@@ -46,6 +46,27 @@ shutdown. No sleep stands in for drain completion. A missing group, error, or
 stall fails the lane; the timeout only bounds failure. QUIC on localhost rarely
 reorders, so the ordering race remains covered by transport unit tests.
 
+The in-tree matrix also has a `finish` case. `just test interop --finish --all`
+runs it alone. Readers establish their sessions first, then wait on a private
+stdin barrier without subscribing to media. Each publisher imports ten nonempty
+H.264 frames in one GOP (the browser encodes the same finite fixture), finishes
+all media and its catalog, and obtains the normal broadcast finish handle. Only
+then does the runner release readers. They require all ten frames, natural media
+and catalog EOF, and the exact broadcast's announcement END. After the finish
+handle's real linger expires, the publisher announces a separate untimed health
+track. Reading its payload and clean EOF on the original session proves that
+withdrawal was not a transport shutdown. The final FIFO acknowledgement permits
+teardown only; it never ends the linger. Each publisher also measures monotonic
+time from before creating its finish handle and refuses a zero linger or a wait
+shorter than that handle promises, without a fixed duration or tolerance.
+
+GStreamer checks the late tail alone. `moqsrc` keeps watching a finished
+broadcast, since an announcement means online/offline, so it has no end,
+withdrawal, or session to report. It joins once the broadcast has finished and
+requires exactly ten nonempty video buffers; its cell passes with the end check
+marked N/A. A pinned moq-transport pass records the case as skipped until
+[`quest/m2/ietf-finish.md`](../../quest/m2/ietf-finish.md) makes it pass.
+
 Every client closes its session on the way out: publishers stop when their input
 ends (the browser on SIGTERM), and subscribers close once they have their frame.
 After each publisher's round, the harness waits for the relay to log the close of
@@ -158,6 +179,38 @@ pinned pass also fails its `negotiated version` case when any connection it
 opened landed on another one, such as a client silently falling back to
 moq-lite. The relay names no client, so a fallback fails the round rather than
 one cell. The tails check their own connections, so a fallback fails the lane.
+
+The in-tree control lanes also run with `--tail`:
+
+- Four untimed 900-byte datagrams cross the relay in both directions between Rust
+  and each native JS runtime. The subscriber acknowledges resolved metadata before
+  sending begins, then acknowledges each packet, so this checks framing and bytes
+  rather than best-effort burst capacity. The publisher stays open until the read is
+  acknowledged, keeping a reliable track end from overtaking the datagrams.
+- A JS wire requester gets the Rust publisher's exact largest location through
+  TRACK\_STATUS on every draft. From draft 18, Rust also queries the JS publisher's
+  non-default priority before subscribing, when the answer can describe a track.
+- On drafts 14 and 16, a JS publisher advertises one usable track slot beyond namespace discovery, holds the first
+  Rust subscription open through a data round trip while a second is queued, and
+  grants credit when the first is cancelled. Sending the second without waiting
+  violates the peer adapter's live-request limit. A JS subscriber runs the same
+  held-first/queued-second exchange over QMux against a controlled JS peer, whose
+  grant and replenishment codecs are also exercised by the Rust subscriber.
+- On drafts 18, 20, and 22, a Rust GOAWAY names a second WebSocket endpoint serving
+  the same publisher epoch. The JS reconnect loop retains its reader across the
+  move. A separate read through the replacement proves it serves data before the
+  original transport is cut; only the replacement can deliver the final group.
+  The reverse JS-server-to-Rust-client case uses a marker broadcast excluded from
+  the old endpoint's scope, then cuts that endpoint before publishing the final
+  group. Both directions use the original publisher stream.
+- Drafts 14 and 16 carry no epoch, so nothing proves the replacement is the same
+  publisher. The same GOAWAY lanes there check that the held reader ends with the
+  original transport instead, and that requesting the path again subscribes
+  through the new URI and reads the final group.
+
+The standalone control endpoints use OS-assigned ports and production QMux,
+SETUP codecs, and request adapters. They verify their negotiated version directly.
+The datagram and query lanes through moq-relay use its usual version-log check.
 
 Some cases change shape on moq-transport:
 

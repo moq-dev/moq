@@ -740,7 +740,9 @@ impl<S: crate::transport::poll::Session> UniAccept<S> {
 		for reader in early {
 			children.push(UniServe {
 				subscriber: subscriber.clone(),
-				state: UniState::Start { reader },
+				state: UniState::Start {
+					reader: reader.with_stats(subscriber.origin.stats()),
+				},
 			});
 		}
 		Self {
@@ -760,7 +762,8 @@ impl<S: crate::transport::poll::Session> UniAccept<S> {
 					self.children.push(UniServe {
 						subscriber: self.subscriber.clone(),
 						state: UniState::Start {
-							reader: Reader::new(stream, self.subscriber.version),
+							reader: Reader::new(stream, self.subscriber.version)
+								.with_stats(self.subscriber.origin.stats()),
 						},
 					});
 				}
@@ -1529,6 +1532,7 @@ impl<S: crate::transport::poll::Session> ProbeStream<S> {
 						return Poll::Ready(Ok(()));
 					}
 					let mut stream = ready!(Stream::poll_open(&mut self.session, self.subscriber.version, &mut cx))?;
+					stream = stream.with_stats(self.subscriber.origin.stats());
 					stream.writer.buffer(&lite::ControlType::Probe)?;
 					self.state = ProbeState::Send { stream };
 				}
@@ -1635,6 +1639,8 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						self.subscriber.version,
 						&mut cx
 					))?;
+
+					stream = stream.with_stats(self.subscriber.origin.stats());
 
 					stream.writer.buffer(&lite::ControlType::Announce)?;
 					// Lite04/05: ask the peer to filter out announces that already passed
@@ -1890,6 +1896,7 @@ impl<S: crate::transport::poll::Session> TracksRecv<S> {
 			Some(stream) => stream,
 			None => {
 				let mut stream = ready!(Stream::poll_open(&mut self.session, version, &mut cx))?;
+				stream = stream.with_stats(source.subscriber.origin.stats());
 				stream.writer.buffer(&lite::ControlType::Tracks)?;
 				stream.writer.buffer(&lite::Tracks {
 					broadcast: source.path.as_path(),
@@ -4334,6 +4341,54 @@ mod tests {
 		}
 	}
 
+	/// A partial prefix, a tail, or a released group cannot seed the inflater. Only
+	/// a complete live prefix permits requesting the tail without widening its start.
+	#[moq_clock::test]
+	async fn compressed_frame_bounds_require_the_entire_cached_prefix() {
+		for (first, count, aborted, expected) in [
+			(0, 0, false, 0),
+			(0, 2, false, 0),
+			(0, 3, false, 3),
+			(1, 3, false, 0),
+			(0, 3, true, 0),
+		] {
+			let mut h = Harness::new(Version::Lite07);
+			h.producer = h
+				._broadcast
+				.create_track("compressed", track::Info::timed().with_compress(true))
+				.unwrap();
+			let mut group = h.producer.create_group(crate::group::Info { sequence: 5 }).unwrap();
+			group.start_at(first).unwrap();
+			for frame in first..first + count {
+				group
+					.write_frame(crate::Timestamp::from_millis(frame).unwrap(), b"prefix".as_ref())
+					.unwrap();
+			}
+			if aborted {
+				group.abort(Error::Cancel).unwrap();
+			} else {
+				group.finish().unwrap();
+			}
+			let mut sub = Sub::None;
+			h.serve
+				.handle_subscription(&mut h.producer, &mut sub, Some(mid_group_demand()), true)
+				.await
+				.unwrap();
+			let wire = h.wire();
+			let mut wire = wire.as_slice();
+			assert_eq!(
+				crate::coding::decode_buf(&mut wire, Version::Lite07, lite::ControlType::decode).unwrap(),
+				lite::ControlType::Subscribe
+			);
+			let msg = crate::coding::decode_buf(&mut wire, Version::Lite07, lite::Subscribe::decode).unwrap();
+			assert_eq!(
+				(msg.start_group, msg.start_frame, msg.end_group, msg.end_frame),
+				(Some(5), expected, Some(5), Some(7)),
+				"first={first}, count={count}, aborted={aborted}"
+			);
+		}
+	}
+
 	/// The model's exclusive end maps back to the wire's inclusive pair.
 	///
 	/// The two disagree deliberately (see [`Position::after_group`]), so this pins the seam:
@@ -6243,6 +6298,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				// The wire carries one range: the span of every range asked for, which the
 				// subscribers' own reads narrow again.
 				subscription.set_bounds(subscription.start(), subscription.end());
+				producer.widen_compressed(&mut subscription);
 				self.widen_frame_bounds(&mut subscription);
 				match sub {
 					Sub::None => {
@@ -6502,6 +6558,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 						end_frame: bounds.end_frame,
 						order: self.subscription.order,
 					};
+					stream = stream.with_stats(self.serve.subscriber.origin.stats());
 					stream.writer.buffer(&lite::ControlType::Subscribe)?;
 					stream.writer.buffer(&msg)?;
 					self.state = EstablishState::Send { stream };
@@ -6817,6 +6874,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 			match &mut self.state {
 				TrackInfoState::Open => {
 					let mut stream = ready!(Stream::poll_open(&mut self.session, serve.subscriber.version, &mut cx))?;
+					stream = stream.with_stats(serve.subscriber.origin.stats());
 					stream.writer.buffer(&lite::ControlType::Track)?;
 					stream.writer.buffer(&lite::Track {
 						epoch: serve.epoch.clone(),
@@ -6898,6 +6956,8 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	/// through the producer's aggregate (including the resume floor after a source
 	/// change).
 	serving: track::Producer,
+	/// Follows `serving`'s largest, to announce a wanted group once one lands below it.
+	edge: track::Consumer,
 	largest: Option<u64>,
 	/// Watches `serving`'s subscribers, to release the copy once nobody reads it.
 	demand: track::Demand,
@@ -7117,6 +7177,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 		let serving = request.accept(info);
 		serving.received();
 		Self {
+			edge: serving.consume(),
 			largest: None,
 			demand: serving.demand(),
 			serving,
@@ -7241,7 +7302,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// past our largest, and every later update restates it. Joins asking for
 					// the same group coalesce into that one update.
 					if serve.subscriber.version.has_refresh() {
-						if let Poll::Ready(Some(largest)) = self.serving.poll_largest(waiter) {
+						while let Poll::Ready(Some(largest)) = self.edge.poll_largest(waiter) {
 							self.largest = Some(largest.group);
 						}
 						let _ = self.demand.poll_wanted_changed(waiter);
@@ -7628,6 +7689,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						// downstream cap is applied when serving, not when fetching.
 						end_frame: None,
 					};
+					stream = stream.with_stats(self.serve.subscriber.origin.stats());
 					let buffered = stream
 						.writer
 						.buffer(&lite::ControlType::Fetch)

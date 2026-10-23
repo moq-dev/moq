@@ -180,5 +180,21 @@ name = "interop-tail"
 path = "../../test/interop/clients/rust/tail.rs"
 
 [[example]]
+name = "interop-goaway"
+path = "../../test/interop/clients/rust/goaway.rs"
+
+[[example]]
+name = "interop-control"
+path = "../../test/interop/clients/rust/control.rs"
+
+[[example]]
+name = "interop-goaway-client"
+path = "../../test/interop/clients/rust/goaway-client.rs"
+
+[[example]]
+name = "interop-finish"
+path = "../../test/interop/clients/rust/finish.rs"
+
+[[example]]
 name = "interop-audio"
 path = "../../test/interop/clients/rust/audio.rs"
