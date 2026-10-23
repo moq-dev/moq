@@ -1288,10 +1288,12 @@ mod tests {
 		let local = Url::from_file_path(dir.join("media.m3u8")).unwrap();
 		let remote = Url::parse("https://example.com/live/media.m3u8").unwrap();
 		let file = Url::from_file_path(&path).unwrap();
+		let mut downgraded = remote.clone();
+		downgraded.set_scheme("http").unwrap();
 		for (entry, reference) in [
 			(&remote, "https://other.example/live/a.mp4"),
 			(&remote, "//other.example/live/a.mp4"),
-			(&remote, "http://example.com/live/a.mp4"),
+			(&remote, downgraded.as_str()),
 			(&remote, "https://example.com:8443/live/a.mp4"),
 			(&remote, file.as_str()),
 			(&local, "https://example.com/live/a.mp4"),
