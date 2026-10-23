@@ -259,18 +259,12 @@ impl Link {
 		// Each driver runs as soon as its handshake resolves: the accept waits on the client's SETUP.
 		let sessions = tokio::join!(
 			async {
-				let (session, driver) = client
-					.connect_lite(moq_net::time::now(), client_transport)
-					.await
-					.unwrap();
+				let (session, driver) = client.connect(moq_net::time::now(), client_transport).await.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			},
 			async {
-				let (session, driver) = server
-					.accept_lite(moq_net::time::now(), server_transport)
-					.await
-					.unwrap();
+				let (session, driver) = server.accept(moq_net::time::now(), server_transport).await.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			}
@@ -304,18 +298,12 @@ impl Link {
 			.with_publisher(from.consume());
 		let sessions = tokio::join!(
 			async {
-				let (session, driver) = client
-					.connect_lite(moq_net::time::now(), client_transport)
-					.await
-					.unwrap();
+				let (session, driver) = client.connect(moq_net::time::now(), client_transport).await.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			},
 			async {
-				let (session, driver) = server
-					.accept_lite(moq_net::time::now(), server_transport)
-					.await
-					.unwrap();
+				let (session, driver) = server.accept(moq_net::time::now(), server_transport).await.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			}

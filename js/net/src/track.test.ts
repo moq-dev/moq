@@ -114,7 +114,8 @@ test("the first subscriber of a track with no group wants group 0", () => {
 	subscriber.close();
 });
 
-test("a join over the refresh ratio wants the group after the newest", () => {
+// The cached group is served either way: refresh is a request, not a hold.
+test("a join over the refresh ratio wants the group after the newest", async () => {
 	for (const [delta, wanted] of [
 		[0, 0],
 		[3, 0],
@@ -124,6 +125,7 @@ test("a join over the refresh ratio wants the group after the newest", () => {
 		refreshGroup(producer, delta);
 		const subscriber = producer.subscribe();
 		expect(producer.demand().wanted.peek()).toBe(wanted);
+		expect((await subscriber.recvGroup())?.sequence).toBe(0);
 		subscriber.close();
 	}
 });
@@ -1997,6 +1999,7 @@ test("largest names the newest frame written", async () => {
 	const subscriber = producer.subscribe({ maxDelay: Milli(1_000) });
 
 	// Nothing published yet, so the first read waits.
+	expect(producer.largest()).toBeUndefined();
 	const initial = subscriber.largest();
 	expect(await Promise.race([initial.then(() => "ready"), Promise.resolve("pending")])).toBe("pending");
 
@@ -2004,6 +2007,9 @@ test("largest names the newest frame written", async () => {
 	first.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.now() });
 	first.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.now() });
 	expect(await initial).toEqual({ group: 0, frame: 1 });
+	// The producer's getter holds no cursor, so every caller reads the same edge.
+	expect(producer.largest()).toEqual({ group: 0, frame: 1 });
+	expect(producer.largest()).toEqual({ group: 0, frame: 1 });
 	first.close();
 
 	// A new group raises the largest at its head before any frame, so its first frame names

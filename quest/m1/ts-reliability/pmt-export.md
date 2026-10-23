@@ -1,61 +1,52 @@
-# [M] TS export follows a PMT revision
+# [M] Synced TS legs revise their PMT identically
 
 ## Goal
 
-A TS export of a broadcast whose layout changes mid-stream announces the
-revised layout as an ordinary PMT revision. A track added, retired, or
-replaced under a fresh name changes the PMT at the next `version_number`;
-nothing else blips.
+Two `moq export ts --sync` legs of a broadcast whose layout changes
+mid-stream revise their PMT identically: the same `version_number`, in the
+same slot, listing the same streams, wherever both legs hold the content
+around it. A track added no longer ends a synced export.
 
 ## Plan
 
-The import already keeps track names honest: a changed `stream_type` or ES
-descriptor loop finishes the old track, drops its catalog entry, and opens
-a new uniquely named one; a removed stream finishes its track and leaves
-the catalog; `programDescriptors` updates in place; a program identity
-change refuses.
+Outside `--sync`, the export follows a PMT revision at the next
+`version_number`: a stream joins the PMT with its first frame, and leaves
+once the catalog has dropped it and nothing of it is left to go out. A track
+recorded on the PID of a dropped stream waits for that stream to drain, and
+cuts it if it never ends. Each revision is one boundary: versions go out in
+order, no packet of a stream a revision adds goes ahead of it, and its PCR
+PID and `muxRate` take over after its last packet. The PCR keeps its PID
+unless its track retires.
 
-What the export does today:
+What `--sync` does today:
 
-- `Export` builds the PAT/PMT once. A track added afterward fails the export
-  ("TS track layout changed after PAT/PMT was emitted"), so every revision
-  the import publishes ends the export.
-- A track that leaves the catalog keeps its PID in the PMT forever, and
-  `programDescriptors` is read once.
-- A switch to another instance already rebuilds the tables at the next
-  `version_number`.
+- The tables are laid once, from the catalog the leg opened on. A track
+  added afterward fails the export ("… under --sync").
+- A track that leaves the catalog keeps its PID and its lane, and an entry
+  or `programDescriptors` change is not announced.
+- A `muxRate` change is warned and ignored: the leg keeps the rate its grid
+  was laid at.
+- So legs that open on either side of a catalog change lay different PMTs
+  and grids, and a pair does not survive an added stream.
 
-Decided 2026-10-20 by the maintainer:
+Decided 2026-10-22 by the maintainer: under `moq export ts --sync`, the
+revision is a function of the catalog alone, so identical legs revise
+their PMT identically. A revision is one transaction over everything the
+catalog configures: a `muxRate` change applies with the tables at the same
+boundary and, under `--sync`, rebuilds the grid there.
 
-- Export rebuilds the PMT at the next `version_number` when the track set
-  or an entry changes, drops a retired track's PID once its track ends, and
-  keeps the PCR PID unless its track retires. A TS receiver sees an
-  ordinary PMT revision and a Hang player sees a rendition switch.
+Open: where a revision lands. Each leg reads the catalog update at its own
+moment, so the slot that carries the revised PMT, and its `version_number`,
+must follow from something both legs read alike, such as an added track's
+first unit on its lane or the end of a retired track's last group. A
+revision that adds a track also needs a lane the rate can carry.
 
-A `programDescriptors` change is an entry change too: the PMT carries the
-revised `program_info` at the next `version_number`.
+Rust: `rs/moq-mux` TS export (`with_sync`).
 
-Under `moq export ts --sync`, the revision is a function of the catalog
-alone, so identical legs revise their PMT identically.
-
-Decided 2026-10-22 by the maintainer: a revision is one transaction over
-everything the catalog configures. A `muxRate` change applies with the
-tables at the same boundary and, under `--sync`, rebuilds the grid there:
-today `Schedule::set_rate` updates the rate while the `--sync` `Grid` keeps
-the layout it was built at, so a running leg and a new joiner schedule the
-same broadcast differently (reproduced in the 2026-10-22 audit).
-
-Rust: `rs/moq-mux` TS export. Draft
-([mpegts](/drafts/draft-lcurley-moq-mpegts.md)): the rebuild section says
-how a consumer revises the PMT.
-
-Tests use the generated `fixture::Mux` builder through import and export:
-PMT add, remove, retype, descriptor-only change, version rollover (31 to
-0), PID reuse after removal, a program descriptor change, and a `muxRate`
-change under `--sync` with a leg joining after it, each asserting the
-exported PMT's streams and version sequence, and the two legs' packets. Extend the
-TSDuck round trip with a generated mid-stream PMT revision so
-`compliance.py` checks the rebuilt version sequence in CI.
+Tests: two synced legs, joined apart, across a PMT add, remove, retype,
+descriptor change and `muxRate` change, write the same packets from the
+revision on, PMTs included; a leg that joins after a revision lays the
+revised PMT at the same `version_number`, and the revised grid.
 
 ## Related
 

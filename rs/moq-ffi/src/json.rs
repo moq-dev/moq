@@ -103,8 +103,9 @@ mod tests {
 
 /// Publishes a JSON value that consumers see as a single latest state.
 ///
-/// A joiner that would download more deltas than the track's `refresh` ratio allows gets the
-/// value restated in a fresh group, by a task this producer runs until it is finished or dropped.
+/// A join that finds more deltas than the track's `refresh` ratio allows gets the value restated
+/// in a fresh group, by a task this producer runs until it is finished or dropped. That joiner
+/// still reads the cached group first.
 #[derive(uniffi::Object)]
 pub struct MoqJsonSnapshotProducer {
 	inner: Arc<std::sync::Mutex<Option<moq_mux::json::Snapshot<Value, Extra>>>>,
