@@ -195,3 +195,6 @@ path = "../../test/interop/clients/rust/finish.rs"
 [[example]]
 name = "interop-audio"
 path = "../../test/interop/clients/rust/audio.rs"
+
+[lints]
+workspace = true

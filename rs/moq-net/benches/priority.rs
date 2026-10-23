@@ -5,7 +5,10 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 // Compiled straight from source so the queue stays private to the crate; a `pub` re-export
 // just for the bench would widen the crate's surface.
 #[path = "../src/priority.rs"]
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "the bench compiles the private module from source and uses only part of it"
+)]
 mod priority;
 
 // The queue names `crate::track::Order`, which is public.

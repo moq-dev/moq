@@ -94,7 +94,7 @@ final encoder = video.Producer(
   ),
 );
 encoder.write(frame: video.Frame(timestampUs: pts, data: rgba));
-camera.announce(route: MoqRoute(epoch: mintEpoch()));
+camera.announce(route: AnnounceRoute(epoch: mintEpoch()));
 encoder.finish();
 ```
 
@@ -122,7 +122,7 @@ final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();
 group.writeFrame(frame: Frame(payload: bytes, timestampUs: null));
 group.finish();
-mine.announce(route: MoqRoute(epoch: mintEpoch())); // a fresh epoch per run
+mine.announce(route: AnnounceRoute(epoch: mintEpoch())); // a fresh epoch per run
 track.finish();
 mine.close();
 
@@ -142,8 +142,8 @@ shows which module holds each.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs: ...)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Decoded frames hold decoder buffers.** `dispose()` each frame from a `video.Consumer` promptly rather than waiting for the garbage collector, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `await moq.close()` or `session.shutdown()` drains for up to one second and reports any error. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Awaiting cancellation of an announcement, grant, or request subscription releases its pending native read. Announcements also release their cursor; authorization and server listeners leave their shared owner usable. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
-- **Ending cleanly.** When the input ends, finish every track, then call `broadcast.finish()`. The returned `BroadcastFinish` keeps the broadcast announced and serving the finished tracks for `linger`, their longest max age, so a subscriber still catching up can drain them. `await finish.wait()` completes once the linger passes, and `finish.close()` closes the broadcast at once, completing the wait. `broadcast.close()` stays the abrupt end.
-- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol, and while a client session reconnects `session.failure()` says why. Before the first connect, `client.failure()` says why the dial is retrying. Hold the owned `BandwidthConsumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `peek()` reads the current estimate in bits per second and `changed()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+- **Ending cleanly.** When the input ends, finish every track, then call `broadcast.finish()`. The returned `BroadcastFinish` keeps the broadcast announced and serving the finished tracks for `linger`, their longest max age, so a subscriber still catching up can drain them. `await finish.wait()` completes once the linger passes, and `finish.close()` closes the broadcast at once, completing the wait. `broadcast.close()` stays the abrupt end. An unreferenced `BroadcastFinish` closes the broadcast only when the garbage collector reclaims it, possibly long after, so wait on or close it rather than dropping it.
+- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol, and while a client session reconnects `session.failure()` says why. Before the first connect, `client.failure()` says why the dial is retrying. Hold the owned `BandwidthConsumer` returned by `session.recvBandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rateChanged()` waits for a new one. Release the consumer or call `cancel()` when finished; releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `ConnectOptions(versions: ...)`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), listen to `moq.auth().grants()` for the `Grant` the relay sent back, `null` until it answers and while a client session reconnects. `await auth().add(token: ...)` presents a fresh token without reconnecting, returns an `AuthToken` whose grant joins the union until `cancel()`, and is presented again on every reconnect. A refusal throws with the relay's code.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.

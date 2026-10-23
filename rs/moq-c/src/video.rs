@@ -31,7 +31,7 @@ use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
 /// carry it are typed `u32`. A C caller passing an unknown discriminant gets
 /// `Error::InvalidCode` instead of UB.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_video_pixel_format {
 	/// Tightly-packed planar I420: Y, then U, then V, no row padding.
@@ -47,7 +47,7 @@ pub enum moq_video_pixel_format {
 /// Not every codec has a backend on every machine: H.265 is hardware-only, so
 /// publishing it fails where no hardware encoder is available.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_video_codec {
 	/// H.264 / AVC, published as an `avc3` track.
@@ -58,7 +58,7 @@ pub enum moq_video_codec {
 
 /// Which encoder implementation [`moq_encode_video`] should use.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_video_encoder_kind {
 	/// Prefer a platform hardware encoder, falling back to software.
@@ -86,7 +86,6 @@ pub struct moq_video_frame_rate {
 /// the resolution and rate the encoder is opened at. Every published frame must
 /// match `width` x `height`; scale before publishing if your source moves.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_encoder_input {
 	/// `moq_video_pixel_format` discriminant.
 	pub format: u32,
@@ -102,7 +101,6 @@ pub struct moq_video_encoder_input {
 /// Codec-side configuration for [`moq_encode_video`]. Every knob spells
 /// "unset" as 0.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_encoder_output {
 	/// `moq_video_codec` discriminant.
 	pub codec: u32,
@@ -129,7 +127,6 @@ pub struct moq_video_encoder_output {
 /// returning). The decode side has its own [`moq_video_frame`], which does carry
 /// dimensions, since there they are what the stream turned out to be.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_encoder_frame {
 	/// Presentation timestamp, in microseconds.
 	pub timestamp_us: u64,
@@ -150,7 +147,6 @@ pub struct moq_video_encoder_frame {
 /// field changes its layout, so rebuild callers against the `moq.h` that ships
 /// with the `libmoq.a` they link.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_decoder_output {
 	/// Upper bound on buffering before skipping a stalled group, in
 	/// microseconds. Same congestion-control knob as
@@ -181,7 +177,6 @@ pub struct moq_video_decoder_output {
 /// The publish side has its own [`moq_video_encoder_frame`], which carries no
 /// dimensions because the encoder already fixed them.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_frame {
 	/// The presentation timestamp in microseconds.
 	pub timestamp_us: u64,

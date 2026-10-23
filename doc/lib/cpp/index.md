@@ -123,7 +123,7 @@ moq::VideoEncoderOutput output{moq::VideoCodec::kH264, std::nullopt, std::nullop
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
 auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba, 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
 ok(video->write({0, rgba}));
-moq::Route route;
+moq::AnnounceRoute route;
 route.epoch = moq::mint_epoch(); // a fresh epoch per run
 ok(broadcast->announce(route));
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
@@ -191,7 +191,7 @@ Audio and video convenience decoders reject a catalog configuration with `enable
 
 ## Bandwidth estimates
 
-Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to receive bandwidth estimates. `peek()` reads the current estimate in bits per second and `changed()` waits for a new one. Releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
+Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to receive bandwidth estimates. `rate()` reads the current estimate in bits per second and `rate_changed()` waits for a new one. Releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 
 ## Compressed tracks
 

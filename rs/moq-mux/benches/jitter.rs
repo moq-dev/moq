@@ -6,7 +6,10 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_net::Timestamp;
 
 #[path = "../src/jitter.rs"]
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "the bench compiles the private module from source and uses only part of it"
+)]
 mod jitter;
 
 /// Every track sends a frame a second as it decodes, for as many two-second steering steps as

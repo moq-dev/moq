@@ -15,6 +15,11 @@ refused. `track` moves out of both encoder output records into
 codec-only encoders keep their input/output arguments and take no publication
 settings. Regenerate bindings and rebuild the native library together.
 
+### `announce` takes a `MoqAnnounceRoute`
+
+`MoqBroadcastProducer.announce` takes `MoqAnnounceRoute` (`cost`, `epoch`) instead of a `MoqRoute`: the origin builds the hop chain, so `hops` is no longer an input.
+`MoqRoute` is only what announcements report, and the `InvalidRoute` error is gone.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.

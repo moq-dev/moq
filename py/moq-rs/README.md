@@ -71,7 +71,7 @@ async def main():
         audio.cut()
 
         # A fresh epoch per run tells viewers a restart is a new broadcast.
-        broadcast.announce(moq.Route(epoch=moq.mint_epoch()))
+        broadcast.announce(moq.AnnounceRoute(epoch=moq.mint_epoch()))
 
         # Clean up
         audio.finish()
