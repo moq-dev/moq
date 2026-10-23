@@ -251,7 +251,7 @@ async function watch(codec: string): Promise<boolean> {
 	throwPageErrors(errors);
 	const heard = playing.tones?.map(({ share }, channel) => `${tones[channel]} Hz ${share.toFixed(2)}`).join(", ");
 	console.error(
-		`rendered, paused, and resumed ${broadcast}: video=${resumed.videoFrames} frames audio=${resumed.audioBytes} bytes (${heard})`,
+		`rendered, paused, and resumed ${broadcast}: video=${resumed.videoFrames} frames audio=${resumed.audioBytes} bytes of ${playing.audioCodec} (${heard})`,
 	);
 	await closeSessions(page);
 	return true;
