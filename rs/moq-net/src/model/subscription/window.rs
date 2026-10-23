@@ -27,9 +27,9 @@ pub(in crate::model) trait Holdings {
 	/// Whether the track carries timestamps at all.
 	fn timed(&self) -> bool;
 
-	/// Whether the groups are a copy received over a wire, which asks upstream only for
-	/// what [`Range::is_wire`] covers, so any other anchor can't resolve here.
-	fn received(&self) -> bool {
+	/// Whether the groups are a copy received over a wire that can't resolve relative or
+	/// time anchors as the publisher would, so only what [`Range::is_wire`] covers reads.
+	fn drops_anchors(&self) -> bool {
 		false
 	}
 
@@ -538,7 +538,7 @@ impl Window {
 		{
 			return Err(Error::TimestampMismatch);
 		}
-		if holdings.received() && !self.ranges.iter().all(Range::is_wire) {
+		if holdings.drops_anchors() && !self.ranges.iter().all(Range::is_wire) {
 			return Err(Error::Unsupported);
 		}
 		self.spans.clear();

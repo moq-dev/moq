@@ -446,9 +446,12 @@ pub(crate) struct TrackState {
 	start_pending: bool,
 
 	// A copy received from a remote publisher, whose declared end waits for groups still
-	// in flight below it (see `tail`), and whose readers' anchors resolve only as far as
-	// the wire carried them upstream (see `Holdings::received`).
+	// in flight below it (see `tail`), and whose readers' relative and time anchors are
+	// refused unless `anchored` (see `Holdings::drops_anchors`).
 	received: bool,
+	// Whether a received copy's wire tells it what relative and time anchors resolve
+	// against, so they resolve here as at the publisher.
+	anchored: bool,
 	// Sequences the upstream publisher gave up, with the error each was given up with: an
 	// incoming SUBSCRIBE_DROP or a producer cut. Kept apart from the cache so reclaiming a
 	// slot cannot erase a disposition a relay must forward, and as ranges so a wide DROP
@@ -746,8 +749,8 @@ impl Holdings for TrackState {
 		self.info.as_ref().is_none_or(|info| info.timescale.is_some())
 	}
 
-	fn received(&self) -> bool {
-		self.received
+	fn drops_anchors(&self) -> bool {
+		self.received && !self.anchored
 	}
 
 	fn containing(&self, pts: Timestamp) -> Containing {
@@ -3007,9 +3010,20 @@ impl Producer {
 	/// Mark this track as a copy received from a remote publisher, before writing to it.
 	///
 	/// Its declared end waits for groups still in flight below it; see [`Self::finish_at`].
+	/// Its readers' relative and time anchors, other than [`Range::live`](crate::track::Range::live)
+	/// and [`Range::oldest`](crate::track::Range::oldest), fail with [`Error::Unsupported`]
+	/// unless its session's wire lets it resolve them, since it holds only part of the track.
 	pub fn received(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.received = true;
+		}
+	}
+
+	/// Let this received copy's readers resolve relative and time anchors, for a wire that
+	/// reports the live edge and media time and asks for every group the budget allows.
+	pub(crate) fn anchored(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.anchored = true;
 		}
 	}
 

@@ -4,11 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Relative and time ranges are refused over a session
+### Relative and time ranges are refused over older wires
 
-No wire carries a relative or time range anchor upstream yet. A track received over a session used to resolve one against the groups it happened to hold, which silently read from the live edge or the wrong groups; reading it now fails with `Error::Unsupported`.
+A track received over moq-lite-06 or earlier, or any moq-transport version, used to resolve a relative or time range anchor against the groups it happened to hold, which silently read from the live edge or the wrong groups; reading it now fails with `Error::Unsupported`.
 This covers a relative start other than the live (`0`) and oldest starts, a time start, and a relative or time end.
-Ask for absolute groups over a session, or resolve the anchor where the track is published.
+A track received over moq-lite-07 resolves them as its publisher would.
+Ask for absolute groups over those wires, or resolve the anchor where the track is published.
 
 ### `Subscriber::floor` and `next_in_range` honor `set_groups`
 

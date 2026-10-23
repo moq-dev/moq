@@ -35,6 +35,14 @@ that is the Largest Object's group, so a newest group with no objects yet is
 not counted until its first object arrives; the relay reports what it has
 rather than waiting for the peer.
 
+Today a track copy received over lite-06 or earlier, or any moq-transport
+draft, refuses relative and time anchors with `Unsupported`, while a lite-07
+copy resolves them locally (it learns the largest and media time and asks for
+everything the budget allows; `lite::Version::resolves_anchors`). Each mapping
+above that makes an older wire carry an anchor lifts that wire's refusal for
+that anchor only, and extends the per-wire table in
+`rs/moq-net/tests/integration/range_anchors.rs`.
+
 Test the lite-05 relay case #5000 left out, on mock time beside
 `rs/moq-net/tests/integration/late_lower_group.rs`: a live subscriber already reading
 group 1, then one from `Absolute(0)`, and a fresh group 0 reaches only the

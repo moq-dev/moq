@@ -1,14 +1,15 @@
 #![cfg(feature = "async")]
 
-//! A range starting relative to the latest group or at a presentation time resolves only
-//! where the track is held. No wire carries such an anchor upstream yet, so a copy
-//! received over a session refuses one instead of joining at the live edge.
+//! A range anchored relative to the latest group or at a presentation time resolves where
+//! the track is held, and on a copy received over a wire that tells it enough to resolve
+//! the anchor the same way. A copy received over any other wire refuses the anchor instead
+//! of resolving it against the part of the track it happens to hold.
 
 use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Anchor, Info, Order, Range, Subscription};
+use moq_net::track::{Anchor, Info, Order, Position, Range, Subscription};
 use moq_net::{Error, Hop, Timescale, Timestamp, Version};
 use support::harness::peer;
 
@@ -100,50 +101,56 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 	Ok(read)
 }
 
-fn from(start: Anchor) -> Range {
-	Range { start, end: None }
+fn range(start: Anchor, end: Option<Anchor>) -> Range {
+	Range { start, end }
 }
 
-/// Where the track is held, both anchors resolve against its groups.
-#[moq_clock::test]
-async fn a_held_track_resolves_relative_and_time_starts() {
-	assert_eq!(read(None, from(Anchor::Relative(2))).await.unwrap(), vec![2, 3, 4]);
-	assert_eq!(
-		read(None, from(Anchor::Time(millis(2500)))).await.unwrap(),
-		vec![2, 3, 4]
-	);
+/// Relative and time anchors at each end, with what a reader of the held track reads.
+fn anchored() -> [(Range, Vec<u64>); 6] {
+	let zero = Anchor::Absolute(Position::group(0));
+	[
+		(range(Anchor::Relative(2), None), vec![2, 3, 4]),
+		(range(Anchor::Time(millis(2500)), None), vec![2, 3, 4]),
+		(range(zero, Some(Anchor::Relative(1))), vec![0, 1, 2, 3]),
+		(range(zero, Some(Anchor::Time(millis(2500)))), vec![0, 1, 2]),
+		(range(Anchor::Relative(2), Some(Anchor::Relative(1))), vec![2, 3]),
+		(
+			range(Anchor::Time(millis(1500)), Some(Anchor::Time(millis(3500)))),
+			vec![1, 2, 3],
+		),
+	]
 }
 
-/// Over a session, the anchors the wire cannot carry are refused, while the live and
-/// oldest starts it does carry still read.
+/// Each wire resolves the anchors it carries as the held track does and refuses the rest,
+/// rather than resolve them against the part of the track its copy happens to hold.
 #[moq_clock::test]
-async fn a_received_copy_refuses_what_its_wire_drops() {
-	let refused = [
-		from(Anchor::Relative(2)),
-		from(Anchor::Time(millis(2500))),
-		Range {
-			start: Anchor::Absolute(moq_net::track::Position::group(0)),
-			end: Some(Anchor::Relative(1)),
-		},
-		Range {
-			start: Anchor::Absolute(moq_net::track::Position::group(0)),
-			end: Some(Anchor::Time(millis(2500))),
-		},
-	];
-	for version in VERSIONS {
-		for range in refused {
-			let result = read(Some(version), range).await;
-			// A wire without timestamps refuses a time anchor for that first.
-			let timed = !matches!(
-				*version,
-				"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-lite-06" | "moq-transport-14" | "moq-transport-16"
-			);
+async fn each_wire_refuses_only_the_anchors_it_drops() {
+	for version in std::iter::once(None).chain(VERSIONS.iter().copied().map(Some)) {
+		// Lite-07 reports the largest and media time and asks for everything the budget
+		// allows, so its copy resolves every anchor where it is held.
+		let carried = matches!(version, None | Some("moq-lite-07-wip"));
+		// A wire without timestamps refuses a time anchor for that first.
+		let timed = !matches!(
+			version,
+			Some("moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-lite-06" | "moq-transport-14" | "moq-transport-16")
+		);
+		for (range, held) in anchored() {
+			let result = read(version, range).await;
 			let time = matches!(range.start, Anchor::Time(_)) || matches!(range.end, Some(Anchor::Time(_)));
-			match (time && !timed, &result) {
-				(true, Err(Error::TimestampMismatch)) | (false, Err(Error::Unsupported)) => {}
-				_ => panic!("{version}: {range:?} read {result:?}"),
+			match (&result, time && !timed, carried) {
+				(Err(Error::TimestampMismatch), true, _) => {}
+				(Err(Error::Unsupported), false, false) => {}
+				(Ok(read), false, true) if *read == held => {}
+				_ => panic!("{version:?}: {range:?} read {result:?}"),
 			}
 		}
+	}
+}
+
+/// Every wire carries the live and oldest starts, which it spells with no floor.
+#[moq_clock::test]
+async fn every_wire_carries_the_live_and_oldest_starts() {
+	for version in VERSIONS {
 		let live = read(Some(version), Range::live()).await;
 		assert_eq!(live.unwrap().last(), Some(&4), "{version}: live reads the latest group");
 		let oldest = read(Some(version), Range::oldest()).await;

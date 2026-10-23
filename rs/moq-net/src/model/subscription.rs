@@ -111,10 +111,11 @@ pub enum Order {
 /// and again whenever the subscriber replaces its ranges. Before any group exists a
 /// relative anchor resolves at the first one, so [`Range::live`] starts there.
 ///
-/// No wire carries either upstream yet, beyond the live and oldest starts it spells with
-/// no floor ([`Range::live`] and [`Range::oldest`]). A track copy received over a session
-/// refuses any other relative or time anchor with [`Error::Unsupported`](crate::Error::Unsupported)
-/// on read, rather than resolve it against the partial cache it holds.
+/// Over a session, the copy resolves them only on moq-lite-07, which reports the live edge
+/// and media time and asks upstream for every group the budget allows. A copy received
+/// over an older lite or any moq-transport version refuses each other than [`Range::live`]
+/// and [`Range::oldest`] with [`Error::Unsupported`](crate::Error::Unsupported) on read,
+/// rather than resolve it against the part of the track it holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Anchor {
 	/// This exact position.

@@ -9,11 +9,12 @@ How to update your code for each breaking change, newest first.
 `MoqSubscription.max_delay_us` is `int | None`, and `None` (the default) keeps moq-net's default of zero, which skips a superseded group at once.
 Explicit values are unchanged.
 
-### Relative and time ranges are refused over a session
+### Relative and time ranges are refused over older wires
 
-No wire carries a relative or time range anchor upstream yet. A track received over a session used to resolve one against the groups it happened to hold, which silently read from the live edge or the wrong groups; reading it now fails with an unsupported error.
+A track received over moq-lite-06 or earlier, or any moq-transport version, used to resolve a relative or time range anchor against the groups it happened to hold, which silently read from the live edge or the wrong groups; reading it now fails with an unsupported error.
 This covers a relative start other than the live (`0`) and oldest starts, a time start, and a relative or time end.
-Ask for absolute groups over a session, or resolve the anchor where the track is published.
+A track received over moq-lite-07 resolves them as its publisher would.
+Ask for absolute groups over those wires, or resolve the anchor where the track is published.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
