@@ -7,6 +7,7 @@ class Render extends AudioWorkletProcessor {
 	#backend?: SharedRingBuffer | AudioRingBuffer;
 	#underflow = 0;
 	#stateCounter = 0;
+	#epoch = 0;
 
 	constructor() {
 		super();
@@ -34,6 +35,7 @@ class Render extends AudioWorkletProcessor {
 			} else if (msg.type === "reset") {
 				// Only meaningful in post mode; shared mode resets via the control array.
 				if (this.#backend instanceof AudioRingBuffer) this.#backend.reset();
+				this.#epoch = msg.epoch;
 			}
 		};
 	}
@@ -61,6 +63,7 @@ class Render extends AudioWorkletProcessor {
 					type: "state",
 					timestamp: backend.timestamp,
 					stalled: backend.stalled,
+					epoch: this.#epoch,
 				};
 				this.port.postMessage(state);
 			}

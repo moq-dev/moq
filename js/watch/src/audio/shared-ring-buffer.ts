@@ -516,6 +516,11 @@ export class SharedRingBuffer {
 		return Time.Micro.fromSecond(((this.#anchor + this.#unwrapRead()) / this.rate) as Time.Second);
 	}
 
+	/** Whether an insert has anchored the ring since it was created or reset. Main thread only. */
+	get anchored(): boolean {
+		return this.#anchored;
+	}
+
 	/** Whether the buffer is stalled (waiting to fill). */
 	get stalled(): boolean {
 		return Atomics.load(this.#control, STALLED) === 1;

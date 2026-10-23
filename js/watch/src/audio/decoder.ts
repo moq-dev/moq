@@ -369,7 +369,7 @@ export class Decoder {
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
 				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await this.#ring?.wait(frame.timestamp as Time.Micro);
+				await this.#ring?.wait(frame.timestamp as Time.Micro, effect.abort);
 
 				const chunk = new EncodedAudioChunk({
 					type: frame.keyframe ? "key" : "delta",
@@ -458,7 +458,7 @@ export class Decoder {
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
 				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await this.#ring?.wait(frame.timestamp);
+				await this.#ring?.wait(frame.timestamp, effect.abort);
 
 				if (decoder.state === "closed") break;
 				decoder.decode(
