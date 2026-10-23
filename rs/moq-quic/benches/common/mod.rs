@@ -35,6 +35,8 @@ use moq_quic::{
 const MAX_DATAGRAMS: usize = 10;
 /// The window the unlimited controller reports: far beyond anything a benchmark puts in flight.
 const WINDOW: u64 = 1 << 30;
+/// The send window unless a benchmark caps it: far beyond anything a benchmark writes.
+const SEND_WINDOW: u64 = 1 << 30;
 /// AEAD tag space the protocol reserves in every packet, which plaintext crypto leaves zeroed.
 const TAG_LEN: usize = 16;
 /// How far virtual time may jump to a timer while settling before the pair counts as idle.
@@ -77,6 +79,8 @@ pub(crate) struct Setup {
     pub(crate) client_cid_len: usize,
     /// The server's connection receive window, unbounded by default.
     pub(crate) server_receive_window: VarInt,
+    /// The client's send window: how many written bytes it retains until they are acknowledged.
+    pub(crate) client_send_window: u64,
 }
 
 impl Default for Setup {
@@ -85,6 +89,7 @@ impl Default for Setup {
             clients: 1,
             client_cid_len: 8,
             server_receive_window: VarInt::MAX,
+            client_send_window: SEND_WINDOW,
         }
     }
 }
@@ -233,8 +238,10 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
                 received.reset += 1;
                 break;
             }
-            // Unreachable today, but keeps the suite compiling against a rewrite's new variants.
-            #[allow(unreachable_patterns)]
+            #[allow(
+                unreachable_patterns,
+                reason = "unreachable today, but keeps the suite compiling against a rewrite's new variants"
+            )]
             Err(err) => panic!("read failed: {err}"),
         }
     }
@@ -330,7 +337,7 @@ impl Pair {
             by_addr: HashMap::new(),
         };
 
-        let client_config = client_config();
+        let client_config = client_config(setup.client_send_window);
         for index in 0..setup.clients {
             let mut config = EndpointConfig::default();
             let cid_len = setup.client_cid_len;
@@ -597,7 +604,7 @@ pub(crate) fn flush(pair: &mut Pair, empty: usize) -> Vec<BytesMut> {
 /// Room for the largest burst of datagrams a benchmark queues or receives at once.
 const DATAGRAM_BUFFER: usize = 64 << 20;
 
-fn transport(receive_window: VarInt) -> Arc<TransportConfig> {
+fn transport(receive_window: VarInt, send_window: u64) -> Arc<TransportConfig> {
     let mut transport = TransportConfig::default();
     transport
         .congestion_controller_factory(Arc::new(Unlimited))
@@ -609,7 +616,7 @@ fn transport(receive_window: VarInt) -> Arc<TransportConfig> {
         .max_concurrent_bidi_streams(VarInt::from_u32(4096))
         .stream_receive_window(VarInt::from_u32(16 << 20))
         .receive_window(receive_window)
-        .send_window(1 << 30)
+        .send_window(send_window)
         .datagram_receive_buffer_size(Some(DATAGRAM_BUFFER))
         .datagram_send_buffer_size(DATAGRAM_BUFFER);
     Arc::new(transport)
@@ -617,13 +624,13 @@ fn transport(receive_window: VarInt) -> Arc<TransportConfig> {
 
 fn server_config(receive_window: VarInt) -> Arc<ServerConfig> {
     let mut config = ServerConfig::with_crypto(Arc::new(Plaintext));
-    config.transport_config(transport(receive_window));
+    config.transport_config(transport(receive_window, SEND_WINDOW));
     Arc::new(config)
 }
 
-fn client_config() -> ClientConfig {
+fn client_config(send_window: u64) -> ClientConfig {
     let mut config = ClientConfig::new(Arc::new(Plaintext));
-    config.transport_config(transport(VarInt::MAX));
+    config.transport_config(transport(VarInt::MAX, send_window));
     config
 }
 

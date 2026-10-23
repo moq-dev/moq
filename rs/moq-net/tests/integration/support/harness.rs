@@ -5,7 +5,7 @@
 //! over a [`super::mock::MockSession`] pair and spawns both protocol drivers, giving tests
 //! two live sessions ready for pub/sub without any real QUIC or network I/O.
 
-#![allow(dead_code)]
+#![allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 
 use std::sync::{
 	Arc,

@@ -623,7 +623,10 @@ enum DriveEvent {
 ///
 /// One per publication, moved twice in its life, so the size difference between
 /// the variants never costs a copy worth an allocation to avoid.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+	clippy::large_enum_variant,
+	reason = "one per publication and moved twice, so boxing the large variant saves nothing"
+)]
 enum Track<E: CatalogExt = ()> {
 	/// Registered in the broadcast but not the catalog, because the rendition
 	/// describes a PCM layout no probe has returned yet.
@@ -735,7 +738,7 @@ pub async fn publish_capture<E: CatalogExt>(
 /// if the future ever regains a `!Send` component. macOS is exempt: the TCC
 /// prompt and ScreenCaptureKit both hold ObjC handles across an await.
 #[cfg(not(target_os = "macos"))]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "a compile-time `Send` assertion, never called")]
 fn assert_publish_capture_send(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
@@ -1211,7 +1214,11 @@ fn frame(samples: &[f32], timestamp_us: u64) -> Result<Frame, Error> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use std::collections::VecDeque;
 	use std::future::Future;

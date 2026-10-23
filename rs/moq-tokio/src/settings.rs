@@ -4,7 +4,10 @@
 //! merged flag is declared twice: once on the `Args` structs the binaries parse,
 //! and once here. [`usage_rs::config::Registry::drift`] is the test that the two stay in step.
 
-#![allow(dead_code)]
+#![allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 
 /// Accept-side settings (`[listen]`, `--listen-*`).
 #[derive(usage_rs::Config)]
