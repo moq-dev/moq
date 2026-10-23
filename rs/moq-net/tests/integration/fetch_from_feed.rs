@@ -24,7 +24,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 struct Relay {
 	track: moq_net::track::Producer,
 	remote: moq_net::broadcast::Consumer,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_pair: support::harness::MockPair,
 	_origins: (moq_net::origin::Producer, moq_net::origin::Producer),
 }

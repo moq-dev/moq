@@ -23,6 +23,30 @@ error.
 - Mirror the shape in `@moq/net` if its producer has the same trap, and in
   moq-ffi where the binding exposes announce on the broadcast.
 
+The draft proposes an `origin::Publication` owner that combines the fill
+broadcast and its real announcement capability. `create_broadcast`, `publish`,
+and an admitted `Prepared::publish` return it; `Prepared::broadcast` and
+standalone producers remain fill-only. The proposed record forwards fill
+operations and exposes the borrowed producer through `broadcast()`.
+
+The return/lifetime shape still needs review. The current proposal preserves
+last-fill and `Finish` retention rather than making the last announcement
+capability clone retract independently. A literal producer/announcement pair
+would make that transfer explicit but requires media holders and finish/linger
+paths to retain both. Settle this choice before mirroring the record in JS,
+moq-ffi, C, and every wrapper; do not export an optional capability on a fill
+producer to avoid the migration.
+
+The native proposal migrates current Rust holders, examples, benchmarks, and
+private C/UniFFI adapters. Remaining work is accepting the return/lifetime shape,
+mirroring the public role in JS and all bindings, regenerating outputs from
+source, and updating those consumers and package migrations. Exercise clone/drop,
+explicit unannounce, finished tails, Prepared admission, and stale owners
+against a replacement publication. A finished-but-open Prepared answer remains
+publishable and serveable through its retained `Finish`; a missing binding fill
+registry/state after finish does not mean the native broadcast is closed. Keep
+deferred validity and request role redesigns separate.
+
 Public API: breaking in moq-net (and `@moq/net`/moq-ffi if they mirror the
 trap). Wire: none.
 

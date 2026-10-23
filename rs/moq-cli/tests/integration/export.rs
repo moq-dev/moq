@@ -510,12 +510,12 @@ async fn the_same_instance_within_the_linger_continues() {
 	let epoch = moq_net::Epoch::mint();
 	let lite07 = ["--connect-version", LITE_07];
 	let origin = moq_tokio::origin::spawn();
-	let mut broadcast = origin.create_broadcast("demo").unwrap();
+	let broadcast = origin.create_broadcast("demo").unwrap();
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(Some(Duration::from_secs(1)))
 		.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
-	let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
+	let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
 		.unwrap();

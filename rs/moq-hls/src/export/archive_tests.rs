@@ -287,7 +287,7 @@ struct Replay {
 	reader: Option<moq_archive::Reader<Counting>>,
 	broadcaster: Arc<Broadcaster>,
 	_catalog: moq_json::snapshot::Producer<hang::Catalog>,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_origin: moq_net::origin::Producer,
 }
 

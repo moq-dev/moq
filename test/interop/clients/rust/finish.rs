@@ -74,8 +74,9 @@ async fn main() -> anyhow::Result<()> {
 		.await?;
 	let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
 	if args.role == "publish" {
-		let mut broadcast = origin.create_broadcast(&args.broadcast)?;
-		let mut catalog = moq_mux::catalog::Producer::<()>::new(&mut broadcast, Default::default())?;
+		let broadcast = origin.create_broadcast(&args.broadcast)?;
+		let mut catalog =
+			moq_mux::catalog::Producer::<()>::new(&mut broadcast.broadcast().clone(), Default::default())?;
 		let mut media = moq_mux::import::TrackStream::video(
 			broadcast.reserve_track("video")?,
 			catalog.reserve(),

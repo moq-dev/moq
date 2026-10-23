@@ -7977,10 +7977,10 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 fn publish_live<E: crate::catalog::hang::CatalogExt>(
 	origin: &moq_net::origin::Producer,
 	route: moq_net::origin::Route,
-) -> (moq_net::broadcast::Producer, crate::catalog::Producer<E>) {
-	let mut broadcast = origin.publish("live", route).unwrap();
+) -> (moq_net::origin::Publication, crate::catalog::Producer<E>) {
+	let broadcast = origin.publish("live", route).unwrap();
 	let config = crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<E>::default());
-	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 	(broadcast, catalog)
 }
 
@@ -8074,8 +8074,8 @@ async fn same_instance_returns(finish: bool) {
 	let epoch = moq_net::Epoch::mint();
 	let route = || moq_net::origin::Route::default().with_epoch(epoch.clone());
 
-	let (mut broadcast, mut catalog) = publish_live::<()>(&origin, route());
-	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
+	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
 		.await
 		.unwrap()
@@ -8098,13 +8098,13 @@ async fn same_instance_returns(finish: bool) {
 	// Back under the same epoch a second later, its media as far on as the wall clock, its
 	// catalog listing the track only in its second snapshot.
 	tokio::time::sleep(Duration::from_secs(1)).await;
-	let (mut broadcast, mut catalog) = publish_live::<()>(&origin, route());
+	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
 	std::ops::DerefMut::deref_mut(&mut catalog.modify().unwrap());
 	let back = origin.consume().routed_broadcast("live").await.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
 	frames.extend(drain_frames(&mut export).await);
-	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let resumed = start.elapsed().as_millis() as u64;
 	for ms in (resumed..resumed + 200).step_by(20) {
 		write_aac(&mut track, ms);
@@ -8149,8 +8149,8 @@ async fn a_return_keeps_catalog_and_group_history() {
 	let origin = crate::source::produce_origin();
 	let epoch = moq_net::Epoch::mint();
 	let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
-	let (mut broadcast, mut catalog) = publish_live::<()>(&origin, route.clone());
-	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let (broadcast, mut catalog) = publish_live::<()>(&origin, route.clone());
+	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut groups = track.consume();
 	let clock = catalog.snapshot().clock;
 	let source = crate::source::resolved(&origin, "live").await;
@@ -8206,8 +8206,8 @@ async fn a_switch_carries_through_an_instance_that_never_built_its_tables() {
 	let origin = crate::source::produce_origin();
 	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
 
-	let (mut old, mut old_catalog) = publish_live::<()>(&origin, route());
-	let mut old_audio = aac_rendition(&mut old, &mut old_catalog, "a.aac");
+	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
+	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
 		.await
 		.unwrap()
@@ -8230,8 +8230,8 @@ async fn a_switch_carries_through_an_instance_that_never_built_its_tables() {
 	);
 
 	// ...and then to another.
-	let (mut new, mut new_catalog) = publish_live::<()>(&origin, route());
-	let mut new_audio = aac_rendition(&mut new, &mut new_catalog, "b.aac");
+	let (new, mut new_catalog) = publish_live::<()>(&origin, route());
+	let mut new_audio = aac_rendition(&mut new.broadcast().clone(), &mut new_catalog, "b.aac");
 	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
 	let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
@@ -8264,8 +8264,8 @@ async fn another_instance_is_a_full_program_switch() {
 	let origin = crate::source::produce_origin();
 	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
 
-	let (mut old, mut old_catalog) = publish_live::<()>(&origin, route());
-	let mut old_audio = aac_rendition(&mut old, &mut old_catalog, "a.aac");
+	let (old, mut old_catalog) = publish_live::<()>(&origin, route());
+	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
 		.await
 		.unwrap()
@@ -8280,9 +8280,9 @@ async fn another_instance_is_a_full_program_switch() {
 		Some(vec![StreamType::AdtsAac])
 	);
 
-	let (mut new, mut new_catalog) = publish_live::<()>(&origin, route());
-	let mut video = h264_rendition(&mut new, &mut new_catalog, "video.avc1");
-	let mut new_audio = aac_rendition(&mut new, &mut new_catalog, "b.aac");
+	let (new, mut new_catalog) = publish_live::<()>(&origin, route());
+	let mut video = h264_rendition(&mut new.broadcast().clone(), &mut new_catalog, "video.avc1");
+	let mut new_audio = aac_rendition(&mut new.broadcast().clone(), &mut new_catalog, "b.aac");
 	let replacement = origin.consume().request_broadcast("live", None).await.unwrap();
 	let stream = crate::catalog::Consumer::new(&replacement, Default::default())
 		.await
@@ -8344,8 +8344,8 @@ async fn a_switch_moving_the_pmt_advances_the_pat() {
 	let origin = crate::source::produce_origin();
 	let route = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
 	let publish = |pmt_pid: u16| {
-		let (mut broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
-		let track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+		let (broadcast, mut catalog) = publish_live::<tscat::Ext>(&origin, route());
+		let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 		catalog.modify().unwrap().ext.mpegts.program = Some(tscat::Program {
 			transport_stream_id: 7,
 			program_number: 1,
@@ -8400,8 +8400,8 @@ async fn export_stats_count_only_returned_output() {
 	let route = || moq_net::origin::Route::default().with_epoch(epoch.clone());
 	let units = |stats: stats::Export| stats.streams.values().map(|row| row.units).sum::<u64>() as usize;
 
-	let (mut broadcast, mut catalog) = publish_live::<()>(&origin, route());
-	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
+	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
 		.await
 		.unwrap()
@@ -8425,8 +8425,8 @@ async fn export_stats_count_only_returned_output() {
 	assert_eq!(units(export.stats()), pes_count(&frames));
 
 	drop((broadcast, catalog, track));
-	let (mut broadcast, mut catalog) = publish_live::<()>(&origin, route());
-	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let (broadcast, mut catalog) = publish_live::<()>(&origin, route());
+	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let back = origin.consume().routed_broadcast("live").await.unwrap();
 	let stream = crate::catalog::Consumer::new(&back, Default::default()).await.unwrap();
 	let mut export = export.follow(back, stream).unwrap();
@@ -8449,9 +8449,9 @@ async fn export_stats_count_only_returned_output() {
 /// Drained after every write, like [`export_twice`], so the export reads every frame and a row
 /// stops only because its track did.
 async fn export_liveness(sample: u64, stop: u64) -> (stats::Export, stats::Export, Vec<Frame>) {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast.clone(), crate::catalog::Config::default()).unwrap();
 
 	let track = broadcast
 		.create_track("video.avc1", hang::container::track_info(hang::catalog::PRIORITY.video))
@@ -8473,8 +8473,8 @@ async fn export_liveness(sample: u64, stop: u64) -> (stats::Export, stats::Expor
 		.insert(track.name().to_string(), cfg);
 	let mut video = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
 	let mut audio = [
-		aac_rendition(&mut broadcast, &mut catalog, "primary.aac"),
-		aac_rendition(&mut broadcast, &mut catalog, "secondary.aac"),
+		aac_rendition(&mut broadcast.clone(), &mut catalog, "primary.aac"),
+		aac_rendition(&mut broadcast.clone(), &mut catalog, "secondary.aac"),
 	];
 
 	let mut export = open_export(crate::source::announced(&consumer).await).await.unwrap();
@@ -8634,9 +8634,9 @@ async fn a_large_pmt_keeps_within_the_system_buffer() {
 /// Export `streams` language-tagged AAC streams, check the PMT reassembles across its packets
 /// and keeps within TBsys and Bsys at `mux_rate`, and return how many packets it spans.
 async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let broadcast = moq_net::broadcast::Info::new().produce();
 	let mut catalog = crate::catalog::Producer::new(
-		&mut broadcast,
+		&mut broadcast.clone(),
 		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
 	)
 	.unwrap();
@@ -8748,7 +8748,7 @@ async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
 fn publish_bare(
 	origin: &moq_net::origin::Producer,
 	epoch: Option<&moq_net::Epoch>,
-) -> (moq_net::broadcast::Producer, crate::catalog::Producer<()>) {
+) -> (moq_net::origin::Publication, crate::catalog::Producer<()>) {
 	let route = moq_net::origin::Route::default();
 	publish_live::<()>(
 		origin,
@@ -8763,7 +8763,7 @@ async fn follower(origin: &moq_net::origin::Producer) -> super::Follower {
 }
 
 /// End a catalog-only broadcast cleanly.
-fn finish((broadcast, mut catalog): (moq_net::broadcast::Producer, crate::catalog::Producer<()>)) {
+fn finish((broadcast, mut catalog): (moq_net::origin::Publication, crate::catalog::Producer<()>)) {
 	catalog.finish().unwrap();
 	drop((broadcast, catalog));
 }
@@ -8773,8 +8773,8 @@ fn finish((broadcast, mut catalog): (moq_net::broadcast::Producer, crate::catalo
 #[tokio::test(start_paused = true)]
 async fn a_follower_fails_with_the_broadcast_up_after_the_grace() {
 	let origin = crate::source::produce_origin();
-	let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
-	let track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let (broadcast, mut catalog) = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut follower = follower(&origin).await.with_linger(Duration::from_secs(10));
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
@@ -9070,8 +9070,8 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 async fn a_follower_follows_a_return_that_came_back_during_the_grace() {
 	let origin = crate::source::produce_origin();
 	let epoch = moq_net::Epoch::mint();
-	let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&epoch));
-	let track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let (broadcast, mut catalog) = publish_bare(&origin, Some(&epoch));
+	let track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut follower = follower(&origin).await.with_linger(Duration::from_secs(10));
 	assert!(
 		tokio::time::timeout(Duration::from_secs(1), follower.next())
@@ -9089,8 +9089,8 @@ async fn a_follower_follows_a_return_that_came_back_during_the_grace() {
 	);
 	// The end and the return both arrive before the follower looks again.
 	drop((broadcast, catalog));
-	let (mut broadcast, mut catalog) = publish_bare(&origin, Some(&epoch));
-	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let (broadcast, mut catalog) = publish_bare(&origin, Some(&epoch));
+	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	assert!(
 		tokio::time::timeout(Duration::from_secs(3), follower.next())
 			.await
@@ -9292,9 +9292,9 @@ async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 	let origin = crate::source::produce_origin();
 	let epoch = moq_net::Epoch::mint();
 	let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
-	let mut exact = origin.publish("pool/job", route.clone()).unwrap();
-	let mut catalog = crate::catalog::Producer::<()>::new(&mut exact, Default::default()).unwrap();
-	let mut track = aac_rendition(&mut exact, &mut catalog, "a.aac");
+	let exact = origin.publish("pool/job", route.clone()).unwrap();
+	let mut catalog = crate::catalog::Producer::<()>::new(&mut exact.broadcast().clone(), Default::default()).unwrap();
+	let mut track = aac_rendition(&mut exact.broadcast().clone(), &mut catalog, "a.aac");
 	let source = crate::source::resolved(&origin, "pool/job").await;
 	let export = open_export(source)
 		.await
@@ -9360,8 +9360,8 @@ async fn a_follower_continues_through_a_same_epoch_handoff_after_a_gap() {
 async fn a_follower_ignores_a_covering_prefix_while_the_exact_route_serves() {
 	let origin = crate::source::produce_origin();
 	let route = |epoch| moq_net::origin::Route::default().with_epoch(epoch);
-	let mut exact = origin.publish("pool/job", route(moq_net::Epoch::mint())).unwrap();
-	let catalog = crate::catalog::Producer::<()>::new(&mut exact, Default::default()).unwrap();
+	let exact = origin.publish("pool/job", route(moq_net::Epoch::mint())).unwrap();
+	let catalog = crate::catalog::Producer::<()>::new(&mut exact.broadcast().clone(), Default::default()).unwrap();
 	let source = crate::source::resolved(&origin, "pool/job").await;
 	let mut follower = super::Follower::new(open_export(source).await.unwrap()).unwrap();
 	let quiet = Duration::from_secs(1);
@@ -9654,7 +9654,7 @@ fn audio_pts(frames: &[Frame]) -> Vec<u64> {
 #[tokio::test(start_paused = true)]
 async fn a_late_rendition_never_reads_a_replacement() {
 	let origin = crate::source::produce_origin();
-	let (mut old, mut old_catalog) = publish_live::<()>(&origin, Default::default());
+	let (old, mut old_catalog) = publish_live::<()>(&origin, Default::default());
 	let mut export = open_export(crate::source::resolved(&origin, "live").await)
 		.await
 		.unwrap()
@@ -9663,13 +9663,13 @@ async fn a_late_rendition_never_reads_a_replacement() {
 	assert!(drain_frames(&mut export).await.is_empty(), "nothing listed yet");
 
 	// Another instance takes the path, its audio ten seconds ahead.
-	let (mut new, mut new_catalog) = publish_live::<()>(&origin, Default::default());
-	let mut new_audio = aac_rendition(&mut new, &mut new_catalog, "a.aac");
+	let (new, mut new_catalog) = publish_live::<()>(&origin, Default::default());
+	let mut new_audio = aac_rendition(&mut new.broadcast().clone(), &mut new_catalog, "a.aac");
 	for ms in (10_000..10_200).step_by(20) {
 		write_aac(&mut new_audio, ms);
 	}
 
-	let mut old_audio = aac_rendition(&mut old, &mut old_catalog, "a.aac");
+	let mut old_audio = aac_rendition(&mut old.broadcast().clone(), &mut old_catalog, "a.aac");
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut old_audio, ms);
 	}
@@ -9700,10 +9700,10 @@ async fn a_repointed_si_entry_never_reads_a_replacement() {
 	};
 
 	let origin = crate::source::produce_origin();
-	let (mut old, mut catalog) = publish_live::<tscat::Ext>(&origin, Default::default());
-	let mut video = h264_rendition(&mut old, &mut catalog, "video.avc1");
-	let _a = si_track(&mut old, "a.si", &sdt_a);
-	let _b = si_track(&mut old, "b.si", &sdt_b);
+	let (old, mut catalog) = publish_live::<tscat::Ext>(&origin, Default::default());
+	let mut video = h264_rendition(&mut old.broadcast().clone(), &mut catalog, "video.avc1");
+	let _a = si_track(&mut old.broadcast().clone(), "a.si", &sdt_a);
+	let _b = si_track(&mut old.broadcast().clone(), "b.si", &sdt_b);
 	catalog
 		.modify()
 		.unwrap()
@@ -9731,8 +9731,8 @@ async fn a_repointed_si_entry_never_reads_a_replacement() {
 		.collect();
 
 	// Another instance takes the path with its own `b.si`, and only then is the entry repointed.
-	let mut new = origin.publish("live", Default::default()).unwrap();
-	let _new_b = si_track(&mut new, "b.si", &sdt_new);
+	let new = origin.publish("live", Default::default()).unwrap();
+	let _new_b = si_track(&mut new.broadcast().clone(), "b.si", &sdt_new);
 	catalog
 		.modify()
 		.unwrap()
@@ -9769,16 +9769,16 @@ async fn a_switch_reads_the_instance_it_followed() {
 		.with_delay(RECORDING_MAX_AGE)
 		.with_replay();
 
-	let (mut followed, mut followed_catalog) = publish_live::<()>(&origin, Default::default());
-	let mut followed_audio = aac_rendition(&mut followed, &mut followed_catalog, "a.aac");
+	let (followed, mut followed_catalog) = publish_live::<()>(&origin, Default::default());
+	let mut followed_audio = aac_rendition(&mut followed.broadcast().clone(), &mut followed_catalog, "a.aac");
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut followed_audio, ms);
 	}
 	let broadcast = origin.consume().request_broadcast("live", None).await.unwrap();
 
 	// Replaced again, ten seconds ahead, before the switched export requests its track.
-	let (mut newer, mut newer_catalog) = publish_live::<()>(&origin, Default::default());
-	let mut newer_audio = aac_rendition(&mut newer, &mut newer_catalog, "a.aac");
+	let (newer, mut newer_catalog) = publish_live::<()>(&origin, Default::default());
+	let mut newer_audio = aac_rendition(&mut newer.broadcast().clone(), &mut newer_catalog, "a.aac");
 	for ms in (10_000..10_200).step_by(20) {
 		write_aac(&mut newer_audio, ms);
 	}
@@ -9897,10 +9897,10 @@ impl Placed {
 
 /// Export `placed` beside an AAC rendition running past its last PES, returning every slice.
 async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(
-		&mut broadcast,
+		&mut broadcast.clone(),
 		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
 	)
 	.unwrap();

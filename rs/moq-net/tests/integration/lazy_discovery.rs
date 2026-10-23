@@ -34,7 +34,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 struct Lazy {
 	subscriber: origin::Producer,
 	pair: MockPair,
-	_broadcasts: Vec<moq_net::broadcast::Producer>,
+	_broadcasts: Vec<moq_net::origin::Publication>,
 }
 
 impl Lazy {

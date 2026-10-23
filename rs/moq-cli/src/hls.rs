@@ -58,12 +58,12 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 		max_age,
 		bandwidth,
 	} = target;
-	let mut producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
+	let producer = origin.create_broadcast(&name).context("failed to create broadcast")?;
 
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(max_age)
 		.with_bandwidth(bandwidth);
-	let catalog = moq_mux::catalog::Producer::new(&mut producer, config)?;
+	let catalog = moq_mux::catalog::Producer::new(&mut producer.broadcast().clone(), config)?;
 	// Announced once the catalog first goes out, which waits for every rendition's init: a
 	// relay queries a broadcast's tracks the moment it is announced, and keeps the refusals of a
 	// publisher that cannot serve its declared tracks yet.
@@ -71,7 +71,7 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Epoc
 
 	let mut config = moq_hls::import::Config::new(playlist_url(&args.playlist)?);
 	config.passthrough = args.passthrough;
-	let mut importer = moq_hls::import::Import::new(producer.clone(), catalog, config)?;
+	let mut importer = moq_hls::import::Import::new(producer.broadcast().clone(), catalog, config)?;
 
 	tracing::info!(%name, "importing HLS");
 

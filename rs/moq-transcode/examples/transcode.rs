@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
 	tracing::info!(source = %source_path, output = %output_path, "transcoding");
 
 	tokio::select! {
-		res = moq_transcode::run(source, output, config) => Ok(res?),
+		res = moq_transcode::run(source, output.broadcast().clone(), config) => Ok(res?),
 		res = session.closed() => Ok(res?),
 	}
 }

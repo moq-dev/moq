@@ -284,7 +284,7 @@ impl Session {
 	) -> Result<(
 		Self,
 		SessionRegistration,
-		moq_net::broadcast::Producer,
+		moq_net::origin::Publication,
 		moq_mux::catalog::Producer,
 	)> {
 		// Producer setup may touch tokio time (group eviction), so run it inside the runtime context.
@@ -295,8 +295,9 @@ impl Session {
 		// lingers, rather than resuming viewers into the old run's group sequence. Reconnects keep it.
 		let epoch = moq_net::Epoch::mint();
 		gst::info!(CAT, "publishing {} under epoch {epoch}", settings.broadcast);
-		let mut broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default().with_epoch(epoch))?;
-		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default())?;
+		let broadcast = origin.publish(&settings.broadcast, moq_net::origin::Route::default().with_epoch(epoch))?;
+		let catalog =
+			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())?;
 
 		let status = Arc::new(Status::default());
 		let completion = CompletionState::new();
@@ -550,7 +551,7 @@ mod tests {
 		assert_eq!(structure.get::<u64>("ended"), Ok(2));
 	}
 
-	fn started_with_broadcast() -> (Session, moq_net::broadcast::Producer) {
+	fn started_with_broadcast() -> (Session, moq_net::origin::Publication) {
 		gst::init().unwrap();
 		let settings = ResolvedSettings {
 			url: "https://127.0.0.1:1".parse().unwrap(),
@@ -571,7 +572,7 @@ mod tests {
 		(session, connection)
 	}
 
-	fn announced_epoch(broadcast: &moq_net::broadcast::Producer) -> moq_net::Epoch {
+	fn announced_epoch(broadcast: &moq_net::origin::Publication) -> moq_net::Epoch {
 		broadcast.route().expect("announced").epoch.expect("an epoch")
 	}
 

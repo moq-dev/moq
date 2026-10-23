@@ -26,7 +26,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 struct Fixture {
 	producer: moq_e2ee::track::Producer,
 	consumer: moq_e2ee::track::Consumer,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_pair: MockPair,
 }
 
@@ -44,7 +44,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	let consumer_origin = produce_origin(2);
 
 	let broadcast = publisher.create_broadcast(&path).unwrap();
-	let protected = moq_e2ee::broadcast::Producer::new(broadcast.clone(), generation.clone());
+	let protected = moq_e2ee::broadcast::Producer::new(broadcast.broadcast().clone(), generation.clone());
 	let producer = protected.create_track(track, timed()).unwrap();
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(generation.epoch().clone()))

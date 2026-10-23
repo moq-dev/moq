@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcement control belongs to a publication
+
+`origin::Producer::create_broadcast`, `publish`, and `Prepared::publish` return `origin::Publication`.
+Use its `announce`, `unannounce`, and `route` methods to control the origin advertisement.
+Use `publication.broadcast()` for a borrowed `broadcast::Producer` fill surface; `Publication` also forwards fill operations.
+A standalone producer and `Prepared::broadcast()` expose no public announcement methods.
+Cloning a publication shares its broadcast and route. A cloned fill producer or `broadcast::Finish` keeps the publication alive after the control handle drops; call `unannounce` to retract sooner.
+Use `publication.finish()` to preserve finished tracks and their existing linger.
+
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
 On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
@@ -125,8 +134,8 @@ Treat a failed group read as the loss of that group and keep reading the track, 
 ### A claim answers by publishing (#5678)
 
 `origin::Producer::dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
-Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its producer.
-Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
+Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its `origin::Publication`.
+Only `publish` announces the answer: `prepared.broadcast()` exposes fill operations without announcement control.
 `Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
 `Request::accept` is no longer part of the public API and panics on a request from `dynamic`.
 Dropping a `Prepared` unpublished refuses the request, as dropping a `Request` does, and `publish` fails with `Error::Unroutable` once the claim went away.

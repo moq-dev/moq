@@ -33,7 +33,7 @@ struct Setup {
 	pair: MockPair,
 	track: moq_net::track::Producer,
 	reader: moq_clock::sim::JoinHandle<Read>,
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 }
 
 async fn setup(version: &str) -> Setup {

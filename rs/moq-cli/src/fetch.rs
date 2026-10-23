@@ -183,7 +183,7 @@ mod tests {
 	struct Fixture {
 		origin: moq_net::origin::Producer,
 		_keep: (
-			moq_net::broadcast::Producer,
+			moq_net::origin::Publication,
 			Vec<moq_net::track::Producer>,
 			moq_net::group::Producer,
 		),
@@ -241,7 +241,7 @@ mod tests {
 		/// Kept so the published broadcast, its tracks, and the open group stay live.
 		_publisher: (moq_tokio::Connection, Fixture),
 		/// Kept so the relay's hidden broadcast and its track stay live.
-		_hidden: (moq_net::broadcast::Producer, moq_net::track::Producer),
+		_hidden: (moq_net::origin::Publication, moq_net::track::Producer),
 	}
 
 	impl NetworkFixture {

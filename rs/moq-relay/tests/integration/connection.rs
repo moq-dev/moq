@@ -72,7 +72,7 @@ fn publish(
 	name: &str,
 ) -> (
 	moq_net::origin::Producer,
-	moq_net::broadcast::Producer,
+	moq_net::origin::Publication,
 	moq_net::track::Producer,
 ) {
 	let origin = moq_tokio::origin::spawn();

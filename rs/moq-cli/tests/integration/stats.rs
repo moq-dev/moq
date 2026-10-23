@@ -388,12 +388,12 @@ async fn export_echo_reports_what_the_export_reads() {
 	let (expected, _) = written(CLIP);
 
 	// A publisher soliciting feedback under `viewers`, a sibling of its broadcast.
-	let mut broadcast = relay.origin.create_broadcast("demo").expect("create the broadcast");
+	let broadcast = relay.origin.create_broadcast("demo").expect("create the broadcast");
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(Some(Duration::from_secs(1)))
 		.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
-	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
-	let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
+	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
+	let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
 	let mut solicit = catalog.modify().unwrap();
 	solicit.echo = Some(hang::catalog::Echo::new("viewers".to_string()));
 	solicit.commit().unwrap();

@@ -16,7 +16,7 @@ use crate::support;
 use std::time::Duration;
 
 use futures::{StreamExt, channel::mpsc};
-use moq_net::{Error, Hop, Timestamp, Version, broadcast, origin, track};
+use moq_net::{Error, Hop, Timestamp, Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(300);
@@ -91,7 +91,7 @@ struct Topology {
 	p_to_a: Option<MockPair>,
 	a_to_r: Option<MockPair>,
 	links: Vec<MockPair>,
-	_broadcast: broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	_track: track::Producer,
 	/// Every payload written to the open group so far.
 	written: Vec<String>,

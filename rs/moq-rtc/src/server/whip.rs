@@ -127,7 +127,7 @@ pub async fn accept(
 	let config = moq_mux::catalog::Config::default()
 		.with_max_age(server.config().max_age)
 		.with_bandwidth(server.config().bandwidth.clone());
-	let sink = Box::new(IngestSink::new(producer, config)?);
+	let sink = Box::new(IngestSink::new(producer.broadcast().clone(), config)?);
 
 	// Register a session on the shared media mux: known ICE credentials (so the
 	// demux routes this peer's STUN by ufrag), an inbox to read datagrams from,

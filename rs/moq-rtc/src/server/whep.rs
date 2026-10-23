@@ -289,13 +289,15 @@ mod tests {
 	async fn a_broadcast_resolves_through_a_lazy_client_session() {
 		let pub_origin = moq_tokio::origin::spawn();
 
-		let mut source = pub_origin.create_broadcast("cam").expect("create broadcast");
+		let source = pub_origin.create_broadcast("cam").expect("create broadcast");
 		source
 			.announce(moq_net::origin::Route::default())
 			.expect("announce broadcast");
 		let catalog =
-			moq_mux::catalog::Producer::new(&mut source, moq_mux::catalog::Config::default()).expect("create catalog");
-		let mut opus = crate::codec::opus::Bridge::new(source, catalog, 48_000, 2).expect("create Opus bridge");
+			moq_mux::catalog::Producer::new(&mut source.broadcast().clone(), moq_mux::catalog::Config::default())
+				.expect("create catalog");
+		let mut opus = crate::codec::opus::Bridge::new(source.broadcast().clone(), catalog, 48_000, 2)
+			.expect("create Opus bridge");
 		opus.push(Frame {
 			timestamp_us: 20_000,
 			payload: Bytes::from_static(&[0xfc, 0xff, 0xfe]),

@@ -15,7 +15,7 @@ moq-transport at setup and presents one API either way. Media is a layer above
 
 What you use it for, beyond what the concept page already describes:
 
-- **An origin outlives the session.** Broadcasts are created on the origin, and a reconnect announces them again. Closing the session does not delete them.
+- **An origin outlives the session.** Creating a broadcast returns an origin publication that controls its announcement and exposes the broadcast to fill. Standalone and Prepared fill producers cannot announce; only publishing the Prepared answer admits its publication. A reconnect announces existing publications again, and closing the session does not delete them.
 - **Requests can pin an epoch.** `consumer.request_broadcast(path, Some(epoch))` resolves only through a route announcing that [publisher epoch](/concept/moq-lite#publisher-epochs); `None` takes whichever route wins. The resolved consumer names its epoch in `info().epoch`, pinned or not.
 - **Rank several CDNs.** Dial each with its own subscribe handle, `origin.clone().with_preference(origin::Preference::new(rank))` (higher wins; 0 is neutral and a negative rank demotes), all on one origin. Requests use the preferred link that has a route and fail over to the next; see [multiple CDNs](/concept/moq-lite#multiple-cdns).
 - **Follow restarts.** `consumer.announced_broadcast(path, None)` hands out each publisher instance serving a path from `available()`: the first once announced, then each one that takes over or returns after an end, like JS `request(path, { announced: true })`. A broadcast already resolved stays on the old instance until dropped or its route goes. `consumer.follow(path)` yields the underlying start, update, restart, and end of the route a request resolves.

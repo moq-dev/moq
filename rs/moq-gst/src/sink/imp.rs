@@ -64,7 +64,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 /// Live state for one READY to PAUSED run.
 struct State {
 	session: Session,
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	catalog: Option<moq_mux::catalog::Producer>,
 	wall: std::sync::Arc<super::wall::Wall>,
 	/// Whether a clean end keeps serving the finished broadcast until its media is stale.

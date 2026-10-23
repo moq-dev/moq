@@ -265,7 +265,7 @@ pub struct EchoTarget {
 struct Feedback {
 	path: moq_net::PathOwned,
 	// Held for the route: dropping it retracts the announcement.
-	_broadcast: moq_net::broadcast::Producer,
+	_broadcast: moq_net::origin::Publication,
 	tracks: Pair<hang::echo::Snapshot<ts::stats::Report>>,
 }
 
@@ -354,8 +354,8 @@ impl Echo {
 	}
 
 	fn publish(&self, path: &moq_net::PathOwned) -> anyhow::Result<Feedback> {
-		let mut broadcast = self.target.origin.create_broadcast(path)?;
-		let tracks = Pair::create(&mut broadcast, hang::echo::TRACK)?;
+		let broadcast = self.target.origin.create_broadcast(path)?;
+		let tracks = Pair::create(&mut broadcast.broadcast().clone(), hang::echo::TRACK)?;
 		// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
 		broadcast.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
 		Ok(Feedback {

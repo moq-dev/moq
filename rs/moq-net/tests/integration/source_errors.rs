@@ -31,7 +31,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// to the relay, with `bcast` resolved at the relay and the far end.
 struct Relayed {
 	_publisher: moq_net::origin::Producer,
-	broadcast: moq_net::broadcast::Producer,
+	broadcast: moq_net::origin::Publication,
 	upstream: MockPair,
 	_downstream: MockPair,
 	relayed: moq_net::broadcast::Consumer,
