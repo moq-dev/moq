@@ -1860,6 +1860,29 @@ mod test {
 		);
 	}
 
+	/// A replacement can't declare an end before or inside a group an earlier producer of the
+	/// name wrote: a subscriber that received that group would read it as a contradiction.
+	#[test]
+	fn replacement_refuses_an_end_below_its_predecessor() {
+		let producer = Info::new().produce();
+		let first = producer.create_track("media", crate::track::Info::timed()).unwrap();
+		first.append_group().unwrap().finish().unwrap();
+		first.finish().unwrap();
+		drop(first);
+
+		let mut second = producer.create_track("media", crate::track::Info::timed()).unwrap();
+		for end in [
+			crate::track::Position::group(0),
+			crate::track::Position { group: 0, frame: 1 },
+		] {
+			assert!(
+				matches!(second.finish_at(end), Err(Error::ProtocolViolation)),
+				"{end:?}"
+			);
+		}
+		second.finish_at(crate::track::Position::group(1)).unwrap();
+	}
+
 	/// A replacement continues the name's timeline, so its groups can't start before the
 	/// highest one an earlier producer checked, while a new broadcast starts over.
 	#[test]
