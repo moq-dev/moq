@@ -135,6 +135,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Deterministic H.265 TS legs](/quest/m2/ts-hitless-h265.md) - H.265's buffering period gets the same group anchor as H.264
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - two legs send identical RTP packets, headers included, so an ST 2022-7 receiver can merge them
 - [Old tail across a restart](/quest/m2/ts-sync-restart-tail.md) - both `--sync` legs send the old timeline's tail up to a restart, so an ST 2022-7 merge has no hole there
+- [Paced gap after a restart](/quest/m2/ts-restart-gap-burst.md) - a forward restart within the minute no longer sends every gap slot in one burst
 - [moqsrc A/V sync](/quest/m2/moqsrc-av-sync.md) - a nightly test measures A/V skew from `moqsrc` through clock-synced sinks
 - [MP4 export](/quest/m2/mp4-export.md) - `moq export mp4 --output` records crash-safe fragments, then finishes a regular MP4 with moov at the end
 - [fMP4 edit lists](/quest/m2/fmp4-edit-lists.md) - the fMP4 importer applies edit lists to frame timestamps
@@ -232,4 +233,5 @@ ranked just below deterministic TS legs, which it requires.
 - [Quest tree audit](/quest/m2/audit-quests.md) - repeat the whole-tree audit after the release ships, against the m1 baseline
 - [CI workflow audit](/quest/m2/audit-ci.md) - repeat the per-workflow and per-job review after the release ships, against the m1 baselines
 - [Performance audit](/quest/m2/audit-perf.md) - benchmarks that regressed since the m1 run are explained, fixed, or planned, and unbenched hot paths get coverage
+- [Upstream unknown-env option in usage-rs](/quest/m2/usage-unknown-env.md) - jdx/usage refuses unknown prefixed env vars, replacing the moq-tokio helper
 - [Artifact size audit](/quest/m2/audit-size.md) - repeat the shipping, native, WASM and browser attribution after the release ships

@@ -109,7 +109,7 @@ impl Producer {
 	}
 
 	/// A handle that mints consumers without being one, so holding it is not demand.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn weak(&self) -> Weak {
 		Weak(self.state.weak())
 	}
@@ -176,12 +176,12 @@ impl Default for Producer {
 
 /// Mints [`Consumer`]s on demand without counting as one, nor keeping the channel open.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub struct Weak(kio::ProducerWeak<State>);
 
 impl Weak {
 	/// A new consumer, which reports the closure once the producer is gone.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn consume(&self) -> Consumer {
 		Consumer {
 			inner: Inner::Whole(self.0.consume()),
@@ -1133,6 +1133,41 @@ mod tests {
 		// And back down, which has to release the difference rather than hold it.
 		small_reserved.update(bps(1_000_000));
 		assert_eq!(large_reserved.peek(), Some(bps(5_000_000)));
+	}
+
+	/// Collected-language callers can relinquish a ceiling before their retained
+	/// handle is finalized, without ending the track or waiting for its subscribers.
+	#[test]
+	fn zero_ceiling_releases_share_and_probe_target() {
+		let estimate = Producer::new();
+		let allocator = Allocator::new(estimate.consume());
+		estimate.set(Some(bps(3_000_000))).unwrap();
+		let mut target = allocator.target();
+		let waiter = kio::Waiter::noop();
+
+		let (_encoder_broadcast, encoder) = track(VIDEO);
+		let _encoder_sub = encoder.subscribe(None);
+		let retired = allocator.reserve(&encoder.demand(), bps(4_000_000));
+		let replacement = allocator.reserve(&encoder.demand(), bps(4_000_000));
+		let (_sibling_broadcast, sibling) = track(VIDEO);
+		let _sibling_sub = sibling.subscribe(None);
+		let sibling = allocator.reserve(&sibling.demand(), bps(4_000_000));
+		assert_eq!(sibling.peek(), Some(bps(1_000_000)));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
+
+		retired.update(Rate::ZERO);
+		assert_eq!(retired.peek(), Some(Rate::ZERO));
+		assert_eq!(replacement.peek(), Some(bps(1_500_000)));
+		assert_eq!(sibling.peek(), Some(bps(1_500_000)));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(8_000_000)));
+		retired.update(Rate::ZERO);
+		assert!(target.poll_changed(&waiter).is_pending());
+
+		// The registration remains usable, so an encoder may resume in place.
+		retired.update(bps(4_000_000));
+		assert_eq!(sibling.peek(), Some(bps(1_000_000)));
+		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
+		assert!(encoder.demand().is_used());
 	}
 
 	/// A reader parked on `changed` has to be woken by its own reservation moving, not

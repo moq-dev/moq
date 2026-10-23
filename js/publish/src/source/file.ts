@@ -162,6 +162,11 @@ export class File {
 		// The encoder sizes its bitrate off this, and a file's real cadence beats assuming 30fps.
 		const frameRate =
 			video && videoOk ? (await video.computePacketStats(FRAME_RATE_SAMPLES)).averagePacketRate : undefined;
+		const toFrame = video && videoOk ? await converter(video) : undefined;
+		const format =
+			audio && audioOk
+				? { sampleRate: await audio.getSampleRate(), channelCount: await audio.getNumberOfChannels() }
+				: undefined;
 
 		// Pin the clock last. Probing the file takes a moment, and anchoring before that would leave
 		// the first samples already overdue, so playback would open with a catch-up burst.
@@ -171,19 +176,14 @@ export class File {
 
 		const source: Media = {
 			video:
-				video && videoOk
+				video && toFrame
 					? {
-							frames: pace(
-								new VideoSampleSink(video),
-								timeline,
-								video.rotation === 0 ? (sample) => sample.toVideoFrame() : rotator(video),
-								signal,
-							),
+							frames: pace(new VideoSampleSink(video), timeline, toFrame, signal),
 							frameRate,
 						}
 					: undefined,
 			audio:
-				audio && audioOk
+				audio && format
 					? {
 							samples: pace(
 								new AudioSampleSink(audio),
@@ -191,8 +191,7 @@ export class File {
 								(sample) => sample.toAudioData(),
 								signal,
 							),
-							sampleRate: audio.sampleRate,
-							channelCount: audio.numberOfChannels,
+							...format,
 							// A file is whatever the user picked, so leave the Opus tuning to the encoder.
 							kind: "auto",
 						}
@@ -295,8 +294,10 @@ function pace<S extends Sample, T>(
 
 // Phone footage is usually stored sideways with rotation metadata, which toVideoFrame() ignores
 // because a VideoFrame can't carry it. Drawing through a canvas is the only way to bake it in.
-function rotator(track: InputVideoTrack): (sample: VideoSample) => VideoFrame {
-	const canvas = new OffscreenCanvas(track.displayWidth, track.displayHeight);
+async function converter(track: InputVideoTrack): Promise<(sample: VideoSample) => VideoFrame> {
+	if ((await track.getRotation()) === 0) return (sample) => sample.toVideoFrame();
+
+	const canvas = new OffscreenCanvas(await track.getDisplayWidth(), await track.getDisplayHeight());
 
 	const ctx = canvas.getContext("2d");
 	if (!ctx) throw new Error("Failed to create 2D canvas context");
@@ -314,7 +315,7 @@ async function decodable(track: InputVideoTrack | InputAudioTrack | null, file: 
 	if (await track.canDecode()) return true;
 
 	console.warn(
-		`Publishing "${file.name}" without its ${track.type} track: this browser can't decode ${track.codec}.`,
+		`Publishing "${file.name}" without its ${track.type} track: this browser can't decode ${await track.getCodec()}.`,
 	);
 	return false;
 }

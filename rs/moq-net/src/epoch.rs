@@ -35,14 +35,14 @@ impl Epoch {
 
 impl Epoch {
 	/// The UUID's 16 bytes, as the wire carries them.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn to_bytes(&self) -> [u8; 16] {
 		// Parsing enforces the canonical form, so this cannot fail.
 		uuid::Uuid::parse_str(&self.0).unwrap().into_bytes()
 	}
 
 	/// Parse the wire's 16 bytes, refusing anything but a UUIDv7 with the RFC variant.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, InvalidEpoch> {
 		let uuid = uuid::Uuid::from_slice(bytes).map_err(|_| InvalidEpoch)?;
 		uuid.hyphenated().to_string().parse()

@@ -8016,6 +8016,220 @@ where
 	}
 }
 
+/// Packets whose continuity counter does not follow the last one on their PID, other than
+/// those flagging a discontinuity.
+fn continuity_errors(frames: &[Frame]) -> usize {
+	let mut last = std::collections::HashMap::new();
+	let mut errors = 0;
+	for packet in frames.iter().flat_map(|f| f.payload.as_chunks::<188>().0.iter()) {
+		let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+		// Only a packet carrying payload advances the counter.
+		if pid == 0x1fff || packet[3] & 0x10 == 0 {
+			continue;
+		}
+		let counter = packet[3] & 0x0f;
+		let flagged = packet[3] & 0x20 != 0 && packet[4] > 0 && packet[5] & 0x80 != 0;
+		if let Some(previous) = last.insert(pid, counter)
+			&& !flagged
+			&& counter != (previous + 1) & 0x0f
+		{
+			errors += 1;
+		}
+	}
+	errors
+}
+
+/// The output of an export reading the [`Moving`](crate::container::test_util::Moving)
+/// rendition's track `a` up to frame `read`, before the catalog moves the rendition to `track`
+/// in `broadcast` described by `sps`. Both tracks run on to frame 120 in step, the new one from
+/// frame `start`, marked 0xb0 before frame 60, a keyframe two seconds in, and 0xb1 from it.
+async fn moved_export(
+	(start, read): (u64, u64),
+	(track, broadcast, sps): (&str, Option<&str>, &'static [u8]),
+	sync: bool,
+) -> Vec<Frame> {
+	use crate::container::test_util::{Moving, marked_frame};
+
+	let mut moving = Moving::new();
+	let mut export = open_export(moving.source().await)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	if sync {
+		export = export.with_mux_rate(2_000_000).with_sync();
+	}
+	let write = |moving: &mut Moving, i: u64, mark: u8| {
+		moving.a.write(marked_frame(i, mark)).unwrap();
+		let next = match broadcast {
+			None => &mut moving.b,
+			Some(_) => &mut moving.other,
+		};
+		if i >= start {
+			let mark = if i < 60 { 0xb0 } else { 0xb1 };
+			next.write(marked_frame(i, mark)).unwrap();
+		}
+	};
+	for i in 0..read {
+		write(&mut moving, i, 0xa1);
+	}
+	let mut frames = drain_frames(&mut export).await;
+
+	moving.point(track, broadcast, sps);
+	frames.extend(drain_frames(&mut export).await);
+	for i in read..120 {
+		write(&mut moving, i, 0xa2);
+		frames.extend(drain_frames(&mut export).await);
+	}
+	match broadcast {
+		None => moving.b.finish().unwrap(),
+		Some(_) => moving.other.finish().unwrap(),
+	}
+	moving.catalog.finish().unwrap();
+	let (rest, end) = drain_to_end(&mut export).await;
+	frames.extend(rest);
+	end.unwrap();
+	frames
+}
+
+/// A rendition the catalog moves to another track, in its broadcast or a sibling one, goes on
+/// out of the PID the PMT announced, with that track's media and none of the one it left. The
+/// continuity counters run on, and the move onto the same clock is no break. Its parameter sets
+/// ride in-band, so the new track may carry another SPS.
+#[tokio::test(start_paused = true)]
+async fn a_moved_rendition_continues_on_its_pid() {
+	use crate::container::test_util::{Moving, marks};
+
+	for (track, broadcast, sps) in [("b", None, Moving::MAIN_SPS), ("a", Some("other"), SPS)] {
+		let frames = moved_export((60, 45), (track, broadcast, sps), false).await;
+		let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+		let video = reassemble_video(&ts, StreamType::H264);
+		let expected: Vec<u8> = [vec![0xa1; 45], vec![0xb1; 60]].concat();
+		assert_eq!(marks(&video), expected, "moved to {track} in {broadcast:?}");
+		assert_eq!(
+			video.windows(4).any(|w| w == &Moving::MAIN_SPS[..4]),
+			sps == Moving::MAIN_SPS,
+			"the new track's parameter sets go out in-band"
+		);
+		assert_eq!(continuity_errors(&frames), 0);
+		assert_eq!(
+			count_discontinuity(&frames),
+			0,
+			"a move onto the same clock is no break"
+		);
+		assert!(
+			pmts(&frames).iter().all(|(version, _)| *version == 0),
+			"the PMT stays as announced"
+		);
+	}
+}
+
+/// Under `--sync`, legs the catalog moves at different points of the old track render the new
+/// track identically: its units take their lane positions from its own groups, whatever the
+/// old track left on each leg. The second leg last read the old track's group 1, the sequence
+/// the new track's first group it reads has too.
+#[tokio::test(start_paused = true)]
+async fn synced_legs_agree_after_a_move() {
+	use crate::container::test_util::{Moving, marks};
+
+	let mut legs = Vec::new();
+	for (read, expected) in [
+		(20, [vec![0xa1; 20], vec![0xb0; 30]]),
+		(50, [vec![0xa1; 50], Vec::new()]),
+	] {
+		let frames = moved_export((30, read), ("b", None, Moving::MAIN_SPS), true).await;
+		// The video PID's payload. The PCR rides a PID the PMT lists no stream on, which
+		// [`reassemble_video`]'s reader refuses.
+		let mut video = None;
+		let mut es = Vec::new();
+		for packet in frames.iter().flat_map(|f| f.payload.as_chunks::<188>().0.iter()) {
+			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+			if packet[3] & 0x10 == 0 {
+				continue;
+			}
+			let payload = match packet[3] & 0x20 {
+				0 => &packet[4..],
+				_ => &packet[5 + usize::from(packet[4])..],
+			};
+			if video.is_none() && payload.starts_with(&[0, 0, 1, 0xe0]) {
+				video = Some(pid);
+			}
+			if video == Some(pid) {
+				es.extend_from_slice(payload);
+			}
+		}
+		let expected: Vec<u8> = [expected[0].clone(), expected[1].clone(), vec![0xb1; 60]].concat();
+		assert_eq!(marks(&es), expected, "read {read}");
+		assert_eq!(continuity_errors(&frames), 0);
+		legs.push(frames);
+	}
+	// From the slot that carries the new track's frame both legs read first, they carry the
+	// same packets.
+	let from = legs[1]
+		.iter()
+		.find(|frame| marks(&frame.payload).contains(&0xb1))
+		.expect("the new track went out")
+		.timestamp;
+	let after = |frames: &[Frame]| -> Vec<(Timestamp, Bytes)> {
+		frames
+			.iter()
+			.filter(|frame| frame.timestamp >= from)
+			.map(|frame| (frame.timestamp, frame.payload.clone()))
+			.collect()
+	};
+	let (first, second) = (after(&legs[0]), after(&legs[1]));
+	let carried: Vec<u8> = second.iter().flat_map(|(_, payload)| payload.iter().copied()).collect();
+	assert_eq!(
+		marks(&carried),
+		vec![0xb1; 60],
+		"the compared slots carry the new track"
+	);
+	assert!(first == second, "the legs disagree after the move");
+}
+
+/// AAC's ADTS headers are written from the announced configuration as its frames go out, so
+/// a move to an AAC track configured differently is refused rather than framing the old
+/// track's queued frames as the new one's.
+#[tokio::test(start_paused = true)]
+async fn a_rendition_moved_to_another_aac_configuration_fails() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut old = aac_rendition(&mut broadcast, &mut catalog, "main");
+	let track = broadcast
+		.create_track("next", hang::container::track_info(hang::catalog::PRIORITY.audio))
+		.unwrap();
+	let mut next = Producer::new(track, HangContainer::Legacy(Kind::Data));
+
+	let mut export = open_export(crate::source::announced(&consumer).await)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut old, ms);
+	}
+	assert!(!drain_frames(&mut export).await.is_empty(), "the PMT went out");
+
+	{
+		let mut guard = catalog.modify().unwrap();
+		let config = guard.audio.renditions.get_mut("main").unwrap();
+		config.track = Some("next".to_string());
+		config.sample_rate = 44_100;
+	}
+	write_aac(&mut next, 200);
+	let err = tokio::time::timeout(DRAIN, async {
+		loop {
+			if let Err(err) = export.next().await {
+				break err;
+			}
+		}
+	})
+	.await
+	.expect("the export reads the catalog update");
+	assert!(err.to_string().contains("'main' moved to a track"), "{err}");
+}
+
 /// A track that leaves the catalog after the PMT is read to its own end rather than
 /// refused as a layout change. A publisher retires a rendition as its track ends, and
 /// that catalog update can land before the track's last frames and its finish do, so
