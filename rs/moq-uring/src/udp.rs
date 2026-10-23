@@ -457,8 +457,8 @@ pub(crate) struct SockShared {
 	/// `owner`, so counting a datagram is not a `Weak::upgrade`.
 	metrics: std::sync::Arc<Counters>,
 	config: Config,
-	/// Starts as `config.gso`, and clears for good once the kernel rejects a
-	/// train: the route or driver cannot segment.
+	/// Starts as `config.gso`, and clears for good once a rejected train's
+	/// datagrams go out alone: the route or driver cannot segment.
 	gso: Cell<bool>,
 	/// When a lost send was last logged, so a flood of them logs once per interval.
 	lost_logged: Cell<Option<moq_clock::Instant>>,
@@ -1036,6 +1036,7 @@ impl TxBuf {
 			ecn,
 			src_ip,
 			segment: sock.gso.get().then_some(segment as u16),
+			resent: false,
 		};
 		if sock.gso.get() {
 			send_one(&shared, &staging, 0, base, len, &one)?;
@@ -1067,6 +1068,7 @@ impl TxBuf {
 			expect,
 			to,
 			train: None,
+			resent: false,
 		}
 	}
 }
@@ -1136,6 +1138,9 @@ pub(crate) struct SendOp {
 	/// A GSO send's payload and destination, to resend it unsegmented if the
 	/// kernel rejects the train.
 	train: Option<(NonNull<u8>, SendOne)>,
+	/// One datagram of a rejected train, sent again alone. Its success proves
+	/// the route cannot segment.
+	resent: bool,
 }
 
 impl Drop for SendOp {
@@ -1152,6 +1157,8 @@ struct SendOne {
 	src_ip: Option<IpAddr>,
 	/// The `UDP_SEGMENT` size, when the call is one GSO train.
 	segment: Option<u16>,
+	/// A datagram of a train the kernel rejected, sent again alone.
+	resent: bool,
 }
 
 fn send_one(
@@ -1167,6 +1174,7 @@ fn send_one(
 		ecn,
 		src_ip,
 		segment,
+		resent,
 	} = *one;
 	// SAFETY: `index` is within the headers `TxBuf::send` reserved, and every
 	// operation gets its own.
@@ -1270,6 +1278,7 @@ fn send_one(
 		expect: len,
 		to,
 		train: segment.and(NonNull::new(base)).map(|base| (base, *one)),
+		resent,
 	}));
 	let entry = opcode::SendMsg::new(types::Fd(staging.sock.io.as_raw_fd()), hdr_ptr)
 		.build()
@@ -1543,9 +1552,6 @@ pub(crate) fn on_send(op: SendOp, cqe: Cqe) {
 		// cost the connection a full RTO, so send it again unsegmented. Other
 		// trains already in flight fail and resend the same way.
 		if let (libc::EIO | libc::EINVAL, Some((base, one))) = (code, op.train) {
-			if op.sock.gso.replace(false) {
-				tracing::info!(code, "GSO send rejected; halting segmentation offload");
-			}
 			if let Err(err) = resend_unsegmented(&op, base, &one) {
 				op.sock.fail_tx(err.raw_os_error().unwrap_or(libc::EIO));
 			}
@@ -1557,7 +1563,15 @@ pub(crate) fn on_send(op: SendOp, cqe: Cqe) {
 			SendFailure::Lost => op.sock.lost(&op, io::Error::from_raw_os_error(code)),
 			SendFailure::Socket => op.sock.fail_tx(code),
 		}
-	} else if cqe.result as usize != op.expect {
+		return;
+	}
+	// Segmentation is what failed only if the datagrams go out alone. A source
+	// address that left the host fails the same way with or without it, and
+	// must not halt segmentation for every connection sharing the socket.
+	if op.resent && op.sock.gso.replace(false) {
+		tracing::info!("GSO send rejected; halting segmentation offload");
+	}
+	if cqe.result as usize != op.expect {
 		let short = format!("short send: {} of {} bytes", cqe.result, op.expect);
 		op.sock.lost(&op, io::Error::other(short));
 	}
@@ -1618,7 +1632,11 @@ fn resend_unsegmented(op: &SendOp, base: NonNull<u8>, one: &SendOne) -> io::Resu
 		id: op.id,
 		headers,
 	};
-	let one = SendOne { segment: None, ..*one };
+	let one = SendOne {
+		segment: None,
+		resent: true,
+		..*one
+	};
 	for index in 0..segments {
 		let offset = index * segment;
 		let chunk = segment.min(op.expect - offset);
@@ -2092,6 +2110,66 @@ mod tests {
 		let mut buf = [0u8; 16];
 		let (len, _) = peer.recv_from(&mut buf).expect("the healthy send arrived");
 		assert_eq!(&buf[..len], b"alive");
+	}
+
+	/// A source address that is no longer local fails a GSO train with `EINVAL`, like a route
+	/// that cannot segment, but its unsegmented resend fails too. That costs only its packets:
+	/// segmentation stays on for every other connection sharing the socket.
+	#[test]
+	fn a_stale_source_keeps_segmentation() {
+		let mut worker = match crate::Worker::new(crate::Config::default()) {
+			Ok(worker) => worker,
+			Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+				eprintln!("skipping io_uring socket test: {reason}");
+				return;
+			}
+			Err(err) => panic!("worker setup failed: {err}"),
+		};
+		let handle = worker.handle();
+		let peer = std::net::UdpSocket::bind("[::1]:0").expect("peer");
+		peer.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+			.expect("timeout");
+		let to = peer.local_addr().expect("peer addr");
+		let io = UdpSocket::bind("[::]:0").expect("bind");
+		let sock = handle.udp(io, Config::default()).expect("socket");
+		assert!(sock.shared.gso.get(), "the test needs GSO to start on");
+
+		worker
+			.block_on(async {
+				// Wait for every staged send to complete.
+				let settle = || async {
+					for _ in 0..1000 {
+						if sock.shared.tx.borrow().bufs.iter().all(|buf| buf.in_flight == 0) {
+							break;
+						}
+						crate::Timer::after(&handle, std::time::Duration::from_millis(1))
+							.wait()
+							.await;
+					}
+				};
+
+				let mut tx = sock.acquire().await.expect("send buffer");
+				tx.resize(2 * 1200, 1);
+				let mut stale = Transmit::new(to, 1200);
+				// A documentation address, never assigned to this host.
+				stale.src_ip = Some(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).into());
+				tx.send(stale).expect("staged");
+				settle().await;
+				assert!(sock.shared.gso.get(), "a stale source halted segmentation");
+
+				let mut tx = sock.acquire().await.expect("a stale source keeps the socket");
+				tx.resize(2 * 1200, 2);
+				tx.send(Transmit::new(to, 1200)).expect("staged");
+				settle().await;
+			})
+			.expect("worker");
+		let mut buf = [0u8; 2048];
+		for _ in 0..2 {
+			let (len, _) = peer.recv_from(&mut buf).expect("the healthy train arrived");
+			assert_eq!(&buf[..len], &[2; 1200][..]);
+		}
+		// The stale train, its two resends, then the healthy train as one train.
+		assert_eq!(handle.metrics().snapshot().tx_sends, 4);
 	}
 
 	/// With nothing routing unreachable reports, a send that finds no route
