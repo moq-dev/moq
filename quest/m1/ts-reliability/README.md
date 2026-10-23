@@ -89,7 +89,9 @@ and PAT plans build on, rank ahead of the remaining rows. Rejected: carrying
 decode time in every frame container, one shared ingest byte budget,
 and replacing the demux with GStreamer or another parser (it fixes neither
 cause). Out of scope for now: decoupling catalog publication from mux-rate
-measurement.
+measurement. Re-planned the same day: decode order covers MKV and FLV too and
+absorbs the release audit's export-reorder quest, and the shared parser lands
+before the open stream-routes and PAT drafts, which rebase onto it.
 
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
 decoder-time admission (#5306) have landed; PSI runs and catalog linger
@@ -98,13 +100,12 @@ remain with their current quests.
 ## Required
 
 - [State bound](/quest/m1/ts-reliability/state-bound.md) - SI and revision state retire with what the source stops repeating
-- [Decode order](/quest/m1/ts-reliability/decode-order.md) - exporters author DTS from decode order and fixed per-rendition constants
+- [Decode order](/quest/m1/ts-reliability/decode-order.md) - TS, MKV and FLV author DTS from decode order and a declared `reorder` depth
 - [Shared parser](/quest/m1/ts-reliability/shared-parser.md) - `--program all` scans the multiplex once
 - [PMT export](/quest/m1/ts-reliability/pmt-export.md) - a TS export announces each PMT revision, mux rate included, at the next `version_number`
 - [Access units](/quest/m1/ts-reliability/pes-access-units.md) - a PES carrying several access units publishes each at its own time
 - [PAT changes](/quest/m1/ts-reliability/pat-lifecycle.md) - a revised PAT never leaves a broadcast meaning another program
 - [Stream routes](/quest/m1/ts-reliability/stream-routes.md) - every PID gets a declared route, and what is not carried is counted
-- [Release clock false alarms](/quest/m1/ts-reliability/release-clock-false-alarms.md) - no false jitter leap at a 500 ms delay and no false drift alarm
 - [Program cap](/quest/m1/ts-reliability/program-cap.md) - a PAT listing every program number cannot create a broadcast per program
 
 ## Related

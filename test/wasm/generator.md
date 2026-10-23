@@ -249,7 +249,8 @@ targets, over one dual-annotated crate.
   The measurements above used a workaround in the pin patch. Since
   [#5681](https://github.com/moq-dev/moq/pull/5681), moq-mux reads moq-clock's browser
   wall clock instead, and the cases pass without the workaround.
-- **On moq-lite-06, group sequence 2^62-1 never arrives.** lite-02 and transport-19
-  carry it, and 2^53+1 crosses all three. Nothing errors: the subscriber waits forever.
-  Both moq-ffi and the slice hit it under both generators. Tracked in
-  [lite-06 max sequence](/quest/m1/lite06-max-sequence.md).
+- **On moq-lite-06, group sequence 2^62-1 never arrived.** The cases also stamped it as
+  the frame timestamp, which lite-05/06 cannot zigzag as a group's first frame, so the
+  publisher dropped the group and the subscriber waited forever. Both moq-ffi and the
+  slice hit it under both generators. Timestamps now stop at 2^61-1, so `writeFrame`
+  refuses the unencodable one and the sequence itself crosses every version.

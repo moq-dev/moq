@@ -19,7 +19,9 @@
  *
  * @module
  */
+
 import { writeFileSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
@@ -29,6 +31,7 @@ import { Hex, Libav } from "@moq/hang/util";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { install } from "@moq/web-transport";
+import { readFinish } from "./finish";
 
 // globalThis.WebTransport = the polyfill (no-op if a native one already exists).
 // @moq/net's connect() reads globalThis.WebTransport at call time, so this just
@@ -53,6 +56,8 @@ const { positionals, values } = parseArgs({
 		broadcast: { type: "string" },
 		timeout: { type: "string", default: "20" },
 		version: { type: "string" },
+		finish: { type: "boolean", default: false },
+		frames: { type: "string", default: "10" },
 		"audio-out": { type: "string" },
 		"audio-ms": { type: "string" },
 	},
@@ -61,6 +66,8 @@ const { positionals, values } = parseArgs({
 const role = positionals[0];
 const url = values.url;
 const broadcast = values.broadcast;
+const frames = Number(values.frames);
+if (!Number.isSafeInteger(frames) || frames <= 0) throw new Error("frames must be a positive integer");
 const audioOut = values["audio-out"];
 const audioMs = Number.parseInt(values["audio-ms"] ?? "", 10);
 const timeoutMs = Number.parseFloat(values.timeout ?? "20") * 1000;
@@ -68,13 +75,12 @@ if (
 	role !== "subscribe" ||
 	!url ||
 	!broadcast ||
-	!audioOut ||
-	!(audioMs > 0) ||
+	(!values.finish && (!audioOut || !(audioMs > 0))) ||
 	!Number.isFinite(timeoutMs) ||
 	timeoutMs <= 0
 ) {
 	console.error(
-		"usage: subscribe.ts subscribe --url U --broadcast B --audio-out PREFIX --audio-ms MS [--timeout S>0] [--version V]",
+		"usage: subscribe.ts subscribe --url U --broadcast B (--audio-out PREFIX --audio-ms MS | --finish [--frames N]) [--timeout S>0] [--version V]",
 	);
 	process.exit(2);
 }
@@ -230,6 +236,17 @@ async function run(): Promise<void> {
 	const unwatch = connection.auth.grant.subscribe(printGrant);
 	let requested: Moq.Origin.Requesting | undefined;
 	try {
+		if (values.finish) {
+			console.error("finish reader ready");
+			const input = createInterface({ input: process.stdin });
+			try {
+				if ((await input.question("")) !== "read") throw new Error("expected finish read release");
+			} finally {
+				input.close();
+			}
+			console.error(await readFinish(origin, broadcast as string, frames, Milli(timeoutMs)));
+			return;
+		}
 		const path = Moq.Path.from(broadcast as string);
 		requested = origin.request(path, { announced: true });
 		let bc = requested.active.peek();
@@ -257,7 +274,7 @@ async function run(): Promise<void> {
 }
 
 const timeout = new Promise<never>((_, reject) =>
-	setTimeout(() => reject(new Error("timed out waiting for data")), timeoutMs),
+	setTimeout(() => reject(new Error("timed out waiting for data")), timeoutMs * (values.finish ? 2 : 1)),
 );
 
 try {

@@ -34,6 +34,12 @@ const group = recv.kind === "group" ? recv.group : undefined;
 `Track.Ordered.tryNextGroup()`, `Track.finalSequence(end)`, `Track.Consumer.info({ hold })`, and `Group.Consumer.expired` are new.
 A custom publisher races its writes against `expired` and against `closed` settling with an error (an eviction, or an aborted copy no route continues), and resets the stream once either does.
 
+### `Track.Producer.largest()` is a getter
+
+`Track.Producer.largest()` returns the track's largest location synchronously, `undefined` before any, instead of a promise for the next newer one.
+Drop the `await`. Every caller reads the same value: the old shared cursor let one caller take an update and leave another waiting forever.
+To wait for each newer one, keep a reader and follow its stream: `const reader = producer.subscribe();`, then `await reader.largest()`.
+
 ### Stage a requested track before subscribers see it (#6111)
 
 `Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
@@ -72,7 +78,7 @@ Close the claim and claim again to change it, and close an answer's producer to 
 `Track.Subscriber.largest()` and `Track.Ordered.largest()` report the track's largest only while it is within the bounds set with `withRange`, where they used to ignore the bounds.
 A largest past the cap or below the floor reports nothing; the cache never stands in for it.
 A cap moved below the largest stays pending. Moving the bounds wakes a pending read, which reports the largest once it is within them and newer than the last report.
-Unbounded readers and `Track.Producer.largest()` are unchanged.
+Unbounded readers are unchanged.
 To read the track's edge from a capped reader, lift the cap with `withRange({})` first.
 
 ### Lite-07 accounts for groups with `SUBSCRIBE_DROP`

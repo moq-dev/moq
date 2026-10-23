@@ -38,6 +38,7 @@ import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.
 import * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { requestReason, toRequestCode } from "./error.ts";
+import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import {
 	decodeObjectTime,
@@ -541,17 +542,11 @@ export class Subscriber {
 					version === Version.DRAFT_16 ||
 					version === Version.DRAFT_17
 				) {
-					await request.writer.u53(SubscribeNamespaceLegacy.id);
-					await new SubscribeNamespaceLegacy({ namespace: prefix, requestId, hidden }).encode(
-						request.writer,
-						version,
-					);
+					const msg = new SubscribeNamespaceLegacy({ namespace: prefix, requestId, hidden });
+					await Message.write(request.writer, SubscribeNamespaceLegacy.id, msg, version);
 				} else {
-					await request.writer.u53(SubscribeNamespace.id);
-					await new SubscribeNamespace({ namespace: prefix, requestId, hidden }).encode(
-						request.writer,
-						version,
-					);
+					const msg = new SubscribeNamespace({ namespace: prefix, requestId, hidden });
+					await Message.write(request.writer, SubscribeNamespace.id, msg, version);
 				}
 				console.debug(`subscribe_namespace written: requestId=${requestId}`);
 
@@ -559,9 +554,8 @@ export class Subscriber {
 					// For v14/v15: send UnsubscribeNamespace before closing
 					if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
 						try {
-							await request.writer.u53(UnsubscribeNamespace.id);
 							const unsub = new UnsubscribeNamespace({ requestId });
-							await unsub.encode(request.writer, version);
+							await Message.write(request.writer, UnsubscribeNamespace.id, unsub, version);
 						} catch {
 							// Stream might already be closed
 						}
@@ -971,7 +965,8 @@ export class Subscriber {
 		} catch (err) {
 			stream.abort(err);
 			const e = await sessionCause(this.#quic, err);
-			producer.close(this.#localClose ? undefined : e);
+			if (this.#localClose) hooks.releaseTrack(producer);
+			else producer.close(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
 			);
@@ -1094,8 +1089,7 @@ export class Subscriber {
 			// Counted before writing: the answer can be read before the write's promise resolves.
 			if (answered) unanswered.update((count) => count + 1);
 			try {
-				await stream.writer.u53(SubscribeUpdate.id);
-				await update.encode(stream.writer, version);
+				await Message.write(stream.writer, SubscribeUpdate.id, update, version);
 			} catch {
 				// The publisher stopped reading; its responses decide how the track ends.
 				return;
@@ -1120,8 +1114,7 @@ export class Subscriber {
 		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) return;
 
 		try {
-			await stream.writer.u53(Unsubscribe.id);
-			await new Unsubscribe({ requestId }).encode(stream.writer, version);
+			await Message.write(stream.writer, Unsubscribe.id, new Unsubscribe({ requestId }), version);
 		} catch {
 			// The stream may already be gone; there is nothing further to tell the peer.
 		}
@@ -1164,7 +1157,6 @@ export class Subscriber {
 		// won the await above. No response data is released from the canceled setup.
 		if (state.cancelled && !legacy) throw new Error("subscribe cancelled before it was sent");
 
-		await state.stream.writer.u53(Subscribe.id);
 		const msg = new Subscribe({
 			requestId,
 			trackNamespace: broadcast,
@@ -1183,7 +1175,7 @@ export class Subscriber {
 			filter: joinFilter(version),
 			epoch,
 		});
-		await msg.encode(state.stream.writer, version);
+		await Message.write(state.stream.writer, Subscribe.id, msg, version);
 		state.sent = true;
 
 		// The caller may have given up while that write was in flight. It deliberately left
@@ -1229,7 +1221,7 @@ export class Subscriber {
 			priority: fromWire(ok.properties.priority ?? ABSENT_WIRE),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 			// A moq-transport peer may stamp arrival times, and nothing on the wire says it didn't.
-			unchecked: ok.properties.timescale != null,
+			ietf: version,
 		});
 		const producer = staged.producer;
 		const subscription: Subscription = { track: producer, tail: new Tail() };
@@ -1337,15 +1329,13 @@ export class Subscriber {
 			// because consumers may trigger Subscribe writes that would
 			// interleave with our OK on the control stream.
 			if (version === Version.DRAFT_14) {
-				await request.writer.u53(PublishNamespaceOk.id);
 				const ok = new PublishNamespaceOk({ requestId: msg.requestId });
-				await ok.encode(request.writer, version);
+				await Message.write(request.writer, PublishNamespaceOk.id, ok, version);
 			} else {
-				await request.writer.u53(RequestOk.id);
 				const ok = new RequestOk({
 					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
 				});
-				await ok.encode(request.writer, version);
+				await Message.write(request.writer, RequestOk.id, ok, version);
 			}
 
 			// Only now is the advertisement ours to announce, for the reason above: a
@@ -1411,12 +1401,12 @@ export class Subscriber {
 					});
 					// Draft-16's advertisement outlives its stream, so withdraw it explicitly.
 					if (keyed) {
-						await request.writer.u53(PublishNamespaceCancel.id);
-						await new PublishNamespaceCancel({
+						const cancel = new PublishNamespaceCancel({
 							requestId: msg.requestId,
 							errorCode: toRequestCode("malformed_auth_token", "publish_namespace", version),
 							reasonPhrase: err.message,
-						}).encode(request.writer, version);
+						});
+						await Message.write(request.writer, PublishNamespaceCancel.id, cancel, version);
 					}
 					request.close();
 					break;
@@ -1454,11 +1444,8 @@ export class Subscriber {
 				// Nothing here can fail to apply, so every update is acknowledged. A leaf
 				// routes nothing, so a repricing changes nothing it holds; consumers still
 				// hear the new route so a forwarder can reprice.
-				await request.writer.u53(RequestOk.id);
-				await new RequestOk({ requestId: keyed ? update.requestId : undefined }).encode(
-					request.writer,
-					version,
-				);
+				const ok = new RequestOk({ requestId: keyed ? update.requestId : undefined });
+				await Message.write(request.writer, RequestOk.id, ok, version);
 			}
 		} finally {
 			if (legacy) this.#legacyRequests.delete(path);

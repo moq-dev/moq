@@ -22,6 +22,19 @@ let subscriber = subscriber.with_range(5..);
 A custom publisher can now reach what the built-in ones use: `track::Subscriber::poll_start`, `track::Subscriber::poll_drop`, `group::Consumer::poll_expired`, `subscription::Position::final_sequence`, and `Subscription::{start, end, with_start, with_end}` for the covering span.
 It gives up on a group it is still writing once `poll_expired` is true, or `poll_finished` fails because the frames it has yet to read are gone.
 
+### `track::Producer::largest()` is a getter
+
+`track::Producer::largest(&self)` returns the track's largest location now, `None` before any, instead of streaming each newer one; `track::Producer::poll_largest` is gone.
+Replace `poll_largest(&kio::Waiter::noop())` and `largest().await` on a producer with `largest()`.
+To wait for each newer one, keep a reader and follow its stream: `let mut reader = producer.consume();`, then `reader.largest().await`.
+
+### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
+
+On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
+Readers accept both forms and set End Of Track to the sequence after the fetched group.
+An older moq-net reader can reject the new answer; upgrade it before pairing it with a new publisher, or use draft 20 and later, whose inclusive End Location is unchanged.
+No Rust API changes.
+
 ### Receive streams are read through leases (#5878)
 
 `transport::poll::RecvStream` now has `poll_lease(cx, want)`, `set_priority`, and `stop`, plus the provided `poll_read_chunk` and `read_chunk`.
@@ -120,6 +133,12 @@ moq-transport sessions, and moq-lite-03/04 sessions (whose announce streams mark
 Replace `Frame { timestamp, payload }` with `Frame::new(timestamp, payload)`.
 `timestamp` and `payload` stay public fields.
 
+### Timestamps stop at 2^61 - 1 (#6168)
+
+`Timestamp::new`, its `from_*` constructors, `convert`, `checked_add`, and `TryFrom<Duration>` return `TimeOverflow` past `2^61 - 1` instead of `2^62 - 1`, the most lite-05/06 can carry as a group's first frame.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `(1 << 61) - 1`.
+
 ### A dropped or cut group ends its reader with an error (#6143)
 
 A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `track::Subscriber` saw it is now handed out, and reading it fails with the publisher's error; before, it was skipped or ended cleanly.
@@ -197,7 +216,7 @@ Handle it like any other skipped group.
 ### Track readers follow `largest()` instead of reading `latest()` (#5725)
 
 `latest()` on `track::{Producer, Consumer, Subscriber, Ordered}` is gone.
-Await `largest()` and read `.group` where you used the sequence; where you read the edge without waiting, poll `poll_largest` once with `kio::Waiter::noop()`.
+Await `largest()` and read `.group` where you used the sequence; on a `Producer`, `largest()` reads the edge without waiting.
 It streams the newest location, the current one at once and then each newer one, and `None` once the track ends.
 A new group or datagram raises it at frame 0 before any frame lands, and it can name a frame the publisher reported before its group arrives.
 
