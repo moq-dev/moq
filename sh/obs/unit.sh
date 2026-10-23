@@ -35,7 +35,7 @@ export PKG_CONFIG_PATH="$moq_prefix/lib/pkgconfig"
 moq_sources=$(pkg-config --variable=sources moq-cpp)
 moq_libs=$(pkg-config --libs moq-cpp)
 
-flags=(-std=c++17 -g -O0 -pthread)
+flags=(-std=c++17 -g -O0 -pthread -Werror)
 if [ "$mode" = "tsan" ]; then
     flags+=(-fsanitize=thread)
 fi

@@ -602,8 +602,9 @@ impl MoqAudioConsumer {
 		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
 		// dynamic handler and open an upstream subscription we would immediately drop.
 		let reference = catalog_audio.broadcast.clone();
+		let epoch = catalog_audio.epoch.clone();
 		let cfg = audio_config(catalog_audio)?;
-		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
+		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 
 		let mut config = moq_audio::decode::Options::default();
 		config.output.format = output.format.into();
@@ -638,6 +639,7 @@ mod tests {
 		MoqAudio {
 			label: None,
 			broadcast: None,
+			epoch: None,
 			track: None,
 			codec: codec.to_string(),
 			description: None,
@@ -698,6 +700,65 @@ mod tests {
 	fn audio_config_rejects_unknown_codec() {
 		let error = audio_config(catalog_audio("unknown")).unwrap_err();
 		assert!(matches!(error, MoqError::Unsupported));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn retired_audio_producers_keep_clean_tails_for_late_readers() {
+		let broadcast = crate::producer::MoqBroadcastProducer::new().unwrap();
+		let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+		let reader = broadcast.consume_inner().unwrap();
+		for index in 0..4 {
+			let audio = MoqAudioProducer::new(
+				&catalog,
+				MoqAudioEncoderInput {
+					format: MoqAudioSampleFormat::F32,
+					sample_rate: 48_000,
+					channels: 1,
+				},
+				MoqAudioEncoderOutput {
+					codec: MoqAudioCodec::opus(),
+					track: Some(format!("audio-{index}")),
+					sample_rate: None,
+					channels: None,
+					bitrate: None,
+					frame_duration_us: 0,
+					preset: None,
+				},
+				None,
+			)
+			.unwrap();
+			// A partial codec frame makes finish publish the final packet and lookahead.
+			audio
+				.write(MoqAudioFrame {
+					timestamp_us: 0,
+					data: vec![0.1_f32; 860].into_iter().flat_map(f32::to_ne_bytes).collect(),
+				})
+				.unwrap();
+			audio.finish().unwrap();
+			drop(audio);
+			broadcast
+				.with_state(|state| {
+					assert_eq!(state.catalog.snapshot().audio.renditions.len(), index + 1);
+					Ok(())
+				})
+				.unwrap();
+		}
+		let _finished = broadcast.finish().unwrap();
+		for index in 0..4 {
+			let mut track = reader
+				.track(&format!("audio-{index}"))
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap();
+			let mut frames = 0;
+			while let Some(mut group) = track.recv_group().await.unwrap() {
+				while group.read_frame().await.unwrap().is_some() {
+					frames += 1;
+				}
+			}
+			assert!(frames > 0);
+		}
 	}
 
 	#[test]

@@ -6,6 +6,7 @@
  * direct read does, and each swap should leave nothing behind once its groups are read.
  */
 
+import { Milli } from "@moq/clock";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { Producer as GroupProducer } from "../src/group.ts";
 import { hooks } from "../src/internal.ts";
@@ -136,6 +137,57 @@ for (const swaps of swapCounts) {
 }
 if (checksum === 0) throw new Error("benchmark did no work");
 
+// Two routes keep the same live group while taking turns. Sweep audience and flap
+// count: the cost per swap must not grow with redundant subscriptions to those routes.
+async function measureFlaps(readers: number, flaps: number): Promise<number> {
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const tracks = sources.map((source) => source.createTrack("seq"));
+	const groups = tracks.map((track) => {
+		const group = track.appendGroup();
+		group.writeFrame({ payload });
+		return group;
+	});
+	front.serve(handles[0]);
+	const subscribers = Array.from({ length: readers }, () =>
+		front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) }),
+	);
+	const held = subscribers.map((subscriber) => {
+		const group = subscriber.tryRecvGroup();
+		if (!group) throw new Error("missing held group");
+		return group;
+	});
+	await flush();
+	const start = performance.now();
+	for (let flap = 0; flap < flaps; flap++) {
+		front.serve(handles[(flap + 1) % 2]);
+		await flush();
+		for (const subscriber of subscribers) {
+			if (subscriber.tryRecvGroup()) throw new Error("repeated held group");
+		}
+	}
+	const elapsed = performance.now() - start;
+	for (const group of held) group.close();
+	for (const subscriber of subscribers) subscriber.close();
+	front.consumer.close();
+	for (const group of groups) group.close();
+	for (const handle of handles) handle.close();
+	for (const source of sources) source.close();
+	await flush();
+	return (elapsed * 1000) / readers / flaps;
+}
+
+await measureFlaps(4, 16);
+console.log("readers,flaps,flap_us");
+for (const readers of readerCounts) {
+	for (const flaps of [1, 16, 64]) {
+		const samples: number[] = [];
+		for (let rep = 0; rep < reps; rep++) samples.push(await measureFlaps(readers, flaps));
+		console.log(`${readers},${flaps},${Math.min(...samples).toFixed(2)}`);
+	}
+}
+
 // An adopted copy may repeat a large prefix before it reaches unread content. Time readiness
 // separately from constructing the copies, sweeping both the replay and independent readers.
 async function measureReplay(readers: number, replayed: number): Promise<number> {
@@ -185,5 +237,44 @@ for (const replayed of [0, 1, 64, 1024]) {
 		const samples: number[] = [];
 		for (let rep = 0; rep < reps; rep++) samples.push(await measureReplay(readers, replayed));
 		console.log(`${readers},${replayed},${Math.min(...samples).toFixed(2)}`);
+	}
+}
+
+// Sweep audience and delivered history: a read must touch only the delivered identity,
+// whether the history is under, at, or past the replay-buffer cap on retained identities.
+async function measureDatagrams(readers: number, retained: number): Promise<number> {
+	const front = new Front();
+	const broadcast = new BroadcastProducer();
+	const producer = broadcast.createTrack("seq");
+	front.serve(broadcast.consume());
+	const subscribers = Array.from({ length: readers }, () =>
+		front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) }),
+	);
+	const deliver = (sequence: number) => {
+		producer.insertDatagram(sequence, undefined, payload);
+		for (const subscriber of subscribers) {
+			const recv = hooks.tryRecvDatagram(subscriber);
+			if (recv.kind !== "datagram") throw new Error("datagram was not delivered");
+			checksum += recv.datagram.sequence;
+		}
+	};
+	for (let sequence = 0; sequence < retained; sequence++) deliver(sequence);
+	const start = performance.now();
+	for (let index = 0; index < groups; index++) deliver(retained + index);
+	const elapsed = performance.now() - start;
+	for (const subscriber of subscribers) subscriber.close();
+	front.consumer.close();
+	broadcast.close();
+	await flush();
+	return (elapsed * 1000) / groups / readers;
+}
+
+await measureDatagrams(4, 64);
+console.log("datagram_readers,retained,us_per_datagram");
+for (const retained of [1, 64, 4096]) {
+	for (const readers of readerCounts) {
+		const runs: number[] = [];
+		for (let rep = 0; rep < reps; rep++) runs.push(await measureDatagrams(readers, retained));
+		console.log(`${readers},${retained},${Math.min(...runs).toFixed(2)}`);
 	}
 }

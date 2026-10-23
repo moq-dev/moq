@@ -102,7 +102,7 @@ describe("unsupported catalog", () => {
 			const track = published.createTrack(format === "hang" ? Catalog.TRACK : Catalog.TRACK_COMPRESSED);
 			const producer = new Json.Snapshot.Producer<Catalog.Root>({
 				track,
-				deltaRatio: 0,
+				deltas: false,
 				compression: format === "hangz" ? "deflate" : "none",
 			});
 			const enabled = new Signal(true);
@@ -133,6 +133,61 @@ describe("unsupported catalog", () => {
 				logged.mockRestore();
 			}
 		});
+	}
+});
+
+// Regression: a finished catalog track dropped the catalog at once, so a publisher finishing its
+// broadcast cut every viewer off before it drained the tail the broadcast still served.
+it("keeps playing a finished catalog until the broadcast ends", async () => {
+	const owner = new Origin.Producer();
+	const name = Path.from("room/live.hang");
+	const published = publish(owner, name);
+	const producer = new Json.Snapshot.Producer<Catalog.Root>({
+		track: published.createTrack(Catalog.TRACK),
+		deltas: false,
+	});
+	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
+	try {
+		const ready = source.out.catalog.changed();
+		producer.update({ value: { video: { renditions: { hd: video("avc1.640028") } } } });
+		await ready;
+		expect(source.out.status.peek()).toBe("live");
+
+		producer.finish();
+		await settle();
+		expect(source.out.status.peek()).toBe("live");
+		expect(videoRenditions(source)).toEqual(["hd"]);
+
+		published.close();
+		await settle();
+		expect(source.out.status.peek()).toBe("offline");
+		expect(source.out.catalog.peek()).toBeUndefined();
+	} finally {
+		source.close();
+		owner.close();
+	}
+});
+
+// A catalog track that ends before its first snapshot has nothing to play, so it reads as offline.
+it("reports a catalog that ends empty as offline", async () => {
+	const owner = new Origin.Producer();
+	const name = Path.from("room/live.hang");
+	const published = publish(owner, name);
+	const producer = new Json.Snapshot.Producer<Catalog.Root>({
+		track: published.createTrack(Catalog.TRACK),
+		deltas: false,
+	});
+	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
+	try {
+		await settle();
+		producer.finish();
+		await settle();
+		expect(source.out.status.peek()).toBe("offline");
+		expect(source.out.catalog.peek()).toBeUndefined();
+	} finally {
+		published.close();
+		source.close();
+		owner.close();
 	}
 });
 
@@ -348,6 +403,37 @@ describe("relativeBroadcast", () => {
 			replacement.close();
 		} finally {
 			effect.close();
+			source.close();
+			old.close();
+			main.close();
+			owner.close();
+		}
+	});
+
+	it("drops a rendition from the catalog while its broadcast proves another epoch", async () => {
+		const owner = new Origin.Producer();
+		const main = publish(owner, Path.from("a/b"));
+		const [oldEpoch, newEpoch] = [Moq.Epoch.mint(), Moq.Epoch.mint()];
+		const old = owner.createBroadcast(Path.from("a/source"));
+		old.announce({ epoch: oldEpoch });
+		const named = { ...video("avc1.64001f", "./source"), epoch: oldEpoch } as Catalog.VideoConfig;
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("a/b"),
+			enabled: true,
+			catalogFormat: "manual",
+			catalog: { video: { renditions: { plain: video("avc1.64001f", "./source"), named } } } as Catalog.Root,
+		});
+		try {
+			await settle();
+			expect(videoRenditions(source)).toEqual(["named", "plain"]);
+
+			const replacement = owner.createBroadcast(Path.from("a/source"));
+			replacement.announce({ epoch: newEpoch });
+			await withoutWarnings(settle);
+			expect(videoRenditions(source)).toEqual(["plain"]);
+			replacement.close();
+		} finally {
 			source.close();
 			old.close();
 			main.close();

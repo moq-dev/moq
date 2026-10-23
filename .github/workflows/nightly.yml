@@ -90,7 +90,7 @@ jobs:
       fail-fast: false
       matrix:
         # Unset keys default to the ARM runner, the plain dev shell, the Rust
-        # cache, no perf sampling, no Chromium, and nextest's default profile.
+        # cache, no perf sampling, and nextest's default profile.
         include:
           - name: Binding benchmark
             recipe: bench-ffi
@@ -145,13 +145,11 @@ jobs:
             uncached: true
           - name: Browser backend baseline
             recipe: test wasm-baseline --uniffi
-            chromium: true
             artifact: wasm-backend-baseline
             artifact-path: target/test
           # Bounded: fails on crashes, missing output, or invalid samples, never on timing.
           - name: Browser benchmark smoke
             recipe: bench-browser --smoke
-            chromium: true
             artifact: bench-browser
             artifact-path: target/bench/browser
           - name: Audit
@@ -178,6 +176,11 @@ jobs:
           - name: OBS
             recipe: obs ci
             shell: .#obs
+          # The OBS unit tests under ThreadSanitizer, against stubbed libobs, so
+          # the plain shell suffices. A loaded run of moq-output-test can take
+          # 60 to 90 s instead of about 8; the suite took 2 to 4.5 min locally.
+          - name: OBS TSan
+            recipe: obs test
           - name: moq-c C fixtures
             recipe: rs c-tests
 
@@ -201,12 +204,6 @@ jobs:
       - name: Allow perf kernel sampling
         if: matrix.perf
         run: sudo sysctl -w kernel.perf_event_paranoid=-1
-
-      # Playwright's Chromium isn't in the nix devShell; `--with-deps` installs
-      # its apt runtime libs, and the recipe's own install then no-ops.
-      - name: Playwright Chromium
-        if: matrix.chromium
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
 
       - name: Run workload
         id: workload
@@ -244,6 +241,8 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
+      # Delete a Pages artifact left by an earlier run attempt.
+      actions: write
       contents: write
       pages: write
       id-token: write
@@ -297,6 +296,11 @@ jobs:
           fail-on-alert: false
       - name: Publish shared history
         run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-publish finish benchmark-site
+      - name: Drop a stale Pages artifact
+        run: nix shell --inputs-from . nixpkgs#just --command just gh pages-clean
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: benchmark-site
@@ -328,7 +332,7 @@ jobs:
         # `rs audio-devices` plays moq-audio's device tests into a private null sink.
         # `rs multicast` runs the mDNS tests, which loop multicast back on the runner.
         # `rs render-sw` renders through wgpu on Mesa's software Vulkan driver.
-        # `test qmux` runs js/qmux against the Rust qmux release, per draft.
+        # `test qmux` runs js/qmux against the in-tree Rust qmux, per draft.
         recipe: ["gate", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test", "test json-properties", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux"]
         include:
           - recipe: rs send-depth
@@ -349,6 +353,10 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: nightly
+      - name: Add a second IPv6 loopback address
+        if: matrix.recipe == 'rs uring'
+        # moq-uring's local address test reaches a wildcard socket on it.
+        run: sudo ip -6 addr add fd6d:6f71::2/128 dev lo nodad
       - name: Test
         run: nix develop --command just ${{ matrix.recipe }}
         env:
@@ -376,9 +384,12 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Install publisher and player engines
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium firefox"
+        # Firefox loads libpulse at runtime; Playwright's engine dependencies omit it.
+        run: |
+          nix develop --command env PLAYWRIGHT_BROWSERS_PATH="${{ runner.temp }}/playwright" bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium firefox"
+          sudo apt-get install -y libpulse0
       - name: Media and negative controls
-        run: nix develop --command just test media --media-engines firefox
+        run: nix develop --command env PLAYWRIGHT_BROWSERS_PATH="${{ runner.temp }}/playwright" just test media --media-engines firefox
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
           # Playwright checks a browser's libraries with the `ldd` on PATH, which in the
@@ -421,11 +432,6 @@ jobs:
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
-      # Playwright's Chromium isn't in the nix devShell; `--with-deps` installs
-      # its apt runtime libs, and run.sh's own install then no-ops.
-      - name: Playwright Chromium
-        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
-
       - name: WebSocket fallback startup benchmark
         run: nix develop --command just js qmux-bench
 
@@ -593,11 +599,13 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Collect and compare sizes
+        id: sizes
         run: nix develop --command just gh size-nightly size-report "$GITHUB_RUN_ID"
         env:
           GH_TOKEN: ${{ github.token }}
+      # Only after the comparison ran, so a setup failure stays the job's only error.
       - name: Preserve sizes and attribution
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.sizes.outcome != 'skipped' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: nightly-size-history

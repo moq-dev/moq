@@ -11,6 +11,7 @@ class Render extends AudioWorkletProcessor {
 	#backend?: SharedRingBuffer | AudioRingBuffer;
 	#underflow = 0;
 	#stateCounter = 0;
+	#epoch = 0;
 	// Whether the previous quantum ended short, so the next one fades back in.
 	#short = false;
 
@@ -42,6 +43,7 @@ class Render extends AudioWorkletProcessor {
 			} else if (msg.type === "reset") {
 				// Only meaningful in post mode; shared mode resets via the control array.
 				if (this.#backend instanceof AudioRingBuffer) this.#backend.reset();
+				this.#epoch = msg.epoch;
 			}
 		};
 	}
@@ -90,6 +92,7 @@ class Render extends AudioWorkletProcessor {
 					timestamp: backend.timestamp,
 					stalled: backend.stalled,
 					underruns: backend.underruns,
+					epoch: this.#epoch,
 				};
 				this.port.postMessage(state);
 			}

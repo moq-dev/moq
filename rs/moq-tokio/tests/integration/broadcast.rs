@@ -135,7 +135,9 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 }
 
 /// Lite05 publisher↔subscriber round-trip exercising the per-frame timestamp
-/// delta encoding, including negative deltas (B-frame ordering).
+/// delta encoding, including negative deltas (B-frame ordering). The subscriber decodes
+/// each delta to stay in step with the payloads, then drops it, since a lite-05 timestamp
+/// may be a send time.
 async fn lite05_timestamp_roundtrip(scheme: &str) {
 	use moq_tokio::moq_net::{Timescale, Timestamp};
 
@@ -159,15 +161,9 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	let mut group = track.append_group().expect("failed to append group");
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
-		let frame = moq_tokio::moq_net::frame::Info {
-			size: payload.len() as u64,
-			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
-		};
-		let mut writer = group.create_frame(frame).expect("failed to create frame");
-		writer
-			.write(bytes::Bytes::from(payload))
+		group
+			.write_frame(Timestamp::new(us, Timescale::MICRO).unwrap(), payload)
 			.expect("failed to write frame");
-		writer.finish().expect("failed to finish frame");
 	}
 	group.finish().expect("failed to finish group");
 
@@ -235,12 +231,9 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 			.expect("next_frame failed")
 			.expect("group closed prematurely");
 
-		let ts = frame_sub.timestamp.expect("timed frame");
-		assert_eq!(ts.scale(), Timescale::MICRO);
-		assert_eq!(ts.value(), expected_us);
-
-		// Drain the payload so the stream advances to the next frame.
-		let _ = frame_sub.read_all().await;
+		assert_eq!(frame_sub.timestamp, None, "a lite-05 subscriber drops timestamps");
+		let payload = frame_sub.read_all().await.expect("failed to read frame");
+		assert_eq!(payload, bytes::Bytes::from(format!("frame@{expected_us}")));
 	}
 
 	drop(connection);
@@ -258,7 +251,7 @@ async fn broadcast_moq_lite_05_timestamps_webtransport() {
 
 /// Lite05 FETCH round-trip: retrieve a past group by sequence without holding a
 /// subscription, exercising the bare-FRAME fetch response and per-frame timestamp
-/// decoding on the fetch stream. The track is also `compress`-hinted, so the
+/// decoding on the fetch stream, whose timestamps the subscriber then drops. The track is also `compress`-hinted, so the
 /// fetched frames are Deflate-compressed (matching TRACK_INFO) and inflated by the
 /// subscriber, exercising fetch/TRACK_INFO codec consistency.
 async fn lite05_fetch_roundtrip(scheme: &str) {
@@ -282,15 +275,9 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	let mut group = track.append_group().expect("failed to append group"); // seq 0
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
-		let frame = moq_tokio::moq_net::frame::Info {
-			size: payload.len() as u64,
-			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
-		};
-		let mut writer = group.create_frame(frame).expect("failed to create frame");
-		writer
-			.write(bytes::Bytes::from(payload))
+		group
+			.write_frame(Timestamp::new(us, Timescale::MICRO).unwrap(), payload)
 			.expect("failed to write frame");
-		writer.finish().expect("failed to finish frame");
 	}
 	group.finish().expect("failed to finish group");
 
@@ -353,9 +340,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 			.expect("next_frame failed")
 			.expect("group closed prematurely");
 
-		let ts = frame_sub.timestamp.expect("timed frame");
-		assert_eq!(ts.scale(), Timescale::MICRO);
-		assert_eq!(ts.value(), expected_us);
+		assert_eq!(frame_sub.timestamp, None, "a lite-05 subscriber drops timestamps");
 
 		let payload = frame_sub.read_all().await.expect("failed to read frame");
 		assert_eq!(payload, bytes::Bytes::from(format!("frame@{expected_us}")));
@@ -517,13 +502,6 @@ async fn fetch_moq_transport_20() {
 async fn lite05_fetch_during_subscribe(scheme: &str) {
 	use moq_tokio::moq_net::{Timescale, Timestamp};
 
-	fn timestamped_frame(us: u64, payload: &str) -> moq_net::frame::Info {
-		moq_net::frame::Info {
-			size: payload.len() as u64,
-			timestamp: Some(Timestamp::new(us, Timescale::MICRO).unwrap()),
-		}
-	}
-
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
 	broadcast
@@ -539,15 +517,15 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	// Group 0 is the "past" group only reachable via FETCH; group 1 is the latest,
 	// delivered live over the subscription.
 	let mut group0 = track.append_group().expect("append group 0"); // seq 0
-	let mut w = group0.create_frame(timestamped_frame(10_000, "old")).expect("frame 0");
-	w.write(bytes::Bytes::from_static(b"old")).expect("write 0");
-	w.finish().expect("finish frame 0");
+	group0
+		.write_frame(Timestamp::new(10_000, Timescale::MICRO).unwrap(), b"old".as_slice())
+		.expect("frame 0");
 	group0.finish().expect("finish group 0");
 
 	let mut group1 = track.append_group().expect("append group 1"); // seq 1
-	let mut w = group1.create_frame(timestamped_frame(20_000, "new")).expect("frame 1");
-	w.write(bytes::Bytes::from_static(b"new")).expect("write 1");
-	w.finish().expect("finish frame 1");
+	group1
+		.write_frame(Timestamp::new(20_000, Timescale::MICRO).unwrap(), b"new".as_slice())
+		.expect("frame 1");
 	group1.finish().expect("finish group 1");
 
 	let mut server_config = moq_tokio::listen::Config::default();
@@ -643,13 +621,11 @@ async fn broadcast_moq_lite_05_fetch_during_subscribe_webtransport() {
 }
 
 /// Lite05 can't declare an untimed track, so a track that sets no timescale goes out
-/// in milliseconds, its frames stamped with their send time. The subscriber receives
-/// `Some(ts)` at that scale.
+/// in milliseconds, its frames stamped with their send time. The subscriber drops them,
+/// so the track arrives untimed.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_05_untimed_track() {
-	use moq_tokio::moq_net::Timescale;
-
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
@@ -724,12 +700,8 @@ async fn broadcast_moq_lite_05_untimed_track() {
 		.expect("next_frame failed")
 		.expect("group closed");
 
-	let ts = frame_sub.timestamp.expect("timed frame");
-	assert_eq!(
-		ts.scale(),
-		Timescale::MILLI,
-		"an untimed track's send times are milliseconds"
-	);
+	assert_eq!(frame_sub.timestamp, None, "the send time is dropped");
+	assert_eq!(track_sub.info().timescale, None, "the track arrives untimed");
 
 	drop(connection);
 	server_handle

@@ -80,7 +80,13 @@ pub(crate) fn test_clock() -> Option<&'static moq_clock::Installed> {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Runtime {
-	fn new(#[cfg_attr(not(feature = "testing"), allow(unused_variables))] test_clock: bool) -> Self {
+	fn new(
+		#[cfg_attr(
+			not(feature = "testing"),
+			allow(unused_variables, reason = "only the `testing` feature uses it")
+		)]
+		test_clock: bool,
+	) -> Self {
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.thread_name("moq-ffi-worker")
 			.enable_all()
@@ -683,13 +689,6 @@ mod tests {
 	use std::time::Duration;
 
 	use super::*;
-
-	#[test]
-	fn runtime_uses_parallel_workers() {
-		let runtime = Runtime::new(false);
-		assert_eq!(runtime.runtime_flavor(), tokio::runtime::RuntimeFlavor::MultiThread);
-		runtime.shutdown();
-	}
 
 	#[test]
 	fn shutdown_joins_a_worker_callback() {

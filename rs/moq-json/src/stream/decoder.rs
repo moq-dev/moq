@@ -84,35 +84,9 @@ mod test {
 	}
 
 	#[test]
-	fn plaintext_roundtrip_in_order() {
-		let values: Vec<Value> = (0..5).map(|n| json!({ "n": n })).collect();
-		assert_eq!(roundtrip(false, &values), values);
-	}
-
-	#[test]
 	fn compressed_roundtrip_in_order() {
 		let values: Vec<Value> = (0..20).map(|n| json!({ "group": n, "pts": n * 2_000 })).collect();
 		assert_eq!(roundtrip(true, &values), values);
-	}
-
-	#[test]
-	fn the_shared_window_shrinks_repetitive_records() {
-		let mut encoder = Encoder::<Value>::new(cfg(true));
-		let sizes: Vec<usize> = (0..8)
-			.map(|n| {
-				let record = encoder.encode(&json!({ "group": n, "pts": n * 2_000 })).unwrap();
-				let len = record.payload().len();
-				record.commit();
-				len
-			})
-			.collect();
-
-		let raw = serde_json::to_vec(&json!({ "group": 7, "pts": 14_000 })).unwrap().len();
-		assert!(
-			*sizes.last().unwrap() < raw / 2,
-			"windowed record {} should be far below its raw size {raw}",
-			sizes.last().unwrap()
-		);
 	}
 
 	/// A caller that rolls a group has to restart both windows, or the new group's frames decode

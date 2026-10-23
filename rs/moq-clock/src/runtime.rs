@@ -4,7 +4,10 @@
 //!
 //! Without the `runtime` feature there are no timers, and reads fall back to std,
 //! except in the browser, where std has no clock and `web_async::time` still reads.
-#![allow(clippy::disallowed_methods)]
+#![cfg_attr(
+	not(target_arch = "wasm32"),
+	expect(clippy::disallowed_methods, reason = "this backend is where the host clock is read")
+)]
 
 #[cfg(feature = "runtime")]
 use std::{future::Future, pin::Pin};
@@ -87,6 +90,38 @@ fn real_now() -> Instant {
 #[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 fn real_now() -> Instant {
 	now()
+}
+
+/// The std instant the runtime clock counts from, as [`read`] picks it.
+#[cfg(all(feature = "runtime", any(not(target_arch = "wasm32"), target_os = "wasi")))]
+fn std_base() -> std::time::Instant {
+	read().0.into_std()
+}
+
+#[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
+fn std_base() -> std::time::Instant {
+	std_origin().0
+}
+
+/// `at` on std's clock, through the origin the runtime clock counts from.
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+pub(crate) fn into_std(at: Instant) -> Option<std::time::Instant> {
+	let base = std_base();
+	match at.since_origin().checked_sub(LEAD) {
+		Some(after) => base.checked_add(after),
+		None => base.checked_sub(LEAD - at.since_origin()),
+	}
+}
+
+/// The inverse of [`into_std`], saturating at the clock's range.
+#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+pub(crate) fn from_std(at: std::time::Instant) -> Instant {
+	let base = std_base();
+	let lead = Instant::from_origin(LEAD);
+	match at.checked_duration_since(base) {
+		Some(after) => lead.checked_add(after).unwrap_or(Instant::MAX),
+		None => lead.checked_sub(base - at).unwrap_or(Instant::ZERO),
+	}
 }
 
 /// A host timer for `at`, on the origin it was created with.
@@ -313,6 +348,49 @@ mod tests {
 		});
 		let (instant, _) = crate::anchor();
 		assert!(instant <= crate::now(), "{instant:?} > {:?}", crate::now());
+	}
+
+	/// On a running clock, a converted instant is the same moment on std's clock.
+	#[test]
+	#[expect(clippy::disallowed_methods, reason = "the test compares against std's clock")]
+	fn std_conversion_is_exact_on_a_running_clock() {
+		let before = std::time::Instant::now();
+		let now = crate::now();
+		let after = std::time::Instant::now();
+		let host = now.into_std();
+		assert!(before <= host && host <= after, "{before:?} <= {host:?} <= {after:?}");
+		assert_eq!(crate::Instant::from_std(host), now);
+		let earlier = now - Duration::from_secs(3_600);
+		assert_eq!(crate::Instant::from_std(earlier.into_std()), earlier);
+	}
+
+	/// On paused tokio, converted instants keep the time between them.
+	#[test]
+	fn std_conversion_keeps_paused_durations() {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.start_paused(true)
+			.build()
+			.unwrap();
+		runtime.block_on(async {
+			let start = crate::now();
+			let host = start.into_std();
+			tokio::time::advance(Duration::from_secs(60)).await;
+			let later = crate::now();
+			assert_eq!(later.into_std() - host, Duration::from_secs(60));
+			assert_eq!(
+				crate::Instant::from_std(host + Duration::from_secs(5)),
+				start + Duration::from_secs(5)
+			);
+		});
+	}
+
+	/// A std instant past the clock's range saturates instead of wrapping.
+	#[test]
+	fn std_conversion_saturates() {
+		let now = crate::now();
+		let far = now.into_std() + Duration::from_secs(1 << 40);
+		assert!(crate::Instant::from_std(far) > now + Duration::from_secs(1 << 33));
 	}
 
 	/// A fresh clock names moments before the process started, as std's does, so

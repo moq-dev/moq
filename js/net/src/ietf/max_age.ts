@@ -2,7 +2,7 @@
 import { SetupOption, type SetupOptions } from "./setup_options.ts";
 
 /** The negotiated max-age Setup Option. @internal */
-export const MAX_AGE_OPTION = SetupOption.MaxAge;
+const MAX_AGE_OPTION = SetupOption.MaxAge;
 /** The subscriber max-age message parameter. @internal */
 export const MAX_AGE_PARAMETER = 0x915c6n;
 

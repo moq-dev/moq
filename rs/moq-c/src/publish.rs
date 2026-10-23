@@ -40,17 +40,6 @@ struct GroupRequest {
 	_pending: oneshot::Sender<()>,
 }
 
-impl GroupRequest {
-	/// Where the group starts: the fill's start frame for its first group.
-	fn frame_start(&self) -> u64 {
-		let start = self.fill.start();
-		match start.group == self.sequence {
-			true => start.frame,
-			false => 0,
-		}
-	}
-}
-
 /// What a request handler serves.
 enum Dynamic {
 	/// Track requests on a broadcast, remembered so media can be published onto them.
@@ -157,6 +146,14 @@ struct Data<T> {
 	clock: moq_mux::Clock,
 }
 
+/// A JSON snapshot producer, kept beside the signal that stops its refresh task.
+struct JsonSnapshot {
+	data: Data<moq_mux::json::Snapshot<serde_json::Value, Extra>>,
+
+	/// Closed when the entry is removed, which wakes the refresh task to stop.
+	_alive: kio::Producer<()>,
+}
+
 struct Container {
 	inner: import::Container<Extra>,
 	driver: crate::ffi::Background,
@@ -185,7 +182,7 @@ pub struct Publish {
 
 	/// JSON snapshot producers (lossy latest-value tracks), each advertised in its broadcast's
 	/// catalog for as long as it lives.
-	json_snapshot: NonZeroSlab<Data<moq_mux::json::Snapshot<serde_json::Value, Extra>>>,
+	json_snapshot: NonZeroSlab<JsonSnapshot>,
 
 	/// JSON stream producers (lossless append-log tracks), advertised the same way.
 	json_stream: NonZeroSlab<Data<moq_mux::json::Stream<serde_json::Value, Extra>>>,
@@ -775,8 +772,8 @@ impl Publish {
 		}
 	}
 
-	/// Hand `fill` to C a group at a time, each once the one before it is answered, until
-	/// every group is answered or nobody waits on it.
+	/// Hand `fill` to C a group at a time, each once the one before it is answered or nobody
+	/// reads it any more, until every group is answered or nobody waits on the fill.
 	async fn serve_fill(callback: OnStatus, fill: Arc<moq_net::track::Fill>) {
 		let mut last = None;
 		while fill.is_used()
@@ -794,10 +791,13 @@ impl Publish {
 				return;
 			};
 			callback.call(id);
-			let unused = kio::wait(|waiter| fill.poll_unused(waiter));
+			let unwanted = kio::wait(|waiter| fill.poll_unwanted(sequence, waiter));
 			tokio::select! {
 				_ = answered => {}
-				_ = unused => return,
+				// Withdrawn, so answering it fails as not found, and the fill moves on.
+				_ = unwanted => {
+					State::lock().publish.group_request.remove(id);
+				}
 			}
 		}
 	}
@@ -871,9 +871,13 @@ impl Publish {
 	}
 
 	/// The sequence, priority, and first frame of a requested group.
-	pub fn group_request_info(&self, request: Id) -> Result<(u64, u8, u64), Error> {
+	pub fn group_request_info(&self, request: Id) -> Result<(u64, i8, u64), Error> {
 		let request = self.group_request.get(request).ok_or(Error::NotFound)?;
-		Ok((request.sequence, request.fill.priority(), request.frame_start()))
+		Ok((
+			request.sequence,
+			request.fill.priority(),
+			request.fill.frame_start(request.sequence),
+		))
 	}
 
 	/// Accept a group request, returning a group handle like [`Self::track_group`].
@@ -972,17 +976,19 @@ impl Publish {
 
 	/// Create a track on a broadcast and hand it, with the broadcast's catalog, to `publish`, which
 	/// wraps it in a data producer that advertises the track in that catalog.
+	///
+	/// `refresh` sets the track's [`refresh`](moq_net::track::Info::refresh) ratio.
 	fn data_track<T>(
 		&mut self,
 		broadcast: Id,
 		name: &str,
+		refresh: Option<u32>,
 		publish: impl FnOnce(&moq_mux::catalog::Producer<Extra>, moq_net::track::Producer) -> moq_mux::Result<T>,
 	) -> Result<Data<T>, Error> {
 		let broadcast = self.broadcast_mut(broadcast)?;
-		let track = broadcast.producer.create_track(
-			name,
-			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
-		)?;
+		let mut info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		info.refresh = refresh;
+		let track = broadcast.producer.create_track(name, info)?;
 		let producer = publish(&broadcast.catalog, track)?;
 		Ok(Data {
 			producer,
@@ -995,24 +1001,62 @@ impl Publish {
 	/// Values published via [`Self::json_snapshot_update`] reach subscribers as a single latest
 	/// state; a late joiner only sees the newest value. The catalog entry (`json.tracks.<name>`,
 	/// `mode: snapshot`) is written now and retired when the track finishes or fails.
+	///
+	/// With deltas on, the track carries a refresh ratio of 8: a join after more than eight
+	/// snapshots' worth of deltas asks for the value restated in a fresh group, which a task
+	/// answers until the track is finished.
 	pub fn json_snapshot(&mut self, broadcast: Id, name: &str, config: moq_mux::json::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, |catalog, track| catalog.json_snapshot(track, config))?;
-		self.json_snapshot.insert(producer)
+		let refresh = config.deltas.then_some(8);
+		let data = self.data_track(broadcast, name, refresh, |catalog, track| {
+			catalog.json_snapshot(track, config)
+		})?;
+		let alive = kio::Producer::new(());
+		let closed = alive.consume();
+		let id = self.json_snapshot.insert(JsonSnapshot { data, _alive: alive })?;
+		crate::ffi::Background::new(async move {
+			Self::json_snapshot_refresh(id, closed).await;
+			Ok(())
+		});
+		Ok(id)
+	}
+
+	/// Answer joiners of the JSON snapshot `id` until it is removed, or a refresh fails.
+	///
+	/// A failed restatement only stops the refreshes: the error that caused it (a closed track, a
+	/// rejected write) reaches the caller through its next update.
+	async fn json_snapshot_refresh(id: Id, closed: kio::Consumer<()>) {
+		loop {
+			let stop = kio::wait(|waiter| {
+				// Check under the state lock that removes the entry, so a removal never slips between
+				// the check and the lookup.
+				let state = State::lock();
+				if closed.poll_closed(waiter).is_ready() {
+					return std::task::Poll::Ready(true);
+				}
+				match state.publish.json_snapshot.get(id) {
+					Some(json) => json.data.producer.poll_refresh(waiter).map(|res| res.is_err()),
+					None => std::task::Poll::Ready(true),
+				}
+			})
+			.await;
+			if stop {
+				return;
+			}
+		}
 	}
 
 	/// Publish a new value to a JSON snapshot track. A no-op if unchanged.
 	pub fn json_snapshot_update(&mut self, json: Id, value: serde_json::Value) -> Result<(), Error> {
-		let producer = self.json_snapshot.get_mut(json).ok_or(Error::TrackNotFound)?;
-		producer
-			.producer
-			.update(moq_net::Timed::from(&value).at(producer.clock.now()))?;
+		let json = &mut self.json_snapshot.get_mut(json).ok_or(Error::TrackNotFound)?.data;
+		json.producer
+			.update(moq_net::Timed::from(&value).at(json.clock.now()))?;
 		Ok(())
 	}
 
 	/// Finish a JSON snapshot track and retire its catalog entry. No more values can be published.
 	pub fn json_snapshot_finish(&mut self, json: Id) -> Result<(), Error> {
-		let producer = self.json_snapshot.remove(json).ok_or(Error::TrackNotFound)?;
-		producer.producer.finish()?;
+		let json = self.json_snapshot.remove(json).ok_or(Error::TrackNotFound)?;
+		json.data.producer.finish()?;
 		Ok(())
 	}
 
@@ -1021,7 +1065,9 @@ impl Publish {
 	/// Every record appended via [`Self::json_stream_append`] is preserved and delivered in order.
 	/// The catalog entry (`json.tracks.<name>`, `mode: stream`) lives as long as the track.
 	pub fn json_stream(&mut self, broadcast: Id, name: &str, config: moq_mux::json::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, |catalog, track| catalog.json_stream(track, config))?;
+		let producer = self.data_track(broadcast, name, None, |catalog, track| {
+			catalog.json_stream(track, config)
+		})?;
 		self.json_stream.insert(producer)
 	}
 
@@ -1044,7 +1090,9 @@ impl Publish {
 	/// Create a binary snapshot track (lossy latest-value) on a broadcast, advertised in its catalog
 	/// as `binary.tracks.<name>`, `mode: snapshot`.
 	pub fn binary_snapshot(&mut self, broadcast: Id, name: &str, config: moq_mux::binary::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, |catalog, track| catalog.binary_snapshot(track, config))?;
+		let producer = self.data_track(broadcast, name, None, |catalog, track| {
+			catalog.binary_snapshot(track, config)
+		})?;
 		self.binary_snapshot.insert(producer)
 	}
 
@@ -1067,7 +1115,9 @@ impl Publish {
 	/// Create a binary stream track (lossless append-log) on a broadcast, advertised in its catalog
 	/// as `binary.tracks.<name>`, `mode: stream`.
 	pub fn binary_stream(&mut self, broadcast: Id, name: &str, config: moq_mux::binary::Config) -> Result<Id, Error> {
-		let producer = self.data_track(broadcast, name, |catalog, track| catalog.binary_stream(track, config))?;
+		let producer = self.data_track(broadcast, name, None, |catalog, track| {
+			catalog.binary_stream(track, config)
+		})?;
 		self.binary_stream.insert(producer)
 	}
 

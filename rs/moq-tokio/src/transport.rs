@@ -1,7 +1,7 @@
 //! Adapts the async transport interface to the poll one moq-net requires.
 //!
 //! moq-net accepts its own `moq_net::transport::poll` traits.
-//! A backend that offers only the async interface (qmux, iroh, quic) is wrapped
+//! A backend that offers only the async interface (iroh, quic) is wrapped
 //! in [`Session`] here, at the edge where async already lives. The wrapping
 //! costs one allocation per operation and one copy per write, and its
 //! closed-watch emulation is weaker than a native implementation (see
@@ -65,6 +65,9 @@ impl std::fmt::Display for Transport {
 /// A stored in-flight operation future. Native transports are Send, so the
 /// plain boxed flavor suffices.
 type OpBox<T> = futures::future::BoxFuture<'static, T>;
+
+/// A stream op that hands the stream back with its result, or `None` if interrupted.
+type StreamOp<S, T, E> = OpBox<(S, Option<Result<T, E>>)>;
 
 /// Adapts one of this crate's async backends (qmux, iroh, quic) to the poll interface
 /// moq-net requires.
@@ -286,13 +289,12 @@ enum SendState<S: GroupedSend + 'static> {
 	/// retrying caller supplied the same bytes. A `None` result means the write
 	/// was interrupted by a reset (see [`SendStream::interrupt`]).
 	Writing {
-		#[allow(clippy::type_complexity)]
-		fut: OpBox<(S, Option<Result<(), S::Error>>)>,
+		fut: StreamOp<S, (), S::Error>,
 		chunk: Bytes,
 	},
 	/// The closed() acknowledgement watch; a `None` result means it was
 	/// interrupted by a late reset or priority change (see [`SendStream::interrupt`]).
-	Closing(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<(), S::Error>>)>),
+	Closing(StreamOp<S, (), S::Error>),
 }
 
 impl<S: GroupedSend + 'static> SendStream<S> {
@@ -668,7 +670,7 @@ enum RecvState<S: web_transport_trait::RecvStream + 'static> {
 	Idle(S),
 	/// A read in flight; a `None` result means it was interrupted by a stop
 	/// (see [`RecvStream::interrupt`]).
-	Reading(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<Option<Bytes>, S::Error>>)>),
+	Reading(StreamOp<S, Option<Bytes>, S::Error>),
 }
 
 impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
@@ -682,6 +684,15 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 			fin: false,
 			stop: None,
 			interrupt: None,
+		}
+	}
+
+	/// The wrapped stream, before any read: the backend leases it natively instead.
+	#[cfg(feature = "quic")]
+	fn into_inner(mut self) -> S {
+		match self.state.get_mut().unwrap().take() {
+			Some(RecvState::Idle(stream)) => stream,
+			_ => unreachable!("unwrapped before any read"),
 		}
 	}
 
@@ -874,8 +885,19 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 
 #[cfg(feature = "quic")]
 impl Grouped for crate::quic::web::Session {
+	// Leased in the QUIC stack, so the receive window bounds what an incomplete message holds.
+	type Recv = crate::quic::web::RecvStream;
+
+	fn recv(stream: RecvStream<Self::RecvStream>) -> Self::Recv {
+		stream.into_inner()
+	}
+
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
 		Some(crate::quic::driver::Connection::wire(self))
+	}
+
+	fn streams_evicted(&self) -> Option<u64> {
+		Some(crate::quic::driver::Connection::stats(self).credit.evicted)
 	}
 
 	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
@@ -917,7 +939,13 @@ impl moq_net::transport::poll::SendGroup for crate::quic::driver::SendGroup {
 }
 
 #[cfg(feature = "iroh")]
-impl Grouped for web_transport_iroh::Session {}
+impl Grouped for web_transport_iroh::Session {
+	type Recv = moq_net::transport::poll::Buffered<RecvStream<Self::RecvStream>>;
+
+	fn recv(stream: RecvStream<Self::RecvStream>) -> Self::Recv {
+		moq_net::transport::poll::Buffered::new(stream)
+	}
+}
 
 #[cfg(feature = "iroh")]
 impl GroupedSend for web_transport_iroh::SendStream {
@@ -928,19 +956,8 @@ impl GroupedSend for web_transport_iroh::SendStream {
 	}
 }
 
-#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
-impl Grouped for qmux::Session {}
-
-#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
-impl GroupedSend for qmux::SendStream {
-	type Group = moq_net::transport::poll::Ungrouped;
-
-	fn set_group(&mut self, group: &Self::Group) {
-		match *group {}
-	}
-}
-
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::sync::{
 		Arc, Mutex,
@@ -1444,7 +1461,13 @@ mod tests {
 	#[derive(Clone)]
 	struct FakeSession;
 
-	impl Grouped for FakeSession {}
+	impl Grouped for FakeSession {
+		type Recv = moq_net::transport::poll::Buffered<RecvStream<FakeRecv>>;
+
+		fn recv(stream: RecvStream<FakeRecv>) -> Self::Recv {
+			moq_net::transport::poll::Buffered::new(stream)
+		}
+	}
 
 	impl web_transport_trait::Session for FakeSession {
 		type SendStream = FakeSend;

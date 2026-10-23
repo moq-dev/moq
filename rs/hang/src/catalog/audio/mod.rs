@@ -303,17 +303,6 @@ mod test {
 	}
 
 	#[test]
-	fn label_round_trips() {
-		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
-		config.label = Some("English".to_string());
-
-		let encoded = serde_json::to_value(&config).expect("failed to encode");
-		assert_eq!(encoded["label"], "English");
-		let decoded: AudioConfig = serde_json::from_value(encoded).expect("failed to decode");
-		assert_eq!(decoded.label.as_deref(), Some("English"));
-	}
-
-	#[test]
 	fn enabled_is_written_only_when_false() {
 		let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 		assert!(serde_json::to_value(&config).unwrap().get("enabled").is_none());

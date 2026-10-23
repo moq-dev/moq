@@ -28,7 +28,10 @@ the codec lists in `doc/bin/rtmp.md` and `srt.md`. Read those kinds of pages
 claim by claim against the code first; the pages recent PRs edit are the
 freshest. Baselines:
 
-- Rust: 28 crates set `#![warn(missing_docs)]`; m1 added `moq-shaper` and
+- Rust: 31 crates set `#![warn(missing_docs)]`, including `moq-mux`,
+  `moq-ffi`, and `moq-c` since
+  [#6088](https://github.com/moq-dev/moq/pull/6088) and
+  [#6091](https://github.com/moq-dev/moq/pull/6091); m1 added `moq-shaper` and
   `moq-wasm`. Count the rest with
   `cargo rustdoc -p <crate> --lib --all-features -- -W missing_docs`, and
   `moq-wasm` with `--target wasm32-unknown-unknown`, since it is empty on
@@ -37,11 +40,7 @@ freshest. Baselines:
   `moq-audio`, `moq-video`, and `moq-sock` were also clean on Linux but stay
   unlinted for their macOS, Windows, and Android items. `moq-gst` has 3 items
   from `gst::plugin_define!`. `moq-v4l` reports 3108, nearly all its generated
-  `sys` bindings; whether the fork earns docs is still undecided. `moq-mux`,
-  `moq-ffi`, and `moq-c` had follow-ups in flight
-  ([docs-mux](https://github.com/moq-dev/moq/pull/6088),
-  [docs-bindings](https://github.com/moq-dev/moq/pull/6091)); check that they
-  landed and set the lint.
+  `sys` bindings; whether the fork earns docs is still undecided.
 - JS: since [docs-js](https://github.com/moq-dev/moq/pull/6163), every
   published package's build runs `js/common/docs.ts`, which fails on an
   undocumented export or public class member, so check only that its
@@ -62,8 +61,9 @@ freshest. Baselines:
   property `doc/bin/gstreamer.md` names.
 - Cross-Package Sync: walked from `9b90cdd569` through `7d2a91fe66`. Walk the
   next run from there. Go has no `Client` failure accessor because `Dial`
-  returns only once connected; the maintainer chose to leave that until a Go
-  caller needs it, so it is not a gap.
+  returns only once connected. The newer 2026-10-21 maintainer decision
+  plans that gap in [Go first-dial failure](/quest/m2/go-first-dial-failure.md);
+  verify its accessor and the Kotlin/Dart wording when that quest lands.
 
 ## Required
 

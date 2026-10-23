@@ -28,8 +28,8 @@ Decided with the maintainer on 2026-10-15:
   unchanged.
 - [The BoltFFI spike](/bench/ffi-gen/README.md) measured the target: BoltFFI's
   JNI backend makes a no-op call in 6 ns and a 100 B `write_frame` in 134 ns,
-  against UniFFI's 3.2 and 12.8 us. If the maintainer picks BoltFFI, delete
-  this quest.
+  against UniFFI's 3.2 and 12.8 us. UniFFI stays the base (#5838), so the
+  fix lands in its Kotlin generator.
 
 Public API: none expected. Wire: none.
 

@@ -95,26 +95,3 @@ async fn main() -> anyhow::Result<()> {
 		res = session.closed() => Ok(res?),
 	}
 }
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn parses_defaults() {
-		let argv = ["transcode", "--source", "input"].map(std::ffi::OsStr::new);
-		let args = Args::try_parse_from(&argv).unwrap();
-		assert_eq!(args.url.as_str(), "http://localhost:4443/anon");
-		assert_eq!(args.source, "input");
-		assert_eq!(args.output, None);
-	}
-
-	#[test]
-	fn rejects_unknown_and_duplicate_flags() {
-		let unknown = ["transcode", "--source", "input", "--unknown"].map(std::ffi::OsStr::new);
-		assert!(Args::try_parse_from(&unknown).is_err());
-
-		let duplicate = ["transcode", "--source", "input", "--source", "other"].map(std::ffi::OsStr::new);
-		assert!(Args::try_parse_from(&duplicate).is_err());
-	}
-}

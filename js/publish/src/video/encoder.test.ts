@@ -1,4 +1,5 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano, sleep } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
@@ -7,6 +8,17 @@ import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
 import { Baseline } from "../jitter";
 import { Encoder } from "./encoder";
+
+// How long a fake hardware probe takes on the installed clock.
+const PROBE = Nano.fromMilli(Milli(5));
+
+let clock = new Manual();
+let restore = () => {};
+beforeEach(() => {
+	clock = new Manual();
+	restore = clock.install();
+});
+afterEach(() => restore());
 
 class FakeVideoEncoder {
 	static instances: FakeVideoEncoder[] = [];
@@ -39,7 +51,7 @@ class FakeVideoEncoder {
 	static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
 		FakeVideoEncoder.probes++;
 		// Pretend the GPU takes a while, like a real probe under load.
-		await new Promise((resolve) => setTimeout(resolve, 5));
+		await sleep(PROBE);
 
 		const supported = config.codec.startsWith("avc1");
 		if (supported)
@@ -255,8 +267,9 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 	}
 });
 
+// Step through 40 back-to-back probes, which outlasts any chain of re-probes a test triggers.
 async function settle(): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, 200));
+	for (let i = 0; i < 40; i++) await clock.advance(PROBE);
 }
 
 // The codec probe only speaks for the codec and coded-size ceiling it ran against. Those live in
@@ -624,7 +637,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 
 		for (const millis of [0, 33, 66]) {
 			controller.enqueue(new Frame(millis * 1000) as unknown as VideoFrame);
-			await new Promise((resolve) => setTimeout(resolve, 5));
+			await clock.advance(PROBE);
 		}
 		expect(encoded.filter((frame) => frame.black)).toEqual([]);
 
@@ -949,7 +962,7 @@ async function recordKeyframes(
 
 	const send = async (millis: number) => {
 		controller.enqueue(new Frame(millis * 1000) as unknown as VideoFrame);
-		await new Promise((resolve) => setTimeout(resolve, 5));
+		await clock.advance(PROBE);
 	};
 
 	try {
@@ -1203,7 +1216,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 	});
 	const send = async (millis: number) => {
 		controller.enqueue(new Frame(millis * 1000) as unknown as VideoFrame);
-		await new Promise((resolve) => setTimeout(resolve, 5));
+		await clock.advance(PROBE);
 	};
 
 	try {

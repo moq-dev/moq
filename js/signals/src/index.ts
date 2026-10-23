@@ -4,7 +4,7 @@
  *
  * @module
  */
-import { Interval, MissedTickBehavior, Nano, Second, sleep } from "@moq/clock";
+import { Instant, Nano, now, Second, sleep, sleepUntil } from "@moq/clock";
 
 /** Cancels a subscription, effect, or other registration when called. */
 export type Dispose = () => void;
@@ -107,7 +107,8 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		if (notify === true) this.#forceNotify = true;
 
 		// If there are no subscribers, don't queue a microtask.
-		// Reset all pending state since no flush will occur to clear it.
+		// Drop the capture since no listener saw the old value; a flush already queued finds
+		// nothing to deliver.
 		if (this.#subscribers.size === 0 && this.#changed.size === 0) {
 			this.#hasCapturedOldValue = false;
 			this.#oldValue = undefined;
@@ -124,6 +125,10 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 	#flush(): void {
 		this.#pending = false;
+
+		// A write while nobody listened dropped the capture, so any listener since then saw the
+		// current value when it subscribed and there is no change to deliver.
+		if (!this.#hasCapturedOldValue) return;
 		this.#hasCapturedOldValue = false;
 		const old = this.#oldValue;
 		this.#oldValue = undefined;
@@ -132,7 +137,6 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		this.#forceNotify = false;
 
 		// Check if the net change is zero (value returned to what it was before).
-		// Use === for class instances, dequal for plain objects/primitives.
 		if (!force && isEqual(old as T, this.#value)) return;
 
 		const value = this.#value;
@@ -854,34 +858,35 @@ export class Effect {
 		});
 	}
 
-	/** Runs `fn` every `period` on the installed clock until the effect reruns or closes. */
+	/**
+	 * Runs `fn` every positive period until cleanup, arming the first deadline before returning.
+	 * Each period uses the clock installed then; a late callback delays the next by a full period.
+	 */
 	interval(fn: () => void, period: Nano) {
 		if (this.#dispose === undefined) {
 			console.warn("Effect.interval called when closed, ignoring");
 			return;
 		}
 
-		const ticks = new Interval(period);
-		// Like setInterval, a late caller gets one tick rather than a burst of missed ones.
-		ticks.setMissedTickBehavior(MissedTickBehavior.Delay);
-		let closed = false;
+		Instant.add(Instant.zero, period);
+		if (period === 0) throw new RangeError("interval period must be positive");
+		const abort = new AbortController();
+		let next = Instant.add(now(), period);
 		void (async () => {
-			// The first tick is ready at once; the callback runs a period later.
-			await ticks.tick();
 			for (;;) {
-				await ticks.tick();
-				if (closed) return;
+				await sleepUntil(next, { signal: abort.signal });
+				if (abort.signal.aborted) return;
 				try {
 					fn();
 				} catch (error) {
 					console.error("effect interval error", error, this.#stack);
 				}
+				// A callback may install a clock with a different origin. A full Delay period
+				// starts from that clock's now, never from the previous clock's deadline.
+				next = Instant.add(now(), period);
 			}
 		})().catch(noop);
-		this.cleanup(() => {
-			closed = true;
-			ticks.close();
-		});
+		this.cleanup(() => abort.abort());
 	}
 
 	/**
@@ -1268,10 +1273,10 @@ export class Derived<const S extends readonly Getter<unknown>[], T> implements G
 	}
 }
 
-// Deep equality for plain objects/arrays, === for class instances and primitives.
+// Deep equality for plain objects/arrays, SameValueZero for everything else.
 // Class instances have identity semantics (e.g. two different Broadcast instances are never equal).
 function isEqual(a: unknown, b: unknown): boolean {
-	if (a === b) return true;
+	if (a === b || (Number.isNaN(a) && Number.isNaN(b))) return true;
 	if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
 
 	const protoA = Object.getPrototypeOf(a);
@@ -1281,11 +1286,15 @@ function isEqual(a: unknown, b: unknown): boolean {
 	if (protoA !== protoB) return false;
 	if (protoA !== Object.prototype && protoA !== Array.prototype) return false;
 
-	const keysA = Object.keys(a as Record<string, unknown>);
-	const keysB = Object.keys(b as Record<string, unknown>);
-	if (keysA.length !== keysB.length) return false;
+	// Holes are not keys, so a sparse array's length is only visible here.
+	if (protoA === Array.prototype && (a as unknown[]).length !== (b as unknown[]).length) return false;
+
+	const keysA = Object.keys(a);
+	if (keysA.length !== Object.keys(b).length) return false;
 
 	for (const key of keysA) {
+		// Membership matters on its own: `{ a: undefined }` is not `{ b: undefined }`.
+		if (!Object.hasOwn(b, key)) return false;
 		if (!isEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) return false;
 	}
 

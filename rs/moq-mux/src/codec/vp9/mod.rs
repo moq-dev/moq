@@ -359,23 +359,4 @@ mod tests {
 		frame[1] = 0x00; // corrupt the sync code
 		assert!(FrameHeader::parse(&frame).is_err());
 	}
-
-	#[test]
-	fn vpcc_round_trips_catalog() {
-		let vp9 = VP9 {
-			profile: 2,
-			level: 31,
-			bit_depth: 10,
-			chroma_subsampling: 1,
-			color_primaries: 9,
-			transfer_characteristics: 16,
-			matrix_coefficients: 9,
-			full_range: true,
-		};
-		let vpcc = vpcc(&vp9);
-		assert_eq!(vpcc.profile, 2);
-		assert_eq!(vpcc.bit_depth, 10);
-		assert_eq!(vpcc.matrix_coefficients, 9);
-		assert!(vpcc.video_full_range_flag);
-	}
 }

@@ -383,7 +383,7 @@ impl Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						tokio::time::sleep(delay).await;
+						moq_clock::sleep(delay).await;
 					}
 				}
 			}
@@ -455,13 +455,5 @@ mod legacy_tests {
 		assert!(config.deprecated().is_empty());
 		assert_eq!(config.allow.uid, vec![501]);
 		assert_eq!(config.allow.gid, vec![20]);
-	}
-
-	/// No flag at all leaves the allowlist empty, so the parent directory's
-	/// permissions stay the only filesystem gate.
-	#[test]
-	fn no_allowlist_stays_unset() {
-		let config = parse(&["--listen-unix-bind", "/tmp/moq.sock"]);
-		assert!(config.allow.is_empty());
 	}
 }

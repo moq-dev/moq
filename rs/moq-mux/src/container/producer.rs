@@ -332,6 +332,14 @@ where
 		self.publish_estimate()
 	}
 
+	/// Declare a segment boundary the source drew at `pts`: the timeline closes a record at the
+	/// first group starting at or after it, instead of pacing records by duration.
+	pub(crate) fn boundary(&mut self, pts: moq_net::Timestamp) {
+		if let Some(recorder) = self.recorder.as_mut() {
+			recorder.cut(pts);
+		}
+	}
+
 	/// Whether the next [`write`](Self::write) has to be a keyframe, i.e. no group is currently open
 	/// (at the start, or after a [`cut`](Self::cut) / [`seek`](Self::seek)).
 	///
@@ -345,10 +353,7 @@ where
 	/// One past the track's largest group, even an empty one: where a group continues after
 	/// what the track holds.
 	pub(crate) fn next_sequence(&self) -> u64 {
-		match self.inner.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
-			std::task::Poll::Ready(Some(largest)) => largest.group + 1,
-			_ => 0,
-		}
+		self.inner.largest().map_or(0, |largest| largest.group + 1)
 	}
 
 	/// Buffer up to `duration` of frames into each container frame.
@@ -1029,11 +1034,7 @@ mod tests {
 			}
 		}
 
-		fn poll_read(
-			&self,
-			_group: &mut moq_net::group::Consumer,
-			_waiter: &kio::Waiter,
-		) -> std::task::Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		fn decode(&self, _frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 			unreachable!("RejectAt is write-only")
 		}
 	}
@@ -1122,18 +1123,16 @@ mod tests {
 	/// though it carries nothing. So a subscriber arriving mid-break waits for real media
 	/// rather than being handed the pre-break group as if it were live -- which is how a
 	/// 40-minute-stale frame once reached a VOD recording.
-	#[tokio::test]
-	async fn discontinuity_moves_the_live_edge_off_stale_content() {
+	#[test]
+	fn discontinuity_moves_the_live_edge_off_stale_content() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
-		let mut edge = producer.track().clone();
-
 		producer.write(frame(0, true)).unwrap();
-		let stale = edge.largest().await.map(|largest| largest.group);
+		let stale = producer.track().largest().map(|largest| largest.group);
 
 		producer.discontinuity().unwrap();
-		let fresh = edge.largest().await.map(|largest| largest.group);
+		let fresh = producer.track().largest().map(|largest| largest.group);
 
 		assert_eq!(fresh, stale.map(|s| s + 1), "the marker group is the live edge now");
 	}
@@ -1414,11 +1413,7 @@ mod tests {
 			Ok(())
 		}
 
-		fn poll_read(
-			&self,
-			_group: &mut moq_net::group::Consumer,
-			_waiter: &kio::Waiter,
-		) -> std::task::Poll<Result<Option<Vec<Frame>>, Self::Error>> {
+		fn decode(&self, _frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 			unreachable!("Recording is write-only")
 		}
 	}

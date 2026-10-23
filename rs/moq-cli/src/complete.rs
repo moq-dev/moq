@@ -20,7 +20,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::Context;
-use tokio::time::{Instant, timeout_at};
+use moq_clock::Instant;
+use moq_clock::timeout_at;
 #[cfg(feature = "capture")]
 use usage_rs::complete::{Candidate, CompleteCtx, CompletionFuture};
 use usage_rs::complete::{CompletionOverlay, CompletionRequest, Shell, render};
@@ -315,7 +316,6 @@ fn microphones(_ctx: CompleteCtx<'_>) -> CompletionFuture<'static> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::test_env::EnvGuard;
 	use usage_rs::spec::ValueEnum;
 
 	/// Answer a whole line, with the cursor at its end.
@@ -340,7 +340,9 @@ mod tests {
 	/// against it offers process-wide flags that the chunk refuses.
 	#[tokio::test(start_paused = true)]
 	async fn retargets_to_the_active_stage() {
-		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
+		if !test_env::Env::without(&["MOQ_CONNECT"]).isolate() {
+			return;
+		}
 		// A stage offers its own flags, and none of the globals it would refuse.
 		let staged = complete("moq --connect http://x/y import fmp4 -- export fmp4 --").await;
 		assert!(!staged.is_empty(), "a later stage completed nothing");
@@ -359,7 +361,7 @@ mod tests {
 		);
 
 		// A cursor sitting on the separator is typing `--`, not inside a stage.
-		assert!(complete("moq import fmp4 --").await.is_empty());
+		assert!(complete("moq import flv --").await.is_empty());
 	}
 
 	/// Every overlay is scoped to a command that declares the value it answers for.
@@ -420,7 +422,9 @@ mod tests {
 	/// announces a broadcast, so a completer that still dialed would name it.
 	#[tokio::test]
 	async fn completion_never_dials() {
-		let _env = EnvGuard::clear(&["MOQ_CONNECT"]);
+		if !test_env::Env::without(&["MOQ_CONNECT"]).isolate() {
+			return;
+		}
 		let _ = moq_tokio::crypto::install_default();
 
 		let origin = moq_tokio::origin::spawn();

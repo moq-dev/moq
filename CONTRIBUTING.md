@@ -1,3 +1,12 @@
+# Getting oriented
+
+Use the [repository map](doc/setup/repository.md) to find the implementation
+and the [development guide](doc/setup/dev.md) for setup and checks.
+[Examples](doc/setup/examples.md), [test harnesses](test/README.md), and
+[benchmarks](bench/README.md) provide focused starting points.
+Agents should also read [AGENTS.md](AGENTS.md) and the instructions nested
+under the files they change.
+
 # Commits
 
 PRs into `main` are squash-merged through the merge queue, so the PR title becomes the commit subject and the PR description becomes the body in `git log`.
@@ -20,17 +29,20 @@ Have at least these sections:
 - **Follow-ups**: any issues encountered or quests created.
 
 When pushing additional commits to an existing PR, update the title and description if needed.
-When taking over someone else's PR, push commits on top of theirs so they keep credit.
+When taking over someone else's PR, push commits on top of theirs so they keep credit; if their fork blocks maintainer edits, open a new PR carrying their commits.
+Never rebase or force-push a pushed branch; merge the base branch in instead.
+Check that the PR is still open before pushing to its branch, since a push after merge recreates the deleted branch.
 
-Create a draft PR.
-Run `just ci` before switching it to "Ready for review" and before every push.
+Open a draft PR while working, without asking once the scope is settled.
+Run `just ci` before every push, and mark the PR ready yourself when the work is done.
+Keep it a draft only while its description lists a decision the maintainer still owns.
 Fix any merge conflicts and failing CI checks.
 
 # Merge queue
 
 PRs into `main` get no cloud CI: they report **Check** as skipped, and `just ci` runs the same gate locally.
 The merge queue runs Check on the PR combined with the latest `main` and the PRs queued ahead of it.
-Enqueue with `gh pr merge <number>` once the review is clean.
+Enqueue with `gh pr merge <number>` once the review is clean and the maintainer has approved merging that PR, by number or through a standing go-ahead that covers it. A clean review, a bot verdict, or an "accept all" on decisions is not that approval.
 Both select only what the diff touches, so a break can reach `main`; `just gate` runs the full suite, and it, the feature matrix, optimized binding builds, macOS, Windows, and the other optional workflows run nightly on `main` and on PRs into `release`.
 A PR whose diff is only quest files, tests, or CI config goes to the front, since other work builds on it: `gh pr merge` has no flag for this, so use the `enqueuePullRequest` GraphQL mutation with `jump: true`.
 
@@ -64,15 +76,10 @@ Skipped or rate-limited reviews do not count.
 For a fork with no automatic non-Grok review, ask the maintainer to arrange one.
 Merge only when that review has no findings, or every finding is fixed or replied to.
 
-# CI
-
-Workflow steps run `just` recipes, never a script path; `just gh check` enforces it.
-
 # Follow-ups
 
-If you encounter issues, or findings that are out of scope, create follow-up quests.
-Focus on the core problem, offering a potential solution only if its obvious.
-For non-trivial tasks, file an issue or offer to run `/quest-plan`.
+Record out-of-scope findings as follow-up quests with `/quest-plan`, not GitHub issues, which are for outside contributors.
+Focus on the core problem, offering a potential solution only if it's obvious.
 
 # Forks
 

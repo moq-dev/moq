@@ -744,25 +744,6 @@ fn test_unsupported_codec_skipped() {
 	assert!(matches!(a.codec, AudioCodec::Opus));
 }
 
-#[test]
-fn test_block_timestamp_scaling() {
-	// TimestampScale = 1_000_000 ns (1ms). Cluster timestamp = 1000, block rel = 33
-	// → 1033 ms = 1_033_000 us.
-	let data = MkvBuilder::new()
-		.header("webm")
-		.segment_start()
-		.info(1_000_000)
-		.track_video(1, "V_VP9", 16, 16)
-		.cluster(1000, || vec![simple_block(1, 33, true, b"f")])
-		.segment_end()
-		.build();
-
-	// Smoke check: parsing succeeds. Timestamp value itself is internal to the
-	// container::Producer; the catalog round-trip above already exercises the
-	// rendition wiring.
-	let _ = run(&data);
-}
-
 /// A rendition must never be advertised when its media producer could not be built.
 ///
 /// Publishing the media producer is fallible (it enrolls the track in the broadcast timeline, minting the

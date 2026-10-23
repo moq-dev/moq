@@ -14,9 +14,10 @@ benchmark's JSON and the "Rust benchmark tests", "Rust bench targets" and "JS
 benchmarks" nightly jobs, converted to the history input format where they
 don't already emit one.
 
-- Most Rust Criterion targets run with `-- --test`, which measures nothing.
-  Switch the charted targets to a measuring mode (or add a measurement pass),
-  weighing the added nightly runtime.
+- Criterion targets now measure through `just gh criterion` in
+  `sh/gh/nightly.sh` (`rust-bench`, `rust-extra`, `rust-uring`), and the
+  comparison harness uses quick mode. Check their published histories
+  rather than converting them again; the unreported sources below remain.
 - The "Rust benchmark tests" job is not recorded yet: its nextest benchmarks
   print no structured measurements.
 - Check each JS bench reports a measurement before recording it.
@@ -25,7 +26,7 @@ don't already emit one.
 - The relay load benches (`bench-audio`, `bench-profile`) and the
   audio-quality job's benchmarks can join later through the same input
   format.
-- [Benchmark regressions in CI](/quest/m2/bench-ci.md) records its nightly
+- [Nightly benchmark regression report](/quest/m1/bench-ci.md) records its nightly
   Criterion history on the same `gh-pages` branch instead of creating its own.
 
 Public API: none. Wire: none.

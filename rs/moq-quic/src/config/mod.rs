@@ -405,7 +405,7 @@ impl ServerConfig {
     ///
     /// This exists to allow system time to be mocked in tests, or wherever else desired.
     ///
-    /// Defaults to [`StdSystemTime`], which simply calls [`SystemTime::now()`](SystemTime::now).
+    /// Defaults to [`StdSystemTime`], which reads the ambient clock's wall time.
     pub fn time_source(&mut self, time_source: Arc<dyn TimeSource>) -> &mut Self {
         self.time_source = time_source;
         self
@@ -538,7 +538,10 @@ impl ValidationTokenConfig {
         self
     }
 
-    #[allow(rustdoc::redundant_explicit_links)] // which links are redundant depends on features
+    #[allow(
+        rustdoc::redundant_explicit_links,
+        reason = "which links are redundant depends on features"
+    )]
     /// Set a custom [`TokenLog`]
     ///
     /// If the `bloom` feature is enabled (which it is by default), defaults to a default
@@ -723,11 +726,11 @@ pub trait TimeSource: Send + Sync {
 
 /// Default implementation of [`TimeSource`]
 ///
-/// Implements `now` by calling [`SystemTime::now()`](SystemTime::now).
+/// Implements `now` by reading the ambient clock's wall time, [`moq_clock::wall()`].
 pub struct StdSystemTime;
 
 impl TimeSource for StdSystemTime {
     fn now(&self) -> SystemTime {
-        SystemTime::now()
+        moq_clock::wall().into()
     }
 }

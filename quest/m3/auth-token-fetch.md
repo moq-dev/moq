@@ -16,22 +16,13 @@ PUBLISH_NAMESPACE. Fetch-only demand (TRACK_STATUS, then FETCH) and
 cache-miss group FETCHes still need the session scope. So a token-only
 peer can subscribe to a track but cannot look it up or fetch its history.
 
-Open question for the maintainer. This reverses a settled decision:
-"standalone FETCH gains no request-token authority" (2026-10-12, in
-[#5148](https://github.com/moq-dev/moq/pull/5148)'s quest and
-[the request gate refactor](https://github.com/moq-dev/moq/pull/5782)).
-
-1. (recommended) Do it in m1, after the request gate. Move this file under
-   [In-band auth](/quest/m1/auth/README.md) and list it in that epic's
-   Required. The gate's dispatcher then makes this one admission path for
-   two more request types, not new per-handler checks. Without it, the hook's
-   interoperability claim stops at SUBSCRIBE, while moq-transport peers
-   routinely look a track up and fetch its history.
-2. Leave it parked here with the other request-token surfaces until a
-   consumer asks.
-
-It is parked in m3 until the maintainer answers, so an undecided scope does
-not gate the breaking release (from this plan's review).
+Decided 2026-10-20 (maintainer): stays in m3 with the other request-token
+surfaces until a consumer asks, because it reverses "standalone FETCH gains
+no request-token authority" (2026-10-12, in
+[#5148](https://github.com/moq-dev/moq/pull/5148)'s quest) and nothing needs
+it before the breaking release. The request gate it would build on landed in
+[#5782](https://github.com/moq-dev/moq/pull/5782): its dispatcher makes this
+one admission path for two more request types, not new per-handler checks.
 
 Keep #5148's boundaries (✅ Decided 2026-10-15, maintainer): a token on a
 request is one kind of auth on `requests()`, the request is held to its

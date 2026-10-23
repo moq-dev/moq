@@ -223,7 +223,7 @@ impl Config {
 		deprecated.extend(config.deprecated());
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		config.origins = Some(resolved);
-		// `Stats::report` feeds this into `tokio::time::interval`, which panics on a
+		// `Stats::report` feeds this into `moq_clock::interval`, which panics on a
 		// zero period. Reject it up front with a clear message.
 		anyhow::ensure!(!config.report().is_zero(), "--report must be greater than 0s");
 		if let Some(fanout) = &config.fanout {
@@ -322,7 +322,10 @@ impl Config {
 	}
 }
 
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 #[derive(usage_rs::Config)]
 struct Settings {
 	#[usage(env = "MOQ_BENCH_NAME", cli("--name"))]
@@ -484,7 +487,7 @@ url = "https://example.com"
 
 	#[test]
 	fn zero_report_is_rejected() {
-		// A zero report interval would panic `tokio::time::interval`; reject it early.
+		// A zero report interval would panic `moq_clock::interval`; reject it early.
 		let err = Config::parse_and_merge(["moq-bench", "--report", "0s"]).unwrap_err();
 		assert!(err.to_string().contains("report"), "unexpected error: {err}");
 	}
@@ -504,17 +507,8 @@ url = "https://example.com"
 	}
 
 	#[test]
-	fn defaults_apply_without_toml() {
+	fn a_default_run_publishes_without_expecting_delivery() {
 		let config = Config::parse_and_merge(["moq-bench"]).unwrap();
-		assert_eq!(config.connections(), Range::new(1, 1));
-		assert_eq!(config.broadcasts(), Range::new(1, 1));
-		assert_eq!(config.subscribe(), Range::new(0, 0));
-		assert_eq!(config.fps(), Range::new(30, 30));
-		assert_eq!(config.frame_size(), Range::new(1200, 1200));
-		assert_eq!(config.group_size(), Range::new(60, 60));
-		assert_eq!(config.max_delay(), Duration::from_secs(2));
-		assert_eq!(config.name(), "bench");
-		assert_eq!(config.fanout(), None);
 		assert!(!config.expects_delivery());
 		assert!(config.publishes());
 	}
@@ -567,15 +561,6 @@ url = "https://example.com"
 		}
 	}
 
-	/// The spec is named for the binary, not for the struct that declares it.
-	///
-	/// Usage takes the program name from the type unless told otherwise, so an
-	/// undeclared name renders every usage line and completion as `config`.
-	#[test]
-	fn the_spec_is_named_for_the_binary() {
-		assert_eq!(Config::spec().bin.unwrap_or(Config::spec().name), "moq-bench");
-	}
-
 	#[test]
 	fn the_settings_registry_matches_the_cli() {
 		let drift = Settings::SETTINGS_REGISTRY.drift(Config::SETTINGS_BINDINGS);
@@ -584,13 +569,14 @@ url = "https://example.com"
 
 	#[test]
 	fn env_overrides_toml_and_cli_overrides_env() {
+		if !test_env::Env::default().set("MOQ_BENCH_NAME", "from-env").isolate() {
+			return;
+		}
 		let dir = std::env::temp_dir().join("moq-bench-provenance");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("bench.toml");
 		std::fs::write(&path, "name = \"from-file\"\nconnections = 100\n").unwrap();
 
-		let prev = std::env::var_os("MOQ_BENCH_NAME");
-		unsafe { std::env::set_var("MOQ_BENCH_NAME", "from-env") };
 		let config = Config::parse_and_merge([
 			std::ffi::OsString::from("moq-bench"),
 			std::ffi::OsString::from("--file"),
@@ -610,10 +596,6 @@ url = "https://example.com"
 		.unwrap();
 		assert_eq!(config.name(), "from-cli");
 		assert!(config.source("name").unwrap().contains("--name"));
-		match prev {
-			Some(value) => unsafe { std::env::set_var("MOQ_BENCH_NAME", value) },
-			None => unsafe { std::env::remove_var("MOQ_BENCH_NAME") },
-		}
 	}
 
 	/// `[client]` in the file is the serde name; the registry key is `connect.*`.

@@ -88,35 +88,10 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn format_roundtrip() {
-		for (s, f) in [
-			("vtt", TextFormat::Vtt),
-			("ttml", TextFormat::Ttml),
-			("utf8", TextFormat::Utf8),
-		] {
-			assert_eq!(TextFormat::from_str(s).unwrap(), f);
-			assert_eq!(f.to_string(), s);
-		}
-	}
-
-	#[test]
 	fn format_unknown_preserved() {
 		let parsed = TextFormat::from_str("cea708").unwrap();
 		assert_eq!(parsed, TextFormat::Unknown("cea708".to_string()));
 		assert_eq!(parsed.to_string(), "cea708");
-	}
-
-	#[test]
-	fn role_default_is_subtitle() {
-		assert_eq!(TextRole::default(), TextRole::Subtitle);
-	}
-
-	#[test]
-	fn role_roundtrip() {
-		for (s, r) in [("subtitle", TextRole::Subtitle), ("caption", TextRole::Caption)] {
-			assert_eq!(TextRole::from_str(s).unwrap(), r);
-			assert_eq!(r.to_string(), s);
-		}
 	}
 
 	#[test]

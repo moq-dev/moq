@@ -94,11 +94,10 @@ export default class MoqWatchSupport extends HTMLElement {
 		if (!support.audio.decoding || !support.video.decoding) return "none";
 		if (!support.audio.render || !support.video.render) return "none";
 
-		if (!Object.values(support.audio.decoding).some((v) => v === true || v === "full" || v === "partial"))
-			return "none";
+		if (!Object.values(support.audio.decoding).some((v) => v !== "none")) return "none";
 		if (!Object.values(support.video.decoding).some((v) => v.software || v.hardware)) return "none";
 
-		if (!Object.values(support.audio.decoding).every((v) => v === true || v === "full")) return "partial";
+		if (!Object.values(support.audio.decoding).every((v) => v === "full")) return "partial";
 		if (!Object.values(support.video.decoding).every((v) => v.software || v.hardware)) return "partial";
 
 		return "full";
@@ -259,7 +258,7 @@ export default class MoqWatchSupport extends HTMLElement {
 		addRow("Rendering", "Audio", binary(support.audio.render));
 		addRow("", "Video", binary(support.video.render));
 		addRow("Decoding", "Opus", partial(support.audio.decoding.opus));
-		addRow("", "AAC", binary(support.audio.decoding.aac));
+		addRow("", "AAC", partial(support.audio.decoding.aac));
 		addRow("", "AV1", hardware(support.video.decoding?.av1));
 		addRow("", "H.265", hardware(support.video.decoding?.h265));
 		addRow("", "H.264", hardware(support.video.decoding?.h264));

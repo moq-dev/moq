@@ -4,8 +4,8 @@
 
 A MoQ runtime trait covers spawn and time (via `moq-clock`), with tokio,
 browser, io_uring, and sim implementations, and replaces web-async in every
-crate that uses it (moq-ffi, moq-mux, moq-net, moq-room, moq-stats, and
-moq-wasm if it still exists), so a crate runs on any of them unchanged.
+crate that still uses it (moq-clock's `runtime` feature, moq-ffi, moq-stats,
+and moq-wasm), so a crate runs on any of them unchanged.
 
 moq-relay spawns through it too, so its in-memory integration tests
 (`rs/moq-relay/tests/integration/connection.rs`) move from paused tokio onto

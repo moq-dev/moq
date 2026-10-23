@@ -1,11 +1,18 @@
 # Cross-language tests
 
 Harnesses that span more than one language or need a server. Per-language unit
-tests live in each language's own justfile.
+tests live in each language's own justfile and are selected by `just check`.
+Run `just --list test` for the full recipe list; the table below routes common
+questions to a harness. For builds and CI selection, see the
+[development guide](../doc/setup/dev.md#checks-and-tests).
 
 | Harness | Entry point | What it proves |
 | --- | --- | --- |
-| [interop](interop/README.md) | `just test interop` | every client built from this checkout interoperates |
+| [interop](interop/README.md) | `just test interop --all` | clients built from this checkout interoperate; without `--all`, only Rust runs |
+| [wire compatibility](interop/README.md) | `just test wire-compat` | this checkout exchanges data with published versions |
+| [registry smoke](smoke/README.md) | `just test smoke` | published packages install and interoperate; see the guide for matrix selection |
+| [browser media](interop/README.md) | `just test media` | browser capture and playback deliver video and audio through publication lifecycle changes |
+| [failure drills](drill/README.md) | `just test drill` | relay and transport failures terminate or recover as expected |
 | [wasm](wasm/README.md) | `just test wasm` | the `@moq/wasm` bindings work in a real browser |
 | [ts](ts/README.md) | `just test ts` | the subscriber's `export ts` output is IRD-compliant |
 | [native-play](native-play/README.md) | `just test native-play` | the shipped headless player reaches a private Linux null audio device and exits cleanly |
@@ -15,9 +22,9 @@ tests live in each language's own justfile.
 | video | `just test video` | the `@moq/video` renderer paints through WebGPU and falls back to Canvas2D after losing the GPU |
 | [json-properties](json-properties.md) | `just test json-properties` | both Snapshot codecs reconstruct, and both Window codecs emit the exact events for, random JSON sequences with replayable seeds |
 
-The first five stand up a `moq-relay` and clients, so two of them running at once, or
-the same one running from two worktrees, would otherwise collide. `lib/harness.sh`
-is what keeps them apart.
+Harnesses that stand up a relay and clients need isolated ports and processes
+when run concurrently or from different worktrees. The shared
+[`lib/harness.sh`](lib/harness.sh) provides that isolation.
 
 ## What a run owns
 

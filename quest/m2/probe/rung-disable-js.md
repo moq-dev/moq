@@ -36,3 +36,7 @@ Public API: whatever knob `@moq/publish` exposes for the rule. Wire: none.
 
 - [Native rung disable](/quest/m1/simulcast-rung-disable.md) - the shared rule and constants this mirrors
 - [Padding probes](/quest/m2/probe/padding.md) - the browser's sender, which raises the estimate so a disabled rung can resume
+
+## Related
+
+- [Closed rung disable](https://github.com/moq-dev/moq/pull/5850) - reference code from before the 2026-10-20 split, closed as superseded

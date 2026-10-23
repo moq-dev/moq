@@ -26,12 +26,13 @@ use rangemap::{RangeInclusiveSet, RangeSet};
 use super::fill::{Ask, FillState, Join};
 use super::{Drift, Order, Position, TrackState};
 use crate::Error;
+use crate::model::subscription::Window;
 
 /// What one reader asks its fills with.
-pub(super) struct Asking {
-	/// Where the reader's own start falls, for the frame of a run beginning at its group.
-	pub start: Option<Position>,
-	pub priority: u8,
+pub(super) struct Asking<'a> {
+	/// The reader's resolved ranges, for the frame each run's first group starts from.
+	pub window: &'a Window,
+	pub priority: i8,
 	pub max_delay: Option<Duration>,
 	pub order: Order,
 }
@@ -109,6 +110,7 @@ impl Misses {
 				return Some(slot.serving().clone());
 			}
 			self.filled.remove(&sequence);
+			self.release(sequence);
 			self.give_up(sequence..sequence + 1, given_up);
 		}
 	}
@@ -116,12 +118,25 @@ impl Misses {
 	/// Take `sequence` as handed out.
 	pub fn take_filled(&mut self, sequence: u64) {
 		self.filled.remove(&sequence);
+		self.release(sequence);
 	}
 
-	/// Forget what the reader no longer reads: below `from`, or outside `admitted`. A fill
-	/// nobody waits on is withdrawn once its last join goes.
+	/// Stop holding a filled `sequence` in its fill: handed out, the group's own reader
+	/// keeps it wanted, or nothing does.
+	fn release(&mut self, sequence: u64) {
+		let mut lost = RangeSet::new();
+		lost.insert(sequence..sequence + 1);
+		self.joins.retain_mut(|join| {
+			join.release(&lost);
+			!join.is_empty()
+		});
+	}
+
+	/// Forget what the reader no longer reads: below `from`, or outside `admitted`. Its fills
+	/// no longer owe it those groups, and one nobody waits on is withdrawn once its last join
+	/// goes.
 	pub fn retain(&mut self, from: u64, admitted: &RangeInclusiveSet<u64>) {
-		if self.wanted.is_empty() && self.filled.is_empty() {
+		if self.wanted.is_empty() && self.filled.is_empty() && self.joins.is_empty() {
 			return;
 		}
 		let outside = |sequence: u64| sequence < from || !admitted.contains(&sequence);
@@ -133,8 +148,13 @@ impl Misses {
 			}
 		}
 		self.wanted = kept;
-		let wanted = &self.wanted;
-		self.joins.retain(|join| wanted.overlaps(&join.groups));
+		self.joins.retain_mut(|join| {
+			// By the join's whole span, not just what is unanswered: a filled group not
+			// taken yet is held too.
+			let inside: RangeSet<u64> = clip(join.groups.clone(), from, admitted).into_iter().collect();
+			join.release(&inside.gaps(&join.groups).collect());
+			!join.is_empty()
+		});
 	}
 
 	/// Take in what the joined fills answered, parking `waiter` on the rest. Returns the
@@ -156,7 +176,11 @@ impl Misses {
 				.map(|run| run.start.max(join.groups.start)..run.end.min(join.groups.end))
 				.collect();
 			if wanted.is_empty() {
-				self.joins.swap_remove(i);
+				// Holding only filled groups until they are taken, it has nothing to answer.
+				match join.is_empty() {
+					true => drop(self.joins.swap_remove(i)),
+					false => i += 1,
+				}
 				continue;
 			}
 			let answers = match join.outcome().poll(waiter, |outcome| {
@@ -185,8 +209,12 @@ impl Misses {
 			};
 			// Read only after the outcome's lock is released.
 			let state = state.read();
+			// What is answered is no longer owed this reader, except a filled group: held until
+			// taken, so its source keeps writing it while the reader picks it up.
+			let mut taken = RangeSet::new();
 			for (groups, answer) in answers {
 				self.wanted.remove(groups.clone());
+				taken.insert(groups.clone());
 				match answer {
 					// What the cache holds is filled, and the rest settled by run: a fill that
 					// ended unanswered may span far more groups than were ever cached.
@@ -195,6 +223,7 @@ impl Misses {
 						for (&sequence, slot) in state.lookup.range(groups) {
 							if !slot.is_aborted() {
 								self.filled.insert(sequence);
+								taken.remove(sequence..sequence + 1);
 							}
 						}
 					}
@@ -204,6 +233,7 @@ impl Misses {
 				}
 			}
 			drop(state);
+			self.joins[i].release(&taken);
 			// Judged again: the same join may have more to answer, or park the waiter now.
 		}
 		retry
@@ -252,15 +282,19 @@ impl Misses {
 				span.insert((*run.start()).max(low)..(*run.end()).min(top) + 1);
 			}
 		}
-		// What left the span is forgotten, so it is judged afresh if it comes back.
-		let judged: RangeSet<u64> = self
-			.judged
-			.iter()
-			.flat_map(|run| {
-				span.overlapping(run)
-					.map(move |s| s.start.max(run.start)..s.end.min(run.end))
-			})
-			.collect();
+		// What left the span is forgotten, so it is judged afresh if it comes back, and a
+		// verdict behind the reader's floor stops costing it memory.
+		let clip = |set: &RangeSet<u64>| -> RangeSet<u64> {
+			set.iter()
+				.flat_map(|run| {
+					span.overlapping(run)
+						.map(move |s| s.start.max(run.start)..s.end.min(run.end))
+				})
+				.collect()
+		};
+		let judged = clip(&self.judged);
+		self.refused = clip(&self.refused);
+		self.given_up = clip(&self.given_up);
 		let mut candidates: RangeSet<u64> = span.iter().flat_map(|run| judged.gaps(run)).collect();
 		for run in std::mem::take(&mut self.deferred).iter() {
 			for s in span.overlapping(run) {
@@ -343,20 +377,35 @@ impl Misses {
 		asks
 	}
 
-	/// Ask the fills for `runs`, settling what no handler can take as refused.
+	/// Ask the fills for `runs` in the reader's order, settling what no handler can take as
+	/// refused. Fills queue in the order asked, so a descending reader's newest run comes first.
 	pub fn ask(
 		&mut self,
 		state: &kio::Consumer<TrackState>,
 		fills: &kio::Shared<FillState>,
 		runs: &RangeSet<u64>,
-		asking: &Asking,
+		asking: &Asking<'_>,
 		given_up: &mut GivenUp,
 	) {
-		for run in runs.iter() {
-			let frame = asking
-				.start
-				.filter(|start| start.group == run.start)
-				.map_or(0, |start| start.frame);
+		// A group a range starts inside heads its own fill, since a fill reads every group
+		// after its first whole.
+		let mut cuts: Vec<u64> = asking.window.partial_starts().collect();
+		cuts.sort_unstable();
+		cuts.dedup();
+		let mut runs: Vec<ops::Range<u64>> = runs
+			.iter()
+			.flat_map(|run| {
+				let inside = cuts.iter().copied().filter(|cut| run.start < *cut && *cut < run.end);
+				let starts = std::iter::once(run.start).chain(inside.clone());
+				let ends = inside.chain(std::iter::once(run.end));
+				starts.zip(ends).map(|(start, end)| start..end)
+			})
+			.collect();
+		if asking.order == Order::Descending {
+			runs.reverse();
+		}
+		for run in runs {
+			let (frame, _) = asking.window.frames(run.start);
 			let ask = Ask {
 				start: Position {
 					group: run.start,
@@ -431,7 +480,10 @@ impl TrackState {
 	/// Never: accounted for by its arrivals (evicted, or a gap it skipped), or in a gap its
 	/// grace gave up on, or anything once the feed is over. A declared start is no promise:
 	/// a group below it may still arrive.
-	#[allow(clippy::type_complexity)]
+	#[expect(
+		clippy::type_complexity,
+		reason = "the never-fed runs and the awaited gaps are returned together; naming them would only move the type"
+	)]
 	pub(super) fn unfed(
 		&self,
 		hole: ops::Range<u64>,
@@ -446,7 +498,7 @@ impl TrackState {
 			return (unfed, awaited);
 		}
 		let mut from = hole.start;
-		let grace = self.arrivals.grace();
+		let grace = self.arrival_grace();
 		let mut gap =
 			|groups: ops::Range<u64>, unfed: &mut RangeSet<u64>| match self.arrivals.folds_at(groups.start, grace) {
 				Some(at) if at <= now => unfed.insert(groups),

@@ -336,7 +336,7 @@ impl Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						tokio::time::sleep(delay).await;
+						moq_clock::sleep(delay).await;
 					}
 				}
 			}
@@ -345,10 +345,11 @@ impl Listener {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
+	use moq_net::transport::poll::Session as _;
 	use std::time::Duration;
-	use web_transport_trait::Session as _;
 
 	/// TLS needs a TCP listener to serve on; asking for it alone is refused.
 	#[test]
@@ -483,11 +484,11 @@ mod tests {
 
 		// Both handshakes are done, so each end knows its peer's grant, and an open
 		// with credit left completes without waiting.
-		for (end, session) in [("client", &client), ("server", &server)] {
+		for (end, mut session) in [("client", client), ("server", server)] {
 			let mut held = Vec::new();
 			for opened in 0..1_000 {
-				let bi = session.open_bi().now_or_never();
-				let uni = session.open_uni().now_or_never();
+				let bi = session.open_bi(Default::default()).now_or_never();
+				let uni = session.open_uni(Default::default()).now_or_never();
 				let (Some(bi), Some(uni)) = (bi, uni) else {
 					panic!("{end} stalled on stream credit after opening {opened} stream pairs");
 				};

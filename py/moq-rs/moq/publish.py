@@ -23,8 +23,8 @@ from moq_ffi import (
 from ._records import _from_us, _opt_from_us, _subscription, _track_info
 from ._stream import _Stream
 from .types import (
+    AnnounceRoute,
     Frame,
-    Route,
     Subscription,
     TrackInfo,
 )
@@ -199,7 +199,8 @@ class Fill:
     Call :meth:`accept` for each group you have and :meth:`drop_groups` for the rest;
     :meth:`next` names what is still owed, in the fill's order. Dropping the fill names
     whatever is left as dropped while a reader still wants it; once nobody does, it is
-    withdrawn, so stop serving it when :meth:`unused` returns.
+    withdrawn, so stop serving it when :meth:`unused` returns. Stop serving a single group
+    when :meth:`unwanted` returns for it, and move on to :meth:`next`.
     """
 
     def __init__(self, inner: MoqFill) -> None:
@@ -257,6 +258,17 @@ class Fill:
     async def unused(self) -> None:
         """Wait until no reader waits on this fill."""
         await self._inner.unused()
+
+    def is_wanted(self, sequence: int) -> bool:
+        """Whether a reader still waits for group ``sequence`` from this fill.
+
+        False once every reader took it or narrowed past it, or nobody waits on the fill.
+        """
+        return self._inner.is_wanted(sequence)
+
+    async def unwanted(self, sequence: int) -> None:
+        """Wait until no reader waits for group ``sequence`` from this fill, so stop serving it."""
+        await self._inner.unwanted(sequence)
 
 
 class TrackDynamic(_Stream[Fill]):
@@ -324,13 +336,13 @@ class BroadcastProducer:
         """Accept subscriptions to tracks that are not published yet."""
         return BroadcastDynamic(self._inner.dynamic())
 
-    def announce(self, route: Route | None = None) -> None:
+    def announce(self, route: AnnounceRoute | None = None) -> None:
         """Advertise this broadcast's exact path as a route.
 
         Announcing again re-prices the route in place. Until announced, the
         broadcast is invisible and unroutable for local consumers and peers alike.
         """
-        self._inner.announce(route if route is not None else Route())
+        self._inner.announce(route if route is not None else AnnounceRoute())
 
     def unannounce(self) -> None:
         """Retract this broadcast's advertisement, if any, from local consumers and peers alike."""

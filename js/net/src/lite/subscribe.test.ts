@@ -276,8 +276,8 @@ test.each(["ascending", "descending"] as const)("lite-07 round-trips a %s group 
 	expect(got.order).toBe(order);
 
 	const update = await encodeMessage(version, new SubscribeUpdate({ priority: 3, order, maxDelay: 250 }));
-	// The length prefix, the priority, then the order.
-	expect(update[1]).toBe(3);
+	// The length prefix, the priority byte, then the order.
+	expect(update[1]).toBe(3 + 128);
 	expect(update[2]).toBe(order === "ascending" ? 1 : 0);
 	const decoded = await SubscribeUpdate.decode(new Reader(undefined, update, version), version);
 	expect(decoded.order).toBe(order);

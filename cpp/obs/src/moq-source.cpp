@@ -70,9 +70,9 @@ static AVCodecID codec_string_to_id(const char *codec, size_t len)
 	return AV_CODEC_ID_NONE;
 }
 
-struct moq_source;
-
 namespace {
+
+struct moq_source;
 
 enum class Decoded { Pending, Ready, Failed };
 
@@ -158,8 +158,6 @@ struct Connection {
 	std::shared_ptr<Track> pending_audio;
 };
 
-} // namespace
-
 struct moq_source {
 	obs_source_t *source = nullptr;
 
@@ -183,6 +181,8 @@ struct moq_source {
 	// Runs every continuation; destroy stops it before freeing the source.
 	MoQWorker worker;
 };
+
+} // namespace
 
 // Forward declarations
 static void moq_source_update(void *data, obs_data_t *settings);

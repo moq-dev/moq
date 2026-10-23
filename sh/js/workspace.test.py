@@ -60,7 +60,6 @@ class SelectionTest(unittest.TestCase):
             stub.write_text("#!/bin/sh\nexit 0\n")
             stub.chmod(0o755)
         just = tools / "just"
-        just.chmod(0o755)
         subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
         calls = self.root / "calls"
         env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", MOQ_ALLOW_HOST="1",
@@ -71,6 +70,7 @@ class SelectionTest(unittest.TestCase):
             path.chmod(0o755)
         just.write_text('#!/bin/sh\nif [ "$1 $2" = "js test-changed" ]; then\n'
                         'printf "%s\\n" "$1 $2" > "$SELECT_CALLS"\ncat "$3" >> "$SELECT_CALLS"\nfi\n')
+        just.chmod(0o755)
         subprocess.run(["bash", "sh/dispatch.sh", "ci", "base"], cwd=self.root, env=env, check=True)
         self.assertEqual(calls.read_text().splitlines(),
                          ["js test-changed", "js/auth/src/token.ts", "demo/pub/worker.ts"])
@@ -88,6 +88,11 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(set(plan["packages"]), {"@example/core", "@example/view", "docs"})
         self.assertFalse(plan["all"])
         self.assertFalse(plan["wasm"])
+
+    def test_a_bench_selects_only_its_workspace(self):
+        self.assertEqual(list(self.plan(["js/core/bench/frames.ts"])["packages"]), ["@example/core"])
+        self.assertEqual(set(self.plan(["js/core/bench/frames.ts", "js/core/src/index.ts"])["packages"]),
+                         {"@example/core", "@example/view", "docs"})
 
     def test_leaf_does_not_select_its_dependencies(self):
         self.assertEqual(list(self.plan(["doc/index.md"])["packages"]), ["docs"])
@@ -197,16 +202,17 @@ class SelectionTest(unittest.TestCase):
     def test_biome_covers_unowned_js_files_in_fallback(self):
         def biome(paths):
             return next(c for c in self.calls(paths) if c[:3] == ["bun", "biome", "check"])
-        self.assertEqual(biome(["js/tsconfig.json"]), ["bun", "biome", "check", "js", "bench/browser", "test", "doc", "demo"])
-        self.assertEqual(biome(["doc/index.md"]), ["bun", "biome", "check", "doc", "js/common"])
+        self.assertEqual(biome(["js/tsconfig.json"]),
+                         ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"])
+        self.assertEqual(biome(["doc/index.md"]), ["bun", "biome", "check", "--error-on-warnings", "doc", "js/common"])
         self.assertEqual(biome(["demo/nested/src/index.ts"]),
-                         ["bun", "biome", "check", "demo/nested", "js/common"])
+                         ["bun", "biome", "check", "--error-on-warnings", "demo/nested", "js/common"])
         self.assertEqual(biome(["demo/pub/src/index.ts"]),
-                         ["bun", "biome", "check", "js", "bench/browser", "test", "doc", "demo"])
+                         ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"])
         self.assertEqual(biome(["js/core/src/index.ts"]),
-                         ["bun", "biome", "check", "js/core", "js/view", "doc", "js/common"])
+                         ["bun", "biome", "check", "--error-on-warnings", "js/core", "js/view", "doc", "js/common"])
         self.assertEqual(biome(["js/wasm/src/index.ts"]),
-                         ["bun", "biome", "check", "js/wasm", "test/browser", "demo/nested", "js/common"])
+                         ["bun", "biome", "check", "--error-on-warnings", "js/wasm", "test/browser", "demo/nested", "js/common"])
 
     def test_build_never_generates_wasm(self):
         self.assertNotIn(["just", "js", "wasm", "dev"], self.calls(None, "build"))

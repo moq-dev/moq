@@ -50,9 +50,8 @@ each gets its own impl:
   and stays public.
 
 Notes from related quests:
-- [qmux on moq-quic](/quest/m1/quic-qmux.md) planned to port qmux's
-  `web-transport-trait` impl. If it lands first, its impl targets moq-net's
-  `transport::poll` instead.
+- The in-tree qmux already implements moq-net's `transport::poll`
+  natively, so only QUIC and iroh still go through the adapter.
 - [poll_acked](/quest/m2/quic-ack-hook.md) already puts its hook on moq-net's
   trait because moq-net has no `web-transport-trait` dependency. That holds
   here.
@@ -65,8 +64,12 @@ moq-dev/web-transport; `moq-quic` powers qmux and WebTransport. The iroh
 (`web-transport-iroh`) and wasm (`web-transport-wasm`) backends stay crates
 from that repo as accepted exceptions, and web-transport-proto may stay.
 
+Decided 2026-10-21 (maintainer): web-transport-proto stays upstream, with no
+migration quest. web-transport-iroh decodes CONNECT with it, so an in-tree
+copy would duplicate the crate whenever iroh is on. Its QPACK bound ships as
+an upstream patch ([web-transport-proto 0.6.3](/quest/m0/web-transport-proto-0.6.3.md)).
+
 ## Related
 
-- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - the in-tree qmux implements the moq-net traits directly
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - another hook that lives only on moq-net's traits
 - [Rust requests fail fast without stream credit](/quest/m1/rs-request-credit.md) - its credit query moves to each backend's moq-net impl

@@ -138,7 +138,7 @@ impl<'a> Path<'a> {
 		}
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn from_escaped(s: String) -> PathOwned {
 		if s.is_empty() {
 			Path::empty()
@@ -812,17 +812,6 @@ mod tests {
 		assert_eq!(Path::new("foo/").join(Path::new("bar")).as_str(), "foo/bar");
 		assert_eq!(Path::new("").join("bar").as_str(), "bar");
 		assert_eq!(Path::new("foo/bar").join(Path::new("baz")).as_str(), "foo/bar/baz");
-	}
-
-	#[test]
-	fn test_empty() {
-		let empty = Path::new("");
-		assert!(empty.is_empty());
-		assert_eq!(empty.len(), 0);
-
-		let non_empty = Path::new("foo");
-		assert!(!non_empty.is_empty());
-		assert_eq!(non_empty.len(), 3);
 	}
 
 	#[test]

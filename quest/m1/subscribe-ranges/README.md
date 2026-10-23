@@ -98,8 +98,8 @@ every sequence delivered or dropped.
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity
+- [Bounded tails](/quest/m1/subscribe-ranges/bounded-tail.md) - a copy cut at a request's mid-group end accepts the rest of its group instead of rejecting it as `Duplicate`
 
 ## Related
 
-- [Track priority scope](/quest/m1/track-priority-scope.md) - group order within a track now follows the subscription
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age

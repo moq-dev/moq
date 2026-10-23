@@ -1,19 +1,14 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use tokio::sync::oneshot;
 use url::Url;
 
+use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, State, ffi};
 
-/// A spawned task entry: `close` signals shutdown, `callback` delivers status.
-///
-/// `close` is an `Option` so `close()` can drop just the sender without
-/// removing the entry. The task delivers one final terminal callback and then
-/// removes itself, so `user_data` stays valid until that callback fires.
+/// A session task and the connection backing its handle.
 struct TaskEntry {
-	close: Option<oneshot::Sender<()>>,
-	callback: ffi::OnStatus,
+	task: Task,
 	link: Link,
 }
 
@@ -24,9 +19,6 @@ enum Link {
 		connection: moq_tokio::Connection,
 		/// Reads live connection stats, reporting `None` while reconnecting.
 		monitor: moq_tokio::connection::Monitor,
-		/// One allocator for the session. Every `moq_session_bandwidth` handle clones
-		/// it, so they share one reservation registry.
-		bandwidth: moq_net::bandwidth::Allocator,
 	},
 	/// A server-accepted session: a single transport, `None` until SETUP completes.
 	Accepted(Option<Accepted>),
@@ -35,8 +27,6 @@ enum Link {
 struct Accepted {
 	session: moq_net::Session,
 	driver: ffi::Background,
-	/// Shared by every `moq_session_bandwidth` handle, like [`Link::Dialed`]'s.
-	bandwidth: moq_net::bandwidth::Allocator,
 }
 
 /// Everything needed to prepare a session without holding the global state lock.
@@ -86,7 +76,7 @@ pub(crate) struct PreparedConnect {
 #[derive(Default)]
 pub struct Session {
 	/// Session tasks. Close signals shutdown; the task delivers a final callback, then removes itself.
-	task: NonZeroSlab<Option<TaskEntry>>,
+	task: NonZeroSlab<TaskEntry>,
 }
 
 impl Session {
@@ -105,16 +95,10 @@ impl Session {
 		let link = Link::Dialed {
 			connection: reconnect.clone(),
 			monitor: reconnect.monitor(),
-			bandwidth: moq_net::bandwidth::Allocator::new(reconnect.send_bandwidth()),
 		};
 
-		let closed = oneshot::channel();
-		let entry = TaskEntry {
-			close: Some(closed.0),
-			callback,
-			link,
-		};
-		let id = self.task.insert(Some(entry))?;
+		let (task, closed) = Task::new(callback);
+		let id = self.task.insert(TaskEntry { task, link })?;
 
 		tokio::spawn(async move {
 			// Keep the origin producers alive for the lifetime of the reconnect loop:
@@ -128,7 +112,7 @@ impl Session {
 			let res = ffi::run(publish_driver.watch(consume_driver.watch(async move {
 				tokio::select! {
 					// close() requested: drain what the session queued, then close it.
-					_ = closed.1 => reconnect.clone().close().await.map_err(map_connect_error),
+					_ = closed => reconnect.clone().close().await.map_err(map_connect_error),
 					res = Self::report(callback, reconnect.clone()) => res,
 				}
 			})))
@@ -146,9 +130,9 @@ impl Session {
 			// Deliver one final terminal callback (0 = closed, < 0 = error), then
 			// drop the entry. Pull it out from under the lock so the callback never
 			// runs while held.
-			let entry = State::lock().session.task.remove(id).flatten();
+			let entry = State::lock().session.task.remove(id);
 			if let Some(entry) = entry {
-				entry.callback.call(res);
+				entry.task.callback.call(res);
 			}
 		});
 
@@ -171,13 +155,11 @@ impl Session {
 			request = request.with_subscriber(consume.producer.clone());
 		}
 
-		let closed = oneshot::channel();
-		let entry = TaskEntry {
-			close: Some(closed.0),
-			callback,
+		let (task, closed) = Task::new(callback);
+		let id = self.task.insert(TaskEntry {
+			task,
 			link: Link::Accepted(None),
-		};
-		let id = self.task.insert(Some(entry))?;
+		})?;
 
 		tokio::spawn(async move {
 			// Keep the origin producers alive for the lifetime of the session.
@@ -189,13 +171,13 @@ impl Session {
 			// A panic ends only this session, reported through the terminal callback.
 			let mut res = ffi::run(publish_driver.watch(consume_driver.watch(async move {
 				tokio::select! {
-					_ = closed.1 => Ok(()),
+					_ = closed => Ok(()),
 					res = Self::serve(id, callback, request) => res,
 				}
 			})))
 			.await;
 
-			let entry = State::lock().session.task.remove(id).flatten();
+			let entry = State::lock().session.task.remove(id);
 			if let Some(entry) = entry {
 				// Close the transport now rather than whenever the last clone drops.
 				if let Link::Accepted(Some(accepted)) = &entry.link
@@ -208,7 +190,7 @@ impl Session {
 					res = Err(error);
 				}
 				let res = publish_driver.check().and_then(|()| consume_driver.check()).and(res);
-				entry.callback.call(res);
+				entry.task.callback.call(res);
 			}
 		});
 
@@ -225,16 +207,11 @@ impl Session {
 				Err(_) => Err(moq_net::Error::Cancel.into()),
 			}
 		});
-		let bandwidth = session
-			.send_bandwidth()
-			.map(moq_net::bandwidth::Allocator::new)
-			.unwrap_or_else(moq_net::bandwidth::Allocator::unlimited);
 
-		if let Some(entry) = State::lock().session.task.get_mut(id).and_then(|entry| entry.as_mut()) {
+		if let Some(entry) = State::lock().session.task.get_mut(id) {
 			entry.link = Link::Accepted(Some(Accepted {
 				session: session.clone(),
 				driver: driver.clone(),
-				bandwidth,
 			}));
 		}
 
@@ -245,21 +222,17 @@ impl Session {
 	}
 
 	fn link(&self, id: Id) -> Result<&Link, Error> {
-		Ok(&self
-			.task
-			.get(id)
-			.and_then(|entry| entry.as_ref())
-			.ok_or(Error::SessionNotFound)?
-			.link)
+		Ok(&self.task.get(id).ok_or(Error::SessionNotFound)?.link)
 	}
 
-	/// The session's bandwidth allocator. Clones share one reservation registry.
+	/// The session's bandwidth allocator. Every handle shares one reservation registry,
+	/// which the session probes for.
 	///
 	/// Errors with [`Error::Offline`] for an accepted session still in SETUP.
 	pub fn bandwidth(&self, id: Id) -> Result<moq_net::bandwidth::Allocator, Error> {
 		match self.link(id)? {
-			Link::Dialed { bandwidth, .. } => Ok(bandwidth.clone()),
-			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.bandwidth.clone()),
+			Link::Dialed { connection, .. } => Ok(connection.bandwidth()),
+			Link::Accepted(accepted) => Ok(accepted.as_ref().ok_or(Error::Offline)?.session.bandwidth()),
 		}
 	}
 
@@ -331,12 +304,9 @@ impl Session {
 		// Signal shutdown; the task delivers a final callback and removes itself.
 		self.task
 			.get_mut(id)
-			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::SessionNotFound)?
-			.close
-			.take()
-			.ok_or(Error::SessionNotFound)?;
-		Ok(())
+			.task
+			.close(Error::SessionNotFound)
 	}
 }
 

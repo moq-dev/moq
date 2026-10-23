@@ -35,11 +35,18 @@ void main() {
 
   test('a non-null optional argument is released', () async {
     // A local broadcast has no origin to resolve against, so each call lowers
-    // the optional String and then throws, also covering the error buffer.
+    // the rendition's optional String and then throws, also covering the error buffer.
     final consumer = MoqBroadcastProducer().consume();
-    final reference = 'x' * size;
+    final rendition = VideoMoqRendition(
+      id: 'video',
+      config: MoqVideo(
+        broadcast: 'x' * size,
+        codec: 'avc1.64001f',
+        container: LegacyMoqContainer(),
+      ),
+    );
     Future<void> call() => expectLater(
-      consumer.resolve(reference: reference),
+      consumer.resolve(rendition: rendition),
       throwsA(isA<MoqException>()),
     );
 

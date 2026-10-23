@@ -14,7 +14,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
 # A scripted RTSP server for downstream integration tests, such as `moq-cli`'s.
-test-support = ["dep:base64", "tokio/io-util", "tokio/macros", "tokio/net", "tokio/rt", "tokio/sync"]
+test-support = ["dep:base64", "dep:tokio", "tokio/io-util", "tokio/macros", "tokio/net", "tokio/rt", "tokio/sync"]
 
 # Pure library: pulls one RTSP session into a caller's broadcast. The CLI lives in
 # `moq-cli` (`moq import rtsp`), which owns reconnect and epochs.
@@ -22,6 +22,7 @@ test-support = ["dep:base64", "tokio/io-util", "tokio/macros", "tokio/net", "tok
 base64 = { workspace = true, optional = true }
 futures = { workspace = true }
 hang = { workspace = true }
+moq-clock = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Only for `RedactedUrl`, so the session URL logs without its query.
@@ -30,8 +31,7 @@ percent-encoding = { workspace = true }
 # Pure-Rust RTSP client and RTP depacketizer (H.264, H.265, AAC).
 retina = "0.4.21"
 thiserror = { workspace = true }
-# Timeouts; retina already runs on tokio.
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, optional = true }
 tracing = { workspace = true }
 url = { workspace = true }
 
@@ -39,3 +39,6 @@ url = { workspace = true }
 base64 = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
+
+[lints]
+workspace = true

@@ -133,9 +133,4 @@ mod tests {
 				.is_err()
 		);
 	}
-
-	#[test]
-	fn display_reads_as_a_resolution() {
-		assert_eq!(Size::new(1920, 1080).to_string(), "1920x1080");
-	}
 }

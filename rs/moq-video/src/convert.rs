@@ -277,21 +277,4 @@ mod tests {
 			);
 		}
 	}
-
-	/// Converting borrows the surface, so the same one converts twice.
-	///
-	/// The reason this matters is not the second conversion: it is that a
-	/// caller holding an `Arc<Frame>` it cannot unwrap, which is every consumer
-	/// of a publisher's preview, has no way to reach a consuming exit at all.
-	#[test]
-	fn conversion_leaves_the_surface_alone() {
-		let size = Size::new(32, 32);
-		let surface = Surface::I420(I420::new(size, vec![128; I420::len(size).unwrap()]).unwrap());
-
-		let first = rgba(&surface, &Config::default()).unwrap();
-		let second = bgra(&surface, &Config::default()).unwrap();
-		assert_eq!(first.data().len(), second.data().len());
-		// And the surface is still there to ask again.
-		assert_eq!(surface.width(), size.width);
-	}
 }

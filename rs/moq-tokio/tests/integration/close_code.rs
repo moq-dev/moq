@@ -93,9 +93,11 @@ async fn client_error(url: &str, websocket: bool) -> moq_tokio::Error {
 
 async fn check(case: Case) {
 	let server = serve(case).await;
+	// The server binds IPv4 only, so `localhost` would race a dead `::1` on hosts that list it
+	// first, paying the Happy Eyeballs stagger on every dial.
 	let urls = [
-		(format!("https://localhost:{}/", server.quic), false),
-		(format!("moqt://localhost:{}/", server.quic), false),
+		(format!("https://127.0.0.1:{}/", server.quic), false),
+		(format!("moqt://127.0.0.1:{}/", server.quic), false),
 		(format!("ws://127.0.0.1:{}/", server.websocket), true),
 	];
 

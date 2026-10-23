@@ -174,7 +174,11 @@ impl Loader for DynamicLoader {
 }
 
 /// The private `NvEncodeAPI` function table.
-#[allow(dead_code, missing_docs)]
+#[allow(
+	dead_code,
+	missing_docs,
+	reason = "mirrors the whole NVENC function table, not all of which is called"
+)]
 #[derive(Debug, Clone)]
 pub(crate) struct EncodeAPI {
 	#[doc(alias = "NvEncOpenEncodeSession")]

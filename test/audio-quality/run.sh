@@ -273,7 +273,6 @@ if [[ ${#ROWS[@]} -gt 0 ]]; then
         echo "building the page..."
         (
             cd "$CLIENT"
-            bunx playwright install chromium
             bunx vite build --outDir "$HARNESS_RUN/page" --emptyOutDir
         )
     fi

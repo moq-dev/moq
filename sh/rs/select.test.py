@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 class SelectTest(unittest.TestCase):
     # CI runs target lints before its test build.
-    def selected(self, *paths, action="lint"):
+    def selected(self, *paths, action="lint", github_actions=False):
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
             calls = scratch / "calls"
@@ -22,16 +22,20 @@ class SelectTest(unittest.TestCase):
             changed = scratch / "changed"
             changed.write_text("\n".join(paths) + "\n")
             env = dict(os.environ, PATH=f"{scratch}:{os.environ['PATH']}",
-                       SELECT_CALLS=str(calls), BASH_ENV=os.devnull)
+                       SELECT_CALLS=str(calls), BASH_ENV=os.devnull,
+                       GITHUB_ACTIONS=str(github_actions).lower())
             subprocess.run(["bash", "sh/rs/select.sh", action, str(changed)],
                            cwd=ROOT, env=env, check=True, capture_output=True, text=True)
             return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
-        for action in ("check", "check-test", "lint", "test"):
-            with self.subTest(action=action):
-                self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz",
-                              self.selected("sh/rs/nextest.sh", action=action))
+        for github_actions in (False, True):
+            for action in ("check", "check-test", "lint", "test"):
+                with self.subTest(action=action, github_actions=github_actions):
+                    timings = " --timings" if github_actions and action == "test" else ""
+                    self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{timings}",
+                                  self.selected("sh/rs/nextest.sh", action=action,
+                                                github_actions=github_actions))
         selected = self.selected("sh/rs/nextest.sh")
         for recipe in ("wasm", "uring-check"):
             self.assertIn(f"rs {recipe}", selected)
@@ -53,6 +57,16 @@ class SelectTest(unittest.TestCase):
                 calls = self.selected(path, action="test")
                 self.assertTrue(any("/demo/carla/bridge#moq-carla-bridge" in call for call in calls), calls)
         self.assertEqual(self.selected("demo/carla/web/src/main.ts"), [])
+
+    def test_a_bench_selects_only_its_crate(self):
+        bench = "rs/moq-stats/benches/producer_tick.rs"
+        for action in ("lint", "test"):
+            with self.subTest(action=action):
+                calls = self.selected(bench, action=action)
+                self.assertTrue(any("#moq-stats@" in call or "/rs/moq-stats#" in call for call in calls), calls)
+                self.assertFalse(any("moq-relay" in call or "moq-cli" in call for call in calls), calls)
+        calls = self.selected(bench, "rs/moq-stats/src/lib.rs", action="test")
+        self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
 
 
 
@@ -104,8 +118,8 @@ class FeatureTest(unittest.TestCase):
     def test_tokio_keeps_extremes_and_crypto_contracts(self):
         boundary = self.trace("tokio")
         exhaustive = self.trace("tokio", "--all")
-        self.assertEqual(sum(call.startswith("clippy ") for call in boundary), 2)
-        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 10)
+        self.assertEqual(sum(call.startswith("clippy ") for call in boundary), 3)
+        self.assertEqual(sum(call.startswith("clippy ") for call in exhaustive), 12)
         self.assertEqual([call for call in boundary if not call.startswith("clippy ")],
                          [call for call in exhaustive if not call.startswith("clippy ")])
 

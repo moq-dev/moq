@@ -72,7 +72,7 @@ for (const [name, list, known] of selectors) {
 
 const rows: { row: Row; trace: Trace }[] = [];
 for (const { profile, trace } of traces) {
-	if (trace.version !== 2) throw new Error(`${profile}: trace version ${trace.version}, expected 2`);
+	if (trace.version !== 3) throw new Error(`${profile}: trace version ${trace.version}, expected 3`);
 	const codec = traceCodec(trace);
 	if (profiles && !profiles.includes(profile)) continue;
 	if (!codecs.includes(codec)) continue;
@@ -108,7 +108,7 @@ for (const { row, trace } of rows) {
 		if (notes.length < 200) notes.push(args.map(String).join(" ").slice(0, 200));
 	};
 
-	const arrivals = trace.arrivals.map(([at, timestamp, group]) => ({ at, timestamp, group }));
+	const arrivals = trace.arrivals.map(([at, timestamp, group, duration]) => ({ at, timestamp, group, duration }));
 	const sample = (quantum: { at: number; timestamp: number; stalled: boolean; delay: number }) => {
 		const gaps = ledger.take();
 		samples.push({

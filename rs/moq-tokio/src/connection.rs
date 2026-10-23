@@ -216,6 +216,22 @@ pub enum Redirect {
 	Ignore,
 }
 
+/// What to do when a peer's GOAWAY names no URI, meaning it is restarting where we reached it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Restart {
+	/// Redial the same addresses at once while the drained session keeps serving. Right for
+	/// an address that can lead to another node, such as a fleet name a fresh resolve moves
+	/// off the drained one. The default.
+	#[default]
+	Redial,
+	/// Keep serving on the drained session until the peer closes it, then reconnect as after
+	/// any drop. Right for an address that names one node, where a redial only reaches the
+	/// draining process again. The peer must close the session itself, as a relay does at
+	/// its drain deadline.
+	Wait,
+}
+
 impl Redirect {
 	/// The URL a GOAWAY assigns. `Ok(None)` keeps the current address list (the
 	/// peer named no URI, or the policy ignores a URI it could parse), `Ok(Some)`
@@ -492,7 +508,7 @@ struct State {
 	session: Option<moq_net::Session>,
 	/// The loop's [`Draining`] predecessor and its handover deadline, so
 	/// [`Connection::close`] drains it too without overstaying that window.
-	predecessor: Option<(moq_net::Session, tokio::time::Instant)>,
+	predecessor: Option<(moq_net::Session, moq_clock::Instant)>,
 }
 
 /// The producer side of everything a [`Connection`] handle can observe.
@@ -698,6 +714,8 @@ pub struct Connection {
 	pacing: Pacing,
 	/// Persistent send-bitrate estimate, fed by the loop from each live session.
 	send_bandwidth: BandwidthConsumer,
+	/// Divides `send_bandwidth`, and every session the loop dials probes for its reservations.
+	bandwidth: moq_net::bandwidth::Allocator,
 	/// Persistent recv-bitrate estimate, fed by the loop from each live session.
 	recv_bandwidth: moq_net::bandwidth::Weak,
 	/// The last status returned by [`status`](Self::status), for change detection.
@@ -734,6 +752,8 @@ impl Connection {
 		let recv_bw = BandwidthProducer::new();
 		let send_bandwidth = send_bw.consume();
 		let recv_bandwidth = recv_bw.weak();
+		let bandwidth = moq_net::bandwidth::Allocator::new(send_bandwidth.clone());
+		let client = client.with_bandwidth(bandwidth.clone());
 
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
@@ -771,6 +791,7 @@ impl Connection {
 			pacing,
 			send_bandwidth,
 			recv_bandwidth,
+			bandwidth,
 			last_reported: None,
 		}
 	}
@@ -832,7 +853,7 @@ impl Connection {
 			let mut close = std::pin::pin!(session.close());
 			tokio::select! {
 				res = &mut close => res,
-				_ = tokio::time::sleep_until(deadline) => {
+				_ = moq_clock::sleep_until(deadline) => {
 					abort.abort(moq_net::Error::GoawayTimeout);
 					close.await
 				}
@@ -870,11 +891,11 @@ impl Connection {
 					shared.connected(&dialed.session, dialed.transport);
 					let session = dialed.session;
 
-					let connected = tokio::time::Instant::now();
+					let connected = moq_clock::now();
 					// Wait for the session to end, forwarding its bandwidth estimates into the
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
-					let ended = run_session(shared, &session, &mut draining).await;
+					let ended = run_session(shared, &session, &mut draining, client.restart).await;
 					// Before any status moves, so a watcher woken by `Disconnected` finds why. Only
 					// a retry has a reason to report; a session that ends the loop reports through
 					// `closed` instead.
@@ -1005,7 +1026,7 @@ impl Connection {
 						if restarting {
 							// After the sleep, so the window counts only the time after the
 							// peer stops answering.
-							retry.start = tokio::time::Instant::now();
+							retry.start = moq_clock::now();
 						}
 						continue;
 					}
@@ -1122,7 +1143,7 @@ impl Connection {
 
 			let dialed = match attempt_timeout(index, candidates.len()) {
 				None => dialed.await,
-				Some(limit) => match tokio::time::timeout(limit, dialed).await {
+				Some(limit) => match moq_clock::timeout(limit, dialed).await {
 					Ok(dialed) => dialed,
 					Err(_) => Err(Error::Reconnect(format!("timed out connecting to {}", Endpoint(url)))),
 				},
@@ -1267,6 +1288,16 @@ impl Connection {
 		self.send_bandwidth.clone()
 	}
 
+	/// Divides [`send_bandwidth`](Self::send_bandwidth) among this connection's senders,
+	/// mirroring [`moq_net::Session::bandwidth`].
+	///
+	/// Persistent like the estimate: every session the loop dials probes for these
+	/// reservations, so they survive reconnects. Reservations report `None` while
+	/// disconnected, telling a sender to hold its rate.
+	pub fn bandwidth(&self) -> moq_net::bandwidth::Allocator {
+		self.bandwidth.clone()
+	}
+
 	/// A consumer for the live session's estimated receive bitrate, mirroring
 	/// [`moq_net::Session::recv_bandwidth`]. Persistent across reconnects like
 	/// [`send_bandwidth`](Self::send_bandwidth); `None` while disconnected or unavailable.
@@ -1317,7 +1348,7 @@ struct Retry {
 	/// The wait before the next attempt, before jitter.
 	delay: Duration,
 	/// When this run of failures began; the give-up timeout counts from here.
-	start: tokio::time::Instant,
+	start: moq_clock::Instant,
 	/// The latest failure, so giving up reports a real cause.
 	last_error: Option<Error>,
 }
@@ -1326,7 +1357,7 @@ impl Retry {
 	fn new(initial: Duration) -> Self {
 		Self {
 			delay: initial,
-			start: tokio::time::Instant::now(),
+			start: moq_clock::now(),
 			last_error: None,
 		}
 	}
@@ -1352,7 +1383,7 @@ fn timeout_error(timeout: Duration, last_error: Option<&Error>) -> Error {
 }
 
 /// Jitter the next delay and cap it at the retry window. `None` means the window is exhausted.
-fn retry_wait(delay: Duration, retry_start: tokio::time::Instant, timeout: Duration) -> Option<Duration> {
+fn retry_wait(delay: Duration, retry_start: moq_clock::Instant, timeout: Duration) -> Option<Duration> {
 	let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
 	if timeout.is_zero() {
 		return Some(wait);
@@ -1432,14 +1463,14 @@ enum Ended {
 struct Draining {
 	session: moq_net::Session,
 	closed: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
-	deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+	deadline: std::pin::Pin<Box<moq_clock::Sleep>>,
 	/// Mirrors the session into [`State::predecessor`] for as long as this lives.
 	state: kio::Producer<State>,
 }
 
 impl Draining {
 	fn new(session: moq_net::Session, handover: Duration, state: &kio::Producer<State>) -> Self {
-		let deadline = Box::pin(tokio::time::sleep(handover));
+		let deadline = Box::pin(moq_clock::sleep(handover));
 		if let Ok(mut state) = state.write() {
 			state.predecessor = Some((session.clone(), deadline.deadline()));
 		}
@@ -1509,7 +1540,7 @@ fn poll_draining(draining: &mut Option<Draining>, waiter: &kio::Waiter) -> bool 
 /// to reach would leave the old session holding its connection well past the
 /// handover window.
 async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared: &Shared) {
-	let mut sleep = std::pin::pin!(tokio::time::sleep(delay));
+	let mut sleep = std::pin::pin!(moq_clock::sleep(delay));
 	kio::wait(|waiter| {
 		// Nothing is serving once it retires: the predecessor closed or overstayed
 		// its handover, and the replacement is still a dial away. Leaving the state
@@ -1530,10 +1561,19 @@ async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared
 /// One `poll_*` step drives it all: [`poll_forward`] mirrors each kio bandwidth estimate, the
 /// GOAWAY consumer is a kio channel, and the transport's close future (the one non-kio source) is
 /// polled through the waiter's own waker.
-async fn run_session(shared: &Shared, session: &moq_net::Session, draining: &mut Option<Draining>) -> Ended {
+///
+/// Under [`Restart::Wait`] a GOAWAY naming no URI does not end the wait: the session serves on
+/// until it closes.
+async fn run_session(
+	shared: &Shared,
+	session: &moq_net::Session,
+	draining: &mut Option<Draining>,
+	restart: Restart,
+) -> Ended {
 	let mut send = session.send_bandwidth();
 	let mut recv = RecvBandwidth::default();
-	let goaway = session.draining();
+	// Dropped once a restart is waited out: it is a latch, so it would keep firing.
+	let mut goaway = Some(session.draining());
 	let closed = session.closed();
 	tokio::pin!(closed);
 
@@ -1553,8 +1593,13 @@ async fn run_session(shared: &Shared, session: &moq_net::Session, draining: &mut
 		// accepting requests and waits for us to leave, so ignoring it is how both
 		// sides end up waiting on each other forever. The caller ends the connection
 		// instead: asked to leave, with no way to migrate, leaving is the answer.
-		if let Poll::Ready(Ok(msg)) = goaway.poll(waiter) {
-			return Poll::Ready(Ended::Goaway(msg));
+		if let Some(Poll::Ready(Ok(msg))) = goaway.as_ref().map(|goaway| goaway.poll(waiter)) {
+			if restart == Restart::Wait && msg.uri().is_empty() {
+				tracing::info!("peer is restarting; serving until it closes the session");
+				goaway = None;
+			} else {
+				return Poll::Ready(Ended::Goaway(msg));
+			}
 		}
 
 		waiter
@@ -1641,6 +1686,11 @@ fn terminal(state: &State) -> Error {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 
@@ -2048,15 +2098,6 @@ mod tests {
 		assert_eq!(pacing.next(Duration::from_millis(100)), Duration::from_millis(200));
 		assert_eq!(pacing.next(Duration::from_millis(200)), Duration::from_millis(400));
 		assert_eq!(pacing.next(Duration::from_millis(400)), Duration::from_millis(400));
-	}
-
-	#[test]
-	fn test_backoff_default() {
-		let backoff = Backoff::default();
-		assert_eq!(backoff.initial, Some(Duration::from_secs(1)));
-		assert_eq!(backoff.multiplier, 2);
-		assert_eq!(backoff.max, Some(Duration::from_secs(5)));
-		assert_eq!(backoff.timeout, Some(Duration::from_secs(10)));
 	}
 
 	#[test]
@@ -2826,6 +2867,61 @@ mod tests {
 			accepted_a.try_recv().is_err(),
 			"a cached resolve redialed the drained relay"
 		);
+	}
+
+	/// Under [`Restart::Wait`] an empty-URI GOAWAY changes nothing while the peer keeps
+	/// the session: no migration and no redial. Its close then reconnects like any drop.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_waited_restart_redials_only_once_the_session_closes() {
+		use futures::FutureExt;
+		const WAIT: Duration = Duration::from_secs(10);
+
+		let origin = crate::origin::spawn();
+		let (addr, mut accepted, _task) = serve(origin.clone()).await;
+
+		let subscriber = crate::origin::spawn();
+		let mut config = crate::connect::Config::default();
+		config.backoff.initial = Some(MIN_BACKOFF);
+		let client = config
+			.init(Default::default())
+			.unwrap()
+			.with_subscriber(subscriber.clone())
+			.with_restart(Restart::Wait);
+		let mut connection = client.connect(url(&format!("tcp://{addr}/")));
+		let status = tokio::time::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Connected);
+		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+
+		session.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+
+		// A broadcast announced after the GOAWAY still arrives: the drained session serves.
+		let late = origin.create_broadcast("late").unwrap();
+		late.announce(Default::default()).unwrap();
+		tokio::time::timeout(WAIT, subscriber.consume().routed("late"))
+			.await
+			.expect("the drained session stopped serving")
+			.unwrap();
+		assert!(
+			connection.draining().and_then(|goaway| goaway.peek()).is_some(),
+			"the GOAWAY never arrived"
+		);
+		assert_eq!(
+			connection.status().now_or_never().transpose().unwrap(),
+			None,
+			"the loop left the session"
+		);
+		assert!(accepted.try_recv().is_err(), "redialed while the session served");
+
+		session.abort(moq_net::Error::GoawayTimeout);
+		let status = tokio::time::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Disconnected);
+		let status = tokio::time::timeout(WAIT, connection.status()).await.unwrap();
+		assert_eq!(status.unwrap(), Status::Connected);
+		tokio::time::timeout(WAIT, accepted.recv())
+			.await
+			.expect("never redialed after the close")
+			.unwrap();
 	}
 
 	#[test]

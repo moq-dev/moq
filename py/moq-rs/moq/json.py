@@ -23,10 +23,10 @@ from moq_ffi import (
     MoqJsonValue,
 )
 
+from . import publish, subscribe
 from ._records import _opt_from_us, _opt_us
 from ._stream import _Stream
-from .publish import BroadcastProducer, TrackDemand, TrackProducer
-from .subscribe import TrackConsumer
+from .publish import BroadcastProducer, TrackDemand
 
 __all__ = ["SnapshotConsumer", "SnapshotProducer", "StreamConsumer", "StreamProducer", "Timed"]
 
@@ -54,26 +54,22 @@ class SnapshotProducer:
     """Publish a JSON value that consumers see as a single latest state (lossy).
 
     Each :meth:`update` supersedes the last; a late joiner only sees the newest value, encoded as
-    snapshots and merge-patch deltas automatically. ``delta_ratio`` controls how aggressively
-    deltas replace full snapshots (0 disables them); ``None`` uses the binding's default. Set
-    ``compression`` to DEFLATE-compress each group; the consumer must pass the same flag. A name
-    the catalog already carries is refused.
+    snapshots and merge-patch deltas automatically. Set ``deltas=False`` to publish every update
+    as a full snapshot in its own group. With deltas on, give the track a ``refresh`` ratio so a
+    join after more than that many snapshots' worth of deltas asks for the value restated in a
+    fresh group. Set ``compression`` to DEFLATE-compress each group; the consumer
+    must pass the same flag. A name the catalog already carries is refused.
     """
 
     def __init__(
         self,
         broadcast: BroadcastProducer,
-        track: TrackProducer,
+        track: publish.TrackProducer,
         *,
-        delta_ratio: int | None = None,
+        deltas: bool = True,
         compression: bool = False,
     ) -> None:
-        # Let the record supply delta_ratio's default rather than restating it here.
-        config = (
-            MoqJsonSnapshotConfig(compression=compression)
-            if delta_ratio is None
-            else MoqJsonSnapshotConfig(delta_ratio=delta_ratio, compression=compression)
-        )
+        config = MoqJsonSnapshotConfig(deltas=deltas, compression=compression)
         self._inner = MoqJsonSnapshotProducer(broadcast._inner, track._inner, config)
 
     def demand(self) -> TrackDemand:
@@ -97,7 +93,9 @@ class StreamProducer:
     carries is refused.
     """
 
-    def __init__(self, broadcast: BroadcastProducer, track: TrackProducer, *, compression: bool = False) -> None:
+    def __init__(
+        self, broadcast: BroadcastProducer, track: publish.TrackProducer, *, compression: bool = False
+    ) -> None:
         config = MoqJsonStreamConfig(compression=compression)
         self._inner = MoqJsonStreamProducer(broadcast._inner, track._inner, config)
 
@@ -123,8 +121,8 @@ class SnapshotConsumer(_Stream[Timed]):
     context manager that cancels on exit.
     """
 
-    def __init__(self, track: TrackConsumer, *, compression: bool = False) -> None:
-        # delta_ratio is producer-only, so leave it at its default here.
+    def __init__(self, track: subscribe.TrackConsumer, *, compression: bool = False) -> None:
+        # deltas is producer-only, so leave it at its default here.
         config = MoqJsonSnapshotConfig(compression=compression)
         self._inner = MoqJsonSnapshotConsumer(track._inner, config)
 
@@ -150,7 +148,7 @@ class StreamConsumer(_Stream[Timed]):
     async context manager that cancels on exit.
     """
 
-    def __init__(self, track: TrackConsumer, *, compression: bool = False) -> None:
+    def __init__(self, track: subscribe.TrackConsumer, *, compression: bool = False) -> None:
         config = MoqJsonStreamConfig(compression=compression)
         self._inner = MoqJsonStreamConsumer(track._inner, config)
 

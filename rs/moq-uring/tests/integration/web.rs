@@ -13,6 +13,7 @@ use std::net::UdpSocket;
 
 use moq_net::origin;
 use moq_uring::{Config, Error, Worker, quic, udp};
+use web_transport_trait::Stats as _;
 use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
 
 fn worker() -> Option<Worker> {
@@ -209,6 +210,41 @@ fn webtransport_echo_end_to_end() {
 	client.join().expect("client thread");
 }
 
+#[test]
+fn webtransport_accepts_a_buffered_uni_after_the_peer_close() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let client = tokio_client(format!("https://{}/tail", endpoint.local_addr()), |session| {
+		Box::pin(async move {
+			let mut send = session.open_uni(Default::default()).await.expect("open uni");
+			send.write_all(PAYLOAD).await.expect("write");
+			send.finish().expect("finish");
+			assert!(send.stopped().await.expect("FIN delivered").is_none());
+			session.close(0, b"done");
+			session.closed().await;
+		})
+	});
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
+			let mut session = request
+				.respond(quic::web::Response::default().with_protocol(PROTO))
+				.await
+				.expect("respond");
+			std::future::poll_fn(|cx| session.poll_closed(cx)).await;
+			let mut recv = std::future::poll_fn(|cx| session.poll_accept_uni(cx))
+				.await
+				.expect("buffered uni precedes the close");
+			assert_eq!(drain(&mut recv).await, PAYLOAD);
+			assert!(std::future::poll_fn(|cx| session.poll_accept_uni(cx)).await.is_err());
+		})
+		.expect("worker");
+	client.join().expect("client thread");
+}
+
 /// A whole moq-lite session over WebTransport: subprotocol negotiation, SETUP
 /// on the bidirectional stream, announce, subscribe, and a group on a
 /// unidirectional stream, with the tokio stack as the subscriber. This is the
@@ -248,12 +284,12 @@ fn lite_session_over_webtransport() {
 
 			let (moq, session_driver) = moq_net::Client::new()
 				.with_subscriber(sub_origin.clone())
-				.connect_lite(
+				.connect(
 					moq_net::time::now(),
 					moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri),
 				)
 				.await
-				.expect("connect_lite");
+				.expect("connect");
 			tokio::spawn(moq_net::time::run(session_driver));
 
 			let bc = {
@@ -299,12 +335,15 @@ fn lite_session_over_webtransport() {
 
 			let (session, driver) = moq_net::Server::new()
 				.with_publisher(&serve_origin)
-				.accept_lite(
+				.accept(
 					moq_net::time::now(),
-					moq_uring::transport::Session::new(session, moq_net::transport::Binding::Uri),
+					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
+						session,
+						moq_net::transport::Binding::Uri,
+					)),
 				)
 				.await
-				.expect("accept_lite");
+				.expect("accept");
 			let task_handle = handle.clone();
 			handle.spawn(async move {
 				let _ = task_handle.run(driver).await;
@@ -340,8 +379,10 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 }
 
 /// A client whose CONNECT is expected to fail, reporting how it failed.
-// Its timeout is a watchdog on the tokio peer, not the worker.
-#[allow(clippy::disallowed_methods)]
+#[expect(
+	clippy::disallowed_methods,
+	reason = "its timeout is a watchdog on the tokio peer, not the worker"
+)]
 fn tokio_client_err(url: String) -> std::thread::JoinHandle<moq_tokio::quic::web::ClientError> {
 	std::thread::spawn(move || {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -703,7 +744,7 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 			let mut filler = session.accept_uni().await.expect("accept_uni");
 			read_all(&mut filler).await;
 
-			#[allow(clippy::disallowed_methods)] // A watchdog on the tokio peer, not the worker.
+			#[expect(clippy::disallowed_methods, reason = "a watchdog on the tokio peer, not the worker")]
 			let accept = tokio::time::timeout(std::time::Duration::from_secs(5), session.accept_uni());
 			let mut recv = accept.await.expect("the reset stream arrives").expect("accept_uni");
 			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");
@@ -911,7 +952,9 @@ fn cancelling_a_pending_web_handshake(send_settings: bool) {
 			let mut watch = conn.clone();
 			let mut control = None;
 			if send_settings {
-				let before = watch.stats().udp_rx.bytes;
+				let before = web_transport_trait::poll::Session::stats(&watch)
+					.bytes_received()
+					.expect("counted");
 				let mut stream = std::future::poll_fn(|cx| peer.poll_open_uni(cx))
 					.await
 					.expect("control stream");
@@ -929,7 +972,10 @@ fn cancelling_a_pending_web_handshake(send_settings: bool) {
 				control = Some(stream);
 				within(&handle, "peer SETTINGS to arrive", async {
 					loop {
-						if watch.stats().udp_rx.bytes > before {
+						if web_transport_trait::poll::Session::stats(&watch)
+							.bytes_received()
+							.expect("counted") > before
+						{
 							break;
 						}
 						let mut tick = moq_uring::Timer::after(&handle, std::time::Duration::from_millis(10));

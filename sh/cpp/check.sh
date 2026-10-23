@@ -2,8 +2,9 @@
 # Build and install cpp/moq, then build the probe against the installed package
 # at C++17, at C++23, and at C++23 over bindings at C++17 through CMake, and run
 # each. Outside Windows, also builds and runs it through pkg-config at C++17
-# and compiles the doc samples and benchmark runner. CXX picks the compiler on
-# Unix; Windows uses MSVC.
+# and compiles the doc samples and benchmark runner. The bindings compile once
+# per standard, and every consumer at that standard links them. CXX picks the
+# compiler on Unix; Windows uses MSVC.
 set -euo pipefail
 
 ffi_dir=""
@@ -26,8 +27,10 @@ fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../cpp"
 
-# Single-config generators build Debug. Visual Studio ignores CMAKE_BUILD_TYPE and gets
-# --config Release, since the Rust staticlib links the release CRT (/MD) either way.
+# Single-config generators build the package Debug, for cargo's dev profile. The consumers
+# clear the build type, since debug info only slows the bindings' compile and link. Visual
+# Studio ignores CMAKE_BUILD_TYPE and gets --config Release, since the Rust staticlib links
+# the release CRT (/MD) either way.
 build=moq/build
 if [[ -n "$ffi_dir" ]]; then build=moq/build/prebuilt; fi
 if [[ -n "$archive" ]]; then
@@ -58,19 +61,15 @@ else
 fi
 
 run() {
-    if [[ -x "$1/probe" ]]; then "$1/probe"; else "$1/Release/probe.exe"; fi
+    if [[ -x "$1/$2" ]]; then "$1/$2"; else "$1/Release/$2.exe"; fi
 }
 for std in 17 23; do
-    cmake -S moq/test -B "$build/test-$std" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD="$std" -DCMAKE_PREFIX_PATH="$prefix"
-    cmake --build "$build/test-$std" --config Release
-    run "$build/test-$std"
+    cmake -S moq/test -B "$build/test-$std" -DCMAKE_BUILD_TYPE= -DCMAKE_CXX_STANDARD="$std" -DCMAKE_PREFIX_PATH="$prefix"
+    cmake --build "$build/test-$std" --config Release --parallel
+    run "$build/test-$std" probe
 done
-
-# Bindings at C++17 under an app target raised to C++23: moq::expected is one type at every
-# standard, so the two link.
-cmake -S moq/test -B "$build/test-mixed" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_STANDARD=17 -DPROBE_CXX_STANDARD=23 -DCMAKE_PREFIX_PATH="$prefix"
-cmake --build "$build/test-mixed" --config Release
-run "$build/test-mixed"
+# The C++23 probe over the C++17 bindings.
+run "$build/test-17" probe-cxx23
 
 # The rest builds with `c++`, which on Windows is MinGW GCC and can't link the MSVC-built
 # package. MSVC consumers use the CMake package.
@@ -91,8 +90,15 @@ if command -v pkg-config >/dev/null 2>&1; then
     # Assigned first: set -e ignores a failing substitution inside a command's arguments.
     sources=$(pkg-config --variable=sources moq-cpp)
     flags=$(pkg-config --cflags --libs moq-cpp)
+    # Those sources already compiled at C++17 with these flags in test-17, so the probe links
+    # that library instead of compiling them again.
+    if [[ ! -f "$sources" ]]; then
+        echo "pkg-config sources not found: $sources" >&2
+        exit 1
+    fi
     mkdir -p "$build/pkg-config"
     # shellcheck disable=SC2086 # flags is a flag list.
-    "${CXX:-c++}" -std=c++17 -o "$build/pkg-config/probe" moq/test/probe.cpp "$sources" $flags
-    run "$build/pkg-config"
+    "${CXX:-c++}" -std=c++17 -fno-exceptions -fno-rtti -o "$build/pkg-config/probe" moq/test/probe.cpp \
+        "$build/test-17/libmoq-cpp.a" $flags
+    run "$build/pkg-config" probe
 fi

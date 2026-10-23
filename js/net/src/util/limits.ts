@@ -28,12 +28,17 @@ export class Slots {
 
 	/** Take one slot, or close the session with TOO_MANY_REQUESTS and throw at the cap. */
 	acquire() {
-		if (this.#live >= this.#max) {
-			const err = new Session(SessionCode.TooManyRequests, { reason: this.#reason });
-			this.#quic?.close({ closeCode: err.code, reason: this.#reason });
-			throw err;
-		}
+		if (this.tryAcquire()) return;
+		const err = new Session(SessionCode.TooManyRequests, { reason: this.#reason });
+		this.#quic?.close({ closeCode: err.code, reason: this.#reason });
+		throw err;
+	}
+
+	/** Take one slot, or leave the session alone and return false at the cap. */
+	tryAcquire(): boolean {
+		if (this.#live >= this.#max) return false;
 		this.#live += 1;
+		return true;
 	}
 
 	/** Give back `count` slots. */
@@ -68,15 +73,21 @@ export class SlotMap<K, V> extends Map<K, V> {
 	}
 }
 
-type Kind = "track" | "subscribe";
-type Counts = { track: number; subscribe: number };
+type Kind = "track" | "subscribe" | "tracks";
+type Counts = Record<Kind, number>;
+
+// A TRACK stream and its SUBSCRIBE are one interest; each listing is charged on top.
+function cost(counts: Counts): number {
+	return Math.max(counts.track, counts.subscribe) + counts.tracks;
+}
 
 /**
  * A session's subscription cap, charged per track as moq-net does.
  *
  * A TRACK stream held open and the SUBSCRIBE that follows it are one interest in the track,
  * so a track costs the larger of its two counts: a peer at the cap can still subscribe to
- * the tracks it holds.
+ * the tracks it holds. A TRACKS listing is charged under the empty track name on top of
+ * that, each until it is gone, replaced or not.
  *
  * @internal
  */
@@ -91,9 +102,17 @@ export class Interests {
 	/** Charge one request for `broadcast`'s `track` until the returned handle is released. */
 	acquire(broadcast: string, track: string, kind: Kind): Interest {
 		let tracks = this.#tracks.get(broadcast);
-		const counts = tracks?.get(track) ?? { track: 0, subscribe: 0 };
-		if (counts[kind] >= counts[kind === "track" ? "subscribe" : "track"]) this.#slots.acquire();
+		const counts = tracks?.get(track) ?? { track: 0, subscribe: 0, tracks: 0 };
+		const before = cost(counts);
 		counts[kind] += 1;
+		if (cost(counts) > before) {
+			try {
+				this.#slots.acquire();
+			} catch (err) {
+				counts[kind] -= 1;
+				throw err;
+			}
+		}
 		if (!tracks) {
 			tracks = new Map();
 			this.#tracks.set(broadcast, tracks);
@@ -106,9 +125,10 @@ export class Interests {
 		const tracks = this.#tracks.get(broadcast);
 		const counts = tracks?.get(track);
 		if (!tracks || !counts) throw new Error("interest already released");
-		if (counts[kind] > counts[kind === "track" ? "subscribe" : "track"]) this.#slots.release();
+		const before = cost(counts);
 		counts[kind] -= 1;
-		if (counts.track === 0 && counts.subscribe === 0) {
+		if (cost(counts) < before) this.#slots.release();
+		if (cost(counts) === 0) {
 			tracks.delete(track);
 			if (tracks.size === 0) this.#tracks.delete(broadcast);
 		}

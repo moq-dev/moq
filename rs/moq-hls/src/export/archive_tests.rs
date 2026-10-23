@@ -135,7 +135,7 @@ impl Recording {
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.unwrap();
 		let mut json = moq_json::snapshot::Config::default();
-		json.delta_ratio = 0;
+		json.deltas = false;
 		let mut catalog = moq_json::snapshot::Producer::new(track, json);
 		catalog
 			.update(moq_net::Timed::from(&self::catalog(archive)).at(Timestamp::now()))
@@ -152,7 +152,7 @@ impl Recording {
 			let timeline = broadcast.create_track(timeline_name(name), timeline).unwrap();
 			let mut config = window::ProducerConfig::default()
 				.with_compression(true)
-				.with_op_ratio(0);
+				.with_ops(false);
 			if let Some(limit) = checkpoint {
 				config = config.with_checkpoint_records(limit);
 			}

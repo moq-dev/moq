@@ -1119,6 +1119,7 @@ pub(crate) fn h264_keyframe_au() -> Bytes {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1600,20 +1601,6 @@ mod tests {
 		);
 	}
 
-	// An unsupported media type fails the pad rather than the session.
-	#[test]
-	fn unsupported_caps_fails_the_pad() {
-		gst::init().unwrap();
-		let (broadcast, catalog) = producers();
-		let mut pad = Pad::new();
-		pad.observe_caps(
-			&broadcast,
-			&catalog,
-			producer_options(&gst::Caps::builder("video/x-raw").build(), None),
-		);
-		assert!(pad.is_failed());
-	}
-
 	// An opaque track nobody can name is unfindable: it is absent from the catalog by design, so a
 	// generated name would publish bytes no consumer could ask for.
 	#[test]
@@ -1874,6 +1861,7 @@ mod tests {
 	}
 
 	// A failed pad drops further buffers (and never panics) instead of writing them.
+	// An unsupported media type fails the pad rather than the session.
 	#[test]
 	fn failed_pad_drops_buffers() {
 		gst::init().unwrap();
@@ -1970,23 +1958,6 @@ mod tests {
 		assert!(
 			subscriber.largest().await.is_some(),
 			"the IDR AU emitted a frame to the track"
-		);
-	}
-
-	// A regressing PTS within an Active timeline still emits: frames arrive in decode order and B-frames
-	// carry non-monotonic presentation timestamps, so a PTS regression is reordering, not an error.
-	#[test]
-	fn regressing_pts_within_an_active_timeline_still_emits() {
-		gst::init().unwrap();
-		let mut pad = Pad::new();
-		pad.observe_segment(time_segment_at(0, 0));
-		assert_eq!(
-			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(10_000))),
-			Ok(10_000_000)
-		);
-		assert_eq!(
-			pad.frame_timestamp(Some(gst::ClockTime::from_mseconds(6_000))),
-			Ok(6_000_000)
 		);
 	}
 

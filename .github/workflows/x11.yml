@@ -31,11 +31,13 @@ jobs:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
       - name: Capture comparison
+        id: capture
         run: nix develop --command just rs x11-bench-ci
         env:
           MOQ_X11_BENCH_LOG: ${{ runner.temp }}/x11-capture-benchmark.log
+      # Only after the comparison ran, so a setup failure stays the job's only error.
       - name: Keep capture measurements
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.capture.outcome != 'skipped' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: x11-capture-benchmark

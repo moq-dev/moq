@@ -1,8 +1,10 @@
 // An open Track Stream is interest in the track: the subscriber keeps it open until its
 // SUBSCRIBE is answered, and the publisher keeps the track wanted until the subscriber closes it.
+
 import { describe, expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { randomHop } from "../hop.ts";
+import { Version as IetfVersion } from "../ietf/version.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -380,6 +382,38 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 
 		publisher.close();
 		broadcast.close();
+		origin.close();
+	});
+
+	// Timestamps received over moq-transport may be arrival times, so they never enter moq-lite,
+	// whose receivers check every timestamp: the track is served untimed (milliseconds of send
+	// time before lite-07).
+	test("an unchecked track is served untimed", async () => {
+		const pair = createMockTransportPair(ALPN_05);
+		const origin = new OriginProducer();
+		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+		const broadcast = origin.createBroadcast(Path.from("room"));
+		broadcast.announce();
+		const serving = (async () => {
+			for (;;) {
+				const request = await wireOf(broadcast).requested();
+				if (!request) return;
+				request.accept({ timescale: Timescale.MICRO, ietf: IetfVersion.DRAFT_22 });
+			}
+		})();
+
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("the publisher never accepted the TRACK stream");
+		void publisher.runTrackInfo(new TrackMessage(Path.from("room"), "video"), server);
+
+		const info = await TrackInfo.decode(client.reader, version);
+		expect(info.timescale).toBe(version === Version.DRAFT_07 ? undefined : Timescale.MILLI);
+
+		client.writer.close();
+		publisher.close();
+		broadcast.close();
+		await serving;
 		origin.close();
 	});
 });

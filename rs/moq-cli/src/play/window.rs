@@ -317,10 +317,8 @@ impl ApplicationHandler<Event> for App {
 					display.window.request_redraw();
 				}
 			}
-			// winit waits on the host clock, so the deadline converts at this boundary.
-			Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(
-				std::time::Instant::now() + deadline.saturating_duration_since(now),
-			)),
+			// winit waits on std's clock.
+			Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline.into_std())),
 			None => event_loop.set_control_flow(ControlFlow::Wait),
 		}
 	}

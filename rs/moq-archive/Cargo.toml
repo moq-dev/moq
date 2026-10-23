@@ -39,3 +39,6 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "test-uti
 [[bench]]
 name = "producer"
 harness = false
+
+[lints]
+workspace = true

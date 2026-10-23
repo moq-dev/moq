@@ -215,6 +215,19 @@ impl Mux {
 		streams: &[(u8, u16, &[u8])],
 		info: usize,
 	) -> &mut Self {
+		self.pmt_at(0, pid, program, pcr_pid, streams, info)
+	}
+
+	/// A [`Self::pmt_with`] at `version_number` `version`.
+	pub(super) fn pmt_at(
+		&mut self,
+		version: u8,
+		pid: u16,
+		program: u16,
+		pcr_pid: u16,
+		streams: &[(u8, u16, &[u8])],
+		info: usize,
+	) -> &mut Self {
 		let mut descriptors = Vec::new();
 		while descriptors.len() < info {
 			let len = (info - descriptors.len()).clamp(2, 200) - 2;
@@ -239,7 +252,7 @@ impl Mux {
 			]);
 			body.extend_from_slice(info);
 		}
-		self.section(pid, &psi::section(psi::PMT_TABLE_ID, program, 0, 0, 0, &body))
+		self.section(pid, &psi::section(psi::PMT_TABLE_ID, program, version, 0, 0, &body))
 	}
 
 	pub(super) fn bytes(&self) -> Vec<u8> {

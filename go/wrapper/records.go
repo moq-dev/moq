@@ -1,6 +1,7 @@
 package moq
 
 import (
+	"math"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
@@ -11,7 +12,12 @@ import (
 // target language has a duration type. These records mirror the generated ones
 // with time.Duration fields and convert at the boundary.
 
+// fromMicros saturates past time.Duration's ~292 years, which a peer's delay or
+// max age can exceed, rather than wrapping to a negative duration.
 func fromMicros(us uint64) time.Duration {
+	if us > uint64(math.MaxInt64/int64(time.Microsecond)) {
+		return time.Duration(math.MaxInt64)
+	}
 	return time.Duration(us) * time.Microsecond
 }
 
@@ -64,7 +70,7 @@ func datagramFromFFI(d *ffi.MoqDatagram) *Datagram {
 // empty non-nil slice asks for nothing), and the order the publisher sends pending
 // groups in (nil for newest first).
 type Subscription struct {
-	Priority uint8
+	Priority int8
 	MaxDelay *time.Duration
 	Ranges   []Range
 	Order    *Order
@@ -96,11 +102,11 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 // non-latest group is cached (nil for no limit), how many times its first frame
 // a group's later bytes may grow before a joining subscriber asks for a new group
 // (nil never asks), and the timescale in ticks per second (nil means untimed on
-// both publish and receive). A zero Priority is the least urgent; set 127 for the
+// both publish and receive). Priority is higher first; the zero Priority is the
 // midpoint a nil TrackInfo uses. Compress DEFLATEs each group on the wire to peers
 // that support it; readers always see the original frames.
 type TrackInfo struct {
-	Priority  uint8
+	Priority  int8
 	MaxAge    *time.Duration
 	Refresh   *uint32
 	Timescale *uint64

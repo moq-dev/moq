@@ -81,4 +81,51 @@ class Load(unittest.TestCase):
                 compare.load(root, "video")
 
 
+class Criterion(unittest.TestCase):
+    def test_full_ids_with_the_same_truncated_title(self):
+        prefix = "session_fanout/" + "a" * 100
+        ids = [prefix + "/publishers=1/readers=16", prefix + "/publishers=16/readers=1"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, benchmark in enumerate(ids):
+                path = root / f"truncated_{index}" / "discovery"
+                path.mkdir(parents=True)
+                (path / "benchmark.json").write_text(json.dumps({"full_id": benchmark}))
+            # Stale real measurements must not join the discovery inventory.
+            path = root / "old" / "new"
+            path.mkdir(parents=True)
+            (path / "benchmark.json").write_text(json.dumps({"full_id": "stale"}))
+            self.assertEqual(compare.criterion_cases(root), sorted(ids))
+
+    def test_baseline_follows_full_id_when_directory_suffix_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            samples = root / "samples"
+            old = samples / "truncated" / "base"
+            current = root / "discovery"
+            new = current / "truncated_2" / "discovery"
+            old.mkdir(parents=True)
+            new.mkdir(parents=True)
+            benchmark = "session/" + "long-" * 30
+            for path in (old, new):
+                (path / "benchmark.json").write_text(json.dumps({"full_id": benchmark}))
+            (old / "sample.json").write_text('{"measured": true}')
+            compare.criterion_baseline(samples, current, benchmark)
+            self.assertEqual((samples / "truncated_2" / "base" / "sample.json").read_text(), '{"measured": true}')
+            with self.assertRaises(ValueError):
+                compare.criterion_baseline(samples, current, "unmatched")
+
+    def test_empty_or_unrepresentable_inventory_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(ValueError):
+                compare.criterion_cases(root)
+            path = root / "case" / "discovery"
+            path.mkdir(parents=True)
+            for value in [None, "", "bad\tcase", "bad\ncase"]:
+                (path / "benchmark.json").write_text(json.dumps({"full_id": value}))
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    compare.criterion_cases(root)
+
+
 unittest.main()

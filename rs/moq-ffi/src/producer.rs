@@ -13,13 +13,13 @@ use crate::media::MoqFrame;
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 127, no publisher age limit, untimed).
+/// (priority 0, no publisher age limit, untimed).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
-	/// Higher is more urgent; the default 127 is the midpoint.
-	#[uniffi(default = 127)]
-	pub priority: u8,
+	/// Higher is more urgent; the default 0 is the midpoint.
+	#[uniffi(default = 0)]
+	pub priority: i8,
 	/// Maximum age of a non-latest group before the publisher evicts it, in
 	/// microseconds. Null imposes no publisher age limit. This is the publisher-side half of
 	/// [`MoqSubscription::max_delay_us`](crate::consumer::MoqSubscription::max_delay_us).
@@ -282,7 +282,7 @@ impl MoqBroadcastProducer {
 	/// Until announced, the broadcast is invisible and unroutable for local
 	/// consumers and peers alike. Announcing again re-prices the route in place.
 	/// Errors with `Closed` on a standalone broadcast (no origin to announce on).
-	pub fn announce(&self, route: crate::origin::MoqRoute) -> Result<(), MoqError> {
+	pub fn announce(&self, route: crate::origin::MoqAnnounceRoute) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let route: moq_net::origin::Route = route.try_into()?;
 		self.with_state(|state| {
@@ -376,7 +376,9 @@ impl MoqBroadcastProducer {
 /// A cleanly ended broadcast, still announced and serving its finished tracks.
 ///
 /// Returned by [`MoqBroadcastProducer::finish`]. Closing or dropping it closes the broadcast,
-/// which is how an interrupt ends the linger early.
+/// which is how an interrupt ends the linger early. A garbage-collected language (Kotlin, Go,
+/// Dart) drops it only when the collector reclaims it, possibly long after the last reference
+/// goes, so wait on or close it rather than leave it for the collector.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastFinish {
 	linger: std::time::Duration,
@@ -486,7 +488,8 @@ impl MoqTrackDynamic {
 /// Call [`accept`](Self::accept) for each group you have and [`drop_groups`](Self::drop_groups)
 /// for the rest; [`next`](Self::next) names what is still owed, in the fill's order. Releasing
 /// it names whatever is left as dropped while a reader still wants it; once nobody does, it is
-/// withdrawn, so stop serving it when [`unused`](Self::unused) resolves.
+/// withdrawn, so stop serving it when [`unused`](Self::unused) resolves. Stop serving a single
+/// group when [`unwanted`](Self::unwanted) resolves for it, and move on to the next.
 #[derive(uniffi::Object)]
 pub struct MoqFill {
 	inner: Arc<moq_net::track::Fill>,
@@ -510,7 +513,7 @@ impl MoqFill {
 	}
 
 	/// The most urgent delivery priority among the readers waiting on it.
-	pub fn priority(&self) -> u8 {
+	pub fn priority(&self) -> i8 {
 		self.inner.priority()
 	}
 
@@ -559,6 +562,22 @@ impl MoqFill {
 		let fill = self.inner.clone();
 		crate::ffi::detached(async move {
 			fill.unused().await;
+			Ok::<_, MoqError>(())
+		})
+		.await
+	}
+
+	/// Whether a reader still waits for group `sequence` from this fill: false once every
+	/// reader took it or narrowed past it, or nobody waits on the fill.
+	pub fn is_wanted(&self, sequence: u64) -> bool {
+		self.inner.is_wanted(sequence)
+	}
+
+	/// Wait until no reader waits for group `sequence` from this fill, so stop serving it.
+	pub async fn unwanted(&self, sequence: u64) -> Result<(), MoqError> {
+		let fill = self.inner.clone();
+		crate::ffi::detached(async move {
+			fill.unwanted(sequence).await;
 			Ok::<_, MoqError>(())
 		})
 		.await

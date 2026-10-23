@@ -20,6 +20,14 @@ moq --connect https://relay.example.com/anon --broadcast my-stream.hang import h
 The CLI serves the one `--broadcast` it was given, at
 `/{broadcast}/master.m3u8` and `/{broadcast}/manifest.mpd`.
 
+Import follows a live playlist until every rendition's playlist ends with
+`EXT-X-ENDLIST`, then keeps the finished broadcast up until its media is stale
+(see [retention](/bin/cli#retention-and-latency)). An `EXT-X-DISCONTINUITY`
+keeps the source's timestamps. Timestamp resets are not supported: if a
+rendition's timestamps go backwards under the same `EXT-X-MAP`, such as an
+encoder restart, the import fails with an error. Import the restarted source
+as a new broadcast.
+
 ## How export works
 
 Export never subscribes to media. It reads each rendition's
@@ -72,7 +80,8 @@ and `--cors-origin` opens it to browsers. See `moq export hls --help`.
 
 Import handles classic HLS; LL-HLS parts are not implemented. It publishes the
 playlist's own media times, and anchors the catalog clock on the first imported
-segment.
+segment. Each fMP4 segment is split into one frame per sample; `--passthrough`
+publishes each fragment whole as CMAF instead, keeping its exact sample timing.
 
 The library, including the recorder cursors for mirroring a broadcast to
 storage, is [`moq-hls`](https://docs.rs/moq-hls).

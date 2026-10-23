@@ -91,19 +91,19 @@ jobs:
       - uses: ./.github/actions/just
 
       # ── client toolchains ──────────────────────────────────────────────
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
-      - uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
           java-version: "21"
-      - uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
         with:
           gradle-version: "8.14.4"
 
@@ -399,6 +399,8 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
+      # Delete a Pages artifact left by an earlier run attempt.
+      actions: write
       contents: write
       pages: write
       id-token: write
@@ -422,6 +424,12 @@ jobs:
 
       - name: Commit report
         run: just publish "$RUNNER_TEMP/relay-report" "$RUNNER_TEMP/pages"
+
+      - name: Drop a stale Pages artifact
+        working-directory: .
+        run: just gh pages-clean
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Upload site
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
@@ -454,7 +462,7 @@ jobs:
       # `cargo build` through it; without mise, setup only reports where the
       # shim lives, so put that directory first on PATH (as moq's dev shell
       # does). `--status` exits non-zero when there is no shim.
-      - uses: jdx/mr-boxington-action@9df1d4b18b2147788a7ee7a2c7b84ecf62fd89d3 # v1.5.0
+      - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
         with:
           version: 1.17.0
           github-cache-mode: objects
@@ -494,7 +502,7 @@ jobs:
       # `cargo build` through it; without mise, setup only reports where the
       # shim lives, so put that directory first on PATH (as moq's dev shell
       # does). `--status` exits non-zero when there is no shim.
-      - uses: jdx/mr-boxington-action@9df1d4b18b2147788a7ee7a2c7b84ecf62fd89d3 # v1.5.0
+      - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
         with:
           version: 1.17.0
           github-cache-mode: objects

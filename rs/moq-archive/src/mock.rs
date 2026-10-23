@@ -36,6 +36,8 @@ struct State {
 	fail_puts: Vec<String>,
 	/// GETs whose path contains any of these return Not Found.
 	hide_gets: Vec<String>,
+	/// GETs whose path contains the pattern wait for a permit before reading.
+	stall_gets: Vec<(String, Arc<tokio::sync::Semaphore>)>,
 	/// Deletes whose path contains any of these fail.
 	fail_deletes: Vec<String>,
 	/// Streaming listings end with an error after every entry.
@@ -100,6 +102,13 @@ impl Mock {
 	pub fn hide_gets(&self, pattern: &str) -> &Self {
 		self.state().hide_gets.push(pattern.to_string());
 		self
+	}
+
+	/// Hold every GET whose path contains `pattern` until the returned semaphore gets a permit.
+	pub fn stall_gets(&self, pattern: &str) -> Arc<tokio::sync::Semaphore> {
+		let gate = Arc::new(tokio::sync::Semaphore::new(0));
+		self.state().stall_gets.push((pattern.to_string(), gate.clone()));
+		gate
 	}
 
 	pub fn fail_deletes(&self, pattern: &str) -> &Self {
@@ -232,6 +241,15 @@ impl ObjectStore for Mock {
 				path: location.to_string(),
 				source: "hidden".into(),
 			});
+		}
+		let stall = self
+			.state()
+			.stall_gets
+			.iter()
+			.find(|(pattern, _)| location.as_ref().contains(pattern))
+			.map(|(_, gate)| gate.clone());
+		if let Some(gate) = stall {
+			gate.acquire().await.expect("stall gate closed").forget();
 		}
 		self.inner.get_opts(location, options).await
 	}

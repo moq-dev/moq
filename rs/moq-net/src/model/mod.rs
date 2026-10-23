@@ -25,8 +25,6 @@ mod delivered;
 mod expiry;
 // The DEFLATE codec behind compressed tracks.
 mod flate;
-// pending: /quest/m1/public-model/ingest.md
-pub(crate) mod ledger;
 // private: passthrough
 pub(crate) mod object;
 mod requests;
@@ -55,8 +53,8 @@ pub use timed::Timed;
 pub mod origin {
 	pub use super::follow::AnnouncedBroadcast;
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, Preference, Prepared, Producer, Request,
-		Requesting, Route, Routing, Source,
+		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, HopLimit, Preference, Prepared, Producer,
+		Request, Requesting, Route, Routing, Source,
 	};
 }
 
@@ -79,6 +77,11 @@ pub(crate) use origin_impl::interest_prefixes;
 #[cfg(feature = "async")]
 // pending: /quest/m1/public-model/answer.md
 pub(crate) use origin_impl::Snapshot;
+
+// What a client session asks its peer to announce, as the origin's readers change.
+#[cfg(feature = "async")]
+// pending: /quest/m1/public-model/answer.md
+pub(crate) use origin_impl::{InterestChange, Interests};
 
 // The advertise-only route guard, for tests shaping the route table.
 #[cfg(all(test, feature = "async"))]

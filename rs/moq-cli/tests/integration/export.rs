@@ -848,9 +848,19 @@ fn redundant_feed() -> (tokio::sync::mpsc::UnboundedSender<ChildStdin>, JoinHand
 	(add, task)
 }
 
-/// Start an importer of the live source on lite-07, with `flags` for `import ts`.
+/// Start an importer of the live source on lite-07, with `flags` for `import ts`. A killed
+/// importer sends no close, so the relay keeps its route until the QUIC idle timeout: a short
+/// one, as a redundant ingest would run, keeps that outage to seconds.
 fn redundant_import(relay: &Relay, feed: &tokio::sync::mpsc::UnboundedSender<ChildStdin>, flags: &[&str]) -> Child {
-	let mut child = moq(relay, &["--connect-version", LITE_07])
+	let global = [
+		"--connect-version",
+		LITE_07,
+		"--quic-idle-timeout",
+		"2s",
+		"--quic-keep-alive",
+		"500ms",
+	];
+	let mut child = moq(relay, &global)
 		.args(["import", "--max-age", "10s", "ts"])
 		.args(flags)
 		.stdin(Stdio::piped())
@@ -928,7 +938,10 @@ async fn redundant_failover(bufferbloat: bool) {
 		for export in &mut exports {
 			tokio::time::timeout(TIMEOUT, async {
 				loop {
-					assert!(export.child.try_wait().unwrap().is_none(), "stitching export exited");
+					if export.child.try_wait().unwrap().is_some() {
+						let errors = (&mut export.stderr).await.expect("collect exporter stderr");
+						panic!("stitching export exited: {errors}");
+					}
 					if packets(&export.output.lock().unwrap())
 						.filter_map(|packet| pat_version(packet))
 						.any(|v| v == version)

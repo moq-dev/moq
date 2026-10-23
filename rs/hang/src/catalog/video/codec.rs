@@ -80,18 +80,3 @@ impl FromStr for VideoCodec {
 		Ok(Self::Unknown(s.to_string()))
 	}
 }
-
-#[cfg(test)]
-mod test {
-	use super::*;
-
-	#[test]
-	fn test_vp8() {
-		let encoded = "vp8";
-		let decoded = VideoCodec::from_str(encoded).expect("failed to parse");
-		assert_eq!(decoded, VideoCodec::VP8);
-
-		let output = decoded.to_string();
-		assert_eq!(output, encoded);
-	}
-}

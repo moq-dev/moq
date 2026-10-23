@@ -23,8 +23,12 @@
 //! A reconnecting client rides out a restart on the same address: the GOAWAYs
 //! the drain sends its redials must not exhaust its retry window.
 //!
+//! The relay owns its signals from before it serves, so a signal right after
+//! READY drains rather than kills it, yet a relay whose startup fails leaves
+//! them to their default action for an embedder that recovers.
+//!
 //! A raised signal reaches every listener in the process, and a relay exits at
-//! once on its second one, so the tests that raise SIGINT hold [`SIGINT`]:
+//! once on its second one, so the tests that raise a signal hold [`SIGINT`]:
 //! `cargo test` (the Nix check phase) runs them as threads of one process.
 //! `a_trigger_before_run_keeps_the_deadline` fires the trigger before `run`
 //! instead of a signal.
@@ -41,7 +45,7 @@ use moq_relay::{Config, Relay, auth};
 /// keeps `Relay::run` up this long.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Held by every test that raises SIGINT, so one test's signal cannot drain (or,
+/// Held by every test that raises a signal, so one test's signal cannot drain (or,
 /// as a second signal, kill) another test's relay.
 static SIGINT: Mutex<()> = Mutex::new(());
 
@@ -68,6 +72,34 @@ fn run_test<F: std::future::Future<Output = ()> + 'static>(test: fn() -> F) {
 fn sigint_drains_sessions_before_exiting() {
 	let _sigint = SIGINT.lock().unwrap_or_else(|e| e.into_inner());
 	run_test(sigint_drains_sessions_before_exiting_inner);
+}
+
+#[test]
+fn a_signal_right_after_ready_drains() {
+	let _sigint = SIGINT.lock().unwrap_or_else(|e| e.into_inner());
+	run_test(a_signal_right_after_ready_drains_inner);
+}
+
+/// The default action has to survive a failed startup, and only a fresh process
+/// shows it: a handler anything else in this one installed would hide a leak.
+#[test]
+fn a_failed_startup_leaves_the_signals_alone() {
+	const CHILD: &str = "MOQ_RELAY_FAILED_STARTUP_CHILD";
+	if std::env::var_os(CHILD).is_some() {
+		run_test(a_failed_startup_leaves_the_signals_alone_inner);
+		return;
+	}
+	let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+		.args(["--exact", "shutdown_signal::a_failed_startup_leaves_the_signals_alone"])
+		.env(CHILD, "1")
+		.status()
+		.expect("spawn the child test process");
+	use std::os::unix::process::ExitStatusExt;
+	assert_eq!(
+		status.signal(),
+		Some(libc::SIGTERM),
+		"SIGTERM did not kill the process after a failed startup: {status}"
+	);
 }
 
 #[test]
@@ -143,6 +175,55 @@ async fn sigint_drains_sessions_before_exiting_inner() {
 		"relay exited after {:?}, short of the {DRAIN_TIMEOUT:?} drain window",
 		signalled.elapsed()
 	);
+}
+
+async fn a_signal_right_after_ready_drains_inner() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	let relay = Relay::load(relay_config()).await.expect("load relay");
+	let port = relay.tcp_addr().expect("TCP listener bound").port();
+	let ready = relay.ready();
+	let run = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
+
+	let connection = connect(&client(Vec::new()), port).await;
+	let draining = connection.draining().expect("connected");
+	// SAFETY: raise has no memory-safety preconditions. Nothing else here listens
+	// for SIGTERM, so in a process of its own (nextest) the relay's handler is all
+	// that keeps this from killing the test.
+	assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0, "failed to raise SIGTERM");
+	let goaway = tokio::time::timeout(Duration::from_secs(5), draining.recv())
+		.await
+		.expect("no GOAWAY within 5s of SIGTERM")
+		.expect("session closed without a GOAWAY");
+	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
+	tokio::time::timeout(Duration::from_secs(15), run)
+		.await
+		.expect("relay never exited after the drain")
+		.expect("relay task panicked")
+		.expect("relay exited with an error");
+}
+
+async fn a_failed_startup_leaves_the_signals_alone_inner() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+	// The cluster starts last before the relay serves, and an unreadable token
+	// fails it.
+	let dir = tempfile::tempdir().expect("tempdir");
+	let mut config = relay_config();
+	config.cluster.connect = vec![moq_relay::cluster::Peer::new("https://127.0.0.1:9")];
+	config.cluster.token = Some(dir.path().join("missing.jwt"));
+	let err = Relay::load(config)
+		.await
+		.expect("load relay")
+		.run()
+		.await
+		.expect_err("started without its cluster token");
+	assert!(format!("{err:#}").contains("cluster token"), "{err:#}");
+
+	// SAFETY: raise has no memory-safety preconditions. With the default action
+	// this never returns.
+	unsafe { libc::raise(libc::SIGTERM) };
 }
 
 async fn an_embedder_owns_the_signals_inner() {

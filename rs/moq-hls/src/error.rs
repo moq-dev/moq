@@ -144,6 +144,16 @@ pub enum Error {
 		/// Why the timeline failed.
 		source: Box<Error>,
 	},
+
+	/// Import refused a rendition whose timestamps went backwards, such as a reset at an
+	/// `EXT-X-DISCONTINUITY` under the same init segment. A restarted source is a new broadcast.
+	#[error("rendition {rendition} rewound its timestamps; HLS import refuses a timestamp reset: {source}")]
+	Rewind {
+		/// The rendition's label.
+		rendition: String,
+		/// The rewind the importer refused.
+		source: moq_mux::Error,
+	},
 }
 
 impl Error {
@@ -180,15 +190,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	/// The import loop consults this, so an origin's settled answer has to reach it intact.
-	#[test]
-	fn an_http_failure_reports_its_status() {
-		// A failure the origin never answered carries no status, so the budget decides instead.
-		assert_eq!(Error::NoVariants.status(), None);
-		assert_eq!(Error::ParsePlaylist("not a playlist".to_string()).status(), None);
-		assert_eq!(Error::Moq(moq_net::Error::Transport("lost".to_string())).status(), None);
-	}
 
 	#[tokio::test]
 	async fn http_error_redacts_url() {

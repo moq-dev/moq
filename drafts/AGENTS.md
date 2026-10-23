@@ -9,7 +9,7 @@ just drafts check                             # every draft still parses
 just drafts publish <name> <version> <email>  # submit to the datatracker
 ```
 
-`publish` POSTs to the datatracker; the version is final only after clicking the emailed confirmation link. For a new draft, set "Replaces" on the confirmation page. The first build needs network access to fetch bibxml into `.refcache/`.
+`README.md` covers publishing. The first build needs network access to fetch bibxml into `.refcache/`.
 
 # Conventions
 
@@ -17,7 +17,6 @@ just drafts publish <name> <version> <email>  # submit to the datatracker
 - `docname` ends in `-latest`; `publish` rewrites it. Never hardcode a version in the source.
 - A wire-format or semantic change adds a bullet to the draft's changelog appendix under the in-progress version. List what changed, not why.
 - Don't add a section for an unpublished next version; edit the in-progress one.
-- `remark` skips these files; a successful `kramdown-rfc` run is the syntax check.
 - Follow IETF contribution rules (BCP 78/79), see `CONTRIBUTING.md` here.
 
 # Documentation site

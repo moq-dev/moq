@@ -233,7 +233,7 @@ mod linux {
 		target.ctx.retain(|tid| live.contains(&tid));
 
 		Ok(Sample {
-			timestamp_ms: SystemTime::now()
+			timestamp_ms: SystemTime::from(moq_clock::wall())
 				.duration_since(UNIX_EPOCH)
 				.unwrap_or_default()
 				.as_millis(),
@@ -280,7 +280,7 @@ mod linux {
 				.join(", ")
 		);
 
-		let start = std::time::Instant::now();
+		let start = moq_clock::now();
 		loop {
 			// Host-wide once per round: unlike the per-target reads inside `sample`,
 			// a failure here is not a target exiting, so it fails the run.
@@ -313,6 +313,10 @@ mod linux {
 			) else {
 				return Ok(());
 			};
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the sampler runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(delay);
 		}
 	}
@@ -345,9 +349,8 @@ mod linux {
 			let err = usage_rs::render_failure(Args::spec(), &argv, &err);
 			assert!(err.contains("greater than 0s"), "unexpected error: {err}");
 
-			// Nonzero still parses, and the default holds.
-			let args = Args::parse_from(&[]).unwrap();
-			assert_eq!(args.interval, PositiveDuration(Duration::from_secs(1)));
+			// The default still passes the same check.
+			Args::parse_from(&[]).unwrap();
 		}
 
 		/// A duration shorter than the interval must cap the sleep, not stretch the

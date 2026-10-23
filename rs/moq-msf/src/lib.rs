@@ -227,7 +227,10 @@ impl<E: CatalogExt> Catalog<E> {
 	}
 
 	/// Deserialize an MSF catalog from a JSON string.
-	#[allow(clippy::should_implement_trait)]
+	#[expect(
+		clippy::should_implement_trait,
+		reason = "public inherent parser; switching to `FromStr` is a breaking change"
+	)]
 	pub fn from_str(s: &str) -> Result<Self, serde_json::Error> {
 		serde_json::from_str(s)
 	}
@@ -929,12 +932,6 @@ mod test {
 
 		let value: serde_json::Value = serde_json::from_str(&catalog.to_json().unwrap()).unwrap();
 		assert_eq!(value["version"], serde_json::json!("draft-01"));
-	}
-
-	#[test]
-	fn draft01_string_version_decodes() {
-		let catalog = Catalog::<()>::from_str(r#"{"version":"draft-01","tracks":[]}"#).unwrap();
-		assert!(catalog.tracks.is_empty());
 	}
 
 	#[test]

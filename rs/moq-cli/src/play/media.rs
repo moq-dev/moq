@@ -708,10 +708,11 @@ async fn play_audio<O: Output>(
 async fn drain(sink: impl Sink) {
 	// The estimated target moves, so the depth the sink was opened with says
 	// nothing about what it holds now: read it at retirement instead.
-	let _ = tokio::time::timeout(sink.buffered() + AUDIO_DRAIN_GRACE, sink.finish()).await;
+	let _ = moq_clock::timeout(sink.buffered() + AUDIO_DRAIN_GRACE, sink.finish()).await;
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use bytes::Bytes;
 	use hang::catalog::{AudioCodec, AudioConfig};

@@ -14,7 +14,7 @@ use std::{
 /// Name of the track carrying the chat window.
 pub const TRACK: &str = "chat";
 /// Delivery priority, below audio and video.
-pub const PRIORITY: u8 = 10;
+pub const PRIORITY: i8 = 10;
 /// How long a published message stays in the window.
 pub const HISTORY: Duration = Duration::from_secs(10);
 /// A message entering, leaving, or missed from the window.
@@ -77,7 +77,7 @@ impl Publisher {
 		Self {
 			producer: moq_json::window::Producer::new(
 				track,
-				moq_json::window::ProducerConfig::default().with_op_ratio(0),
+				moq_json::window::ProducerConfig::default().with_ops(false),
 			),
 			expires: VecDeque::new(),
 			deadline: Deadline::new(),
@@ -151,8 +151,9 @@ impl Subscriber {
 		}
 	}
 
-	/// Poll the next window change, returning errors separately from clean completion.
-	pub fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Event>, Error>> {
+	/// Poll the next window change and when its frame was sent, returning errors separately from
+	/// clean completion.
+	pub fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<Event>>, Error>> {
 		if let State::Positioning(pending) = &mut self.state {
 			let track = pending.as_mut().expect("positioning holds the track");
 			// The newest window is known only once the feed is live: a relay copy still waiting
@@ -170,8 +171,10 @@ impl Subscriber {
 		Poll::Ready(Ok(ready!(consumer.poll_next(waiter))?))
 	}
 
-	/// Wait for the next window change, or None on clean completion.
-	pub async fn recv(&mut self) -> Result<Option<Event>, Error> {
+	/// Wait for the next window change and when its frame was sent, or None on clean completion.
+	///
+	/// A message first seen in a later window's header carries that header's time, not its send time.
+	pub async fn recv(&mut self) -> Result<Option<moq_net::Timed<Event>>, Error> {
 		kio::wait(|waiter| self.poll_recv(waiter)).await
 	}
 }
@@ -187,19 +190,24 @@ mod tests {
 		let mut publisher = Publisher::create(&mut broadcast).unwrap();
 		let mut subscriber = Subscriber::subscribe(&broadcast.consume()).await.unwrap();
 		publisher.send("first").unwrap();
+		let first = subscriber.recv().await.unwrap().unwrap();
+		assert!(first.at.is_some(), "a sent message carries its send time");
 		assert_eq!(
-			subscriber.recv().await.unwrap(),
-			Some(Event::Push {
+			first.value,
+			Event::Push {
 				index: 0,
 				value: "first".into()
-			})
+			}
 		);
 		publisher.expire().await.unwrap();
-		assert_eq!(subscriber.recv().await.unwrap(), Some(Event::Pop(0..1)));
+		assert_eq!(
+			subscriber.recv().await.unwrap().map(|e| e.value),
+			Some(Event::Pop(0..1))
+		);
 		publisher.send("second").unwrap();
 		let mut late = Subscriber::subscribe(&broadcast.consume()).await.unwrap();
 		assert_eq!(
-			late.recv().await.unwrap(),
+			late.recv().await.unwrap().map(|e| e.value),
 			Some(Event::Push {
 				index: 1,
 				value: "second".into()
@@ -247,18 +255,12 @@ mod tests {
 			.with_subscriber(to.clone());
 		tokio::join!(
 			async {
-				let (session, driver) = client
-					.connect_lite(moq_net::time::now(), client_transport)
-					.await
-					.unwrap();
+				let (session, driver) = client.connect(moq_net::time::now(), client_transport).await.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			},
 			async {
-				let (session, driver) = server
-					.accept_lite(moq_net::time::now(), server_transport)
-					.await
-					.unwrap();
+				let (session, driver) = server.accept(moq_net::time::now(), server_transport).await.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			}
@@ -277,7 +279,7 @@ mod tests {
 		let mut demand = track.demand();
 		let mut chat = moq_json::window::Producer::<String>::new(
 			track,
-			moq_json::window::ProducerConfig::default().with_op_ratio(0),
+			moq_json::window::ProducerConfig::default().with_ops(false),
 		);
 		let at = |millis| moq_net::Timestamp::from_millis(millis).unwrap();
 		chat.push(moq_net::Timed::from(&"first".to_owned()).at(at(0))).unwrap();
@@ -292,11 +294,14 @@ mod tests {
 		{
 			let mut warm = Subscriber::subscribe(&remote).await.unwrap();
 			assert_eq!(
-				warm.recv().await.unwrap(),
-				Some(Event::Push {
-					index: 0,
-					value: "first".into()
-				})
+				warm.recv().await.unwrap().map(|e| (e.value, e.at)),
+				Some((
+					Event::Push {
+						index: 0,
+						value: "first".into()
+					},
+					Some(at(0))
+				))
 			);
 		}
 		// The relay cancels the unread upstream subscription; its copy keeps the window.
@@ -308,11 +313,14 @@ mod tests {
 		let subscription = track::Subscription::default().with_max_delay(Duration::from_secs(10));
 		let mut late = Subscriber::new(remote.track(TRACK).unwrap().subscribe(subscription).await.unwrap());
 		assert_eq!(
-			late.recv().await.unwrap(),
-			Some(Event::Push {
-				index: 1,
-				value: "second".into()
-			}),
+			late.recv().await.unwrap().map(|e| (e.value, e.at)),
+			Some((
+				Event::Push {
+					index: 1,
+					value: "second".into()
+				},
+				Some(at(1))
+			)),
 			"the warm copy's backlog was replayed"
 		);
 	}

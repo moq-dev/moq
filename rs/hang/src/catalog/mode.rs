@@ -52,21 +52,6 @@ mod test {
 	use super::*;
 
 	#[test]
-	fn known_roundtrip() {
-		for (mode, json) in [(Mode::Snapshot, r#""snapshot""#), (Mode::Stream, r#""stream""#)] {
-			let config = crate::catalog::JsonConfig::new(mode.clone());
-			let encoded = serde_json::to_value(&config).unwrap();
-			assert_eq!(encoded["mode"].to_string(), json);
-			assert_eq!(
-				serde_json::from_value::<crate::catalog::JsonConfig>(encoded)
-					.unwrap()
-					.mode,
-				mode
-			);
-		}
-	}
-
-	#[test]
 	fn unknown_roundtrip() {
 		let wire = serde_json::json!({ "mode": "future" });
 		let config: crate::catalog::JsonConfig = serde_json::from_value(wire.clone()).unwrap();

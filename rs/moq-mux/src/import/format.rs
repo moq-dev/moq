@@ -51,7 +51,7 @@ pub enum VideoFormat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ContainerFormat {
-	/// Fragmented MP4 / CMAF.
+	/// Fragmented MP4 / CMAF, unwrapped into one frame per sample.
 	Fmp4,
 	/// Matroska / WebM.
 	Mkv,
@@ -59,6 +59,8 @@ pub enum ContainerFormat {
 	Ts,
 	/// Flash Video, as used by RTMP.
 	Flv,
+	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
+	Cmaf,
 }
 
 /// Any format an importer handles, and the kind of import it selects.
@@ -129,7 +131,8 @@ impl FromStr for Format {
 			"vp8" | "vp08" => Format::Video(VideoFormat::Vp8),
 			"vp9" | "vp09" => Format::Video(VideoFormat::Vp9),
 
-			"fmp4" | "cmaf" => Format::Container(ContainerFormat::Fmp4),
+			"fmp4" => Format::Container(ContainerFormat::Fmp4),
+			"cmaf" => Format::Container(ContainerFormat::Cmaf),
 			"mkv" | "webm" | "matroska" => Format::Container(ContainerFormat::Mkv),
 			"ts" | "mpegts" | "mpeg2ts" | "m2ts" => Format::Container(ContainerFormat::Ts),
 			"flv" => Format::Container(ContainerFormat::Flv),
@@ -199,7 +202,7 @@ kind_format!(VideoFormat, Video,
 	Av01 => "av01", Vp8 => "vp8", Vp9 => "vp9");
 
 kind_format!(ContainerFormat, Container,
-	Fmp4 => "fmp4", Mkv => "mkv", Ts => "ts", Flv => "flv");
+	Fmp4 => "fmp4", Cmaf => "cmaf", Mkv => "mkv", Ts => "ts", Flv => "flv");
 
 #[cfg(test)]
 mod tests {
@@ -216,7 +219,8 @@ mod tests {
 			(vec!["av01", "av1", "av1c", "av1C"], "av01"),
 			(vec!["vp8", "vp08"], "vp8"),
 			(vec!["vp9", "vp09"], "vp9"),
-			(vec!["fmp4", "cmaf"], "fmp4"),
+			(vec!["fmp4"], "fmp4"),
+			(vec!["cmaf"], "cmaf"),
 			(vec!["mkv", "webm", "matroska"], "mkv"),
 			(vec!["ts", "mpegts", "mpeg2ts", "m2ts"], "ts"),
 			(vec!["opus"], "opus"),

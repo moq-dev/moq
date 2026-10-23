@@ -15,10 +15,15 @@ until [Byte holes](/quest/m2/unbounded-groups/byte-holes.md).
 
 See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
 
-- The group's state holds sorted runs of frames in place of one
-  `VecDeque` + `offset`. Readers keep one absolute cursor. A sequential
-  reader should hold its run so a lookup stays O(1). The common single-run
-  group must cost what it does today.
+- Storage comes from the
+  [group storage benchmark](/quest/m2/group-storage-bench.md) (decided
+  2026-10-20, maintainer): sorted runs of frames in place of one
+  `VecDeque` + `offset`, or the
+  [append-only log](/quest/m2/perf/kio-channel-contention/log.md) or a ring
+  buffer, which the maintainer leans toward because performance matters more
+  than middle eviction. Readers keep one absolute cursor. A sequential
+  reader should hold its position so a lookup stays O(1). The common
+  single-run group must cost what it does today.
 - Pool debt evicts whole cold groups first (`pay_debt` in
   `model/track.rs`, as today). Front frames are shed only from a group
   that is protected or being read.
@@ -34,8 +39,18 @@ See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
   moq-transport, a hole that covers whole objects refills; one inside an
   object is `Evicted`.
 - Downstream encoders that roll groups by the removed constants (moq-json,
-  moq-flate, moq-mux TS, moq-stats) keep their own local roll triggers if
-  they still need one.
+  moq-mux TS, moq-stats) keep their own local roll triggers if they still
+  need one. The [m1 compression migration](/quest/m1/compress/migrate.md)
+  deletes moq-flate; recheck the surviving JSON stream budget and track
+  compression paths instead of retaining a deleted helper's cap.
+- Compressed groups keep the existing prefix-before-inflate contract
+  ([compressed tracks](/quest/m1/compress/README.md)). Today
+  `GroupState::inflate` refuses a nonzero cached offset. Front eviction must
+  refill the needed compressed prefix before inflation or retain equivalent
+  decoder state, with compressed storage, the shared inflated copy, and
+  codec state all bounded by the pool. Never pin a whole growing prefix to
+  make a late plain reader work. Test a long compressed group through a
+  small pool with a late plain reader and legacy-wire egress.
 - Benchmarks: keep `group.rs` flat. Add a case swept over frames held and
   runs evicted, and one over concurrent readers refilling a hole.
 
@@ -45,4 +60,9 @@ groups. A reader that used to see `GroupTooLarge` now refills or sees
 
 ## Required
 
+- [Group storage benchmark](/quest/m2/group-storage-bench.md) - picks the group storage this builds on
 - [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md) - frame storage the cache can account for without whole-frame preallocation
+
+## Related
+
+- [Append-only log](/quest/m2/perf/kio-channel-contention/log.md) - the other proposal for `GroupState` storage, decided by the same benchmark

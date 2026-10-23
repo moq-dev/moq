@@ -31,7 +31,9 @@ Decided with the maintainer on 2026-10-13:
   #2946 already removed the per-byte copy on the Python side.
 - **`&[u8]` arguments only if the numbers say so.** UniFFI 0.32 makes
   `&[u8]` arguments zero-copy, but only for sync calls that take bytes
-  directly: flate `update`/`append` and the three `write(payload)` methods.
+  directly, such as the `write(payload)` methods. The
+  [m1 compression migration](/quest/m1/compress/migrate.md) deletes the FFI
+  flate namespace, so its `update`/`append` calls are no longer candidates.
   It cannot be used in records, async calls, or callback interfaces. Adopting
   it means fixing the Go and C++/C generators (both lower to `RustBuffer`
   where the declaration expects `ForeignBytes`, so they would not compile)

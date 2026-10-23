@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import shutil
 import statistics
 from pathlib import Path
 
@@ -57,10 +58,45 @@ def load(directory, workload):
             for name in sorted(rounds["base"], key=lambda name: int(name.removeprefix("round-")))]
 
 
+def criterion_cases(directory):
+    """Read exact IDs from a fresh target's discovery measurements."""
+    ids = set()
+    for path in directory.glob("**/discovery/benchmark.json"):
+        benchmark = json.loads(path.read_text())["full_id"]
+        if not isinstance(benchmark, str) or not benchmark or any(c in benchmark for c in "\t\r\n"):
+            raise ValueError(f"invalid Criterion full_id in {path}: {benchmark!r}")
+        ids.add(benchmark)
+    if not ids:
+        raise ValueError(f"no Criterion benchmark cases found in {directory}")
+    return sorted(ids)
+
+
+def criterion_baseline(directory, discovery, benchmark):
+    """Place the exact baseline at the current revision's Criterion directory."""
+    sources = [path.parent for path in directory.glob("**/base/benchmark.json")
+               if json.loads(path.read_text())["full_id"] == benchmark]
+    targets = [path.parent.parent.relative_to(discovery) for path in discovery.glob("**/discovery/benchmark.json")
+               if json.loads(path.read_text())["full_id"] == benchmark]
+    if len(sources) != 1 or len(targets) != 1:
+        raise ValueError(f"expected one baseline and discovery case for {benchmark!r}")
+    destination = directory / targets[0] / "base"
+    if sources[0] != destination:
+        shutil.copytree(sources[0], destination, dirs_exist_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--criterion-cases", action="store_true", help="list full IDs from isolated discovery samples")
+    parser.add_argument("--criterion-baseline", nargs=2, metavar=("DISCOVERY", "ID"), help="align an exact baseline with current discovery")
     parser.add_argument("directory", type=Path)
     args = parser.parse_args()
+    if args.criterion_cases:
+        print("\n".join(criterion_cases(args.directory)))
+        return
+    if args.criterion_baseline:
+        discovery, benchmark = args.criterion_baseline
+        criterion_baseline(args.directory, Path(discovery), benchmark)
+        return
     for workload in ("video", "fanout"):
         result = reduce(load(args.directory, workload))
         (args.directory / f"comparison-{workload}.json").write_text(json.dumps(result, indent=2) + "\n")

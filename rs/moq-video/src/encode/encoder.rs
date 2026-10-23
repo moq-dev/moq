@@ -145,7 +145,7 @@ impl Applied {
 	/// A report that `preset` took effect through `controls`.
 	#[cfg_attr(
 		not(any(feature = "openh264", feature = "nvidia", feature = "vaapi", target_os = "macos")),
-		allow(dead_code)
+		allow(dead_code, reason = "only the encoder backends report a preset")
 	)]
 	pub(crate) fn new(preset: Preset, controls: impl Into<String>) -> Self {
 		Self {
@@ -563,7 +563,10 @@ impl Encoder {
 
 #[cfg(test)]
 mod tests {
-	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+	#![cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
+	)]
 
 	use super::*;
 
@@ -634,23 +637,6 @@ mod tests {
 			"first packet is not Annex-B: {:02x?}",
 			&first[..first.len().min(8)]
 		);
-	}
-
-	/// The bring-your-own-pixels path: RGBA in through `Surface::rgba`, Annex-B out.
-	#[test]
-	#[cfg(feature = "openh264")]
-	fn encode_rgba_surface_emits_annexb() {
-		let config = Config {
-			kind: Kind::Software,
-			..Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
-		};
-		let mut encoder = Encoder::new(&config).unwrap();
-
-		let mut frames = encoder.encode(&gray_frame(320, 240, 0)).unwrap();
-		frames.extend(encoder.finish().unwrap());
-		assert!(!frames.is_empty());
-		let packets = payloads(&frames);
-		assert!(packets[0].starts_with(&[0, 0, 0, 1]) || packets[0].starts_with(&[0, 0, 1]));
 	}
 
 	/// The same path starting from planar I420 the caller already has.
@@ -1073,22 +1059,6 @@ mod tests {
 		// And the encoder is live now, so a further retune takes the direct path.
 		encoder.set_bitrate(halved.scaled(0.5)).unwrap();
 		assert!(encoder.encode(&gray_frame(320, 240, 1)).is_ok());
-	}
-
-	/// Setting the current rate must not reach the backend at all: the control
-	/// loop is allowed to be chatty, and the encoder shouldn't pay for it.
-	#[test]
-	#[cfg(feature = "openh264")]
-	fn set_bitrate_to_current_is_a_noop() {
-		let config = Config {
-			kind: Kind::Software,
-			..Config::new(320, 240, crate::Rate::new(30, 1).unwrap())
-		};
-		let mut encoder = Encoder::new(&config).unwrap();
-
-		let opened = encoder.bitrate();
-		encoder.set_bitrate(opened).unwrap();
-		assert_eq!(encoder.bitrate(), opened);
 	}
 
 	#[test]

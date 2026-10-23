@@ -14,7 +14,8 @@
 
 use std::{sync::Arc, time::Duration};
 
-use tokio::{sync::watch, time::Instant};
+use moq_clock::Instant;
+use tokio::sync::watch;
 
 /// Fires the relay-wide shutdown broadcast. Held by `Relay::run` for the OS
 /// signal path; an embedder clones one to stop the relay from its own task.
@@ -37,6 +38,73 @@ impl Trigger {
 			}
 			first
 		});
+	}
+}
+
+/// SIGINT or, on unix, SIGTERM (what process supervisors send on stop), caught
+/// from construction on.
+///
+/// Building one replaces the default action, which kills the process, for the
+/// rest of its life: tokio never uninstalls a handler, even once this drops. So
+/// build it once nothing that can fail is left before serving, or a caller that
+/// recovers from that failure is left ignoring its signals.
+pub struct Signals {
+	#[cfg(unix)]
+	interrupt: tokio::signal::unix::Signal,
+	#[cfg(unix)]
+	terminate: tokio::signal::unix::Signal,
+	#[cfg(not(unix))]
+	ctrl_c: tokio::signal::windows::CtrlC,
+	/// A signal [`pending`](Self::pending) took, still owed to [`recv`](Self::recv).
+	queued: bool,
+}
+
+impl Signals {
+	/// Install the handlers.
+	pub fn new() -> anyhow::Result<Self> {
+		use anyhow::Context;
+		#[cfg(unix)]
+		{
+			use tokio::signal::unix::{SignalKind, signal};
+			Ok(Self {
+				interrupt: signal(SignalKind::interrupt()).context("failed to listen for SIGINT")?,
+				terminate: signal(SignalKind::terminate()).context("failed to listen for SIGTERM")?,
+				queued: false,
+			})
+		}
+		#[cfg(not(unix))]
+		{
+			let ctrl_c = tokio::signal::windows::ctrl_c().context("failed to listen for Ctrl-C")?;
+			Ok(Self { ctrl_c, queued: false })
+		}
+	}
+
+	/// Whether a signal has arrived that [`recv`](Self::recv) has not returned
+	/// yet, without waiting. One the runtime has not processed yet reads as none.
+	pub fn pending(&mut self) -> bool {
+		use futures::FutureExt;
+		if !self.queued {
+			self.queued = self.next().now_or_never().is_some();
+		}
+		self.queued
+	}
+
+	/// Resolve on the next signal, including one caught before this was polled.
+	pub async fn recv(&mut self) {
+		if !std::mem::take(&mut self.queued) {
+			self.next().await;
+		}
+	}
+
+	/// Cancel safe: a signal is only taken when this resolves.
+	async fn next(&mut self) {
+		#[cfg(unix)]
+		tokio::select! {
+			_ = self.interrupt.recv() => {}
+			_ = self.terminate.recv() => {}
+		}
+		#[cfg(not(unix))]
+		self.ctrl_c.recv().await;
 	}
 }
 
@@ -130,7 +198,7 @@ impl Observer {
 			Err(_) => None,
 		};
 		match deadline {
-			Some(deadline) => tokio::time::sleep_until(deadline).await,
+			Some(deadline) => moq_clock::sleep_until(deadline).await,
 			None => std::future::pending().await,
 		}
 	}
@@ -256,7 +324,7 @@ impl Observer {
 		tokio::select! {
 			biased;
 			_ = session.closed() => return,
-			() = tokio::time::sleep_until(deadline) => {}
+			() = moq_clock::sleep_until(deadline) => {}
 		}
 		tracing::debug!("peer did not leave before the drain deadline; closing");
 		session.abort(moq_net::Error::GoawayTimeout);
@@ -301,9 +369,41 @@ impl Drop for Draining {
 	}
 }
 
+/// Held by every test that raises a signal: it reaches each listener in the
+/// process, and `cargo test` runs tests as threads of one.
+#[cfg(all(test, unix))]
+pub(crate) static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Raise `signal` at this process and wait until the runtime has processed it,
+/// so every [`Signals`] built before this sees it.
+#[cfg(all(test, unix))]
+pub(crate) async fn raise(signal: libc::c_int) {
+	let mut probe = Signals::new().unwrap();
+	// SAFETY: raise has no memory-safety preconditions.
+	assert_eq!(unsafe { libc::raise(signal) }, 0);
+	probe.recv().await;
+}
+
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
+
+	/// Checking for a signal keeps it for `recv`, so a caller that only looks
+	/// before READY still drains on it.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn a_pending_signal_is_still_received() {
+		use futures::FutureExt;
+		let _signals = SIGNALS.lock().await;
+		let mut signals = Signals::new().unwrap();
+		assert!(!signals.pending());
+		raise(libc::SIGTERM).await;
+		assert!(signals.pending());
+		assert!(signals.pending(), "checking twice took the signal");
+		assert!(signals.recv().now_or_never().is_some(), "the checked signal was lost");
+		assert!(!signals.pending(), "one signal was received twice");
+	}
 
 	#[tokio::test]
 	async fn pending_admission_holds_drain() {

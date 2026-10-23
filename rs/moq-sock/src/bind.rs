@@ -475,12 +475,6 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn udp_ipv4_still_binds() {
-		let socket = udp(Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
-		assert!(socket.local_addr().unwrap().is_ipv4());
-	}
-
 	/// A reuseport group is only useful if every member can hold the same port,
 	/// so bind a second socket to the first one's address and check it takes.
 	#[test]

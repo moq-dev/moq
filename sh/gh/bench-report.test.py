@@ -48,6 +48,19 @@ class ReportTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 report.javascript_file(source)
 
+    def test_js_byte_measurements_do_not_become_dimensions(self):
+        source = self.root / 'compression.csv'
+        source.write_text('bytes,us,size_bytes\n4,1.5,64\nmeasurement,size_bytes\nbundle,512\n')
+        entries = report.javascript_file(source)
+        self.assertEqual([(entry['name'], entry['unit'], entry['value']) for entry in entries], [
+            ('js/compression/bytes=4/us', 'us', 1.5),
+            ('js/compression/bytes=4/size_bytes', 'bytes', 64),
+            ('js/compression/measurement=bundle/size_bytes', 'bytes', 512),
+        ])
+        source.write_text('bytes,us,size_bytes\n4,2.5,128\nmeasurement,size_bytes\nbundle,1024\n')
+        self.assertEqual([entry['name'] for entry in report.javascript_file(source)],
+                         [entry['name'] for entry in entries])
+
     def test_criterion_requires_fresh_measured_estimates(self):
         run = self.root / 'runs' / 'one'
         run.mkdir(parents=True)

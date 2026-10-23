@@ -353,7 +353,10 @@ impl MediaFoundation {
 				buffer
 			},
 			Surface::I420(_) => self.upload_nv12(frame)?,
-			#[allow(unreachable_patterns)]
+			#[allow(
+				unreachable_patterns,
+				reason = "the other surfaces exist only on some platforms and features"
+			)]
 			_ => {
 				return Err(Error::Codec(anyhow::anyhow!(
 					"unsupported frame for mediafoundation encoder"

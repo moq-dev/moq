@@ -65,7 +65,7 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 			fields,
 			inflated: None,
 		};
-		let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
+		let mut frame = group.create_object(header).unwrap();
 		frame.write(payload.clone()).unwrap();
 		group = frame.finish().unwrap();
 	}
@@ -73,10 +73,9 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 	(broadcast, track, group)
 }
 
-/// Declare a received track's end while the wire may still owe groups below it, as a
-/// subscriber does on SUBSCRIBE_END, for the pending-tail benchmark.
-pub fn finish_at_pending(track: &mut track::Producer, end: track::Position) -> crate::Result<()> {
-	track.finish_at_pending(end)
+/// Normalize a compressed wire request for the private requesting-model benchmark.
+pub fn widen_compressed(track: &track::Producer, subscription: &mut track::Subscription) {
+	track.widen_compressed(subscription);
 }
 
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
@@ -117,7 +116,7 @@ const IETF_VERSIONS: &[ietf::Version] = &[
 const LITE_KINDS: u8 = 22;
 
 /// How many types [`ietf_wire`] dispatches over.
-const IETF_KINDS: u8 = 40;
+const IETF_KINDS: u8 = 41;
 
 /// Split the two selector bytes off the input: a version and a type.
 fn select(data: &[u8], versions: usize) -> Option<(usize, u8, &[u8])> {
@@ -306,11 +305,31 @@ pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::or
 
 /// A session's snapshot of its peer's initial announcements, for the synced bench.
 /// Drop it to land the snapshot.
-pub struct Snapshot(#[allow(dead_code)] crate::model::Snapshot);
+pub struct Snapshot(#[allow(dead_code, reason = "held for its drop, which lands the snapshot")] crate::model::Snapshot);
 
 /// Start a snapshot under `prefix`, as a session requesting announcements there does.
 pub fn snapshot(origin: &crate::origin::Producer, prefix: &str) -> Snapshot {
 	Snapshot(origin.snapshot(prefix))
+}
+
+/// What a client session fed into an origin hears it should ask its peer about, for
+/// the interests bench.
+pub struct Interests(crate::model::Interests);
+
+/// Register as a client session fed into `origin` does.
+pub fn interests(origin: &crate::origin::Producer) -> Interests {
+	Interests(origin.interests())
+}
+
+impl Interests {
+	/// Take every change heard so far, returning how many there were.
+	pub fn drain(&self) -> usize {
+		let mut changes = 0;
+		while let std::task::Poll::Ready(Some(_)) = self.0.poll_next(&kio::Waiter::noop()) {
+			changes += 1;
+		}
+		changes
+	}
 }
 
 /// Add `n` publisher-side payload bytes on `(path, tier)`, creating the entry
@@ -324,6 +343,24 @@ pub fn bump_publisher_bytes(
 	n: u64,
 ) {
 	registry.bump_publisher_bytes(path, tier, n);
+}
+
+/// An allocator's probe target as its session follows it, for the bandwidth bench.
+pub struct ProbeTarget(crate::bandwidth::Target);
+
+impl ProbeTarget {
+	/// Follow `allocator`'s target.
+	pub fn new(allocator: &crate::bandwidth::Allocator) -> Self {
+		Self(allocator.target())
+	}
+
+	/// The target in bits per second once it moved, without parking.
+	pub fn poll(&mut self) -> Option<u64> {
+		match self.0.poll_changed(&kio::Waiter::noop()) {
+			std::task::Poll::Ready(target) => Some(target.as_bps()),
+			std::task::Poll::Pending => None,
+		}
+	}
 }
 
 /// A payload-byte meter for the stats write-path benchmark.
@@ -555,7 +592,7 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		14 => roundtrip::<ietf::PublishOk, _>(rest, version),
 		15 => roundtrip::<ietf::PublishError<'static>, _>(rest, version),
 		16 => roundtrip::<ietf::PublishDone<'static>, _>(rest, version),
-		17 => roundtrip::<ietf::PublishBlocked<'static>, _>(rest, version),
+		17 => roundtrip::<ietf::PublishSkipped<'static>, _>(rest, version),
 		18 => roundtrip::<ietf::Subscribe<'static>, _>(rest, version),
 		19 => roundtrip::<ietf::SubscribeOk, _>(rest, version),
 		20 => roundtrip::<ietf::SubscribeError<'static>, _>(rest, version),
@@ -578,6 +615,7 @@ pub fn ietf_wire(data: &[u8]) -> bool {
 		37 => roundtrip::<ietf::FetchObject, _>(rest, version),
 		38 => roundtrip::<ietf::PublishNamespaceUpdate, _>(rest, version),
 		39 => roundtrip::<ietf::ObjectDatagram, _>(rest, version),
+		40 => roundtrip::<ietf::SubscribeTracks<'static>, _>(rest, version),
 		_ => unreachable!("kind is taken modulo IETF_KINDS"),
 	}
 }
@@ -1160,6 +1198,8 @@ pub fn seeds() -> Vec<Seed> {
 	seeds
 }
 
+type FrameReader = coding::Reader<crate::transport::poll::Buffered<Chunks>, lite::Version>;
+
 /// Frames arriving on concurrent group streams, as the frame bench times them: one
 /// frame per stream, read a chunk per stream per poll turn so the streams interleave
 /// the way a session's do.
@@ -1168,7 +1208,7 @@ pub fn seeds() -> Vec<Seed> {
 /// every declared size when the first byte lands and `Some(0)` grows every buffer with
 /// the bytes received.
 pub struct FrameRecv {
-	streams: Vec<Option<(coding::Reader<Chunks, lite::Version>, frame::ProducerOwned)>>,
+	streams: Vec<Option<(FrameReader, frame::Producer)>>,
 	// Keeps the groups' track alive.
 	_track: track::Producer,
 	_broadcast: broadcast::Producer,
@@ -1181,6 +1221,7 @@ impl FrameRecv {
 		// Unbounded, so eviction never aborts a group mid-frame.
 		let mut info = broadcast::Info::new();
 		info.pool = cache::Pool::unbounded();
+		info.frames = budget.map(frame::Budget::new).unwrap_or_default();
 		let broadcast = info.produce();
 		let track = broadcast
 			.create_track(
@@ -1188,7 +1229,6 @@ impl FrameRecv {
 				crate::track::Info::default().with_timescale(crate::Timescale::MILLI),
 			)
 			.unwrap();
-		let budget = budget.map(frame::Budget::new).unwrap_or_default();
 		let payload = bytes::Bytes::from(vec![0u8; size]);
 
 		let streams = (0..streams)
@@ -1198,13 +1238,16 @@ impl FrameRecv {
 					size: size as u64,
 					timestamp: Some(crate::Timestamp::ZERO),
 				};
-				let frame = group.create_frame_owned(info, &budget).unwrap();
+				let frame = group.create_frame(info).unwrap();
 				let stream = Chunks {
 					payload: payload.clone(),
 					chunk,
 					ready: true,
 				};
-				Some((coding::Reader::new(stream, lite::Version::Lite05), frame))
+				Some((
+					coding::Reader::new(crate::transport::poll::Buffered::new(stream), lite::Version::Lite05),
+					frame,
+				))
 			})
 			.collect();
 
@@ -1241,22 +1284,8 @@ struct Chunks {
 	ready: bool,
 }
 
-impl crate::transport::poll::RecvStream for Chunks {
+impl crate::transport::poll::Chunks for Chunks {
 	type Error = NoError;
-
-	fn poll_read(
-		&mut self,
-		cx: &mut std::task::Context<'_>,
-		dst: &mut [u8],
-	) -> std::task::Poll<Result<Option<usize>, NoError>> {
-		let max = dst.len();
-		self.poll_read_chunk(cx, max).map_ok(|chunk| {
-			chunk.map(|chunk| {
-				dst[..chunk.len()].copy_from_slice(&chunk);
-				chunk.len()
-			})
-		})
-	}
 
 	// Zero-copy, like the QUIC stacks, so only the frame buffer's own copy is timed.
 	fn poll_read_chunk(
@@ -1276,10 +1305,6 @@ impl crate::transport::poll::RecvStream for Chunks {
 	}
 
 	fn stop(&mut self, _code: u32) {}
-
-	fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), NoError>> {
-		std::task::Poll::Pending
-	}
 }
 
 /// [`Chunks`] never fails.

@@ -241,7 +241,6 @@ impl Relay {
 		#[cfg(feature = "iroh")]
 		let iroh = config.iroh.bind(&config.quic).await?;
 
-		#[allow(unused_mut)]
 		let mut server_config = moq_tokio::server::Config::default();
 		server_config.listen = listen;
 		server_config.tls = served;
@@ -300,7 +299,7 @@ impl Relay {
 			Some(iroh) => cluster.with_iroh(iroh),
 			None => cluster,
 		};
-		let stats = config.stats.build(cluster.origin.clone());
+		let stats = config.stats.build(cluster.origin.clone())?;
 		// The cluster takes over keeping the publish task alive, so an embedder that
 		// drops the producer keeps publishing for as long as it serves.
 		let cluster = cluster.with_stats(stats.clone());
@@ -503,6 +502,12 @@ impl Relay {
 	/// Whether [`Self::run`] starts the drain on SIGINT/SIGTERM. Defaults to
 	/// `true`; pass `false` when the application owns the signals and fires
 	/// [`Self::shutdown_trigger`] itself, e.g. after withdrawing the node from DNS.
+	///
+	/// `run` installs the handlers just before it serves, once its startup can no
+	/// longer fail, so a signal before that takes its default action. With ACME
+	/// it installs them before the first issuance instead, so a stop request
+	/// there still ends `run`. They stay installed for the life of the process,
+	/// since tokio never removes one, even after `run` fails.
 	#[must_use = "the relay with the signal choice is returned"]
 	pub fn with_signals(mut self, signals: bool) -> Self {
 		self.signals = signals;
@@ -557,13 +562,22 @@ impl Relay {
 			"no --auth-url or --auth-public configured; nobody can authenticate (an embedder decides by taking Relay::admissions)"
 		);
 
+		let mut handlers = None;
+
 		// Nothing else serves or reports ready until the certificate exists: a
 		// self-signed placeholder would only fail every browser that connects.
 		if let Some(mut acme) = acme {
 			let listener = web.https_listener().context("ACME needs the HTTPS listener")?;
+			// Issuance can take minutes, and as a container's PID 1 the relay
+			// ignores a signal left at its default action, so a stop would wait it
+			// out. That outweighs leaving the handlers installed if a later step fails.
+			if signals {
+				handlers = Some(shutdown::Signals::new()?);
+			}
 			tokio::select! {
 				res = acme.issue(listener) => res?,
-				res = drain(shutdown_trigger.clone(), shutdown.clone(), signals) => return res,
+				// No session exists yet, so this returns as soon as it starts.
+				() = drain(shutdown_trigger.clone(), shutdown.clone(), handlers.as_mut()) => return Ok(()),
 			}
 			cluster.critical.spawn("ACME renewal", acme.run());
 		}
@@ -576,22 +590,39 @@ impl Relay {
 
 		// Before the readiness notify, for the same reason the cluster starts
 		// before it: an unsupported kernel, a refused ring, or a certificate
-		// certificate identity rustls will not load fails here, and reporting ready first would
+		// identity rustls will not load fails here, and reporting ready first would
 		// release the units depending on a relay that is about to exit.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		let mut uring = uring;
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		if let Some(uring) = uring.as_mut() {
 			uring
-				.serve(cluster.clone(), auth.clone(), shutdown.clone(), sessions.clone())
+				.spawn(cluster.clone(), auth.clone(), shutdown.clone(), sessions.clone())
 				.context("failed to start the io_uring QUIC workers")?;
 		}
 
-		ready.send_replace(true);
+		// Without ACME, after the last step that can fail, since a handler outlives a
+		// failed `run`, and before anything accepts a session a signal would kill
+		// without a GOAWAY.
+		// Nothing awaits from here to the drain below, so a signal caught in between
+		// starts the drain at its first poll, as one just after READY would.
+		if signals && handlers.is_none() {
+			handlers = Some(shutdown::Signals::new()?);
+		}
 
-		#[cfg(unix)]
-		// Notify systemd that we're ready after all initialization is complete
-		let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+		#[cfg(all(target_os = "linux", feature = "_uring"))]
+		if let Some(uring) = uring.as_mut() {
+			uring.serve();
+		}
+
+		// An embedder that already stopped the relay gets a drain, not a READY.
+		if shutdown.deadline().is_none() {
+			ready.send_replace(true);
+
+			#[cfg(unix)]
+			// Notify systemd that we're ready after all initialization is complete
+			let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+		}
 
 		#[cfg(feature = "jemalloc")]
 		let jemalloc = moq_tokio::jemalloc::run();
@@ -707,7 +738,7 @@ impl Relay {
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
 			err = uring_failed => Err(err).context("io_uring QUIC workers failed"),
 			Err(err) = jemalloc => Err(err).context("jemalloc profiler failed"),
-			res = drain(shutdown_trigger, shutdown.clone(), signals) => res,
+			() = drain(shutdown_trigger, shutdown.clone(), handlers.as_mut()) => Ok(()),
 			else => Ok(()),
 		};
 
@@ -738,52 +769,35 @@ impl Relay {
 /// GOAWAY and waits for its peer to leave). Returns from [`Relay::run`] once
 /// [`shutdown::Observer::drained`] does, or on a second signal.
 /// Without `signals` only the trigger and the sessions count.
-async fn drain(trigger: shutdown::Trigger, mut shutdown: shutdown::Observer, signals: bool) -> anyhow::Result<()> {
+async fn drain(
+	trigger: shutdown::Trigger,
+	mut shutdown: shutdown::Observer,
+	mut signals: Option<&mut shutdown::Signals>,
+) {
 	let window = shutdown.drain_timeout;
-	let signal = || async move {
-		match signals {
-			true => shutdown_signal().await,
-			false => std::future::pending().await,
-		}
+	let mut signal = async || match signals.as_mut() {
+		Some(signals) => signals.recv().await,
+		None => std::future::pending().await,
 	};
 	tokio::select! {
-		res = signal() => {
-			res?;
+		// A drain the embedder already started leaves a queued signal to be the
+		// second request, not another first one.
+		biased;
+		() = shutdown.started() => tracing::info!(?window, "shutdown requested; draining sessions"),
+		() = signal() => {
 			tracing::info!(
 				?window,
 				"shutdown signal received; draining sessions (signal again to exit immediately)"
 			);
 			trigger.start();
 		}
-		_ = shutdown.started() => tracing::info!(?window, "shutdown requested; draining sessions"),
 	}
 
 	tokio::select! {
-		res = signal() => {
-			res?;
+		() = signal() => {
 			tracing::warn!(open = shutdown.tally().live, "second shutdown signal; exiting immediately");
 		}
 		() = shutdown.drained() => {}
-	}
-	Ok(())
-}
-
-/// Resolve on a shutdown request: SIGINT (ctrl-c) or, on unix, SIGTERM (what
-/// systemd and most process supervisors send on stop).
-async fn shutdown_signal() -> anyhow::Result<()> {
-	#[cfg(unix)]
-	{
-		let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-			.context("failed to listen for SIGTERM")?;
-		tokio::select! {
-			res = tokio::signal::ctrl_c() => res.context("failed to listen for SIGINT")?,
-			_ = term.recv() => {}
-		}
-		Ok(())
-	}
-	#[cfg(not(unix))]
-	{
-		tokio::signal::ctrl_c().await.context("failed to listen for shutdown")
 	}
 }
 
@@ -825,6 +839,11 @@ async fn serve_listening(
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	#[tokio::test]
 	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {
@@ -861,14 +880,46 @@ mod tests {
 		let (trigger, shutdown) = crate::shutdown::Observer::new(window);
 		let _pending = shutdown.activity.enter();
 		trigger.start();
-		let draining = super::drain(trigger, shutdown, false);
+		let draining = super::drain(trigger, shutdown, None);
 		tokio::pin!(draining);
 		assert!(draining.as_mut().now_or_never().is_none());
 		tokio::time::advance(window).await;
 		assert!(
-			matches!(draining.as_mut().now_or_never(), Some(Ok(()))),
+			draining.as_mut().now_or_never().is_some(),
 			"pending handshake extended the fixed deadline"
 		);
+	}
+
+	/// A signal queued behind an embedder's trigger is the second request, so it
+	/// exits at once rather than starting the drain again.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn a_signal_after_an_early_trigger_exits_at_once() {
+		let _signals = crate::shutdown::SIGNALS.lock().await;
+		// Either arm is ready, so an unbiased wait would pass some runs.
+		for _ in 0..32 {
+			let (trigger, shutdown) = crate::shutdown::Observer::new(std::time::Duration::from_secs(10));
+			let _active = shutdown.activity.enter();
+			trigger.start();
+			let mut signals = crate::shutdown::Signals::new().unwrap();
+			crate::shutdown::raise(libc::SIGTERM).await;
+			let started = tokio::time::Instant::now();
+			super::drain(trigger, shutdown, Some(&mut signals)).await;
+			assert_eq!(started.elapsed(), std::time::Duration::ZERO, "waited out the drain");
+		}
+	}
+
+	/// A relay stopped before it finished starting drains without reporting ready.
+	#[tokio::test]
+	async fn a_stop_during_startup_skips_readiness() {
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut relay = super::Relay::load(config).await.unwrap().with_signals(false);
+		let _admissions = relay.admissions().unwrap();
+		let ready = relay.ready();
+		relay.shutdown_trigger().start();
+		relay.run().await.unwrap();
+		assert!(ready.wait().await.is_err(), "reported ready after the stop");
 	}
 
 	/// A connection arriving as the last admitted one leaves is either counted
@@ -881,7 +932,7 @@ mod tests {
 		let activity = shutdown.activity.clone();
 		let last = activity.enter().expect("admission open before the drain");
 		trigger.start();
-		let draining = super::drain(trigger, shutdown, false);
+		let draining = super::drain(trigger, shutdown, None);
 		tokio::pin!(draining);
 		assert!(draining.as_mut().now_or_never().is_none());
 
@@ -895,7 +946,7 @@ mod tests {
 
 		// Arrives just after the count reaches zero: refused at accept.
 		drop(arrival);
-		assert!(matches!(draining.as_mut().now_or_never(), Some(Ok(()))));
+		assert!(draining.as_mut().now_or_never().is_some());
 		assert!(
 			activity.enter().is_none(),
 			"admitted a connection after the drain committed to exit"

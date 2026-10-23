@@ -63,14 +63,14 @@ async function measure(tracks: number, viewers: number, clock: Manual) {
 	};
 	const start = performance.now();
 	for (let step = 0; step < 1000; step++) {
-		if (step > 0) clock.advance(Nano.fromMilli(Milli(1)));
+		if (step > 0) clock.jump(Nano.fromMilli(Milli(1)));
 		catalog.mutate((root) => {
 			if (!root.video) throw new Error("video missing");
 			for (const config of Object.values(root.video.renditions)) config.jitter = Catalog.u53(step + 1);
 		});
 		await receive();
 	}
-	await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+	await clock.advance(Nano.fromMilli(Milli(1)));
 	await receive();
 	const elapsed = performance.now() - start;
 	if (publishes !== 2 || updates !== 2 * tracks * viewers) {

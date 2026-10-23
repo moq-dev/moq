@@ -18,6 +18,7 @@ python:
 
 sphinx:
   configuration: py/moq-rs/docs/conf.py
+  fail_on_warning: true
 
 formats:
   - htmlzip

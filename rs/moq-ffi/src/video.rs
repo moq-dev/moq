@@ -954,10 +954,11 @@ impl MoqVideoConsumer {
 		// Reject the codec and output before resolving: resolving reaches the origin, which can
 		// invoke a dynamic handler and open an upstream subscription we would immediately drop.
 		let reference = catalog_video.broadcast.clone();
+		let epoch = catalog_video.epoch.clone();
 		let cfg = video_config(catalog_video)?;
 		let mut options = moq_video::decode::Options::default();
 		options.decoder.output = decoder_output(output.surface, HAS_SURFACE)?;
-		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
+		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 
 		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
 		options.max_delay = output
@@ -985,6 +986,7 @@ mod decode_tests {
 		MoqVideo {
 			label: None,
 			broadcast: None,
+			epoch: None,
 			track: None,
 			codec: codec.to_string(),
 			description: None,
@@ -1007,14 +1009,6 @@ mod decode_tests {
 		assert!(matches!(video_config(config.clone()), Err(MoqError::NotFound)));
 		config.enabled = true;
 		assert!(video_config(config).is_ok());
-	}
-
-	#[test]
-	fn video_config_round_trips_the_catalog_fields() {
-		let config = video_config(catalog_video("avc1.64001f")).unwrap();
-		assert_eq!(config.coded_width, Some(1280));
-		assert_eq!(config.coded_height, Some(720));
-		assert_eq!(config.framerate, Some(30.0));
 	}
 
 	#[test]

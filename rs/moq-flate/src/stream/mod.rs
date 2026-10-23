@@ -22,9 +22,9 @@
 //! Instead an append that might not fit is refused with [`moq_net::Error::GroupTooLarge`] before
 //! it is encoded, and the log stays intact and writable. With compression the check counts the
 //! payload's raw size plus DEFLATE's worst-case overhead ([`Encoder::bound`](crate::Encoder::bound)),
-//! since the compressed size is only known once the window has moved. The budget is below the
-//! decoder's [`DEFAULT_MAX_FRAME_SIZE`](crate::DEFAULT_MAX_FRAME_SIZE), so any payload that fits is
-//! one every consumer can inflate. The budget covers the whole log rather than a single payload, so
+//! since the compressed size is only known once the window has moved, and each written payload is
+//! charged its inflated size: the [`Decoder`](crate::Decoder) holds its window to the same budget, so
+//! compression shrinks the wire but not how much a log can hold. The budget covers the whole log rather than a single payload, so
 //! once it is spent every append is refused: the live stream is bounded history by design, and a
 //! publisher with more to say opens a new track.
 
@@ -194,18 +194,6 @@ mod test {
 		assert_ne!(frame.timestamp.unwrap().as_micros(), captured.as_micros());
 	}
 
-	#[test]
-	fn compressed_roundtrip_in_order() {
-		let (mut producer, track) = producer(true);
-		let expected = payloads(20);
-		for payload in &expected {
-			producer.append(payload.clone()).unwrap();
-		}
-		producer.finish().unwrap();
-
-		assert_eq!(drain(track, true), expected);
-	}
-
 	/// The window spans the whole group, so a repeated payload costs almost nothing after the first.
 	#[test]
 	fn the_shared_window_shrinks_repetitive_payloads() {
@@ -302,11 +290,10 @@ mod test {
 
 	/// A payload past the group budget is refused before anything is written, so the log carries
 	/// on: the next payload lands and decodes, which with compression proves the window never
-	/// moved. One past the decoder's cap is refused the same way rather than ending the track.
+	/// moved.
 	#[test]
 	fn an_oversized_payload_is_refused_and_the_log_continues() {
-		let huge = Bytes::from(vec![0u8; crate::DEFAULT_MAX_FRAME_SIZE as usize + 1]);
-		let past_budget = huge.slice(..moq_net::group::MAX_CACHE_BYTES as usize);
+		let past_budget = Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize]);
 
 		for compression in [false, true] {
 			let (mut producer, track) = producer(compression);
@@ -316,7 +303,6 @@ mod test {
 				refused(producer.append(past_budget.clone())),
 				"compression={compression}"
 			);
-			assert!(refused(producer.append(huge.clone())), "compression={compression}");
 			assert!(producer.demand().wanted().is_some(), "a refusal must not end the track");
 
 			producer.append(&b"second"[..]).unwrap();
@@ -334,12 +320,25 @@ mod test {
 	#[test]
 	fn a_refused_first_payload_publishes_nothing() {
 		let (mut producer, mut track) = producer(true);
-		let huge = Bytes::from(vec![0u8; crate::DEFAULT_MAX_FRAME_SIZE as usize + 1]);
+		let huge = Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize + 1]);
 		assert!(refused(producer.append(huge)));
 		assert_eq!(
 			track.largest().now_or_never().flatten().map(|position| position.group),
 			None
 		);
+	}
+
+	/// A compressed payload is charged its inflated size, since that is what every reader's decoder
+	/// holds the group to: two payloads that each fit, and deflate to almost nothing, still overflow
+	/// the budget together.
+	#[test]
+	fn a_compressed_log_is_charged_its_inflated_size() {
+		let half = Bytes::from(vec![0u8; moq_net::group::MAX_CACHE_BYTES as usize / 2 + 1]);
+		let (mut producer, track) = producer(true);
+		assert!(producer.append(half.clone()).unwrap() < 64 * 1024);
+		assert!(refused(producer.append(half.clone())));
+		producer.finish().unwrap();
+		assert_eq!(drain(track, true), vec![half]);
 	}
 
 	/// The budget covers the whole log, so once its frames are spent every append is refused, and
@@ -405,19 +404,6 @@ mod test {
 	/// already superseded.
 	fn replaying() -> moq_net::track::Subscription {
 		moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(30))
-	}
-
-	/// The track ends with the group, so nothing opens a second one and splits the log.
-	#[test]
-	fn a_failed_write_ends_the_track() {
-		let track = rejecting_track();
-		let mut producer = Producer::new(track, Config::default());
-
-		assert!(producer.append(late(b"rejected")).is_err());
-		assert!(
-			producer.append(late(b"again")).is_err(),
-			"a second append must fail on the closed track rather than open another group"
-		);
 	}
 
 	/// An ended log reports why it ended, even for a payload past the budget: `GroupTooLarge` would

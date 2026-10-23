@@ -982,11 +982,8 @@ impl MoqSession {
 			// Persistent across reconnects: `None` while disconnected, then a grant
 			// again on the next connection. Reservations survive the gap.
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => moq_net::bandwidth::Allocator::new(connection.send_bandwidth()),
-			Inner::Session(session) => session
-				.send_bandwidth()
-				.map(moq_net::bandwidth::Allocator::new)
-				.unwrap_or_else(moq_net::bandwidth::Allocator::unlimited),
+			Inner::Connection(connection) => connection.bandwidth(),
+			Inner::Session(session) => session.bandwidth(),
 		}
 	}
 

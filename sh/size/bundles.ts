@@ -12,6 +12,7 @@ mkdirSync(out, { recursive: true });
 const sizes: Record<string, number> = {};
 for (const [name, code] of Object.entries({
 	net: 'export * from "@moq/net";',
+	hang: 'export * from "@moq/hang"; export * from "@moq/hang/catalog"; export * from "@moq/hang/container"; export * from "@moq/hang/util";',
 	watch: 'import "@moq/watch/element";',
 	"watch-ui": 'import "@moq/watch/element"; import "@moq/watch/ui";',
 	publish: 'import "@moq/publish/element";',
@@ -57,14 +58,23 @@ for (const [name, code] of Object.entries({
 	};
 	for (const [path, output] of Object.entries(outputs)) if (output.entryPoint === `${name}.js`) visit(path);
 	if (!first.size) throw new Error(`entry output missing: ${name}`);
+	// CMAF is an optional synchronous export, never part of these initial entry points.
+	const hasCmaf = (path: string) =>
+		Object.keys(outputs[path].inputs).some((input) => /[/]cmaf[/]/.test(input));
+	if ([...first].some(hasCmaf)) throw new Error(`CMAF reached the first load: ${name}`);
+	const lazyCmaf = new Set(Object.keys(outputs).filter((path) => !first.has(path) && hasCmaf(path)));
+	if (name.startsWith("watch") && !lazyCmaf.size) throw new Error(`missing lazy CMAF chunk: ${name}`);
 	for (const file of result.outputFiles) {
-		if (![...first].some((path) => resolve(root, path) === file.path)) continue;
+		const initial = [...first].some((path) => resolve(root, path) === file.path);
+		const cmaf = [...lazyCmaf].some((path) => resolve(root, path) === file.path);
+		if (!initial && !cmaf) continue;
+		const label = initial ? name : `${name}/cmaf`;
 		for (const [format, bytes] of Object.entries({
 			raw: file.contents.length,
 			gzip: gzipSync(file.contents).length,
 			brotli: brotliCompressSync(file.contents).length,
 		}))
-			sizes[`js/${name}/${format}`] = (sizes[`js/${name}/${format}`] ?? 0) + bytes;
+			sizes[`js/${label}/${format}`] = (sizes[`js/${label}/${format}`] ?? 0) + bytes;
 	}
 	if (!sizes[`js/${name}/raw`]) throw new Error(`no first-load bytes: ${name}`);
 }

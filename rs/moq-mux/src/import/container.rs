@@ -26,15 +26,17 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 		format: ContainerFormat,
 	) -> Self {
 		match format {
-			ContainerFormat::Fmp4 => Self::fmp4(broadcast, reserved),
+			ContainerFormat::Fmp4 => Self::fmp4(broadcast, reserved, false),
+			ContainerFormat::Cmaf => Self::fmp4(broadcast, reserved, true),
 			ContainerFormat::Mkv => Self::mkv(broadcast, reserved),
 			ContainerFormat::Ts => Self::ts(broadcast, reserved),
 			ContainerFormat::Flv => Self::flv(broadcast, reserved),
 		}
 	}
 
-	fn fmp4(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
-		ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, reserved)))
+	fn fmp4(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>, passthrough: bool) -> Self {
+		let import = crate::container::fmp4::Import::new(broadcast, reserved).with_passthrough(passthrough);
+		ContainerImpl::Fmp4(Box::new(import))
 	}
 
 	fn mkv(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {

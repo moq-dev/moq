@@ -32,8 +32,8 @@ with unavailable transport measurements absent. Missing rendition counters
 mean zero, and JavaScript preserves omission. A known-zero gauge or transport
 measurement stays explicit, so it remains distinct from unavailable.
 
-`moq import --stats` and `moq export --echo` report them from the
-[CLI](/bin/cli#stats-and-feedback). An import counts the frames and payload
+`moq import --report` and `moq export --echo` report them from the
+[CLI](/bin/cli#reports-and-feedback). An import counts the frames and payload
 bytes it writes to each rendition, and video keyframes; an export counts what
 it reads and records its newest arrival. See the
 [hang draft](/draft/moq-hang#media-stats) for track framing, field units, and
@@ -96,6 +96,8 @@ source's. `export ts --passthrough` reports it without `mpegts`.
 | `offset` | Gauge, milliseconds: how far the output clock sits from the source's plus the delay. Positive holds frames longer than the delay. The clock pulls it shut over ten minutes. |
 | `drift` | Gauge, parts per million: the source clock's rate against ours, positive running fast. |
 | `outOfTolerance` | Measurements that found the source clock past the 30 ppm ISO/IEC 13818-1 allows, which the output cannot follow. |
+| `overruns` | `export ts --sync` only: groups that began behind the end of the one before on their PID, where legs can differ until the lane catches up. |
+| `late` | `export ts --sync` only: packets dropped for reaching their slot after it went out, leaving stuffing. |
 
 ## Broadcasts
 
@@ -151,9 +153,9 @@ comes in two encodings:
 | `totals.json` | tier | [Totals](#totals) for the whole group |
 | `[<tier>/]publisher.json` | broadcast path | [Traffic](#traffic) this node sent (egress) |
 | `[<tier>/]subscriber.json` | broadcast path | [Traffic](#traffic) this node received (ingress) |
-| `[<tier>/]sessions.json` | stats label | [Sessions](#sessions) connected now |
-| `[<label>/]presence.json` | tier | [Sessions](#sessions) under one stats label |
-| `[<path>/]traffic.json` | tier | [Prefix](#prefix) traffic under one broadcast prefix |
+| `[<tier>/]sessions.json` | stats label | [Presence](#presence): sessions connected now |
+| `[<label>/]presence.json` | tier | [Presence](#presence): sessions under one stats label |
+| `[<path>/]prefix.json` | tier | [Prefix](#prefix) traffic under one broadcast prefix |
 
 The default tier's per-tier tracks are unprefixed. A named tier prefixes each
 name with its label and a slash: tier `region/sjc` publishes
@@ -171,7 +173,7 @@ for any stats label in the group (`presence.json` for the empty label). The rela
 answers with the label's current sessions and counts from there, holding a label
 with no sessions open at `{}`, and stops producing it once the last subscriber
 leaves. A prefix track works the same way for any broadcast prefix in the
-group: ask for `<path>/traffic.json` (`traffic.json` for the empty prefix). A
+group: ask for `<path>/prefix.json` (`prefix.json` for the empty prefix). A
 label or prefix outside the group, or any other name, is refused.
 
 ## Frames
@@ -184,8 +186,8 @@ writes only when a track's frame changed, so silence means nothing moved, not
 that the producer is gone. The track ends when the producer does, or at
 depth 1 or more when its group's broadcast is unannounced; the group may
 return later as a new broadcast. A frame too large to cache (32 MB) ends its
-track with a `FrameTooLarge` error, while the `.z` flavor, which compresses
-under the limit, keeps updating.
+track with a `FRAME_TOO_LARGE` error. The `.z` flavor meets the same limit by its
+uncompressed size, since a reader inflates the whole group.
 
 ### Totals
 
@@ -198,7 +200,7 @@ under the limit, keeps updating.
 
 Each tier that recorded anything in the group's epoch, with its egress
 (`publisher`) and ingress (`subscriber`) [Traffic](#traffic) and its
-[Sessions](#sessions), summed over every broadcast and stats label in the group.
+[Presence](#presence), summed over every broadcast and stats label in the group.
 Unlike the per-path tracks, an entry that ends stays counted, so the next
 frame always carries everything since the epoch began: a reader that misses
 frames loses nothing while the group stays announced. Billing reads this
@@ -218,7 +220,7 @@ zero; the totals keep what it counted. A sessions entry appears while a
 session or HTTP request holds its context and on the tick its last one ends. While a group
 lingers empty, these tracks hold `{}`.
 
-### Presence
+### Per-label tracks
 
 A presence track's entries are cumulative from when it was first held: a
 session that ends stays counted, and so does every one after it, while
@@ -258,7 +260,7 @@ real sums. Started minus ended stays exact. A child appears while a broadcast
 under it has counters, and leaves after the frame carrying its last one; its
 tail stays in the rollup, and a child that returns starts over. Children are
 never capped, so roughly ten thousand across four tiers outgrow the 32 MB frame
-limit: that encoding's track then ends with `FRAME_TOO_LARGE` instead of going
+limit: both encodings' tracks then end with `FRAME_TOO_LARGE` instead of going
 stale.
 
 ## Entries
@@ -298,7 +300,7 @@ The last six fields are legacy spellings of the `*_started` and `*_ended`
 counters, still written so an older consumer reads a newer relay. A reader
 should prefer the canonical name and fall back to the legacy one.
 
-### Sessions
+### Presence
 
 ```json
 {

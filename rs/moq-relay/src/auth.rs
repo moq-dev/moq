@@ -74,7 +74,8 @@ pub struct Config {
 
 	/// Maximum in-band tokens one session has the auth server verifying at once,
 	/// counting checks still running past the admission timeout. Later tokens wait
-	/// for a slot. Defaults to 128.
+	/// for a slot. Also the requests one HTTP/2 connection carries at once, each
+	/// admitted on its own. Defaults to 128.
 	#[usage(
 		long = "auth-verifications",
 		env = "MOQ_AUTH_VERIFICATIONS",
@@ -421,10 +422,10 @@ pub struct Token {
 	/// Subtrees read from elsewhere on the origin: each path, relative to `root`,
 	/// resolves at the absolute path it maps to.
 	pub mounts: Vec<(PathOwned, PathOwned)>,
-	/// Subscribe paths and an optional download cap, relative to `root`.
-	pub subscribe: moq_auth::Access,
-	/// Publish paths and an optional upload cap, relative to `root`.
-	pub publish: moq_auth::Access,
+	/// Patterns the session may subscribe to, relative to `root`.
+	pub subscribe: moq_auth::Patterns,
+	/// Patterns the session may publish, relative to `root`.
+	pub publish: moq_auth::Patterns,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
 	/// The path this session's stats record under, empty when the grant names none.
@@ -460,10 +461,6 @@ impl Token {
 		}
 	}
 
-	pub(crate) fn uncapped(&self) -> Result<(), Error> {
-		check_rates(&self.publish, &self.subscribe)
-	}
-
 	/// Rebuild the token from a re-checked grant, relative to the same dialed path,
 	/// so a grant that drops its `root` alias resolves back to what was dialed.
 	pub(crate) fn recheck(&self, grant: &Grant) -> Self {
@@ -471,13 +468,12 @@ impl Token {
 	}
 
 	/// Whether `other` still covers everything this token scopes: the same root and
-	/// mounts, and every path still held. Caps are not compared: a cap change is
-	/// applied to the live connection rather than ending it.
+	/// mounts, and every path still held.
 	pub(crate) fn covered_by(&self, other: &Self) -> bool {
 		self.root == other.root
 			&& self.mounts == other.mounts
-			&& other.subscribe.path.covers(&self.subscribe.path)
-			&& other.publish.path.covers(&self.publish.path)
+			&& other.subscribe.covers(&self.subscribe)
+			&& other.publish.covers(&self.publish)
 	}
 }
 
@@ -628,9 +624,6 @@ impl Lease {
 							return reason;
 						}
 						let fresh = self.token.recheck(&grant);
-						if let Err(err) = fresh.uncapped() {
-							return err.to_string().into();
-						}
 						if fresh.root != self.token.root {
 							return lease::Reason::Narrowed;
 						}
@@ -649,13 +642,13 @@ impl Lease {
 							match &self.session {
 								Some(session) => {
 									tracing::info!(
-										publish = %join(&fresh.publish.path),
-										subscribe = %join(&fresh.subscribe.path),
+										publish = %join(&fresh.publish),
+										subscribe = %join(&fresh.subscribe),
 										"grant changed; re-authorizing the session",
 									);
 									session.authorize(&moq_net::auth::Grant {
-										publish: fresh.publish.path.clone(),
-										subscribe: fresh.subscribe.path.clone(),
+										publish: fresh.publish.clone(),
+										subscribe: fresh.subscribe.clone(),
 										expires: None,
 									});
 									self.token.publish = fresh.publish;
@@ -900,6 +893,11 @@ impl Auth {
 		&self.node
 	}
 
+	/// How many credentials one session may have the decider verifying at once.
+	pub(crate) fn verifications(&self) -> usize {
+		self.verifications
+	}
+
 	/// A fresh `connect` request for this relay, before the transport's facts are filled in.
 	pub fn request(&self, transport: moq_auth::Transport, path: impl Into<String>) -> Request {
 		Request::new(self.node.as_ref(), transport, path)
@@ -916,7 +914,6 @@ impl Auth {
 		// pick up an update that skipped the check.
 		let (consumer, grant) = self.decide(request.clone()).await?;
 		let mut lease = Lease::granted(&request.path, &grant, consumer);
-		lease.token.uncapped()?;
 		lease.source = Some(Source {
 			auth: self.clone(),
 			request,
@@ -965,7 +962,6 @@ fn answered_with(
 	let consumer = answered.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
 	let grant = consumer.grant();
 	grant.validate()?;
-	check_rates(&grant.publish, &grant.subscribe)?;
 	Ok((consumer, grant))
 }
 
@@ -977,14 +973,6 @@ fn still_valid(grant: &Grant) -> Result<(), lease::Reason> {
 		moq_auth::Error::GrantExpired => lease::Reason::Expired,
 		err => err.to_string().into(),
 	})
-}
-
-/// Refuse caps before reducing a grant to the paths its origin can enforce.
-fn check_rates(publish: &moq_auth::Access, subscribe: &moq_auth::Access) -> Result<(), Error> {
-	if publish.rate.is_some() || subscribe.rate.is_some() {
-		return Err(Error::Forbidden("this transport cannot enforce bitrate caps".into()));
-	}
-	Ok(())
 }
 
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
@@ -1064,10 +1052,9 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 	});
 	out.remote = request.remote_addr();
 	out.local = request.local_addr();
-	out.server_name = request
-		.server_name()
-		.map(str::to_owned)
-		.or_else(|| request.authority().map(str::to_owned));
+	// Only the SNI: a WebTransport CONNECT authority or WebSocket `Host` is client-chosen
+	// without having selected a certificate, so a session without SNI reports none.
+	out.server_name = request.server_name().map(str::to_owned);
 	out.alpn = request.alpn().map(str::to_owned);
 	out.role = request.role().and_then(role);
 	out.tls = request.peer_identity().as_ref().and_then(peer);
@@ -1075,9 +1062,9 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 }
 
 /// Build an auth request from the path, credential, and role carried in SETUP.
-pub(crate) fn request_for_setup<S: moq_net::transport::poll::Session>(
+pub(crate) fn request_for_setup(
 	auth: &Auth,
-	setup: &moq_net::server::Handshake<S>,
+	setup: &moq_net::server::Handshake,
 	transport: moq_auth::Transport,
 ) -> Request {
 	let (path, query) = match setup.path().split_once('?') {
@@ -1131,11 +1118,12 @@ pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::time::SystemTime;
 
-	fn patterns(texts: &[&str]) -> moq_auth::Access {
+	fn patterns(texts: &[&str]) -> moq_auth::Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
@@ -1145,57 +1133,6 @@ mod tests {
 			public: public.iter().map(|p| p.parse().unwrap()).collect(),
 			..Default::default()
 		}
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn capped_grants_are_refused_on_every_transport() {
-		use moq_auth::Transport::*;
-		for transport in [
-			Quic,
-			Iroh,
-			WebSocket,
-			Tcp,
-			Unix,
-			Http,
-			Rtmp,
-			Srt,
-			WebRtc,
-			WebTransport,
-			Unknown,
-		] {
-			for publish in [false, true] {
-				let (auth, mut admissions) = Auth::embedded("test");
-				let request = auth.request(transport, "/room");
-				let (result, ()) = tokio::join!(auth.admit(request), async {
-					let mut grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
-					let access = if publish {
-						&mut grant.publish
-					} else {
-						&mut grant.subscribe
-					};
-					access.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
-					admissions.next().await.unwrap().grant(lease::Consumer::fixed(grant));
-				});
-				let Err(Error::Forbidden(message)) = result else {
-					panic!("{transport} admitted a cap")
-				};
-				assert!(
-					message.contains("cannot enforce bitrate caps"),
-					"{transport}: {message}"
-				);
-			}
-		}
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn a_cap_added_at_revalidation_ends_the_lease() {
-		let grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
-		let (producer, consumer) = lease::Producer::new(grant.clone());
-		let mut lease = Lease::new("/room", consumer);
-		let mut capped = grant;
-		capped.subscribe.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
-		producer.update(capped);
-		assert!(lease.ended().await.to_string().contains("cannot enforce bitrate caps"));
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1248,7 +1185,7 @@ mod tests {
 		assert!(config(None, &["anon/**"]).validate(false).is_ok());
 
 		let split = Config {
-			public_subscribe: patterns(&["anon/**"]).path.into_iter().collect(),
+			public_subscribe: patterns(&["anon/**"]).into_iter().collect(),
 			..Default::default()
 		};
 		assert!(split.validate(false).is_ok());
@@ -1257,12 +1194,11 @@ mod tests {
 		assert!(grant.publish.is_empty());
 	}
 
-	/// The verification concurrency defaults to 128, reads from `[auth]`, and refuses 0,
+	/// The verification concurrency reads from `[auth]` and refuses 0,
 	/// which would leave every in-band token waiting forever.
 	#[test]
-	fn verifications_default_and_refuse_zero() {
+	fn verifications_parse_and_refuse_zero() {
 		let config = config(Some("http://127.0.0.1:4440/"), &[]);
-		assert_eq!(config.verifications, 128);
 		let parsed: Config = toml::from_str("url = \"http://127.0.0.1:4440/\"\nverifications = 4\n").unwrap();
 		assert_eq!(parsed.verifications, 4);
 		let zero = Config {
@@ -1292,8 +1228,8 @@ mod tests {
 	#[tokio::test]
 	async fn public_rules_are_rooted_at_slash() {
 		let auth = Config {
-			public_publish: patterns(&["anon/**"]).path.into_iter().collect(),
-			public_subscribe: patterns(&["anon/**", "*/chat"]).path.into_iter().collect(),
+			public_publish: patterns(&["anon/**"]).into_iter().collect(),
+			public_subscribe: patterns(&["anon/**", "*/chat"]).into_iter().collect(),
 			..Default::default()
 		}
 		.init("relay-1", &moq_tokio::tls::Connect::default(), false)
@@ -1381,7 +1317,7 @@ mod tests {
 			assert!(err.contains(&format!("`{hint}`")), "{public}: {err}");
 		}
 		let split = Config {
-			public_subscribe: patterns(&["anon/**", "live"]).path.into_iter().collect(),
+			public_subscribe: patterns(&["anon/**", "live"]).into_iter().collect(),
 			..Default::default()
 		};
 		let err = split.validate(false).unwrap_err().to_string();

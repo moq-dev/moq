@@ -57,7 +57,7 @@ impl Scope {
 			}
 		};
 
-		covers(&self.publish, &claims.publish.path) && covers(&self.subscribe, &claims.subscribe.path)
+		covers(&self.publish, &claims.publish) && covers(&self.subscribe, &claims.subscribe)
 	}
 }
 
@@ -69,16 +69,16 @@ impl Scope {
 /// policy holds its anonymous and mTLS rules as this pair too, authorized at `/`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Permissions {
-	/// Subscribe paths and an optional download cap, relative to the authorized path.
-	pub subscribe: crate::Access,
+	/// Patterns the holder may subscribe to, relative to the authorized path.
+	pub subscribe: Patterns,
 
-	/// Publish paths and an optional upload cap, relative to the authorized path.
-	pub publish: crate::Access,
+	/// Patterns the holder may publish to, relative to the authorized path.
+	pub publish: Patterns,
 }
 
 impl Permissions {
-	/// Grant access to these publish and subscribe paths, with optional bitrate caps.
-	pub fn new(publish: impl Into<crate::Access>, subscribe: impl Into<crate::Access>) -> Self {
+	/// Access granted as these pattern unions.
+	pub fn new(publish: impl Into<Patterns>, subscribe: impl Into<Patterns>) -> Self {
 		Self {
 			publish: publish.into(),
 			subscribe: subscribe.into(),
@@ -119,11 +119,11 @@ pub struct Claims {
 	/// It's mostly for compression and is optional, defaulting to the empty string.
 	pub root: String,
 
-	/// Publish paths and an optional upload cap, relative to the root.
-	pub publish: crate::Access,
+	/// Patterns the holder may publish, relative to the root.
+	pub publish: Patterns,
 
-	/// Subscribe paths and an optional download cap, relative to the root.
-	pub subscribe: crate::Access,
+	/// Patterns the holder may subscribe to, relative to the root.
+	pub subscribe: Patterns,
 
 	/// The expiration time of the token as a unix timestamp (`exp`).
 	pub expires: Option<std::time::SystemTime>,
@@ -143,15 +143,15 @@ impl Claims {
 		self
 	}
 
-	/// Set publish access and its optional bitrate cap, relative to the root.
-	pub fn with_publish(mut self, access: impl Into<crate::Access>) -> Self {
-		self.publish = access.into();
+	/// Grant publish access to these patterns, relative to the root.
+	pub fn with_publish(mut self, patterns: impl IntoIterator<Item = moq_pattern::Pattern>) -> Self {
+		self.publish = patterns.into_iter().collect();
 		self
 	}
 
-	/// Set subscribe access and its optional bitrate cap, relative to the root.
-	pub fn with_subscribe(mut self, access: impl Into<crate::Access>) -> Self {
-		self.subscribe = access.into();
+	/// Grant subscribe access to these patterns, relative to the root.
+	pub fn with_subscribe(mut self, patterns: impl IntoIterator<Item = moq_pattern::Pattern>) -> Self {
+		self.subscribe = patterns.into_iter().collect();
 		self
 	}
 
@@ -224,14 +224,8 @@ impl Claims {
 		};
 
 		let permissions = Permissions {
-			subscribe: crate::Access {
-				path: scope(&self.subscribe.path)?,
-				rate: self.subscribe.rate,
-			},
-			publish: crate::Access {
-				path: scope(&self.publish.path)?,
-				rate: self.publish.rate,
-			},
+			subscribe: scope(&self.subscribe)?,
+			publish: scope(&self.publish)?,
 		};
 
 		if permissions.subscribe.is_empty() && permissions.publish.is_empty() {
@@ -243,7 +237,7 @@ impl Claims {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -256,8 +250,8 @@ mod tests {
 	fn create_test_claims() -> Claims {
 		Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]).into(),
-			subscribe: patterns(&["test-sub/**"]).into(),
+			publish: patterns(&["test-pub/**"]),
+			subscribe: patterns(&["test-sub/**"]),
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
 			not_before: None,
@@ -273,7 +267,7 @@ mod tests {
 		};
 		let claims = Claims {
 			root: "project/live/room".into(),
-			publish: patterns(&["**"]).into(),
+			publish: patterns(&["**"]),
 			..Default::default()
 		};
 		assert!(scope.allows(&claims));
@@ -288,12 +282,12 @@ mod tests {
 		};
 		let sibling = Claims {
 			root: "project/lively".into(),
-			publish: patterns(&["**"]).into(),
+			publish: patterns(&["**"]),
 			..Default::default()
 		};
 		let role = Claims {
 			root: "project/live".into(),
-			subscribe: patterns(&["**"]).into(),
+			subscribe: patterns(&["**"]),
 			..Default::default()
 		};
 		assert!(!scope.allows(&sibling));
@@ -312,17 +306,17 @@ mod tests {
 		for claims in [
 			Claims {
 				root: "project".into(),
-				publish: patterns(&["live/room/**"]).into(),
+				publish: patterns(&["live/room/**"]),
 				..Default::default()
 			},
 			Claims {
 				root: String::new(),
-				publish: patterns(&["project/live/room/**"]).into(),
+				publish: patterns(&["project/live/room/**"]),
 				..Default::default()
 			},
 			Claims {
 				root: "/project/live/".into(),
-				publish: patterns(&["room/**"]).into(),
+				publish: patterns(&["room/**"]),
 				..Default::default()
 			},
 		] {
@@ -342,7 +336,7 @@ mod tests {
 		// everything within the scope.
 		let claims = Claims {
 			root: String::new(),
-			publish: patterns(&["**"]).into(),
+			publish: patterns(&["**"]),
 			..Default::default()
 		};
 		assert!(!scope.allows(&claims));
@@ -357,7 +351,7 @@ mod tests {
 		};
 		let claims = Claims {
 			root: "project/anything/deep".into(),
-			publish: patterns(&["**"]).into(),
+			publish: patterns(&["**"]),
 			..Default::default()
 		};
 		assert!(scope.allows(&claims));
@@ -373,7 +367,7 @@ mod tests {
 		};
 		let claims = Claims {
 			root: "project".into(),
-			publish: patterns(&["live/room/**", "other/**"]).into(),
+			publish: patterns(&["live/room/**", "other/**"]),
 			..Default::default()
 		};
 		assert!(!scope.allows(&claims));
@@ -389,12 +383,12 @@ mod tests {
 		};
 		let exact = Claims {
 			root: "project".into(),
-			publish: patterns(&["live"]).into(),
+			publish: patterns(&["live"]),
 			..Default::default()
 		};
 		let subtree = Claims {
 			root: "project".into(),
-			publish: patterns(&["live/**"]).into(),
+			publish: patterns(&["live/**"]),
 			..Default::default()
 		};
 		assert!(scope.allows(&exact));
@@ -468,7 +462,7 @@ mod tests {
 	fn test_claims_validation_only_publish() {
 		let claims = Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub"]).into(),
+			publish: patterns(&["test-pub"]),
 			..Default::default()
 		};
 
@@ -479,7 +473,7 @@ mod tests {
 	fn test_claims_validation_only_subscribe() {
 		let claims = Claims {
 			root: "test-path".to_string(),
-			subscribe: patterns(&["test-sub"]).into(),
+			subscribe: patterns(&["test-sub"]),
 			..Default::default()
 		};
 
@@ -501,8 +495,8 @@ mod tests {
 	fn test_claims_serde_names() {
 		let claims = Claims {
 			root: "live".into(),
-			publish: patterns(&["camera1"]).into(),
-			subscribe: patterns(&["camera1", "camera2"]).into(),
+			publish: patterns(&["camera1"]),
+			subscribe: patterns(&["camera1", "camera2"]),
 			..Default::default()
 		};
 		assert_eq!(
@@ -515,8 +509,8 @@ mod tests {
 	fn test_claims_read_legacy_prefixes_as_subtrees() {
 		let claims: Claims =
 			serde_json::from_str(r#"{"root":"test","put":["pub1","/a//b/"],"get":"","exp":1700000000}"#).unwrap();
-		assert_eq!(claims.publish, patterns(&["pub1/**", "a/b/**"]).into());
-		assert_eq!(claims.subscribe, patterns(&["**"]).into());
+		assert_eq!(claims.publish, patterns(&["pub1/**", "a/b/**"]));
+		assert_eq!(claims.subscribe, patterns(&["**"]));
 		assert!(claims.expires.is_some());
 	}
 
@@ -525,8 +519,8 @@ mod tests {
 		// Every grant is a subtree, so the legacy form says exactly the same thing.
 		let subtrees = Claims {
 			root: "live".into(),
-			publish: patterns(&["camera1/**"]).into(),
-			subscribe: patterns(&["**"]).into(),
+			publish: patterns(&["camera1/**"]),
+			subscribe: patterns(&["**"]),
 			..Default::default()
 		};
 		let json = serde_json::to_string(&subtrees).unwrap();
@@ -538,8 +532,8 @@ mod tests {
 		// One grant a prefix can't say moves the whole document to patterns.
 		let mixed = Claims {
 			root: "live".into(),
-			publish: patterns(&["camera1/**"]).into(),
-			subscribe: patterns(&["*/chat"]).into(),
+			publish: patterns(&["camera1/**"]),
+			subscribe: patterns(&["*/chat"]),
 			..Default::default()
 		};
 		assert_eq!(
@@ -586,8 +580,8 @@ mod tests {
 	fn authorize_claims(root: &str, subscribe: &[&str], publish: &[&str]) -> Claims {
 		Claims {
 			root: root.to_string(),
-			subscribe: patterns(subscribe).into(),
-			publish: patterns(publish).into(),
+			subscribe: patterns(subscribe),
+			publish: patterns(publish),
 			..Default::default()
 		}
 	}
@@ -597,8 +591,8 @@ mod tests {
 		let claims = authorize_claims("room/123", &["**"], &["alice/**"]);
 		let permissions = claims.authorize("room/123").unwrap();
 
-		assert_eq!(permissions.subscribe, patterns(&["**"]).into());
-		assert_eq!(permissions.publish, patterns(&["alice/**"]).into());
+		assert_eq!(permissions.subscribe, patterns(&["**"]));
+		assert_eq!(permissions.publish, patterns(&["alice/**"]));
 	}
 
 	#[test]
@@ -607,8 +601,8 @@ mod tests {
 		let claims = authorize_claims("room/123", &["bob/**"], &["alice/**"]);
 		let permissions = claims.authorize("room/123/alice").unwrap();
 
-		assert_eq!(permissions.subscribe, Patterns::new().into());
-		assert_eq!(permissions.publish, patterns(&["**"]).into());
+		assert_eq!(permissions.subscribe, Patterns::new());
+		assert_eq!(permissions.publish, patterns(&["**"]));
 	}
 
 	#[test]
@@ -617,7 +611,7 @@ mod tests {
 		let claims = authorize_claims("room", &[], &["alice"]);
 		let permissions = claims.authorize("room/alice").unwrap();
 
-		assert_eq!(permissions.publish, patterns(&[""]).into());
+		assert_eq!(permissions.publish, patterns(&[""]));
 	}
 
 	#[test]
@@ -626,8 +620,8 @@ mod tests {
 		let claims = authorize_claims("demo", &["**"], &["alice/**"]);
 		let permissions = claims.authorize("/").unwrap();
 
-		assert_eq!(permissions.subscribe, patterns(&["demo/**"]).into());
-		assert_eq!(permissions.publish, patterns(&["demo/alice/**"]).into());
+		assert_eq!(permissions.subscribe, patterns(&["demo/**"]));
+		assert_eq!(permissions.publish, patterns(&["demo/alice/**"]));
 	}
 
 	#[test]
@@ -636,8 +630,8 @@ mod tests {
 		let claims = authorize_claims("", &["demo/**"], &[]);
 		let permissions = claims.authorize("demo/room").unwrap();
 
-		assert_eq!(permissions.subscribe, patterns(&["**"]).into());
-		assert_eq!(permissions.publish, Patterns::new().into());
+		assert_eq!(permissions.subscribe, patterns(&["**"]));
+		assert_eq!(permissions.publish, Patterns::new());
 	}
 
 	#[test]
@@ -645,7 +639,7 @@ mod tests {
 		let claims = authorize_claims("/room/123/", &["bob/**"], &[]);
 		let permissions = claims.authorize("//room/123//").unwrap();
 
-		assert_eq!(permissions.subscribe, patterns(&["bob/**"]).into());
+		assert_eq!(permissions.subscribe, patterns(&["bob/**"]));
 	}
 
 	#[test]
@@ -673,17 +667,7 @@ mod tests {
 		// `**/chat` reached at `chat` is both the path itself and deeper `**/chat`.
 		let claims = authorize_claims("", &["**/chat"], &[]);
 		let permissions = claims.authorize("chat").unwrap();
-		assert_eq!(permissions.subscribe.path.len(), 2);
-		assert_eq!(permissions.subscribe, patterns(&["", "**/chat"]).into());
-	}
-	#[test]
-	fn capped_role_roundtrips() {
-		let wire = serde_json::json!({
-			"publish": { "path": "alice/**", "rate": 8_000_000 }
-		});
-		let grant: Claims = serde_json::from_value(wire).unwrap();
-		let encoded = serde_json::to_value(grant).unwrap();
-		assert_eq!(encoded["publish"]["rate"], 8_000_000);
-		assert!(encoded.get("put").is_none());
+		assert_eq!(permissions.subscribe.len(), 2);
+		assert_eq!(permissions.subscribe, patterns(&["", "**/chat"]));
 	}
 }

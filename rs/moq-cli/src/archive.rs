@@ -286,6 +286,7 @@ fn open(url: &Url) -> anyhow::Result<moq_archive::Store<Arc<dyn ObjectStore>>> {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -313,8 +314,6 @@ mod tests {
 	/// `<path>/@<epoch>`, and leaves out what is announced elsewhere.
 	#[tokio::test]
 	async fn each_broadcast_records_under_its_own_key_prefix() {
-		// `open_store` reads the credential variables.
-		let _env = crate::test_env::EnvGuard::clear(&[]);
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
 
@@ -386,7 +385,6 @@ mod tests {
 	/// epoch, serving its stored groups.
 	#[tokio::test]
 	async fn an_exported_broadcast_imports() {
-		let _env = crate::test_env::EnvGuard::clear(&[]);
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
 

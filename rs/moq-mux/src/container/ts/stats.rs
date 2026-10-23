@@ -291,6 +291,15 @@ pub struct Release {
 	/// MPEG-TS system clock may be (ISO/IEC 13818-1 2.4.2.1), which the output cannot follow.
 	#[serde(skip_serializing_if = "is_zero")]
 	pub out_of_tolerance: u64,
+	/// Groups that `--sync` began behind the end of the group before them on their PID, the
+	/// lane too narrow to absorb that group: a leg missing the earlier group's tail places
+	/// them elsewhere, so the legs differ until the lane catches up.
+	#[serde(skip_serializing_if = "is_zero")]
+	pub overruns: u64,
+	/// Packets that `--sync` dropped for reaching their slot after it went out, leaving
+	/// stuffing there.
+	#[serde(skip_serializing_if = "is_zero")]
+	pub late: u64,
 }
 
 impl Release {
@@ -304,6 +313,8 @@ impl Release {
 			offset: jitter.offset().map(millis),
 			drift: jitter.drift().map(|drift| drift * 1e6),
 			out_of_tolerance: jitter.out_of_tolerance(),
+			overruns: 0,
+			late: 0,
 		}
 	}
 }
@@ -439,10 +450,9 @@ impl Log {
 mod test {
 	use super::*;
 
-	/// `Class` keeps its `as` values with `Data` last, and an unknown name reads as data.
+	/// A class a later version adds reads as data.
 	#[test]
-	fn class_keeps_its_discriminants() {
-		assert_eq!([Class::Data as u8, Class::Audio as u8, Class::Video as u8], [0, 1, 2]);
+	fn an_unknown_class_reads_as_data() {
 		let class: Class = serde_json::from_str(r#""subtitle""#).unwrap();
 		assert_eq!(class, Class::Data);
 	}

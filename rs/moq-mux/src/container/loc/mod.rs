@@ -5,8 +5,6 @@
 //! timescale) followed by the codec bitstream. Defaults to microsecond
 //! timestamps. See [draft-ietf-moq-loc-04](https://www.ietf.org/archive/id/draft-ietf-moq-loc-04.html).
 
-use std::task::Poll;
-
 use moq_net::{Timescale, Timestamp};
 
 use crate::container::{Container, Frame, Kind};
@@ -33,30 +31,16 @@ impl Container for Wire {
 
 			// Carry the timestamp on the net frame too (converted to the track's
 			// timescale), so a relay sees it without parsing the LOC payload.
-			let mut chunked = group.create_frame(moq_net::frame::Info {
-				size: data.len() as u64,
-				timestamp: Some(frame.timestamp),
-			})?;
-			chunked.write(data)?;
-			chunked.finish()?;
+			group.write_frame(frame.timestamp, data)?;
 		}
 		Ok(())
 	}
 
-	fn poll_read(
-		&self,
-		group: &mut moq_net::group::Consumer,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>> {
-		use std::task::ready;
-
-		let Some(frame) = ready!(group.poll_read_frame(waiter)?) else {
-			return Poll::Ready(Ok(None));
-		};
+	fn decode(&self, frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error> {
 		// On a data track an object with no bytes is its discontinuity marker, not a frame.
 		// Elsewhere it is malformed, so it fails to decode below.
 		if self.0 == Kind::Data && frame.payload.is_empty() {
-			return Poll::Ready(Ok(Some(Vec::new())));
+			return Ok(Vec::new());
 		}
 
 		let loc = moq_loc::decode(frame.payload)?;
@@ -69,7 +53,7 @@ impl Container for Wire {
 			.unwrap_or(DEFAULT_TIMESCALE);
 		let timestamp = Timestamp::new(loc.timestamp, scale).map_err(hang::Error::from)?;
 
-		Poll::Ready(Ok(Some(vec![Frame {
+		Ok(vec![Frame {
 			timestamp,
 			payload: loc.payload,
 			// LOC doesn't carry the keyframe bit on the wire; the
@@ -77,7 +61,7 @@ impl Container for Wire {
 			keyframe: false,
 			// LOC carries no per-frame duration.
 			duration: None,
-		}])))
+		}])
 	}
 
 	fn kind(&self) -> Kind {

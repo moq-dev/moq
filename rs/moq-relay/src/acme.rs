@@ -217,8 +217,8 @@ impl Acme {
 		let health = moq_tokio::accept::Health::new("acme");
 		// Readiness waits on issuance, so keep extending systemd's start timeout
 		// rather than letting the unit's default kill the relay inside the budget.
-		let mut extend = tokio::time::interval(EXTEND_INTERVAL);
-		let deadline = tokio::time::sleep(self.timeout);
+		let mut extend = moq_clock::interval(EXTEND_INTERVAL);
+		let deadline = moq_clock::sleep(self.timeout);
 		tokio::pin!(deadline);
 		let mut last = None;
 		let mut issued = false;
@@ -261,13 +261,13 @@ impl Acme {
 							let handshake = challenge.accept(stream);
 							// The validator only needs the handshake, then closes.
 							handshakes.spawn(async move {
-								let _ = tokio::time::timeout(CHALLENGE_TIMEOUT, handshake).await;
+								let _ = moq_clock::timeout(CHALLENGE_TIMEOUT, handshake).await;
 							});
 						}
 					}
 					Err(err) => {
 						if let Some(pause) = health.failed(&err) {
-							tokio::time::sleep(pause).await;
+							moq_clock::sleep(pause).await;
 						}
 					}
 				},
@@ -332,7 +332,7 @@ impl Failures {
 		let Some(contents) = Cache::read(&self.path)? else {
 			return Ok(Vec::new());
 		};
-		let cutoff = SystemTime::now() - FAILURE_WINDOW;
+		let cutoff = SystemTime::from(moq_clock::wall()) - FAILURE_WINDOW;
 		let mut recent = Vec::new();
 		for line in String::from_utf8_lossy(&contents).lines() {
 			let secs: u64 = line
@@ -350,7 +350,7 @@ impl Failures {
 	/// Record a failure now, returning the recent ones including it.
 	fn record(&self) -> anyhow::Result<Vec<SystemTime>> {
 		let mut recent = self.recent()?;
-		recent.push(SystemTime::now());
+		recent.push(SystemTime::from(moq_clock::wall()));
 		let lines: String = recent
 			.iter()
 			.map(|at| format!("{}\n", at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()))
@@ -370,7 +370,7 @@ impl Failures {
 	fn refuse(&self, failed: &[SystemTime], domains: &str, addr: SocketAddr, last: Option<&str>) -> anyhow::Error {
 		let retry = failed
 			.first()
-			.map_or(SystemTime::now(), |oldest| *oldest + FAILURE_WINDOW);
+			.map_or(SystemTime::from(moq_clock::wall()), |oldest| *oldest + FAILURE_WINDOW);
 		let last = last.map(|last| format!("; last error: {last}")).unwrap_or_default();
 		anyhow::anyhow!(
 			"ACME validation for {domains} failed {} times in the last hour; stopping before the directory's failed-validation limit locks the hostname out (Let's Encrypt allows 5 failed validations per hostname per hour). Check that each domain resolves to this relay and that TCP port 443 reaches web.https.listen ({addr}), then restart after {} or delete {}{last}",
@@ -467,4 +467,9 @@ impl rustls_acme::AccountCache for Cache {
 }
 
 #[cfg(all(test, unix))]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests;

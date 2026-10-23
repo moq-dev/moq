@@ -1,10 +1,10 @@
 /**
  * The `@moq/video` renderer in headless Chromium: paint through WebGPU, lose the device with no
- * adapter to replace it, check the renderer reports `"surface-lost"`, then check a fresh canvas
+ * adapter to replace it, check the renderer reports an `InvalidStateError`, then check a fresh canvas
  * paints through Canvas2D. Once against the renderer directly and once through `<moq-publish>`,
  * which swaps its own canvas.
  *
- * Not `*.test.ts`: plain `bun test` runs lack Playwright Chromium, which `just test video` installs.
+ * Not `*.test.ts`: `just test video` launches the Chromium provided by the root devShell.
  *
  * @module
  */
@@ -100,7 +100,7 @@ test("the renderer reports a lost surface and recovers on a fresh canvas through
 
 		// Both paths show the same rotation: the frame's left (red) half on top.
 		expect(report.before).toEqual({ context: "webgpu", colors: ["red", "blue"] });
-		expect(report.error).toBe("surface-lost");
+		expect(report.error).toBe("InvalidStateError");
 		expect(report.after).toEqual({ context: "2d", colors: ["red", "blue"] });
 		expect(report.recovered).toBeUndefined();
 	} finally {

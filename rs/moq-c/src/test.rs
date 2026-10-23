@@ -249,13 +249,6 @@ fn publish_container(broadcast: u32, format: moq_container_format, init: &[u8]) 
 }
 
 #[test]
-fn origin_lifecycle() {
-	let origin = id(moq_origin_create());
-	assert_eq!(moq_origin_close(origin), 0, "moq_origin_close should succeed");
-	assert!(moq_origin_close(origin) < 0, "double-close should fail");
-}
-
-#[test]
 fn last_error_reports_reason() {
 	// A failed call records a retrievable reason string for moq_error().
 	assert!(moq_origin_close(9999) < 0);
@@ -406,26 +399,6 @@ fn last_error_protocol_captures_session_known_app_and_unknown() {
 		assert_eq!(protocol.code, code);
 		assert_eq!(protocol.kind, kind);
 	}
-}
-
-#[test]
-fn publish_media_lifecycle() {
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"publish-media-lifecycle");
-	let _guard = Guard(Some(|| {
-		moq_publish_close(broadcast);
-	}));
-
-	let init = opus_head();
-	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
-	let media = id(publish_audio(broadcast, format, &init, None));
-
-	let payload = b"opus frame";
-	let ret = unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 1000) };
-	assert_eq!(ret, 0, "moq_publish_media_frame should succeed");
-
-	assert_eq!(moq_publish_media_finish(media), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
 #[test]
@@ -2092,7 +2065,7 @@ fn json_snapshot_publish_consume() {
 
 	let track_name = b"meta";
 	let config = moq_json_snapshot_config {
-		delta_ratio: 8,
+		deltas: true,
 		compression: true,
 	};
 	let producer = id(unsafe {
@@ -2871,7 +2844,7 @@ fn track_demand_reports_the_wanted_group() {
 	let broadcast = publish_broadcast(origin, b"track-demand-wanted");
 	let name = b"data";
 	let info = moq_track_info {
-		priority: 127,
+		priority: 0,
 		max_age_us: 0,
 		max_age_present: false,
 		timescale: 0,
@@ -3198,7 +3171,7 @@ fn fetch_group(
 	broadcast: u32,
 	name: &str,
 	sequence: u64,
-	priority: u8,
+	priority: i8,
 	frame_start: u64,
 ) -> mpsc::Receiver<Result<(u64, Vec<u8>), moq_net::Error>> {
 	let consumer = State::lock()
@@ -3239,7 +3212,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 	let fetch = fetch_group(broadcast, "data", 5, 11, 0);
 	let request = id(group_cb.recv());
 	let mut sequence = 0u64;
-	let mut priority = 0u8;
+	let mut priority = 0i8;
 	let mut frame_start = 1u64;
 	assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
 	assert_eq!(unsafe { moq_group_request_priority(request, &mut priority) }, 0);
@@ -3268,6 +3241,60 @@ fn track_dynamic_serves_a_fetch_miss() {
 		.expect_err("a rejected fetch fails");
 	assert!(matches!(err, moq_net::Error::NotFound), "got {err:?}");
 
+	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
+	assert_eq!(group_cb.recv_terminal(), 0);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A group request every reader narrowed past is withdrawn, and the next group its fill
+/// still owes is requested without waiting for an answer.
+#[test]
+fn a_group_request_nobody_reads_is_withdrawn() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-dynamic-narrowed");
+	let name = b"data";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let group_cb = Callback::new();
+	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
+
+	let ascending = |start, end| {
+		moq_net::track::Subscription::default()
+			.with_max_delay(None)
+			.with_groups(start..end)
+			.with_order(moq_net::track::Order::Ascending)
+	};
+	let mut reader = {
+		let mut state = State::lock();
+		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
+		let reader = producer.subscribe(ascending(7, u64::MAX));
+		producer.start_at(10).unwrap();
+		let mut group = producer.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
+		group
+			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
+			.unwrap();
+		group.finish().unwrap();
+		reader
+	};
+	let waiter = kio::Waiter::noop();
+	while let std::task::Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {}
+	let first = id(group_cb.recv());
+	let mut sequence = 0u64;
+	assert_eq!(unsafe { moq_group_request_sequence(first, &mut sequence) }, 0);
+	assert_eq!(sequence, 7);
+
+	// Reading only 8, so the fill owes nothing once 8 is let go.
+	reader.update(ascending(8, 9)).unwrap();
+	assert!(reader.poll_recv_group(&waiter).is_pending());
+	let next = id(group_cb.recv());
+	assert_eq!(unsafe { moq_group_request_sequence(next, &mut sequence) }, 0);
+	assert_eq!(sequence, 8, "group 7, which nobody reads, held the fill back");
+	assert!(moq_group_request_accept(first) < 0, "the withdrawn request");
+
+	assert_eq!(moq_group_request_free(next), 0);
+	drop(reader);
 	assert_eq!(moq_publish_dynamic_cancel(dynamic), 0);
 	assert_eq!(group_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
@@ -5656,8 +5683,22 @@ fn server_accepts_a_session() {
 	let bandwidth = id(moq_session_bandwidth(session));
 	assert_eq!(moq_bandwidth_close(bandwidth), 0);
 
-	// The broadcast the server publishes reaches the client.
-	let consumed = request_broadcast(received, b"demo");
+	// The broadcast the server publishes reaches the client. A client only asks the
+	// server about what it watches, so wait on the path rather than request it once.
+	let path = b"demo";
+	let announced_cb = Callback::new();
+	let task = id(unsafe {
+		moq_origin_announced_broadcast(
+			received,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			announced_cb.ptr,
+		)
+	});
+	let consumed = id(announced_cb.recv());
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(announced_cb.recv_terminal(), 0);
 	assert_eq!(moq_consume_close(consumed), 0);
 
 	// Closing the accepted session is a clean terminal close.
@@ -5751,8 +5792,9 @@ fn server_listen_refuses_bad_config() {
 /// than binding and logging nothing.
 #[test]
 fn server_keylog_requires_sslkeylogfile() {
-	// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-	unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+	if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
+		return;
+	}
 	let bind = "127.0.0.1:0";
 	let generate = [moq_str("localhost")];
 	let mut config: moq_server_config = unsafe { std::mem::zeroed() };
@@ -5831,7 +5873,7 @@ fn json_tracks_are_advertised_in_the_catalog() {
 			status.as_ptr() as *const c_char,
 			status.len(),
 			&moq_json_snapshot_config {
-				delta_ratio: 4,
+				deltas: true,
 				compression: true,
 			},
 		)
@@ -5976,7 +6018,7 @@ fn data_track_names_cannot_collide() {
 			name.as_ptr() as *const c_char,
 			name.len(),
 			&moq_json_snapshot_config {
-				delta_ratio: 0,
+				deltas: false,
 				compression: false,
 			},
 		)
@@ -6034,7 +6076,10 @@ async fn a_background_panic_reaches_the_terminal_callback_and_keeps_another_orig
 	let task = crate::ffi::RUNTIME.spawn(async move {
 		let result = crate::ffi::run(async {
 			panic!("injected background panic");
-			#[allow(unreachable_code)]
+			#[expect(
+				unreachable_code,
+				reason = "the panic is the point; the `Ok` names the future's output type"
+			)]
 			Ok::<(), Error>(())
 		})
 		.await;

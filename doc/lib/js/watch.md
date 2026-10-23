@@ -29,6 +29,7 @@ in sync at the latency you ask for.
 | Attribute | |
 | --- | --- |
 | `url`, `name` | Relay URL (with `?jwt=` if needed) and broadcast name. |
+| `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-14,moq-lite-06`. Every stable version by default. |
 | `paused`, `muted`, `volume` | The usual player controls. |
 | `delay` | How far playback trails the live edge: `"auto"` (the default, sized from how late frames arrive; see [audio jitter](/concept/audio-jitter)), a duration like `"300ms"`, or `"instant"` to paint video as it decodes, with no audio. |
 | `buffer` | How far ahead of the live edge media may run; see [buffered playback](#buffered-playback). |
@@ -43,11 +44,10 @@ Every attribute is also a reactive property. The
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, and a stats panel.
 
-`el.error` (also `el.player.error`) reports a fatal audio or video decode error.
+`el.audio.out.error` and `el.video.out.error` report a fatal decode error.
 The failing track closes its subscription and stops decoding. Select another
 source or rendition to clear the failure; the player does not resubscribe to
-broken media automatically. Individual decoder errors are available at
-`el.audio.out.error` and `el.video.out.error`.
+broken media automatically.
 
 `el.broadcast.out.status` is `offline`, `loading`, `live`, `error`, or `unsupported`.
 On `unsupported`, update the player to read the broadcast's newer catalog; the overlay shows this notice.
@@ -56,7 +56,9 @@ and the player does not ask again until it is pointed elsewhere or re-enabled.
 
 The broadcast's announcement is its online signal: the player starts when a
 route serving the name is announced, goes `offline` when none is left, and
-waits for one to return for as long as it is mounted. When the exact route
+waits for one to return for as long as it is mounted. A catalog track that
+ends cleanly keeps playing until the broadcast ends, so a viewer drains a
+finished broadcast's tail. When the exact route
 ends while a covering prefix still serves the name, it moves to the prefix. A
 name outside the origin's scope is an `error`. A restarted publisher at the same name is followed at
 once, with a fresh catalog, and video, audio, and the clock start over on its
@@ -149,8 +151,8 @@ Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
 to change later, such as `muted` or `delay`. `Player` is the pipeline inside
 `<moq-watch>`; its parts are exported for custom composition.
 
-To chart when each frame arrived against when it plays, open an `arrivals()`
-handle on a decoder. It yields every frame received while it is open, stamped
+To chart when each audio frame arrived against when it plays, open an
+`arrivals()` handle on the audio decoder. It yields every frame received while it is open, stamped
 when the frame came off the transport, and a gap wherever media after an earlier
 frame will never arrive (a latency skip, a hole):
 
@@ -171,7 +173,7 @@ last frame's timestamp, and it covers any pause the publisher declared.
 
 Unread frames queue on the handle, so keep reading and keep your own window.
 Leaving the loop or calling `arrivals.close()` stops observing and releases
-them; nothing is retained without an open handle. Video reports the rendition on screen.
+them; nothing is retained without an open handle.
 
 ## Buffered playback
 

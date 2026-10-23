@@ -6,6 +6,7 @@ import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { fromTransport, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
+import { Version as IetfVersion } from "../ietf/version.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -14,6 +15,7 @@ import { sendOrder } from "../priority.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { type AnnounceBroadcast, AnnounceOk, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
+import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
@@ -247,18 +249,24 @@ async function servingNextGroup(opened: ReadableStreamDefaultReader<ReadableStre
 //
 // Every group is left open, so all of their streams are in flight and ranked against each
 // other. A group that finished would leave the ranking, which is the point of it.
-async function groupSendOrders(options: { priority: number; sequences: number[]; update?: number }) {
-	const { priority, sequences, update } = options;
+async function groupSendOrders(options: {
+	priority: number;
+	sequences: number[];
+	update?: number;
+	publisher?: number;
+	version?: Version;
+}) {
+	const { priority, sequences, update, version = Version.DRAFT_05 } = options;
 	const groups = sequences.map((sequence) => new GroupProducer(sequence));
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, priority: options.publisher });
 
-	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
-	const server = await Stream.accept(pair.server, Version.DRAFT_05);
+	const client = await Stream.open(pair.client, { version });
+	const server = await Stream.accept(pair.server, version);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	const msg = replaySubscribe({
@@ -275,7 +283,7 @@ async function groupSendOrders(options: { priority: number; sequences: number[];
 	try {
 		for (const [index, group] of groups.entries()) {
 			if (index === 1 && update !== undefined) {
-				await replayUpdate({ priority: update }).encode(client.writer, Version.DRAFT_05);
+				await replayUpdate({ priority: update }).encode(client.writer, version);
 				// Wait for the publisher to apply it, rather than assuming it beat the next group.
 				while (track.subscription.peek()?.priority !== update) await track.subscription.changed();
 			}
@@ -322,6 +330,13 @@ test("lite draft-05: equal priorities tie regardless of group numbering", async 
 	]);
 
 	expect(fresh).toEqual(ongoing);
+});
+
+// The track's publisher priority breaks ties on every draft, as in Rust, including the drafts
+// before lite-05 that acknowledge with SUBSCRIBE_OK instead of TRACK_INFO.
+test.each([Version.DRAFT_03, Version.DRAFT_05])("lite %s: the publisher priority ranks each group", async (version) => {
+	const orders = await groupSendOrders({ priority: 7, publisher: 5, sequences: [0], version });
+	expect(orders).toEqual([sendOrder({ priority: 7, publisher: 5 })]);
 });
 
 // SUBSCRIBE_UPDATE re-ranks the subscription, so every group it is serving picks up the new
@@ -534,6 +549,41 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	}
 });
 
+// An unchecked track goes out untimed, so lite-06 carries its send time, never the frame's own
+// timestamp, which may be a moq-transport arrival time.
+test("lite draft-06: an unchecked track's fetched frames carry their send time", async () => {
+	const pair = createMockTransportPair(ALPN_06);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
+
+	const broadcast = publish(origin, Path.from("test"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, ietf: IetfVersion.DRAFT_22 });
+
+	const group = new GroupProducer(0);
+	group.writeFrame(textFrame("hello", Timestamp.fromMillis(36_000_000)));
+	group.close();
+	track.writeGroup(group);
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_06);
+	if (!server) throw new Error("publisher never saw the fetch stream");
+
+	const msg = new Fetch({ broadcast: Path.from("test"), track: "video", priority: 0, group: 0 });
+	try {
+		const before = Math.floor(Timestamp.now().value);
+		await publisher.runFetch(msg, server);
+		const after = Math.ceil(Timestamp.now().value);
+
+		// The first frame's zigzag delta is against 0, in the milliseconds TRACK_INFO declares.
+		const sent = Number((await client.reader.u62()) >> 1n);
+		expect(sent).toBeGreaterThanOrEqual(before);
+		expect(sent).toBeLessThanOrEqual(after);
+	} finally {
+		publisher.close();
+		client.close();
+	}
+});
+
 // How long a served-subscription test waits for the next group stream before calling the
 // publisher idle. Nothing waits this out: it only bounds the read when a group never comes.
 const IDLE_MS = 500;
@@ -589,6 +639,7 @@ function gateWrites(target: WritableStream<Uint8Array>, hold: boolean) {
 async function servedSubscription(
 	options: {
 		startGroup?: number;
+		startFrame?: number;
 		endGroup?: number;
 		endFrame?: number;
 		gated?: boolean;
@@ -625,6 +676,7 @@ async function servedSubscription(
 		track: "video",
 		priority: 0,
 		startGroup: options.startGroup,
+		startFrame: options.startFrame,
 		endGroup: options.endGroup,
 		endFrame: options.endFrame,
 	});
@@ -637,6 +689,7 @@ async function servedSubscription(
 
 	return {
 		client,
+		datagrams: pair.client.datagrams.readable,
 		track,
 		serving,
 		parked: gate.parked,
@@ -818,6 +871,52 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	});
 }
 
+test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group and frame bounds", async (version) => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const sub = await servedSubscription({ version, startGroup: 0, startFrame: 1, endGroup: 1, endFrame: 0 });
+	const reader = sub.datagrams.getReader();
+	const received: number[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const next = await reader.read();
+			if (next.done) return;
+			received.push((await DatagramMessage.decode(next.value, version, () => ({ timed: true }))).sequence);
+		}
+	})();
+	try {
+		for (let sequence = 0; sequence < 3; sequence++)
+			sub.track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
+		await clock.advance(Nano.zero);
+		expect(received).toEqual([1]);
+		// Widen both boundaries, then narrow to one datagram. Each update is applied before new arrivals.
+		await replayUpdate({ priority: 0, startGroup: 0, startFrame: 0, endGroup: 4, endFrame: 0 }).encode(
+			sub.client.writer,
+			version,
+		);
+		await clock.advance(Nano.zero);
+		for (let sequence = 2; sequence < 6; sequence++)
+			sub.track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
+		await clock.advance(Nano.zero);
+		expect(received).toEqual([1, 2, 3, 4]);
+		await replayUpdate({ priority: 0, startGroup: 6, startFrame: 1, endGroup: 7, endFrame: 0 }).encode(
+			sub.client.writer,
+			version,
+		);
+		await clock.advance(Nano.zero);
+		for (let sequence = 6; sequence < 9; sequence++)
+			sub.track.insertDatagram(sequence, Timestamp.fromMillis(sequence), new Uint8Array([sequence]));
+		await clock.advance(Nano.zero);
+		expect(received).toEqual([1, 2, 3, 4, 7]);
+	} finally {
+		await reader.cancel();
+		await reading;
+		await sub.close();
+		await sub.serving;
+		restore();
+	}
+});
+
 // A sent datagram is accounted for, so the end sweep does not drop it, as the Rust publisher does.
 test("lite draft-06: the end sweep does not drop a sent datagram", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0 });
@@ -881,14 +980,14 @@ test("lite draft-06: a group stream that never completes is reset once the group
 		sub.serve(1);
 		expect(await sub.servedHeader()).toBe(1);
 		await flush();
-		await clock.advanceAsync(Nano.fromMilli(Milli(budget * 10)));
+		await clock.advance(Nano.fromMilli(Milli(budget * 10)));
 		expect(reason).toBeUndefined();
 
 		sub.serve(2);
 		expect(await sub.servedSequence()).toBe(2);
-		await clock.advanceAsync(Nano.fromMilli(Milli(budget - 1)));
+		await clock.advance(Nano.fromMilli(Milli(budget - 1)));
 		expect(reason).toBeUndefined();
-		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await clock.advance(Nano.fromMilli(Milli(1)));
 		await reset;
 		expect(toStreamCode(fromTransport(reason))).toBe(StreamCode.Old);
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
@@ -980,6 +1079,100 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 		await sub.close();
 	}
 });
+
+// A relay receives the newest group first while its source still promises older groups.
+// START must preserve that promise, bounded by the downstream floor and first served group.
+for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+	for (const [source, expected] of [
+		[0, 2],
+		[3, 3],
+		[9, 6],
+	]) {
+		test(`lite ${version}: descending delivery resolves source start ${source} at ${expected}`, async () => {
+			const sub = await servedSubscription({ version, startGroup: 2 });
+			try {
+				hooks.startTrack(sub.track, { start: source, requested: 2 });
+				sub.serve(6);
+				expect(await sub.servedSequence()).toBe(6);
+				const response = await decodeSubscribeResponse(sub.client.reader, version);
+				if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+				expect(response.start.group).toBe(expected);
+				if (expected < 6) {
+					sub.serve(expected);
+					expect(await sub.servedSequence()).toBe(expected);
+				}
+			} finally {
+				await sub.close();
+			}
+		});
+	}
+}
+
+// A relay's group stream can beat the upstream START on its own stream. Resolving from that
+// group would give up the backlog the START still promises, so the first group waits for it.
+for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
+	test(`lite ${version}: START waits for the upstream START before resolving`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 2 });
+		try {
+			hooks.startTrack(sub.track, { requested: 2 });
+			sub.serve(6);
+			await flush();
+			hooks.startTrack(sub.track, { start: 3, requested: 2 });
+			const response = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(response.start.group).toBe(3);
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+
+	// A track that closes never gets its START, so the held group must not wait for it.
+	test(`lite ${version}: a closed source releases the START it was waiting for`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 2 });
+		try {
+			hooks.startTrack(sub.track, { requested: 2 });
+			sub.serve(6);
+			await flush();
+			sub.track.close();
+			const response = await decodeSubscribeResponse(sub.client.reader, version);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+}
+
+for (const skipped of ["failed", "stale"] as const) {
+	test(`lite draft-06: START advances past a ${skipped} group from the source`, async () => {
+		const sub = await servedSubscription({
+			version: Version.DRAFT_06,
+			startGroup: 5,
+			maxAge: skipped === "stale" ? Milli(0) : undefined,
+		});
+		try {
+			hooks.startTrack(sub.track, { start: 5, requested: 5 });
+			const group = new GroupProducer(5);
+			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
+			sub.track.writeGroup(group);
+			group.close(skipped === "failed" ? new Error("cut") : undefined);
+			if (skipped === "failed") sub.track.dropGroups(7, 8, new Error("cut"));
+			sub.serve(6);
+			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+			expect(response.start.group).toBe(6);
+			if (skipped === "failed") {
+				const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+				if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
+				expect([dropped.drop.start, dropped.drop.end]).toEqual([7, 7]);
+			}
+			expect(await sub.servedSequence()).toBe(6);
+		} finally {
+			await sub.close();
+		}
+	});
+}
 
 // Pre-06 an absent Group Start is the latest group. An update that drops a named floor
 // re-pins there, so a group created below it afterwards is not served.

@@ -23,6 +23,8 @@ export interface InitPost {
 /** Flush the buffer and re-stall (fallback path only; shared path resets via Atomics). */
 export interface Reset {
 	type: "reset";
+	// Echoed in every later state message, so the main thread can tell state from before the reset.
+	epoch: number;
 }
 
 /**
@@ -54,4 +56,6 @@ export interface State {
 	stalled: boolean;
 	// How many times the ring has run dry mid-playback, cumulative.
 	underruns: number;
+	// The epoch of the last reset the worklet applied.
+	epoch: number;
 }

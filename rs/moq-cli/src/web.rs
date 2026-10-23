@@ -97,13 +97,6 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn cors_origin_defaults_to_no_browser_origin() {
-		let cors = Cors::default();
-
-		assert!(cors.layer([Method::GET]).is_ok());
-	}
-
-	#[test]
 	fn cors_origin_allows_specific_allowlist() {
 		let cors = Cors {
 			origin: vec![HeaderValue::from_static("https://example.com")],

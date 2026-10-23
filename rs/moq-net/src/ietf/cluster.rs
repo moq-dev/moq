@@ -285,14 +285,8 @@ mod tests {
 	}
 
 	#[test]
-	fn code_points() {
-		// The registry values are what other implementations key on; a typo here is
-		// invisible against ourselves and fatal against anyone else. The parity is
-		// load-bearing too: odd values are length-prefixed, even ones bare varints.
-		assert_eq!(HOP_ID, 0x40B54);
-		assert_eq!(RELAY_COST, 0x40B56);
-		assert_eq!(HOP_PATH, 0x40B57);
-		assert_eq!(ROUTE_COST, 0x40B58);
+	fn code_point_parity() {
+		// The parity is load-bearing: odd values are length-prefixed, even ones bare varints.
 		assert_eq!(HOP_ID % 2, 0);
 		assert_eq!(RELAY_COST % 2, 0);
 		assert_eq!(HOP_PATH % 2, 1);

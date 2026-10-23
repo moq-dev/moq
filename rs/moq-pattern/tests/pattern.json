@@ -271,6 +271,11 @@
 			"expect": true
 		},
 		{
+			"pattern": "a/b",
+			"path": "/a//b/",
+			"expect": true
+		},
+		{
 			"pattern": "a",
 			"path": "a/b",
 			"expect": false

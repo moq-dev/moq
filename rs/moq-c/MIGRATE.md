@@ -8,7 +8,43 @@ How to update your code for each breaking change, newest first.
 
 The ABI is unchanged. A track's dynamic handler now also gets group requests for history a subscription covers that the cache lacks, not only for fetches; each run arrives one group at a time, the next once the previous is accepted, aborted, or freed.
 `moq_group_request_abort` no longer delivers its error code: the waiting fetches fail as not found.
+A request whose group nobody reads any more, because every subscriber narrowed past it, is withdrawn and the next group follows: answering it then fails as not found.
 `moq_subscription.max_delay_us` always sets a budget, so a C subscriber cannot ask for the publisher's max age alone.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+`moq_consume_video` and `moq_consume_audio` on a rendition whose catalog `broadcast` field names a sibling now wait for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, give up on it yourself with `moq_consume_video_cancel` or `moq_consume_audio_cancel`.
+
+### JSON snapshot `delta_ratio` is `deltas`
+
+`moq_json_snapshot_config.delta_ratio` is replaced by `bool deltas`.
+Set `deltas = false` where you set `delta_ratio = 0`, and `deltas = true` for any positive ratio.
+With deltas on, the track carries a refresh ratio of 8 and the producer restates the value in a new group when a joiner asks.
+
+### Priorities are signed (#6142)
+
+`moq_track_info.priority` and `moq_subscription.priority` are `int8_t`, and `moq_group_request_priority` writes an `int8_t`, which changes the ABI.
+Higher is first and 0 is the unset midpoint, so a zeroed `moq_track_info` now uses the default priority rather than the least urgent one.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `moq_origin_announced` or `moq_origin_announced_broadcast`, instead of under its whole scope at connect.
+`moq_origin_request` watches nothing, so on a client it fails with a negative code for a path nothing watches, even when the relay announces it.
+Resolve the path with `moq_origin_announced_broadcast`, or hold `moq_origin_announced` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
+### `MOQ_CONTAINER_FORMAT_FMP4` unwraps to Legacy (#6250)
+
+A container import with `MOQ_CONTAINER_FORMAT_FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `MOQ_CONTAINER_FORMAT_CMAF` to keep publishing CMAF.
+
+### Timestamps stop at 2^61 - 1 microseconds (#6168)
+
+Writing a frame, or any other call that takes a timestamp, fails with `MOQ_ERROR_TIMESTAMP_OVERFLOW` past `2^61 - 1` microseconds instead of `2^62 - 1`, the most moq-lite-05/06 can carry.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 

@@ -84,19 +84,11 @@ impl Goaway {
 	}
 }
 
-/// The send request and its deadline on the session's caller-supplied clock.
-#[derive(Clone)]
-pub(crate) struct Triggered {
-	pub goaway: Goaway,
-	pub deadline: Option<crate::time::Instant>,
-}
-
 /// Sends this session's single GOAWAY.
 ///
 /// Obtained from `Session::drain`.
 pub struct Producer {
-	trigger: kio::Producer<Option<Triggered>>,
-	runtime: crate::time::Deadlines,
+	trigger: kio::Producer<Option<Goaway>>,
 	/// Whether this side may name a redirect URI. A client may not,
 	/// since it cannot tell a server to open connections (draft-19 sect 10.4).
 	redirect: bool,
@@ -105,9 +97,8 @@ pub struct Producer {
 impl Producer {
 	/// Send the GOAWAY, consuming the handle: a session may only send one.
 	///
-	/// The timeout starts at this send on the session's caller-supplied clock,
-	/// using the latest instant handed to its driver. A later poll cannot restart it.
-	/// The session must stay driven for the message to reach the wire. With
+	/// The timeout starts at the driver poll this send wakes, independent of the
+	/// GOAWAY's own write. The session must stay driven for the message to reach the wire. With
 	/// [`Goaway::timeout`] set, the driver force-closes the session once the
 	/// deadline passes, so awaiting `Session::closed`
 	/// is how a caller observes the drain finishing either way. That holds on a
@@ -137,10 +128,7 @@ impl Producer {
 			if state.is_some() {
 				return Err(Error::Duplicate);
 			}
-			let deadline = goaway
-				.timeout
-				.and_then(|timeout| self.runtime.now().checked_add(timeout));
-			*state = Some(Triggered { goaway, deadline });
+			*state = Some(goaway);
 		}
 		Ok(())
 	}
@@ -193,7 +181,7 @@ impl Consumer {
 /// why the flag is not merely a read of the channel), and a wakeup for the
 /// per-source tasks, which have to react to a peer that drains and then goes quiet.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct GoingAway {
 	flag: Arc<AtomicBool>,
 	received: Consumer,
@@ -201,13 +189,13 @@ pub(crate) struct GoingAway {
 
 impl GoingAway {
 	/// Mark the session as going away, returning whether this was the first time.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn set(&self) -> bool {
 		!self.flag.swap(true, Ordering::AcqRel)
 	}
 
 	/// Whether a GOAWAY has been received.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn is_set(&self) -> bool {
 		self.flag.load(Ordering::Acquire)
 	}
@@ -217,7 +205,7 @@ impl GoingAway {
 	///
 	/// Stays `Ready` once set, so a caller must treat what it does in response as
 	/// idempotent rather than as an edge.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
 		// Presence only, rather than [`Consumer::poll`]: this stays ready for the rest
 		// of the session, and every wakeup of every per-source task would otherwise
@@ -252,10 +240,10 @@ impl Default for GoingAway {
 
 /// The halves handed to a protocol driver's `start()`.
 #[derive(Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Protocol {
 	/// Awaited by the driver's send path; firing means "encode and send GOAWAY now".
-	trigger: kio::Consumer<Option<Triggered>>,
+	trigger: kio::Consumer<Option<Goaway>>,
 	/// Written by the driver's receive path when a GOAWAY is decoded.
 	received: kio::Producer<Option<Goaway>>,
 	/// Set alongside `received`; reprices this session's routes to the drain cost.
@@ -271,7 +259,7 @@ impl Protocol {
 	/// require the session be closed over (draft-19 sect 10.4). Keeping the first
 	/// payload instead would leave an observer acting on a URI the peer has since
 	/// replaced, with no way to tell.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn record(&self, goaway: Goaway) -> Result<()> {
 		if !self.going_away.set() {
 			return Err(Error::ProtocolViolation);
@@ -286,8 +274,8 @@ impl Protocol {
 	///
 	/// `None` if the trigger was dropped without firing (the session is closing
 	/// without a drain), so nothing should be sent.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn poll_triggered(&self, waiter: &kio::Waiter) -> Poll<Option<Triggered>> {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn poll_triggered(&self, waiter: &kio::Waiter) -> Poll<Option<Goaway>> {
 		match self.trigger.poll(waiter, |state| match &**state {
 			Some(goaway) => Poll::Ready(goaway.clone()),
 			None => Poll::Pending,
@@ -300,31 +288,32 @@ impl Protocol {
 }
 
 /// The drain deadline, watched independently of the wire's send progress.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+///
+/// Armed from the instant of the driver poll that observes the send, which the
+/// send wakes. The queue's instant at the send itself is the driver's last poll,
+/// as stale as the session has been idle, so arming from it would cut the peer's
+/// window short.
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Deadline {
 	runtime: crate::time::Deadlines,
-	trigger: Option<kio::Consumer<Option<Triggered>>>,
+	trigger: Option<kio::Consumer<Option<Goaway>>>,
 	armed: Option<(crate::time::Deadline, Duration)>,
 }
 
 impl Deadline {
 	/// Ready with the timeout once it expires, or without one if nothing is to enforce.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Option<Duration>> {
 		if let Some(trigger) = &self.trigger {
-			let triggered = match std::task::ready!(trigger.poll(waiter, |state| match &**state {
-				Some(triggered) => Poll::Ready(triggered.clone()),
+			let timeout = match std::task::ready!(trigger.poll(waiter, |state| match &**state {
+				Some(goaway) => Poll::Ready(goaway.timeout),
 				None => Poll::Pending,
 			})) {
-				Ok(triggered) => triggered,
+				Ok(timeout) => timeout,
 				Err(_) => return Poll::Ready(None),
 			};
 			self.trigger = None;
-			self.armed = triggered.deadline.zip(triggered.goaway.timeout).map(|(at, timeout)| {
-				let mut deadline = crate::time::Deadline::new(&self.runtime);
-				deadline.set(Some(at));
-				(deadline, timeout)
-			});
+			self.armed = timeout.map(|timeout| (crate::time::Deadline::after(&self.runtime, timeout), timeout));
 		}
 		let Some((deadline, timeout)) = &mut self.armed else {
 			return Poll::Ready(None);
@@ -335,11 +324,10 @@ impl Deadline {
 }
 
 /// The halves held by the public [`crate::Session`].
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct Handle {
 	/// Cloned into each [`Producer`] handed out by `crate::Session::drain`.
-	trigger: kio::Producer<Option<Triggered>>,
-	runtime: crate::time::Deadlines,
+	trigger: kio::Producer<Option<Goaway>>,
 	/// Whether this side may name a redirect URI in its own GOAWAY.
 	redirect: bool,
 	/// Handed out by `crate::Session::draining`.
@@ -350,8 +338,8 @@ impl Handle {
 	/// Create the session-side handle and its protocol-side counterpart.
 	///
 	/// `redirect` is whether this side may name a URI in its own GOAWAY.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn new(runtime: &crate::time::Deadlines, redirect: bool) -> (Self, Protocol) {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn new(redirect: bool) -> (Self, Protocol) {
 		let trigger = kio::Producer::new(None);
 		let received = kio::Producer::new(None);
 		let consumer = Consumer {
@@ -364,7 +352,6 @@ impl Handle {
 
 		let handle = Self {
 			trigger: trigger.clone(),
-			runtime: runtime.clone(),
 			redirect,
 			consumer,
 		};
@@ -380,27 +367,26 @@ impl Handle {
 	/// A send half. Handing one out is always allowed; sending twice is what
 	/// [`Producer::send`] refuses, so a caller never has to ask whether the slot
 	/// is still free before deciding how to shut down.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn producer(&self) -> Producer {
 		Producer {
 			trigger: self.trigger.clone(),
-			runtime: self.runtime.clone(),
 			redirect: self.redirect,
 		}
 	}
 
-	/// Watch the local deadline without holding up the protocol's writes.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn deadline(&self) -> Deadline {
+	/// Watch the local deadline on the driver's `runtime` without holding up the protocol's writes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn deadline(&self, runtime: &crate::time::Deadlines) -> Deadline {
 		Deadline {
-			runtime: self.runtime.clone(),
+			runtime: runtime.clone(),
 			trigger: Some(self.trigger.consume()),
 			armed: None,
 		}
 	}
 
 	/// A fresh handle on the receive half.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn consumer(&self) -> Consumer {
 		self.consumer.clone()
 	}
@@ -410,43 +396,27 @@ impl Handle {
 mod tests {
 	use super::*;
 
+	/// A session idle since its last poll still gives the peer the full timeout:
+	/// the window opens at the poll that observes the send, not the stale last one.
 	#[test]
-	fn deadline_starts_when_sent_not_when_the_handle_is_acquired() {
+	fn an_idle_session_gives_the_peer_the_whole_timeout() {
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::ZERO);
-		let (handle, protocol) = Handle::new(&runtime, true);
-		let producer = handle.producer();
-		let sent = crate::time::Instant::ZERO + Duration::from_secs(5);
-		runtime.advance(sent);
-		producer
+		let (handle, _protocol) = Handle::new(true);
+		let mut deadline = handle.deadline(&runtime);
+		let waiter = kio::Waiter::noop();
+		assert!(deadline.poll(&waiter).is_pending());
+
+		handle
+			.producer()
 			.send(Goaway::new().with_timeout(Duration::from_secs(1)))
 			.unwrap();
-		let Poll::Ready(Some(triggered)) = protocol.poll_triggered(&kio::Waiter::noop()) else {
-			panic!("not triggered")
-		};
-		assert_eq!(triggered.deadline, Some(sent + Duration::from_secs(1)));
-	}
-
-	#[test]
-	fn delayed_polling_does_not_restart_the_deadline() {
-		for delay in [Duration::ZERO, Duration::from_millis(500), Duration::from_secs(1)] {
-			let sent = crate::time::Instant::ZERO + Duration::from_secs(5);
-			let runtime = crate::time::Deadlines::new(sent);
-			let (handle, _protocol) = Handle::new(&runtime, true);
-			handle
-				.producer()
-				.send(Goaway::new().with_timeout(Duration::from_secs(1)))
-				.unwrap();
-			let mut deadline = handle.deadline();
-			let waiter = kio::Waiter::noop();
-			runtime.advance(sent + delay);
-			if delay < Duration::from_secs(1) {
-				assert!(deadline.poll(&waiter).is_pending());
-				runtime.advance(sent + Duration::from_secs(1) - Duration::from_nanos(1));
-				assert!(deadline.poll(&waiter).is_pending());
-				runtime.advance(sent + Duration::from_secs(1));
-			}
-			assert_eq!(deadline.poll(&waiter), Poll::Ready(Some(Duration::from_secs(1))));
-		}
+		let sent = crate::time::Instant::ZERO + Duration::from_secs(5);
+		runtime.advance(sent);
+		assert!(deadline.poll(&waiter).is_pending());
+		runtime.advance(sent + Duration::from_secs(1) - Duration::from_nanos(1));
+		assert!(deadline.poll(&waiter).is_pending());
+		runtime.advance(sent + Duration::from_secs(1));
+		assert_eq!(deadline.poll(&waiter), Poll::Ready(Some(Duration::from_secs(1))));
 	}
 
 	/// A session sends at most one GOAWAY. Handing out the handle is always
@@ -454,7 +424,7 @@ mod tests {
 	/// twice is what gets refused, and the first payload is the one kept.
 	#[test]
 	fn only_the_first_send_wins() {
-		let (handle, protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (handle, protocol) = Handle::new(true);
 
 		handle
 			.producer()
@@ -468,7 +438,7 @@ mod tests {
 		assert!(matches!(err, Error::Duplicate));
 
 		assert_eq!(
-			protocol.trigger.read().as_ref().map(|g| g.goaway.uri.as_str()),
+			protocol.trigger.read().as_ref().map(|g| g.uri.as_str()),
 			Some("https://first.example/"),
 			"the peer must not see a URI replaced out from under it"
 		);
@@ -478,7 +448,7 @@ mod tests {
 	/// URI is refused locally rather than getting the session closed by the peer.
 	#[test]
 	fn client_redirect_is_refused() {
-		let (handle, _protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
+		let (handle, _protocol) = Handle::new(false);
 		let err = handle
 			.producer()
 			.send(Goaway {
@@ -489,7 +459,7 @@ mod tests {
 		assert!(matches!(err, Error::ProtocolViolation));
 
 		// An empty URI ("I am going away") is still allowed.
-		let (handle, _protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), false);
+		let (handle, _protocol) = Handle::new(false);
 		handle.producer().send(Goaway::default()).unwrap();
 	}
 
@@ -510,14 +480,14 @@ mod tests {
 	/// reaching an encoder that would frame it wrong.
 	#[test]
 	fn oversized_uri_is_refused() {
-		let (handle, _protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (handle, _protocol) = Handle::new(true);
 		let err = handle
 			.producer()
 			.send(Goaway::redirect("x".repeat(MAX_URI + 1)))
 			.unwrap_err();
 		assert!(matches!(err, Error::ProtocolViolation));
 
-		let (handle, _protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (handle, _protocol) = Handle::new(true);
 		handle
 			.producer()
 			.send(Goaway::redirect("x".repeat(MAX_URI)))
@@ -527,7 +497,7 @@ mod tests {
 	/// A second GOAWAY is a protocol violation, not something to log and discard.
 	#[test]
 	fn duplicate_is_a_protocol_violation() {
-		let (_handle, protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (_handle, protocol) = Handle::new(true);
 		protocol.record(Goaway::default()).unwrap();
 		let err = protocol.record(Goaway::default()).unwrap_err();
 		assert!(matches!(err, Error::ProtocolViolation));
@@ -537,7 +507,7 @@ mod tests {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn consumer_observes_the_recorded_goaway() {
-		let (handle, protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (handle, protocol) = Handle::new(true);
 		let consumer = handle.consumer();
 		assert_eq!(consumer.peek(), None);
 
@@ -556,7 +526,7 @@ mod tests {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn recv_resolves_when_the_session_closes() {
-		let (handle, protocol) = Handle::new(&crate::time::Deadlines::new(crate::time::Instant::ZERO), true);
+		let (handle, protocol) = Handle::new(true);
 		let consumer = handle.consumer();
 		drop(protocol);
 		assert_eq!(consumer.recv().await, None);

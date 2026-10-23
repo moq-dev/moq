@@ -26,8 +26,9 @@ probe opens the camera's own backend with a CPU picture.
 
 - Selection: switch `stream.rs` `config` from `Kind::Named("nvenc")` to
   `Kind::Auto`. A device no backend imports must be refused, never sent to
-  openh264; the workspace unifies `openh264` on, so check that refusal in a
-  test.
+  openh264. #5771 made openh264 opt-in, but the hand-written moq-c still
+  enables it, so a workspace build can unify it on; check that refusal in a
+  test built with `openh264`.
 - Probe: a CPU picture only works on a backend that also takes CPU input.
   Probe with the camera's surface type, or take parameter sets from the first
   keyframe instead, whichever backend picks.
@@ -58,4 +59,4 @@ probe opens the camera's own backend with a CPU picture.
 
 ## Related
 
-- [GPU CI](/quest/m2/gpu-ci.md) - runs the NVIDIA half nightly
+- [GPU CI](/quest/m2/gpu-ci.md) - gates NVIDIA correctness on hardware in the merge queue

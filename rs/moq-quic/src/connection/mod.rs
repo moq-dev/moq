@@ -51,6 +51,8 @@ use datagrams::DatagramState;
 pub use datagrams::{Datagrams, SendDatagramError};
 
 mod mtud;
+#[cfg(feature = "mux")]
+pub mod mux;
 mod pacing;
 
 mod packet_builder;
@@ -79,9 +81,6 @@ mod stats;
 pub(crate) struct ConnectionTag(u64);
 
 impl ConnectionTag {
-    /// No connection, for state that has not come from one yet.
-    pub(crate) const NONE: Self = Self(0);
-
     /// A tag no other connection in this process has.
     pub(crate) fn next() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -93,8 +92,9 @@ pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 mod streams;
 pub(crate) use streams::StreamsState;
 pub use streams::{
-    Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream, SendGroup,
-    SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
+    Chunks, ClosedStream, FinishError, LeaseError, Leased, ReadError, ReadableError, RecvStream,
+    SendGroup, SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams,
+    WriteError, Written,
 };
 
 mod timer;
@@ -237,6 +237,13 @@ pub struct Connection {
     //
     /// The number of times a PTO has been sent without receiving an ack.
     pto_count: u32,
+    /// Whether a packet from the peer has authenticated since the last ack-eliciting 1-RTT packet
+    /// went out. Kept in event order: a packet handled and one sent in the same poll share an
+    /// instant.
+    heard_since_sent: bool,
+    /// A probe timed out with the peer unheard since the packet it probed for went out, so the
+    /// path may have been down: the next packet heard brings the next probe forward.
+    probe_when_heard: bool,
 
     //
     // Congestion Control
@@ -360,6 +367,8 @@ impl Connection {
             next_bundled_ack_time: None,
 
             pto_count: 0,
+            heard_since_sent: false,
+            probe_when_heard: false,
 
             app_limited: false,
             receiving_ecn: false,
@@ -771,6 +780,13 @@ impl Connection {
                         // Clip the unused capacity out of the buffer so future packets don't
                         // overrun
                         buf_capacity = buf.len();
+
+                        // Every later segment is capped at the first one's size. If that is
+                        // too small to be worth sending, end the batch so the rest goes out
+                        // at full size.
+                        if segment_size < MIN_PACKET_SPACE {
+                            break;
+                        }
 
                         // Check whether the data we planned to send will fit in the reduced segment
                         // size. If not, bail out and leave it for the next GSO batch so we don't
@@ -1435,17 +1451,9 @@ impl Connection {
         stats
     }
 
-    /// Return connection flow control credit taken by [`Chunks::hold()`] to the peer.
-    ///
-    /// If [`ShouldTransmit::should_transmit()`] returns `true`, call
-    /// [`Self::poll_transmit()`] soon so the peer learns of the larger window.
-    ///
-    /// # Panics
-    /// If `credit` came from another connection.
-    pub fn release(&mut self, credit: Credit) -> ShouldTransmit {
-        let transmit = self.streams.release(credit);
-        self.spaces[SpaceId::Data].pending.max_data |= transmit.should_transmit();
-        transmit
+    /// The bytes leased from receive stream `id` with [`RecvStream::lease()`], if it has a lease
+    pub fn leased(&self, id: StreamId) -> Option<&Leased> {
+        self.streams.leased(id)
     }
 
     /// Ping the remote endpoint
@@ -1920,8 +1928,29 @@ impl Connection {
             _ => 2,
         };
         self.spaces[space].loss_probes = self.spaces[space].loss_probes.saturating_add(count);
+        self.probe_when_heard = space == SpaceId::Data
+            && self.spaces[space]
+                .time_of_last_ack_eliciting_packet
+                .is_some()
+            && !self.heard_since_sent;
         self.pto_count = self.pto_count.saturating_add(1);
         self.set_loss_detection_timer(now);
+    }
+
+    /// Send the next probe now if the peer, silent through the last probe timeout, is heard
+    /// again ([`Self::probe_when_heard`]). The timeout doubles with each probe (RFC 9002 §6.2.1),
+    /// up to 2^[`MAX_BACKOFF_EXPONENT`] times its base, so after an outage the backed-off timer
+    /// can leave a path that is back idle for seconds.
+    /// A packet that acknowledged anything new has already reset the backoff, and one that
+    /// migrated the connection left a path with nothing in flight to probe for.
+    fn probe_on_heard(&mut self, now: Instant) {
+        if mem::take(&mut self.probe_when_heard)
+            && self.pto_count > 0
+            && self.path.in_flight.ack_eliciting > 0
+            && !self.state.is_closed()
+        {
+            self.timers.set(Timer::LossDetection, now);
+        }
     }
 
     fn detect_lost_packets(&mut self, now: Instant, pn_space: SpaceId, due_to_ack: bool) {
@@ -2689,7 +2718,15 @@ impl Connection {
                 packet.header.is_1rtt(),
             );
         }
-        self.process_decrypted_packet(now, remote, number, packet)
+        let result = self.process_decrypted_packet(now, remote, number, packet);
+        // Only a protected packet is the peer's word: anyone on the path can send a Retry or a
+        // Version Negotiation packet. One from another address, such as a probe of a new path,
+        // says nothing of the active one.
+        if number.is_some() && remote == self.path.remote {
+            self.heard_since_sent = true;
+            self.probe_on_heard(now);
+        }
+        result
     }
 
     /// Apply the state transitions that follow processing a packet

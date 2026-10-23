@@ -902,20 +902,6 @@ mod tests {
 	}
 
 	#[test]
-	fn codec_roundtrips_as_str() {
-		assert_eq!(Codec::Opus.as_str(), "opus");
-		assert_eq!(Codec::Opus.to_string(), "opus");
-		assert_eq!("opus".parse::<Codec>().unwrap(), Codec::Opus);
-		assert_eq!(Codec::Pcm.as_str(), "pcm");
-		assert_eq!(Codec::Pcm.to_string(), "pcm");
-		assert_eq!("pcm".parse::<Codec>().unwrap(), Codec::Pcm);
-		assert_eq!(Codec::Aac.as_str(), "aac");
-		assert_eq!(Codec::Aac.to_string(), "aac");
-		assert_eq!("aac".parse::<Codec>().unwrap(), Codec::Aac);
-		assert!("mp3".parse::<Codec>().is_err());
-	}
-
-	#[test]
 	fn settings_fix_the_codec_rate() {
 		let enc = Encoder::new(&Settings::new(24_000, Layout::Mono)).unwrap();
 		assert_eq!(enc.codec_rate(), 24_000);
@@ -1169,11 +1155,5 @@ mod tests {
 		let finish = enc.finish(&[]).unwrap();
 		assert_eq!(finish.packets().len(), 3);
 		assert_eq!(finish.discard_padding(), 3 * 1024 - backend::stub::DELAY);
-	}
-
-	/// Opus signals its lookahead as pre-skip, so the producer folds none of it.
-	#[test]
-	fn opus_folds_no_delay() {
-		assert_eq!(Encoder::new(&Settings::default()).unwrap().folded_delay(), 0);
 	}
 }

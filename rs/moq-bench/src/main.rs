@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
 			stats: stats.clone(),
 		};
 		tasks.spawn(async move {
-			tokio::time::sleep(delay).await;
+			moq_clock::sleep(delay).await;
 			connection::run(ctx).await;
 		});
 	}
@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
 	let duration = config.duration.map(crate::duration::Duration::into_std);
 	let stop = async move {
 		match duration {
-			Some(d) => tokio::time::sleep(d).await,
+			Some(d) => moq_clock::sleep(d).await,
 			None => std::future::pending::<()>().await,
 		}
 	};

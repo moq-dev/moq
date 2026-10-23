@@ -21,7 +21,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use str0m::Rtc;
@@ -811,7 +811,7 @@ async fn next_write(writes: Option<&mut mpsc::Receiver<Bytes>>) -> Option<Bytes>
 
 /// A str0m connection with this socket's host candidates.
 fn rtc(locals: &[SocketAddr]) -> Result<Rtc, Error> {
-	let mut rtc = Rtc::builder().build(Instant::now());
+	let mut rtc = Rtc::builder().build(moq_clock::now().into_std());
 	for &addr in locals {
 		let candidate = str0m::Candidate::host(addr, "udp").map_err(|err| Error::Candidate(err.to_string()))?;
 		rtc.add_local_candidate(candidate);
@@ -959,4 +959,9 @@ async fn mdns(host: &str) -> Result<IpAddr, Error> {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests;

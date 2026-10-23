@@ -16,16 +16,11 @@ windows are reachable by explicit id even under Wayland.
 The portal path is what is left, and it is different in kind rather than merely
 unimplemented, because xdg-desktop-portal owns source selection:
 
-- **Portal-picked windows reach the Rust API but not the CLI.** #5089 added
-  `capture::Source::Portal(portal::Selection)` with `portal::Kind::{Screen,
-  Window}`, so a caller can ask the picker for a window, and its restore token
-  stays with that selection. The portal still owns which window the user
-  picks, so there is no id to hand back. `moq` only takes an explicit window
-  id; wire a picker-driven window selection into the CLI (for example, a bare
-  `--window` going to the portal, mirroring an unqualified `--display`) and
-  update `doc/bin/cli.md`.
-- **Display selection stays picker-driven.** An unqualified `--display` still
-  goes to the portal and ignores the selector. Since #5089 a `Selection` replays
+- Portal-picked windows reach the CLI: #5089 added
+  `capture::Source::Portal(portal::Selection)`, and #5566 sends a bare
+  `--window` to the portal (`doc/bin/cli.md`).
+- **Display selection stays picker-driven.** On Wayland a bare `--display`
+  goes to the portal and a non-X11 id is refused. Since #5089 a `Selection` replays
   its restore token across reopens within one process, but the token is never
   exposed, so a new `moq` run always shows the picker. Either the token becomes
   persistable (API plus CLI) so a previously-approved source is reused without

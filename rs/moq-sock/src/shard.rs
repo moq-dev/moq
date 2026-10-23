@@ -593,6 +593,7 @@ fn program(count: u16) -> [libc::sock_filter; 18] {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 

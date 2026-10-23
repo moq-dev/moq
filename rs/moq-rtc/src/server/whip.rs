@@ -28,7 +28,7 @@ struct RouterState {
 
 /// Build the WHIP axum router. Only with the `server` feature.
 #[cfg(feature = "server")]
-pub fn router(server: Server, publisher: moq_net::origin::Producer) -> Router {
+pub(crate) fn router(server: Server, publisher: moq_net::origin::Producer) -> Router {
 	Router::new()
 		.route("/{*path}", post(handle).delete(delete))
 		.with_state(RouterState { server, publisher })
@@ -92,13 +92,13 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 /// Accept a WHIP SDP offer and publish the negotiated WebRTC media into
 /// `publisher` under `broadcast` (a path relative to that producer's root).
 ///
-/// This is the negotiation core behind [`router`], exposed so an embedder can
+/// This is the negotiation core behind [`Server::publish_router`], exposed so an embedder can
 /// own the HTTP route and authentication: verify the request, resolve the
 /// authorized broadcast name, scope `publisher` to the caller's grants, then hand
 /// the raw SDP offer here. Taking the producer explicitly (rather than using the
 /// server's) lets the embedder publish through a *scoped* origin, so the publish
 /// scope is enforced by moq-net exactly as for a native session; the bundled
-/// [`router`] passes the server's own (unauthenticated) producer. It parses the
+/// [`Server::publish_router`] passes the server's own (unauthenticated) producer. It parses the
 /// offer, registers a media session on the shared mux, announces the
 /// broadcast under a fresh epoch once negotiation succeeds (so a fast subscriber
 /// doesn't 404 in the gap before the first RTP packet, and a reconnecting
@@ -136,7 +136,7 @@ pub async fn accept(
 	let (creds, inbound, registration) = mux.register();
 	let mut rtc = RtcConfig::new()
 		.set_local_ice_credentials(creds)
-		.build(std::time::Instant::now());
+		.build(moq_clock::now().into_std());
 	for addr in mux.candidates() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);
@@ -176,7 +176,6 @@ pub async fn accept(
 			registration: Some(registration),
 			cancel: Some(cancel),
 			role: "whip server",
-			broadcast: Some(handle),
 		},
 	})
 }
@@ -202,6 +201,7 @@ fn status_for(err: &Error) -> StatusCode {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use str0m::{
 		format::Codec,

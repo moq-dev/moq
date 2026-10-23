@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { DuplicateTrackAlias, RetiredTrackAlias, SharedTrackAlias, TrackAliases } from "./aliases.ts";
 
 test("waits for the control message that establishes an alias", async () => {
@@ -105,6 +106,8 @@ test("a later subscribe reclaims a retired alias", async () => {
 // Tombstones are bounded: a session churning through subscriptions must not accumulate
 // one entry per alias it ever used.
 test("retired aliases are capped", async () => {
+	const clock = new Manual();
+	using _clock = { [Symbol.dispose]: clock.install() };
 	const aliases = new TrackAliases<object>();
 
 	for (let i = 0n; i < 74n; i++) {
@@ -114,6 +117,8 @@ test("retired aliases are capped", async () => {
 	}
 
 	// The oldest tombstones are forgotten, so they fall back to the unknown-alias wait.
-	await expect(aliases.get(0n)).rejects.toThrow("unknown track alias");
+	const forgotten = aliases.get(0n).catch((error: unknown) => error);
+	await clock.advance(Nano.fromMilli(Milli(1000)));
+	expect(await forgotten).toHaveProperty("message", "unknown track alias: 0");
 	await expect(aliases.get(73n)).rejects.toBeInstanceOf(RetiredTrackAlias);
 });

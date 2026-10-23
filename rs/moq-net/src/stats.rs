@@ -137,7 +137,7 @@ use std::{
 	fmt,
 	sync::{
 		Arc, Mutex, MutexGuard, PoisonError, Weak,
-		atomic::{AtomicU64, AtomicUsize, Ordering},
+		atomic::{AtomicU64, AtomicUsize, Ordering, fence},
 	},
 };
 
@@ -307,6 +307,7 @@ struct SessionCounters {
 	bytes: Mutex<SessionBytes>,
 	wire_tx: AtomicU64,
 	wire_rx: AtomicU64,
+	control: [[AtomicU64; 2]; Control::ALL.len()],
 }
 
 impl SessionCounters {
@@ -317,15 +318,19 @@ impl SessionCounters {
 		}
 	}
 
-	/// Read the gauge into a [`Presence`]. Ended is loaded with `Acquire`
+	/// Read the gauge and whether all its payload meters have ended. Ended is loaded with `Acquire`
 	/// before started with `Relaxed`, the same pairing as [`Counters::snapshot`],
 	/// so the readout never shows `ended > started`.
-	fn snapshot(&self) -> Presence {
+	fn snapshot(&self) -> (Presence, bool) {
 		let sessions_failed = self.sessions_failed.snapshot();
 		let sessions_ended = self.sessions_ended.load(Ordering::Acquire);
 		let sessions_started = self.sessions_started.load(Ordering::Relaxed);
-		let (sent_bytes, received_bytes) = self.bytes().read();
-		Presence {
+		let (sent_bytes, received_bytes, empty) = {
+			let mut bytes = self.bytes();
+			let (sent, received) = bytes.read();
+			(sent, received, bytes.live.is_empty())
+		};
+		let presence = Presence {
 			sessions_refused: self.sessions_refused.snapshot(),
 			sessions_failed,
 			requests: self.requests.load(Ordering::Relaxed),
@@ -337,6 +342,15 @@ impl SessionCounters {
 			received_bytes,
 			announces_peak: self.announces_peak.load(Ordering::Relaxed),
 			subscriptions_peak: self.subscriptions_peak.load(Ordering::Relaxed),
+		};
+		(presence, empty)
+	}
+
+	fn control(&self, totals: &mut [[u64; 2]; Control::ALL.len()]) {
+		for (total, counters) in totals.iter_mut().zip(&self.control) {
+			for (total, counter) in total.iter_mut().zip(counters) {
+				*total += counter.load(Ordering::Relaxed);
+			}
 		}
 	}
 
@@ -402,8 +416,12 @@ impl SessionBytes {
 		let Self { sent, received, live } = self;
 		let (mut live_sent, mut live_received) = (0, 0);
 		live.retain(|_, arrival| {
-			// Unique means the session and every meter it handed out have dropped.
-			let ended = Arc::get_mut(&mut arrival.traffic).is_some();
+			// No Weak<SessionTraffic> exists, so a unique arrival cannot gain another writer.
+			let ended = Arc::strong_count(&arrival.traffic) == 1;
+			if ended {
+				// Pair with the last writer's Arc drop before loading its final relaxed counters.
+				fence(Ordering::Acquire);
+			}
 			let (now_sent, now_received) = arrival.traffic.load();
 			let (delta_sent, delta_received) = (now_sent - arrival.sent, now_received - arrival.received);
 			if ended {
@@ -886,6 +904,73 @@ impl Role {
 	}
 }
 
+/// Cumulative bytes sent and received, returned per [`Control`] class by [`Snapshot::control`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Bytes {
+	/// Bytes successfully encoded for sending, counted even if the stream later fails.
+	pub tx: u64,
+	/// Bytes of complete messages decoded and consumed.
+	pub rx: u64,
+}
+
+/// The bounded class of a successfully encoded or decoded control message.
+///
+/// Counters include prefixes inside a complete codec value, but exclude separately
+/// coded selectors and raw payload writes. A framed IETF body counts after its
+/// framing decodes, before request validation. Shared reply IDs use [`Self::Other`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Control {
+	/// Session setup and information.
+	Session,
+	/// Namespace advertisements and listings.
+	Announce,
+	/// Track metadata and listings.
+	TrackInfo,
+	/// Live subscriptions and their updates.
+	Subscribe,
+	/// Finite fetch requests.
+	Fetch,
+	/// Bandwidth probes.
+	Probe,
+	/// Authorization messages.
+	Auth,
+	/// Session or request migration.
+	Goaway,
+	/// Other protocol control messages, including shared request responses.
+	Other,
+}
+
+impl Control {
+	const ALL: [Self; 9] = [
+		Self::Session,
+		Self::Announce,
+		Self::TrackInfo,
+		Self::Subscribe,
+		Self::Fetch,
+		Self::Probe,
+		Self::Auth,
+		Self::Goaway,
+		Self::Other,
+	];
+
+	/// The stable label used by control metrics.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Session => "session",
+			Self::Announce => "announce",
+			Self::TrackInfo => "track_info",
+			Self::Subscribe => "subscribe",
+			Self::Fetch => "fetch",
+			Self::Probe => "probe",
+			Self::Auth => "auth",
+			Self::Goaway => "goaway",
+			Self::Other => "other",
+		}
+	}
+}
+
 /// A point-in-time, host-level rollup of a registry's counters, returned
 /// by [`Registry::snapshot`].
 ///
@@ -904,9 +989,27 @@ pub struct Snapshot {
 	traffic: HashMap<Tier, [Traffic; 2]>,
 	/// Session presence per tier; read via [`Self::sessions`].
 	sessions: HashMap<Tier, Presence>,
+	control: HashMap<Tier, [[u64; 2]; Control::ALL.len()]>,
 }
 
 impl Snapshot {
+	/// The `(tier, class, totals)` control-message rows with any traffic, sorted by tier and class.
+	/// Includes prefixes inside complete codec values, but excludes separately coded type selectors,
+	/// media payload, and transport framing, acknowledgements, and retransmissions.
+	pub fn control(&self) -> Vec<(Tier, Control, Bytes)> {
+		let mut rows = Vec::new();
+		for (tier, totals) in &self.control {
+			for class in Control::ALL {
+				let [tx, rx] = totals[class as usize];
+				if tx != 0 || rx != 0 {
+					rows.push((tier.clone(), class, Bytes { tx, rx }));
+				}
+			}
+		}
+		rows.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()).then(a.1.as_str().cmp(b.1.as_str())));
+		rows
+	}
+
 	/// The `(tier, role, totals)` traffic rows, one publisher and one subscriber
 	/// row per tier present. Sorted by tier label then role for stable output.
 	pub fn traffic(&self) -> Vec<(Tier, Role, Traffic)> {
@@ -1204,7 +1307,8 @@ impl Registry {
 			for (tier, labels) in sessions.iter() {
 				let totals = snap.sessions.entry(tier.clone()).or_default();
 				for counters in labels.values() {
-					totals.add(counters.snapshot());
+					totals.add(counters.snapshot().0);
+					counters.control(snap.control.entry(tier.clone()).or_default());
 				}
 			}
 		}
@@ -1262,8 +1366,8 @@ impl Registry {
 				// Nothing can join a row only the map holds (that needs the lock held here),
 				// but a meter outliving its session still writes until its last clone drops.
 				let unheld = Arc::strong_count(counters) == 1;
-				let presence = counters.snapshot();
-				let closed = unheld && counters.bytes().live.is_empty();
+				let (presence, empty) = counters.snapshot();
+				let closed = unheld && empty;
 				report.sessions.push(SessionEntry {
 					tier: tier.clone(),
 					label: label.clone(),
@@ -1272,6 +1376,7 @@ impl Registry {
 				});
 				if closed {
 					retired.sessions.entry(tier.clone()).or_default().add(presence);
+					counters.control(retired.control.entry(tier.clone()).or_default());
 				}
 				!closed
 			});
@@ -1507,9 +1612,9 @@ pub struct Session {
 /// Which of a session's `crate::session::Limits` a [`Session::hold`] counts against.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Cap {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Announces,
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Subscriptions,
 }
 
@@ -1566,6 +1671,15 @@ struct Viewer {
 }
 
 impl Session {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn control(&self, class: Control, bytes: usize, received: bool) {
+		let Some(inner) = &self.inner else { return };
+		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
+		if let Some(counters) = &current.presence {
+			counters.control[class as usize][usize::from(received)].fetch_add(bytes as u64, Ordering::Relaxed);
+		}
+	}
+
 	/// Count a connection's wire counters under this context's label, following its retags.
 	pub fn wire(&self, counters: crate::transport::Wire) -> Wire {
 		let Some(inner) = &self.inner else {
@@ -1653,7 +1767,7 @@ impl Session {
 	}
 
 	/// Count `live` as what this session holds against `cap`, so a tier change carries it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn track_held(&self, cap: Cap, live: &Arc<AtomicUsize>) {
 		let Some(inner) = &self.inner else { return };
 		let mut held = inner.held.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1664,7 +1778,7 @@ impl Session {
 
 	/// Record that this session holds `held` of what `cap` limits, raising that peak on its
 	/// tier and label.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn hold(&self, cap: Cap, held: u64) {
 		let Some(inner) = &self.inner else { return };
 		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2237,7 +2351,7 @@ mod tests {
 			.sessions
 			.lock()
 			.get(tier)
-			.and_then(|labels| labels.get(&PathOwned::from(label.to_string())).map(|c| c.snapshot()))
+			.and_then(|labels| labels.get(&PathOwned::from(label.to_string())).map(|c| c.snapshot().0))
 	}
 
 	fn test_stats() -> Registry {
@@ -2515,6 +2629,26 @@ mod tests {
 	}
 
 	#[test]
+	fn control_body_totals_follow_retags_and_survive_retirement() {
+		let registry = Registry::new(Default::default());
+		let first = Tier::new("internal");
+		let second = Tier::new("edge");
+		let context = registry.tier(first.clone()).session("");
+		context.control(Control::Announce, 17, false);
+		context.retag(second.clone(), "");
+		context.control(Control::TrackInfo, 23, true);
+		let expected = vec![
+			(second, Control::TrackInfo, Bytes { tx: 0, rx: 23 }),
+			(first, Control::Announce, Bytes { tx: 17, rx: 0 }),
+		];
+		assert_eq!(registry.snapshot().control(), expected);
+		drop(context);
+		registry.report(&mut Report::default());
+		assert_eq!(registry.snapshot().control(), expected);
+		assert_eq!(registry.snapshot().control(), expected, "scrapes do not drain totals");
+	}
+
+	#[test]
 	fn snapshot_preserves_retired_counters() {
 		let stats = test_stats();
 		let tier = Tier::default();
@@ -2572,13 +2706,17 @@ mod tests {
 			}
 		});
 		let mut previous = 0;
+		let mut previous_received = 0;
 		while !worker.is_finished() {
-			let bytes: u64 = stats
-				.snapshot()
-				.traffic()
-				.iter()
-				.map(|(_, _, traffic)| traffic.bytes)
-				.sum();
+			let snap = stats.snapshot();
+			let received = snap.sessions().iter().map(|(_, row)| row.received_bytes).sum::<u64>();
+			assert!(
+				received >= previous_received,
+				"retiring a session must retain its final payload bytes"
+			);
+			assert!(received <= 256);
+			previous_received = received;
+			let bytes: u64 = snap.traffic().iter().map(|(_, _, traffic)| traffic.bytes).sum();
 			assert!(
 				bytes >= previous,
 				"retiring an entry must not double-count or lose its bytes"
@@ -2594,6 +2732,7 @@ mod tests {
 		);
 		assert_eq!(snap.sessions()[0].1.sessions_started, 256);
 		assert_eq!(snap.sessions()[0].1.sessions_ended, 256);
+		assert_eq!(snap.sessions()[0].1.received_bytes, 256);
 		assert!(stats.shared().entries.lock().is_empty());
 		assert!(stats.shared().sessions.lock().is_empty());
 		let retired = stats.shared().retired.lock();
@@ -2679,6 +2818,7 @@ mod tests {
 		// check the line order.
 		let body_start = src.find("fn snapshot(&self) -> Traffic").expect("snapshot fn present");
 		let body = &src[body_start..];
+		let body = &body[..body.find("\n\t}\n").expect("snapshot fn end")];
 		let ended_pos = body.find("self.announces_ended.load").expect("announces_ended load");
 		let started_pos = body
 			.find("self.announces_started.load")
@@ -3077,9 +3217,10 @@ mod tests {
 		// `sessions_ended > sessions_started` leak into a readout.
 		let src = include_str!("stats.rs");
 		let body_start = src
-			.find("fn snapshot(&self) -> Presence")
+			.find("fn snapshot(&self) -> (Presence, bool)")
 			.expect("SessionCounters::snapshot fn present");
 		let body = &src[body_start..];
+		let body = &body[..body.find("\n\t}\n").expect("SessionCounters::snapshot fn end")];
 		let ended_pos = body.find("self.sessions_ended.load").expect("sessions_ended load");
 		let started_pos = body.find("self.sessions_started.load").expect("sessions_started load");
 		assert!(

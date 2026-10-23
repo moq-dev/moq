@@ -43,19 +43,20 @@ extension Json {
         /// finishes. Takes over `track`, whose handle is closed afterward; throws if the catalog
         /// already carries the track's name.
         ///
-        /// `deltaRatio` controls how aggressively merge-patch deltas replace full snapshots (`0`
-        /// disables deltas). Set `compression` to DEFLATE each group; the consumer must pass the
-        /// same flag.
+        /// `deltas` encodes updates as merge-patch deltas; with it off every update is a full
+        /// snapshot in its own group. With deltas on, give the track a `refresh` ratio so a joiner
+        /// past it gets the value restated in a fresh group. Set `compression` to DEFLATE each
+        /// group; the consumer must pass the same flag.
         public init(
             broadcast: BroadcastProducer,
             track: TrackProducer,
-            deltaRatio: UInt32 = MoqJsonSnapshotConfig().deltaRatio,
+            deltas: Bool = MoqJsonSnapshotConfig().deltas,
             compression: Bool = false
         ) throws {
             ffi = try MoqJsonSnapshotProducer(
                 broadcast: broadcast.ffi,
                 track: track.ffi,
-                config: MoqJsonSnapshotConfig(deltaRatio: deltaRatio, compression: compression)
+                config: MoqJsonSnapshotConfig(deltas: deltas, compression: compression)
             )
         }
 
@@ -89,7 +90,7 @@ extension Json {
         /// afterward; throws if it has already read a group. `compression` must match the flag
         /// the producer used.
         public init(track: TrackConsumer, compression: Bool = false) throws {
-            // deltaRatio is producer-only, so leave it at its default here.
+            // deltas is producer-only, so leave it at its default here.
             ffi = try MoqJsonSnapshotConsumer(track: track.ffi, config: MoqJsonSnapshotConfig(compression: compression))
         }
 

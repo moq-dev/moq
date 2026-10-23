@@ -6,7 +6,7 @@ use super::{BoundsExceeded, Form, varint};
 /// Read the value from a [`Decoder`] using the given version.
 ///
 /// If [DecodeError::Short] is returned, the caller should try again with more data.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub trait Decode<V>: Sized {
 	/// Decode the value from the front of the decoder.
 	fn decode(r: &mut Decoder<'_>, version: V) -> Result<Self, DecodeError>;
@@ -113,7 +113,7 @@ pub enum DecodeError {
 
 impl DecodeError {
 	/// A complete frame cannot be extended by reading more stream bytes.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn complete(self) -> Self {
 		match self {
 			Self::Short => Self::InvalidValue,
@@ -133,74 +133,111 @@ impl From<BoundsExceeded> for DecodeError {
 /// A read either consumes exactly what it returns or fails and consumes nothing, so a
 /// [`DecodeError::Short`] can be retried once more bytes arrive.
 #[derive(Debug, Clone)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub struct Decoder<'a> {
 	buf: &'a [u8],
 	form: Form,
+	/// The length of the buffer this decoder started with.
+	len: usize,
+	/// See [`Self::need`].
+	need: usize,
+	/// The control message read, counted once the read is consumed.
+	pub(crate) control: Option<crate::stats::Control>,
+	/// Leading bytes left out of the `control` count: a type selector the sender writes
+	/// apart from the message, and so never counts.
+	pub(crate) uncounted: usize,
 }
 
 impl<'a> Decoder<'a> {
 	/// Read `buf`, with varints in the given form.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn new(buf: &'a [u8], form: Form) -> Self {
-		Self { buf, form }
+		Self {
+			buf,
+			form,
+			len: buf.len(),
+			need: 0,
+			control: None,
+			uncounted: 0,
+		}
+	}
+
+	/// After a [`DecodeError::Short`], how many bytes from the start the failed read
+	/// needed: at least one more than the buffer when it can't tell, and 0 if no read of
+	/// this decoder ran short.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn need(&self) -> usize {
+		self.need
+	}
+
+	/// Record that a read wanted `more` bytes past the current position.
+	fn short(&mut self, more: usize) -> DecodeError {
+		let need = (self.len - self.buf.len()).saturating_add(more);
+		self.need = self.need.max(need);
+		DecodeError::Short
 	}
 
 	/// The varint form this decoder reads.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn form(&self) -> Form {
 		self.form
 	}
 
-	/// The number of unread bytes.
+	/// How many bytes have been read.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn position(&self) -> usize {
+		self.len - self.buf.len()
+	}
+
+	/// The number of unread bytes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn remaining(&self) -> usize {
 		self.buf.len()
 	}
 
 	/// Whether every byte has been read.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn is_empty(&self) -> bool {
 		self.buf.is_empty()
 	}
 
 	/// Read `len` raw bytes.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn slice(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
 		let Some((head, rest)) = self.buf.split_at_checked(len) else {
-			return Err(DecodeError::Short);
+			return Err(self.short(len));
 		};
 		self.buf = rest;
 		Ok(head)
 	}
 
 	/// Read every remaining byte.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn rest(&mut self) -> &'a [u8] {
 		std::mem::take(&mut self.buf)
 	}
 
 	/// Split off the next `len` bytes as their own decoder, e.g. a size-prefixed body.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn sub(&mut self, len: usize) -> Result<Self, DecodeError> {
 		Ok(Self::new(self.slice(len)?, self.form))
 	}
 
 	/// Read a single byte.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn u8(&mut self) -> Result<u8, DecodeError> {
 		Ok(self.slice(1)?[0])
 	}
 
 	/// Read a big-endian `u16`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn u16(&mut self) -> Result<u16, DecodeError> {
 		let b = self.slice(2)?;
 		Ok(u16::from_be_bytes([b[0], b[1]]))
 	}
 
 	/// Read a byte that must be 0 or 1.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn bool(&mut self) -> Result<bool, DecodeError> {
 		match self.u8()? {
 			0 => Ok(false),
@@ -212,21 +249,27 @@ impl<'a> Decoder<'a> {
 	/// Read a varint.
 	#[cfg_attr(target_arch = "wasm32", inline)]
 	#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn varint(&mut self) -> Result<u64, DecodeError> {
-		let (value, rest) = varint::read(self.buf, self.form)?;
-		self.buf = rest;
-		Ok(value)
+		match varint::read(self.buf, self.form) {
+			Ok((value, rest)) => {
+				self.buf = rest;
+				Ok(value)
+			}
+			// The width is in the first byte, but a byte at a time is short enough.
+			Err(DecodeError::Short) => Err(self.short(self.buf.len() + 1)),
+			Err(err) => Err(err),
+		}
 	}
 
 	/// Read an optional varint: 0 is `None`, and `n + 1` is `Some(n)`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn varint_opt(&mut self) -> Result<Option<u64>, DecodeError> {
 		Ok(self.varint()?.checked_sub(1))
 	}
 
 	/// Read a varint length, then that many raw bytes.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn bytes(&mut self) -> Result<&'a [u8], DecodeError> {
 		let start = self.buf;
 		let len = usize::try_from(self.varint()?).map_err(|_| DecodeError::BoundsExceeded)?;
@@ -234,7 +277,7 @@ impl<'a> Decoder<'a> {
 	}
 
 	/// Read a varint length, then that many bytes of UTF-8.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn string(&mut self) -> Result<String, DecodeError> {
 		Ok(String::from_utf8(self.bytes()?.to_vec())?)
 	}
@@ -255,5 +298,19 @@ mod tests {
 		let mut r = Decoder::new(&[0x40], Form::Quic);
 		assert!(matches!(r.varint(), Err(DecodeError::Short)));
 		assert_eq!(r.remaining(), 1);
+	}
+
+	/// A short read reports how much it needed from the start, so a reader can wait for
+	/// all of it rather than retry once per byte.
+	#[test]
+	fn short_reports_what_it_needed() {
+		let mut r = Decoder::new(&[0x01, 0x05, b'a', b'b'], Form::Quic);
+		assert_eq!(r.varint().unwrap(), 1);
+		assert!(matches!(r.bytes(), Err(DecodeError::Short)));
+		assert_eq!(r.need(), 7, "a 5 byte body after two prefix bytes");
+
+		let mut r = Decoder::new(&[0x40], Form::Quic);
+		assert!(matches!(r.varint(), Err(DecodeError::Short)));
+		assert_eq!(r.need(), 2);
 	}
 }

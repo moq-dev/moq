@@ -9,12 +9,60 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 `MoqTrackDynamic::requested_group` is now `requested_fill`, returning a `MoqFill`: `start_group`, `start_frame`, `end_group`, `priority`, `max_delay_us`, `order`, `next`, `accept(sequence)`, `drop_groups(start, end)`, `is_used`, and `unused`.
 `MoqGroupRequest` and `MoqGroupDemand` are removed: serve each group `next()` names, and watch `is_used` or `unused` on the fill.
+A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `is_wanted(sequence)` and `unwanted(sequence)` say when to stop serving one.
 A refusal carries no application code: `drop_groups` fails the waiting fetches with `NotFound`.
 A fill also arrives for history a subscription covers that the cache lacks, not only for a fetch.
 
 ### `MoqSubscription::max_delay_us` is optional
 
 `max_delay_us` is now nullable, where null leaves the publisher's max age alone to bound delivery. It still defaults to 0.
+
+### `announce` takes a `MoqAnnounceRoute`
+
+`MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.
+`MoqRoute` is only what `MoqAnnounceConsumer` reports, so its fields lose their defaults, and `MoqError::InvalidRoute` is gone.
+To re-announce an observed route, copy its `cost` and `epoch`.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel it or race it against a timeout.
+
+### JSON snapshot `delta_ratio` is `deltas`
+
+`MoqJsonSnapshotConfig::delta_ratio` is replaced by `deltas: bool` (default `true`).
+Set `deltas: false` where you set `delta_ratio: 0`.
+Snapshot groups roll on joiner demand, which the producer answers on its own: publish the track with `MoqTrackInfo::refresh` (`Some(8)` matches the old default), or its groups roll only at their caps.
+
+### Priorities are signed (#6142)
+
+`MoqTrackInfo.priority`, `MoqSubscription.priority`, `MoqFetchGroupOptions.priority`, and `MoqFill.priority()` are `i8`, higher first, and 0 is the unset midpoint.
+`MoqTrackInfo.priority` defaulted to 127 and now defaults to 0.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced` or `announced_broadcast`, instead of under its whole scope at connect.
+`MoqOriginConsumer::request_broadcast` watches nothing, so on a client it fails with `MoqError::Unroutable` for a path nothing watches, even when the relay announces it.
+Resolve the path with `announced_broadcast`, or hold `announced` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
+### `MoqContainerFormat::Fmp4` unwraps to Legacy (#6250)
+
+A container import with `MoqContainerFormat::Fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `MoqContainerFormat::Cmaf` to keep publishing CMAF.
+
+### Catalog references carry their epoch
+
+`MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `epoch: None`.
+`MoqBroadcastConsumer::resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads the reference and its `epoch` from it.
+Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
+
+### Timestamps stop at 2^61 - 1 microseconds (#6168)
+
+Every `timestamp_us` input, such as `MoqTrackProducer::write_frame` or `MoqAnchor::Time`, fails with `MoqError::TimeOverflow` past `2^61 - 1` instead of `2^62 - 1`, the most moq-lite-05/06 can carry.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
@@ -59,7 +107,6 @@ A subscription now reads only the groups its own `ranges` cover, rather than sta
 `wanted()` returns null while nobody subscribes, otherwise the group subscribers want next, and `wanted_changed()` waits for it to change (the first call returns at once).
 Loop on `wanted_changed()` until it returns non-null where you awaited `used()`, and null where you awaited `unused()`.
 `MoqTrackInfo` gains `refresh`, the ratio past which a joining subscriber asks for a new group.
-`MoqGroupDemand` is unchanged.
 
 ### `MoqCongestionControl` gained `None` (#5926)
 
@@ -84,11 +131,11 @@ A start group `n` is `MoqRange { start: MoqAnchor::Absolute { group: n, frame: 0
 ### Receive estimates come from `MoqSession::recv_bandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.
-Hold the consumer `MoqSession::recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and drop it to stop. `MoqConnectionStats::estimated_recv_rate_bps` is gone.
+Hold the consumer `MoqSession::recv_bandwidth` returns to request PROBE, read it with `rate()` or wait with `rate_changed()`, and drop it to stop. `MoqConnectionStats::estimated_recv_rate_bps` is gone.
 
 ```rust
 let bandwidth = session.recv_bandwidth();
-let rate = bandwidth.as_ref().and_then(|b| b.peek());
+let rate = bandwidth.as_ref().and_then(|b| b.rate());
 ```
 
 ### `available()` waits for the next publisher instance (#5700)

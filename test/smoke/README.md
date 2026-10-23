@@ -60,6 +60,8 @@ just check    # shfmt, shellcheck, actionlint, freshness
 
 Packages resolve to latest on every run: `@moq/*` on the `latest` tag, PyPI `moq-rs`, `moq.dev/moq`, `moqdev/*` images, and GitHub release tarballs. `cloudflare.sh` and `moxygen.sh` build from unpinned Git HEAD. `test/smoke/` commits no package lock files. `flake.lock` pins the dev toolchain.
 
-npm `playwright` is pinned to the flake's `PLAYWRIGHT_VERSION`. `just freshness` fails when that pin drifts or a lock file is committed. Bump the toolchain with `nix flake update` and the pin together.
+npm `playwright` is pinned to the flake's `PLAYWRIGHT_VERSION`. `just freshness` fails when that pin drifts or a lock file is committed. The weekly [Smoke toolchain update](../../.github/workflows/smoke-toolchain.yml) workflow opens or refreshes one draft PR containing both updates; failures go through the existing alerts workflow. Dispatch that workflow when a smoke-flake Dependabot PR is due, and use the coupled PR instead of merging a lock-only update. Dependabot auto-merge refuses smoke-flake updates so a lock-only proposal cannot land ahead of its matching pin.
+
+For a local update, run `just update-toolchain` here (Nix and Python are required), then `just freshness` inside the refreshed smoke shell. The command updates `flake.lock`, evaluates its `PLAYWRIGHT_VERSION` without downloading the toolchains, and writes the matching npm pin. Commit both files together. `just check-toolchain` validates freshness and launches the updated browser in the smoke shell. The scheduled updater runs it before proposing a PR; dispatch Smoke on that branch for the full published-package matrix.
 
 A broken package fails only its own cells.

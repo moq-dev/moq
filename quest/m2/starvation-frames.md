@@ -4,15 +4,15 @@
 
 Each subscription's acknowledged frontier moves at every frame boundary
 instead of once per group, so the starvation histogram and dropped-media
-counters from the group slice read a frontier at most one frame stale, and a
+counters from the lag histogram read a frontier at most one frame stale, and a
 second histogram reports per-frame delivery delay so viewer jitter is visible
-per broadcast. The wire shape from the group slice is unchanged apart from
+per broadcast. The wire shape from the lag histogram is unchanged apart from
 the new histogram.
 
 ## Plan
 
 A frame is atomic to the viewer: it is useful only once fully delivered. The
-sampler from the parent quest is unchanged; what changes is how often the
+sampler from the lag histogram is unchanged; what changes is how often the
 frontier it reads moves. `Writer` in `rs/moq-net/src/coding/writer.rs` gains
 a monotonic written-offset counter, since every write funnels through it, so
 at each frame end the per-group serve task knows the stream offset and the
@@ -24,7 +24,7 @@ acknowledged in order for the purpose of this metric, so poll the oldest
 pending frame and retire everything at or below the acknowledged offset.
 
 Each acknowledged frame moves the subscription's frontier to that frame's
-timestamp, so the interval samples from the parent quest read a frontier that
+timestamp, so the interval samples from the lag histogram read a frontier that
 is at most one frame stale instead of one group. When a stream
 is reset before a frame is acknowledged, `dropped_duration` now grows by the
 span from the newest acknowledged frame to the newest written one, which is
@@ -39,16 +39,16 @@ and the peer's delayed-ACK timer, since the hook reports no corrected instant
 histogram absent, never zero.
 
 Backends that return unsupported from `poll_acked` keep the group-granularity
-sampling from the parent quest, so the histogram never disappears over qmux or
+sampling from the lag histogram, so the histogram never disappears over qmux or
 a browser transport; document which resolution a node offers.
 
 Deferred to m2 with the parent QoS sampler. Group-granularity lag lands
 first after the next release; frame-granularity sampling then adds the ACK
 hook without making either resolution a release gate.
 
-Decided 2026-10-08: the group-granularity sampler is the egress lag histogram
-from the QoS line, which so far exists only on its line branch, so that quest
-is Required.
+Decided 2026-10-08: the group-granularity sampler is the
+[viewer lag histogram](/quest/m2/qos/lag-histogram.md), not yet on main (its
+code is on `wip/4133-lag-histogram`), so that quest is Required.
 
 Tests: the frontier tracking frame ends under a peer that acknowledges in
 bursts, with interval samples landing one bucket lower than group-granularity

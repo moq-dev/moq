@@ -42,6 +42,7 @@ public final class TrackRequest: Sendable {
 /// Accept each group you have and drop the rest; `next()` names what is still owed, in the
 /// fill's order. Releasing the fill names whatever is left as dropped while a reader still
 /// wants it; once nobody does, it is withdrawn, so stop serving it when `unused()` returns.
+/// Stop serving a single group when `unwanted(sequence:)` returns for it, and move on to `next()`.
 public final class Fill: Sendable {
     let ffi: MoqFill
 
@@ -65,7 +66,7 @@ public final class Fill: Sendable {
     }
 
     /// The most urgent delivery priority among the readers waiting on it.
-    public var priority: UInt8 {
+    public var priority: Int8 {
         ffi.priority()
     }
 
@@ -104,6 +105,17 @@ public final class Fill: Sendable {
     /// Suspend until no reader waits on this fill.
     public func unused() async throws {
         try await ffi.unused()
+    }
+
+    /// Whether a reader still waits for group `sequence` from this fill: false once every
+    /// reader took it or narrowed past it, or nobody waits on the fill.
+    public func isWanted(sequence: UInt64) -> Bool {
+        ffi.isWanted(sequence: sequence)
+    }
+
+    /// Suspend until no reader waits for group `sequence` from this fill, so stop serving it.
+    public func unwanted(sequence: UInt64) async throws {
+        try await ffi.unwanted(sequence: sequence)
     }
 }
 

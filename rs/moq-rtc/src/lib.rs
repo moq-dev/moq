@@ -59,9 +59,8 @@ mod sdp;
 mod session;
 
 /// Re-export of the HTTP router stack, so consumers can merge the [`axum::Router`]
-/// returned by [`Server::publish_router`] / [`Server::subscribe_router`] (and by
-/// [`whip::router`] / [`whep::router`]) into their own app without adding their own
-/// axum dependency (and risking a version mismatch). A major axum bump is therefore
+/// returned by [`Server::publish_router`] / [`Server::subscribe_router`] into their
+/// own app without adding their own axum dependency (and risking a version mismatch). A major axum bump is therefore
 /// a breaking change for this crate. Only with the `server` feature.
 #[cfg(feature = "server")]
 pub use axum;
@@ -77,6 +76,7 @@ pub use error::*;
 pub use server::{Response, Server, whep, whip};
 
 #[cfg(all(test, feature = "server"))]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::time::Duration;
 
@@ -259,6 +259,20 @@ mod tests {
 			.await
 			.unwrap()
 			.unwrap()
+			.unwrap();
+		// The DELETE ended the ingest cleanly, so it serves the finished broadcast until its
+		// media is stale; a newer publish at the path ends that linger at once.
+		let ingested = server_origin
+			.consume()
+			.request_broadcast("ingested", None)
+			.await
+			.unwrap();
+		assert!(!ingested.is_closed(), "the finished ingest lingers");
+		let _replacement = server_origin
+			.publish(
+				"ingested",
+				moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+			)
 			.unwrap();
 		tokio::time::timeout(TIMEOUT, whip_task)
 			.await

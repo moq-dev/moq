@@ -34,14 +34,14 @@ pub enum Program {
 /// Each chunk is handed straight to the TS importer, which consumes whole
 /// transport packets and retains any partial trailing packet internally for the
 /// next call (the same pattern `moq-cli import ... stdin ts` uses against stdin).
-/// Either [`Self::finish`] or dropping the publisher ends the broadcasts and
-/// unannounces their paths.
+/// [`Self::finish`] hands back the finished broadcasts to linger on; dropping the
+/// publisher ends them and unannounces their paths.
 pub struct Publisher {
 	importer: Importer,
 	// The importer's per-stream counters, logged as `moq import ts` logs them, under a
 	// span naming the path, since one server carries many ingests.
 	log: ts::stats::Log,
-	sampled: tokio::time::Instant,
+	sampled: moq_net::time::Instant,
 	span: tracing::Span,
 }
 
@@ -51,8 +51,10 @@ enum Importer {
 		// verbatim, so the importer uses the `mpegts` catalog extension rather than the
 		// media-only `()`, which would route those PIDs to `Stream::Ignored` and drop them.
 		import: Box<ts::Import<ts::Ext>>,
-		// A clone of the importer's producer, so an end can close the broadcast
-		// (prompt unannounce) even though the importer owns it.
+		// Finished at a clean end, so the finished broadcast keeps serving the catalog.
+		catalog: Box<moq_mux::catalog::Producer<ts::Ext>>,
+		// A clone of the importer's producer, so an end can finish or close the broadcast
+		// even though the importer owns it.
 		broadcast: moq_net::broadcast::Producer,
 	},
 	/// Each program's broadcast is created once the first PAT names it, and announced once its PMT
@@ -90,6 +92,7 @@ impl Publisher {
 				}
 				Importer::One {
 					import: Box::new(import),
+					catalog: Box::new(catalog),
 					broadcast,
 				}
 			}
@@ -99,7 +102,7 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			log: ts::stats::Log::default(),
-			sampled: tokio::time::Instant::now(),
+			sampled: moq_net::time::now(),
 			span: tracing::info_span!("srt", %path),
 		})
 	}
@@ -117,7 +120,7 @@ impl Publisher {
 		}
 		.map_err(moq_mux::Error::from)?;
 		if self.sampled.elapsed() >= ts::stats::Log::INTERVAL {
-			self.sampled = tokio::time::Instant::now();
+			self.sampled = moq_net::time::now();
 			let _span = self.span.enter();
 			self.log.sample(self.stats());
 		}
@@ -131,20 +134,25 @@ impl Publisher {
 		}
 	}
 
-	/// Flush any buffered media, close out the broadcast's open groups, and end
-	/// the broadcast so the origin unannounces it immediately.
-	pub fn finish(&mut self) -> Result<()> {
-		match &mut self.importer {
-			Importer::One { import, broadcast } => {
+	/// Flush any buffered media and finish every track, the catalogs included, returning
+	/// each finished broadcast, which stays announced until it is dropped.
+	pub fn finish(mut self) -> Result<Vec<moq_net::broadcast::Finish>> {
+		let finished = match &mut self.importer {
+			Importer::One {
+				import,
+				catalog,
+				broadcast,
+			} => {
 				import.finish().map_err(moq_mux::Error::from)?;
-				broadcast.close();
+				catalog.finish()?;
+				// Taken while the importer is alive, so it holds the tracks just finished.
+				vec![broadcast.clone().finish()]
 			}
-			// Dropping the handles closes every program now, as `close` does for one.
-			Importer::All(programs) => drop(programs.finish().map_err(moq_mux::Error::from)?),
-		}
+			Importer::All(programs) => programs.finish().map_err(moq_mux::Error::from)?,
+		};
 		// The drain at end of input can publish a frame nothing vouched for.
 		self.span.in_scope(|| self.log.finish(&self.stats()));
-		Ok(())
+		Ok(finished)
 	}
 
 	/// Abort the published tracks with `err` so subscribers see the real cause
@@ -153,7 +161,7 @@ impl Publisher {
 	/// Consumes the publisher and closes the broadcasts.
 	pub fn abort(self, err: moq_net::Error) {
 		match self.importer {
-			Importer::One { import, broadcast } => {
+			Importer::One { import, broadcast, .. } => {
 				import.abort(err);
 				broadcast.close();
 			}
@@ -242,6 +250,11 @@ impl Subscriber {
 }
 
 #[cfg(test)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use moq_mux::catalog::hang::Container;
 	use moq_mux::catalog::{CatalogFormat, Stream};
@@ -352,7 +365,7 @@ mod tests {
 			let bytes: Vec<u8> = payload.iter().flat_map(|(_, pkt)| pkt.iter().copied()).collect();
 			publisher.feed(bytes.into()).unwrap();
 		}
-		publisher.finish().unwrap();
+		drop(publisher.finish().unwrap());
 	}
 
 	/// One payload-only TS packet carrying a complete PSI section (PUSI + pointer_field
@@ -549,7 +562,42 @@ mod tests {
 				.is_err(),
 			"nothing is published on the bare path"
 		);
-		publisher.finish().unwrap();
+		drop(publisher.finish().unwrap());
+	}
+
+	/// A finished ingest stays servable, its catalog included, until its media is stale, so a
+	/// subscriber arriving after the end still learns what the tracks were.
+	#[tokio::test(start_paused = true)]
+	async fn a_finished_ingest_serves_its_catalog_until_stale() {
+		let origin = produce_origin();
+		let max_age = Duration::from_secs(3);
+		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
+		let mut publisher = Publisher::new(&origin, "live/cam0", config, None).unwrap();
+		publisher.feed(Bytes::from_static(BBB5S)).unwrap();
+
+		let consumer = origin.consume();
+		consumer.routed("live/cam0").await.unwrap();
+		let broadcast = consumer.request_broadcast("live/cam0", None).await.unwrap();
+		let finished = publisher.finish().unwrap();
+		assert_eq!(
+			finished.iter().map(|finish| finish.linger()).collect::<Vec<_>>(),
+			[max_age]
+		);
+
+		let start = tokio::time::Instant::now();
+		let wait = tokio::spawn(futures::future::join_all(
+			finished.into_iter().map(moq_net::broadcast::Finish::wait),
+		));
+		tokio::time::sleep(max_age / 2).await;
+		let mut catalog = broadcast.track("catalog.json").unwrap().subscribe(None).await.unwrap();
+		assert!(
+			catalog.recv_group().await.unwrap().is_some(),
+			"the late subscriber reads the catalog"
+		);
+
+		wait.await.unwrap();
+		assert_eq!(start.elapsed(), max_age);
+		assert!(broadcast.is_closed());
 	}
 
 	/// The retention the caller configured has to reach the media tracks the TS importer
@@ -678,7 +726,7 @@ mod tests {
 				Err(_) => break,
 			}
 		}
-		publisher.finish().unwrap();
+		drop(publisher.finish().unwrap());
 
 		let mut roundtrip = moq_net::broadcast::Info::new().produce();
 		let roundtrip_consumer = roundtrip.consume();

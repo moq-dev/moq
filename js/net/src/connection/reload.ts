@@ -766,11 +766,13 @@ class Draining {
 }
 
 /**
- * Where `url` dials, without its query or fragment, where a peer may mint fresh credentials on
- * every redirect. Two URLs that differ only there reach the same endpoint.
+ * Where `url` dials, without its userinfo, query, or fragment, where a peer may mint fresh
+ * credentials on every redirect. Two URLs that differ only there reach the same endpoint.
  */
 function endpoint(url: URL): string {
 	const bare = new URL(url);
+	bare.username = "";
+	bare.password = "";
 	bare.search = "";
 	bare.hash = "";
 	return bare.href;

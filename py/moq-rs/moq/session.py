@@ -198,13 +198,13 @@ class Bandwidth:
         def __init__(self, inner: MoqBandwidthConsumer) -> None:
             self._inner = inner
 
-        def peek(self) -> int | None:
-            """Read the current estimate, or None while unavailable."""
-            return self._inner.peek()
+        def rate(self) -> int | None:
+            """The current estimate, or None while unavailable."""
+            return self._inner.rate()
 
-        async def changed(self) -> int | None:
-            """Wait for the estimate to change, raising when its producer closes."""
-            return await self._inner.changed()
+        async def rate_changed(self) -> int | None:
+            """Wait for the estimate to change and return the new rate, raising when its producer closes."""
+            return await self._inner.rate_changed()
 
         def cancel(self) -> None:
             """Release this consumer's demand, including a pending wait."""

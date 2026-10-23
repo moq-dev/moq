@@ -15,7 +15,7 @@
 #
 # test/ is in scope because the tests drive the plugin through the same
 # generated moq headers, so an API that drifts under them fails here rather than
-# only where obs.yml's path filter reaches; `just obs test` is manual.
+# only where obs.yml's path filter reaches; `just obs test` runs nightly.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -52,11 +52,12 @@ ffmpeg=$(pkg-config --cflags libavcodec libavutil libswscale libswresample)
 status=0
 for source in src/*.cpp test/*.cpp; do
     # shellcheck disable=SC2086
+    # -Werror: a warning that only prints is never fixed.
     # -Wno-unused-command-line-argument: the nix compiler wrapper injects
     # link flags, which a syntax-only run reports as unused, once per file.
     # $qt and $ffmpeg stay unquoted on purpose: pkg-config hands back one
     # space-separated string, and splitting it is the intended reading.
-    if ! "$cxx" -std=c++17 -fsyntax-only -Wno-unused-command-line-argument \
+    if ! "$cxx" -std=c++17 -fsyntax-only -Werror -Wno-unused-command-line-argument \
         "${includes[@]}" $qt $ffmpeg \
         -DMOQ_FRONTEND_ENABLED -DMOQ_VERSION_STRING='"0.0.0"' "$source"; then
         status=1

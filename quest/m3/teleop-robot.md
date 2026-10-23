@@ -39,9 +39,15 @@ it are ordered and delivered exactly once.
 
 That guarantee is scoped, and the crate must say so rather than promise
 losslessness. A group holds at most `MAX_CACHE_BYTES` and `MAX_GROUP_FRAMES`
-(`rs/moq-net/src/model/group.rs`), and a write past either aborts it with
-`Error::GroupTooLarge`; `moq_json::stream` never rolls its one group, so that
-bound ends the track, and a link drop or reconnect loses what was in flight.
+(`rs/moq-net/src/model/group.rs`). A raw group write past either aborts it
+with `Error::GroupTooLarge`, but the JSON stream helper refuses an append
+that might exceed the budget before encoding, leaving the log intact and
+writable (`rs/moq-json/src/stream/mod.rs`). It never rolls its one group;
+when its budget is spent the publisher opens a new track. A link drop or
+reconnect loses what was in flight.
+Those caps hold until [Unbounded groups](/quest/m2/unbounded-groups/README.md)
+lands; after it, a lagging reader refills a shed part of the group or sees
+`Evicted`.
 So the contract is ordered, gap-free delivery for a live reader within one
 bounded log, and recovery after a reconnect belongs to the application
 protocol. That is an acceptable division for MAVLink, whose mission, parameter
@@ -74,9 +80,12 @@ The framing is where the guarantee lives, not the subscription flags:
   root section through `moq-mux`'s `CatalogExt` and `RenditionConfig<E>`.
   No hang schema change.
 - Announce-prefix fan-in, generalised from `rs/moq-boy/src/input.rs`.
-- The two delivery classes, as the snapshot and stream modes with the group
-  structure and `Info::max_age` each one needs: `moq-json`'s for JSON, and the
-  opaque-bytes ones for binary frames (`moq-flate`).
+- The two delivery classes with the group structure and `Info::max_age` each
+  one needs: `moq-json`'s snapshot and stream modes for JSON; plain tracks
+  for opaque bytes, one group per latest value or one bounded ordered group
+  for the append-log. The [compression migration](/quest/m1/compress/migrate.md)
+  deletes moq-flate's snapshot/stream helpers, so use the track's `compress`
+  flag when compression is useful, not those helpers.
 - Per-stage timestamp instrumentation, generalised from moq-boy's `status`
   track. Check it against the publisher-reported stats track
   ([media stats](/doc/concept/stats.md#media-reports), moq#2734) before adding a
@@ -115,4 +124,5 @@ control then it is the wrong abstraction.
 
 ## Related
 
+- [Unbounded groups](/quest/m2/unbounded-groups/README.md) - removes the group caps that bound the reliable class's one log
 - [arbitration](/quest/m3/teleop-arbitration.md) - which controller is obeyed

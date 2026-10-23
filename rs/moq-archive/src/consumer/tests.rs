@@ -27,7 +27,7 @@ impl Archive {
 	}
 
 	/// A timed track, timescale 1000, or an untimed one.
-	async fn track(&self, track: &str, priority: u8, timed: bool) {
+	async fn track(&self, track: &str, priority: i8, timed: bool) {
 		let info = Info::new(priority, timed.then_some(1000)).unwrap();
 		self.store.put_info(track, &info).await.unwrap();
 	}
@@ -296,6 +296,56 @@ async fn groups_come_from_cached_objects_and_span_them() {
 	assert_eq!(fetch(&broadcast, "video", 2, 0).await.unwrap(), expected(true, 2, 0..5));
 	// From a frame in the continuation only.
 	assert_eq!(fetch(&broadcast, "video", 2, 4).await.unwrap(), expected(true, 2, 4..5));
+}
+
+/// A group every reader narrowed past stops its GET, so the groups the fill still owes are read
+/// rather than waiting behind it.
+#[tokio::test(start_paused = true)]
+async fn a_narrowed_read_skips_the_group_it_left() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	for sequence in 0..4 {
+		archive.object("video", 0, vec![frames(true, sequence, 0..1)]).await;
+	}
+
+	let (broadcast, _run) = serve(&archive.store).await;
+	let mock = archive.store.inner().clone();
+	mock.take();
+	let gate = mock.stall_gets("rec/video/");
+	let ascending = |groups| {
+		Subscription::default()
+			.with_max_delay(None)
+			.with_groups(groups)
+			.with_order(Order::Ascending)
+	};
+	let mut subscriber = broadcast
+		.consume()
+		.track("video")
+		.unwrap()
+		.subscribe(ascending(0..))
+		.await
+		.unwrap();
+	let waiter = kio::Waiter::noop();
+	let _ = subscriber.poll_recv_group(&waiter);
+	assert!(object_read(&mock, 0).await, "group 0 is read from its object");
+
+	subscriber.update(ascending(1..)).unwrap();
+	let _ = subscriber.poll_recv_group(&waiter);
+	assert!(object_read(&mock, 1).await, "group 1 waited behind group 0, which nobody reads");
+	gate.add_permits(16);
+}
+
+/// Whether the video object starting at `sequence` is requested once the runtime settles.
+/// Bounded by yields rather than time, so the paused clock stays put.
+async fn object_read(mock: &Mock, sequence: u64) -> bool {
+	let prefix = format!("rec/video/{sequence:019}-");
+	for _ in 0..1000 {
+		if mock.gets().iter().any(|get| get.starts_with(&prefix)) {
+			return true;
+		}
+		tokio::task::yield_now().await;
+	}
+	false
 }
 
 #[tokio::test(start_paused = true)]

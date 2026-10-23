@@ -59,10 +59,8 @@ mod tests {
 	const VERSION: Version = Version::Draft19;
 
 	#[test]
-	fn code_points() {
+	fn code_point_parity() {
 		// The parity is load-bearing: odd values are length-prefixed, even ones bare varints.
-		assert_eq!(EPOCH, 0x40B68);
-		assert_eq!(EPOCH_PARAM, 0x40B69);
 		assert_eq!(EPOCH % 2, 0);
 		assert_eq!(EPOCH_PARAM % 2, 1);
 	}

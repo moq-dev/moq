@@ -124,7 +124,7 @@ rewound timestamps forward.
 
 Pads are named by kind and appear as the catalog announces renditions:
 `video_0`, `video_1`, `audio_0`. A rendition referencing another broadcast reads
-that broadcast on the same connection. Link the pad you want by name; the terse
+that broadcast on the same connection and follows its announcements the same way. Link the pad you want by name; the terse
 `moqsrc ! decodebin3` form links only the first pad offered, which may be
 audio. `moqsrc` follows the broadcast's announcements: when the publisher
 restarts, it switches to the new broadcast on the same pads, kept by rendition
@@ -143,7 +143,9 @@ on its own. Losing the relay connection also holds the pads: `moqsrc` redials
 without a retry deadline and resumes when the broadcast returns. A refused
 connection, refused path or catalog, or malformed protocol input or catalog posts
 an error. Properties: `url`,
-`broadcast`, `tls-disable-verify`, `quic-keylog`.
+`broadcast`, `versions` (comma-separated protocol versions to offer, most
+preferred first; every stable version by default), `tls-disable-verify`,
+`quic-keylog`.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.
 To decrypt a capture, set `quic-keylog=true` on either element along with

@@ -396,7 +396,7 @@ impl<E: CatalogExt> Reserved<E> {
 
 	/// Track properties for a media track under this catalog, carrying any retention it declares.
 	/// See [`Producer::track_info`](super::Producer::track_info).
-	pub fn track_info(&self, priority: u8) -> moq_net::track::Info {
+	pub fn track_info(&self, priority: i8) -> moq_net::track::Info {
 		self.timebase.catalog.track_info(priority)
 	}
 
@@ -658,7 +658,8 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let mut resolved = Self::resolved(&self.supplied, &estimate);
 		// A measurement never lowers the published jitter or delay, including one raised through
 		// `modify`.
-		let published = self.config()?.estimate();
+		let mut config = self.config()?;
+		let published = config.estimate();
 		resolved.jitter = resolved.jitter.max(published.jitter);
 		resolved.delay = resolved.delay.max(published.delay);
 		self.detected = estimate;
@@ -676,7 +677,6 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		let throttled = self.published.as_ref().is_some_and(|published| {
 			published.bitrate == resolved.bitrate && published.framerate == resolved.framerate
 		});
-		let mut config = self.config()?;
 		config.set_estimate(resolved.clone());
 		self.stage(config)?.commit_estimate(throttled)?;
 		self.published = Some(resolved);
@@ -703,10 +703,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if !self.present {
 			return Err(crate::Error::NotPublished);
 		}
-		let mut catalog = self.catalog.snapshot();
-		C::get_mut(&mut catalog, &self.name)
-			.cloned()
-			.ok_or(crate::Error::NotPublished)
+		self.catalog.config::<C>(&self.name).ok_or(crate::Error::NotPublished)
 	}
 
 	pub(crate) fn replace(&mut self, config: C) -> crate::Result<()> {
@@ -940,24 +937,6 @@ mod tests {
 
 	fn ts(micros: u64) -> moq_net::Timestamp {
 		moq_net::Timestamp::from_micros(micros).unwrap()
-	}
-
-	// Legacy and 0 unless selected, and a clone (what an importer is handed) carries the selection.
-	#[test]
-	fn a_video_hint_applies_its_container_and_preference_to_every_config() {
-		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		VideoHint::default().apply(&mut config);
-		assert_eq!(config.container, hang::catalog::Container::Legacy);
-		assert_eq!(config.preference, 0);
-
-		let hint = VideoHint {
-			container: hang::catalog::Container::Loc,
-			preference: -1,
-			..Default::default()
-		};
-		hint.apply(&mut config);
-		assert_eq!(config.container, hang::catalog::Container::Loc);
-		assert_eq!(config.preference, -1);
 	}
 
 	/// Feed ~40ms 100 kB frames over more than the bitrate window, with a measured

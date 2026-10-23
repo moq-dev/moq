@@ -450,6 +450,11 @@ impl Session {
 		self.conn.wire()
 	}
 
+	/// Receive streams evicted to free a stuck receive window.
+	pub(crate) fn streams_evicted(&self) -> u64 {
+		self.conn.streams_evicted()
+	}
+
 	/// Open a send group at `priority`, for streams to join with
 	/// [`SendStream::set_group`]. The HTTP/3 streams stay outside every
 	/// group, so they go first.
@@ -616,15 +621,22 @@ impl web_transport_trait::poll::Session for Session {
 			// Adopt every new arrival, then try to classify the pending set.
 			// Each mid-header stream parks the caller in its own stream's
 			// waiters, so progress on any of them re-polls us.
-			loop {
+			let ended = loop {
 				match web_transport_trait::poll::Session::poll_accept_uni(&mut self.conn, cx) {
 					Poll::Ready(Ok(recv)) => web.state.borrow_mut().pending_uni.push(PendingUni::new(recv)),
-					Poll::Ready(Err(err)) => return Poll::Ready(Err(unmap_err(err))),
-					Poll::Pending => break,
+					Poll::Ready(Err(err)) => break Some(err),
+					Poll::Pending => break None,
 				}
-			}
+			};
 
 			if !classify_uni(&web, cx) {
+				// Buffered headers can finish after the connection error. Hand those
+				// streams out before reporting that no more can arrive.
+				if web.state.borrow().pending_uni.is_empty()
+					&& let Some(err) = ended
+				{
+					return Poll::Ready(Err(unmap_err(err)));
+				}
 				return Poll::Pending;
 			}
 		}
@@ -967,10 +979,26 @@ pub struct RecvStream {
 
 impl RecvStream {
 	fn map(&self, err: Error) -> Error {
-		match self.web {
-			true => unmap_err(err),
-			false => unmap_legacy(err),
-		}
+		map(self.web, err)
+	}
+
+	/// Lease the stream's unreleased bytes. See [`super::RecvStream::poll_lease`].
+	pub fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<super::Lease<'_>, Error>> {
+		let web = self.web;
+		self.inner.poll_lease(cx, want).map_err(|err| map(web, err))
+	}
+
+	/// Rank this stream for eviction. See [`super::RecvStream::set_priority`].
+	pub fn set_priority(&mut self, priority: i64) {
+		self.inner.set_priority(priority);
+	}
+}
+
+/// Unmap a stream error's code from the session's code space.
+fn map(web: bool, err: Error) -> Error {
+	match web {
+		true => unmap_err(err),
+		false => unmap_legacy(err),
 	}
 }
 

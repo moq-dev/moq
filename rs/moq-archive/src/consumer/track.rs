@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use futures::future::{self, Either};
 use moq_net::track::{Fill, Position};
 use moq_net::{Timescale, Timestamp, group, track};
 use object_store::ObjectStore;
@@ -151,10 +152,7 @@ pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mut
 /// Answer group `sequence` of `fill` from the objects holding it, or drop the run of sequences
 /// around it that the archive does not hold.
 async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill: &Fill, sequence: u64) {
-	let frame = match fill.start().group == sequence {
-		true => fill.start().frame,
-		false => 0,
-	};
+	let frame = fill.frame_start(sequence);
 	let (holding, after, timed, timescale) = {
 		let index = index.lock().unwrap();
 		let (holding, after) = index.holding(sequence, frame);
@@ -164,7 +162,14 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 
 	let mut objects = Vec::with_capacity(holding.len());
 	for (start, path) in &holding {
-		match super::object(shared, path, *start, timed).await {
+		let unwanted = std::pin::pin!(fill.unwanted(sequence));
+		let load = std::pin::pin!(super::object(shared, path, *start, timed));
+		let loaded = match future::select(unwanted, load).await {
+			// Every reader narrowed past it: the fill moves on to the groups it still owes.
+			Either::Left(_) => return,
+			Either::Right((loaded, _)) => loaded,
+		};
+		match loaded {
 			Ok(object) => objects.push(object),
 			Err(err) => {
 				if let Error::NotFound(_) = err {
@@ -239,6 +244,9 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 		}
 	}
 
+	if !fill.is_wanted(sequence) {
+		return;
+	}
 	let Ok(mut producer) = fill.accept(sequence, None) else {
 		return;
 	};

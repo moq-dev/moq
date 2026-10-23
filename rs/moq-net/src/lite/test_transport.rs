@@ -18,8 +18,12 @@ use std::{
 
 use crate::transport::poll;
 
+/// A failed transport call. After a session close, it carries that close's code, as a
+/// real transport reports the code the session ended with.
 #[derive(Debug, Clone, Default)]
-pub struct SinkError;
+pub struct SinkError {
+	code: u32,
+}
 
 impl std::fmt::Display for SinkError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -31,7 +35,7 @@ impl std::error::Error for SinkError {}
 
 impl crate::transport::Error for SinkError {
 	fn session_error(&self) -> Option<(u32, String)> {
-		Some((0, "closed".to_string()))
+		Some((self.code, "closed".to_string()))
 	}
 }
 
@@ -53,6 +57,8 @@ pub struct Log {
 	streams: Arc<AtomicUsize>,
 	stops: Arc<Mutex<Vec<u32>>>,
 	closes: Arc<Mutex<Vec<(u32, String)>>>,
+	/// The first session close's code, once one happened.
+	closed: kio::Shared<Option<u32>>,
 	/// How long the trail and the stops were at the first session close.
 	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
@@ -80,6 +86,17 @@ pub struct BeforeClose {
 }
 
 impl Log {
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<SinkError> {
+		self.closed
+			.poll(waiter, |closed| match **closed {
+				Some(_) => Poll::Ready(()),
+				None => Poll::Pending,
+			})
+			.map(|closed| SinkError {
+				code: closed.expect("closed"),
+			})
+	}
+
 	/// What every send stream did, in call order, tagged with the stream's id (its
 	/// creation order). Unlike [`Self::writes`] and [`Self::resets`], this keeps the
 	/// order across streams, so a test can check one stream's message against
@@ -166,6 +183,7 @@ impl Log {
 			.unwrap()
 			.get_or_insert_with(|| (self.trail.lock().unwrap().len(), self.stops.lock().unwrap().len()));
 		self.closes.lock().unwrap().push((code, reason.to_owned()));
+		self.closed.lock().get_or_insert(code);
 	}
 
 	/// How many bidi streams the session has opened, so a test can pin down how many
@@ -356,16 +374,16 @@ pub struct PendingRecv;
 
 impl poll::RecvStream for PendingRecv {
 	type Error = SinkError;
+	// Never handed out.
+	type Lease<'a> = poll::BufferedLease<'a>;
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_lease(&mut self, _cx: &mut Context<'_>, _want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
 		Poll::Pending
 	}
+
+	fn set_priority(&mut self, _priority: i64) {}
 
 	fn stop(&mut self, _code: u32) {}
-
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Pending
-	}
 }
 
 /// A RESET_STREAM as the transport reports it. `Some(code)` decodes as
@@ -403,16 +421,16 @@ pub struct DeadRecv(ResetError);
 
 impl poll::RecvStream for DeadRecv {
 	type Error = ResetError;
+	// Never handed out.
+	type Lease<'a> = poll::BufferedLease<'a>;
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_lease(&mut self, _cx: &mut Context<'_>, _want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
 		Poll::Ready(Err(self.0))
 	}
+
+	fn set_priority(&mut self, _priority: i64) {}
 
 	fn stop(&mut self, _code: u32) {}
-
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Err(self.0))
-	}
 }
 
 /// Incoming streams that die before their first byte: `accept_uni` / `accept_bi`
@@ -420,6 +438,7 @@ impl poll::RecvStream for DeadRecv {
 /// peer with nothing more to say. Sends record to [`Log`] like [`SinkSession`].
 #[derive(Clone)]
 pub struct DeadStreamSession {
+	park: kio::Park,
 	/// What the session's send streams recorded, for test assertions.
 	pub log: Log,
 	unis: Arc<Mutex<usize>>,
@@ -431,6 +450,7 @@ impl DeadStreamSession {
 	/// `count` uni streams that die before their first byte, then silence.
 	pub fn unis(count: usize) -> Self {
 		Self {
+			park: Default::default(),
 			log: Log::default(),
 			unis: Arc::new(Mutex::new(count)),
 			bis: Arc::new(Mutex::new(0)),
@@ -441,6 +461,7 @@ impl DeadStreamSession {
 	/// `count` bidi streams that die before their first byte, then silence.
 	pub fn bis(count: usize) -> Self {
 		Self {
+			park: Default::default(),
 			log: Log::default(),
 			unis: Arc::new(Mutex::new(0)),
 			bis: Arc::new(Mutex::new(count)),
@@ -472,17 +493,17 @@ impl poll::Session for DeadStreamSession {
 	type RecvStream = DeadRecv;
 	type Error = SinkError;
 
-	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
 		match Self::take(&self.unis) {
 			true => Poll::Ready(Ok(DeadRecv(self.reset))),
-			false => Poll::Pending,
+			false => self.log.poll_closed(self.park.hold(cx)).map(Err),
 		}
 	}
 
-	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		match Self::take(&self.bis) {
 			true => Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv(self.reset)))),
-			false => Poll::Pending,
+			false => self.log.poll_closed(self.park.hold(cx)).map(Err),
 		}
 	}
 
@@ -538,8 +559,8 @@ impl poll::Session for DeadStreamSession {
 		self.log.close(code, reason);
 	}
 
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
-		Poll::Pending
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+		self.log.poll_closed(self.park.hold(cx))
 	}
 
 	fn stats(&self) -> impl crate::transport::Stats {
@@ -550,6 +571,7 @@ impl poll::Session for DeadStreamSession {
 /// Send streams record their bytes while peer reads park forever.
 #[derive(Clone, Default)]
 pub struct SinkSession {
+	park: kio::Park,
 	bi_prefix: usize,
 	pub log: Log,
 	/// Set by [`Self::gated_bi`]. `None` parks `open_bi` itself forever, which is all
@@ -576,6 +598,8 @@ pub struct SinkSession {
 	/// with no congestion controller exposed. Shared and mutable so a test can
 	/// change it mid-session, the way a real transport's figures move.
 	stats: Arc<Mutex<SinkStats>>,
+	/// Set by [`Self::with_probe`].
+	probe: Option<crate::transport::Probe>,
 }
 
 impl SinkSession {
@@ -602,6 +626,12 @@ impl SinkSession {
 	/// Accept datagrams up to `max_size` bytes, recording them in the log.
 	pub fn with_datagrams(mut self, max_size: usize) -> Self {
 		self.datagram_size = max_size;
+		self
+	}
+
+	/// Give the transport a sender for the session to hand its probe target.
+	pub fn with_probe(mut self) -> Self {
+		self.probe = Some(crate::transport::Probe::new());
 		self
 	}
 
@@ -679,8 +709,8 @@ impl poll::Session for SinkSession {
 	type RecvStream = PendingRecv;
 	type Error = SinkError;
 
-	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
-		Poll::Pending
+	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+		self.log.poll_closed(self.park.hold(cx)).map(Err)
 	}
 
 	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
@@ -759,12 +789,16 @@ impl poll::Session for SinkSession {
 		self.log.close(code, reason);
 	}
 
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
-		Poll::Pending
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+		self.log.poll_closed(self.park.hold(cx))
 	}
 
 	fn stats(&self) -> impl crate::transport::Stats {
 		*self.stats.lock().unwrap()
+	}
+
+	fn probe(&self) -> Option<crate::transport::Probe> {
+		self.probe.clone()
 	}
 }
 
@@ -805,7 +839,11 @@ impl crate::transport::Stats for SinkStats {
 ///
 /// Parks once the script is exhausted rather than reporting EOF: a read loop that saw
 /// EOF would exit, and a test usually wants to assert against the loop still running.
-pub struct ScriptedRecv {
+pub type ScriptedRecv = poll::Buffered<Script>;
+
+/// The plain reads of a [`ScriptedRecv`].
+pub struct Script {
+	park: kio::Park,
 	script: Arc<Mutex<Vec<u8>>>,
 	/// How the peer's send side ends once the script runs out; `None` parks.
 	close: Arc<Mutex<Option<Close>>>,
@@ -819,38 +857,30 @@ pub enum Close {
 	Reset,
 }
 
-impl poll::RecvStream for ScriptedRecv {
+impl poll::Chunks for Script {
 	type Error = SinkError;
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		let take = {
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+		let chunk: bytes::Bytes = {
 			let mut script = self.script.lock().unwrap();
-			if script.is_empty() {
-				0
-			} else {
-				let take = dst.len().min(script.len());
-				dst[..take].copy_from_slice(&script[..take]);
-				script.drain(..take);
-				take
-			}
+			// A real transport hands over what each packet carried, so a body that is all
+			// ready at once still takes many reads.
+			let take = max.min(script.len()).min(8 * 1024);
+			script.drain(..take).collect()
 		};
 
-		match take {
-			0 => match *self.close.lock().unwrap() {
+		match chunk.is_empty() {
+			true => match *self.close.lock().unwrap() {
 				Some(Close::Fin) => Poll::Ready(Ok(None)),
-				Some(Close::Reset) => Poll::Ready(Err(SinkError)),
-				None => Poll::Pending,
+				Some(Close::Reset) => Poll::Ready(Err(SinkError::default())),
+				None => self.log.poll_closed(self.park.hold(cx)).map(Err),
 			},
-			take => Poll::Ready(Ok(Some(take))),
+			false => Poll::Ready(Ok(Some(chunk))),
 		}
 	}
 
 	fn stop(&mut self, code: u32) {
 		self.log.stops.lock().unwrap().push(code);
-	}
-
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Pending
 	}
 }
 
@@ -882,6 +912,8 @@ pub struct ScriptedSession {
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
 	datagram_size: usize,
+	/// Set by [`Self::with_groups`].
+	groups: bool,
 }
 
 impl ScriptedSession {
@@ -908,7 +940,14 @@ impl ScriptedSession {
 			incoming_bidis: Arc::new(Mutex::new(std::collections::VecDeque::new())),
 			unacked_fin: false,
 			datagram_size: 0,
+			groups: false,
 		}
+	}
+
+	/// Open send groups, as native QUIC does, recording them in the log.
+	pub fn with_groups(mut self) -> Self {
+		self.groups = true;
+		self
 	}
 
 	/// Never acknowledge an opened stream's FIN, like a peer that stopped reading.
@@ -998,28 +1037,30 @@ impl poll::Session for ScriptedSession {
 	type RecvStream = ScriptedRecv;
 	type Error = SinkError;
 
-	fn poll_accept_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
+	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
 		let Some(script) = self.incoming_unis.lock().unwrap().pop_front() else {
-			return Poll::Pending;
+			return self.log.poll_closed(self.park.hold(cx)).map(Err);
 		};
-		Poll::Ready(Ok(ScriptedRecv {
+		Poll::Ready(Ok(poll::Buffered::new(Script {
+			park: Default::default(),
 			script: Arc::new(Mutex::new(script)),
 			close: self.close.clone(),
 			log: self.log.clone(),
-		}))
+		})))
 	}
 
-	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		let Some(script) = self.incoming_bidis.lock().unwrap().pop_front() else {
-			return Poll::Pending;
+			return self.log.poll_closed(self.park.hold(cx)).map(Err);
 		};
 		Poll::Ready(Ok((
 			SinkSend::new(self.log.clone()),
-			ScriptedRecv {
+			poll::Buffered::new(Script {
+				park: Default::default(),
 				script: Arc::new(Mutex::new(script)),
 				close: self.close.clone(),
 				log: self.log.clone(),
-			},
+			}),
 		)))
 	}
 
@@ -1049,11 +1090,12 @@ impl poll::Session for ScriptedSession {
 		send.unacked_fin = self.unacked_fin;
 		Poll::Ready(Ok((
 			send,
-			ScriptedRecv {
+			poll::Buffered::new(Script {
+				park: Default::default(),
 				script,
 				close: self.close.clone(),
 				log: self.log.clone(),
-			},
+			}),
 		)))
 	}
 
@@ -1065,8 +1107,8 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
 	}
 
-	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
-		None
+	fn send_group(&mut self, priority: i64) -> Option<SinkGroup> {
+		self.groups.then(|| SinkGroup::open(self.log.clone(), priority))
 	}
 
 	fn send_datagram(
@@ -1097,11 +1139,39 @@ impl poll::Session for ScriptedSession {
 		self.log.close(code, reason);
 	}
 
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
-		Poll::Pending
+	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
+		self.log.poll_closed(self.park.hold(cx))
 	}
 
 	fn stats(&self) -> impl crate::transport::Stats {
 		self.stats
+	}
+}
+
+#[test]
+fn a_local_close_preserves_scripted_uni_bytes_and_ends_accepts() {
+	use poll::{RecvStream as _, Session as _};
+	for fin in [false, true] {
+		let mut session = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![b"last".to_vec()]);
+		if fin {
+			session.close(Close::Fin);
+		}
+		poll::Session::close(&mut session, 0, "done");
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		assert!(session.poll_closed(&mut cx).is_ready());
+		let Poll::Ready(Ok(mut recv)) = session.poll_accept_uni(&mut cx) else {
+			panic!("buffered uni lost")
+		};
+		let Poll::Ready(Ok(Some(bytes))) = recv.poll_read_chunk(&mut cx, 4) else {
+			panic!("buffered bytes lost")
+		};
+		assert_eq!(&bytes[..], b"last");
+		let end = recv.poll_read_chunk(&mut cx, 4);
+		assert!(if fin {
+			matches!(end, Poll::Ready(Ok(None)))
+		} else {
+			matches!(end, Poll::Ready(Err(_)))
+		});
+		assert!(matches!(session.poll_accept_uni(&mut cx), Poll::Ready(Err(_))));
 	}
 }

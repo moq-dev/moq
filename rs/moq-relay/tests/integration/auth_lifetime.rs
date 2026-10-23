@@ -403,10 +403,19 @@ async fn admits_and_reports_the_session() {
 	relay.abort();
 }
 
+/// Write all of `data` to a raw qmux stream.
+async fn write_all(send: &mut qmux::SendStream, mut data: &[u8]) {
+	use moq_net::transport::poll::SendStream as _;
+	while !data.is_empty() {
+		let n = send.write(data).await.expect("write");
+		data = &data[n..];
+	}
+}
+
 /// A moq-transport client's SETUP token reaches the auth server byte for byte.
 #[tokio::test]
 async fn forwards_the_setup_token() {
-	use web_transport_trait::{RecvStream as _, SendStream as _, Session as _};
+	use moq_net::transport::poll::{RecvStream as _, Session as _};
 
 	for websocket in [false, true] {
 		let value = [0x00, 0xff, 0x80, b'x'];
@@ -428,7 +437,7 @@ async fn forwards_the_setup_token() {
 		let encoded = [&[0x03, 0x00][..], &value].concat();
 		let params = [&[0x01, 0x03, encoded.len() as u8][..], &encoded].concat();
 		let setup = [&[0x20][..], &(params.len() as u16).to_be_bytes(), &params].concat();
-		let session = if websocket {
+		let mut session = if websocket {
 			qmux::ws::Client::new()
 				.with_protocol("moqt-16", &[qmux::Version::QMux01])
 				.connect(&format!("ws://127.0.0.1:{port}/room?source=setup"))
@@ -441,16 +450,16 @@ async fn forwards_the_setup_token() {
 				.await
 				.expect("connect TCP")
 		};
-		let (mut send, mut recv) = session.open_bi().await.expect("open the control stream");
-		send.write_all(&setup).await.expect("send CLIENT_SETUP");
-		let mut reply = [0u8; 1];
-		assert_eq!(
-			tokio::time::timeout(TIMEOUT, recv.read(&mut reply))
-				.await
-				.expect("SERVER_SETUP timeout")
-				.expect("SERVER_SETUP"),
-			Some(1)
-		);
+		let (mut send, mut recv) = session
+			.open_bi(Default::default())
+			.await
+			.expect("open the control stream");
+		write_all(&mut send, &setup).await;
+		let reply = tokio::time::timeout(TIMEOUT, recv.read_chunk(1))
+			.await
+			.expect("SERVER_SETUP timeout")
+			.expect("SERVER_SETUP");
+		assert_eq!(reply.map(|chunk| chunk.len()), Some(1));
 		let seen = script.seen.lock().unwrap().clone();
 		let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
 		assert_eq!(connect.token, Some(token));
@@ -458,7 +467,8 @@ async fn forwards_the_setup_token() {
 			assert_eq!(connect.transport, moq_auth::Transport::WebSocket);
 			assert_eq!(connect.path, "/room");
 			assert_eq!(connect.query.as_deref(), Some("source=setup"));
-			assert_eq!(connect.server_name.as_deref(), Some("127.0.0.1"));
+			// Plain `ws://` has no SNI; the `Host` header never stands in for one.
+			assert_eq!(connect.server_name, None);
 			assert!(connect.remote.is_some_and(|addr| addr.ip().is_loopback()));
 			assert_eq!(connect.alpn.as_deref(), Some("qmux-01.moqt-16"));
 		}
@@ -1590,6 +1600,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 }
 
 /// The auth server sees the accepted transport, independent of negotiated MoQ ALPN.
+/// An IP-literal dial sends no SNI, so neither reports a `server_name`: the
+/// WebTransport CONNECT host selected no certificate and never stands in for one.
 #[tokio::test]
 async fn quic_and_webtransport_report_distinct_auth_transports() {
 	let script = Script::new(grant(Duration::from_secs(3600)));
@@ -1605,6 +1617,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 			.unwrap_or_else(|| panic!("auth connect for {path}: {seen:?}"));
 		assert_eq!(request.transport.as_str(), expected, "{scheme}");
 		assert!(request.alpn.as_ref().is_some_and(|alpn| alpn.starts_with("moq-lite-")));
+		assert_eq!(request.server_name, None, "{scheme}");
 		drop(connections);
 	}
 	relay.abort();
@@ -1786,7 +1799,10 @@ async fn relay_request_limits_distinguish_clients_and_peers() {
 /// Browser-visible policy refusals happen after the WebSocket upgrade, in MoQ's close registry.
 #[tokio::test]
 async fn websocket_refusal_is_in_band() {
-	use web_transport_trait::{Error as _, SendStream as _, Session as _};
+	use moq_net::transport::{
+		Error as _,
+		poll::{SendStream as _, Session as _},
+	};
 	for (status, code) in [
 		(401, moq_net::SessionError::Unauthorized),
 		(403, moq_net::SessionError::Unauthorized),
@@ -1795,13 +1811,13 @@ async fn websocket_refusal_is_in_band() {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		script.on_connect(Answer::Status(status));
 		let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
-		let session = qmux::ws::Client::new()
+		let mut session = qmux::ws::Client::new()
 			.with_protocol("moq-lite-06", &[qmux::Version::QMux01])
 			.connect(&format!("ws://127.0.0.1:{port}/room"))
 			.await
 			.expect("policy refusal must not reject the browser-opaque HTTP upgrade");
-		let mut send = session.open_uni().await.expect("open SETUP");
-		send.write_all(&[1, 1, 0]).await.expect("send empty SETUP");
+		let mut send = session.open_uni(Default::default()).await.expect("open SETUP");
+		write_all(&mut send, &[1, 1, 0]).await;
 		send.finish().expect("finish SETUP");
 		let closed = tokio::time::timeout(TIMEOUT, session.closed())
 			.await

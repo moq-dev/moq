@@ -41,7 +41,7 @@ func (b *BroadcastProducer) Dynamic() (*BroadcastDynamic, error) {
 //
 // Announcing again re-prices the route in place. Until announced, the
 // broadcast is invisible and unroutable for local consumers and peers alike.
-func (b *BroadcastProducer) Announce(route Route) error {
+func (b *BroadcastProducer) Announce(route AnnounceRoute) error {
 	return b.inner.Announce(route)
 }
 
@@ -97,7 +97,8 @@ func (b *BroadcastProducer) Finish() (*BroadcastFinish, error) {
 
 // BroadcastFinish is a cleanly ended broadcast, still announced and serving its
 // finished tracks. Closing it, or cancelling a [BroadcastFinish.Wait], closes
-// the broadcast at once.
+// the broadcast at once. An unreferenced one closes the broadcast only when the
+// garbage collector reclaims it, possibly long after, so wait on or close it.
 type BroadcastFinish struct {
 	inner *ffi.MoqBroadcastFinish
 }
@@ -379,7 +380,8 @@ func (d *TrackDynamic) Cancel() {
 // Accept each group you have and DropGroups the rest; Next names what is still
 // owed, in the fill's order. Releasing the fill names whatever is left as dropped
 // while a reader still wants it; once nobody does, it is withdrawn, so stop
-// serving it when Unused returns.
+// serving it when Unused returns. Stop serving a single group when Unwanted
+// returns for it, and move on to Next.
 type Fill struct {
 	inner *ffi.MoqFill
 }
@@ -400,7 +402,7 @@ func (f *Fill) EndGroup() uint64 {
 }
 
 // Priority is the most urgent delivery priority among the readers waiting on it.
-func (f *Fill) Priority() uint8 {
+func (f *Fill) Priority() int8 {
 	return f.inner.Priority()
 }
 
@@ -443,4 +445,16 @@ func (f *Fill) IsUsed() bool {
 // Unused blocks until no reader waits on this fill.
 func (f *Fill) Unused(ctx context.Context) error {
 	return f.inner.Unused(ctx)
+}
+
+// IsWanted reports whether a reader still waits for group sequence from this fill:
+// false once every reader took it or narrowed past it, or nobody waits on the fill.
+func (f *Fill) IsWanted(sequence uint64) bool {
+	return f.inner.IsWanted(sequence)
+}
+
+// Unwanted blocks until no reader waits for group sequence from this fill, so stop
+// serving it.
+func (f *Fill) Unwanted(ctx context.Context, sequence uint64) error {
+	return f.inner.Unwanted(ctx, sequence)
 }

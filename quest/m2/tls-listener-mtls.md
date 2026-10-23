@@ -18,8 +18,7 @@ without it.
 Decided by the maintainer (2026-10-06): the peer certificate comes from a
 new accessor on qmux's TLS session. Rejected: owning the TLS accept outside
 qmux, or leaving it open. Decided 2026-10-20 (maintainer): no new work in
-moq-dev/web-transport, so the accessor goes on the in-tree qmux crate that
-[qmux on moq-quic](/quest/m1/quic-qmux.md) brings into this repository.
+moq-dev/web-transport, so the accessor goes on the in-tree qmux crate (`rs/qmux`).
 
 Keep the token path working on the same listener, and keep pinned peers and
 CA roots meaning the same as on QUIC.
@@ -37,10 +36,6 @@ HTTP and RTMPS, those clients are never asked for one. Whichever lands second
 keeps both working.
 
 Public API: relay config may gain a listener option. Wire: none.
-
-## Required
-
-- [qmux on the QUIC stream state machine](/quest/m1/quic-qmux.md) - moves qmux in-tree, where the peer-certificate accessor lands
 
 ## Related
 

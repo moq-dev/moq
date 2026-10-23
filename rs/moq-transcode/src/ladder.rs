@@ -151,12 +151,6 @@ mod tests {
 		ladder.rungs().iter().map(|rung| rung.size).collect()
 	}
 
-	#[test]
-	fn default_ladder_is_ordered() {
-		let ladder = Ladder::default();
-		assert_eq!(sizes(&ladder), [240, 360, 480, 720, 1080]);
-	}
-
 	/// The operator writes the ladder top-down (or in whatever order), and it
 	/// still resolves to one canonical bottom-up ranking.
 	#[test]

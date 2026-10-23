@@ -65,41 +65,43 @@ struct AcceptedSession {
 	registration: Option<mux::Registration>,
 	cancel: Option<oneshot::Receiver<()>>,
 	role: &'static str,
-	// WHIP only: a clone of the ingest broadcast, so a deliberate DELETE can
-	// finish() it: a clean end instead of an abort error.
-	broadcast: Option<moq_net::broadcast::Producer>,
 }
 
 impl AcceptedSession {
 	async fn run(mut self) -> Result<()> {
-		let session = self.session.take().expect("accepted session missing driver");
+		let mut session = self.session.take().expect("accepted session missing driver");
 		let registration = self
 			.registration
 			.take()
 			.expect("accepted session missing mux registration");
 		let cancel = self.cancel.take().expect("accepted session missing cancel receiver");
 
-		let result = {
-			// Hold the mux registration for the session's lifetime; it
-			// unregisters on exit.
+		let ended = {
+			// Hold the mux registration while media flows; it unregisters on exit.
 			let _registration = registration;
 			tokio::select! {
-				res = session.run() => {
-					crate::session::log_session_end(self.role, &res);
-					res
-				}
-				_ = cancel => {
-					tracing::debug!(role = self.role, "webrtc session terminated by DELETE");
-					// A deliberate end: close the broadcast so the origin
-					// unannounces it immediately.
-					if let Some(broadcast) = self.broadcast.take() {
-						broadcast.close();
-					}
-					Ok(())
-				}
+				// A client may close its peer connection right after its DELETE; the DELETE
+				// still names the end as clean.
+				biased;
+				_ = cancel => None,
+				res = session.run() => Some(res),
 			}
 		};
-		normalize_session_result(result)
+		if let Some(res) = ended {
+			crate::session::log_session_end(self.role, &res);
+			return normalize_session_result(res);
+		}
+
+		// A DELETE is the peer's clean end after its final media. An ingest serves the
+		// finished broadcast until its media is stale, so subscribers still catching up
+		// drain the tail; dropping this future ends that early, as does a newer publish
+		// at the path. A peer that vanishes instead closes the broadcast at once.
+		tracing::debug!(role = self.role, "webrtc session terminated by DELETE");
+		if let Some(finish) = session.finish()? {
+			tracing::info!(role = self.role, linger = ?finish.linger(), "serving the finished broadcast until its media is stale");
+			finish.wait().await;
+		}
+		Ok(())
 	}
 }
 

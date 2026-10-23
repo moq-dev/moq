@@ -501,7 +501,7 @@ enum Source {
 }
 
 /// The IETF header state that cannot be inferred from a plain frame list.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 #[derive(Clone, Debug)]
 // private: passthrough
 pub(crate) struct Wire {
@@ -985,6 +985,10 @@ struct Alive {
 	// policy (`Old`, `Timeout`, `Evicted`). Set before `aborted`, under the same rules, so
 	// a track scan learns why without taking the group lock.
 	cut: OnceLock<Error>,
+	// Monotone mirror of `GroupState::started` for the first frame or the finish, set after
+	// the group lock is released and before the track is told: a track scan reading a stale
+	// false judges the group frameless until that wake re-judges it.
+	started: AtomicBool,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
@@ -1114,6 +1118,7 @@ impl Producer {
 			aborted: AtomicBool::new(false),
 			checked: AtomicBool::new(false),
 			cut: OnceLock::new(),
+			started: AtomicBool::new(false),
 			access,
 		});
 		Self {
@@ -1136,9 +1141,8 @@ impl Producer {
 		self
 	}
 
-	/// The group header.
-	// pending: /quest/m1/public-model/ingest.md
-	pub(crate) fn info(&self) -> Info {
+	/// The group's header, as it was created.
+	pub fn info(&self) -> Info {
 		self.handle.info
 	}
 
@@ -1149,8 +1153,8 @@ impl Producer {
 
 	/// Whether the parent track compresses, so a received frame arrives as a stored slice
 	/// with its inflated size ([`frame::Header::inflated`]).
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/ingest.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	// private: passthrough
 	pub(crate) fn compressed(&self) -> bool {
 		self.handle.track.compress
 	}
@@ -1241,7 +1245,11 @@ impl Producer {
 		state.cache += size;
 		let slots = state.reserve_frame();
 		let now = state.charge.add(size + slots);
-		state.frames.push_back(Frame { timestamp, payload });
+		state.frames.push_back(Frame {
+			timestamp,
+			payload,
+			arrived: super::clock::now(),
+		});
 		if let Some(flate) = &mut state.flate {
 			flate.push(inflated);
 		}
@@ -1257,6 +1265,7 @@ impl Producer {
 			track.first_frame(self.handle.info.sequence, bound);
 		}
 		drop(track);
+		self.handle.start();
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
@@ -1330,7 +1339,10 @@ impl Producer {
 		let mut now = None;
 		let mut latest = None;
 		let mut deflated = deflated.into_iter();
+		// The whole batch lands at once.
+		let arrived = super::clock::now();
 		for mut frame in frames.drain() {
+			frame.arrived = arrived;
 			frame.timestamp =
 				on_track(frame.timestamp, self.handle.track.timescale).expect("timestamp scale checked above");
 			if let Some(flate) = &mut state.flate {
@@ -1358,6 +1370,9 @@ impl Producer {
 			track.first_frame(self.handle.info.sequence, bound);
 		}
 		drop(track);
+		if count > 0 {
+			self.handle.start();
+		}
 
 		self.handle.cache.settle(now);
 		if let Some(latest) = latest {
@@ -1369,38 +1384,31 @@ impl Producer {
 	}
 
 	/// Create a frame with an upfront size and presentation timestamp, streamed in
-	/// chunks. Borrows the group exclusively until the returned [`frame::Producer`]
-	/// is finished or dropped, so only one frame is open at a time.
+	/// chunks. The returned [`frame::Producer`] takes this writer, so only one frame is
+	/// open at a time; its [`finish`](frame::Producer::finish) hands the writer back.
+	/// Use [`Self::write_frame`] for a frame already in one buffer.
 	///
 	/// The `timestamp` is converted into the parent track's timescale, so the scale you
-	/// build it with doesn't have to match the track. Returns [`Error::FrameTooLarge`]
-	/// if the declared size exceeds the group's byte budget (refused before allocating)
-	/// or [`Error::TimestampMismatch`] if the timestamp can't be converted (overflow).
-	pub fn create_frame(&mut self, frame: frame::Info) -> Result<frame::Producer<'_>> {
-		// The buffer allocates on its first write, so refusing the frame costs nothing.
-		let buf = FrameBuf::new(frame.size as usize);
-		let info = self.open_frame(frame.into(), &buf)?;
-		let meter = self.chunk_meter(None);
-		Ok(frame::Producer::new(self, buf, info).with_meter(meter))
+	/// build it with doesn't have to match the track. A frame the group cannot take
+	/// aborts the group with the error: [`Error::FrameTooLarge`] if the declared size
+	/// exceeds the group's byte budget (refused before allocating),
+	/// [`Error::TimestampMismatch`] if the timestamp can't be converted, or
+	/// [`Error::Closed`] once the group finished.
+	///
+	/// The declared size is allocated up front while the frames in flight through the
+	/// origin handle fit its budget, and grows with the bytes written past that, so a
+	/// peer's declaration cannot commit memory it never sends.
+	pub fn create_frame(self, frame: frame::Info) -> Result<frame::Producer> {
+		self.create_object(frame.into())
 	}
 
-	/// The owned counterpart of [`Self::create_frame`], for the wire drivers that
-	/// stream a frame across polls and cannot hold the group borrowed inside their
-	/// state. The frame owns the only writer until its finish returns it.
-	///
-	/// The declared size is the peer's claim, so the buffer is allocated up front only
-	/// while it fits the session's `budget`; otherwise it grows with the bytes received.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/ingest.md
-	pub(crate) fn create_frame_owned(
-		mut self,
-		frame: impl Into<frame::Header>,
-		budget: &frame::Budget,
-	) -> Result<frame::ProducerOwned> {
-		let frame = frame.into();
+	/// [`Self::create_frame`] with the moq-transport object fields a relay forwards.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	// private: passthrough
+	pub(crate) fn create_object(mut self, frame: frame::Header) -> Result<frame::Producer> {
 		let meter = self.chunk_meter(frame.inflated);
 		let size = frame.info.size as usize;
-		let reserved = budget.reserve(size);
+		let reserved = self.handle.cache.frames().reserve(size);
 		let buf = match reserved {
 			Some(_) => FrameBuf::new(size),
 			None => FrameBuf::growing(size),
@@ -1412,7 +1420,7 @@ impl Producer {
 				return Err(err);
 			}
 		};
-		Ok(frame::ProducerOwned::new(self, buf, info, reserved).with_meter(meter))
+		Ok(frame::Producer::new(self, buf, info, reserved).with_meter(meter))
 	}
 
 	/// The meter a streamed frame's chunks bump: none for a plain frame a compressed group
@@ -1502,6 +1510,7 @@ impl Producer {
 			track.first_frame(self.handle.info.sequence, bound);
 		}
 		drop(track);
+		self.handle.start();
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
@@ -1575,6 +1584,8 @@ impl Producer {
 			objects.resize(len, None);
 			objects.push_back(Some(fields));
 		}
+		// Stamped once readable, so a slow DEFLATE above counts against its lateness.
+		frame.arrived = super::clock::now();
 		state.frames.push_back(frame);
 		state.committed = state.next_index;
 		self.advance_largest(&state);
@@ -1613,6 +1624,9 @@ impl Producer {
 		if let Some(flate) = &mut state.flate {
 			flate.finish(fin);
 		}
+		drop(state);
+		// An empty group counts as content once it ends.
+		self.handle.start();
 		// A finished group can no longer raise the track's largest, which may end its stream.
 		self.handle.cache.finish_largest(self.sequence);
 		Ok(())
@@ -1658,8 +1672,10 @@ impl Producer {
 	/// Abort with `err` only while nothing consumes the group, returning whether it is
 	/// closed. Consumer creation and the check share a lock, so a reader arriving after
 	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
-	#[allow(dead_code)]
-	// The answering API retains these on the writer as well as the session observer.
+	#[allow(
+		dead_code,
+		reason = "the answering API retains these on the writer as well as the session observer"
+	)]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn abort_unused(&self, err: Error) -> bool {
 		self.handle.abort_unused(err)
@@ -1694,8 +1710,10 @@ impl Producer {
 	}
 
 	/// Poll for the group becoming unused (every consumer dropped).
-	#[allow(dead_code)]
-	// The answering API retains these on the writer as well as the session observer.
+	#[allow(
+		dead_code,
+		reason = "the answering API retains these on the writer as well as the session observer"
+	)]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.handle.poll_unused(waiter)
@@ -1712,7 +1730,9 @@ impl Handle {
 
 	/// Abort the group with `err` unless it already holds every frame: the publisher gave
 	/// up a group still arriving, while one that finished here stays whole.
-	pub(super) fn abort_open(&self, err: Error) {
+	// private: capability gap
+	// Sessions cancel an unfinished FETCH while its writer belongs to its data stream.
+	pub(crate) fn abort_open(&self, err: Error) {
 		if let Ok(state) = self.state.write()
 			&& state.fin.is_none()
 		{
@@ -1794,6 +1814,7 @@ impl Handle {
 		}
 		let now = state.charge.add(payload + metadata + growth);
 		drop(state);
+		self.start();
 		self.cache.settle(now);
 	}
 
@@ -1826,7 +1847,7 @@ impl Handle {
 	/// Abort with `err` only while nothing consumes the group, returning whether it is
 	/// closed. Consumer creation and the check share a lock, so a reader arriving after
 	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn abort_unused(&self, err: Error) -> bool {
 		match self.state.write_unused() {
@@ -1915,6 +1936,13 @@ impl Handle {
 		state.abort.is_none().then_some(state.offset)
 	}
 
+	/// Whether this copy still holds every committed frame below `end`, so a compressed
+	/// tail requested there can inflate against it. Sparse object IDs are not ordinals.
+	pub(super) fn holds_prefix(&self, end: u64) -> bool {
+		let state = self.state.read();
+		state.abort.is_none() && state.offset == 0 && !state.sparse() && state.committed as u64 >= end
+	}
+
 	/// One past the last frame committed to an unfinished group, when that is past its
 	/// first: where a replacement route resumes. `None` once the group is finished, or
 	/// while it holds nothing a replacement could continue.
@@ -1935,16 +1963,34 @@ impl Handle {
 	}
 
 	/// Whether `other` is a handle to this same group.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
 
-	/// Whether the group opened its first frame, or ended without one.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/ingest.md
-	pub(crate) fn is_started(&self) -> bool {
-		self.state.read().started()
+	/// Whether the group opened its first frame or finished, so the track counts it as
+	/// content. An aborted group is not content either way.
+	///
+	/// Reads the mirror rather than the group's state, so a track scan holding the track
+	/// lock never takes the group's.
+	pub(super) fn is_started(&self) -> bool {
+		self.alive.started.load(Ordering::Relaxed)
+	}
+
+	/// The first frame opened or the group finished: tell the track once, so it re-judges
+	/// the reads that skipped this group while it was frameless. Called with the group
+	/// lock released, since the track's is taken first.
+	fn start(&self) {
+		if self.alive.started.swap(true, Ordering::Relaxed) {
+			return;
+		}
+		let Some(track) = self.cache.track() else {
+			return;
+		};
+		let answers = track.read().reveal(self);
+		if answers && let Ok(mut state) = track.write() {
+			state.shown(self.sequence);
+		}
 	}
 
 	/// Whether this copy may yet present the group's frame 0: it holds it, and nothing
@@ -2122,7 +2168,7 @@ impl Handle {
 	}
 
 	/// Poll for the group becoming unused (every consumer dropped).
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll_unused(waiter).map(|_| ())
@@ -2189,16 +2235,19 @@ impl Demand {
 	}
 }
 
-/// A small inline batch of completed frames, drained from the shared group state
-/// under one lock and then handed out without re-locking.
+/// A small batch of completed frames, drained from the shared group state under one
+/// lock and then handed out without re-locking.
 ///
 /// Each [`Consumer::read_frame`] otherwise takes the group mutex and allocates a
 /// waker just to clone one `Bytes`; draining a batch amortizes both across `CAP`
-/// frames. Storage is inline and uninitialized (no heap), so a consumer that never
-/// reads whole frames, or drains through a higher-level buffer, pays nothing.
+/// frames. Storage is uninitialized and allocated by the first non-empty fill, so a
+/// consumer that never reads whole frames, or drains through a higher-level buffer,
+/// pays nothing. Inline storage would triple the size of every [`Consumer`], which
+/// moves by value through each layer that hands out a group.
+#[derive(Default)]
 struct Prefetch {
 	// Initialized, not-yet-taken frames are `frames[pos..len]`; the rest are uninitialized.
-	frames: [MaybeUninit<Frame>; Self::CAP],
+	frames: Option<Box<[MaybeUninit<Frame>; Self::CAP]>>,
 	// Relay metadata for `frames`, allocated by the first batch that carries any.
 	fields: Option<Box<[Option<Arc<super::object::Fields>>; Self::CAP]>>,
 	// Inflated sizes for `frames`, filled only by a batch of a compressed group's stored slices.
@@ -2220,8 +2269,9 @@ impl Prefetch {
 		if self.pos == self.len {
 			return None;
 		}
+		let frames = self.frames.as_mut()?;
 		// SAFETY: `pos < len`, so this slot was written by `fill` and not yet taken.
-		let frame = unsafe { self.frames[self.pos].assume_init_read() };
+		let frame = unsafe { frames[self.pos].assume_init_read() };
 		self.pos += 1;
 		Some(frame)
 	}
@@ -2246,9 +2296,14 @@ impl Prefetch {
 			Some(flate) if !raw && count > 0 => Some(state.inflate(flate, local + count - 1)?),
 			_ => None,
 		};
-		for frame in state.frames.range(local..local + count) {
-			self.frames[self.len].write(frame.clone());
-			self.len += 1;
+		if count > 0 {
+			let frames = self
+				.frames
+				.get_or_insert_with(|| Box::new([const { MaybeUninit::uninit() }; Self::CAP]));
+			for frame in state.frames.range(local..local + count) {
+				frames[self.len].write(frame.clone());
+				self.len += 1;
+			}
 		}
 		match &state.flate {
 			Some(flate) if raw => {
@@ -2275,12 +2330,15 @@ impl Prefetch {
 	/// frames. A frame that fails to inflate ends the batch, failing it if first.
 	fn inflate(&mut self, job: &Inflate, local: usize, meter: &stats::Meter) -> Result<()> {
 		job.run(meter);
+		let Some(frames) = &mut self.frames else {
+			return Ok(());
+		};
 		for i in self.pos..self.len {
 			match job.get(local + i) {
 				// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
-				Ok(payload) => unsafe { self.frames[i].assume_init_mut() }.payload = payload,
+				Ok(payload) => unsafe { frames[i].assume_init_mut() }.payload = payload,
 				Err(err) => {
-					for slot in &mut self.frames[i..self.len] {
+					for slot in &mut frames[i..self.len] {
 						// SAFETY: as above, and `len` drops below them right after.
 						unsafe { slot.assume_init_drop() };
 					}
@@ -2296,7 +2354,10 @@ impl Prefetch {
 	/// Read once per fill to bump the egress payload counters for the whole batch.
 	fn buffered(&self) -> (u64, u64) {
 		let mut bytes = 0u64;
-		for slot in &self.frames[self.pos..self.len] {
+		let Some(frames) = &self.frames else {
+			return (0, 0);
+		};
+		for slot in &frames[self.pos..self.len] {
 			// SAFETY: slots in `pos..len` are initialized (written by `fill`, not yet popped).
 			bytes += unsafe { slot.assume_init_ref() }.payload.len() as u64;
 		}
@@ -2304,21 +2365,12 @@ impl Prefetch {
 	}
 }
 
-impl Default for Prefetch {
-	fn default() -> Self {
-		Self {
-			frames: [const { MaybeUninit::uninit() }; Self::CAP],
-			fields: None,
-			inflated: None,
-			pos: 0,
-			len: 0,
-		}
-	}
-}
-
 impl Drop for Prefetch {
 	fn drop(&mut self) {
-		for slot in &mut self.frames[self.pos..self.len] {
+		let Some(frames) = &mut self.frames else {
+			return;
+		};
+		for slot in &mut frames[self.pos..self.len] {
 			// SAFETY: slots in `pos..len` are initialized and were never taken.
 			unsafe { slot.assume_init_drop() };
 		}
@@ -2672,6 +2724,7 @@ impl Consumer {
 	/// A machine parked on stream credit reads nothing, so without this an aborted group,
 	/// which never expires, would wait for credit it could only spend on a reset.
 	// pending: /quest/m1/public-model/serve.md
+	#[cfg(feature = "async")]
 	pub(crate) fn poll_abandoned(&mut self, waiter: &kio::Waiter, pending: bool) -> Option<Error> {
 		if self.poll_expired_while_pending(waiter, pending) {
 			return Some(Error::Old);
@@ -2694,7 +2747,7 @@ impl Consumer {
 		// A front's reader may continue the group from another route's copy when it reads.
 		if self
 			.recover
-			.as_ref()
+			.as_mut()
 			.is_some_and(|recover| recover.wants(Some(&aborted), waiter))
 		{
 			return None;
@@ -2721,6 +2774,14 @@ impl Consumer {
 	/// The parent track's timescale, or `None` when it declared no timeline.
 	pub fn timescale(&self) -> Option<Timescale> {
 		self.track.timescale
+	}
+
+	/// The timescale a moq-lite hop serves the parent track at (see
+	/// [`track::Info::lite_timescale`]).
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	// private: passthrough
+	pub(crate) fn lite_timescale(&self, ietf: bool) -> Option<Timescale> {
+		self.track.lite_timescale(ietf)
 	}
 
 	/// The draft the parent track's moq-transport publisher spoke, which serialized every
@@ -3162,8 +3223,8 @@ impl Cursor {
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
 pub struct Fetch {
-	/// Delivery priority for the fetched group's stream. Defaults to 0.
-	pub priority: u8,
+	/// Delivery priority for the fetched group's stream, higher first. Defaults to 0.
+	pub priority: i8,
 
 	/// Maximum age behind the live edge this caller accepts.
 	///
@@ -3186,7 +3247,7 @@ pub struct Fetch {
 
 impl Fetch {
 	/// Set the delivery priority, returning `self` for chaining.
-	pub fn with_priority(mut self, priority: u8) -> Self {
+	pub fn with_priority(mut self, priority: i8) -> Self {
 		self.priority = priority;
 		self
 	}
@@ -3218,7 +3279,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn object_fields_follow_their_frames_through_every_read() {
 		let pool = cache::Pool::unbounded();
-		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let mut group = Producer::new(Info::from(0u64), track::Info::default(), cache);
 		group.write_frame(None, Bytes::from_static(b"p")).unwrap();
 		let plain = pool.used();
@@ -3235,7 +3296,7 @@ mod test {
 				})),
 				inflated: None,
 			};
-			let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
+			let mut frame = group.create_object(header).unwrap();
 			frame.write(Bytes::from_static(b"f")).unwrap();
 			group = frame.finish().unwrap();
 		}
@@ -3287,7 +3348,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn terminal_metadata_stays_charged_after_frames_are_released() {
 		let pool = cache::Pool::unbounded();
-		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let mut group = Producer::new(Info::from(0u64), track::Info::default(), cache);
 		group.write_frame(None, Bytes::from_static(b"payload")).unwrap();
 		let fields = super::super::object::Fields {
@@ -3351,7 +3412,7 @@ mod test {
 	fn frame_capacity_growth_is_charged_and_released() {
 		for mode in 0..3 {
 			let pool = cache::Pool::unbounded();
-			let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+			let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 			let mut group = Producer::new(Info::from(0u64), track::Info::timed(), cache);
 			for _ in 0..FRAME_SLOTS {
 				group.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap();
@@ -3361,12 +3422,7 @@ mod test {
 				0 => group.write_frame(Timestamp::ZERO, bytes::Bytes::new()).unwrap(),
 				1 => {
 					let mut buffer = frame::Buffer::<1>::new();
-					buffer
-						.push(Frame {
-							timestamp: Some(Timestamp::ZERO),
-							payload: bytes::Bytes::new(),
-						})
-						.unwrap();
+					buffer.push(Frame::new(Timestamp::ZERO, bytes::Bytes::new())).unwrap();
 					group.write_frames(&mut buffer).unwrap();
 				}
 				_ => {
@@ -3376,7 +3432,7 @@ mod test {
 							timestamp: Some(Timestamp::ZERO),
 						})
 						.unwrap();
-					frame.finish().unwrap();
+					group = frame.finish().unwrap();
 				}
 			}
 			let capacity = group.handle.state.read().frames.capacity();
@@ -3396,10 +3452,7 @@ mod test {
 	#[test]
 	fn one_frame_fits_the_charged_slots() {
 		let mut frames: VecDeque<Frame> = VecDeque::new();
-		frames.push_back(Frame {
-			timestamp: Some(Timestamp::ZERO),
-			payload: Bytes::new(),
-		});
+		frames.push_back(Frame::new(Timestamp::ZERO, Bytes::new()));
 		let capacity = frames.capacity();
 		assert!(
 			capacity <= FRAME_SLOTS,
@@ -3426,20 +3479,6 @@ mod test {
 		assert_eq!(f1.size, 6);
 		let end = consumer.next_frame().now_or_never().unwrap().unwrap();
 		assert!(end.is_none());
-	}
-
-	#[test]
-	#[cfg(feature = "async")]
-	fn read_frame_all_at_once() {
-		let mut producer = Info { sequence: 0 }.produce();
-		producer
-			.write_frame(Timestamp::ZERO, Bytes::from_static(b"hello"))
-			.unwrap();
-		producer.finish().unwrap();
-
-		let mut consumer = producer.consume();
-		let frame = consumer.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.payload, Bytes::from_static(b"hello"));
 	}
 
 	#[test]
@@ -3507,18 +3546,16 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn chunked_frame_reads_whole() {
-		let mut producer = Info { sequence: 0 }.produce();
-		{
-			let mut frame = producer
-				.create_frame(frame::Info {
-					size: 10,
-					timestamp: Some(Timestamp::ZERO),
-				})
-				.unwrap();
-			frame.write(Bytes::from_static(b"hello")).unwrap();
-			frame.write(Bytes::from_static(b"world")).unwrap();
-			frame.finish().unwrap();
-		}
+		let producer = Info { sequence: 0 }.produce();
+		let mut frame = producer
+			.create_frame(frame::Info {
+				size: 10,
+				timestamp: Some(Timestamp::ZERO),
+			})
+			.unwrap();
+		frame.write(Bytes::from_static(b"hello")).unwrap();
+		frame.write(Bytes::from_static(b"world")).unwrap();
+		let mut producer = frame.finish().unwrap();
 		producer.finish().unwrap();
 
 		// Frame data is held in a single per-frame buffer; a whole-frame read returns
@@ -3531,7 +3568,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn chunked_frame_streams_partial() {
-		let mut producer = Info { sequence: 0 }.produce();
+		let producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
 
 		let mut frame = producer
@@ -3549,7 +3586,7 @@ mod test {
 		assert!(f.read_chunk().now_or_never().is_none());
 
 		frame.write(Bytes::from_static(b"bar")).unwrap();
-		frame.finish().unwrap();
+		let _producer = frame.finish().unwrap();
 
 		let c2 = f.read_chunk().now_or_never().unwrap().unwrap();
 		assert_eq!(c2, Some(Bytes::from_static(b"bar")));
@@ -3653,7 +3690,7 @@ mod test {
 			(Error::GroupTooLarge, false),
 		] {
 			let pool = cache::Pool::unbounded();
-			let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+			let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 			let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
 			producer.write_frame(None, Bytes::from_static(b"a")).unwrap();
 			producer.write_frame(None, Bytes::from_static(b"b")).unwrap();
@@ -3680,7 +3717,7 @@ mod test {
 	#[test]
 	fn a_held_head_expires_with_the_pool_window() {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(std::time::Duration::from_secs(1)));
-		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
 		producer.write_frame(None, Bytes::from_static(b"a")).unwrap();
 		let handoff = producer.consume().handoff();
@@ -3700,7 +3737,7 @@ mod test {
 	fn the_held_registry_follows_the_heads_held() {
 		const BURST: usize = 64;
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(std::time::Duration::from_secs(1)));
-		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let fail = |sequence: u64| {
 			let mut producer = Producer::new(Info::from(sequence), track::Info::default(), cache.clone());
 			producer.write_frame(None, Bytes::from_static(b"a")).unwrap();
@@ -3728,7 +3765,7 @@ mod test {
 	#[test]
 	fn a_full_pool_holds_no_head() {
 		let pool = cache::Pool::new(cache::Config::default().with_capacity(1));
-		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let mut producer = Producer::new(Info::from(0u64), track::Info::default(), cache);
 		producer.write_frame(None, Bytes::from_static(b"a")).unwrap();
 		let handoff = producer.consume().handoff();
@@ -3742,7 +3779,7 @@ mod test {
 	#[test]
 	fn an_open_frame_reserves_its_remainder_from_adoption() {
 		let pool = cache::Pool::unbounded();
-		let cache = cache::Track::new(pool, kio::Weak::new());
+		let cache = cache::Track::new(pool, Default::default(), kio::Weak::new());
 		let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
 		tail.start_at(1).unwrap();
 		let adopter = tail.handle();
@@ -3755,10 +3792,7 @@ mod test {
 		let head = Head {
 			start: 0,
 			first_object: true,
-			frames: vec![Frame {
-				timestamp: None,
-				payload: Bytes::from_static(b"ab"),
-			}],
+			frames: vec![Frame::new(None, Bytes::from_static(b"ab"))],
 			objects: Vec::new(),
 			sizes: None,
 		};
@@ -3785,14 +3819,8 @@ mod test {
 			start: 0,
 			first_object: true,
 			frames: vec![
-				Frame {
-					timestamp: None,
-					payload: Bytes::from_static(b"a"),
-				},
-				Frame {
-					timestamp: None,
-					payload: Bytes::from_static(b"b"),
-				},
+				Frame::new(None, Bytes::from_static(b"a")),
+				Frame::new(None, Bytes::from_static(b"b")),
 			],
 			objects: vec![None, fields(1)],
 			sizes: None,
@@ -3808,7 +3836,7 @@ mod test {
 		};
 		for wired_first in [true, false] {
 			let pool = cache::Pool::unbounded();
-			let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+			let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 			let mut tail = Producer::new(Info::from(0u64), track::Info::default(), cache);
 			tail.start_at(2).unwrap();
 			if wired_first {
@@ -4023,7 +4051,7 @@ mod test {
 
 	#[cfg(feature = "async")]
 	fn prefetched_consumer(pool: &cache::Pool, max_age: std::time::Duration) -> (Producer, Consumer) {
-		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let track = track::Info::timed().with_max_age(max_age);
 		let mut producer = Producer::new(Info { sequence: 0 }, track, cache);
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
@@ -4270,7 +4298,7 @@ mod test {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn chunk_write_wakes_parked_reader() {
-		let mut producer = Info { sequence: 0 }.produce();
+		let producer = Info { sequence: 0 }.produce();
 		let mut consumer = producer.consume();
 		let mut frame = producer
 			.create_frame(frame::Info {
@@ -4291,13 +4319,57 @@ mod test {
 		assert_eq!(chunk, Some(Bytes::from_static(b"foo")));
 	}
 
+	/// Each frame is stamped when its last byte lands, whichever way it is written, and
+	/// readers see that stamp however late they read.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn frames_carry_when_they_landed() {
+		use std::time::Duration;
+
+		let start = moq_clock::now();
+		let mut producer = Info { sequence: 0 }.produce();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
+
+		moq_clock::sleep(Duration::from_millis(10)).await;
+		let mut chunked = producer
+			.create_frame(frame::Info {
+				size: 2,
+				timestamp: Some(Timestamp::ZERO),
+			})
+			.unwrap();
+		chunked.write(Bytes::from_static(b"b")).unwrap();
+		moq_clock::sleep(Duration::from_millis(10)).await;
+		chunked.write(Bytes::from_static(b"c")).unwrap();
+		producer = chunked.finish().unwrap();
+
+		moq_clock::sleep(Duration::from_millis(10)).await;
+		let mut batch = frame::Buffer::<2>::new();
+		batch
+			.push(Frame::new(Timestamp::ZERO, Bytes::from_static(b"d")))
+			.unwrap();
+		moq_clock::sleep(Duration::from_millis(10)).await;
+		batch
+			.push(Frame::new(Timestamp::ZERO, Bytes::from_static(b"e")))
+			.unwrap();
+		producer.write_frames(&mut batch).unwrap();
+		producer.finish().unwrap();
+
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		let mut consumer = producer.consume();
+		let mut arrived = Vec::new();
+		while let Some(frame) = consumer.read_frame().await.unwrap() {
+			arrived.push(frame.arrived().duration_since(start).as_millis());
+		}
+		assert_eq!(arrived, [0, 20, 40, 40], "stamped on completion, a batch at its write");
+	}
+
 	/// A frame whose timestamp is at a different scale is converted to the group's
 	/// scale by `create_frame`.
 	#[test]
 	fn create_frame_converts_mismatched_scale() {
 		use crate::{Timescale, Timestamp};
 
-		let mut producer = Producer::new(
+		let producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
 			Default::default(),
@@ -4316,7 +4388,7 @@ mod test {
 	fn create_frame_converts_current_timestamp() {
 		use crate::Timescale;
 
-		let mut producer = Producer::new(
+		let producer = Producer::new(
 			Info { sequence: 0 },
 			track::Info::default().with_timescale(Timescale::MICRO),
 			Default::default(),
@@ -4493,7 +4565,7 @@ mod test {
 	/// The per-frame size cap (the group byte budget) is enforced before allocating.
 	#[test]
 	fn create_frame_rejects_oversized() {
-		let mut producer = Info { sequence: 0 }.produce();
+		let producer = Info { sequence: 0 }.produce();
 		let result = producer.create_frame(frame::Info {
 			size: MAX_CACHE_BYTES + 1,
 			timestamp: Some(Timestamp::ZERO),
@@ -4514,17 +4586,15 @@ mod test {
 	#[test]
 	fn frame_is_charged_as_written() {
 		let pool = cache::Pool::unbounded();
-		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let producer = Producer::new(Info { sequence: 0 }, track::Info::timed(), cache);
 		let before = pool.used();
 
 		let observing = producer.handle();
-		let mut frame = producer
-			.create_frame_owned(sized(MAX_CACHE_BYTES), &frame::Budget::default())
-			.unwrap();
+		let mut frame = producer.create_frame(sized(MAX_CACHE_BYTES)).unwrap();
 		assert_eq!(pool.used(), before, "the declared size was charged");
 
-		frame.write(Bytes::from(vec![0u8; 100])).unwrap();
+		frame.write_deferred(Bytes::from(vec![0u8; 100])).unwrap();
 		assert_eq!(pool.used(), before, "charged before the write was published");
 		frame.notify();
 		assert_eq!(pool.used(), before + 100);
@@ -4538,12 +4608,44 @@ mod test {
 		assert!(pool.used() <= before);
 	}
 
+	/// A writer names the group it fills.
 	#[test]
-	fn refused_owned_frame_aborts_with_its_error() {
+	fn info_names_the_group() {
+		let producer = Info { sequence: 7 }.produce();
+		assert_eq!(producer.info(), Info { sequence: 7 });
+	}
+
+	/// An open frame still reads its group: which one it is, how many frames it holds,
+	/// and whether anyone reads it. Finishing the frame hands the same writer back.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_open_frame_reads_its_group() {
+		let mut producer = Info { sequence: 3 }.produce();
+		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
+		let mut consumer = producer.consume();
+
+		let mut frame = producer.create_frame(sized(1)).unwrap();
+		let group = frame.group();
+		assert_eq!(group.info().sequence, 3);
+		assert_eq!(group.frame_count(), 2, "the open frame counts");
+		assert!(group.demand().is_used());
+		assert!(group.poll_closed(&kio::Waiter::noop()).is_pending());
+
+		frame.write(Bytes::from_static(b"b")).unwrap();
+		let mut producer = frame.finish().unwrap();
+		producer.finish().unwrap();
+		let mut read = || consumer.read_frame().now_or_never().unwrap().unwrap();
+		assert_eq!(read().unwrap().payload, Bytes::from_static(b"a"));
+		assert_eq!(read().unwrap().payload, Bytes::from_static(b"b"));
+		assert!(read().is_none());
+	}
+
+	#[test]
+	fn refused_frame_aborts_with_its_error() {
 		let producer = Info { sequence: 0 }.produce();
 		let handle = producer.handle();
 		assert!(matches!(
-			producer.create_frame_owned(sized(MAX_CACHE_BYTES + 1), &frame::Budget::default()),
+			producer.create_frame(sized(MAX_CACHE_BYTES + 1)),
 			Err(Error::FrameTooLarge)
 		));
 		assert!(matches!(
@@ -4556,36 +4658,38 @@ mod test {
 	#[test]
 	fn frame_commit_charges_the_tail() {
 		let pool = cache::Pool::unbounded();
-		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let producer = Producer::new(Info { sequence: 0 }, track::Info::timed(), cache);
 		let before = pool.used();
 
 		let observing = producer.handle();
-		let mut frame = producer
-			.create_frame_owned(sized(300), &frame::Budget::default())
-			.unwrap();
+		let mut frame = producer.create_frame(sized(300)).unwrap();
 		frame.write(Bytes::from(vec![0u8; 100])).unwrap();
-		frame.notify();
-		frame.write(Bytes::from(vec![0u8; 200])).unwrap();
+		frame.write_deferred(Bytes::from(vec![0u8; 200])).unwrap();
 		let _producer = frame.finish().unwrap();
 		assert_eq!(pool.used(), before + 300);
 		assert_eq!(observing.state.read().cache, 300);
 	}
 
-	/// Frames within the session's budget allocate their declared size up front; past
+	/// Frames within their origin's budget allocate their declared size up front; past
 	/// it, a frame's buffer holds only what has arrived. A frame hands its share back
 	/// once it ends.
 	#[test]
 	fn frame_budget_bounds_upfront_allocation() {
 		let budget = frame::Budget::new(1024);
-		let a = Info { sequence: 0 }.produce();
-		let b = Info { sequence: 1 }.produce();
+		let pool = cache::Pool::unbounded();
+		let group = |sequence| {
+			let cache = cache::Track::new(pool.clone(), budget.clone(), kio::Weak::new());
+			Producer::new(Info { sequence }, track::Info::timed(), cache)
+		};
+		let a = group(0);
+		let b = group(1);
 
-		let mut first = a.create_frame_owned(sized(1024), &budget).unwrap();
+		let mut first = a.create_frame(sized(1024)).unwrap();
 		first.write(Bytes::from_static(b"x")).unwrap();
 		assert_eq!(first.allocated(), 1024, "a frame within budget is allocated up front");
 
-		let mut second = b.create_frame_owned(sized(MAX_CACHE_BYTES), &budget).unwrap();
+		let mut second = b.create_frame(sized(MAX_CACHE_BYTES)).unwrap();
 		second.write(Bytes::from(vec![0u8; 100])).unwrap();
 		assert_eq!(
 			second.allocated(),
@@ -4598,8 +4702,8 @@ mod test {
 		let mut a = first.finish().unwrap();
 		a.finish().unwrap();
 
-		let a = Info { sequence: 2 }.produce();
-		let mut third = a.create_frame_owned(sized(1024), &budget).unwrap();
+		let a = group(2);
+		let mut third = a.create_frame(sized(1024)).unwrap();
 		third.write(Bytes::from_static(b"x")).unwrap();
 		assert_eq!(third.allocated(), 1024, "the finished frame did not return its share");
 	}
@@ -4617,7 +4721,7 @@ mod test {
 	}
 
 	fn compressed_group(pool: &cache::Pool) -> Producer {
-		let cache = cache::Track::new(pool.clone(), kio::Weak::new());
+		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		Producer::new(Info::from(0u64), track::Info::default().with_compress(true), cache)
 	}
 
@@ -4641,7 +4745,7 @@ mod test {
 		for chunk in verbose(1).chunks(100) {
 			frame.write(Bytes::copy_from_slice(chunk)).unwrap();
 		}
-		frame.finish().unwrap();
+		group = frame.finish().unwrap();
 		group.write_frame(None, verbose(2)).unwrap();
 		group.finish().unwrap();
 
@@ -4651,7 +4755,7 @@ mod test {
 		let mut reference = Producer::new(
 			Info::from(0u64),
 			track::Info::default(),
-			cache::Track::new(uncompressed.clone(), kio::Weak::new()),
+			cache::Track::new(uncompressed.clone(), Default::default(), kio::Weak::new()),
 		);
 		for index in 0..3 {
 			reference.write_frame(None, verbose(index)).unwrap();
@@ -4724,7 +4828,7 @@ mod test {
 		let plain = fail(&mut Producer::new(
 			Info::from(0u64),
 			track::Info::default(),
-			cache::Track::new(pool.clone(), kio::Weak::new()),
+			cache::Track::new(pool.clone(), Default::default(), kio::Weak::new()),
 		));
 		let refused = successor();
 		refused.handle.adopt_head(&plain);
@@ -4830,19 +4934,14 @@ mod test {
 		group.write_frame(None, verbose(0)).unwrap();
 		let mut batch = frame::Buffer::<2>::new();
 		for index in 1..3 {
-			batch
-				.push(Frame {
-					timestamp: None,
-					payload: verbose(index),
-				})
-				.unwrap();
+			batch.push(Frame::new(None, verbose(index))).unwrap();
 		}
 		group.write_frames(&mut batch).unwrap();
 		let mut frame = group.create_frame(untimed(verbose(3).len())).unwrap();
 		for chunk in verbose(3).chunks(100) {
 			frame.write(Bytes::copy_from_slice(chunk)).unwrap();
 		}
-		frame.finish().unwrap();
+		group = frame.finish().unwrap();
 		group.finish().unwrap();
 
 		let stored: u64 = (group.handle.state.read().frames.iter())
@@ -4926,7 +5025,7 @@ mod test {
 			fields: None,
 			inflated: Some(verbose(0).len() as u64 + 1),
 		};
-		let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
+		let mut frame = group.create_object(header).unwrap();
 		frame.write(slice).unwrap();
 		let mut group = frame.finish().unwrap();
 		group.finish().unwrap();
@@ -4944,12 +5043,10 @@ mod test {
 			inflated: Some(inflated),
 		};
 		let pool = cache::Pool::unbounded();
-		let res = compressed_group(&pool).create_frame_owned(header(MAX_CACHE_BYTES + 1), &frame::Budget::default());
+		let res = compressed_group(&pool).create_object(header(MAX_CACHE_BYTES + 1));
 		assert!(matches!(res, Err(Error::FrameTooLarge)));
 
-		let res = Info::from(1u64)
-			.produce_untimed()
-			.create_frame_owned(header(1), &frame::Budget::default());
+		let res = Info::from(1u64).produce_untimed().create_object(header(1));
 		assert!(matches!(res, Err(Error::ProtocolViolation)));
 	}
 

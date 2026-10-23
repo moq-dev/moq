@@ -79,6 +79,11 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
         self.expect(True, base="--all", rust=True)
 
+    def test_nixpkgs_updates_check_browser_pins(self):
+        # JS selection also builds wasm, which is reflected in the Rust cache query.
+        self.change("flake.lock")
+        self.expect(True, rust=True)
+
     def test_empty_diff_keeps_repository_lints(self):
         self.expect(True)
 
@@ -168,32 +173,61 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
 
-    def test_ci_runs_one_lint_preamble_and_one_test_pass(self):
+    def run_ci(self, base="origin/main"):
         for tool in ("bun", "python3", "cargo", "wasm-bindgen", "jq", "shellcheck",
-                     "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix"):
+                     "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix",
+                     "c++", "clang-format", "cmake", "dart", "dash", "gersemi", "go",
+                     "gradle", "java", "kramdown-rfc", "pkg-config", "uniffi-bindgen-cpp",
+                     "uniffi-bindgen-go", "uniffi_bindgen_dart", "uv", "xml2rfc"):
             path = self.bin / tool
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
         just = self.bin / "just"
         just.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >>"$CALLS"\n')
         just.chmod(0o755)
+        nix = self.bin / "nix"
+        nix.write_text('#!/usr/bin/env bash\nprintf "nix %s\\n" "$*" >>"$CALLS"\n')
+        nix.chmod(0o755)
         self.env.update(MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
-        self.change("rs/moq-clock/src/lib.rs")
-        self.env["PATH"] += f":{os.environ['PATH']}"
+        (self.root / "calls").unlink(missing_ok=True)
+        self.env["PATH"] = f"{self.bin}:{os.environ['PATH']}"
         for script in ("markdown.sh", "shell.sh"):
             path = self.repo / "sh" / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
-        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"],
+        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", base],
                                 cwd=self.repo, env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        calls = (self.root / "calls").read_text().splitlines()
+        return (self.root / "calls").read_text().splitlines()
+
+    def test_ci_runs_one_lint_preamble_and_one_test_pass(self):
+        self.change("rs/moq-clock/src/lib.rs")
+        calls = self.run_ci()
         self.assertTrue(any(call.startswith("rs lint-changed ") for call in calls), calls)
         self.assertFalse(any(call.startswith("rs check-changed ") for call in calls), calls)
         self.assertEqual(sum(call.startswith("rs lint-changed ") for call in calls), 1)
         self.assertEqual(sum(call.startswith("rs test-changed ") for call in calls), 1)
         self.assertLess(next(i for i, call in enumerate(calls) if call.startswith("rs lint-changed ")),
                         next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")))
+
+    def test_flake_checks_follow_nix_inputs_instead_of_rust_source(self):
+        for path, expected in (("rs/moq-net/src/lib.rs", False),
+                               ("rs/moq-net/Cargo.toml", True),
+                               ("rs/moq-c/native-libs/linux.txt", True),
+                               ("rs/moq-video/src/frame/nv12_resize.ptx", True),
+                               ("Cargo.toml", True), ("Cargo.lock", True),
+                               ("rust-toolchain.toml", True),
+                               ("flake.nix", True), ("flake.lock", True),
+                               ("nix/runner/hog.py", True),
+                               ("nix/runner/migrate.sh", True),
+                               ("infra/example.nix", True),
+                               ("quest/m1/example.md", False)):
+            with self.subTest(path=path):
+                self.change(path)
+                calls = self.run_ci()
+                (self.repo / path).unlink()
+                self.assertEqual("nix flake check" in calls, expected)
+        self.assertIn("nix flake check", self.run_ci("--all"))
 
 
 def benchmark():

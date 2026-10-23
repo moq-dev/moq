@@ -20,7 +20,7 @@ import { Manual, type Micro, Milli, Nano, type Second } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { Group, Time, Track } from "@moq/net";
-import { Effect } from "@moq/signals";
+import { Effect, Signal } from "@moq/signals";
 import { type Arrival as Diagnostic, gap } from "../arrivals";
 import { type Delay, Sync } from "../sync";
 import { frameDuration } from "./config";
@@ -49,6 +49,8 @@ export interface Arrival {
 	timestamp: number;
 	/** The group that carried it. */
 	group: number;
+	/** The encoded frame's duration, in ms, measured before recording discards its payload. */
+	duration: number;
 }
 
 /** What a replay plays through. */
@@ -141,29 +143,6 @@ function post(rate: number, latency: number): Ring {
 const micros = (ms: number) => Math.round(ms * 1000) as Micro;
 
 /**
- * Samples each frame carries, by its timestamp: the trace's typical frame, the median spacing.
- *
- * A frame within half a frame of that runs up to where the next one starts instead, so consecutive
- * frames tile the timeline exactly despite rounding. Any wider spacing is a frame that never
- * arrived, which stays missing audio rather than stretching the frame before it.
- */
-function frameSamples(trace: Arrival[], rate: number): { spans: Map<Micro, number>; typical: number } {
-	const starts = [...new Set(trace.map((a) => a.timestamp))].sort((a, b) => a - b);
-	const sample = (ms: number) => Math.round((ms * rate) / 1000);
-	const gaps = starts.slice(1).map((next, i) => sample(next) - sample(starts[i]));
-	const typical = [...gaps].sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
-	if (typical === undefined) throw new Error("a trace needs two frames");
-
-	const spans = new Map<Micro, number>();
-	starts.forEach((start, i) => {
-		const gap = gaps[i];
-		const tiles = gap !== undefined && Math.abs(gap - typical) * 2 <= typical;
-		spans.set(micros(start), tiles ? gap : typical);
-	});
-	return { spans, typical };
-}
-
-/**
  * Run every microtask already queued, and every one those queue, before returning.
  *
  * A macrotask starts only once the microtask queue is empty, and nothing between a group write and
@@ -187,7 +166,13 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	if (end < last.at) throw new Error(`an arrival at ${last.at} ms is past the ${options.duration} ms observed`);
 
 	const { rate, config } = options;
-	const { spans: samples, typical } = frameSamples(trace, rate);
+	const recorded = new Map<Micro, Arrival>();
+	for (const arrival of trace) {
+		if (!Number.isFinite(arrival.duration) || arrival.duration <= 0) {
+			throw new Error(`invalid recorded frame duration: ${arrival.duration}`);
+		}
+		recorded.set(micros(arrival.timestamp), arrival);
+	}
 
 	// Where each group's stream finishes.
 	const ends = new Map<number, number>();
@@ -202,15 +187,14 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		maxDelay: sync.out.maxDelay,
 	});
 
-	// The decoder's "auto" target. A recorded frame has no payload to read an Opus duration from,
-	// so a codec without a constant one takes the trace's typical spacing.
+	// Match the decoder: a codec constant until a delivered packet states its own duration.
 	const signals = new Effect();
-	const frame = frameDuration(config) ?? Milli((typical * 1000) / rate);
+	const frame = new Signal(frameDuration(config));
 	const playout = signals.computed((effect) =>
 		target({
 			measured: effect.get(consumer.spread),
 			advertised: config.jitter !== undefined ? Milli(config.jitter) : undefined,
-			frame,
+			frame: effect.get(frame),
 			delay: config.delay !== undefined ? Milli(config.delay) : undefined,
 		}),
 	);
@@ -237,11 +221,12 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 			const { timestamp, arrival } = next.frame;
 			const media = Milli.fromMicro(timestamp);
-			const late = sync.received(media, "audio", arrival);
+			const late = sync.received(media, arrival);
 			arrivals.push({ kind: "frame", timestamp: media, arrival, late });
-			const length = samples.get(timestamp);
-			if (length === undefined) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);
-			ring.insert(timestamp, [new Float32Array(length).fill(0.5)]);
+			const entry = recorded.get(timestamp);
+			if (!entry) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);
+			frame.set(Milli(entry.duration));
+			ring.insert(timestamp, [new Float32Array(Math.round((entry.duration * rate) / 1000)).fill(0.5)]);
 		}
 	})().catch((error: unknown) => {
 		failure = { error };
@@ -255,7 +240,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	// The consumer stamps each arrival on the monotonic clock, which the estimator measures, so a
 	// manual clock reads the trace's time instead until the replay finishes.
 	const manual = new Manual();
-	const moveTo = (ms: number) => manual.advance(Nano(Nano.fromMilli(Milli(ms)) - manual.now()));
+	const moveTo = (ms: number) => manual.jump(Nano(Nano.fromMilli(Milli(ms)) - manual.now()));
 	let clock = first.at;
 	moveTo(clock);
 	const restore = manual.install();

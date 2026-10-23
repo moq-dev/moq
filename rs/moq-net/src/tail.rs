@@ -12,9 +12,9 @@
 
 use std::{ops::Range, task::Poll, time::Duration};
 
-pub(crate) use crate::model::ledger::{GRACE, grace};
+pub(crate) use crate::ledger::{GRACE, grace};
 use crate::{
-	model::ledger::Ledger,
+	ledger::Ledger,
 	time::{Deadline, Instant},
 };
 

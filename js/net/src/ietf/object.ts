@@ -2,6 +2,7 @@ import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.t
 import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import { U64 } from "../util/u64.ts";
+import { ABSENT_WIRE } from "./priority.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // Implementation limit for object extension blocks, independent of the IETF draft.
@@ -58,7 +59,9 @@ async function encodeObjectTime(
 	timescale: Timescale,
 	version: IetfVersion,
 ): Promise<void> {
-	const value = Math.round((timestamp.value * timescale) / timestamp.scale);
+	// The shared conversion: exact at the same scale, and refused before anything is written when
+	// the result leaves the range a Timestamp, and so the receiver, can hold.
+	const value = Math.round(timestamp.as(timescale));
 	await encodeObjectPropertyType(w, PROP_TIMESTAMP, 0n, version);
 	await w.u62(BigInt(value));
 }
@@ -77,27 +80,7 @@ export async function encodeObjectExtensions(
 		return new Uint8Array();
 	}
 
-	const chunks: Uint8Array[] = [];
-	const writer = new Writer(
-		new WritableStream<Uint8Array>({
-			write(chunk) {
-				chunks.push(new Uint8Array(chunk));
-			},
-		}),
-		version,
-	);
-	await encodeObjectTime(writer, timestamp, timescale, version);
-	writer.close();
-	await writer.closed;
-
-	const size = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
-	const result = new Uint8Array(size);
-	let offset = 0;
-	for (const chunk of chunks) {
-		result.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return result;
+	return Writer.collect(version, (w) => encodeObjectTime(w, timestamp, timescale, version));
 }
 
 /** Decode the Timestamp an object's Properties block carries, consuming the whole block. */
@@ -178,7 +161,15 @@ export class Group {
 		this.publisherPriority = publisherPriority;
 	}
 
+	/**
+	 * Write the header, stream type first, in one write: a peer that classifies a stream from
+	 * its first read (imquic) drops a header split across several.
+	 */
 	async encode(w: Writer, version: IetfVersion): Promise<void> {
+		await w.write(await Writer.collect(version, (h) => this.#encode(h, version)));
+	}
+
+	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		if (!this.flags.hasSubgroup && this.subGroupId !== 0) {
 			throw new Error(`Subgroup ID must be 0 if hasSubgroup is false: ${this.subGroupId}`);
 		}
@@ -244,7 +235,7 @@ export class Group {
 		const trackAlias = await r.u62();
 		const groupId = await r.u53();
 		const subGroupId = flags.hasSubgroup ? await r.u53() : 0;
-		const publisherPriority = hasPriority ? await r.u8() : 128; // Default priority when absent
+		const publisherPriority = hasPriority ? await r.u8() : ABSENT_WIRE;
 
 		return new Group({ trackAlias, groupId, subGroupId, publisherPriority, flags });
 	}

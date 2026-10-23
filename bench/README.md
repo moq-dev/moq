@@ -200,12 +200,16 @@ them as `affinity` in the metadata. A CPU with one core type runs unpinned.
 BASE comparisons run paired rounds (default three, `MOQ_BENCH_RUNTIME_ROUNDS`),
 alternating base/current order. Startup remains outside the final five-second
 throughput window. `MOQ_BENCH_ARTIFACTS` chooses the evidence parent (default
-`target/bench/runs`), which must be outside the repository, or git-ignored and
-outside `bench/`; each invocation retains a new run directory even on failure.
+the current worktree's `.scratch/bench`), which must be outside the repository,
+or git-ignored and outside `bench/`; each invocation retains a new run directory even on failure.
 It contains raw load/host JSONL, process diagnostics, Criterion statistics,
 execution order, source revision and tracked dirty patch, tool/build/machine
 metadata, workload files, complete stdout/stderr, and a separate copy of untracked
-source files.
+source files. The retained path is printed at the end, including on failure.
+Choose an evidence parent outside disposable worktrees when the report must survive
+worktree removal. Criterion case discovery uses isolated short measurements and
+their full JSON IDs, since `--list` truncates display names; discovery samples
+are retained separately and never used in the comparison.
 
 Each comparison reports the median of the paired percentage deltas, their median
 absolute deviation and range, and flags fewer than three observations or a sign
@@ -284,8 +288,9 @@ within each round, with the starting variant rotated, after one warmup round
 - `transport`: a publisher page writes 160 B through 1 MiB frames, a consumer page
   subscribes and reads them all. Connection setup and fixture generation stay
   outside the timed interval, which starts at SUBSCRIBE.
-- `cmaf`: CMAF fragment encode and decode of fixed audio (50 x 160 B) and video
-  (a 64 KiB keyframe and 29 x 4 KiB) fixtures, with no network.
+- `cmaf`: CMAF fragment decode of fixed audio (50 x 160 B) and video
+  (a 64 KiB keyframe and 29 x 4 KiB) fixtures. Fixture loading stays outside
+  the timed interval; no encoding or network runs in that interval.
 - `media`: `@moq/publish` encodes a scrolling 1280x720 canvas at 30 fps (H.264,
   2.5 Mb/s, 1 s keyframes) and `@moq/watch` plays it on a 2D canvas. After a
   warmup, a 10 s window reports published, received, decoded and presented frame
@@ -331,6 +336,23 @@ phase's CPU and trace snapshots.
 Crashes, wrong bytes, missing frames, a window that presents nothing, or an
 unavailable CPU clock fail the run; timing never does. The nightly runs
 `--smoke` and keeps its run directory as the `bench-browser` artifact.
+
+The in-memory frame and retained-history paths also run directly in Chromium:
+
+```bash
+nix develop --command bun bench/browser/micro.ts --bench frames --out .scratch/frames.json base=/path/to/release current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench drift --out .scratch/drift.json before=/path/to/main current=. aa=.
+```
+
+Each variant uses its own workspace source and a persistent page, with one full
+warmup before three alternating measured rounds. `aa` must bundle identically to
+`current`. The JSON preserves every CSV sample and the browser version. `frames`
+runs the checkout's existing `js/net/bench/frames.ts`; `drift` uses the same fixture
+against every checkout, sweeping retained groups, publishers, and readers. Replay
+and group setup stay outside drift timing; each parked read checks its live
+payload. The browser smoke lane preserves one measured round of both fixtures, and drift
+also runs in the nightly JS benchmark leg. Timing is
+observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage
 
@@ -380,7 +402,8 @@ The table includes these measurements:
   and Criterion's quick mode. Per-group benchmark settings can override the default warmup. Quick estimates
   trade precision for nightly runtime; use full paired runs to assess a change.
 - JS benchmark CSV time columns (`ns`, `us`, `ms`, and their per-operation
-  variants), retaining every workload dimension in each series name.
+  variants) and `size_bytes` columns, retaining every other column as a workload
+  dimension in each series name.
 
 Hosted runners vary across nights, so a flag prompts a paired local run rather
 than proving a regression. Binding ratios compare languages within one run.

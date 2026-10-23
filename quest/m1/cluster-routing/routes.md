@@ -62,7 +62,8 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   contract). Every receiver echoes, clients included; a closed session
   counts as the echo.
   The hop list leaves lite-07, and with it the
-  `Hop Base`/`Hop Keep` compression.
+  `Hop Base`/`Hop Keep` compression; `cluster.max_hops` then stops applying
+  to lite-07.
 
   ```text
   ROUTE_START  node=0x7a3f seqno=41 metric=12   -> route 0
@@ -574,7 +575,7 @@ Open, for the implementer to settle and record:
   carry the old assumption into acceptance.
 - How much of today's route trie, fronts, and `route_order` survives intact.
 
-The #4349 counterexamples are the `residual_*` tests in
+The counterexamples from #4349 (closed; this quest still owns the fix) are the `residual_*` tests in
 `rs/moq-net/tests/integration/mesh_withdraw.rs`. They pin today's hunting on lite-06:
 a stale path outlasting the 300 ms hold, a revival the quarantine misses,
 and 179 hunting relays (3 reviving) over 200 seeded meshes. Turn each into a
@@ -590,8 +591,8 @@ broadcast stays live. Pin today's sequence beside the `residual_*` tests;
 the epochless Restart rule above decides what it becomes.
 
 Tests, time mocked: the handoff fixtures and sweep in `handoff.rs`;
-#4644's live-graph withdrawal and failover tests
-(`quest/m0/path-hunting` branch) as acceptance, run on the wip version; a
+#4644's live-graph withdrawal and failover tests (the PR closed and
+its branch is gone; fetch `refs/pull/4644/head`) as acceptance, run on the wip version; a
 link flap with many broadcasts behind one origin costs one ROUTE change per
 link; a ring of three where a stale neighbour cannot revive an ended
 broadcast; a two-uplink mesh that never carries CDN routes back to the CDN;
@@ -641,10 +642,6 @@ release.
 ## Required
 
 - [Identity proof](/quest/m1/cluster-routing/identity.md) - proven own identities and subject-qualified forwarded ones
-
-## Closes
-
-- [#4349](https://github.com/moq-dev/moq/issues/4349) - close once the `residual_*` tests in `mesh_withdraw.rs` retract once everywhere
 
 ## Related
 

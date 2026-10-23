@@ -14,18 +14,10 @@ are unchanged by the move itself.
 Decided with the maintainer on 2026-10-13, after a review of how moq uses
 UniFFI:
 
-- **Base**: the maintainer picks UniFFI or BoltFFI from
-  [the BoltFFI spike](/bench/ffi-gen/README.md), which recommends UniFFI.
-  The plan below assumes UniFFI. If BoltFFI is chosen, re-plan this quest
-  against it (the repo name, the
-  crate names, porting the Go, Dart, and C++/C generators to BoltFFI) along
-  with the quests that name UniFFI internals:
-  [Payload bytes](/quest/m2/ffi-bytes.md),
-  [Poll-native async](/quest/m2/ffi-poll-migrate.md),
-  [Foreign poll for hot reads](/quest/m2/ffi-poll-protocol.md),
-  [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md),
-  [Kotlin calls](/quest/m2/kt-ffi-calls.md), and
-  [Namespaced external types](/quest/m2/uniffi-namespaces.md).
+- **Base**: UniFFI. [The BoltFFI spike](/bench/ffi-gen/README.md)
+  recommended it. Decided later in #5838 (2026-10-17, maintainer):
+  UniFFI-generated moq-ffi serves the browser too, over BoltFFI, so one generator serves every
+  language.
 
 - **Why**: every UniFFI minor release breaks external generators (0.31
   changed `module_path`, 0.32 changed the metadata encoding without bumping
@@ -33,7 +25,9 @@ UniFFI:
   external generator has released for 0.32, so moq already carries three
   forks, each pinned in about five places. The core also blocks work moq
   needs: byte copies, zero-copy returns, and namespaced external types
-  (mozilla/uniffi-rs#3026).
+  (mozilla/uniffi-rs#3026, auto-closed by our
+  [#5498](https://github.com/moq-dev/moq/pull/5498) and still unfixed
+  upstream).
 - **Hard fork, fresh repo**: `moq-dev/uniffi` is a new repository, not a
   GitHub fork and not submodules. Import uniffi-rs at the 0.32.2 release and
   the three generators at their pinned tags

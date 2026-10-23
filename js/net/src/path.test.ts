@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import * as Path from "./path.ts";
 
 /** Brand a literal as a relative reference; the tests feed raw strings on purpose. */
@@ -305,13 +305,30 @@ test("decode enforces the max part count", () => {
 });
 
 test("decode never allocates per slash of a hostile path", () => {
-	// A peer can send a path as large as a control message; splitting it would hold one entry per slash.
-	const slashes = "/".repeat(64 * 1024 * 1024);
-	const parts = "a/".repeat(32 * 1024 * 1024);
-	const before = process.memoryUsage().rss;
-	expect(Path.decode(slashes)).toBe(Path.empty());
-	expect(() => Path.decode(parts)).toThrow();
-	expect(process.memoryUsage().rss - before).toBeLessThan(256 * 1024 * 1024);
+	// A peer can send a path as large as a control message; splitting it would hold one entry per
+	// slash, so decode must count separators and stop at the limit instead.
+	const slashes = "/".repeat(1024 * 1024);
+	const parts = "a/".repeat(1024 * 1024);
+	const split = spyOn(String.prototype, "split");
+	const indexOf = spyOn(String.prototype, "indexOf");
+	try {
+		expect(Path.decode(slashes)).toBe(Path.empty());
+		indexOf.mockClear();
+		let error: unknown;
+		try {
+			Path.decode(parts);
+		} catch (e) {
+			error = e;
+		}
+		const scans = indexOf.mock.calls.length;
+		expect(error).toBeInstanceOf(Error);
+		expect(split).not.toHaveBeenCalled();
+		// The scan stops at the limit rather than walking the whole input.
+		expect(scans).toBeLessThanOrEqual(Path.MAX_PARTS + 1);
+	} finally {
+		split.mockRestore();
+		indexOf.mockRestore();
+	}
 });
 
 test("encode enforces the max part count", () => {

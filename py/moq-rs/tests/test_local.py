@@ -385,13 +385,13 @@ async def test_announced_epoch_restarts():
     first = moq.mint_epoch()
     fixed = datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
     assert moq.epoch_time("018bcfe5-6800-7000-8000-000000000000") == fixed
-    broadcast.announce(moq.Route(epoch=first))
+    broadcast.announce(moq.AnnounceRoute(epoch=first))
     start = await next_route(announced)
     assert isinstance(start, moq.AnnounceEventStart)
     assert start.announce.route.epoch == first
 
     second = moq.mint_epoch()
-    broadcast.announce(moq.Route(epoch=second))
+    broadcast.announce(moq.AnnounceRoute(epoch=second))
     restart = await next_route(announced)
     assert isinstance(restart, moq.AnnounceEventRestart)
     assert restart.announce.route.epoch == second
@@ -401,7 +401,7 @@ async def test_announced_epoch_restarts():
     with pytest.raises(OverflowError):
         moq.epoch_time("ffffffff-ffff-7000-8000-000000000000")
     with pytest.raises(moq.Error.InvalidEpoch):  # type: ignore[attr-defined]
-        broadcast.announce(moq.Route(epoch="not-an-epoch"))
+        broadcast.announce(moq.AnnounceRoute(epoch="not-an-epoch"))
     broadcast.close()
 
 
@@ -479,7 +479,7 @@ async def test_publish_track_info_and_subscription():
 
 
 def test_track_info_keeps_native_default_priority():
-    """A partially configured TrackInfo keeps moq-ffi's default priority of 127."""
+    """A partially configured TrackInfo keeps moq-ffi's default priority of 0."""
     native = moq_ffi.MoqTrackInfo().priority
     assert moq.TrackInfo()._ffi().priority == native
     assert moq.TrackInfo(max_age=timedelta(seconds=2))._ffi().priority == native
@@ -515,6 +515,8 @@ async def test_fetch_group_and_serve_dynamic_miss():
     assert fill.priority == 11
     assert fill.next() == 7
     assert fill.is_used()
+    assert fill.is_wanted(7)
+    assert not fill.is_wanted(8)
 
     produced = fill.accept(7)
     produced.write_frame(b"archive", timedelta(microseconds=140_000))

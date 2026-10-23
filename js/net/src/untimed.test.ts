@@ -18,23 +18,21 @@ interface Wire {
 	name: string;
 	protocol: string;
 	version?: number;
-	/** Whether the wire can declare a track's timeline. */
+	/** Whether a timed track arrives timed. Lite-05/06 receivers drop timestamps, which may be send times. */
 	declares: boolean;
-	/** Whether the wire carries a timestamp on every frame, a send time for an untimed one. */
-	stamps: boolean;
 }
 
 const WIRES: Wire[] = [
-	{ name: "lite-01", protocol: "", version: Lite.Version.DRAFT_01, declares: false, stamps: false },
-	{ name: "lite-03", protocol: Lite.ALPN_03, declares: false, stamps: false },
-	{ name: "lite-04", protocol: Lite.ALPN_04, declares: false, stamps: false },
-	{ name: "lite-05", protocol: Lite.ALPN_05, declares: true, stamps: true },
-	{ name: "lite-06", protocol: Lite.ALPN_06, declares: true, stamps: true },
-	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true, stamps: false },
-	{ name: "ietf-14", protocol: "", version: Ietf.Version.DRAFT_14, declares: false, stamps: false },
-	{ name: "ietf-16", protocol: Ietf.ALPN.DRAFT_16, declares: false, stamps: false },
-	{ name: "ietf-17", protocol: Ietf.ALPN.DRAFT_17, declares: true, stamps: false },
-	{ name: "ietf-20", protocol: Ietf.ALPN.DRAFT_20, declares: true, stamps: false },
+	{ name: "lite-01", protocol: "", version: Lite.Version.DRAFT_01, declares: false },
+	{ name: "lite-03", protocol: Lite.ALPN_03, declares: false },
+	{ name: "lite-04", protocol: Lite.ALPN_04, declares: false },
+	{ name: "lite-05", protocol: Lite.ALPN_05, declares: false },
+	{ name: "lite-06", protocol: Lite.ALPN_06, declares: false },
+	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true },
+	{ name: "ietf-14", protocol: "", version: Ietf.Version.DRAFT_14, declares: false },
+	{ name: "ietf-16", protocol: Ietf.ALPN.DRAFT_16, declares: false },
+	{ name: "ietf-17", protocol: Ietf.ALPN.DRAFT_17, declares: true },
+	{ name: "ietf-20", protocol: Ietf.ALPN.DRAFT_20, declares: true },
 ];
 
 /** Serve one group of `timestamps` on a track with `timescale`, and read it back over `wire`. */
@@ -156,21 +154,14 @@ test("a forwarded untimed track stays untimed", async () => {
 });
 
 for (const wire of WIRES) {
-	test(`${wire.name}: an untimed track arrives untimed, or with send times where the wire must stamp`, async () => {
+	test(`${wire.name}: an untimed track arrives untimed`, async () => {
 		const { info, frames } = await roundTrip(wire, undefined, [undefined, undefined]);
 		expect(frames.map((frame) => frame.payload[0])).toEqual([0, 1]);
-
-		if (wire.stamps) {
-			// Lite-05 and lite-06 can't say a track is untimed, so it goes out timed at milliseconds.
-			expect(info.timescale).toBe(Timescale.MILLI);
-			for (const frame of frames) expect(frame.timestamp).toBeDefined();
-		} else {
-			expect(info.timescale).toBeUndefined();
-			for (const frame of frames) expect(frame.timestamp).toBeUndefined();
-		}
+		expect(info.timescale).toBeUndefined();
+		for (const frame of frames) expect(frame.timestamp).toBeUndefined();
 	});
 
-	test(`${wire.name}: a timed track keeps its timestamps only where the wire declares units`, async () => {
+	test(`${wire.name}: a timed track keeps its timestamps only where the wire delivers them`, async () => {
 		const { info, frames } = await roundTrip(wire, Timescale.MICRO, [
 			Timestamp.fromMicros(1_000),
 			Timestamp.fromMicros(1_234),
@@ -181,7 +172,7 @@ for (const wire of WIRES) {
 			expect(info.timescale).toBe(Timescale.MICRO);
 			expect(frames.map((frame) => frame.timestamp?.asMicros())).toEqual([1_000, 1_234]);
 		} else {
-			// No units on the wire, and no arrival time made up in their place.
+			// No trusted units on the wire, and no arrival time made up in their place.
 			expect(info.timescale).toBeUndefined();
 			for (const frame of frames) expect(frame.timestamp).toBeUndefined();
 		}
@@ -189,7 +180,7 @@ for (const wire of WIRES) {
 }
 
 for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name === "lite-07-wip")) {
-	test(`${wire.name}: an untimed datagram arrives untimed, or with a send time where the wire must stamp`, async () => {
+	test(`${wire.name}: an untimed datagram arrives untimed`, async () => {
 		const pair = createMockTransportPair(wire.protocol);
 		const origin = new OriginProducer();
 		const [client, server] = await Promise.all([
@@ -212,8 +203,7 @@ for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name =
 		const datagram = await subscriber.recvDatagram();
 
 		expect(datagram?.payload).toEqual(new Uint8Array([7]));
-		if (wire.stamps) expect(datagram?.timestamp).toBeDefined();
-		else expect(datagram?.timestamp).toBeUndefined();
+		expect(datagram?.timestamp).toBeUndefined();
 
 		broadcast.close();
 		subscriber.close();

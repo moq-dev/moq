@@ -2,6 +2,7 @@ name: Runner VM
 
 on:
   workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -22,4 +23,4 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
-      - run: just gh runner-vm
+      - run: just gh runner-vm-ci

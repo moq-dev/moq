@@ -39,8 +39,8 @@ use super::encoder::Codec;
 const DEFAULT_FRAMERATE: Rate = Rate::integer(30);
 
 /// The [`track::Info::refresh`](moq_net::track::Info::refresh) ratio a capture advertises: a
-/// joiner forces a keyframe once a group's deltas outweigh twice its keyframe, so it downloads
-/// at most about three keyframes' worth before it can decode.
+/// joiner forces a keyframe once a group's deltas outweigh twice its keyframe, so later joiners
+/// start near one. The joiner that asks still reads the cached group meanwhile.
 ///
 /// Measured on realtime CBR encodes (two-second GOPs at 2 to 4 Mbps), where a GOP's deltas run
 /// three to five keyframes: one join a second halves the mean joiner download for 10 to 13%
@@ -94,11 +94,11 @@ enum Codecs {
 pub struct Producer<E: CatalogExt = ()> {
 	codecs: Codecs,
 	/// The published track, read for its largest group.
-	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "capture"),
+		allow(dead_code, reason = "only the `capture` feature uses it")
+	)]
 	track: moq_net::track::Producer,
-	/// The largest group published, as last read from `track`.
-	#[cfg_attr(not(feature = "capture"), allow(dead_code))]
-	largest: Option<u64>,
 	_ext: std::marker::PhantomData<fn() -> E>,
 }
 
@@ -164,7 +164,6 @@ impl<E: CatalogExt> Producer<E> {
 		Ok(Self {
 			codecs,
 			track: published,
-			largest: None,
 			_ext: std::marker::PhantomData,
 		})
 	}
@@ -182,13 +181,10 @@ impl<E: CatalogExt> Producer<E> {
 	/// The group a subscriber wants past the largest published, which the next frame should
 	/// open with a keyframe, or `None` while the largest serves.
 	#[cfg(feature = "capture")]
-	fn wanted(&mut self) -> Option<u64> {
+	fn wanted(&self) -> Option<u64> {
 		let wanted = self.track.demand().wanted()?;
-		// Ready only when the largest moved since the last read.
-		if let std::task::Poll::Ready(Some(largest)) = self.track.poll_largest(&kio::Waiter::noop()) {
-			self.largest = Some(largest.group);
-		}
-		self.largest.is_none_or(|largest| wanted > largest).then_some(wanted)
+		let largest = self.track.largest().map(|largest| largest.group);
+		largest.is_none_or(|largest| wanted > largest).then_some(wanted)
 	}
 
 	/// Publish already-encoded frames, each at its own timestamp. Each frame is one
@@ -538,7 +534,7 @@ pub async fn publish_capture<E: CatalogExt>(
 /// the future ever regains a `!Send` component. Apple platforms are exempt (the inline encoder and objc
 /// capture session are `!Send`).
 #[cfg(all(feature = "capture", not(apple)))]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "a compile-time `Send` assertion, never called")]
 fn assert_publish_capture_send(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer,
@@ -830,7 +826,18 @@ fn map_capture_timestamp(epoch_micros: u64, timestamp: Timestamp) -> Result<Time
 
 #[cfg(test)]
 mod tests {
-	#![cfg_attr(not(feature = "openh264"), allow(dead_code, unused_imports))]
+	#![cfg_attr(
+		not(feature = "openh264"),
+		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
+	)]
+	#![cfg_attr(
+		all(feature = "capture", feature = "openh264"),
+		expect(
+			clippy::disallowed_methods,
+			clippy::disallowed_types,
+			reason = "the capture tests read the host clock directly"
+		)
+	)]
 
 	use moq_mux::catalog::Stream as _;
 
@@ -1138,7 +1145,9 @@ mod tests {
 	/// published timestamp may land up to `SAMPLING` early, never late.
 	#[cfg(all(feature = "capture", feature = "openh264"))]
 	mod clock {
-		use std::time::{Duration, Instant, SystemTime};
+		use std::time::{Duration, SystemTime};
+
+		use moq_clock::Instant;
 
 		use super::*;
 		use crate::capture::Synthetic;
@@ -1176,15 +1185,10 @@ mod tests {
 		impl Fixture {
 			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
 			async fn start(behind: Duration, wall: SystemTime) -> Self {
-				// The capture stream counts on the host clock and the broadcast on moq-clock; the
-				// loop correlates the two, so each epoch is the same moment on its own clock.
-				let epoch = Instant::now()
+				let epoch = moq_clock::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
-				let start = moq_net::time::now()
-					.checked_sub(behind)
-					.expect("a monotonic clock that far back");
-				let clock = moq_mux::Clock::at(start, wall).unwrap();
+				let clock = moq_mux::Clock::at(epoch, wall).unwrap();
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
 				let consumer = broadcast.consume();
 				let config = moq_mux::catalog::Config::default()
@@ -1645,10 +1649,8 @@ mod tests {
 						let mut groups = Vec::new();
 						while let Some(mut group) = subscriber.recv_group().await.unwrap() {
 							let mut frames = Vec::new();
-							while let Some(batch) =
-								kio::wait(|waiter| format.poll_read(&mut group, waiter)).await.unwrap()
-							{
-								for frame in batch {
+							while let Some(wire) = group.read_frame().await.unwrap() {
+								for frame in format.decode(wire).unwrap() {
 									// A duration marker closes the group but is not an encoded picture.
 									if format.end(&frame).is_none() {
 										frames.push(frame.payload.len());
@@ -1826,9 +1828,10 @@ mod tests {
 		/// A keyframe request the backend cannot force is refused to the caller, and the capture
 		/// carries on at its cadence rather than ending or dropping the request without a word.
 		#[tokio::test]
-		// The guard only keeps other tests out of the process-wide probe log, and this runtime has
-		// one thread, so holding it across an await blocks nothing.
-		#[allow(clippy::await_holding_lock)]
+		#[expect(
+			clippy::await_holding_lock,
+			reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+		)]
 		async fn a_cut_the_backend_cannot_force_is_refused() {
 			let _probe = probe::exclusive();
 

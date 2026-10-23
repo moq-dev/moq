@@ -3,6 +3,7 @@
 use std::{sync::Arc, task::Poll, time::Duration};
 
 use crate::transport::Stats as _;
+use crate::transport::poll::Session as _;
 
 use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, goaway};
 
@@ -67,6 +68,10 @@ pub struct Stats {
 
 	/// Total datagrams detected as lost.
 	pub packets_lost: Option<u64>,
+
+	/// Total receive streams evicted because incomplete messages exhausted the receive window.
+	/// A count above zero means the receive window is too small for what the peer sends.
+	pub streams_evicted: Option<u64>,
 }
 
 /// The congestion controller's view of the connection, as PROBE reports it.
@@ -121,6 +126,10 @@ pub struct Session {
 	// Weak, so the sampler runs only while a caller holds a consumer.
 	send_bandwidth: Option<bandwidth::Weak>,
 	recv_bandwidth: Option<bandwidth::Weak>,
+	/// The registry whose reservations this session probes for. Its estimate is
+	/// unused: [`bandwidth`](Self::bandwidth) mints one per call, so holding the
+	/// session doesn't keep the sampler running.
+	bandwidth: bandwidth::Allocator,
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
 }
@@ -136,6 +145,18 @@ impl Session {
 	/// Returns `None` if the QUIC backend doesn't support bandwidth estimation.
 	pub fn send_bandwidth(&self) -> Option<bandwidth::Consumer> {
 		self.send_bandwidth.as_ref().map(bandwidth::Weak::consume)
+	}
+
+	/// Divides [`send_bandwidth`](Self::send_bandwidth) among this session's senders.
+	///
+	/// The session probes up to what the reservations add up to, through its
+	/// transport's [`Probe`](crate::transport::Probe) when it has one, so reserve
+	/// here rather than on an allocator of your own. Clones share one registry: a
+	/// [`Client::with_bandwidth`](crate::Client::with_bandwidth) allocator's when the
+	/// session was dialed with one, so reservations outlive a reconnect. Reservations
+	/// report `None` when the transport has no estimate.
+	pub fn bandwidth(&self) -> bandwidth::Allocator {
+		self.bandwidth.with_estimate(self.send_bandwidth())
 	}
 
 	/// Returns a consumer for the estimated receive bitrate (from PROBE).
@@ -216,6 +237,9 @@ impl Session {
 
 	/// Block until the transport session is closed, returning the reason.
 	///
+	/// The driver keeps draining group streams already delivered to the transport
+	/// after this resolves, so keep driving it until it completes.
+	///
 	/// A close code the peer sent is decoded through the session registry (so an auth
 	/// rejection arrives as `Error::Session(SessionError::Unauthorized)`); every peer code is
 	/// preserved as [`Error::Session`]. A close carrying no application code surfaces as
@@ -287,25 +311,25 @@ pub(super) struct Handles {
 	/// Where the driver publishes [`Estimate`] changes, for a protocol that reports
 	/// them to the peer (moq-lite PROBE). Sampled only while a consumer exists.
 	pub estimate: Option<kio::Producer<Estimate>>,
+	/// The reservations the session probes for.
+	pub bandwidth: bandwidth::Allocator,
 }
 
 impl Session {
-	pub(super) fn new<S>(
+	pub(super) fn new(
 		runtime: crate::time::Deadlines,
-		session: S,
+		session: crate::driver::Transport,
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Weak>,
-		protocol: crate::driver::Protocol<S>,
+		protocol: crate::driver::Protocol,
 		handles: Handles,
-	) -> (Self, crate::Driver<S>)
-	where
-		S: crate::transport::poll::Session,
-	{
+	) -> (Self, crate::Driver) {
 		let Handles {
 			goaway,
 			auth,
 			estimate,
 			stats: context,
+			bandwidth,
 		} = handles;
 		let wire = session.wire().map(|counters| context.wire(counters));
 		let sample = snapshot(&session);
@@ -323,6 +347,9 @@ impl Session {
 			(None, None)
 		};
 
+		// Without a sender there is nothing to hand the target to, so don't follow it.
+		let probe = session.probe().map(|probe| (probe, bandwidth.target()));
+
 		let close = kio::Producer::new(None);
 		let closed = kio::Producer::new(None);
 		let closed_consumer = closed.consume();
@@ -332,7 +359,7 @@ impl Session {
 		});
 
 		let supervisor = Supervisor {
-			goaway: Some(goaway.deadline()),
+			goaway: Some(goaway.deadline(&runtime)),
 			version,
 			local_close: protocol.local_close(),
 			runtime: runtime.clone(),
@@ -344,6 +371,7 @@ impl Session {
 			wire,
 			send_bandwidth: send_producer,
 			estimate,
+			probe,
 			sampled: None,
 			mode: SamplerMode::Idle,
 			drain: Drain::Idle,
@@ -356,6 +384,7 @@ impl Session {
 			version,
 			send_bandwidth,
 			recv_bandwidth,
+			bandwidth,
 			goaway: Arc::new(goaway),
 			auth,
 		};
@@ -378,15 +407,15 @@ impl Session {
 /// anyone is consuming them, and enforces GOAWAY deadlines independently of writes.
 ///
 /// Finishes once the transport reports closed; everything else is moot then.
-pub(crate) struct Supervisor<S> {
+pub(crate) struct Supervisor {
 	goaway: Option<goaway::Deadline>,
 	version: Version,
 	local_close: Arc<std::sync::atomic::AtomicBool>,
 	runtime: crate::time::Deadlines,
-	session: S,
+	session: crate::driver::Transport,
 	// A dedicated clone for the close watch, since each pending poll operation
 	// needs its own handle.
-	closed_watch: S,
+	closed_watch: crate::driver::Transport,
 	/// Handle-side close requests; `None` once one was executed (only the
 	/// first close matters, and the channel closing is the last handle
 	/// dropping).
@@ -399,6 +428,8 @@ pub(crate) struct Supervisor<S> {
 	send_bandwidth: Option<bandwidth::Producer>,
 	/// Published on change while a consumer exists; see [`Self::poll_sampler`].
 	estimate: Option<kio::Producer<Estimate>>,
+	/// The transport's sender and the target it is handed, when it has one.
+	probe: Option<(crate::transport::Probe, bandwidth::Target)>,
 	/// When the last sample was taken.
 	sampled: Option<crate::time::Instant>,
 	mode: SamplerMode,
@@ -428,7 +459,7 @@ enum SamplerMode {
 	},
 }
 
-impl<S: crate::transport::poll::Session> Supervisor<S> {
+impl Supervisor {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
@@ -510,6 +541,13 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		}
 
 		self.poll_sampler(waiter);
+
+		if let Some((probe, target)) = &mut self.probe {
+			while let Poll::Ready(target) = target.poll_changed(waiter) {
+				probe.set_target(target);
+			}
+		}
+
 		Poll::Pending
 	}
 
@@ -664,7 +702,7 @@ fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 		packets_sent: stats.packets_sent(),
 		packets_received: stats.packets_received(),
 		packets_lost: stats.packets_lost(),
-		..Default::default()
+		streams_evicted: stats.streams_evicted(),
 	}
 }
 
@@ -790,9 +828,16 @@ impl Slots {
 		self
 	}
 
+	/// How many more slots may be taken right now.
+	pub(crate) fn available(&self) -> usize {
+		self.max
+			.saturating_sub(self.live.load(std::sync::atomic::Ordering::Acquire))
+	}
+
 	/// Take one slot until the returned guard drops, or [`Error::TooManyRequests`] at the cap.
 	///
-	/// The caller closes the session on that error: a peer past its limits loses the session.
+	/// A peer whose own request runs past its limits loses the session. A subscription we
+	/// would initiate, such as a listed track's PUBLISH, is skipped instead.
 	pub(crate) fn acquire(&self) -> Result<Slot, Error> {
 		use std::sync::atomic::Ordering;
 		let held = self

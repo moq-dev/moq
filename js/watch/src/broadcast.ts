@@ -9,16 +9,28 @@ import { toHang } from "./msf";
 
 type ReferencedRendition = {
 	broadcast?: Path.Relative;
+	epoch?: Catalog.ReferenceEpoch;
 };
+
+// Whether a rendition's reference names something this consumer can play.
+type Usable = (rel: Path.Relative | undefined, epoch: Moq.Epoch.Valid | undefined) => boolean;
 
 // Either the catalog's own broadcast, or a sibling to consume by path.
 type RelativeTarget = { local: true } | { local: false; path: Moq.Path.Valid };
 
 function filterRenditions<T extends ReferencedRendition>(
 	renditions: Record<string, T>,
-	usable: (rel: Path.Relative | undefined) => boolean,
+	usable: Usable,
 ): Record<string, T> {
-	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => usable(config.broadcast)));
+	return Object.fromEntries(
+		Object.entries(renditions).filter(([, config]) => usable(config.broadcast, config.epoch)),
+	);
+}
+
+// Whether `active` is proven to be another instance than `epoch` names. An epochless route cannot
+// prove its instance, so only a known mismatch counts.
+function provesOther(active: Moq.Broadcast.Consumer | undefined, epoch: Moq.Epoch.Valid | undefined): boolean {
+	return epoch !== undefined && active?.epoch !== undefined && active.epoch !== epoch;
 }
 
 // Whether an announced route covers `path`, until closed. Hidden routes count: a service claim
@@ -47,7 +59,7 @@ function watchCovered(origin: Moq.Origin.Table, path: Moq.Path.Valid): { covered
 
 // Every section carrying a `broadcast` reference must be listed here, same as `Catalog.checkResolvable`;
 // one left out silently exempts its tracks from the reachability filter.
-function filterCatalog(catalog: Catalog.Root, usable: (rel: Path.Relative | undefined) => boolean): Catalog.Root {
+function filterCatalog(catalog: Catalog.Root, usable: Usable): Catalog.Root {
 	return {
 		...catalog,
 		video: catalog.video
@@ -182,12 +194,16 @@ export class Broadcast {
 	}
 
 	// Publish the catalog minus every rendition this consumer cannot use: one naming a
-	// broadcast that isn't announced to us. Selecting one of those would render nothing,
-	// since `relativeBroadcast` resolves it to no broadcast at all. Reruns as announcements
-	// arrive, so a rendition appears once its broadcast does.
+	// broadcast that isn't announced to us, or one whose broadcast proves another epoch than it
+	// names. Selecting one of those would render nothing, since `relativeBroadcast` resolves it to
+	// no broadcast at all. Reruns as announcements arrive, so a rendition appears once its
+	// broadcast does. Only a rendition naming an epoch resolves its broadcast here, sharing the
+	// request playback uses.
 	#runFiltered(effect: Effect): void {
 		const raw = effect.get(this.#raw);
-		const usable = (rel: Path.Relative | undefined) => this.#relativeTarget(effect, rel) !== undefined;
+		const usable: Usable = (rel, epoch) =>
+			this.#relativeTarget(effect, rel) !== undefined &&
+			(epoch === undefined || !provesOther(this.#relativeActive(effect, rel), epoch));
 		effect.set(this.#out.catalog, raw ? filterCatalog(raw, usable) : undefined);
 	}
 
@@ -352,12 +368,24 @@ export class Broadcast {
 			};
 		}
 
+		// The snapshot outlives a clean end of the catalog track, so it clears with this run.
+		effect.cleanup(() => this.#raw.set(undefined));
+
 		effect.spawn(async () => {
 			let status: Status = "offline";
+			let received = false;
+			let finished = false;
 			try {
 				for (;;) {
 					const update = await effect.race(fetchNext());
-					if (!update) break;
+					// A finished catalog only means no more edits. A finished broadcast keeps serving
+					// its tail until it closes or is withdrawn, which reruns this, so keep playing it.
+					// One that ended empty has nothing to play.
+					if (!update) {
+						finished = received;
+						break;
+					}
+					received = true;
 
 					console.debug("received catalog", format, this.in.name.peek(), update);
 
@@ -370,8 +398,10 @@ export class Broadcast {
 					console.debug("catalog subscription ended", this.in.name.peek(), err);
 				else console.error("error fetching catalog", this.in.name.peek(), err);
 			} finally {
-				this.#raw.set(undefined);
-				this.#out.status.set(status);
+				if (!finished) {
+					this.#raw.set(undefined);
+					this.#out.status.set(status);
+				}
 			}
 		});
 	}
@@ -427,6 +457,8 @@ export class Broadcast {
 	 * `epoch` is the rendition's `epoch` field, the publisher instance the reference names.
 	 * Returns `undefined` while the followed broadcast is proven to be another instance, rather
 	 * than reading it. A route without an epoch cannot prove one, so there it is best effort.
+	 *
+	 * @internal
 	 */
 	relativeBroadcast(
 		effect: Effect,
@@ -434,7 +466,7 @@ export class Broadcast {
 		epoch?: Moq.Epoch.Valid,
 	): Moq.Broadcast.Consumer | undefined {
 		const active = this.#relativeActive(effect, rel);
-		if (!active || epoch === undefined || active.epoch === undefined || active.epoch === epoch) return active;
+		if (!active || !provesOther(active, epoch)) return active;
 		console.warn("ignoring rendition: its broadcast serves another epoch", active.path, active.epoch, epoch);
 		return undefined;
 	}

@@ -27,19 +27,18 @@ production stability proven merely because upstream artifacts published.
 
 ## Required
 
-- [API-diff check](/quest/m2/release/migrate-audit.md) - PRs into release diff the public API; backports refuse breaks, the cut confirms MIGRATE.md coverage
+- [Migration audit](/quest/m2/release/migrate-audit.md) - the cut confirms every break has a MIGRATE.md entry stating the net published-to-final change
 - [API shape review](/quest/m2/release/api-review.md) - every new or changed public API reviewed for a better shape before the cut
 - [Feature review](/quest/m2/release/feature-review.md) - every major work line since the last release judged end to end before the cut
+- [Claim new npm names](/quest/m2/release/npm-first-publish.md) - a maintainer claims `@moq/clock`, `libav`, `video`, and `p2p` on npm and JSR with trusted publishing, before the cut publishes them
 - [Cut and publish](/quest/m2/release/cut.md) - independently executable after m1; release-triggered publication
-- [Published catalog readers](/quest/m2/release/catalog-readers.md) - released Go and JS clients accept the current Rust publisher's live catalog in smoke; an earlier release-line patch may satisfy it
 - [Published assets](/quest/m2/release/assets-release.md) - npm carries hostable worklets
 - [C++ publication](/quest/m2/release/cpp-release.md) - archives and matching OBS plugin publish and install
 - [Generated C publication](/quest/m2/release/c-publish.md) - released archives run the C samples and interop client
 - [Dart publication](/quest/m2/release/dart-publish.md) - the wrapper and native artifacts install from the registry
 - [Final libmoq stub](/quest/m2/release/libmoq-final-release.md) - publish the migration notice before removing its source
 - [Retire libmoq](/quest/m2/release/libmoq-retire.md) - cleanup only after that publication
-- [Final hand-written C notice](/quest/m2/release/c-final-release.md) - publish the migration notice before source retirement
-- [Retire hand-written C](/quest/m2/release/c-retire.md) - complete the final old-package notice and source retirement
+- [Retire hand-written C](/quest/m2/release/c-retire.md) - delete the hand-written crate once generated C publishes
 - [Retire the web-transport JS qmux](/quest/m2/release/qmux-js-retire.md) - once `@moq/qmux` publishes from `js/qmux`, deprecate `@moq/web-socket-stream` and stop the second publisher
-- [Hosted worklet adoption](/quest/m2/release/dogfood-assets.md) - downstream consumers exercise the published assets
 - [moq.sh deployment](/quest/m2/release/moq-sh-deploy.md) - verify its release-triggered publication
+- [Runner client bump](/quest/m2/release/runner-client-bump.md) - the upstream interop runner's Rust client moves to the published moq-tokio, so it stops stamping every object

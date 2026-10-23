@@ -1,3 +1,7 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "tests read the host clock directly"
+)]
 #[cfg(apple)]
 use std::io::{self, IoSlice};
 #[cfg(not(any(

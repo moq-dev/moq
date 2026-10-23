@@ -104,7 +104,7 @@ rendition's advertised jitter and delay. These distinguish a target increase cau
 transport from one declared by the publisher. The final page environment keeps the full audio
 configuration.
 
-`--capture` also writes `<tag>.arrivals.ndjson`: `[at, timestamp, group]` on the same viewer clock as
+`--capture` also writes `<tag>.arrivals.ndjson`: `[at, timestamp, group, duration]` on the same viewer clock as
 `<tag>.ndjson`, before the container orders or skips groups. The observer shares the player's
 connection and track, priority, and subscription max delay (at least 2 s at "auto", as the decoder
 asks, not the target), so it adds no upstream subscription demand and still sees a frame later than
@@ -117,7 +117,7 @@ Chromium GC timeline in `<tag>.trace.json` and sampled CPU profile in `<tag>.pro
 Tracing can perturb playback; compare it with a separate
 untraced control and never use traced rows to calibrate quality budgets.
 
-To replay a capture, put its arrivals and final environment configuration into the version 2
+To replay a capture, put its arrivals and final environment configuration into the version 3
 `Trace` below, subtract the first arrival's `at` from every arrival and from the last sample's
 `at` for the duration, and supply the observed minimum RTT as a diagnostic. Replay measures the
 target from the arrivals and holds the configuration constant; compare the raw samples when it
@@ -138,10 +138,12 @@ The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, ea
 | `bursty-aac` | a nightly `bursty` AAC row's capture: each flush delivered newest first, which kept the player re-stalling until the estimator measured reordered frames |
 
 A trace is a [`Trace`](clients/js/src/schema.ts): the catalog's audio rendition, the smallest
-PROBE round trip the session saw, how long it observed, and every frame's `[at, timestamp, group]`,
-with `at` on the viewer's clock. `record.ts` stamps a frame as it comes off its group's stream, the way
-`Container.Consumer` receives it, using only public `@moq/net` and `@moq/hang` in the same Chromium
-over WebTransport. It stamps before the consumer's in-order delivery, whose waits and skips depend
+PROBE round trip the session saw, how long it observed, and every frame's `[at, timestamp, group, duration]`,
+with `at` on the viewer's clock and `duration` in ms. Duration comes from the container's sample
+metadata, the Opus packet TOC, or the codec's fixed sample count. Capture refuses a frame whose
+duration cannot be determined; timestamp gaps never stand in for missing packet payloads.
+`record.ts` stamps a frame as it comes off its group's stream, the way `Container.Consumer`
+receives it, with the same transport, container, and codec-duration readers over WebTransport. It stamps before the consumer's in-order delivery, whose waits and skips depend
 on the delay, so the replay decides those again.
 
 `replay.ts` plays a trace through the player's own `Container.Consumer` and rings on a simulated
@@ -149,8 +151,9 @@ clock ([`js/watch/src/audio/replay.ts`](../../js/watch/src/audio/replay.ts)), at
 real `Sync` resolves from the playout target that consumer measures, and reads each quantum through
 the tap's classifier. The consumer makes the player's group ordering, max delay skips, and
 discontinuity resets again at that delay, and the ring follows the delay as it moves; a group's stream is taken to finish with its last recorded frame. Every
-frame is the trace's median spacing long, so a frame that never arrived stays missing audio, and
-rendering runs to the end of the observation, so an outage after the last arrival is heard. It
+frame plays for its recorded encoded duration, so missing packets stay missing audio even when
+most frames never arrive. The target's codec term follows delivered packet durations, as the
+decoder's does. Rendering runs to the end of the observation, so an outage after the last arrival is heard. It
 writes the same samples a page does, so `analyze.ts` reduces both alike, and the shaper, transport,
 and clock checks have nothing to void. Decoding is taken as instant. A replay is deterministic, so
 its budgets are exactly what it measured.
@@ -159,6 +162,11 @@ its budgets are exactly what it measured.
 just test audio-quality-record                        # the three recorded lanes, 35 s each, needs the network
 just test audio-quality-record --lanes relay-bbb
 ```
+
+Version 3 adds per-frame durations. The AAC-LC recordings made before that field existed retain
+their arrival clocks and use the codec's fixed 1024 samples per frame. The Opus `relay-mic` recording
+was replaced with a new fake-device capture because its old payloads, and therefore its packet
+durations, were not retained. It still does not prove real-microphone behavior or added RTT.
 
 Recording is by hand: the public relay and a browser publisher are not something a nightly run
 should depend on. Re-measure the replay budgets after re-recording. The recorder asks the relay for

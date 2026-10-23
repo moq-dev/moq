@@ -10,8 +10,6 @@
 //! track; [`catalog::hang::Container`](crate::catalog::hang::Container)
 //! dispatches the right implementation at runtime.
 
-use std::task::Poll;
-
 use bytes::Bytes;
 
 mod consumer;
@@ -34,7 +32,7 @@ pub mod ts;
 pub use consumer::Consumer;
 pub use group::GroupConsumer;
 pub use producer::Producer;
-pub(crate) use source::ExportSource;
+pub(crate) use source::{ExportSource, Resume};
 
 /// The media role that determines how a container represents frame durations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,24 +192,16 @@ pub trait Container {
 	/// Encode one or more frames into a single moq-lite frame appended to `group`.
 	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error>;
 
-	/// Poll the next moq-lite frame from `group` and decode it into media
-	/// frames. A single call may produce multiple media frames (e.g. all samples
-	/// in a CMAF fragment).
+	/// Decode one moq-lite frame read from a group into media frames.
 	///
-	/// Only `Ok(None)` signals the end of the group. `Ok(Some(batch))` may carry
-	/// an empty `batch`: a wire frame was consumed but decoded to no media frames
-	/// (e.g. a CMAF fragment with zero samples). That is not end-of-group; poll
-	/// again for the next batch. Callers accumulating frames must not treat an
-	/// empty batch as completion.
+	/// A single moq-lite frame may carry several media frames (e.g. all samples in a
+	/// CMAF fragment), or none (a CMAF fragment with zero samples), which is not the
+	/// end of the group.
 	///
 	/// On a data track an empty batch is the discontinuity marker, so a data
 	/// container returns one only for an object with no bytes, and refuses any
 	/// other object that decodes to no frames.
-	fn poll_read(
-		&self,
-		group: &mut moq_net::group::Consumer,
-		waiter: &kio::Waiter,
-	) -> Poll<Result<Option<Vec<Frame>>, Self::Error>>;
+	fn decode(&self, frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error>;
 
 	/// Return the endpoint timestamp when `frame` carries empty-payload metadata.
 	///
@@ -234,19 +224,5 @@ pub trait Container {
 		_end: Option<moq_net::Timestamp>,
 	) -> Result<(), Self::Error> {
 		Ok(())
-	}
-
-	/// Async wrapper around [`Self::poll_read`]. Carries the same contract: only
-	/// `Ok(None)` ends the group, and `Ok(Some(batch))` may hand back an empty
-	/// `batch` (poll again for more), so a caller loop must key completion off
-	/// `None`, not an empty batch.
-	fn read(
-		&self,
-		group: &mut moq_net::group::Consumer,
-	) -> impl std::future::Future<Output = Result<Option<Vec<Frame>>, Self::Error>>
-	where
-		Self: Sync,
-	{
-		async { kio::wait(|waiter| self.poll_read(group, waiter)).await }
 	}
 }

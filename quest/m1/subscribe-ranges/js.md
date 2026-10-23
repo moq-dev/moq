@@ -10,6 +10,11 @@ publisher serves requested ranges that are no longer in its live cache.
 ## Plan
 
 Mirror the Rust names, including `Time(pts)` ends and their refusal on an untimed track.
+Also mirror Rust's optional `Subscription::max_delay`
+([moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171)): a `null`
+`maxDelay` asks for the publisher's max age alone, dominates when subscriptions
+combine, and goes out as the largest delay the wire allows, where today an
+omitted one means the live edge only.
 
 Decided in the 2026-10-05 audit: the producer half of
 [JavaScript FETCH](/quest/m1/js-fetch.md) folds in here, so `@moq/net`'s
@@ -28,6 +33,16 @@ IETF FETCH dispatch. Resized from [M] to [L] for it.
   was never cached, covering exact replay, empty and missing groups,
   concurrent requests, and cancellation while awaiting a reply.
 
+When ranges add frame bounds, the group model carries a lite group's
+`frameStart` instead of refusing a nonzero one, as
+[partial lite groups](/quest/m1/release-audit/js-partial-group.md) does until
+then. Preserve the per-reader group-bound rule for reliable reads, live-edge
+selection, subscription updates, and publisher datagrams.
+
 ## Required
 
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the wire this speaks
+
+## Related
+
+- [Partial lite groups](/quest/m1/release-audit/js-partial-group.md) - refuses a nonzero `frameStart` until this models it

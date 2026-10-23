@@ -120,9 +120,7 @@ TARGET_BASE="${CARGO_TARGET_DIR:-$WORKSPACE/target}"
 
 cd "$WASM_DIR"
 bun install --frozen-lockfile
-# Playwright ships its own Chromium; PLAYWRIGHT_BROWSERS_PATH means CI installed
-# it already, in which case this is a no-op anyway.
-bunx playwright install chromium
+# The root devShell provides the matching Playwright Chromium.
 
 # Type-check against wasm-bindgen's generated .d.ts, as the shared harness check does.
 # wasm-bindgen resolves a type in a signature by its Rust identifier alone, so a

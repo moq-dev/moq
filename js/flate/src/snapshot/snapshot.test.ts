@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
-import { Time, Track } from "@moq/net";
+import { Group, Error as NetError, Time, Track } from "@moq/net";
 import { Consumer, Producer } from "./index.ts";
 
 const bytes = (...values: number[]) => new Uint8Array(values);
@@ -83,6 +83,20 @@ test("compression shrinks the frame on the wire", async () => {
 	const group = await track.subscribe().ordered().nextGroup();
 	const frame = await group?.readFrame();
 	expect(frame?.payload.byteLength).toBeLessThan(payload.byteLength / 4);
+});
+
+// Compression doesn't lift the group limit: a reader inflates the whole value, so one past the budget
+// is refused however small it deflates, and the previous value stays readable.
+test("a compressed value past the group budget is refused", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer({ track, compression: "deflate" });
+	producer.update({ value: bytes(1) });
+	expect(() => producer.update({ value: new Uint8Array(Group.MAX_GROUP_CACHE_BYTES + 1) })).toThrow(
+		NetError.FrameTooLarge,
+	);
+	producer.finish();
+
+	expect(await drain(track.subscribe(), true)).toEqual([bytes(1)]);
 });
 
 test("a finished track ends the consumer", async () => {

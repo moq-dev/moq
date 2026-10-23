@@ -113,6 +113,11 @@ pub struct MoqVideo {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
+	/// The publisher epoch of the instance [`broadcast`](Self::broadcast) names, when the
+	/// catalog knows it. Resolving refuses a broadcast proven to serve another instance; absent
+	/// names whichever instance resolves first.
+	#[uniffi(default = None)]
+	pub epoch: Option<String>,
 	/// The track's name in its broadcast, when it differs from the rendition's ID. Absent means
 	/// the ID is the track name.
 	#[uniffi(default = None)]
@@ -146,6 +151,11 @@ pub struct MoqAudio {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
+	/// The publisher epoch of the instance [`broadcast`](Self::broadcast) names, when the
+	/// catalog knows it. Resolving refuses a broadcast proven to serve another instance; absent
+	/// names whichever instance resolves first.
+	#[uniffi(default = None)]
+	pub epoch: Option<String>,
 	/// The track's name in its broadcast, when it differs from the rendition's ID. Absent means
 	/// the ID is the track name.
 	#[uniffi(default = None)]
@@ -275,7 +285,7 @@ pub enum MoqVideoFormat {
 /// A container that publishes its own tracks, which may be more than one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MoqContainerFormat {
-	/// Fragmented MP4 / CMAF.
+	/// Fragmented MP4 / CMAF, split into one frame per sample.
 	Fmp4,
 	/// Matroska / WebM.
 	Mkv,
@@ -283,6 +293,8 @@ pub enum MoqContainerFormat {
 	Ts,
 	/// Flash Video, as used by RTMP.
 	Flv,
+	/// Fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
+	Cmaf,
 }
 
 /// What an audio publish needs: a format, its codec init bytes, and an optional label.
@@ -462,6 +474,7 @@ impl From<MoqContainerFormat> for moq_mux::import::ContainerFormat {
 	fn from(format: MoqContainerFormat) -> Self {
 		match format {
 			MoqContainerFormat::Fmp4 => Self::Fmp4,
+			MoqContainerFormat::Cmaf => Self::Cmaf,
 			MoqContainerFormat::Mkv => Self::Mkv,
 			MoqContainerFormat::Ts => Self::Ts,
 			MoqContainerFormat::Flv => Self::Flv,
@@ -499,6 +512,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 				MoqVideo {
 					label: config.label.clone(),
 					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
+					epoch: config.epoch.as_ref().map(ToString::to_string),
 					track: config.track.clone(),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
@@ -529,6 +543,7 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 				MoqAudio {
 					label: config.label.clone(),
 					broadcast: config.broadcast.as_ref().map(|path| path.as_str().to_string()),
+					epoch: config.epoch.as_ref().map(ToString::to_string),
 					track: config.track.clone(),
 					codec: config.codec.to_string(),
 					description: config.description.as_ref().map(|d| d.to_vec()),
@@ -595,8 +610,10 @@ mod test {
 	fn catalog_exposes_rendition_broadcast_references() {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 
+		let epoch: moq_net::Epoch = crate::origin::moq_mint_epoch().parse().unwrap();
 		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		video.broadcast = Some(moq_net::path::Relative::new("./source").into_owned());
+		video.epoch = Some(epoch.clone());
 		catalog.video.renditions.insert("video".to_string(), video);
 		let local = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		catalog.video.renditions.insert("local".to_string(), local);
@@ -612,6 +629,9 @@ mod test {
 		assert_eq!(converted.video["video"].broadcast.as_deref(), Some("source"));
 		assert_eq!(converted.video["local"].broadcast, None);
 		assert_eq!(converted.audio["audio"].broadcast.as_deref(), Some("../elsewhere"));
+		// The epoch crosses in the same canonical form `resolve` parses back.
+		assert_eq!(converted.video["video"].epoch, Some(epoch.to_string()));
+		assert_eq!(converted.video["local"].epoch, None);
 	}
 
 	#[test]
@@ -1166,13 +1186,13 @@ pub enum MoqRendition {
 }
 
 impl MoqRendition {
-	/// Split into the broadcast reference, the track name, and the container.
-	fn into_parts(self) -> (Option<String>, String, MoqContainer) {
-		let (id, broadcast, track, container) = match self {
-			Self::Video { id, config } => (id, config.broadcast, config.track, config.container),
-			Self::Audio { id, config } => (id, config.broadcast, config.track, config.container),
+	/// Split into the broadcast reference and its epoch, the track name, and the container.
+	pub(crate) fn into_parts(self) -> (Option<String>, Option<String>, String, MoqContainer) {
+		let (id, broadcast, epoch, track, container) = match self {
+			Self::Video { id, config } => (id, config.broadcast, config.epoch, config.track, config.container),
+			Self::Audio { id, config } => (id, config.broadcast, config.epoch, config.track, config.container),
 		};
-		(broadcast, track.unwrap_or(id), container)
+		(broadcast, epoch, track.unwrap_or(id), container)
 	}
 }
 
@@ -1374,7 +1394,8 @@ impl MoqMediaTrackConsumer {
 	/// Subscribe to a catalog rendition and decode its container.
 	///
 	/// Follows the rendition's broadcast reference and track name, so a rendition served by a
-	/// sibling broadcast or under another track name subscribes to the right track.
+	/// sibling broadcast or under another track name subscribes to the right track, and fails
+	/// one whose broadcast is proven to serve another instance than its epoch.
 	#[uniffi::constructor]
 	pub async fn subscribe(
 		broadcast: &MoqBroadcastConsumer,
@@ -1384,11 +1405,11 @@ impl MoqMediaTrackConsumer {
 			rendition,
 			subscription,
 		} = config;
-		let (reference, name, container) = rendition.into_parts();
+		let (reference, epoch, name, container) = rendition.into_parts();
 		// Parse the container before resolving or subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
 		let media = media_container(container)?;
-		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
+		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 		let subscription = subscription
 			.map(moq_net::track::Subscription::try_from)
 			.transpose()?
@@ -1435,11 +1456,11 @@ impl MoqMediaGroupConsumer {
 			sequence,
 			options,
 		} = config;
-		let (reference, name, container) = rendition.into_parts();
+		let (reference, epoch, name, container) = rendition.into_parts();
 		// Parse the container before fetching so invalid CMAF init data does not leave a
 		// dynamic group request waiting for a consumer that can never read it.
 		let media = media_container(container)?;
-		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
+		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 		let options = options.map(moq_net::group::Fetch::from);
 		let group = broadcast
 			.driver
