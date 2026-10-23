@@ -779,9 +779,10 @@ impl StreamsState {
     ///
     /// `payload` is the packet's frame space in `buf`, which may already hold control frames.
     /// A datagram cannot be split, so one too large for the room left ends the packet and
-    /// leads the next one. Only when it would leave the packet empty, which a packet clamped
-    /// below the path MTU can, does it step aside for what fits behind it, since
-    /// [`Self::can_send_frames`] promised a frame.
+    /// leads the next one. One too large for even an empty packet, which a packet clamped
+    /// below the path MTU can be, steps aside for what fits behind it instead, since
+    /// [`Self::can_send_frames`] promised a frame and control frames alone would leave the
+    /// packet short.
     pub(crate) fn write_frames(
         &mut self,
         buf: &mut Vec<u8>,
@@ -799,7 +800,7 @@ impl StreamsState {
                 Some(Next::Datagram(group)) => {
                     let (_, frame) = self.pending.datagram(group);
                     if buf.len() + frame > max_buf_size {
-                        if buf.len() > payload.start {
+                        if payload.start + frame <= max_buf_size {
                             break;
                         }
                         self.pending.defer_datagram(group);
@@ -833,13 +834,7 @@ impl StreamsState {
             trace!(id = %meta.id, off = meta.offsets.start, len = meta.offsets.end - meta.offsets.start, fin = meta.fin, "STREAM");
             meta.encode(encode_length, buf);
 
-            // The range might not be retrievable in a single `get` if it is
-            // stored in noncontiguous fashion. Therefore this loop iterates
-            // until the range is fully copied into the frame.
-            let mut offsets = meta.offsets.clone();
-            while offsets.start != offsets.end {
-                let data = stream.pending.get(offsets.clone());
-                offsets.start += data.len() as u64;
+            for data in stream.pending.get(meta.offsets.clone()) {
                 buf.put_slice(data);
             }
 

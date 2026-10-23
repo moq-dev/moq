@@ -14,7 +14,7 @@
  * // A canvas that lost its GPU never hands out another context, so swap in a fresh one.
  * renderer.out.error.subscribe((error) => {
  * 	const old = canvas.peek();
- * 	if (error !== "surface-lost" || !old) return;
+ * 	if (error?.name !== "InvalidStateError" || !old) return;
  * 	const fresh = old.cloneNode() as HTMLCanvasElement;
  * 	old.replaceWith(fresh);
  * 	canvas.set(fresh);

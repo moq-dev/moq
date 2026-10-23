@@ -95,4 +95,4 @@ Implementation value changes text.
 ## Related
 
 - [Binding peer version](/quest/m1/binding-peer-version.md) - each binding names itself on top of this
-- [Auth contract](/quest/m1/auth-contract.md) - also changes what the auth request reports
+- [moq-dev/moq#6509](https://github.com/moq-dev/moq/pull/6509) - also changes what the auth request reports

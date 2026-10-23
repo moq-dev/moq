@@ -33,6 +33,12 @@ mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
+`server_name` is the SNI that selected the relay's certificate. It is absent
+over plaintext, on the `tls://` TCP listener, and for an IP-literal dial, and
+never filled from a `Host` header or a WebTransport authority. The client still picks it among the names
+the relay serves, so a hostname-scoped server binds the tenant to the
+credential, not to `server_name` alone.
+
 **Connect.** A 2xx with a grant admits. A 403 can carry JSON such as
 `{"reason":"expired","root":"rooms/123","tier":"edge"}`. The reason is
 `refused`, `forbidden`, or `expired`; unknown reason strings read as `refused`.
@@ -264,9 +270,11 @@ Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` (or a
 server granting its cluster CA everything with `peer: true`); see
 [Clustering](/bin/relay/cluster). `--mtls-link peer` marks every certificate as
-another relay; leave it off when certificates identify clients.
+another relay; leave it off when certificates identify clients. Without
+`peer`, a certificate is a client's: it routes like one and sees
+[hidden](/concept/moq-lite#hidden-broadcasts) routes only by asking.
 `--mtls-link upstream` also marks them
-[upstream](/bin/relay/cluster#upstream-links). Changing either flag ends each
+[upstream](/bin/relay/cluster#upstream-links). Changing the link role ends each
 live mTLS session at its next re-check (the `--revalidate` cadence or a
 `moq auth revalidate` push), so the mesh redials once.
 
