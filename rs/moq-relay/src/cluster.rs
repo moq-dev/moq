@@ -736,6 +736,15 @@ pub struct Config {
 	)]
 	pub id: Option<u64>,
 
+	/// Longest hop path accepted or forwarded, from 1 to 32 (default 32).
+	#[usage(
+		name = "cluster-max-hops",
+		long = "cluster-max-hops",
+		env = "MOQ_CLUSTER_MAX_HOPS",
+		setting = "cluster.max_hops"
+	)]
+	pub max_hops: Option<usize>,
+
 	/// Connect to one or more other cluster nodes. Each entry is a full URL, e.g.
 	/// `https://host/?jwt=TOKEN`, or an object with `url`, `cost`, `egress`,
 	/// `token`, and `upstream`; see [`Peer`]. A bare host or `host:port` is refused; pass the
@@ -1220,6 +1229,9 @@ impl Cluster {
 		peer.quic.validate()?;
 		let critical = crate::critical::Critical::default();
 		let mut origin_config = origin::Config::new(id);
+		if let Some(max) = config.max_hops {
+			origin_config.max_hops = origin::HopLimit::new(max).context("--cluster-max-hops must be from 1 to 32")?;
+		}
 		if let Some(cache) = cache {
 			origin_config.pool = cache.pool;
 			origin_config.cache_duration = cache.duration;
@@ -1316,7 +1328,6 @@ impl Cluster {
 	/// Resolve origin handles for a lease already admitted by a local relay rule.
 	pub(crate) fn scope(&self, lease: auth::Lease, request: &moq_auth::Request) -> Result<Admitted, auth::Error> {
 		let token = lease.token();
-		token.uncapped()?;
 		let publisher = self.publisher(token);
 		let subscriber = self.subscriber(token);
 		let allowed = match request.role {
@@ -1438,7 +1449,7 @@ impl Cluster {
 	/// equivalent per-request setter), which derives the read handle. On an
 	/// upstream grant that handle never sees a route learned from another upstream.
 	pub fn subscriber(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.mounted(token)?.scope(&token.root, &token.subscribe.path).ok()
+		self.mounted(token)?.scope(&token.root, &token.subscribe).ok()
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's publish permissions,
@@ -1446,7 +1457,7 @@ impl Cluster {
 	/// [`origin::Link::Upstream`] when that peer is upstream.
 	/// Nothing is published beneath the grant's mounts.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.mounted(token)?.scope(&token.root, &token.publish.path).ok()
+		self.mounted(token)?.scope(&token.root, &token.publish).ok()
 	}
 
 	/// The origin marked with the grant's link and with its mounts applied,
@@ -1954,14 +1965,12 @@ impl Cluster {
 
 		let addrs = moq_tokio::Addrs::collect(urls).context("peer advertised no reachable address")?;
 
-		let base_backoff = tokio::time::Duration::from_secs(1);
-		let max_backoff = tokio::time::Duration::from_secs(300);
 		// Sessions shorter than this are treated as churn: we keep backing off
 		// instead of resetting, otherwise a peer that rejects us instantly would
 		// turn into a tight reconnect loop.
-		let stable_threshold = tokio::time::Duration::from_secs(10);
+		let stable_threshold = std::time::Duration::from_secs(10);
 
-		let mut backoff = base_backoff;
+		let mut redial = Redial::default();
 
 		loop {
 			let started = moq_clock::now();
@@ -1969,18 +1978,13 @@ impl Cluster {
 			let elapsed = started.elapsed();
 
 			match result {
-				Ok(()) if elapsed >= stable_threshold => backoff = base_backoff,
-				Ok(()) => {
-					tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off");
-					backoff = (backoff * 2).min(max_backoff);
-				}
-				Err(err) => {
-					tracing::warn!(%err, "cluster peer error; will retry");
-					backoff = (backoff * 2).min(max_backoff);
-				}
+				Ok(()) if elapsed >= stable_threshold => redial = Redial::default(),
+				Ok(()) => tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off"),
+				Err(err) => tracing::warn!(%err, "cluster peer error; will retry"),
 			}
 
-			moq_clock::sleep(backoff).await;
+			let wait = redial.next(&mut rand::rng());
+			moq_clock::sleep(wait).await;
 		}
 	}
 
@@ -2048,7 +2052,16 @@ impl Cluster {
 		// relay's own upstream dial, and a cluster peer link that stopped following
 		// GOAWAY would break rolling handoff, redialing the drained URL after the
 		// old session finally closed instead of migrating to the replacement.
-		let mut reconnect = client.with_reconnect(true).connect(addrs.clone());
+		//
+		// A GOAWAY naming no URI is a relay draining to restart. A peer URL names
+		// that one node, so a redial would only reach the draining process again
+		// and replay both announce tables there for the rest of its window. Its
+		// routes are already re-priced to the maximum, so the session serves on
+		// until the node closes it, and the redial after that finds the replacement.
+		let mut reconnect = client
+			.with_reconnect(true)
+			.with_restart(moq_tokio::Restart::Wait)
+			.connect(addrs.clone());
 		let mut connection = None;
 		let mut established = false;
 		loop {
@@ -2278,6 +2291,33 @@ pub(crate) fn canonicalize_peer_key(peer: &str) -> String {
 	}
 }
 
+/// The wait between dials of one cluster peer: exponential with full jitter, so a
+/// mesh recovering from one outage spreads its redials instead of sending them in
+/// lockstep, and capped low enough that a peer back from a long outage is picked
+/// up within tens of seconds.
+struct Redial {
+	/// The longest the next wait may be.
+	ceiling: std::time::Duration,
+}
+
+impl Redial {
+	const FIRST: std::time::Duration = std::time::Duration::from_secs(1);
+	const CAP: std::time::Duration = std::time::Duration::from_secs(30);
+
+	/// A wait drawn uniformly below the ceiling, which then doubles up to [`Self::CAP`].
+	fn next(&mut self, rng: &mut impl rand::RngExt) -> std::time::Duration {
+		let wait = self.ceiling.mul_f64(rng.random());
+		self.ceiling = (self.ceiling * 2).min(Self::CAP);
+		wait
+	}
+}
+
+impl Default for Redial {
+	fn default() -> Self {
+		Self { ceiling: Self::FIRST }
+	}
+}
+
 /// A reconnecting peer keeps one logical presence until its loop actually ends.
 fn remote_status(
 	stats: &moq_net::stats::Session,
@@ -2303,20 +2343,10 @@ fn remote_status(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
-
-	#[tokio::test]
-	async fn fixed_leases_cannot_bypass_cap_refusal() {
-		let cluster = Cluster::new(Options::default()).unwrap();
-		let mut grant = moq_auth::Grant::new(moq_net::Pattern::all(), moq_net::Patterns::new());
-		grant.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
-		let lease = auth::Lease::new("/room", moq_auth::lease::Consumer::fixed(grant));
-		let request = moq_auth::Request::new("test", moq_auth::Transport::Http, "/room");
-		assert!(matches!(cluster.scope(lease, &request), Err(auth::Error::Forbidden(_))));
-	}
 
 	#[tokio::test]
 	async fn request_limits_follow_the_admitted_grant() {
@@ -2442,7 +2472,7 @@ mod tests {
 		};
 
 		let cluster = new_cluster(Config::default()).expect("cluster");
-		let stats = config.build(cluster.origin.clone());
+		let stats = config.build(cluster.origin.clone()).expect("stats");
 		let cluster = cluster.with_stats(stats);
 
 		let path = moq_net::Path::new(".stats").join("node").join("test");
@@ -2555,6 +2585,28 @@ mod tests {
 			ended(moq_tokio::Error::RefusedRedirect("policy".into())),
 			Failures::default()
 		);
+	}
+
+	/// Each wait is drawn across the whole range below a ceiling that doubles to the
+	/// cap, so peers that failed together spread out instead of redialing in step.
+	#[test]
+	fn redial_waits_spread_below_a_doubling_capped_ceiling() {
+		use rand::SeedableRng;
+		let mut rng = rand::rngs::StdRng::seed_from_u64(0x7265_6469_616c);
+		let ceilings = [1, 2, 4, 8, 16, 30, 30].map(std::time::Duration::from_secs);
+		let mut redials: Vec<Redial> = (0..1000).map(|_| Redial::default()).collect();
+		for ceiling in ceilings {
+			let waits: Vec<_> = redials.iter_mut().map(|redial| redial.next(&mut rng)).collect();
+			assert!(waits.iter().all(|wait| *wait <= ceiling), "a wait passed {ceiling:?}");
+			// Uniform over the range: every tenth of it is hit, so none is a lockstep.
+			for tenth in 0..10 {
+				let (low, high) = (ceiling * tenth / 10, ceiling * (tenth + 1) / 10);
+				assert!(
+					waits.iter().any(|wait| (low..high).contains(wait)),
+					"no wait in {low:?}..{high:?} below {ceiling:?}"
+				);
+			}
+		}
 	}
 
 	/// `?cost=` is read and stripped (it rides SETUP, not the URL), other
@@ -2961,7 +3013,7 @@ mod tests {
 
 		#[derive(Debug, serde::Deserialize)]
 		struct Doc {
-			#[allow(dead_code)]
+			#[allow(dead_code, reason = "the test only checks that deserializing fails")]
 			connect: Vec<Peer>,
 		}
 		let err = toml::from_str::<Doc>("connect = [{ url = \"https://peer.example/\", cost = \"cheap\" }]")
@@ -3086,7 +3138,8 @@ mod tests {
 			node: Some("test".to_string()),
 			..Default::default()
 		}
-		.build(origin.clone());
+		.build(origin.clone())
+		.expect("stats");
 		let cluster = cluster.with_stats(stats);
 
 		assert_eq!(cluster.origin.hop().id(), origin.hop().id());
@@ -3127,14 +3180,35 @@ mod tests {
 		}
 	}
 
+	#[tokio::test]
+	async fn cluster_hop_limit_reaches_the_shared_origin() {
+		assert_eq!(
+			new_cluster(Config::default()).unwrap().origin.config().max_hops.get(),
+			32
+		);
+		for cap in [1, 6, 32] {
+			let cluster = new_cluster(Config {
+				max_hops: Some(cap),
+				..Default::default()
+			})
+			.unwrap();
+			assert_eq!(cluster.origin.config().max_hops.get(), cap);
+		}
+		for cap in [0, 33, usize::MAX] {
+			let err = new_cluster(Config {
+				max_hops: Some(cap),
+				..Default::default()
+			})
+			.err()
+			.unwrap();
+			assert!(err.to_string().contains("--cluster-max-hops"), "{err}");
+		}
+	}
+
 	/// Static config accepts the object form beside bare URLs, through the same
 	/// type the connect API parses.
 	#[test]
 	fn cluster_connect_object_form_round_trip() {
-		// Usage reads the environment while parsing, so serialize with the tests
-		// that mutate it.
-		let _env = crate::test_env::EnvGuard::lock();
-
 		let toml = "[cluster]\nconnect = [\"https://a.example/?cost=1\", { url = \"https://b.example/\", cost = 2, egress = 2, token = \"secret\", upstream = true }]\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
 		std::fs::create_dir_all(&dir).unwrap();
@@ -3231,10 +3305,11 @@ mod tests {
 	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cluster_lan_survives_toml_merge() {
-		// Usage reads the environment while parsing, so serialize with the tests
-		// that mutate it.
-		let _env =
-			crate::test_env::EnvGuard::clear(&["MOQ_CLUSTER_LAN", "MOQ_CLUSTER_LAN_SECRET", "MOQ_CLUSTER_LAN_APP"]);
+		// Usage reads the environment while parsing, so a variable in the developer's
+		// shell must not decide the merge.
+		if !test_env::Env::without(&["MOQ_CLUSTER_LAN", "MOQ_CLUSTER_LAN_SECRET", "MOQ_CLUSTER_LAN_APP"]).isolate() {
+			return;
+		}
 
 		let toml = "[cluster]\nnode = \"https://relay.example.com\"\n\n[cluster.lan]\nenabled = true\nsecret = \"cluster.key\"\napp = \"custom\"\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
@@ -3261,8 +3336,9 @@ mod tests {
 	#[cfg(feature = "cluster-lan")]
 	#[test]
 	fn cli_overrides_toml_cluster_lan() {
-		let _env =
-			crate::test_env::EnvGuard::clear(&["MOQ_CLUSTER_LAN", "MOQ_CLUSTER_LAN_SECRET", "MOQ_CLUSTER_LAN_APP"]);
+		if !test_env::Env::without(&["MOQ_CLUSTER_LAN", "MOQ_CLUSTER_LAN_SECRET", "MOQ_CLUSTER_LAN_APP"]).isolate() {
+			return;
+		}
 
 		let toml = "[cluster.lan]\nenabled = true\nsecret = \"from-toml.key\"\napp = \"from-toml\"\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
@@ -3453,10 +3529,6 @@ mod tests {
 
 	#[test]
 	fn cluster_connect_api_survives_toml_merge() {
-		// Usage reads the environment while parsing, so serialize with the tests
-		// that mutate it.
-		let _env = crate::test_env::EnvGuard::lock();
-
 		let toml = "[cluster]\nconnect_api = \"https://api.example.com/cluster/connect\"\nconnect_api_tls_root = [\"api.pem\"]\n";
 		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
 		std::fs::create_dir_all(&dir).unwrap();

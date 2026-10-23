@@ -60,7 +60,7 @@ async function handle(msg: ToWorker): Promise<void> {
 function start(track: MediaStreamTrack): void {
 	source = track;
 
-	// @ts-expect-error No typescript types yet.
+	// @ts-expect-error TypeScript's DOM lib lacks the Chrome-only `MediaStreamTrackProcessor`.
 	const processor = new MediaStreamTrackProcessor({ track });
 	reader = (processor.readable as ReadableStream<VideoFrame>).getReader();
 }

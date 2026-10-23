@@ -92,6 +92,7 @@ impl Setup {
 
 impl Encode<Version> for Setup {
 	fn encode(&self, w: &mut Encoder<'_>, v: Version) -> Result<(), EncodeError> {
+		w.control = Some(crate::stats::Control::Session);
 		Self::check_version(v);
 		w.varint(SETUP_V17)?;
 		let prefix = w.prefix_u16();
@@ -102,6 +103,7 @@ impl Encode<Version> for Setup {
 
 impl Decode<Version> for Setup {
 	fn decode(r: &mut Decoder<'_>, v: Version) -> Result<Self, DecodeError> {
+		r.control = Some(crate::stats::Control::Session);
 		Self::check_version(v);
 		let kind = r.varint()?;
 		if kind != SETUP_V17 {
@@ -167,6 +169,7 @@ impl Client {
 impl Decode<Version> for Client {
 	/// Decode a client setup message (draft-14 through draft-16 only).
 	fn decode(r: &mut Decoder<'_>, v: Version) -> Result<Self, DecodeError> {
+		r.control = Some(crate::stats::Control::Session);
 		let kind = r.u8()?;
 		if kind != CLIENT_SETUP {
 			return Err(DecodeError::InvalidValue);
@@ -195,6 +198,7 @@ impl Decode<Version> for Client {
 impl Encode<Version> for Client {
 	/// Encode a client setup message (draft-14 through draft-16 only).
 	fn encode(&self, w: &mut Encoder<'_>, v: Version) -> Result<(), EncodeError> {
+		w.control = Some(crate::stats::Control::Session);
 		w.u8(CLIENT_SETUP);
 		let prefix = prefix_body(w, v)?;
 		self.encode_inner(w, v)?;
@@ -263,6 +267,7 @@ impl Server {
 impl Encode<Version> for Server {
 	/// Encode a server setup message (draft-14 through draft-16 only).
 	fn encode(&self, w: &mut Encoder<'_>, v: Version) -> Result<(), EncodeError> {
+		w.control = Some(crate::stats::Control::Session);
 		w.u8(SERVER_SETUP);
 		let prefix = prefix_body(w, v)?;
 		self.encode_inner(w, v)?;
@@ -273,6 +278,7 @@ impl Encode<Version> for Server {
 impl Decode<Version> for Server {
 	/// Decode a server setup message (draft-14 through draft-16 only).
 	fn decode(r: &mut Decoder<'_>, v: Version) -> Result<Self, DecodeError> {
+		r.control = Some(crate::stats::Control::Session);
 		let kind = r.u8()?;
 		if kind != SERVER_SETUP {
 			return Err(DecodeError::InvalidValue);

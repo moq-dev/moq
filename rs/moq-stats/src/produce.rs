@@ -14,8 +14,8 @@ use serde::Serialize;
 use web_async::spawn;
 
 use crate::{
-	COMPRESSED_SUFFIX, Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track,
-	sessions_track, totals_track, traffic_track,
+	COMPRESSED_SUFFIX, Encoding, Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track,
+	presence_track, sessions_track, totals_track, traffic_track,
 };
 
 /// Settings for a [`Producer`]. Construct with [`Config::new`] and chain
@@ -660,6 +660,14 @@ struct PendingPair {
 }
 
 impl PendingPair {
+	/// The request slot for one encoding.
+	fn slot(&mut self, encoding: Encoding) -> &mut Option<track::Request> {
+		match encoding {
+			Encoding::Plain => &mut self.plain,
+			Encoding::Compressed => &mut self.compressed,
+		}
+	}
+
 	/// Build a pair from consumer requests, creating whichever flavor was not
 	/// requested. A popped request is no longer queued, so `create_track`'s
 	/// queued-request fulfillment cannot reach it; the caller collects both
@@ -792,13 +800,10 @@ impl<V: Serialize> TrackFamily<V> {
 
 	/// Park one popped request, merging the two flavors of a plain name. Only a
 	/// NEW name while the parked buffer is `full` is rejected.
-	fn park(&mut self, plain: String, compressed: bool, request: track::Request, full: bool) {
+	fn park(&mut self, plain: String, encoding: Encoding, request: track::Request, full: bool) {
 		match self.parked.get_mut(&plain) {
 			Some(pending) => {
-				let slot = match compressed {
-					true => &mut pending.compressed,
-					false => &mut pending.plain,
-				};
+				let slot = pending.slot(encoding);
 				// Keep the first requester for a flavor. A duplicate means
 				// the original was already popped off the broadcast queue;
 				// dropping the newcomer aborts it into a retry, which joins
@@ -810,10 +815,7 @@ impl<V: Serialize> TrackFamily<V> {
 			None if full => request.reject(moq_net::Error::NotFound),
 			None => {
 				let mut pending = PendingPair::default();
-				match compressed {
-					true => pending.compressed = Some(request),
-					false => pending.plain = Some(request),
-				}
+				*pending.slot(encoding) = Some(request);
 				self.parked.insert(plain, pending);
 			}
 		}
@@ -918,9 +920,9 @@ struct TierNames {
 impl TierNames {
 	fn new(tier: &Tier) -> Self {
 		Self {
-			publisher: traffic_track(tier, Role::Publisher, false),
-			subscriber: traffic_track(tier, Role::Subscriber, false),
-			sessions: sessions_track(tier, false),
+			publisher: traffic_track(tier, Role::Publisher, Encoding::Plain),
+			subscriber: traffic_track(tier, Role::Subscriber, Encoding::Plain),
+			sessions: sessions_track(tier, Encoding::Plain),
 		}
 	}
 }
@@ -1024,7 +1026,7 @@ impl PresenceTrack {
 	}
 }
 
-/// One broadcast prefix's requested `traffic.json` pair and its per-tier sums,
+/// One broadcast prefix's requested `prefix.json` pair and its per-tier sums,
 /// cumulative from when it was first held. Reclaimed once nobody reads it.
 struct PrefixTrack {
 	/// The plain track name, for logs.
@@ -1147,7 +1149,7 @@ impl GroupPublisher {
 		// The totals and the default tier's tracks always exist, even while idle.
 		let tier = Tier::default();
 		for role in [Role::Publisher, Role::Subscriber] {
-			let name = traffic_track(&tier, role, false);
+			let name = traffic_track(&tier, role, Encoding::Plain);
 			match TrackPair::create(&broadcast, &name, sequence.clone()) {
 				Ok(pair) => {
 					traffic.tracks.insert(name, pair);
@@ -1158,7 +1160,7 @@ impl GroupPublisher {
 				}
 			}
 		}
-		let name = sessions_track(&tier, false);
+		let name = sessions_track(&tier, Encoding::Plain);
 		match TrackPair::create(&broadcast, &name, sequence.clone()) {
 			Ok(pair) => {
 				sessions.tracks.insert(name, pair);
@@ -1168,7 +1170,7 @@ impl GroupPublisher {
 				return None;
 			}
 		}
-		let name = totals_track(false);
+		let name = totals_track(Encoding::Plain);
 		let totals = match TrackPair::create(&broadcast, &name, sequence) {
 			Ok(pair) => TotalsTrack {
 				pair,
@@ -1368,22 +1370,18 @@ impl GroupPublisher {
 		let noop = kio::Waiter::noop();
 		while let Poll::Ready(Ok(request)) = self.dynamic.poll_requested_track(&noop) {
 			let keyed = match parse_presence_track(request.name()) {
-				Some((label, compressed)) => Some((&mut labels, label, compressed)),
+				Some((label, encoding)) => Some((&mut labels, label, encoding)),
 				None => parse_prefix_track(request.name())
 					// No broadcast path is deeper than `MAX_PARTS`.
 					.filter(|(path, _)| path.parts().count() <= Path::MAX_PARTS)
-					.map(|(path, compressed)| (&mut paths, path, compressed)),
+					.map(|(path, encoding)| (&mut paths, path, encoding)),
 			};
-			if let Some((held, key, compressed)) = keyed {
+			if let Some((held, key, encoding)) = keyed {
 				if group_key(key.as_str(), depth) != self.key.as_str() {
 					request.reject(moq_net::Error::NotFound);
 					continue;
 				}
-				let pending = held.entry(key).or_default();
-				let slot = match compressed {
-					true => &mut pending.compressed,
-					false => &mut pending.plain,
-				};
+				let slot = held.entry(key).or_default().slot(encoding);
 				// A duplicate is dropped into a retry, which finds the live track.
 				if slot.is_none() {
 					*slot = Some(request);
@@ -1396,8 +1394,8 @@ impl GroupPublisher {
 			};
 			let full = self.traffic.parked.len() + self.sessions.parked.len() >= MAX_PARKED_REQUESTS;
 			match shape.sessions {
-				true => self.sessions.park(shape.plain, shape.compressed, request, full),
-				false => self.traffic.park(shape.plain, shape.compressed, request, full),
+				true => self.sessions.park(shape.plain, shape.encoding, request, full),
+				false => self.traffic.park(shape.plain, shape.encoding, request, full),
 			}
 		}
 
@@ -1420,7 +1418,7 @@ impl GroupPublisher {
 			pending.reject(moq_net::Error::NotFound);
 			return;
 		}
-		let name = presence_track(&label, false);
+		let name = presence_track(&label, Encoding::Plain);
 		let pair = match pending.adopt(&self.broadcast, &name, self.traffic.sequence.clone()) {
 			Ok(pair) => pair,
 			Err(err) => {
@@ -1455,7 +1453,7 @@ impl GroupPublisher {
 			pending.reject(moq_net::Error::NotFound);
 			return;
 		}
-		let name = prefix_track(&path, false);
+		let name = prefix_track(&path, Encoding::Plain);
 		let pair = match pending.adopt(&self.broadcast, &name, self.traffic.sequence.clone()) {
 			Ok(pair) => pair,
 			Err(err) => {
@@ -1499,8 +1497,8 @@ impl GroupPublisher {
 struct RequestedShape {
 	/// The plain (uncompressed) track name, the pair maps' key.
 	plain: String,
-	/// Whether the requested flavor was the [`COMPRESSED_SUFFIX`] one.
-	compressed: bool,
+	/// The requested flavor.
+	encoding: Encoding,
 	/// Sessions track vs traffic track, picking the frame type.
 	sessions: bool,
 }
@@ -1509,10 +1507,7 @@ struct RequestedShape {
 /// `[<tier>/]{publisher|subscriber|sessions}.json[.z]`, or `None` for a name no
 /// tier could ever produce.
 fn requested_track_shape(name: &str) -> Option<RequestedShape> {
-	let (base, compressed) = match name.strip_suffix(COMPRESSED_SUFFIX) {
-		Some(base) => (base, true),
-		None => (name, false),
-	};
+	let (base, encoding) = Encoding::split(name);
 	let (tier, kind) = match base.rsplit_once('/') {
 		Some((tier, kind)) => (Some(tier), kind),
 		None => (None, base),
@@ -1531,7 +1526,7 @@ fn requested_track_shape(name: &str) -> Option<RequestedShape> {
 	}
 	Some(RequestedShape {
 		plain: base.to_string(),
-		compressed,
+		encoding,
 		sessions,
 	})
 }
@@ -1737,7 +1732,7 @@ mod tests {
 			[a, b]
 		}
 		for version in ["moq-lite-06", "moq-lite-07-wip"].map(|value| value.parse().unwrap()) {
-			for compressed in [false, true] {
+			for encoding in [Encoding::Plain, Encoding::Compressed] {
 				let registry = Registry::new(moq_net::stats::Config::new());
 				let origin = produce_origin();
 				let mut drain = Drain::new(Task {
@@ -1772,11 +1767,9 @@ mod tests {
 				assert!(active);
 				assert_eq!(route.prefix.as_str(), ".stats/node");
 				let broadcast = consumer.request_broadcast(".stats/node", None).await.unwrap();
-				let name = presence_track("room", compressed);
+				let name = presence_track("room", encoding);
 				let mut config = moq_json::snapshot::consumer::Config::default();
-				if compressed {
-					config.compression = moq_json::Compression::Deflate;
-				}
+				config.compression = encoding.compression();
 				let mut previous = None;
 				for (reading, delta) in [(40, 11), (1_000, 7)] {
 					store(reading);
@@ -1804,7 +1797,7 @@ mod tests {
 					drain.publish(Instant::now());
 					let next = pumping(&mut drain, reader.next()).await.unwrap().unwrap().value;
 					assert_eq!((next[""].wire_tx, next[""].wire_rx), (delta, delta * 2));
-					if compressed {
+					if encoding == Encoding::Compressed {
 						// Cross the codec's group budget naturally, leaving a completed
 						// group cached when unsubscribe aborts the still-open last group.
 						for extra in 1..=300 {
@@ -1850,7 +1843,11 @@ mod tests {
 				let total = drain.groups[""].totals.sums.tiers[&Tier::default()].current.sessions;
 				assert_eq!(
 					(total.wire_tx, total.wire_rx),
-					if compressed { (1_307, 2_614) } else { (1_007, 2_014) },
+					if encoding == Encoding::Compressed {
+						(1_307, 2_614)
+					} else {
+						(1_007, 2_014)
+					},
 					"epoch totals never reset on re-hold"
 				);
 			}
@@ -1953,7 +1950,7 @@ mod tests {
 
 	/// Kept-alive handles from [`feed`]: dropping them closes the subscription and the
 	/// announce (bumping the `_closed` counters).
-	#[allow(dead_code)]
+	#[allow(dead_code, reason = "held for their drop, never read")]
 	struct Feed {
 		announced: announce::Consumer,
 		source: broadcast::Producer,
@@ -2678,7 +2675,7 @@ mod tests {
 	/// the producer adopts the request.
 	async fn hold_presence(broadcast: &moq_net::broadcast::Consumer, label: &str) -> track::Ordered {
 		let subscribing = broadcast
-			.track(&presence_track(label, false))
+			.track(&presence_track(label, Encoding::Plain))
 			.expect("track")
 			.subscribe(None);
 		drive_tick().await;
@@ -2758,7 +2755,7 @@ mod tests {
 
 		// Let the request reach the stats broadcast's queue before the drain.
 		let subscribing = broadcast
-			.track(&presence_track("", false))
+			.track(&presence_track("", Encoding::Plain))
 			.expect("track")
 			.subscribe(None);
 		for _ in 0..8 {
@@ -2795,7 +2792,7 @@ mod tests {
 		let acme = origin.consume().request_broadcast(ACME, None).await.expect("resolve");
 
 		let subscribing = acme
-			.track(&presence_track("beta", false))
+			.track(&presence_track("beta", Encoding::Plain))
 			.expect("track")
 			.subscribe(None);
 		drive_tick().await;
@@ -2806,7 +2803,7 @@ mod tests {
 
 		let pending: Vec<_> = (0..3)
 			.map(|i| {
-				acme.track(&presence_track(format!("acme/{i}").as_str(), false))
+				acme.track(&presence_track(format!("acme/{i}").as_str(), Encoding::Plain))
 					.expect("track")
 					.subscribe(None)
 			})
@@ -2819,7 +2816,7 @@ mod tests {
 
 		// A held label's compressed flavor shares the live pair.
 		let subscribing = acme
-			.track(&presence_track("acme/0", true))
+			.track(&presence_track("acme/0", Encoding::Compressed))
 			.expect("track")
 			.subscribe(None);
 		drive_tick().await;
@@ -2830,7 +2827,7 @@ mod tests {
 	/// producer adopts the request.
 	async fn hold_prefix(broadcast: &moq_net::broadcast::Consumer, path: &str) -> track::Ordered {
 		let subscribing = broadcast
-			.track(&prefix_track(path, false))
+			.track(&prefix_track(path, Encoding::Plain))
 			.expect("track")
 			.subscribe(None);
 		drive_tick().await;
@@ -2902,7 +2899,7 @@ mod tests {
 			["acme"; Path::MAX_PARTS + 1].join("/"),
 		] {
 			let subscribing = acme
-				.track(&prefix_track(path.as_str(), false))
+				.track(&prefix_track(path.as_str(), Encoding::Plain))
 				.expect("track")
 				.subscribe(None);
 			drive_tick().await;
@@ -3027,7 +3024,7 @@ mod tests {
 			.expect("resolve");
 
 		let subscribing = broadcast
-			.track(&prefix_track("acme", false))
+			.track(&prefix_track("acme", Encoding::Plain))
 			.expect("track")
 			.subscribe(None);
 		for _ in 0..8 {
@@ -3143,12 +3140,12 @@ mod tests {
 	fn requested_track_shape_classifies() {
 		let shape = requested_track_shape("rtmp/publisher.json").expect("valid");
 		assert_eq!(shape.plain, "rtmp/publisher.json");
-		assert!(!shape.compressed);
+		assert_eq!(shape.encoding, Encoding::Plain);
 		assert!(!shape.sessions);
 
 		let shape = requested_track_shape("region/sjc/subscriber.json.z").expect("valid");
 		assert_eq!(shape.plain, "region/sjc/subscriber.json");
-		assert!(shape.compressed);
+		assert_eq!(shape.encoding, Encoding::Compressed);
 		assert!(!shape.sessions);
 
 		let shape = requested_track_shape("sessions.json").expect("default tier");

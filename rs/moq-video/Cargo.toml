@@ -282,3 +282,6 @@ pollster = { workspace = true }
 # `start_paused`, so the capture driver tests run on mocked time.
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
+
+[lints]
+workspace = true

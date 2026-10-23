@@ -40,7 +40,7 @@ impl fmt::Debug for Version {
 
 /// A list of versions in preferred order.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub struct Versions(Vec<Version>);
 
 impl<V: Copy> Decode<V> for Versions {

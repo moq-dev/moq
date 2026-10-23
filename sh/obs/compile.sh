@@ -15,7 +15,7 @@
 #
 # test/ is in scope because the tests drive the plugin through the same
 # generated moq headers, so an API that drifts under them fails here rather than
-# only where obs.yml's path filter reaches; `just obs test` is manual.
+# only where obs.yml's path filter reaches; `just obs test` runs nightly.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)

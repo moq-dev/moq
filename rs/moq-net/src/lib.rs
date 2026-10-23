@@ -1,5 +1,3 @@
-#![cfg_attr(test, allow(clippy::disallowed_methods))]
-
 //! # moq-net: Media over QUIC networking layer
 //!
 //! `moq-net` is the networking layer for Media over QUIC: real-time pub/sub with built-in
@@ -77,17 +75,13 @@
 //! instant.
 
 #![warn(missing_docs)]
-// The browser transport is `!Send`, so on wasm the shared state behind these `Arc`s is
-// too and clippy suggests `Rc`. The same code is genuinely cross-thread on native, so
-// `Arc` stays and the lint is unactionable here.
-#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 // Sessions hand out the auth, GOAWAY, and SETUP handles, so without `async` they are
 // unobtainable and stay private to the model and wire code that still uses them.
 #[cfg(feature = "async")]
 pub mod auth;
 #[cfg(not(feature = "async"))]
-#[allow(dead_code, unused_imports)]
+#[allow(dead_code, unused_imports, reason = "async-only")]
 mod auth;
 #[cfg(feature = "async")]
 mod client;
@@ -101,7 +95,7 @@ mod error;
 #[cfg(feature = "async")]
 pub mod goaway;
 #[cfg(not(feature = "async"))]
-#[allow(dead_code, unused_imports)]
+#[allow(dead_code, unused_imports, reason = "async-only")]
 mod goaway;
 // Not part of the public API: compiled only for the crate's own tests and for the
 // `fuzz/` harness.
@@ -120,7 +114,7 @@ mod recv;
 #[cfg(feature = "async")]
 pub mod setup;
 #[cfg(not(feature = "async"))]
-#[allow(dead_code, unused_imports)]
+#[allow(dead_code, unused_imports, reason = "async-only")]
 mod setup;
 #[cfg(feature = "async")]
 mod tail;
