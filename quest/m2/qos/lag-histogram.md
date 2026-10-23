@@ -6,7 +6,7 @@ The relay's `moq-stats` egress side reports, per broadcast, how far behind
 its viewers are according to what the network has acknowledged: a
 byte-weighted cumulative `lag` histogram and `dropped` counters (duration,
 bytes, and groups dropped before they were acknowledged), on the stats totals
-and prefix tracks (`<path>/traffic.json`). A spliced subscription
+and prefix tracks (`<path>/prefix.json`). A spliced subscription
 stays exact across a route switch, and a closing subscription records its
 last partial interval.
 

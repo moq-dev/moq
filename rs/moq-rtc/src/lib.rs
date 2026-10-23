@@ -59,9 +59,8 @@ mod sdp;
 mod session;
 
 /// Re-export of the HTTP router stack, so consumers can merge the [`axum::Router`]
-/// returned by [`Server::publish_router`] / [`Server::subscribe_router`] (and by
-/// [`whip::router`] / [`whep::router`]) into their own app without adding their own
-/// axum dependency (and risking a version mismatch). A major axum bump is therefore
+/// returned by [`Server::publish_router`] / [`Server::subscribe_router`] into their
+/// own app without adding their own axum dependency (and risking a version mismatch). A major axum bump is therefore
 /// a breaking change for this crate. Only with the `server` feature.
 #[cfg(feature = "server")]
 pub use axum;
