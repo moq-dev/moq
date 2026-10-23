@@ -10,7 +10,7 @@ and the reason is written here.
 This epic's own work: once every child has landed, run the full main against
 release comparison again with `just bench origin/release`, and confirm nothing
 new regressed. Then add a release-baseline step to the recurring
-[performance audit](/quest/m1/audit-perf.md), so every later cut
+[performance audit](/quest/m2/audit-perf.md), so every later cut
 repeats this comparison.
 
 ## Plan
@@ -116,5 +116,5 @@ outside the worktree to keep the next one.
 
 ## Related
 
-- [Performance audit](/quest/m1/audit-perf.md) - compares nightly to nightly; this epic compares main to release
+- [Performance audit](/quest/m2/audit-perf.md) - compares nightly to nightly; this epic compares main to release
 - [Nightly benchmark regressions](/quest/m1/bench-ci.md) - paired nightly-to-nightly comparison on one runner
