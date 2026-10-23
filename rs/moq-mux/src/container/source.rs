@@ -62,6 +62,8 @@ enum SourceState {
 	/// The resolved consumer, reading frames. Boxed because it's much larger than
 	/// the `Subscribing` variant (clippy `large_enum_variant`).
 	Active(Box<Consumer<HangContainer>>),
+	/// The sibling instance it read went, and its rendition with it.
+	Ended,
 }
 
 /// A per-rendition source that normalizes frame shape (Annex-B →
@@ -97,6 +99,8 @@ pub(crate) struct ExportSource {
 	ends: Option<(u64, u64)>,
 	/// The counters the export source reports for this rendition, as received, before any transform.
 	received: std::sync::Arc<crate::stats::Received>,
+	/// The sibling broadcast the rendition reads, once resolved: its end ends the rendition.
+	instance: Option<moq_net::broadcast::Consumer>,
 }
 
 impl ExportSource {
@@ -184,6 +188,7 @@ impl ExportSource {
 			cuts: 0,
 			ends: None,
 			received: source.received(name),
+			instance: None,
 		};
 		source.resolve_video_dimensions(&[])?;
 		Ok(Some(source))
@@ -222,6 +227,7 @@ impl ExportSource {
 			cuts: 0,
 			ends: None,
 			received: source.received(name),
+			instance: None,
 		}))
 	}
 
@@ -253,6 +259,7 @@ impl ExportSource {
 			cuts: 0,
 			ends: None,
 			received: source.received(name),
+			instance: None,
 		})
 	}
 
@@ -364,19 +371,31 @@ impl ExportSource {
 
 	/// Read normalized media or a clean group boundary.
 	pub fn poll_event(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Option<Event>>> {
+		if matches!(self.state, SourceState::Ended) {
+			return Poll::Ready(Ok(None));
+		}
+
 		// Resolve a cross-broadcast reference into a broadcast before subscribing.
 		if matches!(self.state, SourceState::Requesting(..)) {
-			let (broadcast, name) = {
+			let (broadcast, name, sibling) = {
 				let SourceState::Requesting(pending, name) = &self.state else {
 					unreachable!("just matched Requesting");
 				};
-				(ready!(pending.poll_broadcast(waiter))?, name.clone())
+				(ready!(pending.poll_broadcast(waiter))?, name.clone(), pending.sibling())
 			};
+			if sibling {
+				self.instance = Some(broadcast.clone());
+			}
 			let mut subscription = moq_net::track::Subscription::default().with_max_delay(self.max_delay);
 			if let Some(start) = self.start {
 				subscription = subscription.with_groups(start..);
 			}
-			self.state = SourceState::Subscribing(broadcast.track(&name)?.subscribe(subscription));
+			let track = match broadcast.track(&name) {
+				Ok(track) => track,
+				Err(_) if self.instance_ended(waiter) => return self.end(),
+				Err(err) => return Poll::Ready(Err(err.into())),
+			};
+			self.state = SourceState::Subscribing(track.subscribe(subscription));
 		}
 
 		// Resolve the subscription before reading any frames.
@@ -386,7 +405,12 @@ impl ExportSource {
 				let SourceState::Subscribing(pending) = &self.state else {
 					unreachable!("just matched Subscribing");
 				};
-				ready!(pending.poll_ok(waiter))?
+				match pending.poll_ok(waiter) {
+					Poll::Ready(Ok(track)) => track,
+					Poll::Ready(Err(_)) | Poll::Pending if self.instance_ended(waiter) => return self.end(),
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
+					Poll::Pending => return Poll::Pending,
+				}
 			};
 			let media = self
 				.media
@@ -407,7 +431,30 @@ impl ExportSource {
 				let SourceState::Active(consumer) = &mut self.state else {
 					unreachable!("subscription resolved into an Active consumer");
 				};
-				match ready!(consumer.poll_item(waiter))? {
+				let item = match consumer.poll_item(waiter) {
+					Poll::Ready(Ok(item)) => item,
+					// Only an orderly shutdown of the instance is its end: malformed media or a
+					// failed transport still fails the export. The field, not `instance_ended`, so
+					// the borrow stays off the consumer.
+					Poll::Ready(Err(crate::Error::Moq(
+						moq_net::Error::Cancel
+						| moq_net::Error::Closed
+						| moq_net::Error::GoingAway
+						| moq_net::Error::SessionClosed
+						| moq_net::Error::Session(moq_net::SessionError::Cancel),
+					)))
+					| Poll::Pending
+						if self
+							.instance
+							.as_ref()
+							.is_some_and(|instance| instance.poll_closed(waiter).is_ready()) =>
+					{
+						return self.end();
+					}
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Pending => return Poll::Pending,
+				};
+				match item {
 					Some(Item::Frame { group, frame, arrived }) => {
 						if self.ends.is_some_and(|(end_group, _)| end_group != group) {
 							self.finish_ends();
@@ -484,6 +531,23 @@ impl ExportSource {
 				}
 			}
 		}
+	}
+
+	/// Whether the sibling broadcast this rendition reads has stopped serving, registering
+	/// `waiter` for when it does. Its track stalling or failing then is that instance's end,
+	/// which ends the rendition rather than the export once what it delivered is read; following
+	/// the instance that replaces it is the export's own call.
+	fn instance_ended(&self, waiter: &kio::Waiter) -> bool {
+		self.instance
+			.as_ref()
+			.is_some_and(|instance| instance.poll_closed(waiter).is_ready())
+	}
+
+	/// End the rendition with its instance.
+	fn end(&mut self) -> Poll<crate::Result<Option<Event>>> {
+		self.finish_ends();
+		self.state = SourceState::Ended;
+		Poll::Ready(Ok(None))
 	}
 
 	fn finish_ends(&mut self) {
@@ -664,6 +728,158 @@ mod tests {
 				.unwrap_or_else(|err| panic!("{reference:?} should keep the rendition: {err:?}"))
 				.unwrap_or_else(|| panic!("{reference:?} should keep the rendition"));
 		}
+	}
+
+	/// A sibling rendition's first announcement starts it, a replacement is never read, and its
+	/// instance going ends the rendition instead of failing the export, both mid-stream and
+	/// before the subscription resolves.
+	#[tokio::test(start_paused = true)]
+	async fn a_sibling_rendition_starts_late_and_ends_with_its_instance() {
+		use std::time::Duration;
+
+		use crate::container::test_util::raw_frame;
+
+		let origin = crate::source::produce_origin();
+		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+		tokio::task::yield_now().await;
+		let source = crate::source::resolved(&origin, "a/pub").await;
+		let config = audio(Some("./source"));
+		let mut export = ExportSource::for_audio(&source, "audio", &config, Duration::from_secs(10))
+			.unwrap()
+			.unwrap();
+		let mut read = async || {
+			tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
+				.await
+				.ok()
+				.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros()))
+		};
+		let wire = || HangContainer::Legacy(crate::container::Kind::Audio);
+		let info = || hang::container::track_info(hang::catalog::PRIORITY.audio);
+
+		assert_eq!(read().await, None, "nothing announces the sibling yet");
+		let old = origin.publish("a/source", Default::default()).unwrap();
+		let mut track = crate::container::Producer::new(old.create_track("audio", info()).unwrap(), wire());
+		track.write(raw_frame(0, b"old", true)).unwrap();
+		assert_eq!(read().await, Some(Some(0)), "the late announcement starts it");
+
+		let new = origin.publish("a/source", Default::default()).unwrap();
+		let mut replacement = crate::container::Producer::new(new.create_track("audio", info()).unwrap(), wire());
+		replacement.write(raw_frame(1_000_000, b"new", true)).unwrap();
+		track.write(raw_frame(24_000, b"old", true)).unwrap();
+		assert_eq!(read().await, Some(Some(24_000)), "the replacement is never read");
+
+		drop(old);
+		assert_eq!(read().await, Some(None), "its end ends the rendition");
+
+		// A rendition still subscribing when its instance goes ends too.
+		let mut late = ExportSource::for_audio(&source, "late", &config, Duration::from_secs(10))
+			.unwrap()
+			.unwrap();
+		let ended = tokio::time::timeout(Duration::from_secs(1), kio::wait(|waiter| late.poll_read(waiter))).await;
+		assert!(
+			matches!(ended, Ok(Ok(None))),
+			"{:?}",
+			ended.map(|read| read.map(|_| ()))
+		);
+		drop((track, replacement, new));
+	}
+
+	/// A sibling's failure still fails the export when its instance goes, whether its media is
+	/// malformed, its track is aborted with a protocol error, or its producers went away
+	/// unfinished: only an orderly shutdown of the instance is the rendition's end.
+	#[tokio::test(start_paused = true)]
+	async fn a_sibling_failure_outlives_its_instance() {
+		use std::time::Duration;
+
+		for failure in ["malformed", "violation", "dropped"] {
+			let origin = crate::source::produce_origin();
+			let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+			tokio::task::yield_now().await;
+			let source = crate::source::resolved(&origin, "a/pub").await;
+			let config = audio(Some("./source"));
+			let mut export = ExportSource::for_audio(&source, "audio", &config, Duration::from_secs(10))
+				.unwrap()
+				.unwrap();
+
+			let sibling = origin.publish("a/source", Default::default()).unwrap();
+			let track = sibling
+				.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+				.unwrap();
+			// Subscribe before anything is written, so the failure and the instance's end arrive
+			// together.
+			let settle = tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)));
+			assert!(settle.await.is_err(), "nothing is written yet");
+			let mut group = track.append_group().unwrap();
+			let held = match failure {
+				"malformed" => {
+					// An empty Legacy audio frame is malformed.
+					group
+						.write_frame(moq_net::Timestamp::from_micros(0).unwrap(), bytes::Bytes::new())
+						.unwrap();
+					Some((group, track))
+				}
+				"violation" => {
+					track.clone().abort(moq_net::Error::ProtocolViolation).unwrap();
+					Some((group, track))
+				}
+				_ => {
+					drop((group, track));
+					None
+				}
+			};
+			drop(sibling);
+			tokio::time::sleep(Duration::from_millis(10)).await;
+			assert!(export.instance_ended(&kio::Waiter::noop()), "the instance has gone");
+
+			let read = tokio::time::timeout(Duration::from_secs(1), kio::wait(|waiter| export.poll_read(waiter)))
+				.await
+				.expect("the read settles");
+			assert!(
+				read.is_err(),
+				"{failure}: {:?}",
+				read.map(|frame| frame.map(|frame| frame.timestamp))
+			);
+			drop(held);
+		}
+	}
+
+	/// A sibling served over a session ends the rendition cleanly when its publisher goes, which
+	/// the session reports as its own cancellation.
+	#[tokio::test(start_paused = true)]
+	async fn a_remote_sibling_ends_with_its_instance() {
+		use std::time::Duration;
+
+		use crate::container::test_util::{Link, raw_frame};
+
+		let remote = crate::source::produce_origin();
+		let origin = crate::source::produce_origin();
+		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
+		tokio::task::yield_now().await;
+		let source = crate::source::resolved(&origin, "a/pub").await;
+		let _link = Link::new(&remote, &origin).await;
+		let sibling = remote.publish("a/source", Default::default()).unwrap();
+		let mut track = crate::container::Producer::new(
+			sibling
+				.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+				.unwrap(),
+			HangContainer::Legacy(crate::container::Kind::Audio),
+		);
+		track.write(raw_frame(0, b"x", true)).unwrap();
+		let mut export = ExportSource::for_audio(&source, "audio", &audio(Some("./source")), Duration::from_secs(10))
+			.unwrap()
+			.unwrap();
+		let mut read = async || {
+			tokio::time::timeout(Duration::from_secs(1), kio::wait(|waiter| export.poll_read(waiter)))
+				.await
+				.expect("the read settles")
+				.unwrap()
+				.map(|frame| frame.timestamp.as_micros())
+		};
+		assert_eq!(read().await, Some(0));
+
+		drop(sibling);
+		assert_eq!(read().await, None, "its end ends the rendition");
+		drop(track);
 	}
 
 	/// The requested budget must be present on the first SUBSCRIBE, a live start's too. Updating

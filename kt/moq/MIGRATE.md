@@ -12,6 +12,11 @@ A reader narrowing its ranges can leave a single group while the fill stays used
 A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
 `Subscription.maxDelayUs` is a `ULong?` and `maxDelay` a `Duration?`, where null leaves the publisher's max age alone to bound delivery.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel the coroutine or wrap it in `withTimeout`.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio: UInt` is replaced by `deltas: Boolean` (default `true`).

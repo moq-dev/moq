@@ -12,6 +12,11 @@ A reader narrowing its ranges can leave a single group while the fill stays used
 A refusal carries no application code: `drop_groups` fails the waiting fetches with `moq.Error.NotFound`.
 `Subscription.max_delay` also accepts `None`, leaving the publisher's max age alone to bound delivery.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve()` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel the task or wrap it in `asyncio.wait_for`.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `SnapshotProducer(delta_ratio=...)` is replaced by `deltas: bool = True`.

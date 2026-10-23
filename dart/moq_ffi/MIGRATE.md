@@ -14,6 +14,12 @@ A fill also arrives for history a subscription covers that the cache lacks, not 
 `MoqSubscription.maxDelayUs` is nullable, where null leaves the publisher's max age alone to bound delivery.
 Regenerate the bindings with `just dart generate` for the changed types and checksums.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: add a `.timeout` to the future.
+Regenerate the bindings for the changed `resolve` checksum.
+
 ### Priorities are signed (#6142)
 
 `MoqTrackInfo.priority`, `MoqSubscription.priority`, `MoqFetchGroupOptions.priority`, and `MoqFill.priority()` take `-128..=127`, higher first, and 0 is the unset midpoint.

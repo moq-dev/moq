@@ -11,6 +11,11 @@ The ABI is unchanged. A track's dynamic handler now also gets group requests for
 A request whose group nobody reads any more, because every subscriber narrowed past it, is withdrawn and the next group follows: answering it then fails as not found.
 `moq_subscription.max_delay_us` always sets a budget, so a C subscriber cannot ask for the publisher's max age alone.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+`moq_consume_video` and `moq_consume_audio` on a rendition whose catalog `broadcast` field names a sibling now wait for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, give up on it yourself with `moq_consume_video_cancel` or `moq_consume_audio_cancel`.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `moq_json_snapshot_config.delta_ratio` is replaced by `bool deltas`.

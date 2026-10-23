@@ -14,6 +14,12 @@ A fill also arrives for history a subscription covers that the cache lacks, not 
 `MoqSubscription.MaxDelayUs` is `*uint64`, where `nil` leaves the publisher's max age alone to bound delivery.
 Regenerate the bindings for the changed types and checksums.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.Resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: pass a `ctx` with a deadline.
+Regenerate the bindings for the changed `resolve` checksum.
+
 ### Priorities are signed (#6142)
 
 `MoqTrackInfo.Priority`, `MoqSubscription.Priority`, `MoqFetchGroupOptions.Priority`, and `MoqFill.Priority()` are `int8`, higher first, and 0 is the unset midpoint.

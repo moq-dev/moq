@@ -13,6 +13,11 @@ A refusal carries no application code: `drop_groups` fails the waiting fetches a
 A fill also arrives for history a subscription covers that the cache lacks, not only for a fetch.
 `Subscription::max_delay_us` is a `std::optional<uint64_t>` that still defaults to 0, where `std::nullopt` leaves the publisher's max age alone to bound delivery.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `BroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel it.
+
 ### Priorities are signed (#6142)
 
 `TrackInfo::priority`, `Subscription::priority`, and `FetchGroupOptions::priority` are `int8_t`, and `Fill::priority()` returns one.
