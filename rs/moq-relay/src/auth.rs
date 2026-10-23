@@ -74,7 +74,8 @@ pub struct Config {
 
 	/// Maximum in-band tokens one session has the auth server verifying at once,
 	/// counting checks still running past the admission timeout. Later tokens wait
-	/// for a slot. Defaults to 128.
+	/// for a slot. Also the requests one HTTP/2 connection carries at once, each
+	/// admitted on its own. Defaults to 128.
 	#[usage(
 		long = "auth-verifications",
 		env = "MOQ_AUTH_VERIFICATIONS",
@@ -892,6 +893,11 @@ impl Auth {
 		&self.node
 	}
 
+	/// How many credentials one session may have the decider verifying at once.
+	pub(crate) fn verifications(&self) -> usize {
+		self.verifications
+	}
+
 	/// A fresh `connect` request for this relay, before the transport's facts are filled in.
 	pub fn request(&self, transport: moq_auth::Transport, path: impl Into<String>) -> Request {
 		Request::new(self.node.as_ref(), transport, path)
@@ -1046,10 +1052,9 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 	});
 	out.remote = request.remote_addr();
 	out.local = request.local_addr();
-	out.server_name = request
-		.server_name()
-		.map(str::to_owned)
-		.or_else(|| request.authority().map(str::to_owned));
+	// Only the SNI: a WebTransport CONNECT authority or WebSocket `Host` is client-chosen
+	// without having selected a certificate, so a session without SNI reports none.
+	out.server_name = request.server_name().map(str::to_owned);
 	out.alpn = request.alpn().map(str::to_owned);
 	out.role = request.role().and_then(role);
 	out.tls = request.peer_identity().as_ref().and_then(peer);
@@ -1057,9 +1062,9 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 }
 
 /// Build an auth request from the path, credential, and role carried in SETUP.
-pub(crate) fn request_for_setup<S: moq_net::transport::poll::Session>(
+pub(crate) fn request_for_setup(
 	auth: &Auth,
-	setup: &moq_net::server::Handshake<S>,
+	setup: &moq_net::server::Handshake,
 	transport: moq_auth::Transport,
 ) -> Request {
 	let (path, query) = match setup.path().split_once('?') {
@@ -1113,7 +1118,7 @@ pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::time::SystemTime;

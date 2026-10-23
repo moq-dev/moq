@@ -32,3 +32,6 @@ cfg_aliases = "0.2"
 [dev-dependencies]
 rand = "0.10"
 tracing-test = "0.2"
+
+[lints]
+workspace = true

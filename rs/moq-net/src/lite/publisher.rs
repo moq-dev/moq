@@ -292,9 +292,10 @@ struct Control<S: crate::transport::poll::Session> {
 	state: ControlState<S>,
 }
 
-// A state machine's enum is its storage: one transient instance per stream, so the
-// big variant is the working state, not padding held in bulk.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk"
+)]
 enum ControlState<S: crate::transport::poll::Session> {
 	/// Reading the stream's type.
 	Start {
@@ -844,9 +845,10 @@ struct AnnounceServe<S: crate::transport::poll::Session> {
 	state: AnnounceState,
 }
 
-// A state machine's enum is its storage: one transient instance per stream, so the
-// big variant is the working state, not padding held in bulk.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk"
+)]
 enum AnnounceState {
 	/// Reading the ANNOUNCE_REQUEST.
 	Decode,
@@ -955,6 +957,12 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		// model uses this exposure to park a reflected copy before it can replace
 		// the source we are currently advertising to that peer.
 		let origin = origin.excluding(Hop::new(exclude_hop).unwrap_or(Hop::UNKNOWN));
+		// Lite03 and later carry the hop path, so only routes with room for our hop
+		// under the origin's cap are advertised; Lite01/02 hide the depth entirely.
+		let origin = match self.shared.version {
+			Version::Lite01 | Version::Lite02 => origin,
+			_ => origin.forwardable(),
+		};
 		// Hidden routes are left out unless the peer opted in. A publish origin that
 		// already opted in (the caller's choice for this peer) keeps them either way.
 		let origin = match hidden {
@@ -2024,6 +2032,9 @@ impl<S: crate::transport::poll::Session> Request<S> for TracksServe {
 			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
 				name: name.to_string().into(),
 			},
+			Some(crate::broadcast::TracksEvent::Finished { name }) => lite::TracksEvent::Finished {
+				name: name.to_string().into(),
+			},
 			Some(crate::broadcast::TracksEvent::Synced) => lite::TracksEvent::Synced,
 			None => return Poll::Ready(Ok(ControlFlow::Break(()))),
 		};
@@ -2218,9 +2229,10 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 }
 
 /// Answers a FETCH stream: a single cached group, streamed in order.
-// A state machine's enum is its storage: one transient instance per stream, so the
-// big variant is the working state, not padding held in bulk.
-#[allow(clippy::large_enum_variant)]
+#[allow(
+	clippy::large_enum_variant,
+	reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk; an allow, since the size gap varies by target"
+)]
 enum FetchServe {
 	/// Waiting for the fetched group.
 	Fetch {
@@ -3421,10 +3433,6 @@ fn buffer_zigzag_delta<W: crate::transport::poll::SendStream>(
 /// What [`recv_next`] pulled from the one subscriber: the next group to serve, the next
 /// best-effort datagram to forward, the track declaring its exclusive final sequence, or
 /// the track finishing (the live edge having reached that boundary).
-// A `group::Consumer` carries an inline frame prefetch, so the `Group` variant dwarfs the
-// others. This is a transient, one-at-a-time return value, so the padding is never held in
-// bulk; boxing would only add a per-group allocation.
-#[allow(clippy::large_enum_variant)]
 enum Recv {
 	Group(group::Consumer),
 	Datagram(crate::model::datagram::Stored),
@@ -4297,9 +4305,13 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	budget: kio::coop::Budget,
 }
 
-// A state machine's enum is its storage: one transient instance per stream, so the
-// big variant is the working state, not padding held in bulk.
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(
+	target_pointer_width = "64",
+	expect(
+		clippy::large_enum_variant,
+		reason = "a state machine's enum is its storage: one transient instance per stream, so the big variant is the working state, not padding held in bulk"
+	)
+)]
 enum GroupState<S: crate::transport::poll::Session> {
 	/// Waiting for stream credit on this machine's own session handle.
 	Open,

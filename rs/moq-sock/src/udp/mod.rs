@@ -69,9 +69,10 @@ mod imp;
 #[path = "wasi.rs"]
 mod imp;
 
-// moq-sock always logs through `tracing`, so quinn-udp's `log` and no-op
-// backends are not carried.
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "moq-sock always logs through `tracing`, so quinn-udp's `log` and no-op backends are not carried"
+)]
 mod log {
     pub(crate) use tracing::{debug, error, info, trace, warn};
 }
@@ -165,7 +166,13 @@ impl Transmit<'_> {
     /// This case is actually quite common when splitting up a prepared GSO batch
     /// again after GSO has been disabled because the last datagram in a GSO
     /// batch is allowed to be smaller than the segment size.
-    #[cfg_attr(apple_fast, allow(dead_code))] // Used by prepare_msg, which is unused when apple_fast
+    #[cfg_attr(
+        apple_fast,
+        allow(
+            dead_code,
+            reason = "used by prepare_msg, which is unused when apple_fast"
+        )
+    )]
     fn effective_segment_size(&self) -> Option<usize> {
         match self.segment_size? {
             size if size >= self.contents.len() => None,
