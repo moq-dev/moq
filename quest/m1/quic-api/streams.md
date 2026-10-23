@@ -7,8 +7,8 @@ moq-uring's `quic` module share one namespaced shape: `send::{Stream,
 Finished, Group, Options, Error}`, `recv::{Stream, Lease, Error}`, and
 `stream::{Id, Dir, Event}`, with the same signatures in both drivers. One
 error type per direction replaces quinn's zoo, a write after `finish` or any
-use after `reset`/`stop` does not compile, and writes and reads take `Buf`
-and `BufMut`.
+use after `reset`/`stop` does not compile, writes and reads take `Buf`
+and `BufMut`, and a receive lease holds no connection lock.
 
 ## Plan
 
@@ -64,6 +64,17 @@ zero-copy split, so one generic write covers owned and borrowed data. Send:
 `benches/streams.rs` that owned writes stay zero-copy. A buffer pool is out
 of scope: [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) owns it after a
 profile.
+
+**Leases hold no lock** (maintainer, 2026-10-23). The driver's `Lease` wraps
+the connection's `MutexGuard`, so while moq-net decodes a message from a
+lease, the connection's packet processing, transmits, timers, and every other
+stream wait on it. `recv::Lease` instead holds owned `Bytes` chunks, taken
+under a short lock, and returns their credit under another short lock on
+release or drop. The [receive pinning](/quest/m1/quic-receive-pinning.md)
+fix already copies or compacts chunks out of the batch, so owning them adds
+no copy. A lease stays `!Send` only if something still needs it; otherwise it
+may cross an await. Test that the driver keeps sending and receiving on
+other streams while a lease is held.
 
 **Datagrams.** `send_datagram(impl Buf, send::Options)`, so a caller
 chains its own header (WebTransport's session id) instead of allocating and
