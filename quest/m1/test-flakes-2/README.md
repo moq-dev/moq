@@ -26,34 +26,24 @@ Rules every child keeps:
   (the draft-16 cancel race was a retry sweep jittered past a fixed settle
   budget). Wait out the jitter's whole window, not a count of small steps.
 
-Added 2026-10-15 (maintainer): three flakes seen while landing that day's
-merge batch, ranked by how likely each hides a product bug.
-
 This README's own work, after the children: run `just check --all` several
-times on a loaded machine, as the first round did. moq-tokio's
-`a_subscription_cut_by_the_publisher_disconnecting_does_not_end_clean` is a
-known exception, tracked by [Readers see SUBSCRIBE_DROP](/quest/m1/subscribe-drop-errors.md).
+times on a loaded machine, as the first round did.
 
-Added 2026-10-19 (maintainer): three more, the redial pair first since CI
-hit it. The same day's test cost audit added the macOS QUIC connects, and the
-redundant failover drift first: it may hide a TS export bug and failed two of
-three loaded `just check` runs.
+The redundant failover drift moved to m0 on 2026-10-20 (maintainer) and is
+fixed by [moq-dev/moq#6113](https://github.com/moq-dev/moq/pull/6113).
 
-Added 2026-10-20 (maintainer): three more from that day's merge batch, the
-draft-16 cancel race first since it fails on a mocked clock and so may hide
-an ordering bug. The failed-listen test was meant to join the redial quest,
-which #6032 had already finished, so it reuses #6032's reserved-port fix as
-its own child. moq-uring's `host_tracks_moq_clock` was seen the same day
-but #6056 had already fixed it by measuring the calibration gap.
+Added 2026-10-21 and 2026-10-22 (maintainer): failures from the m0/m1
+merge runs, one child each.
 
 Public API: none. Wire: none.
 
 ## Required
 
-- [Redundant failover drift](/quest/m1/test-flakes-2/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
-- [Relay bench holder](/quest/m1/test-flakes-2/relay-bench-holder.md) - the foreign-listener bench test fails fast when its holder cannot bind, instead of hanging on a fifo
+- [Union renewal](/quest/m1/test-flakes-2/auth-union-renewal.md) - the JS subscriber never leaves a torn REQUEST_UPDATE on the stream
+- [One process](/quest/m1/test-flakes-2/one-process.md) - no test writes process-wide env or unwraps the crypto provider install
+- [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
+- [Interop cpp to js budget](/quest/m1/test-flakes-2/interop-cpp-js.md) - the cpp -> js cell finishes inside its 30 s budget, fixed at its cause
 
 ## Related
 
 - [Controlled time](/quest/m1/time/README.md) - the systemic fix these rules ask for: every crate on a controlled clock
-- [Publish channel count](/quest/m1/publish-audio-channel-count.md) - tracks the media fixture's cold-start audio-tone flake, a player stall it shares with the mono pin

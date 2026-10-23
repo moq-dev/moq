@@ -236,7 +236,7 @@ async fn master(server: &Server, broadcast: &str, query: Option<&str>) -> Respon
 	};
 	// A master listing no variant is unplayable: wait for one that can start, else answer
 	// unavailable.
-	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.advertised()).await;
+	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.advertised()).await;
 	let (video, audio) = broadcaster.variants(query);
 	if video.is_empty() && audio.is_empty() {
 		return not_found();
@@ -248,18 +248,19 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 	let Some(broadcaster) = server.broadcaster(broadcast).await else {
 		return not_found();
 	};
-	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
+	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
 	if broadcaster.is_empty() {
 		return not_found();
 	}
 	// A manifest whose timelines are all empty confuses players; give the broadcast a moment
 	// to index its first complete segment before answering.
-	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.playable()).await;
+	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.playable()).await;
 	// Each representation names its init by hash, which an inline codec only learns from media.
 	broadcaster.build_inits().await;
 	match broadcaster.manifest(query) {
-		Some(manifest) => mpd(manifest),
-		None => not_found(),
+		Ok(Some(manifest)) => mpd(manifest),
+		Ok(None) => not_found(),
+		Err(err) => server_error(err),
 	}
 }
 
@@ -271,7 +272,7 @@ async fn media(server: &Server, broadcast: &str, kind: Kind, rendition: &str, qu
 	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
 		return not_found();
 	};
-	match tokio::time::timeout(READY_TIMEOUT, rendition.playlist(range, child_query.as_deref())).await {
+	match moq_clock::timeout(READY_TIMEOUT, rendition.playlist(range, child_query.as_deref())).await {
 		Ok(Ok(Some(playlist))) => m3u8(playlist),
 		Ok(Ok(None)) | Err(_) => not_found(),
 		Ok(Err(crate::Error::RangeNotDurable | crate::Error::RangeUnavailable(_))) => range_not_satisfiable(),
@@ -363,7 +364,7 @@ async fn segment(
 /// Resolve a rendition, waiting for the catalog to populate.
 async fn rendition_for(server: &Server, broadcast: &str, kind: Kind, rendition: &str) -> Option<Arc<Rendition>> {
 	let broadcaster = server.broadcaster(broadcast).await?;
-	let _ = tokio::time::timeout(READY_TIMEOUT, broadcaster.ready()).await;
+	let _ = moq_clock::timeout(READY_TIMEOUT, broadcaster.ready()).await;
 	broadcaster.rendition(kind, rendition)
 }
 
@@ -426,6 +427,7 @@ fn server_error(err: crate::Error) -> Response {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 
@@ -872,9 +874,69 @@ mod tests {
 		wait_listed(&app, "/live/master.m3u8", "video/video0/media.m3u8").await;
 	}
 
+	/// A failed timeline answers every listing, a clip included, with an uncacheable error
+	/// rather than ending it as a complete recording or refusing the range.
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_timeline_answers_an_uncacheable_error() {
+		let origin = moq_tokio::origin::spawn();
+		let mut broadcast = origin.create_broadcast("live").expect("publish");
+		broadcast.announce(Default::default()).expect("announce");
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let name = hang::timeline::default_name("video0");
+		catalog
+			.mutate(|catalog| {
+				catalog.video.renditions.insert("video0".into(), video_config());
+				let mut archive = hang::catalog::Archive::new();
+				archive
+					.timelines
+					.insert("video0".into(), hang::catalog::Timeline::new(name.clone(), 1_000));
+				archive.store = Some("https://example.com/recording/".parse().unwrap());
+				catalog.archive = Some(archive);
+			})
+			.unwrap();
+		let track = broadcast
+			.create_track(name, moq_mux::timeline::Producer::info())
+			.unwrap();
+		let mut timeline = moq_mux::timeline::Producer::new(track.clone());
+		for sequence in 0..3 {
+			let start = hang::timeline::Position::group(sequence);
+			let end = hang::timeline::Position::group(sequence + 1);
+			let record = hang::timeline::Record::new(sequence, sequence * 2_000, 2_000, start, end);
+			timeline.push(&record).unwrap();
+		}
+
+		let config = crate::export::Config {
+			history: true,
+			..Default::default()
+		};
+		let app = Server::new(origin.consume(), config).router();
+		wait_listed(&app, "/live/video/video0/media.m3u8", ".2.m4s").await;
+		assert_eq!(status(&app, "/live/manifest.mpd").await, StatusCode::OK);
+
+		drop(timeline);
+		track.abort(moq_net::Error::SessionClosed).unwrap();
+		for uri in [
+			"/live/video/video0/media.m3u8",
+			"/live/video/video0/media.m3u8?start=0&end=2",
+			"/live/manifest.mpd",
+		] {
+			let deadline = tokio::time::Instant::now() + TIMEOUT;
+			let response = loop {
+				let response = oneshot(app.clone(), uri).await;
+				if response.status() != StatusCode::OK {
+					break response;
+				}
+				assert!(tokio::time::Instant::now() < deadline, "{uri} never failed");
+				tokio::time::sleep(Duration::from_millis(50)).await;
+			};
+			assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR, "{uri}");
+			assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store", "{uri}");
+		}
+	}
+
 	/// Only the URLs the renderers emit are served: the init under its hash, segments under the
-	/// current generation.
-	#[tokio::test]
+	/// current generation. Paused, since a refused lookup waits out [`READY_TIMEOUT`].
+	#[tokio::test(start_paused = true)]
 	async fn serves_only_versioned_media_urls() {
 		let origin = moq_tokio::origin::spawn();
 		let mut broadcast = origin.create_broadcast("live").expect("publish");
@@ -986,6 +1048,71 @@ mod tests {
 		pair.accept.abort();
 	}
 
+	/// The server watches its whole scope, so a lookup rides one request to the peer
+	/// rather than opening its own for every path an HTTP client names.
+	#[tokio::test]
+	async fn lookups_ride_the_servers_scope_watch() {
+		let pair = lite_pair().await;
+		let other = pair.pub_origin.create_broadcast("room/other").expect("other");
+		other.announce(Default::default()).expect("announce other");
+
+		let server = Server::new(pair.sub_origin.consume(), crate::export::Config::default());
+		let missing = tokio::time::timeout(TIMEOUT, server.broadcaster("room/missing"))
+			.await
+			.expect("lookup timed out");
+		assert!(missing.is_none());
+
+		// Nothing watches `room/other` on its own, yet the synced lookup already discovered it.
+		pair.sub_origin
+			.consume()
+			.request_broadcast("room/other", None)
+			.await
+			.expect("discovered through the scope watch");
+
+		drop(other);
+		pair.accept.abort();
+	}
+
+	/// A client asks its peer only about watched paths, so a sibling no listing covers is
+	/// asked about before it is requested, on every lite version, including those whose
+	/// announce stream marks no initial set.
+	#[tokio::test]
+	async fn a_sibling_resolves_through_a_client_session() {
+		for version in [
+			"moq-lite-01",
+			"moq-lite-02",
+			"moq-lite-03",
+			"moq-lite-04",
+			"moq-lite-05",
+			"moq-lite-06",
+			"moq-lite-07-wip",
+		] {
+			let pair = lite_pair_on(version, moq_net::origin::Config::default()).await;
+			let catalog = pair.pub_origin.create_broadcast("room/live").expect("catalog");
+			catalog.announce(Default::default()).expect("announce catalog");
+			let media = pair.pub_origin.create_broadcast("room/source").expect("media");
+			media.announce(Default::default()).expect("announce media");
+
+			let origin = pair.sub_origin.consume();
+			let broadcast = tokio::time::timeout(TIMEOUT, origin.routed_broadcast("room/live"))
+				.await
+				.expect("catalog resolve timed out")
+				.expect("catalog broadcast");
+			let source = moq_mux::Source::new(origin, broadcast);
+			let sibling = tokio::time::timeout(
+				TIMEOUT,
+				source.resolve(Some(&moq_net::path::Relative::new("./source")), None),
+			)
+			.await
+			.expect("sibling resolve timed out")
+			.unwrap_or_else(|err| panic!("{version}: sibling broadcast: {err}"));
+			assert!(!sibling.is_closed(), "{version}");
+
+			drop((catalog, media));
+			pair.accept.abort();
+		}
+	}
+
 	#[tokio::test]
 	async fn a_disconnected_sibling_publisher_answers_404() {
 		let pair = lite_pair().await;
@@ -1015,15 +1142,14 @@ mod tests {
 		let app = Server::new(pair.sub_origin.consume(), crate::export::Config::default()).router();
 		wait_listed(&app, "/room/live/video/video0/media.m3u8", "seg/656e3d1b.0.m4s").await;
 
-		let remote_media = tokio::time::timeout(
-			TIMEOUT,
-			pair.sub_origin.consume().request_broadcast("room/source", None),
-		)
-		.await
-		.expect("sibling resolve timed out")
-		.expect("sibling broadcast");
-		drop(media);
-		drop(media_broadcast);
+		// Waited on rather than requested once: a client only asks about what it watches.
+		let remote_media = tokio::time::timeout(TIMEOUT, pair.sub_origin.consume().routed_broadcast("room/source"))
+			.await
+			.expect("sibling resolve timed out")
+			.expect("sibling broadcast");
+		// Only the sibling goes: the catalog keeps listing the rendition, so the request
+		// reaches the media fetch rather than missing the rendition.
+		media_broadcast.close();
 		tokio::time::timeout(TIMEOUT, remote_media.closed())
 			.await
 			.expect("sibling close timed out");
@@ -1032,7 +1158,7 @@ mod tests {
 		assert_eq!(response.status(), StatusCode::NOT_FOUND);
 		assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
 
-		drop((catalog, catalog_broadcast));
+		drop((catalog, catalog_broadcast, media));
 		pair.accept.abort();
 	}
 }

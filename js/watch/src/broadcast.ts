@@ -352,12 +352,24 @@ export class Broadcast {
 			};
 		}
 
+		// The snapshot outlives a clean end of the catalog track, so it clears with this run.
+		effect.cleanup(() => this.#raw.set(undefined));
+
 		effect.spawn(async () => {
 			let status: Status = "offline";
+			let received = false;
+			let finished = false;
 			try {
 				for (;;) {
 					const update = await effect.race(fetchNext());
-					if (!update) break;
+					// A finished catalog only means no more edits. A finished broadcast keeps serving
+					// its tail until it closes or is withdrawn, which reruns this, so keep playing it.
+					// One that ended empty has nothing to play.
+					if (!update) {
+						finished = received;
+						break;
+					}
+					received = true;
 
 					console.debug("received catalog", format, this.in.name.peek(), update);
 
@@ -370,8 +382,10 @@ export class Broadcast {
 					console.debug("catalog subscription ended", this.in.name.peek(), err);
 				else console.error("error fetching catalog", this.in.name.peek(), err);
 			} finally {
-				this.#raw.set(undefined);
-				this.#out.status.set(status);
+				if (!finished) {
+					this.#raw.set(undefined);
+					this.#out.status.set(status);
+				}
 			}
 		});
 	}
@@ -423,8 +437,23 @@ export class Broadcast {
 	 * The consumer is scoped to the caller's `effect` (closed on its next run), so a
 	 * reference resolves lazily and reacts to `enabled` / connection / announcement
 	 * changes exactly like the catalog broadcast.
+	 *
+	 * `epoch` is the rendition's `epoch` field, the publisher instance the reference names.
+	 * Returns `undefined` while the followed broadcast is proven to be another instance, rather
+	 * than reading it. A route without an epoch cannot prove one, so there it is best effort.
 	 */
-	relativeBroadcast(effect: Effect, rel: Path.Relative | undefined): Moq.Broadcast.Consumer | undefined {
+	relativeBroadcast(
+		effect: Effect,
+		rel: Path.Relative | undefined,
+		epoch?: Moq.Epoch.Valid,
+	): Moq.Broadcast.Consumer | undefined {
+		const active = this.#relativeActive(effect, rel);
+		if (!active || epoch === undefined || active.epoch === undefined || active.epoch === epoch) return active;
+		console.warn("ignoring rendition: its broadcast serves another epoch", active.path, active.epoch, epoch);
+		return undefined;
+	}
+
+	#relativeActive(effect: Effect, rel: Path.Relative | undefined): Moq.Broadcast.Consumer | undefined {
 		const target = this.#relativeTarget(effect, rel);
 		if (!target) return undefined;
 		if (target.local) return effect.get(this.out.active);

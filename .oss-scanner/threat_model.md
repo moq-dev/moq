@@ -61,4 +61,4 @@ Not a vulnerability: bandwidth exhaustion by simply sending a lot of data within
 
 ## How reports and patches should look
 
-Give the smallest reproducer: a Rust test against the in-crate API or a sequence of wire bytes, plus the command that triggers it. Patches should fix the root cause and add a regression test, rather than add a retry, sleep, or timeout.
+Give the smallest reproducer: a Rust test against the in-crate API or a sequence of wire bytes, plus the command that triggers it. Patches should fix the root cause and test the edge case, rather than add a retry, sleep, or timeout.

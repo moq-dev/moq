@@ -77,7 +77,7 @@ idle_timeout = "10s"                 # Drop a connection after this long with no
 keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
-receive_window = 67108864            # Whole-connection window, in bytes. Default (64 MiB).
+receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
 stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
 send_window = 16777216               # Unacknowledged outgoing data, in bytes. Default (16 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
@@ -96,10 +96,16 @@ QUIC uses the smaller of the two endpoints' values, so this also bounds the
 other end. Keep `keep_alive` under a third of it.
 
 Raise the receive windows when a fat, long path idles below the link rate. The
-64 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
-how much unread data one peer can make the relay buffer. Keep
-`stream_receive_window` well under it so one slow group cannot starve the
-connection.
+128 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
+how much unread data and incomplete messages one peer can make the relay
+buffer. It has to fit the largest message, just over 64 MiB, so a smaller
+value, here or in `[peer.quic]`, is refused at startup. When incomplete
+messages fill the window, the relay cancels the least urgent stream: the
+lowest subscription priority, then the group its subscription would deliver
+last. Over iroh the window bounds only
+unread data, and over WebSocket or TCP nothing bounds incomplete messages.
+`stream_receive_window` only paces one stream: its credit returns as bytes are
+read, whether or not their message is complete.
 
 ## \[session] and \[peer]
 
@@ -377,8 +383,10 @@ ALPN because extended CONNECT is disabled. A later WebSocket upgrade on the same
 keep-alive connection joins the drain when its headers arrive. The internal
 listener is unaffected.
 
-The relay exits as soon as every admitted connection has left, when the window
-ends, or immediately on a second signal. Once it commits to exit, WebSocket
+The relay exits as soon as every admitted connection has left, or immediately on
+a second signal. When the window ends, it stops waiting for connections still
+pending and exits once every session it closed has reported its `end` to the
+auth server, each report bounded by that server's request timeout. Once it commits to exit, WebSocket
 upgrades receive 503; plain HTTP is served until the public listener stops.
 `0` skips the GOAWAY.
 Only moq-lite-04+ and moq-transport clients act on a GOAWAY; older ones are

@@ -109,6 +109,7 @@ Share `moq::MediaTimebase::init(broadcast)` through `ContainerInit` when several
 use one source timeline; omitting it keeps an independent offset. A timebase belongs to
 its broadcast and does not keep it open. `MediaContainerProducer` takes chunks split
 anywhere, so a raw byte stream needs no other importer.
+`moq::ContainerFormat::kFmp4` splits each fragment into one frame per sample; `kCmaf` republishes it whole.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.
@@ -200,6 +201,10 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
+## Authorization
+
+On `moq-lite-07-wip` (opt in with `ClientConfig::versions`) and on moq-transport draft-17+ with the [MoQ Auth extension](/draft/moq-auth), `session->auth()->grant()` is the `Grant` the relay sent back, empty until it answers and while a client session reconnects; `grant_changed()` waits for the next one. `add(token)` presents a fresh token without reconnecting and resolves to an `AuthToken` whose grant joins the union until `cancel()`; it is presented again on every reconnect. A refusal resolves to an `Error` carrying the relay's code.
+
 ## Stats
 
 `session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. While a client session reconnects, `session->failure()` returns why as a `moq::Error`, and while its first `connect` is still retrying, `client->failure()` does.
@@ -210,6 +215,13 @@ Obtain a dynamic track request’s `demand()` before accepting it to watch subsc
 Application delivery requires explicitly selecting `moq-lite-07-wip` on both
 peers; older Lite versions (including default lite-06) and IETF wait only for
 transport ACKs. Finish or abort live tracks first.
+
+To end a broadcast cleanly, finish every track, then call `broadcast->finish()`.
+The returned `moq::BroadcastFinish` keeps the broadcast announced and serving the
+finished tracks for `linger_us()`, their longest max age, so a subscriber still
+catching up can drain them. `finish->wait()` resolves once the linger passes, and
+`finish->close()` closes the broadcast at once, resolving the wait.
+`broadcast->close()` stays the abrupt end.
 
 `moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call

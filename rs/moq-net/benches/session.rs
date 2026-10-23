@@ -16,6 +16,11 @@
 //! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
 //! `session_delivery_group_cost` sweeps publishers and viewers independently for SUBSCRIBE
 //! and FETCH; its constrained cases release held streams only after a real blocked write.
+//! A one-relay lite FETCH fixture asserts one upstream FETCH per group during setup.
+//! `session_delivery_credit` grants a viewer one uni stream at a time, swept over its
+//! subscriptions and the backlog each holds, so every group waits for a stream grant. A
+//! publisher that parks state per backlogged group pays for it on each grant, which shows
+//! as a slope over the backlog.
 //! `SESSION_EXPIRY_ONLY=1` uses the standalone 30s-expiry pool and reports groups
 //! written plus charged cache bytes every 10s during long profiling runs. Each round
 //! advances the cache clock by a second, so the expiry window spans 30 rounds.
@@ -111,6 +116,10 @@ struct Shape {
 	history: usize,
 	/// Bytes queued before a mock stream applies backpressure.
 	window: usize,
+	/// Group streams a viewer's relay may have open toward it at once.
+	credit: Option<usize>,
+	/// Publish compressed groups and exercise negotiated versus plain fallback egress.
+	compress: bool,
 	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
 }
@@ -130,7 +139,9 @@ impl Shape {
 		burst: 1,
 		history: 1,
 		window: 1024 * 1024,
+		credit: None,
 		fetch: false,
+		compress: false,
 	};
 
 	/// What each viewer subscribes with: a burst is a backlog, which the default
@@ -154,6 +165,11 @@ impl Shape {
 	}
 
 	fn id(&self, version: &str) -> String {
+		// The credit sweep names only what it varies: the full form passes Criterion's
+		// 100-character title limit, which truncates and renumbers it.
+		if let Some(credit) = self.credit {
+			return format!("{version}/watch={}/burst={}/credit={credit}", self.watch, self.burst);
+		}
 		format!(
 			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}{}{}",
 			self.relays,
@@ -305,6 +321,7 @@ fn path(broadcast: usize) -> String {
 struct Cluster {
 	version: Version,
 	window: usize,
+	credit: Option<usize>,
 	relays: Vec<origin::Producer>,
 	/// One track per broadcast, indexed like [`path`].
 	tracks: Vec<track::Producer>,
@@ -321,6 +338,7 @@ impl Cluster {
 		let mut this = Self {
 			version: version.parse().unwrap(),
 			window: shape.window,
+			credit: shape.credit,
 			relays: Vec::new(),
 			tracks: Vec::new(),
 			_broadcasts: Vec::new(),
@@ -359,7 +377,11 @@ impl Cluster {
 				let broadcast = origin
 					.publish(path(publisher * shape.broadcasts + index), Default::default())
 					.unwrap();
-				this.tracks.push(broadcast.create_track(TRACK, timed()).unwrap());
+				this.tracks.push(
+					broadcast
+						.create_track(TRACK, timed().with_compress(shape.compress))
+						.unwrap(),
+				);
 				this._broadcasts.push(broadcast);
 			}
 
@@ -393,6 +415,9 @@ impl Cluster {
 		let (origin, pool) = self.origin(CLIENT_CACHE);
 		let mut options = MockConnectOptions::new(self.version);
 		options.transport.stream_buffer = self.window;
+		// Draft 22, the one IETF version here, keeps its SETUP stream open beside the groups.
+		options.transport.max_concurrent_uni_streams =
+			self.credit.map(|credit| credit + usize::from(self.version.is_ietf()));
 		// Hidden included, as the dash's `.stats/` scope sees its subtree.
 		options.server_publish = Some(self.relays[relay].consume().with_hidden(true));
 		options.client_subscribe = Some(origin.clone());
@@ -551,6 +576,22 @@ impl Room {
 				blocked > blocked_before,
 				"the constrained fixture must exercise flow control"
 			);
+		}
+		if shape.fetch && shape.relays == 1 && room.cluster.version.is_lite() {
+			let upstream_fetches = room
+				.cluster
+				._pairs
+				.iter()
+				.map(|pair| {
+					// Lite FETCH's stream type is 3, encoded in one byte.
+					pair.server_transport
+						.bidi_types()
+						.into_iter()
+						.filter(|kind| *kind == 3)
+						.count()
+				})
+				.sum::<usize>();
+			assert_eq!(upstream_fetches, room.groups, "one upstream FETCH per written group");
 		}
 		room
 	}
@@ -1025,14 +1066,23 @@ impl ChurnRoom {
 	}
 
 	/// Open and close one subscription per iteration, round-robin over the sessions.
-	async fn measure(&self, iters: u64) -> Duration {
+	async fn measure(&mut self, iters: u64) -> Duration {
 		let start = Instant::now();
 		for iter in 0..iters as usize {
 			let session = iter % self.broadcasts.len();
 			let track = self.broadcasts[session].track(&format!("churn{session}")).unwrap();
-			let subscriber = track.subscribe(None).await.unwrap();
-			// The relay saw the request, rather than a cached track answering it locally.
-			support::wanted(self.churn[session].demand()).await.unwrap();
+			let mut subscriber = track.subscribe(None).await.unwrap();
+			// Keep the reader polled while its per-route subscription resolves. No
+			// groups are produced here, so this starts demand without consuming data.
+			kio::wait(|waiter| {
+				assert!(subscriber.poll_recv_group(waiter).is_pending());
+				while std::task::ready!(self.churn[session].poll_subscription_changed(waiter))
+					.unwrap()
+					.is_none()
+				{}
+				std::task::Poll::Ready(())
+			})
+			.await;
 			drop(subscriber);
 			drop(track);
 			support::unwanted(self.churn[session].demand()).await.unwrap();
@@ -1190,6 +1240,20 @@ fn session(c: &mut Criterion) {
 
 	delivery(
 		c,
+		"compression",
+		[1, 16].into_iter().flat_map(|publishers| {
+			[1, 16].map(move |viewers| Shape {
+				publishers,
+				viewers,
+				compress: true,
+				frame: 1024,
+				..base
+			})
+		}),
+	);
+
+	delivery(
+		c,
 		"publishers",
 		[1, 16, 256].map(|publishers| Shape { publishers, ..base }),
 	);
@@ -1247,6 +1311,22 @@ fn session(c: &mut Criterion) {
 			watch,
 			burst,
 			..base
+		}),
+	);
+	// The same backlog behind one uni stream grant at a time.
+	delivery(
+		c,
+		"credit",
+		[1, 16, 64].into_iter().flat_map(|watch| {
+			[1, 16, 64].map(move |burst| Shape {
+				publishers: 1,
+				broadcasts: 64,
+				viewers: 1,
+				watch,
+				burst,
+				credit: Some(1),
+				..base
+			})
 		}),
 	);
 	delivery(

@@ -28,6 +28,11 @@ connection makes, with no re-add or re-announce from the application.
   refusal and a final stop on `Unauthorized`). With the handle in moq-net,
   `Connection::auth()` returns that `moq_net::auth::Handle`, and
   `connection::auth::{Handle, Auth}` go away.
+- Decided 2026-10-20 (maintainer): a handle backs one active session at a
+  time, plus the predecessors it is draining, matching the reconnect code's
+  single active generation. Attaching a handle to a second concurrent session
+  fails loudly; independent concurrent sessions use separate handles, so an
+  `Auth` never has to pick between two live grants.
 - An `Auth`'s `grant()` and `closed()` follow the session that is live now: the
   grant clears while disconnected and returns once the new session's peer
   answers, and `closed()` settles only on a refusal or when the handle ends.
@@ -47,4 +52,4 @@ none.
 ## Related
 
 - [#5695](https://github.com/moq-dev/moq/pull/5695) - adds `Route::auth`, bound to one session's handle
-- [Bindings](/quest/m1/auth/bindings.md) - exposes `Connection::auth()` through moq-ffi, so it should follow this shape
+- `rs/moq-ffi/src/auth.rs` - wraps both the session and the connection handle behind one `MoqAuth`; collapse it onto this shape

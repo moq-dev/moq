@@ -21,8 +21,8 @@ copy's first one.
 
 Found while building SUBSCRIBE_ALL
 ([moq-dev/moq#5931](https://github.com/moq-dev/moq/pull/5931)), which
-patched it for listed tracks only by sending the resolved start as an
-absolute floor (`listed_demand` in `f074d09e7`).
+closed unmerged; its listed-track workaround (sending the resolved start as
+an absolute floor) never reached main.
 
 Decided by the maintainer on 2026-10-19: re-offer when the max age widens,
 with no wire change.
@@ -53,9 +53,9 @@ with no wire change.
   budget covers, in the subscription's order: newest first when descending
   (the default, so congestion sheds backlog rather than the live edge), and
   lowest first only when ascending. This extends the re-offer
-  [moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929) adds for a
+  [moq-dev/moq#5929](https://github.com/moq-dev/moq/pull/5929) landed for a
   widened range (a group outside the ranges is parked and re-offered when they
-  widen); land after it and reuse that path rather than a second one. Only
+  widen); reuse that path rather than a second one. Only
   groups this cursor never delivered come back, keeping #5929's rule that
   nothing already served goes out twice; a group already delivered and since
   evicted downstream is a cache miss, which the relay fills upstream by range
@@ -170,10 +170,9 @@ max age or the range.
 
 ## Required
 
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - #5929 lands the re-offer and serving path and the range miss fill this reuses
+- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the range miss fill this reuses, beside #5929's landed re-offer and serving path
 
 ## Related
 
-- [Archive producer](/quest/m1/archive/producer.md) - its resume floor crosses relays that viewers may have warmed
 - [Drop set](/quest/m1/drop-set.md) - closes the gap this leaves for groups already reported dropped
 - [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - the JS byte bound for groups and the cursor runs between them

@@ -6,7 +6,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker, ready},
@@ -193,8 +193,8 @@ impl Connecting {
     /// the endpoint is bound to a wildcard address like `0.0.0.0` or `::`.
     ///
     /// This will return `None` for clients, or when the platform does not expose this
-    /// information. See [`quinn_udp::RecvMeta::dst_ip`](moq_sock::udp::RecvMeta::dst_ip) for a list of
-    /// supported platforms when using [`quinn_udp`](udp) for I/O, which is the default.
+    /// information. See [`moq_sock::udp::RecvMeta::dst_ip`] for a list of
+    /// supported platforms when using [`moq_sock::udp`] for I/O, which is the default.
     ///
     /// Will panic if called after `poll` has returned `Ready`.
     pub fn local_ip(&self) -> Option<IpAddr> {
@@ -284,9 +284,12 @@ impl Future for ConnectionDriver {
         conn.forward_app_events(&self.conn.shared);
 
         // Every datagram sent or received passes through this poll.
-        let stats = conn.inner.stats();
-        self.conn.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
-        self.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
+        #[cfg(feature = "net")]
+        {
+            let stats = conn.inner.stats();
+            self.conn.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
+            self.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
+        }
 
         if !conn.inner.is_drained() {
             if keep_going {
@@ -618,8 +621,8 @@ impl Connection {
     /// the endpoint is bound to a wildcard address like `0.0.0.0` or `::`.
     ///
     /// This will return `None` for clients, or when the platform does not expose this
-    /// information. See [`quinn_udp::RecvMeta::dst_ip`](moq_sock::udp::RecvMeta::dst_ip) for a list of
-    /// supported platforms when using [`quinn_udp`](udp) for I/O, which is the default.
+    /// information. See [`moq_sock::udp::RecvMeta::dst_ip`] for a list of
+    /// supported platforms when using [`moq_sock::udp`] for I/O, which is the default.
     pub fn local_ip(&self) -> Option<IpAddr> {
         self.0.state.lock("local_ip").inner.local_ip()
     }
@@ -639,7 +642,21 @@ impl Connection {
         self.0.state.lock("stats").inner.stats()
     }
 
+    /// Whether the connection has freed the send stream's state
+    #[cfg(test)]
+    pub(crate) fn send_stream_freed(&self, id: StreamId) -> bool {
+        let mut state = self.0.state.lock("send_stream_freed");
+        state.inner.send_stream(id).stopped().is_err()
+    }
+
+    /// How many streams have `SendStream::stopped` waiters registered, to check none leak
+    #[cfg(test)]
+    pub(crate) fn stopped_waiters(&self) -> usize {
+        self.0.state.lock("stopped_waiters").stopped.len()
+    }
+
     /// The wire counters the driver updates as it sends and receives.
+    #[cfg(feature = "net")]
     pub(crate) fn wire(&self) -> moq_net::transport::Wire {
         self.0.shared.wire.clone()
     }
@@ -1069,6 +1086,9 @@ pub(crate) struct Shared {
     /// Number of live handles that can used to initiate or handle I/O; excludes the driver
     ref_count: AtomicUsize,
     /// Refreshed by every driver poll, so readers never wake the driver to sample.
+    ///
+    /// Only moq-net reads them, so a driver-only build skips the per-poll stats.
+    #[cfg(feature = "net")]
     wire: moq_net::transport::Wire,
 }
 
@@ -1085,7 +1105,7 @@ pub(crate) struct State {
     endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
     pub(crate) blocked_writers: FxHashMap<StreamId, Waker>,
     pub(crate) blocked_readers: FxHashMap<StreamId, Waker>,
-    pub(crate) stopped: FxHashMap<StreamId, Arc<Notify>>,
+    pub(crate) stopped: FxHashMap<StreamId, Arc<StopWaiters>>,
     /// Always set to Some before the connection becomes drained
     pub(crate) error: Option<ConnectionError>,
     sender: Pin<Box<dyn UdpSender>>,
@@ -1272,9 +1292,9 @@ impl State {
                     // Might mean any number of streams are ready, so we wake up everyone
                     shared.stream_budget_available[dir as usize].notify_waiters();
                 }
-                Stream(StreamEvent::Finished { id }) => wake_stream_notify(id, &mut self.stopped),
-                Stream(StreamEvent::Stopped { id, .. }) => {
-                    wake_stream_notify(id, &mut self.stopped);
+                Stream(StreamEvent::Finished { id }) => self.resolve_stopped(id, None),
+                Stream(StreamEvent::Stopped { id, error_code }) => {
+                    self.resolve_stopped(id, Some(error_code));
                     wake_stream(id, &mut self.blocked_writers);
                 }
                 PathUpdated => {
@@ -1365,6 +1385,14 @@ impl State {
         self.close(0u32.into(), Bytes::new(), shared);
     }
 
+    /// Resolves the stream's `stopped` waiters with the peer's STOP_SENDING code, or `None`
+    pub(crate) fn resolve_stopped(&mut self, id: StreamId, outcome: Option<VarInt>) {
+        if let Some(waiters) = self.stopped.remove(&id) {
+            let _ = waiters.outcome.set(outcome);
+            waiters.notify.notify_waiters();
+        }
+    }
+
     pub(crate) fn check_0rtt(&self) -> Result<(), ()> {
         if self.inner.is_handshaking()
             || self.inner.accepted_0rtt()
@@ -1404,16 +1432,19 @@ fn wake_all(wakers: &mut FxHashMap<StreamId, Waker>) {
     wakers.drain().for_each(|(_, waker)| waker.wake())
 }
 
-fn wake_stream_notify(stream_id: StreamId, wakers: &mut FxHashMap<StreamId, Arc<Notify>>) {
-    if let Some(notify) = wakers.remove(&stream_id) {
-        notify.notify_waiters()
-    }
+/// The `SendStream::stopped` futures waiting on one stream
+#[derive(Debug, Default)]
+pub(crate) struct StopWaiters {
+    pub(crate) notify: Notify,
+    /// What a STOP_SENDING, a delivered finish, or a local reset settled, kept here because the
+    /// stream may be freed before a woken waiter polls. Once set, nothing later counts.
+    pub(crate) outcome: OnceLock<Option<VarInt>>,
 }
 
-fn wake_all_notify(wakers: &mut FxHashMap<StreamId, Arc<Notify>>) {
+fn wake_all_notify(wakers: &mut FxHashMap<StreamId, Arc<StopWaiters>>) {
     wakers
         .drain()
-        .for_each(|(_, notify)| notify.notify_waiters())
+        .for_each(|(_, waiters)| waiters.notify.notify_waiters())
 }
 
 /// Errors that can arise when sending a datagram

@@ -16,6 +16,19 @@ The MoQ source loads and plays supported video without FFmpeg's video libraries 
 
 The source consumes the `video` namespace decoder rather than the removed decoder on `BroadcastConsumer`.
 
+The 2026-10-22 release audit reproduced two inherited correctness defects in
+the current FFmpeg path at main 1d43c096e0. `moq_source_decode_frame` assigns
+the current input packet timestamp to a decoded output, even when B-frame
+reordering returns an older picture. The clean media EOF callback also
+returns without draining delayed pictures. An algorithm-level reproduction
+using real libavcodec and 12 H.264 B-frames produced 10 pictures, all with
+incorrect assigned timestamps; explicit EOF draining recovered two omitted
+pictures. This was not a running OBS integration test. Preserve decoded
+output timestamps and drain clean EOF in the replacement, and cover both
+with reordered video. Track these release concerns here rather than creating
+a competing decoder rewrite; this evidence does not make the entire GPU
+replacement a prerequisite for the release.
+
 ## Related
 
 - [VP8/VP9 in OBS](/quest/m2/obs-moq-video/vpx-obs.md) - restores deferred codec coverage once this lands

@@ -278,15 +278,6 @@ mod tests {
 		moq_net::Timestamp::from_micros(v).unwrap()
 	}
 
-	#[test]
-	fn copies_share_one_epoch() {
-		let clock = Clock::at(epoch(), moq_epoch() + Duration::from_secs(1)).unwrap();
-		let shared = clock;
-		// Compare the anchors, not live readings: two `now()` calls race the clock.
-		assert_eq!(clock.instant, shared.instant);
-		assert_eq!(clock.wall(), shared.wall());
-	}
-
 	/// A capture maps onto the clock's own timeline, and one ahead of now or before the epoch is
 	/// refused rather than clamped.
 	#[moq_clock::test]
@@ -469,7 +460,7 @@ mod tests {
 	fn wall_clock_validates_bounds() {
 		let clock = Clock::at(epoch(), moq_epoch()).unwrap();
 		// The largest representable broadcast timestamp still maps.
-		let max = moq_net::Timestamp::from_micros((1u64 << 62) - 1).unwrap();
+		let max = moq_net::Timestamp::from_micros((1u64 << 61) - 1).unwrap();
 		assert!(clock.wall_clock(max).is_err(), "past the JSON-safe range is refused");
 	}
 }

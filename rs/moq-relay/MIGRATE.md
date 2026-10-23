@@ -5,6 +5,35 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### `receive_window` has a floor (#5878)
+
+The `[quic]` and `[peer.quic]` `receive_window` must be at least 67108880 bytes (64 MiB plus 16), or the relay refuses to start; the `[quic]` default is now 128 MiB.
+Raise an explicit value below that, or remove it.
+
+### WebSocket clients must offer a QMux subprotocol (#6231)
+
+The relay answers a WebSocket upgrade with 400 when its `Sec-WebSocket-Protocol` offers none of the relay's QMux subprotocols, instead of falling back to the legacy `webtransport` format.
+Upgrade any client that still speaks only `webtransport` over WebSocket before the relay.
+
+### io\_uring workers start serving separately (#6245)
+
+`uring::Workers::serve(cluster, auth, shutdown, sessions)` is now `spawn` with the same arguments, which sets every worker up without accepting, followed by `serve()`, which starts them accepting.
+Install anything that must be in place before the first session (`Relay::run` installs its signal handlers) between the two.
+
+### `supervise` takes a `Serving` guard (#6144)
+
+`moq_relay::supervise` takes the `shutdown::Serving` from `Observer::serve` in place of the `Observer`.
+Take it before the session's SETUP reply, and bound that reply with `Observer::until_deadline`, so the drain waits for the session to report its end but not for a stalled reply:
+
+```rust
+let serving = shutdown.serve();
+let (session, driver) = shutdown
+	.until_deadline(request.ok())
+	.await
+	.context("the SETUP reply was still pending at the drain deadline")??;
+moq_relay::supervise(session, lease, serving, None).await
+```
+
 ### `cluster.lan.secret` is a file path only (#5910)
 
 `--cluster-lan-secret`, `MOQ_CLUSTER_LAN_SECRET`, and `[cluster.lan] secret` no longer accept 64 hex characters inline.

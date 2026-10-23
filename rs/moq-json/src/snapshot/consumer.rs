@@ -19,7 +19,11 @@ pub struct Config {
 	pub compression: Compression,
 
 	/// Maximum bytes in an inflated frame or the compact JSON of the reconstructed value.
-	/// Unset preserves the DEFLATE decoder's default frame cap and leaves state size unlimited.
+	///
+	/// Unset, the group budget is the only bound: a compressed group inflates to at most
+	/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES), the most a plain one carries, so the
+	/// reconstructed value costs no more than an uncompressed track's. Set it to hold a smaller
+	/// document, at the cost of re-measuring the value after every delta.
 	pub max_size: Option<usize>,
 }
 
@@ -124,12 +128,17 @@ impl<T: DeserializeOwned> Consumer<T> {
 					advanced = Some(frame.timestamp);
 				}
 				Poll::Ready(Ok(None)) => self.group = None,
-				Poll::Ready(Err(
-					err @ (moq_net::Error::Old
-					| moq_net::Error::Evicted
-					| moq_net::Error::Lagged
-					| moq_net::Error::GroupTooLarge),
-				)) => {
+				// Judged by stream code, so a group the publisher reset as old is the same loss as
+				// one this side dropped.
+				Poll::Ready(Err(err))
+					if matches!(
+						moq_net::StreamError::from(&err),
+						moq_net::StreamError::Old
+							| moq_net::StreamError::Evicted
+							| moq_net::StreamError::TooFarBehind
+							| moq_net::StreamError::GroupTooLarge
+					) =>
+				{
 					// A later group starts a fresh snapshot and compression window.
 					tracing::warn!(track = self.track.name(), group = group.sequence, error = ?err,
 						"snapshot group lost; waiting for a newer one");
@@ -175,8 +184,10 @@ mod timestamps {
 			let mut subscription = subscriber.subscription();
 			subscription.max_delay = std::time::Duration::MAX;
 			subscriber.update(subscription).unwrap();
-			let mut config = crate::snapshot::Config::default().with_delta_ratio(100);
-			config.compression = compression;
+			let config = crate::snapshot::Config {
+				compression,
+				..Default::default()
+			};
 			let mut producer = crate::snapshot::Producer::new(track, config.clone());
 			let mut consumer = Consumer::<serde_json::Value>::new(
 				subscriber,
@@ -237,7 +248,7 @@ mod timestamps {
 		let subscriber = track.subscribe(None);
 		let config = crate::snapshot::Config {
 			compression: crate::Compression::Deflate,
-			..crate::snapshot::Config::default().with_delta_ratio(100)
+			..crate::snapshot::Config::default()
 		};
 		let mut producer = crate::snapshot::Producer::new(track, config.clone());
 		let mut consumer = Consumer::<serde_json::Value>::new(

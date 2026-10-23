@@ -6,6 +6,15 @@ WORKSPACE=$(cd "$DIR/../.." && pwd)
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
 source "$DIR/../lib/harness.sh"
 harness_begin wire-compat "just test wire-compat$(harness_argv "$@")"
+# The CI report's records (see harness_result). The token and catalog lanes are known up
+# front; the session cells depend on the resolved releases, so they are recorded as they run.
+record() {
+    harness_result "$1" suite=wire-compat "${@:2}"
+}
+for source in current released js-current js-released; do
+    record "not run" case=token publisher="$source"
+    record "not run" case=catalog/container publisher="$source"
+done
 # --remeasure runs the cells planned breaks cover, then rewrites planned-breaks.json
 # from the result: re-pinned to these releases if a cell still fails, else deleted.
 remeasure=
@@ -97,6 +106,7 @@ for source in current released js-current js-released; do
     bun "$DIR/compat/client.ts" verify "$HARNESS_RUN/key.jwk" "$HARNESS_RUN/$source.jwt"
     bun "$HARNESS_RUN/js/client.ts" verify "$HARNESS_RUN/key.jwk" "$HARNESS_RUN/$source.jwt"
     echo "PASS token signed by $source"
+    record pass case=token publisher="$source"
 done
 
 # Exercise the actual hang library release, independently of the version bundled
@@ -127,6 +137,7 @@ for source in current released js-current js-released; do
     bun "$DIR/compat/client.ts" decode "$HARNESS_RUN/$source.catalog" "$HARNESS_RUN/$source.frame"
     bun "$HARNESS_RUN/js/client.ts" decode "$HARNESS_RUN/$source.catalog" "$HARNESS_RUN/$source.frame"
     echo "PASS catalog/container written by $source"
+    record pass case=catalog/container publisher="$source"
 done
 
 # Every session cell runs, so one nightly names every break; the run fails at the
@@ -137,18 +148,27 @@ ran=0
 skipped=0
 : >"$HARNESS_RUN/measured"
 cell() {
-    local lane="$1" version="$2" relay_source="$3" source="$4" planned result
+    local lane="$1" version="$2" relay_source="$3" source="$4" planned result reader started=$SECONDS
     shift 4
     local name="$version relay=$relay_source publisher=$source $lane"
+    # A control reads its own source's output; every other cell reads the opposite one's.
+    case "$lane:$source" in
+        media-control:* | *:both) reader="$source" ;;
+        *:current) reader=released ;;
+        *) reader=current ;;
+    esac
+    local cell=(case="$lane relay=$relay_source" publisher="$source" subscriber="$reader" transport=auto version="$version")
     planned=$(bun "$DIR/compat/resolve.ts" skip "$DIR/compat/planned-breaks.json" "$lane" "$version" "$relay_source" "$source")
     if [[ -n "$planned" && -z "$remeasure" ]]; then
         echo "SKIP $name: planned break $planned"
+        record skip "${cell[@]}" detail="planned break $planned"
         skipped=$((skipped + 1))
         return
     fi
     ran=$((ran + 1))
     echo "=== $name${planned:+ (planned break $planned)} ==="
-    if "$@"; then
+    # The nested interop.sh runs are this cell, not cases of their own.
+    if (unset MOQ_TEST_RESULTS && "$@"); then
         echo "PASS $name"
         result=pass
     else
@@ -156,6 +176,9 @@ cell() {
         result=fail
         [[ -n "$planned" ]] || failed+=("$name")
     fi
+    cell+=(seconds=$((SECONDS - started)))
+    [[ -z "$planned" ]] || cell+=(detail="planned break $planned")
+    record "$result" "${cell[@]}"
     [[ -z "$planned" ]] || printf '%s\t%s\t%s\n' "$planned" "$result" "$name" >>"$HARNESS_RUN/measured"
 }
 

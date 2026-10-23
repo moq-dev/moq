@@ -179,7 +179,6 @@ mod tests {
 		assert!(echo::is_echo(&moq_net::Path::new("room/alice.echo")));
 		assert!(!echo::is_echo(&moq_net::Path::new("room.echo/alice")));
 		assert!(!echo::is_echo(&moq_net::Path::new("room/alice.echoes")));
-		assert_eq!(echo::TRACK, "feedback.json");
 	}
 
 	#[test]

@@ -12,7 +12,17 @@
 }:
 
 {
-  imports = [ (modulesPath + "/profiles/qemu-guest.nix") ];
+  imports = [
+    (modulesPath + "/profiles/qemu-guest.nix")
+    ./image.nix
+  ];
+
+  assertions = [
+    {
+      assertion = resources.disk >= 8;
+      message = "Runner guests and migrations need at least 8 GiB for the base image.";
+    }
+  ];
 
   networking = {
     hostName = "github-runner";
@@ -31,7 +41,11 @@
     ];
   };
   boot = {
-    loader.grub.device = "/dev/vda";
+    loader = {
+      grub.enable = false;
+      systemd-boot.enable = true;
+      efi.canTouchEfiVariables = false;
+    };
     kernelParams = [ "console=ttyS0" ];
     kernelModules = [ "qemu_fw_cfg" ];
     growPartition = true;
@@ -41,18 +55,31 @@
   };
   fileSystems."/" = {
     device = "/dev/disk/by-label/nixos";
-    fsType = "ext4";
+    fsType = "xfs";
     autoResize = true;
+  };
+  fileSystems."/boot" = {
+    device = "/dev/disk/by-label/ESP";
+    fsType = "vfat";
+    options = [ "umask=0077" ];
   };
   system.stateVersion = "26.05";
 
-  system.build.image = import (modulesPath + "/../lib/make-disk-image.nix") {
-    inherit config lib pkgs;
-    format = "qcow2";
-    partitionTableType = "legacy";
-    diskSize = "auto";
-    additionalSpace = "1G";
-    copyChannel = false;
+  # Build the offline migration tool with the same image and disk budget.
+  system.build.runner-migrate = pkgs.writeShellApplication {
+    name = "runner-migrate";
+    runtimeInputs = with pkgs; [
+      coreutils
+      gptfdisk
+      libguestfs-with-appliance
+      psmisc
+      qemu_kvm
+    ];
+    text = ''
+      runner_image=${config.system.build.image}/${config.image.fileName}
+      runner_capacity=${toString resources.disk}G
+      ${builtins.readFile ./migrate.sh}
+    '';
   };
 
   services.openssh = {
@@ -64,6 +91,12 @@
     };
   };
   programs.nix-ld.enable = true;
+
+  # Without swap, the kernel's OOM killer waits until no page cache is left to
+  # evict, so a job that nearly fills memory instead re-reads its binaries and
+  # inputs from disk indefinitely. earlyoom kills the largest process once
+  # available memory drops below 10%.
+  services.earlyoom.enable = true;
 
   nix = {
     settings = {

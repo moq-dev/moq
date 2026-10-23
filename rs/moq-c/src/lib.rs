@@ -1,3 +1,5 @@
+#![warn(missing_docs)]
+
 //! C bindings for [`moq_net`].
 //!
 //! Provides a C-compatible API for real-time pub/sub over QUIC.
@@ -49,4 +51,5 @@ pub(crate) use session::*;
 pub(crate) use state::*;
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod test;

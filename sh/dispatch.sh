@@ -56,9 +56,10 @@ declare -A scope=(
     # The JS tests also read Rust's shared JSON vectors; sh/js/workspace.py
     # fails a check that reads a cross-tree input this pattern misses.
     # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
-    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$)'
+    # Root Nix inputs own the browser version every npm Playwright pin matches.
+    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)'
     # Workers with lockfiles outside the Bun workspace.
-    [workers]='^(infra/apt/|infra/rpm/|infra/moq-sh/|demo/pub/|sh/js/workers\.sh$)'
+    [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
     [rs]='^(rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
@@ -89,10 +90,12 @@ declare -A scope=(
     # `obs check` compares the OBS pinned in buildspec.json, flake.nix, and
     # nixpkgs, and the last moves on a flake.lock bump alone.
     [obs]='^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)'
-    [flake]='(^rs/|^Cargo\.(toml|lock)$|^flake\.lock$|\.nix$)'
+    # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
+    # and its own modules and test helpers; those still gate the full flake.
+    [flake]='(^rs/.*\.(toml|txt|ptx|in)$|^Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^flake\.lock$|^nix/|\.nix$)'
     # ts.yml's crate filters against the closure test/ts/run.sh builds, which
     # moves only with a manifest, the lockfile, or the harness's packages.
-    [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/ts\.yml$|sh/gh/ts-paths\.py$)'
+    [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'
     [markdown]=''
     [shell]=''
     [toml]=''
@@ -237,7 +240,42 @@ files() {
     git ls-files -z --cached --others --exclude-standard -- "$@"
 }
 
+# Each phase's wall time, printed when the run ends, pass or fail, so the slow
+# module of a check or a queue run is named without reading log timestamps.
+# GitHub Actions also gets it in the job summary.
+labels=()
+seconds=()
+current=
+began=0
+begin() {
+    current=$1
+    began=$SECONDS
+}
+finish() {
+    [[ -n "$current" ]] || return 0
+    labels+=("$current${1:+ ($1)}")
+    seconds+=("$((SECONDS - began))")
+    current=
+}
+report() {
+    finish failed
+    ((${#labels[@]})) || return 0
+    echo "$action: seconds per module" >&2
+    for i in "${!labels[@]}"; do
+        printf '%6d  %s\n' "${seconds[$i]}" "${labels[$i]}" >&2
+    done
+    [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
+    {
+        printf '| %s module | Seconds |\n| --- | ---: |\n' "$action"
+        for i in "${!labels[@]}"; do
+            printf '| %s | %d |\n' "${labels[$i]}" "${seconds[$i]}"
+        done
+    } >>"$GITHUB_STEP_SUMMARY"
+}
+trap 'report; rm -f "$changed" "$js_changed"' EXIT
+
 for module in "${selected[@]}"; do
+    begin "$verb $module"
     case "$verb:$module" in
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
@@ -245,7 +283,10 @@ for module in "${selected[@]}"; do
         # The preamble keeps docs and target-specific lints; the test build
         # below enforces default-feature clippy without a second compile.
         check:rs) just rs lint-changed "$rs_list" ;;
-        check:bench) cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring ;;
+        check:bench)
+            python3 bench/compare.test.py
+            cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
+            ;;
         check:quest) quest check ;;
         check:drill) just test drill-sensitivity --apply-only ;;
         check:obs_compile) just obs compile ;;
@@ -269,15 +310,20 @@ for module in "${selected[@]}"; do
         *:shell) sh/shell.sh "$verb" ;;
         *) just "$module" "$verb" ;;
     esac
+    finish
 done
 
 # The bindings run their tests in the preamble; these suites run once here.
 if [[ "$verb" == check ]]; then
     for module in "${selected[@]}"; do
         case "$module" in
+            rs | js | py) begin "test $module" ;;
+        esac
+        case "$module" in
             rs) just rs test-changed "$rs_list" ;;
             js) just js test-changed "$js_list" ;;
             py) just py test ;;
         esac
+        finish
     done
 fi

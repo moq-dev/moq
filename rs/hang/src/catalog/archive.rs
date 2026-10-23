@@ -34,6 +34,7 @@ impl Timeline {
 /// A live publisher sets the timeline fields (`timelines`, `timescale`) alone,
 /// and a recording also names the replay broadcast and object store those spans live under.
 /// Every advertised span is FETCHable; with a store they are durable.
+#[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +54,12 @@ pub struct Archive {
 	#[serde(default)]
 	pub replay: Option<moq_net::path::RelativeOwned>,
 
+	/// The publisher instance [`replay`](Self::replay) names, when known. Absent accepts the
+	/// first one a reader resolves; see [`Reference::epoch`](super::Reference::epoch).
+	#[serde(default)]
+	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	pub replay_epoch: Option<moq_net::Epoch>,
+
 	/// The object-store URL the recording objects live under, if exposed by the publisher.
 	#[serde(default)]
 	pub store: Option<url::Url>,
@@ -64,7 +71,7 @@ pub struct Archive {
 
 impl Archive {
 	/// The recording object format advertised in [`version`](Self::version).
-	pub const VERSION: u32 = 2;
+	pub const VERSION: u32 = 3;
 
 	/// The default timeline timescale, milliseconds.
 	pub const fn default_timescale() -> u32 {
@@ -77,6 +84,7 @@ impl Archive {
 			timelines: BTreeMap::new(),
 			timescale: Self::default_timescale(),
 			replay: None,
+			replay_epoch: None,
 			store: None,
 			version: None,
 		}
@@ -121,7 +129,7 @@ mod test {
 		let json = serde_json::to_string(&archive).unwrap();
 		assert_eq!(
 			json,
-			r#"{"timelines":{"video":{"track":"video.timeline.z","duration":4000}},"timescale":1000,"replay":"recordings/clip","store":"https://objects.example/rec/","version":2}"#
+			r#"{"timelines":{"video":{"track":"video.timeline.z","duration":4000}},"timescale":1000,"replay":"recordings/clip","store":"https://objects.example/rec/","version":3}"#
 		);
 		assert_eq!(serde_json::from_str::<Archive>(&json).unwrap(), archive);
 	}

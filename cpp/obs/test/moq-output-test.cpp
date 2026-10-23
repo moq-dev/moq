@@ -632,9 +632,12 @@ int main()
 			auto first = TestOk(next.get(), "first frame");
 			CHECK(first.has_value());
 
-			// Large enough that it is still in flight when Stop() runs.
+			// Large enough to be in flight when Stop() runs, so a Stop() that cancels
+			// rather than drains cuts it off (256 KiB can land first under TSan). Small
+			// enough to drain well inside moq-net's one-second drain deadline, which cuts
+			// the track off by design, even under TSan on a loaded host.
 			auto large = keyframe;
-			large.resize(large.size() + 16 * 1024 * 1024, 0xff);
+			large.resize(large.size() + 2 * 1024 * 1024, 0xff);
 			auto last = videoPacket(large, 1);
 			o->Data(&last);
 			// OBS may destroy the output right after stopping it.
@@ -839,6 +842,27 @@ int main()
 		CHECK(signalCount() == 2);
 	}
 	printf("OBS-driven restart: ok\n");
+
+	// A token edited mid-stream goes to the live session only, and presenting a
+	// newer one or stopping cancels whatever is still in flight.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(!o.PresentToken("early"));
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		CHECK(o.PresentToken("fresh"));
+		CHECK(o.PresentToken("fresher"));
+		// The default protocol carries no in-band AUTH, so the relay's refusal is
+		// kept for the dock while the stream stays up.
+		CHECK(WaitFor([&] { return !o.TokenRefusal().empty(); }));
+		CHECK(o.IsLiveSession());
+		CHECK(signalCount() == 0);
+		o.Stop();
+		CHECK(!o.PresentToken("late"));
+	}
+	printf("present a token mid-stream: ok\n");
 
 	// Restarts and teardown racing failures still in flight, repeatedly. Whatever
 	// the order, each Start() reports at most once, and nothing reports once the

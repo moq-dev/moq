@@ -102,7 +102,7 @@ describe("unsupported catalog", () => {
 			const track = published.createTrack(format === "hang" ? Catalog.TRACK : Catalog.TRACK_COMPRESSED);
 			const producer = new Json.Snapshot.Producer<Catalog.Root>({
 				track,
-				deltaRatio: 0,
+				deltas: false,
 				compression: format === "hangz" ? "deflate" : "none",
 			});
 			const enabled = new Signal(true);
@@ -133,6 +133,61 @@ describe("unsupported catalog", () => {
 				logged.mockRestore();
 			}
 		});
+	}
+});
+
+// Regression: a finished catalog track dropped the catalog at once, so a publisher finishing its
+// broadcast cut every viewer off before it drained the tail the broadcast still served.
+it("keeps playing a finished catalog until the broadcast ends", async () => {
+	const owner = new Origin.Producer();
+	const name = Path.from("room/live.hang");
+	const published = publish(owner, name);
+	const producer = new Json.Snapshot.Producer<Catalog.Root>({
+		track: published.createTrack(Catalog.TRACK),
+		deltas: false,
+	});
+	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
+	try {
+		const ready = source.out.catalog.changed();
+		producer.update({ value: { video: { renditions: { hd: video("avc1.640028") } } } });
+		await ready;
+		expect(source.out.status.peek()).toBe("live");
+
+		producer.finish();
+		await settle();
+		expect(source.out.status.peek()).toBe("live");
+		expect(videoRenditions(source)).toEqual(["hd"]);
+
+		published.close();
+		await settle();
+		expect(source.out.status.peek()).toBe("offline");
+		expect(source.out.catalog.peek()).toBeUndefined();
+	} finally {
+		source.close();
+		owner.close();
+	}
+});
+
+// A catalog track that ends before its first snapshot has nothing to play, so it reads as offline.
+it("reports a catalog that ends empty as offline", async () => {
+	const owner = new Origin.Producer();
+	const name = Path.from("room/live.hang");
+	const published = publish(owner, name);
+	const producer = new Json.Snapshot.Producer<Catalog.Root>({
+		track: published.createTrack(Catalog.TRACK),
+		deltas: false,
+	});
+	const source = new Broadcast({ origin: owner, name, catalogFormat: "hang", enabled: true });
+	try {
+		await settle();
+		producer.finish();
+		await settle();
+		expect(source.out.status.peek()).toBe("offline");
+		expect(source.out.catalog.peek()).toBeUndefined();
+	} finally {
+		published.close();
+		source.close();
+		owner.close();
 	}
 });
 
@@ -266,6 +321,91 @@ describe("relativeBroadcast", () => {
 			expect(Object.keys(renditions).sort()).toEqual(["good", "root", "sibling"]);
 		} finally {
 			source.close();
+			owner.close();
+		}
+	});
+
+	it("reads a reference only from the epoch it names, best effort without one", async () => {
+		const owner = new Origin.Producer();
+		const [catalogEpoch, siblingEpoch, other] = [Moq.Epoch.mint(), Moq.Epoch.mint(), Moq.Epoch.mint()];
+		const catalog = owner.createBroadcast(Path.from("a/b"));
+		catalog.announce({ epoch: catalogEpoch });
+		const sibling = owner.createBroadcast(Path.from("a/source"));
+		sibling.announce({ epoch: siblingEpoch });
+		const plain = publish(owner, Path.from("a/plain"));
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("a/b"),
+			enabled: true,
+			announced: false,
+			catalogFormat: "manual",
+		});
+		const effect = new Effect();
+		try {
+			await settle();
+			const rel = Path.normalizeRelative("./source");
+			expect(source.relativeBroadcast(effect, rel)?.epoch).toBe(siblingEpoch);
+			expect(source.relativeBroadcast(effect, rel, siblingEpoch)?.epoch).toBe(siblingEpoch);
+			const own = source.out.active.peek();
+			expect(own?.epoch).toBe(catalogEpoch);
+			expect(source.relativeBroadcast(effect, undefined, catalogEpoch)).toBe(own);
+			withoutWarnings(() => {
+				expect(source.relativeBroadcast(effect, rel, other)).toBeUndefined();
+				expect(source.relativeBroadcast(effect, undefined, other)).toBeUndefined();
+				expect(source.relativeBroadcast(effect, Path.normalizeRelative("./b"), other)).toBeUndefined();
+			});
+			// An epochless route cannot prove its instance, so the epoch cannot refuse it.
+			expect(source.relativeBroadcast(effect, Path.normalizeRelative("./plain"), other)).toBeDefined();
+		} finally {
+			effect.close();
+			source.close();
+			plain.close();
+			sibling.close();
+			catalog.close();
+			owner.close();
+		}
+	});
+
+	it("follows a replaced sibling only for a reference that names no epoch", async () => {
+		const owner = new Origin.Producer();
+		const main = publish(owner, Path.from("a/b"));
+		const [oldEpoch, newEpoch] = [Moq.Epoch.mint(), Moq.Epoch.mint()];
+		const old = owner.createBroadcast(Path.from("a/source"));
+		old.announce({ epoch: oldEpoch });
+		const source = new Broadcast({
+			origin: owner,
+			name: Path.from("a/b"),
+			enabled: true,
+			catalogFormat: "manual",
+		});
+		const effect = new Effect();
+		const rel = Path.normalizeRelative("./source");
+		let following: Moq.Broadcast.Consumer | undefined;
+		let pinned: Moq.Broadcast.Consumer | undefined;
+		effect.run((nested) => {
+			following = source.relativeBroadcast(nested, rel);
+		});
+		effect.run((nested) => {
+			pinned = withoutWarnings(() => source.relativeBroadcast(nested, rel, oldEpoch));
+		});
+		try {
+			await settle();
+			expect(following?.epoch).toBe(oldEpoch);
+			expect(pinned?.epoch).toBe(oldEpoch);
+
+			// The announcement is the online signal: the plain reference follows the restart,
+			// while one naming the old instance never reads the new one.
+			const replacement = owner.createBroadcast(Path.from("a/source"));
+			replacement.announce({ epoch: newEpoch });
+			await settle();
+			expect(following?.epoch).toBe(newEpoch);
+			expect(pinned).toBeUndefined();
+			replacement.close();
+		} finally {
+			effect.close();
+			source.close();
+			old.close();
+			main.close();
 			owner.close();
 		}
 	});

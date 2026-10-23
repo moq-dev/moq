@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/a5b83a3dfd14492d62011afdb3c3893fcebbcca6";
+      url = "github:kixelated/quest/a73fb295a3679ff54205af68a1a7bb8ec5bdc7af";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -158,7 +158,13 @@
             cargo-hack
             cargo-nextest
             # Source-based test coverage (`just rs coverage`).
-            cargo-llvm-cov
+            # Its LLVM test helpers must read the compiler's profile format.
+            (cargo-llvm-cov.override {
+              rustPlatform = makeRustPlatform {
+                cargo = rust-toolchain;
+                rustc = rust-toolchain;
+              };
+            })
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
             # Cargo.lock selects the matching schema version, independently of
             # nixpkgs' default wasm-bindgen-cli.
@@ -215,6 +221,8 @@
           # JSR publishing. We call `deno publish` directly instead of `bunx jsr`
           # so the release doesn't race on a runtime binary download.
           deno
+          # One browser build for local and CI Playwright checks.
+          playwright-driver.browsers
         ];
 
         # Python dependencies
@@ -539,6 +547,9 @@
 
           inherit uniffi-bindgen-cpp uniffi-bindgen-dart;
 
+          # The @moq/libav npm package, which js/libav/build.ts copies into js/libav/dist.
+          moq-libav = pkgs.callPackage ./js/libav/package.nix { };
+
           # The quest CLI alone, so quest.yml can validate the tree without
           # realising the whole dev shell.
           quest = quest-cli;
@@ -562,6 +573,8 @@
         # are disallowed in the flake `packages` schema.
         legacyPackages = {
           inherit (pkgs) gst_all_1;
+
+          runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out
@@ -625,6 +638,10 @@
             # fix`. IN_NIX_SHELL would also pass inside another project's shell.
             MOQ_DEV_SHELL = "1";
 
+            PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
+            PLAYWRIGHT_VERSION = pkgs.playwright-driver.version;
+            PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "true";
+
             # Where `just obs compile` and `just obs test` look for libobs. Set
             # on every platform so the plugin type-checks against the pinned OBS
             # release everywhere, rather than whatever the host happens to have.
@@ -650,8 +667,8 @@
         # test` (see rs/justfile), reaching mbx through the Cargo shim the dev
         # shell puts on PATH. Neither path goes through crane.
         # `nix flake check` is kept -- it still validates flake eval + builds the
-        # dev shell -- but no longer compiles the workspace, so it's cheap
-        # enough that `just check` runs it on any Nix/Rust input change. Release
+        # runner tests. The dispatcher runs it for Nix and packaging inputs;
+        # Rust source changes use the Cargo gate above. Release
         # artifacts still build via crane `buildPackage` (see `packages` above /
         # release-*.yml).
         #

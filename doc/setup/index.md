@@ -42,7 +42,7 @@ Windows users should run `setup.bat` first; see [Development](/setup/dev#windows
 
 1. [moq-relay](/bin/relay/) on `localhost:4443` with a generated certificate and anonymous access.
 2. [moq-cli](/bin/cli) publishing Big Buck Bunny through the relay.
-3. The [web demo](/bin/demo) at [localhost:5173](http://localhost:5173), where you can watch the stream or publish your camera.
+3. The [web demo](/bin/demo) at [localhost:5173/watch.html](http://localhost:5173/watch.html), where you can watch the stream or publish your camera.
 
 ## Skip the relay
 
@@ -62,7 +62,12 @@ broadcasts end in `.hang`.
 
 ## Next steps
 
+- Find an [example](/setup/examples) to adapt, or use [Troubleshooting](/setup/troubleshooting) if the demo fails.
+
 - [Install](/setup/install) the relay and CLI as packages instead of building them.
+
 - Publish from [OBS](/bin/obs), [GStreamer](/bin/gstreamer), or an [RTMP, SRT, or WebRTC gateway](/bin/#gateways).
+
 - Embed a player with the [web components](/lib/js/) or pick a [library](/lib/).
+
 - [Deploy](/setup/prod) a relay with real TLS and authentication.

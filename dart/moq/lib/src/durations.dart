@@ -11,6 +11,13 @@ extension ConnectionStatsDuration on MoqConnectionStats {
   Duration? get rtt => rttUs == null ? null : Duration(microseconds: rttUs!);
 }
 
+/// Duration views over an authorization grant.
+extension GrantDuration on MoqGrant {
+  /// How long until the grant lapses, measured when it was read, or null for never.
+  Duration? get expires =>
+      expiresUs == null ? null : Duration(microseconds: expiresUs!);
+}
+
 /// Duration views over the reconnect pacing.
 extension BackoffDuration on MoqBackoff {
   /// Delay before the first reconnect attempt, or null for the default.
@@ -37,6 +44,12 @@ extension TrackInfoDuration on MoqTrackInfo {
   /// Maximum age of a non-latest group before the publisher evicts it, or null for the default.
   Duration? get maxAge =>
       maxAgeUs == null ? null : Duration(microseconds: maxAgeUs!);
+}
+
+/// Duration view over how long a finished broadcast stays up.
+extension BroadcastFinishDuration on MoqBroadcastFinish {
+  /// The longest max age of the finished tracks the broadcast holds.
+  Duration get linger => Duration(microseconds: lingerUs());
 }
 
 /// Duration view over a raw frame's presentation time.

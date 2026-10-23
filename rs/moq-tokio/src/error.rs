@@ -42,6 +42,7 @@ pub(crate) use from_message;
 /// A response that arrived is the server's answer, and only this narrow set invites another
 /// attempt: request timeout, rate limit, and the gateway/overload statuses. Every other status,
 /// `404` and `403` included, is settled.
+#[cfg(feature = "net")]
 pub(crate) fn status_retryable(status: u16) -> bool {
 	matches!(status, 408 | 429 | 502 | 503 | 504)
 }
@@ -68,6 +69,7 @@ pub enum Error {
 	Io(Arc<std::io::Error>),
 
 	/// The MoQ session itself failed, after the transport was established.
+	#[cfg(feature = "net")]
 	#[error(transparent)]
 	MoqNet(#[from] moq_net::Error),
 
@@ -113,6 +115,11 @@ pub enum Error {
 	#[error("quic max_streams must be between 1 and 2^60")]
 	StreamsRange,
 
+	/// The QUIC connection receive window can't fit the largest message a session
+	/// assembles. The payload is the minimum, in bytes.
+	#[error("quic receive_window must be at least {0} bytes to fit the largest message")]
+	ReceiveWindowTooSmall(u64),
+
 	/// Every backend we tried gave up without reporting why.
 	#[error("failed to connect to server")]
 	ConnectFailed,
@@ -128,6 +135,7 @@ pub enum Error {
 	ConnectTimeout(std::time::Duration),
 
 	/// The server rejected the connection with an auth status. See [`crate::ConnectError`].
+	#[cfg(feature = "net")]
 	#[error(transparent)]
 	Connect(#[from] crate::ConnectError),
 
@@ -247,6 +255,7 @@ pub enum Error {
 
 impl Error {
 	/// A fixed local error or settled rejection that another dial cannot repair.
+	#[cfg(feature = "net")]
 	pub(crate) fn is_terminal(&self) -> bool {
 		match self {
 			#[cfg(feature = "websocket")]
@@ -264,6 +273,7 @@ impl Error {
 			| Self::Deprecated(_)
 			| Self::IdleTimeoutRange
 			| Self::WindowRange(_)
+			| Self::ReceiveWindowTooSmall(_)
 			| Self::StreamsRange
 			| Self::QlogUnsupported
 			| Self::KeylogUnset
@@ -295,6 +305,7 @@ impl Error {
 	}
 
 	/// The auth rejection behind this error, digging through backend and race variants.
+	#[cfg(feature = "net")]
 	pub fn connect_error(&self) -> Option<crate::ConnectError> {
 		match self {
 			Self::Connect(err) => Some(*err),
@@ -312,6 +323,7 @@ impl Error {
 	}
 
 	/// True if the server rejected us for auth reasons, so retrying won't help without new credentials.
+	#[cfg(feature = "net")]
 	pub fn is_auth(&self) -> bool {
 		// Expiry has no HTTP status, so it has no `ConnectError` to report.
 		matches!(self, Self::MoqNet(err) if moq_net::SessionError::from(err) == moq_net::SessionError::Expired)

@@ -4,6 +4,47 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON snapshot `deltaRatio` is `deltas`
+
+`SnapshotConfig.deltaRatio: UInt` is replaced by `deltas: Boolean` (default `true`).
+Pass `deltas = false` where you passed `deltaRatio = 0u`, and drop the argument otherwise.
+Publish the track with a `refresh` ratio so a joiner gets the value restated in a fresh group.
+
+### Priorities are signed (#6142)
+
+`TrackInfo.priority`, `Subscription.priority`, and `FetchGroupOptions.priority` are `Byte`, higher first, and 0 is the unset midpoint; write `priority = 3` instead of `3u`.
+`TrackInfo.priority` defaulted to 127 and now defaults to 0.
+To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
+
+### A client asks only about what it watches (#6165)
+
+On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announcedBroadcast()`, instead of under its whole scope at connect.
+`requestBroadcast()` watches nothing, so on a client it fails with an unroutable error for a path nothing watches, even when the relay announces it.
+Resolve the path with `announcedBroadcast()`, or hold `announced()` over its prefix while requesting.
+moq-transport and moq-lite-03/04 sessions are unchanged.
+
+### `ContainerFormat.FMP4` unwraps to Legacy (#6250)
+
+A container import with `ContainerFormat.FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
+Pass the new `ContainerFormat.CMAF` to keep publishing CMAF.
+
+### Catalog references carry their epoch
+
+`Video` and `Audio` gain `epoch`, the publisher instance their `broadcast` reference names; it defaults to `null`, so only positional construction changes.
+`BroadcastConsumer.resolve(reference)` becomes `resolve(reference, epoch)`; pass the rendition's `epoch` alongside its `broadcast`, or `null` to resolve whichever instance answers.
+Resolving, and the rendition-based consumers, throw `MoqException.Mux` for a rendition whose broadcast is proven to serve another epoch.
+
+### Timestamps stop at 2^61 - 1 microseconds (#6168)
+
+Writing a frame, or any other call that takes a timestamp, fails with `TimeOverflow` past `2^61 - 1` microseconds instead of `2^62 - 1`, the most moq-lite-05/06 can carry.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `2^61 - 1`.
+
+### Finished tracks stay until the broadcast ends (#6157)
+
+A finished track now stays listed, with its catalog rendition and demand, until its broadcast ends or the new `BroadcastProducer.finish()` lets go.
+Publish a replacement under a new name, and expect a finished track's demand watch to end with the broadcast.
+
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.dynamic(prefix)` takes no route, and `OriginDynamic.update` is gone.
@@ -13,6 +54,13 @@ Replace `request.accept(broadcast)` with `request.prepare(mintEpoch())`, which r
 
 `Anchor` gains `AnchorTime`, so exhaustive `when` expressions need a branch for it.
 `TrackConsumer.update` now throws `MoqException` on a time anchor an untimed track can't serve.
+
+### Rebuild the matching raw bindings
+
+The documentation update changes UniFFI's audio-producer method metadata checksums.
+Regenerate the Kotlin sources and update the native libraries in `moq-ffi` together,
+then rebuild the application; older generated guards reject the rebuilt library.
+Application calls are unchanged.
 
 ### JSON consumers emit timestamps (#5677)
 

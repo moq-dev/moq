@@ -471,6 +471,93 @@ describe("Patterns", () => {
 		expect(a.covers(new Patterns())).toBe(true);
 		expect(JSON.stringify(a)).toBe('["a","b"]');
 	});
+
+	describe("indexed operations match their scans", () => {
+		// A deterministic generator, so a failure reproduces from its seed.
+		let seed = 0x9e3779b9;
+		const below = (n: number) => {
+			seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+			return (seed >>> 8) % n;
+		};
+		// A small alphabet, so members and queries meet often.
+		const atoms = ["a", "b", "ab", "ba", "aab", "*", "*", "a*", "*b", "a*b", "ab*", "*ab", "aa*", "*bb"];
+		atoms.push("é", "aé", "é*", "*é", "😀", "*😀");
+		const random = () => {
+			const segments = Array.from({ length: below(5) }, () => atoms[below(atoms.length)]);
+			if (below(3) === 0) segments.splice(below(segments.length + 1), 0, "**");
+			return Pattern.parse(segments.join("/"));
+		};
+
+		const naiveReduce = (patterns: Pattern[]) => {
+			const out = new Patterns();
+			for (const pattern of patterns) out.insert(pattern);
+			return out;
+		};
+		const naiveIntersect = (a: Patterns, b: Patterns) => {
+			const out = new Patterns();
+			for (const member of a)
+				for (const candidate of b) for (const p of member.intersect(candidate)) out.insert(p);
+			if (out.size > Pattern.MAX_INTERSECTIONS) throw new IntersectionError();
+			return out;
+		};
+		const outcome = (fn: () => Patterns) => {
+			try {
+				return texts(fn());
+			} catch (err) {
+				if (err instanceof IntersectionError) return "too many";
+				throw err;
+			}
+		};
+
+		const check = (members: Pattern[], queries: Pattern[]) => {
+			const ours = new Patterns(members);
+			const theirs = new Patterns(queries);
+			expect(texts(ours)).toEqual(texts(naiveReduce(members)));
+			for (const query of queries) {
+				const contained = members.some((member) => member.contains(query));
+				expect(ours.covers(new Patterns([query]))).toBe(contained);
+			}
+			expect(ours.covers(theirs)).toBe([...theirs].every((query) => ours.contains(query)));
+			expect(texts(new Patterns([...ours, ...theirs]))).toEqual(texts(naiveReduce([...members, ...queries])));
+			expect(outcome(() => ours.intersect(theirs))).toEqual(outcome(() => naiveIntersect(ours, theirs)));
+		};
+
+		test("random", () => {
+			for (let round = 0; round < 300; round++) {
+				check(Array.from({ length: below(24) }, random), Array.from({ length: below(24) }, random));
+			}
+		});
+
+		test("adversarial", () => {
+			const shapes: ((i: number) => string)[] = [
+				// Two specificity tiers that never contain each other.
+				(i) => (i % 2 === 0 ? `room${i}` : `room${i}/x`),
+				// Partials of one literal that never contain each other: the prefix grows as the
+				// suffix shrinks.
+				(i) => `${"a".repeat(i % 9)}*${"a".repeat(8 - (i % 9))}`,
+				// Literals those partials cover, or nearly.
+				(i) => "a".repeat(8 + (i % 4)),
+				// `*` or a literal per position, failing only at the end.
+				(i) => `${Array.from({ length: 5 }, (_, bit) => ((i >> bit) & 1 ? "*" : "a")).join("/")}/end${i % 7}`,
+				(i) => `a/a/a/a/a/end${i % 9}`,
+				// `**` with heads and tails of every length.
+				(i) => `${"a/".repeat(i % 4)}**${"/b".repeat(Math.floor(i / 4) % 4)}`,
+				(i) => `${"*/".repeat(i % 3)}**${"/*".repeat(Math.floor(i / 3) % 3)}`,
+				(i) =>
+					Array(i % 7)
+						.fill("a")
+						.join("/"),
+			];
+			for (const member of shapes) {
+				for (const query of shapes) {
+					check(
+						Array.from({ length: 64 }, (_, i) => Pattern.parse(member(i))),
+						Array.from({ length: 64 }, (_, i) => Pattern.parse(query(i))),
+					);
+				}
+			}
+		});
+	});
 });
 
 test("patterns own immutable segment records", () => {
@@ -559,7 +646,7 @@ test("the pattern segment limit is immutable at runtime", () => {
 	const original = Pattern.MAX_SEGMENTS;
 	try {
 		expect(Reflect.set(Pattern, "MAX_SEGMENTS", 33)).toBe(false);
-		expect(Pattern.MAX_SEGMENTS).toBe(32);
+		expect(Pattern.MAX_SEGMENTS).toBe(original);
 		expect(errorCode(() => Pattern.parse(Array(33).fill("a").join("/")))).toBe("too-many-segments");
 	} finally {
 		Reflect.set(Pattern, "MAX_SEGMENTS", original);

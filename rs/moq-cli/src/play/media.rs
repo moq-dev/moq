@@ -237,7 +237,7 @@ impl<O: Output> Media<O> {
 					// A rendition pointing at a broadcast we can't reach is that
 					// rendition's problem, not the catalog's: fall through to the
 					// next one like an unsupported codec does.
-					let rendition = match source.resolve(config.broadcast.as_ref()).await {
+					let rendition = match source.resolve(config.broadcast.as_ref(), config.epoch.as_ref()).await {
 						Ok(rendition) => rendition,
 						Err(err) => {
 							tracing::warn!(track = name, %err, "cannot resolve video rendition");
@@ -304,7 +304,7 @@ impl<O: Output> Media<O> {
 					if playback.finished(&reference) {
 						continue;
 					}
-					let rendition = match source.resolve(config.broadcast.as_ref()).await {
+					let rendition = match source.resolve(config.broadcast.as_ref(), config.epoch.as_ref()).await {
 						Ok(rendition) => rendition,
 						Err(err) => {
 							tracing::warn!(track = name, %err, "cannot resolve audio rendition");
@@ -708,10 +708,11 @@ async fn play_audio<O: Output>(
 async fn drain(sink: impl Sink) {
 	// The estimated target moves, so the depth the sink was opened with says
 	// nothing about what it holds now: read it at retirement instead.
-	let _ = tokio::time::timeout(sink.buffered() + AUDIO_DRAIN_GRACE, sink.finish()).await;
+	let _ = moq_clock::timeout(sink.buffered() + AUDIO_DRAIN_GRACE, sink.finish()).await;
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use bytes::Bytes;
 	use hang::catalog::{AudioCodec, AudioConfig};

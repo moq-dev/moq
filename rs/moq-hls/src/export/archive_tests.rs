@@ -137,9 +137,7 @@ impl Recording {
 				.put_info(&timeline(track), &Info::new(0, Some(1000)).unwrap())
 				.await
 				.unwrap();
-			let config = window::ProducerConfig::default()
-				.with_compression(true)
-				.with_op_ratio(0);
+			let config = window::ProducerConfig::default().with_compression(true).with_ops(false);
 			let encoder = Encoder {
 				encoder: window::Encoder::new(config),
 				group: 0,
@@ -307,7 +305,7 @@ impl Replay {
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.unwrap();
 		let mut json = moq_json::snapshot::Config::default();
-		json.delta_ratio = 0;
+		json.deltas = false;
 		let mut catalog = moq_json::snapshot::Producer::new(track, json);
 		catalog
 			.update(moq_net::Timed::from(&self::catalog(archive)).at(moq_net::Timestamp::now()))
@@ -363,6 +361,22 @@ impl Replay {
 		}
 		panic!("{name} playlist never became ready");
 	}
+
+	/// Wait until `name`'s playlist answers a failed timeline, then return that error.
+	async fn failure(&self, kind: Kind, name: &str) -> crate::Error {
+		let rendition = self.rendition(kind, name);
+		for _ in 0..500 {
+			let answer = tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None, None))
+				.await
+				.expect("playlist answers");
+			if let Err(err) = answer {
+				assert!(matches!(err, crate::Error::TimelineFailed { .. }), "{name}: {err}");
+				return err;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		panic!("{name} playlist never failed");
+	}
 }
 
 fn is_media(path: &str) -> bool {
@@ -392,7 +406,7 @@ async fn segments_with(count: u64, checkpoint: Option<usize>) -> Recording {
 				window::ProducerConfig::default()
 					.with_compression(true)
 					.with_checkpoint_records(limit)
-					.with_op_ratio(0),
+					.with_ops(false),
 			);
 		}
 	}
@@ -627,7 +641,7 @@ async fn history_mode_lists_a_durable_timeline_past_the_window() {
 	for (kind, name) in [(Kind::Video, "360p"), (Kind::Video, "1080p"), (Kind::Audio, "audio")] {
 		replay.rendition(kind, name).init().await.unwrap();
 	}
-	let manifest = replay.broadcaster.manifest(None).expect("manifest renders");
+	let manifest = replay.broadcaster.manifest(None).unwrap().expect("manifest renders");
 	assert!(manifest.contains("timeShiftBufferDepth=\"PT24.000S\""), "{manifest}");
 
 	let mut elsewhere = durable();
@@ -733,71 +747,8 @@ async fn history_mode_recovers_a_finished_timeline() {
 
 async fn history_after_expiry(finished: bool) {
 	let recording = bounded_segments(12).await;
-	let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
-	let driver = tokio::spawn(moq_net::time::run(driver));
-	let broadcast = origin.create_broadcast("rec").unwrap();
-	let track = broadcast
-		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
-		.unwrap();
-	let mut catalog = moq_json::snapshot::Producer::new(track, moq_json::snapshot::Config::default());
-	catalog
-		.update(moq_net::Timed::from(&self::catalog(durable())).at(moq_net::Timestamp::now()))
-		.unwrap();
-	let reader = moq_archive::Reader::open(
-		recording.store.clone(),
-		&broadcast,
-		reader::Config::new(recording.timelines()),
-	)
-	.await
-	.unwrap();
-	let serving = tokio::spawn(reader.serve());
-	let reader = if finished {
-		reader.finish().unwrap();
-		None
-	} else {
-		Some(reader)
-	};
-	// Expire the publisher cache before any HLS consumer can retain a copy.
-	let now = moq_net::time::Instant::now();
-	broadcast.info().pool.gc(now, &kio::Waiter::noop());
-	broadcast
-		.info()
-		.pool
-		.gc(now + Duration::from_secs(31), &kio::Waiter::noop());
-	let subscription = moq_net::track::Subscription::default()
-		.with_groups(0..)
-		.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));
-	let mut retained = broadcast
-		.consume()
-		.track(&timeline("1080p"))
-		.unwrap()
-		.subscribe(subscription)
-		.await
-		.unwrap()
-		.ordered();
-	let retained = retained.next_group().await.unwrap();
-	assert!(
-		retained.is_none_or(|group| group.sequence > 0),
-		"the initial timeline groups must really be evicted"
-	);
-	broadcast.announce(Default::default()).unwrap();
-	let broadcaster = Broadcaster::new(
-		crate::resolved(&origin, "rec").await,
-		Config {
-			history: true,
-			..Config::default()
-		},
-	);
-	tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
-		.await
-		.expect("a rendition becomes playable after cache expiry");
-	let replay = Replay {
-		reader,
-		broadcaster,
-		_catalog: catalog,
-		_broadcast: broadcast,
-		_origin: origin,
-	};
+	let expired = Expired::open(&recording, finished, &[]).await;
+	let replay = &expired.replay;
 	// Every rendition recovers its own evicted timeline, not only the reference: otherwise the
 	// reference's early rows resolve as gaps on its siblings.
 	for (kind, name) in [(Kind::Video, "1080p"), (Kind::Video, "360p"), (Kind::Audio, "audio")] {
@@ -809,10 +760,119 @@ async fn history_after_expiry(finished: bool) {
 		assert!(!playlist.contains("#EXT-X-GAP"), "{name}: {playlist}");
 		assert!(replay.rendition(kind, name).listed_segment(0).await.unwrap().is_some());
 	}
-	serving.abort();
-	driver.abort();
-	let _ = serving.await;
-	let _ = driver.await;
+}
+
+/// How a stored timeline object is damaged.
+#[derive(Clone, Copy, Debug)]
+enum Fault {
+	/// The object is gone, so its group fails to FETCH.
+	Missing,
+	/// The object's frames are garbage, so its group fails to decode.
+	Corrupt,
+}
+
+/// A history-mode export of a recording whose publisher cache expired first, so every timeline
+/// group is FETCHed from the store.
+struct Expired {
+	replay: Replay,
+	serving: tokio::task::JoinHandle<()>,
+	driver: tokio::task::JoinHandle<moq_net::Error>,
+}
+
+impl Expired {
+	/// Expire the cache, apply each `(track, record, fault)` to that record's stored timeline
+	/// object, then start exporting. `finished` supplies finality first.
+	async fn open(recording: &Recording, finished: bool, faults: &[(&str, u64, Fault)]) -> Self {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		let driver = tokio::spawn(moq_net::time::run(driver));
+		let broadcast = origin.create_broadcast("rec").unwrap();
+		let track = broadcast
+			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
+			.unwrap();
+		let mut catalog = moq_json::snapshot::Producer::new(track, moq_json::snapshot::Config::default());
+		catalog
+			.update(moq_net::Timed::from(&self::catalog(durable())).at(moq_net::Timestamp::now()))
+			.unwrap();
+		let reader = moq_archive::Reader::open(
+			recording.store.clone(),
+			&broadcast,
+			reader::Config::new(recording.timelines()),
+		)
+		.await
+		.unwrap();
+		let serving = tokio::spawn(reader.serve());
+		let reader = if finished {
+			reader.finish().unwrap();
+			None
+		} else {
+			Some(reader)
+		};
+		// Expire the publisher cache before any HLS consumer can retain a copy.
+		let now = moq_net::time::Instant::now();
+		broadcast.info().pool.gc(now, &kio::Waiter::noop());
+		broadcast
+			.info()
+			.pool
+			.gc(now + Duration::from_secs(31), &kio::Waiter::noop());
+		let subscription = moq_net::track::Subscription::default()
+			.with_groups(0..)
+			.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));
+		let mut retained = broadcast
+			.consume()
+			.track(&timeline("1080p"))
+			.unwrap()
+			.subscribe(subscription)
+			.await
+			.unwrap()
+			.ordered();
+		let retained = retained.next_group().await.unwrap();
+		assert!(
+			retained.is_none_or(|group| group.sequence > 0),
+			"the initial timeline groups must really be evicted"
+		);
+		for &(track, record, fault) in faults {
+			let track = timeline(track);
+			let mut object = recording.store.get_segments(&track, record, true).await.unwrap();
+			let key = moq_archive::Key::segments(&track, record).unwrap();
+			recording.store.delete(&key).await.unwrap();
+			if let Fault::Corrupt = fault {
+				for frame in object.groups.iter_mut().flat_map(|group| group.frames.iter_mut()) {
+					frame.payload = Bytes::from_static(b"garbage");
+				}
+				recording.store.put_segments(&track, record, &object).await.unwrap();
+			}
+		}
+		broadcast.announce(Default::default()).unwrap();
+		let broadcaster = Broadcaster::new(
+			crate::resolved(&origin, "rec").await,
+			Config {
+				history: true,
+				..Config::default()
+			},
+		);
+		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
+			.await
+			.expect("a rendition becomes playable or fails after cache expiry");
+		let replay = Replay {
+			reader,
+			broadcaster,
+			_catalog: catalog,
+			_broadcast: broadcast,
+			_origin: origin,
+		};
+		Self {
+			replay,
+			serving,
+			driver,
+		}
+	}
+}
+
+impl Drop for Expired {
+	fn drop(&mut self) {
+		self.serving.abort();
+		self.driver.abort();
+	}
 }
 
 /// Retention prunes a recording's first timeline objects, so history mode refuses it before
@@ -837,13 +897,11 @@ async fn history_mode_refuses_a_retained_recording() {
 	)
 	.await;
 	for (kind, name) in [(Kind::Video, "360p"), (Kind::Video, "1080p"), (Kind::Audio, "audio")] {
-		let snapshot = replay.rendition(kind, name).snapshot();
+		let err = replay.failure(kind, name).await;
 		assert!(
-			snapshot.segments.is_empty(),
-			"{name} listed {} segments",
-			snapshot.segments.len()
+			err.to_string().contains("retained recordings are not supported"),
+			"{name}: {err}"
 		);
-		assert!(snapshot.finished, "{name} playlist must end");
 	}
 
 	let broadcast = replay._origin.consume().request_broadcast("rec", None).await.unwrap();
@@ -851,4 +909,61 @@ async fn history_mode_refuses_a_retained_recording() {
 		.await
 		.unwrap_err();
 	assert!(matches!(err, crate::Error::HistoryPruned(_)), "{err}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_missing_mid_history_reference_group_fails_every_listing() {
+	mid_history_reference_fault(Fault::Missing).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_corrupt_mid_history_reference_group_fails_every_listing() {
+	mid_history_reference_fault(Fault::Corrupt).await;
+}
+
+/// A finished recording missing part of its reference timeline would otherwise list a prefix
+/// and end with `EXT-X-ENDLIST`, so every listing answers the failure instead, a clip of the
+/// readable prefix included.
+async fn mid_history_reference_fault(fault: Fault) {
+	let recording = bounded_segments(12).await;
+	let expired = Expired::open(&recording, true, &[("1080p", 6, fault)]).await;
+	let replay = &expired.replay;
+	for (kind, name) in [(Kind::Video, "1080p"), (Kind::Video, "360p"), (Kind::Audio, "audio")] {
+		replay.failure(kind, name).await;
+	}
+	assert!(matches!(
+		replay.broadcaster.manifest(None),
+		Err(crate::Error::TimelineFailed { .. })
+	));
+	let range = super::Range::new(Duration::ZERO, Duration::from_secs(4)).unwrap();
+	assert!(matches!(
+		replay.rendition(Kind::Video, "1080p").playlist(Some(range), None).await,
+		Err(crate::Error::TimelineFailed { .. })
+	));
+}
+
+/// A rendition missing part of its own history fails alone: its siblings finish, and the DASH
+/// manifest and master playlist leave it out.
+#[tokio::test(start_paused = true)]
+async fn a_corrupt_mid_history_rendition_group_fails_only_its_playlist() {
+	let recording = bounded_segments(12).await;
+	let expired = Expired::open(&recording, true, &[("360p", 6, Fault::Corrupt)]).await;
+	let replay = &expired.replay;
+	replay.failure(Kind::Video, "360p").await;
+	for (kind, name) in [(Kind::Video, "1080p"), (Kind::Audio, "audio")] {
+		let playlist = replay
+			.playlist_until(kind, name, |playlist| playlist.contains("#EXT-X-ENDLIST"))
+			.await;
+		assert!(playlist.contains(".11.m4s\n"), "{name}: {playlist}");
+	}
+	let manifest = replay
+		.broadcaster
+		.manifest(None)
+		.unwrap()
+		.expect("the siblings stay listed");
+	assert!(manifest.contains("id=\"video/1080p\""), "{manifest}");
+	assert!(!manifest.contains("id=\"video/360p\""), "{manifest}");
+	let master = replay.broadcaster.master_playlist(None);
+	assert!(master.contains("video/1080p/"), "{master}");
+	assert!(!master.contains("video/360p/"), "{master}");
 }

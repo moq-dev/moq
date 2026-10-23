@@ -19,6 +19,9 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// The runtime that arms the session's timers.
 	pub runtime: crate::time::Deadlines,
 
+	/// Where the session's control traffic is counted, even with neither origin set.
+	pub stats: crate::stats::Session,
+
 	pub session: S,
 
 	/// The bidi SETUP stream (draft-14 through draft-16 only). Draft-17+ passes `None`
@@ -115,6 +118,7 @@ where
 {
 	let Config {
 		runtime,
+		stats,
 		mut session,
 		setup,
 		request_id_max,
@@ -206,8 +210,12 @@ where
 		// moq-transport threads concrete origins through the publisher/subscriber.
 		// An unset half gets an empty origin: an empty publish origin announces
 		// nothing, and an empty subscribe origin issues no SUBSCRIBE_NAMESPACE.
-		let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
-		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
+		let publish = publish.unwrap_or_else(|| {
+			origin::Producer::empty(Hop::random())
+				.consume()
+				.with_stats(stats.clone())
+		});
+		let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()).with_stats(stats.clone()));
 		let subscriptions = crate::session::Slots::new(limits.subscriptions)
 			.with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 		let announces =
@@ -224,7 +232,7 @@ where
 					return Err(err);
 				};
 				let control = Control::new(request_id_max, client).with_window(limits.requests(), client, version);
-				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
+				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version).with_stats(&stats);
 
 				// No AUTH on these drafts, but a limit still reaches both halves.
 				let mut publisher = Publisher::new(
@@ -267,7 +275,6 @@ where
 					let mut session = session.clone();
 					let adapter = adapter.clone();
 					let goaway = goaway.clone();
-					let runtime = runtime.clone();
 					tasks.push(async move {
 						let payload = kio::wait(|waiter| {
 							let mut cx = waiter.context();
@@ -282,7 +289,6 @@ where
 						};
 						let timeout_ms = payload.timeout.map(|d| d.as_millis() as u64).unwrap_or(0);
 						adapter.send_goaway(&payload.uri, timeout_ms, version);
-						crate::goaway::enforce(&runtime, &mut session, payload.timeout).await;
 					});
 				}
 				drop(tasks);
@@ -294,7 +300,7 @@ where
 				// Every half only ends the session on error (err_only parks on clean
 				// completion); the task set draining is the one clean exit.
 				let mut adapter_run = std::pin::pin!(err_only(adapter.run(setup.reader, setup.writer, goaway.clone())));
-				let mut unis = std::pin::pin!(err_only(run_unis(
+				let mut unis = Unis::new(
 					adapter.clone(),
 					subscriber.clone(),
 					UniSetup {
@@ -304,9 +310,8 @@ where
 						client,
 						version,
 						goaway,
-						local_close: closing.clone()
 					},
-				)));
+				);
 				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
 					dispatch_session,
 					publisher.clone(),
@@ -329,9 +334,11 @@ where
 								Version::Draft16 => {
 									let mut sub_ns_adapter = sub_ns_adapter;
 									let (send, recv) = sub_ns_adapter.open_native_bi().await?;
+									let mut reader = crate::coding::Reader::new(recv, version);
+									reader.set_priority(crate::priority::RECV_CONTROL);
 									Stream {
 										writer: crate::coding::Writer::new(send, version),
-										reader: crate::coding::Reader::new(recv, version),
+										reader,
 									}
 								}
 								_ => Stream::open(&mut sub_ns_adapter.clone(), version).await?,
@@ -358,8 +365,8 @@ where
 					if let Poll::Ready(err) = waiter.poll_future(adapter_run.as_mut()) {
 						return Poll::Ready(Err::<(), Error>(err));
 					}
-					if let Poll::Ready(err) = waiter.poll_future(unis.as_mut()) {
-						return Poll::Ready(Err(err));
+					if let Poll::Ready(res) = unis.poll(waiter) {
+						return Poll::Ready(res);
 					}
 					if let Poll::Ready(err) = waiter.poll_future(dispatch.as_mut()) {
 						return Poll::Ready(Err(err));
@@ -380,6 +387,9 @@ where
 				})
 				.await;
 				close(&mut session, &res);
+				if !closing.load(std::sync::atomic::Ordering::Relaxed) {
+					kio::wait(|waiter| unis.poll_drain(waiter)).await;
+				}
 				if closing.load(std::sync::atomic::Ordering::Relaxed) {
 					subscriber.close();
 				} else if let Err(err) = &res {
@@ -393,7 +403,6 @@ where
 				// Send SETUP and retain its writer for the session's lifetime. Only a failure
 				// ends the session; the other branches report how it closed.
 				let setup = err_only(run_setup(
-					runtime.clone(),
 					session.clone(),
 					version,
 					path,
@@ -406,22 +415,9 @@ where
 					},
 					goaway.clone(),
 					control.clone(),
+					stats.clone(),
 				));
 
-				// Only the dialing side fails loud on a publication outside its grant: a
-				// server's publish origin is everything the peer may read, not what it
-				// intends to push.
-				let enforce = {
-					let auth = auth.clone();
-					let origin = publish.clone();
-					let session = session.clone();
-					async move {
-						match client {
-							true => enforce_grant(auth, origin, session).await,
-							false => std::future::pending().await,
-						}
-					}
-				};
 				let mut publisher = Publisher::new(
 					runtime.clone(),
 					session.clone(),
@@ -437,6 +433,21 @@ where
 				publisher.owed = serving.clone();
 				publisher.subscriptions = subscriptions;
 				publisher.fetches = crate::session::Slots::new(limits.fetches);
+
+				// Only the dialing side fails loud on a publication outside its grant: a
+				// server's publish origin is everything the peer may read, not what it
+				// intends to push.
+				let enforce = {
+					let auth = auth.clone();
+					let publisher = publisher.clone();
+					let session = session.clone();
+					async move {
+						match client {
+							true => enforce_grant(auth, publisher, session).await,
+							false => std::future::pending().await,
+						}
+					}
+				};
 
 				let mut subscriber = Subscriber::new(
 					runtime.clone(),
@@ -463,6 +474,7 @@ where
 					peer_setup.clone(),
 					version,
 					goaway.going_away.clone(),
+					stats.clone(),
 				);
 				// Only a side that offered MoQ Auth answers the peer's Auth requests: one that
 				// arrives otherwise falls through to the protocol violation in `run_dispatch`.
@@ -481,9 +493,13 @@ where
 				// arrives on the wire.
 				let goaway_recv = {
 					let goaway = goaway.clone();
+					let stats = stats.clone();
 					async move {
 						match peer_setup_stream {
-							Some(reader) => run_goaway(reader.with_version(version), version, client, goaway).await,
+							Some(reader) => {
+								run_goaway(reader.with_stats(&stats).with_version(version), version, client, goaway)
+									.await
+							}
 							None => std::future::pending().await,
 						}
 					}
@@ -492,7 +508,7 @@ where
 				// Every half only ends the session on error (err_only parks on clean
 				// completion); `setup` never resolves (it holds the stream open) and the
 				// task set draining is the one clean exit.
-				let mut unis = std::pin::pin!(err_only(run_unis(
+				let mut unis = Unis::new(
 					session.clone(),
 					subscriber.clone(),
 					UniSetup {
@@ -502,9 +518,8 @@ where
 						client,
 						version,
 						goaway,
-						local_close: closing.clone()
 					},
-				)));
+				);
 				let mut dispatch = std::pin::pin!(err_only(run_dispatch(
 					session.clone(),
 					publisher.clone(),
@@ -548,8 +563,8 @@ where
 
 				let res = kio::wait(|waiter| {
 					use std::task::Poll;
-					if let Poll::Ready(err) = waiter.poll_future(unis.as_mut()) {
-						return Poll::Ready(Err::<(), Error>(err));
+					if let Poll::Ready(res) = unis.poll(waiter) {
+						return Poll::Ready(res);
 					}
 					if let Poll::Ready(err) = waiter.poll_future(dispatch.as_mut()) {
 						return Poll::Ready(Err(err));
@@ -589,6 +604,9 @@ where
 					Ok(()) => Error::Cancel,
 					Err(err) => err.clone(),
 				});
+				if !closing.load(std::sync::atomic::Ordering::Relaxed) {
+					kio::wait(|waiter| unis.poll_drain(waiter)).await;
+				}
 				if closing.load(std::sync::atomic::Ordering::Relaxed) {
 					subscriber.close();
 				} else if let Err(err) = &res {
@@ -647,6 +665,9 @@ fn close<S: crate::transport::poll::Session>(session: &mut S, res: &Result<(), E
 pub struct PeerSetup<S: crate::transport::poll::Session> {
 	/// The SETUP stream, which becomes the GOAWAY channel.
 	pub stream: Reader<S::RecvStream, crate::Version>,
+
+	/// The SETUP's encoded size, counted once the session's stats are known.
+	pub size: usize,
 
 	/// The request path the peer advertised, for URL-less transports.
 	pub path: Option<String>,
@@ -707,7 +728,8 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 			continue;
 		}
 
-		let setup: setup::Setup = reader.decode().await?;
+		reader.set_priority(crate::priority::RECV_CONTROL);
+		let (setup, size) = reader.decode_sized::<setup::Setup>().await?;
 		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, version)?;
 		let path = match params.get_bytes(ietf::ParameterBytes::Path) {
 			Some(bytes) => Some(
@@ -722,6 +744,7 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 
 		return Ok(PeerSetup {
 			stream: reader,
+			size,
 			path,
 			token,
 			declared,
@@ -758,6 +781,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 		auth: auth::from_setup(params, version) == Some(true),
 		active_count: active_count::from_setup(params, version),
 		epoch: epoch::from_setup(params, version),
+		flate: super::flate::from_setup(params, version)?,
 	})
 }
 
@@ -770,7 +794,6 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 /// names the other extensions we offer.
 #[allow(clippy::too_many_arguments)]
 async fn run_setup<S: crate::transport::poll::Session>(
-	runtime: crate::time::Deadlines,
 	mut session: S,
 	version: Version,
 	path: Option<String>,
@@ -780,6 +803,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 	extensions: crate::setup::Extensions,
 	goaway: crate::goaway::Protocol,
 	control: Control,
+	stats: crate::stats::Session,
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
@@ -787,7 +811,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		.open_uni(Default::default())
 		.await
 		.map_err(Error::from_transport)?;
-	let mut writer: Writer<S::SendStream, crate::Version> = Writer::new(send, outer_version);
+	let mut writer: Writer<S::SendStream, crate::Version> = Writer::new(send, outer_version).with_stats(&stats);
 
 	let mut parameters = ietf::Parameters::default();
 	parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
@@ -811,6 +835,7 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		epoch::into_setup(&mut parameters, version);
 	}
 	request_update::into_setup(&mut parameters, version);
+	super::flate::into_setup(&mut parameters, version);
 	let parameters = parameters.encode_bytes(version)?;
 
 	writer
@@ -854,13 +879,9 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		// control-stream messages this channel otherwise carries.
 		let mut writer = writer.with_version(version);
 		writer.encode_message(&msg).await.map_err(control_stream_error)?;
-
-		let mut draining = std::pin::pin!(async {
-			crate::goaway::enforce(&runtime, &mut session, payload.timeout).await;
-			session.closed().await;
-		});
+		let mut closed = std::pin::pin!(session.closed());
 		kio::wait(|waiter| {
-			if waiter.poll_future(draining.as_mut()).is_ready() {
+			if waiter.poll_future(closed.as_mut()).is_ready() {
 				return std::task::Poll::Ready(Ok(()));
 			}
 			if writer.poll_closed(&mut waiter.context()).is_ready() {
@@ -931,7 +952,6 @@ struct UniSetup<S: crate::transport::poll::Session> {
 	client: bool,
 	version: Version,
 	goaway: crate::goaway::Protocol,
-	local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Accept incoming uni streams, including SETUP and GOAWAY on draft-17+.
@@ -941,82 +961,87 @@ struct UniSetup<S: crate::transport::poll::Session> {
 /// the peer has not sent yet, held back by connection flow control that the later
 /// streams' unread data is using up. Waiting here for its type would deadlock the
 /// connection.
-async fn run_unis<S>(mut session: S, subscriber: Subscriber<S>, setup: UniSetup<S>) -> Result<(), Error>
-where
-	S: crate::transport::poll::Boxable,
-{
-	use std::task::Poll;
+struct Unis<S: crate::transport::poll::Session> {
+	session: S,
+	uni: Uni<S>,
+	early: std::collections::VecDeque<Reader<S::RecvStream, crate::Version>>,
+	tasks: TaskSet,
+	fatal: kio::Shared<Option<Error>>,
+	ended: Option<Error>,
+}
 
-	let UniSetup {
-		peer: peer_setup,
-		read: setup_read,
-		early,
-		client,
-		version,
-		goaway,
-		local_close,
-	} = setup;
-	let outer_version = crate::Version::Ietf(version);
-	let mut tasks = TaskSet::owned();
-	let uni = Uni {
-		subscriber: subscriber.clone(),
-		peer_setup,
-		// A gated server accept already read the peer's one SETUP off its own uni stream,
-		// so anything arriving here is a second one.
-		seen_setup: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(setup_read)),
-		goaway,
-		client,
-		version,
-	};
-	// The first stream to break the session, recorded by the child that read it.
-	let fatal = kio::Shared::<Option<Error>>::default();
-	let mut early = early.into_iter();
+impl<S: crate::transport::poll::Boxable> Unis<S> {
+	fn new(session: S, subscriber: Subscriber<S>, setup: UniSetup<S>) -> Self {
+		Self {
+			uni: Uni {
+				subscriber,
+				peer_setup: setup.peer,
+				seen_setup: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(setup.read)),
+				goaway: setup.goaway,
+				client: setup.client,
+				version: setup.version,
+			},
+			session,
+			early: setup.early.into(),
+			tasks: TaskSet::owned(),
+			fatal: Default::default(),
+			ended: None,
+		}
+	}
 
-	loop {
-		let reader = match early.next() {
-			Some(reader) => reader,
-			None => {
-				let recv = tasks
-					.drive(|waiter| {
-						let broken = fatal.poll(waiter, |fatal| match fatal.is_some() {
-							true => Poll::Ready(()),
-							false => Poll::Pending,
-						});
-						if let Poll::Ready(mut fatal) = broken
-							&& let Some(err) = fatal.take()
-						{
-							return Poll::Ready(Err(err));
-						}
-						let mut cx = waiter.context();
-						session.poll_accept_uni(&mut cx).map(Ok)
-					})
-					.await;
-				let recv = match recv {
-					Ok(Ok(recv)) => recv,
-					Ok(Err(err)) => {
-						let err = Error::from_transport(err);
-						// Settle tracks and open groups before the owned receive tasks drop
-						// their cancellation guards, which would otherwise record Cancel.
-						if local_close.load(std::sync::atomic::Ordering::Relaxed) {
-							subscriber.close();
-						} else {
-							subscriber.abort(&err);
-						}
-						return Err(err);
+	fn accept(&mut self, waiter: &kio::Waiter) {
+		while self.ended.is_none() {
+			let reader = match self.early.pop_front() {
+				Some(reader) => reader,
+				None => match self.session.poll_accept_uni(&mut waiter.context()) {
+					std::task::Poll::Ready(Ok(recv)) => Reader::new(recv, crate::Version::Ietf(self.uni.version)),
+					std::task::Poll::Ready(Err(err)) => {
+						self.ended = Some(Error::from_transport(err));
+						break;
 					}
-					Err(fatal) => return Err(fatal),
-				};
-				Reader::new(recv, outer_version)
-			}
-		};
+					std::task::Poll::Pending => break,
+				},
+			};
+			let uni = self.uni.clone();
+			let fatal = self.fatal.clone();
+			self.tasks.push(async move {
+				if let Err(err) = uni.serve(reader).await {
+					fatal.lock().get_or_insert(err);
+				}
+			});
+		}
+	}
 
-		let uni = uni.clone();
-		let fatal = fatal.clone();
-		tasks.push(async move {
-			if let Err(err) = uni.serve(reader).await {
-				fatal.lock().get_or_insert(err);
-			}
-		});
+	fn poll(&mut self, waiter: &kio::Waiter) -> std::task::Poll<Result<(), Error>> {
+		let _ = self.tasks.poll(waiter);
+		if let Some(err) = self.fatal.lock().take() {
+			return std::task::Poll::Ready(Err(err));
+		}
+		self.accept(waiter);
+		let _ = self.tasks.poll(waiter);
+		if let Some(err) = self.fatal.lock().take() {
+			return std::task::Poll::Ready(Err(err));
+		}
+		match &self.ended {
+			Some(err) => std::task::Poll::Ready(Err(err.clone())),
+			None => std::task::Poll::Pending,
+		}
+	}
+
+	fn poll_drain(&mut self, waiter: &kio::Waiter) -> std::task::Poll<()> {
+		self.accept(waiter);
+		let drained = self.tasks.poll(waiter).is_ready();
+		if self.ended.is_none() {
+			return std::task::Poll::Pending;
+		}
+		// Every accepted child has first consumed its buffered header. A fill
+		// still waiting to be promised or opened can no longer arrive.
+		self.uni.subscriber.settle_control();
+		if drained {
+			std::task::Poll::Ready(())
+		} else {
+			self.tasks.poll(waiter)
+		}
 	}
 }
 
@@ -1035,6 +1060,7 @@ struct Uni<S: crate::transport::poll::Session> {
 impl<S: crate::transport::poll::Boxable> Uni<S> {
 	/// Read the stream's type and serve it, failing only when the stream breaks the session.
 	async fn serve(self, mut reader: Reader<S::RecvStream, crate::Version>) -> Result<(), Error> {
+		reader = reader.with_stats(self.subscriber.stats());
 		let Self {
 			mut subscriber,
 			peer_setup,
@@ -1086,6 +1112,7 @@ impl<S: crate::transport::poll::Boxable> Uni<S> {
 				// The negotiation gates the announce and dispatch loops, so a SETUP we
 				// cannot read must end the session rather than leave them parked on a
 				// slot nothing will ever fill.
+				reader.set_priority(crate::priority::RECV_CONTROL);
 				let msg = reader.decode::<setup::Setup>().await?;
 				if let Some(peer_setup) = peer_setup {
 					peer_setup.set(decode_peer_setup(msg.parameters, version, client)?);
@@ -1279,6 +1306,7 @@ struct Bidi<S: crate::transport::poll::Session> {
 impl<S: crate::transport::poll::Boxable> Bidi<S> {
 	/// Read and serve a request, failing only when it breaks the session.
 	async fn serve(self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		stream = super::request_stream::with_stats(stream, self.publisher.stats(), self.version);
 		let Self {
 			publisher,
 			mut subscriber,
@@ -1308,6 +1336,14 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 			}
 			Err(err) => return Err(err),
 		};
+		let native = !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+			|| (version == Version::Draft16 && id == ietf::SubscribeNamespaceLegacy::ID);
+		if native {
+			stream.reader = stream.reader.with_stats(publisher.stats());
+			publisher
+				.stats()
+				.control(super::message::control(id, version), data.0.len() + 2, true);
+		}
 		if !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 			&& matches!(
 				id,
@@ -1315,7 +1351,7 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 					| ietf::Fetch::ID
 					| ietf::SubscribeNamespace::ID
 					| ietf::SubscribeNamespaceLegacy::ID
-					| ietf::SUBSCRIBE_TRACKS_ID
+					| ietf::SubscribeTracks::ID
 					| ietf::TrackStatus::ID
 					| ietf::Publish::ID
 					| ietf::PublishNamespace::ID
@@ -1346,7 +1382,7 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 			| ietf::Fetch::ID
 			| ietf::SubscribeNamespace::ID
 			| ietf::SubscribeNamespaceLegacy::ID
-			| ietf::SUBSCRIBE_TRACKS_ID
+			| ietf::SubscribeTracks::ID
 			| ietf::TrackStatus::ID => {
 				publisher.handle_stream(id, data, stream, epoch)?.await;
 			}
@@ -1443,6 +1479,9 @@ async fn read_goaways<R: crate::transport::poll::RecvStream>(
 		}
 
 		let msg: ietf::GoAway = body.message(version)?;
+		reader
+			.stats()
+			.control(crate::stats::Control::Goaway, body.0.len() + 2, true);
 		tracing::info!(message = ?msg, "received GOAWAY");
 
 		// Draft-18 names the first of our own Request IDs it did not process: even for a
@@ -1483,15 +1522,19 @@ impl Drop for AuthClose {
 	}
 }
 
-/// Close the session when our origin announces a broadcast our grant never covered,
-/// instead of leaving it to wait for a subscription that never comes. See
-/// [`crate::auth::Enforce`].
-async fn enforce_grant<S: crate::transport::poll::Session>(
+/// Close the session when we publish a broadcast our grant never covered, instead of
+/// leaving it to wait for a subscription that never comes. See [`crate::auth::Enforce`].
+///
+/// Judges the publisher's serving origin rather than the raw one: an origin that also
+/// consumes holds what the peer sent us, which is not ours to publish back.
+async fn enforce_grant<S: crate::transport::poll::Boxable>(
 	auth: crate::auth::Handle,
-	origin: origin::Consumer,
+	publisher: Publisher<S>,
 	mut session: S,
 ) -> Result<(), Error> {
-	let mut announced = origin.announced();
+	let origin = publisher.serving_origin().await;
+	// Checking what we publish is not a local reader asking to discover anything.
+	let mut announced = origin.clone().serving().announced();
 	let mut check = crate::auth::Enforce::default();
 	let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
 		return Ok(());
@@ -1566,6 +1609,7 @@ mod tests {
 					let log = session.log.clone();
 					let (driver, _) = start(Config {
 						runtime: crate::time::sim(),
+						stats: Default::default(),
 						session,
 						setup: None,
 						request_id_max: None,
@@ -1621,6 +1665,7 @@ mod tests {
 				let log = session.log.clone();
 				let (driver, _) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -1667,6 +1712,7 @@ mod tests {
 				let log = session.log.clone();
 				let (driver, _) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -1724,6 +1770,7 @@ mod tests {
 		writer.varint(ietf::RequestOk::ID).await.unwrap();
 		writer
 			.encode(&ietf::RequestOk {
+				largest: None,
 				request_id: None,
 				active: None,
 			})
@@ -1761,6 +1808,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -1824,6 +1872,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -1897,6 +1946,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: Some(setup),
 			request_id_max: None,
@@ -1985,6 +2035,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2088,6 +2139,7 @@ mod tests {
 		let handle = crate::auth::Handle::ietf(true);
 		let (driver, goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2172,6 +2224,7 @@ mod tests {
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2268,6 +2321,7 @@ mod tests {
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2357,6 +2411,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2400,6 +2455,7 @@ mod tests {
 
 			let (driver, _goaway) = start(Config {
 				runtime: crate::time::sim(),
+				stats: Default::default(),
 				session,
 				setup: None,
 				request_id_max: None,
@@ -2529,7 +2585,7 @@ mod tests {
 		// group stream racing ahead of it lands in.
 		let read = accepted.is_some();
 		let early = accepted.map(|accepted| accepted.early).unwrap_or_default();
-		let mut unis = std::pin::pin!(run_unis(
+		let mut unis = Unis::new(
 			session,
 			subscriber,
 			UniSetup {
@@ -2539,12 +2595,11 @@ mod tests {
 				client: true,
 				version,
 				goaway,
-				local_close: Default::default()
-			}
-		));
+			},
+		);
 
 		for _ in 0..100 {
-			if let std::task::Poll::Ready(result) = futures::poll!(unis.as_mut()) {
+			if let std::task::Poll::Ready(result) = unis.poll(&kio::Waiter::noop()) {
 				return (log, Some(result));
 			}
 			if !log.stops().is_empty() {
@@ -2667,6 +2722,7 @@ mod tests {
 	fn bidi_driver(session: crate::lite::test_transport::ScriptedSession, publish: Option<origin::Consumer>) -> Driver {
 		start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2810,6 +2866,7 @@ mod tests {
 				let log = session.log.clone();
 				let (driver, _goaway) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -2878,6 +2935,7 @@ mod tests {
 				let log = session.log.clone();
 				let (driver, _goaway) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -2980,6 +3038,7 @@ mod tests {
 
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: Some(setup),
 			request_id_max: None,
@@ -3102,6 +3161,7 @@ mod tests {
 				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 				let (driver, _goaway) = start(Config {
 					runtime: crate::time::sim(),
+					stats: Default::default(),
 					session,
 					setup,
 					request_id_max: None,
@@ -3333,6 +3393,7 @@ mod tests {
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -3403,7 +3464,6 @@ mod tests {
 			control.accept(RequestId(first + 4)).unwrap();
 			let (handle, goaway_protocol) = crate::goaway::Handle::new(!client);
 			let mut setup = std::pin::pin!(run_setup(
-				crate::time::sim(),
 				session,
 				VERSION,
 				None,
@@ -3413,6 +3473,7 @@ mod tests {
 				Default::default(),
 				goaway_protocol,
 				control.clone(),
+				Default::default(),
 			));
 			handle.producer().send(crate::goaway::Goaway::new()).unwrap();
 			assert!(futures::poll!(setup.as_mut()).is_pending());
@@ -3435,6 +3496,7 @@ mod tests {
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
 			runtime: crate::time::sim(),
+			stats: Default::default(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -3529,7 +3591,7 @@ mod tests {
 					"a 4097 byte full track name",
 				),
 				(
-					frame(version, ietf::SUBSCRIBE_TRACKS_ID, &oversized_prefix),
+					frame(version, ietf::SubscribeTracks::ID, &oversized_prefix),
 					SessionError::ProtocolViolation,
 					"a 4097 byte SUBSCRIBE_TRACKS prefix",
 				),

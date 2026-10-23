@@ -44,8 +44,9 @@ websocket = ["moq-tokio/websocket"]
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 humantime = { workspace = true }
+moq-clock = { workspace = true }
 moq-net = { workspace = true }
-moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
+moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "net"] }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

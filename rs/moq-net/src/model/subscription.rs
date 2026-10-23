@@ -17,8 +17,9 @@ pub(super) use window::{Containing, Held, Holdings, Resolved, Unheld, Window, la
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Subscription {
-	/// Delivery priority. Higher values preempt lower ones when bandwidth is constrained.
-	pub priority: u8,
+	/// Delivery priority, higher first, defaulting to 0. Higher values preempt lower ones
+	/// when bandwidth is constrained.
+	pub priority: i8,
 	/// How long a superseded group stays worth delivering to this subscriber.
 	///
 	/// [`Duration::ZERO`] (the default) skips immediately: group 8 arriving means group 7
@@ -75,8 +76,8 @@ pub struct Subscription {
 	/// for nothing.
 	///
 	/// A request to the publisher, aggregated across every live subscriber as the union of
-	/// their ranges, and this subscriber's read filter: it reads only the groups its own
-	/// ranges cover, whatever another subscriber widens the union to.
+	/// their ranges, and this subscriber's read filter: it reads only the groups and frames
+	/// its own ranges cover, whatever another subscriber widens the union to.
 	/// [`crate::track::Subscriber::set_groups`] narrows the reads further. See [Local cursor
 	/// vs wire preference](crate::track::Subscriber#local-cursor-vs-wire-preference).
 	pub ranges: Vec<Range>,
@@ -271,7 +272,7 @@ impl Default for Subscription {
 
 impl Subscription {
 	/// Set the delivery priority, returning `self` for chaining.
-	pub fn with_priority(mut self, priority: u8) -> Self {
+	pub fn with_priority(mut self, priority: i8) -> Self {
 		self.priority = priority;
 		self
 	}
@@ -305,6 +306,7 @@ impl Subscription {
 	/// from the latest group (or none is asked for).
 	///
 	/// The form a wire without ranges carries: a floor below which nothing is requested.
+	#[cfg(any(feature = "async", test))]
 	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn start(&self) -> Option<Position> {
 		let mut floor: Option<Position> = None;

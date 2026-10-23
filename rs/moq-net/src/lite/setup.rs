@@ -190,6 +190,7 @@ pub struct Setup {
 }
 
 impl Message for Setup {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Session);
 	const MAX_SIZE: usize = crate::setup::MAX_SETUP_SIZE;
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
@@ -240,6 +241,7 @@ pub(super) struct ReceivedSetup {
 }
 
 impl Message for ReceivedSetup {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::Session);
 	const MAX_SIZE: usize = Setup::MAX_SIZE;
 
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
@@ -458,6 +460,18 @@ mod tests {
 		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::Report);
 	}
 
+	/// Probing to a local target never reaches the wire, so a sender alone promises the
+	/// peer nothing more than a report.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_sender_still_reports() {
+		use crate::lite::test_transport::{SinkSession, SinkStats};
+
+		let stats = SinkStats::default().with_send_rate(1_000_000);
+		let session = SinkSession::new(Default::default()).with_stats(stats).with_probe();
+		assert_eq!(ProbeLevel::detect(&session), ProbeLevel::Report);
+	}
+
 	#[test]
 	fn probe_levels_round_trip() {
 		for probe in [ProbeLevel::None, ProbeLevel::Report, ProbeLevel::Increase] {
@@ -642,13 +656,13 @@ mod tests {
 		assert_eq!(got.probe, ProbeLevel::Increase);
 	}
 
+	/// Roles, pinned to the draft. A swap still round trips against our own decoder but
+	/// breaks every other implementation.
 	#[test]
-	fn role_wire_codes() {
-		// The draft pins Publisher=1 / Subscriber=2. A swap here would still round-trip
-		// against our own decoder, but break every other implementation.
-		for (role, code) in [(Role::Publisher, 1u64), (Role::Subscriber, 2)] {
-			assert_eq!(role.to_code(), code);
-			assert_eq!(Role::from_code(code), Some(role));
+	fn role_code_points() {
+		for (role, spec) in [(Role::Publisher, 1u64), (Role::Subscriber, 2)] {
+			assert_eq!(role.to_code(), spec, "{role:?}");
+			assert_eq!(Role::from_code(spec), Some(role));
 		}
 	}
 

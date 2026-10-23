@@ -33,9 +33,9 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 - `Credential { context, kid, secret }` accepts the application-owned secret. The application generates and distributes it over its authenticated channel; the library does not mint a secret it cannot return. `credential.path(semantic)` derives the epoch-free opaque broadcast name. Credential is cheap to clone, never serializes the secret, and redacts it from `Debug`.
 - A core produces only under an epoch it minted itself (decided 2026-10-08). Only `credential.produce()` mints a producing generation, and it takes no epoch: it mints a fresh UUIDv7 and returns a `generation::Producer` owning `epoch()` for the route and `name(semantic)` for opaque track names. `credential.consume(epoch)` binds a discovered epoch as a consume-only `generation::Consumer` with `name(semantic)`. The two are separate types, so producing under a discovered or shared epoch does not compile (names decided 2026-10-11 in [#5313](https://github.com/moq-dev/moq/pull/5313)). Clones of a producing generation share publisher claims so reopening a track cannot reset its nonce counters.
-- Applications only handle semantic track names (maintainer, 2026-10-17). `broadcast::Producer` wraps a `moq-net` broadcast under a producing generation with `create_track(semantic, info)` and `reserve_track(semantic)`; `broadcast::Consumer` wraps one under a consuming generation with `subscribe(semantic, subscription)`. Each derives the physical name, so only the CDN sees physical names. `generation` no longer opens tracks itself.
-- `track::Producer` appends groups and datagrams and allocates identities; `track::Consumer` yields groups and datagram events. `group::Producer` and `group::Consumer` wrap the whole group lifecycle so every AEAD call has the canonical physical name and transport identity.
-- Errors are the draft's typed codes plus the transport's. Nothing catalog-, hang-, or MSF-shaped lives here: a catalog is a track under a derived name, and compression is the catalog owner's job.
+- Applications only handle semantic track names (maintainer, 2026-10-17). `broadcast::Producer` wraps a `moq-net` broadcast under a producing generation and `broadcast::Consumer` wraps one under a consuming generation; each derives the physical name, so only the CDN sees physical names. `generation` no longer opens tracks itself. The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876).
+- The wrappers implement the [moq-net traits](/quest/m2/net-wrap/README.md) at the broadcast, track, group, and frame levels, datagrams included (decided 2026-10-20, maintainer, because one encrypted broadcast then works with every writer and reader). moq-mux, moq-json, hang, and the CLI publish and consume an encrypted broadcast unchanged, under semantic names, and every AEAD call still has the canonical physical name and transport identity. The e2ee mux bridge ([#5822](https://github.com/moq-dev/moq/pull/5822)) is closed and superseded.
+- Errors are the draft's typed codes plus the transport's. Nothing catalog-, hang-, or MSF-shaped lives here: a catalog is a track under a derived name. The catalog owner sets logical `track::Info.compress`; the [e2ee wrapper](/quest/m2/net-wrap/e2ee.md) compresses before AEAD and authenticates the logical compression metadata.
 - Stateless `seal`/`open` primitives with caller-chosen identities, HKDF labels and info builders, raw key bytes, and process-global claims are not public. The vectors are tested inside each core.
 
 ### Application and platform shape
@@ -46,18 +46,17 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ### Dynamic names
 
-Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so a publisher cannot answer a request for a name it never declared. [Dynamic names](/quest/m2/e2ee/dynamic-names.md) designs that before any dynamic-name implementation. The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876) with `reserve_track`, which covers names declared in advance; that is every track the Rust publishers serve, so [rust-publish](/quest/m2/e2ee/rust-publish.md) does not wait on the design (maintainer, 2026-10-19). [Reopen](/quest/m2/e2ee/reopen.md) and the [consumer shape](/quest/m2/e2ee/consumer.md) still do.
+Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so a publisher cannot answer a request for a name it never declared. [Dynamic names](/quest/m2/e2ee/dynamic-names.md) designs that before any dynamic-name implementation. The broadcast wrappers merged in [#5876](https://github.com/moq-dev/moq/pull/5876) with `reserve_track`, which covers names declared in advance; that is every track the Rust publishers serve, so [rust-publish](/quest/m2/e2ee/rust-publish.md) does not wait on the design (maintainer, 2026-10-19). The [consumer shape](/quest/m2/e2ee/consumer.md) still does.
 
 ## Required
 
-- [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust media
-  and catalog publishers accept opaque physical names and emit no plaintext
-  semantic catalog in E2EE mode
 - [Dynamic names](/quest/m2/e2ee/dynamic-names.md) - a reviewed design for
   answering requests for undeclared track names, split into implementation
   quests
-- [Refuse a re-created track](/quest/m2/e2ee/reopen.md) - a name the producer already carried fails loudly
-- [Encrypted consumer shape](/quest/m2/e2ee/consumer.md) - one consumer shape, the producer's mirror, shared by browser, CLI, and FFI
+- [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust
+  publishers emit encrypted catalogs and no plaintext semantic catalog in
+  E2EE mode, through the moq-net traits
+- [Encrypted consumer shape](/quest/m2/e2ee/consumer.md) - one consumer shape, the producer's mirror, shared by browser and CLI (moq-ffi is out of scope for this epic)
 - [Encrypted browser components](/quest/m2/e2ee/browser.md) - browser publish
   and watch components handle encrypted audio and video without leaking
   credentials into browser-owned surfaces
@@ -67,6 +66,9 @@ Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
+- [One epoch, one producer](/quest/m2/e2ee/lifecycle-hardening.md) - the epoch rule
+  holds in the TypeScript API, a failed grouped write ends the group, and an
+  out-of-range datagram is dropped
 
 ## Closes
 
@@ -75,4 +77,4 @@ Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so
 ## Related
 
 - [archive](/quest/m1/archive/README.md) - protected broadcasts are deliberately outside recording and replay formats
-- [Wrapper seam over moq-net](/quest/m2/net-wrap-trait.md) - whether a moq-net trait replaces the bridge the e2ee mux path uses
+- [Wrapper traits over moq-net](/quest/m2/net-wrap/README.md) - the traits the e2ee wrappers implement, so every writer and reader takes an encrypted broadcast

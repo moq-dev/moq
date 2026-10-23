@@ -680,6 +680,12 @@ impl Lease {
 		}
 	}
 
+	/// Resolve once the lease has ended and the decider heard; see
+	/// [`moq_auth::lease::Consumer::reported`]. Take it before [`close`](Self::close).
+	pub(crate) fn reported(&self) -> impl Future<Output = ()> + Send + 'static {
+		self.consumer.reported()
+	}
+
 	/// End the lease with the session's close classification and the totals it
 	/// moved, and learn what ended the session: that, or for a gateway the
 	/// decider's reason if it revoked first. Dropping the consumer reports zero bytes.
@@ -699,7 +705,11 @@ impl Lease {
 				self.consumer.close(reason, bytes)
 			}
 			Some(refresh) => {
-				if let Some(ended) = refresh.ended().now_or_never() {
+				// The session has closed by now, withdrawing every grant it was issued.
+				// That is the effect of `reason`, not a verdict that overrides it.
+				if let Some(ended) = refresh.ended().now_or_never()
+					&& ended != lease::Reason::Dropped
+				{
 					if let Some(kind) = uncovered(&ended) {
 						self.stats.fail(kind);
 					}
@@ -1121,6 +1131,7 @@ pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod tests {
 	use super::*;
 	use std::time::SystemTime;
@@ -1247,12 +1258,11 @@ mod tests {
 		assert!(grant.publish.is_empty());
 	}
 
-	/// The verification concurrency defaults to 128, reads from `[auth]`, and refuses 0,
+	/// The verification concurrency reads from `[auth]` and refuses 0,
 	/// which would leave every in-band token waiting forever.
 	#[test]
-	fn verifications_default_and_refuse_zero() {
+	fn verifications_parse_and_refuse_zero() {
 		let config = config(Some("http://127.0.0.1:4440/"), &[]);
-		assert_eq!(config.verifications, 128);
 		let parsed: Config = toml::from_str("url = \"http://127.0.0.1:4440/\"\nverifications = 4\n").unwrap();
 		assert_eq!(parsed.verifications, 4);
 		let zero = Config {

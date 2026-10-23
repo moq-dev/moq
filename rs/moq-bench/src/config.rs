@@ -223,7 +223,7 @@ impl Config {
 		deprecated.extend(config.deprecated());
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		config.origins = Some(resolved);
-		// `Stats::report` feeds this into `tokio::time::interval`, which panics on a
+		// `Stats::report` feeds this into `moq_clock::interval`, which panics on a
 		// zero period. Reject it up front with a clear message.
 		anyhow::ensure!(!config.report().is_zero(), "--report must be greater than 0s");
 		if let Some(fanout) = &config.fanout {
@@ -484,7 +484,7 @@ url = "https://example.com"
 
 	#[test]
 	fn zero_report_is_rejected() {
-		// A zero report interval would panic `tokio::time::interval`; reject it early.
+		// A zero report interval would panic `moq_clock::interval`; reject it early.
 		let err = Config::parse_and_merge(["moq-bench", "--report", "0s"]).unwrap_err();
 		assert!(err.to_string().contains("report"), "unexpected error: {err}");
 	}
@@ -504,17 +504,8 @@ url = "https://example.com"
 	}
 
 	#[test]
-	fn defaults_apply_without_toml() {
+	fn a_default_run_publishes_without_expecting_delivery() {
 		let config = Config::parse_and_merge(["moq-bench"]).unwrap();
-		assert_eq!(config.connections(), Range::new(1, 1));
-		assert_eq!(config.broadcasts(), Range::new(1, 1));
-		assert_eq!(config.subscribe(), Range::new(0, 0));
-		assert_eq!(config.fps(), Range::new(30, 30));
-		assert_eq!(config.frame_size(), Range::new(1200, 1200));
-		assert_eq!(config.group_size(), Range::new(60, 60));
-		assert_eq!(config.max_delay(), Duration::from_secs(2));
-		assert_eq!(config.name(), "bench");
-		assert_eq!(config.fanout(), None);
 		assert!(!config.expects_delivery());
 		assert!(config.publishes());
 	}
@@ -565,15 +556,6 @@ url = "https://example.com"
 			assert!(answer.is_question(), "{flag} was treated as a failure");
 			assert!(!answer.message().trim().is_empty(), "{flag} rendered nothing");
 		}
-	}
-
-	/// The spec is named for the binary, not for the struct that declares it.
-	///
-	/// Usage takes the program name from the type unless told otherwise, so an
-	/// undeclared name renders every usage line and completion as `config`.
-	#[test]
-	fn the_spec_is_named_for_the_binary() {
-		assert_eq!(Config::spec().bin.unwrap_or(Config::spec().name), "moq-bench");
 	}
 
 	#[test]

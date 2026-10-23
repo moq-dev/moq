@@ -434,7 +434,7 @@ impl<E: CatalogExt> Producer<E> {
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
 		let mut json_config = moq_json::snapshot::Config::default();
-		json_config.delta_ratio = 0;
+		json_config.deltas = false;
 		let hang = moq_json::snapshot::Producer::new(hang_track.clone(), json_config.clone());
 
 		// The `.z` track carries the same catalog, DEFLATE-compressed. Deltas stay off for parity
@@ -483,7 +483,7 @@ impl<E: CatalogExt> Producer<E> {
 	/// `priority` should come from [`PRIORITY`](hang::catalog::PRIORITY) for the kind of media
 	/// the track carries. Chain [`with_timescale`](moq_net::track::Info::with_timescale) for a
 	/// container that carries the source's own scale (CMAF and Matroska both do).
-	pub fn track_info(&self, priority: u8) -> moq_net::track::Info {
+	pub fn track_info(&self, priority: i8) -> moq_net::track::Info {
 		let info = hang::container::track_info(priority);
 		match self.max_age {
 			Some(max_age) => info.with_max_age(max_age),
@@ -571,6 +571,11 @@ impl<E: CatalogExt> Producer<E> {
 	/// The clock as it stands, without fixing it: for readers that follow it on every use.
 	pub(super) fn current_clock(&self) -> crate::Clock {
 		take(&self.current).clock
+	}
+
+	/// The config `name` holds in `C`'s section, cloned without copying the rest of the catalog.
+	pub(super) fn config<C: super::RenditionConfig<E>>(&self, name: &str) -> Option<C> {
+		C::get_mut(&mut take(&self.current).catalog, name).cloned()
 	}
 
 	/// Anchor a timebase on its first timestamp `pts`, which happened at `wall` (or arrived now),
@@ -974,10 +979,12 @@ impl<E: CatalogExt> Producer<E> {
 	/// `config` is a [`json::Config`](crate::json::Config) for the `json` section, or an
 	/// application's own entry embedding a [`JsonConfig`](hang::catalog::JsonConfig) (see
 	/// [`IntoRendition`](super::IntoRendition)). The producer sets its `mode`, encodes the track
-	/// with its `compression`, and fills an absent `bitrate` from what it writes. A
-	/// [`delta_ratio`](crate::json::Config::delta_ratio) on `json::Config` selects the snapshot
-	/// encoder; it is not written into the catalog entry. The config is `'static` so that ratio
-	/// can be read off the builder.
+	/// with its `compression`, and fills an absent `bitrate` from what it writes. The
+	/// [`deltas`](crate::json::Config::deltas) switch on `json::Config` configures the snapshot
+	/// encoder; it is not written into the catalog entry. The config is `'static` so that switch
+	/// can be read off the builder. With deltas, create `track` with a
+	/// [`refresh`](moq_net::track::Info::refresh) ratio and drive
+	/// [`Snapshot::refresh`](crate::json::Snapshot::refresh), so joiners get a fresh group.
 	///
 	/// Errors if the entry's section already carries that name, for example an entry seeded
 	/// through [`Config::with_catalog`] or one pointing at a sibling broadcast, or if the entry
@@ -1306,6 +1313,10 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 	let mut names = BTreeSet::new();
 	let mut reference = |id: &str, config: &dyn Reference| {
 		let name = config.track(id);
+		if let Some(epoch) = config.epoch() {
+			// MSF has nowhere to name an instance, so its readers take whichever resolves first.
+			tracing::warn!(rendition = id, %epoch, "MSF cannot carry a reference epoch; advertising without it");
+		}
 		let namespace = match config.broadcast().filter(|rel| !rel.is_empty()) {
 			None => None,
 			Some(rel) => {

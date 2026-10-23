@@ -1,4 +1,4 @@
-# moq-transport passthrough
+# [M] moq-transport passthrough
 
 ## Goal
 
@@ -48,11 +48,12 @@ cannot answer unambiguously is refused.
   turns it on. A non-relay peer that negotiated it would receive properties
   and status objects it can only discard.
 - **Dynamic groups** are supported rather than treated as an opaque track
-  property. A private request path carries NEW_GROUP_REQUEST upstream and
-  coalesces redundant requests until the largest group advances. Plain
-  moq-lite does not advertise this capability.
-- **Immutable properties** keep their serialized inner bytes and ingress
-  encoding family, including across relay hops. Refuse forwarding between
+  property. The public `Demand::wanted` path (#5930, through relays in
+  #6030) carries NEW_GROUP_REQUEST upstream and coalesces redundant requests
+  until the largest group advances, so dynamic groups are no longer part of
+  the private carve-out below.
+- **Immutable properties** keep their serialized inner bytes, and the track
+  its ingress moq-transport version, including across relay hops. Refuse forwarding between
   the absolute-key/QUIC-varint drafts 14/15, delta-key/QUIC-varint draft 16,
   and delta-key/leading-ones-varint drafts 17+ when immutable properties
   are present. Draft 17 is a separate family because it forbids 7-byte varints.
@@ -80,10 +81,6 @@ Work owned by this README, after the children land:
   before working around it.
 - FETCH cases are skipped upstream. Section 8 stays out while PUBLISH is
   declined.
-
-## Required
-
-- [Ingress-version provenance](/quest/m1/ietf-extension/lite.md) - a track crossing a lite-07 hop carries its moq-transport ingress version once, replacing per-block Encoding codes
 
 ## Related
 

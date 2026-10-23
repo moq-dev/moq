@@ -40,6 +40,7 @@ static NEXT_AUDIO_PAD_ID: AtomicU64 = AtomicU64::new(0);
 struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
+	versions: Option<String>,
 	tls_disable_verify: bool,
 	quic_keylog: bool,
 }
@@ -48,6 +49,8 @@ struct Settings {
 struct ResolvedSettings {
 	url: url::Url,
 	broadcast: String,
+	/// Empty offers every supported version.
+	versions: Vec<moq_net::Version>,
 	tls_disable_verify: bool,
 	quic_keylog: bool,
 }
@@ -63,6 +66,14 @@ impl TryFrom<Settings> for ResolvedSettings {
 				.as_ref()
 				.context("broadcast property is required")?
 				.clone(),
+			versions: value
+				.versions
+				.iter()
+				.flat_map(|versions| versions.split(','))
+				.map(str::trim)
+				.filter(|version| !version.is_empty())
+				.map(|version| version.parse().map_err(anyhow::Error::msg))
+				.collect::<Result<_>>()?,
 			tls_disable_verify: value.tls_disable_verify,
 			quic_keylog: value.quic_keylog,
 		})
@@ -205,13 +216,20 @@ impl SessionController {
 	}
 }
 
+/// The dial's configuration: versions and TLS as set, retrying without a budget.
+fn connect_config(settings: &ResolvedSettings) -> moq_tokio::connect::Config {
+	let mut config = moq_tokio::connect::Config::default();
+	config.version = settings.versions.clone();
+	config.tls.insecure = Some(settings.tls_disable_verify);
+	config.backoff.timeout = Some(std::time::Duration::ZERO);
+	config
+}
+
 /// Start the reconnecting dial and the origin its announcements land in.
 fn connect(
 	settings: &ResolvedSettings,
 ) -> Result<(moq_tokio::Client, moq_tokio::Connection, moq_net::origin::Consumer)> {
-	let mut config = moq_tokio::connect::Config::default();
-	config.tls.insecure = Some(settings.tls_disable_verify);
-	config.backoff.timeout = Some(std::time::Duration::ZERO);
+	let config = connect_config(settings);
 
 	// The origin and the connection loop are both spawned tasks.
 	let _rt = RUNTIME.enter();
@@ -253,6 +271,11 @@ impl ObjectImpl for MoqSrc {
 				glib::ParamSpecString::builder("broadcast")
 					.nick("Broadcast")
 					.blurb("The broadcast name to subscribe to")
+					.mutable_ready()
+					.build(),
+				glib::ParamSpecString::builder("versions")
+					.nick("Versions")
+					.blurb("Comma-separated protocol versions to offer, most preferred first, like moq-lite-06; unset offers every stable version")
 					.mutable_ready()
 					.build(),
 				glib::ParamSpecBoolean::builder("tls-disable-verify")
@@ -297,6 +320,7 @@ impl ObjectImpl for MoqSrc {
 		match pspec.name() {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
+			"versions" => settings.versions = value.get().unwrap(),
 			"tls-disable-verify" => settings.tls_disable_verify = value.get().unwrap(),
 			"quic-keylog" => settings.quic_keylog = value.get().unwrap(),
 			_ => unreachable!(),
@@ -308,6 +332,7 @@ impl ObjectImpl for MoqSrc {
 		match pspec.name() {
 			"url" => settings.url.to_value(),
 			"broadcast" => settings.broadcast.to_value(),
+			"versions" => settings.versions.to_value(),
 			"tls-disable-verify" => settings.tls_disable_verify.to_value(),
 			"quic-keylog" => settings.quic_keylog.to_value(),
 			_ => unreachable!(),
@@ -404,6 +429,7 @@ struct Shape {
 	container: hang::catalog::Container,
 	track: String,
 	broadcast: Option<moq_net::path::RelativeOwned>,
+	epoch: Option<moq_net::Epoch>,
 }
 
 /// A pump's progress, shared with its [`ActiveTrack`] so teardown and pad creation can't both
@@ -880,6 +906,7 @@ fn reconcile(
 				container: container.clone(),
 				track: reference.track(name).to_string(),
 				broadcast: reference.broadcast().cloned(),
+				epoch: reference.epoch().cloned(),
 			};
 			desired.insert(name.clone(), Desired { kind, shape });
 		}
@@ -982,7 +1009,7 @@ fn reconcile(
 
 		// Bind without waiting: an unavailable sibling or track must not park the catalog loop
 		// and hold up every other rendition. The pump resolves both under its cancellation scope.
-		let binding = match source.bind(d.shape.broadcast.as_ref()) {
+		let binding = match source.bind(d.shape.broadcast.as_ref(), d.shape.epoch.as_ref()) {
 			Ok(binding) => binding,
 			Err(err) => {
 				gst::warning!(CAT, "ignoring rendition {name}: {err:?}");
@@ -1355,13 +1382,17 @@ fn video_caps(config: &hang::catalog::VideoConfig) -> Result<gst::Caps> {
 	Ok(caps)
 }
 
+// GStreamer's audio caps carry rate and channels as `int`: an unsigned field never intersects a
+// decoder's template, so decodebin finds no decoder.
 fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
+	let rate = i32::try_from(config.sample_rate).context("sample rate out of range")?;
+	let channels = i32::try_from(config.channel_count).context("channel count out of range")?;
 	let caps = match &config.codec {
 		hang::catalog::AudioCodec::AAC(_) => {
 			let mut builder = gst::Caps::builder("audio/mpeg")
 				.field("mpegversion", 4)
-				.field("rate", config.sample_rate)
-				.field("channels", config.channel_count);
+				.field("rate", rate)
+				.field("channels", channels);
 			if let Some(description) = &config.description {
 				builder = builder
 					.field("codec_data", gst::Buffer::from_slice(description.clone()))
@@ -1371,26 +1402,70 @@ fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
 			}
 			builder.build()
 		}
-		hang::catalog::AudioCodec::Opus => {
-			let mut builder = gst::Caps::builder("audio/x-opus")
-				.field("rate", config.sample_rate)
-				.field("channels", config.channel_count);
-			if let Some(description) = &config.description {
-				builder = builder
-					.field("codec_data", gst::Buffer::from_slice(description.clone()))
-					.field("stream-format", "ogg");
-			}
-			builder.build()
-		}
+		hang::catalog::AudioCodec::Opus => opus_caps(config, rate, channels)?,
 		hang::catalog::AudioCodec::Mp3 => gst::Caps::builder("audio/mpeg")
 			.field("mpegversion", 1)
 			.field("layer", 3)
-			.field("rate", config.sample_rate)
-			.field("channels", config.channel_count)
+			.field("rate", rate)
+			.field("channels", channels)
 			.build(),
 		other => bail!("unsupported audio codec: {other:?}"),
 	};
 	Ok(caps)
+}
+
+/// An OpusTags packet (RFC 7845 §5.2) with no vendor and no comments.
+const OPUS_TAGS: &[u8] = b"OpusTags\0\0\0\0\0\0\0\0";
+
+/// The `audio/x-opus` caps opusdec and moqsink negotiate on: the stream layout as mapping fields,
+/// which decodebin needs to pick a decoder, plus the catalog's OpusHead and an empty OpusTags as the
+/// streamheader. opusdec reads the head, and so its output gain, only from a two-buffer streamheader.
+fn opus_caps(config: &hang::catalog::AudioConfig, rate: i32, channels: i32) -> Result<gst::Caps> {
+	let head = match &config.description {
+		Some(description) => moq_mux::codec::opus::Config::parse(&mut description.as_ref())
+			.context("Opus description is not an OpusHead")?,
+		None => moq_mux::codec::opus::Config::new(config.sample_rate, config.channel_count),
+	};
+	anyhow::ensure!(
+		head.channel_count == config.channel_count,
+		"the catalog's {} Opus channels contradict its OpusHead's {}",
+		config.channel_count,
+		head.channel_count
+	);
+	let mut builder = gst::Caps::builder("audio/x-opus")
+		.field("rate", rate)
+		.field("channels", channels);
+	builder = match &head.mapping {
+		Some(mapping) => builder
+			.field("channel-mapping-family", i32::from(mapping.family()))
+			.field("stream-count", i32::from(mapping.streams()))
+			.field("coupled-count", i32::from(mapping.coupled()))
+			.field(
+				"channel-mapping",
+				gst::Array::new(mapping.table().iter().map(|&c| i32::from(c))),
+			),
+		// Family 0 is mono or stereo: one stream, coupled when stereo.
+		None => {
+			anyhow::ensure!(
+				(1..=2).contains(&channels),
+				"Opus family 0 carries 1 or 2 channels, not {channels}"
+			);
+			builder
+				.field("channel-mapping-family", 0i32)
+				.field("stream-count", 1i32)
+				.field("coupled-count", channels - 1)
+		}
+	};
+	if let Some(description) = &config.description {
+		builder = builder.field(
+			"streamheader",
+			gst::Array::new([
+				gst::Buffer::from_slice(description.clone()),
+				gst::Buffer::from_slice(OPUS_TAGS),
+			]),
+		);
+	}
+	Ok(builder.build())
 }
 
 #[cfg(test)]
@@ -1444,6 +1519,40 @@ mod tests {
 					if description.is_some() { format } else { "byte-stream" }
 				);
 				assert_eq!(structure.has_field("codec_data"), description.is_some());
+			}
+		}
+	}
+
+	/// opusdec's templates require the mapping fields as ints, so decodebin finds no decoder without them.
+	#[test]
+	fn opus_caps_carry_the_stream_layout() {
+		gst::init().unwrap();
+		for channels in [1, 2] {
+			let head = moq_mux::codec::opus::Config::new(48_000, channels).with_pre_skip(312);
+			for description in [None, Some(head.encode().unwrap())] {
+				let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, channels);
+				config.description = description.clone();
+				let caps = super::audio_caps(&config).unwrap();
+				let structure = caps.structure(0).unwrap();
+				assert_eq!(structure.get::<i32>("rate").unwrap(), 48_000);
+				assert_eq!(structure.get::<i32>("channels").unwrap(), channels as i32);
+				assert_eq!(structure.get::<i32>("channel-mapping-family").unwrap(), 0);
+				assert_eq!(structure.get::<i32>("stream-count").unwrap(), 1);
+				assert_eq!(structure.get::<i32>("coupled-count").unwrap(), channels as i32 - 1);
+				let headers = structure.get_optional::<gst::Array>("streamheader").unwrap();
+				let headers: Option<Vec<Vec<u8>>> = headers.map(|headers| {
+					headers
+						.iter()
+						.map(|header| header.get::<gst::Buffer>().unwrap().map_readable().unwrap().to_vec())
+						.collect()
+				});
+				assert_eq!(
+					headers,
+					description
+						.as_ref()
+						.map(|head| vec![head.to_vec(), super::OPUS_TAGS.to_vec()]),
+					"opusdec ignores a streamheader without the OpusTags after the OpusHead"
+				);
 			}
 		}
 	}
@@ -1557,6 +1666,7 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 mod session_tests {
 	use std::collections::BTreeMap;
 	use std::sync::Mutex;
@@ -1569,7 +1679,9 @@ mod session_tests {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoCodec, VideoConfig};
 	use tokio::sync::watch;
 
-	use super::{NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, TrackKind, follow_catalog, follow_path};
+	use super::{
+		NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, Settings, TrackKind, follow_catalog, follow_path,
+	};
 
 	/// The pad-id counters are process-global, so a test reading one has to be the only test
 	/// allocating while it runs. `cargo test` shares a process across tests (nextest doesn't),
@@ -2498,9 +2610,37 @@ mod session_tests {
 		ResolvedSettings {
 			url: "https://127.0.0.1:1".parse().unwrap(),
 			broadcast: "test".into(),
+			versions: Vec::new(),
 			tls_disable_verify: false,
 			quic_keylog: false,
 		}
+	}
+
+	/// `versions` reaches the dial in order, and an unknown name fails the start instead of
+	/// offering the defaults.
+	#[test]
+	fn versions_reach_the_dial() {
+		let settings = |versions: &str| Settings {
+			url: Some("https://127.0.0.1:1".into()),
+			broadcast: Some("test".into()),
+			versions: Some(versions.into()),
+			..Default::default()
+		};
+		let resolved = ResolvedSettings::try_from(settings(" moq-transport-14 , moq-lite-06 ")).unwrap();
+		let config = super::connect_config(&resolved);
+		let expected: Vec<moq_net::Version> = vec!["moq-transport-14".parse().unwrap(), "moq-lite-06".parse().unwrap()];
+		assert_eq!(config.version, expected);
+
+		let err = ResolvedSettings::try_from(settings("moq-lite-06,moq-lite-99")).unwrap_err();
+		assert!(err.to_string().contains("moq-lite-99"), "{err}");
+	}
+
+	/// The source retries without a budget, so an outage of any length is ridden out
+	/// (`relay_loss_reconnects_after_refused_redials` covers the redial itself).
+	#[test]
+	fn the_source_retries_without_a_budget() {
+		let config = super::connect_config(&unreachable());
+		assert_eq!(config.backoff.timeout, Some(Duration::ZERO), "zero is unlimited");
 	}
 
 	/// `quic-keylog` reaches the client's QUIC config, which refuses it without `SSLKEYLOGFILE`.
@@ -3187,6 +3327,8 @@ mod session_tests {
 		/// Set before a `close` so the redial meets it. The listener stays bound throughout:
 		/// rebinding a freed port races its release and other tests binding port 0.
 		admit: std::sync::Arc<Mutex<Admit>>,
+		/// Dials dropped while [`Admit::Down`], and a wakeup for each.
+		dropped: tokio::sync::watch::Sender<usize>,
 	}
 
 	impl Relay {
@@ -3200,6 +3342,8 @@ mod session_tests {
 				let serving = origin.clone();
 				let admit = std::sync::Arc::new(Mutex::new(Admit::Serve));
 				let admitting = admit.clone();
+				let dropped = tokio::sync::watch::Sender::new(0);
+				let dropping = dropped.clone();
 				let (close, mut closing) = tokio::sync::mpsc::unbounded_channel::<moq_net::Error>();
 				let task = tokio::spawn(async move {
 					let mut sessions: Vec<moq_net::Session> = Vec::new();
@@ -3217,7 +3361,10 @@ mod session_tests {
 											sessions.push(session);
 										}
 									}
-									Admit::Down => drop(request),
+									Admit::Down => {
+										drop(request);
+										dropping.send_modify(|dropped| *dropped += 1);
+									}
 									Admit::Refuse => request.reject(moq_tokio::server::Reject::Forbidden).await.unwrap(),
 								}
 							}
@@ -3230,6 +3377,7 @@ mod session_tests {
 					task,
 					close,
 					admit,
+					dropped,
 				}
 			})
 		}
@@ -3322,9 +3470,10 @@ mod session_tests {
 		assert_eq!(video, 1, "the switch took another pad");
 	}
 
-	/// Both elements keep their sessions alive across an outage beyond the default retry budget.
+	/// Both elements keep their sessions alive across an outage that refuses several redials.
+	/// `the_*_retries_without_a_budget` pin that no budget ever ends the retrying.
 	#[test]
-	fn relay_loss_reconnects_after_the_default_budget() {
+	fn relay_loss_reconnects_after_refused_redials() {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
 		let url = relay.url.clone();
@@ -3371,8 +3520,14 @@ mod session_tests {
 		let held = pipeline.by_name("src").unwrap().src_pads();
 		*relay.admit.lock().unwrap() = Admit::Down;
 		relay.close.send(moq_net::Error::GoingAway).unwrap();
-		// Real sockets use the real clock: this exercises the deployed 10s retry budget.
-		std::thread::sleep(Duration::from_secs(11));
+		// Two refused redials from each element, so each retried past a failed attempt.
+		let mut dropped = relay.dropped.subscribe();
+		super::RUNTIME
+			.block_on(async {
+				tokio::time::timeout(Duration::from_secs(30), dropped.wait_for(|dropped| *dropped >= 4)).await
+			})
+			.expect("the elements stopped redialing")
+			.unwrap();
 		while pull(Duration::ZERO).is_some() {}
 		*relay.admit.lock().unwrap() = Admit::Serve;
 		play();

@@ -4,6 +4,24 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The connection receive window is 128 MiB, and has a floor (#5878)
+
+`quic::DEFAULT_RECEIVE_WINDOW` is 128 MiB instead of 64 MiB, since incomplete messages now hold connection credit until complete.
+A `quic.receive_window` (`--quic-receive-window`, `[quic] receive_window`) below `moq_net::transport::MIN_RECEIVE_WINDOW`, the 64 MiB announcement cap plus 16 bytes, fails with `Error::ReceiveWindowTooSmall`.
+Raise an explicit window to at least that, or unset it.
+
+### qmux sessions are qmux 0.7 (#6231)
+
+The WebSocket, TCP, TLS, and Unix socket transports run on [qmux 0.7](https://github.com/moq-dev/moq/blob/main/rs/qmux/MIGRATE.md), which implements moq-net's poll traits directly instead of going through `web_transport_trait`.
+Code that holds a `qmux::Session` from moq-tokio, such as one from the WebSocket listener's `accept`, follows qmux's migration guide.
+A WebSocket client must offer a QMux subprotocol: `websocket::accept` refuses an upgrade without one, and the legacy `webtransport` format is gone.
+
+### MoQ sessions need the `net` feature (#6132)
+
+moq-net is optional, behind the default `net` feature that every transport feature (`quic`, `websocket`, `tcp`, `uds`, `iroh`, `webrtc`) turns on.
+A build with `default-features = false` and no transport feature loses `client`, `connect`, `connection`, `listen`, `origin`, `transport`, their root re-exports (`Client`, `Connection`, `ConnectError`, `Transport`, ...), `Error::MoqNet`, `Error::Connect`, `Error::connect_error`, `Error::is_auth`, and the `moq_net` re-export.
+Enable `net`, or a transport feature, to keep them.
+
 ### `mdns::Secret` is `secret::Secret`, read from a file (#5910)
 
 The 32-byte secret type moved out of `mdns` so `listen.reset.secret` shares it, and it no longer parses inline hex.

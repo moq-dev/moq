@@ -44,7 +44,18 @@ impl Drop for Fixture {
 	}
 }
 
-async fn prepare(tracks: usize, frames: usize, payload: &Bytes) -> (moq_mux::Source, impl Stream, Fixture) {
+struct Video {
+	tracks: usize,
+	frames: usize,
+	frames_per_group: usize,
+}
+
+async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream, Fixture) {
+	let Video {
+		tracks,
+		frames,
+		frames_per_group,
+	} = video;
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
@@ -66,7 +77,7 @@ async fn prepare(tracks: usize, frames: usize, payload: &Bytes) -> (moq_mux::Sou
 					timestamp: timestamp(index),
 					duration: Some(Timestamp::from_millis(20).unwrap()),
 					payload: payload.clone(),
-					keyframe: true,
+					keyframe: index % frames_per_group == 0,
 				})
 				.unwrap();
 		}
@@ -120,10 +131,12 @@ async fn export(format: &str, source: moq_mux::Source, stream: impl Stream, coll
 	data.freeze()
 }
 
-fn cmaf_import() -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
+/// An fMP4 importer, republishing fragments whole when `passthrough` and unwrapping their samples
+/// otherwise.
+fn cmaf_import(passthrough: bool) -> (moq_mux::catalog::Producer, moq_mux::container::fmp4::Import) {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve());
+	let import = moq_mux::container::fmp4::Import::new(broadcast, catalog.reserve()).with_passthrough(passthrough);
 	(catalog, import)
 }
 
@@ -180,14 +193,23 @@ fn containers(c: &mut Criterion) {
 			for frames in [1, 16, 64] {
 				for size in [256, 4096] {
 					let payload = payload(size);
-					let (source, stream, fixture) = runtime.block_on(prepare(*tracks, frames, &payload));
+					let (source, stream, fixture) = runtime.block_on(prepare(
+						Video {
+							tracks: *tracks,
+							frames,
+							frames_per_group: 1,
+						},
+						&payload,
+					));
 					let data = runtime.block_on(export(format, source, stream, true));
 					drop(fixture);
 					if format == "cmaf" {
-						let (catalog, mut import) = cmaf_import();
-						import.decode(&data).unwrap();
-						import.finish().unwrap();
-						assert_eq!(catalog.snapshot().video.renditions.len(), *tracks);
+						for passthrough in [false, true] {
+							let (catalog, mut import) = cmaf_import(passthrough);
+							import.decode(&data).unwrap();
+							import.finish().unwrap();
+							assert_eq!(catalog.snapshot().video.renditions.len(), *tracks);
+						}
 						use mp4_atom::DecodeMaybe;
 						let mut cursor = std::io::Cursor::new(data.as_ref());
 						let mut fragments = 0;
@@ -212,16 +234,22 @@ fn containers(c: &mut Criterion) {
 						} else {
 							Throughput::Bytes(data.len() as u64)
 						};
-						for direction in ["import", "export"] {
+						// `unwrap` imports the same fragments one frame per sample; `import` passes them through.
+						let directions: &[&str] = match format {
+							"cmaf" => &["import", "unwrap", "export"],
+							_ => &["import", "export"],
+						};
+						for &direction in directions {
 							let mut group = c.benchmark_group(format!("{format}-{direction}-{unit}"));
 							group.throughput(throughput.clone());
 							group.bench_function(
 								BenchmarkId::new(format!("{tracks}tracks-{frames}frames"), size),
 								|b| {
-									if direction == "import" {
+									if direction != "export" {
 										if format == "cmaf" {
+											let passthrough = direction == "import";
 											b.iter_batched(
-												cmaf_import,
+												|| cmaf_import(passthrough),
 												|import| import_cmaf(import, std::hint::black_box(&data)),
 												BatchSize::PerIteration,
 											);
@@ -237,7 +265,16 @@ fn containers(c: &mut Criterion) {
 										}
 									} else {
 										b.iter_batched(
-											|| runtime.block_on(prepare(*tracks, frames, &payload)),
+											|| {
+												runtime.block_on(prepare(
+													Video {
+														tracks: *tracks,
+														frames,
+														frames_per_group: 1,
+													},
+													&payload,
+												))
+											},
 											|(source, stream, fixture)| {
 												std::hint::black_box(
 													runtime.block_on(export(format, source, stream, false)),
@@ -258,5 +295,59 @@ fn containers(c: &mut Criterion) {
 	}
 }
 
-criterion_group!(benches, containers);
+// A stable profiling boundary excludes publishing and benchmark setup from counts.
+#[inline(never)]
+fn export_queued_groups(runtime: &tokio::runtime::Runtime, source: moq_mux::Source, stream: impl Stream) {
+	std::hint::black_box(runtime.block_on(export("annexb", source, stream, false)));
+}
+
+// Keep both dimensions independent: per-frame scans over queued groups grow with
+// frames per group as well as group count, unlike one constant cost per group.
+fn queued_groups(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let payload = payload(256);
+	let mut group = c.benchmark_group("annexb-export-queued-groups");
+	for groups in [1, 16, 64] {
+		for frames_per_group in [1, 16] {
+			let frames = groups * frames_per_group;
+			let (source, stream, fixture) = runtime.block_on(prepare(
+				Video {
+					tracks: 1,
+					frames,
+					frames_per_group,
+				},
+				&payload,
+			));
+			let data = runtime.block_on(export("annexb", source, stream, true));
+			assert_eq!(data.len(), 256 * frames);
+			drop(fixture);
+			group.throughput(Throughput::Elements(frames as u64));
+			group.bench_function(BenchmarkId::new(groups.to_string(), frames_per_group), |b| {
+				b.iter_batched(
+					|| {
+						runtime.block_on(prepare(
+							Video {
+								tracks: 1,
+								frames,
+								frames_per_group,
+							},
+							&payload,
+						))
+					},
+					|(source, stream, fixture)| {
+						export_queued_groups(&runtime, source, stream);
+						fixture
+					},
+					BatchSize::PerIteration,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, containers, queued_groups);
 criterion_main!(benches);

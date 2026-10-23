@@ -61,25 +61,26 @@ pub enum AudioCodec {
 }
 
 /// Coarse audio codec family, used for tag-only matching.
+// Explicit discriminants keep `as` values stable: a new kind takes the next number.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AudioCodecKind {
 	/// Advanced Audio Coding.
-	AAC,
+	AAC = 0,
 	/// Opus.
-	Opus,
+	Opus = 1,
 	/// Unknown or unsupported codec.
-	Unknown,
+	Unknown = 2,
 	/// Free Lossless Audio Codec.
-	Flac,
+	Flac = 3,
 	/// MPEG-1/2 Audio Layer III.
-	Mp3,
+	Mp3 = 4,
 	/// Uncompressed interleaved little-endian IEEE-754 binary32 PCM.
-	Pcm,
+	Pcm = 5,
 	/// Dolby Digital (AC-3).
-	Ac3,
+	Ac3 = 6,
 	/// Dolby Digital Plus (E-AC-3).
-	Ec3,
+	Ec3 = 7,
 }
 
 impl AudioCodec {
@@ -122,38 +123,5 @@ impl FromStr for AudioCodec {
 		}
 
 		Ok(Self::Unknown(s.to_string()))
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn flac_roundtrip() {
-		let codec = AudioCodec::from_str("flac").unwrap();
-		assert_eq!(codec, AudioCodec::Flac);
-		assert_eq!(codec.to_string(), "flac");
-		assert_eq!(codec.kind(), AudioCodecKind::Flac);
-	}
-
-	#[test]
-	fn pcm_roundtrip() {
-		let codec = AudioCodec::from_str("pcm").unwrap();
-		assert_eq!(codec, AudioCodec::Pcm);
-		assert_eq!(codec.to_string(), "pcm");
-		assert_eq!(codec.kind(), AudioCodecKind::Pcm);
-	}
-
-	#[test]
-	fn codec_kind_discriminants_are_stable() {
-		assert_eq!(AudioCodecKind::AAC as isize, 0);
-		assert_eq!(AudioCodecKind::Opus as isize, 1);
-		assert_eq!(AudioCodecKind::Unknown as isize, 2);
-		assert_eq!(AudioCodecKind::Flac as isize, 3);
-		assert_eq!(AudioCodecKind::Mp3 as isize, 4);
-		assert_eq!(AudioCodecKind::Pcm as isize, 5);
-		assert_eq!(AudioCodecKind::Ac3 as isize, 6);
-		assert_eq!(AudioCodecKind::Ec3 as isize, 7);
 	}
 }

@@ -56,8 +56,8 @@ always a prefix. A service that serves only some of the paths beneath it
 refuses the rest as they are requested. Announcements are hints; the request is
 what decides.
 
-Inside a broadcast, a reader can list its tracks (moq-lite-07, Rust only so
-far): each track with its fixed properties, a synced mark, then tracks as they
+Inside a broadcast, a reader can list its tracks (moq-lite-07): each track
+with its fixed properties, a synced mark, then tracks as they
 come and go. Listing is discovery, not delivery: subscribe to each track you
 want, and its groups still cached upstream reach you late. A broadcast lists
 the tracks its publisher creates, never one served only on request, and a path
@@ -97,7 +97,10 @@ authorization and hidden names work exactly as without one.
   the latest UUIDv7 timestamp, so hosts with skewed clocks can lose a restart
   until the old instance retracts.
 - **Same epoch resumes.** A subscription moves between routes with the same
-  epoch without a seam, continuing from the first frame it lacks. A route
+  epoch without a seam, continuing from the first frame it lacks. That is a
+  floor, not a promise: groups the outage held back still arrive only while
+  the subscriber's max age covers them, so a route that dies silently, noticed
+  only at the idle timeout, costs whatever aged out meanwhile. A route
   without an epoch keeps its subscriptions until that route goes, and a track
   that fails ends instead of resuming, so request the path again.
 - **Another instance restarts.** A newer epoch, or, without one, another route
@@ -233,13 +236,15 @@ Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |
 | --- | --- |
-| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
+| **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 | **Ranges** | Which groups to ask for: from a group, a number of groups back from the latest, or the group containing a presentation time, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.
 This lets a finished subscription settle without waiting for missing groups.
+A reader of a reported group, including one still arriving, ends with the publisher's error, such as `OLD` or `NOT_FOUND`.
+On moq-lite 05 and 06 that code is application-specific, so every reported group ends with `NOT_FOUND` there.
 Datagram delivery stays best effort.
 
 Ranges are both a request and a filter. A subscriber reads only the groups its
@@ -278,13 +283,24 @@ untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
 
+A publisher refuses a group that starts before a lower one, and so does a
+moq-lite 07 receiver. Since moq-lite 05 and 06 send times look like media time,
+a receiver drops every timestamp it gets over them and the track arrives
+untimed.
+Timestamps received over moq-transport, whose peers may stamp arrival times,
+are not checked. Rust relays preserve them across moq-lite 07 when both peers
+negotiate the [ietf extension](/draft/moq-ietf), which carries their origin and
+keeps them unchecked. A moq-lite peer without it receives that track untimed.
+
 A publisher may compress a track, which pays off for repetitive data such as
 JSON and not for media. Each group's frames become one DEFLATE stream
 ([moq-flate](/draft/moq-flate)), and a datagram
 compresses alone. Only the work-in-progress moq-lite 07 carries the compressed
 bytes. A relay forwards them as received and inflates each group once for every
 other subscriber, moq-transport included, so readers always see the original
-frames. Rust publishes and relays compressed tracks; js/net refuses them for now.
+frames. Rust and JavaScript publish compressed tracks by setting `compress: true`
+on the track's info. Application writes stay synchronous and readers receive plain
+payloads; compression is useful for repetitive data, not already compressed media.
 
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning

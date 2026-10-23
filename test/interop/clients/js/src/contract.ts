@@ -77,6 +77,12 @@ export const TONE_FLOOR_DB = 15;
  */
 export const AUDIBLE_RMS = 0.02;
 
+/**
+ * The interop matrix's tone check, the in-page twin of `test/interop/tone.py`: each channel must
+ * carry at least this level and this share of its energy at its own tone. Keep the two in step.
+ */
+export const TONE_CHECK = { minRms: 0.05, minShare: 0.8 };
+
 /** Live instances of each resource the page's wrappers count. */
 export type Resources = {
 	/** Open `WebTransport` sessions, i.e. connections to the relay. */
@@ -156,6 +162,13 @@ export type Sample = {
 	noiseDb?: number;
 	/** Root mean square of the graph root's output over the analyser window. */
 	rms?: number;
+	/** The catalog's audio channel count. */
+	audioChannels?: number;
+	/**
+	 * Per channel of the graph root, when the page was given the expected tones: the channel's RMS
+	 * and the share of its energy at its own tone, over the last ~170ms it played.
+	 */
+	tones?: { rms: number; share: number }[];
 
 	/** `aria-label` of the primary control button: "Pause" while playing, "Play" while paused. */
 	controlLabel?: string;
@@ -170,6 +183,21 @@ export type Sample = {
 	/** Platform resources the page still holds. See {@link Resources}. */
 	resources: Resources;
 };
+
+/** A main-thread stall a page logged: one long animation frame and the scripts that ran longest in it. */
+export type LongFrame = {
+	/** When the frame started, in epoch milliseconds, so two pages' logs line up. */
+	at: number;
+	/** How long the frame took, in milliseconds. */
+	duration: number;
+	/** How much of it blocked input, in milliseconds. */
+	blocking: number;
+	/** The longest-running scripts in the frame, or "no script" when the time went elsewhere. */
+	scripts: string;
+};
+
+/** The `window` property each page keeps its {@link LongFrame} log on. */
+export const LONG_FRAMES = "__moqLongFrames";
 
 /** Whether a changed presented frame belongs to playback within the live bound. */
 export function reachesLive(observation: {

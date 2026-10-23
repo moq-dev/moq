@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as z from "@zod/mini";
 import { ARCHIVE_VERSION, ArchiveSchema } from "./archive.ts";
 import { u53 } from "./integers.ts";
-import type { RelativeBroadcast } from "./path.ts";
+import type { ReferenceEpoch, RelativeBroadcast } from "./path.ts";
 import { checkRenditions, DuplicateRendition, minVersion, RootSchema, UnsupportedVersion, VERSION } from "./root.ts";
 import { track } from "./track.ts";
 
@@ -43,6 +43,49 @@ test("rendition broadcast reference is parsed and normalized", () => {
 	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
 	// Normalized like Rust path::Relative: redundant `.` and empty segments are dropped.
 	expect(parsed.video.renditions.video?.broadcast).toBe("source" as RelativeBroadcast);
+});
+
+// Mirrors Rust's `reference_epochs_roundtrip_in_every_section`.
+test("every reference-bearing section carries an optional epoch", () => {
+	const EPOCH = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceEpoch;
+	const catalog = (epoch: string) => ({
+		video: {
+			renditions: {
+				v: { broadcast: "./a", epoch, codec: "avc1.64001f", container: { kind: "legacy" } },
+			},
+		},
+		audio: {
+			renditions: {
+				a: {
+					broadcast: "./a",
+					epoch,
+					codec: "opus",
+					sampleRate: 48000,
+					numberOfChannels: 2,
+					container: { kind: "legacy" },
+				},
+			},
+		},
+		text: { renditions: { t: { broadcast: "./a", epoch, format: "vtt" } } },
+		json: { tracks: { j: { broadcast: "./a", epoch, mode: "snapshot" } } },
+		binary: { tracks: { b: { broadcast: "./a", epoch, mode: "snapshot" } } },
+		archive: { timelines: {}, replay: "./a", replayEpoch: epoch },
+	});
+
+	const parsed = RootSchema.parse(catalog(EPOCH));
+	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	if (!parsed.audio || !("renditions" in parsed.audio)) throw new Error("missing audio section");
+	expect(parsed.video.renditions.v?.epoch).toBe(EPOCH);
+	expect(parsed.audio.renditions.a?.epoch).toBe(EPOCH);
+	expect(parsed.text?.renditions.t?.epoch).toBe(EPOCH);
+	expect(parsed.json?.tracks.j?.epoch).toBe(EPOCH);
+	expect(parsed.binary?.tracks.b?.epoch).toBe(EPOCH);
+	expect(parsed.archive?.replayEpoch).toBe(EPOCH);
+
+	// A malformed or noncanonical epoch refuses the catalog, as in Rust.
+	for (const bad of ["not-a-uuid", EPOCH.toUpperCase(), "01890a5d-ac96-474b-bcce-b302099a8057"]) {
+		expect(RootSchema.safeParse(catalog(bad)).success).toBe(false);
+	}
 });
 
 test("rendition parent broadcast reference stays distinct from empty", () => {
@@ -149,7 +192,7 @@ test("archive round-trips at the root", () => {
 		timescale: 1000,
 		replay: "recordings/clip",
 		store: "https://objects.example/rec/",
-		version: 2,
+		version: ARCHIVE_VERSION,
 	});
 	expect(JSON.stringify(parsed)).not.toContain('"timeline":');
 });

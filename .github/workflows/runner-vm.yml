@@ -2,15 +2,7 @@ name: Runner VM
 
 on:
   workflow_call:
-  pull_request:
-    branches: [release]
-    types: [opened, synchronize, reopened, edited, closed]
-    paths:
-      - "nix/**"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/justfile"
-      - ".github/workflows/runner-vm.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,7 +13,6 @@ concurrency:
 
 jobs:
   check:
-    if: github.event.action != 'closed'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -32,4 +23,4 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
-      - run: just gh runner-vm
+      - run: just gh runner-vm-ci

@@ -124,6 +124,15 @@ impl Version {
 		}
 	}
 
+	/// Whether either endpoint may open a Padding Stream (0x2). Added in lite-07.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_padding(self) -> bool {
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether a subscriber may open a Tracks Stream (0x8) to list a broadcast's
 	/// tracks. Added in lite-07.
 	#[allow(clippy::match_like_matches_macro)]
@@ -283,6 +292,19 @@ impl Version {
 		}
 	}
 
+	/// Whether SUBSCRIBE_DROP's Error Code is a stream error code, ending a dropped group's
+	/// reader as a reset keeping its header would. Added in lite-07; earlier versions carry
+	/// an application-specific code there.
+	#[allow(clippy::match_like_matches_macro)]
+	#[cfg(feature = "async")]
+	pub(crate) fn has_drop_code(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether announcements and track requests carry the publisher epoch, the
 	/// identity that says two routes serve the same bytes. Added in lite-07.
 	/// Older versions carry nothing, so a received route has no epoch and is
@@ -325,6 +347,18 @@ impl Version {
 	/// track that never refreshes.
 	#[allow(clippy::match_like_matches_macro)]
 	pub(crate) fn has_refresh(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
+	/// Whether received frame timestamps are the publisher's media time. Lite05/06 stamp an
+	/// untimed track's payloads with their send time, which a receiver cannot tell from it,
+	/// so it drops every timestamp received on them and the track arrives untimed.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_media_time(self) -> bool {
 		// Match form so future versions default forward (AGENTS.md convention).
 		match self {
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,

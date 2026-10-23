@@ -1,3 +1,5 @@
+//! Publish broadcasts, tracks, and groups.
+
 use std::sync::Arc;
 
 use moq_mux::catalog::hang::Extra;
@@ -11,13 +13,13 @@ use crate::media::MoqFrame;
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 127, no publisher age limit, untimed).
+/// (priority 0, no publisher age limit, untimed).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
-	/// Higher is more urgent; the default 127 is the midpoint.
-	#[uniffi(default = 127)]
-	pub priority: u8,
+	/// Higher is more urgent; the default 0 is the midpoint.
+	#[uniffi(default = 0)]
+	pub priority: i8,
 	/// Maximum age of a non-latest group before the publisher evicts it, in
 	/// microseconds. Null imposes no publisher age limit. This is the publisher-side half of
 	/// [`MoqSubscription::max_delay_us`](crate::consumer::MoqSubscription::max_delay_us).
@@ -94,13 +96,56 @@ pub(crate) struct BroadcastProducer {
 	// Core timebases own catalog outputs, so the broadcast holds them and binding handles stay weak.
 	pub(crate) timebases: std::collections::HashMap<usize, moq_mux::catalog::Timebase<Extra>>,
 	pub(crate) driver: Background,
+	pub(crate) finished: Finished,
 }
 
+impl Drop for BroadcastProducer {
+	fn drop(&mut self) {
+		self.finished.release();
+	}
+}
+
+/// The finished importers a broadcast keeps, or `None` once it ended.
+type Keeping = Option<Vec<Box<dyn kio::MaybeSend>>>;
+
+/// Finished producers a broadcast keeps until it ends.
+///
+/// A track unlists once its last producer drops, and a finish holds only listed tracks. An
+/// importer lets go of its producer when it finishes, and a binding may release a raw track's
+/// handle whenever its garbage collector runs, so the broadcast keeps them here instead, and
+/// [`MoqBroadcastProducer::finish`] still holds the track.
+#[derive(Clone)]
+pub(crate) struct Finished(Arc<std::sync::Mutex<Keeping>>);
+
+impl Default for Finished {
+	fn default() -> Self {
+		Self(Arc::new(std::sync::Mutex::new(Some(Vec::new()))))
+	}
+}
+
+impl Finished {
+	/// Keep a finished producer until the broadcast ends, or drop it now if it already has.
+	pub(crate) fn keep(&self, producer: impl kio::MaybeSend + 'static) {
+		let producer: Box<dyn kio::MaybeSend> = Box::new(producer);
+		let mut kept = self.0.lock().unwrap();
+		if let Some(kept) = kept.as_mut() {
+			kept.push(producer);
+		}
+	}
+
+	/// Stop keeping, handing back what was kept so the caller decides when it drops.
+	fn release(&self) -> Vec<Box<dyn kio::MaybeSend>> {
+		self.0.lock().unwrap().take().unwrap_or_default()
+	}
+}
+
+/// A broadcast in which tracks can be published.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastProducer {
 	pub(crate) state: std::sync::Mutex<Option<BroadcastProducer>>,
 }
 
+/// A handler for requests for tracks in a broadcast.
 #[derive(uniffi::Object)]
 pub struct MoqBroadcastDynamic {
 	task: Task<DynamicProducer>,
@@ -122,6 +167,7 @@ impl MoqTrackDynamic {
 
 struct DynamicProducer {
 	inner: moq_net::broadcast::Dynamic,
+	finished: Finished,
 }
 
 struct TrackDynamicProducer {
@@ -134,7 +180,7 @@ impl DynamicProducer {
 		// accepts it (raw, at a chosen timescale) or publishes media onto it (importer accepts).
 		// The subscriber's subscribe stays pending until then.
 		let request = self.inner.requested_track().await?;
-		Ok(Arc::new(MoqTrackRequest::new(request)))
+		Ok(Arc::new(MoqTrackRequest::new(request, self.finished.clone())))
 	}
 }
 
@@ -161,6 +207,7 @@ impl MoqBroadcastProducer {
 				catalog,
 				timebases: Default::default(),
 				driver,
+				finished: Default::default(),
 			})),
 		})
 	}
@@ -210,6 +257,7 @@ impl MoqBroadcastProducer {
 			Ok(Arc::new(MoqBroadcastDynamic {
 				task: Task::new(DynamicProducer {
 					inner: state.broadcast.dynamic(),
+					finished: state.finished.clone(),
 				})
 				.supervised(state.driver.clone()),
 			}))
@@ -270,6 +318,7 @@ impl MoqBroadcastProducer {
 			let producer = broadcast.create_track(name, Some(info))?;
 			Ok(Arc::new(MoqTrackProducer {
 				inner: std::sync::Mutex::new(Some(producer)),
+				finished: std::sync::Mutex::new(Some(state.finished.clone())),
 			}))
 		})
 	}
@@ -290,6 +339,95 @@ impl MoqBroadcastProducer {
 		let result = state.catalog.finish().map_err(Into::into);
 		state.driver.check()?;
 		result
+	}
+
+	/// End the broadcast cleanly, keeping it servable until its media goes stale.
+	///
+	/// Finish every track first: the returned handle holds the tracks finished by now and keeps
+	/// the broadcast announced, so a subscriber still catching up can drain them. A track still
+	/// live is not held and adds nothing to the linger. Await [`MoqBroadcastFinish::wait`], or keep
+	/// the handle for [`MoqBroadcastFinish::linger_us`] on your own clock and then close it.
+	///
+	/// Every later call on this producer fails with `Closed`, as after [`close`](Self::close).
+	pub fn finish(&self) -> Result<Arc<MoqBroadcastFinish>, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut state = self.state.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		// Finished before the broadcast is, so the catalog lingers with the media. On failure the
+		// producer is gone, so close the broadcast rather than leave a dynamic handle holding it.
+		let ready = state.catalog.finish().map_err(MoqError::from);
+		if let Err(err) = ready.and_then(|()| state.driver.check()) {
+			state.broadcast.close();
+			return Err(err);
+		}
+		let broadcast = state.broadcast.clone();
+		// Released only once the finish holds their tracks.
+		let finished = state.finished.release();
+		let finish = state.broadcast.clone().finish();
+		drop(finished);
+		Ok(Arc::new(MoqBroadcastFinish {
+			linger: finish.linger(),
+			until: moq_clock::now().checked_add(finish.linger()),
+			broadcast,
+			finish: std::sync::Mutex::new(Some(finish)),
+		}))
+	}
+}
+
+/// A cleanly ended broadcast, still announced and serving its finished tracks.
+///
+/// Returned by [`MoqBroadcastProducer::finish`]. Closing or dropping it closes the broadcast,
+/// which is how an interrupt ends the linger early.
+#[derive(uniffi::Object)]
+pub struct MoqBroadcastFinish {
+	linger: std::time::Duration,
+	// The linger counts from the finish, as a C caller's own clock would, not from the first
+	// poll of a wait; `None` when it overflows the clock.
+	until: Option<moq_clock::Instant>,
+	// Closes the broadcast from any thread, ending a wait that took `finish`.
+	broadcast: moq_net::broadcast::Producer,
+	// Taken by `wait` or `close`.
+	finish: std::sync::Mutex<Option<moq_net::broadcast::Finish>>,
+}
+
+#[uniffi::export]
+impl MoqBroadcastFinish {
+	/// How long to keep the broadcast, in microseconds: the longest max age of the held tracks.
+	///
+	/// Tracks still live at the finish, and tracks without a max age, add nothing.
+	pub fn linger_us(&self) -> u64 {
+		u64::try_from(self.linger.as_micros()).unwrap_or(u64::MAX)
+	}
+
+	/// Keep the broadcast up for its linger, or until [`close`](Self::close), then close it.
+	///
+	/// Cancelling the wait closes the broadcast at once. Errors with `Closed` once another wait
+	/// or a close took the handle.
+	pub async fn wait(&self) -> Result<(), MoqError> {
+		let finish = self.finish.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		let until = self.until;
+		crate::ffi::detached(async move {
+			let closed = kio::wait(|waiter| finish.poll_closed(waiter));
+			match until {
+				Some(until) => {
+					tokio::select! {
+						_ = moq_clock::sleep_until(until) => {}
+						_ = closed => {}
+					}
+				}
+				None => closed.await,
+			}
+			// Dropping the finish is what closes the broadcast.
+			drop(finish);
+			Ok::<_, MoqError>(())
+		})
+		.await
+	}
+
+	/// Close the broadcast now, ending the linger and any wait. Closing again is a no-op.
+	pub fn close(&self) {
+		let _guard = crate::ffi::enter();
+		self.broadcast.close();
+		drop(self.finish.lock().unwrap().take());
 	}
 }
 
@@ -347,7 +485,7 @@ impl MoqTrackDynamic {
 #[derive(uniffi::Object)]
 pub struct MoqGroupRequest {
 	sequence: u64,
-	priority: u8,
+	priority: i8,
 	inner: std::sync::Mutex<Option<moq_net::group::Request>>,
 }
 
@@ -373,7 +511,7 @@ impl MoqGroupRequest {
 	}
 
 	/// The consumer's delivery priority for this fetch.
-	pub fn priority(&self) -> u8 {
+	pub fn priority(&self) -> i8 {
 		self.priority
 	}
 
@@ -411,12 +549,14 @@ impl MoqGroupRequest {
 #[derive(uniffi::Object)]
 pub struct MoqTrackRequest {
 	inner: std::sync::Mutex<Option<moq_net::track::Request>>,
+	finished: Finished,
 }
 
 impl MoqTrackRequest {
-	pub(crate) fn new(request: moq_net::track::Request) -> Self {
+	pub(crate) fn new(request: moq_net::track::Request, finished: Finished) -> Self {
 		Self {
 			inner: std::sync::Mutex::new(Some(request)),
+			finished,
 		}
 	}
 
@@ -464,6 +604,7 @@ impl MoqTrackRequest {
 		let request = self.take()?;
 		Ok(Arc::new(MoqTrackProducer {
 			inner: std::sync::Mutex::new(Some(request.accept(Some(info)))),
+			finished: std::sync::Mutex::new(Some(self.finished.clone())),
 		}))
 	}
 
@@ -478,9 +619,12 @@ impl MoqTrackRequest {
 
 // ---- Track Producer ----
 
+/// A track to which groups, frames, or datagrams can be published.
 #[derive(uniffi::Object)]
 pub struct MoqTrackProducer {
 	inner: std::sync::Mutex<Option<moq_net::track::Producer>>,
+	// Taken by the first finish, so repeating it keeps the track only once.
+	finished: std::sync::Mutex<Option<Finished>>,
 }
 
 impl MoqTrackProducer {
@@ -603,13 +747,17 @@ impl MoqTrackProducer {
 	/// End the track at the live edge.
 	///
 	/// [`finish_at`](Self::finish_at) declares the boundary ahead of time, so this keeps
-	/// that boundary. The handle remains so a later [`abort`](Self::abort) can still run.
+	/// that boundary. The handle remains so a later [`abort`](Self::abort) can still run, and
+	/// the broadcast keeps the finished track until it ends, so its finish still holds it.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
 		if track.end().is_none() {
 			track.finish()?;
+		}
+		if let Some(finished) = self.finished.lock().unwrap().take() {
+			finished.keep(track.clone());
 		}
 		Ok(())
 	}
@@ -628,6 +776,7 @@ impl MoqTrackProducer {
 	}
 }
 
+/// A group to which frames can be published.
 #[derive(uniffi::Object)]
 pub struct MoqGroupProducer {
 	sequence: u64,
@@ -712,6 +861,20 @@ mod metadata_tests {
 			consumer.poll_read_frame(&moq_net::kio::Waiter::noop()),
 			std::task::Poll::Ready(Err(moq_net::Error::Dropped))
 		));
+	}
+
+	#[test]
+	fn repeated_finishes_keep_the_track_once() {
+		let broadcast = MoqBroadcastProducer::new().unwrap();
+		let track = broadcast.publish_track("data".into(), None).unwrap();
+		for _ in 0..3 {
+			track.finish().unwrap();
+		}
+		let state = broadcast.state.lock().unwrap();
+		let finished = &state.as_ref().unwrap().finished;
+		let kept = finished.0.lock().unwrap().as_ref().map(Vec::len);
+		drop(state);
+		assert_eq!(kept, Some(1));
 	}
 
 	#[test]

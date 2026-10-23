@@ -10,8 +10,8 @@ pub enum Error {
 	#[error("not found: {0}")]
 	NotFound(String),
 
-	/// The recording format version is not the current one.
-	#[error("unknown version {0}")]
+	/// The recording format version is unknown, or older than the current one when writing.
+	#[error("unsupported version {0}")]
 	Version(u64),
 
 	/// A group ID, segment ID, or frame timestamp is outside 0 through 2^53 - 1.
@@ -26,9 +26,9 @@ pub enum Error {
 	#[error("priority {existing} does not match {intended}")]
 	Priority {
 		/// The priority already recorded.
-		existing: u8,
+		existing: i8,
 		/// The priority the caller wanted to record.
-		intended: u8,
+		intended: i8,
 	},
 
 	/// An existing `.info` has a different timescale, `None` when untimed.
@@ -38,20 +38,6 @@ pub enum Error {
 		existing: Option<u64>,
 		/// The timescale the caller wanted to record.
 		intended: Option<u64>,
-	},
-
-	/// An existing `.info` was recorded from another publisher instance: the source
-	/// restarted, so the caller starts a new prefix.
-	#[error(
-		"source epoch {} does not match the recorded {}",
-		epoch_text(intended),
-		epoch_text(existing)
-	)]
-	EpochMismatch {
-		/// The epoch already recorded.
-		existing: Option<moq_net::Epoch>,
-		/// The epoch of the source being recorded now.
-		intended: Option<moq_net::Epoch>,
 	},
 
 	/// The object has no groups.
@@ -102,14 +88,6 @@ pub enum Error {
 	#[error("moq: {0}")]
 	Moq(String),
 
-	/// The track was already enrolled, or is the recording's own timeline.
-	#[error("track already enrolled: {0}")]
-	Enrolled(String),
-
-	/// The track is untimed, so a DVR has no content time to measure its retention by.
-	#[error("untimed track: {0}")]
-	Untimed(String),
-
 	/// A frame's timestamp does not match its track: missing on a timed track, or present on an
 	/// untimed one.
 	#[error("frame timing does not match the track")]
@@ -118,14 +96,6 @@ pub enum Error {
 	/// The source broadcast or one of its tracks failed.
 	#[error("source: {0}")]
 	Source(String),
-
-	/// The recording's timeline could not be recovered, segmented, or published.
-	#[error("timeline: {0}")]
-	Timeline(String),
-
-	/// The writer stopped accepting commands.
-	#[error("writer closed")]
-	Closed,
 }
 
 impl From<object_store::Error> for Error {
@@ -151,10 +121,3 @@ impl From<serde_json::Error> for Error {
 
 /// A [`Result`](std::result::Result) using this crate's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
-
-fn epoch_text(epoch: &Option<moq_net::Epoch>) -> String {
-	match epoch {
-		Some(epoch) => epoch.to_string(),
-		None => "none".to_string(),
-	}
-}

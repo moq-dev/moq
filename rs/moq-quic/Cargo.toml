@@ -44,6 +44,9 @@ tracing-log = ["tracing/log"]
 rustls-log = ["rustls?/logging"]
 # Enable qlog support
 qlog = ["dep:qlog"]
+# The sans-IO QMux connection, which runs the stream state machine over a reliable, ordered
+# transport. Driven by the `qmux` crate.
+mux = []
 # Internal (PRIVATE!) features used to aid testing.
 # Don't rely on these whatsoever. They may disappear at any time.
 
@@ -78,7 +81,7 @@ tracing = { version = "0.1.10", default-features = false, features = ["std"] }
 # wasm-bindgen is assumed for a wasm*-*-unknown target
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.4", default-features = false, features = ["wasm_js"] }
-ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"] }
+ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"], optional = true }
 # only added as dependency to enforce the `web` feature for this target
 rustls-pki-types = { version = "1.7", features = ["web"] }
 web-time = "1"
@@ -90,6 +93,8 @@ criterion = { workspace = true }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
 moq-clock = { path = "../moq-clock" }
+# The mux module's tests run in the default merge gate.
+moq-quic = { path = ".", features = ["mux"] }
 proptest = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring"] }
 stats_alloc = "0.1.10"

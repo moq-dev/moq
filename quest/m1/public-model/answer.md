@@ -1,12 +1,11 @@
-# [L] Public routes and answering
+# [L] Public answering
 
 ## Goal
 
 A custom relay or session does what the built-in ones do with an origin,
-through public moq-net and @moq/net calls only: ingest a peer's routes under
-the peer's identity, answer broadcast and track requests on demand and close
-them once unused without racing a returning reader, and advertise routes to
-a peer without echoing the peer's own routes back.
+through public moq-net and @moq/net calls only: answer broadcast and track
+requests on demand and close them once unused without racing a returning
+reader.
 
 ## Plan
 
@@ -17,20 +16,6 @@ recommendations below are the planning quest's, and the ones marked
 
 Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 
-- `origin::Hop::from_wire` (IETF cluster): public as the decode-side
-  constructor that accepts 0 (`Hop::UNKNOWN`), beside `Hop::new`.
-- `origin::Cost::charged` (both subscribers, IETF cluster): public.
-  `Cost::UNKNOWN` goes; it equals `Cost::default()`.
-- **Announcing identity** (`origin::Route::via`, `Route::source`,
-  `Route::with_via`; both subscribers, server). **Decision**:
-  - ✅ Replace. The identity moves onto the origin handle a session
-    announces through, as `origin::Producer::via(hop)` beside the public
-    `Producer::peer` (the name `via` stays), so every route it ingests
-    carries it and a `Route` can never forward it. `Route.via` and
-    `Route.source` stay private fields the handle sets.
-  - A public `Route::with_via`, which a caller could forward by mistake.
-- `origin::Consumer::excluding` (both publishers, client): public;
-  split-horizon toward a peer, the counterpart of the identity above.
 - `origin::Producer::create_source` (both subscribers): public under a role
   name (for example `answer_source`). It mints a broadcast with the origin's
   cache policy and stats that answers a `Dynamic` request without entering
@@ -62,20 +47,8 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   - Keep them private.
 - `origin::Dynamic::withdrawn` (lite subscriber): public, as the explicit
   peer withdrawal that differs from a session simply dropping its handle.
-- **Peer-route escape hatches** (`origin::Producer::dynamic_route`,
-  `origin::Dynamic::update_route`, `origin::Request::accept`; JS
-  `Origin.Producer.dynamicRoute`, `Dynamic.updateRoute`, `Request.accept`).
-  Settled as the interim in [#5678](https://github.com/moq-dev/moq/pull/5678):
-  an application claim (`dynamic(prefix)`) carries no route and answers
-  through `Request::prepare` then `Prepared::publish`, and these stay
-  `#[doc(hidden)] pub` / `@internal` for the sessions, tests, and benches that
-  model a peer's route (a covering claim with hops, cost, or an epoch,
-  answered with a broadcast the session already routes). Make them private
-  (`pub(crate)`, and private in JS) once the identity handle above and the
-  answer source give a peer's route a public shape, and move the
-  out-of-crate tests and benches onto it.
 - `origin::interest_prefixes` (both subscribers): remove the need through
-  [Rust lazy discovery](/quest/m1/lazy-discovery/rust.md), which gives Rust
+  Rust lazy discovery ([moq-dev/moq#6165](https://github.com/moq-dev/moq/pull/6165)), which gives Rust
   the origin's watched interests the way JS has them; make that public in
   both languages there or here, whichever lands second.
 - `origin::Consumer::discovery`, `includes_hidden` (IETF publisher): fold
@@ -100,11 +73,6 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 
 JS items (`js/net/src/`):
 
-- `wire.ts` `OriginProducer.receive` (`connection/forward.ts`): mirror the
-  identity decision. A received route is a public `Origin.Producer.dynamic`
-  on a handle marked with the peer's identity, so `receive` goes and
-  `Origin.Request.accept` stops special-casing session-delivered broadcasts
-  (`Broadcast.fromSession`).
 - `wire.ts` `OriginProducer.requests`, `changed`, `blind`, `answer`,
   `routes`, `origin.ts` `RequestSlot`, `internal.ts` `coveringPrefixes`
   (the blind-answer loop in `connection/forward.ts`). **Decision**:
@@ -115,12 +83,12 @@ JS items (`js/net/src/`):
 - **Blind answers** (the same loop, raised in review of #5717). Every JS
   session answers each request no route covers by subscribing on its peer:
   always, and as the only path after a peer refuses or resets discovery.
-  [Lazy discovery](/quest/m1/lazy-discovery/README.md) keeps a plain
-  `request(path)` blind, and its Rust child adds the same downgrade, so
-  blind answering stays and needs a public shape before the loop goes.
-  **Decision** (settled 2026-10-16):
-  - ✅ A fallback answerer, `origin::Producer::fallback()` in Rust and
-    `Origin.Producer.fallback()` in JS. The name is still open: propose
+  Lazy discovery keeps a plain JS
+  `request(path)` blind, so blind answering stays in JS and needs a public
+  shape before the loop goes. Rust has no blind answers (decided 2026-10-20,
+  maintainer), so no Rust session needs this shape.
+  **Decision** (settled 2026-10-16, narrowed to JS 2026-10-20):
+  - ✅ A fallback answerer, `Origin.Producer.fallback()` in JS. The name is still open: propose
     alternatives in this quest's PR before shipping it. It returns the same
     `Dynamic` request stream, scoped to the handle's allowed paths. It
     receives only requests that no announced or served route covers. Once
@@ -138,9 +106,8 @@ JS items (`js/net/src/`):
     announced route. This reuses one call but puts an unadvertised,
     claim-free entry in the route table, where selection and split-horizon
     must special-case it.
-  Land the Rust side with or after Rust lazy discovery (Required below),
-  which brings blind answers to Rust. Delete the JS loop only once the
-  fallback answers the same requests, including after a downgrade.
+  Delete the JS loop only once the fallback answers the same requests,
+  including after a downgrade.
 - `wire.ts` `OriginProducer.expect` (`connection/reload.ts`, keeps requests
   pending while a reconnect is in flight): public if Rust has the same need
   across a reconnect, else private to the connection.
@@ -148,15 +115,6 @@ JS items (`js/net/src/`):
   is public with Lazy discovery; `attach(discovery)` goes with the
   `discovery` option Lazy discovery removes; `accepts` is a check on the
   public `allowed()` patterns.
-- `wire.ts` `OriginConsumer.advertised`, `local`, `demand`, with
-  `Advertised`, `Advertisements`, `sameInstance`, and `internal.ts`
-  `presented`, `hiddenBelow`, `scopeHead`, `scopeCaptures`, `scopeOverlaps`
-  (both publishers and subscribers): replace with the Rust shape. A
-  publisher advertises from the public `announced()` stream of an
-  `excluding(peer)` consumer and resolves with the public request taking an
-  epoch, as Rust does. The helpers stay private to `origin.ts`. Check that
-  the public announce event carries what `sameInstance` and a scoped
-  route's claim need; if it does not, that is track metadata and goes public.
 - `wire.ts` `Broadcast.requested` (with its `served` flag) and
   `overrideBroadcastWire` (both subscribers). Part of the JS answering
   decision above: ✅ public, mirroring Rust's
@@ -168,16 +126,6 @@ JS items (`js/net/src/`):
   moved to [the deferred quest](/quest/m1/public-model/deferred.md), which
   waits on Model ranges.
 - `wire.ts` `OriginConsumer.broadcasts`: registered and never read; delete.
-- `hop.ts` `HopSchema`, `randomHop`, `UNKNOWN_HOP`, `MAX_HOPS`,
-  `Cost.zero`, `Route.default`, `Route.normalize`, `routesEqual`: public
-  values under `Origin`, mirroring Rust's `Hop::new`, `Hop::UNKNOWN`,
-  `Route::default` and `PartialEq`. `Hop` is branded, so a third party
-  cannot build `Route.hops` without a cast today. Today `Route.default` is
-  one shared mutable object (`{ hops: [], cost: 0n }`), so a caller's
-  `hops.push` would pollute every later route. Publish it as a factory
-  returning a fresh route (`Route.empty()`, like Rust's `Route::default()`),
-  and move the internal readers onto it, rather than exporting the shared
-  object.
 - `announced.ts` `Announce.Producer`: remove the need; a session's route
   ingestion goes through the origin.
 - `wireOf`, `registerWire`, `trackOf`, `registerTrackConsumer`: stay
@@ -188,10 +136,7 @@ Tests: each public call gets a mock-time test in its language, and the
 built-in sessions move onto the public calls, so their existing suites
 cover the behavior.
 
-## Required
-
-- [Rust lazy discovery](/quest/m1/lazy-discovery/rust.md) - settles the interest and discovery items before they become public
-
 ## Related
 
+- [Public routes](/quest/m1/public-model/routes.md) - route ingest and advertising, split out of this quest to follow cluster routing
 - [Public model after ranges, handover, and the JS tail](/quest/m1/public-model/deferred.md) - the track info and fetch answers, split out of this quest

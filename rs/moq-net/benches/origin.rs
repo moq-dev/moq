@@ -1310,7 +1310,7 @@ fn bench_copy_walk(c: &mut Criterion) {
 
 /// `(readers, retained, routes)` for [`bench_resume_overlap`]: readers of one track,
 /// the groups every route holds, and the routes it swapped through.
-const RESUME_OVERLAP: [(usize, usize, usize); 15] = [
+const RESUME_OVERLAP: [(usize, usize, usize); 17] = [
 	(1, 1, 1),
 	(1, 64, 1),
 	(32, 64, 1),
@@ -1326,6 +1326,8 @@ const RESUME_OVERLAP: [(usize, usize, usize); 15] = [
 	(1, 64, 8),
 	(1, 64, 32),
 	(32, 64, 8),
+	(32, 64, 32),
+	(256, 64, 8),
 ];
 
 /// A track that swapped through its routes while its readers' local cap held every
@@ -1335,6 +1337,20 @@ struct ResumeOverlap {
 	_producer: origin::Producer,
 	_generations: Vec<(broadcast::Producer, track::Producer)>,
 	readers: Vec<ResumeReader>,
+}
+
+impl ResumeOverlap {
+	#[inline(never)]
+	fn drain(&mut self, retained: usize) {
+		let waiter = kio::Waiter::noop();
+		for reader in &mut self.readers {
+			let mut delivered = 0;
+			while let Poll::Ready(Ok(Some(_))) = reader.poll_group(&waiter) {
+				delivered += 1;
+			}
+			assert_eq!(delivered, retained, "every group once");
+		}
+	}
 }
 
 enum ResumeReader {
@@ -1351,7 +1367,20 @@ impl ResumeReader {
 	}
 }
 
-async fn resume_overlap(readers: usize, retained: usize, routes: usize, ordered: bool) -> ResumeOverlap {
+struct ResumeShape {
+	readers: usize,
+	retained: usize,
+	routes: usize,
+	waiting: bool,
+}
+
+async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
+	let ResumeShape {
+		readers,
+		retained,
+		routes,
+		waiting,
+	} = shape;
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
 	let epoch = Epoch::mint();
@@ -1391,8 +1420,14 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize, ordered:
 		subscribers.push(subscriber);
 	}
 	let waiter = kio::Waiter::noop();
-	for _ in 1..routes {
-		generations.push(generation(&mut (0..retained).rev()));
+	for route in 1..routes + usize::from(waiting) {
+		generations.push(if waiting && route == routes {
+			// The serving copy has answered but not produced a group. It has not yet
+			// bounded the overlapping copies, which must still skip each other's replay.
+			generation(&mut std::iter::empty())
+		} else {
+			generation(&mut (0..retained).rev())
+		});
 		let (_, latest) = generations.last().unwrap();
 		moq_clock::timeout(COPY_WAIT, support::wanted(latest.demand()))
 			.await
@@ -1429,8 +1464,16 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize, ordered:
 fn bench_resume_overlap(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/resume_overlap");
 	group.sample_size(10);
-	for (order, ordered) in [("arrival", false), ("sequence", true)] {
+	for (order, ordered, waiting) in [
+		("arrival", false, false),
+		("sequence", true, false),
+		("arrival_waiting", false, true),
+		("sequence_waiting", true, true),
+	] {
 		for (readers, retained, routes) in RESUME_OVERLAP {
+			if waiting && !(readers == 1 && retained == 64 && routes >= 2) {
+				continue;
+			}
 			group.throughput(Throughput::Elements((readers * retained) as u64));
 			group.bench_function(
 				BenchmarkId::new(order, format!("{readers}r_{retained}g_{routes}c")),
@@ -1439,18 +1482,19 @@ fn bench_resume_overlap(c: &mut Criterion) {
 						.enable_all()
 						.build()
 						.unwrap();
-					let waiter = kio::Waiter::noop();
 					b.iter_batched_ref(
-						|| runtime.block_on(resume_overlap(readers, retained, routes, ordered)),
-						|rig| {
-							for reader in &mut rig.readers {
-								let mut delivered = 0;
-								while let Poll::Ready(Ok(Some(_))) = reader.poll_group(&waiter) {
-									delivered += 1;
-								}
-								assert_eq!(delivered, retained, "every group once");
-							}
+						|| {
+							runtime.block_on(resume_overlap(
+								ResumeShape {
+									readers,
+									retained,
+									routes,
+									waiting,
+								},
+								ordered,
+							))
 						},
+						|rig| rig.drain(retained),
 						BatchSize::PerIteration,
 					);
 				},
