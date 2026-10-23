@@ -150,9 +150,7 @@ impl Recording {
 			let media = broadcast.create_track(name, media).unwrap();
 			let timeline = track::Info::default().with_timescale(Timescale::MILLI);
 			let timeline = broadcast.create_track(timeline_name(name), timeline).unwrap();
-			let mut config = window::ProducerConfig::default()
-				.with_compression(true)
-				.with_ops(false);
+			let mut config = window::ProducerConfig::default().with_compression(true).with_ops(false);
 			if let Some(limit) = checkpoint {
 				config = config.with_checkpoint_records(limit);
 			}

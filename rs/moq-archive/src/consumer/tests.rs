@@ -331,7 +331,10 @@ async fn a_narrowed_read_skips_the_group_it_left() {
 
 	subscriber.update(ascending(1..)).unwrap();
 	let _ = subscriber.poll_recv_group(&waiter);
-	assert!(object_read(&mock, 1).await, "group 1 waited behind group 0, which nobody reads");
+	assert!(
+		object_read(&mock, 1).await,
+		"group 1 waited behind group 0, which nobody reads"
+	);
 	gate.add_permits(16);
 }
 
