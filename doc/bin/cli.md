@@ -104,7 +104,7 @@ through as tracks. Video AUs can span PES, and a PES can contain several. Supply
 a PTS for each AU or declare a proportional POC clock: AVC needs
 `fixed_frame_rate_flag` and `temporal_poc_flag` in the TS timing descriptor plus
 fixed-rate SPS VUI; HEVC needs VUI's `vui_poc_proportional_to_timing_flag`. Missing timing
-ends the import instead of repeating a timestamp. Each such PES goes through whole, at its place on the program clock
+ends the import instead of repeating a timestamp. Private and undecoded PES go through whole, at their place on the program clock
 (PCR); one before the first PCR is dropped. A stream it cannot carry unaltered
 is refused with a warning: any in a program with no PCR, and one whose PES carry
 an ESCR, pack header or TREF, are scrambled, leave a non-video PES unbounded,
