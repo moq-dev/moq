@@ -233,27 +233,20 @@ export type Drift = {
 
 // ── the row ─────────────────────────────────────────────────────────────────
 
-/**
- * The output path that played. In the browser, which ring the page ran, decided by whether the
- * document is cross-origin isolated. Natively, the audio backend under the player's one ring:
- * `pulse` is the production ALSA/cpal output into a private PulseAudio null sink.
- */
-export type Ring = "isolated" | "plain" | "pulse";
-
 /** The audio codecs the matrix publishes. */
 export type Codec = "opus" | "aac";
 
 /**
  * Where a row played: a headless browser over the shaper, the shipped native player (`moq play`)
- * over the same shaper, or a {@link Trace} replayed through the browser player's rings on a
- * simulated clock, whose profile is the trace's name.
+ * over the same shaper into a private PulseAudio null sink, or a {@link Trace} replayed through the
+ * browser player's ring on a simulated clock, whose profile is the trace's name.
  */
 export type Runtime = "chromium" | "native" | "replay";
 
 /**
  * One matrix cell.
  *
- * A budget is keyed by the whole thing. The codec, its rate, and the ring each move the expected
+ * A budget is keyed by the whole thing. The runtime, the codec, and its rate each move the expected
  * floor as much as the profile does, so a profile-only key would grade one cell against another's
  * threshold.
  */
@@ -263,50 +256,47 @@ export type Row = {
 	/** Sample rate in Hz. */
 	rate: number;
 	profile: string;
-	ring: Ring;
 };
 
 /** The row as a flat string: a file name and a table label. */
-export const rowKey = (row: Row): string => `${row.runtime}-${row.codec}-${row.rate}-${row.profile}-${row.ring}`;
+export const rowKey = (row: Row): string => `${row.runtime}-${row.codec}-${row.rate}-${row.profile}`;
 
 /** Parse {@link rowKey}. The profile is the only field that may contain a dash. */
 export function parseRow(key: string): Row {
 	const parts = key.split("-");
 	const [runtime, codec, rate] = parts;
-	const ring = parts.at(-1);
-	const profile = parts.slice(3, -1).join("-");
+	const profile = parts.slice(3).join("-");
 	const hz = Number.parseInt(rate ?? "", 10);
 	if (
 		(runtime !== "chromium" && runtime !== "native" && runtime !== "replay") ||
 		(codec !== "opus" && codec !== "aac") ||
-		(ring !== "isolated" && ring !== "plain" && ring !== "pulse") ||
 		!Number.isFinite(hz) ||
 		profile === ""
 	) {
 		throw new Error(`not a row key: ${key}`);
 	}
-	return { runtime, codec, rate: hz, profile, ring };
+	return { runtime, codec, rate: hz, profile };
 }
 
 // ── what the recorder keeps ─────────────────────────────────────────────────
 
 /**
  * One audio frame reaching the viewer's container consumer: when, on the `viewer` clock; its
- * timestamp, on the `media` clock; and the group that carried it.
+ * timestamp, on the `media` clock; the group that carried it; and its encoded duration.
  */
-export type Arrival = [at: Ms, timestamp: Ms, group: number];
+export type Arrival = [at: Ms, timestamp: Ms, group: number, duration: Ms];
 
 /** A recorded arrival trace, as checked in under `traces/`. The file name is its profile. */
 export type Trace = {
 	/** Bumped when a field's meaning changes. */
-	version: 2;
+	version: 3;
 	/** Where it was recorded: the relay, the broadcast, its publisher, the date. */
 	source: string;
 	/** The shape it carries, and why it is kept. */
 	description: string;
 	/** The transport the session negotiated. */
 	transport: string;
-	/** The smallest round trip the connection's PROBE reported, which "auto" sizes from. */
+	/** The smallest round trip the connection's PROBE reported, retained as a diagnostic. */
 	rtt: Ms | null;
 	/** The audio rendition, as the catalog advertised it. */
 	config: {
@@ -380,10 +370,8 @@ export type Sample = {
 	stalled?: boolean;
 	/** `sync.out.delay`: the resolved playout target. Natively, the target the speaker is held on. */
 	delay?: Ms;
-	/** The current connection PROBE round trip, before Sync keeps its minimum. */
+	/** The current connection PROBE round trip. */
 	rtt?: Ms;
-	/** `sync.out.jitter`: the network portion in auto mode, or the configured fixed delay. */
-	networkJitter?: Ms;
 	/** The selected rendition's advertised jitter at this sample. */
 	jitter?: Ms;
 	/** The selected rendition's advertised delay at this sample. */
@@ -411,8 +399,6 @@ export type Sample = {
 
 /** What the page, or the native driver, reports once the session is up. */
 export type Environment = {
-	/** Whether the document is cross-origin isolated, and therefore which ring runs. Browser only. */
-	crossOriginIsolated?: boolean;
 	/** The transport the session negotiated. Anything but WebTransport never crossed the UDP shaper. */
 	transport?: string;
 	/** The audio rendition's codec string. */

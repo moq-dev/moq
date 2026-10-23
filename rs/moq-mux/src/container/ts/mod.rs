@@ -71,3 +71,5 @@ mod pes_packet_test;
 mod recovery_test;
 #[cfg(test)]
 mod release_test;
+#[cfg(test)]
+mod revision_test;

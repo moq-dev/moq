@@ -4,7 +4,6 @@ use std::fmt;
 bitflags! {
 	#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 	pub struct Capabilities: u32 {
-		#[allow(clippy::unreadable_literal)]
 		const TIME_PER_FRAME    = 0x1000;
 	}
 }

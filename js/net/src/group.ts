@@ -270,7 +270,6 @@ export class Producer {
 		return makeConsumer(this.#state);
 	}
 
-	// pending: /quest/m1/public-model/deferred.md
 	/**
 	 * Create an independent read handle that receives every frame written here.
 	 *
@@ -948,7 +947,13 @@ export class Consumer {
 
 	/** Closes the group, optionally with an error to abort readers. Idempotent. */
 	close(abort?: Error) {
+		// A copy failure recovery was continuing past ends with the abort instead.
+		if (abort && this.#recover && this.#state.closed.peek() instanceof Error) {
+			this.#terminal ??= abort;
+			if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
+		}
 		this.#abandon();
+		this.#recover?.close?.();
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
 		this.#released = true;

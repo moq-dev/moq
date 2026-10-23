@@ -14,9 +14,9 @@ scan here recovers. PCR value intervals, byte schedule and release timing live
 in `pcr-timing.py`.
 
 Checks split into two severities:
-  - HARD (structural): fail the run by default. PAT/PMT, packet size, sync,
-    continuity counters, PSI CRC, PCR presence, PCR monotonicity, T-STD buffers,
-    system buffers.
+  - HARD (structural): fail the run by default. PAT/PMT, PMT versions, packet
+    size, sync, continuity counters, PSI CRC, PCR presence, PCR monotonicity,
+    T-STD buffers, system buffers.
   - SHAPE (broadcast profile): reported as WARN and only fail the run under
     `--strict`. Service descriptors (SDT).
 
@@ -1527,6 +1527,64 @@ class SystemBuffers:
                 grade.flag("Bsys overflow")
 
 
+def pmt_tables(data: bytes, packet_size: int) -> dict[int, list[tuple[int, int, bytes]]]:
+    """Each program's PMTs in force (current_next_indicator set), by program_number: (index
+    of the packet completing the section, version_number, the section less its version and
+    CRC), on whichever PMT PID a PAT named, each run of repeats once."""
+    pmt_pids = set()
+    for _, section in sections(packets_on(data, packet_size, {0}).get(0, [])):
+        if section[0] == 0x00 and section[5] & 0x01:
+            for at in range(8, len(section) - 4, 4):
+                if (section[at] << 8) | section[at + 1]:
+                    pmt_pids.add(((section[at + 2] & 0x1F) << 8) | section[at + 3])
+    found: dict[int, list[tuple[int, int, bytes]]] = {}
+    for packets in packets_on(data, packet_size, pmt_pids).values():
+        for index, section in sections(packets):
+            if section[0] == 0x02 and section[5] & 0x01:
+                program = (section[3] << 8) | section[4]
+                body = section[:5] + section[6:-4]
+                found.setdefault(program, []).append((index, (section[5] >> 1) & 0x1F, body))
+    tables: dict[int, list[tuple[int, int, bytes]]] = {}
+    for program, seen in found.items():
+        runs = tables.setdefault(program, [])
+        for table in sorted(seen):
+            if not runs or runs[-1][1:] != table[1:]:
+                runs.append(table)
+    return tables
+
+
+def check_pmt_versions(ts_path: str, packet_size: int) -> Check:
+    """Each program's PMT changes only at a new version_number (ISO 13818-1 2.4.4.9), and an
+    older version never follows a newer one.
+
+    A demux keeps the table it has until the version changes, so a change made under the same
+    version never reaches it, and a copy of the table a revision replaced, arriving after it,
+    reverts the revision. A version one up to 15 behind the newest is older, modulo 32. So is
+    a table coming back under the version it went out at before the versions since have come
+    round to it, which modulo 32 alone reads as a skip forward. A revision that skips versions
+    is reported, not failed: what a receiver sees still changes at every new version."""
+    with open(ts_path, "rb") as handle:
+        data = handle.read()
+    revisions = skipped = 0
+    for program, runs in sorted(pmt_tables(data, packet_size).items()):
+        for at in range(1, len(runs)):
+            newest, (index, version, body) = runs[at - 1][1], runs[at]
+            behind = (newest - version) % 32
+            last = max((n for n in range(at) if runs[n][1:] == (version, body)), default=None)
+            returned = last is not None and len({v for _, v, _ in runs[last + 1 : at]}) < 31
+            if behind == 0:
+                detail = f"program {program}: the PMT changed at packet {index} under version {version}"
+            elif behind < 16 or returned:
+                detail = f"program {program}: version {version} at packet {index}, after version {newest}"
+            else:
+                revisions += 1
+                skipped += (version - newest) % 32 - 1
+                continue
+            return Check("pmt-versions", Severity.HARD, Status.FAIL, detail, {"revisions": revisions})
+    detail = f"{revisions} revision(s), each at a new version" + (f", {skipped} version(s) skipped" if skipped else "")
+    return Check("pmt-versions", Severity.HARD, Status.PASS, detail, {"revisions": revisions, "skipped": skipped})
+
+
 def check_system_buffers(ts_path: str, packet_size: int, scan: Scan) -> Check:
     """TBsys and Bsys (ISO 13818-1 2.4.2.3) for each program, on its PCR.
 
@@ -1695,6 +1753,7 @@ def analyze(ts_path: str, reference_seconds: float | None = None) -> list[Check]
     pat, pmt = check_pat_pmt(analysis)
     checks.append(pat)
     checks.append(pmt)
+    checks.append(check_pmt_versions(ts_path, packet_size))
     checks.append(check_psi_crc(analysis))
     checks.append(check_continuity(analysis))
     checks.append(check_pcr_presence(analysis, clock_by_pid))

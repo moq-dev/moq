@@ -23,8 +23,9 @@ from relay egress to native publisher ingest. Both ends are ours.
 - Receiver: fill spare ACK space with the newest receive times first, as the
   draft's section 7.2 recommends; never send a packet just for timestamps.
 - Receive time: kernel `SO_TIMESTAMPNS` where the OS has it (moq-sock
-  already sets it and exposes `RecvMeta::timestamp`, used by moq-tokio and
-  moq-uring), userspace recv instant elsewhere. A GRO batch reports only its
+  already sets it and exposes `RecvMeta::timestamp` for moq-tokio; moq-uring
+  parses its own control messages without it, so the ring needs the same
+  option and parsing), userspace recv instant elsewhere. A GRO batch reports only its
   first datagram and omits the rest (section 7.1), since one kernel stamp
   covers the whole batch.
 - The kernel stamp is `CLOCK_REALTIME`, which NTP or an admin can step. Map

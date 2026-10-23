@@ -7,7 +7,7 @@
  *
  *     bun native.ts --moq target/debug/moq --url https://127.0.0.1:4501 \
  *         --fingerprint http://127.0.0.1:4500/certificate.sha256 --broadcast tone-opus.hang \
- *         --delay auto --duration 60 --tag native-opus-48000-mild-pulse --out <run dir>
+ *         --delay auto --duration 60 --tag native-opus-48000-mild --out <run dir>
  *
  * Leaves the same pair the browser driver does: `<tag>.ndjson`, the player's own samples, and
  * `<tag>.page.json`, the environment, notes, and voids. The player's log is `player-<tag>.log`.

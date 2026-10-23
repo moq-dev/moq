@@ -15,31 +15,27 @@ use crate::time::{Deadlines, Instant};
 ///
 /// It holds no session handle: dropping the last [`crate::Session`] requests
 /// closure on the next poll. Dropping the driver cancels the session, and
-/// [`crate::Session::closed`] resolves with [`Error::Cancel`]. Its `Send`-ness
-/// follows its transport.
+/// [`crate::Session::closed`] resolves with [`Error::Cancel`]. It is `Send` on
+/// native, like the [`Boxable`](crate::transport::poll::Boxable) transport it drives.
 #[must_use = "the session makes no progress unless its driver is polled"]
-pub struct Driver<S: crate::transport::poll::Session> {
-	state: State<S>,
+pub struct Driver {
+	state: State,
 	clock: Deadlines,
 }
 
 /// The protocol half of a machine, one variant per negotiated wire protocol.
-///
-/// The lite driver is a named machine, so the machine's `Send`-ness follows
-/// the transport (a pinned `!Send` transport yields a `!Send` machine that
-/// stays on its thread). The ietf driver is still a boxed future; the box
-/// demands `Send` on native, which is why the ietf path requires a
-/// [`Boxable`](crate::transport::poll::Boxable) transport until it too becomes
-/// a named machine.
-pub(crate) enum Protocol<S: crate::transport::poll::Session> {
-	/// Boxed for size only: a concrete box, so `Send` stays inferred.
-	Lite(Box<crate::lite::Driver<S>>),
+pub(crate) enum Protocol {
+	/// Boxed for size only.
+	Lite(Box<crate::lite::Driver<Transport>>),
 	Ietf(crate::ietf::Driver),
 }
 
+/// The transport every session runs on, boxed once by `Client` or `Server`.
+pub(crate) type Transport = crate::transport::boxed::Session;
+
 /// Protocol and lifecycle work owned by the driver.
-pub(crate) struct State<S: crate::transport::poll::Session> {
-	pub(crate) protocol: Protocol<S>,
+pub(crate) struct State {
+	pub(crate) protocol: Protocol,
 	// The session supervisor, polled alongside the protocol: it executes the
 	// handles' close requests, publishes the transport's terminal error, and
 	// samples stats. It finishes once the transport reports closed, and the
@@ -47,13 +43,13 @@ pub(crate) struct State<S: crate::transport::poll::Session> {
 	// is what `Session::closed` observes, so resolving before it is published
 	// would leave waiters parked on a machine nobody polls again. `None` once
 	// finished, since a completed machine must not be polled again.
-	pub(crate) supervisor: Option<crate::session::Supervisor<S>>,
+	pub(crate) supervisor: Option<crate::session::Supervisor>,
 	// Cached so a poll after completion doesn't re-poll a finished protocol.
 	pub(crate) result: Option<Result<(), Error>>,
 }
 
-impl<S: crate::transport::poll::Session> Driver<S> {
-	pub(crate) fn new(clock: Deadlines, state: State<S>) -> Self {
+impl Driver {
+	pub(crate) fn new(clock: Deadlines, state: State) -> Self {
 		Self { state, clock }
 	}
 
@@ -72,7 +68,7 @@ impl<S: crate::transport::poll::Session> Driver<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> Protocol<S> {
+impl Protocol {
 	pub(crate) fn local_close(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
 		match self {
 			Self::Lite(driver) => driver.local_close.clone(),
@@ -104,7 +100,7 @@ impl<S: crate::transport::poll::Session> Protocol<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> State<S> {
+impl State {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if let Some(supervisor) = &mut self.supervisor
 			&& supervisor.poll(waiter).is_ready()
@@ -145,16 +141,23 @@ impl<S: crate::transport::poll::Session> State<S> {
 	}
 }
 
-impl<S: crate::transport::poll::Session> crate::time::Driver for Driver<S> {
+impl crate::time::Driver for Driver {
 	fn poll(&mut self, now: Instant, waiter: &kio::Waiter) -> Result<Option<Instant>, Error> {
 		self.poll(now, waiter)
 	}
 }
 
-impl<S: crate::transport::poll::Session> std::fmt::Debug for Driver<S> {
+impl std::fmt::Debug for Driver {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("Driver")
 			.field("done", &self.state.result.is_some())
 			.finish()
 	}
 }
+
+// The relay and the bindings spawn drivers on multi-threaded runtimes.
+#[cfg(not(target_family = "wasm"))]
+const _: () = {
+	const fn assert_send<T: Send>() {}
+	assert_send::<Driver>();
+};
