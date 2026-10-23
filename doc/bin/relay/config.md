@@ -335,7 +335,7 @@ group of every track is always kept, even past `capacity`.
 [stats]
 enabled = true
 prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<node>.
-interval = 1                         # Seconds between snapshots.
+interval = "1s"                      # Time between snapshots. Default.
 node = "sjc/1"                       # Disambiguates relays sharing a cluster.
 depth = 1                            # Also bucket by the first N path segments (per tenant).
 layout = "broadcast"                 # Or "track": each group is a track of the node's one broadcast.

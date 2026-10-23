@@ -10,6 +10,10 @@ A broadcast no longer remembers the sequences an ended track of a name wrote, so
 A track that replaces an ended one, created or requested, appends from 0 instead of returning `Error::Duplicate`, `finish()` ends at its own writes, and `finish_at()` and its first frames are no longer checked against the predecessor.
 A publisher that recreates a name continues past the groups it already wrote with `create_group` at an explicit sequence, such as a timestamp.
 
+### `Version::uses_setup_negotiation` is removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
+
+Match the version yourself: lite-01, lite-02, and moq-transport draft 14 negotiate the version in SETUP; every other version negotiates it through ALPN.
+
 ### Sessions box their transport (#6176)
 
 `Driver` and `server::Handshake` lose their transport type parameter: write `moq_net::Driver` and `moq_net::server::Handshake`.

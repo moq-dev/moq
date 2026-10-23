@@ -7486,17 +7486,6 @@ impl Subscriber {
 		);
 	}
 
-	// TODO assert specific errors after implementing PartialEq
-	pub fn assert_error(&mut self) {
-		assert!(
-			kio::wait(|waiter| self.poll_finished(waiter))
-				.now_or_never()
-				.expect("should not block")
-				.is_err(),
-			"should be error"
-		);
-	}
-
 	pub fn assert_is_clone(&self, other: &Self) {
 		assert!(self.is_clone(other), "should be clone");
 	}
