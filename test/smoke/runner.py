@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import time
 
 
 OWN = ('moq-dev-rs', 'moq-dev-js')
@@ -77,7 +78,13 @@ def run(upstream, output):
         subprocess.run(command, check=True)
     images = {entry['image'] for entry in inventory if entry['status'] == 'selected'}
     for image in sorted(images - {RELAY_IMAGE}):
-        subprocess.run(['docker', 'pull', image], check=True)
+        # A registry blip would otherwise abort both matrices before any report.
+        for attempt in range(1, 4):
+            if not subprocess.run(['docker', 'pull', image]).returncode:
+                break
+            if attempt == 3:
+                raise SystemExit(f'failed to pull {image}')
+            time.sleep(attempt * 2)
     subprocess.run(['docker', 'image', 'inspect', RELAY_IMAGE], check=True)
     subprocess.run(['make', 'certs'], cwd=upstream, check=True)
     results = upstream / 'results'
