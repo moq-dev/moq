@@ -28,7 +28,10 @@ pub struct PartialDecode {
     buf: io::Cursor<BytesMut>,
 }
 
-#[allow(clippy::len_without_is_empty)]
+#[expect(
+    clippy::len_without_is_empty,
+    reason = "a partially decoded packet is never empty"
+)]
 impl PartialDecode {
     /// Begin decoding a QUIC packet from `bytes`, returning any trailing data not part of that packet
     pub fn new(

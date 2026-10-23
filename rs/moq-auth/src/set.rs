@@ -45,7 +45,10 @@ impl<'de> Deserialize<'de> for KeySet {
 
 impl KeySet {
 	/// Parse a set from a JSON string.
-	#[allow(clippy::should_implement_trait)]
+	#[expect(
+		clippy::should_implement_trait,
+		reason = "public inherent parser; switching to `FromStr` is a breaking change"
+	)]
 	pub fn from_str(s: &str) -> crate::Result<Self> {
 		Ok(serde_json::from_str(s)?)
 	}
@@ -133,7 +136,7 @@ impl KeySet {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 

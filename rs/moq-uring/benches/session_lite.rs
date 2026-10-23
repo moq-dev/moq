@@ -6,8 +6,10 @@
 //! machine and container framing on top of the same wire path.
 //!
 //! Run it with `just rs bench-session` on a Linux 6.12+ kernel.
-// Benchmarks measure themselves on the host clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "benchmarks measure themselves on the host clock"
+)]
 
 use criterion::{criterion_group, criterion_main};
 

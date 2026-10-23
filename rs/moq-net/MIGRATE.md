@@ -9,6 +9,11 @@ How to update your code for each breaking change, newest first.
 Rename `moq_net::stats::Refusal` to `moq_net::stats::RefusalKind`, so it no longer shares a name with `moq_auth::Refusal`; its variants and `Refusals` are unchanged.
 Replace `moq_net::time::now()` with `moq_net::time::Instant::now()`, the one way to read the clock.
 
+### A listing says whether a removed track finished (#6399)
+
+`broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
+`broadcast::Lister::finish()`, which ended every reader as if the broadcast ended, is `Lister::end()`. `Lister::finish(name)` now unlists a track as finished, beside `remove(name)` for one that left unfinished.
+
 ### `Version::uses_setup_negotiation` is removed ([#6483](https://github.com/moq-dev/moq/pull/6483))
 
 Match the version yourself: lite-01, lite-02, and moq-transport draft 14 negotiate the version in SETUP; every other version negotiates it through ALPN.
