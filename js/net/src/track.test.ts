@@ -1519,6 +1519,102 @@ test("an aborted live-edge anchor does not make older content stale", async () =
 	track.close();
 });
 
+test.each(["arrival", "ordered"] as const)("subscription bounds stay reader-local for %s reads", async (order) => {
+	const producer = new TrackProducer("test");
+	const everything = producer.subscribe({ maxDelay: Milli(5000) });
+	const subscriber = producer.subscribe({
+		maxDelay: Milli(5000),
+		groups: { start: { included: 1 }, end: { excluded: 3 } },
+	});
+	const ordered = order === "ordered" ? subscriber.ordered() : undefined;
+	const read = () => (ordered ? ordered.nextGroup() : subscriber.recvGroup());
+	try {
+		for (let sequence = 0; sequence < 5; sequence++) producer.writeGroup(new GroupProducer(sequence));
+		expect((await everything.recvGroup())?.sequence).toBe(0);
+		expect((await read())?.sequence).toBe(1);
+		expect((await read())?.sequence).toBe(2);
+		const pending = read();
+		expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+		subscriber.update({ maxDelay: Milli(5000), groups: { start: { included: 3 }, end: { excluded: 4 } } });
+		expect((await pending)?.sequence).toBe(3);
+		const capped = read();
+		expect(await Promise.race([capped, Promise.resolve("pending")])).toBe("pending");
+		subscriber.update({ maxDelay: Milli(5000), groups: { end: { included: 4 } } });
+		// Arrival readers can now offer the unread group below the old floor; ordered ones cannot rewind.
+		if (!ordered) expect((await capped)?.sequence).toBe(0);
+		expect((await (ordered ? capped : read()))?.sequence).toBe(4);
+		producer.close();
+		expect(await read()).toBeUndefined();
+	} finally {
+		subscriber.close();
+		everything.close();
+		producer.close();
+	}
+});
+
+test("subscription updates narrow the cursor before its first read", async () => {
+	const producer = new TrackProducer("test");
+	const everything = producer.subscribe({ maxDelay: Milli(5000) });
+	const track = producer.subscribe({ maxDelay: Milli(5000) });
+	try {
+		for (let sequence = 0; sequence < 5; sequence++) producer.writeGroup(new GroupProducer(sequence));
+		track.update({ maxDelay: Milli(5000), groups: { start: { excluded: 2 }, end: { included: 3 } } });
+		expect((await track.recvGroup())?.sequence).toBe(3);
+		const pending = track.recvGroup();
+		expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+		track.close();
+		await pending;
+	} finally {
+		track.close();
+		everything.close();
+		producer.close();
+	}
+});
+
+test("a subscription cap chooses its own live edge", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
+	const everything = producer.subscribe({ maxDelay: Milli(5000) });
+	const track = producer.subscribe({ groups: { end: { excluded: 2 } } });
+	try {
+		for (let sequence = 0; sequence < 5; sequence++) {
+			producer.writeFrame({
+				payload: enc.encode(`${sequence}`),
+				timestamp: Timestamp.fromMillis(sequence * 1000),
+			});
+		}
+		expect((await track.recvGroup())?.sequence).toBe(1);
+		track.update({ groups: { start: { included: 3 }, end: { excluded: 4 } } });
+		expect((await track.recvGroup())?.sequence).toBe(3);
+	} finally {
+		track.close();
+		everything.close();
+		producer.close();
+	}
+});
+
+test("subscription updates bound each reader's datagrams", async () => {
+	const producer = new TrackProducer("test");
+	const everything = producer.subscribe({ maxDelay: Milli(5000) });
+	const track = producer.subscribe({ groups: { start: { included: 1 }, end: { excluded: 2 } } });
+	try {
+		for (let sequence = 0; sequence < 4; sequence++)
+			producer.insertDatagram(sequence, undefined, new Uint8Array([sequence]));
+		expect((await track.recvDatagram())?.sequence).toBe(1);
+		track.update({ groups: { start: { included: 3 }, end: { excluded: 4 } } });
+		for (let sequence = 2; sequence < 5; sequence++)
+			producer.insertDatagram(sequence, undefined, new Uint8Array([sequence]));
+		expect((await track.recvDatagram())?.sequence).toBe(3);
+		const pending = track.recvDatagram();
+		expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+		track.close();
+		await pending;
+	} finally {
+		track.close();
+		everything.close();
+		producer.close();
+	}
+});
+
 test("setGroups with an excluded end of 0 is the empty range and does not ride another subscriber's demand", async () => {
 	const producer = new TrackProducer("test");
 	const everything = producer.subscribe({ maxDelay: Milli(5000) });

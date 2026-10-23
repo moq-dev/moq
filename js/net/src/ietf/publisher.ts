@@ -627,7 +627,7 @@ export class Publisher {
 				groups: rangeGroups(range),
 			});
 			const startGroup = range.start ? Number(range.start.group) : hooks.latestSequence(track);
-			if (startGroup !== undefined) track.setGroups({ start: { included: startGroup } });
+			if (startGroup !== undefined) track.setGroups({ ...rangeGroups(range), start: { included: startGroup } });
 
 			// A fill reads the group cache through its own consumer, independent of the
 			// subscription's cursor. Forked from this subscriber rather than resolved through
@@ -794,18 +794,8 @@ export class Publisher {
 			// Serve groups until the track ends or the requester cancels.
 			const serving = (async () => {
 				for (;;) {
-					const group = await track.recvGroup();
+					const group = await servingGroup(track);
 					if (!group) return;
-
-					// Past the filter's end. Dropped here rather than through `setGroups`, which
-					// parks a capped group instead: this range is fixed for the life of the
-					// subscription, so a group above it is never coming back in, and holding
-					// one keeps the loop from ever ending. A producer that publishes beyond
-					// the end and then closes would otherwise strand PUBLISH_DONE.
-					if (range.end !== undefined && BigInt(group.sequence) > range.end.group) {
-						group.close();
-						continue;
-					}
 
 					const task = this.#runGroup({
 						track,
@@ -825,7 +815,7 @@ export class Publisher {
 
 			// Datagrams count toward no stream, so PUBLISH_DONE never waits on them; closing
 			// the track below ends the loop.
-			void this.#runDatagrams({ requestId: msg.requestId, track, timescale, publisherPriority });
+			void this.#runDatagrams({ requestId: msg.requestId, track, timescale, publisherPriority, range });
 
 			// The fill (when one was requested) runs alongside on its own fetch stream; its
 			// failures reset that stream and never touch the subscription.
@@ -1124,16 +1114,19 @@ export class Publisher {
 		/** The units datagrams are stamped in, if any; see {@link RunGroup.timescale}. */
 		timescale: Timescale | undefined;
 		publisherPriority: number;
+		range: ServeRange;
 	}) {
 		const writer = this.#datagramWriter;
 		if (!writer) return;
-		const { requestId, track, timescale, publisherPriority } = options;
+		const { requestId, track, timescale, publisherPriority, range } = options;
 		const version = this.#session.version;
 
 		try {
 			for (;;) {
 				const datagram = await track.recvDatagram();
 				if (!datagram) return;
+				// A model datagram is object 0 of its group, subject to the reliable slice.
+				if (groupSlice(range, datagram.sequence).skip > 0) continue;
 
 				const body = await encodeDatagram(
 					datagram,
@@ -2791,6 +2784,25 @@ interface ServeRange {
 	 * once the range is exhausted; draft-20 removed the notion of a filter ending one.
 	 */
 	end?: EndLocation;
+}
+
+/** Read within a fixed filter, ending at its cap once the track itself finishes. */
+async function servingGroup(track: TrackSubscriber): Promise<group.Consumer | undefined> {
+	for (;;) {
+		const recv = hooks.tryRecvGroup(track, false);
+		if (recv.kind === "group") return recv.group;
+		if (recv.kind === "error") throw recv.error;
+		// A local reader holds this boundary for a possible cap raise; a fixed wire
+		// filter cannot widen, so excluded groups cannot delay PUBLISH_DONE.
+		if (recv.kind === "done" || recv.kind === "boundary") return undefined;
+		if (recv.kind === "drop") continue;
+		await new Promise<void>((resolve) => {
+			const dispose = hooks.groupChanged(track, () => {
+				dispose();
+				resolve();
+			});
+		});
+	}
 }
 
 /** The model's group bounds for a {@link ServeRange}: an absent start joins at the latest group. */
