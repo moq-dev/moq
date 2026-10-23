@@ -66,7 +66,7 @@ pub(crate) struct Stored {
 impl Stored {
 	/// The payload a session sends, with its inflated size when that is the DEFLATE slice:
 	/// only a session that carries `compression` takes a compressed track's stored form.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn sent(&self, compression: bool) -> (&Bytes, Option<u64>) {
 		match &self.deflated {
 			Some(deflated) if compression => (deflated, Some(self.datagram.payload.len() as u64)),

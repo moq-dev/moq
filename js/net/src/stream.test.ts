@@ -538,6 +538,32 @@ test("closed is stable, so racing it per frame does not allocate", async () => {
 	expect(reader.closed).toBe(reader.closed);
 });
 
+test("reading to FIN builds no error", async () => {
+	// Fixtures built outside the window, and kept alive so an error they retain stays counted.
+	const readers = Array.from(
+		{ length: 32 },
+		() =>
+			new Reader(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(new Uint8Array([7]));
+						controller.close();
+					},
+				}),
+				undefined,
+				QUIC,
+			),
+	);
+	const before = heapStats().objectTypeCounts;
+	for (const reader of readers) {
+		expect(await reader.u8()).toBe(7);
+		expect(await reader.done()).toBe(true);
+	}
+	const after = heapStats().objectTypeCounts;
+	expect(after.TypeError ?? 0).toBeLessThanOrEqual(before.TypeError ?? 0);
+	expect(after.Error ?? 0).toBeLessThanOrEqual(before.Error ?? 0);
+});
+
 test("stop after FIN allocates nothing and sends nothing", async () => {
 	const cancelled: unknown[] = [];
 	const reader = new Reader(

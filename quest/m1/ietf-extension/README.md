@@ -1,4 +1,4 @@
-# moq-transport passthrough
+# [M] moq-transport passthrough
 
 ## Goal
 
@@ -8,7 +8,7 @@ object properties, END_OF_GROUP status objects, datagram object IDs, and
 unknown track properties intact.
 Tracks advertising DYNAMIC_GROUPS relay NEW_GROUP_REQUEST back to the
 original publisher, with redundant requests coalesced. Across the cluster,
-[refresh](/quest/m1/refresh/README.md) carries them on native lite-07.
+refresh demand carries them on native lite-07.
 moxygen's moq-test conformance (sections 1-7, except cases that use a
 subgroup other than 0) passes through moq-relay in a nightly CI job.
 
@@ -82,12 +82,7 @@ Work owned by this README, after the children land:
 - FETCH cases are skipped upstream. Section 8 stays out while PUBLISH is
   declined.
 
-## Required
-
-- [Timed tracks cross lite-07](/quest/m1/ietf-extension/serve-timed.md) - moq-transport timestamps reach `ietf` extension peers over lite-07, with `unchecked` derived from `Info::ietf()`
-
 ## Related
 
 - [#4926](https://github.com/moq-dev/moq/issues/4926) - the declined request for an object-level API; this carries the fields for relays only
 - [A public model](/quest/m1/public-model/README.md) - these fields are its deliberate exception
-- [Refresh](/quest/m1/refresh/README.md) - promotes the dynamic-groups request path to a public byte-ratio API on native lite

@@ -40,11 +40,10 @@ Public API: none. Wire: none.
 ## Required
 
 - [Union renewal](/quest/m1/test-flakes-2/auth-union-renewal.md) - the JS subscriber never leaves a torn REQUEST_UPDATE on the stream
-- [One process](/quest/m1/test-flakes-2/one-process.md) - no test writes process-wide env or unwraps the crypto provider install
 - [Media resource instrumentation](/quest/m1/test-flakes-2/resource-instrumentation.md) - the media test stops seeing a playing player report nothing to release
 - [Interop cpp to js budget](/quest/m1/test-flakes-2/interop-cpp-js.md) - the cpp -> js cell finishes inside its 30 s budget, fixed at its cause
+- [Relay tests in one process](/quest/m1/test-flakes-2/relay-one-process.md) - moq-relay's integration binary passes under plain `cargo test`, not only nextest
 
 ## Related
 
 - [Controlled time](/quest/m1/time/README.md) - the systemic fix these rules ask for: every crate on a controlled clock
-- [Publish channel count](/quest/m1/publish-audio-channel-count.md) - tracks the media fixture's cold-start audio-tone flake, a player stall it shares with the mono pin

@@ -39,3 +39,6 @@ url = { workspace = true }
 base64 = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-test = { workspace = true, features = ["no-env-filter"] }
+
+[lints]
+workspace = true

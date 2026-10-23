@@ -60,7 +60,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [ID3 catalog section](/quest/m3/id3.md) - timed ID3 as a first-class container-neutral catalog section
 - [FLV script tags](/quest/m3/flv-script.md) - onMetaData and AMF data messages survive RTMP and FLV import
 - [Half and quarter rate AC-3](/quest/m3/ac3-low-rate.md) - bsid 9 and 10 AC-3 parse through TS and FLV instead of being refused
-- [MSF feedback tracks](/quest/m3/msf-publish-tracks.md) - `--stats` and `--echo` work under `--catalog-format msf` through `publishTracks`, once a consumer asks
+- [MSF feedback tracks](/quest/m3/msf-publish-tracks.md) - `--report` and `--echo` work under `--catalog-format msf` through `publishTracks`, once a consumer asks
 - [MSFTS convergence](/quest/m3/msfts-convergence.md) - the demultiplexed TS lane converges on MSFTS where they differ, once an MSFTS implementer engages
 - [#2279](/quest/m3/2279-hang-typed-scte-35-ad-cue-signaling-carried-opaquely.md) - hang: SCTE-35 cues arrive immediately on an independent metadata track, optionally associated with a rendition
 - [CEA-608/708](/quest/m3/captions-cea.md) - captions carried inside video SEI become a real text rendition at import

@@ -1360,6 +1360,62 @@ async fn drain_until_idle<S: crate::catalog::Stream>(
 	}
 }
 
+/// A rendition the catalog moves to another track, in its broadcast or a sibling one, goes on
+/// as the same FLV video with that track's media and none of the one it left. A new track
+/// described by another SPS is announced by a new sequence-header tag ahead of its first frame.
+#[tokio::test(start_paused = true)]
+async fn a_moved_rendition_continues_on_its_new_track() {
+	use crate::container::test_util::{Moving, SPS, marked_frame, marks};
+
+	for (track, broadcast, sps) in [("b", None, Moving::MAIN_SPS), ("a", Some("other"), SPS)] {
+		let mut moving = Moving::new();
+		let mut exporter = Export::new(moving.source().await, moving.catalog_stream().await);
+		let mut out = Vec::new();
+		for i in 0..45 {
+			moving.a.write(marked_frame(i, 0xa1)).unwrap();
+			assert!(drain_until_idle(&mut exporter, &mut out).await.is_none());
+		}
+
+		moving.point(track, broadcast, sps);
+		assert!(drain_until_idle(&mut exporter, &mut out).await.is_none());
+		let next = match broadcast {
+			None => &mut moving.b,
+			Some(_) => &mut moving.other,
+		};
+		for i in 45..120 {
+			moving.a.write(marked_frame(i, 0xa2)).unwrap();
+			if i >= 60 {
+				next.write(marked_frame(i, 0xb1)).unwrap();
+			}
+			assert!(drain_until_idle(&mut exporter, &mut out).await.is_none());
+		}
+
+		let expected: Vec<u8> = [vec![0xa1; 45], vec![0xb1; 60]].concat();
+		assert_eq!(marks(&out), expected, "moved to {track} in {broadcast:?}");
+		// Each sequence header's record, and the mark of the frame after it.
+		let tags = parse_tags(&out);
+		let headers: Vec<(bool, Option<u8>)> = tags
+			.iter()
+			.enumerate()
+			.filter(|(_, tag)| tag.tag_type == 9 && tag.body[1] == 0)
+			.map(|(index, tag)| {
+				let main = tag.body.windows(4).any(|w| w == &Moving::MAIN_SPS[..4]);
+				(
+					main,
+					tags.get(index + 1).and_then(|tag| marks(&tag.body).first().copied()),
+				)
+			})
+			.collect();
+		let mut announced = vec![(false, Some(0xa1))];
+		if sps == Moving::MAIN_SPS {
+			announced.push((true, Some(0xb1)));
+		}
+		assert_eq!(headers, announced, "moved to {track} in {broadcast:?}");
+		let timestamps: Vec<u32> = tags.iter().map(|tag| tag.timestamp).collect();
+		assert!(timestamps.is_sorted(), "{timestamps:?}");
+	}
+}
+
 /// A bound track that leaves the catalog is read to its own end, not refused as removed:
 /// a publisher retires a rendition as its track ends, and the catalog update can land first.
 #[tokio::test(start_paused = true)]

@@ -26,21 +26,21 @@ public final class BroadcastConsumer: Sendable {
         GroupConsumer(try await ffi.fetchGroup(name: name, sequence: sequence, options: options))
     }
 
-    /// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
+    /// Resolve a catalog rendition to the broadcast serving its track.
     ///
-    /// `reference` is `Media.Video.broadcast` / `Media.Audio.broadcast`: `nil` or empty names this
-    /// broadcast, anything else names a sibling relative to it (e.g. `./source`). `epoch` is the
-    /// same rendition's `epoch`: a broadcast proven to serve another instance throws instead of
-    /// resolving, and a route without an epoch cannot prove one, so there it is best effort. Call
-    /// it on a rendition that carries a reference before `subscribeTrack` or `fetchGroup`, which
-    /// take a track name rather than a rendition: the rendition's `track`, or its ID when `nil`.
-    /// The rendition-based `Media.TrackConsumer.subscribe`, `Media.GroupConsumer.fetch`,
-    /// `Audio.Consumer.subscribe`, and `Video.Consumer.subscribe` resolve both themselves.
+    /// The rendition's `broadcast` reference, `nil` or empty, names this broadcast; anything else
+    /// names a sibling relative to it (e.g. `./source`). Its `epoch` is the publisher instance the
+    /// reference names: a broadcast proven to serve another instance throws instead of resolving,
+    /// and a route without an epoch cannot prove one, so there it is best effort. Call it on a
+    /// rendition that carries a reference before `subscribeTrack` or `fetchGroup`, which take a
+    /// track name rather than a rendition: the rendition's `track`, or its ID when `nil`. The
+    /// rendition-based `Media.TrackConsumer.subscribe`, `Media.GroupConsumer.fetch`,
+    /// `Audio.Consumer.subscribe`, and `Video.Consumer.subscribe` resolve it themselves.
     ///
     /// Throws if this broadcast came from a local producer rather than an origin, since a
     /// standalone broadcast has no sibling to name.
-    public func resolve(_ reference: String?, epoch: String?) async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.resolve(reference: reference, epoch: epoch))
+    public func resolve(_ rendition: Media.Rendition) async throws -> BroadcastConsumer {
+        BroadcastConsumer(try await ffi.resolve(rendition: rendition))
     }
 
 }
@@ -78,7 +78,7 @@ public final class BroadcastProducer: Sendable {
     ///
     /// Announcing again re-prices the route in place. Until announced, the
     /// broadcast is invisible and unroutable for local consumers and peers alike.
-    public func announce(route: Route = Route()) throws {
+    public func announce(route: AnnounceRoute = AnnounceRoute()) throws {
         try ffi.announce(route: route)
     }
 

@@ -138,6 +138,17 @@ export function encodeVarint(v: number | bigint, version: StreamVersion): Uint8A
 	return encodeTo(new ArrayBuffer(9), parts.hi, lo, version);
 }
 
+/** The parts joined into one buffer, so they can go out in one write. */
+export function concat(parts: Uint8Array[]): Uint8Array {
+	const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
+	let offset = 0;
+	for (const part of parts) {
+		out.set(part, offset);
+		offset += part.byteLength;
+	}
+	return out;
+}
+
 /**
  * The `WebTransportSendStream` that every outgoing stream is, narrowed to the one attribute
  * this package uses. The DOM types available here still describe them as plain
@@ -267,7 +278,7 @@ export class Reader {
 	#buffer: Uint8Array;
 	#chunks: Uint8Array[] = [];
 	#chunked = 0; // bytes across #chunks
-	#stream?: ReadableStream<Uint8Array>; // if undefined, the buffer is consumed then EOF
+	// Undefined once the stream finishes, or without a stream: the buffer is consumed then EOF.
 	#reader?: ReadableStreamDefaultReader<Uint8Array>;
 	#closed?: Promise<void>;
 	// The decode that last ran short and how far, so a retry can wait for those bytes.
@@ -283,8 +294,7 @@ export class Reader {
 		version: StreamVersion,
 	) {
 		this.#buffer = buffer ?? new Uint8Array();
-		this.#stream = stream;
-		this.#reader = this.#stream?.getReader();
+		this.#reader = stream?.getReader();
 		this.version = version;
 	}
 
@@ -303,11 +313,9 @@ export class Reader {
 
 		if (result.done) {
 			// The transport already finished the stream. Drop the reader so a later stop
-			// neither builds a cancel error nor sends a reset the peer will ignore.
-			if (this.#reader === reader) {
-				this.#reader = undefined;
-				reader.releaseLock();
-			}
+			// neither builds a cancel error nor sends a reset the peer will ignore. Dropped,
+			// not released: releasing a closed stream's lock builds a TypeError per stream.
+			if (this.#reader === reader) this.#reader = undefined;
 			return false;
 		}
 
@@ -806,6 +814,23 @@ export class Writer {
 
 	reset(reason: unknown) {
 		this.#writer.abort(withCode(reason, this.version)).catch(() => void 0);
+	}
+
+	/** Run `f` against a Writer that buffers in memory, returning everything it wrote as one chunk. */
+	static async collect(version: StreamVersion, f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
+		const chunks: Uint8Array[] = [];
+		// Copied, since each primitive reuses the Writer's scratch buffer.
+		const w = new Writer(
+			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(chunk.slice()) }),
+			version,
+		);
+		try {
+			await f(w);
+		} finally {
+			w.close();
+		}
+		await w.closed;
+		return concat(chunks);
 	}
 
 	/**

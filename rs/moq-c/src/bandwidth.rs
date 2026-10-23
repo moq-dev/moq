@@ -70,21 +70,6 @@ pub extern "C" fn moq_bandwidth_close(bandwidth: u32) -> i32 {
 	})
 }
 
-/// Probe up to `target_bps` instead of the sum of the reservations.
-///
-/// The session probes for what its reservations add up to by default, so the
-/// estimate can rise to fund them. A `target_bps` of 0 turns probing off, and
-/// `present` false follows the reservations again.
-#[unsafe(no_mangle)]
-pub extern "C" fn moq_bandwidth_set_target(bandwidth: u32, target_bps: u64, present: bool) -> i32 {
-	ffi::enter(move || {
-		let bandwidth = ffi::parse_id(bandwidth)?;
-		let allocator = State::lock().bandwidth.allocator(bandwidth)?;
-		allocator.set_target(present.then_some(moq_net::bandwidth::Rate::from_bps(target_bps)));
-		Ok(())
-	})
-}
-
 /// Reserve up to `max_bps` for `track`, returning a reservation handle.
 ///
 /// `max_bps` is a ceiling, not a measurement: reserve the most the track can
