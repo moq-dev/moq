@@ -1310,7 +1310,7 @@ fn bench_copy_walk(c: &mut Criterion) {
 
 /// `(readers, retained, routes)` for [`bench_resume_overlap`]: readers of one track,
 /// the groups every route holds, and the routes it swapped through.
-const RESUME_OVERLAP: [(usize, usize, usize); 15] = [
+const RESUME_OVERLAP: [(usize, usize, usize); 17] = [
 	(1, 1, 1),
 	(1, 64, 1),
 	(32, 64, 1),
@@ -1326,6 +1326,8 @@ const RESUME_OVERLAP: [(usize, usize, usize); 15] = [
 	(1, 64, 8),
 	(1, 64, 32),
 	(32, 64, 8),
+	(32, 64, 32),
+	(256, 64, 8),
 ];
 
 /// A track that swapped through its routes while its readers' local cap held every
