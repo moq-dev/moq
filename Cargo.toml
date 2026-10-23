@@ -115,6 +115,14 @@ ignored = ["getrandom"]
 # That pin sits above every MSRV here; rust-toolchain.toml says why.
 rust-version = "1.91"
 
+[workspace.lints.rust]
+# kio and moq-net model-check their primitives under `--cfg loom`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[workspace.lints.clippy]
+# Every suppression says why, so the next lint audit can judge it.
+allow_attributes_without_reason = "warn"
+
 [workspace.dependencies]
 anyhow = "1"
 ash = "0.38"

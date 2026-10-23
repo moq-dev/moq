@@ -66,3 +66,6 @@ tracing-test = { workspace = true, features = ["no-env-filter"] }
 [[bench]]
 name = "chunk_interleaving"
 harness = false
+
+[lints]
+workspace = true

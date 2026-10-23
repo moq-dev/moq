@@ -16,3 +16,6 @@ categories = ["multimedia", "network-programming", "web-programming"]
 bytes = { workspace = true }
 moq-net = { workspace = true }
 thiserror = { workspace = true }
+
+[lints]
+workspace = true

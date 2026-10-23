@@ -201,7 +201,7 @@ fn status_for(err: &Error) -> StatusCode {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use str0m::{
 		format::Codec,

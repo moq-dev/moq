@@ -410,7 +410,10 @@ impl Server {
 		let supported = self.protocols.clone();
 		let require_protocol = self.require_protocol;
 
-		#[allow(clippy::result_large_err)]
+		#[expect(
+			clippy::result_large_err,
+			reason = "tungstenite's handshake callback fixes the error type"
+		)]
 		let callback = move |req: &server::Request,
 		               mut response: server::Response|
 		      -> Result<server::Response, server::ErrorResponse> {
