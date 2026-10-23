@@ -977,7 +977,6 @@ fn reconcile(
 			renditions: HashMap::new(),
 			readers: tokio::task::JoinSet::new(),
 			current: None,
-			online: false,
 			finished: Finished::default(),
 			started: 0,
 			next_id: 0,
@@ -1058,8 +1057,6 @@ struct Follower {
 	readers: tokio::task::JoinSet<(Rendition, u64, Exit)>,
 	/// The instance last started, kept across its end so its return resumes it.
 	current: Option<Current>,
-	/// Whether [`Self::current`] is announced.
-	online: bool,
 	/// Shared with the readers.
 	finished: Finished,
 	/// How many instances started, numbering each.
@@ -1073,7 +1070,10 @@ struct Follower {
 
 /// The instance a [`Follower`] reads.
 struct Current {
-	instance: moq_net::broadcast::Consumer,
+	/// Released at its end, so an offline sibling holds none of its state.
+	instance: Option<moq_net::broadcast::Consumer>,
+	/// Identifies it after its end, if its route named one.
+	epoch: Option<moq_net::Epoch>,
 	/// Shared by every rendition reading the instance, so their first frames fix one mapping for
 	/// all of them.
 	timeline: Arc<Timeline>,
@@ -1175,8 +1175,7 @@ impl Follower {
 					}
 					Ok(moq_mux::follow::Event::End) => {
 						gst::info!(CAT, "{} is offline, holding its pads", self.path);
-						self.online = false;
-						self.idle();
+						self.offline();
 					}
 					Err(err) => {
 						gst::warning!(CAT, "lost {}: {err:?}", self.path);
@@ -1187,8 +1186,7 @@ impl Follower {
 				// sibling renditions idle with it.
 				_ = catalog.closed(), if following && !listening => {
 					following = false;
-					self.online = false;
-					self.idle();
+					self.offline();
 				}
 			}
 		}
@@ -1239,17 +1237,16 @@ impl Follower {
 
 	/// Read `instance`, which took over from any before it.
 	fn start(&mut self, instance: moq_net::broadcast::Consumer) {
-		self.online = true;
 		match &mut self.current {
 			// Announced again without an end, its readers carry on.
-			Some(current) if current.instance.is_clone(&instance) => {}
+			Some(Current {
+				instance: Some(current),
+				..
+			}) if current.is_clone(&instance) => {}
 			// The same publisher instance served again after an end keeps its timeline and the
 			// tracks it finished. An epochless one cannot prove it is the same.
-			Some(current)
-				if current.instance.info().epoch.is_some()
-					&& current.instance.info().epoch == instance.info().epoch =>
-			{
-				current.instance = instance;
+			Some(current) if current.epoch.is_some() && current.epoch == instance.info().epoch => {
+				current.instance = Some(instance);
 				self.idle();
 			}
 			_ => {
@@ -1261,7 +1258,8 @@ impl Follower {
 					_ => Arc::default(),
 				};
 				self.current = Some(Current {
-					instance,
+					epoch: instance.info().epoch.clone(),
+					instance: Some(instance),
 					timeline,
 					serial: self.started,
 				});
@@ -1270,6 +1268,14 @@ impl Follower {
 			}
 		}
 		self.play();
+	}
+
+	/// The instance ended: release it and idle until the next one.
+	fn offline(&mut self) {
+		if let Some(current) = &mut self.current {
+			current.instance = None;
+		}
+		self.idle();
 	}
 
 	/// Stop reading the instance. A draining rendition leaves with it.
@@ -1282,11 +1288,14 @@ impl Follower {
 
 	/// Start a reader on the current instance for each rendition without one that it may serve.
 	fn play(&mut self) {
-		let Some(current) = self.current.as_ref().filter(|_| self.online) else {
+		let Some(current) = &self.current else {
+			return;
+		};
+		let Some(instance) = &current.instance else {
 			return;
 		};
 		for (rendition, entry) in &mut self.renditions {
-			if entry.reader.is_none() && serves(&current.instance, entry.shape.epoch.as_ref()) {
+			if entry.reader.is_none() && serves(instance, entry.shape.epoch.as_ref()) {
 				self.next_id += 1;
 				let (cancel, cancelled) = watch::channel(false);
 				let live = Arc::new(AtomicBool::new(false));
@@ -1294,7 +1303,7 @@ impl Follower {
 					playback: self.playback.clone(),
 					rendition: rendition.clone(),
 					shape: entry.shape.clone(),
-					instance: current.instance.clone(),
+					instance: instance.clone(),
 					serial: current.serial,
 					timeline: current.timeline.clone(),
 					finished: self.finished.clone(),
