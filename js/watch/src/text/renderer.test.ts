@@ -1,19 +1,39 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { VTTCue } from "media-captions";
-import { type CueStore, clearCue, insertCue, pruneCues, rollUp, sanitizeCue } from "./renderer";
+import { parseText, VTTCue } from "media-captions";
+import {
+	type CueStore,
+	clearCue,
+	cueRegions,
+	insertCues,
+	MAX_RETAINED,
+	pruneCues,
+	rollUp,
+	sanitizeCue,
+} from "./renderer";
 
 function store(cues: VTTCue[] = []): CueStore {
-	return { cues, regions: new Map(), clears: [] };
+	return { cues, clears: [] };
 }
 
-// Build a cue store by inserting in the given delivery order, returning the resulting start times.
+// Build a cue store by inserting one payload per cue in the given delivery order, returning the
+// resulting start times.
 function starts(order: number[]): number[] {
-	const cues: VTTCue[] = [];
-	for (const start of order) insertCue(cues, new VTTCue(start, start + 1, `cue ${start}`));
-	return cues.map((cue) => cue.startTime);
+	const s = store();
+	for (const start of order) insertCues(s, [new VTTCue(start, start + 1, `cue ${start}`)]);
+	return s.cues.map((cue) => cue.startTime);
 }
 
-describe("insertCue", () => {
+// The text the renderer would show at `time`, using its own activity test.
+function showing(s: CueStore, time: number): string[] {
+	return s.cues.filter((cue) => time >= cue.startTime && time <= cue.endTime).map((cue) => cue.text);
+}
+
+// A VTT timestamp for a time under an hour.
+function vttTime(seconds: number): string {
+	return new Date(seconds * 1000).toISOString().slice(11, 23);
+}
+
+describe("insertCues", () => {
 	test("keeps cues sorted when they arrive in order", () => {
 		expect(starts([0, 1, 2, 3])).toEqual([0, 1, 2, 3]);
 	});
@@ -25,10 +45,77 @@ describe("insertCue", () => {
 	});
 
 	test("keeps equal start times in arrival order", () => {
-		const cues: VTTCue[] = [];
-		insertCue(cues, new VTTCue(1, 2, "first"));
-		insertCue(cues, new VTTCue(1, 2, "second"));
-		expect(cues.map((c) => c.text)).toEqual(["first", "second"]);
+		const s = store();
+		insertCues(s, [new VTTCue(1, 2, "first")]);
+		insertCues(s, [new VTTCue(1, 2, "second"), new VTTCue(1, 2, "third")]);
+		expect(s.cues.map((c) => c.text)).toEqual(["first", "second", "third"]);
+	});
+
+	// Inserting each cue with a splice would make this payload quadratic: seconds, not milliseconds.
+	test("merges a descending 100k-cue payload into a bounded store", () => {
+		const payload: VTTCue[] = [];
+		for (let i = 100_000; i > 0; i--) payload.push(new VTTCue(i, i + 1, `cue ${i}`));
+
+		const s = store([new VTTCue(99_999, 99_999.25, "stored")]);
+		insertCues(s, payload);
+
+		expect(s.cues).toHaveLength(MAX_RETAINED);
+		// The latest starts survive, one slot going to the stored cue.
+		expect(s.cues[0].startTime).toBe(100_000 - MAX_RETAINED + 2);
+		expect(s.cues.every((cue, i) => i === 0 || s.cues[i - 1].startTime <= cue.startTime)).toBe(true);
+		expect(showing(s, 99_999.5)).toEqual(["cue 99999"]);
+		expect(showing(s, 99_999.1)).toEqual(["stored", "cue 99999"]);
+	});
+
+	// Unclamped, a cue declaring a far-future end outlives every prune sweep, so a long stream of them
+	// grows the store for as long as the viewer watches.
+	test("a declared end cannot keep a cue past the prune horizon", () => {
+		const s = store();
+		for (let t = 0; t <= 600; t++) {
+			insertCues(s, [new VTTCue(t, 1e9, `cue ${t}`)]);
+			pruneCues(s, t - 30);
+		}
+
+		// Ends clamp to 30s past the start, then linger 30s behind the playhead before the sweep.
+		expect(s.cues).toHaveLength(61);
+		expect(s.cues.every((cue) => cue.endTime === cue.startTime + 30)).toBe(true);
+		expect(showing(s, 600).at(-1)).toBe("cue 600");
+	});
+
+	// Timestamps that run ahead of the playhead never fall behind the prune horizon, so the ceiling is
+	// what holds them; the earliest go first, and nothing is refused.
+	test("a stream running ahead of the playhead stays within the ceiling", () => {
+		const s = store();
+		for (let i = 0; i < 2 * MAX_RETAINED; i++) {
+			insertCues(s, [new VTTCue(1e6 + i, 1e6 + i + 1, `cue ${i}`)]);
+			clearCue(s, 1e6 + i + 0.5);
+			pruneCues(s, 0);
+		}
+
+		expect(s.cues).toHaveLength(MAX_RETAINED);
+		expect(s.clears).toHaveLength(MAX_RETAINED);
+		expect(s.cues[0].text).toBe(`cue ${MAX_RETAINED}`);
+		expect(s.clears[0]).toBe(1e6 + MAX_RETAINED + 0.5);
+	});
+});
+
+describe("cueRegions", () => {
+	// Regions kept apart from their cues would outlive them, so a payload declaring a fresh region
+	// per frame would grow the store, and the overlay, for the life of the stream.
+	test("a fresh region per frame lives only as long as its cue", async () => {
+		const s = store();
+		for (let t = 0; t < 200; t++) {
+			const payload = `WEBVTT\n\nREGION\nid:r${t}\n\n${vttTime(t)} --> ${vttTime(t + 1)} region:r${t}\ncue ${t}\n`;
+			const parsed = await parseText(payload, { type: "vtt" });
+			insertCues(s, parsed.cues);
+			pruneCues(s, t - 30);
+		}
+
+		const regions = cueRegions(s.cues).map((region) => region.id);
+		expect(regions).toHaveLength(32);
+		expect(regions).toEqual(s.cues.map((cue) => cue.region?.id ?? ""));
+		expect(showing(s, 199.5)).toEqual(["cue 199"]);
+		expect(regions.at(-1)).toBe("r199");
 	});
 });
 
@@ -37,11 +124,11 @@ describe("rollUp", () => {
 	test("ends the previous cue where this one begins", () => {
 		const s = store();
 		const first = new VTTCue(0, 30, "first");
-		insertCue(s.cues, first);
+		insertCues(s, [first]);
 		rollUp(s, first);
 
 		const second = new VTTCue(2, 32, "second");
-		insertCue(s.cues, second);
+		insertCues(s, [second]);
 		rollUp(s, second);
 
 		expect(first.endTime).toBe(2);
@@ -52,11 +139,11 @@ describe("rollUp", () => {
 	test("clamps a late cue against the successor already stored", () => {
 		const s = store();
 		const later = new VTTCue(4, 34, "later");
-		insertCue(s.cues, later);
+		insertCues(s, [later]);
 		rollUp(s, later);
 
 		const earlier = new VTTCue(1, 31, "earlier");
-		insertCue(s.cues, earlier);
+		insertCues(s, [earlier]);
 		rollUp(s, earlier);
 
 		expect(earlier.endTime).toBe(4);
@@ -67,7 +154,7 @@ describe("rollUp", () => {
 	test("leaves a lone cue lingering", () => {
 		const s = store();
 		const only = new VTTCue(0, 30, "only");
-		insertCue(s.cues, only);
+		insertCues(s, [only]);
 		rollUp(s, only);
 		expect(only.endTime).toBe(30);
 	});
@@ -101,7 +188,7 @@ describe("clearCue", () => {
 		clearCue(s, 4);
 
 		const late = new VTTCue(1, 31, "late");
-		insertCue(s.cues, late);
+		insertCues(s, [late]);
 		rollUp(s, late);
 
 		expect(late.endTime).toBe(4);
