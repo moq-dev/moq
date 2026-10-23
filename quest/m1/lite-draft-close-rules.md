@@ -11,8 +11,8 @@ already do on every lite version. Wire: no change.
 
 Found by an external conformance runner and verified against the code
 2026-10-22. [#5550](https://github.com/moq-dev/moq/pull/5550) made any
-control decode error close the session, on every lite version, but left two
-sentences that still say "reset the stream":
+control decode error close the session, on every lite version, but left three
+sentences that still respond to a forbidden value on the stream alone:
 
 - Line 222, Frame bounds: a `Frame Start` without the group it qualifies, or a
   `Frame End` without a `Group End`. `decode_frame_bounds` in
@@ -22,9 +22,13 @@ sentences that still say "reset the stream":
 - Line 1366, Timescale: a lite-05/06 TRACK_INFO with Timescale 0.
   `lite/track.rs` decodes it as `InvalidValue`. Confirm the subscriber closes
   the session in Rust and JS; if either only resets, fix it in the same PR.
+- Line 1096, Hop Count: a Hop Count that disagrees with the Hop ID entries
+  that follow says "close the stream", but ANNOUNCE rides a bidirectional
+  stream and both implementations already treat the decode failure as
+  session-fatal.
 
-Reword both to close the session, and grep the draft for any other forbidden
-value whose stated response is a stream reset. Leave the legitimate resets
+Reword all three to close the session, and grep the draft for any other forbidden
+value whose stated response is a stream reset or close. Leave the legitimate resets
 alone: an unknown stream type, a publisher that cannot serve a range, and a
 publisher without Probe. Extend the lite-07 changelog entry for the Message
 Length rule to name frame bounds.
