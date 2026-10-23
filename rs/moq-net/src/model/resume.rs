@@ -2866,7 +2866,8 @@ mod test {
 			sub.poll_recv_group(&kio::Waiter::noop()).is_pending(),
 			"B replays only group 0"
 		);
-		b.abort(Error::SessionClosed).unwrap();
+		b.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
 
 		// C lacks the group; reading a later one from it lets go of what nothing needs.
 		let c = copy();
@@ -2877,8 +2878,10 @@ mod test {
 		assert_eq!(recv(&mut sub).sequence, 1);
 		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
 
-		open.abort(Error::SessionClosed).unwrap();
-		a.abort(Error::SessionClosed).unwrap();
+		open.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
+		a.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert_eq!(read(&mut reading), None);
 	}
