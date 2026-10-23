@@ -166,7 +166,10 @@ connect = [
 Prices aren't static. A publisher can re-price a live announcement, which is
 how a standby transcoder pool seeds a high cost and drops it once it's working,
 and a relay receiving a GOAWAY re-prices every route learned from that peer to
-the maximum so new subscriptions go elsewhere while existing ones finish.
+the maximum so new subscriptions go elsewhere while existing ones finish. A
+relay keeps its session to a peer draining to restart until that peer closes
+it, and redials only then, so it reaches the replacement rather than the
+draining process.
 
 A route's price is the publisher's production cost plus the link costs it
 crosses. A live publisher seeds 0, and caching never changes it.
@@ -255,8 +258,8 @@ needs an auth server that grants the cluster CA, such as
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-peer`. An
 accepted peer counts as a cluster peer only when its grant sets `peer: true`,
 as `--mtls-peer` does; otherwise what it announces counts as ingest here, like
-a client's. Dials retry forever with capped backoff, so a rejected peer is loud
-in the logs rather than fatal. See [Authentication](/bin/relay/auth#mtls).
+a client's. Dials retry forever with jittered backoff capped at 30s, so a rejected
+peer is loud in the logs rather than fatal. See [Authentication](/bin/relay/auth#mtls).
 
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) lists the peers
 this relay dialed and holds a session with.

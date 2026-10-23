@@ -4626,6 +4626,7 @@ dependencies = [
  "rand 0.10.3",
  "serde",
  "serde_json",
+ "test-env",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
  "tracing",
@@ -4671,6 +4672,7 @@ dependencies = [
  "moq-video",
  "pollster",
  "serde_json",
+ "test-env",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -4731,6 +4733,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "terminal_size",
+ "test-env",
  "tokio",
  "tower-http 0.7.1",
  "tracing",
@@ -4793,6 +4796,7 @@ dependencies = [
  "moq-video",
  "pollster",
  "serde_json",
+ "test-env",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -4832,6 +4836,7 @@ dependencies = [
  "moq-mux",
  "moq-net",
  "moq-tokio",
+ "test-env",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -4972,6 +4977,7 @@ dependencies = [
  "libc",
  "loom",
  "moq-clock",
+ "moq-json",
  "moq-pattern 0.1.2",
  "num_enum",
  "rand 0.10.3",
@@ -5035,6 +5041,7 @@ dependencies = [
  "fastbloom",
  "getrandom 0.4.3",
  "hex-literal",
+ "indexmap 2.14.2",
  "lru-slab",
  "moq-clock",
  "moq-quic",
@@ -5078,6 +5085,7 @@ dependencies = [
  "bytesize",
  "criterion",
  "futures",
+ "h2",
  "hex",
  "http-body",
  "http-cache-reqwest",
@@ -5108,6 +5116,7 @@ dependencies = [
  "stun-types",
  "sysinfo",
  "tempfile",
+ "test-env",
  "thiserror 2.0.21",
  "time",
  "tokio",
@@ -9666,6 +9675,10 @@ dependencies = [
  "rustix 1.1.5",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "test-env"
+version = "0.0.1"
 
 [[package]]
 name = "textwrap"

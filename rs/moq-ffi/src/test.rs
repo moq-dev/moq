@@ -1306,8 +1306,8 @@ async fn json_snapshot_roundtrip() {
 	assert_eq!(end, None);
 }
 
-/// An idle snapshot producer restates its value in a fresh group once a joiner would otherwise
-/// download more deltas than the track's refresh ratio allows.
+/// An idle snapshot producer restates its value in a fresh group once a join finds more deltas
+/// than the track's refresh ratio allows.
 #[tokio::test]
 async fn json_snapshot_refreshes_for_a_joiner() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -5530,42 +5530,45 @@ async fn client_new_validates_the_connection_knobs() {
 	assert_eq!(client(MoqClientTls::default(), qlog).is_ok(), moq_qlog_supported());
 }
 
-/// `quic.keylog` reaches the backend: refused without `SSLKEYLOGFILE`, and writing the client's
-/// session secrets once it names a file.
+/// A client with `quic.keylog` on, dialing `localhost` pinned to `fingerprints`.
+fn keylog_client(fingerprints: Vec<String>) -> Result<Arc<MoqClient>, MoqError> {
+	MoqClient::new(MoqClientConfig {
+		tls: MoqClientTls {
+			host_name: Some("localhost".into()),
+			fingerprints,
+			..Default::default()
+		},
+		quic: MoqQuicConfig {
+			keylog: Some(true),
+			..Default::default()
+		},
+		websocket: MoqWebSocketConfig {
+			enabled: Some(false),
+			delay_us: None,
+		},
+		..Default::default()
+	})
+}
+
+/// `quic.keylog` reaches the backend, which refuses it without `SSLKEYLOGFILE`.
+#[test]
+fn client_keylog_requires_sslkeylogfile() {
+	if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
+		return;
+	}
+	assert!(matches!(keylog_client(Vec::new()), Err(MoqError::Config { .. })));
+}
+
+/// `quic.keylog` writes the client's session secrets to the file `SSLKEYLOGFILE` names.
 #[tokio::test]
 async fn client_keylog_writes_session_keys() {
-	let keylog = MoqQuicConfig {
-		keylog: Some(true),
-		..Default::default()
-	};
-	let client = |quic: MoqQuicConfig, fingerprints: Vec<String>| {
-		MoqClient::new(MoqClientConfig {
-			tls: MoqClientTls {
-				host_name: Some("localhost".into()),
-				fingerprints,
-				..Default::default()
-			},
-			quic,
-			websocket: MoqWebSocketConfig {
-				enabled: Some(false),
-				delay_us: None,
-			},
-			..Default::default()
-		})
-	};
-
-	// SAFETY: nextest runs each test in its own process, and nothing has spawned a thread that
-	// reads the environment yet.
-	unsafe { std::env::remove_var("SSLKEYLOGFILE") };
-	assert!(matches!(
-		client(keylog.clone(), Vec::new()),
-		Err(MoqError::Config { .. })
-	));
-
 	let path = std::env::temp_dir().join(format!("moq-ffi-keylog-{}.log", std::process::id()));
+	if !test_env::Env::default().set("SSLKEYLOGFILE", &path).isolate() {
+		return;
+	}
+	// A child's process id, and so the path it would pick, is not its parent's.
+	let path = std::env::var_os("SSLKEYLOGFILE").expect("isolate sets SSLKEYLOGFILE");
 	let _ = std::fs::remove_file(&path);
-	// SAFETY: as above.
-	unsafe { std::env::set_var("SSLKEYLOGFILE", &path) };
 
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),
@@ -5587,7 +5590,7 @@ async fn client_keylog_writes_session_keys() {
 		request.accept(None, None).await.expect("handshake failed")
 	});
 
-	let client = client(keylog, server.cert_fingerprints().unwrap()).unwrap();
+	let client = keylog_client(server.cert_fingerprints().unwrap()).unwrap();
 	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
 		.await
 		.expect("connect timed out")

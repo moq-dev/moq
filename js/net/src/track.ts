@@ -127,8 +127,8 @@ export interface Info {
 	 * How many times its first frame a group's later stored bytes may grow before a joining
 	 * subscriber asks for a new group, or omitted to never ask. A join against a newest group
 	 * whose bytes after its first frame exceed this many times the first frame moves
-	 * {@link Demand.wanted} past it, so a late joiner never downloads much more than a
-	 * snapshot or keyframe. `0` asks on any join after a delta. An integer in `0..2^32`.
+	 * {@link Demand.wanted} past it. The joiner still receives the cached group while the new
+	 * one is pending. `0` asks on any join after a delta. An integer in `0..2^32`.
 	 */
 	refresh?: number;
 	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
@@ -595,22 +595,6 @@ function after(a: Location, b: Location): boolean {
 	return a.group > b.group || (a.group === b.group && a.frame > b.frame);
 }
 
-async function nextLargest(
-	state: TrackState,
-	seen: Location | undefined,
-	commit: (largest: Location) => void,
-): Promise<Location | undefined> {
-	for (;;) {
-		const largest = state.largest.peek();
-		if (largest && (!seen || after(largest, seen))) {
-			commit(largest);
-			return largest;
-		}
-		if (state.closed.peek() !== undefined || state.largestEnded.peek()) return undefined;
-		await Signal.race(state.largest, state.closed, state.largestEnded);
-	}
-}
-
 // A source group retained in the producer cache, with the mirror handed to each sink
 // so eviction can drop them together.
 // `arrived` is when the group joined this track, which its mirrors age a predecessor from.
@@ -778,7 +762,6 @@ export class Producer {
 	// datagram taking the next sequence can never leave the ask behind.
 	#refresh = false;
 	#demand: Demand;
-	#largestSeen?: Location;
 	// The largest group's content may still grow: it has not closed cleanly, and it is not a
 	// datagram. An aborted one stays open, since it can be recreated.
 	#largestOpen = false;
@@ -807,6 +790,7 @@ export class Producer {
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
+		hooks.releaseTrack = (producer) => producer.#close(undefined, false);
 		hooks.startTrack = (producer, served) => {
 			producer.#served = served;
 			producer.#owe();
@@ -1261,9 +1245,9 @@ export class Producer {
 		for (const sink of this.#sinks) sink.largest.set(largest);
 	}
 
-	/** The track's largest location, as {@link Subscriber.largest} follows it. */
-	async largest(): Promise<Location | undefined> {
-		return nextLargest(this.#state, this.#largestSeen, (largest) => (this.#largestSeen = largest));
+	/** The track's largest location: its newest group or datagram at the newest frame, or undefined before any. */
+	largest(): Location | undefined {
+		return this.#state.largest.peek();
 	}
 
 	// Evict cached groups idle for longer than the cache window. Idle means nothing
@@ -1725,13 +1709,19 @@ export class Producer {
 	 * them.
 	 */
 	close(abort?: Error) {
+		this.#close(abort, true);
+	}
+
+	// `declare` is false for a received copy whose session closed locally: a dead route, not
+	// finished content, so a clean close there leaves the end undeclared.
+	#close(abort: Error | undefined, declare: boolean) {
 		if (this.#state.closed.peek() !== undefined) return;
 		// A gap past the grace was lost before the abort rather than cut off by it.
 		if (abort && this.#tailPending) this.#arrivals.expire(now(), this.#grace());
 		if (abort && this.#settled()) abort = undefined;
 		// A replacement continues its name's timeline: ending below an earlier producer's
 		// groups would contradict the ones subscribers already received.
-		if (abort === undefined && this.#state.end.peek() === undefined) {
+		if (declare && abort === undefined && this.#state.end.peek() === undefined) {
 			this.#declareEnd({ group: this.#liveEdge(), frame: 0 });
 		}
 		// Nobody will finish these, so a subscriber that has not taken one yet never sees it.

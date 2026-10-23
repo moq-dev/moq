@@ -45,14 +45,11 @@ pub struct Config {
 	)]
 	pub prefix: String,
 
-	/// Interval (in seconds) between snapshot publishes. Defaults to 1.
-	#[usage(
-		long = "stats-interval",
-		env = "MOQ_STATS_INTERVAL",
-		default = "1",
-		setting = "stats.interval"
-	)]
-	pub interval: u64,
+	/// How often a snapshot is published, e.g. "1s" or "500ms". Defaults to 1
+	/// second.
+	#[usage(long = "stats-interval", env = "MOQ_STATS_INTERVAL", setting = "stats.interval")]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub interval: Option<moq_tokio::cli::Duration>,
 
 	/// Node identifier appended to the advertised stats path to disambiguate
 	/// broadcasts when multiple relays share a cluster origin. Without this,
@@ -95,7 +92,7 @@ impl Default for Config {
 		Self {
 			enabled: false,
 			prefix: ".stats".into(),
-			interval: 1,
+			interval: None,
 			node: None,
 			depth: 0,
 			linger: None,
@@ -104,6 +101,11 @@ impl Default for Config {
 }
 
 impl Config {
+	/// The publish interval, defaulting to one second.
+	pub(crate) fn interval(&self) -> Duration {
+		self.interval.map_or(Duration::from_secs(1), Into::into)
+	}
+
 	/// The linger after command-line overrides; `None` keeps the producer's default.
 	pub(crate) fn linger(&self) -> Option<Duration> {
 		self.linger.map(Into::into)
@@ -115,17 +117,18 @@ impl Config {
 	/// attach the result unconditionally. Hand it to
 	/// [`Cluster::with_stats`](crate::cluster::Cluster::with_stats), which takes over both
 	/// the registry and keeping the publish task alive (the task stops when the
-	/// last clone of the producer drops).
-	pub fn build(&self, origin: origin::Producer) -> moq_stats::Producer {
+	/// last clone of the producer drops). Fails on a zero interval.
+	pub fn build(&self, origin: origin::Producer) -> anyhow::Result<moq_stats::Producer> {
 		if !self.enabled {
-			return moq_stats::Producer::new(moq_stats::produce::Config::new());
+			return Ok(moq_stats::Producer::new(moq_stats::produce::Config::new()));
 		}
 		let prefix = self.prefix.clone();
-		let interval = Duration::from_secs(self.interval.max(1));
+		let interval = self.interval();
+		anyhow::ensure!(!interval.is_zero(), "stats.interval must be non-zero");
 		let node = self.node.clone().map(PathOwned::from);
 		let depth = self.depth;
 		let linger = self.linger();
-		tracing::info!(prefix, interval_secs = interval.as_secs(), node = ?node, depth, ?linger, "stats publishing enabled");
+		tracing::info!(prefix, ?interval, node = ?node, depth, ?linger, "stats publishing enabled");
 		let mut config = moq_stats::produce::Config::new()
 			.with_origin(origin)
 			.with_prefix(prefix)
@@ -135,6 +138,6 @@ impl Config {
 		if let Some(linger) = linger {
 			config = config.with_linger(linger);
 		}
-		moq_stats::Producer::new(config)
+		Ok(moq_stats::Producer::new(config))
 	}
 }

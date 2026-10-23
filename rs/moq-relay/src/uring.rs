@@ -724,16 +724,10 @@ async fn serve_connection(
 		Some(_) => moq_net::transport::Binding::Uri,
 		None => moq_net::transport::Binding::InBand,
 	};
-	let session = moq_uring::transport::Session::new(transport, binding);
+	// moq-net boxes the transport with a native `Send` bound, which only a `Local`
+	// session meets; it still never leaves this worker.
+	let session = moq_uring::transport::Local::new(moq_uring::transport::Session::new(transport, binding));
 	let now = moq_net::time::now();
-	// moq-lite on its own ALPN runs unboxed on this worker. Everything else
-	// (moq-transport, and the versions that negotiate in a bidi SETUP, which a
-	// browser offering no subprotocol falls back to) boxes its futures with a
-	// native `Send` bound, which only a `Local` session meets.
-	let unboxed = alpn
-		.as_deref()
-		.and_then(moq_net::Version::from_alpn)
-		.is_some_and(|version| version.is_lite());
 	let mut accepted = Accepted {
 		handle,
 		conn,
@@ -745,24 +739,12 @@ async fn serve_connection(
 		alpn,
 		url,
 	};
-	match unboxed {
-		true => {
-			let request = accepted
-				.deadline
-				.bound(server.accept_request_lite(now, session))
-				.await
-				.context("moq handshake failed")?;
-			serve_request(accepted, request, lifecycle).await
-		}
-		false => {
-			let request = accepted
-				.deadline
-				.bound(server.accept_request(now, moq_uring::transport::Local::new(session)))
-				.await
-				.context("moq handshake failed")?;
-			serve_request(accepted, request, lifecycle).await
-		}
-	}
+	let request = accepted
+		.deadline
+		.bound(server.accept_request(now, session))
+		.await
+		.context("moq handshake failed")?;
+	serve_request(accepted, request, lifecycle).await
 }
 
 /// A connection past its transport handshake, with the facts read off it
@@ -779,14 +761,14 @@ struct Accepted {
 	url: Option<moq_uring::url::Url>,
 }
 
-/// A started session's supervision, boxed so both handshake paths return one type.
+/// A started session's supervision.
 type Supervision = futures::future::BoxFuture<'static, anyhow::Result<()>>;
 
 /// Authenticate on the shared runtime, then start the session on the worker.
 /// Returns the session's supervision, which runs on the shared runtime too.
-async fn serve_request<S: moq_net::transport::poll::Session>(
+async fn serve_request(
 	accepted: Accepted,
-	request: moq_net::server::Handshake<S>,
+	request: moq_net::server::Handshake,
 	lifecycle: &Lifecycle,
 ) -> anyhow::Result<Supervision> {
 	let Accepted {

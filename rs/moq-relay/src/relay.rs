@@ -300,7 +300,7 @@ impl Relay {
 			Some(iroh) => cluster.with_iroh(iroh),
 			None => cluster,
 		};
-		let stats = config.stats.build(cluster.origin.clone());
+		let stats = config.stats.build(cluster.origin.clone())?;
 		// The cluster takes over keeping the publish task alive, so an embedder that
 		// drops the producer keeps publishing for as long as it serves.
 		let cluster = cluster.with_stats(stats.clone());
