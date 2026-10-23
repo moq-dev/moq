@@ -30,6 +30,13 @@ both paths, so a long task stalls them alike.
 Start after [moq-dev/moq#6425](https://github.com/moq-dev/moq/pull/6425)
 merges; it edits both rings and `buffer.ts`, and lands as is.
 
+The nightlies compare listener quality only. Before deleting, measure
+main-thread CPU and allocations at 1, 4, and 16 players on both rings in
+headless Chromium, and put the numbers in the PR. If postMessage costs
+materially more, stop and reconsider the removal with the maintainer. This is
+a one-off A/B, not a persistent bench: the surviving path gets the
+[watch worker plan](/quest/m2/plan-watch-worker.md)'s N-player sweep.
+
 - Delete `js/watch/src/audio/shared-ring-buffer.ts` and its test,
   `SharedAudioBuffer`, `supportsSharedArrayBuffer`, the `createAudioBuffer`
   selection (construct the postMessage buffer directly), the `init-shared`
