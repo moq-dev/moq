@@ -1,7 +1,9 @@
 // cargo run --example basic
 
-// A standalone program stamping a real token, so it reads the host clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "`Claims` takes `SystemTime`, so the example reads the host clock"
+)]
 
 use std::time::{Duration, SystemTime};
 

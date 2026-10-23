@@ -23,10 +23,12 @@ Per-platform, picked at compile time:
   application), yielding zero-copy `CVPixelBuffer` surfaces straight to
   VideoToolbox.
 - **Linux**: native V4L2 (camera; YUYV resampled, MJPEG via `zune-jpeg`) and
-  xdg-desktop-portal + PipeWire on Wayland (display; behind the `pipewire`
-  feature), with native X11 monitor/window selection and capture as the X11
-  fallback. The Wayland picker dialog chooses the screen, and the portal's
-  restore token is reused so demand-driven reopens don't re-prompt.
+  native X11 monitor/window selection and capture, plus xdg-desktop-portal +
+  PipeWire for a picker-chosen screen or window (`capture::Source::Portal`,
+  behind the `pipewire` feature). `capture::Source::Display` is X11-only and
+  refuses a Wayland display rather than opening the picker. A portal selection
+  keeps its restore token, so its publication's demand-driven reopens don't
+  re-prompt.
 - **Windows**: native Media Foundation (camera; `IMFSourceReader`) and
   Windows.Graphics.Capture (display and window; Windows 10 2004/build 19041
   or newer). Screen capture honors `Config::cursor` and converts BGRA to an
@@ -40,7 +42,8 @@ Per-platform, picked at compile time:
 identifiers accepted by `capture::Source::Camera`. `capture::displays()` does
 the same for macOS, Windows, and X11 displays. `capture::windows()` lists macOS,
 Windows, and X11 windows. Wayland display selection stays in the desktop portal
-picker, which does not expose a stable display identifier.
+picker, which does not expose a stable display identifier; ask it with
+`capture::Source::Portal`.
 
 Windows `display:N` selectors are enumeration indices, not persistent monitor
 identities. Switching from Desktop Duplication to WGC can change which monitor
@@ -60,6 +63,9 @@ while let Some(frame) = capture.read().await? {
     // holds the pixels and `frame.timestamp` the capture time.
 }
 ```
+
+On Wayland, set `Source::Portal(portal::Selection::new(portal::Kind::Screen))`
+instead and keep that selection for the publication's reopens.
 
 The stream retains only the newest unconsumed frame, so a slow encoder adds
 drops rather than latency. `read` ends with `None` when the source stopped for

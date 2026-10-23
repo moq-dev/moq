@@ -1,4 +1,3 @@
-#![cfg_attr(test, allow(clippy::disallowed_methods))]
 #![warn(missing_docs)]
 
 //! Publish and consume MoQ traffic stats.

@@ -300,11 +300,18 @@ The relay is anonymous here, since released binaries may predate AUTH; the
 default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
 publishers feed current readers, through both relay sources. Each reader is its
-own lane, `media-rust` and `media-js-native-node`. Rust exports must
-decode to a video frame through ffmpeg. The JS reader is
-`compat/client.ts`, not the interop subscriber, whose API follows the
-checkout. One copy runs against each package set, using only API both have,
-and it reconstructs the catalog and decodes the container.
+own lane, `media-rust` and `media-js-native-node`. Each Rust CLI publishes the
+stereo interop tone from fragmented MP4 (released CLIs publish it as CMAF), and
+every reader must decode both a video frame and the tone, which `tone.py`
+judges as in the matrix: a garbled decode, a missing audio rendition, or a
+timestamp gap fails the lane, and the swapped-tone control must fail it. Rust
+exports decode through ffmpeg, which also logs each decoded audio frame's
+timestamp. The JS reader is `compat/client.ts`, not the interop subscriber,
+whose API follows the checkout. One copy runs against each package set, using
+only API both have: it reconstructs the catalog, decodes the container, and
+decodes audio through `@moq/hang`'s libav fallback. It copies samples in the
+decoder's own layout, since the released fallback garbles every channel past
+the first when converting to planar. The FETCH lanes keep a video-only publisher.
 Before cross-version sessions, current and released media controls each run
 with their own relay, publisher, and Rust/JS readers on moq-lite-06. These
 controls always run, including when a planned break skips cross-version lanes,
