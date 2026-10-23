@@ -53,15 +53,16 @@ async function encodePatterns(w: Writer, patterns: Path.Patterns) {
 
 async function decodePatterns(r: Reader): Promise<Path.Patterns> {
 	const count = await r.u53();
-	const patterns = new Path.Patterns();
+	const patterns: Path.Pattern[] = [];
 	for (let i = 0; i < count; i++) {
 		const text = await r.string();
 		const pattern = Path.Pattern.parse(text);
 		// Only the canonical spelling is valid, so each pattern has one encoding.
 		if (pattern.text !== text) throw new Error(`non-canonical pattern: ${text}`);
-		patterns.insert(pattern);
+		patterns.push(pattern);
 	}
-	return patterns;
+	// Reduce once, so a peer's count never turns into quadratic work.
+	return new Path.Patterns(patterns);
 }
 
 /** The grant a token earns, as the acceptor writes it. Encodes its own type. */
