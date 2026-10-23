@@ -25,7 +25,8 @@ Found in the 2026-10-23 moq-quic audit (`connection/streams/lease.rs`,
   `stuck_victims` still counts `end - bytes_read` as held, though `reset()`
   already returned it, so evicting the stream frees nothing and its reader
   sees `Evicted` instead of `Reset(code)`. Rank by
-  `unread_before(reliable_size)` in the reset state.
+  `unread_before(reliable_size)` in the reset state, plus any bytes a lease
+  has taken but not yet released, which still hold credit.
 - **Window shrink debt.** `set_receive_window` adds the full growth to
   `local_max_data` without first cancelling `receive_window_shrink_debt`:
   window 100, shrink to 50, grow to 100 gives `local_max_data` 150. Subtract
@@ -38,12 +39,13 @@ Found in the 2026-10-23 moq-quic audit (`connection/streams/lease.rs`,
   slope.
 - **Lost transmit flag.** `lease()` drops `fill()`'s `ShouldTransmit` on its
   `TooLarge` and `Reset` returns, delaying `MAX_STREAM_DATA` and
-  `MAX_STREAMS` to the next wake.
+  `MAX_STREAMS` to the next wake. Propagate it on every return.
 
 Tests: repeated eviction cycles; a reset (including `RESET_STREAM_AT` below
 the leased offset) while a lease holds taken bytes; eviction, `stop`, then a
 late FIN sending exactly one `STOP_SENDING` and one `MAX_STREAMS`; shrink
-then grow. Extend the connection fuzz target past `lease(0)` to real `want`
+then grow; a `TooLarge` or `Reset` lease that freed credit sends
+`MAX_STREAM_DATA` and `MAX_STREAMS` without waiting for another wake. Extend the connection fuzz target past `lease(0)` to real `want`
 values, asserting `held` equals the sum of the leases' held bytes.
 
 ## Related

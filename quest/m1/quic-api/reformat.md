@@ -16,8 +16,9 @@ Decided 2026-10-23 (maintainer): rename freely; quinn is a reference, not an
 upstream we patch from, so its formatting no longer pays for itself. This
 quest lands first so the reshape children diff against the final style.
 
-A mechanical change: no code edits besides what rustfmt does, so review is a
-check that `git diff -w`-style noise is all it contains. Land it while no
+A mechanical change with no semantic Rust edits: rustfmt's output, plus the
+config, module-guard, `rs/justfile`, and README cleanup named in the Goal.
+Review the Rust diff as formatting noise and the cleanup separately. Land it while no
 other moq-quic PR is open, or rerun the formatter over the conflict.
 
 ## Required

@@ -4,7 +4,7 @@
 
 moq-tokio, moq-uring, moq-relay, moq-ffi and moq-wasm no longer depend on
 `web-transport-trait`. Native QUIC already implements moq-net's traits
-([native WebTransport](/quest/m1/quic-api/native-web.md)); the qmux, iroh and wasm backends implement moq-net's
+([native WebTransport](/quest/m1/quic-api/native-web.md)); the qmux, iroh, wasm and ffi backends implement moq-net's
 `transport::poll` traits, either directly or through a thin adapter per
 backend. The generic adapters over `web_transport_trait` are deleted:
 moq-tokio's `transport::Session<S>` with its async-to-poll emulation, and

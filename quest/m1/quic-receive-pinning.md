@@ -33,7 +33,9 @@ Fix at the source, the way `mux` already does
 
 - Copy DATAGRAM payloads into their own allocation on receive.
 - Copy leased chunks out of the batch in `take()`, or compact on every
-  `fill`, whichever the `receive` bench shows is cheaper.
+  `fill`, whichever the `receive` bench shows is cheaper. `take()` is
+  documented as zero-copy: copying there changes that doc in the same PR,
+  and fill-time compaction keeps it. The pinning tests hold either way.
 - Check moq-uring's receive path the same way; its buffer-ring slots may
   pin differently.
 

@@ -3,8 +3,10 @@
 ## Goal
 
 `SendStream::set_priority` in moq-quic takes effect at once for a stream
-that is already queued, as `SendGroups::set_priority` does for a group, so
-raising a starved stream's priority lets it send.
+waiting in its group's queue (`Queued::At`), as `SendGroups::set_priority`
+does for a group, so raising a starved stream's priority lets it send. A
+stream finishing a frame (`Queued::Frame`) keeps its place and takes the new
+priority when it next requeues.
 
 ## Plan
 
