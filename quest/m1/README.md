@@ -77,7 +77,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Announce cursors stay linear](/quest/m1/announce-cursor-cpu.md) - a withdrawal costs each announce cursor O(K log K), and a no-op route change allocates nothing
 - [Path length setting](/quest/m1/max-hops-setting.md) - operators cap hop paths near their mesh diameter instead of 32
-- [Draining relays don't pull peers back](/quest/m1/drain-peer-redial.md) - cluster peers fail over instead of redialing a draining relay, and peer redials back off with jitter
 - [Stats groups as tracks](/quest/m1/stats-group-tracks.md) - one stable node broadcast per stats producer, with each group a produced track listed by TRACKS
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts

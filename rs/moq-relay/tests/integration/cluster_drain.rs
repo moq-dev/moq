@@ -20,13 +20,13 @@ use moq_relay::{
 /// How long B drains before it force-closes what is left.
 const DRAIN: Duration = Duration::from_secs(30);
 
-/// How far the manual clock moves per step: below the first backoff, so a
-/// redial waiting on one gets its chance to land between steps.
-const STEP: Duration = Duration::from_millis(250);
+/// How far the manual clock moves per step: no longer than the shortest first
+/// backoff, so a redial waiting on one gets its chance to land between steps.
+const STEP: Duration = Duration::from_millis(500);
 
 /// Wall time a step gives loopback traffic to land, since a redial that a timer
 /// released has to cross real sockets before the forwarder can count it.
-const SETTLE: Duration = Duration::from_millis(20);
+const SETTLE: Duration = Duration::from_millis(10);
 
 /// Wall-clock bound on anything the test waits for.
 const WAIT: Duration = Duration::from_secs(10);
@@ -171,10 +171,8 @@ async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
 	trigger.start();
 	pass(&clock, DRAIN).await;
 	within("B exits after its drain", b_run).await.expect("relay task").expect("relay run");
-	let (during_a, during_c) = (forward_a.sessions(b_addr), forward_c.sessions(b_addr));
-	println!("sessions opened to the draining relay: A {during_a}, C {during_c}");
-	assert_eq!(during_a, 1, "A redialed the draining relay");
-	assert_eq!(during_c, 1, "C redialed the draining relay");
+	assert_eq!(forward_a.sessions(b_addr), 1, "A redialed the draining relay");
+	assert_eq!(forward_c.sessions(b_addr), 1, "C redialed the draining relay");
 
 	// Nothing answers while B is down. Then its replacement comes up.
 	forward_a.point(None);
