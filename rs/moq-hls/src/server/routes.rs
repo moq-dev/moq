@@ -427,7 +427,11 @@ fn server_error(err: crate::Error) -> Response {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 
@@ -1136,7 +1140,7 @@ mod tests {
 		.unwrap();
 		let reserved = catalog.reserve();
 		let mut config = video_config();
-		config.broadcast = Some(moq_net::path::Relative::new("../source").to_owned());
+		config.broadcast = Some(moq_net::path::Relative::new("./source").to_owned());
 		let track = media_broadcast.create_track("video0", timed()).unwrap();
 		let mut media = reserved
 			.video(

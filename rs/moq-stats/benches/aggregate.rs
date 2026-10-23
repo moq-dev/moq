@@ -9,13 +9,15 @@
 //!
 //! Run `cargo bench -p moq-stats --bench aggregate` and compare the table across revisions.
 
-// Custom timings measure the real time the work took, not the ambient clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "custom timings measure the real time the work took, not the ambient clock"
+)]
 
 use std::time::{Duration, Instant};
 
 use moq_net::{Epoch, origin};
-use moq_stats::{Role, Tier, Traffic, TrafficFrame, aggregate, traffic_track};
+use moq_stats::{Encoding, Role, Tier, Traffic, TrafficFrame, aggregate, traffic_track};
 
 /// Broadcast paths each node reports.
 const KEYS: usize = 16;
@@ -46,7 +48,7 @@ impl Node {
 			.unwrap();
 		let track = source
 			.create_track(
-				traffic_track(&Tier::default(), Role::Publisher, false),
+				traffic_track(&Tier::default(), Role::Publisher, Encoding::Plain),
 				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
 			)
 			.unwrap();

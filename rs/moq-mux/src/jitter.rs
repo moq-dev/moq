@@ -1,6 +1,7 @@
 //! A jitter buffer that releases several tracks' frames in one decode order, each a fixed
 //! delay after its decode time.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::task::Poll;
@@ -973,7 +974,10 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 	/// Count a frame of `key` the caller dropped before queuing it: a loss once the track
 	/// started or when the caller queued frames `ahead` of it, else trimmed.
-	pub fn lose(&mut self, key: &K, ahead: bool) {
+	pub fn lose<Q: Ord + ?Sized>(&mut self, key: &Q, ahead: bool)
+	where
+		K: Borrow<Q>,
+	{
 		match ahead || self.tracks.get(key).is_some_and(|track| track.started) {
 			true => self.dropped += 1,
 			false => self.trimmed += 1,
@@ -981,9 +985,37 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	}
 
 	/// The frame `key` releases next, if it has one queued.
-	pub fn peek(&self, key: &K) -> Option<&T> {
+	pub fn peek<Q: Ord + ?Sized>(&self, key: &Q) -> Option<&T>
+	where
+		K: Borrow<Q>,
+	{
 		let (_, _, _, item) = self.tracks.get(key)?.queue.front()?;
 		Some(item)
+	}
+
+	/// Whether `key` has a frame waiting, queued or held for a clock still being acquired.
+	pub fn holds<Q: Ord + ?Sized>(&self, key: &Q) -> bool
+	where
+		K: Borrow<Q>,
+	{
+		self.peek(key).is_some()
+			|| self
+				.acquire
+				.as_ref()
+				.is_some_and(|acquire| acquire.tracks.contains_key(key))
+	}
+
+	/// Forget `key`, which holds nothing and will push nothing more, so what it kept to stay in
+	/// step goes with it.
+	pub fn forget<Q: Ord + ?Sized>(&mut self, key: &Q)
+	where
+		K: Borrow<Q>,
+	{
+		debug_assert!(!self.holds(key), "forgot a track that holds frames");
+		self.tracks.remove(key);
+		self.expect.remove(key);
+		self.leads.remove(key);
+		self.steer.tracks.remove(key);
 	}
 
 	/// When the next queued frame is due, or the acquisition under way ends.
@@ -998,7 +1030,10 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 	/// Whether `key` has a frame waiting that is already due (any frame, without a delay), so
 	/// reading more of it now would only queue what the output cannot take yet.
-	pub fn full(&self, key: &K) -> bool {
+	pub fn full<Q: Ord + ?Sized>(&self, key: &Q) -> bool
+	where
+		K: Borrow<Q>,
+	{
 		self.tracks
 			.get(key)
 			.and_then(|track| track.queue.front())

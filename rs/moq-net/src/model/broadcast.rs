@@ -719,7 +719,7 @@ impl Drop for Alive {
 
 /// Whether a path request still names the source that handed out its track.
 #[derive(Clone, Default)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 // pending: /quest/m1/public-model/answer.md
 pub(crate) enum RequestValidity {
 	#[default]
@@ -731,13 +731,13 @@ pub(crate) enum RequestValidity {
 }
 
 impl RequestValidity {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn token(route: Option<kio::Consumer<()>>) -> Self {
 		route.map(Self::Route).unwrap_or_default()
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn for_source(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
 		route
@@ -747,7 +747,7 @@ impl RequestValidity {
 	}
 
 	/// Capture one selection period so a pending request never revives after a replacement.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn start(&self) -> Self {
 		match self {
@@ -756,7 +756,7 @@ impl RequestValidity {
 		}
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn check(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
@@ -774,7 +774,7 @@ impl RequestValidity {
 }
 
 #[cfg(test)]
-#[allow(missing_docs)] // test-only assertion helpers
+#[expect(missing_docs, reason = "test-only assertion helpers")]
 impl Producer {
 	pub fn assert_create_track(
 		&mut self,
@@ -790,12 +790,12 @@ impl Producer {
 ///
 /// A peer's retraction and a dead session end the source the same way: a broadcast
 /// carries no end cause past this hop. Shared by the lite and IETF subscribers.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 // pending: /quest/m1/public-model/answer.md
 pub(crate) struct SourceGuard(Producer);
 
 impl SourceGuard {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn new(producer: Producer) -> Self {
 		Self(producer)
 	}
@@ -958,7 +958,7 @@ impl Dynamic {
 use futures::FutureExt;
 
 #[cfg(test)]
-#[allow(missing_docs)] // test-only assertion helpers
+#[expect(missing_docs, reason = "test-only assertion helpers")]
 impl Dynamic {
 	pub fn assert_request(&mut self) -> track::Request {
 		kio::wait(|waiter| self.poll_requested_track(waiter))
@@ -1312,7 +1312,7 @@ impl Consumer {
 }
 
 #[cfg(test)]
-#[allow(missing_docs)] // test-only assertion helpers
+#[expect(missing_docs, reason = "test-only assertion helpers")]
 impl Consumer {
 	pub fn assert_not_closed(&self) {
 		assert!(

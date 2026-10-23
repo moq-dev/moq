@@ -8,9 +8,10 @@ is fixed. Cost that pays for a feature `main` deliberately added is accepted,
 and the reason is written here.
 
 This epic's own work: once every child has landed, run the full main against
-release comparison again with `just bench origin/release`, and confirm nothing
-new regressed. Then add a release-baseline step to the recurring
-[performance audit](/quest/m1/audit-perf.md), so every later cut
+release comparison again with `just bench origin/release`, plus the JS frame
+path in Chromium with `bench/browser/micro.ts`, and confirm nothing new
+regressed. Then add a release-baseline step to the recurring
+[performance audit](/quest/m2/audit-perf.md), so every later cut
 repeats this comparison.
 
 ## Plan
@@ -60,6 +61,13 @@ noise.
   [#5548](https://github.com/moq-dev/moq/pull/5548) needs. An earliest-deadline
   atomic cannot prove a replacement driver is registered, and a lock-free
   notification primitive is not worth ~8 ns.
+- `track_gap_flush` is accepted at O(log gaps + retired entries) per shared
+  successor, after [#6287](https://github.com/moq-dev/moq/pull/6287) indexed
+  the gap ledger and retired a shared verdict's gaps with one split. Each
+  retired entry must be freed exactly once, so the batch is already amortized
+  optimal; a representation that hides that reclamation would widen scope for
+  no measured benefit. Sparse arrivals cost O(log gaps) amortized, and at 4096
+  gaps flush, read, and expiry instructions fell 80 to 95%.
 
 ### Release as a baseline
 
@@ -74,9 +82,9 @@ usually pays for a feature.
 
 | Bench | release | main | Ratio | Owner |
 |---|---|---|---|---|
-| `track_gap_flush/4096` | 5.7 us | 551 us | 96x | [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) |
-| `track_gap_flush/512` | 1.8 us | 48 us | 27x | same |
-| `track_gap_flush/64` | 1.5 us | 6.2 us | 4.1x | same |
+| `track_gap_flush/4096` | 5.7 us | 551 us | 96x | accepted (above) |
+| `track_gap_flush/512` | 1.8 us | 48 us | 27x | accepted (above) |
+| `track_gap_flush/64` | 1.5 us | 6.2 us | 4.1x | accepted (above) |
 | `stats/session-report/1000x10` | 11.0 us | 86.8 us | 7.9x | accepted (above) |
 | `track_gc/idle/16384` | 11.6 ns | 73.7 ns | 6.3x | accepted (above) |
 | `origin/resume_overlap/sequence/1r_64g_32c` | 93 us | 426 us | 4.6x | fixed in [moq-dev/moq#6292](https://github.com/moq-dev/moq/pull/6292) |
@@ -102,7 +110,14 @@ and 12% less on fanout, with the same delivery.
 - kio `contended_notify` and `contended_log` at 16 threads: 4 to 5x. These
   are contention benches on a busy host, so they are likely noise.
 - JS `net/bench/frames.ts` on bun: lite rows 1.2 to 1.3x, IETF rows 1.3 to
-  2.2x ([JS frames](/quest/m1/release-perf/js-frames.md)).
+  2.2x. Fixed in Chromium:
+  [#6296](https://github.com/moq-dev/moq/pull/6296) removed a retained-history
+  scan, and [#6479](https://github.com/moq-dev/moq/pull/6479) stopped
+  releasing a finished stream's reader lock, which built a `TypeError` per
+  group stream. Every row then sits within the A/A spread of release.
+  The group write/read microbench stays 3 to 12% above release against an
+  A/A of 3 to 8% on the same host. Decided 2026-10-23 (maintainer): browser
+  parity accepted on this evidence; the final re-run above checks it again.
 
 The raw report lived in a scratch directory that has since been removed.
 `just bench <base>` now pairs full Criterion IDs; point `MOQ_BENCH_ARTIFACTS`
@@ -110,11 +125,9 @@ outside the worktree to keep the next one.
 
 ## Required
 
-- [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) - an arrival and a gap flush cost O(log gaps), not O(gaps)
 - [Re-check](/quest/m1/release-perf/recheck.md) - the screen-only moves are re-measured with instruction counts, and the ones that hold are fixed or accepted
-- [JS frames](/quest/m1/release-perf/js-frames.md) - the js/net frame path is no slower than release in a browser, or the gap is accepted
 
 ## Related
 
-- [Performance audit](/quest/m1/audit-perf.md) - compares nightly to nightly; this epic compares main to release
-- [Nightly benchmark regressions](/quest/m1/bench-ci.md) - paired nightly-to-nightly comparison on one runner
+- [Performance audit](/quest/m2/audit-perf.md) - compares nightly to nightly; this epic compares main to release
+- [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - noise floor of the paired nightly-to-nightly comparison on one runner

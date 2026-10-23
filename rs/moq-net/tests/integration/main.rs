@@ -14,6 +14,7 @@ mod catalog_acquisition;
 mod catalog_churn;
 mod catalog_handover;
 mod compress;
+mod control_stats;
 mod datagram;
 mod dial_split_horizon;
 mod drained_claim;

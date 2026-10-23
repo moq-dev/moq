@@ -5772,8 +5772,9 @@ fn server_listen_refuses_bad_config() {
 /// than binding and logging nothing.
 #[test]
 fn server_keylog_requires_sslkeylogfile() {
-	// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-	unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+	if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
+		return;
+	}
 	let bind = "127.0.0.1:0";
 	let generate = [moq_str("localhost")];
 	let mut config: moq_server_config = unsafe { std::mem::zeroed() };
@@ -6055,7 +6056,10 @@ async fn a_background_panic_reaches_the_terminal_callback_and_keeps_another_orig
 	let task = crate::ffi::RUNTIME.spawn(async move {
 		let result = crate::ffi::run(async {
 			panic!("injected background panic");
-			#[allow(unreachable_code)]
+			#[expect(
+				unreachable_code,
+				reason = "the panic is the point; the `Ok` names the future's output type"
+			)]
 			Ok::<(), Error>(())
 		})
 		.await;

@@ -469,7 +469,12 @@ impl Serve {
 				}
 			}
 		}
-		let rules = |publish: &[Pattern], subscribe: &[Pattern]| Permissions::new(publish.to_vec(), subscribe.to_vec());
+		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
+			Permissions::new(
+				publish.iter().cloned().collect::<moq_auth::Patterns>(),
+				subscribe.iter().cloned().collect::<moq_auth::Patterns>(),
+			)
+		};
 		if self.key_set.is_some() && (self.key.is_some() || self.key_dir.is_some()) {
 			anyhow::bail!("--key-set conflicts with --key and --key-dir");
 		}

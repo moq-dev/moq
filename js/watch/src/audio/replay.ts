@@ -1,5 +1,5 @@
 /**
- * Replay a recorded arrival trace through the player's consumer and rings on a simulated clock.
+ * Replay a recorded arrival trace through the player's consumer and ring on a simulated clock.
  *
  * Every frame is written into its group at the instant the trace says it arrived, and the player's
  * real `Container.Consumer` decides what to deliver, wait for, and skip, at the max delay the delay
@@ -26,7 +26,6 @@ import { type Delay, Sync } from "../sync";
 import { frameDuration } from "./config";
 import { ringSamples, target } from "./latency";
 import { AudioRingBuffer } from "./ring-buffer";
-import { allocSharedRingBuffer, SharedRingBuffer } from "./shared-ring-buffer";
 import { Terminal } from "./terminal";
 
 /** An AudioWorklet render quantum, in frames. */
@@ -57,8 +56,6 @@ export interface Arrival {
 export interface Options {
 	/** Hold decoder delivery until this simulated monotonic time. */
 	decodeAfter?: number;
-	/** `shared` is the SharedArrayBuffer ring a cross-origin isolated page runs; `post` is the rest. */
-	ring: "shared" | "post";
 	/** The sample rate, in Hz. */
 	rate: number;
 	/** The configured delay, as the element takes it. "instant" plays no audio, so it has no replay. */
@@ -88,56 +85,8 @@ export interface Quantum {
 	delay: number;
 }
 
-/** The two rings behind the calls the decoder and the worklet make on them. */
-interface Ring {
-	insert(timestamp: Micro, data: Float32Array[]): void;
-	read(output: Float32Array[]): number;
-	reset(): void;
-	setLatency(samples: number): void;
-	readonly stalled: boolean;
-	readonly timestamp: Micro;
-}
-
-/** The shared ring, sized and grown the way `SharedAudioBuffer` sizes and grows it. */
-function shared(rate: number, latency: number): Ring {
-	let ring = new SharedRingBuffer(allocSharedRingBuffer(1, Math.max(rate, latency * 2), rate));
-	ring.setLatency(latency);
-	return {
-		insert: (timestamp, data) => ring.insert(timestamp, data),
-		read: (output) => ring.read(output),
-		reset: () => ring.reset(),
-		setLatency: (samples) => {
-			ring.setLatency(samples);
-			if (ring.capacity < samples * 1.5) ring = ring.resize(Math.max(rate, samples * 2));
-		},
-		get stalled() {
-			return ring.stalled;
-		},
-		get timestamp() {
-			return ring.timestamp;
-		},
-	};
-}
-
-/** Samples as the milliseconds `PostAudioBuffer` posts to the worklet. */
+/** Samples as the milliseconds `AudioBuffer` posts to the worklet. */
 const millis = (rate: number, samples: number) => Milli.fromSecond((samples / rate) as Second);
-
-/** The postMessage ring, sized the way `PostAudioBuffer` asks the worklet to size it. */
-function post(rate: number, latency: number): Ring {
-	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, latency) });
-	return {
-		insert: (timestamp, data) => ring.write(timestamp, data),
-		read: (output) => ring.read(output),
-		reset: () => ring.reset(),
-		setLatency: (samples) => ring.resize(millis(rate, samples)),
-		get stalled() {
-			return ring.stalled;
-		},
-		get timestamp() {
-			return ring.timestamp;
-		},
-	};
-}
 
 /** A trace's media timestamp as the container carries it. */
 const micros = (ms: number) => Math.round(ms * 1000) as Micro;
@@ -202,7 +151,8 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	await settle();
 
 	let delay = sync.out.delay.peek();
-	const ring = (options.ring === "shared" ? shared : post)(rate, ringSamples(rate, delay));
+	// The worklet's ring, sized the way `AudioBuffer` asks the worklet to size it.
+	const ring = new AudioRingBuffer({ rate, channels: 1, latency: millis(rate, ringSamples(rate, delay)) });
 
 	// The decoder's read loop, with the codec taken out. A failure is rethrown at the next quantum.
 	const terminal = new Terminal();
@@ -221,12 +171,12 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 			const { timestamp, arrival } = next.frame;
 			const media = Milli.fromMicro(timestamp);
-			const late = sync.received(media, "audio", arrival);
+			const late = sync.received(media, arrival);
 			arrivals.push({ kind: "frame", timestamp: media, arrival, late });
 			const entry = recorded.get(timestamp);
 			if (!entry) throw new Error(`the consumer delivered an unrecorded frame at ${timestamp} us`);
 			frame.set(Milli(entry.duration));
-			ring.insert(timestamp, [new Float32Array(Math.round((entry.duration * rate) / 1000)).fill(0.5)]);
+			ring.write(timestamp, [new Float32Array(Math.round((entry.duration * rate) / 1000)).fill(0.5)]);
 		}
 	})().catch((error: unknown) => {
 		failure = { error };
@@ -290,7 +240,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			const resolved = sync.out.delay.peek();
 			if (resolved !== delay) {
 				delay = resolved;
-				ring.setLatency(ringSamples(rate, delay));
+				ring.resize(millis(rate, ringSamples(rate, delay)));
 			}
 
 			output.fill(0);
