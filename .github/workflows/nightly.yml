@@ -52,6 +52,10 @@ jobs:
     uses: ./.github/workflows/features.yml
     secrets: inherit
 
+  ietf-conformance:
+    uses: ./.github/workflows/ietf-conformance.yml
+    secrets: inherit
+
   runner-vm:
     uses: ./.github/workflows/runner-vm.yml
 

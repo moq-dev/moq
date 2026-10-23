@@ -76,11 +76,60 @@ Work owned by this README, after the children land:
   END_OF_GROUP status object, and a FIRST_OBJECT bit that differs. Every child must
   preserve these byte for byte.
 - Check routing first. Sections 1-7 send a SUBSCRIBE for a 16-field namespace
-  under the announced `moq-test-00` prefix. Whether `origin.dynamic` routes it
-  is unverified. If it does not, bring the routing decision to the maintainer
-  before working around it.
+  under the announced `moq-test-00` prefix. Mock-clock integration tests now
+  prove that path on drafts 16 and 18, through one relay and through two relays
+  joined by lite-07; the live harness reaches the publisher too.
 - FETCH cases are skipped upstream. Section 8 stays out while PUBLISH is
   declined.
+
+
+### Remaining conformance decision
+
+The original Goal above is unmet. The pinned harness is in
+[`test/ietf-conformance`](../../../test/ietf-conformance/README.md), with Moxygen
+`c27ae6358df62a1195da479b2e07c50dd8174279` and its matching dependency revisions.
+It keeps all selected case arguments and deadlines, excludes only the agreed
+nonzero-subgroup cases, and fails on client crashes or publisher reconnects.
+The nightly job is a diagnostic checkpoint, not a passing conformance claim.
+
+The direct-origin controls pass 29/29 cases on draft 16 and 28/29 on draft 18.
+The draft-18 large-scale case fails even without a relay with
+`Group Mismatch: Actual=1 Expected=0`; its provenance must be resolved upstream.
+A different single-relay draft-18 case, "End of group markers with single object", also reports `(1, expected 0)`;
+its relationship to the direct-control failure is not established.
+Every relay cell fails 29/29. Single-relay cells expose the conflicts below;
+cluster cells fail before media because their TRACK_INFO query needs upstream
+TRACK_STATUS, and the pinned MoQTestPublisher inherits NOT_SUPPORTED. Preserve
+that refusal: changing query-only demand into a SUBSCRIBE is not an authorized
+fallback here. [Range widening](/quest/m1/compress/ietf-range-widen.md), claimed
+by [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465), owns that separate
+cold-metadata boundary. The recommended prerequisite is an upstream publisher
+that answers metadata queries, plus a validated direct-origin control.
+
+The suite's assumptions conflict with two settled behaviors:
+
+- Its subgroup-zero verifier requires `publisherPriorityForGroup(group)`
+  (200 on even groups, 201 on odd groups). This Plan explicitly ranks egress
+  by track priority, so a track with priority 200 remains 200.
+- It rejects END_OF_TRACK. The relay keeps that status, as decided on
+  2026-10-22 in [the runner decision](https://github.com/moq-dev/moq/blob/5f09861634b793056f840408a589f89a8c464fb0/quest/m1/interop-coverage/runner-cases.md).
+  Its subgroup-header verifier also applies ordinary payload-group expectations
+  to that extra terminal stream. A standalone marker at `(last_group + 1, 0)`
+  does not claim END_OF_GROUP for a payload group that never existed.
+
+Retain the hard Goal until a maintainer chooses a compatible verification
+contract. Recommended: keep the approved relay behavior and agree an upstream
+conformance profile that understands track-level priority and legitimate
+END_OF_TRACK, while still checking forwarded object IDs, properties,
+END_OF_GROUP and FIRST_OBJECT. That changes the Goal's current requirement that
+this selected unmodified suite passes, so it needs approval. The alternative is
+to revisit the egress-priority and terminal-status decisions and explicitly
+scope their API/wire and scheduling costs. Do not silently alter those decisions,
+weaken assertions, or exclude every failing case.
+
+After that decision, rerun both direct-origin controls and all four relay cells,
+fix any remaining independently justified forwarding failures at source, and
+make the nightly gate pass before deleting this README.
 
 ## Related
 
