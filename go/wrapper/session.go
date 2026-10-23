@@ -150,14 +150,6 @@ func (b *Bandwidth) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
 	return &Reservation{inner: b.inner.Reserve(demand.inner, maxBps)}
 }
 
-// SetTarget probes up to targetBps instead of the sum of the reservations. The
-// session probes for what its reservations add up to by default, so the
-// estimate can rise to fund them. 0 turns probing off, and nil follows the
-// reservations again.
-func (b *Bandwidth) SetTarget(targetBps *uint64) {
-	b.inner.SetTarget(targetBps)
-}
-
 // Reservation is one track's standing claim on a Bandwidth.
 //
 // Grant is a snapshot: nil means no estimate or no demand, so hold the current
