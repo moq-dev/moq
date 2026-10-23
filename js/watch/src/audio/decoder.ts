@@ -62,9 +62,6 @@ type DecoderOutput = {
 	// Whether the audio buffer is stalled (waiting to fill)
 	stalled: Signal<boolean>;
 
-	// How many times the ring ran dry mid-playback, so the UI can show that the target is too low.
-	underruns: Signal<number>;
-
 	// Combined buffered ranges (network jitter + decode buffer)
 	buffered: Signal<Container.BufferedRanges>;
 };
@@ -82,6 +79,8 @@ type Shape = {
 export interface Stats {
 	/** Number of encoded bytes received. */
 	bytesReceived: number;
+	/** How many times playback ran dry mid-stream; a rising count means the delay is too low. */
+	underruns: number;
 }
 
 /**
@@ -105,7 +104,6 @@ export class Decoder {
 		stats: new Signal<Stats | undefined>(undefined),
 		timestamp: new Signal<Milli | undefined>(undefined),
 		stalled: new Signal<boolean>(true),
-		underruns: new Signal<number>(0),
 		buffered: new Signal<Container.BufferedRanges>([]),
 	};
 	/** The derived outputs, read-only. */
@@ -286,8 +284,17 @@ export class Decoder {
 			effect.run((inner) => {
 				this.#out.stalled.set(inner.get(ring.stalled));
 			});
+			// Each ring counts from zero, so add only what this one counted to the cumulative stats.
+			let counted = 0;
 			effect.run((inner) => {
-				this.#out.underruns.set(inner.get(ring.underruns));
+				const underruns = inner.get(ring.underruns);
+				const added = underruns - counted;
+				counted = underruns;
+				if (added <= 0) return;
+				this.#out.stats.update((stats) => ({
+					bytesReceived: stats?.bytesReceived ?? 0,
+					underruns: (stats?.underruns ?? 0) + added,
+				}));
 			});
 
 			effect.set(this.#out.root, worklet);
@@ -507,6 +514,7 @@ export class Decoder {
 
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
+					underruns: stats?.underruns ?? 0,
 				}));
 
 				if (!(await play(order.push(next)))) return;
@@ -589,6 +597,7 @@ export class Decoder {
 
 				this.#out.stats.update((stats) => ({
 					bytesReceived: (stats?.bytesReceived ?? 0) + frame.payload.byteLength,
+					underruns: stats?.underruns ?? 0,
 				}));
 
 				if (!(await play(order.push(next)))) return;
@@ -828,7 +837,11 @@ export class Decoder {
 		return true;
 	}
 
-	/** Observe every frame and gap received from now until the handle or this decoder closes. */
+	/**
+	 * Observe every frame and gap received from now until the handle or this decoder closes.
+	 *
+	 * Each open handle queues every entry until read, so read it continuously or close it.
+	 */
 	arrivals(): Arrivals {
 		return this.#arrivals.consume();
 	}

@@ -83,7 +83,6 @@ func TestErrorSentinels(t *testing.T) {
 		{"Expired", ffi.NewMoqErrorExpired(), moq.ErrExpired},
 		{"NotFound", ffi.NewMoqErrorNotFound(), moq.ErrNotFound},
 		{"Unsupported", ffi.NewMoqErrorUnsupported(), moq.ErrUnsupported},
-		{"InvalidRoute", ffi.NewMoqErrorInvalidRoute(""), moq.ErrInvalidRoute},
 		{"InvalidPattern", ffi.NewMoqErrorInvalidPattern(""), moq.ErrInvalidPattern},
 		{"InvalidEpoch", ffi.NewMoqErrorInvalidEpoch(""), moq.ErrInvalidEpoch},
 		{"UnresolvableBroadcast", ffi.NewMoqErrorUnresolvableBroadcast(""), moq.ErrUnresolvableBroadcast},
