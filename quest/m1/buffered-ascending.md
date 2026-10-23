@@ -67,9 +67,10 @@ Implementation:
   re-runs the other's tests.
 - Update `doc/concept/use-case/ai.md` and the `buffer` docs in
   `js/watch/src/element.ts` and `js/watch/src/sync.ts` in the same PR.
-- Verify against a voice agent on a lite-07 relay: every reply decodes from
-  its first frame, plain and barge-in, with no overflow. moq.dev's local
-  Pipecat stack (moq-dev/moq.pro#2785) is one way.
+- Verify against a voice agent on a lite-07 relay, such as a Pipecat pipeline
+  publishing each TTS reply as a fresh track with one Opus frame per group:
+  every reply decodes from its first frame, plain and barge-in, with no
+  overflow.
 
 ## Required
 
