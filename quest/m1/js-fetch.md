@@ -40,7 +40,6 @@ claims that change.
 ## Required
 
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - the on-demand request surface this dispatches onto
-- [FETCH_OK whole group](/quest/m1/ietf-fetch-end-location.md) - the Rust FETCH_OK contract this copies reads End Object 0 as the whole group first
 
 ## Related
 

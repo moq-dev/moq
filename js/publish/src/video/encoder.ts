@@ -810,7 +810,7 @@ export class Encoder {
 				latencyMode: "realtime",
 				hardwareAcceleration,
 				avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
-				// @ts-expect-error Typescript needs to be updated.
+				// @ts-expect-error TypeScript's DOM lib lacks the HEVC codec registration's `hevc` config.
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
 			};
 

@@ -176,4 +176,3 @@ max age or the range.
 
 - [Drop set](/quest/m1/drop-set.md) - closes the gap this leaves for groups already reported dropped
 - [JS unbounded groups](/quest/m2/unbounded-groups/js.md) - the JS byte bound for groups and the cursor runs between them
-- [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) - folds stale gaps into `Delivered`'s floor, which this record replaces; keep `track_gap_flush` and the sparse read benches flat

@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Video rendition preference
+
+`moq::Video` gains `int32_t preference`. Update aggregate initializers with `0` to keep the default ranking and rebuild against the matching generated headers and native library. Higher values are preferred; compatibility transcodes use `-1`.
+
+### `announce` takes an `AnnounceRoute`
+
+`BroadcastProducer::announce` takes `moq::AnnounceRoute{cost, epoch}` instead of a `moq::Route`: the origin builds the hop chain, so `hops` is no longer an input.
+`moq::Route` is only what announcements report. To re-announce an observed route, copy its `cost` and `epoch`.
+
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `BroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel it.
+
 ### Priorities are signed (#6142)
 
 `TrackInfo::priority`, `Subscription::priority`, and `FetchGroupOptions::priority` are `int8_t`, and `GroupRequest::priority()` returns one.
@@ -25,8 +39,14 @@ Pass the new `moq::ContainerFormat::kCmaf` to keep publishing CMAF.
 ### Catalog references carry their epoch
 
 `Video` and `Audio` gain `epoch`, the publisher instance their `broadcast` reference names, right after `broadcast`; positional initializers shift by one.
-`BroadcastConsumer::resolve(reference)` becomes `resolve(reference, epoch)`; pass the rendition's `epoch` alongside its `broadcast`, or `std::nullopt` to resolve whichever instance answers.
+`BroadcastConsumer::resolve(reference)` becomes `resolve(rendition)`, taking the catalog `Rendition` and reading its `broadcast` and `epoch` from it.
 Resolving, and the rendition-based consumers, fail with `moq::Error::kMux` for a rendition whose broadcast is proven to serve another epoch.
+
+### Timestamps stop at 2^61 - 1 microseconds (#6168)
+
+Writing a frame, or any other call that takes a timestamp, fails with `TimeOverflow` past `2^61 - 1` microseconds instead of `2^62 - 1`, the most moq-lite-05/06 can carry.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `2^61 - 1`.
 
 ### Finished tracks stay until the broadcast ends (#6157)
 
@@ -94,11 +114,11 @@ To start at group `n`, pass one range starting at the absolute anchor for group 
 ### Receive estimates come from `Session::recv_bandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.
-Hold the consumer `Session::recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and `cancel()` it to stop.
+Hold the consumer `Session::recv_bandwidth` returns to request PROBE, read it with `rate()` or wait with `rate_changed()`, and `cancel()` it to stop.
 
 ```cpp
 auto bandwidth = session->recv_bandwidth();
-auto rate = bandwidth ? bandwidth->peek() : std::nullopt;
+auto rate = bandwidth ? bandwidth->rate() : std::nullopt;
 ```
 
 ### `AnnouncedBroadcast::available()` waits for the next publisher instance (#5700)

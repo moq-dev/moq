@@ -4,9 +4,8 @@
 
 Seven scheduled nightlies on `main` after the estimator began capping how much
 weight one observation takes show the AAC `bursty` browser rows discarding
-about as much audio a minute as the Opus `bursty` rows, on both rings, and
-the Opus `near-zero` `isolated` row holding the same 60 ms target as the
-`plain` row with no underrun episodes. `test/audio-quality/budgets.json`
+about as much audio a minute as the Opus `bursty` rows, and the Opus
+`near-zero` row holding a 60 ms target with no underrun episodes. `test/audio-quality/budgets.json`
 carries every browser row's ceilings re-measured from them.
 
 ## Plan
@@ -14,9 +13,10 @@ carries every browser row's ceilings re-measured from them.
 Waits on the nightlies: check the `audio-quality-run` artifacts of the
 scheduled Nightly runs on `main` (`gh run download <id> -n audio-quality-run`)
 once seven have run since the change merged. Never dispatch the nightly by
-hand. Re-measure by the rule in the budgets note, and drop the note's sentences
-that budget the AAC bursty discards against Opus's and the isolated row's
-one-second drops as measured.
+hand. Re-measure by the rule in the budgets note, and drop the note's sentence
+that budgets the AAC bursty discards against Opus's as measured. Nightlies
+from before the one-ring removal also carry `-isolated` rows; grade only the
+`-plain` rows, which are the browser rows now.
 
 Decided 2026-10-22 (maintainer): the Opus near-zero budgets quest folded in
 here, so one pass over the same seven nightlies covers both. The cap

@@ -9,7 +9,7 @@ undocumented exported symbols are fixed or planned.
 
 Recurs once per major release (decided 2026-10-19). The PR that finishes
 this run also adds the next one with the same file name at the end of the next
-milestone's `Required` (m0 to m1, m1 to m2, m2 to m3). The successor keeps the Goal
+milestone's `Required` (m0 to m1, m1 to m2). The successor keeps the Goal
 and this paragraph; the rest of its Plan is rewritten with what this run
 learned: baselines, results, and what to check first. A successor placed in m2
 also lists the [release cut](/quest/m2/release/cut.md) under `Required`, so it

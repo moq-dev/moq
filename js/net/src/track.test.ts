@@ -3,6 +3,7 @@ import { Manual, Milli, Nano } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -113,7 +114,8 @@ test("the first subscriber of a track with no group wants group 0", () => {
 	subscriber.close();
 });
 
-test("a join over the refresh ratio wants the group after the newest", () => {
+// The cached group is served either way: refresh is a request, not a hold.
+test("a join over the refresh ratio wants the group after the newest", async () => {
 	for (const [delta, wanted] of [
 		[0, 0],
 		[3, 0],
@@ -123,6 +125,7 @@ test("a join over the refresh ratio wants the group after the newest", () => {
 		refreshGroup(producer, delta);
 		const subscriber = producer.subscribe();
 		expect(producer.demand().wanted.peek()).toBe(wanted);
+		expect((await subscriber.recvGroup())?.sequence).toBe(0);
 		subscriber.close();
 	}
 });
@@ -1519,6 +1522,102 @@ test("an aborted live-edge anchor does not make older content stale", async () =
 	track.close();
 });
 
+test.each(["arrival", "ordered"] as const)("subscription bounds stay reader-local for %s reads", async (order) => {
+	const producer = new TrackProducer("test");
+	const everything = producer.subscribe({ maxDelay: Milli(5000) });
+	const subscriber = producer.subscribe({
+		maxDelay: Milli(5000),
+		groups: { start: { included: 1 }, end: { excluded: 3 } },
+	});
+	const ordered = order === "ordered" ? subscriber.ordered() : undefined;
+	const read = () => (ordered ? ordered.nextGroup() : subscriber.recvGroup());
+	try {
+		for (let sequence = 0; sequence < 5; sequence++) producer.writeGroup(new GroupProducer(sequence));
+		expect((await everything.recvGroup())?.sequence).toBe(0);
+		expect((await read())?.sequence).toBe(1);
+		expect((await read())?.sequence).toBe(2);
+		const pending = read();
+		expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+		subscriber.update({ maxDelay: Milli(5000), groups: { start: { included: 3 }, end: { excluded: 4 } } });
+		expect((await pending)?.sequence).toBe(3);
+		const capped = read();
+		expect(await Promise.race([capped, Promise.resolve("pending")])).toBe("pending");
+		subscriber.update({ maxDelay: Milli(5000), groups: { end: { included: 4 } } });
+		// Arrival readers can now offer the unread group below the old floor; ordered ones cannot rewind.
+		if (!ordered) expect((await capped)?.sequence).toBe(0);
+		expect((await (ordered ? capped : read()))?.sequence).toBe(4);
+		producer.close();
+		expect(await read()).toBeUndefined();
+	} finally {
+		subscriber.close();
+		everything.close();
+		producer.close();
+	}
+});
+
+test("subscription updates narrow the cursor before its first read", async () => {
+	const producer = new TrackProducer("test");
+	const everything = producer.subscribe({ maxDelay: Milli(5000) });
+	const track = producer.subscribe({ maxDelay: Milli(5000) });
+	try {
+		for (let sequence = 0; sequence < 5; sequence++) producer.writeGroup(new GroupProducer(sequence));
+		track.update({ maxDelay: Milli(5000), groups: { start: { excluded: 2 }, end: { included: 3 } } });
+		expect((await track.recvGroup())?.sequence).toBe(3);
+		const pending = track.recvGroup();
+		expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+		track.close();
+		await pending;
+	} finally {
+		track.close();
+		everything.close();
+		producer.close();
+	}
+});
+
+test("a subscription cap chooses its own live edge", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
+	const everything = producer.subscribe({ maxDelay: Milli(5000) });
+	const track = producer.subscribe({ groups: { end: { excluded: 2 } } });
+	try {
+		for (let sequence = 0; sequence < 5; sequence++) {
+			producer.writeFrame({
+				payload: enc.encode(`${sequence}`),
+				timestamp: Timestamp.fromMillis(sequence * 1000),
+			});
+		}
+		expect((await track.recvGroup())?.sequence).toBe(1);
+		track.update({ groups: { start: { included: 3 }, end: { excluded: 4 } } });
+		expect((await track.recvGroup())?.sequence).toBe(3);
+	} finally {
+		track.close();
+		everything.close();
+		producer.close();
+	}
+});
+
+test("subscription updates bound each reader's datagrams", async () => {
+	const producer = new TrackProducer("test");
+	const everything = producer.subscribe({ maxDelay: Milli(5000) });
+	const track = producer.subscribe({ groups: { start: { included: 1 }, end: { excluded: 2 } } });
+	try {
+		for (let sequence = 0; sequence < 4; sequence++)
+			producer.insertDatagram(sequence, undefined, new Uint8Array([sequence]));
+		expect((await track.recvDatagram())?.sequence).toBe(1);
+		track.update({ groups: { start: { included: 3 }, end: { excluded: 4 } } });
+		for (let sequence = 2; sequence < 5; sequence++)
+			producer.insertDatagram(sequence, undefined, new Uint8Array([sequence]));
+		expect((await track.recvDatagram())?.sequence).toBe(3);
+		const pending = track.recvDatagram();
+		expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
+		track.close();
+		await pending;
+	} finally {
+		track.close();
+		everything.close();
+		producer.close();
+	}
+});
+
 test("setGroups with an excluded end of 0 is the empty range and does not ride another subscriber's demand", async () => {
 	const producer = new TrackProducer("test");
 	const everything = producer.subscribe({ maxDelay: Milli(5000) });
@@ -1900,6 +1999,7 @@ test("largest names the newest frame written", async () => {
 	const subscriber = producer.subscribe({ maxDelay: Milli(1_000) });
 
 	// Nothing published yet, so the first read waits.
+	expect(producer.largest()).toBeUndefined();
 	const initial = subscriber.largest();
 	expect(await Promise.race([initial.then(() => "ready"), Promise.resolve("pending")])).toBe("pending");
 
@@ -1907,6 +2007,9 @@ test("largest names the newest frame written", async () => {
 	first.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.now() });
 	first.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.now() });
 	expect(await initial).toEqual({ group: 0, frame: 1 });
+	// The producer's getter holds no cursor, so every caller reads the same edge.
+	expect(producer.largest()).toEqual({ group: 0, frame: 1 });
+	expect(producer.largest()).toEqual({ group: 0, frame: 1 });
 	first.close();
 
 	// A new group raises the largest at its head before any frame, so its first frame names
@@ -2600,6 +2703,24 @@ test("a datagram whose timedness disagrees with its track is refused", async () 
 	expect(got?.timestamp).toBeUndefined();
 });
 
+test("unknown track metadata keeps presentation-time expiry until accepted", () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("pending");
+	try {
+		for (let second = 0; second < 4; second++) {
+			producer.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(second * 1000) });
+		}
+		// No wall time passes. Until metadata is accepted, buffered timestamps still
+		// prove that the two oldest groups are outside this reader's media budget.
+		expect(drain(producer.subscribe({ maxDelay: Milli(500) }))).toEqual([2, 3]);
+		producer.accept({ timescale: Timescale.MILLI });
+		expect(drain(producer.subscribe({ maxDelay: Milli(500) }))).toEqual([2, 3]);
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
 // The wall clock judges an untimed track, so a new subscriber starts at the oldest cached
 // group it doesn't find stale, the way a timed one does: a group is stale once its
 // successor arrived a full budget ago.
@@ -2974,6 +3095,22 @@ test("an endless track with gaps remembers only those within the budget", () => 
 		expect(drainGroups(subscriber)).toEqual([2995]);
 	} finally {
 		time.restore();
+	}
+});
+
+test("IETF provenance survives normalization on timed and untimed tracks", () => {
+	for (const timescale of [undefined, Timescale.MILLI]) {
+		const info = infoDefaults({ ietf: IetfVersion.DRAFT_22, timescale });
+		expect(info.ietf).toBe(IetfVersion.DRAFT_22);
+		expect(info.timescale).toBe(timescale);
+	}
+	const producer = new TrackProducer("ietf").accept({ timescale: Timescale.MILLI, ietf: IetfVersion.DRAFT_22 });
+	try {
+		stampGroup(producer, 0, 1000);
+		stampGroup(producer, 1, 500);
+		producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
+	} finally {
+		producer.close();
 	}
 });
 

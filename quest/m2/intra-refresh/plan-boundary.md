@@ -21,9 +21,8 @@ fractional-millisecond `warmup` up
 is amended so a consumer running a parallel max-delay decoder MAY present
 min-delay pictures before the group start plus `warmup`, which keeps the
 merged dual decoder in `decode::Consumer`
-([#5842](https://github.com/moq-dev/moq/pull/5842)); that amendment moved to
-[its own m1 quest](/quest/m1/warmup-draft.md) so it ships with the decoder. Publication ordering for
-a later, longer sweep remains to settle.
+([#5842](https://github.com/moq-dev/moq/pull/5842)), and the draft now says
+so. Publication ordering for a later, longer sweep remains to settle.
 
 Ask the maintainer to choose between an exact per-group boundary and a safe
 bound known and published before the affected content, including the latency

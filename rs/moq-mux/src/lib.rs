@@ -1,5 +1,8 @@
 #![warn(missing_docs)]
-#![cfg_attr(test, allow(clippy::disallowed_methods))]
+#![cfg_attr(
+	test,
+	expect(clippy::disallowed_methods, reason = "tests read the host clock directly")
+)]
 
 //! Media muxers and demuxers for MoQ.
 //!
@@ -28,6 +31,8 @@
 //!   record per aligned segment, mapping a span of content time to the group
 //!   ranges that carry it on each track, so consumers can seek or build
 //!   HLS/DASH playlists without downloading media.
+//! - [`follow`] follows a broadcast across the publisher instances that
+//!   serve it, for a reader that restarts on each one.
 
 pub mod binary;
 pub mod catalog;
@@ -35,6 +40,7 @@ mod clock;
 pub mod codec;
 pub mod container;
 mod error;
+pub mod follow;
 pub mod import;
 mod jitter;
 pub mod json;

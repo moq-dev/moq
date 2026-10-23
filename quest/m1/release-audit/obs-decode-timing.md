@@ -18,7 +18,9 @@ callback returns without draining (about `moq-source.cpp:217` and `:634` at
 all mis-stamped, two lost at EOF) is the regression test to automate.
 
 Use the decoder's output timestamp (`best_effort_timestamp` or the frame's
-`pts`), send a flush packet on clean EOF and emit what it returns. Keep the
-fix inside the current path; the GPU replacement keeps the same behavior.
+`pts`). On clean EOF, send a flush packet and call `avcodec_receive_frame`
+until it returns `AVERROR_EOF`, emitting every picture; the regression
+asserts all 12 pictures and their timestamps. Keep the fix inside the
+current path; the GPU replacement keeps the same behavior.
 
 Public API: none. Wire: none.

@@ -13,7 +13,10 @@ token. `moq_tokio::tcp::Listener::with_tls` (`rs/moq-tokio/src/tcp.rs`)
 already takes an `Arc<rustls::ServerConfig>`, so requesting a certificate is
 config. The real gap is getting the peer certificate out afterwards:
 `qmux::tls::Server::accept` finishes the handshake and returns a `Session`
-without it.
+without it. The same accessor also returns the SNI the client sent, so a
+`tls://` session reports it as QUIC sessions do (from
+[moq-dev/moq#6509](https://github.com/moq-dev/moq/pull/6509), decided
+2026-10-23).
 
 Decided by the maintainer (2026-10-06): the peer certificate comes from a
 new accessor on qmux's TLS session. Rejected: owning the TLS accept outside

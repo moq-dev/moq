@@ -2,6 +2,7 @@ use crate::error::KeyError;
 use crate::{Claims, Key, KeyOperation};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 
 /// JWK Set to spec <https://datatracker.ietf.org/doc/html/rfc7517#section-5>
@@ -43,13 +44,16 @@ impl<'de> Deserialize<'de> for KeySet {
 	}
 }
 
-impl KeySet {
+impl FromStr for KeySet {
+	type Err = crate::Error;
+
 	/// Parse a set from a JSON string.
-	#[allow(clippy::should_implement_trait)]
-	pub fn from_str(s: &str) -> crate::Result<Self> {
+	fn from_str(s: &str) -> crate::Result<Self> {
 		Ok(serde_json::from_str(s)?)
 	}
+}
 
+impl KeySet {
 	/// Load a set from a JSON file.
 	pub fn from_file<P: AsRef<Path>>(path: P) -> crate::Result<Self> {
 		let json = std::fs::read_to_string(&path)?;
@@ -133,7 +137,7 @@ impl KeySet {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -146,8 +150,8 @@ mod tests {
 	fn create_test_claims() -> Claims {
 		Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]).into(),
-			subscribe: patterns(&["test-sub/**"]).into(),
+			publish: patterns(&["test-pub/**"]),
+			subscribe: patterns(&["test-sub/**"]),
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
 			not_before: None,

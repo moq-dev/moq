@@ -12,7 +12,7 @@ BytesMut, constructs a fresh WebmIterator and skips handled tags only after
 parsing them (lines 227-252). A B-byte partial block arriving in c-byte
 chunks can copy O(B²/c) bytes before completion; replay can add parse work.
 This is before the reorder queues covered by
-[export reorder](/quest/m1/release-audit/export-reorder.md).
+[decode order](/quest/m1/ts-reliability/decode-order.md).
 
 Benchmark block size × input chunk size with identical complete media,
 including large keyframes, lacing, bounded BlockGroups and unknown-size live

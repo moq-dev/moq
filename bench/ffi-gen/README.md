@@ -36,7 +36,7 @@ just bench-ffi-gen build bench  # or some steps: build | bench | size
 `target/ffi-gen`, then builds the slice with each generator, its Python, Kotlin, and
 Swift bindings, both `.wasm` builds, and BoltFFI's web package. `bench` runs
 `MOQ_BENCH_ROUNDS` rounds (default 3), alternating which generator goes first, and
-writes `target/ffi-gen/results/report.md`. Each case gets 3 warmup steps and a
+writes `target/ffi-gen/results/report.md` and appends the table to the Actions job summary. Each case gets 3 warmup steps and a
 `MOQ_BENCH_SECONDS` budget (default 1). Throughput mirrors `just bench-ffi`:
 `clamp(8 MiB / size, 1, 64)` frames per group, every byte checked, and CPU from
 `getrusage`. `size` builds moq-ffi and moq-wasm for reference, then prints the size
@@ -216,7 +216,7 @@ and do not translate to BoltFFI's IR.
 | Bulk byte copies | M: [Payload bytes](/quest/m2/ffi-bytes.md) | done |
 | Call overhead | M: JNI or JNA direct mapping for Kotlin ([Kotlin calls](/quest/m2/kt-ffi-calls.md)); L: a C-extension Python backend, not yet planned | done |
 | Zero-copy byte returns | M: [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md) | M: bytes cross its wire buffer, with no borrowed return |
-| Namespaced types | M: [Namespaced external types](/quest/m2/uniffi-namespaces.md) | M: same-name types collide (RFC #700, open) |
+| Namespaced types | M: [Namespaced external types](https://github.com/kixelated/rust2/blob/main/quest/m2/uniffi-namespaces.md) | M: same-name types collide (RFC #700, open) |
 | Poll-native async | M: [Poll-native async](/quest/m2/ffi-poll-migrate.md) | M: the same poll-plus-continuation model, with per-method poll exports |
 | Binding moq-ffi as written | none | M: drop `Arc` returns, rework wasm gating, and fix the gaps above |
 
