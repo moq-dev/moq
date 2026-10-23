@@ -284,12 +284,12 @@ fn lite_session_over_webtransport() {
 
 			let (moq, session_driver) = moq_net::Client::new()
 				.with_subscriber(sub_origin.clone())
-				.connect_lite(
+				.connect(
 					moq_net::time::now(),
 					moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri),
 				)
 				.await
-				.expect("connect_lite");
+				.expect("connect");
 			tokio::spawn(moq_net::time::run(session_driver));
 
 			let bc = {
@@ -335,12 +335,15 @@ fn lite_session_over_webtransport() {
 
 			let (session, driver) = moq_net::Server::new()
 				.with_publisher(&serve_origin)
-				.accept_lite(
+				.accept(
 					moq_net::time::now(),
-					moq_uring::transport::Session::new(session, moq_net::transport::Binding::Uri),
+					moq_uring::transport::Local::new(moq_uring::transport::Session::new(
+						session,
+						moq_net::transport::Binding::Uri,
+					)),
 				)
 				.await
-				.expect("accept_lite");
+				.expect("accept");
 			let task_handle = handle.clone();
 			handle.spawn(async move {
 				let _ = task_handle.run(driver).await;

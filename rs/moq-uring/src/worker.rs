@@ -1109,14 +1109,7 @@ mod tests {
 		assert!(handle.udp(bind(), udp::Config::default()).is_err());
 		assert!(matches!(sock.poll_recv(&kio::Waiter::noop()), Poll::Ready(Err(_))));
 		assert!(matches!(sock.poll_acquire(&kio::Waiter::noop()), Poll::Ready(Err(_))));
-		assert!(
-			tx.send(udp::Transmit {
-				to,
-				segment: 1200,
-				ecn: None,
-			})
-			.is_err()
-		);
+		assert!(tx.send(udp::Transmit::new(to, 1200)).is_err());
 		// And a late spawn is dropped rather than parked forever.
 		handle.spawn(async {});
 		drop(sock);
@@ -1258,12 +1251,7 @@ mod tests {
 		assert_eq!(held.len(), usize::from(ceiling));
 		for mut tx in held.drain(..) {
 			tx.resize(1200, 0);
-			tx.send(udp::Transmit {
-				to,
-				segment: 1200,
-				ecn: None,
-			})
-			.expect("send");
+			tx.send(udp::Transmit::new(to, 1200)).expect("send");
 		}
 
 		// The point of the test is the overflow, so prove it happened: the
@@ -1377,12 +1365,7 @@ mod tests {
 			panic!("no tx buffer");
 		};
 		tx.resize(64 * 1024, 0);
-		tx.send(udp::Transmit {
-			to,
-			segment: 1000,
-			ecn: None,
-		})
-		.expect("send 66 datagrams");
+		tx.send(udp::Transmit::new(to, 1000)).expect("send 66 datagrams");
 		drop(worker);
 	}
 
@@ -1406,11 +1389,7 @@ mod tests {
 		};
 		tx.resize(64 * 1024, 0);
 		let err = tx
-			.send(udp::Transmit {
-				to,
-				segment: 1,
-				ecn: None,
-			})
+			.send(udp::Transmit::new(to, 1))
 			.expect_err("65536 datagrams from one buffer");
 		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 		drop(worker);
@@ -1466,11 +1445,7 @@ mod tests {
 		};
 		tx.resize(4096, 0);
 		let err = tx
-			.send(udp::Transmit {
-				to,
-				segment: 1024,
-				ecn: None,
-			})
+			.send(udp::Transmit::new(to, 1024))
 			.expect_err("4096 bytes from a 2048 byte buffer");
 		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 		drop(worker);
@@ -1494,11 +1469,7 @@ mod tests {
 		// `UDP_SEGMENT` is a u16: without validation this would truncate to a
 		// one-byte stride instead of one segment.
 		let err = tx
-			.send(udp::Transmit {
-				to,
-				segment: usize::from(u16::MAX) + 2,
-				ecn: None,
-			})
+			.send(udp::Transmit::new(to, usize::from(u16::MAX) + 2))
 			.expect_err("oversized segment");
 		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 		drop(worker);
@@ -1537,12 +1508,7 @@ mod tests {
 				panic!("the socket failed after a rejected train");
 			};
 			tx.resize(2 * 1200, 7);
-			tx.send(udp::Transmit {
-				to,
-				segment: 1200,
-				ecn: None,
-			})
-			.expect("send");
+			tx.send(udp::Transmit::new(to, 1200)).expect("send");
 			while received < 2 * 1200 && handle.now() < deadline {
 				let handle = handle.clone();
 				worker
@@ -1586,12 +1552,7 @@ mod tests {
 			panic!("no tx buffer");
 		};
 		tx.resize(4 * 1200, 7);
-		tx.send(udp::Transmit {
-			to,
-			segment: 1200,
-			ecn: None,
-		})
-		.expect("send");
+		tx.send(udp::Transmit::new(to, 1200)).expect("send");
 
 		// Drive the worker until the loopback delivers, parking on a timer each
 		// turn so the park and timer counters see traffic too.
@@ -1669,12 +1630,7 @@ mod tests {
 		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
 		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
 		assert_eq!(metrics.snapshot().tx_stalls, 1);
-		tx.send(udp::Transmit {
-			to,
-			segment: 1200,
-			ecn: None,
-		})
-		.expect("send");
+		tx.send(udp::Transmit::new(to, 1200)).expect("send");
 
 		// Hold the received packet: its buffer is the pool, so the re-arm has
 		// nowhere to receive into.

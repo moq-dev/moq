@@ -610,7 +610,7 @@ mod tests {
 		.await;
 
 		let consumer = client(&server).connect(request()).await.unwrap();
-		assert_eq!(consumer.grant().publish, patterns(&["**"]).into());
+		assert_eq!(consumer.grant().publish, patterns(&["**"]));
 		assert_eq!(log.events(), [Event::Connect]);
 
 		consumer.close("disconnected", Bytes { sent: 7, received: 11 });
@@ -1254,7 +1254,7 @@ mod tests {
 		assert!(log.revalidates() >= 1, "the outage was answered before expires");
 		assert_eq!(
 			consumer.grant().publish,
-			patterns(&["**"]).into(),
+			patterns(&["**"]),
 			"the grant stands through the outage"
 		);
 		let reason = tokio::time::timeout_at(latest + tolerance, consumer.closed())

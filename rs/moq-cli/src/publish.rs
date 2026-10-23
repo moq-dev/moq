@@ -1177,6 +1177,9 @@ pub(crate) mod tests {
 	#[tokio::test]
 	async fn ts_passthrough_crosses_a_relay_through_a_flagged_jump() {
 		const KYRION: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/kyrion_mpeg2av_ac3.ts");
+		if !test_env::Env::without(&["MOQ_CONNECT", "MOQ_HOP"]).isolate() {
+			return;
+		}
 		// The capture with its clock `seconds` ahead, its first PCR flagged as a discontinuity
 		// when `flagged`.
 		let shifted = |seconds: u64, flagged: bool| {
@@ -1204,7 +1207,6 @@ pub(crate) mod tests {
 		let second = shifted(24, true);
 		let input = [&lead[..], &second].concat();
 
-		let _env = crate::test_env::EnvGuard::clear(&["MOQ_CONNECT", "MOQ_HOP"]);
 		let _ = moq_tokio::crypto::install_default();
 		for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-14"] {
 			let fixture = moq_relay::test_relay().await.unwrap();

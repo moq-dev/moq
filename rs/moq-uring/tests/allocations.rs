@@ -81,12 +81,7 @@ fn steady_state_sends_do_not_allocate() {
 			for _ in 0..100 {
 				let mut tx = socket.acquire().await.expect("warmup acquire");
 				tx.resize(4800, 0x5a);
-				tx.send(udp::Transmit {
-					to,
-					segment: 1200,
-					ecn: None,
-				})
-				.expect("warmup send");
+				tx.send(udp::Transmit::new(to, 1200)).expect("warmup send");
 			}
 
 			let mut acquires = 0;
@@ -101,11 +96,7 @@ fn steady_state_sends_do_not_allocate() {
 
 				count_from_zero();
 				tx.resize(4800, 0x5a);
-				let sent = tx.send(udp::Transmit {
-					to,
-					segment: 1200,
-					ecn: None,
-				});
+				let sent = tx.send(udp::Transmit::new(to, 1200));
 				let (allocs, deallocs) = counted();
 				sent.expect("send");
 				stage_allocs += allocs;

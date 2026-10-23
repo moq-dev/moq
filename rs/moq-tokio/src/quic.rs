@@ -582,10 +582,7 @@ impl Config {
 			Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
 			_ => Ok(()),
 		}?;
-		// rustls logs nothing without a path, which would hide the mistake the same way.
-		if self.keylog == Some(true) && std::env::var_os("SSLKEYLOGFILE").is_none_or(|path| path.is_empty()) {
-			return Err(crate::Error::KeylogUnset);
-		}
+		validate_keylog(self.keylog, std::env::var_os("SSLKEYLOGFILE").as_deref())?;
 		validate_idle_timeout(Some(self.resolve().idle_timeout))?;
 		validate_streams(self.max_streams)?;
 		validate_windows(self)
@@ -625,6 +622,18 @@ impl Config {
 			keylog: self.keylog.unwrap_or(false),
 		}
 	}
+}
+
+/// Reject a key log with no file to write to, given the file `SSLKEYLOGFILE` names.
+///
+/// rustls logs nothing without a path, which would hide the mistake the way an
+/// ignored qlog directory would.
+#[cfg(feature = "_transport")]
+fn validate_keylog(keylog: Option<bool>, file: Option<&std::ffi::OsStr>) -> crate::Result<()> {
+	if keylog == Some(true) && file.is_none_or(std::ffi::OsStr::is_empty) {
+		return Err(crate::Error::KeylogUnset);
+	}
+	Ok(())
 }
 
 /// QUIC carries `max_idle_timeout` as a varint of milliseconds, so anything past this
@@ -966,19 +975,18 @@ mod tests {
 	#[cfg(feature = "_transport")]
 	#[test]
 	fn keylog_requires_a_path() {
-		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
-		assert!(Config::default().validate().is_ok());
-
-		let set = Config {
-			keylog: Some(true),
-			..Default::default()
-		};
-		assert!(matches!(set.validate(), Err(crate::Error::KeylogUnset)));
-
-		// SAFETY: as above.
-		unsafe { std::env::set_var("SSLKEYLOGFILE", "/tmp/keys.log") };
-		assert!(set.validate().is_ok());
+		let file = Some(std::ffi::OsStr::new("/tmp/keys.log"));
+		let empty = Some(std::ffi::OsStr::new(""));
+		for keylog in [None, Some(false)] {
+			assert!(validate_keylog(keylog, None).is_ok());
+		}
+		for unset in [None, empty] {
+			assert!(matches!(
+				validate_keylog(Some(true), unset),
+				Err(crate::Error::KeylogUnset)
+			));
+		}
+		assert!(validate_keylog(Some(true), file).is_ok());
 	}
 
 	/// The backends convert this duration with an infallible-by-panic `expect`, and the

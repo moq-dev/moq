@@ -338,8 +338,6 @@ mod tests {
 	/// `<path>/@<epoch>`, and leaves out what is announced elsewhere.
 	#[tokio::test]
 	async fn each_broadcast_records_under_its_own_key_prefix() {
-		// `open_store` reads the credential variables.
-		let _env = crate::test_env::EnvGuard::clear(&[]);
 		let dir = tempfile::tempdir().unwrap();
 		let url = Url::from_directory_path(dir.path()).unwrap();
 

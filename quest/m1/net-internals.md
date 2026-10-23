@@ -25,7 +25,3 @@ Dropped: renaming the over-long `session_delivery_*` bench IDs, since it
 loses their history for a cosmetic gain.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [moq-net compiles once](/quest/m1/net-erase-transport.md) - boxes the transport these cleanups build on
