@@ -3566,7 +3566,9 @@ where
 									// A no-op once an END_OF_TRACK declared the end, whose readers wait
 									// for a missing group only as long as the grace.
 									let _ = track.finish();
-									finished = true;
+									// Only TRACK_ENDED ends the track: after SUBSCRIPTION_ENDED a
+									// later reader subscribes afresh.
+									finished = matches!(ended, Some(Ok(())));
 								}
 							}
 							Err(err) => {
@@ -15976,6 +15978,33 @@ mod joining_fetch_tests {
 			);
 			let end = group.read_frame().await;
 			assert!(matches!(end, Ok(None)), "{version}: the head was cut short: {end:?}");
+		}
+	}
+
+	/// SUBSCRIPTION_ENDED ends only our subscription, not the track, so the copy is released
+	/// for a later reader to subscribe afresh rather than lingering as if the track ended.
+	#[moq_clock::test]
+	async fn a_subscription_ended_copy_does_not_linger() {
+		for version in JOINING_DRAFTS {
+			let mut ok = subscribe_ok(version, None);
+			ok.extend(message_bytes(
+				ietf::PublishDone::ID,
+				&ietf::PublishDone {
+					request_id: matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+						.then_some(RequestId(1)),
+					status_code: 0x3,
+					stream_count: 0,
+					reason_phrase: "done".into(),
+				},
+				version,
+			));
+			let mut run = JoinRun::start(version, None, ok, Vec::new()).await;
+			let _subscriber = (&mut run._hold.2).await.expect("subscribed");
+			while !run.subscriber.state.lock().subscribes.is_empty() {
+				settle().await;
+			}
+			settle().await;
+			assert!(run.serving.is_finished(), "{version}: the copy is released");
 		}
 	}
 
