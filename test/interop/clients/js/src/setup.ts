@@ -73,7 +73,13 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 	document.body.appendChild(host);
 
 	const fault = parseFault(params.get("fault"));
-	let fixture: Fixture | undefined = new Fixture(host, url, broadcast, fault);
+	let fixture: Fixture | undefined = new Fixture(host, {
+		url,
+		name: broadcast,
+		fault,
+		versions: versions?.split(","),
+		generation: Number(params.get("generation") ?? 0),
+	});
 
 	// The driver stops and restarts the publisher in place to exercise a same-path republish, which
 	// has to reuse this page so the audio context keeps its user activation.
@@ -84,7 +90,13 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 		},
 		start: () => {
 			fixture?.close();
-			fixture = new Fixture(host, url, broadcast, fault);
+			fixture = new Fixture(host, {
+				url,
+				name: broadcast,
+				fault,
+				versions: versions?.split(","),
+				generation: Number(params.get("generation") ?? 0),
+			});
 		},
 		disableVideo: () => fixture?.setVideo(false),
 		enableVideo: () => fixture?.setVideo(true),

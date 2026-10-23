@@ -421,6 +421,21 @@ It uses the same real fixture, player and content oracles while leaving cold-sta
 grading and the unrelated negative controls to the default full run. A focused
 pass makes no claim about those omitted checks.
 
+`just test media --media-cases replacement` keeps publisher A open while B takes
+the same path, then closes B and follows A again. Lite-07, lite-06, and IETF draft
+22 viewers must present each run's marked pixels and synchronized audio, with
+no A pictures spliced into B. Epoch-aware viewers also check the broadcast
+identities. Both publishers use lite-07. The fixture logs publisher preparation,
+first decoded replacement, and fallback separately, alongside its 500 ms GOP,
+50 ms playback delay, and sampling interval. These are measured component
+latencies; the existing watchdog is not an RTT performance budget.
+
+The CLI integration suite's `epochs` cases exercise the real QUIC relay with
+lite-07, lite-06, and IETF drafts 14 and 22. Held catalog snapshots and media
+subscriptions keep A while fresh catalog handles resolve B with fresh sibling
+pins. Later metadata and FETCH work cannot join B through A's retired handle;
+withdrawing B reveals the still-live A to fresh readers.
+
 The run ends with negative controls. Each injects a defect and names the
 assertion that has to catch it, and passes only by failing there:
 

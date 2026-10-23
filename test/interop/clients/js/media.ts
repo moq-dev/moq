@@ -50,6 +50,7 @@ import { type Capabilities, missing, probe, type Role } from "./src/capabilities
 import {
 	type CaptureState,
 	FAULTS,
+	KEYFRAME_INTERVAL_MS,
 	LONG_FRAMES,
 	type LongFrame,
 	leakedPlayerStarted,
@@ -62,7 +63,17 @@ import * as Pattern from "./src/pattern";
 import { resumeSkew } from "./src/resume";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
-const CASES = ["capture-denial", "pause", "disable", "rejoin", "detach", "republish", "late-join", "rename"] as const;
+const CASES = [
+	"capture-denial",
+	"pause",
+	"disable",
+	"rejoin",
+	"detach",
+	"republish",
+	"replacement",
+	"late-join",
+	"rename",
+] as const;
 type Case = (typeof CASES)[number];
 
 const { values } = parseArgs({
@@ -611,13 +622,15 @@ type SubscriberProps = {
 	trace?: boolean;
 	/** The player's `delay` attribute, when not its adaptive default. */
 	delay?: string;
+	/** Pin the reader independently of the epoch-aware publishers. */
+	versions?: string;
 };
 
 /** Open a subscriber page and wait for the player to start sampling. Never reloads. */
 async function subscriber(
 	broadcast: string,
 	label: string,
-	{ muted = false, trace = true, delay }: SubscriberProps = {},
+	{ muted = false, trace = true, delay, versions }: SubscriberProps = {},
 ): Promise<[Page, BrowserErrors]> {
 	// visible="always" because the window is never frontmost in a headless run, and the default
 	// policy would stop downloading video and leave the canvas black.
@@ -630,6 +643,7 @@ async function subscriber(
 		muted: String(muted),
 	};
 	if (delay !== undefined) params.delay = delay;
+	if (versions !== undefined) params.versions = versions;
 	const [page, errors] = await open(
 		await browserFor("player"),
 		pageUrl(server.origin, "subscribe", params),
@@ -1006,6 +1020,123 @@ try {
 		await command(player, "reattach");
 		await waitForLive(publisher, publisherErrors, player, playerErrors, "reattach reaches live", true);
 		await measurePlayback(player, playerErrors, "after reattach");
+	}
+
+	// These publishers overlap: neither a successful new picture nor fallback
+	// can be explained by the incumbent timing out or closing its session.
+	if (wants("replacement")) {
+		const sourceBrowser = await browserFor("publisher");
+		for (const version of ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"]) {
+			console.error(`=== live replacement and fallback: ${version} ===`);
+			const name = `replacement-${version}-${process.pid}.hang`;
+			const [old, oldErrors] = await open(
+				sourceBrowser,
+				pageUrl(server.origin, "fixture", {
+					url: relay,
+					broadcast: name,
+					versions: "moq-lite-07-wip",
+					generation: "0",
+				}),
+				`old-${version}`,
+			);
+			let next: Page | undefined;
+			let viewer: Page | undefined;
+			try {
+				await gesture(old);
+				await waitForFixture(old, oldErrors, {
+					deadline: Date.now() + timeoutMs,
+					assertion: "incumbent ready",
+					description: "the incumbent catalog and clock",
+					predicate: (s) => s.ready && s.frameId > 0,
+				});
+				const [watch, watchErrors] = await subscriber(name, `replacement-${version}`, {
+					versions: version,
+					delay: "50ms",
+				});
+				viewer = watch;
+				await gesture(watch);
+				const first = await waitForState(watch, watchErrors, {
+					deadline: Date.now() + timeoutMs,
+					assertion: "incumbent plays",
+					description: "the incumbent's marked pixels",
+					predicate: (s) => s.generation === 0 && !s.audioStalled,
+				});
+				check(
+					version === "moq-lite-06" ? first.broadcastEpoch === undefined : first.broadcastEpoch !== undefined,
+					"negotiated epoch identity",
+					() => JSON.stringify(first),
+				);
+				const before = await readFixtureState(old);
+				const [replacement, replacementErrors] = await open(
+					sourceBrowser,
+					pageUrl(server.origin, "fixture", {
+						url: relay,
+						broadcast: name,
+						versions: "moq-lite-07-wip",
+						generation: "1",
+					}),
+					`new-${version}`,
+				);
+				next = replacement;
+				const started = Date.now();
+				await gesture(replacement);
+				await waitForFixture(replacement, replacementErrors, {
+					deadline: Date.now() + timeoutMs,
+					assertion: "replacement ready",
+					description: "the replacement catalog and clock",
+					predicate: (s) => s.ready && s.frameId > 0,
+				});
+				const preparationMs = Date.now() - started;
+				const switched = await waitForState(watch, watchErrors, {
+					deadline: Date.now() + timeoutMs,
+					assertion: "live replacement plays",
+					description: "the new run while its incumbent stays open",
+					predicate: (s) => s.generation === 1 && !s.audioStalled,
+				});
+				const replacementMs = Date.now() - started;
+				if (version !== "moq-lite-06")
+					check(switched.broadcastEpoch !== first.broadcastEpoch, "replacement has a fresh epoch", () =>
+						JSON.stringify(switched),
+					);
+				const during = await collect(watch, watchErrors, WINDOW_MS);
+				check(
+					during.every((s) => s.frameId === undefined || s.generation === 1),
+					"old run never splices",
+					() => JSON.stringify(during.filter((s) => s.frameId !== undefined && s.generation !== 1)),
+				);
+				await measurePlayback(watch, watchErrors, `replacement ${version}`);
+				const held = await readFixtureState(old);
+				check(held.ready && held.frameId > before.frameId, "incumbent stays live", () => JSON.stringify(held));
+				const withdrawn = Date.now();
+				await command(replacement, "stop");
+				const back = await waitForState(watch, watchErrors, {
+					deadline: Date.now() + timeoutMs,
+					assertion: "live incumbent fallback plays",
+					description: "the still-live older run after the newest withdraws",
+					predicate: (s) => s.generation === 0 && !s.audioStalled,
+				});
+				const fallbackMs = Date.now() - withdrawn;
+				check(back.broadcastEpoch === first.broadcastEpoch, "fallback keeps incumbent identity", () =>
+					JSON.stringify(back),
+				);
+				await measurePlayback(watch, watchErrors, `fallback ${version}`);
+				console.error(
+					JSON.stringify({
+						version,
+						preparationMs,
+						replacementMs,
+						fallbackMs,
+						keyframeIntervalMs: KEYFRAME_INTERVAL_MS,
+						playbackDelayMs: 50,
+						sampleIntervalMs: SAMPLE_MS,
+					}),
+				);
+			} finally {
+				await viewer?.context().close();
+				await next?.context().close();
+				await old.context().close();
+			}
+		}
 	}
 
 	// ── publisher stop and same-path republish ───────────────────────────────

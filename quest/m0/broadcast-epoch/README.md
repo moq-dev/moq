@@ -22,10 +22,10 @@ and hashes only peer routes. Through a peer, a restart on a different chain
 of the same length and cost that loses the routing hash is reached only once
 the old session closes and its route is withdrawn.
 
-The epoch rides moq-lite 07 announcements and requests as metadata, so the
-path never changes and every older version and moq-transport keeps working:
-their routes carry no epoch, and see a restart as an end and start at the
-same path.
+The epoch rides moq-lite 07 announcements and requests as metadata, and the
+negotiated IETF epoch extension carries it on supported moq-transport versions.
+The path never changes. Versions without epoch support keep working: their
+routes carry no epoch, and see a restart as an end and start at the same path.
 
 Decided 2026-10-10: keep epochless clients supported on updated relays, with
 unchanged paths and End+Start on replacement. The relay retains the explicit
@@ -114,7 +114,8 @@ handover. Keep existing reads sticky; stopping new unpinned wire work is a
 separate boundary. Catalog references apply the same identity policy to
 players and exporters, distinguishing announcement followers from readers
 that retain lifetime pins. Wall-clock expiry, live DROP dispositions,
-FETCH budgets, seamless JS handover, and the IETF extension remain m1.
+FETCH budgets and seamless JS handover remain m1; the IETF extension landed
+independently.
 
 Extend the line's relay/media tests to hold catalog and media from A while B
 replaces it, exercise later metadata/subscription/FETCH operations, and prove
@@ -123,3 +124,20 @@ restarts that sibling while preserving the catalog's explicit epoch
 constraints; it never mixes instances through an old handle. Check
 exact and covering routes, matching/different/absent epochs, and legacy
 End+Start. The child quests own their focused regressions.
+
+The remaining acceptance question is the real-player phrase "within that
+bound" above. The real relay and player gates in
+[PR 6548](https://github.com/moq-dev/moq/pull/6548) keep the incumbent open,
+observe replacement and fallback, and distinguish catalog-lifetime pins from
+fresh readers. Their network watchdogs detect hangs; they do not establish the
+original RTT-scale decoded-playback bound. The browser fixture has a 500 ms
+GOP and an explicitly configured 50 ms playback delay; native playback uses
+the same delay and a 400 ms decoded-PCM observation window.
+
+Proposed clarification, pending maintainer acceptance: announcement-following
+readers observe replacement within the protocol round trips and configured
+announcement hold, independently of the idle timeout. Real players then
+present the replacement within those routing delays plus their explicitly
+configured codec cadence, decoding, and playback delays. Keep this release
+gate open until that clarification and a derived performance bound are
+accepted and enforced, or the original decoded-playback requirement is met.

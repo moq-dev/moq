@@ -5,6 +5,7 @@
 #![allow(clippy::disallowed_methods, clippy::disallowed_types)]
 
 mod auth_serve;
+mod epochs;
 mod export;
 mod import;
 mod listen;

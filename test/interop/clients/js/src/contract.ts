@@ -111,6 +111,8 @@ export type Sample = {
 	seq: number;
 	/** Whether the subscriber has resolved an announced broadcast. */
 	broadcastActive: boolean;
+	/** The active route epoch, absent on legacy sessions. */
+	broadcastEpoch?: string;
 	/** The subscriber's catalog state, which stays offline without an announcement. */
 	broadcastStatus: ReturnType<Broadcast["out"]["status"]["peek"]>;
 	/** Whether this document has received user activation. */
