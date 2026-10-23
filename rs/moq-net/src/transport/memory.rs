@@ -725,7 +725,7 @@ mod tests {
 
 	#[test]
 	fn bounds() {
-		fn boxable<S: poll::Boxable<SendStream: Sync, RecvStream: Sync>>() {}
+		fn boxable<S: poll::Boxable>() {}
 		boxable::<Session>();
 	}
 
