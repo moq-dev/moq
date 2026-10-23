@@ -779,9 +779,10 @@ impl StreamsState {
     ///
     /// `payload` is the packet's frame space in `buf`, which may already hold control frames.
     /// A datagram cannot be split, so one too large for the room left ends the packet and
-    /// leads the next one. Only when it would leave the packet empty, which a packet clamped
-    /// below the path MTU can, does it step aside for what fits behind it, since
-    /// [`Self::can_send_frames`] promised a frame.
+    /// leads the next one. One too large for even an empty packet, which a packet clamped
+    /// below the path MTU can be, steps aside for what fits behind it instead, since
+    /// [`Self::can_send_frames`] promised a frame and control frames alone would leave the
+    /// packet short.
     pub(crate) fn write_frames(
         &mut self,
         buf: &mut Vec<u8>,
@@ -799,7 +800,7 @@ impl StreamsState {
                 Some(Next::Datagram(group)) => {
                     let (_, frame) = self.pending.datagram(group);
                     if buf.len() + frame > max_buf_size {
-                        if buf.len() > payload.start {
+                        if payload.start + frame <= max_buf_size {
                             break;
                         }
                         self.pending.defer_datagram(group);

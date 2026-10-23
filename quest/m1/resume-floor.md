@@ -29,7 +29,3 @@ test: switch routes with a high floor, release the old copy, lower the floor,
 and expect the groups only it cached.
 
 Public API: behavior only. Wire: none.
-
-## Related
-
-- [Rust resume backs single-route groups](/quest/m1/resume-handed-out.md) - also edits which replaced copies the Rust reader keeps
