@@ -1846,19 +1846,23 @@ export class Subscriber {
 		const { end } = this.#cursor.peek();
 		const timeline = this.#state.timeline;
 		let presentation: { sequence: number; timestamp: Timestamp } | undefined;
-		// The edge wants the newest content that exists, so it takes the newest
-		// stamped group's latest frame: walk back from the cap to the first one.
-		for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
-			const group = timeline[i];
-			if (group.closed.peek() instanceof Error) continue;
-			const timestamp = hooks.groupTimestamp(group);
-			if (timestamp === undefined) continue;
-			presentation = { sequence: group.sequence, timestamp: hooks.groupLatest(group) ?? timestamp };
-			break;
+		const info = this.#state.info.peek();
+		// An accepted untimed track cannot contain a presentation timestamp.
+		if (info === undefined || info.timescale != null) {
+			// The edge wants the newest content that exists, so it takes the newest
+			// stamped group's latest frame: walk back from the cap to the first one.
+			for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
+				const group = timeline[i];
+				if (group.closed.peek() instanceof Error) continue;
+				const timestamp = hooks.groupTimestamp(group);
+				if (timestamp === undefined) continue;
+				presentation = { sequence: group.sequence, timestamp: hooks.groupLatest(group) ?? timestamp };
+				break;
+			}
 		}
 
 		const requested = this.#fetchBudget ?? this.#state.update.peek()?.maxDelay ?? 0;
-		const retained = this.#state.info.peek()?.maxAge;
+		const retained = info?.maxAge;
 		return {
 			budget: retained === undefined ? requested : Math.min(requested, retained),
 			presentation,

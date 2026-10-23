@@ -47,6 +47,10 @@ struct Route {
 	/// The serving route's copy; `None` while nobody reads the track, between routes, or
 	/// once the front let go.
 	copy: Option<track::Consumer>,
+	/// The copy the front let go of when nobody read the track, until the front serves
+	/// another or its source detaches: a whole group it still caches is served without
+	/// waking the front. A lazy handle, so it keeps neither the copy nor its route alive.
+	parked: Option<track::Consumer>,
 	/// How the track ended, once the front decided.
 	end: Option<Result<()>>,
 	/// No front is left to replace the copy, though one may still hold it for readers
@@ -122,6 +126,7 @@ impl Producer {
 		if let Ok(mut route) = self.state.write() {
 			route.generation += 1;
 			route.copy = Some(copy);
+			route.parked = None;
 		}
 		let readers = {
 			let mut readers = self.readers.lock().unwrap_or_else(PoisonError::into_inner);
@@ -142,7 +147,15 @@ impl Producer {
 			&& route.copy.is_some()
 		{
 			route.generation += 1;
-			route.copy = None;
+			route.parked = route.copy.take();
+		}
+	}
+
+	/// Stop serving whole groups from the parked copy: its source detached, so a fetch
+	/// resolves the current route again.
+	pub(super) fn unpark(&self) {
+		if let Ok(mut route) = self.state.write() {
+			route.parked = None;
 		}
 	}
 
@@ -168,6 +181,7 @@ impl Producer {
 	pub(super) fn release(self) {
 		if let Ok(mut route) = self.state.write() {
 			route.copy = None;
+			route.parked = None;
 		}
 	}
 
@@ -190,6 +204,15 @@ impl Consumer {
 	/// The serving route's copy, if any.
 	pub(super) fn serving(&self) -> Option<track::Consumer> {
 		self.state.read().copy.clone()
+	}
+
+	/// The copy the front parked, while it serves none and may still serve one again.
+	pub(super) fn parked(&self) -> Option<track::Consumer> {
+		let route = self.state.read();
+		match route.copy.is_none() && route.end.is_none() && !route.concluded && !route.is_closed() {
+			true => route.parked.clone(),
+			false => None,
+		}
 	}
 
 	/// Poll for a largest location within `bounds` newer than `seen` on the serving copy,

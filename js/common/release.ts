@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { dirname, join } from "node:path";
 
 const dryRun = process.argv.includes("--dry-run") || process.env.DRY_RUN === "true";
 
@@ -51,33 +52,47 @@ if (!dryRun && npmDone && (!publishJsr || jsrDone)) {
 console.log(`📦 Building ${name}@${version}...`);
 execFileSync("bun", ["run", "build"], { stdio: "inherit" });
 
-// Dependency ordering does not stop dependents after a failed publish. Check
-// the built ranges before npm; JSR dry runs reuse this check's result.
+// Dry runs may use a releasable workspace version; real publishes require npm.
+const siblings = new Map<string, string>();
+if (dryRun) {
+	for (let root = process.cwd(); ; root = dirname(root)) {
+		const file = Bun.file(join(root, "package.json"));
+		if (await file.exists()) {
+			const workspace = await file.json();
+			if (workspace.workspaces) {
+				for (const path of workspace.workspaces as string[]) {
+					// Match the literal workspace paths used by the release runner.
+					if (/[*?[\]{}!]/.test(path)) throw new Error(`Unsupported workspace pattern: ${path}`);
+					const sibling = await Bun.file(join(root, path, "package.json")).json();
+					if (!sibling.private && sibling.scripts?.release) siblings.set(sibling.name, sibling.version);
+				}
+				break;
+			}
+		}
+		if (dirname(root) === root) break;
+	}
+}
+const registry = new Map<string, boolean>();
 if (dryRun || !npmDone) {
 	const manifest = JSON.parse(await Bun.file("dist/package.json").text()) as {
 		dependencies?: Record<string, string>;
 		peerDependencies?: Record<string, string>;
 	};
-	const specs = new Set(
+	checkDependencies(
 		[...Object.entries(manifest.dependencies ?? {}), ...Object.entries(manifest.peerDependencies ?? {})]
 			.filter(([name]) => name.startsWith("@moq/"))
 			.map(([name, range]) => `${name}@${range}`),
 	);
-	const unresolved = [...specs].filter((spec) => {
-		try {
-			return !execFileSync("npm", ["view", spec, "version"], {
-				encoding: "utf8",
-				stdio: ["ignore", "pipe", "inherit"],
-			}).trim();
-		} catch {
-			// Preserve npm's diagnostic: an unavailable registry is not proof
-			// that the version is missing, but neither is it safe to publish.
-			return true;
-		}
-	});
-	if (unresolved.length > 0) {
-		throw new Error(`Cannot publish: unresolved dependencies: ${unresolved.join(", ")}`);
-	}
+}
+// Validate JSR-only imports before packing too, and reuse registry results.
+let jsrMissing: string[] = [];
+if (dryRun && publishJsr) {
+	const jsr = (await Bun.file("jsr.json").json()) as { imports?: Record<string, string> };
+	jsrMissing = checkDependencies(
+		Object.values(jsr.imports ?? {})
+			.filter((spec) => spec.startsWith("npm:@moq/"))
+			.map((spec) => spec.slice("npm:".length)),
+	);
 }
 
 // npm
@@ -118,13 +133,55 @@ if (publishJsr) {
 	// not guarantee this when a dependency's release fails.
 	const env = { ...process.env, DENO_NO_PACKAGE_JSON: "1" };
 	if (dryRun) {
-		console.log(`🧪 Publishing ${name}@${version} to JSR (dry-run)...`);
-		args.push("--dry-run");
-		execFileSync("deno", args, { stdio: "inherit", env });
+		// A sibling's new version may not be on npm until the real release, so
+		// Deno cannot resolve that import map during a release dry run.
+		if (jsrMissing.length > 0) {
+			console.log(`⏭️  Skipping JSR dry-run: ${jsrMissing.join(", ")} not on npm yet`);
+		} else {
+			console.log(`🧪 Publishing ${name}@${version} to JSR (dry-run)...`);
+			args.push("--dry-run");
+			execFileSync("deno", args, { stdio: "inherit", env });
+		}
 	} else if (jsrDone) {
 		console.log(`⏭️  ${name}@${version} already on JSR, skipping`);
 	} else {
 		console.log(`🚀 Publishing ${name}@${version} to JSR...`);
 		execFileSync("deno", args, { stdio: "inherit", env });
 	}
+}
+
+function checkDependencies(specs: string[]): string[] {
+	const missing = [...new Set(specs)].filter((spec) => {
+		if (registry.has(spec)) return !registry.get(spec);
+		let found = false;
+		try {
+			const output = execFileSync("npm", ["view", spec, "version", "--json"], {
+				encoding: "utf8",
+				stdio: ["ignore", "pipe", "pipe"],
+			}).trim();
+			const versions = output ? JSON.parse(output) : [];
+			found = typeof versions === "string" ? versions.length > 0 : Array.isArray(versions) && versions.length > 0;
+		} catch (error) {
+			const command = error as { stdout?: string; stderr?: string };
+			// Only a missing version can be supplied by this release. A broken registry
+			// must not masquerade as an unpublished sibling and give the gate a pass.
+			let code: string | undefined;
+			try {
+				code = JSON.parse(command.stdout ?? "").error?.code;
+			} catch {
+				/* Preserve the original failure below. */
+			}
+			if (code !== "E404")
+				throw new Error(`Cannot resolve ${spec}: ${command.stderr ?? error}`, { cause: error });
+		}
+		registry.set(spec, found);
+		return !found;
+	});
+	const unresolved = missing.filter((spec) => {
+		const split = spec.lastIndexOf("@");
+		const version = siblings.get(spec.slice(0, split));
+		return !dryRun || !version || !Bun.semver.satisfies(version, spec.slice(split + 1));
+	});
+	if (unresolved.length) throw new Error(`Cannot publish: unresolved dependencies: ${unresolved.join(", ")}`);
+	return missing;
 }

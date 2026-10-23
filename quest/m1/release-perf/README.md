@@ -35,8 +35,14 @@ noise.
   release's bare track handle opened a live SUBSCRIBE, while main sends a real
   FETCH per viewer ([#5820](https://github.com/moq-dev/moq/pull/5820) made
   handles lazy, and [#4974](https://github.com/moq-dev/moq/pull/4974) added
-  fetch-only demand). The lite `/fetch` cost is different: it is real, and
-  [FETCH fan-out](/quest/m1/release-perf/fetch-fanout.md) owns it.
+  fetch-only demand). The lite `/fetch` cost was real: a relay sent one
+  upstream FETCH per group, but revived the parked logical track for every
+  viewer's FETCH. [#6286](https://github.com/moq-dev/moq/pull/6286) serves a
+  whole cached group from the parked copy instead, cutting 12 to 19% of the
+  instructions per viewer where viewers share a group. The rest of the gap to
+  a viewer that holds a query is accepted: each viewer's own fetch of a group
+  it lacks revives its logical track, so the open group keeps its route and
+  fails over mid-read, and its copy releases the route's demand once idle.
 - `stats/session-report` is accepted at O(live sessions), after a cheap fix.
   Per-label payload bytes ([#5731](https://github.com/moq-dev/moq/pull/5731))
   match payload billing per label, such as per signing key. After removing
@@ -104,7 +110,6 @@ outside the worktree to keep the next one.
 
 ## Required
 
-- [FETCH fan-out](/quest/m1/release-perf/fetch-fanout.md) - a relay serves later viewers' lite FETCHes of a group from its cache, so per-viewer cost falls with viewers again
 - [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) - an arrival and a gap flush cost O(log gaps), not O(gaps)
 - [Re-check](/quest/m1/release-perf/recheck.md) - the screen-only moves are re-measured with instruction counts, and the ones that hold are fixed or accepted
 - [JS frames](/quest/m1/release-perf/js-frames.md) - the js/net frame path is no slower than release in a browser, or the gap is accepted
