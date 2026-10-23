@@ -26,7 +26,3 @@ Tests cover configuration changes, rendition switching, parameter-set
 injection, keyframe joining, completion, and the rebind.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - reworks `ExportSource` and sets the rebind pattern this follows

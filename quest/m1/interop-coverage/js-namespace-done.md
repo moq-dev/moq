@@ -25,8 +25,3 @@ built on `main` or on #6518. The Rust client already passes.
 
 The interop audit's standing approval covers PRs touching the `moq-dev-*`
 builds.
-
-## Related
-
-- [Runner cases](/quest/m1/interop-coverage/runner-cases.md) - lands the
-  client case this cell runs

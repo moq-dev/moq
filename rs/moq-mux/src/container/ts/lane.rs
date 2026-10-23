@@ -315,8 +315,14 @@ impl Lane {
 
 	/// Forget every group, for a timeline that starts again.
 	pub fn reset(&mut self) {
-		self.group = None;
+		self.forget();
 		self.end = 0;
+	}
+
+	/// Forget the group being laid, for a source whose group sequences are its own. The
+	/// timeline runs on, so the next group still lays after the positions taken.
+	pub fn forget(&mut self) {
+		self.group = None;
 	}
 
 	/// Whether a unit of group `sequence`, its first when `opens`, would be the first its group
