@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### An application claim's request has no `accept` ([#6496](https://github.com/moq-dev/moq/pull/6496))
+
+`origin::Request`, from `origin::Producer::dynamic`, no longer has the hidden `accept`, so calling it fails to compile instead of panicking.
+Answer it with `prepare(epoch)` then `Prepared::publish`, or `reject`.
+The hidden `origin::Producer::dynamic_route` now returns an `origin::Forward`, whose `origin::ForwardRequest` keeps `accept`; name those types where you named `Dynamic` or `Request` for one.
+
 ### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
 
 On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
@@ -128,7 +134,7 @@ Treat a failed group read as the loss of that group and keep reading the track, 
 Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its producer.
 Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
 `Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
-`Request::accept` is no longer part of the public API and panics on a request from `dynamic`.
+`Request::accept` is no longer part of the public API.
 Dropping a `Prepared` unpublished refuses the request, as dropping a `Request` does, and `publish` fails with `Error::Unroutable` once the claim went away.
 
 ### Anchors can name a time (#6074)

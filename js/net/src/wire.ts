@@ -67,7 +67,7 @@ export interface OriginProducer {
 	receive(
 		prefix: Path.Valid,
 		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
-	): origin.Dynamic;
+	): origin.Forward;
 	// pending: /quest/m1/public-model/answer.md
 	attach(discovery: boolean): Dispose;
 	// pending: /quest/m1/public-model/answer.md

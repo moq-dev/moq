@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### An application claim's request has no `accept` ([#6496](https://github.com/moq-dev/moq/pull/6496))
+
+`Origin.Request`, from `Origin.Producer.dynamic`, no longer has the internal `accept`, so calling it fails to typecheck instead of throwing.
+Answer it with `prepare(epoch)` then `Prepared.publish()`, or `reject`.
+The internal `Origin.Producer.dynamicRoute` now returns an `Origin.Forward`, whose `Origin.ForwardRequest` keeps `accept`.
+
 ### Stage a requested track before subscribers see it (#6111)
 
 `Track.Request.stage(info)` returns a `Track.Staged` whose `producer` writes while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
@@ -34,7 +40,7 @@ Treat a rejected group read as the loss of that group and keep reading the track
 Answer each `Origin.Request` with `request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its producer.
 Only `publish` announces it: `prepared.broadcast.announce()` throws.
 Call `prepared.reject(err)` to refuse instead; JS has no destructor, so an abandoned `Prepared` holds its request open.
-`Dynamic.update` and `Request.accept` are no longer part of the public API, and `accept` throws on a request from `dynamic`.
+`Dynamic.update` and `Request.accept` are no longer part of the public API.
 Close the claim and claim again to change it, and close an answer's producer to end that output.
 
 ### `largest()` reports within a reader's `setGroups` bounds

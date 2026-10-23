@@ -102,7 +102,6 @@ Work owned by this README, after the children land:
 
 ## Required
 
-- [Claim request type](/quest/m1/public-model/claim-request-type.md) - accepting an application claim's request fails to compile instead of panicking
 - [Public serving](/quest/m1/public-model/serve.md) - a custom publisher reads a track's start, cursor, and group expiry for its wire through public calls
 - [Public answering](/quest/m1/public-model/answer.md) - a custom relay answers broadcast and track requests on demand and closes them once unused
 - [Public routes](/quest/m1/public-model/routes.md) - a custom relay ingests routes under a peer's identity and advertises without echoing them back, once cluster routing lands

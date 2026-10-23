@@ -1132,7 +1132,7 @@ struct RouteEntry {
 	advertised: bool,
 	/// Whether a peer the chain passes through has since withdrawn this prefix.
 	/// The route was derived from that peer's advertisement, so it serves nobody
-	/// until the peer announces again. See [`Dynamic::withdrawn`].
+	/// until the peer announces again. See [`Forward::withdrawn`].
 	stale: bool,
 	/// [`prefix_claim`] of [`Self::prefix`], built once at announce time.
 	///
@@ -2157,16 +2157,21 @@ impl Producer {
 	/// The prefix must overlap this producer's pattern scope. Individual requests
 	/// remain authoritative and are refused when they do not match the scope.
 	pub fn dynamic(&self, prefix: impl AsPath) -> Result<Dynamic, Error> {
-		self.dynamic_inner(prefix, Route::default(), true)
+		Ok(Dynamic {
+			serve: self.serve(prefix, Route::default())?,
+			publisher: self.clone(),
+		})
 	}
 
 	/// Land a peer's claim with its wire route metadata.
 	#[doc(hidden)]
-	pub fn dynamic_route(&self, prefix: impl AsPath, route: Route) -> Result<Dynamic, Error> {
-		self.dynamic_inner(prefix, route, false)
+	pub fn dynamic_route(&self, prefix: impl AsPath, route: Route) -> Result<Forward, Error> {
+		Ok(Forward {
+			serve: self.serve(prefix, route)?,
+		})
 	}
 
-	fn dynamic_inner(&self, prefix: impl AsPath, route: Route, publishes: bool) -> Result<Dynamic, Error> {
+	fn serve(&self, prefix: impl AsPath, route: Route) -> Result<Serve, Error> {
 		let announcing = Announcing::new(self, prefix)?;
 		let serve = kio::Shared::<ServeState>::default();
 		serve.lock().requests.add_handler();
@@ -2178,10 +2183,9 @@ impl Producer {
 				advertised: true,
 			},
 		)?;
-		Ok(Dynamic {
+		Ok(Serve {
 			announcement,
 			state: serve,
-			publisher: publishes.then(|| self.clone()),
 			_keepalive: self.tasks.keepalive(),
 		})
 	}
@@ -4633,7 +4637,7 @@ struct OriginState {
 	fronts: WeakCache<FrontKey, RemoteFront>,
 
 	// Peers that withdrew a prefix while routes there still passed through them,
-	// which are stale. See [`Dynamic::withdrawn`].
+	// which are stale. See [`Forward::withdrawn`].
 	withdrawn: HashMap<PathOwned, HashSet<Hop>>,
 
 	// Set when the origin's driver dropped: new requests fail with `Closed`
@@ -5094,8 +5098,8 @@ impl OriginState {
 
 /// One-shot result of a dynamic broadcast request.
 ///
-/// Stays `None` until a handler [`accept`](Request::accept)s (yielding the served
-/// broadcast) or [`reject`](Request::reject)s (yielding an error). The producer is
+/// Stays `None` until a handler answers (yielding the served broadcast) or
+/// [`reject`](Request::reject)s (yielding an error). The producer is
 /// dropped right after writing, closing the channel; kio checks the value before the closed
 /// flag, so an awaiting requester still observes the final result.
 #[derive(Default)]
@@ -5157,9 +5161,7 @@ impl Resolution {
 ///
 /// The origin-level analogue of [`broadcast::Dynamic`]: where that serves tracks
 /// on demand within a broadcast, this serves whole broadcasts on demand within
-/// an origin. A relay holds one per route a peer announces to it, materializing
-/// a requested path from that peer; an application holds one to answer a
-/// subtree it never publishes ahead of time.
+/// an origin, to answer a subtree it never publishes ahead of time.
 ///
 /// Drop it to retract the route and reject the requests still waiting to be
 /// served.
@@ -5168,18 +5170,34 @@ impl Resolution {
 /// handler can drop every [`Producer`] and keep serving.
 #[must_use = "dropping an origin::Dynamic retracts the route"]
 pub struct Dynamic {
+	serve: Serve,
+	/// Each answer is published into this origin as an exact route.
+	publisher: Producer,
+}
+
+/// A peer's route landed by a session, from [`Producer::dynamic_route`]: answers
+/// each request with the broadcast the session already routes from that peer.
+///
+/// A relay holds one per route a peer announces to it. Drop it to retract the
+/// route and reject the requests still waiting to be served.
+#[doc(hidden)]
+#[must_use = "dropping an origin::Forward retracts the route"]
+pub struct Forward {
+	serve: Serve,
+}
+
+/// The advertisement and request queue behind a [`Dynamic`] or [`Forward`].
+struct Serve {
 	/// The advertisement, retracted on drop.
 	announcement: AnnounceProducer,
 	state: kio::Shared<ServeState>,
-	/// Present for application claims, which publish each answer as an exact route.
-	publisher: Option<Producer>,
 	/// Producer-side children pin their parent where no cycle exists. The
 	/// origin's state holds only the [`ServeState`], never this handle, so the
 	/// driver cannot keep itself alive.
 	_keepalive: Keepalive,
 }
 
-impl Dynamic {
+impl Serve {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(super) fn request_validity(&self, path: &Path) -> Option<Selection> {
 		let shared = &self.announcement.shared;
@@ -5242,19 +5260,93 @@ impl Dynamic {
 		})
 	}
 
+	fn route(&self) -> Route {
+		self.announcement
+			.route()
+			.expect("a dynamic route stands until its handle drops")
+	}
+
+	fn poll_requested(&self, waiter: &kio::Waiter) -> Poll<Result<Handoff, Error>> {
+		let mut state = ready!(self.state.poll(waiter, |state| {
+			if state.closed || state.requests.has_queued() {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		}));
+
+		// The teardown already drained the queue, so there is nothing left to pop.
+		if state.closed {
+			return Poll::Ready(Err(Error::Closed));
+		}
+
+		let path = state.requests.pop().expect("predicate guaranteed a request");
+		// The popped request stays pending, so a repeat request in the window between
+		// hand-off and an answer coalesces onto it instead of re-invoking the handler.
+		// The producer is a shared clone; answering or dropping the request removes the
+		// entry. This mirrors how `poll_requested_track` keeps a served track
+		// discoverable via the weak cache across the same window.
+		let producer = state.requests.get(&path).expect("popped key must be pending").clone();
+		Poll::Ready(Ok(Handoff {
+			path,
+			producer,
+			home: self.state.clone(),
+		}))
+	}
+}
+
+impl Dynamic {
+	/// The route this handle advertises, as last given.
+	pub fn route(&self) -> Route {
+		self.serve.route()
+	}
+
+	/// Replace the route in place, taken as given; see [`Forward::update_route`].
+	#[doc(hidden)]
+	pub fn update_route(&self, route: Route) -> Result<(), Error> {
+		self.serve.announcement.update(route)
+	}
+
+	/// Poll for the next requested path under this route, without blocking.
+	///
+	/// Returns [`Error::Closed`] once the origin's [`Driver`] has been dropped:
+	/// no request will ever arrive again, so handler loops should end.
+	pub fn poll_requested_broadcast(&self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
+		let handoff = ready!(self.serve.poll_requested(waiter))?;
+		Poll::Ready(Ok(Request {
+			handoff,
+			publisher: self.publisher.clone(),
+		}))
+	}
+
+	/// Block until a consumer requests a path under this route, returning a
+	/// [`Request`] to serve.
+	///
+	/// Takes `&self` so a handler can serve from one task while another re-prices
+	/// the route; concurrent callers each receive distinct requests.
+	#[cfg(feature = "async")]
+	pub async fn requested_broadcast(&self) -> Result<Request, Error> {
+		kio::wait(|waiter| self.poll_requested_broadcast(waiter)).await
+	}
+}
+
+impl Forward {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(super) fn request_validity(&self, path: &Path) -> Option<Selection> {
+		self.serve.request_validity(path)
+	}
+
 	/// Retire an explicit peer withdrawal, hiding derived paths only once its
 	/// last live advertisement at the prefix is gone. A lost session just drops.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn withdrawn(self) {
-		self.announcement.retract(true);
+		self.serve.announcement.retract(true);
 	}
 
 	/// The route this handle advertises, as last given.
 	pub fn route(&self) -> Route {
-		self.announcement
-			.route()
-			.expect("a dynamic route stands until its handle drops")
+		self.serve.route()
 	}
 
 	/// Replace the route in place, taken as given.
@@ -5272,56 +5364,27 @@ impl Dynamic {
 	/// those too. Route selection still applies: another route still at the old epoch
 	/// outranks one without.
 	/// To re-price, start from the current route:
-	/// `dynamic.update_route(dynamic.route().with_cost(cost))`.
+	/// `forward.update_route(forward.route().with_cost(cost))`.
 	///
 	/// The prefix is fixed at announce time: to move a route, drop this and call
-	/// [`Producer::dynamic`] again. Fails with [`Error::Closed`] once the origin's
-	/// [`Driver`] has been dropped.
-	#[doc(hidden)]
+	/// [`Producer::dynamic_route`] again. Fails with [`Error::Closed`] once the
+	/// origin's [`Driver`] has been dropped.
 	pub fn update_route(&self, route: Route) -> Result<(), Error> {
-		self.announcement.update(route)
+		self.serve.announcement.update(route)
 	}
 
 	/// Poll for the next requested path under this route, without blocking.
 	///
-	/// Returns [`Error::Closed`] once the origin's [`Driver`] has been dropped:
-	/// no request will ever arrive again, so handler loops should end.
-	pub fn poll_requested_broadcast(&self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
-		let mut state = ready!(self.state.poll(waiter, |state| {
-			if state.closed || state.requests.has_queued() {
-				Poll::Ready(())
-			} else {
-				Poll::Pending
-			}
-		}));
-
-		// The teardown already drained the queue, so there is nothing left to pop.
-		if state.closed {
-			return Poll::Ready(Err(Error::Closed));
-		}
-
-		let path = state.requests.pop().expect("predicate guaranteed a request");
-		// The popped request stays pending, so a repeat request in the window between
-		// hand-off and accept coalesces onto it instead of re-invoking the handler. The
-		// producer is a shared clone; `Request::{accept, reject, drop}` removes the
-		// entry. This mirrors how `poll_requested_track` keeps a served track
-		// discoverable via the weak cache across the same window.
-		let producer = state.requests.get(&path).expect("popped key must be pending").clone();
-		Poll::Ready(Ok(Request {
-			path,
-			producer,
-			home: self.state.clone(),
-			publisher: self.publisher.clone(),
-		}))
+	/// Returns [`Error::Closed`] once the origin's [`Driver`] has been dropped.
+	pub fn poll_requested_broadcast(&self, waiter: &kio::Waiter) -> Poll<Result<ForwardRequest, Error>> {
+		let handoff = ready!(self.serve.poll_requested(waiter))?;
+		Poll::Ready(Ok(ForwardRequest { handoff }))
 	}
 
 	/// Block until a consumer requests a path under this route, returning a
-	/// [`Request`] to serve.
-	///
-	/// Takes `&self` so a handler can serve from one task while another re-prices
-	/// the route; concurrent callers each receive distinct requests.
+	/// [`ForwardRequest`] to serve.
 	#[cfg(feature = "async")]
-	pub async fn requested_broadcast(&self) -> Result<Request, Error> {
+	pub async fn requested_broadcast(&self) -> Result<ForwardRequest, Error> {
 		kio::wait(|waiter| self.poll_requested_broadcast(waiter)).await
 	}
 }
@@ -5418,7 +5481,73 @@ impl ServeState {
 /// [`Consumer::request_broadcast`]; [`prepare`](Self::prepare) then [`Prepared::publish`]
 /// resolves it with a new exact-path broadcast, and [`reject`](Self::reject) resolves it
 /// with an error. Dropping the request without either rejects it.
+///
+/// It has no `accept`: an application answers as its own publisher instance, never
+/// with a broadcast routed from elsewhere.
+///
+/// ```compile_fail
+/// # fn answer(request: moq_net::origin::Request, other: moq_net::broadcast::Producer) {
+/// request.accept(&other);
+/// # }
+/// ```
 pub struct Request {
+	handoff: Handoff,
+	// The origin each answer is published into as an exact route.
+	publisher: Producer,
+}
+
+impl Request {
+	/// The absolute path that was requested.
+	pub fn path(&self) -> &Path<'_> {
+		&self.handoff.path
+	}
+
+	/// Start an answer under a new publisher `epoch`, hidden until it is published.
+	pub fn prepare(self, epoch: Epoch) -> Result<Prepared, Error> {
+		let (broadcast, announcer) = self.publisher.create_withheld(self.handoff.path.clone())?;
+		Ok(Prepared {
+			request: self.handoff,
+			broadcast,
+			announcer,
+			epoch,
+		})
+	}
+
+	/// Reject the request, resolving every awaiting requester with `err`.
+	pub fn reject(self, err: Error) {
+		self.handoff.resolve(Err(err));
+	}
+}
+
+/// A pending request under a [`Forward`], answered with the broadcast its session
+/// already routes from the peer.
+///
+/// Yielded by [`Forward::poll_requested_broadcast`]. Dropping it without an answer
+/// rejects it.
+#[doc(hidden)]
+pub struct ForwardRequest {
+	handoff: Handoff,
+}
+
+impl ForwardRequest {
+	/// The absolute path that was requested.
+	pub fn path(&self) -> &Path<'_> {
+		&self.handoff.path
+	}
+
+	/// Resolve every awaiting requester with the peer's already-routed broadcast.
+	pub fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
+		self.handoff.resolve(Ok(broadcast.consume()));
+	}
+
+	/// Reject the request, resolving every awaiting requester with `err`.
+	pub fn reject(self, err: Error) {
+		self.handoff.resolve(Err(err));
+	}
+}
+
+/// A request handed to a handler, refused on drop unless answered.
+struct Handoff {
 	// Absolute path that was requested.
 	path: PathOwned,
 
@@ -5426,52 +5555,15 @@ pub struct Request {
 	// this wakes them with the outcome.
 	producer: kio::Producer<PendingBroadcast>,
 
-	// The queue this request came from, so `accept` can cache the served
+	// The queue this request came from, so an answer can cache the served
 	// broadcast for repeat requests.
 	home: kio::Shared<ServeState>,
-
-	// Applications publish answers into this origin; session-forwarded claims accept
-	// their peer's already-routed broadcast directly instead.
-	publisher: Option<Producer>,
 }
 
-impl Request {
-	/// The absolute path that was requested.
-	pub fn path(&self) -> &Path<'_> {
-		&self.path
-	}
-
-	/// Start an answer under a new publisher `epoch`, hidden until it is published.
-	pub fn prepare(self, epoch: Epoch) -> Result<Prepared, Error> {
-		let publisher = self.publisher.clone().ok_or(Error::Unroutable)?;
-		let (broadcast, announcer) = publisher.create_withheld(self.path.clone())?;
-		Ok(Prepared {
-			request: self,
-			broadcast,
-			announcer,
-			epoch,
-		})
-	}
-
-	/// Resolve a session-forwarded claim with its peer's already-routed broadcast.
-	///
-	/// # Panics
-	///
-	/// On a request from [`Producer::dynamic`], which answers only through [`Self::prepare`].
-	#[doc(hidden)]
-	pub fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
-		assert!(
-			self.publisher.is_none(),
-			"an application claim answers through prepare and publish"
-		);
-		let broadcast = broadcast.consume();
-		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Ok(broadcast));
+impl Handoff {
+	fn resolve(self, result: Result<broadcast::Consumer, Error>) {
+		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, result);
 		// `self.producer` drops here, closing the channel; the value is still observable.
-	}
-
-	/// Reject the request, resolving every awaiting requester with `err`.
-	pub fn reject(self, err: Error) {
-		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Err(err));
 	}
 }
 
@@ -5479,7 +5571,7 @@ impl Request {
 ///
 /// Dropping it unpublished refuses the request, as dropping a [`Request`] does.
 pub struct Prepared {
-	request: Request,
+	request: Handoff,
 	broadcast: broadcast::Producer,
 	// Withheld from the broadcast until `publish`, so the answer cannot announce
 	// itself under another epoch or skip the request's admission.
@@ -5527,13 +5619,13 @@ impl Prepared {
 	}
 }
 
-impl Drop for Request {
+impl Drop for Handoff {
 	fn drop(&mut self) {
-		// Handed off but neither accepted nor rejected: drop the still-pending entry so its
-		// producer clone (plus this one) closes the channel, resolving coalesced requesters to
+		// Handed off but never answered: drop the still-pending entry so its producer
+		// clone (plus this one) closes the channel, resolving coalesced requesters to
 		// `Unroutable` rather than hanging.
 		//
-		// The identity guard matters: `accept`/`reject` already removed our entry and released
+		// The identity guard matters: an answer already removed our entry and released
 		// the lock before we run, so a concurrent request for the same path may have registered
 		// a *new* one here. Removing unconditionally would clobber it, stranding its requesters.
 		ServeState::forget(&self.home, &self.path, &self.producer);
@@ -5727,8 +5819,7 @@ impl kio::Task for Routing {
 /// Derive a read view from a handle.
 ///
 /// Lets APIs accept either a producer or a consumer (e.g.
-/// `Client::with_publisher`,
-/// [`Request::accept`]). The blanket `&T` impl means you can
+/// `Client::with_publisher`). The blanket `&T` impl means you can
 /// pass by value (`foo(x)`) to hand off ownership, or by reference (`foo(&x)`)
 /// to keep it, without spelling out `.consume()`.
 pub trait Consume<T> {
@@ -7096,11 +7187,31 @@ mod tests {
 		panic!("condition never settled");
 	}
 
+	/// A handle that serves requests: an application [`Dynamic`] or a peer's [`Forward`].
+	trait Serves {
+		type Request;
+		fn poll_requested(&self, waiter: &kio::Waiter) -> Poll<Result<Self::Request, Error>>;
+	}
+
+	impl Serves for Dynamic {
+		type Request = Request;
+		fn poll_requested(&self, waiter: &kio::Waiter) -> Poll<Result<Request, Error>> {
+			self.poll_requested_broadcast(waiter)
+		}
+	}
+
+	impl Serves for Forward {
+		type Request = ForwardRequest;
+		fn poll_requested(&self, waiter: &kio::Waiter) -> Poll<Result<ForwardRequest, Error>> {
+			self.poll_requested_broadcast(waiter)
+		}
+	}
+
 	/// Yield to the driver until the server's front watcher delivers a request.
 	#[cfg(feature = "async")]
-	async fn queued(server: &Dynamic) -> Request {
+	async fn queued<S: Serves>(server: &S) -> S::Request {
 		let mut request = None;
-		settle(|| match server.poll_requested_broadcast(&kio::Waiter::noop()) {
+		settle(|| match server.poll_requested(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(popped)) => {
 				request = Some(popped);
 				true
@@ -7897,7 +8008,7 @@ mod tests {
 		// arrived in `order`.
 		fn winners(order: impl Iterator<Item = u64>) -> Vec<Hop> {
 			let producer = origin(1).produce();
-			let _pool: Vec<Dynamic> = order
+			let _pool: Vec<Forward> = order
 				.map(|id| {
 					producer
 						.dynamic_route("pool", Route::default().with_hops(hops(&[id])).with_cost(3))
@@ -8049,7 +8160,7 @@ mod tests {
 	/// An origin delivering restarts at once, and a way to claim `prefix` with a
 	/// producer scoped to `scope`, from `hop` at `cost`.
 	#[cfg(feature = "async")]
-	fn scoped_pool() -> (Producer, impl Fn(&str, &str, u64, u64) -> Dynamic) {
+	fn scoped_pool() -> (Producer, impl Fn(&str, &str, u64, u64) -> Forward) {
 		let producer = Config {
 			update_hold: Duration::ZERO,
 			..Config::new(origin(1))
@@ -8069,7 +8180,7 @@ mod tests {
 	/// Request `path` from `consumer` and have `server` answer it: the answer, and
 	/// the requester's broadcast.
 	#[cfg(feature = "async")]
-	async fn hold(consumer: &Consumer, path: &str, server: &Dynamic) -> (broadcast::Producer, broadcast::Consumer) {
+	async fn hold(consumer: &Consumer, path: &str, server: &Forward) -> (broadcast::Producer, broadcast::Consumer) {
 		let pending = consumer.request_broadcast(path, None);
 		let answer = broadcast::Info::new().produce();
 		queued(server).await.accept(&answer);
@@ -8798,7 +8909,7 @@ mod tests {
 	/// A front resolved through a served route, as a relay's upstream session serves
 	/// one: the upstream broadcast's track requests arrive on the returned handle.
 	#[cfg(feature = "async")]
-	async fn served_front() -> (Dynamic, broadcast::Producer, broadcast::Dynamic, broadcast::Consumer) {
+	async fn served_front() -> (Forward, broadcast::Producer, broadcast::Dynamic, broadcast::Consumer) {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let server = producer
@@ -10410,16 +10521,6 @@ mod tests {
 		assert!(matches!(stale.await, Err(Error::Unroutable)));
 	}
 
-	#[moq_clock::test]
-	#[cfg(feature = "async")]
-	#[should_panic(expected = "prepare and publish")]
-	async fn an_application_claim_cannot_accept_an_arbitrary_broadcast() {
-		let producer = origin(1).produce();
-		let claim = producer.dynamic("room").unwrap();
-		let _pending = producer.consume().request_broadcast("room/alice", None);
-		queued(&claim).await.accept(broadcast::Info::new().produce());
-	}
-
 	/// A refusal from the longest prefix is the answer: neither a costlier advertiser of
 	/// that prefix nor a catch-all is asked instead.
 	#[moq_clock::test]
@@ -10821,7 +10922,10 @@ mod tests {
 			panic!("front requested its route");
 		};
 		drop(driver);
-		assert!(matches!(request.producer.read().resolved, Some(Err(Error::Closed))));
+		assert!(matches!(
+			request.handoff.producer.read().resolved,
+			Some(Err(Error::Closed))
+		));
 	}
 
 	/// One live subscription reading a track through a remote front, plus the
@@ -10841,7 +10945,7 @@ mod tests {
 		/// Announce a served route with `first` as its first hop, materialize
 		/// "room/alice" through it with a one-group "before" track, and subscribe.
 		#[cfg(feature = "async")]
-		async fn new(first: &[u64]) -> (Self, Dynamic, broadcast::Producer) {
+		async fn new(first: &[u64]) -> (Self, Forward, broadcast::Producer) {
 			let producer = origin(1).produce();
 			let consumer = producer.consume();
 
@@ -10887,7 +10991,7 @@ mod tests {
 
 		/// Stand up a second served route with `first` as its first hop and hand
 		/// back its handle, ready to answer the front's re-request.
-		fn standby(&self, first: &[u64]) -> Dynamic {
+		fn standby(&self, first: &[u64]) -> Forward {
 			self.producer
 				.dynamic_route("room", Route::default().with_epoch(epoch()).with_hops(hops(first)))
 				.unwrap()
@@ -10899,7 +11003,7 @@ mod tests {
 	/// rig's subscription resumes onto it: the successor group is delivered on
 	/// the same subscription, at the group boundary.
 	#[cfg(feature = "async")]
-	async fn assert_resumes(rig: &mut ResumeRig, server: &Dynamic) {
+	async fn assert_resumes(rig: &mut ResumeRig, server: &Forward) {
 		let request = queued(server).await;
 		let replacement = broadcast::Info::new().produce();
 		let track = replacement.create_track("video", crate::track::Info::timed()).unwrap();
@@ -11125,7 +11229,12 @@ mod tests {
 			matches!(pinned.await, Err(Error::Unroutable)),
 			"a request pinned to the old epoch resolved"
 		);
-		let cached = dynamic.state.lock().served.get(&Path::new("room/alice").to_owned());
+		let cached = dynamic
+			.serve
+			.state
+			.lock()
+			.served
+			.get(&Path::new("room/alice").to_owned());
 		assert!(
 			cached.is_some_and(|cached| cached.consume().is_clone(&fresh.consume())),
 			"the old answer was cached"
@@ -12200,7 +12309,7 @@ mod tests {
 	#[cfg(feature = "async")]
 	async fn remote_front() -> (
 		Producer,
-		Dynamic,
+		Forward,
 		broadcast::Producer,
 		track::Producer,
 		track::Subscriber,

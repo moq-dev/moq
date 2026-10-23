@@ -387,8 +387,8 @@ class ServeState {
 		this.originated = originated;
 	}
 
-	queue = new Signal(new Set<Request>());
-	pending = new Map<Path.Valid, Request>();
+	queue = new Signal(new Set<Handoff>());
+	pending = new Map<Path.Valid, Handoff>();
 	served = new Map<Path.Valid, broadcast.Consumer>();
 	rejected = new Map<Path.Valid, Error>();
 	// demand() is the only reader of `rejected`. A Consumer.request refusal never
@@ -408,7 +408,7 @@ class ServeState {
 		if (this.pending.has(path)) return;
 		const live = this.served.get(path);
 		if (live && live.closed.peek() === undefined) return;
-		const request = makeRequest(Path.stripPrefix(this.root, path) ?? Path.empty(), this);
+		const request = new Handoff(Path.stripPrefix(this.root, path) ?? Path.empty(), this);
 		this.pending.set(path, request);
 		this.queue.mutate((queue) => {
 			queue.add(request);
@@ -416,17 +416,17 @@ class ServeState {
 	}
 
 	/** Withdraw only this pending request; a later answer cannot replace a newer one. */
-	forget(path: Path.Valid, request: Request): void {
+	forget(path: Path.Valid, request: Handoff): void {
 		if (this.pending.get(path) !== request) return;
 		this.pending.delete(path);
 		this.queue.mutate((queue) => {
 			queue.delete(request);
 		});
 		this.rejected.delete(path);
-		finishRequest(request, unroutable());
+		request.withdraw();
 	}
 
-	accept(request: Request, front: broadcast.Consumer): void {
+	accept(request: Handoff, front: broadcast.Consumer): void {
 		const path = Path.join(this.root, request.path);
 		if (this.closed.peek() !== undefined || this.pending.get(path) !== request) {
 			front.close();
@@ -453,11 +453,11 @@ class ServeState {
 		this.settled.update((n) => n + 1);
 	}
 
-	has(request: Request): boolean {
+	has(request: Handoff): boolean {
 		return this.closed.peek() === undefined && this.pending.get(Path.join(this.root, request.path)) === request;
 	}
 
-	reject(request: Request, err: Error): void {
+	reject(request: Handoff, err: Error): void {
 		const path = Path.join(this.root, request.path);
 		if (this.pending.get(path) !== request) return;
 		this.pending.delete(path);
@@ -468,16 +468,15 @@ class ServeState {
 
 	close(abort?: Error): void {
 		if (this.closed.peek() !== undefined) return;
-		const err = abort ?? unroutable();
-		this.closed.set(err);
-		this.reset(err);
+		this.closed.set(abort ?? unroutable());
+		this.reset();
 	}
 
 	/**
 	 * Release answers and the requests handlers hold when the publisher instance changes: a
 	 * handler's late answer is for the old one, and the requesters ask the new one again.
 	 */
-	reset(err: Error = unroutable()): void {
+	reset(): void {
 		this.resets++;
 		const queued = [...this.pending.values()];
 		this.pending.clear();
@@ -485,7 +484,7 @@ class ServeState {
 			queue.clear();
 		});
 		for (const request of queued) {
-			finishRequest(request, err);
+			request.withdraw();
 		}
 		const served = [...this.served];
 		this.served.clear();
@@ -496,6 +495,33 @@ class ServeState {
 		this.rejected.clear();
 		this.demanding.clear();
 		this.settled.update((n) => n + 1);
+	}
+}
+
+/** A request handed to a handler, pending in its {@link ServeState} until answered or released. */
+class Handoff {
+	/** The path that was requested, relative to the origin's root. */
+	readonly path: Path.Valid;
+	readonly server: ServeState;
+	/** Answered, refused, or released: it takes no further answer. */
+	done = false;
+	/** Released unanswered, so an answer handed to it afterwards is closed. */
+	withdrawn = false;
+
+	constructor(path: Path.Valid, server: ServeState) {
+		this.path = path;
+		this.server = server;
+	}
+
+	withdraw(): void {
+		this.done = true;
+		this.withdrawn = true;
+	}
+
+	reject(err: Error): void {
+		if (this.done) return;
+		this.done = true;
+		this.server.reject(this, err);
 	}
 }
 
@@ -1112,7 +1138,7 @@ export interface Table {
 	dynamicRoute(
 		prefix: Path.Valid,
 		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
-	): Dynamic;
+	): Forward;
 }
 
 /** Options for resolving a broadcast path. */
@@ -1304,7 +1330,7 @@ export class Producer implements Table {
 	 * no announced local broadcast wins is handed to the handle as a {@link Request}.
 	 */
 	dynamic(prefix: Path.Valid): Dynamic {
-		return this.#insertRoute(prefix, Route.default, true, true);
+		return makeDynamic(this.#insertRoute(prefix, Route.default, true), this);
 	}
 
 	/** Insert an originated claim with route metadata that answers through `accept`, for tests and benches. @internal */
@@ -1318,8 +1344,8 @@ export class Producer implements Table {
 					cost?: Route["cost"];
 					auth?: Route["auth"];
 			  } = Route.default,
-	): Dynamic {
-		return this.#insertRoute(prefix, Route.normalize(route), true, false);
+	): Forward {
+		return makeForward(this.#insertRoute(prefix, Route.normalize(route), true));
 	}
 
 	/**
@@ -1338,11 +1364,11 @@ export class Producer implements Table {
 					cost?: Route["cost"];
 					auth?: Route["auth"];
 			  } = Route.default,
-	): Dynamic {
-		return this.#insertRoute(prefix, Route.normalize(route), false, false);
+	): Forward {
+		return makeForward(this.#insertRoute(prefix, Route.normalize(route), false));
 	}
 
-	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean, publishes: boolean): Dynamic {
+	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean): Serve {
 		prefix = this.#scope.prefix(prefix);
 		const server = new ServeState(this.#scope.root, prefix, originated);
 		server.onChange = (path) => this.#state.refresh(path);
@@ -1369,7 +1395,7 @@ export class Producer implements Table {
 		});
 		if (closed) {
 			server.close();
-			return makeDynamic(prefix, entry, this.#state, () => {}, publishes ? this : undefined);
+			return new Serve(prefix, entry, this.#state, () => {});
 		}
 		this.#state.rebuildOriginated();
 		this.#state.refreshPrefix(prefix);
@@ -1388,7 +1414,7 @@ export class Producer implements Table {
 			this.#state.refreshPrefix(prefix);
 		};
 
-		return makeDynamic(prefix, entry, this.#state, retract, publishes ? this : undefined);
+		return new Serve(prefix, entry, this.#state, retract);
 	}
 
 	/**
@@ -1572,16 +1598,16 @@ let makeRequesting: (
 	dispose: Dispose,
 ) => Requesting;
 
-let makeDynamic: (
-	prefix: Path.Valid,
-	entry: RouteEntry,
-	state: OriginState,
-	retract: Dispose,
-	publisher?: Producer,
-) => Dynamic;
-
-let makeRequest: (path: Path.Valid, server: ServeState) => Request;
-let finishRequest: (request: Request, err: Error) => void;
+let makeDynamic: (serve: Serve, publisher: Producer) => Dynamic;
+let makeForward: (serve: Serve) => Forward;
+let makeRequest: (handoff: Handoff, publisher: Producer) => Request;
+let makeForwardRequest: (handoff: Handoff) => ForwardRequest;
+let makePrepared: (
+	handoff: Handoff,
+	answer: broadcast.Producer,
+	announcer: broadcast.Announcer,
+	epoch: Epoch.Valid,
+) => Prepared;
 
 /**
  * An owned request for a broadcast path; see {@link Consumer.request}.
@@ -2238,67 +2264,27 @@ export class Consumer {
 	}
 }
 
-/**
- * A served route from {@link Producer.dynamic}: advertises a prefix and answers the
- * requests beneath it.
- *
- * Drop it (or {@link close}) to retract the route and reject anything still waiting
- * with {@link StreamCode.Unroutable}. {@link update} re-prices it in place.
- *
- * @public
- */
-export class Dynamic {
-	/** The prefix this handle advertises. */
+/** The advertisement and request queue behind a {@link Dynamic} or {@link Forward}. */
+class Serve {
+	/** The prefix this route advertises, relative to its scope's root. */
 	readonly prefix: Path.Valid;
 
 	#entry: RouteEntry;
 	#state: OriginState;
 	#retract: Dispose;
-	#publisher?: Producer;
 	#closed = false;
 
-	private constructor(
-		prefix: Path.Valid,
-		entry: RouteEntry,
-		state: OriginState,
-		retract: Dispose,
-		publisher?: Producer,
-	) {
+	constructor(prefix: Path.Valid, entry: RouteEntry, state: OriginState, retract: Dispose) {
 		this.prefix = Path.stripPrefix(entry.scope.root, prefix) ?? Path.empty();
 		this.#entry = entry;
 		this.#state = state;
 		this.#retract = retract;
-		this.#publisher = publisher;
 	}
 
-	static {
-		makeDynamic = (prefix, entry, state, retract, publisher) =>
-			new Dynamic(prefix, entry, state, retract, publisher);
-	}
-
-	/** The route this handle advertises. */
 	get route(): Route {
 		return this.#entry.route.peek();
 	}
 
-	/**
-	 * Replace the route in place. The prefix is fixed at announce time.
-	 *
-	 * The route is taken as given. At the same epoch this re-prices: consumers see an update
-	 * and every handle survives. Another epoch, or none, names another publisher instance:
-	 * consumers see a restart, resolved requests keep their old broadcast until closed, and a
-	 * re-request never joins it. Requests still waiting on this handle carry over: the handler
-	 * is asked again under the new epoch, and its answer to a request asked before the change
-	 * is dropped, never served under the new epoch. A new or unresolved request pinned to the
-	 * old epoch is refused as unroutable. The answers already served are forgotten, so the next
-	 * request for one of those paths asks the handler again too. The broadcasts it served keep
-	 * running for the subscriptions already on them; close them to end those too.
-	 * Route selection still applies: another route still at the old epoch outranks one
-	 * without. To re-price, start from the current route, `updateRoute({ ...dynamic.route, cost })`.
-	 *
-	 * @internal
-	 */
-	// pending: /quest/m1/public-model/answer.md
 	updateRoute(
 		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): void {
@@ -2313,18 +2299,17 @@ export class Dynamic {
 		this.#state.routes.mutate(() => {});
 	}
 
-	/** Retract the route and reject anything still waiting. Idempotent. */
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#retract();
 	}
 
-	/** Requests under this prefix, as they arrive, each to {@link Request.prepare} or reject. */
-	async *requested(): AsyncIterableIterator<Request> {
+	/** Requests under this prefix as they arrive; advancing or closing refuses the last one unanswered. */
+	async *requested(): AsyncIterableIterator<Handoff> {
 		const server = this.#entry.server;
 		if (!server) return;
-		let current: Request | undefined;
+		let current: Handoff | undefined;
 		const drop = () => {
 			current?.reject(unroutable());
 			current = undefined;
@@ -2340,7 +2325,6 @@ export class Dynamic {
 						queue.delete(next.value);
 					});
 					current = next.value;
-					current.publisher = this.#publisher;
 					yield next.value;
 					continue;
 				}
@@ -2355,11 +2339,127 @@ export class Dynamic {
 }
 
 /**
+ * A served route from {@link Producer.dynamic}: advertises a prefix and answers the
+ * requests beneath it.
+ *
+ * Drop it (or {@link close}) to retract the route and reject anything still waiting
+ * with {@link StreamCode.Unroutable}.
+ *
+ * @public
+ */
+export class Dynamic {
+	/** The prefix this handle advertises. */
+	readonly prefix: Path.Valid;
+
+	#serve: Serve;
+	#publisher: Producer;
+
+	private constructor(serve: Serve, publisher: Producer) {
+		this.prefix = serve.prefix;
+		this.#serve = serve;
+		this.#publisher = publisher;
+	}
+
+	static {
+		makeDynamic = (serve, publisher) => new Dynamic(serve, publisher);
+	}
+
+	/** The route this handle advertises. */
+	get route(): Route {
+		return this.#serve.route;
+	}
+
+	/**
+	 * Replace the route in place; see {@link Forward.updateRoute}.
+	 *
+	 * @internal
+	 */
+	// pending: /quest/m1/public-model/answer.md
+	updateRoute(
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
+	): void {
+		this.#serve.updateRoute(route);
+	}
+
+	/** Retract the route and reject anything still waiting. Idempotent. */
+	close(): void {
+		this.#serve.close();
+	}
+
+	/** Requests under this prefix, as they arrive, each to {@link Request.prepare} or reject. */
+	async *requested(): AsyncIterableIterator<Request> {
+		for await (const handoff of this.#serve.requested()) yield makeRequest(handoff, this.#publisher);
+	}
+}
+
+/**
+ * A peer's route landed by a session, from {@link Producer.dynamicRoute}: answers each
+ * request with the broadcast the session already routes from that peer.
+ *
+ * Drop it (or {@link close}) to retract the route and reject anything still waiting
+ * with {@link StreamCode.Unroutable}. {@link updateRoute} re-prices it in place.
+ *
+ * @internal
+ */
+// pending: /quest/m1/public-model/answer.md
+export class Forward {
+	/** The prefix this handle advertises. */
+	readonly prefix: Path.Valid;
+
+	#serve: Serve;
+
+	private constructor(serve: Serve) {
+		this.prefix = serve.prefix;
+		this.#serve = serve;
+	}
+
+	static {
+		makeForward = (serve) => new Forward(serve);
+	}
+
+	/** The route this handle advertises. */
+	get route(): Route {
+		return this.#serve.route;
+	}
+
+	/**
+	 * Replace the route in place. The prefix is fixed at announce time.
+	 *
+	 * The route is taken as given. At the same epoch this re-prices: consumers see an update
+	 * and every handle survives. Another epoch, or none, names another publisher instance:
+	 * consumers see a restart, resolved requests keep their old broadcast until closed, and a
+	 * re-request never joins it. Requests still waiting on this handle carry over: the handler
+	 * is asked again under the new epoch, and its answer to a request asked before the change
+	 * is dropped, never served under the new epoch. A new or unresolved request pinned to the
+	 * old epoch is refused as unroutable. The answers already served are forgotten, so the next
+	 * request for one of those paths asks the handler again too. The broadcasts it served keep
+	 * running for the subscriptions already on them; close them to end those too.
+	 * Route selection still applies: another route still at the old epoch outranks one
+	 * without. To re-price, start from the current route, `updateRoute({ ...forward.route, cost })`.
+	 */
+	updateRoute(
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
+	): void {
+		this.#serve.updateRoute(route);
+	}
+
+	/** Retract the route and reject anything still waiting. Idempotent. */
+	close(): void {
+		this.#serve.close();
+	}
+
+	/** Requests under this prefix, as they arrive, each to {@link ForwardRequest.accept} or reject. */
+	async *requested(): AsyncIterableIterator<ForwardRequest> {
+		for await (const handoff of this.#serve.requested()) yield makeForwardRequest(handoff);
+	}
+}
+
+/**
  * A pending request for a broadcast to be served on demand.
  *
- * Yielded by {@link Dynamic.requested}. {@link accept} resolves it with a live
- * broadcast; {@link reject} resolves it with an error. Advancing the iterator or
- * closing it without either rejects the request.
+ * Yielded by {@link Dynamic.requested}. {@link prepare} then {@link Prepared.publish}
+ * resolves it with a new publisher instance; {@link reject} resolves it with an error.
+ * Advancing the iterator or closing it without either rejects the request.
  *
  * @public
  */
@@ -2367,62 +2467,60 @@ export class Request {
 	/** The path that was requested. */
 	readonly path: Path.Valid;
 
-	#server: ServeState;
-	#done = false;
-	#withdrawn = false;
-	/** @internal Set only by an application claim. */
-	publisher?: Producer;
+	#handoff: Handoff;
+	#publisher: Producer;
 
-	private constructor(path: Path.Valid, server: ServeState) {
-		this.path = path;
-		this.#server = server;
+	private constructor(handoff: Handoff, publisher: Producer) {
+		this.path = handoff.path;
+		this.#handoff = handoff;
+		this.#publisher = publisher;
 	}
 
 	static {
-		makeRequest = (path, server) => new Request(path, server);
-		finishRequest = (request, err) => {
-			request.#done = true;
-			request.#withdrawn = true;
-			void err;
-		};
+		makeRequest = (handoff, publisher) => new Request(handoff, publisher);
 	}
 
 	/** Start answering as a new publisher instance, hidden until published. */
 	prepare(epoch: Epoch.Valid): Prepared {
-		if (this.#done) throw new Error("request is closed");
-		if (!this.publisher) throw new Error("forwarded requests cannot be prepared");
-		this.#done = true;
-		const answer = this.publisher.createBroadcast(this.path);
+		if (this.#handoff.done) throw new Error("request is closed");
+		this.#handoff.done = true;
+		const answer = this.#publisher.createBroadcast(this.path);
 		// Withheld until publish, so the answer cannot announce itself under another
 		// epoch or skip the request's admission.
 		const announcer = hooks.withholdAnnouncer(answer);
 		if (!announcer) throw new Error("origin is closed");
-		return new Prepared(this, answer, announcer, epoch);
+		return makePrepared(this.#handoff, answer, announcer, epoch);
 	}
 
-	/** @internal Publish a prepared answer after its tracks have been filled. */
-	publishPrepared(
-		answer: broadcast.Producer,
-		announcer: broadcast.Announcer,
-		epoch: Epoch.Valid,
-	): broadcast.Producer {
-		if (!this.#server.has(this)) throw new Error("request is closed");
-		if (answer.closed.peek() !== undefined) throw new Error("broadcast is closed");
-		hooks.attachAnnouncer(answer, announcer);
-		// The exact route usually settles the request on its own, resolving its waiters
-		// through the new epoch; answer it directly if it is still pending.
-		answer.announce({ epoch });
-		if (this.#server.has(this)) this.#server.accept(this, answer.consume());
-		return answer;
+	/** Reject the request, resolving every awaiting requester with `err`. */
+	reject(err: Error): void {
+		this.#handoff.reject(err);
+	}
+}
+
+/**
+ * A pending request under a {@link Forward}, answered with the broadcast its session
+ * already routes from the peer.
+ *
+ * @internal
+ */
+export class ForwardRequest {
+	/** The path that was requested. */
+	readonly path: Path.Valid;
+
+	#handoff: Handoff;
+
+	private constructor(handoff: Handoff) {
+		this.path = handoff.path;
+		this.#handoff = handoff;
 	}
 
-	/** @internal Refuse the request a prepared answer abandoned. */
-	rejectPrepared(err: Error): void {
-		this.#server.reject(this, err);
+	static {
+		makeForwardRequest = (handoff) => new ForwardRequest(handoff);
 	}
 
 	/**
-	 * Resolve a session-forwarded request with its peer's routed broadcast.
+	 * Resolve the request with its peer's routed broadcast.
 	 *
 	 * The caller keeps producing into `broadcast`; repeat requests for the path share
 	 * it for as long as it stays live.
@@ -2431,31 +2529,28 @@ export class Request {
 	 * this origin's hop. To serve upstream content, copy its tracks into a prepared answer
 	 * and publish it.
 	 *
-	 * @throws Error when handed a broadcast a session delivered. The request stays open.
-	 * @internal
+	 * @throws Error when an originated route is handed a broadcast a session delivered. The
+	 * request stays open.
 	 */
-	// pending: /quest/m1/public-model/answer.md
 	accept(source: broadcast.Producer | broadcast.Consumer): void {
-		if (this.#done) {
+		const handoff = this.#handoff;
+		if (handoff.done) {
 			// A withdrawn request takes no answer. Only the handed-off consumer is ours;
 			// the application still owns its producer and any other consumers.
-			if (this.#withdrawn && source instanceof broadcast.Consumer) source.close();
+			if (handoff.withdrawn && source instanceof broadcast.Consumer) source.close();
 			return;
 		}
-		if (this.publisher) throw new Error("claim answers must be prepared and published");
-		if (this.#server.originated && !(source instanceof broadcast.Producer) && wireOf(source).fromSession) {
+		if (handoff.server.originated && !(source instanceof broadcast.Producer) && wireOf(source).fromSession) {
 			throw new Error("origin cannot serve a broadcast it did not produce");
 		}
-		this.#done = true;
+		handoff.done = true;
 		const front = source instanceof broadcast.Producer ? source.consume() : source;
-		this.#server.accept(this, front);
+		handoff.server.accept(handoff, front);
 	}
 
 	/** Reject the request, resolving every awaiting requester with `err`. */
 	reject(err: Error): void {
-		if (this.#done) return;
-		this.#done = true;
-		this.#server.reject(this, err);
+		this.#handoff.reject(err);
 	}
 }
 
@@ -2463,28 +2558,45 @@ export class Request {
 export class Prepared {
 	/** The unannounced broadcast to fill before publishing; only {@link publish} announces it. */
 	readonly broadcast: broadcast.Producer;
-	readonly #request: Request;
+	readonly #handoff: Handoff;
 	readonly #announcer: broadcast.Announcer;
 	readonly #epoch: Epoch.Valid;
 	#done = false;
 
-	/** @internal */
-	constructor(request: Request, answer: broadcast.Producer, announcer: broadcast.Announcer, epoch: Epoch.Valid) {
-		this.#request = request;
+	private constructor(
+		handoff: Handoff,
+		answer: broadcast.Producer,
+		announcer: broadcast.Announcer,
+		epoch: Epoch.Valid,
+	) {
+		this.#handoff = handoff;
 		this.broadcast = answer;
 		this.#announcer = announcer;
 		this.#epoch = epoch;
+	}
+
+	static {
+		makePrepared = (handoff, answer, announcer, epoch) => new Prepared(handoff, answer, announcer, epoch);
 	}
 
 	/** Announce the filled broadcast and resolve every waiting requester, refusing them if it cannot be announced. */
 	publish(): broadcast.Producer {
 		if (this.#done) throw new Error("prepared answer is closed");
 		this.#done = true;
+		const handoff = this.#handoff;
+		const answer = this.broadcast;
 		try {
-			return this.#request.publishPrepared(this.broadcast, this.#announcer, this.#epoch);
+			if (!handoff.server.has(handoff)) throw new Error("request is closed");
+			if (answer.closed.peek() !== undefined) throw new Error("broadcast is closed");
+			hooks.attachAnnouncer(answer, this.#announcer);
+			// The exact route usually settles the request on its own, resolving its waiters
+			// through the new epoch; answer it directly if it is still pending.
+			answer.announce({ epoch: this.#epoch });
+			if (handoff.server.has(handoff)) handoff.server.accept(handoff, answer.consume());
+			return answer;
 		} catch (err) {
-			this.broadcast.close();
-			this.#request.rejectPrepared(err instanceof Error ? err : new Error(String(err)));
+			answer.close();
+			handoff.server.reject(handoff, err instanceof Error ? err : new Error(String(err)));
 			throw err;
 		}
 	}
@@ -2494,6 +2606,6 @@ export class Prepared {
 		if (this.#done) return;
 		this.#done = true;
 		this.broadcast.close();
-		this.#request.rejectPrepared(err);
+		this.#handoff.server.reject(this.#handoff, err);
 	}
 }

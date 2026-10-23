@@ -56,6 +56,8 @@ pub mod origin {
 		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, Preference, Prepared, Producer, Request,
 		Requesting, Route, Routing, Source,
 	};
+	#[doc(hidden)]
+	pub use super::origin_impl::{Forward, ForwardRequest};
 }
 
 /// Subscribing to route (un)announcements from an origin.

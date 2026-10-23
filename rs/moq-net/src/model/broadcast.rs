@@ -739,7 +739,7 @@ impl RequestValidity {
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	// pending: /quest/m1/public-model/answer.md
-	pub(crate) fn for_source(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
+	pub(crate) fn for_source(route: &crate::origin::Forward, path: &crate::Path) -> Self {
 		route
 			.request_validity(path)
 			.map(|selected| Self::Selected(std::sync::Arc::new(selected)))

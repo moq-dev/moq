@@ -41,9 +41,10 @@ the route layer under their new types, and drop items whose need it removes
   - A public `Route::with_via`, which a caller could forward by mistake.
 - `origin::Consumer::excluding` (both publishers, client): public;
   split-horizon toward a peer, the counterpart of the identity above.
-- **Peer-route escape hatches** (`origin::Producer::dynamic_route`,
-  `origin::Dynamic::update_route`, `origin::Request::accept`; JS
-  `Origin.Producer.dynamicRoute`, `Dynamic.updateRoute`, `Request.accept`).
+- **Peer-route escape hatches** (`origin::Producer::dynamic_route` with
+  the `origin::Forward` and `origin::ForwardRequest` it yields, and
+  `origin::Dynamic::update_route`; JS `Origin.Producer.dynamicRoute`,
+  `Forward`, `ForwardRequest`, and `Dynamic.updateRoute`).
   Settled as the interim in [#5678](https://github.com/moq-dev/moq/pull/5678):
   an application claim (`dynamic(prefix)`) carries no route and answers
   through `Request::prepare` then `Prepared::publish`, and these stay
@@ -56,7 +57,7 @@ the route layer under their new types, and drop items whose need it removes
 - `wire.ts` `OriginProducer.receive` (`connection/forward.ts`): mirror the
   identity decision. A received route is a public `Origin.Producer.dynamic`
   on a handle marked with the peer's identity, so `receive` goes and
-  `Origin.Request.accept` stops special-casing session-delivered broadcasts
+  `Origin.ForwardRequest.accept` stops special-casing session-delivered broadcasts
   (`Broadcast.fromSession`).
 - `wire.ts` `OriginConsumer.advertised`, `local`, `demand`, with
   `Advertised`, `Advertisements`, `sameInstance`, and `internal.ts`

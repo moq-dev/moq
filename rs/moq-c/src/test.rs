@@ -3707,7 +3707,7 @@ fn consume_announced_delivers_a_held_takeover_once() {
 }
 
 /// Serve `prefix` on `origin` dynamically through `route`.
-fn serve_dynamic(origin: u32, prefix: &str, route: moq_net::origin::Route) -> moq_net::origin::Dynamic {
+fn serve_dynamic(origin: u32, prefix: &str, route: moq_net::origin::Route) -> moq_net::origin::Forward {
 	let _runtime = crate::ffi::RUNTIME.enter();
 	let origin = crate::Id::try_from(origin).unwrap();
 	State::lock()
