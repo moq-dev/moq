@@ -11746,13 +11746,13 @@ mod tests {
 		let mut handler = replacement.dynamic();
 		queued(&standby).await.accept(&replacement);
 		let request = handler.requested_track().await.unwrap();
-		assert_eq!(request.subscription().unwrap().start(), Some(track::Position::group(5)));
+		assert_eq!(request.subscription().unwrap().start(), Some(5));
 		let track = request.accept(crate::track::Info::timed());
 		let mut preferences = rig.subscription.subscription();
 		preferences.priority = 7;
 		rig.subscription.update(preferences).unwrap();
 		settle(|| track.subscription().is_some_and(|sub| sub.priority == 7)).await;
-		assert_eq!(track.subscription().unwrap().start(), Some(track::Position::group(5)));
+		assert_eq!(track.subscription().unwrap().start(), Some(5));
 	}
 
 	/// A route updated in place to a new first hop still serves the same broadcast:

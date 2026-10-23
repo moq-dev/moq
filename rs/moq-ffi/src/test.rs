@@ -1055,7 +1055,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 			priority: 10,
 			max_delay_us: 25_000,
 			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0, frame: 0 },
+				start: MoqAnchor::Absolute { group: 0 },
 				end: None,
 			}]),
 			order: None,
@@ -4349,7 +4349,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 			priority: 10,
 			max_delay_us: 25_000,
 			ranges: Some(vec![MoqRange {
-				start: MoqAnchor::Absolute { group: 0, frame: 0 },
+				start: MoqAnchor::Absolute { group: 0 },
 				end: None,
 			}]),
 			order: None,

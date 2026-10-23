@@ -1411,7 +1411,7 @@ impl TimeEnd {
 		let subscription = track::Subscription::default()
 			.with_max_delay(AGED_BUDGET)
 			.with_ranges([track::Range {
-				start: track::Anchor::Absolute(track::Position::group(0)),
+				start: track::Anchor::Absolute(0),
 				end: Some(track::Anchor::Time(Timestamp::from_secs(u32::MAX.into()).unwrap())),
 			}]);
 		let waiter = kio::Waiter::noop();

@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Subscriptions and fetches start at a group's first frame ([#6465](https://github.com/moq-dev/moq/pull/6465))
+
+A group is the unit of decodability, so every range names whole groups.
+`track::Anchor::Absolute` takes a group sequence instead of a `Position`: replace `Anchor::Absolute(Position::group(n))` with `Anchor::Absolute(n)`, and as an exclusive end, `Position::after_group(n)` with `n + 1`.
+`group::Fetch::frame_start` and `with_frame_start` are gone: fetch the whole group and skip frames with `group::Consumer::set_frames`.
+
 ### A listing says whether a removed track finished (#6399)
 
 `broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.

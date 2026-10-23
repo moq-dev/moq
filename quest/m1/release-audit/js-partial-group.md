@@ -29,7 +29,4 @@ way and is swallowed too; fix both, letting the violation escape `runGroup`
 while ordinary group errors stay stream-scoped. Test that each closes the
 session.
 
-[JS ranges](/quest/m1/subscribe-ranges/js.md) carries the offset through the
-group model when it adds frame bounds.
-
 Public API: none. Wire: none.

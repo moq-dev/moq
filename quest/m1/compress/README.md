@@ -55,12 +55,9 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
 - **Ranges.** Compressed tracks are not special: every subscription, new or
   resumed, starts at the beginning of a group, and one resuming from another
   route may take the group's start from that route's cached prefix
-  (maintainer, on [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)).
-  The requesting model enforces it on every protocol: a mid-group start it
-  lacks the prefix for widens to frame 0 before the request leaves, the
-  reader still starts at the frame it asked for, and a server serves exactly
-  what is asked. A compressed group therefore always inflates from a prefix
-  its requester holds.
+  (maintainer, on [moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)). Application
+  ranges and fetches name whole groups, so a compressed group always
+  inflates from a prefix its requester holds.
 - **Specs:** draft-lcurley-moq-flate keeps the codec and becomes the IETF
   extension; draft-lcurley-moq-lite specifies the lite-07 field and size and
   references it for the codec.

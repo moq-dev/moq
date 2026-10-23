@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `AnchorAbsolute` names a group ([#6465](https://github.com/moq-dev/moq/pull/6465))
+
+`AnchorAbsolute` drops `frame`: a range always starts at a group's first frame. Write `AnchorAbsolute(group)`.
+
 ### `announce` takes an `AnnounceRoute`
 
 `BroadcastProducer.announce` takes `AnnounceRoute(cost, epoch)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.

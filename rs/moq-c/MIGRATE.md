@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `moq_anchor` names a group ([#6465](https://github.com/moq-dev/moq/pull/6465))
+
+`moq_anchor` drops `frame`, which changes its ABI: `MOQ_ANCHOR_ABSOLUTE` always starts at the group's first frame. Remove any `frame` you set.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 `moq_consume_video` and `moq_consume_audio` on a rendition whose catalog `broadcast` field names a sibling now wait for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.

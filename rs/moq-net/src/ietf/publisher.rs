@@ -16420,17 +16420,12 @@ struct ServeRange {
 }
 
 impl ServeRange {
-	/// Bound `subscription` to this range.
+	/// Bound `subscription` to the whole groups this range touches: a model subscription
+	/// starts and ends on a group boundary, and [`GroupSlice`] cuts the objects when serving.
 	fn apply(&self, subscription: &mut Subscription) {
 		subscription.set_bounds(
-			self.start.map(|start| track::Position {
-				group: start.group,
-				frame: start.object,
-			}),
-			self.end.and_then(|end| match end.object {
-				Some(object) => track::Position::after(end.group, object),
-				None => track::Position::after_group(end.group),
-			}),
+			self.start.map(|start| start.group),
+			self.end.and_then(|end| end.group.checked_add(1)),
 		);
 	}
 }

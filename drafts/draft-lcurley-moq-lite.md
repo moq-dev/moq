@@ -211,15 +211,15 @@ The resolved start is therefore always either exactly the requested Position or 
 
 The asymmetry with Groups is deliberate.
 A Group is the unit of decodability: dropping leading *Groups* leaves a stream the application can still decode, whereas dropping leading *Frames* often does not, whether because the Group opens with a keyframe the rest depends on or because its compression state lives in the frames that went missing.
-Only the subscriber knows whether a partial Group is any use to it, so only the subscriber may ask for one.
+A subscription therefore starts at a Group's first frame, and a subscriber asks for a partial Group only to finish one whose earlier frames it already holds, from this publisher or another.
 
 Frame indices are only meaningful relative to a Group the subscriber has already begun receiving, so:
 
 - A `Frame Start` qualifies the group `Group Start` names, group 0 included.
-  A subscriber that has seen no such group MUST send `Frame Start` = 0, since it cannot number the frames of a group it has not received.
+  A subscriber MUST send `Frame Start` = 0 unless it already holds every frame of that group below it.
 - A `Frame End` is meaningless without a `Group End`; an unbounded subscription (`Group End` = 0) MUST send `Frame End` = 0.
 
-A publisher MUST treat a violation of either rule as a protocol violation and reset the stream.
+A publisher MUST treat a non-zero `Frame End` without a `Group End` as a protocol violation and reset the stream.
 
 # Flow
 This section outlines the flow of messages within a moq-lite session.
@@ -1797,7 +1797,7 @@ The `Message Length` describes the payload size on the wire.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none. Earlier versions receive the Track inflated.
-- A SUBSCRIBE carries a non-zero `Frame Start` only when the subscriber holds every frame below it; otherwise it asks for the whole Group.
+- A subscription starts at a Group's first frame: SUBSCRIBE carries a non-zero `Frame Start` only when the subscriber holds every frame below it, compressed Track or not.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 

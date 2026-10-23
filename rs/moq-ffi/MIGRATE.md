@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### `MoqAnchor::Absolute` names a group ([#6465](https://github.com/moq-dev/moq/pull/6465))
+
+`MoqAnchor::Absolute` drops `frame`: a range always starts at a group's first frame. Pass `MoqAnchor::Absolute { group }`.
+
 ### `announce` takes a `MoqAnnounceRoute`
 
 `MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.

@@ -119,7 +119,7 @@ async fn relay(published: Published, hops: [&str; 2], subscription: moq_net::tra
 	}
 }
 
-/// Hops that carry a mid-group start and negotiate compression: lite-07, and moq-transport
+/// Hops that carry a start group and negotiate compression: lite-07, and moq-transport
 /// draft-17 and later.
 const RANGED: &[&str] = &[
 	"moq-lite-07-wip",
@@ -128,19 +128,11 @@ const RANGED: &[&str] = &[
 	"moq-transport-22",
 ];
 
-/// A cold subscriber asks from the group's first frame, compressed or not, but its
-/// application sees only its requested half-open frame range across every pair of hops,
-/// whether the group began before it subscribed or after. Lite-07 hops also carry a live
-/// change.
+/// A subscription starting at a group delivers it whole from its first frame across every
+/// pair of hops, compressed or not, whether the group began before it subscribed or after.
 #[moq_clock::test]
-async fn application_ranges_keep_their_filter_after_requesting_the_group_head() {
-	use moq_net::track::{Anchor, Position, Range, Subscription};
-	let range = |group, start, end: Option<u64>| {
-		Subscription::default().with_ranges([Range {
-			start: Anchor::Absolute(Position { group, frame: start }),
-			end: end.map(|end| Anchor::Absolute(Position { group, frame: end })),
-		}])
-	};
+async fn a_start_group_arrives_whole() {
+	use moq_net::track::{Anchor, Subscription};
 	let write = |group: &mut moq_net::group::Producer, frames: std::ops::Range<u64>| {
 		for index in frames {
 			group
@@ -152,11 +144,6 @@ async fn application_ranges_keep_their_filter_after_requesting_the_group_head() 
 		for &downstream in RANGED {
 			let hops = [upstream, downstream];
 			let lite = hops.iter().all(|hop| *hop == "moq-lite-07-wip");
-			// A pre-draft-20 join cannot carry an end, so its range stays open.
-			let end = hops
-				.iter()
-				.all(|hop| matches!(*hop, "moq-lite-07-wip" | "moq-transport-22"))
-				.then_some(4);
 			for compress in [true, false] {
 				// Frames of the group written before the subscription, which a joining FETCH
 				// or fill delivers.
@@ -173,18 +160,19 @@ async fn application_ranges_keep_their_filter_after_requesting_the_group_head() 
 							.create_group(moq_net::group::Info { sequence: 5 })
 							.unwrap();
 						write(&mut group, 0..head);
-						let mut fixture = relay(published, hops, range(5, 2, end)).await;
+						let mut fixture = relay(published, hops, Subscription::default().with_groups(5..)).await;
 						if lite {
 							assert_eq!(
 								fixture.track.subscription_changed().await.unwrap().unwrap().ranges[0].start,
-								Anchor::Absolute(Position::group(5)),
-								"{case}: upstream asks from the group's first frame"
+								Anchor::Absolute(5),
+								"{case}: upstream asks for the start group"
 							);
 						}
 						write(&mut group, head..5);
 						group.finish().unwrap();
 						let mut reading = fixture.subscriber.recv_group().await.unwrap().unwrap();
-						for index in 2..end.unwrap_or(5) {
+						assert_eq!(reading.sequence, 5, "{case}");
+						for index in 0..5 {
 							assert_eq!(
 								reading.read_frame().await.unwrap().unwrap().payload,
 								payload(index),
@@ -192,33 +180,9 @@ async fn application_ranges_keep_their_filter_after_requesting_the_group_head() 
 							);
 						}
 						assert!(reading.read_frame().await.unwrap().is_none(), "{case}");
-
-						// REQUEST_UPDATE carries no range: /quest/m1/subscribe-ranges/ietf.md.
-						if !lite {
-							return;
-						}
-						fixture.subscriber.update(range(6, 1, Some(3))).unwrap();
-						let updated = fixture.track.subscription_changed().await.unwrap().unwrap();
-						// Old route copies can keep their earlier floor until a newer group arrives.
-						// The updated end must already permit the newly requested group.
-						assert_eq!(
-							updated.ranges[0].end,
-							Some(Anchor::Absolute(Position { group: 6, frame: 3 }))
-						);
-						let mut group = fixture
-							.track
-							.create_group(moq_net::group::Info { sequence: 6 })
-							.unwrap();
-						write(&mut group, 0..5);
-						group.finish().unwrap();
-						let mut reading = fixture.subscriber.recv_group().await.unwrap().unwrap();
-						for index in 1..3 {
-							assert_eq!(reading.read_frame().await.unwrap().unwrap().payload, payload(index));
-						}
-						assert!(reading.read_frame().await.unwrap().is_none());
 					})
 					.await
-					.unwrap_or_else(|_| panic!("{case}: the requested frames never arrived"));
+					.unwrap_or_else(|_| panic!("{case}: the group never arrived whole"));
 				}
 			}
 		}

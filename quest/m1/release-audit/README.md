@@ -109,7 +109,7 @@ child records whether its behavior is new on main or inherited from release.
 - [JS subscription ranges](/quest/m1/subscribe-ranges/js.md) - range lists and frame offsets build on the bounds fixed here
 - [OBS video source](/quest/m2/obs-moq-video/source.md) - reproduced inherited timing and EOF defects remain with the decoder replacement owner
 - [QPACK dependency fix](/quest/m0/web-transport-proto-0.6.3.md) - decoded header expansion is already tracked
-- [Compressed tracks](/quest/m1/compress/README.md) - mid-group widening and application migration have existing owners
+- [Compressed tracks](/quest/m1/compress/README.md) - application migration has an existing owner
 - [Archive consumer](/quest/m1/archive/consumer.md) - current producer and CLI reader still need the new-format roundtrip
 - [Measured release performance](/quest/m1/release-perf/README.md) - existing paired benchmark regressions and their confirmation runs
 - [Transport performance audit](/quest/m2/audit-perf.md) - congestion-control coverage remains outstanding

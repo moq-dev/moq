@@ -62,7 +62,7 @@ type (
 	Range = ffi.MoqRange
 	// Anchor is where one end of a Range falls: AnchorAbsolute, AnchorRelative, or AnchorTime.
 	Anchor = ffi.MoqAnchor
-	// AnchorAbsolute is an exact group and frame.
+	// AnchorAbsolute is a group, delivered from its first frame.
 	AnchorAbsolute = ffi.MoqAnchorAbsolute
 	// AnchorRelative is the group Groups before the latest one, clamped to group 0: 0 is the latest.
 	AnchorRelative = ffi.MoqAnchorRelative
