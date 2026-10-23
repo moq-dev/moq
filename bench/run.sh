@@ -288,13 +288,22 @@ criterion_build() {
         | [($package | split("/") | last) + "/" + .target.name, $package, .executable] | @tsv' | sort >"$out"
 }
 
-# Build the base with the current cargo arguments, minus bench targets it does not have yet:
-# naming one would fail the whole build. Lists nothing in OUT when every selected target is new.
+# Build the base with the current cargo arguments, minus bench targets its selected packages
+# do not have yet: naming one would fail the whole build. Lists nothing in OUT when every
+# selected target is new.
 criterion_build_base() {
     local out=$1 names name index selected=0 count=${#CRITERION_CARGO_ARGS[@]}
-    local args=()
+    local args=() packages=()
     : >"$out"
-    names=$(criterion_targets "$WORKTREE" | cut -f2) || return 1
+    for ((index = 0; index + 1 < count; index++)); do
+        if [[ ${CRITERION_CARGO_ARGS[index]} == -p || ${CRITERION_CARGO_ARGS[index]} == --package ]]; then
+            packages+=("${CRITERION_CARGO_ARGS[index + 1]}")
+        fi
+    done
+    # Another package's target of the same name must not count, or cargo rejects the base build.
+    names=$(cd "$WORKTREE" && cargo metadata --locked --format-version 1 --no-deps |
+        jq -r '.packages[] | select(($ARGS.positional | length) == 0 or (.name as $name | any($ARGS.positional[]; . == $name)))
+            | .targets[] | select(any(.kind[]; . == "bench")) | .name' --args ${packages[@]+"${packages[@]}"}) || return 1
     for ((index = 0; index < count; index++)); do
         name=${CRITERION_CARGO_ARGS[index]}
         if [[ $name == --bench ]] && ((index + 1 < count)); then

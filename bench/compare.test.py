@@ -147,21 +147,23 @@ class Criterion(unittest.TestCase):
         self.assertNotIn(("moq-net/session", "steady"), screen)
 
     def test_rounds_decide_each_flagged_slowdown(self):
-        regressed, noisy, beyond = ("t/a", "regressed"), ("t/a", "noisy"), ("t/a", "beyond")
+        regressed, noisy, tied, beyond = ("t/a", "regressed"), ("t/a", "noisy"), ("t/a", "tied"), ("t/a", "beyond")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self.paired_run(root, {regressed: (100, 150), noisy: (100, 150), beyond: (100, 115),
+            self.paired_run(root, {regressed: (100, 150), noisy: (100, 150), tied: (100, 150), beyond: (100, 115),
                                    ("t/a", "faster"): (100, 80), ("t/a", "same"): (100, 105),
                                    ("t/a", "added"): (None, 10), ("t/a", "dropped"): (10, None),
                                    ("t/broken", "base failed"): (None, 10)})
-            (root / "confirm.tsv").write_text("t/a\tregressed\nt/a\tnoisy\n")
+            (root / "confirm.tsv").write_text("t/a\tregressed\nt/a\tnoisy\nt/a\ttied\n")
             self.confirm(root, 1, regressed, [(100, 120), (100, 130), (100, 125)])
             # A bimodal case: slower in two rounds, faster in one.
             self.confirm(root, 2, noisy, [(100, 150), (150, 100), (100, 150)])
+            # A tied round is not slower, even with a median past the threshold.
+            self.confirm(root, 3, tied, [(100, 100), (100, 130), (100, 125)])
             (root / "paired-unavailable.tsv").write_text("t/broken\tbase run failed\n")
             result = compare.criterion_paired(root)
         verdicts = {case["id"]: case["verdict"] for case in result["cases"]}
-        self.assertEqual(verdicts, {"regressed": "regression", "noisy": "noise", "beyond": "unconfirmed",
+        self.assertEqual(verdicts, {"regressed": "regression", "noisy": "noise", "tied": "noise", "beyond": "unconfirmed",
                                     "faster": "faster", "same": "unchanged", "added": "new", "dropped": "removed",
                                     "base failed": "unavailable"})
         regression = next(case for case in result["cases"] if case["id"] == "regressed")

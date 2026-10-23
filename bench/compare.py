@@ -161,8 +161,9 @@ def criterion_paired(run):
             case["delta_pct"] = delta = percent(base[key], current[key])
             if key in confirmed:
                 case["rounds"] = confirmed[key]
-                agreed = case["rounds"]["status"] == "consistent sign" and case["rounds"]["delta_pct"] > THRESHOLD_PCT
-                case["verdict"] = "regression" if agreed else "noise"
+                # Every round strictly slower, so a tie or a single fast round rejects it at any round count.
+                slower = all(delta > 0 for delta in case["rounds"]["paired_deltas_pct"])
+                case["verdict"] = "regression" if slower and case["rounds"]["delta_pct"] > THRESHOLD_PCT else "noise"
             elif delta > THRESHOLD_PCT:
                 case["verdict"] = "unavailable" if target in blocked else "unconfirmed"
             elif delta < -THRESHOLD_PCT:
