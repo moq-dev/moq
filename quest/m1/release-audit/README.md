@@ -103,7 +103,6 @@ child records whether its behavior is new on main or inherited from release.
 - [Parse QMux records without copying suffixes](/quest/m1/release-audit/qmux-copy.md) - many small frames do not cause quadratic copying
 - [Release AUTH wake listeners](/quest/m1/release-audit/auth-listeners.md) - session churn does not retain one terminal promise reaction per change
 - [Report fatal watch ingestion failures](/quest/m1/release-audit/watch-errors.md) - failed audio/video reads reach the existing error output and tear down their resources
-- [Constrain auth credential redirects](/quest/m1/release-audit/auth-redirects.md) - JSON credentials cannot silently follow redirects to another origin
 - [Finish bitrate recovery](/quest/m1/release-audit/rate-recovery.md) - a quiet bandwidth grant no longer strands moq-video, moq-ffi, and moq-c encoders partway up the ramp
 - [Release finished FFI codecs](/quest/m1/release-audit/ffi-finished.md) - preserving finished tracks does not preserve drained encoders and scratch buffers
 - [Retire expiry metadata](/quest/m1/release-audit/expiry-index.md) - empty deadline entries do not accumulate with historical read budgets
