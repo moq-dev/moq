@@ -1424,7 +1424,7 @@ mod tests {
 	/// An HTTP `--cluster-api-url` is a MoQ side, so start-up must attach
 	/// client TLS the way the relay does rather than refuse after validate.
 	#[tokio::test]
-	async fn cluster_connect_api_http_attaches_client_tls() {
+	async fn cluster_api_url_http_attaches_client_tls() {
 		let _ = moq_tokio::crypto::install_default();
 		let invocation =
 			Invocation::try_parse_from(["moq", "--cluster-api-url", "https://api.example/peers", "import", "ts"])

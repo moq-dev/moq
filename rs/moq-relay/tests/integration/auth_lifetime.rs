@@ -1183,7 +1183,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 	relay.abort();
 }
 
-/// A relay dialing in with a certificate, admitted by `moq auth serve --mtls-peer`,
+/// A relay dialing in with a certificate, admitted by `moq auth serve --mtls-link peer`,
 /// is a cluster peer: what it announces entered the cluster elsewhere.
 #[tokio::test]
 async fn an_mtls_peer_is_a_cluster_peer() {
@@ -1194,7 +1194,7 @@ async fn an_mtls_peer_is_a_cluster_peer() {
 	);
 }
 
-/// Without `--mtls-peer`, a certificate identifies a client ingesting here.
+/// Without `--mtls-link peer`, a certificate identifies a client ingesting here.
 #[tokio::test]
 async fn an_mtls_client_ingests_here() {
 	assert_eq!(mtls_route_source(false).await, moq_net::origin::Source::Local);

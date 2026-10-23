@@ -62,7 +62,7 @@ HTTPS is currently not supported.
 Relays can be joined together to proxy announcements and subscriptions. A viewer talks to whichever relay is closest; if their broadcast lives elsewhere in the cluster, the local relay fetches it from a neighbor and caches it. Hop tracking on every broadcast keeps loops out and picks the shortest path when there's more than one.
 
 - `--cluster-connect <peer-url>` lists the peers this relay dials. Repeatable; defines the topology by hand. A simple chain like `eu-west <- us-east <- us-west` lets `us-east` cache and dedup the transatlantic fetches that fan out to many `us-west` viewers.
-- `--cluster-connect-api <url-or-path>` fetches that list from an endpoint or file instead, reloading it without a restart.
+- `--cluster-api-url <url-or-path>` fetches that list from an endpoint or file instead, reloading it without a restart.
 - `--cluster-lan` finds peers on the local network over mDNS.
 
 A relay only dials peers listed this way or found on the LAN.
