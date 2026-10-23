@@ -777,6 +777,7 @@ async fn follow_catalog(
 	let (stop, stopped) = watch::channel(false);
 	let playback = Playback {
 		element,
+		broadcast: broadcast.clone(),
 		pads: pads.clone(),
 		timeline: Arc::default(),
 		shutdown: shutdown.clone(),
@@ -991,6 +992,8 @@ fn reconcile(
 #[derive(Clone)]
 struct Playback {
 	element: glib::WeakRef<super::MoqSrc>,
+	/// The catalog's broadcast. A sibling outlives its closed catalog until it ends.
+	broadcast: moq_net::broadcast::Consumer,
 	pads: Pads,
 	/// Shared by the catalog's own renditions and the first instance of each sibling.
 	timeline: Arc<Timeline>,
@@ -1004,8 +1007,9 @@ struct Playback {
 #[derive(Clone, Default)]
 struct Plan {
 	renditions: HashMap<Rendition, Shape>,
-	/// The catalog closed: no rendition starts again, and the follower ends once its readers
-	/// drain.
+	/// The catalog closed: the renditions no longer change. The catalog's own follower ends once
+	/// its readers drain, and a sibling's keeps following its instances until the catalog's
+	/// broadcast ends.
 	closed: bool,
 }
 
@@ -1077,8 +1081,13 @@ impl Follower {
 			}
 			_ => {}
 		}
+		let catalog = self.playback.broadcast.clone();
+		let sibling = self.path != catalog.info().path;
 		let first = plan.borrow_and_update().clone();
-		let mut following = !first.closed;
+		// Taking plan updates, until the catalog closes or stops referencing this path.
+		let mut listening = !first.closed;
+		// Following instances, which a sibling does past its catalog's close.
+		let mut following = listening || sibling;
 		self.apply(first.renditions);
 		self.play();
 
@@ -1090,18 +1099,22 @@ impl Follower {
 			tokio::select! {
 				biased;
 				_ = stop.changed() => break,
-				changed = plan.changed(), if following => {
-					// A dropped plan reads no rendition any more.
-					let next = match changed {
-						Ok(()) => plan.borrow_and_update().clone(),
-						Err(_) => Plan { closed: true, ..Default::default() },
-					};
-					following = !next.closed;
-					self.apply(next.renditions);
-					if following {
-						self.play();
+				changed = plan.changed(), if listening => match changed {
+					Ok(()) => {
+						let next = plan.borrow_and_update().clone();
+						listening = !next.closed;
+						following = listening || sibling;
+						self.apply(next.renditions);
+						if listening {
+							self.play();
+						}
 					}
-				}
+					// No rendition reads this path any more.
+					Err(_) => {
+						(listening, following) = (false, false);
+						self.apply(HashMap::new());
+					}
+				},
 				Some(joined) = self.readers.join_next() => {
 					if let Ok((rendition, id, exit)) = joined {
 						self.exited(rendition, id, exit);
@@ -1122,6 +1135,9 @@ impl Follower {
 						break;
 					}
 				},
+				// The catalog's broadcast ended after its catalog, and nothing reads this sibling
+				// any more.
+				_ = catalog.closed(), if following && !listening => following = false,
 			}
 		}
 
@@ -3033,6 +3049,7 @@ mod session_tests {
 		let reader = super::Reader {
 			playback: super::Playback {
 				element: element.downgrade(),
+				broadcast: instance.clone(),
 				pads,
 				timeline: Arc::default(),
 				shutdown,
@@ -3400,6 +3417,31 @@ mod session_tests {
 			recorder.seen()
 		);
 		drop(old);
+	}
+
+	/// A catalog finished while its broadcast stays up still follows its siblings: the next
+	/// instance plays on the same pad.
+	#[test]
+	fn a_sibling_is_followed_past_its_catalogs_close() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let mut room = referencing(&origin, None);
+		let session = follow(&element, &origin);
+
+		let mut first = Publisher::sibling(&origin, Default::default());
+		let pad = recorder.written(&mut first, 1);
+		room.catalog.finish().unwrap();
+		let mut follow = origin.consume().follow("cam").unwrap();
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		drop(first);
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::End(_)));
+
+		let mut second = Publisher::sibling(&origin, Default::default());
+		assert_eq!(recorder.written(&mut second, 2), pad, "the return moved to another pad");
+		stop(session);
+		recorder.assert_one_pad_held();
 	}
 
 	/// A sibling track finishing while its instance stays up idles the pad, and the instance that
