@@ -1062,8 +1062,17 @@ impl Rendition {
 	async fn track(
 		&self,
 		binding: &moq_mux::Binding,
-	) -> Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)> {
-		kio::wait(|waiter| self.media.poll_track(binding, waiter)).await
+	) -> Result<Option<(moq_net::broadcast::Consumer, moq_net::track::Consumer)>> {
+		let track = kio::wait(|waiter| self.media.poll_track(binding, waiter)).await;
+		// The bind can be refused while this read waits. Preserve that exact instance's
+		// authorization error; other failed or disconnected references stay missing.
+		if track.is_none()
+			&& let Poll::Ready(Err(err @ moq_mux::Error::Moq(moq_net::Error::Unauthorized))) =
+				binding.poll_broadcast(&kio::Waiter::noop())
+		{
+			return Err(err.into());
+		}
+		Ok(track)
 	}
 
 	/// The media track's name in its broadcast, which can differ from the rendition's ID.
@@ -1137,7 +1146,7 @@ impl Rendition {
 				let Some(sequence) = latest.or_else(|| self.live.latest_keyframe_group(&reference)) else {
 					return Ok(None);
 				};
-				let Some((broadcast, track)) = self.track(&binding).await else {
+				let Some((broadcast, track)) = self.track(&binding).await? else {
 					return Ok(None);
 				};
 				let Ok(mut group) = fetch(&track, hang::timeline::Position::group(sequence), None, &broadcast).await?
@@ -1199,7 +1208,7 @@ impl Rendition {
 			return Ok(None);
 		}
 
-		let Some((broadcast, track)) = self.track(&binding).await else {
+		let Some((broadcast, track)) = self.track(&binding).await? else {
 			return Ok(None);
 		};
 
@@ -1478,6 +1487,42 @@ mod tests {
 		assert!(matches!(
 			media.refusal(),
 			Some(crate::Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized)))
+		));
+	}
+
+	#[tokio::test]
+	async fn a_pending_segment_preserves_a_later_authorization_refusal() {
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = origin.create_broadcast("room/live").unwrap();
+		let dynamic = origin.dynamic_route("room/secret", Default::default()).unwrap();
+		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
+		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
+		config.broadcast = Some(moq_net::path::Relative::new("./secret").to_owned());
+		let rendition = Rendition::video("video".into(), &config, &source, Archive::default(), None).unwrap();
+		let request = dynamic.requested_broadcast().await.unwrap();
+		let row = segments::Row {
+			index: 0,
+			segment: 0,
+			period: moq_net::Timestamp::ZERO,
+			reference: Arc::new((Kind::Video, "video".into(), "video".into())),
+			frames: hang::timeline::Position::group(0)..hang::timeline::Position::group(1),
+			keyframe: true,
+			duration: Duration::from_secs(1),
+			pts: moq_net::Timestamp::ZERO,
+			end: Duration::from_secs(1),
+			discontinuity: 0,
+		};
+		let segment = rendition.fetch(&row);
+		tokio::pin!(segment);
+		tokio::select! {
+			biased;
+			_ = &mut segment => panic!("the reference request has not been answered"),
+			_ = std::future::ready(()) => {}
+		}
+		request.reject(moq_net::Error::Unauthorized);
+		assert!(matches!(
+			segment.await,
+			Err(crate::Error::Mux(moq_mux::Error::Moq(moq_net::Error::Unauthorized)))
 		));
 	}
 
