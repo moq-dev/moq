@@ -611,7 +611,7 @@ export class Publisher {
 	 * answer then, or none once the request ended.
 	 *
 	 * A paused subscription holds nothing upstream, so only its priority and max age change
-	 * while it waits.
+	 * while it waits. It still ends once our grant stops covering it, as a forwarding one does.
 	 */
 	async #pausedSubscribe(
 		msg: Subscribe,
@@ -620,7 +620,26 @@ export class Publisher {
 	): Promise<{ requestId?: bigint } | undefined> {
 		const version = this.#session.version;
 		for (;;) {
-			const framed = await request.next();
+			const revoked = new Once<true>();
+			const gate = this.#gate.watch(msg.trackNamespace, () => revoked.set(true));
+			if (gate.revoked()) revoked.set(true);
+			let framed: Framed | undefined | true;
+			try {
+				framed = await race([request.next(), revoked]);
+			} finally {
+				gate.dispose();
+			}
+			if (framed === true) {
+				const done = new PublishDone({
+					requestId: msg.requestId,
+					statusCode: PublishDoneStatus.UNAUTHORIZED,
+					streamCount: BigInt(streams.opened),
+					reasonPhrase: "not granted",
+				});
+				await Message.write(request.writer, PublishDone.id, done, version);
+				request.close();
+				return undefined;
+			}
 			if (framed === undefined) {
 				await request.ended;
 				return undefined;

@@ -21,7 +21,7 @@ import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { toWire } from "./priority.ts";
-import { PublishDone } from "./publish.ts";
+import { PublishDone, PublishDoneStatus } from "./publish.ts";
 import {
 	PublishNamespace,
 	PublishNamespaceCancel,
@@ -2619,7 +2619,10 @@ const ALPNS: Record<IetfVersion, string> = {
  * The uni reader is taken up front: a group stream opened before the test asks for one still
  * queues, but taking the reader late races the publisher rather than the test.
  */
-function fixture(version: IetfVersion = V20): {
+function fixture(
+	version: IetfVersion = V20,
+	grant?: Signal<Grant | undefined>,
+): {
 	pair: ReturnType<typeof createMockTransportPair>;
 	pub: Publisher;
 	broadcast: BroadcastProducer;
@@ -2629,7 +2632,7 @@ function fixture(version: IetfVersion = V20): {
 } {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const session = new NativeSession(pair.server, version, false);
-	const { pub, origin } = publisher(pair.server, { session });
+	const { pub, origin } = publisher(pair.server, { session, grant });
 	const broadcast = publish(origin, Path.from("test"));
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
 		ReadableStream<Uint8Array>
@@ -3980,6 +3983,32 @@ test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async 
 			track.close();
 			fx.close();
 		}
+	}
+});
+
+test("a paused SUBSCRIBE ends once its grant is revoked", async () => {
+	const grant = new Signal<Grant | undefined>(undefined);
+	const fx = fixture(V20, grant);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+			filter: { kind: "nextObject" },
+			forward: false,
+		}),
+	);
+	try {
+		grant.set({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		expect((await PublishDone.decode(client.reader, V20)).statusCode).toBe(PublishDoneStatus.UNAUTHORIZED);
+	} finally {
+		client.close();
+		track.close();
+		fx.close();
 	}
 });
 
