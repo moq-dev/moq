@@ -109,6 +109,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [One audio ring](/quest/m1/watch-audio-one-ring.md) - the SharedArrayBuffer audio ring and the isolated test axis are gone; playback uses the postMessage ring only
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
 - [Buffered backpressure timestamps](/quest/m1/audio-backpressure-timestamps.md) - buffered audio keeps holding frames past 2^31 microseconds instead of decoding ahead and dropping audio
+- [Play keeps its audio output](/quest/m1/play-audio-handover.md) - `moq play` switches to a replacement run without reopening its audio output, so native-play holds its derived bound
 - [Audio playout memory](/quest/m1/audio-playout-memory.md) - a catalog's advertised jitter or delay cannot size decoded PCM; the lookahead stays encoded
 - [AAC alias classification](/quest/m1/aac-he-alias.md) - every accepted AAC spelling gets the right frame duration from one classification
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles

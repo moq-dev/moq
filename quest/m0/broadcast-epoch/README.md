@@ -109,8 +109,12 @@ show a new run sooner than its keyframe cadence and playback delay allow, and
 the hold is a deliberate routing setting, so neither is a stall; the gate
 exists to exclude waiting on the old session's idle timeout. Each gate enforces
 the bound derived from its own configuration rather than a hang watchdog.
-The IETF22 viewer failures that bound exposed are fixed in the same PR, which
-stays draft until they are: they are what the gate exists to catch.
+That PR fixed the IETF22 viewer's group recovery and its object-stream error.
+The gates landed with two problems left open (maintainer): a fallback session
+drop and audio stall that did not reproduce, tracked in
+[IETF22 fallback](/quest/m1/test-flakes-2/ietf22-fallback.md), and the native
+player reopening its audio output on each switch, which glitches under load,
+tracked in [Play keeps its audio output](/quest/m1/play-audio-handover.md).
 
 When the release cut carries stats epochs, drop
 [#4810](https://github.com/moq-dev/moq/pull/4810)'s wall-clock group seed and
