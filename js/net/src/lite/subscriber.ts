@@ -1621,6 +1621,8 @@ export class Subscriber {
 				scale = timescale.peek();
 			}
 
+			// This subscriber never asks for an end frame, so no stream may stop at one.
+			if (group.frameEnd !== undefined) throw new ProtocolViolation("unrequested group frame end");
 			const compress = entry.compress;
 			if (compress && group.frameStart !== 0)
 				throw new StreamError(StreamCode.TooFarBehind, { message: "compressed group lacks its prefix" });

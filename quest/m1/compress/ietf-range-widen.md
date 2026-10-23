@@ -55,4 +55,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - carries a live range change upstream on REQUEST_UPDATE
-- [Bounded tails](/quest/m1/subscribe-ranges/bounded-tail.md) - a copy cut at a request's end must accept its tail before a warm prefix can be extended
+- [IETF bounded tails](/quest/m1/subscribe-ranges/bounded-tail-ietf.md) - a moq-transport copy cut at a request's end must accept its tail before a warm prefix can be extended

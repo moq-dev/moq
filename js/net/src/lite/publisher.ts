@@ -48,6 +48,7 @@ import {
 	hasAnnounceRestart,
 	hasCompression,
 	hasDatagrams,
+	hasFrameEnd,
 	hasLargest,
 	hasProbeRtt,
 	hasRouteCost,
@@ -150,6 +151,12 @@ interface RunGroup {
 
 	/** Last frame to send (inclusive), or undefined for the rest of the group. */
 	end?: number;
+
+	/** Where the stream says it stops, so its FIN there ends only the stream (lite-07). */
+	frameEnd?: number;
+
+	/** The group's reader already sits at {@link start}, continuing an earlier stream. */
+	continued?: boolean;
 }
 
 /**
@@ -1191,6 +1198,62 @@ export class Publisher {
 		const groups = new Set<Promise<void>>();
 		const drops = new Signal(0);
 		const pendingDrops: SubscribeDrop[] = [];
+		// The group whose stream stops at the end frame on lite-07, kept open so a later end
+		// can continue it: `stopped` settles with whether the stream stopped there.
+		let capped: { group: group.Consumer; end: number; stopped: Promise<boolean> } | undefined;
+
+		// Open a stream for a group and serve it. The FIN waits for every stream to finish or
+		// reset, including one that has not opened yet.
+		const serve = (options: RunGroup, after = Promise.resolve(true)) => {
+			const { group } = options;
+			if (options.end !== undefined && hasFrameEnd(this.version)) options.frameEnd = options.end + 1;
+			const stopped = Promise.withResolvers<boolean>();
+			if (options.frameEnd !== undefined) {
+				// Only the end group is capped, so a cap moved to another group frees the old one.
+				const old = capped;
+				if (old && old.group !== group) void old.stopped.then(() => old.group.close());
+				capped = { group, end: options.frameEnd, stopped: stopped.promise };
+			}
+			const task = after.then(async (ready) => {
+				if (!ready) return stopped.resolve(false);
+				const writer = await this.#openGroup(options);
+				const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
+				stopped.resolve(failed === "capped");
+				if (emitRange && failed instanceof Error) {
+					pendingDrops.push(SubscribeDrop.given(group.sequence, group.sequence, failed, this.version));
+					drops.update((revision) => revision + 1);
+				}
+			});
+			groups.add(task);
+			void task.finally(() => groups.delete(task));
+		};
+
+		// Serve the rest of the capped group once the end moved past where its stream
+		// stopped, after that stream let go of the group's reader.
+		const continueCapped = () => {
+			const held = capped;
+			if (!held) return;
+			const sequence = held.group.sequence;
+			if (bounds.startGroup !== undefined && bounds.startGroup > sequence) return;
+			if (bounds.endGroup !== undefined && bounds.endGroup < sequence) return;
+			const range = frameRange(bounds, sequence);
+			if (range.end !== undefined && range.end + 1 <= held.end) return;
+			capped = undefined;
+			serve(
+				{
+					sub,
+					group: held.group,
+					stamp,
+					compress,
+					priority,
+					unsubscribed,
+					start: Math.max(range.start, held.end),
+					end: range.end,
+					continued: true,
+				},
+				held.stopped,
+			);
+		};
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -1259,6 +1322,7 @@ export class Publisher {
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
+							continueCapped();
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
 							// task boundary lets the decoder finish whatever the transport already
@@ -1404,7 +1468,7 @@ export class Publisher {
 				}
 				if (served) insertRun(served, group.sequence, group.sequence + 1);
 
-				const options: RunGroup = {
+				serve({
 					sub,
 					group,
 					stamp,
@@ -1413,22 +1477,13 @@ export class Publisher {
 					unsubscribed,
 					start: range.start,
 					end: range.end,
-				};
-				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
-				const opened = this.#openGroup(options);
-				const task = opened.then(async (writer) => {
-					const failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
-					if (emitRange && failed instanceof Error) {
-						pendingDrops.push(SubscribeDrop.given(group.sequence, group.sequence, failed, this.version));
-						drops.update((revision) => revision + 1);
-					}
 				});
-				groups.add(task);
-				void task.finally(() => groups.delete(task));
 			}
 		} finally {
 			if (!finished) unsubscribe();
 			priority.close();
+			const left = capped;
+			if (left) void left.stopped.then(() => left.group.close());
 		}
 	}
 
@@ -1762,11 +1817,14 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #serveGroup(stream: Writer, options: RunGroup) {
-		const { sub, group, stamp, compress, priority, start: startFrame, end: endFrame } = options;
+	async #serveGroup(stream: Writer, options: RunGroup): Promise<Error | "capped" | undefined> {
+		const { sub, group, stamp, compress, priority, start: startFrame, end: endFrame, frameEnd } = options;
 		// This model holds whole groups, so frame `startFrame` is always reachable unless
 		// the group ends first. Declaring it up front keeps the stream self-describing.
-		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
+		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame, frameEnd });
+		// Whether the stream stopped at its Frame End, leaving the group's reader open for the
+		// stream continuing it.
+		let capped = false;
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
 		// a finished group's stream being ranked.
 		try {
@@ -1782,7 +1840,7 @@ export class Publisher {
 			let prevTs = 0n;
 			// Whether the cursor ever reached the requested start, which decides how the
 			// end of the group is read below.
-			let reached = startFrame === 0;
+			let reached = startFrame === 0 || options.continued === true;
 
 			for (;;) {
 				const read = await race([hooks.readGroupFrame(group, undefined, compress), stream.closed]);
@@ -1801,7 +1859,6 @@ export class Publisher {
 					// Frames below the requested start were excluded, and the receiver
 					// numbers what it gets from `startFrame`.
 					if (read.sequence < startFrame) continue;
-					if (endFrame !== undefined && read.sequence > endFrame) break;
 
 					if (stamp !== undefined) {
 						// Convert each frame to the track's wire timescale.
@@ -1818,15 +1875,20 @@ export class Publisher {
 				} finally {
 					read.complete();
 				}
+				// Stop at the end frame rather than wait on the frame after it.
+				if (endFrame !== undefined && read.sequence >= endFrame) {
+					capped = frameEnd !== undefined;
+					break;
+				}
 			}
 
 			stream.close();
-			group.close();
+			if (!capped) group.close();
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
 			// Its bytes still hold the connection until acknowledged, so a group gone stale
 			// meanwhile is reset like one still serving, as the Rust `GroupServe` does.
 			await hooks.guardGroup(group, () => stream.closed);
-			return undefined;
+			return capped ? "capped" : undefined;
 		} catch (err: unknown) {
 			const e = error(err);
 			stream.reset(e);

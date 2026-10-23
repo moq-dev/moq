@@ -257,6 +257,23 @@ export function hasFrameBounds(version: Version): boolean {
 	}
 }
 
+/** Whether GROUP carries `Frame End`, so a stream stopped at a subscription's end frame
+ * does not end its group. Added in lite-07. */
+export function hasFrameEnd(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`. Added in
  * lite-07; an earlier subscription is served newest first. */
 export function hasOrder(version: Version): boolean {

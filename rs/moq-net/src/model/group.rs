@@ -205,6 +205,11 @@ pub(super) struct GroupState {
 	// Whether an adopted head (see [`Handle::adopt_head`]) begins at the group's first
 	// object, for a wire header that arrives after it.
 	adopted: Option<bool>,
+
+	// The writer stopped at a request's end without ending the group (see
+	// [`Producer::suspend`]): the group holds the write permission until
+	// [`Handle::resume`] hands it to the stream continuing it.
+	suspended: bool,
 }
 
 /// The frames a copy of a group holds, from where it starts, which a successor copy of
@@ -998,7 +1003,7 @@ struct Alive {
 impl Drop for Producer {
 	fn drop(&mut self) {
 		if let Ok(state) = self.handle.state.write() {
-			if state.fin.is_some() || state.abort.is_some() {
+			if state.fin.is_some() || state.abort.is_some() || state.suspended {
 				return;
 			}
 			tracing::warn!(
@@ -1632,6 +1637,22 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Stop writing without ending the group, because the stream writing it stopped at a
+	/// request's end rather than the group's. The group keeps the write permission, so
+	/// readers wait past the last frame until [`Handle::resume`] hands it to the stream
+	/// continuing the group, or the group is aborted.
+	#[cfg(feature = "async")]
+	// private: capability gap
+	// A custom subscriber cannot continue a copy cut at a request's end until resuming goes public.
+	pub(crate) fn suspend(self) -> Result<()> {
+		let mut state = modify(&self.handle.state)?;
+		debug_assert!(state.partial.is_none(), "a frame is still open");
+		state.suspended = true;
+		drop(state);
+		// Dropping the writer now leaves the group open.
+		Ok(())
+	}
+
 	/// Abort the group with the given error.
 	///
 	/// Consumes the writer. Drops the cached frames so a stale [`Consumer`] can't pin
@@ -1962,9 +1983,69 @@ impl Handle {
 		(state.committed > state.offset).then_some(state.committed)
 	}
 
+	/// Take the write permission a [`Producer::suspend`] left with the group, for a stream
+	/// continuing it from frame `at`. `None` unless the group is suspended and `at` falls
+	/// within what it holds; the caller discards the frames it replays below
+	/// [`Self::frame_count`].
+	#[cfg(feature = "async")]
+	pub(super) fn resume(&self, at: u64, stats: stats::Meter) -> Option<Producer> {
+		let mut state = self.state.write().ok()?;
+		let held = state.offset as u64..=state.committed as u64;
+		if !state.suspended || state.abort.is_some() || state.fin.is_some() || !held.contains(&at) {
+			return None;
+		}
+		state.suspended = false;
+		drop(state);
+		Some(Producer {
+			handle: self.clone(),
+			stats,
+		})
+	}
+
+	/// Ready once a writer of the group starting at or below `at` is no longer writing it:
+	/// it suspended, finished, or aborted. `None` when no such writer exists, so a stream
+	/// continuing the group from `at` need not wait for one.
+	#[cfg(feature = "async")]
+	pub(super) fn poll_writer(&self, at: u64, waiter: &kio::Waiter) -> Option<Poll<()>> {
+		let res = self.state.poll(waiter, |state| {
+			if state.suspended || state.fin.is_some() || state.abort.is_some() || state.offset as u64 > at {
+				Poll::Ready(())
+			} else {
+				Poll::Pending
+			}
+		});
+		match res {
+			Poll::Ready(_) => None,
+			Poll::Pending => Some(Poll::Pending),
+		}
+	}
+
+	/// Abort the group with `err` if it is still suspended, so nobody waits on a
+	/// continuation that will not come.
+	#[cfg(feature = "async")]
+	// private: capability gap
+	// A custom subscriber cannot continue a copy cut at a request's end until resuming goes public.
+	pub(crate) fn abort_suspended(&self, err: Error) {
+		if let Ok(state) = self.state.write()
+			&& state.suspended
+		{
+			self.commit_abort(state, err);
+		}
+	}
+
+	/// Whether the group waits on a stream continuing it; see [`Producer::suspend`].
+	#[cfg(feature = "async")]
+	// private: capability gap
+	// A custom subscriber cannot continue a copy cut at a request's end until resuming goes public.
+	pub(crate) fn is_suspended(&self) -> bool {
+		self.state.read().suspended
+	}
+
 	/// Whether `other` is a handle to this same group.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn is_clone(&self, other: &Self) -> bool {
+	// private: capability gap
+	// A custom subscriber cannot continue a copy cut at a request's end until resuming goes public.
+	pub(crate) fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
 
@@ -2878,6 +2959,14 @@ impl Consumer {
 	pub(crate) fn end_at(&mut self, end: impl Into<Cap>) {
 		let end = end.into().exclusive();
 		self.cursor.end = end.map(|end| usize::try_from(end).unwrap_or(usize::MAX));
+	}
+
+	/// The group's total frame count once it finished, `None` before.
+	#[cfg(feature = "async")]
+	// private: capability gap
+	// A custom publisher cannot label a stream capped at a request's end until resuming goes public.
+	pub(crate) fn final_count(&self) -> Option<u64> {
+		self.cursor.state.read().fin.map(|fin| fin as u64)
 	}
 
 	/// The number of frames written so far (completed plus any in-flight), independent of

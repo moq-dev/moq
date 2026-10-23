@@ -785,7 +785,7 @@ Receiving padding does not change session or subscription state.
 This allows bandwidth probes to measure delivery without requiring a media subscription.
 Versions before lite-07 do not define this stream type and reset only the stream, as required for unknown stream types.
 
-### Group
+### Group {#group-stream}
 A publisher creates Group Streams in response to a Subscribe Stream.
 
 A Group Stream MUST start with a GROUP message and MAY be followed by any number of FRAME messages.
@@ -795,7 +795,8 @@ A frame MAY contain an empty payload, potentially indicating a gap in the group.
 The GROUP message's `Frame Start` gives the index of the first FRAME on the stream, so a stream carrying only part of a Group is self-describing.
 It is redundant with the subscription's own `Frame Start` in the steady state, and carried anyway because a SUBSCRIBE_UPDATE that moves the bound races the Group Streams already in flight: the two travel on different streams with no ordering between them, so the receiver would otherwise have to guess which bound a given Group Stream was opened under.
 
-A publisher MUST NOT send two Group Streams for the same Group Sequence on one subscription.
+A publisher MUST NOT send two Group Streams for the same Group Sequence on one subscription, except to continue one that stopped at its `Frame End`.
+When a SUBSCRIBE_UPDATE moves the end past such a Group, the publisher sends the rest on a new Group Stream whose `Frame Start` is the earlier stream's `Frame End`.
 A subscriber assembling a Group from more than one publisher does so across separate subscriptions, and is responsible for concatenating the runs in index order and for ignoring any frame it has already received.
 
 Both the publisher and subscriber MAY reset the stream at any time.
@@ -1293,6 +1294,7 @@ SUBSCRIBE_UPDATE Message {
 
 See [SUBSCRIBE](#subscribe) for information about each field.
 Moving `Frame Start` forward within a group that is already being delivered does not retract frames the publisher has already sent; like `Group Start`, it only bounds what the publisher sends from here on.
+Moving the end past a Group whose stream stopped at its `Frame End` sends the rest of that Group (see [Group](#group-stream)).
 
 
 **Wanted Group**:
@@ -1732,6 +1734,7 @@ GROUP Message {
   Subscribe ID (i)
   Group Sequence (i)
   Frame Start (i)
+  Frame End (i)
 }
 ~~~
 
@@ -1749,6 +1752,12 @@ The index of the first FRAME message on this stream within the group (see [Posit
 A plain absolute index; 0 means the stream carries the group from its beginning, which is the common case.
 A non-zero value means the leading frames are not on this stream, either because the subscription started partway into this group or because the publisher only holds part of it.
 The subscriber MUST NOT assume it will receive the missing frames on another stream; they are a gap unless a separate subscription or FETCH covers them.
+
+**Frame End**:
+The subscription's end frame this stream stops at, encoded as the index + 1 like SUBSCRIBE's `Frame End`, or 0 when the stream runs to the end of the Group.
+A FIN before `Frame End`, or any FIN when it is 0, ends the Group.
+A FIN at `Frame End` ends only the stream: the Group may have more frames, which a later Group Stream delivers if the subscription's end moves past them (see [Group](#group-stream)).
+A non-zero `Frame End` at or below `Frame Start` is malformed, as is a FRAME at or past it.
 
 
 ## FRAME
@@ -1789,6 +1798,7 @@ The `Message Length` describes the payload size on the wire.
 ## moq-lite-07
 
 - Allow a negotiated extension to preserve timestamps with explicitly unchecked provenance.
+- Added `Frame End` to GROUP: a FIN at it ends only the stream, and a later Group Stream continues the Group once the subscription's end moves past it.
 
 - Added Padding Stream (0x2), read and discarded incrementally by either endpoint.
 

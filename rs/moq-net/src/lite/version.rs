@@ -148,6 +148,15 @@ impl Version {
 		)
 	}
 
+	/// Whether GROUP carries `Frame End`, so a stream stopped at a subscription's end frame
+	/// does not end its group. Added in lite-07.
+	pub(crate) fn has_frame_end(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`.
 	/// Added in lite-07; an earlier subscription is served newest first.
 	pub(crate) fn has_order(self) -> bool {

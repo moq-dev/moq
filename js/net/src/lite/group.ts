@@ -5,7 +5,7 @@ import { hooks } from "../internal.ts";
 import type { Cursor, Reader, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, type Version } from "./version.ts";
+import { hasFrameBounds, hasFrameEnd, type Version } from "./version.ts";
 
 export class Group {
 	subscribe: bigint;
@@ -21,18 +21,28 @@ export class Group {
 	 */
 	frameStart: number;
 
+	/**
+	 * The exclusive frame this stream stops at because the subscription ends there, or
+	 * undefined when it runs to the end of the group. A FIN at it ends only the stream, so
+	 * a later stream may continue the group. Lite-07+.
+	 */
+	frameEnd?: number;
+
 	constructor({
 		subscribe,
 		sequence,
 		frameStart = 0,
+		frameEnd,
 	}: {
 		subscribe: bigint;
 		sequence: number;
 		frameStart?: number;
+		frameEnd?: number;
 	}) {
 		this.subscribe = subscribe;
 		this.sequence = sequence;
 		this.frameStart = frameStart;
+		this.frameEnd = frameEnd;
 	}
 
 	async #encode(w: Writer, version: Version) {
@@ -44,13 +54,21 @@ export class Group {
 			// The peer would number the frames from 0 and silently misalign the group.
 			throw new Error("frame offsets not supported for this version");
 		}
+		if (hasFrameEnd(version)) {
+			await w.u53(this.frameEnd ?? 0);
+		} else if (this.frameEnd !== undefined) {
+			// The peer would read the FIN as the group's end.
+			throw new Error("frame end not supported for this version");
+		}
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Group> {
 		const subscribe = await r.u62();
 		const sequence = await r.u53();
 		const frameStart = hasFrameBounds(version) ? await r.u53() : 0;
-		return new Group({ subscribe, sequence, frameStart });
+		const frameEnd = hasFrameEnd(version) ? await r.u53() : 0;
+		if (frameEnd !== 0 && frameEnd <= frameStart) throw new Error("frame end at or below frame start");
+		return new Group({ subscribe, sequence, frameStart, frameEnd: frameEnd === 0 ? undefined : frameEnd });
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {

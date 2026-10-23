@@ -9,6 +9,7 @@
 mod announce_covering_route;
 mod announce_to_serve;
 mod auth;
+mod bounded_tail;
 mod broadcast_close;
 mod catalog_acquisition;
 mod catalog_churn;

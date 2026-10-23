@@ -89,6 +89,7 @@ fn lite_group(version: lite::Version, frames: impl IntoIterator<Item = (Option<i
 		subscribe: 5,
 		sequence: 1 << 20,
 		frame_start: 200,
+		frame_end: None,
 	};
 	header.encode(w, version).unwrap();
 	for (delta, size) in frames {

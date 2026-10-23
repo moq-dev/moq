@@ -482,6 +482,7 @@ impl LiteSample {
 				subscribe: 3,
 				sequence: 1_234,
 				frame_start: 0,
+				frame_end: None,
 			}
 			.encode(w, version)
 			.unwrap(),
@@ -717,6 +718,7 @@ impl Default for Messages {
 				subscribe: 7,
 				sequence: 123_456,
 				frame_start: 0,
+				frame_end: None,
 			},
 			ietf_subscribe: ietf::Subscribe {
 				max_age: None,

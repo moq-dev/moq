@@ -46,6 +46,11 @@ impl Group {
 		}
 	}
 
+	/// Whether the writer is here rather than with an in-flight frame.
+	pub fn has_writer(&self) -> bool {
+		self.writer.is_some()
+	}
+
 	/// Hand ownership to the next receive stage without closing the group.
 	pub fn into_inner(mut self) -> group::Producer {
 		self.armed = false;

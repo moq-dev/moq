@@ -100,7 +100,8 @@ every sequence delivered or dropped.
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - range FETCH upstream per missing run, and non-blocking FETCH served downstream
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity
-- [Bounded tails](/quest/m1/subscribe-ranges/bounded-tail.md) - a copy cut at a request's mid-group end accepts the rest of its group instead of rejecting it as `Duplicate`
+- [Lite-06 bounded tails](/quest/m1/subscribe-ranges/bounded-tail-lite06.md) - a lite-06 copy cut at a request's mid-group end accepts the rest of its group, correlating each end with its request
+- [IETF bounded tails](/quest/m1/subscribe-ranges/bounded-tail-ietf.md) - a moq-transport copy cut at a request's mid-group end accepts the rest of its group, using END_OF_GROUP
 
 ## Related
 

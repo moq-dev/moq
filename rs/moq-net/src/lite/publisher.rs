@@ -8,7 +8,7 @@ use std::{
 	ops::{Bound, ControlFlow, Range},
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll, ready},
 	time::Duration,
@@ -3765,6 +3765,7 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 			sequence,
 			frame_start,
 			false,
+			None,
 			Rank::Queue(priority),
 			group,
 		));
@@ -3813,6 +3814,39 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	opening: Option<GroupServe<S>>,
 	/// The groups with a stream, serving or awaiting the acknowledgement of their FIN.
 	children: kio::Tasks<GroupServe<S>>,
+	/// The group whose last stream stops at the end frame, so a later end can continue it
+	/// (lite-07).
+	capped: Option<Capped>,
+	/// The rest of `capped`, waiting to open once the end moved past it and its stream let go.
+	tail: Option<(group::Consumer, Released)>,
+}
+
+/// A group whose stream stops at the subscription's end frame.
+struct Capped {
+	group: group::Consumer,
+	/// The exclusive frame the stream stops at.
+	end: u64,
+	released: Released,
+}
+
+/// Set once a capped stream wrote its FIN or failed, so the stream continuing its group opens
+/// only after it: the subscriber appends a continuation once the stream before it let go.
+#[derive(Clone, Default)]
+struct Released(Arc<AtomicBool>);
+
+impl Released {
+	fn is_set(&self) -> bool {
+		self.0.load(Ordering::Acquire)
+	}
+}
+
+/// Sets its [`Released`] when dropped.
+struct Release(Released);
+
+impl Drop for Release {
+	fn drop(&mut self) {
+		self.0.0.store(true, Ordering::Release);
+	}
 }
 
 impl<S: crate::transport::poll::Session> TrackRun<S> {
@@ -3841,6 +3875,8 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			datagrams,
 			opening: None,
 			children: kio::Tasks::new(),
+			capped: None,
+			tail: None,
 		}
 	}
 
@@ -3924,6 +3960,38 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			.end_at(upd.end_group.map_or(Bound::Unbounded, Bound::Included));
 		self.start_frame = bounds.start_frame();
 		self.end_frame = bounds.end_frame();
+		self.continue_capped(&upd);
+	}
+
+	/// Queue the rest of the group a stream stopped at the end frame, once the end moved
+	/// past where it stopped. The continuation is capped again by the new end.
+	fn continue_capped(&mut self, upd: &lite::SubscribeUpdate) {
+		let Some(capped) = self.capped.take() else {
+			return;
+		};
+		let sequence = capped.group.sequence;
+		let stopped = capped.end;
+		// A floor raised past the group no longer wants it.
+		if upd.start_group.is_some_and(|start| start > sequence) {
+			return;
+		}
+		let end = match self.end_frame {
+			Some((end, last)) if end == sequence => Some(last.saturating_add(1)),
+			_ => None,
+		};
+		let within = upd.end_group.is_none_or(|end| end >= sequence);
+		if !within || end.is_some_and(|end| end <= stopped) {
+			self.capped = Some(capped);
+			return;
+		}
+		let mut tail = capped.group;
+		let from = match self.start_frame {
+			Some((start, frame)) if start == sequence => frame.max(stopped),
+			_ => stopped,
+		};
+		tail.start_at(from);
+		tail.end_at(end.map_or(Bound::Unbounded, Bound::Excluded));
+		self.tail = Some((tail, capped.released));
 	}
 
 	/// Serve until the live edge reaches the track's boundary.
@@ -4015,6 +4083,16 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				largest: Some(largest),
 			}))?;
 			self.track.raise_start_to(start.group);
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
+		}
+
+		// A continuation goes out before the cursor's next group, once the stream before it
+		// let go. That stream is one of the children polled above, so its release wakes this.
+		if self.opening.is_none()
+			&& self.tail.as_ref().is_some_and(|(_, released)| released.is_set())
+			&& let Some((tail, _)) = self.tail.take()
+		{
+			self.serve(tail);
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
@@ -4248,6 +4326,22 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		let frame_start = group.index();
 		// The stream stops at the end frame, before the group may end.
 		let capped = self.end_frame.is_some_and(|(end, _)| end == sequence);
+		// Lite-07 says where, so its FIN there ends only the stream and a later end can
+		// continue the group. A group already known to end by then needs neither.
+		let frame_end = self
+			.end_frame
+			.filter(|(end, _)| *end == sequence && self.ctx.version.has_frame_end())
+			.map(|(_, last)| last.saturating_add(1))
+			.filter(|end| group.final_count().is_none_or(|fin| fin > *end));
+		let frame_end = frame_end.map(|end| {
+			let released = Released::default();
+			self.capped = Some(Capped {
+				group: group.clone(),
+				end,
+				released: released.clone(),
+			});
+			(end, Release(released))
+		});
 		self.mark_served(sequence);
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence, "serving group");
 
@@ -4272,6 +4366,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			sequence,
 			frame_start,
 			capped,
+			frame_end,
 			rank,
 			group,
 		));
@@ -4296,6 +4391,9 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	frame_start: u64,
 	/// The stream stops at a subscription's end frame, so its FIN cannot end the group.
 	capped: bool,
+	/// Where `capped` stops, on a version whose GROUP says so, and what lets the stream
+	/// continuing the group open once this one wrote its FIN or failed.
+	frame_end: Option<(u64, Release)>,
 	// Lite05+ delta-encodes per-frame timestamps within the group. The first
 	// frame's delta is absolute (against an implicit prev value of 0), every
 	// subsequent delta is signed against the previous frame.
@@ -4340,6 +4438,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		sequence: u64,
 		frame_start: u64,
 		capped: bool,
+		frame_end: Option<(u64, Release)>,
 		rank: Rank<GroupOf<S>>,
 		group: group::Consumer,
 	) -> Self {
@@ -4355,6 +4454,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			sequence,
 			frame_start,
 			capped,
+			frame_end,
 			prev_ts: 0,
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
@@ -4407,6 +4507,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			subscribe: self.ctx.id,
 			sequence: self.sequence,
 			frame_start: self.frame_start,
+			frame_end: self.frame_end.as_ref().map(|(end, _)| *end),
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
 		let records = header.and_then(|()| {
@@ -4648,7 +4749,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 							// The buffer drained before the final frame resolved, so the
 							// FIN follows the last byte.
 							match writer.finish() {
-								Ok(()) => self.state = GroupState::Closed { writer },
+								Ok(()) => {
+									self.frame_end = None;
+									self.state = GroupState::Closed { writer };
+								}
 								// The writer drops here: the Drop reset stands in for the
 								// abort, exactly like the old `finish()?`.
 								Err(err) => return Poll::Ready(Err(err)),

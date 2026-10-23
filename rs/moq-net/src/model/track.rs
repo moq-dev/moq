@@ -2713,6 +2713,46 @@ impl Producer {
 		Ok(group)
 	}
 
+	/// Take over the cached copy of `sequence` a stream stopped writing at a request's end
+	/// (see [`group::Producer::suspend`]), for a stream continuing it from `frame_start`.
+	///
+	/// Pending while a copy starting at or below `frame_start` is still being written: the
+	/// stream continuing a group can overtake the one stopping it. `None` when no suspended
+	/// copy can continue from there.
+	#[cfg(feature = "async")]
+	// private: capability gap
+	// A custom subscriber cannot continue a copy cut at a request's end until resuming goes public.
+	pub(crate) fn poll_resume_group(
+		&self,
+		sequence: u64,
+		frame_start: u64,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<group::Producer>> {
+		let copies: Vec<group::Handle> = match self.state.read().lookup.get(&sequence) {
+			Some(slot) => slot.copies().cloned().collect(),
+			None => return Poll::Ready(None),
+		};
+		let mut writing = false;
+		for copy in &copies {
+			if let Some(group) = copy.resume(frame_start, self.stats.meter()) {
+				return Poll::Ready(Some(group));
+			}
+			match copy.poll_writer(frame_start, waiter) {
+				Some(pending) => writing |= pending.is_pending(),
+				// It stopped since the first try.
+				None => {
+					if let Some(group) = copy.resume(frame_start, self.stats.meter()) {
+						return Poll::Ready(Some(group));
+					}
+				}
+			}
+		}
+		match writing {
+			true => Poll::Pending,
+			false => Poll::Ready(None),
+		}
+	}
+
 	/// Create a new group with the next sequence number: one past this producer's own writes.
 	///
 	/// [`Error::Duplicate`] if an earlier producer of the name in this broadcast already wrote

@@ -651,7 +651,8 @@ async function servedSubscription(
 ) {
 	const version = options.version ?? Version.DRAFT_05;
 	const frames = options.frames ?? ["hello"];
-	const pair = createMockTransportPair(version === Version.DRAFT_06 ? ALPN_06 : ALPN_05);
+	const alpn = { [Version.DRAFT_06]: ALPN_06, [Version.DRAFT_07]: ALPN_07_WIP }[version as number] ?? ALPN_05;
+	const pair = createMockTransportPair(alpn);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 
@@ -755,7 +756,7 @@ async function servedSubscription(
 				await reader.u62();
 				payloads.push(new TextDecoder().decode(await reader.read(await reader.u53())));
 			}
-			return { sequence: header.sequence, frameStart: header.frameStart, payloads };
+			return { sequence: header.sequence, frameStart: header.frameStart, frameEnd: header.frameEnd, payloads };
 		},
 		// The sequence alone, for tests that only care which groups reached the wire.
 		async servedSequence(): Promise<number | undefined> {
@@ -1331,6 +1332,34 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 	}
 });
 
+// A lite-07 stream stopped at the end frame says where, and each update moving the end past
+// it continues the group on a new stream from there.
+test("lite draft-07: a capped group continues once the end moves past it", async () => {
+	const sub = await servedSubscription({
+		version: Version.DRAFT_07,
+		startGroup: 0,
+		endGroup: 0,
+		endFrame: 1,
+		frames: ["a", "b", "c"],
+	});
+	try {
+		sub.serve(0);
+		expect(await sub.servedGroup()).toEqual({ sequence: 0, frameStart: 0, frameEnd: 2, payloads: ["a", "b"] });
+
+		await replayUpdate({ priority: 0, startGroup: 0, endGroup: 0, endFrame: 2 }).encode(
+			sub.client.writer,
+			Version.DRAFT_07,
+		);
+		expect(await sub.servedGroup()).toEqual({ sequence: 0, frameStart: 2, frameEnd: 3, payloads: ["c"] });
+
+		// The group ends where the last stream stopped, which only an empty continuation says.
+		await replayUpdate({ priority: 0, startGroup: 0 }).encode(sub.client.writer, Version.DRAFT_07);
+		expect(await sub.servedGroup()).toEqual({ sequence: 0, frameStart: 3, payloads: [] });
+	} finally {
+		await sub.close();
+	}
+});
+
 // The update and group are both ready when the write unblocks. Control is drained first, then
 // the group is popped and positioned synchronously under the new frame cap.
 test("lite draft-06: a queued frame update applies before the next group pop", async () => {
@@ -1838,7 +1867,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 });
 
 /** One group stream the publisher put on the wire. */
-type Served = { sequence: number; frameStart: number; payloads: string[] };
+type Served = { sequence: number; frameStart: number; frameEnd?: number; payloads: string[] };
 
 /**
  * Serves `groups` (frame payloads per group, keyed by sequence) under `bounds`, and
