@@ -4,7 +4,7 @@ import MoqFFI
 public enum Audio {
     /// The PCM layout (format, sample rate, channels) written to a `Producer`.
     public typealias EncoderInput = AudioEncoderInput
-    /// The codec side: codec, track name, rate, channels, bitrate, frame duration, and preset.
+    /// The codec side: codec, rate, channels, bitrate, frame duration, and preset.
     public typealias EncoderOutput = AudioEncoderOutput
     /// The PCM layout a `Consumer` delivers, how stale a group may get, and its playout delay.
     public typealias DecoderOutput = AudioDecoderOutput
