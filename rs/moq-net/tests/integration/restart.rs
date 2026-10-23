@@ -175,7 +175,7 @@ relay_chain_tests! {
 /// whose `video` track carries the worker's name.
 struct Worker {
 	origin: origin::Producer,
-	_claim: Rc<origin::Forward>,
+	_claim: Rc<origin::Dynamic>,
 	_outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
@@ -257,7 +257,7 @@ async fn prefix_pool_lite07() {
 /// A claim at `live` whose handler answers each request with a fresh output, kept so
 /// the test can write into it: `outputs[n]` answered the `n`th request.
 struct Claim {
-	dynamic: Rc<origin::Forward>,
+	dynamic: Rc<origin::Dynamic>,
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 

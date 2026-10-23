@@ -819,7 +819,7 @@ const POOL_HOP: u64 = 1_000;
 struct Pool {
 	producer: origin::Producer,
 	driver: origin::Driver,
-	_members: Vec<origin::Forward>,
+	_members: Vec<origin::Dynamic>,
 	_producers: Vec<broadcast::Producer>,
 	_consumers: Vec<broadcast::Consumer>,
 	cursors: Vec<announce::Consumer>,

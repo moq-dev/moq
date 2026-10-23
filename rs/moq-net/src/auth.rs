@@ -1387,7 +1387,7 @@ impl Drop for RequestVerdict {
 /// Ending a request grant never touches the session: only that one request ends.
 #[derive(Clone)]
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-pub(crate) struct RequestGrant(std::sync::Arc<std::sync::Mutex<Held>>);
+pub(crate) struct RequestGrant(std::sync::Arc<crate::sync::Mutex<Held>>);
 
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 struct Held {
@@ -1423,7 +1423,7 @@ impl RequestGrant {
 		}
 		let mut deadline = crate::time::Deadline::new(clock);
 		deadline.set(grant.expires);
-		Ok(Self(std::sync::Arc::new(std::sync::Mutex::new(Held {
+		Ok(Self(std::sync::Arc::new(crate::sync::Mutex::new(Held {
 			verdict,
 			grant,
 			deadline,
@@ -1435,7 +1435,7 @@ impl RequestGrant {
 		}))))
 	}
 
-	fn held(&self) -> std::sync::MutexGuard<'_, Held> {
+	fn held(&self) -> crate::sync::MutexGuard<'_, Held> {
 		self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 	}
 

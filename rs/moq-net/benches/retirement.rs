@@ -22,11 +22,7 @@ fn retirement(c: &mut Criterion) {
 							|| {
 								let (origin, driver) = origin::Producer::new(origin::Config::default());
 								let routes: Vec<_> = (0..routes)
-									.map(|i| {
-										origin
-											.dynamic_route(format!("route/{i}"), origin::Route::default())
-											.unwrap()
-									})
+									.map(|i| origin.dynamic(format!("route/{i}")).unwrap())
 									.collect();
 								let mut watches = Vec::new();
 								let mut controls = Vec::new();

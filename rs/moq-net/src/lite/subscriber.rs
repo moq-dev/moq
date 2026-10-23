@@ -5954,7 +5954,7 @@ impl Announced {
 	}
 
 	/// Attach a route, queued for its first serve pass.
-	fn attach(&mut self, path: PathOwned, route: crate::origin::Route, dynamic: crate::origin::Forward) {
+	fn attach(&mut self, path: PathOwned, route: crate::origin::Route, dynamic: crate::origin::Dynamic) {
 		let wake = crate::util::QueueWake::new(path.clone(), self.ready.clone());
 		let route = AnnouncedRoute::new(route, dynamic, wake);
 		route.waker.wake_by_ref();
@@ -6146,7 +6146,7 @@ struct AnnouncedRoute {
 	/// without recomputing the chain.
 	route: crate::origin::Route,
 	/// Dropping it retracts the route and rejects its queued requests.
-	dynamic: crate::origin::Forward,
+	dynamic: crate::origin::Dynamic,
 	/// Closes as the route goes, which closes every source it minted.
 	live: kio::Producer<()>,
 	/// Whether the GOAWAY drain already re-priced this route.
@@ -6161,7 +6161,7 @@ struct AnnouncedRoute {
 impl AnnouncedRoute {
 	fn new(
 		route: crate::origin::Route,
-		dynamic: crate::origin::Forward,
+		dynamic: crate::origin::Dynamic,
 		wake: Arc<crate::util::QueueWake<PathOwned>>,
 	) -> Self {
 		Self {

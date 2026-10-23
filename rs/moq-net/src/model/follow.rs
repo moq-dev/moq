@@ -564,8 +564,7 @@ mod tests {
 		exact.unannounce();
 		let served = broadcast::Info::new().produce();
 		let (again, ()) = futures::join!(available(&mut announced), async {
-			let request = moq_clock::timeout(Duration::from_secs(1), dynamic.requested_broadcast()).await;
-			request.expect("never asked").expect("the route closed").accept(&served);
+			requested(&dynamic).await.accept(&served);
 		});
 		assert!(again.is_clone(&first), "the route above did not carry the instance on");
 	}

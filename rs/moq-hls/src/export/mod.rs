@@ -3569,7 +3569,7 @@ mod tests {
 		media
 	}
 
-	async fn accept_sibling(server: &moq_net::origin::Forward, broadcast: &moq_net::broadcast::Producer) {
+	async fn accept_sibling(server: &moq_net::origin::Dynamic, broadcast: &moq_net::broadcast::Producer) {
 		let request = tokio::time::timeout(Duration::from_secs(5), server.requested_broadcast())
 			.await
 			.expect("the sibling path is requested")

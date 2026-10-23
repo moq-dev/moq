@@ -1340,7 +1340,7 @@ pub struct RequestValidity(crate::model::broadcast::RequestValidity);
 
 impl RequestValidity {
 	/// Watch which instance this route's peer selects for a path.
-	pub fn new(route: &crate::origin::Forward, path: &crate::Path) -> Self {
+	pub fn new(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
 		Self(crate::model::broadcast::RequestValidity::for_source(route, path))
 	}
 

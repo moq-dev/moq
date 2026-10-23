@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast";
 import * as Epoch from "./epoch";
 import { Route } from "./hop";
-import { Producer, type Request } from "./origin";
+import { Producer } from "./origin";
 import * as Path from "./path";
 import { wireOf } from "./wire";
 
@@ -341,12 +341,17 @@ test("a prepared answer cannot announce itself before publish", async () => {
 	origin.close();
 });
 
-test("an application claim's request cannot accept an arbitrary broadcast", () => {
-	const answer = (request: Request) => {
-		// @ts-expect-error An application claim answers through prepare and publish.
-		request.accept(new BroadcastProducer());
-	};
-	expect(answer).toBeDefined();
+test("an application claim refuses an arbitrary broadcast", async () => {
+	const origin = new Producer();
+	const claim = origin.dynamic(Path.from("room"));
+	const requests = claim.requested();
+	const request = origin.request(Path.from("room/alice"));
+	const pending = (await requests.next()).value;
+	if (!pending) throw new Error("expected a request");
+	expect(() => pending.accept(new BroadcastProducer())).toThrow("prepared and published");
+	request.close();
+	claim.close();
+	origin.close();
 });
 
 test("rejecting a prepared answer refuses the request and closes its broadcast", async () => {

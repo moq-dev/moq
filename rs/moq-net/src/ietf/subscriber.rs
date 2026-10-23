@@ -622,7 +622,7 @@ struct BroadcastState {
 	// The served route: dropping it (and the serve task's clone) retracts the
 	// route and rejects its queued requests. `None` while the session's limit holds
 	// it back, though the peer still advertises it.
-	dynamic: Option<crate::origin::Forward>,
+	dynamic: Option<crate::origin::Dynamic>,
 
 	// Bumped each time the route attaches, so a serve task outlived by a limit that
 	// took the route away and gave it back ends rather than serve beside the new one.

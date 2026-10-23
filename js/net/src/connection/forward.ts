@@ -9,7 +9,7 @@ import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { type Route, routesEqual } from "../hop.ts";
 import { coveringPrefixes } from "../internal.ts";
-import type { Forward, Producer as OriginProducer, RequestSlot } from "../origin.ts";
+import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import * as Path from "../path.ts";
 import { after } from "../util/timer.ts";
 import { wireOf } from "../wire.ts";
@@ -39,7 +39,7 @@ interface Interest {
  * request handing over to another never retracts it. The first reporter drives it.
  */
 interface Reported {
-	handle: Forward;
+	handle: Dynamic;
 	/** Each request's latest route for the prefix. */
 	readonly reporters: Map<Interest, Route>;
 }
@@ -272,7 +272,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 }
 
 /** Answer the requests under a received route by consuming them from the session. */
-async function drive(handle: Forward, conn: Established): Promise<void> {
+async function drive(handle: Dynamic, conn: Established): Promise<void> {
 	const session = wireOf(conn);
 	try {
 		for await (const request of handle.requested()) {

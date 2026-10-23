@@ -19,6 +19,10 @@ closes (`js/net/src/origin.ts`, `prepare`, `Prepared`, `ServeState.enqueue`).
   `[Symbol.dispose]` (`Bandwidth.Reservation` is the precedent), mirroring
   Rust where dropping a `Prepared` refuses with `Unroutable`.
 - Closing `prepared.broadcast` before `publish()` abandons the request too.
+- Make the `Prepared` constructor private with a static factory, and move
+  `Request.publisher`, `publishPrepared`, and `rejectPrepared` into module
+  hooks (the `finishRequest` pattern), so callers cannot bypass the done
+  state or the "forwarded requests cannot be prepared" check.
 - Update `doc/lib/js/net.md`, the `js/net/MIGRATE.md` "A claim answers by
   publishing" entry, and `origin-request.test.ts`; examples use `using`.
 
@@ -26,3 +30,7 @@ Test: a handler that throws after `prepare()` leaves the path answerable by
 the next request. moq.pro has no JS claim handlers.
 
 Public API: `@moq/net` breaking (`Prepared.reject` to `close`). Wire: none.
+
+## Related
+
+- [Claim request type](/quest/m1/api-audit/claim-request-type.md) - the JS `accept` half lives there
