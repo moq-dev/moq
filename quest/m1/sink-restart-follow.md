@@ -35,7 +35,11 @@ request and confirms a late stale answer cannot take the replacement's pads.
 and announce a fresh derivative instance with its own epoch, including an
 epochless source restart. A clean source end waits for another instance. Its
 pending-catalog tests exercise replacement before any encoder is required.
-The flags and public Rust APIs are unchanged; CLI behavior migration is in
+Cancellation tests also reproduced unfinished catalog/rung drops when retiring a
+ladder. Private cleanup now belongs to the actual transcoder, rung, and group
+writers, including constructed run and rung futures abandoned before their
+first poll. Cancellation aborts incomplete output; it does not mark it clean.
+The flags and public Rust signatures are unchanged; CLI behavior migration is in
 `rs/moq-cli/MIGRATE.md`.
 
 Remaining work and decisions:

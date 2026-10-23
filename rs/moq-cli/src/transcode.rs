@@ -241,6 +241,12 @@ mod tests {
 		let first = moq_clock::timeout(std::time::Duration::from_secs(1), next(&mut derivatives))
 			.await
 			.unwrap();
+		let mut old_catalog = first
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
 		let new = origin.publish("source", route()).unwrap();
 		let _new_dynamic = new.dynamic();
 		let second = moq_clock::timeout(std::time::Duration::from_secs(1), next(&mut derivatives))
@@ -249,6 +255,13 @@ mod tests {
 		assert!(!first.is_clone(&second));
 		assert_ne!(first.info().epoch, second.info().epoch);
 		assert!(first.is_closed(), "the superseded ladder is retired");
+		loop {
+			match old_catalog.recv_group().await {
+				Ok(Some(_)) => continue,
+				Err(moq_net::Error::Cancel) => break,
+				_ => panic!("the retired catalog must report deliberate cancellation"),
+			}
+		}
 		assert!(!second.is_closed(), "the new ladder serves immediately");
 		assert!(
 			!old.consume().is_closed(),
