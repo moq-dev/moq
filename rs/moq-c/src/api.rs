@@ -895,7 +895,7 @@ pub enum moq_connection_phase {
 	MOQ_CONNECTION_PHASE_CLOSED = 4,
 }
 
-/// One coherent snapshot of a session's lifecycle, delivered to its [moq_state_callback].
+/// One coherent snapshot of a session's lifecycle, delivered to its `moq_state_callback`.
 ///
 /// The struct and its `protocol` are valid only during the callback, so copy what you keep.
 #[repr(C)]
