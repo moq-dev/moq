@@ -519,8 +519,8 @@ pub struct Route {
 
 	/// What pulling content via this route costs, accumulated per link: lower wins
 	/// among routes of the same anonymity, with ties broken by a broadcast published
-	/// on this origin, then hop length, then a deterministic hash, and finally the
-	/// most recently announced route. See [`Cost`].
+	/// on this origin, then hop length, then a deterministic hash of a route a cluster
+	/// peer forwarded, and finally the most recently announced route. See [`Cost`].
 	pub cost: Cost,
 
 	/// The announcing session's declared or assigned identity.
