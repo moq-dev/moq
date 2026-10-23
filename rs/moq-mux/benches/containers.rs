@@ -183,6 +183,13 @@ impl Annexb {
 	}
 }
 
+// Collect only timed import work, excluding the output validation in setup.
+#[inline(never)]
+fn profiled_import(mut import: Annexb, payload: &Bytes, frames: usize) -> Annexb {
+	import.decode(payload, frames);
+	import
+}
+
 /// `fragments` moofs whose `tracks` trafs each split their samples into `runs` one-sample runs,
 /// interleaved in the mdat run by run, after the init of an exported `tracks`-track broadcast.
 fn interleaved(init: &[u8], tracks: usize, runs: usize, fragments: usize, payload: &Bytes) -> Bytes {
@@ -360,9 +367,8 @@ fn containers(c: &mut Criterion) {
 										} else {
 											b.iter_batched(
 												Annexb::new,
-												|mut import| {
-													import.decode(std::hint::black_box(&payload), frames);
-													import
+												|import| {
+													profiled_import(import, std::hint::black_box(&payload), frames)
 												},
 												BatchSize::PerIteration,
 											);
