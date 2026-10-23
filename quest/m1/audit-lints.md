@@ -71,9 +71,12 @@ m2 successor before finishing these checks and the audit's fixes.
   ESLint 9.39.5. The [supported TypeScript range](https://typescript-eslint.io/users/dependency-versions/)
   remains `>=4.8.4 <6.1.0`, so a permanent TS 7 deprecation gate is still premature.
 - Python: removed 20 unnecessary type ignores, reproduced by pyright against
-  freshly generated bindings. Both the wrapper and CARLA configurations now
-  reject unnecessary ignores in their existing checks; both pass. Retained
-  ignores cover intentional invalid calls or UniFFI error-class rebinding.
+  freshly generated bindings. The wrapper now rejects unnecessary ignores in
+  its existing check. Both wrapper and CARLA passed the audit with generated
+  bindings installed. CARLA cannot enable this gate yet: its standalone check
+  removes the installed bindings, loses type information, and falsely marks
+  its three necessary ignores unused. Retained ignores cover intentional
+  invalid calls or UniFFI error-class rebinding.
 - Existing stale-suppression gates remain: Rust lint reasons and unconditional
   `expect`, Biome unused suppressions, and Ruff `RUF100`. Go, Kotlin, and Dart
   deprecation gates were clean in m0; this run found no additional hand-written
