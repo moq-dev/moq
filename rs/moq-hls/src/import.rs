@@ -604,7 +604,16 @@ impl TrackState {
 		// carries no styp. Every rendition declares the same ones; the timeline drops a cut
 		// that would land inside its minimum segment duration, so the duplicates cost nothing.
 		importer.cut();
-		importer.decode(&bytes)?;
+		importer.decode(&bytes).map_err(|err| match err {
+			// Timestamp resets are unsupported: the published tracks never rewind, and no later
+			// pass can import this segment, so it is refused rather than retried.
+			moq_mux::Error::TimestampRewind(_)
+			| moq_mux::Error::Cmaf(moq_mux::container::fmp4::Error::NonMonotonicDecodeTime { .. }) => Error::Rewind {
+				rendition: self.label.clone(),
+				source: err,
+			},
+			err => err.into(),
+		})?;
 
 		self.media_range = range;
 		self.next_sequence = Some(sequence + 1);
@@ -666,6 +675,11 @@ impl Import {
 	/// last segment is imported; this then returns `Ok`, and [`finish`](Self::finish) ends the
 	/// broadcast. A playlist that never ends runs until cancelled.
 	///
+	/// An `EXT-X-DISCONTINUITY` keeps the source's timestamps: a forward jump continues the same
+	/// tracks, and a changed `EXT-X-MAP` starts a fresh generation of them. Timestamps that go
+	/// backwards on the same tracks, such as an encoder restart that reuses its init segment,
+	/// end the import with [`Error::Rewind`] instead of publishing a group that rewinds.
+	///
 	/// A failed step is logged and retried with escalating backoff, and the import ends with the
 	/// last error once the backoff budget is spent, so a broken source surfaces within seconds
 	/// instead of looping forever. The one shortcut is an HTTP status the origin actually sent: a
@@ -704,6 +718,8 @@ impl Import {
 				Err(err) if err.status().is_some_and(|status| !crate::status_retryable(status)) => {
 					return Err(err);
 				}
+				// The source rewound its timestamps, which no later pass can import.
+				Err(err @ Error::Rewind { .. }) => return Err(err),
 				Err(err) => {
 					let now = moq_clock::now();
 					if now >= deadline {
@@ -810,6 +826,9 @@ impl Import {
 				}
 				Err(err) => match on_error {
 					OnError::Fail => return Err(err),
+					// A rewind ends the import: no sibling covers for it, and evicting the
+					// rendition would rejoin it as fresh tracks, accepting the reset after all.
+					OnError::Warn if matches!(err, Error::Rewind { .. }) => return Err(err),
 					// Keep the other renditions going: one bad variant or segment shouldn't
 					// drop the rest or abort the whole step.
 					OnError::Warn => {
@@ -1653,12 +1672,12 @@ mod tests {
 		new_groups: Vec<(u64, u128)>,
 	}
 
-	/// Exercise the playlist/map path with real fMP4 produced by the exporter's muxer.
-	async fn discontinuity(video: bool, passthrough: bool, changed_map: bool, after_us: u64) -> Discontinuity {
+	/// A one-track fMP4 muxer for synthesized VP8 video or Opus audio.
+	fn synth(video: bool) -> moq_mux::container::fmp4::Muxer {
 		use hang::catalog::{AudioCodec, AudioConfig, VideoCodec, VideoConfig};
-		use moq_mux::container::{Frame, fmp4::Muxer};
+		use moq_mux::container::fmp4::Muxer;
 
-		let muxer = if video {
+		if video {
 			let mut config = VideoConfig::new(VideoCodec::VP8);
 			config.coded_width = Some(320);
 			config.coded_height = Some(240);
@@ -1666,19 +1685,33 @@ mod tests {
 			Muxer::video(&config).unwrap()
 		} else {
 			Muxer::audio(&AudioConfig::new(AudioCodec::Opus, 48_000, 2)).unwrap()
-		};
-		let frame = |micros| Frame {
-			timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
-			duration: Some(moq_net::Timestamp::from_micros(20_000).unwrap()),
-			payload: Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
-			keyframe: true,
-		};
+		}
+	}
+
+	/// Write `muxer`'s init segment to `init.mp4` in `dir`, and one keyframe at each of `stamps`
+	/// (in microseconds) to `{prefix}{index}.m4s`.
+	fn write_synth(dir: &Path, muxer: &moq_mux::container::fmp4::Muxer, prefix: &str, stamps: &[u64]) {
+		std::fs::write(dir.join(format!("{prefix}init.mp4")), muxer.init().unwrap().unwrap()).unwrap();
+		for (index, &micros) in stamps.iter().enumerate() {
+			let frame = moq_mux::container::Frame {
+				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
+				duration: Some(moq_net::Timestamp::from_micros(20_000).unwrap()),
+				payload: Bytes::from_static(&[0x78, 0x00, 0x00, 0x00]),
+				keyframe: true,
+			};
+			let fragment = muxer.fragment(index as u32, &[frame]).unwrap();
+			std::fs::write(dir.join(format!("{prefix}{index}.m4s")), fragment).unwrap();
+		}
+	}
+
+	/// Exercise the playlist/map path with real fMP4 produced by the exporter's muxer.
+	///
+	/// The second segment, stamped `after_us`, follows a 5 s one behind the playlist `tags`.
+	async fn discontinuity(video: bool, passthrough: bool, tags: &str, after_us: u64) -> Discontinuity {
 		let dir = temp_dir();
-		let init = muxer.init().unwrap().unwrap();
-		std::fs::write(dir.join("init.mp4"), &init).unwrap();
-		std::fs::write(dir.join("other.mp4"), &init).unwrap();
-		std::fs::write(dir.join("before.m4s"), muxer.fragment(0, &[frame(5_000_000)]).unwrap()).unwrap();
-		std::fs::write(dir.join("after.m4s"), muxer.fragment(1, &[frame(after_us)]).unwrap()).unwrap();
+		let muxer = synth(video);
+		write_synth(&dir, &muxer, "", &[5_000_000, after_us]);
+		std::fs::copy(dir.join("init.mp4"), dir.join("other.mp4")).unwrap();
 
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
@@ -1694,7 +1727,7 @@ mod tests {
 			},
 			sink,
 		);
-		let before = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\nbefore.m4s\n";
+		let before = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n";
 		let before = m3u8_rs::parse_media_playlist_res(before.as_bytes()).unwrap();
 		track.consume_segments(&fetcher(), &before).await.unwrap();
 		let name = |snapshot: &moq_mux::catalog::hang::Catalog| {
@@ -1715,13 +1748,8 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
-		let map = if changed_map {
-			"#EXT-X-MAP:URI=\"other.mp4\"\n"
-		} else {
-			""
-		};
 		let after = format!(
-			"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\nbefore.m4s\n#EXT-X-DISCONTINUITY\n{map}#EXTINF:1,\nafter.m4s\n"
+			"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n{tags}#EXTINF:1,\n1.m4s\n"
 		);
 		let after = m3u8_rs::parse_media_playlist_res(after.as_bytes()).unwrap();
 		let result = track.consume_segments(&fetcher(), &after).await;
@@ -1756,7 +1784,7 @@ mod tests {
 	async fn forward_discontinuity_preserves_source_time_and_identity() {
 		for video in [false, true] {
 			for passthrough in [false, true] {
-				let case = discontinuity(video, passthrough, false, 7_000_000).await;
+				let case = discontinuity(video, passthrough, DISCONTINUITY, 7_000_000).await;
 				case.result.unwrap();
 				assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
 				assert_eq!(case.before, case.after);
@@ -1768,45 +1796,94 @@ mod tests {
 		}
 	}
 
+	const DISCONTINUITY: &str = "#EXT-X-DISCONTINUITY\n";
+
+	/// A timestamp reset under the same init segment is refused as a rewind, unwrapped or
+	/// passthrough, with or without the discontinuity the source should have signalled, and
+	/// without publishing anything for it: the track keeps its media and its name, and no group
+	/// (not even an aborted one) opens for the refused segment.
 	#[tokio::test]
-	async fn timestamp_reset_discontinuity_never_rewinds_an_existing_track() {
+	async fn timestamp_reset_is_refused() {
 		for video in [false, true] {
 			for passthrough in [false, true] {
-				let case = discontinuity(video, passthrough, false, 0).await;
-				match case.result {
-					Ok(_) => {
-						assert_ne!(case.before, case.after, "a reset needs a new published identity");
-						assert_eq!(case.new_groups, [(moq_sequence(1, 1).unwrap(), 0)]);
-					}
-					Err(error) => {
-						assert!(
-							matches!(
-								error,
-								Error::Mux(moq_mux::Error::TimestampRewind(_))
-									| Error::Mux(moq_mux::Error::Moq(moq_net::Error::TimestampMismatch))
-							),
-							"video={video} passthrough={passthrough}: {error:?}"
-						);
-						assert_eq!(case.before, case.after);
-						assert!(case.new_groups.is_empty());
-						if passthrough {
-							assert!(matches!(case.terminal, Some(moq_net::Error::TimestampMismatch)));
-						} else {
-							assert!(case.terminal.is_none());
-						}
-					}
+				for tags in [DISCONTINUITY, ""] {
+					let case = discontinuity(video, passthrough, tags, 0).await;
+					let label = format!("video={video} passthrough={passthrough} tags={tags:?}");
+					assert!(
+						matches!(
+							case.result,
+							Err(Error::Rewind {
+								source: moq_mux::Error::TimestampRewind(_)
+									| moq_mux::Error::Cmaf(
+										moq_mux::container::fmp4::Error::NonMonotonicDecodeTime { .. }
+									),
+								..
+							})
+						),
+						"{label}: {:?}",
+						case.result
+					);
+					assert_eq!(case.before, case.after, "{label}");
+					assert!(case.terminal.is_none(), "{label}: {:?}", case.terminal);
+					assert_eq!(case.old_groups, [(0, 5_000_000)], "{label}");
 				}
-				assert_eq!(case.old_groups, [(0, 5_000_000)]);
 			}
 		}
 	}
+
+	/// A rewind ends the import at once, even while a sibling rendition is healthy: it is not
+	/// retried, and the rendition is not evicted and rejoined as fresh tracks.
+	#[tokio::test]
+	async fn a_rewind_ends_the_import() {
+		let dir = temp_dir();
+		write_synth(&dir, &synth(true), "video", &[5_000_000, 7_000_000]);
+		write_synth(&dir, &synth(false), "audio", &[5_000_000, 0]);
+		let master = "#EXTM3U\n\
+			#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",DEFAULT=YES,URI=\"audio.m3u8\"\n\
+			#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS=\"avc1.4d401f,opus\",AUDIO=\"aud\"\n\
+			video.m3u8\n";
+		std::fs::write(dir.join("master.m3u8"), master).unwrap();
+		let playlist = |prefix: &str, segments: &str| {
+			let body = format!("#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"{prefix}init.mp4\"\n{segments}");
+			std::fs::write(dir.join(format!("{prefix}.m3u8")), body).unwrap();
+		};
+		playlist("video", "#EXTINF:1,\nvideo0.m4s\n");
+		playlist("audio", "#EXTINF:1,\naudio0.m4s\n");
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let cfg = Config::new(Url::from_file_path(dir.join("master.m3u8")).unwrap());
+		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
+		import.init().await.unwrap();
+
+		// Video moves forward while audio restarts at zero under the same init segment.
+		playlist(
+			"video",
+			"#EXTINF:1,\nvideo0.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\nvideo1.m4s\n",
+		);
+		playlist(
+			"audio",
+			"#EXTINF:1,\naudio0.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\naudio1.m4s\n",
+		);
+		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+			.await
+			.expect("a rewind is not retried");
+		assert!(
+			matches!(&run, Err(Error::Rewind { rendition, .. }) if rendition == "audio"),
+			"{run:?}"
+		);
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
+	/// A different `EXT-X-MAP` resource, even with identical bytes.
+	const CHANGED_MAP: &str = "#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"other.mp4\"\n";
 
 	#[tokio::test]
 	async fn changed_map_discontinuity_publishes_a_fresh_identity() {
 		for video in [false, true] {
 			for passthrough in [false, true] {
 				for after_us in [0, 7_000_000] {
-					let case = discontinuity(video, passthrough, true, after_us).await;
+					let case = discontinuity(video, passthrough, CHANGED_MAP, after_us).await;
 					case.result.unwrap();
 					assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
 					assert_ne!(case.before, case.after);
