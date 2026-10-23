@@ -38,7 +38,7 @@ pub use api::*;
 pub use audio::*;
 pub use bandwidth::*;
 pub use error::*;
-pub use ffi::moq_status_callback;
+pub use ffi::{moq_state_callback, moq_status_callback};
 pub use id::*;
 pub use video::*;
 

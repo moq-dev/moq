@@ -5,7 +5,7 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
-`MoqClient::connect` returns a connecting native session without waiting for its first dial to succeed. Read `MoqSession::state()` and pass its `revision` to `state_changed(after)` to observe first-dial failures and reconnects. `MoqConnectionState` carries `phase`, `connects`, `failure`, and `version` together. These replace `status()`, `connects()`, and both `failure()` polls. Cancel the returned session to stop dialing; cancelling or releasing the client does not close it. Browser connect continues waiting for establishment.
+`MoqClient::connect` returns a connecting session without waiting for its first dial to succeed, natively and in the browser. Read `MoqSession::state()` and pass its `revision` to `state_changed(after)` to observe first-dial failures and reconnects. `MoqConnectionState` carries `phase`, `connects`, `failure`, and `version` together. These replace `status()`, `connects()`, and both `failure()` polls. Cancel the returned session to stop dialing; cancelling or releasing the client does not close it.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 

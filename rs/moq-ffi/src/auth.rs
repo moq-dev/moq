@@ -32,13 +32,16 @@ impl From<moq_net::auth::Grant> for MoqGrant {
 	}
 }
 
-/// Where a session's tokens live: on the session itself, or on a connection that presents
-/// them again on every reconnect.
+/// Where a session's tokens live: on the session itself, on a connection that presents
+/// them again on every reconnect, or on a browser session once its dial completes.
 #[derive(Clone)]
 pub(crate) enum Handle {
 	Session(moq_net::auth::Handle),
 	#[cfg(not(target_arch = "wasm32"))]
 	Connection(moq_tokio::connection::auth::Handle),
+	/// A browser session still dialing when the handle was taken.
+	#[cfg(target_arch = "wasm32")]
+	Dial(crate::session::Dial),
 }
 
 impl Handle {
@@ -47,28 +50,44 @@ impl Handle {
 			Self::Session(handle) => Watch::Session(handle.grant()),
 			#[cfg(not(target_arch = "wasm32"))]
 			Self::Connection(handle) => Watch::Connection(handle.grant()),
+			#[cfg(target_arch = "wasm32")]
+			Self::Dial(dial) => match dial.session() {
+				Some(session) => Watch::Session(session.auth().grant()),
+				None => Watch::Dial {
+					dial: dial.clone(),
+					watch: None,
+				},
+			},
 		}
 	}
 
 	async fn add(self, token: String) -> Result<Token, MoqError> {
 		match self {
-			Self::Session(handle) => {
-				let auth = handle.add(token).await?;
-				// A token the peer accepted carries a grant until it ends. Without AUTH,
-				// moq-transport accepts one at once for the requests that name it, but nothing
-				// here can name one, so it would never be sent. One already revoked is left for
-				// `closed` to report. moq-tokio refuses the same for a client's connection.
-				if auth.grant().peek().is_none() && poll_now(auth.closed()).is_pending() {
-					return Err(MoqError::Unsupported);
-				}
-				Ok(Token::Session(auth))
-			}
+			Self::Session(handle) => add(handle, token).await,
 			#[cfg(not(target_arch = "wasm32"))]
 			Self::Connection(handle) => Ok(Token::Connection(
 				handle.add(token).await.map_err(crate::session::map_closed_error)?,
 			)),
+			// The token waits for the handshake; a dial that ends first refuses it.
+			#[cfg(target_arch = "wasm32")]
+			Self::Dial(dial) => match dial.established().await? {
+				Some(session) => add(session.auth(), token).await,
+				None => Err(MoqError::Closed),
+			},
 		}
 	}
+}
+
+async fn add(handle: moq_net::auth::Handle, token: String) -> Result<Token, MoqError> {
+	let auth = handle.add(token).await?;
+	// A token the peer accepted carries a grant until it ends. Without AUTH,
+	// moq-transport accepts one at once for the requests that name it, but nothing
+	// here can name one, so it would never be sent. One already revoked is left for
+	// `closed` to report. moq-tokio refuses the same for a client's connection.
+	if auth.grant().peek().is_none() && poll_now(auth.closed()).is_pending() {
+		return Err(MoqError::Unsupported);
+	}
+	Ok(Token::Session(auth))
 }
 
 /// Poll `future` once without waiting.
@@ -81,6 +100,12 @@ enum Watch {
 	Session(moq_net::auth::Watch),
 	#[cfg(not(target_arch = "wasm32"))]
 	Connection(moq_tokio::connection::auth::Watch),
+	/// A browser session still dialing, which has no grant until its session's watch exists.
+	#[cfg(target_arch = "wasm32")]
+	Dial {
+		dial: crate::session::Dial,
+		watch: Option<moq_net::auth::Watch>,
+	},
 }
 
 impl Watch {
@@ -89,6 +114,11 @@ impl Watch {
 			Self::Session(watch) => watch.peek(),
 			#[cfg(not(target_arch = "wasm32"))]
 			Self::Connection(watch) => watch.peek(),
+			#[cfg(target_arch = "wasm32")]
+			Self::Dial { dial, watch } => match watch {
+				Some(watch) => watch.peek(),
+				None => dial.session().and_then(|session| session.auth().grant().peek()),
+			},
 		}
 		.map(Into::into)
 	}
@@ -98,6 +128,22 @@ impl Watch {
 			Self::Session(watch) => watch.changed().await?,
 			#[cfg(not(target_arch = "wasm32"))]
 			Self::Connection(watch) => watch.changed().await.map_err(crate::session::map_closed_error)?,
+			#[cfg(target_arch = "wasm32")]
+			Self::Dial { dial, watch } => {
+				let watch = match watch {
+					Some(watch) => watch,
+					None => {
+						let session = dial.established().await?.ok_or(MoqError::Closed)?;
+						let fresh = watch.insert(session.auth().grant());
+						// Dialing reported no grant, so one the session already holds is the change.
+						if let Some(grant) = fresh.peek() {
+							return Ok(Some(grant.into()));
+						}
+						fresh
+					}
+				};
+				watch.changed().await?
+			}
 		};
 		Ok(grant.map(Into::into))
 	}

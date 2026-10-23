@@ -1,15 +1,63 @@
 use std::sync::Arc;
 
-use anyhow::Context;
+use moq_tokio::connection::Phase;
 use url::Url;
 
 use crate::task::Task;
-use crate::{Error, Id, NonZeroSlab, State, ffi};
+use crate::{Error, Id, NonZeroSlab, State, ffi, moq_connection_phase, moq_connection_state, moq_string};
 
 /// A session task and the connection backing its handle.
 struct TaskEntry {
-	task: Task,
+	task: Task<ffi::OnState>,
 	link: Link,
+}
+
+/// One lifecycle snapshot, converted to a [`moq_connection_state`] for the callback.
+pub(crate) struct Lifecycle {
+	phase: moq_connection_phase,
+	connects: u64,
+	pub failure: Option<Error>,
+	version: Option<moq_net::Version>,
+}
+
+impl Lifecycle {
+	fn observed(state: moq_tokio::connection::Observation) -> Self {
+		Self {
+			phase: match state.phase {
+				Phase::Connecting => moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTING,
+				Phase::Connected => moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED,
+				Phase::Disconnected => moq_connection_phase::MOQ_CONNECTION_PHASE_DISCONNECTED,
+				Phase::Migrating => moq_connection_phase::MOQ_CONNECTION_PHASE_MIGRATING,
+				Phase::Closed => moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED,
+			},
+			connects: state.connects,
+			failure: state.failure.map(map_connect_error),
+			version: state.version,
+		}
+	}
+
+	/// The terminal snapshot: `res` is the session's final result.
+	fn closed(connects: u64, res: Result<(), Error>) -> Self {
+		Self {
+			phase: moq_connection_phase::MOQ_CONNECTION_PHASE_CLOSED,
+			connects,
+			failure: res.err(),
+			version: None,
+		}
+	}
+
+	pub fn to_c(&self) -> moq_connection_state {
+		let protocol = self.version.map_or("", |version| version.as_str());
+		moq_connection_state {
+			phase: self.phase,
+			connects: self.connects,
+			failure: self.failure.as_ref().map_or(0, ffi::ReturnCode::code),
+			protocol: moq_string {
+				data: protocol.as_ptr().cast(),
+				len: protocol.len(),
+			},
+		}
+	}
 }
 
 /// What backs a session handle.
@@ -35,7 +83,7 @@ pub(crate) struct Connect {
 	pub url: Url,
 	pub publish: Option<crate::origin::Producer>,
 	pub consume: Option<crate::origin::Producer>,
-	pub callback: ffi::OnStatus,
+	pub callback: ffi::OnState,
 }
 
 impl Connect {
@@ -70,7 +118,7 @@ pub(crate) struct PreparedConnect {
 	url: Url,
 	publish: Option<crate::origin::Producer>,
 	consume: Option<crate::origin::Producer>,
-	callback: ffi::OnStatus,
+	callback: ffi::OnState,
 }
 
 #[derive(Default)]
@@ -92,9 +140,10 @@ impl Session {
 		// Build the reconnect loop up front so we can grab a monitor for it
 		// before moving it into the spawned task.
 		let reconnect = client.connect(url);
+		let monitor = reconnect.monitor();
 		let link = Link::Dialed {
 			connection: reconnect.clone(),
-			monitor: reconnect.monitor(),
+			monitor: monitor.clone(),
 		};
 
 		let (task, closed) = Task::new(callback);
@@ -113,7 +162,7 @@ impl Session {
 				tokio::select! {
 					// close() requested: drain what the session queued, then close it.
 					_ = closed => reconnect.clone().close().await.map_err(map_connect_error),
-					res = Self::report(callback, reconnect.clone()) => res,
+					res = Self::report(callback, &reconnect, &monitor) => res,
 				}
 			})))
 			.await;
@@ -127,25 +176,29 @@ impl Session {
 			})
 			.await;
 
-			// Deliver one final terminal callback (0 = closed, < 0 = error), then
-			// drop the entry. Pull it out from under the lock so the callback never
+			// Deliver the terminal snapshot after dropping the entry, so the handle is gone
+			// once the caller sees it. Pulled out from under the lock so the callback never
 			// runs while held.
 			let entry = State::lock().session.task.remove(id);
 			if let Some(entry) = entry {
-				entry.task.callback.call(res);
+				let connects = match &entry.link {
+					Link::Dialed { monitor, .. } => monitor.state().connects,
+					Link::Accepted(_) => unreachable!("a dialed entry"),
+				};
+				entry.task.callback.call(&Lifecycle::closed(connects, res));
 			}
 		});
 
 		Ok(id)
 	}
 
-	/// Complete SETUP for an incoming session, reporting `1` once established.
+	/// Complete SETUP for an incoming session, reporting it connected once established.
 	pub fn accept(
 		&mut self,
 		request: moq_tokio::server::Request,
 		publish: Option<crate::origin::Producer>,
 		consume: Option<crate::origin::Producer>,
-		callback: ffi::OnStatus,
+		callback: ffi::OnState,
 	) -> Result<Id, Error> {
 		let mut request = request;
 		if let Some(publish) = &publish {
@@ -179,6 +232,10 @@ impl Session {
 
 			let entry = State::lock().session.task.remove(id);
 			if let Some(entry) = entry {
+				let connects = match &entry.link {
+					Link::Accepted(accepted) => u64::from(accepted.is_some()),
+					Link::Dialed { .. } => unreachable!("an accepted entry"),
+				};
 				// Close the transport now rather than whenever the last clone drops.
 				if let Link::Accepted(Some(accepted)) = &entry.link
 					&& let Err(error) = ffi::run(async {
@@ -190,7 +247,7 @@ impl Session {
 					res = Err(error);
 				}
 				let res = publish_driver.check().and_then(|()| consume_driver.check()).and(res);
-				entry.task.callback.call(res);
+				entry.task.callback.call(&Lifecycle::closed(connects, res));
 			}
 		});
 
@@ -198,7 +255,7 @@ impl Session {
 	}
 
 	/// Establish an accepted session, publish it to the entry, and wait for it to close.
-	async fn serve(id: Id, callback: ffi::OnStatus, request: moq_tokio::server::Request) -> Result<(), Error> {
+	async fn serve(id: Id, callback: ffi::OnState, request: moq_tokio::server::Request) -> Result<(), Error> {
 		let (session, driver) = request.ok().await.map_err(map_connect_error)?;
 		let driver = ffi::Background::new(async move {
 			match driver.await {
@@ -216,7 +273,12 @@ impl Session {
 		}
 
 		// A server-accepted session is a single transport, so it only ever connects once.
-		callback.call(1);
+		callback.call(&Lifecycle {
+			phase: moq_connection_phase::MOQ_CONNECTION_PHASE_CONNECTED,
+			connects: 1,
+			failure: None,
+			version: Some(session.version()),
+		});
 		driver.finished().await?;
 		Err(session.closed().await.into())
 	}
@@ -269,35 +331,31 @@ impl Session {
 		}
 	}
 
-	/// Why a dialed session is reconnecting, or `None` while nothing has failed since the
-	/// last connect. A server-accepted session never reconnects, so it is always `None`.
+	/// Deliver each lifecycle change until the connection stops, then return its result.
 	///
-	/// Errors with [`Error::SessionNotFound`] if the handle is unknown.
-	pub fn failure(&self, id: Id) -> Result<Option<Error>, Error> {
-		Ok(match self.link(id)? {
-			Link::Dialed { monitor, .. } => monitor.failure().map(map_connect_error),
-			Link::Accepted(_) => None,
-		})
-	}
-
-	/// Forward connect counts to the status callback until the reconnect loop stops.
-	///
-	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a
-	/// clean close (delivered as the terminal callback once the task ends).
-	async fn report(callback: ffi::OnStatus, mut reconnect: moq_tokio::Connection) -> Result<(), Error> {
-		let mut connects: u64 = 0;
-		loop {
-			if let moq_tokio::Status::Connected = reconnect.status().await.map_err(map_connect_error)? {
-				connects += 1;
-				// Positive status carries the connect count, so callers can tell a
-				// reconnect (>1) from the first connect (1). No lock is held, so the C
-				// callback is free to re-enter moq-c.
-				let code = i32::try_from(connects)
-					.context("connect count exceeded i32::MAX")
-					.map_err(|err| Error::Connect(Arc::new(err)))?;
-				callback.call(code);
+	/// Changes coalesce: a snapshot is the state when the callback runs, not every step
+	/// between. No lock is held, so the C callback is free to re-enter moq-c.
+	async fn report(
+		callback: ffi::OnState,
+		connection: &moq_tokio::Connection,
+		monitor: &moq_tokio::connection::Monitor,
+	) -> Result<(), Error> {
+		// The loop may have moved before we got here; the untouched initial state says nothing.
+		let mut state = monitor.state();
+		let initial = state.phase == Phase::Connecting && state.connects == 0 && state.failure.is_none();
+		if !initial && state.phase != Phase::Closed {
+			callback.call(&Lifecycle::observed(state.clone()));
+		}
+		while state.phase != Phase::Closed {
+			let Ok(next) = monitor.state_changed(state.revision).await else {
+				break;
+			};
+			state = next;
+			if state.phase != Phase::Closed {
+				callback.call(&Lifecycle::observed(state.clone()));
 			}
 		}
+		connection.closed().await.map_err(map_connect_error)
 	}
 
 	pub fn close(&mut self, id: Id) -> Result<(), Error> {

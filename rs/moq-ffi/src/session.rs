@@ -10,6 +10,11 @@ use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
 
+#[cfg(target_arch = "wasm32")]
+mod dial;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use dial::Dial;
+
 /// Configuration for [`MoqClient::new`], mirroring moq-tokio's client config.
 ///
 /// Every field has a default, so set only what you need; [`moq_client_defaults`] reports
@@ -627,29 +632,24 @@ impl Client {
 	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
 		let (publish, subscribe) = crate::origin::resolve_pair(self.publish.as_ref(), self.consume.as_ref());
 
-		let transport = match self.fingerprints.is_empty() {
-			true => crate::transport::connect(url, &self.versions).await,
-			false => crate::transport::connect_with_hashes(url, &self.versions, self.fingerprints.clone()).await,
-		}
-		.map_err(|err| MoqError::Connect {
-			reason: format!("{err}"),
-		})?;
-
-		// Run the driver on the microtask queue. The driver
-		// holds no session clone, so dropping the last handle still closes the
-		// transport and ends that task.
-		let (session, driver) = moq_net::Client::new()
+		let versions = self.versions.clone();
+		let fingerprints = self.fingerprints.clone();
+		let transport = async move {
+			match fingerprints.is_empty() {
+				true => crate::transport::connect(url, &versions).await,
+				false => crate::transport::connect_with_hashes(url, &versions, fingerprints).await,
+			}
+		};
+		let client = moq_net::Client::new()
 			.with_versions(self.versions.clone())
 			.with_publisher(&publish.inner)
-			.with_subscriber(subscribe.inner.clone())
-			.connect(moq_clock::now(), transport)
-			.await?;
+			.with_subscriber(subscribe.inner.clone());
 
-		crate::ffi::spawn(async move {
-			moq_net::time::run(driver).await;
-		});
-
-		Ok(Arc::new(MoqSession::accepted(session, publish, subscribe)))
+		Ok(Arc::new(MoqSession::build(
+			Inner::Dial(Dial::start(client, transport)),
+			publish,
+			subscribe,
+		)))
 	}
 }
 
@@ -714,13 +714,13 @@ impl MoqClient {
 		}))
 	}
 
-	/// Start a connection without waiting for its first native dial to succeed.
+	/// Start a connection without waiting for its first dial to succeed.
 	///
 	/// A native session automatically reconnects with backoff when the transport drops
 	/// (unless [`MoqClientConfig::once`] is set), and broadcasts consumed through it ride out
-	/// the gap. Read [`MoqSession::state`] and wait with [`MoqSession::state_changed`] for
-	/// first-dial failures and reconnects; [`MoqSession::closed`] waits for the terminal result.
-	/// Browser connections currently return after establishment and never reconnect.
+	/// the gap. A browser session dials once and never reconnects. Read [`MoqSession::state`]
+	/// and wait with [`MoqSession::state_changed`] for first-dial failures and reconnects;
+	/// [`MoqSession::closed`] waits for the terminal result.
 	///
 	/// Both origin sides are always accessible via [`MoqSession::publish`] and
 	/// [`MoqSession::consume`], without the caller constructing a [`MoqOriginProducer`].
@@ -790,7 +790,7 @@ impl MoqConnectionStats {
 /// The current lifecycle phase, distinct from cumulative statistics presence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MoqConnectionPhase {
-	/// No native session has connected yet.
+	/// No session has connected yet.
 	Connecting,
 	/// A session is serving.
 	Connected,
@@ -837,14 +837,17 @@ impl From<moq_tokio::connection::Observation> for MoqConnectionState {
 	}
 }
 
-/// What backs a [`MoqSession`]: a client connection (a loop that may redial) or
+/// What backs a [`MoqSession`]: a native client connection (a loop that may redial),
 /// a server-accepted session (one transport; the peer redialing yields a fresh
-/// `accept()`).
+/// `accept()`), or a browser dial (one attempt, then its session).
 #[derive(Clone)]
 enum Inner {
 	#[cfg(not(target_arch = "wasm32"))]
 	Connection(moq_tokio::Connection),
+	#[cfg(not(target_arch = "wasm32"))]
 	Session(Accepted),
+	#[cfg(target_arch = "wasm32")]
+	Dial(Dial),
 }
 
 #[derive(Clone)]
@@ -922,13 +925,13 @@ impl MoqSession {
 	}
 
 	/// Wrap a server-accepted session (see `MoqServer::accept`).
+	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) fn accepted(
 		session: moq_net::Session,
 		publish: crate::origin::Origin,
 		subscribe: crate::origin::Origin,
-		#[cfg(not(target_arch = "wasm32"))] driver: tokio::task::JoinHandle<moq_tokio::Result<()>>,
+		driver: tokio::task::JoinHandle<moq_tokio::Result<()>>,
 	) -> Self {
-		#[cfg(not(target_arch = "wasm32"))]
 		let driver = crate::ffi::Background::new(async move {
 			match driver.await {
 				Ok(result) => result,
@@ -936,8 +939,6 @@ impl MoqSession {
 				Err(_) => Err(moq_tokio::Error::Panic),
 			}
 		});
-		#[cfg(target_arch = "wasm32")]
-		let driver = crate::ffi::Background::default();
 		Self::build(Inner::Session(Accepted { session, driver }), publish, subscribe)
 	}
 
@@ -947,7 +948,11 @@ impl MoqSession {
 			// again on the next connection. Reservations survive the gap.
 			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => connection.bandwidth(),
+			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(session) => session.bandwidth(),
+			// Persistent from before the handshake, so a reservation made while dialing counts.
+			#[cfg(target_arch = "wasm32")]
+			Inner::Dial(dial) => dial.bandwidth(),
 		}
 	}
 
@@ -975,12 +980,15 @@ impl MoqSession {
 			.await
 	}
 
-	/// Abort the live transport (if any) with `err` and stop any reconnect loop.
+	/// Abort the live transport (if any) with `err` and stop any dial or reconnect loop.
 	fn teardown(&self, err: moq_net::Error) {
 		match &self.inner {
 			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => connection.abort(err),
+			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(session) => session.abort(err),
+			#[cfg(target_arch = "wasm32")]
+			Inner::Dial(dial) => dial.stop(err),
 		}
 	}
 }
@@ -1012,7 +1020,10 @@ impl MoqSession {
 			match &*inner {
 				#[cfg(not(target_arch = "wasm32"))]
 				Inner::Connection(connection) => connection.closed().await.map_err(map_closed_error),
+				#[cfg(not(target_arch = "wasm32"))]
 				Inner::Session(session) => session.closed().await,
+				#[cfg(target_arch = "wasm32")]
+				Inner::Dial(dial) => dial.closed().await,
 			}
 		}))
 		.await
@@ -1024,7 +1035,10 @@ impl MoqSession {
 		match &self.inner {
 			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => connection.monitor().state().into(),
+			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(session) => session.state(),
+			#[cfg(target_arch = "wasm32")]
+			Inner::Dial(dial) => dial.state(),
 		}
 	}
 
@@ -1043,6 +1057,7 @@ impl MoqSession {
 					.await
 					.map_err(map_closed_error)?
 					.into()),
+				#[cfg(not(target_arch = "wasm32"))]
 				Inner::Session(session) => {
 					let state = session.state();
 					if state.revision != after {
@@ -1054,6 +1069,8 @@ impl MoqSession {
 					let _ = session.closed::<()>().await;
 					Ok(session.state())
 				}
+				#[cfg(target_arch = "wasm32")]
+				Inner::Dial(dial) => dial.state_changed(after).await,
 			}
 		}))
 		.await
@@ -1080,7 +1097,10 @@ impl MoqSession {
 			match inner {
 				#[cfg(not(target_arch = "wasm32"))]
 				Inner::Connection(connection) => connection.close().await.map_err(map_closed_error),
+				#[cfg(not(target_arch = "wasm32"))]
 				Inner::Session(session) => session.close().await,
+				#[cfg(target_arch = "wasm32")]
+				Inner::Dial(dial) => dial.close().await,
 			}
 		})
 		.await;
@@ -1127,7 +1147,13 @@ impl MoqSession {
 		Arc::new(MoqAuth::new(match &self.inner {
 			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => crate::auth::Handle::Connection(connection.auth()),
+			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(session) => crate::auth::Handle::Session(session.auth()),
+			#[cfg(target_arch = "wasm32")]
+			Inner::Dial(dial) => match dial.session() {
+				Some(session) => crate::auth::Handle::Session(session.auth()),
+				None => crate::auth::Handle::Dial(dial.clone()),
+			},
 		}))
 	}
 
@@ -1136,7 +1162,10 @@ impl MoqSession {
 		let consumer = match &self.inner {
 			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => Some(connection.recv_bandwidth()),
+			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(session) => session.recv_bandwidth(),
+			#[cfg(target_arch = "wasm32")]
+			Inner::Dial(dial) => Some(dial.recv_bandwidth()),
 		}?;
 		Some(Arc::new(crate::bandwidth::MoqBandwidthConsumer::new(consumer)))
 	}
@@ -1156,7 +1185,13 @@ impl MoqSession {
 				Some(snapshot) => MoqConnectionStats::new(snapshot.stats, Some(snapshot.version)),
 				None => MoqConnectionStats::new(Default::default(), None),
 			},
+			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(session) => MoqConnectionStats::new(session.stats(), Some(session.version())),
+			#[cfg(target_arch = "wasm32")]
+			Inner::Dial(dial) => match dial.session() {
+				Some(session) => MoqConnectionStats::new(session.stats(), Some(session.version())),
+				None => MoqConnectionStats::new(Default::default(), None),
+			},
 		}
 	}
 }

@@ -32,6 +32,7 @@ under the same names.
   target of `rs/moq-ffi` changes, and its `moq.h` C ABI) point at the
   generated package instead; update `AGENTS.md` in this quest.
 
-The hand-written `moq_session_failure` names a retrying first dial; the
-generated package must keep that, through the moq-ffi report added in
-[moq-dev/moq#6131](https://github.com/moq-dev/moq/pull/6131).
+The hand-written session callback delivers a `moq_connection_state`
+snapshot naming a retrying first dial, ending with a terminal closed
+snapshot; the generated package must keep both, through moq-ffi's `state()`
+and `state_changed()`.

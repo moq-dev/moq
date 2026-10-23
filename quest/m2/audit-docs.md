@@ -61,10 +61,9 @@ freshest. Baselines:
   property `doc/bin/gstreamer.md` names.
 - Cross-Package Sync: walked from `9b90cdd569` through `7d2a91fe66`. Walk the
   next run from there. At that baseline, Go could not observe first-dial
-  failures because `Dial` returned only once connected. The
-  [binding state audit](/quest/m1/api-audit/binding-state.md) now owns one
-  immediately returned session and coherent state across wrappers; verify
-  first-dial failure observation and Kotlin/Dart wording against its final API.
+  failures because `Dial` returned only once connected. Every binding now
+  returns a connecting session with one coherent `state()` snapshot; verify
+  first-dial failure observation and Kotlin/Dart wording against that API.
 
 ## Required
 

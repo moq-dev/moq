@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Sessions report a lifecycle snapshot
+
+`moq_session_connect` and `moq_session_request_accept` take a `moq_state_callback` instead of a `moq_status_callback`: `void on_state(void *user_data, const moq_connection_state *state)`.
+Each change delivers a `moq_connection_state` with `phase`, `connects`, `failure`, and the live `protocol`; copy what you keep, since it is valid only during the callback.
+Read `state->connects` where you read a positive status code. A failed dial or dropped connection now fires the callback with a negative `failure`, so drop your `moq_session_failure` polling; `moq_error()` describes it during the callback.
+The terminal call has phase `MOQ_CONNECTION_PHASE_CLOSED`, with `failure` zero after a requested close or the error that ended the session, where the terminal status code used to be. Release `user_data` there, as before.
+
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
 `moq_consume_video` and `moq_consume_audio` on a rendition whose catalog `broadcast` field names a sibling now wait for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.

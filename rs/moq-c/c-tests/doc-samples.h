@@ -13,9 +13,9 @@ static size_t url_len;
 static uint32_t origin;
 static void *user_data;
 
-static void on_status(void *user_data, int32_t code) {
+static void on_state(void *user_data, const moq_connection_state *state) {
 	(void)user_data;
-	(void)code;
+	(void)state;
 }
 
 static int fail(const char *reason) {
