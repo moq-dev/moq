@@ -2063,12 +2063,7 @@ mod tests {
 				// Still sending: a real datagram reaches the peer.
 				let mut tx = sock.acquire().await.expect("send buffer");
 				tx.extend_from_slice(b"alive");
-				tx.send(Transmit {
-					to,
-					segment: 5,
-					ecn: None,
-				})
-				.expect("staged");
+				tx.send(Transmit::new(to, 5)).expect("staged");
 				// Let the worker submit it and reap its completion.
 				for _ in 0..1000 {
 					if sock.shared.tx.borrow().bufs.iter().all(|buf| buf.in_flight == 0) {
