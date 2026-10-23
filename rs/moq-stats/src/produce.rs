@@ -290,7 +290,9 @@ impl Task {
 		ticker.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
 
 		loop {
-			ticker.tick().await;
+			// Scheduled instants are at least an interval apart, even after a late tick,
+			// so each drain gets an interval of its own to open its groups in.
+			let scheduled = ticker.tick().await;
 
 			if weak.upgrade().is_none() {
 				drain.finish();
@@ -298,7 +300,7 @@ impl Task {
 			}
 
 			drain.collect();
-			drain.publish(moq_clock::now());
+			drain.publish(scheduled);
 		}
 	}
 	fn node(&self) -> Option<&str> {
@@ -2448,6 +2450,54 @@ mod tests {
 
 		let (_producer, origin) = test_producer(Some("///"));
 		assert_eq!(announced(&origin).await.0, ".stats/node");
+	}
+
+	/// A drain that runs late is numbered by its schedule, so the next on-time
+	/// drain still opens its own group and publishes its readout on the plain
+	/// track, which writes every frame as a fresh group.
+	#[tokio::test(start_paused = true)]
+	async fn a_late_drain_leaves_the_next_its_own_interval() {
+		// Schedule the drains a millisecond before an interval boundary.
+		let phase = Duration::from(Timestamp::from(moq_clock::now())).as_millis() % 1000;
+		tokio::time::advance(Duration::from_millis(((1999 - phase) % 1000) as u64)).await;
+
+		let origin = produce_origin();
+		let producer = node_producer(&origin);
+		let session = producer.registry().tier(Tier::default()).session("acme/live");
+		let counters = moq_net::transport::Wire::new();
+		let _wire = session.wire(counters.clone());
+		let step = async |millis: u64| {
+			tokio::time::advance(Duration::from_millis(millis)).await;
+			for _ in 0..4 {
+				tokio::task::yield_now().await;
+			}
+		};
+		// The first drain announces the broadcast.
+		step(0).await;
+		let broadcast = origin
+			.consume()
+			.request_broadcast(".stats/node/sjc", None)
+			.await
+			.expect("resolve");
+		let mut totals = subscribe(&broadcast, crate::TOTALS).await;
+		let mut sent = |bytes: u64| {
+			counters.set_sent_bytes(bytes);
+			let mut last = None;
+			while let Some(frame) = try_next_frame(&mut totals) {
+				last = Some(frame);
+			}
+			last.map(|frame| {
+				let frame: TotalsFrame = serde_json::from_slice(&frame.payload).expect("json parse");
+				frame.get("").expect("the default tier").sessions.wire_tx
+			})
+		};
+
+		sent(1);
+		// Two milliseconds late, past the boundary into the next drain's interval.
+		step(1002).await;
+		assert_eq!(sent(2), Some(1));
+		step(998).await;
+		assert_eq!(sent(3), Some(2), "the on-time drain publishes its readout");
 	}
 
 	/// A producer on `origin` publishing as node `sjc` at depth 0.

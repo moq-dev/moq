@@ -217,11 +217,11 @@ frame too large to cache (32 MB) ends its track with a `FRAME_TOO_LARGE` error.
 The `.z` flavor meets the same limit by its
 uncompressed size, since a reader inflates the whole group.
 
-A group's number is the time it opened divided by the interval, so the
-interval is its timescale, and a track opens at most one group per interval: a
-snapshot due in an interval that already has one, such as a joiner's refresh,
-waits for the next. A track recreated later numbers its groups past every
-group its earlier instance wrote.
+A group's number is its publish's scheduled time divided by the interval, so
+the interval is its timescale. Publishes are scheduled at least an interval
+apart, even after a late one, so each opens its groups in an interval of its
+own, and a track recreated later numbers its groups past every group its
+earlier instance wrote.
 
 ### Totals
 
