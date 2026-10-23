@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### One router path
+
+`whip::router(server, publisher)` and `whep::router(server, subscriber)` are private.
+Call `server.publish_router(publisher)` and `server.subscribe_router(subscriber)` instead.
+
 ### A WHIP `DELETE` lingers
 
 After a `DELETE`, a WHIP server session's `Response::run` finishes the ingest and resolves only once the finished broadcast goes stale.

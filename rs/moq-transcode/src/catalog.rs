@@ -410,7 +410,11 @@ pub(crate) fn populate(
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use hang::catalog::H264;
 
@@ -964,6 +968,33 @@ mod tests {
 			assert!(!decoders.probe(Codec::H265, &hevc(height * 16 / 9, height)).await);
 		}
 		assert_eq!(decoders.probed, [(Codec::H265, false)]);
+	}
+
+	/// The ladder transcodes video alone: audio is referenced in the source, with every field kept,
+	/// so a player decodes exactly what the source published.
+	#[test]
+	fn populate_passes_audio_through_untouched() {
+		let mut child = moq_mux::catalog::hang::Catalog::<()>::default();
+		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
+		audio.description = Some(
+			moq_mux::codec::opus::Config::new(48_000, 2)
+				.with_pre_skip(312)
+				.encode()
+				.unwrap(),
+		);
+		audio.bitrate = Some(128_000);
+		audio.track = Some("1.m4s".to_string());
+		audio.jitter = Some(std::time::Duration::from_millis(20));
+		child.audio.insert("audio", audio.clone()).unwrap();
+
+		let rel = RelativeOwned::from(".".to_string());
+		let mut out = moq_mux::catalog::hang::Catalog::<()>::default();
+		populate(&mut out, &child, &[], Some(&rel)).unwrap();
+
+		let mut expected = audio;
+		expected.broadcast = Some(rel);
+		assert_eq!(out.audio.renditions.get("audio"), Some(&expected));
+		assert_eq!(out.audio.renditions.len(), 1);
 	}
 
 	#[test]

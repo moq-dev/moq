@@ -73,7 +73,7 @@ fn measure(fields: usize, changed_percent: usize, compressed: bool) -> (usize, u
 	} else {
 		moq_json::Compression::None
 	};
-	let mut config = snapshot::Config::default().with_delta_ratio(u32::MAX);
+	let mut config = snapshot::Config::default().with_deltas(true);
 	config.compression = compression;
 	let mut encoder = Encoder::<Value>::new(config);
 	let mut decoder_config = snapshot::consumer::Config::default();

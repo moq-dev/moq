@@ -44,7 +44,18 @@ impl Drop for Fixture {
 	}
 }
 
-async fn prepare(tracks: usize, frames: usize, payload: &Bytes) -> (moq_mux::Source, impl Stream, Fixture) {
+struct Video {
+	tracks: usize,
+	frames: usize,
+	frames_per_group: usize,
+}
+
+async fn prepare(video: Video, payload: &Bytes) -> (moq_mux::Source, impl Stream, Fixture) {
+	let Video {
+		tracks,
+		frames,
+		frames_per_group,
+	} = video;
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
@@ -66,7 +77,7 @@ async fn prepare(tracks: usize, frames: usize, payload: &Bytes) -> (moq_mux::Sou
 					timestamp: timestamp(index),
 					duration: Some(Timestamp::from_millis(20).unwrap()),
 					payload: payload.clone(),
-					keyframe: true,
+					keyframe: index % frames_per_group == 0,
 				})
 				.unwrap();
 		}
@@ -172,6 +183,117 @@ impl Annexb {
 	}
 }
 
+// Collect only timed import work, excluding the output validation in setup.
+#[inline(never)]
+fn profiled_import(mut import: Annexb, payload: &Bytes, frames: usize) -> Annexb {
+	import.decode(payload, frames);
+	import
+}
+
+/// `fragments` moofs whose `tracks` trafs each split their samples into `runs` one-sample runs,
+/// interleaved in the mdat run by run, after the init of an exported `tracks`-track broadcast.
+fn interleaved(init: &[u8], tracks: usize, runs: usize, fragments: usize, payload: &Bytes) -> Bytes {
+	use mp4_atom::{Decode, Encode};
+	let mut cursor = std::io::Cursor::new(init);
+	mp4_atom::Ftyp::decode(&mut cursor).unwrap();
+	let moov = mp4_atom::Moov::decode(&mut cursor).unwrap();
+	let mut out = BytesMut::from(&init[..cursor.position() as usize]);
+	for fragment in 0..fragments {
+		let mut moof = mp4_atom::Moof {
+			mfhd: mp4_atom::Mfhd {
+				sequence_number: fragment as u32 + 1,
+			},
+			traf: moov.trak[..tracks]
+				.iter()
+				.map(|trak| mp4_atom::Traf {
+					tfhd: mp4_atom::Tfhd {
+						track_id: trak.tkhd.track_id,
+						..Default::default()
+					},
+					tfdt: Some(mp4_atom::Tfdt {
+						base_media_decode_time: (fragment * runs * 20) as u64 * trak.mdia.mdhd.timescale as u64 / 1000,
+					}),
+					trun: (0..runs)
+						.map(|run| mp4_atom::Trun {
+							data_offset: Some(0),
+							entries: vec![mp4_atom::TrunEntry {
+								duration: Some(trak.mdia.mdhd.timescale / 50),
+								size: Some(payload.len() as u32),
+								flags: Some(if run == 0 { 0 } else { 0x0001_0000 }),
+								cts: None,
+							}],
+						})
+						.collect(),
+					..Default::default()
+				})
+				.collect(),
+		};
+		let mut buf = Vec::new();
+		moof.encode(&mut buf).unwrap();
+		let data = buf.len() + 8;
+		for (track, traf) in moof.traf.iter_mut().enumerate() {
+			for (run, trun) in traf.trun.iter_mut().enumerate() {
+				trun.data_offset = Some((data + (run * tracks + track) * payload.len()) as i32);
+			}
+		}
+		buf.clear();
+		moof.encode(&mut buf).unwrap();
+		mp4_atom::Mdat {
+			data: payload.repeat(tracks * runs),
+		}
+		.encode(&mut buf)
+		.unwrap();
+		out.extend_from_slice(&buf);
+	}
+	out.freeze()
+}
+
+/// fMP4 passthrough and unwrapping of fragments whose tracks interleave their runs in one mdat,
+/// across track and run count: each track copies only its own samples.
+fn interleaved_runs(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let payload = payload(4096);
+	let frames = 16;
+	for tracks in [1, 4] {
+		let (source, stream, fixture) = runtime.block_on(prepare(
+			Video {
+				tracks,
+				frames: 1,
+				frames_per_group: 1,
+			},
+			&payload,
+		));
+		let init = runtime.block_on(export("cmaf", source, stream, true));
+		drop(fixture);
+		for runs in [1, 16] {
+			let data = interleaved(&init, tracks, runs, frames, &payload);
+			for passthrough in [false, true] {
+				let (catalog, import) = import_cmaf(cmaf_import(passthrough), &data);
+				assert_eq!(catalog.snapshot().video.renditions.len(), tracks);
+				drop(import);
+			}
+			for (direction, passthrough) in [("import", true), ("unwrap", false)] {
+				let mut group = c.benchmark_group(format!("cmaf-interleaved-{direction}"));
+				group.throughput(Throughput::Bytes(data.len() as u64));
+				group.bench_function(
+					BenchmarkId::new(format!("{tracks}tracks"), format!("{runs}runs")),
+					|b| {
+						b.iter_batched(
+							|| cmaf_import(passthrough),
+							|import| import_cmaf(import, std::hint::black_box(&data)),
+							BatchSize::PerIteration,
+						);
+					},
+				);
+				group.finish();
+			}
+		}
+	}
+}
+
 fn containers(c: &mut Criterion) {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
@@ -182,7 +304,14 @@ fn containers(c: &mut Criterion) {
 			for frames in [1, 16, 64] {
 				for size in [256, 4096] {
 					let payload = payload(size);
-					let (source, stream, fixture) = runtime.block_on(prepare(*tracks, frames, &payload));
+					let (source, stream, fixture) = runtime.block_on(prepare(
+						Video {
+							tracks: *tracks,
+							frames,
+							frames_per_group: 1,
+						},
+						&payload,
+					));
 					let data = runtime.block_on(export(format, source, stream, true));
 					drop(fixture);
 					if format == "cmaf" {
@@ -238,16 +367,24 @@ fn containers(c: &mut Criterion) {
 										} else {
 											b.iter_batched(
 												Annexb::new,
-												|mut import| {
-													import.decode(std::hint::black_box(&payload), frames);
-													import
+												|import| {
+													profiled_import(import, std::hint::black_box(&payload), frames)
 												},
 												BatchSize::PerIteration,
 											);
 										}
 									} else {
 										b.iter_batched(
-											|| runtime.block_on(prepare(*tracks, frames, &payload)),
+											|| {
+												runtime.block_on(prepare(
+													Video {
+														tracks: *tracks,
+														frames,
+														frames_per_group: 1,
+													},
+													&payload,
+												))
+											},
 											|(source, stream, fixture)| {
 												std::hint::black_box(
 													runtime.block_on(export(format, source, stream, false)),
@@ -268,5 +405,59 @@ fn containers(c: &mut Criterion) {
 	}
 }
 
-criterion_group!(benches, containers);
+// A stable profiling boundary excludes publishing and benchmark setup from counts.
+#[inline(never)]
+fn export_queued_groups(runtime: &tokio::runtime::Runtime, source: moq_mux::Source, stream: impl Stream) {
+	std::hint::black_box(runtime.block_on(export("annexb", source, stream, false)));
+}
+
+// Keep both dimensions independent: per-frame scans over queued groups grow with
+// frames per group as well as group count, unlike one constant cost per group.
+fn queued_groups(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let payload = payload(256);
+	let mut group = c.benchmark_group("annexb-export-queued-groups");
+	for groups in [1, 16, 64] {
+		for frames_per_group in [1, 16] {
+			let frames = groups * frames_per_group;
+			let (source, stream, fixture) = runtime.block_on(prepare(
+				Video {
+					tracks: 1,
+					frames,
+					frames_per_group,
+				},
+				&payload,
+			));
+			let data = runtime.block_on(export("annexb", source, stream, true));
+			assert_eq!(data.len(), 256 * frames);
+			drop(fixture);
+			group.throughput(Throughput::Elements(frames as u64));
+			group.bench_function(BenchmarkId::new(groups.to_string(), frames_per_group), |b| {
+				b.iter_batched(
+					|| {
+						runtime.block_on(prepare(
+							Video {
+								tracks: 1,
+								frames,
+								frames_per_group,
+							},
+							&payload,
+						))
+					},
+					|(source, stream, fixture)| {
+						export_queued_groups(&runtime, source, stream);
+						fixture
+					},
+					BatchSize::PerIteration,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, containers, interleaved_runs, queued_groups);
 criterion_main!(benches);

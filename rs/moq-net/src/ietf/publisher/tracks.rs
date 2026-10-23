@@ -165,8 +165,8 @@ struct Listed {
 	namespace: crate::PathOwned,
 	name: Arc<str>,
 	properties: ietf::Properties,
-	/// Closes once the track is no longer listed.
-	listed: kio::Consumer<()>,
+	/// Closes once the track is no longer listed, holding whether it finished.
+	listed: kio::Consumer<bool>,
 	/// Closes once the request is cancelled, which a PUBLISH not yet sent heeds.
 	live: kio::Consumer<()>,
 	/// The subscription slot the PUBLISH holds for as long as it lives.
@@ -535,7 +535,7 @@ where
 		};
 		// Each PUBLISH watches its track's entry here: dropping it says the track is no
 		// longer listed.
-		let mut listed: HashMap<Arc<str>, kio::Producer<()>> = HashMap::new();
+		let mut listed: HashMap<Arc<str>, kio::Producer<bool>> = HashMap::new();
 		// The tracks this broadcast queued a skip for, so its end touches only its own.
 		let mut skipped: HashSet<Arc<str>> = HashSet::new();
 		let mut publishes = TaskSet::owned();
@@ -602,7 +602,7 @@ where
 			let Some(event) = event else {
 				return;
 			};
-			let unlist = |listed: &mut HashMap<Arc<str>, kio::Producer<()>>, skipped: &mut HashSet<Arc<str>>| {
+			let unlist = |listed: &mut HashMap<Arc<str>, kio::Producer<bool>>, skipped: &mut HashSet<Arc<str>>| {
 				listed.clear();
 				let mut skips = request.skips.lock();
 				for name in skipped.drain() {
@@ -638,11 +638,21 @@ where
 				// reading the listing for them, adding nothing.
 				Event::Cancelled => adding = false,
 				Event::Track(crate::broadcast::TracksEvent::Synced) => {}
+				Event::Track(
+					crate::broadcast::TracksEvent::Removed { name } | crate::broadcast::TracksEvent::Finished { name },
+				) if skipped.remove(&name) => {
+					request.skips.lock().remove(&(suffix.clone(), name));
+				}
 				Event::Track(crate::broadcast::TracksEvent::Removed { name }) => {
-					if skipped.remove(&name) {
-						request.skips.lock().remove(&(suffix.clone(), name.clone()));
-					}
 					listed.remove(&name);
+				}
+				// Its PUBLISH ends with TRACK_ENDED rather than in error.
+				Event::Track(crate::broadcast::TracksEvent::Finished { name }) => {
+					if let Some(entry) = listed.remove(&name)
+						&& let Ok(mut finished) = entry.write()
+					{
+						*finished = true;
+					}
 				}
 				Event::Track(crate::broadcast::TracksEvent::Added { .. }) if !adding => {}
 				Event::Track(crate::broadcast::TracksEvent::Added { name, info }) => {
@@ -685,7 +695,7 @@ where
 						}
 						_ => None,
 					};
-					let entry = kio::Producer::new(());
+					let entry = kio::Producer::new(false);
 					let task = Listed {
 						track,
 						namespace: namespace.clone(),
@@ -748,7 +758,7 @@ where
 		let Some(opened) = opened else {
 			return Ok(());
 		};
-		let mut stream = opened?;
+		let mut stream = super::super::request_stream::with_stats(opened?, self.stats(), self.version);
 		let allocated = kio::wait(|waiter| {
 			if listed.poll_closed(waiter).is_ready() || live.poll_closed(waiter).is_ready() {
 				return Poll::Ready(None);
@@ -801,11 +811,12 @@ where
 		let mut finished = false;
 		let mut goaways = super::super::request_stream::Messages::new(self.session.clone(), self.control.client());
 
-		// PUBLISH_OK or REQUEST_ERROR. A track unlisted before the answer has nothing to
-		// end yet, so the request is reset.
+		// PUBLISH_OK or REQUEST_ERROR. A track that left the listing unfinished before the
+		// answer has nothing to end yet, so the request is reset. One that finished waits for
+		// the answer, then ends with TRACK_ENDED, since the peer listed it on the PUBLISH.
 		let answer = kio::wait(|waiter| {
 			let mut cx = waiter.context();
-			if session.poll_closed(&mut cx).is_ready() || listed.poll_closed(waiter).is_ready() {
+			if session.poll_closed(&mut cx).is_ready() || (listed.poll_closed(waiter).is_ready() && !*listed.read()) {
 				return Poll::Ready(None);
 			}
 			goaways.poll_next(&mut stream.reader, &mut cx).map(Some)
@@ -892,12 +903,12 @@ where
 					)
 					.await
 				{
-					Ok(Served::Paused) => {
+					Ok(Served::Paused(_)) => {
 						self.pause_join(join.as_ref());
 						self.write_request_ok(&mut stream.writer, request_id, None).await?;
 						// Unlisted while it forwarded: it ends now that it is idle.
 						if listed.is_closed() {
-							break unlisted();
+							break unlisted(&listed);
 						}
 						continue;
 					}
@@ -937,7 +948,7 @@ where
 
 			let update = match wait {
 				Wait::Update(update) => update,
-				Wait::Removed => break unlisted(),
+				Wait::Removed => break unlisted(&listed),
 				Wait::Revoked => {
 					tracing::info!(broadcast = %absolute, track = %name, "publish no longer authorized");
 					break Served::Track(Err(Error::Unauthorized));
@@ -1004,7 +1015,7 @@ where
 
 	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
 	/// unless the subscription forwards.
-	fn pause_join(&self, join: Option<&Join<GroupOf<S>>>) {
+	pub(super) fn pause_join(&self, join: Option<&Join<GroupOf<S>>>) {
 		if let Some(join) = join {
 			join.joins.lock().insert(join.request_id, Some(Joined::Empty));
 		}
@@ -1033,7 +1044,10 @@ where
 	/// with them would be served, until it pauses again or ends. Answers the resuming update
 	/// with where the subscription now joins, when `answer` says one asked. `Err(())` when the
 	/// subscriber cancelled.
-	#[allow(clippy::too_many_arguments)]
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "private plumbing; a single-use argument struct would only rename the parameters"
+	)]
 	async fn resume_publish(
 		&self,
 		stream: &mut Stream<S, Version>,
@@ -1044,7 +1058,7 @@ where
 		how: Resume,
 		dynamic: bool,
 		join: Option<&Join<GroupOf<S>>>,
-		listed: &kio::Consumer<()>,
+		listed: &kio::Consumer<bool>,
 		gate: &mut crate::auth::Gate,
 		finished: &mut bool,
 		goaways: &mut super::super::request_stream::Messages<S>,
@@ -1124,7 +1138,6 @@ where
 		)
 		.compression(self.peer_setup.get().await.flate)
 		.ranked(self.priority.clone());
-		serve.pausable = true;
 		serve.dynamic = dynamic;
 		if let Some(value) = how.new_group {
 			serve.request_new_group(value);
@@ -1188,21 +1201,19 @@ where
 		params.priority = crate::ietf::priority::to_wire(applied.priority);
 		params.max_age = applied.max_delay.as_millis().try_into().ok();
 		let served = match served {
-			Ok(Some(Served::Paused)) => Served::Paused,
-			Ok(Some(served)) => {
-				if matches!(served, Served::Track(Ok(()))) {
-					self.write_end_of_track(stream, &mut serve, finished, goaways).await;
-				}
-				served
-			}
+			Ok(Some(served)) => served,
 			Ok(None) => {
 				serve.close_groups();
 				*opened += serve.opened();
 				return Err(());
 			}
-			Err(refusal) if matches!(refusal.error, Error::Cancel) => unlisted(),
+			// Unlisted while it forwarded.
+			Err(refusal) if matches!(refusal.error, Error::Cancel) => unlisted(listed),
 			Err(refusal) => Served::Track(Err(refusal.error)),
 		};
+		if matches!(served, Served::Track(Ok(()))) {
+			self.write_end_of_track(stream, &mut serve, finished, goaways).await;
+		}
 		// Forwarding stops here: PUBLISH_DONE, or the answer to the pause, follows the close
 		// of every data stream.
 		serve.close_groups();
@@ -1211,12 +1222,14 @@ where
 	}
 }
 
-/// How a PUBLISH whose track is no longer listed ends: always in error, never TRACK_ENDED.
-/// A track that leaves the listing may go on elsewhere, as when its broadcast's route is
-/// withdrawn, and a clean end would tell the subscriber it is over. A finished track is
-/// unlisted the same way, so it deliberately ends in error too.
-fn unlisted() -> Served {
-	Served::Track(Err(Error::NotFound))
+/// How a PUBLISH whose track is no longer listed ends: TRACK_ENDED if it finished, otherwise
+/// in error. A track that leaves the listing unfinished may go on elsewhere, as when its
+/// broadcast's route is withdrawn, and a clean end would tell the subscriber it is over.
+fn unlisted(listed: &kio::Consumer<bool>) -> Served {
+	match *listed.read() {
+		true => Served::Track(Ok(())),
+		false => Served::Track(Err(Error::NotFound)),
+	}
 }
 
 #[cfg(test)]
@@ -1377,6 +1390,7 @@ mod tests {
 			authorization_token: None,
 			new_group: None,
 			max_age: None,
+			fill: None,
 		}
 	}
 
@@ -1420,6 +1434,37 @@ mod tests {
 			assert_eq!(id, ietf::PublishDone::ID, "{version}");
 			let done: ietf::PublishDone = body.message(version).unwrap();
 			assert_eq!(done.stream_count, 0, "{version}");
+		}
+	}
+
+	/// A track that finishes while its PUBLISH awaits the answer still ends with TRACK_ENDED
+	/// once answered, since the peer listed it on the PUBLISH; a reset would fail its listing.
+	#[moq_clock::test]
+	async fn a_track_finished_before_the_answer_ends_cleanly() {
+		for version in DRAFTS {
+			let mut h = harness(version);
+			let mut request = h.request(&listing(false)).await;
+			assert_eq!(next(&mut request).await.0, ietf::RequestOk::ID, "{version}");
+			let mut published = HashMap::new();
+			for _ in 0..2 {
+				let (stream, _, name, _) = h.publish().await;
+				published.insert(name, stream);
+			}
+
+			let mut video = published.remove("video").unwrap();
+			let track = h.tracks.remove("video").unwrap();
+			track.finish().unwrap();
+			drop(track);
+			moq_clock::sleep(Duration::from_millis(10)).await;
+			publish_ok(&mut video).await;
+			let (id, body) = next(&mut video).await;
+			assert_eq!(id, ietf::PublishDone::ID, "{version}");
+			let done: ietf::PublishDone = body.message(version).unwrap();
+			assert_eq!(
+				done.status_code,
+				ietf::PublishDoneStatus::TrackEnded.code(version),
+				"{version}"
+			);
 		}
 	}
 
@@ -1863,7 +1908,8 @@ mod tests {
 	}
 
 	async fn resume_asks_for_a_new_group(on_listing: bool) {
-		let version = Version::Draft22;
+		// Draft-22 sends no NEW_GROUP_REQUEST on SUBSCRIBE_TRACKS.
+		let version = Version::Draft21;
 		let mut h = harness(version);
 		let live = h
 			.broadcast
@@ -2048,11 +2094,12 @@ mod tests {
 		}
 	}
 
-	/// A paused listing's FILL_PARAMETERS (draft-20+) open no fill, even once a PUBLISH
-	/// resumes without its own (draft-22 section 3.4.1).
+	/// A paused listing's FILL_PARAMETERS (draft-20 and draft-21; draft-22 sends none on
+	/// SUBSCRIBE_TRACKS) open no fill, even once a PUBLISH resumes without its own
+	/// (draft-22 section 3.4.1).
 	#[moq_clock::test]
 	async fn a_listing_fill_opens_nothing() {
-		for version in [Version::Draft20, Version::Draft22] {
+		for version in [Version::Draft20, Version::Draft21] {
 			let mut h = harness(version);
 			let video = h.tracks.remove("video").unwrap();
 			let mut group = video.append_group().unwrap();
@@ -2151,9 +2198,10 @@ mod tests {
 
 	/// From draft-20 each PUBLISH states the listing's subscription parameters, which the
 	/// subscriber otherwise takes as the defaults; earlier drafts carry them on PUBLISH_OK.
+	/// Draft-22 sends none of them on SUBSCRIBE_TRACKS.
 	#[moq_clock::test]
 	async fn a_listing_states_its_parameters_on_each_publish() {
-		for version in DRAFTS {
+		for version in DRAFTS.into_iter().filter(|version| *version != Version::Draft22) {
 			let mut h = harness(version);
 			let request = ietf::SubscribeTracks {
 				subscriber_priority: Some(7),

@@ -37,40 +37,6 @@ public final class TrackRequest: Sendable {
     }
 }
 
-/// A watch-only handle to the callers waiting on a requested group.
-///
-/// Returned by `GroupRequest.demand()`. Weak: holding it does not keep the request alive. The last
-/// caller to leave withdraws the request, so once unused, demand never returns: drop the request.
-/// Waits throw `MoqError.Closed` after the request is accepted or dropped, and keep the rejection
-/// reason after it is rejected.
-public final class GroupDemand: Sendable {
-    let ffi: MoqGroupDemand
-
-    init(_ ffi: MoqGroupDemand) {
-        self.ffi = ffi
-    }
-
-    /// The sequence of the group this watches.
-    public var sequence: UInt64 {
-        ffi.sequence()
-    }
-
-    /// Whether the group has at least one waiting caller right now.
-    public var isUsed: Bool {
-        ffi.isUsed()
-    }
-
-    /// Suspend until the group has at least one waiting caller.
-    public func used() async throws {
-        try await ffi.used()
-    }
-
-    /// Suspend until the group has no waiting callers.
-    public func unused() async throws {
-        try await ffi.unused()
-    }
-}
-
 /// A request to produce one uncached group for a fetch consumer.
 public final class GroupRequest: Sendable {
     let ffi: MoqGroupRequest
@@ -87,11 +53,6 @@ public final class GroupRequest: Sendable {
     /// The consumer's delivery priority for this fetch.
     public var priority: Int8 {
         ffi.priority()
-    }
-
-    /// A watch-only handle to whether any caller still wants this group.
-    public func demand() throws -> GroupDemand {
-        GroupDemand(try ffi.demand())
     }
 
     /// Accept the request and return a producer for the group.

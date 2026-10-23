@@ -6,6 +6,7 @@ import { type OpenOptions, Reader, Stream, type Writer } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
+import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { MaxRequestId } from "./request.ts";
 import { refuseUpdate } from "./request_stream.ts";
@@ -759,8 +760,8 @@ export class ControlStreamAdapter implements Session {
 				const max = this.#peerMax;
 				await this.#writeMutex.runExclusive(async () => {
 					if (this.#closed) return;
-					await this.#writer.u53(MaxRequestId.id);
-					await new MaxRequestId({ requestId: max }).encode(this.#writer, this.version);
+					const grant = new MaxRequestId({ requestId: max });
+					await Message.write(this.#writer, MaxRequestId.id, grant, this.version);
 				});
 			}
 		} catch {
@@ -1054,8 +1055,17 @@ export class ControlStreamAdapter implements Session {
 				if (subNs08 === undefined) throw new Error("unexpected message 0x08: no SubscribeNamespace stream");
 				return { route: Route.FollowUp, requestId: subNs08 };
 			}
+			case 0x0f: {
+				// TRACK_STATUS_ERROR has the SUBSCRIBE_ERROR body on draft 14.
+				if (this.version !== Version.DRAFT_14) throw new Error("unexpected TrackStatusError");
+				return { route: Route.ErrorResponse, requestId: await readRequestId() };
+			}
 			case 0x0e: {
-				if (this.version === Version.DRAFT_14 || this.version === Version.DRAFT_15) {
+				if (this.version === Version.DRAFT_14) {
+					// TRACK_STATUS_OK names its request, unlike draft 16's namespace entry.
+					return { route: Route.Response, requestId: await readRequestId() };
+				}
+				if (this.version === Version.DRAFT_15) {
 					throw new Error("unexpected message 0x0e");
 				}
 				// v16+: NamespaceDone entry (no requestId) — route to SubscribeNamespace stream

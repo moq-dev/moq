@@ -88,7 +88,7 @@ impl From<Code> for u64 {
 
 macro_rules! errors {
     {$($name:ident($val:expr) $desc:expr;)*} => {
-        #[allow(non_snake_case, unused)]
+        #[allow(non_snake_case, unused, reason = "constructors are named after the wire codes, and not every code is raised")]
         impl Error {
             $(
             pub(crate) fn $name<T>(reason: T) -> Self where T: Into<String> {

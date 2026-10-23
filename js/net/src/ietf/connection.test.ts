@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
-import { SessionCode } from "../error.ts";
+import { SessionCode, StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -134,8 +134,8 @@ for (const [version, alpn] of [
 	}
 }
 
-/** A defined but unsupported request is refused without closing the session. */
-test("SUBSCRIBE_TRACKS refuses only its request", async () => {
+/** A cancelled listing leaves the session usable for a new listing of the same prefix. */
+test("SUBSCRIBE_TRACKS accepts an empty origin", async () => {
 	const version = Version.DRAFT_19;
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const control = await Stream.open(pair.server, { version });
@@ -149,19 +149,18 @@ test("SUBSCRIBE_TRACKS refuses only its request", async () => {
 	});
 
 	try {
-		// A second refusal proves the first left the session usable.
+		// A disjoint second listing proves the first left the session usable.
 		for (let i = 0; i < 2; i++) {
 			const stream = await Stream.open(pair.client, { version });
 			await stream.writer.u62(BigInt(SUBSCRIBE_TRACKS_ID));
 			await Message.encode(stream.writer, async (writer) => {
 				await writer.u62(BigInt(i * 2));
-				await Namespace.encode(writer, Path.from(""));
+				await Namespace.encode(writer, Path.from(`prefix-${i}`));
 				await writer.u53(0);
 			});
-			expect(await stream.reader.u53()).toBe(RequestError.id);
-			const refused = await RequestError.decode(stream.reader, version);
-			expect(refused.errorCode).toBe(0x3);
-			expect(refused.reasonPhrase).toBe("SUBSCRIBE_TRACKS is not supported");
+			expect(await stream.reader.u53()).toBe(RequestOk.id);
+			await RequestOk.decode(stream.reader, version);
+			stream.abort(new StreamError(StreamCode.Cancel));
 		}
 	} finally {
 		connection.abort();

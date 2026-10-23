@@ -2,6 +2,7 @@
 """Measure Bun unit tests in separate package processes, as the merge gate does."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -71,8 +72,15 @@ def main():
         result.check_returncode()
     summary = report(ROOT, selected)
     (ROOT / "target/coverage/js/summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    rows = ["## JS unit coverage", "", "| Package | Covered lines | Measured lines | Unloaded sources |",
+            "| --- | ---: | ---: | ---: |"]
     for name, entry in summary.items():
+        rows.append(f"| {name} | {entry['covered']} | {entry['lines']} | {len(entry['unloaded'])} |")
         print(f"{name}: {entry['covered']}/{entry['lines']} measured lines, {len(entry['unloaded'])} unloaded sources")
+
+    if destination := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with Path(destination).open("a") as output:
+            output.write("\n".join(rows) + "\n")
 
 
 if __name__ == "__main__":

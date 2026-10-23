@@ -49,3 +49,6 @@ harness = false
 [[example]]
 name = "teleop"
 test = true
+
+[lints]
+workspace = true

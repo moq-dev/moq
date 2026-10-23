@@ -81,6 +81,9 @@ jobs:
         if: steps.scope.outputs.needed == 'true'
         run: |
           rm -rf target/cargo-timings
+          if [[ "$GITHUB_EVENT_NAME" == merge_group ]]; then
+            export NEXTEST_TEST_THREADS=24
+          fi
           nix develop --command just ci "$CI_BASE"
         env:
           CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.merge_group.base_sha }}

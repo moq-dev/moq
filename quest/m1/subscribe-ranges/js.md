@@ -28,27 +28,16 @@ IETF FETCH dispatch. Resized from [M] to [L] for it.
   was never cached, covering exact replay, empty and missing groups,
   concurrent requests, and cancellation while awaiting a reply.
 
-The 2026-10-22 release audit reproduced a P2 defect in already accepted
-datagram filters at main 1d43c096e0. For an inclusive request from
-(group 0, object 1) through (group 1, object 0), publishing datagrams at
-(0, 0), (1, 0), and (2, 0) should deliver only (1, 0). Each datagram is object
-0 of its group; the observed lists below contain group sequences.
-The real JS publisher with paired
-mock transports delivered [0, 1, 2] on IETF drafts 20/22 and [0, 1] on Lite
-06/07. IETF's datagram task receives no resolved range, losing both bounds;
-Lite installs the group cap but does not pass frame bounds to its datagram
-task. The three existing reliable-group range controls passed. These were
-local publisher/codec reproductions; the native counterpart was inspected
-but not exercised by these targeted tests.
-
-Keep this correction under the existing range work, including currently
-published Lite-06 behavior and subscription updates. Lite's defect is
-inherited; JS IETF datagrams newly expose it after
-[moq-dev/moq#4979](https://github.com/moq-dev/moq/pull/4979).
-Correcting an accepted filter needs no additional API or wire format by
-itself. Test datagrams against both object boundaries as well as group/time
-ranges, so the reliable and unreliable paths share the same selection rule.
+When ranges add frame bounds, the group model carries a lite group's
+`frameStart` instead of refusing a nonzero one, as
+[partial lite groups](/quest/m1/release-audit/js-partial-group.md) does until
+then. Preserve the per-reader group-bound rule for reliable reads, live-edge
+selection, subscription updates, and publisher datagrams.
 
 ## Required
 
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the wire this speaks
+
+## Related
+
+- [Partial lite groups](/quest/m1/release-audit/js-partial-group.md) - refuses a nonzero `frameStart` until this models it

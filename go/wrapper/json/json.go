@@ -20,26 +20,22 @@ import (
 	"moq.dev/moq/internal/bridge"
 )
 
-// DefaultDeltaRatio is used when [SnapshotOptions.DeltaRatio] is nil. Go has no field
-// defaults, so unlike the other bindings this restates the `#[uniffi(default = 8)]` on
-// moq-ffi's MoqJsonSnapshotConfig (itself pinned to moq-json's default by a Rust test).
-const DefaultDeltaRatio uint32 = 8
-
 // SnapshotOptions configures a lossy latest-value JSON producer.
 type SnapshotOptions struct {
-	// DeltaRatio controls how aggressively deltas replace full snapshots. Nil uses
-	// [DefaultDeltaRatio]; a pointer to zero disables deltas entirely.
-	DeltaRatio *uint32
+	// Deltas encodes updates as merge-patch deltas against the group's snapshot. Nil
+	// enables them, matching the other bindings; a pointer to false publishes every
+	// update as a full snapshot in its own group. With deltas on, give the track a
+	// refresh ratio so a joiner past it gets the value restated in a fresh group.
+	Deltas *bool
 	// Compression enables group-scoped DEFLATE and must match on the consumer.
 	Compression bool
 }
 
-// deltaRatio resolves the configured ratio, falling back to the shared default.
-func (o SnapshotOptions) deltaRatio() uint32 {
-	if o.DeltaRatio == nil {
-		return DefaultDeltaRatio
-	}
-	return *o.DeltaRatio
+// deltas resolves the configured switch. Go has no field defaults, so this restates the
+// `#[uniffi(default = true)]` on moq-ffi's MoqJsonSnapshotConfig (itself pinned to
+// moq-json's default by a Rust test).
+func (o SnapshotOptions) deltas() bool {
+	return o.Deltas == nil || *o.Deltas
 }
 
 // StreamOptions configures a lossless append-log JSON producer.
@@ -69,7 +65,7 @@ func NewSnapshotProducer(broadcast *moq.BroadcastProducer, track *moq.TrackProdu
 	inner, err := ffi.NewMoqJsonSnapshotProducer(
 		bridge.BroadcastProducer(broadcast),
 		bridge.TrackProducer(track),
-		ffi.MoqJsonSnapshotConfig{DeltaRatio: options.deltaRatio(), Compression: options.Compression},
+		ffi.MoqJsonSnapshotConfig{Deltas: options.deltas(), Compression: options.Compression},
 	)
 	if err != nil {
 		return nil, err
@@ -182,7 +178,7 @@ type SnapshotConsumer struct {
 // NewSnapshotConsumer reads track as a lossy latest-value JSON track. It takes over
 // track, whose handle is closed afterward, and fails if track has already read a group.
 func NewSnapshotConsumer(track *moq.TrackConsumer, options ConsumerOptions) (*SnapshotConsumer, error) {
-	// DeltaRatio is producer-only; the consumer ignores it.
+	// Deltas is producer-only; the consumer ignores it.
 	inner, err := ffi.NewMoqJsonSnapshotConsumer(
 		bridge.TrackConsumer(track),
 		ffi.MoqJsonSnapshotConfig{Compression: options.Compression},

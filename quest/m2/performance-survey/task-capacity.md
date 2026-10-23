@@ -24,6 +24,12 @@ does not isolate historical capacity. Any reclamation or ready-word index
 must preserve stale-waker safety, concurrent wakeups, coalescing and snapshot
 fairness. Do not trade cheap burst reuse for churn without measuring both.
 
+A 2026-10-22 staging CDN profile (`f57c0aad`, DWARF stacks, 27-36% incomplete)
+put `Tasks<GroupServe>::poll` at 2.40% self-time on a 501-connection chat
+shape and 1.90% on SD, the largest moq-net site on both, and kio
+tasks/waiters at 7.5-11.5% of samples. Self-time only; it does not show how
+much is historical capacity.
+
 Related: [worker quiescence](/quest/m2/perf/uring-quiescence.md) and
 [relay allocations](/quest/m2/perf/relay-allocs.md) own other costs.
 

@@ -12,12 +12,27 @@ distribution-mechanism matrix.
 
 It stands up a `moq-relay`, then for each publisher language publishes an H.264
 broadcast and confirms every subscriber sees data flowing before the timeout.
-Most subscribers check for a non-empty frame. The browser additionally verifies
+Most subscribers check for a non-empty video frame. The browser additionally verifies
 WebCodecs output painted to a canvas and drives the player's pause/resume controls.
-Every publisher but the Rust CLI also carries an Opus track, which the browser
-subscriber checks end-to-end: the browser encodes fake microphone audio, and the
-Python, Go, and C++ clients encode a synthetic tone through `moq-ffi` at a 2.5 ms frame
-duration, so the matrix covers the FFI audio path with a non-default codec config.
+
+Every publisher also sends an Opus tone, one sine per channel, and every subscriber
+decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
+660 Hz right, so a channel swap fails too. The Rust CLI imports it from ffmpeg in
+fragmented MP4, the browser encodes its fake microphone playing the tone from a WAV
+file, and the Python, Go, and C++ clients encode it through `moq-ffi` at a 2.5 ms
+frame duration, so the matrix covers the FFI audio path with a non-default codec config.
+Each subscriber decodes with what it already has: moq-audio for Rust (the
+`interop-audio` example, since the CLI has no PCM output), `moq-ffi` for Python,
+Go, and C++, `moq-c` for C, `decodebin` on `audio_0` for GStreamer, and
+`@moq/hang`'s libav WebCodecs fallback under Node and Bun. Each writes its first
+600 ms of PCM and frame timestamps for [`tone.py`](tone.py), which requires the
+publisher's channel count, contiguous timestamps, and each channel's tone carrying
+most of its energy by a Goertzel filter. A garbled decode (wrong channel order or
+sample rate), silence, or a timestamp gap fails the cell; a misapplied pre-skip only
+shifts the tone's phase, which this does not check. The browser
+runs the same filter on each channel of the player's audio graph. A negative control
+then has the Rust CLI swap its channels' tones, and every subscriber must refuse it
+as the wrong tone, not fail some other way. `interop.sh` is the one place the tones are chosen.
 
 The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
@@ -30,6 +45,27 @@ reader's complete clean end over stdin, so a lane tests delivery rather than
 shutdown. No sleep stands in for drain completion. A missing group, error, or
 stall fails the lane; the timeout only bounds failure. QUIC on localhost rarely
 reorders, so the ordering race remains covered by transport unit tests.
+
+The in-tree matrix also has a `finish` case. `just test interop --finish --all`
+runs it alone. Readers establish their sessions first, then wait on a private
+stdin barrier without subscribing to media. Each publisher imports ten nonempty
+H.264 frames in one GOP (the browser encodes the same finite fixture), finishes
+all media and its catalog, and obtains the normal broadcast finish handle. Only
+then does the runner release readers. They require all ten frames, natural media
+and catalog EOF, and the exact broadcast's announcement END. After the finish
+handle's real linger expires, the publisher announces a separate untimed health
+track. Reading its payload and clean EOF on the original session proves that
+withdrawal was not a transport shutdown. The final FIFO acknowledgement permits
+teardown only; it never ends the linger. Each publisher also measures monotonic
+time from before creating its finish handle and refuses a zero linger or a wait
+shorter than that handle promises, without a fixed duration or tolerance.
+
+GStreamer checks the late tail alone. `moqsrc` keeps watching a finished
+broadcast, since an announcement means online/offline, so it has no end,
+withdrawal, or session to report. It joins once the broadcast has finished and
+requires exactly ten nonempty video buffers; its cell passes with the end check
+marked N/A. A pinned moq-transport pass records the case as skipped until
+[`quest/m2/ietf-finish.md`](../../quest/m2/ietf-finish.md) makes it pass.
 
 Every client closes its session on the way out: publishers stop when their input
 ends (the browser on SIGTERM), and subscribers close once they have their frame.
@@ -56,7 +92,7 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 
 | Client | Source under test | Built with | Roles |
 |---|---|---|---|
-| Rust | `rs/moq-relay` + `rs/moq-cli` | `cargo build` | publish (video) + subscribe |
+| Rust | `rs/moq-relay` + `rs/moq-cli` (+ `rs/moq-audio` for the `interop-audio` example) | `cargo build` | publish (video + audio) + subscribe |
 | Python | `py/moq-rs` (+ `rs/moq-ffi`, import `moq`) | `uv build` wheels (maturin + hatchling), installed into a venv in the run directory | publish (video + audio) + subscribe |
 | Go | `go/wrapper` (+ `rs/moq-ffi`, import `moq-go/moq`) | `sh/go/stage.sh` (uniffi-bindgen-go) + `go build` | publish (video + audio) + subscribe |
 | C++ | `cpp/moq` (+ `rs/moq-ffi`, `find_package(moq-cpp)`) | `cmake` build + install of `cpp/moq` (uniffi-bindgen-cpp), then `cmake` for the client | publish (video + audio) + subscribe |
@@ -85,8 +121,9 @@ marks the cell unavailable.
 
 The GStreamer client builds the `moqsrc` plugin from `rs/moq-gst` and points
 `GST_PLUGIN_PATH` at it, then reads a broadcast with
-`gst-launch-1.0 moqsrc ... ! filesink`. The plugin dynamic-links the host's
-GStreamer, so this cell needs `gst-launch-1.0` + the core plugins on the system.
+`gst-launch-1.0 moqsrc ... ! filesink`, decoding `audio_0` through `decodebin`.
+The plugin dynamic-links the host's GStreamer, so this cell needs `gst-launch-1.0`
+plus the core plugins and `opusdec` on the system.
 The `nix develop` shell ships them; a bare shell without GStreamer marks the cell
 unavailable rather than failing it.
 
@@ -142,6 +179,38 @@ pinned pass also fails its `negotiated version` case when any connection it
 opened landed on another one, such as a client silently falling back to
 moq-lite. The relay names no client, so a fallback fails the round rather than
 one cell. The tails check their own connections, so a fallback fails the lane.
+
+The in-tree control lanes also run with `--tail`:
+
+- Four untimed 900-byte datagrams cross the relay in both directions between Rust
+  and each native JS runtime. The subscriber acknowledges resolved metadata before
+  sending begins, then acknowledges each packet, so this checks framing and bytes
+  rather than best-effort burst capacity. The publisher stays open until the read is
+  acknowledged, keeping a reliable track end from overtaking the datagrams.
+- A JS wire requester gets the Rust publisher's exact largest location through
+  TRACK\_STATUS on every draft. From draft 18, Rust also queries the JS publisher's
+  non-default priority before subscribing, when the answer can describe a track.
+- On drafts 14 and 16, a JS publisher advertises one usable track slot beyond namespace discovery, holds the first
+  Rust subscription open through a data round trip while a second is queued, and
+  grants credit when the first is cancelled. Sending the second without waiting
+  violates the peer adapter's live-request limit. A JS subscriber runs the same
+  held-first/queued-second exchange over QMux against a controlled JS peer, whose
+  grant and replenishment codecs are also exercised by the Rust subscriber.
+- On drafts 18, 20, and 22, a Rust GOAWAY names a second WebSocket endpoint serving
+  the same publisher epoch. The JS reconnect loop retains its reader across the
+  move. A separate read through the replacement proves it serves data before the
+  original transport is cut; only the replacement can deliver the final group.
+  The reverse JS-server-to-Rust-client case uses a marker broadcast excluded from
+  the old endpoint's scope, then cuts that endpoint before publishing the final
+  group. Both directions use the original publisher stream.
+- Drafts 14 and 16 carry no epoch, so nothing proves the replacement is the same
+  publisher. The same GOAWAY lanes there check that the held reader ends with the
+  original transport instead, and that requesting the path again subscribes
+  through the new URI and reads the final group.
+
+The standalone control endpoints use OS-assigned ports and production QMux,
+SETUP codecs, and request adapters. They verify their negotiated version directly.
+The datagram and query lanes through moq-relay use its usual version-log check.
 
 Some cases change shape on moq-transport:
 
@@ -226,11 +295,18 @@ The relay is anonymous here, since released binaries may predate AUTH; the
 default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
 publishers feed current readers, through both relay sources. Each reader is its
-own lane, `media-rust` and `media-js-native-node`. Rust exports must
-decode to a video frame through ffmpeg. The JS reader is
-`compat/client.ts`, not the interop subscriber, whose API follows the
-checkout. One copy runs against each package set, using only API both have,
-and it reconstructs the catalog and decodes the container.
+own lane, `media-rust` and `media-js-native-node`. Each Rust CLI publishes the
+stereo interop tone from fragmented MP4 (released CLIs publish it as CMAF), and
+every reader must decode both a video frame and the tone, which `tone.py`
+judges as in the matrix: a garbled decode, a missing audio rendition, or a
+timestamp gap fails the lane, and the swapped-tone control must fail it. Rust
+exports decode through ffmpeg, which also logs each decoded audio frame's
+timestamp. The JS reader is `compat/client.ts`, not the interop subscriber,
+whose API follows the checkout. One copy runs against each package set, using
+only API both have: it reconstructs the catalog, decodes the container, and
+decodes audio through `@moq/hang`'s libav fallback. It copies samples in the
+decoder's own layout, since the released fallback garbles every channel past
+the first when converting to planar. The FETCH lanes keep a video-only publisher.
 Before cross-version sessions, current and released media controls each run
 with their own relay, publisher, and Rust/JS readers on moq-lite-06. These
 controls always run, including when a planned break skips cross-version lanes,
@@ -382,9 +458,12 @@ contract](../README.md).
 interop.sh              orchestrator: build clients, run the relay + matrix or media checks
 interop.toml            relay config (token auth via `moq auth serve`, self-signed localhost)
 report.py               the CI report: case records to a static pass/fail page
+tone.py                 judges a subscriber's decoded audio against its publisher's tones
 bare-fin.ts             the JS side of `just test bare-fin`, driven by moq-net's tests
 varint.ts               the JS side of the varint check, driven by moq-net's tests
 clients/
+  rust/audio.rs           the Rust subscriber's audio decode via rs/moq-audio (`interop-audio`)
+  rust/tail.rs            the finite raw-track client (`interop-tail`)
   python/interop.py       publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
   cpp/main.cpp            publish/subscribe via cpp/moq (find_package(moq-cpp))

@@ -77,7 +77,7 @@ impl Publisher {
 		Self {
 			producer: moq_json::window::Producer::new(
 				track,
-				moq_json::window::ProducerConfig::default().with_op_ratio(0),
+				moq_json::window::ProducerConfig::default().with_ops(false),
 			),
 			expires: VecDeque::new(),
 			deadline: Deadline::new(),
@@ -255,18 +255,12 @@ mod tests {
 			.with_subscriber(to.clone());
 		tokio::join!(
 			async {
-				let (session, driver) = client
-					.connect_lite(moq_net::time::now(), client_transport)
-					.await
-					.unwrap();
+				let (session, driver) = client.connect(moq_net::time::now(), client_transport).await.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			},
 			async {
-				let (session, driver) = server
-					.accept_lite(moq_net::time::now(), server_transport)
-					.await
-					.unwrap();
+				let (session, driver) = server.accept(moq_net::time::now(), server_transport).await.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			}
@@ -285,7 +279,7 @@ mod tests {
 		let mut demand = track.demand();
 		let mut chat = moq_json::window::Producer::<String>::new(
 			track,
-			moq_json::window::ProducerConfig::default().with_op_ratio(0),
+			moq_json::window::ProducerConfig::default().with_ops(false),
 		);
 		let at = |millis| moq_net::Timestamp::from_millis(millis).unwrap();
 		chat.push(moq_net::Timed::from(&"first".to_owned()).at(at(0))).unwrap();

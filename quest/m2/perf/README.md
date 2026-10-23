@@ -75,12 +75,19 @@ as the [Stream transports](/quest/m2/perf/stream/README.md) epic, ranked
 second, and the io_uring TCP line moves in from m3. io_uring pays far more
 for TCP than for UDP, so it no longer waits on fleet demand.
 
+Decided 2026-10-22 from the io_uring audit: `just bench BASE` and
+`just bench-profile` run only tokio, so an io_uring quest measures with
+`just bench-runtime` at both revisions on the same host and worker count,
+and profiles through [Profile the io_uring workers](/quest/m2/perf/uring-profile.md).
+
 ## Required
 
 - [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter, per-thread spikes, and an append-only log
 - [Stream transports](/quest/m2/perf/stream/README.md) - qmux drives its own WebSocket and TCP sockets in one task, measured end to end, then serves them from the io_uring workers
 - [Relay allocations](/quest/m2/perf/relay-allocs.md) - fewer allocations per delivered frame, starting with per-stream session clones
+- [Profile the io_uring workers](/quest/m2/perf/uring-profile.md) - `just bench-profile` profiles `io-uring-workers` too, so ring quests stop working around a tokio-only recipe
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux
 - [Profile the io_uring clock read](/quest/m2/perf/uring-clock-profile.md) - a `perf` profile shows whether #5926's per-turn clock read cut the io_uring relay's `[vdso]` share and CPU
+- [io_uring buffer pool memory](/quest/m2/perf/uring-pool-memory.md) - measure reserved versus resident pool memory before any shrink policy
