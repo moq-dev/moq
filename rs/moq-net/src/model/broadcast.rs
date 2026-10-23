@@ -1797,7 +1797,7 @@ mod test {
 		let consumer = producer.consume();
 
 		let track = consumer.track("media").unwrap().subscribe(None);
-		let mut first = dynamic.assert_request().accept(crate::track::Info::timed());
+		let first = dynamic.assert_request().accept(crate::track::Info::timed());
 		let mut group = first.create_group(crate::group::Info { sequence: 8 }).unwrap();
 		group.write_frame(at(1000), b"a".as_slice()).unwrap();
 		group.finish().unwrap();
