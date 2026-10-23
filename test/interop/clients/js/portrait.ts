@@ -21,7 +21,7 @@ try {
 	);
 	await page.evaluate(() => {
 		const watch = document.querySelector("moq-watch") as MoqWatch;
-		watch.controls.target.set({ name: "video/360p" });
+		watch.controls.video.target.set({ name: "video/360p" });
 	});
 	// The real renderer's frame and clock prove the rung was downloaded, decoded and painted.
 	await page.waitForFunction(

@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Rendition targets nest by media kind
+
+Replace `controls.target` with `controls.video.target` on `<moq-watch>`, and `new Player({ target })` with `new Player({ video: { target } })`; read it back from `player.in.video.target`.
+Pin an audio rendition the same way, with `controls.audio.target` or `new Player({ audio: { target: { name } } })`.
+
 ### `Sync` drops its duplicate and decoder-only surface
 
 Read `Sync.out.delay` instead of `Sync.out.jitter`, and the element's `sync.out.delay` instead of its `jitter` getter; they always held the same value.

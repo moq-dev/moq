@@ -120,7 +120,7 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 		el.signals.run((effect) => {
 			const renditions = effect.get(el.broadcast.out.catalog)?.audio?.renditions ?? {};
 			const name = Object.keys(renditions).find((name) => renditions[name].codec.split(".")[0] === codec);
-			if (name) el.controls.audioTarget.set({ name });
+			if (name) el.controls.audio.target.set({ name });
 		});
 	}
 

@@ -117,6 +117,10 @@ const player = new Watch.Player({
 // Later: player.close(); connection.close();
 ```
 
+Pass `video: { target }` or `audio: { target }` to pin a rendition by catalog
+name or, for video, cap its size and bitrate; `<moq-watch>` exposes the same
+signals as `controls.video.target` and `controls.audio.target`.
+
 `<moq-watch>` wraps this same `Player` and maps attributes to its controls.
 `Broadcast`, `Sync`, and the `Video`, `Audio`, and `Text` components remain
 available when an application needs a different pipeline.

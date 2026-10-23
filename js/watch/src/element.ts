@@ -186,10 +186,14 @@ export default class MoqWatch extends HTMLElement {
 		delay: new Signal<Delay>("auto"),
 		// Future-dated media held beyond the live edge before playback skips ahead.
 		buffer: new Signal<Milli>(Milli.zero),
-		// The desired video rendition (resolution/bitrate cap).
-		target: new Signal<Video.Target | undefined>(undefined),
-		// The desired audio rendition, or automatic selection when unset.
-		audioTarget: new Signal<Audio.Target | undefined>(undefined),
+		video: {
+			// The desired video rendition (resolution/bitrate cap).
+			target: new Signal<Video.Target | undefined>(undefined),
+		},
+		audio: {
+			// The desired audio rendition, or automatic selection when unset.
+			target: new Signal<Audio.Target | undefined>(undefined),
+		},
 		// The selected caption track name, or undefined for off (the default; captions are opt-in).
 		captions: new Signal<string | undefined>(undefined),
 	};
@@ -373,7 +377,7 @@ export default class MoqWatch extends HTMLElement {
 		const updateDimensions = (width: number, height: number) => {
 			if (width <= 0 || height <= 0) return;
 			const dpr = window.devicePixelRatio || 1;
-			this.controls.target.update((prev) => ({
+			this.controls.video.target.update((prev) => ({
 				...prev,
 				width: Math.round(width * dpr),
 				height: Math.round(height * dpr),

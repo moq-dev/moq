@@ -33,7 +33,7 @@ most of its energy by a Goertzel filter. A garbled decode (wrong channel order o
 sample rate), silence, a timestamp gap, or a rendition left undecoded fails the cell;
 a misapplied pre-skip or AAC priming only shifts the tone's phase, which this does not
 check. The browser plays each rendition in a page of its own, the player pinned to it
-by `controls.audioTarget`, and runs the same filter on each channel of the player's
+by `controls.audio.target`, and runs the same filter on each channel of the player's
 audio graph. A negative control then has the Rust CLI swap its channels' tones, and
 every subscriber must refuse every rendition as the wrong tone, not fail some other
 way. `interop.sh` is the one place the tones and each publisher's codecs are chosen.

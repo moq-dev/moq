@@ -2,7 +2,7 @@ import { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import { Broadcast, type CatalogFormat } from "./broadcast";
 import { type Delay, Sync } from "./sync";
@@ -43,21 +43,38 @@ export type PlayerInput = {
 	delay: Getter<Delay>;
 	/** Future-dated media held beyond the live edge. */
 	buffer: Getter<Milli>;
-	/** Desired video rendition or quality limits. */
-	target: Getter<Video.Target | undefined>;
-	/** Desired audio rendition, or automatic selection when absent. */
-	audioTarget: Getter<Audio.Target | undefined>;
+	/** Video rendition selection. */
+	video: {
+		/** Desired video rendition or quality limits. */
+		target: Getter<Video.Target | undefined>;
+	};
+	/** Audio rendition selection. */
+	audio: {
+		/** Desired audio rendition, or automatic selection when absent. */
+		target: Getter<Audio.Target | undefined>;
+	};
 	/** Selected caption track, or undefined for off. */
 	captions: Getter<string | undefined>;
 };
 
+// The inputs that are not nested under a media kind.
+type FlatInput = Omit<PlayerInput, "video" | "audio">;
+
 /** Constructor options for {@link Player}; omitted controls use the element defaults. */
-export type PlayerProps = Inputs<PlayerInput>;
+export type PlayerProps = Inputs<FlatInput> & {
+	/** Video rendition selection. */
+	video?: Inputs<PlayerInput["video"]>;
+	/** Audio rendition selection. */
+	audio?: Inputs<PlayerInput["audio"]>;
+};
 
 /** Owns the broadcast, synchronized media pipelines, and their download policy. */
 export class Player {
 	/** Inputs wired into the pipeline. Pass signals to change them after construction. */
-	readonly in: Readonlys<PlayerInput>;
+	readonly in: Readonlys<FlatInput> & {
+		readonly video: Readonlys<PlayerInput["video"]>;
+		readonly audio: Readonlys<PlayerInput["audio"]>;
+	};
 	/** Broadcast subscription and effective catalog. */
 	readonly broadcast: Broadcast;
 	/** Shared audio, video, and caption clock. */
@@ -83,7 +100,7 @@ export class Player {
 	#signals = new Effect();
 
 	constructor(props: PlayerProps = {}) {
-		this.in = readonlys({
+		this.in = {
 			origin: getter(props.origin),
 			name: getter(props.name ?? Path.empty()),
 			enabled: getter(props.enabled ?? true),
@@ -100,23 +117,23 @@ export class Player {
 			backend: getter<Video.Backend>(props.backend ?? "auto"),
 			delay: getter(props.delay ?? "auto"),
 			buffer: getter(props.buffer ?? Milli.zero),
-			target: getter<Video.Target | undefined>(props.target),
-			audioTarget: getter<Audio.Target | undefined>(props.audioTarget),
+			video: { target: getter<Video.Target | undefined>(props.video?.target) },
+			audio: { target: getter<Audio.Target | undefined>(props.audio?.target) },
 			captions: getter<string | undefined>(props.captions),
-		});
+		};
 
 		this.broadcast = new Broadcast(this.in);
 		this.#signals.cleanup(() => this.broadcast.close());
 
 		const videoSource = new Video.Source({
 			broadcast: this.broadcast,
-			target: this.in.target,
+			target: this.in.video.target,
 			supported: Video.Decoder.supported,
 			probe: this.in.probe,
 		});
 		const audioSource = new Audio.Source({
 			broadcast: this.broadcast,
-			target: this.in.audioTarget,
+			target: this.in.audio.target,
 			supported: Audio.Decoder.supported,
 		});
 		this.#signals.cleanup(() => {
