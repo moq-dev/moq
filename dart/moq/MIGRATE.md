@@ -9,6 +9,11 @@ How to update your code for each breaking change, newest first.
 `session.shutdown()` requests a drain synchronously; `await session.closed()` waits for its result. `Moq.close()` returns `Future<void>` and drains before stopping the client, so await it. Use `session.cancel(code: 0)` for immediate cancellation.
 When upgrading from the release-line additive async `drain()` backport, replace `await session.drain()` with `session.shutdown(); await session.closed()`; `main` has no separate `drain()` method.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference in the rendition-based subscribes and fetches now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: add a `.timeout` to the future.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `SnapshotConfig.deltaRatio` is replaced by `bool deltas` (default `true`).

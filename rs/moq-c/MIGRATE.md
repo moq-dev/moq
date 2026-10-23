@@ -9,6 +9,11 @@ How to update your code for each breaking change, newest first.
 `moq_session_close()` keeps its synchronous request/terminal-callback ABI. Accepted sessions now drain finished tracks too; a failed drain is reported by the terminal `on_status` callback. Finish or abort live published tracks before requesting close.
 The UniFFI release-line additive async `drain()` backport maps to `shutdown()` then `closed()` on main. The C ABI continues to use `moq_session_close()` and its terminal callback; no function is renamed.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+`moq_consume_video` and `moq_consume_audio` on a rendition whose catalog `broadcast` field names a sibling now wait for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, give up on it yourself with `moq_consume_video_cancel` or `moq_consume_audio_cancel`.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `moq_json_snapshot_config.delta_ratio` is replaced by `bool deltas`.

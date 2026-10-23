@@ -23,6 +23,7 @@ pub struct Tracks<'a> {
 }
 
 impl Message for Tracks<'_> {
+	const CONTROL: Option<crate::stats::Control> = Some(crate::stats::Control::TrackInfo);
 	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_tracks() {
 			return Err(DecodeError::Version);
@@ -56,6 +57,7 @@ pub enum TracksEvent<'a> {
 
 impl Encode<Version> for TracksEvent<'_> {
 	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
+		w.control = Some(crate::stats::Control::TrackInfo);
 		if !version.has_tracks() {
 			return Err(EncodeError::Version);
 		}
@@ -83,6 +85,7 @@ impl Encode<Version> for TracksEvent<'_> {
 
 impl Decode<Version> for TracksEvent<'_> {
 	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		r.control = Some(crate::stats::Control::TrackInfo);
 		if !version.has_tracks() {
 			return Err(DecodeError::Version);
 		}

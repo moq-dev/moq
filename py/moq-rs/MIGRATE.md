@@ -9,6 +9,11 @@ How to update your code for each breaking change, newest first.
 `session.shutdown()` requests the drain synchronously. Use `session.shutdown(); await session.closed()` to wait and raise delivery failures, or `session.cancel(0)` for immediate cancellation. A clean `async with` exit now waits for the drain.
 When upgrading from the release-line additive async `drain()` backport, replace `await session.drain()` with `session.shutdown(); await session.closed()`; `main` has no separate `drain()` method.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve()` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel the task or wrap it in `asyncio.wait_for`.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `SnapshotProducer(delta_ratio=...)` is replaced by `deltas: bool = True`.

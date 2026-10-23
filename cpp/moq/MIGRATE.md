@@ -9,6 +9,11 @@ How to update your code for each breaking change, newest first.
 `session->shutdown()` returns `void` and requests the drain synchronously. Use `session->closed().get()` to wait and report delivery failures, or `session->cancel(0)` to cancel immediately. A shutdown request survives session disposal and discarded waiters.
 When upgrading from the release-line additive async `drain()` backport, replace `session->drain().get()` with `session->shutdown(); session->closed().get()`; `main` has no separate `drain()` method.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `BroadcastConsumer::resolve` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel it.
+
 ### Priorities are signed (#6142)
 
 `TrackInfo::priority`, `Subscription::priority`, and `FetchGroupOptions::priority` are `int8_t`, and `GroupRequest::priority()` returns one.

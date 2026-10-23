@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Source` waits for a sibling's first announcement (#6254)
+
+`Source::bind`, `resolve`, and `subscribe_track` now wait for a sibling nothing announces yet instead of failing with `Unroutable`, and keep the first instance they resolve: once it goes, they answer that ended broadcast rather than waiting for the next.
+Where you skipped a rendition on that error, bound the call yourself (`tokio::time::timeout`, or drop it), or follow the sibling's instances with `Source::follow`.
+
 ### JSON `delta_ratio` is `deltas`
 
 `json::Config::delta_ratio` and `with_delta_ratio` are replaced by `deltas: bool` and `with_deltas` (default `true`).

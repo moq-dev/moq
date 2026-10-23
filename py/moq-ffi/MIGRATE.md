@@ -9,6 +9,12 @@ How to update your code for each breaking change, newest first.
 `shutdown()` requests a drain synchronously; `await closed()` waits for its result and reports delivery failures. Regenerate bindings and link the matching native library together. See the [core migration guide](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md) for the core contract.
 When upgrading from the release-line additive async `drain()` backport, replace the release-line async `drain()` with `shutdown()` followed by `await closed()`; `main` has no separate `drain()` method.
 
+### A broadcast reference waits for its sibling's announcement (#6254)
+
+Resolving a rendition's `broadcast` reference, through `MoqBroadcastConsumer.resolve()` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Where you skipped such a rendition on that error, bound the call yourself: cancel the task or wrap it in `asyncio.wait_for`.
+Regenerate the bindings for the changed `resolve` checksum.
+
 ### A client asks only about what it watches (#6165)
 
 On moq-lite, a client session asks its relay for announcements only under paths something watches, through `announced()` or `announced_broadcast()`, instead of under its whole scope at connect.
