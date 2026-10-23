@@ -114,6 +114,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [An evicted group is judged stale](/quest/m1/evicted-group-stale.md) - a handed-out group the cache evicted goes stale once its successor's arrival plus the budget passes, so its stalled stream resets
 - [Native probing](/quest/m1/probe-native.md) - moq-quic retransmits in-flight data during BBR3's ProbeBW_UP so an app-limited sender validates headroom up to the target
 - [Native rung disable](/quest/m1/simulcast-rung-disable.md) - Rust/FFI and OBS publishers stop encoding the top renditions their grant cannot fund and resume them once probing raises the estimate
+- [One audio ring](/quest/m1/watch-audio-one-ring.md) - the SharedArrayBuffer audio ring and the isolated test axis are gone; playback uses the postMessage ring only
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
 - [Buffered backpressure timestamps](/quest/m1/audio-backpressure-timestamps.md) - buffered audio keeps holding frames past 2^31 microseconds instead of decoding ahead and dropping audio
 - [Audio playout memory](/quest/m1/audio-playout-memory.md) - a catalog's advertised jitter or delay cannot size decoded PCM; the lookahead stays encoded
