@@ -41,7 +41,3 @@ that drains before the deadline writes APPLICATION_CLOSE before the transport
 closes; and one that never drains closes at the deadline without it.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - another fix in the same file; its PR is [moq-dev/moq#6271](https://github.com/moq-dev/moq/pull/6271)

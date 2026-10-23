@@ -48,12 +48,12 @@ const ERROR_14: Record<RequestKind, number> = {
 };
 
 async function writeRefusal(w: Writer, version: IetfVersion, kind: RequestKind, refusal: Refusal): Promise<void> {
-	await w.u53(version === Version.DRAFT_14 ? ERROR_14[kind] : RequestError.id);
-	await new RequestError({
+	const err = new RequestError({
 		requestId: version <= Version.DRAFT_16 ? refusal.requestId : undefined,
 		errorCode: toRequestCode(refusal.condition, kind, version),
 		reasonPhrase: refusal.reasonPhrase,
-	}).encode(w, version);
+	});
+	await Message.write(w, version === Version.DRAFT_14 ? ERROR_14[kind] : RequestError.id, err, version);
 }
 
 /**

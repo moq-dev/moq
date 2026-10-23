@@ -2422,16 +2422,14 @@ where
 						.await;
 				}
 
-				// An End Object of 0 asks for the whole End Group.
-				let end = match end.object {
-					0 => end.group.checked_add(1).map(|group| Location { group, object: 0 }),
-					_ => Some(end),
-				};
-				let Some(end) = end.filter(|end| (start.group, start.object) < (end.group, end.object)) else {
+				// End Object 0 includes the entire End Group, even at the largest Group ID.
+				if start.group > end.group
+					|| (start.group == end.group && end.object != 0 && start.object >= end.object)
+				{
 					return self
 						.reject_fetch(stream, msg.request_id, &Error::InvalidRange, "empty range")
 						.await;
-				};
+				}
 
 				// The peer must have seen the announcement to name this namespace, so this
 				// resolves like a SUBSCRIBE does.
@@ -2518,11 +2516,7 @@ where
 
 		// One group per FETCH: on a relay, a range costs a serial upstream fetch per missing
 		// group, all buffered until FETCH_OK. Ranges wait for upstream fills by range.
-		let last = match end.object {
-			0 => end.group - 1,
-			_ => end.group,
-		};
-		if start.group != last {
+		if start.group != end.group {
 			return self
 				.reject_fetch(
 					stream,
@@ -2651,9 +2645,9 @@ where
 			}
 			(end, false)
 		} else {
-			// A group that ends the track ends the response at its last object; otherwise
-			// the response ends where it was asked to.
-			match end_of_track {
+			// Cap a bounded response at the track's last object. A whole-group response
+			// keeps Object 0 rather than claiming that the next group is covered.
+			match end_of_track && end.object > 0 {
 				true => (
 					Location {
 						group: group.sequence,
@@ -2661,7 +2655,7 @@ where
 					},
 					true,
 				),
-				false => (end, false),
+				false => (end, end_of_track),
 			}
 		};
 		// Draft-20's End Location is inclusive: the requested end, capped at Largest Object
@@ -3668,6 +3662,10 @@ where
 		}
 	}
 
+	pub(super) fn stats(&self) -> &crate::stats::Session {
+		self.origin.stats()
+	}
+
 	/// Open a stream for one advertisement, or `None` if the peer did not give us one in
 	/// time.
 	///
@@ -3681,7 +3679,13 @@ where
 
 		kio::wait(|waiter| {
 			if let Poll::Ready(res) = waiter.poll_future(open.as_mut()) {
-				return Poll::Ready(res.map(Some));
+				return Poll::Ready(res.map(|stream| {
+					Some(super::request_stream::with_stats(
+						stream,
+						self.origin.stats(),
+						self.version,
+					))
+				}));
 			}
 			if timeout.poll(waiter).is_ready() {
 				return Poll::Ready(Ok(None));
@@ -7327,6 +7331,7 @@ mod serve_tests {
 					forward: Some(forward),
 					filter: None,
 					authorization_token: None,
+					fill: None,
 				}
 				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
 				.unwrap();
@@ -7445,6 +7450,7 @@ mod serve_tests {
 			forward: None,
 			filter: None,
 			authorization_token: None,
+			fill: None,
 		}
 		.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
 		.unwrap();
@@ -7641,6 +7647,7 @@ mod serve_tests {
 					forward: Some(true),
 					filter: None,
 					authorization_token: None,
+					fill: None,
 				}
 				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
 				.unwrap();
@@ -9819,8 +9826,8 @@ mod serve_tests {
 		Version::Draft22,
 	];
 
-	/// FETCH_OK's End Location for a response whose last object is `last`: one past it
-	/// before draft 20, and the object itself from then on.
+	/// A bounded FETCH_OK's End Location: one past `last` before draft 20,
+	/// and the object itself from then on. Whole-group answers use Object 0 before draft 20.
 	fn end_location(version: Version, group: u64, last: u64) -> Location {
 		let object = match Filter::is_draft20(version) {
 			true => last,
@@ -10021,7 +10028,7 @@ mod serve_tests {
 			let (ok, objects) = fetch_answer(buf, version);
 			let end = match Filter::is_draft20(version) {
 				true => Location { group: 2, object: 1 },
-				false => Location { group: 3, object: 0 },
+				false => Location { group: 2, object: 0 },
 			};
 			assert_eq!(ok.end_location, end, "{version}");
 			assert!(!ok.end_of_track, "{version}");
@@ -10563,7 +10570,11 @@ mod serve_tests {
 			)
 			.await;
 			let (ok, objects) = fetch_answer(buf, version);
-			assert_eq!(ok.end_location, end_location(version, 4, 1), "{version}");
+			let end = match Filter::is_draft20(version) {
+				true => end_location(version, 4, 1),
+				false => Location { group: 4, object: 0 },
+			};
+			assert_eq!(ok.end_location, end, "{version}");
 			assert!(ok.end_of_track, "{version}");
 			assert_eq!(objects, pairs([4])[1..].to_vec(), "{version}");
 		}
@@ -10642,6 +10653,38 @@ mod serve_tests {
 				)
 				.await;
 				assert_eq!(fetch_refusal(buf, version), 0x3, "{version}");
+			}
+		}
+	}
+
+	/// A whole End Group at the wire's limit is valid: a multi-group range is unsupported,
+	/// and a missing single group is not found. Drafts 14-16 cannot encode u64::MAX.
+	#[moq_clock::test]
+	async fn a_standalone_fetch_through_the_maximum_group_is_unsupported() {
+		for version in FETCH_DRAFTS {
+			let maximum = match version {
+				Version::Draft14 | Version::Draft15 | Version::Draft16 => (1 << 62) - 1,
+				_ => u64::MAX,
+			};
+			let mut h = serve(version);
+			publish_pairs(&mut h, 1, None);
+			h.track.finish().unwrap();
+			settle().await;
+			for (start, code) in [(0, 0x3), (maximum, does_not_exist(version))] {
+				let buf = standalone_fetch(
+					&h,
+					Location {
+						group: start,
+						object: 0,
+					},
+					Location {
+						group: maximum,
+						object: 0,
+					},
+					GroupOrder::Ascending,
+				)
+				.await;
+				assert_eq!(fetch_refusal(buf, version), code, "{version}: start {start}");
 			}
 		}
 	}
@@ -11659,6 +11702,7 @@ mod serve_tests {
 			forward: Some(true),
 			filter: None,
 			authorization_token: Some(request_token()),
+			fill: None,
 		};
 		writer.varint(ietf::SubscribeUpdate::ID).await.unwrap();
 		writer.encode(&msg).await.unwrap();
@@ -11973,6 +12017,7 @@ mod serve_tests {
 			forward: Some(true),
 			filter: None,
 			authorization_token: Some(request_token()),
+			fill: None,
 		};
 		writer.varint(ietf::SubscribeUpdate::ID).await.unwrap();
 		writer.encode(&msg).await.unwrap();
@@ -12000,6 +12045,7 @@ mod serve_tests {
 			forward: Some(true),
 			filter: None,
 			authorization_token: None,
+			fill: None,
 		};
 		writer.varint(ietf::SubscribeUpdate::ID).await.unwrap();
 		writer.encode(&msg).await.unwrap();

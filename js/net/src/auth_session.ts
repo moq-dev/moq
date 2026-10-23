@@ -48,17 +48,18 @@ export interface AuthWire {
 	unsupported(stream: Stream, reason: string): Promise<void>;
 }
 
+/** The paths any of `grants` allows. Reduced once, so it costs about the grants' total size. */
 function union(grants: Iterable<Grant>): Grant {
-	const publish = new Path.Patterns();
-	const subscribe = new Path.Patterns();
+	const publish: Path.Pattern[] = [];
+	const subscribe: Path.Pattern[] = [];
 	let expires: number | undefined;
 	for (const grant of grants) {
-		for (const pattern of grant.publish) publish.insert(pattern);
-		for (const pattern of grant.subscribe) subscribe.insert(pattern);
+		for (const pattern of grant.publish) publish.push(pattern);
+		for (const pattern of grant.subscribe) subscribe.push(pattern);
 		// The earliest expiry is when the union next shrinks.
 		if (grant.expires !== undefined) expires = Math.min(expires ?? grant.expires, grant.expires);
 	}
-	return { publish, subscribe, expires };
+	return { publish: new Path.Patterns(publish), subscribe: new Path.Patterns(subscribe), expires };
 }
 
 // The transport closed under the stream, which ends the whole session rather than one token.

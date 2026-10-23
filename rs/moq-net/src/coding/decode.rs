@@ -137,19 +137,56 @@ impl From<BoundsExceeded> for DecodeError {
 pub struct Decoder<'a> {
 	buf: &'a [u8],
 	form: Form,
+	/// The length of the buffer this decoder started with.
+	len: usize,
+	/// See [`Self::need`].
+	need: usize,
+	/// The control message read, counted once the read is consumed.
+	pub(crate) control: Option<crate::stats::Control>,
+	/// Leading bytes left out of the `control` count: a type selector the sender writes
+	/// apart from the message, and so never counts.
+	pub(crate) uncounted: usize,
 }
 
 impl<'a> Decoder<'a> {
 	/// Read `buf`, with varints in the given form.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn new(buf: &'a [u8], form: Form) -> Self {
-		Self { buf, form }
+		Self {
+			buf,
+			form,
+			len: buf.len(),
+			need: 0,
+			control: None,
+			uncounted: 0,
+		}
+	}
+
+	/// After a [`DecodeError::Short`], how many bytes from the start the failed read
+	/// needed: at least one more than the buffer when it can't tell, and 0 if no read of
+	/// this decoder ran short.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub fn need(&self) -> usize {
+		self.need
+	}
+
+	/// Record that a read wanted `more` bytes past the current position.
+	fn short(&mut self, more: usize) -> DecodeError {
+		let need = (self.len - self.buf.len()).saturating_add(more);
+		self.need = self.need.max(need);
+		DecodeError::Short
 	}
 
 	/// The varint form this decoder reads.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn form(&self) -> Form {
 		self.form
+	}
+
+	/// How many bytes have been read.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn position(&self) -> usize {
+		self.len - self.buf.len()
 	}
 
 	/// The number of unread bytes.
@@ -168,7 +205,7 @@ impl<'a> Decoder<'a> {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn slice(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
 		let Some((head, rest)) = self.buf.split_at_checked(len) else {
-			return Err(DecodeError::Short);
+			return Err(self.short(len));
 		};
 		self.buf = rest;
 		Ok(head)
@@ -214,9 +251,15 @@ impl<'a> Decoder<'a> {
 	#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn varint(&mut self) -> Result<u64, DecodeError> {
-		let (value, rest) = varint::read(self.buf, self.form)?;
-		self.buf = rest;
-		Ok(value)
+		match varint::read(self.buf, self.form) {
+			Ok((value, rest)) => {
+				self.buf = rest;
+				Ok(value)
+			}
+			// The width is in the first byte, but a byte at a time is short enough.
+			Err(DecodeError::Short) => Err(self.short(self.buf.len() + 1)),
+			Err(err) => Err(err),
+		}
 	}
 
 	/// Read an optional varint: 0 is `None`, and `n + 1` is `Some(n)`.
@@ -255,5 +298,19 @@ mod tests {
 		let mut r = Decoder::new(&[0x40], Form::Quic);
 		assert!(matches!(r.varint(), Err(DecodeError::Short)));
 		assert_eq!(r.remaining(), 1);
+	}
+
+	/// A short read reports how much it needed from the start, so a reader can wait for
+	/// all of it rather than retry once per byte.
+	#[test]
+	fn short_reports_what_it_needed() {
+		let mut r = Decoder::new(&[0x01, 0x05, b'a', b'b'], Form::Quic);
+		assert_eq!(r.varint().unwrap(), 1);
+		assert!(matches!(r.bytes(), Err(DecodeError::Short)));
+		assert_eq!(r.need(), 7, "a 5 byte body after two prefix bytes");
+
+		let mut r = Decoder::new(&[0x40], Form::Quic);
+		assert!(matches!(r.varint(), Err(DecodeError::Short)));
+		assert_eq!(r.need(), 2);
 	}
 }

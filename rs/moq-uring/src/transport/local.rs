@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, Bytes};
 use moq_net::transport::{self as moq, poll};
 use send_wrapper::SendWrapper;
 use std::task::{Context, Poll};
@@ -139,29 +139,25 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 
 impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
 	type Error = T::Error;
+	type Lease<'a>
+		= T::Lease<'a>
+	where
+		Self: 'a;
 
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		self.0.poll_read(cx, dst)
+	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
+		self.0.poll_lease(cx, want)
 	}
 
-	fn poll_read_buf<B: BufMut>(
-		&mut self,
-		cx: &mut Context<'_>,
-		buf: &mut B,
-	) -> Poll<Result<Option<usize>, Self::Error>> {
-		self.0.poll_read_buf(cx, buf)
-	}
-
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
-		self.0.poll_read_chunk(cx, max)
+	fn set_priority(&mut self, priority: i64) {
+		self.0.set_priority(priority)
 	}
 
 	fn stop(&mut self, code: u32) {
 		self.0.stop(code)
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		self.0.poll_closed(cx)
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		self.0.poll_read_chunk(cx, max)
 	}
 }
 

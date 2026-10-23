@@ -3,6 +3,7 @@ import { Manual, Milli, Nano } from "@moq/clock";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -2600,6 +2601,24 @@ test("a datagram whose timedness disagrees with its track is refused", async () 
 	expect(got?.timestamp).toBeUndefined();
 });
 
+test("unknown track metadata keeps presentation-time expiry until accepted", () => {
+	const clock = manualTime(10_000);
+	const producer = new TrackProducer("pending");
+	try {
+		for (let second = 0; second < 4; second++) {
+			producer.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(second * 1000) });
+		}
+		// No wall time passes. Until metadata is accepted, buffered timestamps still
+		// prove that the two oldest groups are outside this reader's media budget.
+		expect(drain(producer.subscribe({ maxDelay: Milli(500) }))).toEqual([2, 3]);
+		producer.accept({ timescale: Timescale.MILLI });
+		expect(drain(producer.subscribe({ maxDelay: Milli(500) }))).toEqual([2, 3]);
+	} finally {
+		producer.close();
+		clock.restore();
+	}
+});
+
 // The wall clock judges an untimed track, so a new subscriber starts at the oldest cached
 // group it doesn't find stale, the way a timed one does: a group is stale once its
 // successor arrived a full budget ago.
@@ -2974,6 +2993,22 @@ test("an endless track with gaps remembers only those within the budget", () => 
 		expect(drainGroups(subscriber)).toEqual([2995]);
 	} finally {
 		time.restore();
+	}
+});
+
+test("IETF provenance survives normalization on timed and untimed tracks", () => {
+	for (const timescale of [undefined, Timescale.MILLI]) {
+		const info = infoDefaults({ ietf: IetfVersion.DRAFT_22, timescale });
+		expect(info.ietf).toBe(IetfVersion.DRAFT_22);
+		expect(info.timescale).toBe(timescale);
+	}
+	const producer = new TrackProducer("ietf").accept({ timescale: Timescale.MILLI, ietf: IetfVersion.DRAFT_22 });
+	try {
+		stampGroup(producer, 0, 1000);
+		stampGroup(producer, 1, 500);
+		producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
+	} finally {
+		producer.close();
 	}
 });
 

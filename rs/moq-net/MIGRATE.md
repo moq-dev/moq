@@ -4,6 +4,35 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
+
+On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
+Readers accept both forms and set End Of Track to the sequence after the fetched group.
+An older moq-net reader can reject the new answer; upgrade it before pairing it with a new publisher, or use draft 20 and later, whose inclusive End Location is unchanged.
+No Rust API changes.
+
+### Receive streams are read through leases (#5878)
+
+`transport::poll::RecvStream` now has `poll_lease(cx, want)`, `set_priority`, and `stop`, plus the provided `poll_read_chunk` and `read_chunk`.
+`poll_read`, `poll_read_buf`, `poll_closed`, `read`, `read_buf`, `closed`, `Read`, and `ReadBuf` are gone.
+A lease borrows the stream's unreleased bytes as a `bytes::Buf`: reading moves past bytes for good, but they keep their flow-control credit until `Lease::release()`.
+Bytes not read stay for the next lease, `Lease::chunks()` peeks without reading, and `is_fin` replaces `closed`.
+A transport that can only hand out chunks implements `transport::poll::Chunks` (`poll_read_chunk` and `stop`) and wraps each stream in `transport::poll::Buffered`.
+
+```rust
+// Before
+let n = stream.read(&mut buf).await?;
+
+// After: copy what arrived, then return its credit
+let mut lease = poll_fn(|cx| stream.poll_lease(cx, 1)).await?;
+let n = lease.remaining().min(buf.len()); // 0 with `lease.is_fin()` is the end
+lease.copy_to_slice(&mut buf[..n]);
+lease.release();
+```
+
+`transport::CloseKind` gained `Evicted`, which `Error::from_transport` maps to `Error::Evicted`.
+`transport::Stats` gained `streams_evicted()`, and `session::Stats` the matching `streams_evicted` field.
+
 ### Stage a requested track before subscribers see it (#6111)
 
 `track::Request::stage(info)` returns a `track::Staged` that derefs to the track's `Producer` while subscribers waiting on the request stay pending; `commit()` publishes it with everything written so far and returns the `Producer`.
@@ -79,6 +108,12 @@ moq-transport sessions, and moq-lite-03/04 sessions (whose announce streams mark
 `frame::Frame` gains a private arrival stamp, read with `Frame::arrived()`, so it can no longer be built with a struct literal.
 Replace `Frame { timestamp, payload }` with `Frame::new(timestamp, payload)`.
 `timestamp` and `payload` stay public fields.
+
+### Timestamps stop at 2^61 - 1 (#6168)
+
+`Timestamp::new`, its `from_*` constructors, `convert`, `checked_add`, and `TryFrom<Duration>` return `TimeOverflow` past `2^61 - 1` instead of `2^62 - 1`, the most lite-05/06 can carry as a group's first frame.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `(1 << 61) - 1`.
 
 ### A dropped or cut group ends its reader with an error (#6143)
 
