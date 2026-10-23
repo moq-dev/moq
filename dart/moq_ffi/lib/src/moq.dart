@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -12572,7 +12574,7 @@ abstract class MoqSessionInterface {
   MoqException? failure();
   MoqOriginProducer publish();
   MoqBandwidthConsumer? recvBandwidth();
-  Future<void> shutdown();
+  void shutdown();
   MoqConnectionStats stats();
   Future<MoqConnectionStatus> status();
 }
@@ -12706,15 +12708,13 @@ class MoqSession implements MoqSessionInterface {
     );
   }
 
-  Future<void> shutdown() {
-    return uniffiRustCallAsync(
-      () => uniffi_moq_ffi_fn_method_moqsession_shutdown(uniffiClonePointer()),
-      ffi_moq_ffi_rust_future_poll_void,
-      ffi_moq_ffi_rust_future_complete_void,
-      ffi_moq_ffi_rust_future_free_void,
-      (_) {},
-      moqExceptionErrorHandler,
-    );
+  void shutdown() {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqsession_shutdown(
+        uniffiClonePointer(),
+        status,
+      );
+    }, null);
   }
 
   MoqConnectionStats stats() {
@@ -17951,9 +17951,12 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqsession_recv_bandwidth(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
-external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_shutdown(
+@Native<Void Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqsession_shutdown(
   Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
 );
 
 @Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
@@ -19802,7 +19805,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqsession_cancel() != 39476) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqsession_closed() != 7901) {
+  if (uniffi_moq_ffi_checksum_method_moqsession_closed() != 20675) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_connects() != 18791) {
@@ -19820,13 +19823,13 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqsession_recv_bandwidth() != 46568) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqsession_shutdown() != 1301) {
+  if (uniffi_moq_ffi_checksum_method_moqsession_shutdown() != 32451) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_stats() != 36396) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqsession_status() != 49725) {
+  if (uniffi_moq_ffi_checksum_method_moqsession_status() != 22056) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqvideoconsumer_cancel() != 21122) {

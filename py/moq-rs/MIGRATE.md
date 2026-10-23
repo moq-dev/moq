@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shutdown requests the drain synchronously
+
+`session.shutdown()` requests the drain synchronously. Use `session.shutdown(); await session.closed()` to wait and raise delivery failures, or `session.cancel(0)` for immediate cancellation. A clean `async with` exit now waits for the drain.
+When upgrading from the release-line additive async `drain()` backport, replace `await session.drain()` with `session.shutdown(); await session.closed()`; `main` has no separate `drain()` method.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `SnapshotProducer(delta_ratio=...)` is replaced by `deltas: bool = True`.

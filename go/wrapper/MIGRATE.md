@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shutdown requests the drain synchronously
+
+`session.Shutdown()` requests a drain synchronously with no context or error result. Call `session.Closed(ctx)` to wait and report delivery failures, or `session.Cancel(0)` for immediate cancellation. `Client.Close()` now waits for the drain and returns an error.
+When upgrading from the release-line additive async `drain()` backport, replace `session.Drain(ctx)` with `session.Shutdown(); session.Closed(ctx)`; `main` has no separate `drain()` method.
+
 ### JSON snapshot `DeltaRatio` is `Deltas`
 
 `json.SnapshotOptions.DeltaRatio *uint32` and `json.DefaultDeltaRatio` are replaced by `Deltas *bool` (nil enables deltas).

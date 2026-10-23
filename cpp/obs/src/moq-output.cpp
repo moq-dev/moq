@@ -103,16 +103,6 @@ MoQOutput::~MoQOutput()
 	// stop on an output that is going away.
 	Stop();
 
-	// Let the sessions finish draining, so the relay sees the tracks end rather than a
-	// cancel. moq-ffi bounds each drain to about a second.
-	std::vector<moq::Future<void>> drains;
-	{
-		std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
-		drains.swap(draining);
-	}
-	for (auto &drain : drains)
-		drain.wait();
-
 	// Drops whatever is still queued and waits out a continuation in flight, which
 	// may be parked on signal_mutex; so this must not hold it. Nothing touches this
 	// object once it returns.
@@ -445,18 +435,10 @@ void MoQOutput::Reset()
 	broadcast.reset();
 	origin.reset();
 
-	// Drain once tracks finish. Default lite-06 waits for transport ACKs, not
-	// confirmation that the peer received the tail. Keep the future past this
-	// attempt because dropping it aborts the drain.
-	if (retired) {
-		draining.erase(std::remove_if(draining.begin(), draining.end(),
-					      [](const moq::Future<void> &drain) {
-						      return drain.wait_for(std::chrono::seconds(0)) ==
-							     std::future_status::ready;
-					      }),
-			       draining.end());
-		draining.push_back(retired->shutdown());
-	}
+	// The session owns the drain after this request, even if the output dies now.
+	if (retired)
+		retired->shutdown();
+
 	lock.unlock();
 
 	for (auto &[encoder, bitrate] : restore)

@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shutdown requests the drain synchronously
+
+`session->shutdown()` returns `void` and requests the drain synchronously. Use `session->closed().get()` to wait and report delivery failures, or `session->cancel(0)` to cancel immediately. A shutdown request survives session disposal and discarded waiters.
+When upgrading from the release-line additive async `drain()` backport, replace `session->drain().get()` with `session->shutdown(); session->closed().get()`; `main` has no separate `drain()` method.
+
 ### Priorities are signed (#6142)
 
 `TrackInfo::priority`, `Subscription::priority`, and `FetchGroupOptions::priority` are `int8_t`, and `GroupRequest::priority()` returns one.

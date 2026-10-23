@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shutdown requests the drain synchronously
+
+`moq_session_close()` keeps its synchronous request/terminal-callback ABI. Accepted sessions now drain finished tracks too; a failed drain is reported by the terminal `on_status` callback. Finish or abort live published tracks before requesting close.
+The UniFFI release-line additive async `drain()` backport maps to `shutdown()` then `closed()` on main. The C ABI continues to use `moq_session_close()` and its terminal callback; no function is renamed.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `moq_json_snapshot_config.delta_ratio` is replaced by `bool deltas`.

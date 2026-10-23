@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Shutdown requests the drain synchronously
+
+`MoqSession::shutdown()` requests the drain synchronously. Use `shutdown(); closed().await?` to wait and report delivery failures, or `cancel(0)` for immediate cancellation.
+When upgrading from the release-line additive async `drain()` backport, replace `drain().await?` with `shutdown(); closed().await?`; `main` has no separate `drain()` method.
+
 ### JSON snapshot `delta_ratio` is `deltas`
 
 `MoqJsonSnapshotConfig::delta_ratio` is replaced by `deltas: bool` (default `true`).

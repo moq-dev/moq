@@ -161,7 +161,7 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 ///
 /// Exports `Display`, which the bindings surface as the error's string form.
 /// Diagnostic payloads are named `reason`; structured protocol failures use `details`.
-#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
 #[uniffi::export(Display)]
 #[non_exhaustive]
 pub enum MoqError {

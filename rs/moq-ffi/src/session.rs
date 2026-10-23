@@ -930,10 +930,34 @@ impl Accepted {
 	}
 }
 
+/// An owned drain; dropping its waiter or the foreign session cannot cancel it.
+struct Shutdown {
+	result: kio::Consumer<Option<Result<(), MoqError>>>,
+	task: crate::ffi::Background,
+}
+
+impl Shutdown {
+	async fn finished(&self) -> Result<(), MoqError> {
+		// Publish a background panic before reading the channel it dropped.
+		#[cfg(not(target_arch = "wasm32"))]
+		self.task.finished().await?;
+		#[cfg(target_arch = "wasm32")]
+		self.task.check()?;
+		self.result
+			.wait(|result| match &**result {
+				Some(result) => std::task::Poll::Ready(result.clone()),
+				None => std::task::Poll::Pending,
+			})
+			.await
+			.map_err(|_| MoqError::Cancelled)?
+	}
+}
+
 /// A connection that exchanges broadcasts with a peer.
 #[derive(uniffi::Object)]
 pub struct MoqSession {
 	inner: Inner,
+	shutdown: std::sync::OnceLock<Shutdown>,
 	/// Serializes `closed()` calls onto the FFI runtime; holds its own `Inner` clone
 	/// so a parked `closed()` doesn't block the rest of the surface.
 	closed: Task<Inner>,
@@ -996,6 +1020,7 @@ impl MoqSession {
 		let bandwidth = Arc::new(MoqBandwidth::new(Self::mint_allocator(&inner)));
 		Self {
 			inner: inner.clone(),
+			shutdown: Default::default(),
 			closed: Task::new(inner.clone()),
 			status: Task::new(inner),
 			publisher,
@@ -1029,7 +1054,9 @@ impl Drop for MoqSession {
 		// lingering CLOSE task, which panics if no reactor is in context. We can't leave this to the last `Session` clone's drop: clones
 		// live in the `closed`/`status` tasks and the connection state, released after
 		// this guard, off-runtime. Close-once dedup then makes those trailing drops no-ops.
-		self.teardown(moq_net::Error::Cancel);
+		if self.shutdown.get().is_none() {
+			self.teardown(moq_net::Error::Cancel);
+		}
 	}
 }
 
@@ -1040,19 +1067,24 @@ impl MoqSession {
 	/// A client session resolves when its connection stops for good: `Err` with the
 	/// terminal error when it gave up (retries exhausted, or the session's close reason
 	/// with reconnecting disabled), `Ok` after a local [`shutdown`](Self::shutdown) /
-	/// [`cancel`](Self::cancel). Transient drops the reconnect loop rides out do not
+	/// [`cancel`](Self::cancel), or the drain error if shutdown failed. Transient drops the reconnect loop rides out do not
 	/// resolve this; watch [`status`](Self::status) for those. A server-accepted
-	/// session resolves with the session's close reason.
+	/// session reports a requested drain's result, otherwise the session's close reason.
 	pub async fn closed(&self) -> Result<(), MoqError> {
 		// We have a task to run all of the closed calls juuuuust so they use the same tokio runtime.
-		self.watch(self.closed.run(|inner| async move {
-			match &*inner {
-				#[cfg(not(target_arch = "wasm32"))]
-				Inner::Connection(connection) => connection.closed().await.map_err(map_closed_error),
-				Inner::Session(session) => session.closed().await,
-			}
-		}))
-		.await
+		let terminal = self
+			.watch(self.closed.run(|inner| async move {
+				match &*inner {
+					#[cfg(not(target_arch = "wasm32"))]
+					Inner::Connection(connection) => connection.closed().await.map_err(map_closed_error),
+					Inner::Session(session) => session.closed().await,
+				}
+			}))
+			.await;
+		match self.shutdown.get() {
+			Some(shutdown) => shutdown.finished().await,
+			None => terminal,
+		}
 	}
 
 	/// Wait for the connection status to differ from the one this handle last reported.
@@ -1060,7 +1092,8 @@ impl MoqSession {
 	/// A client session reports `Connected` first (the connect it was built from), then
 	/// follows the reconnect loop: `Disconnected` while redialing, `Connected` again on
 	/// success, `Migrating` during a GOAWAY handover. It returns an error once the
-	/// connection stops for good (same terminal result as [`closed`](Self::closed)).
+	/// connection stops for good. After requesting shutdown, use [`closed`](Self::closed)
+	/// to wait for the drain and its delivery result.
 	/// A server-accepted session is a single transport, so its only transition is
 	/// terminal: this waits for the close and returns its reason.
 	///
@@ -1100,26 +1133,42 @@ impl MoqSession {
 		// (with the close reason, or Ok once the connection loop stops).
 	}
 
-	/// Drain finished tracks within one second, returning any drain error.
+	/// Request a draining close now; wait for its result with [`closed`](Self::closed).
 	///
-	/// Finish or abort live tracks first. `cancel` stays immediate. The name
-	/// avoids Kotlin's generated `AutoCloseable.close()`, which releases the handle.
+	/// Finish or abort live tracks first. The request survives disposal of this
+	/// handle or a `closed()` waiter; repeated requests share the same drain.
+	/// `cancel` stays immediate. The name avoids Kotlin's generated
+	/// `AutoCloseable.close()`, which releases the handle.
 	/// Explicit `moq-lite-07-wip` waits for the peer to receive the tail. Older Lite
-	/// versions, including the default lite-06, wait only for transport ACKs.
-	/// IETF also waits for transport ACKs.
-	pub async fn shutdown(&self) -> Result<(), MoqError> {
-		let inner = self.inner.clone();
-		let result = crate::ffi::detached(async move {
-			match inner {
-				#[cfg(not(target_arch = "wasm32"))]
-				Inner::Connection(connection) => connection.close().await.map_err(map_closed_error),
-				Inner::Session(session) => session.close().await,
-			}
-		})
-		.await;
-		self.publisher.inner().driver.check()?;
-		self.consumer.driver.check()?;
-		result
+	/// versions, including the default lite-06, and IETF wait only for transport ACKs.
+	/// A drain that takes longer than one second ends with a delivery timeout.
+	pub fn shutdown(&self) {
+		let _guard = crate::ffi::enter();
+		self.shutdown.get_or_init(|| {
+			let result = kio::Producer::new(None);
+			let receiver = result.consume();
+			let inner = self.inner.clone();
+			// Keep the origins, not just the connection, alive through the drain.
+			let publisher = self.publisher.clone();
+			let consumer = self.consumer.clone();
+			let task = crate::ffi::spawn(async move {
+				let completed = match inner {
+					#[cfg(not(target_arch = "wasm32"))]
+					Inner::Connection(connection) => connection.close().await.map_err(map_closed_error),
+					Inner::Session(session) => session.close().await,
+				};
+				let completed = publisher
+					.inner()
+					.driver
+					.check()
+					.and(consumer.driver.check())
+					.and(completed);
+				*result
+					.write()
+					.unwrap_or_else(|_| unreachable!("the drain owns its completion")) = Some(completed);
+			});
+			Shutdown { result: receiver, task }
+		});
 	}
 
 	/// The publish-side origin: where local broadcasts get advertised

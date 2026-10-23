@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shutdown requests the drain synchronously
+
+`session.shutdown()` is synchronous and requests a drain. Follow it with `try await session.closed()` to wait and report delivery failures; use `session.cancel(code: 0)` for immediate cancellation.
+When upgrading from the release-line additive async `drain()` backport, replace `try await session.drain()` with `session.shutdown(); try await session.closed()`; `main` has no separate `drain()` method.
+
 ### JSON snapshot `deltaRatio` is `deltas`
 
 `Json.SnapshotProducer(deltaRatio:)` and `MoqJsonSnapshotConfig.deltaRatio` are replaced by `deltas: Bool` (default `true`).
@@ -166,7 +171,7 @@ The `Client` setters are `Client(...)` arguments, with `tls`, `quic`, `websocket
 `setReconnect(false)` is `once: true`.
 A value the native side cannot use throws `MoqError.Config`, including a bad bind address.
 `Server` takes its config at init too, and a request takes its origins in `accept(publish:consume:)`, where `nil` inherits the server's origin.
-`Session.shutdown()` is `async throws` and drains before returning.
+`Session.shutdown()` requests a drain synchronously; `try await session.closed()` waits for its result.
 
 ```swift
 let client = try Client(tls: ClientTls(insecure: true), consume: origin)

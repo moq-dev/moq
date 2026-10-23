@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Shutdown requests the drain synchronously
+
+`shutdown()` requests a drain synchronously; `await closed()` waits for its result and reports delivery failures. Regenerate bindings and link the matching native library together. See the [core migration guide](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md) for the core contract.
+When upgrading from the release-line additive async `drain()` backport, replace the release-line async `drain()` with `shutdown()` followed by `await closed()`; `main` has no separate `drain()` method.
+
 ### Priorities are signed (#6142)
 
 `MoqTrackInfo.priority`, `MoqSubscription.priority`, `MoqFetchGroupOptions.priority`, and `MoqGroupRequest.priority()` take `-128..=127`, higher first, and 0 is the unset midpoint.
