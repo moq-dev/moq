@@ -75,9 +75,14 @@ runs:
     # The namespace splits it per runner platform anyway, so a platform's
     # usage and misses can be read off its own prefix. The remote mode comes
     # from MBX_REMOTE_MODE above.
+    #
+    # Held at 1.25: under 1.26 the persistent runner's target directory ends
+    # up with zero-byte `.rmeta` files for fresh dependencies, which Cargo
+    # trusts and rustc rejects as `can't find crate`. Move past it only to a
+    # release that fixes that.
     - uses: jdx/mr-boxington-action@47ce49b32025d93a7a2f4570815afaa2b7092240 # v1.7.2
       with:
-        version: 1.26.0
+        version: 1.25.0
         backend: ${{ runner.environment != 'self-hosted' && inputs.access-key-id != '' && inputs.secret-access-key != '' && 'remote' || 'local' }}
         remote-url: s3://mbx-moq-dev
         namespace: ${{ runner.os }}-${{ runner.arch }}
