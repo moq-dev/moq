@@ -138,7 +138,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Generated JS API reference](/quest/m1/js-api-reference.md) - the doc site renders an API reference for every `@moq/*` package from API Extractor's doc model
 - [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - moq-transport sessions ask for announcements only under watched prefixes, starting with UNSUBSCRIBE_NAMESPACE on d14/15
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over the even drafts 14 to 22
-- [Runner nightly](/quest/m1/interop-runner-nightly.md) - a nightly job runs the upstream interop runner against our relay and clients, so newly registered implementations with a published image are tested without a change here
 - [One Annex-B exporter](/quest/m1/annexb-export.md) - H.264 and H.265 Annex-B export share one private lifecycle, which also follows a rebound rendition
 - [One CLI duration type](/quest/m1/cli-duration.md) - moq-cli, moq-bench and moq-relay reuse moq-tokio's public `cli::Duration` instead of their own copies
 - [Shared watch and publish UI](/quest/m1/js-ui.md) - a new `@moq/ui` package holds the graph, buttons, and support banner that watch and publish duplicate

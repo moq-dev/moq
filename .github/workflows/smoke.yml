@@ -399,7 +399,8 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
-      # Delete a Pages artifact left by an earlier run attempt.
+      # Delete a Pages artifact left by an earlier run attempt or by this run's
+      # upstream runner report.
       actions: write
       contents: write
       pages: write
@@ -529,7 +530,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      report: ${{ steps.runner.outcome }}
+      report: ${{ steps.upload.outcome }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -552,21 +553,23 @@ jobs:
           path: runner-upstream
           persist-credentials: false
 
+      # Any failed pair or setup step fails the job. A complete run still writes
+      # its report first, since a failing run is the one worth looking at.
       - name: Run upstream Docker matrices
-        id: runner
-        run: just runner "$GITHUB_WORKSPACE/runner-upstream" "$RUNNER_TEMP/interop-runner-report"
+        run: just runner "$GITHUB_WORKSPACE/runner-upstream" "$GITHUB_WORKSPACE/interop-runner-report"
 
       - name: Upload upstream report
-        if: ${{ !cancelled() && steps.runner.outcome == 'success' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        id: upload
+        if: ${{ !cancelled() && hashFiles('interop-runner-report/index.html') != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: interop-runner-report
-          path: ${{ runner.temp }}/interop-runner-report
+          path: interop-runner-report/
           if-no-files-found: error
 
       - name: Upload runner diagnostics
         if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: interop-runner-diagnostics
           path: runner-upstream/results
@@ -575,7 +578,7 @@ jobs:
   interop-runner-report:
     name: Publish upstream runner report
     needs: interop-runner
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && github.event_name == 'schedule' && needs.interop-runner.outputs.report == 'success' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.interop-runner.outputs.report == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
@@ -583,6 +586,9 @@ jobs:
       cancel-in-progress: false
       queue: max
     permissions:
+      # Delete a Pages artifact left by an earlier run attempt or by this run's
+      # relay report.
+      actions: write
       contents: write
       pages: write
       id-token: write
@@ -608,6 +614,11 @@ jobs:
 
       - name: Commit upstream report
         run: just gh pages-publish interop-runner "$RUNNER_TEMP/interop-runner-report" "$RUNNER_TEMP/pages"
+
+      - name: Drop a stale Pages artifact
+        run: just gh pages-clean
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Upload site
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

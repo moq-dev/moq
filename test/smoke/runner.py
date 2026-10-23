@@ -85,23 +85,21 @@ def run(upstream, output):
         raise ValueError(f'runner checkout already contains results: {results}')
     combined = None
     target = None
+    failed = []
     try:
         for index, plan in enumerate(plans):
             registry_file.write_text(json.dumps(plan))
             expected = expected_pairs(plan)
             if not expected:
                 raise ValueError(f'runner matrix {index} has no compatible pairs')
-            verdict = subprocess.run(['bash', 'run-interop-tests.sh', '--docker-only'], cwd=upstream)
+            if subprocess.run(['bash', 'run-interop-tests.sh', '--docker-only'], cwd=upstream).returncode:
+                failed.append(index)
             summaries = list(results.glob('*/summary.json'))
             if len(summaries) != 1:
                 raise ValueError('runner must produce exactly one summary per matrix')
             summary_file = summaries[0]
             summary = json.loads(summary_file.read_text())
             validate_summary(summary, expected)
-            # Upstream exit 1 conflates setup and test failures. Until its contract
-            # distinguishes them, a complete summary alone cannot make it safe to
-            # treat a nonzero exit as a report-only third-party verdict.
-            verdict.check_returncode()
             if combined is None:
                 combined = summary
                 target = upstream / 'combined'
@@ -129,6 +127,9 @@ def run(upstream, output):
         registry_file.write_text(original)
         subprocess.run(['docker', 'compose', '-f', 'docker-compose.test.yml', 'down', '--timeout', '1'],
                        cwd=upstream, check=True)
+    # Any failure fails the run, but only after the report shows which pairs failed.
+    if failed:
+        raise SystemExit(f'runner matrices {failed} exited nonzero; see the report')
 
 
 def main():

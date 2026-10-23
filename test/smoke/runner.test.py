@@ -53,29 +53,38 @@ class Runner(unittest.TestCase):
             with self.subTest(cells=cells), self.assertRaises(ValueError):
                 runner.validate_summary({'runs': cells}, {('a', 'b')})
 
-    def test_complete_summary_does_not_mask_ambiguous_nonzero_exit(self):
+    def test_failed_matrix_still_reports_every_matrix_then_fails(self):
         with tempfile.TemporaryDirectory() as temporary:
             upstream = Path(temporary)
             registry = upstream / 'implementations.json'
             original = json.dumps(self.registry)
             registry.write_text(original)
+            matrices = []
 
             def command(args, **kwargs):
+                results = upstream / 'results'
                 if args[:2] == ['bash', 'run-interop-tests.sh']:
                     pairs = runner.expected_pairs(json.loads(registry.read_text()))
-                    result = upstream / 'results' / 'one'
+                    result = results / str(len(matrices))
                     result.mkdir(parents=True)
                     (result / 'summary.json').write_text(json.dumps({'runs': [
                         {'client': client, 'relay': relay, 'mode': 'docker', 'status': 'fail'}
                         for client, relay in pairs]}))
-                    return subprocess.CompletedProcess(args, 1)
+                    matrices.append(pairs)
+                    return subprocess.CompletedProcess(args, 1 if len(matrices) == 1 else 0)
+                if args[:2] == ['bash', 'generate-report.sh']:
+                    (results / 'index.html').write_text('<body></body>')
+                    (results / 'nightly' / 'report.html').write_text('')
                 return subprocess.CompletedProcess(args, 0)
 
             with patch.object(runner.subprocess, 'run', side_effect=command):
-                with self.assertRaises(subprocess.CalledProcessError):
+                with self.assertRaises(SystemExit):
                     runner.run(upstream, upstream / 'report')
+            self.assertEqual(len(matrices), 2)
             self.assertEqual(registry.read_text(), original)
-            self.assertFalse((upstream / 'report').exists())
+            runs = json.loads((upstream / 'report' / 'nightly' / 'summary.json').read_text())['runs']
+            self.assertEqual(len(runs), sum(len(pairs) for pairs in matrices))
+            self.assertIn('local-adapter', (upstream / 'report' / 'index.html').read_text())
 
     def test_drafts_without_overlap_have_no_pair(self):
         self.registry['implementations']['new']['draft_versions'] = ['draft-22']
