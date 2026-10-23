@@ -20,12 +20,22 @@ The program-clock SI retirement portion is implemented in this checkpoint:
 - A deadline index holds one entry per retained generation, replacing the old
   deadline on renewal. Expiry visits due entries rather than scanning every
   identity on every packet. A commit clears only its identity's five-bit
-  versions. Active expiry publishes a reduced or empty snapshot immediately,
+  versions. Pending tree nodes follow live generations rather than retaining a
+  hash table's peak bucket allocation; expiry releases section-byte ownership,
+  without an allocator/RSS reclamation claim. Active expiry publishes a reduced
+  or empty snapshot immediately,
   bypassing ordinary host-clock debounce and retracting empty catalog entries.
   Readers holding earlier snapshots remain valid.
 - Tests cover 4,096 incomplete EIT and unknown identities, per-version renewal,
   active renewal/retraction/reappearance, input stalls, and clock boundaries.
-  The SI renewal benchmark sweeps retained identities and touched identities.
+  SI benchmarks sweep active and pending identities against touched identities
+  while accepted PCR progresses and deadlines move. A separate sweep measures
+  historical table keys against touched entries after their generations expire.
+- `Capture::entries` preserves each published `(PID, table_id)` track for
+  reappearance and existing readers, and `flush` visits these slots. The actual
+  importer admits only four `SI_PIDS`, so this is a fixed protocol-space cost of
+  at most 1,024 keys, not arbitrary PID or per-revision growth. The table-history
+  benchmark covers this real domain; no track-continuity policy is changed.
 
 The full Goal remains unfinished. Preserve the maintainer's 2026-10-22 choices:
 

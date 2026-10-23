@@ -27,7 +27,7 @@
 //! one. Network-wide tables (NIT, BAT, SDT other, EIT other, TDT/TOT) pass through
 //! verbatim, as does everything when no program is selected.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use moq_clock::Instant;
@@ -210,8 +210,9 @@ struct Entry {
 	/// The selected service an SDT actual snapshot is reduced to.
 	service: Option<u16>,
 	active: BTreeMap<Identity, Generation>,
-	/// In-flight generations, keyed by sub-table and version.
-	pending: HashMap<(Identity, u8), Pending>,
+	/// In-flight generations, keyed by sub-table and version. Tree nodes follow
+	/// live generations instead of retaining a hash table's peak bucket allocation.
+	pending: BTreeMap<(Identity, u8), Pending>,
 	/// One deadline per retained generation: None is active, Some(version) is pending.
 	/// Renewal replaces its old key rather than leaving stale timer entries behind.
 	expiry: BTreeSet<(Duration, Identity, Option<u8>)>,
@@ -512,7 +513,7 @@ impl<E: catalog::Catalog> Capture<E> {
 			interval: catalog::si_interval(table_id),
 			service,
 			active: BTreeMap::new(),
-			pending: HashMap::new(),
+			pending: BTreeMap::new(),
 			expiry: BTreeSet::new(),
 			dirty: false,
 			populated: false,
@@ -721,6 +722,8 @@ mod tests {
 				capture.section(0x12, section(table, id, 0, 1)).unwrap();
 			}
 		}
+		let payload = capture.entries[&(0x12, 0x4e)].pending.values().next().unwrap().sections[&0].clone();
+		assert!(!payload.is_unique());
 		capture.advance(Duration::from_secs(2));
 		capture.flush(Timestamp::ZERO, false).unwrap();
 		assert_eq!(
@@ -733,6 +736,10 @@ mod tests {
 		let eit = &capture.entries[&(0x12, 0x4e)];
 		assert!(eit.pending.is_empty());
 		assert!(eit.expiry.is_empty());
+		assert!(
+			payload.is_unique(),
+			"expiry releases the generation's payload ownership"
+		);
 		assert_eq!(capture.entries[&(0x12, 0x80)].pending.len(), 4096);
 		capture.advance(Duration::from_secs(30) + Duration::from_nanos(1));
 		capture.flush(Timestamp::ZERO, false).unwrap();
@@ -860,5 +867,25 @@ mod tests {
 		capture.advance(Duration::from_nanos(clock.now().unwrap() * 1_000 / 27));
 		capture.flush(Timestamp::ZERO, false).unwrap();
 		assert!(capture.entries[&(0x11, 0x42)].active.is_empty());
+	}
+	#[moq_clock::test]
+	async fn short_form_repetitions_replace_their_deadline_and_latest_value() {
+		let (mut capture, _) = capture();
+		let mut time = vec![0x70, 0x70, 5, 0, 0, 0, 0, 0];
+		capture.section(0x14, time.clone()).unwrap();
+		capture.advance(Duration::from_secs(29));
+		capture.section(0x14, time.clone()).unwrap();
+		capture.advance(Duration::from_secs(31));
+		time[7] = 1;
+		capture.section(0x14, time.clone()).unwrap();
+		capture.advance(Duration::from_secs(60));
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		let entry = &capture.entries[&(0x14, 0x70)];
+		assert_eq!(entry.expiry.len(), 1);
+		assert_eq!(entry.active[&Identity::Table].sections[&0], Bytes::from(time));
+		capture.advance(Duration::from_millis(61_001));
+		capture.flush(Timestamp::ZERO, false).unwrap();
+		assert!(capture.entries[&(0x14, 0x70)].active.is_empty());
+		assert!(capture.entries[&(0x14, 0x70)].expiry.is_empty());
 	}
 }
