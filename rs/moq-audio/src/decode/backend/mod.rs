@@ -17,6 +17,10 @@ use super::Decoded;
 use super::decoder::{Config, Kind};
 use crate::{Error, Layout};
 
+#[cfg(test)]
+#[path = "../conformance.rs"]
+mod conformance;
+
 mod libopus;
 mod pcm;
 #[cfg(feature = "aac")]

@@ -2,9 +2,9 @@
 # Unit-test the plugin sources against stubbed libobs and ffmpeg and the real
 # moq-ffi, under ThreadSanitizer.
 #
-# Manual because ThreadSanitizer needs its own build. `just obs ci` runs the
-# same tests without it, so a regression these assertions catch still turns PR
-# CI red; the sanitizer is what adds the races on top. Run this whenever you
+# Nightly only, because ThreadSanitizer needs its own build. `just obs ci` runs
+# the same tests without it, so a regression these assertions catch still turns
+# PR CI red; the sanitizer is what adds the races on top. Run this whenever you
 # touch src/, especially the continuation plumbing, whose orderings the build
 # can't check.
 set -euo pipefail

@@ -667,8 +667,8 @@
         # test` (see rs/justfile), reaching mbx through the Cargo shim the dev
         # shell puts on PATH. Neither path goes through crane.
         # `nix flake check` is kept -- it still validates flake eval + builds the
-        # dev shell -- but no longer compiles the workspace, so it's cheap
-        # enough that `just check` runs it on any Nix/Rust input change. Release
+        # runner tests. The dispatcher runs it for Nix and packaging inputs;
+        # Rust source changes use the Cargo gate above. Release
         # artifacts still build via crane `buildPackage` (see `packages` above /
         # release-*.yml).
         #

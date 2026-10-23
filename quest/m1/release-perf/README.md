@@ -10,7 +10,7 @@ and the reason is written here.
 This epic's own work: once every child has landed, run the full main against
 release comparison again with `just bench origin/release`, and confirm nothing
 new regressed. Then add a release-baseline step to the recurring
-[performance audit](/quest/m1/audit-perf.md), so every later cut
+[performance audit](/quest/m2/audit-perf.md), so every later cut
 repeats this comparison.
 
 ## Plan
@@ -35,8 +35,14 @@ noise.
   release's bare track handle opened a live SUBSCRIBE, while main sends a real
   FETCH per viewer ([#5820](https://github.com/moq-dev/moq/pull/5820) made
   handles lazy, and [#4974](https://github.com/moq-dev/moq/pull/4974) added
-  fetch-only demand). The lite `/fetch` cost is different: it is real, and
-  [FETCH fan-out](/quest/m1/release-perf/fetch-fanout.md) owns it.
+  fetch-only demand). The lite `/fetch` cost was real: a relay sent one
+  upstream FETCH per group, but revived the parked logical track for every
+  viewer's FETCH. [#6286](https://github.com/moq-dev/moq/pull/6286) serves a
+  whole cached group from the parked copy instead, cutting 12 to 19% of the
+  instructions per viewer where viewers share a group. The rest of the gap to
+  a viewer that holds a query is accepted: each viewer's own fetch of a group
+  it lacks revives its logical track, so the open group keeps its route and
+  fails over mid-read, and its copy releases the route's demand once idle.
 - `stats/session-report` is accepted at O(live sessions), after a cheap fix.
   Per-label payload bytes ([#5731](https://github.com/moq-dev/moq/pull/5731))
   match payload billing per label, such as per signing key. After removing
@@ -46,6 +52,21 @@ noise.
   with those wires; the earlier under-0.01% estimate omitted their walk.
   This remaining per-session and per-connection sampling is accepted. Deleting
   per-label bytes was rejected.
+- `track_gc/idle` is accepted at about 20 ns, flat across track counts, after
+  [#6291](https://github.com/moq-dev/moq/pull/6291) skipped the clock read
+  with no wall deadline and reused the bench's waiter (36.7 ns before). The
+  remaining ~8 ns over release's 11.6 ns is the lock and driver registration
+  that the wall-clock aging from
+  [#5548](https://github.com/moq-dev/moq/pull/5548) needs. An earliest-deadline
+  atomic cannot prove a replacement driver is registered, and a lock-free
+  notification primitive is not worth ~8 ns.
+- `track_gap_flush` is accepted at O(log gaps + retired entries) per shared
+  successor, after [#6287](https://github.com/moq-dev/moq/pull/6287) indexed
+  the gap ledger and retired a shared verdict's gaps with one split. Each
+  retired entry must be freed exactly once, so the batch is already amortized
+  optimal; a representation that hides that reclamation would widen scope for
+  no measured benefit. Sparse arrivals cost O(log gaps) amortized, and at 4096
+  gaps flush, read, and expiry instructions fell 80 to 95%.
 
 ### Release as a baseline
 
@@ -60,11 +81,11 @@ usually pays for a feature.
 
 | Bench | release | main | Ratio | Owner |
 |---|---|---|---|---|
-| `track_gap_flush/4096` | 5.7 us | 551 us | 96x | [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) |
-| `track_gap_flush/512` | 1.8 us | 48 us | 27x | same |
-| `track_gap_flush/64` | 1.5 us | 6.2 us | 4.1x | same |
+| `track_gap_flush/4096` | 5.7 us | 551 us | 96x | accepted (above) |
+| `track_gap_flush/512` | 1.8 us | 48 us | 27x | accepted (above) |
+| `track_gap_flush/64` | 1.5 us | 6.2 us | 4.1x | accepted (above) |
 | `stats/session-report/1000x10` | 11.0 us | 86.8 us | 7.9x | accepted (above) |
-| `track_gc/idle/16384` | 11.6 ns | 73.7 ns | 6.3x | [Idle GC](/quest/m1/release-perf/gc-idle.md) |
+| `track_gc/idle/16384` | 11.6 ns | 73.7 ns | 6.3x | accepted (above) |
 | `origin/resume_overlap/sequence/1r_64g_32c` | 93 us | 426 us | 4.6x | fixed in [moq-dev/moq#6292](https://github.com/moq-dev/moq/pull/6292) |
 | `session_delivery_group_cost/moq-transport-22/.../viewers=64/.../fetch` | 1.19 ms | 3.86 ms | 3.2x | accepted (above) |
 | `group_write_frames/single/8192` | 424 us | 486 us | 1.17x | [Re-check](/quest/m1/release-perf/recheck.md) |
@@ -96,13 +117,10 @@ outside the worktree to keep the next one.
 
 ## Required
 
-- [FETCH fan-out](/quest/m1/release-perf/fetch-fanout.md) - a relay serves later viewers' lite FETCHes of a group from its cache, so per-viewer cost falls with viewers again
-- [Sparse gaps](/quest/m1/release-perf/sparse-gaps.md) - an arrival and a gap flush cost O(log gaps), not O(gaps)
-- [Idle GC](/quest/m1/release-perf/gc-idle.md) - an idle track GC skips the wall-clock pass when nothing is due
 - [Re-check](/quest/m1/release-perf/recheck.md) - the screen-only moves are re-measured with instruction counts, and the ones that hold are fixed or accepted
 - [JS frames](/quest/m1/release-perf/js-frames.md) - the js/net frame path is no slower than release in a browser, or the gap is accepted
 
 ## Related
 
-- [Performance audit](/quest/m1/audit-perf.md) - compares nightly to nightly; this epic compares main to release
+- [Performance audit](/quest/m2/audit-perf.md) - compares nightly to nightly; this epic compares main to release
 - [Nightly benchmark regressions](/quest/m1/bench-ci.md) - paired nightly-to-nightly comparison on one runner
