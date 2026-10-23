@@ -34,8 +34,8 @@ The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
 `server_name` is the SNI that selected the relay's certificate. It is absent
-over plaintext and for an IP-literal dial, and never filled from a `Host`
-header or a WebTransport authority. The client still picks it among the names
+over plaintext, on the `tls://` TCP listener, and for an IP-literal dial, and
+never filled from a `Host` header or a WebTransport authority. The client still picks it among the names
 the relay serves, so a hostname-scoped server binds the tenant to the
 credential, not to `server_name` alone.
 
