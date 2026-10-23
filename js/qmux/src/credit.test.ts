@@ -24,6 +24,30 @@ describe("Credit basics still work", () => {
 	});
 });
 
+describe("Credit.claim abort", () => {
+	test("aborting a parked claim rejects with the reason and leaves no waiter", async () => {
+		const credit = new Credit(0n);
+		const controller = new AbortController();
+		const parked = settle(credit.claim(1n, controller.signal));
+
+		const reason = new Error("aborted");
+		controller.abort(reason);
+		expect(await parked).toBe(reason);
+
+		// The aborted claim took nothing: a later grant goes to the next claimant.
+		const next = credit.claim(5n);
+		credit.increaseMax(5n);
+		expect(await next).toBe(5n);
+	});
+
+	test("an already-aborted signal rejects without claiming available credit", async () => {
+		const credit = new Credit(10n);
+		const reason = new Error("aborted");
+		expect(await settle(credit.claim(1n, AbortSignal.abort(reason)))).toBe(reason);
+		expect(credit.available).toBe(10n);
+	});
+});
+
 describe("Credit.close reason propagation", () => {
 	test("claim() after close(reason) rejects with the exact reason instance", async () => {
 		const credit = new Credit(0n);
