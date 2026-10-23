@@ -1,0 +1,292 @@
+//! One served track: its live feed of what the archive gains, and fills of what it holds.
+
+use std::sync::{Arc, Mutex};
+
+use futures::future::{self, Either};
+use moq_net::track::{Fill, Position};
+use moq_net::{Timescale, Timestamp, group, track};
+use object_store::ObjectStore;
+
+use super::Shared;
+use super::index::Index;
+use crate::layout::{End, Entry, Frame, Object};
+use crate::{Error, Info, Result};
+
+/// A track's live feed: its newest stored sequence when found, then everything stored after.
+pub(super) struct Live {
+	producer: track::Producer,
+	timescale: Option<Timescale>,
+	/// The newest group, kept open since a later object may continue it.
+	open: Option<Open>,
+	/// Whether the feed declared where it starts; fills serve everything before.
+	started: bool,
+}
+
+struct Open {
+	group: group::Producer,
+	sequence: u64,
+	/// The index of the next frame it takes.
+	next: u64,
+}
+
+impl Live {
+	pub fn new(producer: track::Producer) -> Self {
+		let timescale = producer.info().timescale;
+		Self {
+			producer,
+			timescale,
+			open: None,
+			started: false,
+		}
+	}
+
+	pub fn is_started(&self) -> bool {
+		self.started
+	}
+
+	/// Feed `objects`' entries from sequence `from` on, in order.
+	pub fn push(&mut self, objects: &[Arc<Object>], from: u64) -> Result<()> {
+		for object in objects {
+			for (index, entry) in object.entries.iter().enumerate() {
+				if entry.sequence() < from {
+					continue;
+				}
+				if !self.started {
+					// Readers ask fills for everything older.
+					self.producer.start_at(entry.sequence())?;
+					self.started = true;
+				}
+				let first = match index {
+					0 => object.frame_start,
+					_ => 0,
+				};
+				self.entry(entry, first)?;
+			}
+		}
+		Ok(())
+	}
+
+	fn entry(&mut self, entry: &Entry, first: u64) -> Result<()> {
+		match entry {
+			Entry::Datagram { sequence, frame } => {
+				// A later sequence completes the open group.
+				self.close()?;
+				let timestamp = timestamp(frame.timestamp, self.timescale)?;
+				self.producer
+					.insert_datagram(*sequence, timestamp, frame.payload.clone())?;
+			}
+			Entry::Group { sequence, frames } => {
+				let mut open = match self.open.take() {
+					Some(open) if open.sequence == *sequence => {
+						if open.next != first {
+							return Err(Error::Sequence);
+						}
+						open
+					}
+					other => {
+						if let Some(mut other) = other {
+							other.group.finish()?;
+						}
+						let mut group = self.producer.create_group(group::Info { sequence: *sequence })?;
+						if first > 0 {
+							// Its head was pruned.
+							group.start_at(first)?;
+						}
+						Open {
+							group,
+							sequence: *sequence,
+							next: first,
+						}
+					}
+				};
+				for frame in frames {
+					let timestamp = timestamp(frame.timestamp, self.timescale)?;
+					open.group.write_frame(timestamp, frame.payload.clone())?;
+					open.next += 1;
+				}
+				self.open = Some(open);
+			}
+		}
+		Ok(())
+	}
+
+	fn close(&mut self) -> Result<()> {
+		if let Some(mut open) = self.open.take() {
+			open.group.finish()?;
+		}
+		Ok(())
+	}
+
+	/// End the feed as the archive recorded.
+	pub fn end(&mut self, end: End, track: &str) -> Result<()> {
+		self.close()?;
+		match end {
+			End::Finish(at) => self.producer.finish_at(Position {
+				group: at.group,
+				frame: at.frame,
+			})?,
+			End::Error(code) => {
+				// An abort would refuse every later reader the stored history, so the track
+				// ends cleanly after its newest stored sequence instead.
+				tracing::warn!(track, code, "archived track ended with an error");
+				self.producer.finish()?;
+			}
+		}
+		Ok(())
+	}
+}
+
+/// Serve `fill` from the archive, a group at a time in the fill's order, until every group is
+/// answered or nobody waits on it.
+pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mutex<Index>>, fill: Fill) {
+	let mut last = None;
+	while fill.is_used()
+		&& let Some(sequence) = fill.next()
+		&& last != Some(sequence)
+	{
+		last = Some(sequence);
+		serve_group(&shared, &index, &fill, sequence).await;
+	}
+}
+
+/// Answer group `sequence` of `fill` from the objects holding it, or drop the run of sequences
+/// around it that the archive does not hold.
+async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill: &Fill, sequence: u64) {
+	let frame = fill.frame_start(sequence);
+	let (holding, after, timed, timescale) = {
+		let index = index.lock().unwrap();
+		let (holding, after) = index.holding(sequence, frame);
+		(holding, after, index.timed(), index.timescale)
+	};
+	let next = after.map_or(u64::MAX, |start| start.0);
+
+	let mut objects = Vec::with_capacity(holding.len());
+	for (start, path) in &holding {
+		let unwanted = std::pin::pin!(fill.unwanted(sequence));
+		let load = std::pin::pin!(super::object(shared, path, *start, timed));
+		let loaded = match future::select(unwanted, load).await {
+			// Every reader narrowed past it: the fill moves on to the groups it still owes.
+			Either::Left(_) => return,
+			Either::Right((loaded, _)) => loaded,
+		};
+		match loaded {
+			Ok(object) => objects.push(object),
+			Err(err) => {
+				if let Error::NotFound(_) = err {
+					// Pruned since it was listed.
+					index.lock().unwrap().forget(*start);
+				} else {
+					tracing::warn!(%path, sequence, %err, "archived group is unavailable");
+				}
+				fill.drop_groups(sequence..sequence + 1);
+				return;
+			}
+		}
+	}
+
+	let Some(first) = objects.first() else {
+		// Older than the oldest stored object: pruned, or never stored.
+		fill.drop_groups(0..next);
+		return;
+	};
+	let Some(position) = first.entries.iter().position(|entry| entry.sequence() >= sequence) else {
+		// A gap after the object's last entry.
+		let last = first.entries.last().map_or(0, |entry| entry.sequence() + 1);
+		fill.drop_groups(last..next);
+		return;
+	};
+	let frames = match &first.entries[position] {
+		Entry::Group {
+			sequence: found,
+			frames,
+		} if *found == sequence => frames,
+		// A datagram stays lossy and uncached, never a fetched group.
+		Entry::Datagram { sequence: found, .. } if *found == sequence => {
+			fill.drop_groups(sequence..sequence + 1);
+			return;
+		}
+		// A gap between two entries.
+		other => {
+			let gap = match position {
+				0 => sequence,
+				_ => first.entries[position - 1].sequence() + 1,
+			};
+			fill.drop_groups(gap..other.sequence());
+			return;
+		}
+	};
+	let start = match position {
+		0 => first.frame_start,
+		_ => 0,
+	};
+	if start > frame {
+		// Its head was pruned.
+		fill.drop_groups(sequence..sequence + 1);
+		return;
+	}
+
+	// The group's frames, with their indices, across every object holding it.
+	let mut stored: Vec<(u64, &Frame)> = (start..).zip(frames).collect();
+	for object in &objects[1..] {
+		let next = start + stored.len() as u64;
+		match object.entries.first() {
+			Some(Entry::Group {
+				sequence: found,
+				frames,
+			}) if *found == sequence && object.frame_start == next => {
+				stored.extend((next..).zip(frames));
+			}
+			_ => {
+				// A continuation went missing, so the group can't be served whole.
+				fill.drop_groups(sequence..sequence + 1);
+				return;
+			}
+		}
+	}
+
+	if !fill.is_wanted(sequence) {
+		return;
+	}
+	let Ok(mut producer) = fill.accept(sequence, None) else {
+		return;
+	};
+	for (index, stored) in stored {
+		if index < frame {
+			continue;
+		}
+		let written = timestamp(stored.timestamp, timescale)
+			.map_err(|_| moq_net::Error::ProtocolViolation)
+			.and_then(|timestamp| producer.write_frame(timestamp, stored.payload.clone()));
+		if let Err(err) = written {
+			tracing::warn!(sequence, %err, "archived group is malformed");
+			let _ = producer.abort(err);
+			return;
+		}
+	}
+	let _ = producer.finish();
+}
+
+/// The served properties of a track stored with `info`: no max age, since the archive's
+/// retention bounds what it holds and the source's would expire archived history.
+pub(super) fn info(info: &Info) -> Result<track::Info> {
+	Ok(track::Info::default()
+		.with_priority(info.priority)
+		.with_max_age(None)
+		.with_timescale(timescale(info)?))
+}
+
+/// A stored track's timescale, `None` when untimed.
+pub(super) fn timescale(info: &Info) -> Result<Option<Timescale>> {
+	info.timescale
+		.map(|timescale| Timescale::new(timescale).map_err(|_| Error::Timescale(timescale)))
+		.transpose()
+}
+
+/// A stored timestamp on its track, which must be timed exactly when the frame is.
+fn timestamp(value: Option<u64>, timescale: Option<Timescale>) -> Result<Option<Timestamp>> {
+	match (value, timescale) {
+		(Some(value), Some(timescale)) => Ok(Some(Timestamp::new(value, timescale).map_err(|_| Error::Id(value))?)),
+		(None, None) => Ok(None),
+		_ => Err(Error::Timing),
+	}
+}

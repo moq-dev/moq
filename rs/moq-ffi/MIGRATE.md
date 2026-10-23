@@ -5,6 +5,18 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Dynamic tracks serve fills
+
+`MoqTrackDynamic::requested_group` is now `requested_fill`, returning a `MoqFill`: `start_group`, `start_frame`, `end_group`, `priority`, `max_delay_us`, `order`, `next`, `accept(sequence)`, `drop_groups(start, end)`, `is_used`, and `unused`.
+`MoqGroupRequest` and `MoqGroupDemand` are removed: serve each group `next()` names, and watch `is_used` or `unused` on the fill.
+A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `is_wanted(sequence)` and `unwanted(sequence)` say when to stop serving one.
+A refusal carries no application code: `drop_groups` fails the waiting fetches with `NotFound`.
+A fill also arrives for history a subscription covers that the cache lacks, not only for a fetch.
+
+### `MoqSubscription::max_delay_us` is optional
+
+`max_delay_us` is now nullable, where null leaves the publisher's max age alone to bound delivery. It still defaults to 0.
+
 ### Video rendition preference
 
 `MoqVideo` gains `preference: i32`. Set it to `0` in record literals to keep the default ranking; higher values are preferred and compatibility transcodes use `-1`. Regenerate bindings and rebuild them with the matching native library.
@@ -28,7 +40,7 @@ Snapshot groups roll on joiner demand, which the producer answers on its own: pu
 
 ### Priorities are signed (#6142)
 
-`MoqTrackInfo.priority`, `MoqSubscription.priority`, `MoqFetchGroupOptions.priority`, and `MoqGroupRequest.priority()` are `i8`, higher first, and 0 is the unset midpoint.
+`MoqTrackInfo.priority`, `MoqSubscription.priority`, `MoqFetchGroupOptions.priority`, and `MoqFill.priority()` are `i8`, higher first, and 0 is the unset midpoint.
 `MoqTrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 

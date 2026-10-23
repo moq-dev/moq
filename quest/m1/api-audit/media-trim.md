@@ -21,10 +21,9 @@ Decided 2026-10-22 (API audit). Make `pub(crate)` or delete:
   sets history, so `?start=` always answers 416 while `doc/bin/hls.md`
   documents it. Remove the docs with it; see
   [history floor](/quest/m1/archive/history-floor.md).
-- moq-archive `segment::*`, `Key`, and most of `Store`.
 - moq-json `window::Checkpoint`, `Encoder::resume`, `Producer::{resume, cut}`
-  and `moq_mux::timeline::Producer::resume`, reached only by tests, unless
-  the [archive consumer](/quest/m1/archive/consumer.md) needs them.
+  and `moq_mux::timeline::Producer::resume`, reached only by tests; the
+  archive consumer does not use them.
 - hang `Catalog::from_value`, `Section`/`deserialize_section`.
 - The `@moq/loc` `Producer` (test-only, no Rust twin) and the JS
   `Container.Consumer` `maxAge` guard.

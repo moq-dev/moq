@@ -56,11 +56,11 @@ and [Rust identity enforcement](/quest/m1/catalog-identity-rs.md)) Require this
 line and land their C half on the generated package, so C users break once.
 Signed priorities already reached the hand-written ABI as `int8_t` in
 [moq-dev/moq#6142](https://github.com/moq-dev/moq/pull/6142).
-[Dynamic subscribe ranges](/quest/m1/subscribe-ranges/dynamic.md) is the
-settled exception from its later plan in
-[moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123): if generation
-has not landed, the frozen C crate splits fills into its existing per-group
-requests internally and keeps its ABI, so that quest does not wait here.
+Dynamic subscribe ranges ([moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171))
+was the settled exception from its later plan in
+[moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123): generation
+had not landed, so the frozen C crate splits fills into its existing per-group
+requests internally and keeps its ABI.
 
 ## Required
 

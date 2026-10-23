@@ -1069,7 +1069,7 @@ where
 			subscription = subscription.with_order(order.to_order());
 		}
 		if let Some(max_age) = params.max_age {
-			subscription.max_delay = Duration::from_millis(max_age);
+			subscription.max_delay = Some(Duration::from_millis(max_age));
 		}
 		// A start the live edge does not decide is no join; see `serve_subscribe_stream`.
 		let fixed = subscribe_range(params.filter, LiveEdge::default(), self.version);
@@ -1199,7 +1199,9 @@ where
 		// What an update changed while forwarding outlives a pause.
 		let applied = serve.track.subscription();
 		params.priority = crate::ietf::priority::to_wire(applied.priority);
-		params.max_age = applied.max_delay.as_millis().try_into().ok();
+		params.max_age = applied
+			.max_delay
+			.and_then(|max_delay| max_delay.as_millis().try_into().ok());
 		let served = match served {
 			Ok(Some(served)) => served,
 			Ok(None) => {

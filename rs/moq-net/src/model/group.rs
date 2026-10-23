@@ -2144,7 +2144,7 @@ impl Handle {
 	pub(crate) fn demand(&self) -> Demand {
 		Demand {
 			sequence: self.info.sequence,
-			state: DemandSource::Group(self.state.weak()),
+			state: self.state.weak(),
 		}
 	}
 
@@ -2160,41 +2160,25 @@ impl Handle {
 	}
 }
 
-/// A cloneable, watch-only handle to a group's readers or pending fetch callers.
+/// A cloneable, watch-only handle to a group's readers.
 ///
-/// An accepted or dropped request ends waits with [`Error::Dropped`]; a rejected request keeps
-/// its rejection reason.
+/// A finished or dropped group ends waits with [`Error::Dropped`]; an aborted one keeps
+/// its abort reason.
 #[derive(Clone)]
 pub struct Demand {
 	sequence: u64,
-	state: DemandSource,
-}
-
-#[derive(Clone)]
-enum DemandSource {
-	Group(kio::ProducerWeak<GroupState>),
-	Fetch(kio::ProducerWeak<track::FetchOutcome>),
+	state: kio::ProducerWeak<GroupState>,
 }
 
 impl Demand {
-	pub(super) fn fetch(sequence: u64, state: kio::ProducerWeak<track::FetchOutcome>) -> Self {
-		Self {
-			sequence,
-			state: DemandSource::Fetch(state),
-		}
-	}
-
 	/// The group sequence this handle watches.
 	pub fn sequence(&self) -> u64 {
 		self.sequence
 	}
 
-	/// Whether the group or fetch is open and has readers right now.
+	/// Whether the group is open and has readers right now.
 	pub fn is_used(&self) -> bool {
-		match &self.state {
-			DemandSource::Group(state) => !state.is_closed() && state.is_used(),
-			DemandSource::Fetch(state) => !state.is_closed() && state.is_used(),
-		}
+		!self.state.is_closed() && self.state.is_used()
 	}
 
 	/// Wait until at least one reader needs the group.
@@ -2211,38 +2195,23 @@ impl Demand {
 
 	/// Poll until at least one reader needs the group.
 	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		match &self.state {
-			DemandSource::Group(state) => state.poll_used(waiter),
-			DemandSource::Fetch(state) => state.poll_used(waiter),
-		}
-		.map_err(|_| self.abort_reason())
+		self.state.poll_used(waiter).map_err(|_| self.abort_reason())
 	}
 
 	/// Poll until no reader needs the group.
 	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		match &self.state {
-			DemandSource::Group(state) => state.poll_unused(waiter),
-			DemandSource::Fetch(state) => state.poll_unused(waiter),
-		}
-		.map_err(|_| self.abort_reason())
+		self.state.poll_unused(waiter).map_err(|_| self.abort_reason())
 	}
 
-	/// Wait until the group or fetch closes, returning its cause.
+	/// Wait until the group closes, returning its cause.
 	#[cfg(feature = "async")]
 	pub async fn closed(&self) -> Error {
-		match &self.state {
-			DemandSource::Group(state) => state.closed().await,
-			DemandSource::Fetch(state) => state.closed().await,
-		}
+		self.state.closed().await;
 		self.abort_reason()
 	}
 
 	fn abort_reason(&self) -> Error {
-		match &self.state {
-			DemandSource::Group(state) => state.read().abort.clone(),
-			DemandSource::Fetch(state) => state.read().rejected.clone(),
-		}
-		.unwrap_or(Error::Dropped)
+		self.state.read().abort.clone().unwrap_or(Error::Dropped)
 	}
 }
 
@@ -3260,27 +3229,6 @@ impl Fetch {
 		self.frame_start = frame_start;
 		self
 	}
-}
-
-/// A consumer's request for a single past group, handed to a handler via
-/// [`track::Dynamic::poll_requested_group`].
-///
-/// The handler fulfills it by calling [`Self::accept`], which inserts the group
-/// into the track cache (resolving every [`track::Consumer::fetch_group`] that joined the
-/// attempt) and returns a [`Producer`] to fill. A relay typically opens a wire
-/// FETCH and waits for the publisher to answer before accepting, so a group the
-/// publisher lacks is rejected rather than accepted and then aborted. The request
-/// carries its own producer handle, so it works the same whether or not the track
-/// has been accepted yet.
-pub struct Request {
-	pub(crate) state: kio::Producer<track::TrackState>,
-	pub(super) fetch: kio::Shared<track::FetchState>,
-	pub(super) sequence: u64,
-	pub(super) priority: i8,
-	pub(super) max_delay: Option<std::time::Duration>,
-	pub(super) frame_start: u64,
-	pub(crate) result: kio::Producer<track::FetchOutcome>,
-	pub(super) done: bool,
 }
 
 #[cfg(test)]

@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Consumer` replaces `Reader`
+
+`Reader`, `reader::Config`, and the timeline layout it read are removed; serve an archive with `Consumer::open(store, broadcast, consumer::Config::default()).await?` and then `run().await`.
+`open` creates every stored track on the `broadcast::Producer` you pass, so announce it afterwards, with an epoch you pick; `run` follows a growing archive until its `.end` and serves until the broadcast closes, replacing `Reader::{track, refresh, finish, serve}`.
+`Consumer` reads only the per-track layout `Producer` writes, version 2 or 3; an old timeline recording holds keys it does not recognize and is refused.
+The timeline layout's API goes with it: `Key`, `Frame`, `Group`, `Object`, the `segment` module, `store::list`, and `Store::{path, put_segments, get_segments, timelines, delete, list, list_paginated}`; use the `object_store` API on `Store::inner` for raw access.
+`Store::put_info` returns `()`.
+`.info` refuses an `epoch` member, which an older `Writer` stored.
+`Error::{Span, Directory, Pagination}` are removed.
+
 ### Recording format version 3 stores a signed priority (#6142)
 
 `Info::priority`, `Info::new`, and `Error::Priority` use `i8`, higher first, with 0 unset.

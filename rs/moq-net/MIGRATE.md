@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Dynamic` serves fills, not group requests
+
+`track::Dynamic::requested_group` and `poll_requested_group` are replaced by `requested_fill` and `poll_requested_fill`, which yield a `track::Fill`: a run from `start()` (group and frame) to the exclusive `end()`, where `frame_start(sequence)` is the frame each group starts from, with `priority()`, `max_delay()`, and `order()`.
+Call `accept(sequence, info)` for each group you have (the first starts at `start().frame`) and `drop_groups(range)` for the rest; `next()` names the next group still owed, in the fill's order.
+`group::Request` is removed, and its `demand()` with it: watch the fill's `is_used()` and `unused()` instead.
+A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `is_wanted(sequence)`, `unwanted(sequence)`, and `poll_unwanted(sequence, waiter)` say when to stop serving one.
+A fill also arrives for history a subscriber's ranges cover below the live feed that the cache lacks, not only for `fetch_group`.
+Dropping a fill with groups unanswered names them dropped, where the live feed won't deliver them, while a reader still waits; a fill nobody waits on is withdrawn and records nothing.
+
+### `Subscription::max_delay` is optional
+
+`Subscription::max_delay` is an `Option<Duration>`, where `None` leaves the publisher's max age alone to bound delivery.
+The default stays `Some(Duration::ZERO)`, and `with_max_delay` takes `impl Into<Option<Duration>>`, so `with_max_delay(delay)` still compiles; reads and assignments of the field need the `Option`.
+A lite SUBSCRIBE carries `None` as the largest delay the wire allows.
+
 ### A listing says whether a removed track finished (#6399)
 
 `broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
@@ -108,7 +123,7 @@ Dropping the last `track::Producer` without a finish aborts them with `Error::Dr
 
 ### Priorities are signed, with 0 unset (#6142)
 
-`track::Info::priority`, `track::Subscription::priority`, `group::Fetch::priority`, and `group::Request::priority()` are `i8`, higher first, and 0 is the unset midpoint.
+`track::Info::priority`, `track::Subscription::priority`, `group::Fetch::priority`, and `track::Fill::priority()` are `i8`, higher first, and 0 is the unset midpoint.
 The track's default was 127, the midpoint, and the subscription's was 0, the least urgent; both are 0 now.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 The publisher's `Info::priority` now breaks ties between subscriptions at one subscriber priority.
@@ -372,8 +387,7 @@ A dynamic route updated to another epoch refuses the requests its handler still 
 ### Demand is read through `demand()`
 
 `track::Producer`'s `is_used`, `used`, `unused`, and `poll_unused`, and `group::Producer`'s `used` and `unused`, moved to `demand()`: `track.unused().await` is `track.demand().unused().await?`.
-`track::Request`, `track::Dynamic`, and `group::Request` poll it through `demand().poll_unused`, which returns `Poll<Result<()>>`: treat `Err` (the request closed) as unused too.
-A `group::Request` is withdrawn once its last `fetch_group` caller leaves, so a handler that sees it unused just drops it; a later fetch queues a fresh request, and serving the abandoned one returns `Error::Duplicate`.
+`track::Request` and `track::Dynamic` poll it through `demand().poll_unused`, which returns `Poll<Result<()>>`: treat `Err` (the request closed) as unused too.
 
 ### moq-net owns its transport traits
 

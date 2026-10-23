@@ -14,7 +14,7 @@ never listing as a complete recording.
 Decided 2026-10-11 (#5236): refuse pruned recordings now, and quest the floor.
 
 Decided 2026-10-17: kept as its own `moq-hls` quest rather than folded into
-the [Archive consumer](/quest/m1/archive/consumer.md). The consumer only
+the archive consumer. The consumer only
 answers a group below its oldest stored key as dropped; this quest makes
 history mode start there. The old Reader's timeline-map pruning and any
 retention field in the catalog are gone with the reader and the root
@@ -33,7 +33,6 @@ stored segment, and a hole after it still fails.
 
 ## Required
 
-- [Archive consumer](/quest/m1/archive/consumer.md) - serves the pruned archive and drops groups below its floor
 - [Catalog HLS field](/quest/m1/archive/catalog-hls.md) - the `hls` records history mode reads
 
 ## Related

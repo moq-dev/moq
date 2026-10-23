@@ -2966,6 +2966,8 @@ pub unsafe extern "C" fn moq_publish_dynamic(
 /// [moq_publish_dynamic_cancel] was called) or a negative error. After the terminal
 /// (`<= 0`) callback, `user_data` is never touched again. Cached groups never reach the
 /// handler. Answer each request with [moq_group_request_accept] or [moq_group_request_abort].
+/// A request whose group nobody reads any more is withdrawn: answering it then fails as not
+/// found, so move on to the next request.
 ///
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
@@ -3179,9 +3181,10 @@ pub extern "C" fn moq_group_request_accept(request: u32) -> i32 {
 	})
 }
 
-/// Reject a group request with an application error code, failing the waiting fetches.
+/// Reject a group request, failing the waiting fetches as not found.
 ///
-/// Consumes the request handle. Returns a zero on success, or a negative code on failure.
+/// The error code is not delivered. Consumes the request handle. Returns a zero on success,
+/// or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_group_request_abort(request: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {

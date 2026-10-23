@@ -69,7 +69,3 @@ segment is refused, and that a rendition without `hls` gets no playlist.
 Public API: `hang::catalog::Archive` is deleted, the rendition types gain an
 `hls` field in Rust and JS, and `moq-mux` gains the opt-in. Wire: the hang
 catalog format.
-
-## Required
-
-- [Archive consumer](/quest/m1/archive/consumer.md) - the old writer and reader, which read the root `archive` section, are gone first

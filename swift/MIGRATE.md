@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Dynamic tracks serve fills
+
+`TrackDynamic.requestedGroup()` is now `requestedFill()`, returning a `Fill` (`startGroup`, `startFrame`, `endGroup`, `priority`, `maxDelayUs`, `order`, `next()`, `accept(sequence:)`, `dropGroups(start:end:)`, `isUsed`, `unused()`), and iterating a `TrackDynamic` yields fills.
+`GroupRequest` and `GroupDemand` are removed: serve each group `next()` names, and watch `isUsed` or `unused()` on the fill.
+A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `isWanted(sequence:)` and `unwanted(sequence:)` say when to stop serving one.
+A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
+`Subscription.maxDelayUs` is a `UInt64?`, where nil leaves the publisher's max age alone to bound delivery.
+
 ### Video rendition preference
 
 `Media.Video` gains `preference: Int32`, defaulting to `0`. Rebuild with the matching MoqFFI package. Higher values are preferred; compatibility transcodes use `-1`.
@@ -26,7 +34,7 @@ Publish the track with a `refresh` ratio so a joiner gets the value restated in 
 
 ### Priorities are signed (#6142)
 
-`TrackInfo.priority`, `Subscription.priority`, `FetchGroupOptions.priority`, and `GroupRequest.priority` are `Int8`, higher first, and 0 is the unset midpoint.
+`TrackInfo.priority`, `Subscription.priority`, `FetchGroupOptions.priority`, and `Fill.priority` are `Int8`, higher first, and 0 is the unset midpoint.
 `TrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it, widening first so it doesn't trap (`Int8(Int16(old) - 128)`): 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 

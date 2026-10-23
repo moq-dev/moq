@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Dynamic tracks serve fills
+
+`MoqTrackDynamic.requestedGroup()` is now `requestedFill()`, returning a `MoqFill`: `startGroup()`, `startFrame()`, `endGroup()`, `priority()`, `maxDelayUs()`, `order()`, `next()`, `accept(sequence:)`, `dropGroups(start:, end:)`, `isUsed()`, and `unused()`.
+`MoqGroupRequest` and `MoqGroupDemand` are removed: serve each group `next()` names, and watch `isUsed()` or `unused()` on the fill.
+A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `isWanted(sequence:)` and `unwanted(sequence:)` say when to stop serving one.
+A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
+A fill also arrives for history a subscription covers that the cache lacks, not only for a fetch.
+`MoqSubscription.maxDelayUs` is nullable, where null leaves the publisher's max age alone to bound delivery.
+Regenerate the bindings with `just dart generate` for the changed types and checksums.
+
 ### Video rendition preference
 
 `MoqVideo` gains `preference`, defaulting to `0`. Regenerate bindings and rebuild with the matching native library. Higher values are preferred; compatibility transcodes use `-1`.
@@ -31,7 +41,7 @@ Regenerate the bindings for the changed `resolve` checksum.
 
 ### Priorities are signed (#6142)
 
-`MoqTrackInfo.priority`, `MoqSubscription.priority`, `MoqFetchGroupOptions.priority`, and `MoqGroupRequest.priority()` take `-128..=127`, higher first, and 0 is the unset midpoint.
+`MoqTrackInfo.priority`, `MoqSubscription.priority`, `MoqFetchGroupOptions.priority`, and `MoqFill.priority()` take `-128..=127`, higher first, and 0 is the unset midpoint.
 `MoqTrackInfo.priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 Regenerate the bindings for the changed checksums.

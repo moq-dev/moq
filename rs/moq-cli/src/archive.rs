@@ -1,5 +1,5 @@
 //! Archive endpoints: record every broadcast announced under a prefix into an object store
-//! (export), or republish a recording from one (import), through `moq-archive`.
+//! (export), or republish one recorded broadcast from one (import), through `moq-archive`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,13 +38,12 @@ pub struct ExportArgs {
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
-	/// The timeline recording to replay.
+	/// One recorded broadcast: the `<broadcast>/@<epoch>` key prefix `export archive` wrote.
 	pub store: Url,
 
-	/// Keep following a recording that is still growing, checking for new segments at this
-	/// interval. Unset replays what is stored now and ends the timeline there.
+	/// How often a recording still growing is checked for new objects and tracks. Defaults to 1s.
 	#[usage(long)]
-	pub follow: Option<crate::duration::Duration>,
+	pub refresh: Option<crate::duration::Duration>,
 }
 
 /// One publisher instance being recorded: its path, and its epoch when its route has one.
@@ -239,8 +238,9 @@ fn key(root: &Path, (path, epoch): &Instance) -> anyhow::Result<Path> {
 
 /// Republish the recording at `args.store` as the broadcast `name`, announced under `epoch`.
 ///
-/// Each track's timeline replays as a live track and every other track's groups are served on
-/// request.
+/// Every stored track is served with its original groups: each live from its newest stored
+/// group, and history on request. A recording still growing is followed until its producer
+/// marks it complete.
 pub async fn import(
 	origin: moq_net::origin::Producer,
 	name: String,
@@ -248,48 +248,24 @@ pub async fn import(
 	epoch: moq_net::Epoch,
 ) -> anyhow::Result<()> {
 	let store = open(&args.store)?;
-	// A second handle lists the recording's timelines while the reader owns the first.
-	let listing = open(&args.store)?;
+	let mut config = moq_archive::consumer::Config::default();
+	if let Some(refresh) = args.refresh {
+		config = config.with_refresh(refresh.into_std());
+	}
 	let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-	let mut timelines = store
-		.timelines()
-		.await
-		.with_context(|| format!("failed to list the recording at {}", args.store))?;
-	let config = moq_archive::reader::Config::new(timelines.clone());
-	let mut reader = moq_archive::Reader::open(store, &broadcast, config)
+	let consumer = moq_archive::Consumer::open(store, broadcast.clone(), config)
 		.await
 		.with_context(|| format!("no readable recording at {}", args.store))?;
-	let serve = reader.serve();
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(epoch))
 		.context("failed to announce broadcast")?;
 
 	tracing::info!(%name, store = %args.store, "replaying");
 	notify_ready();
-
-	// The store holds no end marker, so only the caller can say the recording is complete.
-	let Some(interval) = args.follow.map(crate::duration::Duration::into_std) else {
-		reader.finish()?;
-		serve.await;
-		return Ok(());
-	};
-	let refresh = async {
-		loop {
-			moq_clock::sleep(interval).await;
-			// A rendition the recording enrolled after the replay started.
-			for (track, timeline) in listing.timelines().await? {
-				if let std::collections::btree_map::Entry::Vacant(entry) = timelines.entry(track) {
-					reader.track(entry.key(), &timeline).await?;
-					entry.insert(timeline);
-				}
-			}
-			reader.refresh().await?;
-		}
-	};
-	tokio::select! {
-		() = serve => Ok(()),
-		result = refresh => result,
-	}
+	consumer
+		.run()
+		.await
+		.with_context(|| format!("replaying {} failed", args.store))
 }
 
 /// Open the object store `url` names, taking cloud credentials from the `AWS_*`, `GOOGLE_*`,
@@ -303,7 +279,7 @@ fn open_store(url: &Url) -> anyhow::Result<(Arc<dyn ObjectStore>, Path)> {
 	Ok((Arc::from(store), prefix))
 }
 
-/// [`open_store`] as one recording.
+/// [`open_store`] as one recorded broadcast.
 fn open(url: &Url) -> anyhow::Result<moq_archive::Store<Arc<dyn ObjectStore>>> {
 	let (store, prefix) = open_store(url)?;
 	Ok(moq_archive::Store::new(store, prefix))
@@ -403,6 +379,62 @@ mod tests {
 			);
 		}
 		assert!(!files.iter().any(|file| file.starts_with("other")), "{files:?}");
+	}
+
+	/// `import archive` republishes a recording `export archive` wrote under the given name and
+	/// epoch, serving its stored groups.
+	#[tokio::test]
+	async fn an_exported_broadcast_imports() {
+		let dir = tempfile::tempdir().unwrap();
+		let url = Url::from_directory_path(dir.path()).unwrap();
+
+		let source = moq_net::broadcast::Info::new().produce();
+		let info = track::Info::default().with_timescale(Timescale::MILLI);
+		let video = source.create_track("video", info).unwrap();
+		for sequence in 0..2 {
+			let mut group = video.create_group(group::Info { sequence }).unwrap();
+			let pts = Timestamp::from_millis(sequence * 1000).unwrap();
+			group.write_frame(pts, format!("frame {sequence}")).unwrap();
+			group.finish().unwrap();
+		}
+		video.finish().unwrap();
+		let recording =
+			tokio::spawn(moq_archive::Producer::new(open(&url).unwrap(), source.consume(), Default::default()).run());
+		// Its objects, then the markers once the broadcast ends.
+		tokio::time::timeout(Duration::from_secs(10), async {
+			while files(dir.path()).len() < 2 {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the recording stores its track");
+		source.close();
+		recording.await.unwrap().unwrap();
+
+		let origin = moq_tokio::origin::spawn();
+		let args = ImportArgs {
+			store: url,
+			refresh: None,
+		};
+		let epoch = moq_net::Epoch::mint();
+		let _import = tokio::spawn(import(origin.clone(), "replay".into(), args, epoch.clone()));
+		let mut announced = origin.consume().announced();
+		tokio::time::timeout(Duration::from_secs(10), async {
+			loop {
+				if let Some(moq_net::announce::Event::Start(announce)) = announced.next().await {
+					assert_eq!(announce.prefix.as_str(), "replay");
+					assert_eq!(announce.route.epoch, Some(epoch.clone()));
+					break;
+				}
+			}
+		})
+		.await
+		.expect("the replay is announced");
+		let broadcast = origin.consume().request_broadcast("replay", None).await.unwrap();
+		let track = broadcast.track("video").unwrap();
+		let mut group = track.fetch_group(0, None).await.unwrap();
+		let frame = group.read_frame().await.unwrap().unwrap();
+		assert_eq!(&frame.payload[..], b"frame 0");
 	}
 
 	/// An epochless route announced again while its last recording drains is a new recording, and

@@ -73,6 +73,11 @@
 //! the readers: an unsettled time end walks on from where it stopped, so a rescan of the
 //! groups behind the gap on every read shows up as a slope over them.
 //!
+//! `track_fill` has readers miss the same runs below where the feed starts, each asked of the
+//! track's handler as a fill, swept over the readers and the runs: readers share each
+//! fill, so asking, dropping, and settling must cost each reader the same per run, and a
+//! cost that grows with the audience or the runs beyond that shows up as a slope.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 #![expect(
@@ -1467,6 +1472,84 @@ fn bench_time_end(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Readers missing the same runs of one track below where its feed starts, and the handler
+/// they ask; see [`bench_fill`].
+struct Fills {
+	_broadcast: broadcast::Producer,
+	_track: track::Producer,
+	dynamic: track::Dynamic,
+	readers: Vec<track::Subscriber>,
+	runs: u64,
+}
+
+impl Fills {
+	fn new(readers: usize, runs: u64) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let mut track = broadcast.create_track("bench", timed()).unwrap();
+		let dynamic = track.dynamic();
+		// The feed starts past every run, so each is a miss asked at once.
+		let start = runs * 2;
+		track.start_at(start).unwrap();
+		let mut group = track.create_group(group::Info { sequence: start }).unwrap();
+		group
+			.write_frame(Timestamp::from_millis(start).unwrap(), Bytes::from_static(b"x"))
+			.unwrap();
+		group.finish().unwrap();
+		// One range per run, with a sequence between each that no reader asks for.
+		let ranges = (0..runs)
+			.map(|run| track::Range::groups(run * 2..run * 2 + 1))
+			.chain([track::Range::groups(start..)]);
+		let subscription = track::Subscription::default()
+			.with_ranges(ranges)
+			.with_max_delay(AGED_BUDGET);
+		let readers = (0..readers).map(|_| track.subscribe(subscription.clone())).collect();
+		Self {
+			_broadcast: broadcast,
+			_track: track,
+			dynamic,
+			readers,
+			runs,
+		}
+	}
+
+	/// Every reader reads what is cached and asks for its misses, the handler drops each
+	/// fill they share, and every reader settles the drops.
+	fn run(&mut self) {
+		let waiter = kio::Waiter::noop();
+		for reader in &mut self.readers {
+			while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
+				black_box(group);
+			}
+		}
+		let mut fills = 0;
+		while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
+			fill.drop_groups(fill.start().group..fill.end());
+			fills += 1;
+		}
+		assert_eq!(fills, self.runs, "readers share each run's fill");
+		for reader in &mut self.readers {
+			assert!(reader.poll_recv_group(&waiter).is_pending());
+		}
+	}
+}
+
+/// Readers missing the same runs below the feed's start, each asked as one fill they share,
+/// swept over the readers and the runs. Each reader must pay the same per run, so a cost
+/// that grows with the audience or the runs shows up as a slope.
+fn bench_fill(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_fill");
+	group.sample_size(10);
+	for readers in [1usize, 8, 64] {
+		for runs in [1u64, 64, 1024] {
+			group.throughput(Throughput::Elements(runs * readers as u64));
+			group.bench_function(BenchmarkId::new(format!("{readers}r"), runs), |b| {
+				b.iter_batched_ref(|| Fills::new(readers, runs), Fills::run, BatchSize::PerIteration);
+			});
+		}
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_range_widening,
@@ -1490,6 +1573,7 @@ criterion_group!(
 	bench_gap_flush,
 	bench_wall,
 	bench_empty_run,
-	bench_time_end
+	bench_time_end,
+	bench_fill
 );
 criterion_main!(benches);

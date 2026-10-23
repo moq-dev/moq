@@ -46,13 +46,22 @@ What that means for you:
 - **Segment URLs are stable.** Every edge and every reload derive the same URLs, so a CDN in front of export caches them.
 - **Only a clean finish ends a playlist.** `EXT-X-ENDLIST` and a `static` DASH manifest mean the timeline finished. If the segment-boundary rendition's timeline fails instead, such as a publisher dropping its session, every media playlist and the DASH manifest answer HTTP 500 with `Cache-Control: no-store`, so a truncated recording never looks complete. A rendition whose own timeline fails answers the error alone and leaves the multivariant playlist and DASH manifest, so players switch to a sibling.
 
-A [`moq-archive`](https://docs.rs/moq-archive) recording replayed through its
-`Reader` is served the same way, with no second stored copy, and lists the
-same window as a live broadcast by default. `export::Config::history` includes
-earlier timeline groups even after replay-cache eviction: the exporter FETCHes
-missing groups from the Reader's stored timeline objects before following live
-edits. Missing or unreadable stored history fails that export with an error,
-and so does a recording whose start was pruned by retention.
+A [`moq-archive`](https://docs.rs/moq-archive) recording is served the same
+way, with no second stored copy: record a broadcast, republish it, and export
+the republished broadcast.
+
+```bash
+moq --connect https://relay.example.com/anon --broadcast event export archive s3://recordings
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<epoch>
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang export hls --listen '[::]:8089'
+```
+
+The archived catalog and timelines replay as recorded, so the export lists the
+same window as a live broadcast by default. When the recorded catalog's
+`archive` entry names a `store`, `export::Config::history` lists the whole
+recording, FETCHing earlier timeline groups from the stored objects. Missing or
+unreadable stored history fails that export with an error, and so does a
+recording whose start was pruned by retention.
 
 With `export::Config::history` enabled, a durable recording's media playlists
 also accept `start` and `end` query parameters in decimal media-time seconds.

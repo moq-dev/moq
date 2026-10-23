@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Dynamic tracks serve fills
+
+`TrackDynamic::requested_group()` is now `requested_fill()`, returning a `Fill` (`start_group()`, `start_frame()`, `end_group()`, `priority()`, `max_delay_us()`, `order()`, `next()`, `accept(sequence)`, `drop_groups(start, end)`, `is_used()`, `unused()`).
+`GroupRequest` and `GroupDemand` are removed: serve each group `next()` names, and watch `is_used()` or `unused()` on the fill.
+A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `is_wanted(sequence)` and `unwanted(sequence)` say when to stop serving one.
+A refusal carries no application code: `drop_groups` fails the waiting fetches as not found.
+A fill also arrives for history a subscription covers that the cache lacks, not only for a fetch.
+`Subscription::max_delay_us` is a `std::optional<uint64_t>` that still defaults to 0, where `std::nullopt` leaves the publisher's max age alone to bound delivery.
+
 ### Video rendition preference
 
 `moq::Video` gains `int32_t preference`. Update aggregate initializers with `0` to keep the default ranking and rebuild against the matching generated headers and native library. Higher values are preferred; compatibility transcodes use `-1`.
@@ -20,7 +29,7 @@ Where you skipped such a rendition on that error, bound the call yourself: cance
 
 ### Priorities are signed (#6142)
 
-`TrackInfo::priority`, `Subscription::priority`, and `FetchGroupOptions::priority` are `int8_t`, and `GroupRequest::priority()` returns one.
+`TrackInfo::priority`, `Subscription::priority`, and `FetchGroupOptions::priority` are `int8_t`, and `Fill::priority()` returns one.
 Higher is first and 0 is the unset midpoint; `TrackInfo::priority` defaulted to 127 and now defaults to 0.
 To keep a value's moq-lite byte, subtract 128 from it, widening first (`static_cast<int8_t>(int(old) - 128)`): 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 

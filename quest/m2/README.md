@@ -83,6 +83,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Ordered owed wait](/quest/m2/ordered-owed-wait.md) - an ordered reader waits within max_delay for a missing group only while the track still owes it
 - [lite-05/06 gap judgement](/quest/m2/lite-legacy-gap.md) - a resumed copy on lite-05/06 never reads a descending track's newest group as its start
 - [Unbounded groups](/quest/m2/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
+- [Refill evicted groups](/quest/m2/evicted-refill.md) - a group evicted after a reader judged it but before it took it is refilled, never delivered twice, and guarded against thrash
 - [Receive pool](/quest/m2/receive-pool.md) - one byte budget per worker covers every connection's receive credit and the cache, billing each frame once
 - [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) - measure browser baselines, complete WASM bindings, and adopt Rust behind @moq/net before the later JS-only stage
 - [Front parking](/quest/m2/origin-front-parks.md) - an unroutable request waits on a front instead of re-asking on every route-table move
@@ -202,7 +203,9 @@ ranked just below deterministic TS legs, which it requires.
 - [QUIC on the sim](/quest/m2/quic-sim.md) - MoQ sessions and the relay run over `moq-quic` on the seeded sim, reusing its `Pair` and `Link`
 - [Seeded sim](/quest/m2/sim-seed.md) - sim tests draw every jitter from one seeded generator and replay bit-exact
 
+- [Archive time ranges](/quest/m2/archive-time-ranges.md) - a `Time(pts)` range on an archive consumer broadcast resolves from the archive's keys, however old
 - [DVR rewind](/quest/m2/archive-dvr.md) - follow-on capability after the release contract is stable
+- [An errored track end keeps its history](/quest/m2/errored-end.md) - a replayed archive ends with its source's error after serving every stored group, instead of a clean finish
 
 - [JS HLS field](/quest/m2/js-hls.md) - follow-on capability after the release contract is stable
 

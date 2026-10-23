@@ -2112,7 +2112,7 @@ mod tests {
 		)
 		.await
 		.unwrap();
-		assert_eq!(observed.subscription().unwrap().max_delay, max_delay);
+		assert_eq!(observed.subscription().unwrap().max_delay, Some(max_delay));
 
 		let samples = [0.25f32, -0.5, 0.75, -1.0];
 		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();

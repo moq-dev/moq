@@ -138,19 +138,6 @@ impl Mock {
 		self.hold.notify_waiters();
 	}
 
-	/// Clear every injected failure.
-	pub fn heal(&self) {
-		let mut state = self.state();
-		state.fail_puts.clear();
-		state.hide_gets.clear();
-		state.stall_gets.clear();
-		state.fail_deletes.clear();
-		state.fail_lists = false;
-		state.holds.clear();
-		drop(state);
-		self.hold.notify_waiters();
-	}
-
 	/// Wait out a [`hold_puts`](Self::hold_puts) gate.
 	///
 	/// The waiter is armed before the check, so a `release` in between is not missed.

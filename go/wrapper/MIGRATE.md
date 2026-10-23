@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Dynamic tracks serve fills
+
+`TrackDynamic.RequestedGroup` is now `RequestedFill`, returning a `*Fill` (`StartGroup`, `StartFrame`, `EndGroup`, `Priority`, `MaxDelay`, `Order`, `Next`, `Accept(sequence)`, `DropGroups(start, end)`, `IsUsed`, `Unused`), and `All` ranges over fills.
+`GroupRequest` and `GroupDemand` are removed: serve each group `Next` names, and watch `IsUsed` or `Unused` on the fill.
+A reader narrowing its ranges can leave a single group while the fill stays used: `Next` skips it, and `IsWanted(sequence)` and `Unwanted(ctx, sequence)` say when to stop serving one.
+A refusal carries no application code: `DropGroups` fails the waiting fetches with `ErrNotFound`.
+
+### `Subscription.MaxDelay` is a pointer
+
+`Subscription.MaxDelay` is a `*time.Duration`, where nil leaves the publisher's max age alone to bound delivery.
+A zero-value `Subscription` now means that rather than live edge only: point `MaxDelay` at a zero duration to keep skipping at once.
+
 ### Video rendition preference
 
 `media.Video` gains `Preference int32`. Update unkeyed struct literals or use keyed fields, leaving `Preference: 0` for the default ranking. Upgrade the matching FFI module too. Higher values are preferred; compatibility transcodes use `-1`.
@@ -26,7 +38,7 @@ Publish the track with a `Refresh` ratio so a joiner gets the value restated in 
 
 ### Priorities are signed (#6142)
 
-`TrackInfo.Priority`, `Subscription.Priority`, and `FetchGroupOptions.Priority` are `int8`, and `GroupRequest.Priority()` returns one.
+`TrackInfo.Priority`, `Subscription.Priority`, and `FetchGroupOptions.Priority` are `int8`, and `Fill.Priority()` returns one.
 Higher is first and the zero value is the unset midpoint, so a `TrackInfo` that leaves `Priority` zero now gets the default rather than the least urgent priority; drop any `Priority: 127` that asked for the midpoint.
 To keep a value's moq-lite byte, subtract 128 from it: 255 becomes 127, 128 becomes 0, and 0 becomes -128.
 

@@ -477,7 +477,7 @@ impl Copy {
 		{
 			self.since = Some(self.track.now());
 		}
-		let budget = reader.mirrored.max_delay;
+		let budget = reader.mirrored.budget();
 		let grace = ledger::grace(budget);
 		// What is under the bound is past the reader's budget a full budget after a newer
 		// group superseded it, landed or not.
@@ -1286,7 +1286,7 @@ impl Reader {
 		}
 		self.groups_read = true;
 		let groups = self.groups;
-		let budget = self.mirrored.max_delay;
+		let budget = self.mirrored.budget();
 		let floor = if ordered { delivered.floor() } else { Some(0) };
 		let mut lowest: Option<Candidate> = None;
 		for index in 0..self.copies.len() {
@@ -1444,7 +1444,7 @@ impl Reader {
 		}
 		self.let_go(delivered, waiter);
 		let at = Instant::now();
-		self.datagrams.expire(at, self.mirrored.max_delay);
+		self.datagrams.expire(at, self.mirrored.budget());
 		let groups = self.groups;
 		for index in (0..self.copies.len()).rev() {
 			loop {
@@ -1891,7 +1891,7 @@ impl Recover {
 		// A held group or frame may be the only thing being polled. Mirror and watch
 		// preferences here too, before judging its budget against the live edge.
 		reader.sync(waiter);
-		Some(reader.mirrored.max_delay)
+		Some(reader.mirrored.budget())
 	}
 
 	/// Commit the replacement only once the caller has acquired its cursor or frame.
@@ -2081,7 +2081,7 @@ mod test {
 			open.abort(Error::SessionClosed).unwrap();
 			a.abort(Error::SessionClosed).unwrap();
 			assert!(held.poll_read_frame(&waiter).is_pending());
-			let Poll::Ready(request) = dynamic.poll_requested_group(&waiter) else {
+			let Poll::Ready(request) = dynamic.poll_requested_fill_group(&waiter) else {
 				panic!("recovery fetch")
 			};
 			request.unwrap().reject(Error::NotFound);
@@ -2523,7 +2523,7 @@ mod test {
 		let dynamic = b.dynamic();
 		routes.serve(b.consume());
 		assert!(reading.read_frame().now_or_never().is_none());
-		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!((request.sequence(), request.frame_start()), (0, 2));
 		let mut rest = request.accept(None).unwrap();
 		rest.write_frame(ts(2), frames[2].clone()).unwrap();
@@ -2602,7 +2602,7 @@ mod test {
 		let dynamic = b.dynamic();
 		routes.serve(b.consume());
 		assert!(reading.read_frame().now_or_never().is_none());
-		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!(request.frame_start(), 1);
 
 		// Shrink the pool so the next write reclaims the held head.
@@ -2684,7 +2684,7 @@ mod test {
 			let dynamic = b.dynamic();
 			routes.serve(b.consume());
 			assert!(reading.read_frame().now_or_never().is_none(), "fails={fails}");
-			let _pending = dynamic.requested_group().now_or_never().unwrap().unwrap();
+			let _pending = dynamic.requested_fill().now_or_never().unwrap().unwrap();
 
 			b.drop_groups(0..1, StreamError::App(5));
 			let res = reading.read_frame().now_or_never();
@@ -2717,7 +2717,7 @@ mod test {
 		routes.serve(b.consume());
 		b.drop_groups(0..1, StreamError::Old);
 		assert!(fetched.read_frame().now_or_never().is_none());
-		let _pending = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let _pending = dynamic.requested_fill().now_or_never().unwrap().unwrap();
 		assert!(fetched.read_frame().now_or_never().is_none());
 	}
 
@@ -2760,7 +2760,7 @@ mod test {
 		routes.serve(b.consume());
 		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
 		assert!(reading.read_frame().now_or_never().is_none());
-		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!((request.sequence(), request.frame_start()), (0, 2));
 		let mut rest = request.accept(None).unwrap();
 		rest.write_frame(ts(2), b"c".as_ref()).unwrap();
@@ -2771,7 +2771,10 @@ mod test {
 		let whole = [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
 		assert_eq!(read_cached(&b.consume(), 0), whole);
 		assert_eq!(read_cached(&logical.consume(), 0), whole);
-		assert!(dynamic.requested_group().now_or_never().is_none(), "no second fetch");
+		assert!(
+			dynamic.requested_fill_group().now_or_never().is_none(),
+			"no second fetch"
+		);
 	}
 
 	/// A replaced route that only stalled lends the replacement its head the same way.
@@ -2793,7 +2796,7 @@ mod test {
 		let dynamic = b.dynamic();
 		routes.serve(b.consume());
 		assert!(reading.read_frame().now_or_never().is_none());
-		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!(request.frame_start(), 1);
 		let mut rest = request.accept(None).unwrap();
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
@@ -2826,7 +2829,7 @@ mod test {
 		let dynamic = b.dynamic();
 		routes.serve(b.consume());
 		assert!(fetched.read_frame().now_or_never().is_none());
-		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!(request.frame_start(), 1);
 		let mut rest = request.accept(None).unwrap();
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
@@ -2835,7 +2838,7 @@ mod test {
 		assert_eq!(read(&mut fetched), None);
 		let _whole = b.consume().fetch_group(0, None);
 		assert!(
-			dynamic.requested_group().now_or_never().is_some(),
+			dynamic.requested_fill_group().now_or_never().is_some(),
 			"the head was not kept"
 		);
 	}
@@ -4617,7 +4620,7 @@ mod test {
 		let wake = Arc::new(Wake::default());
 		let waiter = kio::Waiter::new(wake.clone().into());
 		assert!(kio::Task::poll(&mut *fetching, &waiter).is_pending());
-		let _request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let _request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
 		let b = copy();
 		let mut group = b.create_group(group::Info { sequence: 0 }).unwrap();
@@ -4930,7 +4933,7 @@ mod test {
 		arriving.abort(Error::Stream(StreamError::Old)).unwrap();
 		assert!(fetched.read_frame().now_or_never().is_none());
 
-		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!((request.sequence(), request.frame_start()), (0, 1));
 		let mut rest = request.accept(None).unwrap();
 		rest.write_frame(ts(1), b"b".as_ref()).unwrap();
@@ -4987,7 +4990,7 @@ mod test {
 					);
 				}
 				assert!(
-					dynamic.requested_group().now_or_never().is_none(),
+					dynamic.requested_fill_group().now_or_never().is_none(),
 					"{err:?} fetched={fetched}: asked its own route again"
 				);
 			}
@@ -5028,11 +5031,11 @@ mod test {
 				assert!(matches!(res, Some(Err(Error::WrongSize))), "fetched={fetched}: {res:?}");
 			}
 			assert!(
-				a_requests.requested_group().now_or_never().is_none(),
+				a_requests.requested_fill_group().now_or_never().is_none(),
 				"fetched={fetched}"
 			);
 			assert!(
-				b_requests.requested_group().now_or_never().is_none(),
+				b_requests.requested_fill_group().now_or_never().is_none(),
 				"fetched={fetched}"
 			);
 		}
@@ -5058,7 +5061,7 @@ mod test {
 			routes.serve(b.consume());
 			open.abort(Error::Stream(code.clone())).unwrap();
 			assert!(reading.read_frame().now_or_never().is_none(), "{code:?}");
-			let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 			let mut rest = request.accept(None).unwrap();
 			rest.write_frame(ts(1), b"b".as_ref()).unwrap();
 			rest.finish().unwrap();
@@ -5114,7 +5117,7 @@ mod test {
 		let dynamic = b.dynamic();
 		routes.serve(b.consume());
 		assert!(fetched.read_frame().now_or_never().is_none());
-		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!((request.frame_start(), request.max_delay()), (1, Some(budget)));
 
 		// The new route runs a full second past the group's successor while its fetch is unanswered.
@@ -5689,7 +5692,7 @@ mod test {
 			);
 			let demand = copies[0].subscription().expect("surviving reader");
 			assert_eq!(demand.priority, 7, "{events:?}");
-			assert_eq!(demand.max_delay, Duration::from_secs(2), "{events:?}");
+			assert_eq!(demand.max_delay, Some(Duration::from_secs(2)), "{events:?}");
 			drop(groups);
 			drop(subscriptions);
 			drop(control);

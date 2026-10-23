@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Dynamic tracks serve fills
+
+`TrackDynamic.requestedGroup()` is now `requestedFill()`, returning a `Fill` (`startGroup()`, `startFrame()`, `endGroup()`, `priority()`, `maxDelayUs()`, `order()`, `next()`, `accept(sequence)`, `dropGroups(start, end)`, `isUsed()`, `unused()`), and `requestedGroups()` is now `requestedFills()`.
+`GroupRequest` and `GroupDemand` are removed: serve each group `next()` names, and watch `isUsed()` or `unused()` on the fill.
+A reader narrowing its ranges can leave a single group while the fill stays used: `next()` skips it, and `isWanted(sequence)` and `unwanted(sequence)` say when to stop serving one.
+A refusal carries no application code: `dropGroups` fails the waiting fetches as not found.
+`Subscription.maxDelayUs` is a `ULong?` and `maxDelay` a `Duration?`, where null leaves the publisher's max age alone to bound delivery.
+
 ### Video rendition preference
 
 `dev.moq.media.Video` gains `preference: Int`, defaulting to `0`. Update positional constructors and use the matching moq-ffi package. Higher values are preferred; compatibility transcodes use `-1`.

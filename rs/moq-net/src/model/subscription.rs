@@ -20,18 +20,22 @@ pub struct Subscription {
 	/// Delivery priority, higher first, defaulting to 0. Higher values preempt lower ones
 	/// when bandwidth is constrained.
 	pub priority: i8,
-	/// How long a superseded group stays worth delivering to this subscriber.
+	/// How long a superseded group stays worth delivering to this subscriber, or `None`
+	/// for as long as the publisher keeps it.
 	///
-	/// [`Duration::ZERO`] (the default) skips immediately: group 8 arriving means group 7
-	/// is abandoned, timed or not. A larger budget tolerates that much reordering before giving up.
-	/// This never *adds* delay, since the bound is only reached once newer data is
-	/// already that far ahead.
+	/// `Some(Duration::ZERO)` (the default) skips immediately: group 8 arriving means group
+	/// 7 is abandoned, timed or not. A larger budget tolerates that much reordering before
+	/// giving up. This never *adds* delay, since the bound is only reached once newer data
+	/// is already that far ahead. `None` is the publisher's
+	/// [`Info::max_age`](crate::track::Info::max_age) alone, what a reader reaching back
+	/// for history wants.
 	///
 	/// This is the `Subscriber Max Age` on the wire, and it is stored here verbatim so
 	/// what was asked for stays readable. Encoded as milliseconds in a QUIC varint, so
-	/// a duration of `2^62` milliseconds or more cannot be put on the wire. Clamped to
-	/// the publisher's [`Info::max_age`](crate::track::Info::max_age), since waiting for
-	/// a group longer than it is kept around cannot produce it.
+	/// a duration of `2^62` milliseconds or more cannot be put on the wire; `None` goes out
+	/// as the largest value every peer can read. Clamped to the publisher's
+	/// [`Info::max_age`](crate::track::Info::max_age), since waiting for a group longer
+	/// than it is kept around cannot produce it.
 	///
 	/// It caps every one of [`Self::ranges`]: a range names what may be delivered, and this
 	/// budget skips what inside it has gone stale.
@@ -68,7 +72,7 @@ pub struct Subscription {
 	/// when something collects the track's cache pool: an origin's driver does, and a
 	/// standalone track needs [`Pool::gc`](crate::cache::Pool::gc) called, as its idle
 	/// expiry already does. Otherwise it is judged only when something else wakes the read.
-	pub max_delay: Duration,
+	pub max_delay: Option<Duration>,
 	/// The spans of the track to deliver; see [`Range`].
 	///
 	/// The default is [`Range::oldest`]: everything [`Self::max_delay`] still considers
@@ -263,7 +267,7 @@ impl Default for Subscription {
 	fn default() -> Self {
 		Self {
 			priority: 0,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
 			ranges: vec![Range::oldest()],
 			order: Order::Descending,
 		}
@@ -277,11 +281,16 @@ impl Subscription {
 		self
 	}
 
-	/// Set how far a group may fall behind the live edge before it is skipped, returning
-	/// `self` for chaining.
-	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
-		self.max_delay = max_delay;
+	/// Set how far a group may fall behind the live edge before it is skipped, `None` for
+	/// the publisher's max age alone, returning `self` for chaining.
+	pub fn with_max_delay(mut self, max_delay: impl Into<Option<Duration>>) -> Self {
+		self.max_delay = max_delay.into();
 		self
+	}
+
+	/// [`Self::max_delay`] as a budget: `None` waits as long as anything could.
+	pub(crate) fn budget(&self) -> Duration {
+		self.max_delay.unwrap_or(Duration::MAX)
 	}
 
 	/// Replace [`Self::ranges`], returning `self` for chaining.
@@ -306,7 +315,6 @@ impl Subscription {
 	/// from the latest group (or none is asked for).
 	///
 	/// The form a wire without ranges carries: a floor below which nothing is requested.
-	#[cfg(any(feature = "async", test))]
 	pub(crate) fn start(&self) -> Option<Position> {
 		let mut floor: Option<Position> = None;
 		for range in &self.ranges {
@@ -442,7 +450,10 @@ impl Combined {
 			return;
 		};
 		combined.priority = combined.priority.max(sub.priority);
-		combined.max_delay = combined.max_delay.max(sub.max_delay);
+		combined.max_delay = match (combined.max_delay, sub.max_delay) {
+			(Some(a), Some(b)) => Some(a.max(b)),
+			_ => None,
+		};
 		combined.ranges.extend_from_slice(&sub.ranges);
 		// Sequence-first prioritization is enabled only when every subscriber wants it.
 		if let Order::Descending = sub.order {

@@ -168,10 +168,6 @@ Public API: none. Wire: no encoding change. A publisher now re-offers
 cached groups it never reported dropped when a SUBSCRIBE_UPDATE widens the
 max age or the range.
 
-## Required
-
-- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the range miss fill this reuses, beside #5929's landed re-offer and serving path
-
 ## Related
 
 - [Drop set](/quest/m1/drop-set.md) - closes the gap this leaves for groups already reported dropped
