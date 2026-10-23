@@ -4,7 +4,6 @@ use std::{fmt, str};
 use crate::sys::*;
 
 bitflags! {
-	#[allow(clippy::unreadable_literal)]
 	#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 	pub struct Flags: u32 {
 		const VIDEO_CAPTURE         = 0x00000001;

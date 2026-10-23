@@ -17,8 +17,7 @@ function summarize(support: Full): Level {
 	if (!support.audio.encoding || !support.video.encoding) return "none";
 	if (!support.audio.capture) return "none";
 
-	if (!Object.values(support.audio.encoding).some((v) => v === true || v === "full" || v === "partial"))
-		return "none";
+	if (!Object.values(support.audio.encoding).some((v) => v !== "none")) return "none";
 	if (!Object.values(support.video.encoding).some((v) => v.software || v.hardware)) return "none";
 
 	if (support.video.capture === "partial") return "partial";
