@@ -16065,6 +16065,30 @@ mod test {
 		assert!(producer.state.read().drops.overlapping(&(0..8)).next().is_none());
 	}
 
+	/// A wide fill refused group by group, each with its own error, holds only the answers its
+	/// readers have yet to take, not one per refusal.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_wide_fill_forgets_refusals_its_readers_took() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let mut subscriber = producer.subscribe(replay().with_groups(0..).with_order(Order::Ascending));
+		producer.start_at(100).unwrap();
+		write_group(&producer, 100);
+		let waiter = kio::Waiter::noop();
+		while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(&waiter) {}
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("below the start is a miss");
+		};
+		assert_eq!((fill.start().group, fill.end()), (0, 100));
+		for sequence in 0..50 {
+			assert_eq!(fill.next(), Some(sequence));
+			fill.group(sequence).reject(Error::App(sequence as u16));
+			let _ = subscriber.poll_recv_group(&waiter);
+			assert!(fill.answers() <= 1, "group {sequence}: {} answers held", fill.answers());
+		}
+	}
+
 	/// What a fill stopped owing is asked afresh by a reader that wants it later, rather than
 	/// joining a fetch its handler is cancelling.
 	#[test]

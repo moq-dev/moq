@@ -3260,16 +3260,16 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	let group_cb = Callback::new();
 	let dynamic = id(unsafe { moq_publish_track_dynamic(track, Some(channel_callback), group_cb.ptr) });
 
-	let ascending = |groups| {
+	let ascending = |start, end| {
 		moq_net::track::Subscription::default()
 			.with_max_delay(None)
-			.with_groups(groups)
+			.with_groups(start..end)
 			.with_order(moq_net::track::Order::Ascending)
 	};
 	let mut reader = {
 		let mut state = State::lock();
 		let producer = state.publish.track_producer(Id::try_from(track).unwrap()).unwrap();
-		let reader = producer.subscribe(ascending(7..));
+		let reader = producer.subscribe(ascending(7, u64::MAX));
 		producer.start_at(10).unwrap();
 		let mut group = producer.create_group(moq_net::group::Info { sequence: 10 }).unwrap();
 		group
@@ -3285,7 +3285,8 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 	assert_eq!(unsafe { moq_group_request_sequence(first, &mut sequence) }, 0);
 	assert_eq!(sequence, 7);
 
-	reader.update(ascending(8..)).unwrap();
+	// Reading only 8, so the fill owes nothing once 8 is let go.
+	reader.update(ascending(8, 9)).unwrap();
 	assert!(reader.poll_recv_group(&waiter).is_pending());
 	let next = id(group_cb.recv());
 	assert_eq!(unsafe { moq_group_request_sequence(next, &mut sequence) }, 0);

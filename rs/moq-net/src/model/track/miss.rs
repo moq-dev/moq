@@ -190,8 +190,14 @@ impl Misses {
 			};
 			// Read only after the outcome's lock is released.
 			let state = state.read();
+			// A refusal taken is no longer owed this reader. An accept stays held: its group may
+			// still be arriving, and is cancelled once nobody reads it.
+			let mut taken = RangeSet::new();
 			for (groups, answer) in answers {
 				self.wanted.remove(groups.clone());
+				if answer.is_err() {
+					taken.insert(groups.clone());
+				}
 				match answer {
 					// What the cache holds is filled, and the rest settled by run: a fill that
 					// ended unanswered may span far more groups than were ever cached.
@@ -209,6 +215,7 @@ impl Misses {
 				}
 			}
 			drop(state);
+			self.joins[i].release(&taken);
 			// Judged again: the same join may have more to answer, or park the waiter now.
 		}
 		retry

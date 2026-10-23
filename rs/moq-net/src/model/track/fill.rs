@@ -372,12 +372,27 @@ impl FillState {
 
 	/// Count a join out of reading `groups` of fill `id`. What nobody reads any more is no
 	/// longer routed to it: a reader wanting it later asks afresh rather than joining a fetch
-	/// being cancelled, so a sequence a fill stops owing stays unowed.
+	/// being cancelled, so a sequence a fill stops owing stays unowed. Its answers are
+	/// forgotten too, so a wide fill holds the answers its readers have yet to take, not one
+	/// per group its source answered.
 	fn unwant(&mut self, id: u64, groups: ops::Range<u64>) {
 		let Some(pending) = self.pending.get_mut(&id) else {
 			return;
 		};
-		for run in pending.unwant(groups) {
+		let unwanted = pending.unwant(groups);
+		let answered = {
+			let outcome = pending.result.read();
+			unwanted
+				.iter()
+				.any(|run| outcome.refused.overlaps(run) || outcome.accepted.overlaps(run))
+		};
+		if answered && let Ok(mut outcome) = pending.result.write() {
+			for run in &unwanted {
+				outcome.refused.remove(run.clone());
+				outcome.accepted.remove(run.clone());
+			}
+		}
+		for run in unwanted {
 			for range in self.routed(id, &run) {
 				self.covers.remove(range);
 			}
@@ -606,6 +621,13 @@ impl Fill {
 	/// Poll until no reader reads group `sequence`.
 	pub fn poll_unwanted(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
 		self.inner.poll_unwanted(sequence, waiter)
+	}
+
+	/// How many answer runs the fill still holds for its readers.
+	#[cfg(test)]
+	pub(super) fn answers(&self) -> usize {
+		let outcome = self.inner.result.read();
+		outcome.refused.iter().count() + outcome.accepted.iter().count()
 	}
 
 	/// The next group still owed in the fill's order: a reader still reads it, and it was
