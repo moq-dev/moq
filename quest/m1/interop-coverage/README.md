@@ -40,11 +40,9 @@ coverage on `main` at `3ab6cbf81d`.
 
 ## Required
 
-- [Runner cases](/quest/m1/interop-coverage/runner-cases.md) - our runner clients' data-subgroup-basic and subscribe-namespace-lifecycle land upstream and go green on the report
 - [JS namespace lifecycle](/quest/m1/interop-coverage/js-namespace-done.md) - moq-dev-js subscribe-namespace-lifecycle sees NAMESPACE_DONE with publisher and subscriber in one process
 - [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md) - moq-dev-js data-subgroup-basic receives objects from imquic over WebTransport
 - [Late join and FETCH](/quest/m1/interop-coverage/late-join.md) - a late subscriber gets the current group from object 0, and a standalone FETCH returns a past group exactly
-- [Control cases](/quest/m1/interop-coverage/control.md) - GOAWAY redirect, TRACK_STATUS, datagrams, and request-ID limits pass across implementations
 
 ## Related
 

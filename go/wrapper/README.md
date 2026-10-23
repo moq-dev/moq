@@ -70,6 +70,13 @@ pinning a generated self-signed certificate.
 `Client.Session().Stats()` returns a connection stats snapshot. Fields are nil
 when the transport backend does not report that metric yet.
 
+An encoder you manage can claim a share of `Client.Session().Bandwidth()` with
+`Reserve(demand, maxBps)`, using the track's `Demand()`. Keep one reservation and change its ceiling
+with `Update(maxBps)`. Call `Update(0)` before abandoning or replacing it to
+return its share and automatic probe ceiling immediately, even while the track
+stays subscribed. A later update can resume the same claim. While the track
+stays open, dropping the Go reference alone leaves release to garbage collection.
+
 Incoming server requests expose the query-free `Path()` before `Accept()`. It
 is consistent across transports and returns an empty string for the root or
 missing path. `Query()` returns the encoded query and may contain credentials.
