@@ -977,6 +977,7 @@ fn reconcile(
 			renditions: HashMap::new(),
 			readers: tokio::task::JoinSet::new(),
 			current: None,
+			resumable: HashMap::new(),
 			finished: Finished::default(),
 			started: 0,
 			next_id: 0,
@@ -1055,8 +1056,11 @@ struct Follower {
 	path: moq_net::PathOwned,
 	renditions: HashMap<Rendition, Entry>,
 	readers: tokio::task::JoinSet<(Rendition, u64, Exit)>,
-	/// The instance last started, kept across its end so its return resumes it.
+	/// The instance last started.
 	current: Option<Current>,
+	/// The number and timeline of each instance a return would resume: the current one and each
+	/// a rendition pins, by epoch. An epochless instance cannot prove it is the one returning.
+	resumable: HashMap<moq_net::Epoch, (u64, Arc<Timeline>)>,
 	/// Shared with the readers.
 	finished: Finished,
 	/// How many instances started, numbering each.
@@ -1072,7 +1076,7 @@ struct Follower {
 struct Current {
 	/// Released at its end, so an offline sibling holds none of its state.
 	instance: Option<moq_net::broadcast::Consumer>,
-	/// Identifies it after its end, if its route named one.
+	/// Its route's, which [`Follower::resumable`] keeps it by.
 	epoch: Option<moq_net::Epoch>,
 	/// Shared by every rendition reading the instance, so their first frames fix one mapping for
 	/// all of them.
@@ -1231,25 +1235,27 @@ impl Follower {
 				},
 			);
 		}
-		// A disabled rendition keeps its pad, and the record with it. A retired pad needs none.
-		self.finished.retain(|rendition, _| pads.is_listed(rendition));
+		self.forget();
 	}
 
 	/// Read `instance`, which took over from any before it.
 	fn start(&mut self, instance: moq_net::broadcast::Consumer) {
-		match &mut self.current {
-			// Announced again without an end, its readers carry on.
-			Some(Current {
-				instance: Some(current),
-				..
-			}) if current.is_clone(&instance) => {}
-			// The same publisher instance served again after an end keeps its timeline and the
-			// tracks it finished. An epochless one cannot prove it is the same.
-			Some(current) if current.epoch.is_some() && current.epoch == instance.info().epoch => {
-				current.instance = Some(instance);
-				self.idle();
-			}
-			_ => {
+		// Announced again without an end, its readers carry on.
+		if let Some(Current {
+			instance: Some(current),
+			..
+		}) = &self.current
+			&& current.is_clone(&instance)
+		{
+			self.play();
+			return;
+		}
+
+		// An instance served again keeps its timeline and the tracks it finished.
+		let epoch = instance.info().epoch.clone();
+		let (serial, timeline) = match epoch.as_ref().and_then(|epoch| self.resumable.get(epoch)) {
+			Some((serial, timeline)) => (*serial, timeline.clone()),
+			None => {
 				self.started += 1;
 				// The first instance is the one the run started alongside. A later one's
 				// timestamps share no origin with the run's.
@@ -1257,17 +1263,42 @@ impl Follower {
 					1 => self.playback.timeline.clone(),
 					_ => Arc::default(),
 				};
-				self.current = Some(Current {
-					epoch: instance.info().epoch.clone(),
-					instance: Some(instance),
-					timeline,
-					serial: self.started,
-				});
-				self.finished.retain(|_, serial| serial == self.started);
-				self.idle();
+				(self.started, timeline)
 			}
+		};
+		if let Some(epoch) = &epoch {
+			self.resumable.insert(epoch.clone(), (serial, timeline.clone()));
 		}
+		self.current = Some(Current {
+			instance: Some(instance),
+			epoch,
+			timeline,
+			serial,
+		});
+		self.forget();
+		self.idle();
 		self.play();
+	}
+
+	/// Drop the state no return can resume: an instance neither current nor pinned by a rendition,
+	/// and the records of a retired pad. A disabled rendition keeps its pad, and its records.
+	fn forget(&mut self) {
+		let pinned: HashSet<&moq_net::Epoch> = self
+			.renditions
+			.values()
+			.filter_map(|entry| entry.shape.epoch.as_ref())
+			.chain(self.current.as_ref().and_then(|current| current.epoch.as_ref()))
+			.collect();
+		self.resumable.retain(|epoch, _| pinned.contains(epoch));
+		let serials: HashSet<u64> = self
+			.resumable
+			.values()
+			.map(|(serial, _)| *serial)
+			.chain(self.current.as_ref().map(|current| current.serial))
+			.collect();
+		let pads = &self.playback.pads;
+		self.finished
+			.retain(|rendition, serial| pads.is_listed(rendition) && serials.contains(&serial));
 	}
 
 	/// The instance ended: release it and idle until the next one.
@@ -1555,24 +1586,24 @@ impl Reader {
 	}
 }
 
-/// The track each of a follower's renditions last played to the end on its pad, and the serial of
-/// the instance that served it. A new subscription to a finished track replays its last group, so
-/// a catalog update that still lists the rendition (a publisher's final snapshot lands after its
-/// tracks end, or a disable and an enable) must not start it on that pad again. A later instance
-/// carries a new track, and a pad that never played the track joins it like any late subscriber.
-/// Shared with the readers, since a reader that replaces another on its pad learns this only once
-/// the other lets go.
+/// Each track a follower's renditions played to the end on their pads, with the serial of the
+/// instance that served it. A new subscription to a finished track replays its last group, so a
+/// catalog update that still lists the rendition (a publisher's final snapshot lands after its
+/// tracks end, a disable and an enable, or a switch back to a track) must not start it on that pad
+/// again. Another instance carries a new track, and a pad that never played the track joins it
+/// like any late subscriber. At most one record per track an instance the follower keeps served,
+/// on a listed pad. Shared with the readers, since a reader that replaces another on its pad
+/// learns this only once the other lets go.
 #[derive(Clone, Default)]
-struct Finished(Arc<Mutex<HashMap<Rendition, (String, u64)>>>);
+struct Finished(Arc<Mutex<HashSet<(Rendition, String, u64)>>>);
 
 impl Finished {
-	/// Record that instance `serial` served the rendition's `track` to its end. A reader of an
-	/// earlier instance never overwrites a later one's record.
+	/// Record that instance `serial` served the rendition's `track` to its end.
 	fn insert(&self, rendition: &Rendition, track: &str, serial: u64) {
-		let mut finished = self.0.lock().unwrap();
-		if finished.get(rendition).is_none_or(|(_, recorded)| *recorded <= serial) {
-			finished.insert(rendition.clone(), (track.to_string(), serial));
-		}
+		self.0
+			.lock()
+			.unwrap()
+			.insert((rendition.clone(), track.to_string(), serial));
 	}
 
 	/// Whether instance `serial` already served the rendition's `track` to its end on its pad.
@@ -1580,8 +1611,7 @@ impl Finished {
 		self.0
 			.lock()
 			.unwrap()
-			.get(rendition)
-			.is_some_and(|(finished, recorded)| finished == track && *recorded == serial)
+			.contains(&(rendition.clone(), track.to_string(), serial))
 	}
 
 	/// Keep only the records `keep` accepts.
@@ -1589,7 +1619,7 @@ impl Finished {
 		self.0
 			.lock()
 			.unwrap()
-			.retain(|rendition, (_, serial)| keep(rendition, *serial));
+			.retain(|(rendition, _, serial)| keep(rendition, *serial));
 	}
 }
 
@@ -3640,11 +3670,16 @@ mod session_tests {
 
 	/// Block until `publisher`'s video track reads to its end, as a reader reading it does.
 	fn await_finished(publisher: &Publisher) {
+		await_track_finished(publisher, "video");
+	}
+
+	/// [`await_finished`] for the track `name`.
+	fn await_track_finished(publisher: &Publisher, name: &str) {
 		let broadcast = publisher.broadcast.consume();
 		super::RUNTIME.block_on(async {
 			let finished = async {
 				let subscriber = broadcast
-					.track("video")
+					.track(name)
 					.unwrap()
 					.subscribe(moq_net::track::Subscription::default())
 					.await
@@ -3821,6 +3856,164 @@ mod session_tests {
 
 		recorder.assert_one_pad_held();
 		drop(first);
+	}
+
+	/// An instance a rendition pins that wins its path back from another resumes its state: the
+	/// track it finished replays on no pad, pinned or not.
+	#[test]
+	fn a_pinned_instance_winning_its_path_back_does_not_replay_its_finish() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let (pinned, other, next) = (moq_net::Epoch::mint(), moq_net::Epoch::mint(), moq_net::Epoch::mint());
+		let mut room = referencing(&origin, Some(pinned.clone()));
+		{
+			let mut guard = room.catalog.modify().unwrap();
+			let mut again = guard.video.renditions["video"].clone();
+			again.track = Some("video".into());
+			again.epoch = None;
+			guard.video.renditions.insert("again".into(), again);
+		}
+		let session = follow(&element, &origin);
+
+		// Each rendition plays the first instance on a pad of its own.
+		let reached = |tag: u8| -> HashSet<String> {
+			recorder
+				.seen()
+				.into_iter()
+				.filter_map(|seen| match seen {
+					Seen::Buffer(pad, seen) if seen == tag => Some(pad),
+					_ => None,
+				})
+				.collect()
+		};
+		let mut first = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(pinned));
+		for _ in 0..200 {
+			if reached(1).len() == 2 {
+				break;
+			}
+			first.write(1);
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		assert_eq!(reached(1).len(), 2, "{:?}", recorder.seen());
+		first.video.finish().unwrap();
+		await_finished(&first);
+
+		// Another instance wins the path, which only the unpinned rendition plays, then leaves it
+		// to the pinned one.
+		let mut second = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(other));
+		let unpinned = recorder.written(&mut second, 2);
+		let pad = reached(1).into_iter().find(|pad| *pad != unpinned).unwrap();
+		let mut follow = origin.consume().follow("cam").unwrap();
+		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
+		drop(second);
+		await_event(&mut follow, |event| {
+			matches!(
+				event,
+				moq_net::announce::Event::Restart(_) | moq_net::announce::Event::Start(_)
+			)
+		});
+
+		let mut third = Publisher::sibling(&origin, moq_net::origin::Route::default().with_epoch(next.clone()));
+		room.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.get_mut("video")
+			.unwrap()
+			.epoch = Some(next);
+		for _ in 0..200 {
+			if reached(3).contains(&pad) {
+				break;
+			}
+			third.write(3);
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		assert!(reached(3).contains(&pad), "the next instance moved to another pad");
+		stop(session);
+
+		// Neither pad replays the first instance's track on its return.
+		let seen = recorder.seen();
+		for pad in [&pad, &unpinned] {
+			assert_eq!(
+				recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1)),
+				1,
+				"{seen:?}"
+			);
+		}
+		drop(first);
+	}
+
+	/// A rendition that finished one track, then another, and switches back to the first replays
+	/// nothing of it.
+	#[test]
+	fn a_rendition_switched_back_to_a_finished_track_does_not_replay_it() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let mut room = referencing(&origin, None);
+		let _audio = room
+			.broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let session = follow(&element, &origin);
+
+		let mut first = Publisher::sibling(&origin, Default::default());
+		let pad = recorder.written(&mut first, 1);
+		first.video.finish().unwrap();
+		await_finished(&first);
+		let played = recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1));
+
+		// Writing through the publisher now feeds the other track.
+		let other = first
+			.broadcast
+			.create_track("other", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut finished = moq_mux::container::Producer::new(
+			other,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		std::mem::swap(&mut first.video, &mut finished);
+		room.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.get_mut("video")
+			.unwrap()
+			.track = Some("other".into());
+		assert_eq!(recorder.written(&mut first, 2), pad, "the switch moved to another pad");
+		first.video.finish().unwrap();
+		await_track_finished(&first, "other");
+
+		// The update also lists an audio rendition: its pad appearing proves the run acted on it.
+		{
+			let mut guard = room.catalog.modify().unwrap();
+			guard.video.renditions.get_mut("video").unwrap().track = None;
+			guard.audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
+		}
+		await_pad(&element, "audio_");
+		let mut second = Publisher::sibling(&origin, Default::default());
+		assert_eq!(
+			recorder.written(&mut second, 3),
+			pad,
+			"the next instance moved to another pad"
+		);
+		stop(session);
+
+		// The switch and the next instance each start a stream on the pad; the switch back none.
+		let seen = recorder.seen();
+		assert_eq!(recorder.count(|seen| *seen == Seen::Start(pad.clone())), 2, "{seen:?}");
+		assert_eq!(
+			recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1)),
+			played,
+			"{seen:?}"
+		);
+		recorder.assert_one_pad_held();
+		drop((first, finished));
 	}
 
 	/// A rendition delisted while its sibling is offline ends its idle pad, and the sibling's next
