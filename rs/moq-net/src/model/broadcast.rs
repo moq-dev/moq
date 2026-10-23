@@ -24,7 +24,6 @@ use super::{Requests, WeakCache};
 
 #[path = "listing.rs"]
 mod listing;
-// private: capability gap
 // Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 #[cfg(feature = "async")]
 pub(crate) use listing::Owner;
@@ -65,6 +64,10 @@ pub struct Info {
 	/// Stamped on every [`Consumer`] an origin resolves, like [`Self::path`]. `None` for a
 	/// route without an epoch and for a handle not resolved through an origin.
 	pub epoch: Option<crate::Epoch>,
+
+	// What the frames this broadcast's groups are still receiving may allocate up front,
+	// inherited from the origin handle that created it.
+	pub(crate) frames: super::frame::Budget,
 }
 
 impl Default for Info {
@@ -74,6 +77,7 @@ impl Default for Info {
 			cache_duration: std::time::Duration::MAX,
 			path: crate::PathOwned::default(),
 			epoch: None,
+			frames: Default::default(),
 		}
 	}
 }
@@ -524,7 +528,6 @@ impl Producer {
 	}
 
 	/// `Ready(Ok)` once no [`Consumer`] handle is left, `Ready(Err)` once the broadcast ended.
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_unheld(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
 		self.alive.token.poll_unused(waiter)
 	}
@@ -532,7 +535,6 @@ impl Producer {
 	/// [`Self::close`], unless a [`Consumer`] holds the broadcast or a track it asked for
 	/// still waits for a handler. Atomic with minting a consumer, so a holder either keeps
 	/// the broadcast or only ever sees it closed. Returns whether the broadcast is closed.
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn close_unheld(&self) -> bool {
 		self.alive.close_unheld()
 	}
@@ -713,8 +715,7 @@ impl Drop for Alive {
 
 /// Whether a path request still names the source that handed out its track.
 #[derive(Clone, Default)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
-// pending: /quest/m1/public-model/answer.md
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) enum RequestValidity {
 	#[default]
 	Unrestricted,
@@ -725,14 +726,12 @@ pub(crate) enum RequestValidity {
 }
 
 impl RequestValidity {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn token(route: Option<kio::Consumer<()>>) -> Self {
 		route.map(Self::Route).unwrap_or_default()
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn for_source(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
 		route
 			.request_validity(path)
@@ -741,8 +740,7 @@ impl RequestValidity {
 	}
 
 	/// Capture one selection period so a pending request never revives after a replacement.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn start(&self) -> Self {
 		match self {
 			Self::Selected(selected) => Self::Period(selected.current(), selected.clone()),
@@ -750,8 +748,7 @@ impl RequestValidity {
 		}
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn check(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
 			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
@@ -768,7 +765,7 @@ impl RequestValidity {
 }
 
 #[cfg(test)]
-#[allow(missing_docs)] // test-only assertion helpers
+#[expect(missing_docs, reason = "test-only assertion helpers")]
 impl Producer {
 	pub fn assert_create_track(
 		&mut self,
@@ -785,12 +782,11 @@ impl Producer {
 ///
 /// A peer's retraction and a dead session end the source the same way: a broadcast
 /// carries no end cause past this hop. Shared by the lite and IETF subscribers.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
-// pending: /quest/m1/public-model/answer.md
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) struct SourceGuard(Producer);
 
 impl SourceGuard {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn new(producer: Producer) -> Self {
 		Self(producer)
 	}
@@ -953,7 +949,7 @@ impl Dynamic {
 use futures::FutureExt;
 
 #[cfg(test)]
-#[allow(missing_docs)] // test-only assertion helpers
+#[expect(missing_docs, reason = "test-only assertion helpers")]
 impl Dynamic {
 	pub fn assert_request(&mut self) -> track::Request {
 		kio::wait(|waiter| self.poll_requested_track(waiter))
@@ -1307,7 +1303,7 @@ impl Consumer {
 }
 
 #[cfg(test)]
-#[allow(missing_docs)] // test-only assertion helpers
+#[expect(missing_docs, reason = "test-only assertion helpers")]
 impl Consumer {
 	pub fn assert_not_closed(&self) {
 		assert!(
@@ -1854,6 +1850,29 @@ mod test {
 		);
 	}
 
+	/// A replacement can't declare an end before or inside a group an earlier producer of the
+	/// name wrote: a subscriber that received that group would read it as a contradiction.
+	#[test]
+	fn replacement_refuses_an_end_below_its_predecessor() {
+		let producer = Info::new().produce();
+		let first = producer.create_track("media", crate::track::Info::timed()).unwrap();
+		first.append_group().unwrap().finish().unwrap();
+		first.finish().unwrap();
+		drop(first);
+
+		let mut second = producer.create_track("media", crate::track::Info::timed()).unwrap();
+		for end in [
+			crate::track::Position::group(0),
+			crate::track::Position { group: 0, frame: 1 },
+		] {
+			assert!(
+				matches!(second.finish_at(end), Err(Error::ProtocolViolation)),
+				"{end:?}"
+			);
+		}
+		second.finish_at(crate::track::Position::group(1)).unwrap();
+	}
+
 	/// A replacement continues the name's timeline, so its groups can't start before the
 	/// highest one an earlier producer checked, while a new broadcast starts over.
 	#[test]
@@ -2143,6 +2162,57 @@ mod test {
 
 		let stale = request.accept(crate::track::Info::timed());
 		assert!(stale.append_group().is_err());
+	}
+
+	/// A staged track resolves no subscriber until it commits, and then with what was
+	/// written meanwhile.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_staged_track_resolves_subscribers_at_commit() {
+		let producer = Info::new().produce();
+		let request = producer.reserve_track("track1").unwrap();
+		let track = producer.consume().track("track1").unwrap();
+		let mut subscribing = std::pin::pin!(track.subscribe(None));
+		assert!(futures::poll!(subscribing.as_mut()).is_pending());
+
+		let mut staged = request.stage(crate::track::Info::timed());
+		staged.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		moq_clock::sim::yield_now().await;
+		assert!(futures::poll!(subscribing.as_mut()).is_pending(), "still staged");
+
+		let _track = staged.commit();
+		let mut subscriber = subscribing.await.unwrap();
+		assert_eq!(subscriber.recv_group().await.unwrap().unwrap().sequence, 0);
+	}
+
+	/// Dropping a staged track uncommitted rejects the request, so its subscribers fail
+	/// rather than wait on a track nobody will publish.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn dropping_a_staged_track_rejects_the_request() {
+		let producer = Info::new().produce();
+		let request = producer.reserve_track("track1").unwrap();
+		let track = producer.consume().track("track1").unwrap();
+		let subscribing = track.subscribe(None);
+
+		let mut staged = request.stage(crate::track::Info::timed());
+		staged.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
+		drop(staged);
+		assert!(matches!(subscribing.await, Err(Error::Dropped)));
+	}
+
+	/// Dropping a staged track uncommitted aborts a group still being written through it, so
+	/// its writer fails rather than fill a track nobody will read.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn dropping_a_staged_track_aborts_its_open_groups() {
+		let producer = Info::new().produce();
+		let request = producer.reserve_track("track1").unwrap();
+		let staged = request.stage(crate::track::Info::timed());
+		let mut group = staged.append_group().unwrap();
+		drop(staged);
+		let write = group.write_frame(crate::Timestamp::ZERO, b"x".as_slice());
+		assert!(matches!(write, Err(Error::Dropped)), "{write:?}");
 	}
 
 	/// Ending the broadcast doesn't cascade into a track someone is publishing: it keeps

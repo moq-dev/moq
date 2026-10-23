@@ -18,8 +18,8 @@ Decided in planning (2026-10-20):
   draw the media QA frame-counter pattern and generate the stepped tone, and
   `moq` publishes them through moq-mux. The browser grades pitch and sync,
   which covers native importer timestamps. The FFI publishers' tone is
-  graded for pitch and continuity by [interop audio
-  delivery](/quest/m1/interop-audio.md), not here.
+  graded for pitch and continuity by the interop matrix
+  (`test/interop/tone.py`), not here.
 - Browser AAC publish runs end to end for the first time in the AAC case.
 - Watch mute and volume are verified on the output (muted is silence, volume
   scales the level). The media QA probe taps `audio.out.root`, upstream of the

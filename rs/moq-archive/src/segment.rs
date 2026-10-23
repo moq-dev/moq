@@ -3,7 +3,7 @@ use hang::timeline::Position;
 use moq_net::varint;
 
 use crate::path::check_id;
-use crate::{Error, Result, VERSION};
+use crate::{Error, Result, VERSION, VERSION_MIN};
 
 /// One group's stored frames in a segment object, in sequence order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,11 +116,13 @@ impl Object {
 
 	/// Decode a complete table before slicing any payload, and refuse an unknown version.
 	///
+	/// Version 2 objects are identical to the current ones.
+	///
 	/// `timed` is whether the track's `.info` declares a timescale, which says whether the table
 	/// stores a timestamp per frame.
 	pub fn decode(mut buf: impl Buf, timed: bool) -> Result<Self> {
 		let version = read_varint(&mut buf)?;
-		if version != VERSION {
+		if !(VERSION_MIN..=VERSION).contains(&version) {
 			return Err(Error::Version(version));
 		}
 
@@ -368,7 +370,7 @@ mod tests {
 		.unwrap();
 
 		let mut buf = &bytes[..];
-		assert_eq!(read_varint(&mut buf).unwrap(), 2); // version
+		assert_eq!(read_varint(&mut buf).unwrap(), VERSION); // version
 		assert_eq!(read_varint(&mut buf).unwrap(), 0); // frame start
 		assert_eq!(read_varint(&mut buf).unwrap(), 3); // group count
 		assert_eq!(read_varint(&mut buf).unwrap(), 5); // absolute
@@ -496,12 +498,27 @@ mod tests {
 	#[test]
 	fn unknown_version_is_refused() {
 		// Version 1 objects held whole groups under range-named keys.
-		for version in [1, 3] {
+		for version in [1, VERSION + 1] {
 			let mut bytes = BytesMut::new();
 			write_varint(&mut bytes, version).unwrap();
 			write_varint(&mut bytes, 1).unwrap();
 			assert!(matches!(Object::decode(bytes.freeze(), true), Err(Error::Version(v)) if v == version));
 		}
+	}
+
+	#[test]
+	fn a_version_2_object_decodes_unchanged() {
+		let original = object(vec![Group {
+			sequence: 3,
+			frames: vec![untimed(b"a")],
+		}]);
+		let mut bytes = BytesMut::new();
+		write_varint(&mut bytes, 2).unwrap();
+		let encoded = original.encode().unwrap();
+		let mut rest = &encoded[..];
+		assert_eq!(read_varint(&mut rest).unwrap(), VERSION);
+		bytes.extend_from_slice(rest);
+		assert_eq!(Object::decode(bytes.freeze(), false).unwrap(), original);
 	}
 
 	#[test]

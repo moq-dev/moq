@@ -81,9 +81,6 @@ mod stats;
 pub(crate) struct ConnectionTag(u64);
 
 impl ConnectionTag {
-    /// No connection, for state that has not come from one yet.
-    pub(crate) const NONE: Self = Self(0);
-
     /// A tag no other connection in this process has.
     pub(crate) fn next() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -95,8 +92,9 @@ pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 mod streams;
 pub(crate) use streams::StreamsState;
 pub use streams::{
-    Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream, SendGroup,
-    SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
+    Chunks, ClosedStream, FinishError, LeaseError, Leased, ReadError, ReadableError, RecvStream,
+    SendGroup, SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams,
+    WriteError, Written,
 };
 
 mod timer;
@@ -783,6 +781,13 @@ impl Connection {
                         // overrun
                         buf_capacity = buf.len();
 
+                        // Every later segment is capped at the first one's size. If that is
+                        // too small to be worth sending, end the batch so the rest goes out
+                        // at full size.
+                        if segment_size < MIN_PACKET_SPACE {
+                            break;
+                        }
+
                         // Check whether the data we planned to send will fit in the reduced segment
                         // size. If not, bail out and leave it for the next GSO batch so we don't
                         // end up trying to send an empty packet. We can't easily compute the right
@@ -1446,17 +1451,9 @@ impl Connection {
         stats
     }
 
-    /// Return connection flow control credit taken by [`Chunks::hold()`] to the peer.
-    ///
-    /// If [`ShouldTransmit::should_transmit()`] returns `true`, call
-    /// [`Self::poll_transmit()`] soon so the peer learns of the larger window.
-    ///
-    /// # Panics
-    /// If `credit` came from another connection.
-    pub fn release(&mut self, credit: Credit) -> ShouldTransmit {
-        let transmit = self.streams.release(credit);
-        self.spaces[SpaceId::Data].pending.max_data |= transmit.should_transmit();
-        transmit
+    /// The bytes leased from receive stream `id` with [`RecvStream::lease()`], if it has a lease
+    pub fn leased(&self, id: StreamId) -> Option<&Leased> {
+        self.streams.leased(id)
     }
 
     /// Ping the remote endpoint

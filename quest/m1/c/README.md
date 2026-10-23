@@ -51,10 +51,11 @@ Rust and JS so C cannot retain the unsafe accept path while this line waits.
 That change owns its C tests and `MIGRATE.md` entries; other API reshaping stays here.
 
 Decided 2026-10-20 (maintainer): m1 quests that change the C API
-([exact binding timestamps](/quest/m1/binding-timestamps.md),
-[scope track priority](/quest/m1/track-priority-scope.md),
+([exact binding timestamps](/quest/m1/binding-timestamps.md)
 and [Rust identity enforcement](/quest/m1/catalog-identity-rs.md)) Require this
 line and land their C half on the generated package, so C users break once.
+Signed priorities already reached the hand-written ABI as `int8_t` in
+[moq-dev/moq#6142](https://github.com/moq-dev/moq/pull/6142).
 [Dynamic subscribe ranges](/quest/m1/subscribe-ranges/dynamic.md) is the
 settled exception from its later plan in
 [moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123): if generation
@@ -65,3 +66,4 @@ requests internally and keeps its ABI, so that quest does not wait here.
 
 - [moq-c package](/quest/m1/c/package.md) - the generated header ships as `moq-c` 0.8.0 with `moq::c`, pkg-config, and a release workflow
 - [C consumers](/quest/m1/c/consumers.md) - the C interop client and `doc/lib/c` samples move onto the generated API
+- [Async failure contract](/quest/m1/c/async-failure-contract.md) - a generated async call that fails early fires no callback, and one that started always delivers its terminal callback

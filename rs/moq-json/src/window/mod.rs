@@ -24,11 +24,13 @@
 //!
 //! # Group boundaries are invisible
 //!
-//! The publisher rolls a group when the ops in it outgrow
-//! [`ProducerConfig::op_ratio`](ProducerConfig::op_ratio) times the header that opened it, exactly as
-//! [`snapshot`](crate::snapshot) rolls on its delta budget. That is purely a compression decision
-//! with no age bound, and a [`Consumer`] never surfaces it. A caller that stores complete groups
-//! can also end one with [`Producer::cut`]; the next edit opens a new group with a header. A header
+//! The publisher rolls a group when a joiner wants a fresh one, exactly as
+//! [`snapshot`](crate::snapshot) does: on a track created with a
+//! [`refresh`](moq_net::track::Info::refresh) ratio, a subscriber joining once the open group's ops
+//! outweigh that ratio times its header asks for one, and [`Producer::refresh`] restates the window
+//! in it. Otherwise a group runs to the frame and byte caps. A [`Consumer`] never surfaces a roll.
+//! A caller that stores complete groups can also end one with [`Producer::cut`]; the next edit
+//! opens a new group with a header. A header
 //! restating records a reader already has yields nothing, so however often the publisher rolls, the
 //! reader sees one continuous stream of [`Event`]s. [`ProducerConfig::checkpoint_records`] bounds
 //! the suffix repeated on each roll for a long-lived window.
@@ -383,7 +385,7 @@ mod test {
 	#[test]
 	fn a_popped_record_is_never_restated() {
 		// Ops disabled, so every single edit is its own group restating the whole window.
-		let mut live = Live::new(ProducerConfig::default().with_op_ratio(0));
+		let mut live = Live::new(ProducerConfig::default().with_ops(false));
 		live.push(0);
 		live.push(1);
 		live.pop(1);
@@ -413,7 +415,7 @@ mod test {
 
 	#[test]
 	fn bounded_checkpoints_keep_a_following_consumer_contiguous() {
-		let config = ProducerConfig::default().with_op_ratio(0).with_checkpoint_records(2);
+		let config = ProducerConfig::default().with_ops(false).with_checkpoint_records(2);
 		let mut live = Live::new(config);
 		for n in 0..6 {
 			live.push(n);
@@ -428,7 +430,7 @@ mod test {
 
 	#[test]
 	fn a_late_consumer_skips_to_the_bounded_checkpoint() {
-		let config = ProducerConfig::default().with_op_ratio(0).with_checkpoint_records(2);
+		let config = ProducerConfig::default().with_ops(false).with_checkpoint_records(2);
 		let mut encoder = Encoder::<Value>::new(config);
 		let mut latest = None;
 		for n in 0..5 {
@@ -457,7 +459,7 @@ mod test {
 
 	#[test]
 	fn a_resumed_encoder_continues_the_window() {
-		let config = ProducerConfig::default().with_op_ratio(0).with_checkpoint_records(2);
+		let config = ProducerConfig::default().with_ops(false).with_checkpoint_records(2);
 		let mut original = Encoder::<Value>::new(config.clone());
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 		for n in 0..4 {
@@ -527,7 +529,7 @@ mod test {
 			.produce()
 			.create_track("test", moq_net::track::Info::default())
 			.unwrap();
-		let mut producer = Producer::<Value>::new(track, ProducerConfig::default().with_op_ratio(0));
+		let mut producer = Producer::<Value>::new(track, ProducerConfig::default().with_ops(false));
 
 		for n in 0..5 {
 			producer.push(&rec(n)).unwrap();
@@ -568,7 +570,7 @@ mod test {
 		// Ops are disabled, so every edit opens a new group. Feed the first two groups to the
 		// decoder, skip the middle groups as a lagging track subscriber would, then resume at the
 		// latest header.
-		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_op_ratio(0));
+		let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_ops(false));
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 		for n in 0..2 {
 			let frame = encoder.push(&rec(n)).unwrap();
@@ -646,7 +648,7 @@ mod test {
 				.create_track("test", timed())
 				.unwrap();
 			let mut consumer = consumer(track.subscribe(None), false);
-			let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_op_ratio(0));
+			let mut encoder = Encoder::<Value>::new(ProducerConfig::default().with_ops(false));
 
 			let first = encoder.push(&rec(0)).unwrap();
 			let payload = first.payload.clone();
@@ -680,17 +682,133 @@ mod test {
 		}
 	}
 
+	/// A joiner under the ratio reads the open group, and one over it gets the window restated in a
+	/// fresh group, where it reads the same records with none of the ops before it.
+	#[test]
+	fn a_joiner_over_the_ratio_gets_a_fresh_header() {
+		let waiter = kio::Waiter::noop();
+		let (mut producer, _track) = producer_on(
+			ProducerConfig::default(),
+			moq_net::track::Info::default().with_refresh(1),
+		);
+
+		// A 32 byte header and a 16 byte push: under the ratio.
+		producer.push(&rec(0)).unwrap();
+		producer.push(&rec(1)).unwrap();
+		let _early = producer.consume();
+		assert!(producer.poll_refresh(&waiter).is_pending(), "a join under the ratio");
+
+		producer.push(&rec(2)).unwrap();
+		producer.pop(1).unwrap();
+		assert!(producer.poll_refresh(&waiter).is_pending(), "no join, no refresh");
+		let mut late = producer.consume();
+		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
+		assert!(producer.poll_refresh(&waiter).is_pending(), "answered once");
+
+		let mut fresh = std::iter::from_fn(|| match late.poll_recv_group(&waiter) {
+			Poll::Ready(Ok(Some(group))) => Some(group),
+			_ => None,
+		})
+		.last()
+		.expect("the fresh group");
+		assert_eq!(fresh.sequence, 1);
+		let Poll::Ready(Ok(Some(header))) = fresh.poll_read_frame(&waiter) else {
+			panic!("expected the restating header");
+		};
+		assert_eq!(
+			serde_json::from_slice::<Value>(&header.payload).unwrap(),
+			json!({ "offset": 1, "records": [rec(1), rec(2)] })
+		);
+
+		// The next edit rides as an op in the fresh group.
+		producer.push(&rec(3)).unwrap();
+		let Poll::Ready(Ok(Some(op))) = fresh.poll_read_frame(&waiter) else {
+			panic!("expected an op in the fresh group");
+		};
+		assert_eq!(
+			serde_json::from_slice::<Value>(&op.payload).unwrap(),
+			json!({ "push": rec(3) })
+		);
+	}
+
+	/// A refresh restates the window at the newest timestamp written.
+	#[test]
+	fn a_refresh_reuses_the_newest_timestamp() {
+		let waiter = kio::Waiter::noop();
+		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
+		let (mut producer, _track) = producer_on(ProducerConfig::default(), timed().with_refresh(1));
+		for n in 0..4 {
+			producer.push(moq_net::Timed::from(&rec(n)).at(ms(100 + n))).unwrap();
+		}
+		producer.pop(moq_net::Timed::from(1).at(ms(200))).unwrap();
+
+		let mut late = producer.consume();
+		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
+		let mut fresh = std::iter::from_fn(|| match late.poll_recv_group(&waiter) {
+			Poll::Ready(Ok(Some(group))) => Some(group),
+			_ => None,
+		})
+		.last()
+		.expect("the fresh group");
+		let Poll::Ready(Ok(Some(header))) = fresh.poll_read_frame(&waiter) else {
+			panic!("expected the restating header");
+		};
+		assert_eq!(header.timestamp, Some(ms(200)));
+	}
+
+	/// An op may carry a timestamp older than its group's first frame, but a new group may not start
+	/// before that frame, so the restating header takes the newest timestamp written.
+	#[test]
+	fn a_refresh_after_an_older_edit_starts_at_the_newest_timestamp() {
+		let waiter = kio::Waiter::noop();
+		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
+		let (mut producer, _track) = producer_on(ProducerConfig::default(), timed().with_refresh(1));
+		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
+			producer.push(moq_net::Timed::from(&rec(n as u64)).at(ms(at))).unwrap();
+		}
+
+		let mut late = producer.consume();
+		assert!(matches!(producer.poll_refresh(&waiter), Poll::Ready(Ok(()))));
+		let mut fresh = std::iter::from_fn(|| match late.poll_recv_group(&waiter) {
+			Poll::Ready(Ok(Some(group))) => Some(group),
+			_ => None,
+		})
+		.last()
+		.expect("the fresh group");
+		let Poll::Ready(Ok(Some(header))) = fresh.poll_read_frame(&waiter) else {
+			panic!("expected the restating header");
+		};
+		assert_eq!(header.timestamp, Some(ms(130)));
+	}
+
+	/// Without a ratio no join asks for a group, and a finished producer stops refreshing.
+	#[test]
+	fn refresh_needs_a_ratio_and_an_open_track() {
+		let (mut producer, _track) = producer(ProducerConfig::default());
+		for n in 0..8 {
+			producer.push(&rec(n)).unwrap();
+		}
+		let _late = producer.consume();
+		assert!(producer.poll_refresh(&kio::Waiter::noop()).is_pending());
+
+		producer.finish().unwrap();
+		assert!(matches!(producer.refresh().now_or_never(), Some(Err(_))));
+	}
+
 	#[test]
 	fn compressed_round_trip_across_rolls() {
-		let mut live = Live::new(ProducerConfig::default().with_compression(true).with_op_ratio(1));
+		let mut live = Live::new(ProducerConfig::default().with_compression(true));
 		for n in 0..40 {
 			live.push(n);
 			if n >= 10 {
 				live.pop(1);
 			}
+			if n % 7 == 6 {
+				live.producer.cut().unwrap();
+			}
 		}
 
-		// A tight ratio rolls many times; every record still arrives exactly once, in order.
+		// Cuts roll many compressed groups; every record still arrives exactly once, in order.
 		assert_eq!(Live::pushed(&live.finish()), (0..40).collect::<Vec<_>>());
 	}
 
@@ -920,8 +1038,8 @@ mod test {
 	#[test]
 	fn rolling_is_invisible_to_the_consumer() {
 		// The same edits, framed two ways: one group for everything, versus a roll per edit.
-		let edits = |ratio: u32| {
-			let mut live = Live::new(ProducerConfig::default().with_op_ratio(ratio));
+		let edits = |ops: bool| {
+			let mut live = Live::new(ProducerConfig::default().with_ops(ops));
 			for n in 0..6 {
 				live.push(n);
 				if n >= 3 {
@@ -931,6 +1049,6 @@ mod test {
 			live.finish()
 		};
 
-		assert_eq!(edits(1_000), edits(0));
+		assert_eq!(edits(true), edits(false));
 	}
 }

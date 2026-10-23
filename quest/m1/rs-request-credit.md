@@ -36,10 +36,7 @@ Propose the error variant's name in the PR. Public API: one new `Error`
 variant, and possibly a `transport::poll` session method. Wire: none.
 
 Decided 2026-10-20 (maintainer): the `transport::poll` trait breaks land in
-order, [receive memory](/quest/m1/quic/receive-memory.md) first, then this
-quest, then [Scope track priority](/quest/m1/track-priority-scope.md), so
+order, this quest on the receive-lease shape from
+[moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878), then the send
+domain in [broadcast fairness](/quest/m2/broadcast-fairness.md), so
 implementers rebase on one shape at a time.
-
-## Required
-
-- [Bound message assembly](/quest/m1/quic/receive-memory.md) - lands its `transport::poll` change first; this quest builds its non-waiting open on that shape

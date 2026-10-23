@@ -13,7 +13,10 @@
  * following frames are RFC 7396 JSON Merge Patch deltas applied in order. Interoperable with the
  * Rust `moq_json::snapshot`.
  *
- * The encoder rolls a group on its own budget, but a caller can roll one for its own reasons with
+ * A group of deltas runs until a joiner wants a fresh one: once the deltas outweigh the track's
+ * `refresh` ratio times the snapshot, a join asks for a group past the largest, and the
+ * {@link Producer} restates the value there. The encoder also rolls at its frame and byte caps.
+ * A caller can roll one for its own reasons with
  * {@link Producer.cut}: it closes the open group and leaves the next update to open the replacement
  * with a full snapshot, so the deltas already written stop being provisional without publishing an
  * empty group.

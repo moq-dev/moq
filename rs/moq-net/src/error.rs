@@ -489,9 +489,10 @@ pub enum Error {
 	#[error("frame timestamp doesn't fit its track")]
 	TimestampMismatch,
 
-	/// The group was evicted by its own track to pay eviction debt under memory
-	/// pressure (see [`cache::Pool`](crate::cache::Pool)). Unlike [`Self::Old`],
-	/// the group was still within the publisher's window; it can be re-fetched.
+	/// The group was evicted under memory pressure: by its own track to pay eviction debt
+	/// (see [`cache::Pool`](crate::cache::Pool)), or by the transport when incomplete
+	/// messages spent its receive window. Unlike [`Self::Old`], the group was still within
+	/// the publisher's window; it can be re-fetched.
 	#[error("evicted")]
 	Evicted,
 
@@ -585,6 +586,7 @@ impl Error {
 
 		match err.close_kind() {
 			crate::transport::CloseKind::IdleTimeout => Self::IdleTimeout,
+			crate::transport::CloseKind::Evicted => Self::Evicted,
 			// A connection ending must not become the model's clean end-of-content.
 			crate::transport::CloseKind::Closed => SessionError::Cancel.into(),
 			_ => Self::Transport(err.to_string()),

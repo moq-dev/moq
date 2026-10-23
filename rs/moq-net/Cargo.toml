@@ -45,20 +45,21 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["js"] }
 
+# Model-layer locks must yield to Loom whenever kio does. This is compiled only
+# by `just rs loom`, never in production builds.
+[target.'cfg(loom)'.dependencies]
+loom = { workspace = true }
+
 [dev-dependencies]
 criterion = { workspace = true }
 futures = { workspace = true }
 # The tests' executor, with simulated time.
 moq-clock = { path = "../moq-clock", features = ["sim"] }
+moq-json = { path = "../moq-json" }
 serde_json = { workspace = true }
 # The benches run on tokio. test-util (tokio::time::pause/advance) is test-only and
 # is NOT supported on wasm, so it must not leak into the normal dependency feature set.
 tokio = { workspace = true, features = ["rt", "test-util", "time"] }
-
-# Model checks for the kio-backed model layer (tests/loom.rs). `cfg(loom)` is only
-# set by `just rs loom`, and the whole test file compiles away without it.
-[target.'cfg(loom)'.dev-dependencies]
-loom = { workspace = true }
 
 # wasm model-layer tests (tests/wasm.rs). getrandom's wasm backend is enabled
 # only here (dev), so it isn't forced on downstream consumers. They select
@@ -71,9 +72,6 @@ wasm-bindgen-test = "=0.3.79"
 # Optional per-thread CPU timing in the session benchmark.
 [target.'cfg(unix)'.dev-dependencies]
 libc = { workspace = true }
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 # Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
 # `--all-targets` build skips it rather than failing to find the module.
@@ -143,11 +141,10 @@ required-features = ["async"]
 name = "tracks"
 harness = false
 
-# Declares a pending tail through the hidden `fuzz` module.
 [[bench]]
 name = "tail"
 harness = false
-required-features = ["fuzz"]
+required-features = ["async"]
 
 [[bench]]
 name = "priority"
@@ -205,3 +202,6 @@ required-features = ["async"]
 name = "memory"
 harness = false
 required-features = ["async"]
+
+[lints]
+workspace = true

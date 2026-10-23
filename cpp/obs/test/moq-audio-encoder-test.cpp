@@ -203,7 +203,7 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 
 	auto origin = moq::OriginProducer::init(moq::OriginConfig{});
 	auto broadcast = TestOk(origin->create_broadcast("room"), "create_broadcast");
-	moq::Route route;
+	moq::AnnounceRoute route;
 	route.epoch = moq::mint_epoch();
 	TestOk(broadcast->announce(route), "announce");
 

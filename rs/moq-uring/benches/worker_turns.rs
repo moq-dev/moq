@@ -41,12 +41,8 @@ fn benchmark(c: &mut criterion::Criterion) {
 								for _ in 0..burst {
 									let mut tx = sender.acquire().await.expect("send buffer");
 									tx.extend_from_slice(b"turn");
-									tx.send(udp::Transmit {
-										to: receiver.local_addr().expect("addr"),
-										segment: 4,
-										ecn: None,
-									})
-									.expect("send");
+									tx.send(udp::Transmit::new(receiver.local_addr().expect("addr"), 4))
+										.expect("send");
 								}
 							}
 							for receiver in &receivers {

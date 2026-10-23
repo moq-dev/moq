@@ -9,6 +9,11 @@ The reference implementation. Published crates are on
 [crates.io](https://crates.io/search?q=moq) with API docs on docs.rs; source
 links cover crates awaiting their first release.
 
+Start with [moq-net](/lib/rs/moq-net) and `moq-tokio` for a connection,
+then add [hang](/lib/rs/hang) for media. To run a tool without embedding it,
+see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
+[Repository map](/setup/repository) locates internal crates and their tests.
+
 ## Crates
 
 | Crate | Does |

@@ -55,7 +55,7 @@ func TestTracks(t *testing.T) {
 	broadcast, consumer := newBroadcast(t)
 
 	scale := uint64(1_000_000)
-	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Priority: 127, Timescale: &scale})
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale})
 	if err != nil {
 		t.Fatal(err)
 	}

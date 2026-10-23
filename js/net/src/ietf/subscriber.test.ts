@@ -1226,9 +1226,9 @@ test("a compact END_OF_TRACK at object 5 with properties is subgroup 5, refused 
 	}
 });
 
-test("older peer without priority property inherits wire priority 128", async () => {
+test("older peer without priority property inherits the unset priority", async () => {
 	const { subscriber, track } = await subscribeTrack();
-	expect((await track.info()).priority).toBe(0xff - 128);
+	expect((await track.info()).priority).toBe(0);
 	const group = new GroupMessage({
 		trackAlias: ALIAS,
 		groupId: 3,
@@ -1237,7 +1237,7 @@ test("older peer without priority property inherits wire priority 128", async ()
 		flags: { ...groupFlags(true), hasPriority: false },
 	});
 	await subscriber.handleGroup(group, new Reader(undefined, encodeObjects([0]), VERSION));
-	expect(group.publisherPriority).toBe(128);
+	expect(group.publisherPriority).toBe(127);
 	track.close();
 });
 
@@ -1257,7 +1257,7 @@ test("an info-only lookup waits for SUBSCRIBE_OK instead of abandoning", async (
 		trackAlias: ALIAS,
 		properties: { priority: 37 },
 	}).encode(peer.writer, VERSION);
-	expect((await info).priority).toBe(0xff - 37);
+	expect((await info).priority).toBe(127 - 37);
 });
 
 test("SUBSCRIBE_OK's largest is known before any group arrives", async () => {
@@ -1288,15 +1288,15 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 	const subscriber = new Subscriber({ session });
 	const opening = spyOn(session, "openBi");
 	const broadcast = subscriber.consume(Path.from("room"));
-	const pending = hooks.pendingTrackProducer;
+	const make = hooks.makeRequest;
 	let returned: track.Subscriber | undefined;
 	const resumed = Promise.withResolvers<void>();
 	const waiting = Promise.withResolvers<void>();
 	const unwanted = demandUtil.unwanted;
 	const unwantedSpy = spyOn(demandUtil, "unwanted");
-	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
-		const producer = pending(request);
-		const demand = producer.demand();
+	const captured = spyOn(hooks, "makeRequest").mockImplementationOnce((options) => {
+		const request = make(options);
+		const demand = request.demand();
 		let returnedOnce = false;
 		unwantedSpy.mockImplementation(async (watched) => {
 			if (watched !== demand) return unwanted(watched);
@@ -1319,7 +1319,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 				return used;
 			});
 		});
-		return producer;
+		return request;
 	});
 	const first = broadcast.track("video").subscribe();
 	// Restore real timers even if an injection promise outlives the test.
@@ -1351,7 +1351,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 	if (outcome === "acceptance") {
 		await peer.writer.u53(SubscribeOk.id);
 		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
-		expect(await info).toMatchObject({ priority: 127 });
+		expect(await info).toMatchObject({ priority: 0 });
 		expect(returned.closed.peek()).toBeUndefined();
 	} else {
 		jest.advanceTimersByTime(4_000);
@@ -1366,13 +1366,13 @@ test("setup abandonment closes before a queued viewer can attach", async () => {
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 	const broadcast = subscriber.consume(Path.from("room"));
-	const pending = hooks.pendingTrackProducer;
+	const make = hooks.makeRequest;
 	const resumed = Promise.withResolvers<track.Subscriber>();
 	const unwanted = demandUtil.unwanted;
 	const unwantedSpy = spyOn(demandUtil, "unwanted");
-	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
-		const producer = pending(request);
-		const demand = producer.demand();
+	const captured = spyOn(hooks, "makeRequest").mockImplementationOnce((options) => {
+		const request = make(options);
+		const demand = request.demand();
 		unwantedSpy.mockImplementationOnce(async (watched) => {
 			await unwanted(watched);
 			const peek = demand.wanted.peek.bind(demand.wanted);
@@ -1388,7 +1388,7 @@ test("setup abandonment closes before a queued viewer can attach", async () => {
 				return used;
 			});
 		});
-		return producer;
+		return request;
 	});
 	const first = broadcast.track("video").subscribe();
 	let returned: track.Subscriber | undefined;
@@ -1418,7 +1418,7 @@ test("setup abandonment closes before a queued viewer can attach", async () => {
 	const request = await Subscribe.decode(next.reader, VERSION);
 	await next.writer.u53(SubscribeOk.id);
 	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(next.writer, VERSION);
-	expect(await info).toMatchObject({ priority: 127 });
+	expect(await info).toMatchObject({ priority: 0 });
 });
 
 test("abandonment cancels once and a late acceptance cannot capture a reused alias", async () => {
@@ -1433,13 +1433,19 @@ test("abandonment cancels once and a late acceptance cannot capture a reused ali
 	peer.reader.version = version;
 	peer.writer.version = version;
 	const broadcast = subscriber.consume(Path.from("room"));
-	const pending = hooks.pendingTrackProducer;
-	let producer: track.Producer | undefined;
+	const make = hooks.makeRequest;
 	let oldRequest: track.Request | undefined;
-	const captured = spyOn(hooks, "pendingTrackProducer").mockImplementationOnce((request) => {
+	// The error the abandoned request is rejected with.
+	const rejected = Promise.withResolvers<Error | undefined>();
+	const captured = spyOn(hooks, "makeRequest").mockImplementationOnce((options) => {
+		const request = make(options);
+		const reject = request.reject.bind(request);
+		spyOn(request, "reject").mockImplementation((err) => {
+			rejected.resolve(err);
+			reject(err);
+		});
 		oldRequest = request;
-		producer = pending(request);
-		return producer;
+		return request;
 	});
 	const decoded = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
@@ -1455,13 +1461,13 @@ test("abandonment cancels once and a late acceptance cannot capture a reused ali
 	try {
 		expect(await peer.reader.u53()).toBe(Subscribe.id);
 		const request = await Subscribe.decode(peer.reader, version);
-		if (!producer || !oldRequest) throw new Error("missing pending track");
+		if (!oldRequest) throw new Error("missing pending track");
 		const accepted = spyOn(oldRequest, "accept");
 		await peer.writer.u53(SubscribeOk.id);
 		await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, version);
 		await decoded.promise;
 		first.close();
-		expect(await producer.closed).toBeInstanceOf(Error);
+		expect(await rejected.promise).toBeInstanceOf(Error);
 		expect(await peer.reader.u53()).toBe(Unsubscribe.id);
 		expect((await Unsubscribe.decode(peer.reader, version)).requestId).toBe(request.requestId);
 
@@ -1524,7 +1530,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 		properties: { priority: 37 },
 	}).encode(peer.writer, VERSION);
 	await arriving;
-	expect((await track.info()).priority).toBe(0xff - 37);
+	expect((await track.info()).priority).toBe(127 - 37);
 	expect(group.publisherPriority).toBe(37);
 	const ordered = track.ordered();
 	expect((await ordered.nextGroup())?.sequence).toBe(3);
@@ -1537,7 +1543,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	});
 	await subscriber.handleGroup(explicit, new Reader(undefined, encodeObjects([0]), VERSION));
 	expect(explicit.publisherPriority).toBe(9);
-	expect((await track.info()).priority).toBe(0xff - 37);
+	expect((await track.info()).priority).toBe(127 - 37);
 	expect((await ordered.nextGroup())?.sequence).toBe(4);
 	ordered.close();
 	track.close();
@@ -1848,13 +1854,14 @@ test("returning demand survives a blocked unsubscribe", async () => {
 	const open = session.openBi.bind(session);
 	const opening = spyOn(session, "openBi").mockImplementationOnce(() => {
 		const stream = open();
-		const write = stream.writer.u53.bind(stream.writer);
-		spyOn(stream.writer, "u53").mockImplementation(async (value) => {
-			if (value === Unsubscribe.id) {
+		const write = stream.writer.write.bind(stream.writer);
+		// Each message is one write that leads with its one-byte type.
+		spyOn(stream.writer, "write").mockImplementation(async (chunk) => {
+			if (chunk[0] === Unsubscribe.id) {
 				cancelStarted.resolve();
 				await releaseCancel.promise;
 			}
-			await write(value);
+			await write(chunk);
 		});
 		const close = stream.close.bind(stream);
 		spyOn(stream, "close").mockImplementation(() => {
@@ -2365,7 +2372,7 @@ for (const negotiated of [false, true]) {
 		expect(await peer.reader.u53()).toBe(SubscribeUpdate.id);
 		const update = await SubscribeUpdate.decode(peer.reader, VERSION);
 		expect(update.parameters.maxAge).toBe(negotiated ? 900 : undefined);
-		expect(update.parameters.subscriberPriority).toBe(246);
+		expect(update.parameters.subscriberPriority).toBe(127 - 9);
 		tolerant.close();
 		track.close();
 		peer.close();
@@ -2412,7 +2419,7 @@ test("a draft 16 subscription update waits for the last one's answer", async () 
 		await new RequestOk({ requestId: first.ownRequestId }).encode(peer.writer, version);
 		expect(await next).toBe(SubscribeUpdate.id);
 		const second = await SubscribeUpdate.decode(peer.reader, version);
-		expect(second.parameters.subscriberPriority).toBe(235);
+		expect(second.parameters.subscriberPriority).toBe(127 - 20);
 		higher.close();
 		highest.close();
 	} finally {

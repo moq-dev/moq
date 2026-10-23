@@ -549,6 +549,7 @@ fn publish_catalog_config_invalid_broadcast() {
 	let name = "video";
 	let codec = "vp8";
 	let video = moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -604,6 +605,7 @@ fn publish_media_owns_its_rendition_before_the_first_keyframe() {
 	let name = "0.avc3";
 	let codec = "avc1.42c01e";
 	let video = moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -654,6 +656,7 @@ fn publish_video_config_replaces_its_own_rendition() {
 	let name = "authored";
 	let codec = "vp8";
 	let mut video = moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -726,6 +729,7 @@ fn publish_catalog_roundtrip() {
 	let height: u32 = 1080;
 	let description: &[u8] = &[0x01, 0x02, 0x03];
 	let video = moq_video_config {
+		preference: 0,
 		name: video_name.as_ptr() as *const c_char,
 		name_len: video_name.len(),
 		label: video_label.as_ptr() as *const c_char,
@@ -741,6 +745,7 @@ fn publish_catalog_roundtrip() {
 	assert_eq!(unsafe { moq_publish_video_config(broadcast, &video) }, 0);
 	let disabled_video_name = "video-disabled";
 	let disabled_video = moq_video_config {
+		preference: 0,
 		name: disabled_video_name.as_ptr() as *const c_char,
 		name_len: disabled_video_name.len(),
 		label: std::ptr::null(),
@@ -803,6 +808,7 @@ fn publish_catalog_roundtrip() {
 
 	// The video rendition we authored comes back through the consume API.
 	let mut video_cfg = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -926,6 +932,7 @@ fn a_half_specified_coded_size_round_trips() {
 	let name = "video";
 	let codec = "vp8";
 	let mut video = moq_video_config {
+		preference: -1,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -946,6 +953,7 @@ fn a_half_specified_coded_size_round_trips() {
 	let catalog = id(catalog_cb.recv());
 
 	let mut read = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -959,6 +967,7 @@ fn a_half_specified_coded_size_round_trips() {
 		container: moq_container::default(),
 	};
 	assert_eq!(unsafe { moq_consume_video_config(catalog, 0, &mut read) }, 0);
+	assert_eq!(read.preference, -1);
 	assert_eq!(read.coded_width, 1920);
 	assert_eq!(read.coded_height, 0, "the absent height must not come back invented");
 
@@ -966,6 +975,7 @@ fn a_half_specified_coded_size_round_trips() {
 	// size across unchanged, which is the case a shared presence flag would break
 	// by inventing a zero height.
 	let forward = publish_broadcast(origin, b"half-coded-size-forwarded");
+	video.preference = read.preference;
 	video.coded_width = read.coded_width;
 	video.coded_height = read.coded_height;
 	assert_eq!(unsafe { moq_publish_video_config(forward, &video) }, 0);
@@ -975,6 +985,7 @@ fn a_half_specified_coded_size_round_trips() {
 	let forwarded_task = id(unsafe { moq_consume_catalog(forwarded, Some(channel_callback), forwarded_cb.ptr) });
 	let forwarded_catalog = id(forwarded_cb.recv());
 	assert_eq!(unsafe { moq_consume_video_config(forwarded_catalog, 0, &mut read) }, 0);
+	assert_eq!(read.preference, -1);
 	assert_eq!(read.coded_width, 1920);
 	assert_eq!(read.coded_height, 0, "forwarding must not invent the absent height");
 
@@ -1004,6 +1015,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 
 	let codec = b"vp8";
 	let video = moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -1029,6 +1041,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 
 	// The declaration survives the round trip, so a consumer knows to parse LOC.
 	let mut video_cfg = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -1162,6 +1175,7 @@ fn unpublishable_catalog_containers_are_rejected() {
 	let name = "video";
 	let codec = "vp8";
 	let config = |container| moq_video_config {
+		preference: 0,
 		name: name.as_ptr() as *const c_char,
 		name_len: name.len(),
 		label: std::ptr::null(),
@@ -2065,7 +2079,7 @@ fn json_snapshot_publish_consume() {
 
 	let track_name = b"meta";
 	let config = moq_json_snapshot_config {
-		delta_ratio: 8,
+		deltas: true,
 		compression: true,
 	};
 	let producer = id(unsafe {
@@ -2844,7 +2858,7 @@ fn track_demand_reports_the_wanted_group() {
 	let broadcast = publish_broadcast(origin, b"track-demand-wanted");
 	let name = b"data";
 	let info = moq_track_info {
-		priority: 127,
+		priority: 0,
 		max_age_us: 0,
 		max_age_present: false,
 		timescale: 0,
@@ -3171,7 +3185,7 @@ fn fetch_group(
 	broadcast: u32,
 	name: &str,
 	sequence: u64,
-	priority: u8,
+	priority: i8,
 	frame_start: u64,
 ) -> mpsc::Receiver<Result<(u64, Vec<u8>), moq_net::Error>> {
 	let consumer = State::lock()
@@ -3212,7 +3226,7 @@ fn track_dynamic_serves_a_fetch_miss() {
 	let fetch = fetch_group(broadcast, "data", 5, 11, 0);
 	let request = id(group_cb.recv());
 	let mut sequence = 0u64;
-	let mut priority = 0u8;
+	let mut priority = 0i8;
 	let mut frame_start = 1u64;
 	assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
 	assert_eq!(unsafe { moq_group_request_priority(request, &mut priority) }, 0);
@@ -3361,6 +3375,7 @@ fn local_publish_consume() {
 	assert_eq!(codec, "opus");
 
 	let mut video_cfg = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -3869,6 +3884,7 @@ fn video_publish_consume() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let mut video_cfg = moq_video_config {
+		preference: 0,
 		name: std::ptr::null(),
 		name_len: 0,
 		label: std::ptr::null(),
@@ -5738,8 +5754,9 @@ fn server_listen_refuses_bad_config() {
 /// than binding and logging nothing.
 #[test]
 fn server_keylog_requires_sslkeylogfile() {
-	// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
-	unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+	if !test_env::Env::without(&["SSLKEYLOGFILE"]).isolate() {
+		return;
+	}
 	let bind = "127.0.0.1:0";
 	let generate = [moq_str("localhost")];
 	let mut config: moq_server_config = unsafe { std::mem::zeroed() };
@@ -5818,7 +5835,7 @@ fn json_tracks_are_advertised_in_the_catalog() {
 			status.as_ptr() as *const c_char,
 			status.len(),
 			&moq_json_snapshot_config {
-				delta_ratio: 4,
+				deltas: true,
 				compression: true,
 			},
 		)
@@ -5963,7 +5980,7 @@ fn data_track_names_cannot_collide() {
 			name.as_ptr() as *const c_char,
 			name.len(),
 			&moq_json_snapshot_config {
-				delta_ratio: 0,
+				deltas: false,
 				compression: false,
 			},
 		)
@@ -6021,7 +6038,10 @@ async fn a_background_panic_reaches_the_terminal_callback_and_keeps_another_orig
 	let task = crate::ffi::RUNTIME.spawn(async move {
 		let result = crate::ffi::run(async {
 			panic!("injected background panic");
-			#[allow(unreachable_code)]
+			#[expect(
+				unreachable_code,
+				reason = "the panic is the point; the `Ok` names the future's output type"
+			)]
 			Ok::<(), Error>(())
 		})
 		.await;

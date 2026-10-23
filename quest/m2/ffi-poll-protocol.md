@@ -52,6 +52,16 @@ Things to carry over and check:
   spike's Python and Go cancel probes are a starting point.
 - **Concurrent pollers on one handle share one waker.** Pick a semantic and
   test it: either reject a second concurrent read, or wake every poller.
+- **Reader modes are chosen up front** (API audit, 2026-10-22). Today one
+  `MoqTrackConsumer` offers arrival-order reads, ordered reads, and
+  `read_frame`; the first read commits a mode and later calls fail
+  `AlreadyCommitted`, and track-level `read_frame` silently returns only each
+  group's first frame (`rs/moq-ffi/src/consumer.rs`, inherited from release).
+  Since this quest reshapes these reads anyway, land the split here so they
+  break once: `MoqTrackConsumer::ordered() -> MoqOrderedTrackConsumer` takes
+  over the handle like Rust's `Subscriber::ordered()`, the base consumer keeps
+  `recv_*`, and `read_frame` moves to the ordered reader returning the group
+  and frame position like JS. Python's `__aiter__` stops committing silently.
 - Measure every generated wrapper (Go, Python, Kotlin, Swift, Dart, C++);
   the spike covered only Go and Python. Sweep
   publishers as well as subscribers, since the generator's callback-handle map
@@ -63,7 +73,7 @@ terminal to per-read. Wire: none.
 
 ## Required
 
-- [Hard-fork the binding generator](/quest/m2/uniffi-fork.md) - the generators that emit the protocol
+- [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - the generators that emit the protocol
 - [Poll-native async](/quest/m2/ffi-poll-migrate.md) - the kio poll each export wraps, with `ffi::Task` gone
 
 ## Related

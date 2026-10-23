@@ -65,6 +65,15 @@ jobs:
         run: nix develop --command just test max-age
         shell: bash -leo pipefail {0}
 
+      - name: Receive credit recovery
+        id: receive-credit
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test receive-credit
+        shell: bash -leo pipefail {0}
+        env:
+          # Fail rather than skip the io_uring arm if the runner's kernel lacks it.
+          MOQ_STRICT: 1
+
       - name: Harness regressions
         id: harness
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
@@ -196,6 +205,7 @@ jobs:
             "Rust cache": "${{ steps.rust-cache.outcome }}",
             "Playwright Chromium": "${{ steps.setup.outcome }}",
             "Optional publisher retention": "${{ steps.max-age.outcome }}",
+            "Receive credit recovery": "${{ steps.receive-credit.outcome }}",
             "Harness regressions": "${{ steps.harness.outcome }}",
             "Subscription termination interop": "${{ steps.bare-fin.outcome }}",
             "P2P data-channel transport": "${{ steps.p2p.outcome }}",

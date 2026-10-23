@@ -12,7 +12,7 @@ use tracing::Level;
 /// The ABI carries this as a `uint32_t`, so an unknown discriminant from C is an
 /// error rather than UB.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_container_kind {
 	/// A QUIC varint timestamp prefix followed by the raw codec payload.
@@ -35,7 +35,6 @@ pub enum moq_container_kind {
 /// Zeroing this struct means `MOQ_CONTAINER_KIND_LEGACY` with no init segment,
 /// which is what a rendition written by [moq_publish_audio] or [moq_publish_video] carries.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct moq_container {
 	/// `moq_container_kind` discriminant.
@@ -105,7 +104,7 @@ pub(crate) fn borrow_container(container: &hang::catalog::Container) -> moq_cont
 
 /// A single audio codec [moq_publish_audio] can parse.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_audio_format {
 	/// Advanced Audio Coding, configured by an AudioSpecificConfig.
@@ -124,7 +123,7 @@ pub enum moq_audio_format {
 /// codec: AVC1/HVC1 are length-prefixed with an out-of-band config record,
 /// while AVC3/HEV1 are Annex-B with the parameter sets inline.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_video_format {
 	/// H.264, length-prefixed NALUs with an out-of-band avcC.
@@ -145,7 +144,7 @@ pub enum moq_video_format {
 
 /// A container [moq_publish_container] can demux, which may publish several tracks.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_container_format {
 	/// Fragmented MP4 / CMAF, split into one frame per sample.
@@ -165,7 +164,6 @@ pub enum moq_container_format {
 /// Zero the struct, then set `format` and the required `init` bytes. New
 /// optional fields are appended so existing initializers keep their meaning.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_audio_init {
 	/// The audio codec, a [moq_audio_format] value.
 	pub format: u32,
@@ -187,7 +185,6 @@ pub struct moq_audio_init {
 /// Zero the struct, then set `format` and whatever else the codec needs. `init`
 /// may stay NULL for a format that resolves in band.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_init {
 	/// The video codec, a [moq_video_format] value.
 	pub format: u32,
@@ -213,7 +210,6 @@ pub struct moq_video_init {
 /// bitstream leaves (especially bitrate); a value the stream detects later wins
 /// for dimensions.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Default)]
 pub struct moq_video_hint {
 	/// Encoded width in pixels when `has_coded` is true.
@@ -265,7 +261,6 @@ impl moq_video_hint {
 /// There is no label here: a container publishes and describes its own tracks,
 /// so a rendition name would have no single track to land on.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_container_init {
 	/// The container format, a [moq_container_format] value.
 	pub format: u32,
@@ -321,7 +316,6 @@ fn container_format_from_u32(value: u32) -> Result<moq_mux::import::ContainerFor
 
 /// Information about a video rendition in the catalog.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_video_config {
 	/// The name of the track, NOT NULL terminated.
 	pub name: *const c_char,
@@ -355,13 +349,14 @@ pub struct moq_video_config {
 	pub label: *const c_char,
 	/// Length of `label` in bytes.
 	pub label_len: usize,
+	/// Higher values are preferred; compatibility transcodes use -1 and the default is 0.
+	pub preference: i32,
 }
 
 /// Catalog properties shared by every video rendition.
 ///
 /// A false `has_*` flag clears that field from the next catalog rather than preserving its previous value.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Default)]
 pub struct moq_video_properties {
 	/// Final rendered width in pixels when `has_display` is true.
@@ -388,7 +383,6 @@ pub struct moq_video_properties {
 
 /// Information about an audio rendition in the catalog.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_audio_config {
 	/// The name of the track, NOT NULL terminated
 	pub name: *const c_char,
@@ -423,14 +417,13 @@ pub struct moq_audio_config {
 /// Options for a JSON snapshot track (lossy latest-value mode).
 ///
 /// The same config is passed to a producer and its consumers, but the consumer reads only
-/// `compression`; `delta_ratio` is producer-only.
+/// `compression`; `deltas` is producer-only.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_json_snapshot_config {
-	/// How aggressively the producer emits deltas instead of full snapshots. `0` disables deltas
-	/// (one snapshot per group); a positive value allows roughly that many snapshots' worth of
-	/// deltas before rolling. Ignored by the consumer.
-	pub delta_ratio: u32,
+	/// Encode updates as deltas against the group's snapshot. When off, each update opens a new
+	/// group with a full snapshot. When on, a join after more than eight snapshots' worth of
+	/// deltas asks for the value restated in a fresh group. Ignored by the consumer.
+	pub deltas: bool,
 
 	/// DEFLATE-compress each group. Must match on the producer and consumer.
 	pub compression: bool,
@@ -438,7 +431,6 @@ pub struct moq_json_snapshot_config {
 
 /// Options for a JSON stream track (lossless append-log mode).
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_json_stream_config {
 	/// DEFLATE-compress the group. Must match on the producer and consumer.
 	pub compression: bool,
@@ -449,7 +441,6 @@ pub struct moq_json_stream_config {
 /// The mode is fixed by which constructor is called ([moq_publish_binary_snapshot] or
 /// [moq_publish_binary_stream]), so it is not in here.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_binary_config {
 	/// DEFLATE-compress each payload, advertised in the catalog entry.
 	pub compression: bool,
@@ -462,7 +453,6 @@ pub struct moq_binary_config {
 
 /// A JSON value delivered by a consumer callback.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_json_value {
 	/// The JSON document as UTF-8, NOT NULL terminated.
 	pub json: *const c_char,
@@ -480,7 +470,6 @@ pub struct moq_json_value {
 
 /// Information about a frame of media.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_frame {
 	/// The payload of the frame, or NULL/0 if the stream has ended
 	pub payload: *const u8,
@@ -501,7 +490,6 @@ pub struct moq_frame {
 
 /// A best-effort raw track datagram delivered via [moq_consume_datagrams].
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_datagram {
 	/// The payload of the datagram, or NULL/0 if the track has ended.
 	pub payload: *const u8,
@@ -521,14 +509,13 @@ pub struct moq_datagram {
 
 /// Publisher-side raw track properties.
 ///
-/// A null [moq_publish_track] `info` pointer uses the moq-net defaults.
-/// A zero-initialized struct also uses those defaults, except `priority`, which
-/// has no presence flag: zero is the least urgent, and 127 is the moq-net default.
+/// A null [moq_publish_track] `info` pointer uses the moq-net defaults, and so does a
+/// zero-initialized struct.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_track_info {
 	/// Priority, used to break ties between subscriptions of equal subscriber priority.
-	pub priority: u8,
+	/// Higher is more urgent; the default 0 is the midpoint.
+	pub priority: i8,
 
 	/// Maximum age of a non-latest group before the publisher evicts it, in microseconds.
 	/// The publisher-side half of `moq_subscription.max_delay_us`.
@@ -581,7 +568,7 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 /// the terminal statuses every callback shares. [moq_publish_demand_wanted] reads which
 /// group the subscribers want.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_demand {
 	/// At least one subscriber is active. Repeats when the wanted group moves.
@@ -595,10 +582,10 @@ pub enum moq_demand {
 /// A null [moq_consume_track] or [moq_consume_track_update] `subscription`
 /// pointer uses the moq-net defaults, and so does a zeroed struct.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_subscription {
-	/// Delivery priority. Higher values preempt lower ones under contention.
-	pub priority: u8,
+	/// Delivery priority. Higher values preempt lower ones under contention; the default 0 is
+	/// the midpoint.
+	pub priority: i8,
 
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in microseconds.
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
@@ -623,7 +610,6 @@ pub struct moq_subscription {
 /// A relative or time start is the first frame of its group, and a relative or time end
 /// includes its whole group. An absolute end is exclusive.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct moq_range {
 	/// Where delivery starts.
@@ -636,7 +622,6 @@ pub struct moq_range {
 
 /// Where one end of a [moq_range] falls. Zeroing it means group 0, frame 0.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct moq_anchor {
 	/// `moq_anchor_kind` discriminant.
@@ -652,7 +637,7 @@ pub struct moq_anchor {
 
 /// How a [moq_anchor] names its position.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_anchor_kind {
 	/// A fixed group and frame.
@@ -665,7 +650,7 @@ pub enum moq_anchor_kind {
 
 /// Which of a subscription's pending groups the publisher sends first. Zero is the default.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_order {
 	/// Newest first, so congestion sheds the backlog rather than the live edge.
@@ -728,7 +713,6 @@ pub(crate) unsafe fn parse_subscription(
 /// [moq_client_config] list) the pointer borrows the caller's storage and is only read
 /// during the call.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct moq_string {
 	/// Pointer to `len` bytes of UTF-8, NOT NULL terminated.
@@ -744,7 +728,6 @@ pub struct moq_string {
 /// [moq_consume_catalog_free]. `json` is the section's value serialized as JSON
 /// (parse it yourself); a top-level catalog key beyond `video`/`audio`.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_section {
 	/// The section name, NOT NULL terminated.
 	pub name: *const c_char,
@@ -765,7 +748,6 @@ pub struct moq_section {
 ///
 /// `cost` is the static production and link price; lower wins.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 #[derive(Clone, Copy)]
 pub struct moq_route {
 	/// Hop ids, oldest first. NULL when `hops_len` is 0. 0 is the anonymous
@@ -822,7 +804,6 @@ unsafe fn parse_route(route: *const moq_route) -> Result<moq_net::origin::Route,
 /// duration of the call. New fields always append, so a zeroed struct keeps
 /// meaning the defaults.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_announce_config {
 	/// A literal path root, NOT NULL terminated. NULL when `prefix_len` is 0.
 	pub prefix: *const c_char,
@@ -841,7 +822,7 @@ pub struct moq_announce_config {
 
 /// Which announce event a [moq_announce_event] reports.
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_announce_kind {
 	/// A route now covers the prefix; the listener had none there.
@@ -857,7 +838,6 @@ pub enum moq_announce_kind {
 
 /// An announce event from an origin: a route starting, updating, ending, or restarting.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
 	pub prefix: *const c_char,
@@ -879,7 +859,6 @@ pub struct moq_announce_event {
 
 /// Statistics and protocol sampled from the same connection by [moq_session_snapshot].
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_connection_snapshot {
 	/// Transport statistics, with per-metric availability flags.
 	pub stats: moq_connection_stats,
@@ -894,7 +873,6 @@ pub struct moq_connection_snapshot {
 /// Native QUIC reports every metric; the browser WebTransport reports few or none. Initialize
 /// the struct to zero before the call; [moq_session_stats] overwrites every field.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_connection_stats {
 	/// Smoothed round-trip time, in microseconds.
 	pub rtt_us: u64,
@@ -1105,7 +1083,6 @@ fn micros(duration: std::time::Duration) -> u64 {
 /// New settings are appended to the end of this struct, and a zeroed one keeps
 /// the previous behavior, so adding one does not disturb existing callers.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_client_config {
 	/// Protocol versions to offer during the handshake, most preferred first.
 	/// NULL/0 offers everything this build supports. Names are spelled the way
@@ -1505,7 +1482,6 @@ pub extern "C" fn moq_session_failure(session: u32) -> i32 {
 /// one keeps the previous behavior. TLS is required: set `tls_cert` and `tls_key`,
 /// or `tls_generate`.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_server_config {
 	/// Address to bind, e.g. `[::]:443`, `127.0.0.1:0`, or `localhost:4443`; NULL
 	/// for `[::]:443`. A port of 0 picks one; read it back with [moq_server_addr].
@@ -2623,6 +2599,7 @@ pub unsafe extern "C" fn moq_publish_video_config(broadcast: u32, config: *const
 
 		let mut video = hang::catalog::VideoConfig::new(codec);
 		video.label = label.map(str::to_string);
+		video.preference = config.preference;
 		if !config.description.is_null() {
 			let description = unsafe { ffi::parse_slice(config.description, config.description_len)? };
 			video.description = Some(bytes::Bytes::copy_from_slice(description));
@@ -3156,9 +3133,9 @@ pub unsafe extern "C" fn moq_group_request_sequence(request: u32, dst: *mut u64)
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - `dst` must point at a writable `uint8_t`.
+/// - `dst` must point at a writable `int8_t`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_group_request_priority(request: u32, dst: *mut u8) -> i32 {
+pub unsafe extern "C" fn moq_group_request_priority(request: u32, dst: *mut i8) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
@@ -3292,7 +3269,7 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let producer = moq_mux::json::Config::default()
 			.with_compression(config.compression)
-			.with_delta_ratio(config.delta_ratio);
+			.with_deltas(config.deltas);
 		State::lock().publish.json_snapshot(broadcast, name, producer)
 	})
 }

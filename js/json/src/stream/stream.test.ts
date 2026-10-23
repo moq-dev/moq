@@ -226,6 +226,18 @@ for (const compression of [false, true]) {
 	});
 }
 
+// A compressed record is charged its plaintext, since that is what a reader's window inflates: two
+// records that each fit, and deflate to almost nothing, still overflow the budget together.
+test("a compressed log is charged its inflated size", async () => {
+	const track = new Track.Producer("test");
+	const producer = new Producer<{ n: number; pad: string }>({ track, compression: "deflate" });
+	const pad = "x".repeat(Group.MAX_GROUP_CACHE_BYTES / 2);
+	producer.append({ value: { n: 0, pad } });
+	expect(() => producer.append({ value: { n: 1, pad } })).toThrow(NetError.GroupTooLarge);
+	producer.finish();
+	expect(await drain(track.subscribe(), true)).toEqual([0]);
+});
+
 // The budget covers the whole log, so once its frames are spent every append is refused, and the log
 // written so far still finishes cleanly and reads back whole.
 for (const compression of [false, true]) {

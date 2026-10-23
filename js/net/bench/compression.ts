@@ -7,7 +7,7 @@ import { Producer as Track } from "../src/track.ts";
 const payload = new TextEncoder().encode('{"value":123,"status":"unchanged"}\n'.repeat(64));
 const frames = 32;
 const rounds = 10;
-console.log("publishers,readers,publish_us,read_us,stored_bytes,inflated_bytes");
+console.log("publishers,readers,phase,us,size_bytes");
 for (const publishers of [1, 4, 16]) {
 	for (const readers of [1, 4, 16]) {
 		let publish = 0;
@@ -45,16 +45,8 @@ for (const publishers of [1, 4, 16]) {
 			if (inflated !== publishers * frames * payload.length) throw new Error("inflated bytes scale with readers");
 			for (const track of tracks) track.close();
 		}
-		console.log(
-			[
-				publishers,
-				readers,
-				((publish * 1000) / rounds).toFixed(1),
-				((read * 1000) / rounds).toFixed(1),
-				stored,
-				inflated,
-			].join(","),
-		);
+		console.log([publishers, readers, "publish", ((publish * 1000) / rounds).toFixed(1), stored].join(","));
+		console.log([publishers, readers, "read", ((read * 1000) / rounds).toFixed(1), inflated].join(","));
 	}
 }
 
@@ -67,4 +59,6 @@ const bundle = await Bun.build({
 });
 if (!bundle.success) throw new AggregateError(bundle.logs, "consumer bundle failed");
 const bytes = new Uint8Array(await bundle.outputs[0].arrayBuffer());
-console.log(`consumer_bundle_bytes=${bytes.length},gzip_bytes=${gzipSync(bytes).length}`);
+console.log("measurement,size_bytes");
+console.log(`consumer_bundle,${bytes.length}`);
+console.log(`consumer_bundle_gzip,${gzipSync(bytes).length}`);

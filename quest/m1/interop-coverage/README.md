@@ -40,11 +40,12 @@ coverage on `main` at `3ab6cbf81d`.
 
 ## Required
 
-- [Runner cases](/quest/m1/interop-coverage/runner-cases.md) - our runner clients run data-subgroup-basic and subscribe-namespace-lifecycle
+- [JS namespace lifecycle](/quest/m1/interop-coverage/js-namespace-done.md) - moq-dev-js subscribe-namespace-lifecycle sees NAMESPACE_DONE with publisher and subscriber in one process
+- [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md) - moq-dev-js data-subgroup-basic passes against imquic, or the cell is classified with imquic's split-header bug reported upstream
 - [Late join and FETCH](/quest/m1/interop-coverage/late-join.md) - a late subscriber gets the current group from object 0, and a standalone FETCH returns a past group exactly
-- [Control cases](/quest/m1/interop-coverage/control.md) - GOAWAY redirect, TRACK_STATUS, datagrams, and request-ID limits pass across implementations
 
 ## Related
 
-- [Interop audit](/quest/m0/audit-interop.md) - classifies the red cells these cases produce
+- [Runner client bump](/quest/m2/release/runner-client-bump.md) - after the cut publishes #5083, the runner's Rust client stops stamping every object
+- [Interop audit](/quest/m1/audit-interop.md) - classifies the red cells these cases produce
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - Moxygen's moq-test conformance through moq-relay

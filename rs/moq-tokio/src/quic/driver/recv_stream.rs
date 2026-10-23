@@ -1,20 +1,19 @@
 use std::{
-    fmt,
     future::{Future, poll_fn},
-    io, mem,
+    io,
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll, ready},
 };
 
-use bytes::Bytes;
-use moq_quic::{Chunk, Chunks, ClosedStream, ConnectionError, ReadableError, StreamId};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use moq_quic::{Chunk, Chunks, ClosedStream, ConnectionError, LeaseError, ReadableError, StreamId};
 use thiserror::Error;
 use tokio::io::ReadBuf;
 
 use crate::quic::driver::{
     VarInt,
-    connection::{ConnectionInner, ConnectionRef},
+    connection::{ConnectionRef, State},
+    mutex::MutexGuard,
 };
 
 /// A stream that can only be used to receive data
@@ -102,48 +101,68 @@ impl RecvStream {
         .await
     }
 
-    /// Read data contiguously from the stream, keeping its connection flow control credit.
+    /// Lease the stream's unreleased bytes once at least `want` have arrived in order, or the
+    /// stream ended.
     ///
-    /// Like [`read()`], but yields the [`Credit`] for exactly the bytes read into `buf`, or `None`
-    /// if the stream was finished. Stream credit still advances, so a stream window smaller than
-    /// an application message keeps the message flowing, while the connection window these bytes
-    /// occupy stays spent until the credit is dropped.
+    /// The bytes stay in the connection's receive buffer, keeping their connection flow control
+    /// credit, until read through the lease as a [`Buf`] and then [`Lease::release`]d; bytes not
+    /// read stay for the next lease. Stream credit still advances, so a stream window smaller
+    /// than a message keeps the message flowing.
     ///
-    /// This operation is cancel-safe.
+    /// When the peer has spent the connection window and no reader can make progress, the
+    /// stream ranked lowest by [`Self::set_priority`] is evicted: its buffered bytes and their
+    /// credit are discarded and its next lease fails with [`ReadError::Evicted`]. Bytes it took
+    /// keep their credit until the stream is stopped. Nothing is evicted while the leased and
+    /// unread bytes of every stream stay below the connection receive window.
     ///
-    /// [`read()`]: RecvStream::read
-    pub async fn read_held(&mut self, buf: &mut [u8]) -> Result<Option<Credit>, ReadError> {
-        poll_fn(|cx| self.poll_read_held(cx, buf)).await
-    }
-
-    /// Attempts to read from the stream into the provided buffer, keeping the bytes' connection
-    /// flow control credit.
-    ///
-    /// See [`read_held()`] for details.
-    ///
-    /// [`read_held()`]: RecvStream::read_held
-    pub fn poll_read_held(
+    /// The lease holds the connection's lock: drop it before touching any other stream.
+    /// Do not mix with the plain reads on one stream, which skip the leased bytes.
+    pub fn poll_lease(
         &mut self,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<Result<Option<Credit>, ReadError>> {
-        let mut buf = ReadBuf::new(buf);
-        let mut held = moq_quic::Credit::default();
-        let read = match buf.remaining() {
-            0 => Poll::Ready(Ok(Some(()))),
-            _ => self.poll_read_generic(cx, true, |chunks| {
-                let status = fill(chunks, &mut buf);
-                held.merge(chunks.hold());
-                status
-            }),
+        want: usize,
+    ) -> Poll<Result<Lease<'_>, ReadError>> {
+        let mut conn = self.conn.state.lock("RecvStream::poll_lease");
+        if self.is_0rtt {
+            conn.check_0rtt().map_err(|()| ReadError::ZeroRttRejected)?;
+        }
+        let err = match conn.inner.recv_stream(self.stream).lease(want) {
+            Ok(transmit) => {
+                if transmit.should_transmit() {
+                    conn.wake();
+                }
+                return Poll::Ready(Ok(Lease {
+                    conn,
+                    stream: self.stream,
+                }));
+            }
+            Err(LeaseError::Blocked(transmit)) => {
+                if transmit.should_transmit() {
+                    conn.wake();
+                }
+                if let Some(x) = &conn.error {
+                    return Poll::Ready(Err(ReadError::ConnectionLost(x.clone())));
+                }
+                conn.blocked_readers.insert(self.stream, cx.waker().clone());
+                return Poll::Pending;
+            }
+            Err(LeaseError::Reset(code)) => ReadError::Reset(code),
+            Err(LeaseError::Evicted) => ReadError::Evicted,
+            Err(LeaseError::TooLarge) => ReadError::TooLarge,
+            Err(LeaseError::ClosedStream) => match &conn.error {
+                Some(x) => ReadError::ConnectionLost(x.clone()),
+                None => ReadError::ClosedStream,
+            },
         };
-        // Bytes are read exactly when the read yields `Some`.
-        read.map_ok(|read| {
-            read.map(|()| Credit {
-                conn: self.conn.0.clone(),
-                inner: mem::take(&mut held),
-            })
-        })
+        conn.blocked_readers.remove(&self.stream);
+        Poll::Ready(Err(err))
+    }
+
+    /// Rank this stream for eviction: when the connection window is stuck, the stream with the
+    /// lowest priority goes first, and the newest of those that tie.
+    pub fn set_priority(&mut self, priority: i64) {
+        let mut conn = self.conn.state.lock("RecvStream::set_priority");
+        conn.inner.recv_stream(self.stream).set_priority(priority);
     }
 
     /// Attempts to read from the stream into the provided buffer
@@ -490,69 +509,70 @@ fn fill(chunks: &mut Chunks<'_>, buf: &mut ReadBuf<'_>) -> ReadStatus<()> {
     }
 }
 
-/// Connection flow control credit for bytes read with [`RecvStream::read_held`].
+/// Unreleased bytes borrowed from a [`RecvStream`] by [`RecvStream::poll_lease`], read as a
+/// [`Buf`].
 ///
-/// The peer cannot reuse the connection window these bytes occupy until this is dropped, which
-/// returns it even after the stream or connection is gone.
-pub struct Credit {
-    conn: Arc<ConnectionInner>,
-    inner: moq_quic::Credit,
+/// Holds the connection's lock for as long as it lives.
+pub struct Lease<'a> {
+    conn: MutexGuard<'a, State>,
+    stream: StreamId,
 }
 
-impl Credit {
-    /// The number of bytes this credit covers.
-    pub fn len(&self) -> u64 {
-        self.inner.len()
-    }
-
-    /// Whether this credit covers no bytes.
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    /// Split off the credit for the first `bytes`, keeping the rest.
-    ///
-    /// # Panics
-    /// If `bytes` exceeds [`Self::len()`].
-    pub fn split(&mut self, bytes: u64) -> Self {
-        Self {
-            conn: self.conn.clone(),
-            inner: self.inner.split(bytes),
-        }
-    }
-
-    /// Take over the bytes covered by `other`.
-    ///
-    /// # Panics
-    /// If `other` came from another connection.
-    pub fn merge(&mut self, mut other: Self) {
-        assert!(
-            Arc::ptr_eq(&self.conn, &other.conn),
-            "merged credit from another connection"
-        );
-        self.inner.merge(mem::take(&mut other.inner));
-    }
-}
-
-impl Drop for Credit {
-    fn drop(&mut self) {
-        if self.inner.is_empty() {
-            return;
-        }
-        let mut conn = self.conn.state.lock("Credit::drop");
-        if conn
+impl Lease<'_> {
+    fn leased(&self) -> &moq_quic::Leased {
+        self.conn
             .inner
-            .release(mem::take(&mut self.inner))
+            .leased(self.stream)
+            .expect("a lease outlives nothing it borrows")
+    }
+
+    /// Whether the peer finished the stream right after the leased bytes.
+    pub fn is_fin(&self) -> bool {
+        self.leased().is_fin()
+    }
+
+    /// The bytes not yet read, in order, one contiguous chunk at a time.
+    pub fn chunks(&self) -> impl Iterator<Item = &[u8]> {
+        self.leased().chunks()
+    }
+
+    /// Return the credit of every byte read so far, by this lease or an earlier one.
+    pub fn release(mut self) {
+        if self
+            .conn
+            .inner
+            .recv_stream(self.stream)
+            .release()
             .should_transmit()
         {
-            conn.wake();
+            self.conn.wake();
         }
     }
 }
 
-impl fmt::Debug for Credit {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Credit").field("len", &self.len()).finish()
+/// Reading moves past bytes for good, but they keep their credit until [`Lease::release`].
+impl Buf for Lease<'_> {
+    fn remaining(&self) -> usize {
+        self.leased().len()
+    }
+
+    fn chunk(&self) -> &[u8] {
+        self.leased().chunks().next().unwrap_or_default()
+    }
+
+    fn advance(&mut self, n: usize) {
+        self.conn.inner.recv_stream(self.stream).advance(n);
+    }
+
+    fn copy_to_bytes(&mut self, n: usize) -> Bytes {
+        match n <= self.chunk().len() {
+            true => self.conn.inner.recv_stream(self.stream).take(n),
+            false => {
+                let mut bytes = BytesMut::with_capacity(n);
+                bytes.put((&mut *self).take(n));
+                bytes.freeze()
+            }
+        }
     }
 }
 
@@ -713,6 +733,15 @@ pub enum ReadError {
     /// [`Connecting::into_0rtt()`]: crate::quic::driver::Connecting::into_0rtt()
     #[error("0-RTT rejected")]
     ZeroRttRejected,
+    /// The connection window was stuck and this stream was discarded to free it
+    ///
+    /// See [`RecvStream::poll_lease`]. The peer hears of it once the stream is stopped, so call
+    /// [`RecvStream::stop`] with your own code: dropping the stream sends code 0.
+    #[error("evicted")]
+    Evicted,
+    /// A lease wanted more than the connection receive window can hold
+    #[error("want exceeds the receive window")]
+    TooLarge,
 }
 
 impl From<ReadableError> for ReadError {
@@ -737,9 +766,9 @@ impl From<ReadError> for io::Error {
     fn from(x: ReadError) -> Self {
         use ReadError::*;
         let kind = match x {
-            Reset { .. } | ZeroRttRejected => io::ErrorKind::ConnectionReset,
+            Reset { .. } | ZeroRttRejected | Evicted => io::ErrorKind::ConnectionReset,
             ConnectionLost(_) | ClosedStream => io::ErrorKind::NotConnected,
-            IllegalOrderedRead => io::ErrorKind::InvalidInput,
+            IllegalOrderedRead | TooLarge => io::ErrorKind::InvalidInput,
         };
         Self::new(kind, x)
     }

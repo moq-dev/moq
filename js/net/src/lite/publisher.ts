@@ -20,6 +20,7 @@ import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { liteTimescale } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { nextChange } from "../util/change.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -609,18 +610,8 @@ export class Publisher {
 		// afterwards would sleep through it, leaving the change unannounced until something
 		// unrelated moved. A grant change re-diffs the same way, withdrawing what it no longer
 		// covers and announcing what it now does.
-		// TODO Make a better helper within Signals.
-		let dispose: Dispose = () => {};
-		const arm = () =>
-			new Promise<"changed">((resolve) => {
-				const table = this.#advertised.changed(() => resolve("changed"));
-				const grant = this.#grant?.changed(() => resolve("changed"));
-				dispose = () => {
-					table();
-					grant?.();
-				};
-			});
-		let changed = arm();
+		const arm = () => nextChange(this.#advertised, this.#grant);
+		let { changed, dispose } = arm();
 
 		try {
 			// Nothing is announced before the grant it would be checked against. A local close
@@ -762,7 +753,7 @@ export class Publisher {
 				if (woke !== "changed") break;
 
 				// Re-arm before reading, so an advertise that lands while we write is not lost.
-				changed = arm();
+				({ changed, dispose } = arm());
 
 				const latest = this.#advertised.peek();
 				if (!latest) break;
@@ -882,6 +873,15 @@ export class Publisher {
 		// track finishes (recvDatagram returns undefined), so #runTrack alone ends the
 		// subscription; awaited during teardown so it doesn't outlive the subscription.
 		let datagrams = Promise.resolve();
+		const bounds: FrameBounds = {
+			startGroup: msg.startGroup,
+			startFrame: msg.startFrame,
+			endGroup: msg.endGroup,
+			endFrame: msg.endFrame,
+		};
+		// Datagram reads continue while a reliable response is blocked, so they use
+		// the latest decoded bounds rather than the reliable loop's next-pop snapshot.
+		const datagramBounds = { ...bounds };
 		let controls: SubscriptionControls | undefined;
 		// Lite-05 and later name every sequence below the end that this subscription never
 		// got with SUBSCRIBE_DROP, so the subscriber settles without waiting out its grace
@@ -891,6 +891,12 @@ export class Publisher {
 		const served: Run[] | undefined = hasTrackStream(this.version) ? [] : undefined;
 
 		try {
+			// Every draft waits for the track's info, as Rust does: it surfaces a rejected track
+			// (accept never called, track closed) as an error here, which resets the stream, and
+			// its priority breaks ties between this session's subscriptions at one subscriber
+			// priority.
+			const info = await untilAborted(track.info(), left.signal);
+			const publisher = info.priority;
 			// Older drafts carry no timestamps.
 			let stamp: Stamp | undefined;
 			let compress = false;
@@ -902,10 +908,7 @@ export class Publisher {
 				//
 				// The timescale is an immutable property, so serving MUST use exactly
 				// what TRACK_INFO advertised. It comes from the producer's accept(), so
-				// they always agree. Awaiting info() also surfaces a rejected track
-				// (accept never called, track closed) as an error here, which resets the
-				// stream.
-				const info = await untilAborted(track.info(), left.signal);
+				// they always agree.
 				stamp = stamping(this.version, liteTimescale(info));
 				compress = hasCompression(this.version) && !!info.compress;
 			} else {
@@ -924,7 +927,7 @@ export class Publisher {
 			// Serve datagrams concurrently with groups whenever the transport carries them
 			// (the writer exists iff so). No group fallback: otherwise they simply aren't sent.
 			if (this.#datagramWriter) {
-				datagrams = this.#runDatagrams(msg.id, track, stamp, served);
+				datagrams = this.#runDatagrams(track, { sub: msg.id, stamp, served, bounds: datagramBounds });
 			}
 
 			controls = new SubscriptionControls({
@@ -933,6 +936,12 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				apply: (update) => {
+					Object.assign(datagramBounds, {
+						startGroup: update.startGroup,
+						startFrame: update.startFrame,
+						endGroup: update.endGroup,
+						endFrame: update.endFrame,
+					});
 					// Every update restates the wanted group. Past our largest it is a join, which
 					// repeats the pending ask; at or below it the group already exists.
 					const largest = hooks.peekLargest(track).largest?.group;
@@ -954,14 +963,10 @@ export class Publisher {
 				sub: msg.id,
 				broadcast: msg.broadcast,
 				stamp,
+				publisher,
 				compress,
 				served,
-				bounds: {
-					startGroup: msg.startGroup,
-					startFrame: msg.startFrame,
-					endGroup: msg.endGroup,
-					endFrame: msg.endFrame,
-				},
+				bounds,
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -1124,12 +1129,14 @@ export class Publisher {
 			sub: bigint;
 			broadcast: Path.Valid;
 			stamp: Stamp | undefined;
+			/** The track's publisher priority, breaking ties between subscriptions. */
+			publisher: number;
 			compress: boolean;
 			served: Run[] | undefined;
 			bounds: FrameBounds;
 		},
 	): Promise<boolean> {
-		const { sub, broadcast, stamp, compress, served, bounds } = serving;
+		const { sub, broadcast, stamp, publisher, compress, served, bounds } = serving;
 		// Lite-05+ resolves the range on the subscribe stream: SUBSCRIBE_START once the
 		// first group is known, SUBSCRIBE_END when the track finishes.
 		const emitRange = hasTrackStream(this.version);
@@ -1178,7 +1185,7 @@ export class Publisher {
 		};
 
 		// One ranking for the whole subscription, shared by every group it serves.
-		const priority = new Priority(track);
+		const priority = new Priority(track, publisher);
 
 		// Every group this subscription started serving, until its stream finishes or resets.
 		const groups = new Set<Promise<void>>();
@@ -1619,7 +1626,16 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async #runDatagrams(sub: bigint, track: track.Subscriber, stamp: Stamp | undefined, served: Run[] | undefined) {
+	async #runDatagrams(
+		track: track.Subscriber,
+		options: {
+			sub: bigint;
+			stamp: Stamp | undefined;
+			served: Run[] | undefined;
+			bounds: FrameBounds;
+		},
+	) {
+		const { sub, stamp, served, bounds } = options;
 		const writer = this.#datagramWriter;
 		if (!writer) return; // Only reached with a writer (see the #datagramWriter gate).
 		const maxSize = DatagramStream.maxDatagramSize(this.#quic);
@@ -1628,6 +1644,8 @@ export class Publisher {
 			for (;;) {
 				const datagram = await track.recvDatagram();
 				if (!datagram) return; // Track finished; #runTrack tears the subscription down.
+				// A datagram is frame 0 of its group, subject to the reliable frame range.
+				if (frameRange(bounds, datagram.sequence).start > 0) continue;
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
 				const ts = stamp === undefined ? undefined : wireTime(datagram.timestamp, stamp);

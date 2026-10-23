@@ -4,10 +4,13 @@
 # (tokio's atomics and parking, the handoffs between its threads) is invisible and
 # reads as a race wherever memory crosses it. That includes the generated bindings'
 # future plumbing, which hands its state to Rust on one thread and gets it back in a
-# Rust callback on another. This matches reports with a Rust frame on either stack:
-# the symbolizer leaves Rust's v0-mangled names as they are, and every one starts
-# with _R, which no demangled C++ name does.
+# Rust callback on another. These match reports with a Rust frame on either stack.
+# A frame's name depends on how it was symbolized: from the symbol table it is a
+# v0-mangled name starting with _R, which no demangled C++ name does, but from an
+# inlined call's debug info it is a demangled one. Its source file ends in .rs
+# either way.
 race:^_R
+race:.rs$
 
 # aws-lc is C built inside moq-ffi without the sanitizer too. A TLS connection's
 # state moves between moq-ffi's worker threads through tokio's handoffs, so its

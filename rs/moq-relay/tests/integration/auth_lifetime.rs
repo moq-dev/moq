@@ -455,14 +455,11 @@ async fn forwards_the_setup_token() {
 			.await
 			.expect("open the control stream");
 		write_all(&mut send, &setup).await;
-		let mut reply = [0u8; 1];
-		assert_eq!(
-			tokio::time::timeout(TIMEOUT, recv.read(&mut reply))
-				.await
-				.expect("SERVER_SETUP timeout")
-				.expect("SERVER_SETUP"),
-			Some(1)
-		);
+		let reply = tokio::time::timeout(TIMEOUT, recv.read_chunk(1))
+			.await
+			.expect("SERVER_SETUP timeout")
+			.expect("SERVER_SETUP");
+		assert_eq!(reply.map(|chunk| chunk.len()), Some(1));
 		let seen = script.seen.lock().unwrap().clone();
 		let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
 		assert_eq!(connect.token, Some(token));
@@ -470,7 +467,8 @@ async fn forwards_the_setup_token() {
 			assert_eq!(connect.transport, moq_auth::Transport::WebSocket);
 			assert_eq!(connect.path, "/room");
 			assert_eq!(connect.query.as_deref(), Some("source=setup"));
-			assert_eq!(connect.server_name.as_deref(), Some("127.0.0.1"));
+			// Plain `ws://` has no SNI; the `Host` header never stands in for one.
+			assert_eq!(connect.server_name, None);
 			assert!(connect.remote.is_some_and(|addr| addr.ip().is_loopback()));
 			assert_eq!(connect.alpn.as_deref(), Some("qmux-01.moqt-16"));
 		}
@@ -1602,6 +1600,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 }
 
 /// The auth server sees the accepted transport, independent of negotiated MoQ ALPN.
+/// An IP-literal dial sends no SNI, so neither reports a `server_name`: the
+/// WebTransport CONNECT host selected no certificate and never stands in for one.
 #[tokio::test]
 async fn quic_and_webtransport_report_distinct_auth_transports() {
 	let script = Script::new(grant(Duration::from_secs(3600)));
@@ -1617,6 +1617,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 			.unwrap_or_else(|| panic!("auth connect for {path}: {seen:?}"));
 		assert_eq!(request.transport.as_str(), expected, "{scheme}");
 		assert!(request.alpn.as_ref().is_some_and(|alpn| alpn.starts_with("moq-lite-")));
+		assert_eq!(request.server_name, None, "{scheme}");
 		drop(connections);
 	}
 	relay.abort();

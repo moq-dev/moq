@@ -27,8 +27,8 @@ const VERSIONS: &[&str] = &[
 	"moq-transport-22",
 ];
 
-const LOW: u8 = 1;
-const HIGH: u8 = 200;
+const LOW: i8 = -100;
+const HIGH: i8 = 100;
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -37,7 +37,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 }
 
 /// Wait until the subscription `track` serves asks for `want`.
-async fn priority(track: &moq_net::track::Producer, want: u8) -> Result<(), String> {
+async fn priority(track: &moq_net::track::Producer, want: i8) -> Result<(), String> {
 	let mut track = track.clone();
 	let reached = moq_clock::timeout(TIMEOUT, async {
 		while track
@@ -85,7 +85,7 @@ async fn follows(version: Version, relay: bool) -> Result<(), String> {
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
-	let subscribe = |priority: u8| {
+	let subscribe = |priority: i8| {
 		let track = remote.track("video").unwrap();
 		async move {
 			moq_clock::timeout(

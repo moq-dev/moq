@@ -192,7 +192,7 @@ test("archive round-trips at the root", () => {
 		timescale: 1000,
 		replay: "recordings/clip",
 		store: "https://objects.example/rec/",
-		version: 2,
+		version: ARCHIVE_VERSION,
 	});
 	expect(JSON.stringify(parsed)).not.toContain('"timeline":');
 });

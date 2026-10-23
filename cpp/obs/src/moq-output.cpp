@@ -192,7 +192,7 @@ bool MoQOutput::Start()
 		LOG_ERROR("Failed to create broadcast: %s", next_broadcast.error().to_string().c_str());
 		return false;
 	}
-	moq::Route route;
+	moq::AnnounceRoute route;
 	route.epoch = moq::mint_epoch();
 	if (auto announced = (*next_broadcast)->announce(route); !announced) {
 		LOG_ERROR("Failed to announce broadcast: %s", announced.error().to_string().c_str());
@@ -272,6 +272,11 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	auto ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
 	const int connects = static_cast<int>((*result)->connects());
 
+	// OBS and older dock paths treat connect_time_ms == 0 as "never connected".
+	// Clamp sub-millisecond connects to 1 so that sentinel stays honest. Set before
+	// the session reads as live, so nothing sees a live session that never connected.
+	connect_time_ms = ms > 0 ? ms : 1;
+
 	current->session = *result;
 	current->connected = true;
 	current->live = true;
@@ -290,9 +295,6 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
 	}
-	// OBS and older dock paths treat connect_time_ms == 0 as "never connected".
-	// Clamp sub-millisecond connects to 1 so that sentinel stays honest.
-	connect_time_ms = ms > 0 ? ms : 1;
 
 	LOG_INFO("MoQ session connected (%d ms, connect %d): %s", ms, connects, MoQRedactUrl(current->url).c_str());
 
@@ -500,7 +502,7 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 	snapshot.estimated_send_rate_valid = raw.estimated_send_rate_bps.has_value();
 	snapshot.estimated_send_rate_bps =
 		raw.estimated_send_rate_bps ? static_cast<double>(*raw.estimated_send_rate_bps) : 0;
-	const auto recv_rate = receive ? receive->peek() : std::nullopt;
+	const auto recv_rate = receive ? receive->rate() : std::nullopt;
 	snapshot.estimated_recv_rate_valid = recv_rate.has_value();
 	snapshot.estimated_recv_rate_bps = recv_rate ? static_cast<double>(*recv_rate) : 0;
 	snapshot.bytes_sent_valid = raw.bytes_sent.has_value();

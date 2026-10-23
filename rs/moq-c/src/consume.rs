@@ -53,7 +53,7 @@ impl ConsumeCatalog {
 /// A catalog media section whose renditions are consumed by index.
 pub(crate) trait Media: hang::catalog::Reference + Clone {
 	/// The delivery priority its tracks subscribe with.
-	const PRIORITY: u8;
+	const PRIORITY: i8;
 
 	/// Its renditions, keyed by ID.
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self>;
@@ -63,7 +63,7 @@ pub(crate) trait Media: hang::catalog::Reference + Clone {
 }
 
 impl Media for hang::catalog::VideoConfig {
-	const PRIORITY: u8 = hang::catalog::PRIORITY.video;
+	const PRIORITY: i8 = hang::catalog::PRIORITY.video;
 
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.video.renditions
@@ -75,7 +75,7 @@ impl Media for hang::catalog::VideoConfig {
 }
 
 impl Media for hang::catalog::AudioConfig {
-	const PRIORITY: u8 = hang::catalog::PRIORITY.audio;
+	const PRIORITY: i8 = hang::catalog::PRIORITY.audio;
 
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.audio.renditions
@@ -197,7 +197,7 @@ pub struct Consume {
 	frame: NonZeroSlab<moq_mux::container::Frame>,
 
 	/// Raw track consumer tasks (no media/container framing).
-	raw_task: NonZeroSlab<Option<RawTaskEntry>>,
+	raw_task: NonZeroSlab<RawTaskEntry>,
 
 	/// Buffered raw frames ready for consumption.
 	raw_frame: NonZeroSlab<moq_net::frame::Frame>,
@@ -322,6 +322,7 @@ impl Consume {
 		let codec = consume.video_codec.get(index).ok_or(Error::NoIndex)?;
 
 		*dst = moq_video_config {
+			preference: config.preference,
 			name: rendition.as_str().as_ptr() as *const c_char,
 			name_len: rendition.len(),
 			codec: codec.as_str().as_ptr() as *const c_char,
@@ -596,7 +597,7 @@ impl Consume {
 
 		let (task, close) = Task::new(on_frame);
 		let control = RawControl::Pending(None);
-		let id = self.raw_task.insert(Some(RawTaskEntry { task, control }))?;
+		let id = self.raw_task.insert(RawTaskEntry { task, control })?;
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
@@ -605,12 +606,7 @@ impl Consume {
 				let control = track.control();
 				Self::update_raw(&control, Self::raw_subscription(subscription))?;
 				// Go live under the lock, so no later update lands before the pending one.
-				if let Some(entry) = State::lock()
-					.consume
-					.raw_task
-					.get_mut(id)
-					.and_then(|entry| entry.as_mut())
-				{
+				if let Some(entry) = State::lock().consume.raw_task.get_mut(id) {
 					let pending = std::mem::replace(&mut entry.control, RawControl::Live(control.clone()));
 					if let RawControl::Pending(Some(subscription)) = pending {
 						Self::update_raw(&control, subscription)?;
@@ -622,7 +618,7 @@ impl Consume {
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
-			let entry = State::lock().consume.raw_task.remove(id).flatten();
+			let entry = State::lock().consume.raw_task.remove(id);
 			if let Some(entry) = entry {
 				entry.task.callback.call(res);
 			}
@@ -712,11 +708,7 @@ impl Consume {
 		track: Id,
 		subscription: Option<moq_net::track::Subscription>,
 	) -> Result<(), Error> {
-		let entry = self
-			.raw_task
-			.get_mut(track)
-			.and_then(|entry| entry.as_mut())
-			.ok_or(Error::TrackNotFound)?;
+		let entry = self.raw_task.get_mut(track).ok_or(Error::TrackNotFound)?;
 		let subscription = Self::raw_subscription(subscription);
 		match &mut entry.control {
 			RawControl::Pending(pending) => *pending = Some(subscription),
@@ -728,7 +720,6 @@ impl Consume {
 	pub fn raw_track_close(&mut self, track: Id) -> Result<(), Error> {
 		self.raw_task
 			.get_mut(track)
-			.and_then(|entry| entry.as_mut())
 			.ok_or(Error::TrackNotFound)?
 			.task
 			.close(Error::TrackNotFound)
