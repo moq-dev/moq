@@ -25,7 +25,10 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 
 // Both schedulers compile straight from source, so neither widens its crate's API for this.
 #[path = "../src/priority.rs"]
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "the bench compiles the private module from source and uses only part of it"
+)]
 mod priority;
 
 // The queue names `crate::track::Order`, which is public.
@@ -36,7 +39,7 @@ mod track {
 // Keeps moq-quic's own formatting.
 #[rustfmt::skip]
 #[path = "../../moq-quic/src/connection/streams/schedule.rs"]
-#[allow(dead_code)]
+#[allow(dead_code, reason = "the bench compiles the private module from source and uses only part of it")]
 mod schedule;
 
 use priority::{Priority, PriorityHandle, PriorityQueue};

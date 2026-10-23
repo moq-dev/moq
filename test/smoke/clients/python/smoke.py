@@ -108,7 +108,7 @@ def main() -> None:
     except (TimeoutError, asyncio.TimeoutError):
         print("error: timed out waiting for data", file=sys.stderr)
         sys.exit(1)
-    except Exception as err:  # noqa: BLE001 - smoke client: any failure is a failure
+    except Exception as err:  # smoke client: any failure is a failure
         print(f"error: {err}", file=sys.stderr)
         sys.exit(1)
 

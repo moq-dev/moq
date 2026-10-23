@@ -4,6 +4,29 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Sync` drops its duplicate and decoder-only surface
+
+Read `Sync.out.delay` instead of `Sync.out.jitter`, and the element's `sync.out.delay` instead of its `jitter` getter; they always held the same value.
+Stop passing `probe` to `new Sync(...)`; it was never read.
+`Sync.now()` returns `Milli | undefined`.
+`received`, `wait`, and `register` are internal to the built-in decoders, and `epoch` and `skipped` are gone: `wait` now resolves `true` to present the frame or `false` to drop it.
+`<moq-watch>` no longer observes `reload`, `latency`, `latency-min`, or `jitter`, nor has the `latency`, `latencyMin`, `latencyMax`, or `reload` properties; use `announced`, `delay`, and `buffer` (see 0.5 -> 0.6).
+
+### `Video.Source.out.error` is an `Error`
+
+`Video.SourceError` is gone, and `Video.Source.out.error` holds an `Error` instead of the `"unsupported"` string, like every other `out.error`.
+Replace `error === "unsupported"` with `error?.name === "NotSupportedError"`.
+
+### Time units come from `Clock`
+
+`Net.Time.Milli` and the other duration units moved to `@moq/clock`, which `@moq/watch` re-exports as `Clock`.
+Replace `Net.Time.Milli` with `Clock.Milli`, or import from `@moq/clock` directly.
+
+### `Broadcast.relativeBroadcast` is internal
+
+`relativeBroadcast` is gone from the published types; the decoders resolve each rendition's broadcast themselves.
+Read the media through `Video.Decoder` or `Audio.Decoder` instead.
+
 ### AAC decoding support is a `Level`
 
 `Support.Audio.aac` is `"full" | "partial" | "none"` like `opus`, instead of a boolean, since the libav fallback now decodes AAC where `AudioDecoder` is missing.

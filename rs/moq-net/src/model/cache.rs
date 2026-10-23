@@ -746,6 +746,11 @@ impl Track {
 		}
 	}
 
+	/// The greatest location written or reported, without waiting.
+	pub(super) fn largest(&self) -> Option<Position> {
+		self.largest.read().position
+	}
+
 	/// Whether the largest group's content may still grow; see [`Self::finish_largest`].
 	pub(super) fn largest_open(&self) -> bool {
 		self.largest.read().open

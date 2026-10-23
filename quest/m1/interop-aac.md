@@ -22,7 +22,3 @@ Things to look out for:
   phase to timestamps).
 
 Public API: none expected. Wire: none.
-
-## Related
-
-- [Wire-compat audio](/quest/m1/wire-compat-audio.md) - the release lanes that would follow an AAC track

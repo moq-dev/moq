@@ -45,12 +45,10 @@ const ACCESS_TIMEOUT: Duration = Duration::from_secs(60);
 /// unauthorized process still sees the devices, just not their frames.
 pub(super) fn cameras() -> Result<Vec<Camera>, Error> {
 	let media = unsafe { AVMediaTypeVideo }.ok_or_else(|| Error::Codec(anyhow::anyhow!("AVMediaTypeVideo")))?;
-	// The suggested replacement, AVCaptureDeviceDiscoverySession, has to be handed
-	// an explicit list of device types, and the constants for external and
-	// Continuity cameras are macOS 14+. Naming them would drop those cameras on
-	// older systems (or miss a symbol); this returns every video device on every
-	// version, which is exactly what listing wants.
-	#[allow(deprecated)]
+	#[expect(
+		deprecated,
+		reason = "its replacement needs device-type constants that are macOS 14+, which would drop cameras on older systems"
+	)]
 	let devices = unsafe { AVCaptureDevice::devicesWithMediaType(media) };
 	Ok((0..devices.count())
 		.map(|index| devices.objectAtIndex(index))
