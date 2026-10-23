@@ -13,7 +13,7 @@ use crate::{Error, Id, moq_protocol_error};
 pub type moq_status_callback = Option<extern "C" fn(user_data: *mut c_void, code: i32)>;
 
 /// A callback receiving each session lifecycle change; the `MOQ_CONNECTION_PHASE_CLOSED` one is terminal.
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 pub type moq_state_callback = Option<extern "C" fn(user_data: *mut c_void, state: *const crate::moq_connection_state)>;
 
 pub static RUNTIME: LazyLock<tokio::runtime::Handle> = LazyLock::new(|| {

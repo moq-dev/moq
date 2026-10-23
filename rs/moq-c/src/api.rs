@@ -857,7 +857,7 @@ pub struct moq_announce_event {
 
 /// Where a session is in its lifecycle, reported by [moq_connection_state].
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum moq_connection_phase {
 	/// No connection has been established yet.
@@ -876,7 +876,6 @@ pub enum moq_connection_phase {
 ///
 /// The struct and its `protocol` are valid only during the callback, so copy what you keep.
 #[repr(C)]
-#[allow(non_camel_case_types)]
 pub struct moq_connection_state {
 	/// The lifecycle phase.
 	pub phase: moq_connection_phase,
