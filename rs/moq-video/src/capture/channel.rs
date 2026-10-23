@@ -368,7 +368,7 @@ mod tests {
 		let at = |millis| chan.epoch + std::time::Duration::from_millis(millis);
 
 		chan.push_native_at(frame(1), us(0), at(0));
-		chan.push_native_at(frame(2), us((1 << 62) - 1), at(1));
+		chan.push_native_at(frame(2), us((1 << 61) - 1), at(1));
 		chan.push_native_at(frame(3), us(0), at(2));
 
 		assert!(matches!(chan.recv().await, Err(Error::TimeOverflow(_))));
