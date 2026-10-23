@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { analyze, type Input, percentile, SKIP_MS, skipAheads } from "./analyze.ts";
 import type { Sample, Shaper } from "./schema.ts";
 
-const row = { runtime: "chromium", codec: "opus", rate: 48000, profile: "mild", ring: "plain" } as const;
+const row = { runtime: "chromium", codec: "opus", rate: 48000, profile: "mild" } as const;
 const counters = { packets: 100, lost: 0, overflowed: 0, throttled: 0, delayed: 100, reordered: 0 };
 const shaper: Shaper = { seed: 7, status: 0, up: counters, down: counters };
 
@@ -25,7 +25,7 @@ function clean(): Sample[] {
 const input = (samples: Sample[], extra: Partial<Input> = {}): Input => ({
 	row,
 	samples,
-	environment: { crossOriginIsolated: false, transport: "webtransport" },
+	environment: { transport: "webtransport" },
 	voids: [],
 	notes: [],
 	shaper,

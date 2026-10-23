@@ -1,7 +1,7 @@
 //! Revalidate one token while sweeping unrelated sessions and held credentials, and
 //! cycle one verification slot while sweeping the waiting tokens and the slot count.
 //! The real relay/controller runs over loopback TCP; timings include one AUTH round trip.
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![expect(clippy::disallowed_methods, reason = "host time measures benchmark throughput")]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_auth::{Grant, lease};

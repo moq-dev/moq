@@ -1531,6 +1531,51 @@ async fn remote_address_monitoring() {
     client_conn.close(0u32.into(), b"done");
 }
 
+/// A send group from another connection panics where it is passed in, without poisoning the
+/// connection's lock: a poisoned lock panics again in every handle's drop, aborting the process.
+#[tokio::test]
+async fn foreign_send_group_panics_cleanly() {
+    use futures::FutureExt;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let _guard = subscribe();
+    let endpoint = endpoint();
+    let connect = || async {
+        tokio::try_join!(
+            endpoint
+                .connect(endpoint.local_addr().unwrap(), "localhost")
+                .unwrap(),
+            async { endpoint.accept().await.unwrap().await }
+        )
+        .unwrap()
+    };
+    let (conn, server_conn) = connect().await;
+    let (other, _other_server) = connect().await;
+    let group = other.send_group(0);
+    let options = super::SendOptions {
+        group: Some(&group),
+        priority: 0,
+    };
+
+    let uni = AssertUnwindSafe(conn.open_uni(options)).catch_unwind();
+    assert!(uni.await.is_err(), "open_uni accepted a foreign group");
+    let bi = AssertUnwindSafe(conn.open_bi(options)).catch_unwind();
+    assert!(bi.await.is_err(), "open_bi accepted a foreign group");
+    let datagram = catch_unwind(AssertUnwindSafe(|| {
+        conn.send_datagram(Bytes::from_static(b"x"), options)
+    }));
+    assert!(datagram.is_err(), "send_datagram accepted a foreign group");
+    let mut send = conn.open_uni(Default::default()).await.unwrap();
+    let set = catch_unwind(AssertUnwindSafe(|| send.set_group(Some(&group))));
+    assert!(set.is_err(), "set_group accepted a foreign group");
+
+    // The connection still works, and its handles drop without panicking.
+    send.write_all(b"after").await.unwrap();
+    send.finish().unwrap();
+    let mut recv = server_conn.accept_uni().await.unwrap();
+    assert_eq!(recv.read_to_end(usize::MAX).await.unwrap(), b"after");
+}
+
 #[tokio::test]
 async fn stream_id_flow_control() {
     let _guard = subscribe();
@@ -2164,9 +2209,16 @@ async fn stuck_window_evicts_the_lower_priority() {
         client.open_uni(Default::default()).await.unwrap(),
     ]
     .map(|mut send| {
-        tokio::spawn(
-            async move { send.write_all(&[7; WINDOW]).await.is_ok() && send.finish().is_ok() },
-        )
+        let id = send.id();
+        let writer = tokio::spawn(async move {
+            // Queuing the whole write and FIN can succeed before the peer evicts the stream.
+            // Only the peer's final outcome proves whether it was stopped.
+            if send.write_all(&[7; WINDOW]).await.is_ok() {
+                send.finish().unwrap();
+            }
+            send.stopped().await.unwrap()
+        });
+        (id, writer)
     });
 
     let mut low = server.accept_uni().await.unwrap();
@@ -2175,20 +2227,27 @@ async fn stuck_window_evicts_the_lower_priority() {
     high.set_priority(1);
     let leased = tokio::join!(
         poll_fn(|cx| low.poll_lease(cx, WINDOW).map_ok(|lease| lease.remaining())),
-        poll_fn(|cx| high
-            .poll_lease(cx, WINDOW)
-            .map_ok(|lease| lease.remaining())),
+        poll_fn(|cx| high.poll_lease(cx, WINDOW).map_ok(|mut lease| {
+            let len = lease.remaining();
+            lease.advance(len);
+            lease.release();
+            len
+        })),
     );
     assert_eq!(leased, (Err(ReadError::Evicted), Ok(WINDOW)));
 
-    // The peer hears of the eviction once the stream is stopped.
-    drop((low, high));
-    let [low, high] = writers;
+    let low_id = low.id();
+    // The peer hears of the eviction once the stream is stopped. Drain the survivor to FIN
+    // instead of dropping unread data, which would stop that stream too.
+    drop(low);
     assert!(
-        !low.await.unwrap(),
-        "the evicted stream's writer is stopped"
+        poll_fn(|cx| high.poll_lease(cx, 1).map_ok(|lease| lease.is_fin()))
+            .await
+            .unwrap()
     );
-    assert!(high.await.unwrap());
+    for (id, writer) in writers {
+        assert_eq!(writer.await.unwrap(), (id == low_id).then(|| 0u32.into()));
+    }
 }
 
 /// Wait until `recv` leases at least `want` bytes, returning how many it leased.

@@ -49,3 +49,6 @@ aws-lc-rs = { workspace = true }
 moq-tokio = { workspace = true, features = ["net", "tcp"] }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-test = { workspace = true }
+
+[lints]
+workspace = true

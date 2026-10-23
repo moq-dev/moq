@@ -47,8 +47,10 @@
 //!
 //! Run with `cargo bench -p moq-net --bench session`.
 
-// Custom timings measure the real time the work took, not the ambient clock.
-#![allow(clippy::disallowed_methods)]
+#![expect(
+	clippy::disallowed_methods,
+	reason = "custom timings measure the real time the work took, not the ambient clock"
+)]
 
 #[path = "../tests/integration/support/mod.rs"]
 mod support;

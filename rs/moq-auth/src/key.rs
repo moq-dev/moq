@@ -323,7 +323,10 @@ impl Key {
 	}
 
 	/// Parse a key from a string, auto-detecting JSON or base64url encoding.
-	#[allow(clippy::should_implement_trait)]
+	#[expect(
+		clippy::should_implement_trait,
+		reason = "public inherent parser; switching to `FromStr` is a breaking change"
+	)]
 	pub fn from_str(s: &str) -> crate::Result<Self> {
 		let s = s.trim();
 		if s.starts_with('{') {
@@ -699,7 +702,7 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 

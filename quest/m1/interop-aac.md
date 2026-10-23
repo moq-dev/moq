@@ -22,7 +22,3 @@ Things to look out for:
   `phase_checked` allows it. Check the AAC pairs it should cover actually pass.
 
 Public API: none expected. Wire: none.
-
-## Related
-
-- [Wire-compat audio](/quest/m1/wire-compat-audio.md) - the release lanes that would follow an AAC track

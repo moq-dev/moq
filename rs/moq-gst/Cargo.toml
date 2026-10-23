@@ -47,3 +47,6 @@ tokio = { workspace = true, features = ["test-util"] }
 [[bench]]
 name = "catalog"
 harness = false
+
+[lints]
+workspace = true

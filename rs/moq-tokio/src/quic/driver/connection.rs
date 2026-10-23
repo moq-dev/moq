@@ -542,13 +542,12 @@ impl Connection {
         data: Bytes,
         options: SendOptions<'_>,
     ) -> Result<(), SendDatagramError> {
+        let options = send_group::to_quic(options, &self.0.0);
         let conn = &mut *self.0.state.lock("send_datagram");
         if let Some(x) = &conn.error {
             return Err(SendDatagramError::ConnectionLost(x.clone()));
         }
-        conn.inner
-            .datagrams()
-            .send(data, send_group::to_quic(options))?;
+        conn.inner.datagrams().send(data, options)?;
         conn.wake();
         Ok(())
     }
@@ -880,14 +879,11 @@ fn poll_open<'a>(
     mut notify: Pin<&mut Notified<'a>>,
     dir: Dir,
 ) -> Poll<Result<(ConnectionRef, StreamId, bool), ConnectionError>> {
+    let options = send_group::to_quic(options, &conn.0);
     let mut state = conn.state.lock("poll_open");
     if let Some(e) = &state.error {
         return Poll::Ready(Err(e.clone()));
-    } else if let Some(id) = state
-        .inner
-        .streams()
-        .open(dir, send_group::to_quic(options))
-    {
+    } else if let Some(id) = state.inner.streams().open(dir, options) {
         let is_0rtt = state.inner.side().is_client() && state.inner.is_handshaking();
         drop(state); // Release the lock so clone can take it
         return Poll::Ready(Ok((conn.clone(), id, is_0rtt)));
@@ -1116,7 +1112,6 @@ pub(crate) struct State {
 }
 
 impl State {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         inner: moq_quic::Connection,
         handle: ConnectionHandle,
