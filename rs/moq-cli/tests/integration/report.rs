@@ -1,5 +1,5 @@
-//! `moq import --stats` and `moq export --echo` over a real relay, read back through the
-//! `export stats` and `export echo` sinks: each report counts what its side carried.
+//! `moq import --report` and `moq export --echo` over a real relay, read back through the
+//! `export report` and `export echo` sinks: each report counts what its side carried.
 #![cfg(unix)]
 
 use std::collections::BTreeMap;
@@ -207,22 +207,22 @@ fn assert_advancing(first: &ts::stats::Snapshot, last: &ts::stats::Snapshot) {
 	}
 }
 
-/// The stats an import names in its catalog count each rendition and elementary stream while
+/// The reports an import names in its catalog count each rendition and elementary stream while
 /// it runs, and its last report holds what the import wrote in full, with every TR 101 290
 /// counter at zero on a clean clip.
 #[tokio::test]
-async fn import_stats_count_what_each_rendition_wrote() {
+async fn import_reports_count_what_each_rendition_wrote() {
 	let relay = relay().await;
 	let (expected, health) = written(CLIP);
 	assert_eq!(expected.len(), 2, "the clip carries video and audio: {expected:?}");
 	assert_clean(&health);
 
-	let mut import = moq(&relay, "demo", &["import", "--stats", "--max-age", "2s", "ts"])
+	let mut import = moq(&relay, "demo", &["import", "--report", "--max-age", "2s", "ts"])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn the import");
 	let mut stdin = import.stdin.take().expect("stdin");
-	let (mut sink, mut lines) = sink(&relay, "demo", "stats");
+	let (mut sink, mut lines) = sink(&relay, "demo", "report");
 
 	// Half the clip, then a report before the rest: the import reports while it runs, and a
 	// stalled input keeps reporting until the sink has joined.
@@ -273,7 +273,7 @@ async fn import_stats_count_what_each_rendition_wrote() {
 /// reports show that row's `quiet` growing while every other row keeps delivering, the row
 /// counting again once it returns, and no TR 101 290 priority 1 check firing.
 #[tokio::test]
-async fn import_stats_report_a_silent_video_pid() {
+async fn import_reports_a_silent_video_pid() {
 	let relay = relay().await;
 	let (_, clean) = written(CLIP);
 	let pid = |class| {
@@ -284,12 +284,12 @@ async fn import_stats_report_a_silent_video_pid() {
 	let stimulus = suppress(CLIP, video, 2.5, 4.5);
 	let (_, health) = written(&stimulus);
 
-	let mut import = moq(&relay, "demo", &["import", "--stats", "--max-age", "2s", "ts"])
+	let mut import = moq(&relay, "demo", &["import", "--report", "--max-age", "2s", "ts"])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn the import");
 	let mut stdin = import.stdin.take().expect("stdin");
-	let (mut sink, mut lines) = sink(&relay, "demo", "stats");
+	let (mut sink, mut lines) = sink(&relay, "demo", "report");
 
 	// Up to the silence, then a report, so the sink is reading before the video stops.
 	feed(&stimulus[..HALF], async |chunk| {
@@ -339,11 +339,11 @@ async fn import_stats_report_a_silent_video_pid() {
 /// A sink that joins once the import has finished, while it lingers, still reads its final
 /// counts.
 #[tokio::test]
-async fn a_late_sink_reads_the_final_stats() {
+async fn a_late_sink_reads_the_final_report() {
 	let relay = relay().await;
 	let (expected, health) = written(CLIP);
 
-	let mut import = moq(&relay, "demo", &["import", "--stats", "--max-age", "10s", "ts"])
+	let mut import = moq(&relay, "demo", &["import", "--report", "--max-age", "10s", "ts"])
 		// Readiness is an INFO event, independent of the invoking shell's filter.
 		.env("RUST_LOG", "info")
 		.stdin(Stdio::piped())
@@ -364,7 +364,7 @@ async fn a_late_sink_reads_the_final_stats() {
 	});
 	ended.await.expect("the import never reached the end of its input");
 
-	let (mut sink, mut lines) = sink(&relay, "demo", "stats");
+	let (mut sink, mut lines) = sink(&relay, "demo", "report");
 	let report: hang::stats::Snapshot<ts::stats::Report> = next(&mut lines).await.expect("the final report");
 	assert_eq!(report.renditions, expected);
 	assert_eq!(report.ext.mpegts.as_ref().map(units), Some(units(&health)));

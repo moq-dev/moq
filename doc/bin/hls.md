@@ -25,6 +25,10 @@ until every rendition's playlist ends with `EXT-X-ENDLIST`. It then keeps the
 finished broadcast up until its media is stale
 (see [retention](/bin/cli#retention-and-latency)). A playlist that has already
 ended, such as a VOD recording, is refused with an error rather than imported.
+An `EXT-X-DISCONTINUITY` keeps the source's timestamps. Timestamp resets are not
+supported: if a rendition's timestamps go backwards under the same `EXT-X-MAP`,
+such as an encoder restart, the import fails with an error. Import the restarted
+source as a new broadcast.
 
 ## How export works
 

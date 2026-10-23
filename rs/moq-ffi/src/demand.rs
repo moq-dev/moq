@@ -1,4 +1,4 @@
-//! Watching what subscribers want of a published track, or whether a requested group is still wanted.
+//! Watching what subscribers want of a published track.
 
 use std::sync::Arc;
 
@@ -63,52 +63,10 @@ impl MoqTrackDemand {
 	}
 }
 
-/// A watch-only handle to the callers waiting on a requested group.
+/// Report a track released without an abort as [`MoqError::Closed`].
 ///
-/// Weak: holding it does not keep the request alive. The last caller to leave withdraws the
-/// request, and a later fetch of the group queues a fresh one, so once unused, demand never
-/// returns: drop the request. Waits fail with `Closed` after the request is accepted or dropped,
-/// and keep the rejection reason after it is rejected.
-#[derive(uniffi::Object)]
-pub struct MoqGroupDemand {
-	inner: moq_net::group::Demand,
-}
-
-impl MoqGroupDemand {
-	pub(crate) fn new(inner: moq_net::group::Demand) -> Arc<Self> {
-		Arc::new(Self { inner })
-	}
-}
-
-#[uniffi::export]
-impl MoqGroupDemand {
-	/// The sequence of the group this watches.
-	pub fn sequence(&self) -> u64 {
-		self.inner.sequence()
-	}
-
-	/// Whether the group has at least one waiting caller right now, without waiting.
-	pub fn is_used(&self) -> bool {
-		self.inner.is_used()
-	}
-
-	/// Wait until the group has at least one waiting caller.
-	pub async fn used(&self) -> Result<(), MoqError> {
-		let demand = self.inner.clone();
-		crate::ffi::detached(async move { gone(demand.used().await) }).await
-	}
-
-	/// Wait until the group has no waiting callers.
-	pub async fn unused(&self) -> Result<(), MoqError> {
-		let demand = self.inner.clone();
-		crate::ffi::detached(async move { gone(demand.unused().await) }).await
-	}
-}
-
-/// Report a track or group released without an abort as [`MoqError::Closed`].
-///
-/// That is how a finished track or request ends, which a demand watcher expects, not the internal
-/// failure `Dropped` means to a consumer. An aborted track or rejected request keeps its reason.
+/// That is how a finished track ends, which a demand watcher expects, not the internal failure
+/// `Dropped` means to a consumer. An aborted track keeps its reason.
 fn gone<T>(result: Result<T, moq_net::Error>) -> Result<T, MoqError> {
 	match result {
 		Err(moq_net::Error::Dropped) => Err(MoqError::Closed),

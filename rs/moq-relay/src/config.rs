@@ -788,7 +788,7 @@ root = ["ca.pem"]
 		let toml = r#"
 [stats]
 enabled = true
-interval = 5
+interval = "5s"
 node = "localhost"
 depth = 2
 linger = "2m"
@@ -805,7 +805,7 @@ linger = "2m"
 			config.stats.enabled,
 			"TOML's stats.enabled=true must not be clobbered by CLI defaults"
 		);
-		assert_eq!(config.stats.interval, 5);
+		assert_eq!(config.stats.interval(), std::time::Duration::from_secs(5));
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
 		assert_eq!(config.stats.depth, 2);
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(120)));
@@ -814,9 +814,11 @@ linger = "2m"
 			std::ffi::OsString::from("moq-relay"),
 			std::ffi::OsString::from(&path),
 			std::ffi::OsString::from("--stats-linger=30s"),
+			std::ffi::OsString::from("--stats-interval=250ms"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(30)));
+		assert_eq!(config.stats.interval(), std::time::Duration::from_millis(250));
 	}
 
 	/// Bare runtime defaults loaded from TOML survive when the CLI omits them.
@@ -1068,6 +1070,7 @@ ws = false
 		"MOQ_CONNECT_TIMEOUT",
 		"MOQ_CLUSTER_TIER",
 		"MOQ_CLUSTER_ID",
+		"MOQ_CLUSTER_MAX_HOPS",
 		"MOQ_QUIC_RECEIVE_WINDOW",
 		"MOQ_CONNECT_TLS_SYSTEM_ROOTS",
 		"MOQ_QUIC_CONGESTION_CONTROL",
@@ -1188,6 +1191,14 @@ ws = false
 				key: "cluster.id",
 				check: |config| assert_eq!(config.cluster.id, Some(12345)),
 				source: "id",
+			},
+			Case {
+				name: "hop-limit-from-file",
+				toml: "[cluster]\nmax_hops = 8\n",
+				cli: &[],
+				key: "cluster.max_hops",
+				check: |config| assert_eq!(config.cluster.max_hops, Some(8)),
+				source: "max_hops",
 			},
 			Case {
 				name: "flattened-optional-int-from-file",
@@ -1325,6 +1336,35 @@ ws = false
 				key: "stats.enabled",
 				check: |config| assert!(!config.stats.enabled),
 				source: "--stats-enabled",
+			},
+		]);
+	}
+
+	/// The hop limit follows the same precedence: environment over file, CLI over both.
+	#[test]
+	fn hop_limit_merges_from_the_environment() {
+		if !test_env::Env::without(PROVENANCE_ENV)
+			.set("MOQ_CLUSTER_MAX_HOPS", "6")
+			.isolate()
+		{
+			return;
+		}
+		check_provenance(&[
+			Case {
+				name: "hop-limit-env-overrides-file",
+				toml: "[cluster]\nmax_hops = 8\n",
+				cli: &[],
+				key: "cluster.max_hops",
+				check: |config| assert_eq!(config.cluster.max_hops, Some(6)),
+				source: "MOQ_CLUSTER_MAX_HOPS",
+			},
+			Case {
+				name: "hop-limit-cli-overrides-env-and-file",
+				toml: "[cluster]\nmax_hops = 8\n",
+				cli: &["--cluster-max-hops", "4"],
+				key: "cluster.max_hops",
+				check: |config| assert_eq!(config.cluster.max_hops, Some(4)),
+				source: "--cluster-max-hops",
 			},
 		]);
 	}

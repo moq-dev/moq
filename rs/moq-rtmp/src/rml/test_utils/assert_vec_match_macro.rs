@@ -1,4 +1,4 @@
-#[allow(unused)]
+#[allow(unused, reason = "vendored rml code")]
 macro_rules! assert_vec_match{
     (@empty $vector:expr) => {
         if $vector.len() > 0 {
