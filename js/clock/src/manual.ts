@@ -7,7 +7,7 @@ type Timer = { at: number; order: number; index: number; ready: () => void };
 
 /**
  * A clock that starts at zero and advances only when a test moves it.
- * Drive it serially: overlapping advance, jump, or fire calls fail immediately.
+ * Drive it serially: overlapping advance, jump, fire, or drive calls fail immediately.
  */
 export class Manual {
 	/** The reproducible starting wall time, 2025-01-01T00:00:00Z. */
@@ -93,13 +93,37 @@ export class Manual {
 		}
 	}
 
+	/**
+	 * Fire timers like repeated `fire` calls until `work` settles, then settle the same way.
+	 * Time stops at the deadline being fired when `work` settles, and no wait outlives the call.
+	 */
+	async drive<T>(work: PromiseLike<T>): Promise<T> {
+		if (this.#driving) throw new Error("time driver already pending");
+		this.#driving = true;
+		const done = Promise.resolve(work);
+		let settled = false;
+		const stop = () => {
+			settled = true;
+			// Settled work may never arm the timer a parked wait expects.
+			this.#armed?.();
+		};
+		done.then(stop, stop);
+		try {
+			while (!settled) await this.#advance(undefined, () => settled);
+		} finally {
+			this.#driving = false;
+		}
+		return await done;
+	}
+
 	/** Set wall time forward or backward without passing monotonic time. */
 	stepWall(wall: Wall): void {
 		this.#wallAnchor = Wall(wall);
 		this.#wallAnchorAt = this.#now;
 	}
 
-	async #advance(target?: Instant): Promise<void> {
+	// Without a target, advances to the earliest deadline unless `stop` holds first.
+	async #advance(target?: Instant, stop?: () => boolean): Promise<void> {
 		const fired = this.#fired;
 		// Reached timers armed while draining join the heap once a target is chosen.
 		this.#advancing = target !== undefined;
@@ -108,6 +132,7 @@ export class Manual {
 				const revision = this.#revision;
 				await drain();
 				if (target === undefined) {
+					if (stop?.()) return;
 					// Select fire's target in the same turn that readies its first timer.
 					const at = this.#fired !== fired ? this.#now : this.#timers[0]?.at;
 					if (at === undefined) {
