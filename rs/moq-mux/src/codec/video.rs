@@ -117,6 +117,72 @@ impl Reorder {
 	}
 }
 
+/// The deepest catalog `reorder` a rendition's codec and level can reach: what fits the level's
+/// decoded picture buffer at the coded size (H.264 A.3.1 MaxDpbFrames, H.265 A.4.2 MaxDpbSize
+/// less the current picture), or the codec's largest buffer when the level or size is unknown.
+/// VP8, VP9 and AV1 present in decode order.
+pub(crate) fn max_reorder(config: &hang::catalog::VideoConfig) -> u32 {
+	use hang::catalog::VideoCodec;
+
+	match &config.codec {
+		VideoCodec::H264(h264) => {
+			// level_idc 11 with constraint_set3_flag is level 1b for Baseline, Main and Extended.
+			let level_1b = h264.level == 11 && h264.constraints & 0x10 != 0 && matches!(h264.profile, 66 | 77 | 88);
+			let max_dpb_mbs: Option<u64> = match h264.level {
+				_ if level_1b => Some(396),
+				9 | 10 => Some(396),
+				11 => Some(900),
+				12 | 13 | 20 => Some(2_376),
+				21 => Some(4_752),
+				22 | 30 => Some(8_100),
+				31 => Some(18_000),
+				32 => Some(20_480),
+				40 | 41 => Some(32_768),
+				42 => Some(34_816),
+				50 => Some(110_400),
+				51 | 52 => Some(184_320),
+				60..=62 => Some(696_320),
+				_ => None,
+			};
+			let frame_mbs = config
+				.coded_width
+				.zip(config.coded_height)
+				.map(|(width, height)| u64::from(width.div_ceil(16)) * u64::from(height.div_ceil(16)));
+			match max_dpb_mbs.zip(frame_mbs.filter(|mbs| *mbs > 0)) {
+				Some((dpb, frame)) => (dpb / frame).min(u64::from(Reorder::MAX_DEPTH)) as u32,
+				None => Reorder::MAX_DEPTH,
+			}
+		}
+		VideoCodec::H265(h265) => {
+			let max_luma_ps: Option<u64> = match h265.level_idc {
+				30 => Some(36_864),
+				60 => Some(122_880),
+				63 => Some(245_760),
+				90 => Some(552_960),
+				93 => Some(983_040),
+				120 | 123 => Some(2_228_224),
+				150 | 153 | 156 => Some(8_912_896),
+				180 | 183 | 186 => Some(35_651_584),
+				_ => None,
+			};
+			let samples = config
+				.coded_width
+				.zip(config.coded_height)
+				.map(|(width, height)| u64::from(width) * u64::from(height));
+			let max_dpb_size = match max_luma_ps.zip(samples) {
+				Some((luma, size)) if size <= luma >> 2 => 16,
+				Some((luma, size)) if size <= luma >> 1 => 12,
+				Some((luma, size)) if size <= (3 * luma) >> 2 => 8,
+				Some(_) => 6,
+				None => 16,
+			};
+			max_dpb_size - 1
+		}
+		VideoCodec::VP8 | VideoCodec::VP9(_) | VideoCodec::AV1(_) => 0,
+		_ => Reorder::MAX_DEPTH,
+	}
+}
+
 /// The hypothetical reference decoder a video sequence header declares: its NAL HRD's last
 /// schedule, the one the transport stream's decoder buffers are sized from (ISO 13818-1
 /// 2.14.3.1, 2.17.2).

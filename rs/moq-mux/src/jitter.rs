@@ -19,6 +19,11 @@ impl Decode {
 		Self(nanos)
 	}
 
+	/// The instant `ticks` of a 90 kHz clock, rounded down.
+	pub(crate) fn from_ticks(ticks: i128) -> Self {
+		Self((ticks * 1_000_000_000).div_euclid(90_000))
+	}
+
 	fn as_nanos(self) -> i128 {
 		self.0
 	}

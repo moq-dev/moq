@@ -72,7 +72,10 @@ pub struct Export<S: Stream> {
 }
 
 struct MkvTrack {
+	/// The inferred decode clock of a rendition that declares no `reorder`.
 	clock: crate::container::decode::DecodeClock<crate::jitter::Arrival<Frame>>,
+	/// The current group's clock, when its rendition declared `reorder` at the group's start.
+	declared: Option<crate::container::decode::DeclaredClock<crate::jitter::Arrival<Frame>>>,
 	config: Option<VideoConfig>,
 	restart: u64,
 	reorder: Option<(u64, u64)>,
@@ -97,6 +100,7 @@ impl MkvTrack {
 	fn new(source: ExportSource, kind: TrackKind, config: Option<VideoConfig>, track_number: u64) -> Self {
 		Self {
 			clock: Default::default(),
+			declared: None,
 			config,
 			restart: 0,
 			reorder: None,
@@ -122,6 +126,7 @@ impl MkvTrack {
 	) -> Result<()> {
 		self.release(name, jitter, true)?;
 		self.clock = Default::default();
+		self.declared = None;
 		self.reorder = None;
 		self.source = source.continuing(&self.source);
 		self.finished = false;
@@ -153,57 +158,73 @@ impl MkvTrack {
 		}
 	}
 
-	fn configure_clock(&mut self) -> Result<()> {
-		if self.reorder.is_some() {
-			return Ok(());
+	/// Start a group: release the last one's frames, then clock this one at the depth its
+	/// rendition declares now, or on the inferred clock when it declares none.
+	fn start_group(&mut self, name: &str, jitter: &mut crate::jitter::Buffer<String, Frame>) -> Result<()> {
+		let depth = match &self.config {
+			Some(config) => crate::container::decode::declared(config)?,
+			None => None,
+		};
+		// The inferred clock spans groups, so it is only flushed when a declaration replaces it.
+		if self.declared.is_some() || depth.is_some() {
+			self.release(name, jitter, true)?;
 		}
-		let Some(config) = &self.config else { return Ok(()) };
-		let declared = self.source.description().and_then(|description| match config.codec {
-			VideoCodec::H264(_) => {
-				crate::codec::h264::sps_reorder(crate::codec::h264::Avcc::parse(description).ok()?.sps.first()?)
-			}
-			VideoCodec::H265(_) => {
-				crate::codec::h265::sps_reorder(crate::codec::h265::Hvcc::parse(description).ok()?.sps.first()?)
-			}
-			_ => None,
-		});
-		// A progressive AVC SPS already declares the fixed frame-count contract. Legacy
-		// catalogs lacking that declaration keep their existing timing interpretation.
-		if matches!(config.codec, VideoCodec::H264(_))
-			&& let Some(declared) = declared.filter(|declared| !declared.fields)
-		{
-			self.clock = crate::container::decode::DecodeClock::new(declared.pictures())?;
-		}
-		let (floor, lookahead) = declared.map_or((0, 0), |reorder| reorder.timing(config.framerate));
-		let limit = crate::container::decode::MAX_REORDER;
-		let lookahead = lookahead
-			.max(
-				config
-					.jitter
-					.map_or(0, |jitter| (jitter.as_nanos() * 90_000 / 1_000_000_000) as u64),
-			)
-			.min(limit);
-		self.reorder = Some((floor.min(limit), lookahead));
+		self.declared = depth.map(crate::container::decode::DeclaredClock::new);
 		Ok(())
 	}
 
+	/// Hold a video frame on its clock, then release what it settles.
+	fn push(
+		&mut self,
+		name: &str,
+		arrival: crate::jitter::Arrival<Frame>,
+		jitter: &mut crate::jitter::Buffer<String, Frame>,
+	) -> Result<()> {
+		let pts = (arrival.item.timestamp.as_nanos() * 90_000 / 1_000_000_000) as u64;
+		match &mut self.declared {
+			Some(clock) => clock.push(arrival, pts)?,
+			None => self.clock.push(arrival, pts),
+		}
+		self.release(name, jitter, false)
+	}
+
 	fn release(&mut self, name: &str, jitter: &mut crate::jitter::Buffer<String, Frame>, flush: bool) -> Result<()> {
-		let Some((floor, lookahead)) = self.reorder else {
-			return Ok(());
-		};
-		loop {
-			let next = match self.clock.is_fixed() {
-				true => self.clock.pop(flush)?,
-				false => self
-					.clock
-					.settled(lookahead, floor, flush)
-					.map(|(frame, dts)| (frame, i128::from(dts))),
-			};
-			let Some((mut arrival, dts)) = next else { break };
+		if let Some(clock) = &mut self.declared {
+			while let Some((mut arrival, dts)) = clock.pop(flush)? {
+				if !self.finished && !flush {
+					arrival.arrived = arrival.arrived.max(self.latest);
+				}
+				arrival.decode = crate::jitter::Decode::from_ticks(dts);
+				jitter.push(name.to_owned(), arrival)?;
+			}
+		}
+		let Some(config) = &self.config else { return Ok(()) };
+		let (floor, lookahead) = *self.reorder.get_or_insert_with(|| {
+			let declared = self.source.description().and_then(|description| match config.codec {
+				VideoCodec::H264(_) => {
+					crate::codec::h264::sps_reorder(crate::codec::h264::Avcc::parse(description).ok()?.sps.first()?)
+				}
+				VideoCodec::H265(_) => {
+					crate::codec::h265::sps_reorder(crate::codec::h265::Hvcc::parse(description).ok()?.sps.first()?)
+				}
+				_ => None,
+			});
+			let (floor, lookahead) = declared.map_or((0, 0), |reorder| reorder.timing(config.framerate));
+			let limit = crate::container::decode::MAX_REORDER;
+			let lookahead = lookahead
+				.max(
+					config
+						.jitter
+						.map_or(0, |jitter| (jitter.as_nanos() * 90_000 / 1_000_000_000) as u64),
+				)
+				.min(limit);
+			(floor.min(limit), lookahead)
+		});
+		while let Some((mut arrival, dts)) = self.clock.pop(lookahead, floor, flush) {
 			if !self.finished && !flush {
 				arrival.arrived = arrival.arrived.max(self.latest);
 			}
-			arrival.decode = crate::jitter::Decode::from_nanos((dts * 1_000_000_000).div_euclid(90_000));
+			arrival.decode = moq_net::Timestamp::from_scale(dts, 90_000)?.into();
 			jitter.push(name.to_owned(), arrival)?;
 		}
 		Ok(())
@@ -428,11 +449,16 @@ impl<S: Stream> Export<S> {
 	#[cfg(test)]
 	pub(super) fn buffered(&self) -> usize {
 		self.jitter.len()
-			+ self
-				.tracks
-				.values()
-				.map(|track| track.clock.len() + usize::from(track.pending.is_some()))
-				.sum::<usize>()
+	}
+
+	/// How many video frames wait on a declared clock for their DTS.
+	#[cfg(test)]
+	pub(super) fn held(&self) -> usize {
+		self.tracks
+			.values()
+			.filter_map(|track| track.declared.as_ref())
+			.map(|clock| clock.len())
+			.sum()
 	}
 
 	#[cfg(test)]
@@ -459,15 +485,10 @@ impl<S: Stream> Export<S> {
 					}
 					let (frame, arrived) = match track.source.poll_event(waiter)? {
 						Poll::Ready(Some(Event::Frame { frame, arrived })) => (frame, arrived.max(track.subscribed)),
-						Poll::Ready(Some(Event::GroupEnd)) => {
-							if track.clock.is_fixed() {
+						// A group that ended or was cut short holds frames no later one can precede.
+						Poll::Ready(Some(Event::GroupEnd | Event::Cut)) => {
+							if track.declared.is_some() {
 								track.release(name, &mut self.jitter, true)?;
-							}
-							continue;
-						}
-						Poll::Ready(Some(Event::Cut)) => {
-							if track.clock.is_fixed() {
-								track.clock.discard();
 							}
 							continue;
 						}
@@ -515,26 +536,19 @@ impl<S: Stream> Export<S> {
 					track.pending = Some(arrival);
 					break;
 				}
-				if track.kind == TrackKind::Video {
-					track.configure_clock()?;
+				let video = track.kind == TrackKind::Video;
+				if video && arrival.restart != track.restart {
+					track.release(name, &mut self.jitter, true)?;
+					track.clock = Default::default();
+					track.declared = None;
+					track.restart = arrival.restart;
 				}
-				if track.kind == TrackKind::Video && (!self.delay.is_zero() || track.clock.is_fixed()) {
-					if arrival.restart != track.restart {
-						track.release(name, &mut self.jitter, true)?;
-						if track.clock.is_fixed() {
-							track.clock.discard();
-						} else {
-							track.clock = Default::default();
-						}
-						track.restart = arrival.restart;
-					}
-					if arrival.item.keyframe && track.clock.is_fixed() {
-						track.release(name, &mut self.jitter, true)?;
-						track.clock.discard();
-					}
-					let pts = (arrival.item.timestamp.as_nanos() * 90_000 / 1_000_000_000) as u64;
-					track.clock.push(arrival, pts)?;
-					track.release(name, &mut self.jitter, false)?;
+				if video && arrival.item.keyframe {
+					track.start_group(name, &mut self.jitter)?;
+				}
+				// A declared depth is checked even when nothing is scheduled by decode time.
+				if video && (track.declared.is_some() || !self.delay.is_zero()) {
+					track.push(name, arrival, &mut self.jitter)?;
 				} else {
 					self.jitter.push(name.clone(), arrival)?;
 				}
@@ -587,11 +601,10 @@ impl<S: Stream> Export<S> {
 					{
 						track.rebind(name, source, &mut self.jitter)?;
 					}
-					if !track.clock.is_fixed()
-						&& track
-							.config
-							.as_ref()
-							.is_some_and(|old| old.jitter != config.jitter || old.framerate != config.framerate)
+					if track
+						.config
+						.as_ref()
+						.is_some_and(|old| old.jitter != config.jitter || old.framerate != config.framerate)
 					{
 						track.reorder = None;
 					}

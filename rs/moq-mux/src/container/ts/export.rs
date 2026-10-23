@@ -48,7 +48,7 @@ use crate::codec::annexb::InBandCodec;
 use crate::codec::video::{Hrd, Reorder};
 use crate::codec::{aac, annexb, opus};
 use crate::container::consumer::Event;
-use crate::container::decode::{DecodeClock, MAX_REORDER};
+use crate::container::decode::{DeclaredClock, DecodeClock, MAX_REORDER};
 use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
 
@@ -317,8 +317,11 @@ struct Track {
 	/// PMT ES-level descriptors to re-announce, captured verbatim on import (language,
 	/// registration, ...). Empty for non-TS sources; AC-3/E-AC-3 then synthesize one.
 	descriptors: Vec<catalog::Descriptor>,
-	/// Authors each video frame's DTS, holding the frames until it can.
+	/// Authors each video frame's DTS, holding the frames until it can, for a rendition that
+	/// declares no `reorder`.
 	clock: DecodeClock<(Pending, Option<Bytes>)>,
+	/// The current group's clock, when its rendition declared `reorder` at the group's start.
+	declared: Option<DeclaredClock<(Pending, Option<Bytes>)>>,
 	/// Loss counter at the last read, excluding declared ends.
 	recovery_gap: Option<u64>,
 	/// Leading pictures below the recovery keyframe have unavailable references, and whether
@@ -378,6 +381,7 @@ impl Track {
 			kind,
 			descriptors: Vec::new(),
 			clock: DecodeClock::default(),
+			declared: None,
 			recovery_gap: None,
 			leading_floor: None,
 			held: None,
@@ -408,6 +412,7 @@ impl Track {
 			self.release(name, jitter, true)?;
 			self.restart = pending.restart;
 			self.clock = DecodeClock::default();
+			self.declared = None;
 			if let Some(sync) = &mut self.sync {
 				sync.lane.reset();
 				sync.released = None;
@@ -438,14 +443,26 @@ impl Track {
 		// sync they go, as on a leg that never read them.
 		if self.sync.is_some() && self.held.is_some_and(|held| held != pending.cut) {
 			self.clock.discard();
+			self.declared = None;
 		}
 		self.held = Some(pending.cut);
 		if pending.frame.keyframe {
 			self.timing
 				.describe(stream_type, self.source.description(), name, self.sync.is_some());
+			// A group decodes on its own clock at the depth its rendition declares now. The
+			// inferred clock spans groups, so it is only flushed when a declaration replaces it.
+			let depth = self.timing.reorder;
+			if self.declared.is_some() || depth.is_some() {
+				self.release(name, jitter, true)?;
+			}
+			self.declared = depth.map(DeclaredClock::new);
 		}
 		let pts = to_ticks(pending.frame.timestamp);
-		self.clock.push((pending, self.source.description().cloned()), pts)?;
+		let item = (pending, self.source.description().cloned());
+		match &mut self.declared {
+			Some(clock) => clock.push(item, pts)?,
+			None => self.clock.push(item, pts),
+		}
 		self.release(name, jitter, false)
 	}
 
@@ -510,7 +527,10 @@ impl Track {
 							self.settle = false;
 							self.release(name, input.jitter, true)?;
 						}
-						Some(_) => self.clock.discard(),
+						Some(_) => {
+							self.clock.discard();
+							self.declared = None;
+						}
 					}
 					input.jitter.cut(&name.to_owned(), self.base.2 + self.source.cuts());
 				}
@@ -838,27 +858,44 @@ impl Track {
 	/// Under sync, a stream whose SPS declares its depth is settled by counting frames at the
 	/// SPS's delay, so a frame's DTS never depends on what the leg read before it.
 	fn release(&mut self, name: &str, jitter: &mut jitter::Buffer<String, Queued>, flush: bool) -> anyhow::Result<()> {
-		let (delay, lookahead) = self.timing.reorder();
+		if let Some(mut clock) = self.declared.take() {
+			let released = (|| {
+				while let Some(((mut pending, description), dts)) = clock.pop(flush)? {
+					if !self.finished {
+						pending.arrived = pending.arrived.max(self.latest);
+					}
+					self.push(name, pending, Some(dts), description, jitter)?;
+				}
+				anyhow::Ok(())
+			})();
+			self.declared = Some(clock);
+			released?;
+		}
+		let (delay, lookahead) = self.timing.inferred();
 		let lookahead = lookahead.max(self.timing.jitter);
 		let counted = self.sync.as_ref().and(self.timing.depth());
 		while let Some(((mut pending, description), dts)) = match counted {
 			Some(depth) => self.clock.pop_counted(depth, delay, flush),
-			None => self.clock.settled(lookahead, delay, flush),
+			None => self.clock.pop(lookahead, delay, flush),
 		} {
 			if !self.finished {
 				pending.arrived = pending.arrived.max(self.latest);
 			}
-			self.push(name, pending, Some(dts), description, jitter)?;
+			self.push(name, pending, Some(dts.into()), description, jitter)?;
 		}
 		Ok(())
 	}
 
-	/// Queue a frame decoding at `dts` (90 kHz ticks), else at its PTS.
+	/// Queue a frame decoding at `dts` (signed 90 kHz ticks), else at its PTS.
+	///
+	/// A DTS before the timeline's zero, a declared group's leading frames at its start, wraps
+	/// into the 33-bit wire field like any other, and is scheduled from zero: the few ticks it
+	/// precedes zero by are below anything the T-STD resolves.
 	fn push(
 		&mut self,
 		name: &str,
 		pending: Pending,
-		dts: Option<u64>,
+		dts: Option<i128>,
 		description: Option<Bytes>,
 		jitter: &mut jitter::Buffer<String, Queued>,
 	) -> anyhow::Result<()> {
@@ -871,10 +908,12 @@ impl Track {
 			read,
 			group,
 		} = pending;
-		let dts = dts.filter(|&dts| dts != to_ticks(frame.timestamp));
+		let dts = dts.filter(|&dts| dts != i128::from(to_ticks(frame.timestamp)));
 		let decode = dts
-			.and_then(|ticks| Timestamp::from_scale(ticks, 90_000).ok())
+			.and_then(|ticks| Timestamp::from_scale(u64::try_from(ticks.max(0)).ok()?, 90_000).ok())
 			.unwrap_or(frame.timestamp);
+		// Two's complement, so the 33-bit mask wraps a DTS before zero as it would a later one.
+		let dts = dts.map(|ticks| ticks as u64);
 		let (key, pes) = self.release_key(decode, jitter.delay(), &frame)?;
 		// Planned as it is read, so a frame the jitter buffer drops still moves its group on.
 		let planned = match self.sync.is_some() {
@@ -946,6 +985,8 @@ struct Timing {
 	declared: Option<Reorder>,
 	/// The stream's level limits, from the catalog codec.
 	level: Option<Level>,
+	/// The reorder depth the catalog declares, which clocks each group on its own.
+	reorder: Option<usize>,
 	/// The HRD its SPS declares.
 	hrd: Option<Hrd>,
 	/// The NAL unit length and buffering period layout of an H.264 rendition with a NAL HRD.
@@ -955,10 +996,12 @@ struct Timing {
 impl Timing {
 	/// Take the rendition's timing from a catalog snapshot, before or after the program
 	/// tables are written.
-	fn configure(&mut self, config: &VideoConfig, name: &str) {
+	fn configure(&mut self, config: &VideoConfig, name: &str) -> crate::Result<()> {
 		self.jitter = config.jitter.map_or(0, |t| (t.as_micros() * 90_000 / 1_000_000) as u64);
 		self.framerate = config.framerate.filter(|fps| fps.is_finite() && *fps > 0.0);
 		self.level = Some(video_level(config, name));
+		self.reorder = crate::container::decode::declared(config)?;
+		Ok(())
 	}
 
 	/// Read the reorder depth from the codec config a keyframe is carried with.
@@ -970,8 +1013,8 @@ impl Timing {
 		self.declared = description.and_then(|d| declared_reorder(stream_type, d));
 		self.hrd = description.and_then(|d| declared_hrd(stream_type, d));
 		self.buffering = description.and_then(|d| declared_buffering(stream_type, d));
-		tracing::debug!(track = %name, reorder = ?self.reorder(), "video reordering declared");
-		if synced && self.declared.is_none() {
+		tracing::debug!(track = %name, reorder = ?self.inferred(), "video reordering declared");
+		if synced && self.declared.is_none() && self.reorder.is_none() {
 			tracing::warn!(track = %name, "no reorder depth declared: if it reorders, --sync legs may give it different DTS");
 		}
 	}
@@ -1026,7 +1069,7 @@ impl Timing {
 	/// `framerate`'s. A frame can be presented up to `2^depth - 1` pictures below one decoded
 	/// before it (a B-pyramid that deep), which bounds the lookahead the catalog `jitter`
 	/// gives when it is not published.
-	fn reorder(&self) -> (u64, u64) {
+	fn inferred(&self) -> (u64, u64) {
 		let Some(declared) = self.declared else {
 			return (0, 0);
 		};
@@ -1993,7 +2036,7 @@ where
 			// `framerate` published after the tables still sizes the decode clock.
 			for (name, config) in catalog.video.renditions.iter() {
 				if let Some(track) = self.tracks.get_mut(name).filter(|track| track.listed) {
-					track.timing.configure(config, name);
+					track.timing.configure(config, name)?;
 				}
 			}
 			// A track that leaves the catalog is read to its own end. A publisher retires a
@@ -2093,7 +2136,7 @@ where
 				},
 			};
 			track.kind = kind;
-			track.timing.configure(config, name);
+			track.timing.configure(config, name)?;
 			self.refresh(name, track, pid, track_descriptors(&mpegts, name));
 		}
 		for (name, config) in catalog.audio.renditions.iter() {
@@ -2241,6 +2284,7 @@ where
 			);
 			track.release(name, &mut self.jitter, true)?;
 			track.clock = DecodeClock::default();
+			track.declared = None;
 			track.source = source.continuing(&track.source);
 			track.finished = false;
 			track.subscribed = moq_clock::now();
@@ -4719,12 +4763,12 @@ mod tests {
 		let mut clock = DecodeClock::default();
 		let mut dts = vec![0; pts.len()];
 		for (i, &p) in pts.iter().enumerate() {
-			clock.push(i, p).unwrap();
-			while let Some((i, d)) = clock.settled(jitter, floor, false) {
+			clock.push(i, p);
+			while let Some((i, d)) = clock.pop(jitter, floor, false) {
 				dts[i] = d;
 			}
 		}
-		while let Some((i, d)) = clock.settled(jitter, floor, true) {
+		while let Some((i, d)) = clock.pop(jitter, floor, true) {
 			dts[i] = d;
 		}
 		dts

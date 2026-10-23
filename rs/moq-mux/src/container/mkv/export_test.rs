@@ -22,7 +22,7 @@ use crate::container::test_util::{IDR, Live, PPS, SPS, raw_frame, video_frame};
 /// completeness has to be asked for, exactly as a real recorder does.
 const RECORDING_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// A progressive AVC rendition whose SPS declares a reorder depth of two.
+/// An AVC rendition that declares a reorder depth of two.
 fn declared_avc() -> Live {
 	Live::new(".avc1", |catalog, name| {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
@@ -33,6 +33,7 @@ fn declared_avc() -> Live {
 		});
 		config.coded_width = Some(64);
 		config.coded_height = Some(64);
+		config.reorder = Some(2);
 		config.container = hang::catalog::Container::Legacy;
 		config.description = Some(
 			crate::codec::h264::build_avcc(
@@ -46,7 +47,7 @@ fn declared_avc() -> Live {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_declared_sps_bounds_malformed_video_by_count_and_payload() {
+async fn a_declared_depth_bounds_malformed_video_by_count_and_payload() {
 	for backwards in [false, true] {
 		for count in [16, 128, 1024] {
 			for size in [256, 16_384] {
@@ -76,10 +77,10 @@ async fn a_declared_sps_bounds_malformed_video_by_count_and_payload() {
 						Ok(None) => break,
 						Ok(Some(_)) => {}
 					}
-					assert!(export.buffered() <= 3, "a depth-two clock and one released frame");
+					assert!(export.held() <= 2, "a depth-two clock");
 				}
 				assert!(refused, "backwards={backwards} count={count} size={size}");
-				assert!(export.buffered() <= 3);
+				assert!(export.held() <= 2 && export.buffered() <= 4);
 			}
 		}
 	}

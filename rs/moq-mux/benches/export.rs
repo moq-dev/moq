@@ -136,7 +136,7 @@ fn bench_export(c: &mut Criterion) {
 criterion_group!(benches, bench_export, video_reorder);
 criterion_main!(benches);
 
-/// A progressive AVC SPS with a declared reorder depth of two (25 fps).
+/// A progressive AVC SPS declaring a reorder depth of two (25 fps), as the catalog does.
 const REORDER_SPS: &[u8] = &[
 	0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9, 0x44, 0x26, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00,
 	0xca, 0x3c, 0x48, 0x96, 0x58,
@@ -162,6 +162,7 @@ async fn prepare_video(
 	});
 	config.coded_width = Some(64);
 	config.coded_height = Some(64);
+	config.reorder = Some(2);
 	let mut description = vec![1, 100, 0, 10, 0xff, 0xe1];
 	description.extend_from_slice(&(REORDER_SPS.len() as u16).to_be_bytes());
 	description.extend_from_slice(REORDER_SPS);

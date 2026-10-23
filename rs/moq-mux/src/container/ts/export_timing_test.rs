@@ -206,6 +206,14 @@ impl Live {
 		self.reorder = true;
 	}
 
+	/// Declare the B-pyramid's reorder depth in the catalog, so each group decodes on its own.
+	fn declare(&mut self) {
+		let mut catalog = self.catalog.modify().unwrap();
+		for config in catalog.video.renditions.values_mut() {
+			config.reorder = Some(2);
+		}
+	}
+
 	/// Declare an 800 kb/s CBR NAL HRD with 0.4 s of buffer delay, and open each group with a
 	/// buffering period SEI giving its first picture `delay` ticks of `initial_cpb_removal_delay`.
 	fn buffering(&mut self, delay: u32) {
@@ -1092,6 +1100,46 @@ async fn synced_legs_render_reordered_video_the_same_way() {
 				alone, 0,
 				"lag {lag}, join {join}: clean legs differ in {alone} positions"
 			);
+		}
+	}
+}
+
+/// Each video frame's DTS (else PTS) by its PTS, in 90 kHz ticks, as a leg rendered it.
+fn decode_times(leg: &Leg) -> std::collections::BTreeMap<u64, u64> {
+	let bytes: Vec<u8> = leg.out.iter().flat_map(|(_, frame)| frame.payload.iter().copied()).collect();
+	let mut reader = TsPacketReader::new(Cursor::new(bytes));
+	let mut out = std::collections::BTreeMap::new();
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if let Some(TsPayload::PesStart(pes)) = &packet.payload
+			&& packet.header.pid.as_u16() == VIDEO_PID
+			&& let Some(pts) = pes.header.pts
+		{
+			out.insert(pts.as_u64(), pes.header.dts.unwrap_or(pts).as_u64());
+		}
+	}
+	out
+}
+
+/// Legs that joined at different groups, one after reading a group cut short below a frame it
+/// never received, author the same DTS for every frame both render once the rendition declares
+/// its reorder depth: each group decodes from its own frames alone.
+#[tokio::test(start_paused = true)]
+async fn declared_legs_author_the_same_dts() {
+	let stall = |tick: u64| (2 * GOP + 8..3 * GOP).contains(&tick);
+	for join in [JOIN, 4 * GOP + 2] {
+		let mut live = Live::new(1.0, 0).await;
+		live.reorder();
+		live.declare();
+		let mut a = live.join(Duration::ZERO).await;
+		live.run(join, &mut [&mut a], stall).await;
+		let mut b = live.join(Duration::from_millis(100)).await;
+		live.run(12 * GOP, &mut [&mut a, &mut b], stall).await;
+		live.finish(&mut [&mut a, &mut b]).await;
+		let (a, b) = (decode_times(&a), decode_times(&b));
+		let shared: Vec<_> = b.iter().filter(|(pts, _)| a.contains_key(pts)).collect();
+		assert!(shared.len() > 6 * GOP as usize, "join {join}: {} shared frames", shared.len());
+		for (pts, dts) in shared {
+			assert_eq!(a[pts], *dts, "join {join}: the frame presented at {pts}");
 		}
 	}
 }
