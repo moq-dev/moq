@@ -144,6 +144,8 @@ struct Passthrough<E: crate::catalog::hang::CatalogExt> {
 
 	track: moq_net::track::Producer,
 	group: Option<moq_net::group::Producer>,
+	/// The latest group's start, which the next group may not start below.
+	start: Option<Timestamp>,
 
 	// Reports this track's fragments into its timeline. Passthrough writes groups by hand (no
 	// `container::Producer`), so the recorder is fed directly rather than through `with_recorder`.
@@ -469,6 +471,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			rendition,
 			track,
 			group: None,
+			start: None,
 			recorder: Some(recorder),
 			pending_sequence: None,
 			estimator: Estimator::new(),
@@ -1201,6 +1204,14 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		// are frames. The keyframe bit does not decide that: audio flags every sample a sync
 		// sample, so keying off it opened a group (a QUIC stream) per audio fragment.
 		let start_group = self.group.is_none() || placement.new_segment;
+		// A group may not start below the one before it. Refused before the open group closes or
+		// a new one opens, so a rewound fragment publishes nothing, as an unwrapped track does.
+		if start_group
+			&& let Some(floor) = self.start
+			&& timestamp < floor
+		{
+			return Err(crate::container::TimestampRewind { timestamp, floor }.into());
+		}
 		let mut group = if start_group {
 			if let Some(mut prev) = self.group.take() {
 				prev.finish()?;
@@ -1232,6 +1243,9 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		}
 		let fragment_len = fragment.len();
 		group.write_frame(timestamp, fragment)?;
+		if start_group {
+			self.start = Some(timestamp);
+		}
 
 		// Only once published, so a rejected fragment is never indexed. Audio is always
 		// independently decodable; video says whether this fragment really begins on an IDR,
@@ -1369,7 +1383,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// The source signalled a new timeline (an HLS `EXT-X-DISCONTINUITY`), so the next
 	/// fragment's decode time is not compared with the last one on each track. A timeline that
-	/// restarts below where it was still fails: a track refuses a group that rewinds.
+	/// restarts below where it was still fails with
+	/// [`TimestampRewind`](crate::container::TimestampRewind): a track refuses a group that
+	/// rewinds, before publishing any of it.
 	pub fn discontinuity(&mut self) {
 		for track in self.text.values_mut() {
 			track.end_decode_time = None;

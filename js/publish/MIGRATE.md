@@ -6,6 +6,23 @@ How to update your code for each breaking change, newest first.
 
 ### Clean completion always serves the finished tail
 
+### Time units come from `Clock`
+
+`Net.Time.Milli` and the other duration units moved to `@moq/clock`, which `@moq/publish` re-exports as `Clock`.
+Replace `Net.Time.Milli` with `Clock.Milli`, or import from `@moq/clock` directly.
+
+### `Broadcast.net` is read-only
+
+`Broadcast.net` is a `Getter` instead of a writable `Signal`.
+Read it with `get` or `peek` as before; the broadcast alone replaces the producer.
+
+### AAC encoding support is a `Level`
+
+`Support.Audio.aac` is `"full" | "none"` like `opus`, instead of a boolean.
+Replace `aac === true` with `aac === "full"`.
+
+### `BroadcastInput` has a `linger` input
+
 Turning `BroadcastInput.announce` off after announcing now finishes the broadcast
 and serves its tail until the media is stale. Turning it back on publishes a new
 broadcast and publisher epoch; reacquire `broadcast.net` rather than reuse its

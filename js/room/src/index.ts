@@ -11,6 +11,8 @@
  * @module
  */
 
+/** Re-export of {@link https://jsr.io/@moq/clock | @moq/clock}, the time units this package's signatures take. */
+export * as Clock from "@moq/clock";
 /** Re-export of {@link https://jsr.io/@moq/hang | @moq/hang}, the media layer. */
 export * as Hang from "@moq/hang";
 /** Re-export of {@link https://jsr.io/@moq/net | @moq/net}, the transport. */

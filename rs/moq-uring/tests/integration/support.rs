@@ -1,7 +1,7 @@
 //! Shared test certificates.
 
 #![cfg(target_os = "linux")]
-#![allow(dead_code)]
+#![allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
 
 /// A self-signed certificate on disk for `localhost` and `127.0.0.1`.
 pub struct Certs {

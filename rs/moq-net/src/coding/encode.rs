@@ -36,7 +36,7 @@ impl From<BoundsExceeded> for EncodeError {
 }
 
 /// Write the value to an [`Encoder`] using the given version.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub trait Encode<V> {
 	/// Encode the value to the given encoder, which may hold partial output on error.
 	fn encode(&self, w: &mut Encoder<'_>, version: V) -> Result<(), EncodeError>;
@@ -73,7 +73,7 @@ impl<'a> Encoder<'a> {
 	}
 
 	/// The varint form this encoder writes.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn form(&self) -> Form {
 		self.form
 	}
@@ -84,19 +84,19 @@ impl<'a> Encoder<'a> {
 	}
 
 	/// Write a single byte.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn u8(&mut self, v: u8) {
 		self.buf.push(v);
 	}
 
 	/// Write a big-endian `u16`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn u16(&mut self, v: u16) {
 		self.buf.extend_from_slice(&v.to_be_bytes());
 	}
 
 	/// Write a bool as a 0 or 1 byte.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn bool(&mut self, v: bool) {
 		self.buf.push(v as u8);
 	}
@@ -109,7 +109,7 @@ impl<'a> Encoder<'a> {
 	}
 
 	/// Write an optional varint: `None` as 0, and `Some(n)` as `n + 1`.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn varint_opt(&mut self, v: Option<u64>) -> Result<(), EncodeError> {
 		let v = match v {
 			Some(v) => v.checked_add(1).ok_or(EncodeError::TooLarge)?,
@@ -119,7 +119,7 @@ impl<'a> Encoder<'a> {
 	}
 
 	/// Write a varint length, then the raw bytes.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn bytes(&mut self, v: &[u8]) -> Result<(), EncodeError> {
 		self.varint(v.len() as u64)?;
 		self.slice(v);
@@ -127,7 +127,7 @@ impl<'a> Encoder<'a> {
 	}
 
 	/// Write a varint length, then the UTF-8 bytes.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn string(&mut self, v: &str) -> Result<(), EncodeError> {
 		self.bytes(v.as_bytes())
 	}
@@ -135,7 +135,7 @@ impl<'a> Encoder<'a> {
 	/// Reserve a varint size prefix for the body written next; [`Self::fill`] sizes it.
 	///
 	/// One byte is reserved, which most bodies fit, so they never move.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn prefix_varint(&mut self) -> Prefix {
 		self.buf.push(0);
 		Prefix {
@@ -145,7 +145,7 @@ impl<'a> Encoder<'a> {
 	}
 
 	/// Reserve a big-endian `u16` size prefix for the body written next; [`Self::fill`] sizes it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn prefix_u16(&mut self) -> Prefix {
 		self.buf.extend_from_slice(&[0, 0]);
 		Prefix {
@@ -155,13 +155,13 @@ impl<'a> Encoder<'a> {
 	}
 
 	/// The number of bytes written since `prefix` was reserved.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn since(&self, prefix: &Prefix) -> usize {
 		self.buf.len() - prefix.body
 	}
 
 	/// Drop a reserved prefix and everything written since, as if neither was written.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn discard(&mut self, prefix: Prefix) {
 		let start = match prefix.kind {
 			PrefixKind::Varint => prefix.body - 1,
@@ -171,7 +171,7 @@ impl<'a> Encoder<'a> {
 	}
 
 	/// Size a reserved prefix to everything written since.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn fill(&mut self, prefix: Prefix) -> Result<(), EncodeError> {
 		let body = prefix.body;
 		let end = self.buf.len();
@@ -206,7 +206,7 @@ impl<'a> Encoder<'a> {
 /// A size prefix reserved ahead of a body, sized by [`Encoder::fill`] once it is written.
 #[must_use = "an unfilled prefix leaves a zero size on the wire"]
 #[derive(Debug)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub struct Prefix {
 	/// Where the body starts, just past the reserved bytes.
 	body: usize,
@@ -214,7 +214,7 @@ pub struct Prefix {
 }
 
 #[derive(Debug)]
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
+#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 enum PrefixKind {
 	Varint,
 	U16,

@@ -426,8 +426,10 @@ fn run_emulator(
 		// Wait for next frame.
 		let now = Instant::now();
 		if now < next_frame {
-			// The emulator thread runs outside any runtime, so it blocks on the host clock.
-			#[allow(clippy::disallowed_methods)]
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "the emulator thread runs outside any runtime, so it blocks on the host clock"
+			)]
 			std::thread::sleep(next_frame - now);
 		}
 		next_frame += frame_duration;

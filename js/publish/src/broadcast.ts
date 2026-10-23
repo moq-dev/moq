@@ -85,6 +85,8 @@ export class Broadcast {
 	 */
 	readonly catalog = new CatalogProducer();
 
+	readonly #net = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
+
 	/**
 	 * The underlying network broadcast, recreated when the name, enabled state, or maxAge changes
 	 * or after announcing stops cleanly. It is `undefined` while the finished tail is served. It lives in the origin rather than any session, so it spans
@@ -93,7 +95,7 @@ export class Broadcast {
 	 * Names under a rendition's ID (`video/1`) are reserved for that rendition's replacement tracks.
 	 * Reacquire it via an effect, since a rename swaps in a fresh producer.
 	 */
-	readonly net = new Signal<Moq.Broadcast.Producer | undefined>(undefined);
+	readonly net: Getter<Moq.Broadcast.Producer | undefined> = this.#net;
 
 	/**
 	 * @internal The recent minimum flush lateness across every rendition, which each encoder
@@ -385,9 +387,9 @@ export class Broadcast {
 		const epoch = Moq.Epoch.mint();
 
 		// Expose it before serving so an application reacting to `net` can insert its own tracks.
-		this.net.set(broadcast);
+		this.#net.set(broadcast);
 		effect.cleanup(() => {
-			if (this.net.peek() === broadcast) this.net.set(undefined);
+			if (this.#net.peek() === broadcast) this.#net.set(undefined);
 		});
 
 		// Each track lives as long as the broadcast: a track name always means the same content,
