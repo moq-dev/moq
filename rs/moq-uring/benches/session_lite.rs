@@ -140,15 +140,15 @@ mod linux {
 					.expect("quic accept");
 				let (session, driver) = moq_net::Server::new()
 					.with_publisher(&pub_origin)
-					.accept_lite(
+					.accept(
 						moq_net::time::now(),
-						moq_uring::transport::Session::new(
+						moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 							quic::web::Session::raw(conn),
 							moq_net::transport::Binding::InBand,
-						),
+						)),
 					)
 					.await
-					.expect("accept_lite");
+					.expect("accept");
 				let _ = server_handle.run(driver).await;
 				session.closed().await;
 			});
@@ -159,15 +159,15 @@ mod linux {
 					let conn = quic::client::connect(client_sock, &dial).await.expect("quic connect");
 					let (session, driver) = moq_net::Client::new()
 						.with_subscriber(sub_origin.clone())
-						.connect_lite(
+						.connect(
 							moq_net::time::now(),
-							moq_uring::transport::Session::new(
+							moq_uring::transport::Local::new(moq_uring::transport::Session::new(
 								quic::web::Session::raw(conn),
 								moq_net::transport::Binding::InBand,
-							),
+							)),
 						)
 						.await
-						.expect("connect_lite");
+						.expect("connect");
 					let task_handle = handle.clone();
 					handle.spawn(async move {
 						let _ = task_handle.run(driver).await;
