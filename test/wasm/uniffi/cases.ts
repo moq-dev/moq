@@ -51,6 +51,12 @@ export interface Report {
 /** Above 2^53, so a lossy `number` conversion anywhere changes it; the largest QUIC varint. */
 const HIGH = [2n ** 53n + 1n, 2n ** 62n - 1n];
 
+/** The largest timestamp, which lite-05/06 can still zigzag as a group's first frame. */
+const MAX_TIMESTAMP = 2n ** 61n - 1n;
+
+/** The ladder's timestamp for `sequence`, capped where a timestamp stops. */
+const stamp = (sequence: bigint) => (sequence < MAX_TIMESTAMP ? sequence : MAX_TIMESTAMP);
+
 /** Microsecond ticks, so `timestampUs` passes through unscaled. */
 const TIMED = MoqTrackInfo.create({ timescale: 1_000_000n });
 
@@ -131,11 +137,22 @@ const local: Record<string, () => Promise<string | undefined>> = {
 		for (const sequence of HIGH) {
 			const { group, consumer } = localGroup(sequence);
 			if (consumer.sequence() !== sequence) throw new Error(`sequence ${consumer.sequence()} != ${sequence}`);
-			group.writeFrame({ payload: payload(1), timestampUs: sequence });
+			group.writeFrame({ payload: payload(1), timestampUs: stamp(sequence) });
 			const frame = await consumer.readFrame();
-			if (frame?.timestampUs !== sequence) throw new Error(`timestamp ${frame?.timestampUs} != ${sequence}`);
+			if (frame?.timestampUs !== stamp(sequence))
+				throw new Error(`timestamp ${frame?.timestampUs} != ${stamp(sequence)}`);
 		}
 		return undefined;
+	},
+
+	"writeFrame refuses a timestamp past 2^61 - 1": async () => {
+		const { group } = localGroup();
+		try {
+			group.writeFrame({ payload: payload(1), timestampUs: MAX_TIMESTAMP + 1n });
+		} catch (err) {
+			return (err as Error).message;
+		}
+		throw new Error("an unencodable timestamp was written");
 	},
 
 	"AbortSignal rejects a pending read without stealing the next frame": async () => {
@@ -251,24 +268,15 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 			const seen: string[] = [];
 			for (const sequence of [5n, 2n ** 32n, 2n ** 53n - 1n, ...HIGH]) {
 				const group = track.createGroup(sequence);
-				group.writeFrame({ payload: payload(160), timestampUs: sequence });
+				group.writeFrame({ payload: payload(160), timestampUs: stamp(sequence) });
 				group.finish();
-				const next = within(sub.recvGroup(), 5000, `recvGroup ${sequence} after [${seen}]`);
-				// Known: on moq-lite-06 the largest varint never arrives, while lite-02 and IETF carry it.
-				if (sequence === HIGH[1] && relay.version === "moq-lite-06") {
-					const outcome = await next.then(
-						(group) => `arrived as ${group?.sequence()}`,
-						(err: unknown) => (err as Error).message,
-					);
-					if (outcome === `arrived as ${sequence}`)
-						throw new Error("known lite-06 gap now passes; update the case");
-					return `known gap: 2^62-1 ${outcome}`;
-				}
-				const got = (await next) as MoqGroupConsumerLike | undefined;
+				const got = (await within(sub.recvGroup(), 5000, `recvGroup ${sequence} after [${seen}]`)) as
+					| MoqGroupConsumerLike
+					| undefined;
 				if (got?.sequence() !== sequence) throw new Error(`sequence ${got?.sequence()} != ${sequence}`);
 				const frame = await got.readFrame();
 				// Lite-02 carries no timestamp and a lite-05/06 subscriber drops it; the rest keep it exact.
-				const expected = /^moq-lite-0[1-6]$/.test(relay.version) ? undefined : sequence;
+				const expected = /^moq-lite-0[1-6]$/.test(relay.version) ? undefined : stamp(sequence);
 				if (frame?.timestampUs !== expected) throw new Error(`timestamp ${frame?.timestampUs} != ${expected}`);
 				seen.push(String(sequence));
 			}

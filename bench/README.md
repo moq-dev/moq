@@ -200,12 +200,16 @@ them as `affinity` in the metadata. A CPU with one core type runs unpinned.
 BASE comparisons run paired rounds (default three, `MOQ_BENCH_RUNTIME_ROUNDS`),
 alternating base/current order. Startup remains outside the final five-second
 throughput window. `MOQ_BENCH_ARTIFACTS` chooses the evidence parent (default
-`target/bench/runs`), which must be outside the repository, or git-ignored and
-outside `bench/`; each invocation retains a new run directory even on failure.
+the current worktree's `.scratch/bench`), which must be outside the repository,
+or git-ignored and outside `bench/`; each invocation retains a new run directory even on failure.
 It contains raw load/host JSONL, process diagnostics, Criterion statistics,
 execution order, source revision and tracked dirty patch, tool/build/machine
 metadata, workload files, complete stdout/stderr, and a separate copy of untracked
-source files.
+source files. The retained path is printed at the end, including on failure.
+Choose an evidence parent outside disposable worktrees when the report must survive
+worktree removal. Criterion case discovery uses isolated short measurements and
+their full JSON IDs, since `--list` truncates display names; discovery samples
+are retained separately and never used in the comparison.
 
 Each comparison reports the median of the paired percentage deltas, their median
 absolute deviation and range, and flags fewer than three observations or a sign

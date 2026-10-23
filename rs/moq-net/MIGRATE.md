@@ -102,6 +102,12 @@ moq-transport sessions, and moq-lite-03/04 sessions (whose announce streams mark
 Replace `Frame { timestamp, payload }` with `Frame::new(timestamp, payload)`.
 `timestamp` and `payload` stay public fields.
 
+### Timestamps stop at 2^61 - 1 (#6168)
+
+`Timestamp::new`, its `from_*` constructors, `convert`, `checked_add`, and `TryFrom<Duration>` return `TimeOverflow` past `2^61 - 1` instead of `2^62 - 1`, the most lite-05/06 can carry as a group's first frame.
+A received timestamp past it fails the group as a malformed track.
+Clamp timestamps you build from unbounded input to `(1 << 61) - 1`.
+
 ### A dropped or cut group ends its reader with an error (#6143)
 
 A group the publisher cut, or named in `SUBSCRIBE_DROP`, after a `track::Subscriber` saw it is now handed out, and reading it fails with the publisher's error; before, it was skipped or ended cleanly.
