@@ -9,7 +9,7 @@ epic.
 
 ## Plan
 
-Use the instruction-count method from the [performance audit](/quest/m1/audit-perf.md).
+Use the instruction-count method from the [performance audit](/quest/m2/audit-perf.md).
 Wall time on a shared host can't tell these apart. Build each bench at
 `origin/release` and at main, and compare instructions per iteration. A
 change that needs a maintainer decision, or is too large to review alongside
