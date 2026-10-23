@@ -26,7 +26,6 @@ export function time(epoch: Valid): Date {
 	return new Date(Number.parseInt(epoch.slice(0, 8) + epoch.slice(9, 13), 16));
 }
 
-// private: plumbing
 /** The UUID's 16 bytes, as the wire carries them. @internal */
 export function toBytes(epoch: Valid): Uint8Array {
 	const hex = epoch.replaceAll("-", "");
@@ -35,7 +34,6 @@ export function toBytes(epoch: Valid): Uint8Array {
 	return bytes;
 }
 
-// private: plumbing
 /** Parse the wire's 16 bytes, refusing anything but a UUIDv7 with the RFC variant. @internal */
 export function fromBytes(bytes: Uint8Array): Valid {
 	if (bytes.length !== 16) throw new RangeError("invalid epoch: expected 16 bytes");

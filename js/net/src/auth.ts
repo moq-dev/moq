@@ -114,7 +114,6 @@ export interface Handle {
 	 */
 	add(token: string | Uint8Array): Promise<Auth>;
 
-	// pending: /quest/m2/p2p/peer-grant.md
 	/**
 	 * Answer every token the peer presents, instead of the default: granting what this side
 	 * publishes and consumes for the connection's own credential and refusing any other.

@@ -248,7 +248,7 @@ packages each target from its
 consumers succeed. It verifies the archive sidecar and manifest before CMake
 uses it, with no source fallback. An unrelated coordinator failure does not
 suppress a successful C++ target. Tag releases refuse same-run inputs and keep
-the explicit release pin path. `just cpp check` and nightly `just gh test` also
+the explicit release pin path. `just cpp check` and `just gh test` also
 cover hash refusal,
 archive traversal/symlink refusal, reproducible packaging, publication refusal,
 and CMake's build-free prebuilt path with malformed-input fixtures.

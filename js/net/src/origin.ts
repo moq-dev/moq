@@ -219,7 +219,6 @@ class CoveringRoot {
 	}
 }
 
-// pending: /quest/m1/public-model/answer.md
 /**
  * One requested path: the notify node for everything watching it.
  *
@@ -2165,7 +2164,6 @@ export class Dynamic {
 	 *
 	 * @internal
 	 */
-	// pending: /quest/m1/public-model/answer.md
 	updateRoute(
 		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): void {
@@ -2301,7 +2299,6 @@ export class Request {
 	 * @throws Error when handed a broadcast a session delivered. The request stays open.
 	 * @internal
 	 */
-	// pending: /quest/m1/public-model/answer.md
 	accept(source: broadcast.Producer | broadcast.Consumer): void {
 		if (this.#done) {
 			// A withdrawn request takes no answer. Only the handed-off consumer is ours;

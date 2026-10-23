@@ -322,9 +322,10 @@ COMPRESS_VERSIONS=(moq-lite-07-wip moq-lite-06)
 # AUDIO_MS of it for tone.py (the browser: its page) to check against the publisher's list. This
 # is the one place the tones are chosen. A stereo publisher sends a different tone per channel, so a
 # channel swap fails too. A run that swaps in released CLIs or JS clients (the wire-compat lanes)
-# skips audio, and the bindings' clients, which always check it, refuse to run there.
+# checks audio only in its decoding media lanes, and the bindings' clients, which always check it,
+# refuse to run in the rest.
 AUDIO=1
-[[ -z "${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" ]] || AUDIO=0
+[[ -z "${MOQ_BIN:-}${INTEROP_SUB_MOQ:-}${INTEROP_COMPAT_CLIENT:-}" || "${INTEROP_DECODE:-0}" == 1 ]] || AUDIO=0
 if [[ "$AUDIO" -eq 0 ]]; then
     for sub in "${SUB_LIST[@]}"; do
         case "$sub" in
@@ -333,7 +334,7 @@ if [[ "$AUDIO" -eq 0 ]]; then
             *) sub_needs_audio="$sub" ;;
         esac
         if [[ -n "${sub_needs_audio:-}" ]]; then
-            echo "error: the $sub subscriber always checks audio, which a run with MOQ_BIN, INTEROP_SUB_MOQ, or INTEROP_COMPAT_CLIENT turns off" >&2
+            echo "error: the $sub subscriber always checks audio, which a run with MOQ_BIN, INTEROP_SUB_MOQ, or INTEROP_COMPAT_CLIENT turns off without INTEROP_DECODE" >&2
             exit 2
         fi
     done
@@ -960,7 +961,7 @@ run_publisher() {
     case "$lang" in
         rust)
             # A finished import stays up for its max-age; `stop_publisher` allows 10 s to close.
-            # Released CLIs (the wire-compat lanes) keep the video-only Annex-B input.
+            # The wire-compat FETCH lanes keep the video-only Annex-B input.
             if [[ "$AUDIO" -eq 1 ]]; then
                 ffmpeg_fmp4 "$tone" | RUST_LOG="$CLI_LOG" "$MOQ" --connect "$url" --connect-version "$(cell_version rust)" \
                     --broadcast "$broadcast" import --max-age 1s fmp4
@@ -1174,11 +1175,42 @@ PYCODE
                 return
             fi
             if [[ "${INTEROP_DECODE:-0}" == 1 ]]; then
-                # ffmpeg actually decodes the exported media; mux headers alone cannot pass.
+                # ffmpeg actually decodes the exported media; mux headers alone cannot pass. The
+                # first $AUDIO_MS of audio from its first decoded sample (atrim, unlike -t, ignores
+                # where video starts) lands in a WAV, and the encoder's input stats log each decoded
+                # frame's timestamp and length for tone.py. The outputs are the verdict: a CLI may
+                # exit on EPIPE with a plain error once ffmpeg has what it needs.
                 (timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" \
                     ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" export fmp4 || [[ "$?" == 141 ]]) |
-                    ffmpeg -hide_banner -loglevel error -i - -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/$broadcast.raw"
-                [[ -s "$HARNESS_RUN/$broadcast.raw" ]]
+                    ffmpeg -hide_banner -loglevel error -i - \
+                        -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/$broadcast.raw" \
+                        -map 0:a:0 -af "atrim=duration=${AUDIO_MS}ms" -c:a pcm_f32le \
+                        -stats_enc_pre "$audio_out.stats" -stats_enc_pre_fmt '{tb} {pts} {samp}' -f wav "$audio_out.wav"
+                [[ -s "$HARNESS_RUN/$broadcast.raw" ]] || return
+                python3 - "$audio_out" <<'PYCODE'
+import struct, sys
+out = sys.argv[1]
+wav = open(f"{out}.wav", "rb").read()
+assert wav[:4] == b"RIFF" and wav[8:12] == b"WAVE", "ffmpeg wrote no WAV"
+pos, rate, pcm = 12, None, None
+while pos + 8 <= len(wav):
+    chunk, size = wav[pos : pos + 4], struct.unpack_from("<I", wav, pos + 4)[0]
+    if chunk == b"fmt ":
+        tag, channels, rate = struct.unpack_from("<HHI", wav, pos + 8)
+        bits = struct.unpack_from("<H", wav, pos + 22)[0]
+        assert (tag, bits) == (3, 32), f"WAV is not f32 (format {tag}, {bits} bits)"
+    elif chunk == b"data":
+        pcm = wav[pos + 8 : pos + 8 + size]
+    pos += 8 + size + (size & 1)
+assert rate and pcm is not None, "WAV has no fmt or data chunk"
+lines = [f"{rate} {channels}"]
+for line in open(f"{out}.stats"):
+    tb, pts, samples = line.split()
+    num, den = (int(v) for v in tb.split("/"))
+    lines.append(f"{round(int(pts) * num * 1_000_000 / den)} {samples}")
+open(f"{out}.pcm", "wb").write(pcm)
+open(f"{out}.txt", "w").write("\n".join(lines) + "\n")
+PYCODE
                 return
             fi
             # The CLI has no PCM output, so moq-audio decodes the audio in a client of its own,

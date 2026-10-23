@@ -1325,7 +1325,7 @@ impl Drop for RequestVerdict {
 /// Clones share the grant: the request's [`until`] watches it end while the request renews it.
 /// Ending a request grant never touches the session: only that one request ends.
 #[derive(Clone)]
-pub(crate) struct RequestGrant(std::sync::Arc<std::sync::Mutex<Held>>);
+pub(crate) struct RequestGrant(std::sync::Arc<crate::sync::Mutex<Held>>);
 
 struct Held {
 	verdict: RequestVerdict,
@@ -1359,7 +1359,7 @@ impl RequestGrant {
 		}
 		let mut deadline = crate::time::Deadline::new(clock);
 		deadline.set(grant.expires);
-		Ok(Self(std::sync::Arc::new(std::sync::Mutex::new(Held {
+		Ok(Self(std::sync::Arc::new(crate::sync::Mutex::new(Held {
 			verdict,
 			grant,
 			deadline,
@@ -1371,7 +1371,7 @@ impl RequestGrant {
 		}))))
 	}
 
-	fn held(&self) -> std::sync::MutexGuard<'_, Held> {
+	fn held(&self) -> crate::sync::MutexGuard<'_, Held> {
 		self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 	}
 

@@ -132,7 +132,6 @@ export interface Info {
 	 */
 	refresh?: number;
 	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
-	// private: passthrough
 	ietf?: IetfVersion;
 }
 
@@ -2255,7 +2254,6 @@ export class Subscriber {
 		return undefined;
 	}
 
-	// pending: /quest/m1/public-model/deferred.md
 	/**
 	 * An independent subscriber to the same track, with its own cursor and its own replay of
 	 * the retained window.

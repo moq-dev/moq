@@ -401,7 +401,6 @@ export class Producer {
 		return this.#state.closed;
 	}
 
-	// private: test
 	/**
 	 * Watch demand for the broadcast's tracks.
 	 *

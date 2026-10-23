@@ -24,12 +24,10 @@ use super::{Requests, WeakCache};
 
 #[path = "listing.rs"]
 mod listing;
-// private: capability gap
 // Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 #[cfg(feature = "async")]
 pub(crate) use listing::Owner;
 pub(super) use listing::{ListOnAccept, Unlist};
-// private: capability gap
 // Only sessions answer a peer's listings; `finish` does not end a custom handler's answer.
 pub(crate) use listing::Lister;
 pub use listing::{Tracks, TracksEvent};
@@ -71,7 +69,6 @@ pub struct Info {
 
 	// What the frames this broadcast's groups are still receiving may allocate up front,
 	// inherited from the origin handle that created it.
-	// private: tuning
 	pub(crate) frames: super::frame::Budget,
 }
 
@@ -533,7 +530,6 @@ impl Producer {
 	}
 
 	/// `Ready(Ok)` once no [`Consumer`] handle is left, `Ready(Err)` once the broadcast ended.
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_unheld(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
 		self.alive.token.poll_unused(waiter)
 	}
@@ -541,7 +537,6 @@ impl Producer {
 	/// [`Self::close`], unless a [`Consumer`] holds the broadcast or a track it asked for
 	/// still waits for a handler. Atomic with minting a consumer, so a holder either keeps
 	/// the broadcast or only ever sees it closed. Returns whether the broadcast is closed.
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn close_unheld(&self) -> bool {
 		self.alive.close_unheld()
 	}
@@ -723,7 +718,6 @@ impl Drop for Alive {
 /// Whether a path request still names the source that handed out its track.
 #[derive(Clone, Default)]
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-// pending: /quest/m1/public-model/answer.md
 pub(crate) enum RequestValidity {
 	#[default]
 	Unrestricted,
@@ -735,13 +729,11 @@ pub(crate) enum RequestValidity {
 
 impl RequestValidity {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn token(route: Option<kio::Consumer<()>>) -> Self {
 		route.map(Self::Route).unwrap_or_default()
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn for_source(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
 		route
 			.request_validity(path)
@@ -751,7 +743,6 @@ impl RequestValidity {
 
 	/// Capture one selection period so a pending request never revives after a replacement.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn start(&self) -> Self {
 		match self {
 			Self::Selected(selected) => Self::Period(selected.current(), selected.clone()),
@@ -760,7 +751,6 @@ impl RequestValidity {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn check(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
 			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
@@ -795,7 +785,6 @@ impl Producer {
 /// A peer's retraction and a dead session end the source the same way: a broadcast
 /// carries no end cause past this hop. Shared by the lite and IETF subscribers.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-// pending: /quest/m1/public-model/answer.md
 pub(crate) struct SourceGuard(Producer);
 
 impl SourceGuard {
@@ -937,7 +926,6 @@ impl Dynamic {
 	///
 	/// A handler that serves any name on request takes none, so it lists nothing. One
 	/// answer per broadcast: fails with [`Error::Duplicate`] while another lister exists.
-	// private: capability gap
 	pub(crate) fn lister(&self) -> Result<Lister, Error> {
 		Lister::new(self.state.clone())
 	}

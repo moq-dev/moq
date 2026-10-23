@@ -1053,10 +1053,9 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 	});
 	out.remote = request.remote_addr();
 	out.local = request.local_addr();
-	out.server_name = request
-		.server_name()
-		.map(str::to_owned)
-		.or_else(|| request.authority().map(str::to_owned));
+	// Only the SNI: a WebTransport CONNECT authority or WebSocket `Host` is client-chosen
+	// without having selected a certificate, so a session without SNI reports none.
+	out.server_name = request.server_name().map(str::to_owned);
 	out.alpn = request.alpn().map(str::to_owned);
 	out.role = request.role().and_then(role);
 	out.tls = request.peer_identity().as_ref().and_then(peer);
