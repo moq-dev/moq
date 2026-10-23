@@ -1864,6 +1864,14 @@ test("integration: ietf republish on one session swaps the handle every generati
 	await runRepublishCycle("", Ietf.Version.DRAFT_14);
 });
 
+// Draft-17+ withdraws by reset, which the replacement request does not wait behind.
+test.each([Ietf.Version.DRAFT_17, Ietf.Version.DRAFT_19])(
+	"integration: ietf republish withdrawn by reset swaps the handle (%#)",
+	async (version) => {
+		await runRepublishCycle("", version);
+	},
+);
+
 test("integration: a blind handle picks up a publisher that arrives late", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();

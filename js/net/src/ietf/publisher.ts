@@ -1310,41 +1310,37 @@ export class Publisher {
 			return "dropped";
 		}
 
-		// The peer already closed out a refused request, and its STOP_SENDING can reject the
-		// wait on our FIN. That is the withdrawal finishing, not a reason to end the loop.
+		// The peer may already have closed out a refused request. Ending it again is the
+		// withdrawal finishing, not a reason to end the loop.
 		if (answer !== "held") await this.#withdraw(path, requests).catch(() => undefined);
 		return answer;
 	}
 
 	/**
-	 * Close out a namespace's PUBLISH_NAMESPACE request with PUBLISH_NAMESPACE_DONE.
+	 * End a namespace's PUBLISH_NAMESPACE request: PUBLISH_NAMESPACE_DONE then FIN before
+	 * draft-17, a cancel in both directions after. Neither waits on the peer.
 	 */
 	async #withdraw(path: Path.Valid, requests: Requests) {
 		const request = requests.get(path);
 		if (!request) return;
 		requests.delete(path);
 
-		// Draft-17+ removed PUBLISH_NAMESPACE_DONE: the close below is the whole
-		// withdrawal. Sending it anyway puts the type on the wire before the body throws,
-		// and a receiver reading 0x09 there has no choice but to treat it as a protocol
-		// violation.
+		// Draft-17+ withdraws by cancelling the request in both directions; a FIN is only
+		// allowed to end SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS.
 		const version = this.#session.version;
-		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			try {
-				await request.stream.writer.u53(PublishNamespaceDone.id);
-				const done = new PublishNamespaceDone({ trackNamespace: request.path, requestId: request.requestId });
-				await done.encode(request.stream.writer, version);
-			} catch {
-				// Stream might already be closed
-			}
-			request.stream.close();
+		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
+			request.stream.abort(new StreamError(StreamCode.Cancel, { message: "withdrawn" }));
 			return;
 		}
+
+		try {
+			await request.stream.writer.u53(PublishNamespaceDone.id);
+			const done = new PublishNamespaceDone({ trackNamespace: request.path, requestId: request.requestId });
+			await done.encode(request.stream.writer, version);
+		} catch {
+			// Stream might already be closed
+		}
 		request.stream.close();
-		// Wait for transport acknowledgment before opening a replacement request.
-		// This assumes the peer processes the withdrawal by then; FIN acknowledgment
-		// does not itself acknowledge application processing across streams.
-		await request.stream.writer.closed;
 	}
 
 	/**

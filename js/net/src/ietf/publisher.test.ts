@@ -1,7 +1,6 @@
-import { expect, jest, mock, spyOn, test } from "bun:test";
-import { Signal } from "@moq/signals";
+import { expect, jest, spyOn, test } from "bun:test";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
-import { error } from "../error.ts";
+import { error, StreamCode } from "../error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -385,89 +384,6 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 		origin.close();
 	}
 });
-
-test.each(["acknowledged", "rejected"] as const)(
-	"a replacement waits until its predecessor's FIN is %s",
-	async (result) => {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
-		const open = pair.server.createBidirectionalStream.bind(pair.server);
-		const closing = Promise.withResolvers<void>();
-		const acknowledged = Promise.withResolvers<void>();
-		let opened = 0;
-		pair.server.createBidirectionalStream = async (options) => {
-			const stream = await open(options);
-			if (++opened !== 1) return stream;
-			const writer = stream.writable.getWriter();
-			return {
-				readable: stream.readable,
-				writable: new WritableStream<Uint8Array>({
-					write: (chunk) => writer.write(chunk),
-					async close() {
-						await writer.close();
-						closing.resolve();
-						await acknowledged.promise;
-					},
-					abort: (reason) => writer.abort(reason),
-				}),
-			} as WebTransportBidirectionalStream;
-		};
-		const { pub, origin } = publisher(pair.server);
-		let first: BroadcastProducer | undefined;
-		let second: BroadcastProducer | undefined;
-		const changed = Signal.prototype.changed;
-		const disposed = mock(() => {});
-		let registration: ReturnType<typeof spyOn<typeof Signal.prototype, "changed">> | undefined;
-		const loop = pub.runPublishNamespaces();
-		try {
-			first = publish(origin, Path.from("replacement"));
-			const old = await nextStream(pair.client);
-			if (!old) throw new Error("missing initial advertisement");
-			expect(await readPublishNamespace(old)).toBe(Path.from("replacement"));
-			await acceptPublishNamespace(old);
-			registration = spyOn(Signal.prototype, "changed").mockImplementation(function (
-				this: Signal<unknown>,
-				fn?: (value: unknown) => void,
-			) {
-				const original = changed.bind(this);
-				if (!fn) return original();
-				const dispose = original(fn);
-				return () => {
-					dispose();
-					disposed();
-				};
-			} as typeof changed);
-			first.close();
-			second = publish(origin, Path.from("replacement"));
-			await closing.promise;
-			const early = await nextStream(pair.client);
-			early?.abort(new Error("replacement arrived before acknowledgment"));
-			expect(early).toBeUndefined();
-			expect(opened).toBe(1);
-			if (result === "rejected") {
-				expect(disposed).not.toHaveBeenCalled();
-				acknowledged.reject(new Error("FIN acknowledgment failed"));
-				await loop;
-				expect(opened).toBe(1);
-				expect(disposed).toHaveBeenCalled();
-				return;
-			}
-			acknowledged.resolve();
-			const replacement = await nextStream(pair.client);
-			if (!replacement) throw new Error("missing replacement after acknowledgment");
-			expect(await readPublishNamespace(replacement)).toBe(Path.from("replacement"));
-			await acceptPublishNamespace(replacement);
-		} finally {
-			registration?.mockRestore();
-			acknowledged.resolve();
-			first?.close();
-			second?.close();
-			origin.close();
-			await loop;
-			pair.client.close();
-			pair.server.close();
-		}
-	},
-);
 
 /**
  * Every advertisement waits a round trip for the peer's reply. A broadcast published in
@@ -1224,8 +1140,8 @@ test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async (
 
 		republish(origin, broadcast);
 
-		// Draft-17+ withdraws with the FIN alone, and the replacement waits for it.
-		expect(await old.reader.done()).toBe(true);
+		// Draft-17+ withdraws by cancelling the request, never a FIN.
+		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
 		const next = await take(streams);
 		expect(await acceptClustered(next)).toMatchObject({ cost: 4n });
 	} finally {
@@ -1285,8 +1201,8 @@ test.each([
 		await readUpdate(stream);
 		await declinePublishNamespace(stream, retryInterval);
 
-		// Our side finishes too, which completes the withdrawal.
-		expect(await stream.reader.done()).toBe(true);
+		// Our side cancels too, which completes the withdrawal.
+		expect(await stream.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
 
 		// Well past our own backoff, but inside the interval the peer asked for.
 		await advance(9_000);
@@ -1308,9 +1224,9 @@ test.each([
 });
 
 /**
- * A peer that refuses an update and then closes its side can make our withdrawal's wait
- * on the FIN reject. The request is gone either way, so the loop keeps the refusal and
- * re-offers the namespace instead of ending.
+ * A peer that refuses an update and then closes its side races our own withdrawal. The
+ * request is gone either way, so the loop keeps the refusal and re-offers the namespace
+ * instead of ending.
  */
 test("a refused update whose peer closes the request keeps the loop running", async () => {
 	const { pub, origin, streams, close } = clustered();
