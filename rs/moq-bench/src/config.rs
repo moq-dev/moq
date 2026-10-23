@@ -322,7 +322,10 @@ impl Config {
 	}
 }
 
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "declares the settings for the usage registry; nothing reads the fields"
+)]
 #[derive(usage_rs::Config)]
 struct Settings {
 	#[usage(env = "MOQ_BENCH_NAME", cli("--name"))]
@@ -566,13 +569,14 @@ url = "https://example.com"
 
 	#[test]
 	fn env_overrides_toml_and_cli_overrides_env() {
+		if !test_env::Env::default().set("MOQ_BENCH_NAME", "from-env").isolate() {
+			return;
+		}
 		let dir = std::env::temp_dir().join("moq-bench-provenance");
 		std::fs::create_dir_all(&dir).unwrap();
 		let path = dir.join("bench.toml");
 		std::fs::write(&path, "name = \"from-file\"\nconnections = 100\n").unwrap();
 
-		let prev = std::env::var_os("MOQ_BENCH_NAME");
-		unsafe { std::env::set_var("MOQ_BENCH_NAME", "from-env") };
 		let config = Config::parse_and_merge([
 			std::ffi::OsString::from("moq-bench"),
 			std::ffi::OsString::from("--file"),
@@ -592,10 +596,6 @@ url = "https://example.com"
 		.unwrap();
 		assert_eq!(config.name(), "from-cli");
 		assert!(config.source("name").unwrap().contains("--name"));
-		match prev {
-			Some(value) => unsafe { std::env::set_var("MOQ_BENCH_NAME", value) },
-			None => unsafe { std::env::remove_var("MOQ_BENCH_NAME") },
-		}
 	}
 
 	/// `[client]` in the file is the serde name; the registry key is `connect.*`.

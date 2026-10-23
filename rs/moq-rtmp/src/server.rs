@@ -83,7 +83,7 @@ const PLAY_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// the interval between probes. Once a connection is publishing or playing it can
 /// block in a `read` indefinitely, so without keepalive a half-open connection (a
 /// peer that vanished without sending a FIN/RST, e.g. a yanked network cable)
-/// would pin its broadcast (and its first-publisher stream-key slot) forever.
+/// would pin its broadcast forever.
 /// Keepalive lets the kernel surface the dead peer as a read error, tearing the
 /// session down. The values are generous enough not to disturb a healthy but
 /// momentarily quiet connection.
@@ -593,8 +593,8 @@ impl<S: Stream> Publish<S> {
 	/// segmented egress (HLS/DASH) reading the broadcast downstream, which may only
 	/// advertise segments that are still fetchable. Lower it when nothing reads history
 	/// and the memory matters.
-	pub fn with_max_age(mut self, max_age: Option<Duration>) -> Self {
-		self.max_age = max_age;
+	pub fn with_max_age(mut self, max_age: impl Into<Option<Duration>>) -> Self {
+		self.max_age = max_age.into();
 		self
 	}
 
@@ -735,9 +735,8 @@ pub struct Play<S = Conn> {
 	tc_url: Option<String>,
 	peer: SocketAddr,
 	/// How long the FLV muxer waits for a stalled group before skipping to a newer
-	/// one. Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); override with
-	/// [`with_max_delay`](Self::with_max_delay).
-	latency: Duration,
+	/// one; see [`with_max_delay`](Self::with_max_delay).
+	max_delay: Duration,
 	/// Enhanced-RTMP capabilities advertised by the player in its connect object.
 	capabilities: ClientCapabilities,
 }
@@ -768,10 +767,9 @@ impl<S: Stream> Play<S> {
 	}
 
 	/// Set the FLV release delay and stalled-group budget.
-	/// Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); zero releases
-	/// available frames immediately without deadline drops.
-	pub fn with_max_delay(mut self, latency: Duration) -> Self {
-		self.latency = latency;
+	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
+	pub fn with_max_delay(mut self, max_delay: Duration) -> Self {
+		self.max_delay = max_delay;
 		self
 	}
 
@@ -856,7 +854,7 @@ impl<S: Stream> Play<S> {
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_delay(self.latency)
+			.with_delay(self.max_delay)
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -1185,7 +1183,7 @@ async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> any
 							stream_key,
 							tc_url,
 							peer,
-							latency: crate::DEFAULT_MAX_DELAY,
+							max_delay: crate::DEFAULT_MAX_DELAY,
 							capabilities: client_capabilities.clone(),
 						})));
 					}
@@ -1549,7 +1547,11 @@ impl Publisher {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "tests read the host clock directly"
+)]
 mod tests {
 	use super::*;
 	#[tokio::test(start_paused = true)]

@@ -443,13 +443,8 @@ impl<E: CatalogExt> Producer<E> {
 		let hangz = moq_json::snapshot::Producer::new(hangz_track, json_config);
 
 		let timeline = crate::timeline::Timelines::new(broadcast);
-		#[allow(clippy::arc_with_non_send_sync)]
 		let catalog_timeline = Arc::new(Mutex::new(CatalogTimeline::default()));
 
-		// The contents are `Send + Sync` natively; on wasm moq-net's handles are
-		// `Rc`-backed, so clippy sees a pointlessly atomic `Arc`. Keeping one type for
-		// both targets is worth the unused atomics on the single-threaded one.
-		#[allow(clippy::arc_with_non_send_sync)]
 		Ok(Self {
 			outputs: Outputs {
 				hang,
@@ -571,6 +566,11 @@ impl<E: CatalogExt> Producer<E> {
 	/// The clock as it stands, without fixing it: for readers that follow it on every use.
 	pub(super) fn current_clock(&self) -> crate::Clock {
 		take(&self.current).clock
+	}
+
+	/// The config `name` holds in `C`'s section, cloned without copying the rest of the catalog.
+	pub(super) fn config<C: super::RenditionConfig<E>>(&self, name: &str) -> Option<C> {
+		C::get_mut(&mut take(&self.current).catalog, name).cloned()
 	}
 
 	/// Anchor a timebase on its first timestamp `pts`, which happened at `wall` (or arrived now),
@@ -1861,7 +1861,6 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default().with_catalog(Catalog::<Extra>::default());
 		let mut catalog = Producer::<Extra>::new(&mut broadcast, config).unwrap();
-		let mut track = catalog.outputs.hang.consume();
 
 		let mut guard = catalog.modify().unwrap();
 		guard
@@ -1875,7 +1874,10 @@ mod test {
 		// The caller got the error, so the tracks stay usable once the catalog fits again.
 		catalog.modify().unwrap().remove_section("big").unwrap();
 		catalog.finish().unwrap();
-		assert!(matches!(track.poll_largest(&kio::Waiter::noop()), Poll::Ready(Some(position)) if position.group == 0));
+		assert_eq!(
+			catalog.outputs.hang_track.largest(),
+			Some(moq_net::track::Position::group(0))
+		);
 	}
 
 	/// Every consumer refuses an ID naming both a video and an audio rendition, so the producer
@@ -1884,7 +1886,6 @@ mod test {
 	fn a_cross_kind_duplicate_id_is_refused() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut track = catalog.outputs.hang.consume();
 
 		let result = catalog.mutate(|catalog| {
 			catalog.video.renditions.insert(
@@ -1901,7 +1902,7 @@ mod test {
 			Err(crate::Error::Hang(hang::Error::DuplicateRendition(id))) if id == "main"
 		));
 		assert!(
-			matches!(track.poll_largest(&kio::Waiter::noop()), Poll::Pending),
+			catalog.outputs.hang_track.largest().is_none(),
 			"the refused catalog reached the wire"
 		);
 	}
@@ -1910,7 +1911,6 @@ mod test {
 	fn commit_publishes_once() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let mut track = catalog.outputs.hang.consume();
 
 		let mut guard = catalog.modify().unwrap();
 		guard
@@ -1921,7 +1921,10 @@ mod test {
 
 		// The drop that follows `commit` must not publish a second snapshot.
 		catalog.finish().unwrap();
-		assert!(matches!(track.poll_largest(&kio::Waiter::noop()), Poll::Ready(Some(position)) if position.group == 0));
+		assert_eq!(
+			catalog.outputs.hang_track.largest(),
+			Some(moq_net::track::Position::group(0))
+		);
 	}
 
 	#[test]
@@ -3098,11 +3101,7 @@ mod test {
 
 	/// How many catalogs have gone out on the wire.
 	fn sent(catalog: &Producer) -> Option<u64> {
-		let mut track = catalog.outputs.hang_track.consume();
-		match track.poll_largest(&kio::Waiter::noop()) {
-			Poll::Ready(Some(position)) => Some(position.group),
-			Poll::Ready(None) | Poll::Pending => None,
-		}
+		catalog.outputs.hang_track.largest().map(|position| position.group)
 	}
 
 	/// The catalog a viewer joining now receives.

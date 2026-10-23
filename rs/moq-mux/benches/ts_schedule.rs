@@ -11,10 +11,16 @@ mod export {
 	use std::time::Duration;
 }
 #[path = "../src/container/ts/lane.rs"]
-#[allow(dead_code)]
+#[expect(
+	dead_code,
+	reason = "the bench compiles the private module from source and uses only part of it"
+)]
 mod lane;
 #[path = "../src/container/ts/schedule.rs"]
-#[allow(dead_code)]
+#[allow(
+	dead_code,
+	reason = "the bench compiles the private module from source and uses only part of it"
+)]
 mod schedule;
 
 fn packet(pid: u16) -> [u8; 188] {

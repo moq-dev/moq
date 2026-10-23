@@ -507,7 +507,10 @@ mod tests {
 			.start(&tokio::runtime::Handle::current(), async {
 				Ok::<_, anyhow::Error>(async {
 					panic!("injected supervision panic");
-					#[allow(unreachable_code)]
+					#[expect(
+						unreachable_code,
+						reason = "the panic is the point; the `Ok` names the future's output type"
+					)]
 					Ok::<_, anyhow::Error>(())
 				})
 			})

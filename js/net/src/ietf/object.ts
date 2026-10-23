@@ -59,7 +59,9 @@ async function encodeObjectTime(
 	timescale: Timescale,
 	version: IetfVersion,
 ): Promise<void> {
-	const value = Math.round((timestamp.value * timescale) / timestamp.scale);
+	// The shared conversion: exact at the same scale, and refused before anything is written when
+	// the result leaves the range a Timestamp, and so the receiver, can hold.
+	const value = Math.round(timestamp.as(timescale));
 	await encodeObjectPropertyType(w, PROP_TIMESTAMP, 0n, version);
 	await w.u62(BigInt(value));
 }
