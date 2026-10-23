@@ -19,9 +19,6 @@ let subscriber = subscriber.with_range(5..);
 
 `group::Consumer::finished` (and `poll_finished`) now ends cleanly once a `with_range` frame cap is reached, where it waited for the group itself to end, as reads already do.
 
-A custom publisher can now reach what the built-in ones use: `track::Subscriber::poll_start`, `track::Subscriber::poll_drop`, `group::Consumer::poll_expired`, `subscription::Position::final_sequence`, and `Subscription::{start, end, with_start, with_end}` for the covering span.
-It gives up on a group it is still writing once `poll_expired` is true, or `poll_finished` fails because the frames it has yet to read are gone.
-
 ### A listing says whether a removed track finished (#6399)
 
 `broadcast::TracksEvent` gains `Finished { name }`: the track left the listing because its producer declared its end. `Removed { name }` now means it left unfinished (dropped or aborted without an end, or its route withdrawn). Handle both where you matched `Removed`.
@@ -255,7 +252,7 @@ session.retag(tier, &label);
 
 ### Subscriptions carry group ranges (#5732)
 
-The `track::Subscription::start` and `end` fields are replaced by `ranges: Vec<Range>`; the `start()` and `end()` methods and the `with_start` and `with_end` builders read and set the span covering them.
+`track::Subscription::start` and `end` are replaced by `ranges: Vec<Range>`, and `with_start` and `with_end` are gone.
 Use `with_range(start..end)` for one span of groups, or `with_ranges` with `Range::live()`, `Range::oldest()` (the default), or `Range::groups(..)`.
 
 ### Receive estimates come from `Session::recv_bandwidth` (#5777)

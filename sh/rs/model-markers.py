@@ -254,7 +254,7 @@ def js():
 
 	def reads(text, binding):
 		"""The members session code reads off `binding`, a local name or a dotted path."""
-		return sorted(set(re.findall(rf"(?<![\w$.]){re.escape(binding)}\s*\.\s*(\w+)", code(text))))
+		return sorted(set(re.findall(rf"(?<![\w$.]){re.escape(binding)}\.(\w+)", code(text))))
 
 	def reach_hooks(text, binding, user):
 		# Only `binding.<name>` reads are followed, so refuse any other use, like destructuring.

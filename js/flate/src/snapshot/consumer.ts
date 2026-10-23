@@ -69,8 +69,8 @@ export class Consumer {
 				// Taking groups, not the track's largest position, ignores datagrams (which share
 				// the sequence space) and stays inside any range the caller set on the reader.
 				// Mirrors the Rust consumer.
-				for (let recv = this.#track.tryNextGroup(); recv.kind === "group"; recv = this.#track.tryNextGroup()) {
-					this.#open(recv.group);
+				for (let group = this.#track.tryNextGroup(); group; group = this.#track.tryNextGroup()) {
+					this.#open(group);
 				}
 			}
 

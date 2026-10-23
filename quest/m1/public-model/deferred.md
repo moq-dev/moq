@@ -25,9 +25,7 @@ the prerequisites will have deleted or renamed most of these.
   the need. Model ranges replaces per-group requests with ranges, and its
   public range answer is the ingest path.
 - Cache peeks (Rust `track::Consumer::peek_latest`, `peek_before`,
-  `peek_group`, `is_live`, and `final_sequence`, which a FETCH reads for
-  END_OF_TRACK with no subscriber to poll the end on; IETF publisher, for
-  Largest Object and FETCH)
+  `peek_group`, `is_live`; IETF publisher, for Largest Object and FETCH)
   and JS `Track.Subscriber.fork`: remove the need, since IETF FETCH is served
   from ranges and the largest location is public. If either still has a
   caller, bring the shape back to the maintainer rather than publishing

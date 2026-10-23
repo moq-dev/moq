@@ -11,14 +11,14 @@ import { error, NotFound, ProtocolViolation, reason, StreamCode, StreamError, un
 import { stored } from "../flate/group.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
-import { hiddenBelow, hooks, insertRun, presented, type Run, runGaps } from "../internal.ts";
+import { finalSequence, hiddenBelow, hooks, insertRun, presented, type Run, runGaps } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
-import { finalSequence, liteTimescale } from "../track.ts";
+import { liteTimescale } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { untilGivenUp } from "../util/given_up.ts";
@@ -355,7 +355,7 @@ function waitForSubscription(
 			for (const close of dispose) close();
 			resolve();
 		};
-		dispose.push(controls.changed(wake), subscriber.groupChanged(wake));
+		dispose.push(controls.changed(wake), hooks.groupChanged(subscriber, wake));
 		dispose.push(drops.changed(wake));
 	});
 }
@@ -1300,7 +1300,7 @@ export class Publisher {
 						: undefined;
 				const recv = first
 					? ({ kind: "group", group: first.group } as const)
-					: track.tryRecvGroup({ drops: emitRange });
+					: hooks.tryRecvGroup(track, emitRange);
 				first = undefined;
 				switch (recv.kind) {
 					case "error":
@@ -1599,7 +1599,7 @@ export class Publisher {
 		if (!entry || entry.release.signal.aborted) {
 			const release = new AbortController();
 			const info = (async () =>
-				trackInfoMessage(await front.track(track).info({ hold: release.signal }), this.version))();
+				trackInfoMessage(await wireOf(front).resolveTrackInfo(track, release.signal), this.version))();
 
 			const created: TrackInfoEntry = { info, holders: 0, answered: false, release };
 			info.then(

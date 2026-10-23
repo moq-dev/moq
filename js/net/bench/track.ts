@@ -38,9 +38,8 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 function receive(subscribers: Subscriber[]): GroupConsumer[] {
 	const received: GroupConsumer[] = [];
 	for (const subscriber of subscribers) {
-		const recv = subscriber.tryRecvGroup();
-		if (recv.kind !== "group") throw new Error("group was not delivered");
-		const group = recv.group;
+		const group = subscriber.tryRecvGroup();
+		if (!group) throw new Error("group was not delivered");
 		const frame = group.tryReadFrame();
 		if (!frame) throw new Error("frame was not delivered");
 		checksum += frame.payload.byteLength;
@@ -117,7 +116,7 @@ async function measure(
 	clock += CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8 + 1;
 	const idleStart = now();
 	const replay = producer.subscribe({ maxDelay: window });
-	if (replay.tryRecvGroup().kind === "group") throw new Error("idle cache entries were retained");
+	if (replay.tryRecvGroup()) throw new Error("idle cache entries were retained");
 	const idle = (now() - idleStart) * 1000;
 	replay.close();
 	return { publish: (elapsed * 1000) / groups, end, idle };

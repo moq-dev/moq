@@ -17,23 +17,6 @@ subscriber.setGroups({ end: { excluded: 10 } });
 subscriber.withRange({ start: { included: floor }, end: { excluded: 10 } });
 ```
 
-### `tryRecvGroup` says why it returned no group
-
-`Track.Subscriber.tryRecvGroup()` returns a `Track.Recv` instead of a group or `undefined`, and no longer throws the track's error.
-Read `recv.group` when `recv.kind === "group"`; `idle` and `boundary` may change once `groupChanged(fn)` fires, `done` is the end, and `error` carries what it used to throw.
-`{ drops: true }` also reports the sequences the cursor gave up.
-
-```ts
-// Before
-const group = subscriber.tryRecvGroup();
-// After
-const recv = subscriber.tryRecvGroup();
-const group = recv.kind === "group" ? recv.group : undefined;
-```
-
-`Track.Ordered.tryNextGroup()`, `Track.finalSequence(end)`, `Track.Consumer.info({ hold })`, and `Group.Consumer.expired` are new.
-A custom publisher races its writes against `expired` and against `closed` settling with an error (an eviction, or an aborted copy no route continues), and resets the stream once either does.
-
 ### A listing says whether a removed track finished (#6399)
 
 `Broadcast.TracksEvent` gains `{ kind: "finished", name }`: the track left the listing because it finished. `{ kind: "removed", name }` now means it left unfinished. Handle both where you matched `"removed"`.

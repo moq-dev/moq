@@ -68,9 +68,9 @@ export class Consumer<T> {
 				// the sequence space) and stays inside any range the caller set on the reader.
 				// Mirrors the Rust consumer. A newer group restarts from a full snapshot, so switching mid-group loses
 				// nothing but stale state.
-				for (let recv = this.#track.tryNextGroup(); recv.kind === "group"; recv = this.#track.tryNextGroup()) {
+				for (let group = this.#track.tryNextGroup(); group; group = this.#track.tryNextGroup()) {
 					this.#group?.close();
-					this.#group = recv.group;
+					this.#group = group;
 					this.#framesRead = 0;
 				}
 			}

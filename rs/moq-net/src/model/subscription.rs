@@ -306,7 +306,9 @@ impl Subscription {
 	/// from the latest group (or none is asked for).
 	///
 	/// The form a wire without ranges carries: a floor below which nothing is requested.
-	pub fn start(&self) -> Option<Position> {
+	#[cfg(any(feature = "async", test))]
+	// private: capability gap
+	pub(crate) fn start(&self) -> Option<Position> {
 		let mut floor: Option<Position> = None;
 		for range in &self.ranges {
 			let Anchor::Absolute(start) = range.start else {
@@ -321,7 +323,9 @@ impl Subscription {
 	/// the latest group. An empty list is the empty range, `Position::group(0)`.
 	///
 	/// The form a wire without ranges carries, alongside [`Self::start`].
-	pub fn end(&self) -> Option<Position> {
+	#[cfg(any(feature = "async", test))]
+	// private: capability gap
+	pub(crate) fn end(&self) -> Option<Position> {
 		let mut end = Some(Position::default());
 		for range in &self.ranges {
 			let Some(Anchor::Absolute(next)) = range.end else {
@@ -334,18 +338,23 @@ impl Subscription {
 
 	/// Replace the ranges with one from `start` (or [`Range::oldest`]'s) up to [`Self::end`],
 	/// returning `self` for chaining: the form a wire without ranges carries.
-	pub fn with_start(self, start: impl Into<Option<Position>>) -> Self {
+	#[cfg(feature = "async")]
+	// private: capability gap
+	pub(crate) fn with_start(self, start: impl Into<Option<Position>>) -> Self {
 		let end = self.end();
 		self.with_span(start.into(), end)
 	}
 
 	/// Replace the ranges with one from [`Self::start`] up to the exclusive `end`, or onward
 	/// for `None`, returning `self` for chaining: the form a wire without ranges carries.
-	pub fn with_end(self, end: impl Into<Option<Position>>) -> Self {
+	#[cfg(any(feature = "async", test))]
+	// private: capability gap
+	pub(crate) fn with_end(self, end: impl Into<Option<Position>>) -> Self {
 		let start = self.start();
 		self.with_span(start, end.into())
 	}
 
+	#[cfg(any(feature = "async", test))]
 	fn with_span(self, start: Option<Position>, end: Option<Position>) -> Self {
 		self.with_ranges([Range {
 			start: start.map_or(Range::oldest().start, Anchor::Absolute),
@@ -515,7 +524,8 @@ impl Position {
 
 	/// The first group this exclusive end excludes whole, `None` past the last group: the
 	/// boundary a wire that cannot name a frame carries as the track's end.
-	pub fn final_sequence(self) -> Option<u64> {
+	// private: capability gap
+	pub(crate) fn final_sequence(self) -> Option<u64> {
 		self.group.checked_add(u64::from(self.frame != 0))
 	}
 }

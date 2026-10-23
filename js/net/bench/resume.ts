@@ -28,15 +28,14 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 function read(subscribers: Subscriber[]) {
 	for (const subscriber of subscribers) {
-		const recv = subscriber.tryRecvGroup();
-		if (recv.kind !== "group") throw new Error("group was not delivered");
-		const group = recv.group;
+		const group = subscriber.tryRecvGroup();
+		if (!group) throw new Error("group was not delivered");
 		const frame = group.tryReadFrame();
 		if (!frame) throw new Error("frame was not delivered");
 		checksum += frame.payload.byteLength;
 		group.close();
 		// Read until idle, as a reader parked on the next group does.
-		if (subscriber.tryRecvGroup().kind === "group") throw new Error("group delivered twice");
+		if (subscriber.tryRecvGroup()) throw new Error("group delivered twice");
 	}
 }
 
@@ -155,9 +154,9 @@ async function measureFlaps(readers: number, flaps: number): Promise<number> {
 		front.consumer.track("seq").subscribe({ maxDelay: Milli(3_600_000) }),
 	);
 	const held = subscribers.map((subscriber) => {
-		const recv = subscriber.tryRecvGroup();
-		if (recv.kind !== "group") throw new Error("missing held group");
-		return recv.group;
+		const group = subscriber.tryRecvGroup();
+		if (!group) throw new Error("missing held group");
+		return group;
 	});
 	await flush();
 	const start = performance.now();
@@ -165,7 +164,7 @@ async function measureFlaps(readers: number, flaps: number): Promise<number> {
 		front.serve(handles[(flap + 1) % 2]);
 		await flush();
 		for (const subscriber of subscribers) {
-			if (subscriber.tryRecvGroup().kind === "group") throw new Error("repeated held group");
+			if (subscriber.tryRecvGroup()) throw new Error("repeated held group");
 		}
 	}
 	const elapsed = performance.now() - start;

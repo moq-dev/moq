@@ -640,6 +640,8 @@ export class Consumer {
 	 * settling with an error, and abandons the stream once either does. Peek it synchronously
 	 * (`undefined` while within budget), or race it, which stops watching the budget once the
 	 * race ends.
+	 *
+	 * @internal Wire publishers only.
 	 */
 	get expired(): GetPromise<Error> {
 		this.#expired ??= new Expired(

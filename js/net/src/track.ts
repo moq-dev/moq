@@ -23,12 +23,14 @@ import type { IetfVersion } from "./ietf/version.ts";
 import {
 	type DropRun,
 	dropAt,
+	finalSequence,
 	groupBounds,
 	hooks,
 	insertDrop,
 	insertRun,
 	type Land,
 	MAX_DATAGRAMS,
+	type Recv,
 	type RecvDatagram,
 	type ResumeSource,
 	type Run,
@@ -44,28 +46,16 @@ import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.t
 
 export type { Datagram } from "./datagram.ts";
 
-/** The first group an exclusive track end excludes whole: one past the last group that may exist. */
-export function finalSequence(end: Location): number {
-	return end.group + (end.frame === 0 ? 0 : 1);
+// The group a non-blocking read takes, skipping drops and throwing the track's error;
+// `undefined` when nothing is deliverable now.
+function taken(read: () => Recv): GroupConsumer | undefined {
+	for (;;) {
+		const recv = read();
+		if (recv.kind === "group") return recv.group;
+		if (recv.kind === "error") throw recv.error;
+		if (recv.kind !== "drop") return undefined;
+	}
 }
-
-/**
- * What a non-blocking group read found, which is everything the caller needs to decide what
- * to do next: no second look at the track's closed state, and no ordering rule to get wrong.
- */
-export type Recv =
-	/** A group to serve. It has already left the buffer, so dropping this is dropping the group. */
-	| { kind: "group"; group: GroupConsumer }
-	/** Sequences `[start, end)` this cursor gave up without serving, and why. */
-	| { kind: "drop"; start: number; end: number; error: Error }
-	/** Nothing readable, but the track is live and may produce more. */
-	| { kind: "idle" }
-	/** The producer finished, yet groups above the cap are still held: raising it releases them. */
-	| { kind: "boundary" }
-	/** The producer finished and the buffer is drained. Nothing can follow. */
-	| { kind: "done" }
-	/** The track aborted. */
-	| { kind: "error"; error: Error };
 
 // Wall-clock bound for idle cached content, matching Rust cache::DEFAULT_EXPIRY.
 // Media maxDelay only bounds how far behind the live edge a reader may fall.
@@ -493,15 +483,9 @@ export class Consumer {
 		return this.#broadcast.subscribe(this.name, options);
 	}
 
-	/**
-	 * Fetch the track's immutable publisher properties without subscribing.
-	 *
-	 * A pending lookup keeps the track wanted. With `hold`, it stays wanted until `hold` aborts,
-	 * as a held Rust `query` does, so a publisher can keep a track alive while it answers for
-	 * it; aborting before the answer abandons the lookup.
-	 */
-	info(options?: { hold?: AbortSignal }): Promise<Info> {
-		return this.#broadcast.resolveTrackInfo(this.name, options?.hold);
+	/** Fetch the track's immutable publisher properties without subscribing. */
+	info(): Promise<Info> {
+		return this.#broadcast.resolveTrackInfo(this.name);
 	}
 
 	/** Fetch a single group by sequence without holding a live subscription. */
@@ -2083,6 +2067,7 @@ export class Subscriber {
 			if (start === undefined || start === "pending") return start;
 			return Math.max(start, subscriber.#cursor.peek().start);
 		};
+		hooks.tryRecvGroup = (subscriber, dispositions) => subscriber.#tryRecvGroup(dispositions);
 		hooks.tryNextGroup = (subscriber) => subscriber.#tryNextGroup();
 		hooks.peekGroup = (subscriber, ordered) => subscriber.#peekGroup(ordered);
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
@@ -2196,6 +2181,7 @@ export class Subscriber {
 			};
 			return dispose;
 		};
+		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.fetchBudget = (subscriber, maxDelay) => {
 			subscriber.#fetchBudget = maxDelay ?? Number.POSITIVE_INFINITY;
 		};
@@ -2449,7 +2435,8 @@ export class Subscriber {
 		});
 	}
 
-	// The synchronous half of recvGroup, behind the public tryRecvGroup.
+	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
+	// control state, popping the group, and positioning its frames are one JavaScript turn.
 	#tryRecvGroup(dispositions = false): Recv {
 		if (this.#resume) return this.#tryResumed(false);
 		const groups = this.#state.groups.peek();
@@ -2546,7 +2533,9 @@ export class Subscriber {
 		return end !== undefined && this.#state.received.peek() >= finalSequence(end) && !this.#state.owed.peek();
 	}
 
-	// The readiness half of recvGroup, behind the public groupChanged.
+	// Package-internal readiness half of recvGroup. Each registration fires at most once, and
+	// the caller disposes the losers after whichever source wakes it. A declared end wakes it
+	// too, so a publisher can forward the end before the live edge reaches it.
 	#groupChanged(fn: () => void): Dispose {
 		if (this.#resume) {
 			const resumed = [this.#resume.changed(fn), this.#cursor.changed(fn), this.#state.closed.changed(fn)];
@@ -2570,28 +2559,18 @@ export class Subscriber {
 	}
 
 	/**
-	 * Take the next group without waiting, honoring the same cursor bounds as
-	 * {@link recvGroup}, or say why there is none.
+	 * Take the next buffered group without blocking, honoring the same cursor bounds as
+	 * {@link recvGroup}.
 	 *
-	 * Synchronous, so a publisher can pop a group and act on it in the same turn. `idle` and
-	 * `boundary` may read differently once {@link groupChanged} fires; `done` and `error` are
-	 * final. With `drops`, each run of sequences the cursor gives up is reported once as a
-	 * `drop`, which a publisher forwards to its peer; without it they pass silently.
-	 *
-	 * The first call commits this track to arrival order, as {@link recvGroup} does.
+	 * Returns `undefined` when nothing is deliverable right now, which is not by itself the
+	 * end of the track: a group may still arrive, or one may be parked beyond the
+	 * {@link withRange} cap. Use it to drain what the retained window already holds, where
+	 * waiting for a sequence nothing will republish would park forever.
 	 */
-	tryRecvGroup(options?: { drops?: boolean }): Recv {
+	tryRecvGroup(): GroupConsumer | undefined {
 		this.#live();
 		this.#mode = "arrival";
-		return this.#tryRecvGroup(options?.drops ?? false);
-	}
-
-	/**
-	 * Call `fn` once when {@link tryRecvGroup} may read differently, including when the track
-	 * declares its end, and return the disposer.
-	 */
-	groupChanged(fn: () => void): Dispose {
-		return this.#groupChanged(fn);
+		return taken(() => this.#tryRecvGroup());
 	}
 
 	/**
@@ -2929,11 +2908,11 @@ export class Ordered {
 	}
 
 	/**
-	 * Take the next group as {@link nextGroup} would without waiting, or say why there is none;
-	 * see {@link Subscriber.tryRecvGroup}. Mirrors the Rust `poll_next_group`.
+	 * Take the next group as {@link nextGroup} would, without waiting; see
+	 * {@link Subscriber.tryRecvGroup}. Mirrors the Rust `poll_next_group`.
 	 */
-	tryNextGroup(): Recv {
-		return ordered_.tryNextGroup(this.#subscriber);
+	tryNextGroup(): GroupConsumer | undefined {
+		return taken(() => ordered_.tryNextGroup(this.#subscriber));
 	}
 
 	/**

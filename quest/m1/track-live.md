@@ -17,15 +17,9 @@ what an ended feed left; this quest makes the signal itself public.
   `readable()` in `rs/moq-net/src/model/track.rs`, the crate-private
   `resume` `poll_live`, and the crate-private `Producer::is_live`. Expose one
   reader-side `poll_live`/`live()` (or `is_live`) on `track::Subscriber` and
-  `track::Ordered`.
-- The publishers' wire answers (SUBSCRIBE_START, SUBSCRIBE_OK, TRACK_STATUS
-  Largest) are marked here: `track::Subscriber::poll_live` and
-  `latest_sequence` on `track::{Producer,Consumer,Subscriber}` in Rust, and
-  `wire.ts` `Broadcast.largest`, `hooks.latestSequence`, and
-  `hooks.bufferedLargest` in JS. `largest()` follows the source's reported
-  largest, which can name a frame the cache does not hold yet, so the
-  publishers answer with the buffered edge instead. Fold them into the public
-  signal, or keep them private as passthrough.
+  `track::Ordered`, and decide whether the publishers' crate-private
+  `poll_live` folds into it (see
+  [Public serving](/quest/m1/public-model/serve.md)).
 - JS has no equivalent: a track never goes idle, so its reader is live from
   the start. Mirror the name, and the idle state if JS gains warm copies.
 - Decide what a reader does with groups served before live: keep serving
@@ -34,4 +28,4 @@ what an ended feed left; this quest makes the signal itself public.
 
 ## Related
 
-- [Public serving](/quest/m1/public-model/serve.md) - moved the publishers' `poll_live` and the JS largest hooks here
+- [Public serving](/quest/m1/public-model/serve.md) - the publishers' `poll_live` and the `largest()` decision

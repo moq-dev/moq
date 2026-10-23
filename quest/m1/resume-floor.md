@@ -32,5 +32,4 @@ Public API: behavior only. Wire: none.
 
 ## Related
 
-- [Public JS feed start](/quest/m1/public-model/serve.md) - the public serving cursor this extends
 - [Rust resume backs single-route groups](/quest/m1/resume-handed-out.md) - also edits which replaced copies the Rust reader keeps

@@ -3182,7 +3182,7 @@ impl Producer {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// pending: /quest/m1/track-live.md
+	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn latest_sequence(&self) -> Option<u64> {
 		self.state.read().max_sequence
 	}
@@ -4655,7 +4655,7 @@ impl Consumer {
 		kio::wait(|waiter| self.poll_largest(waiter)).await
 	}
 
-	// pending: /quest/m1/track-live.md
+	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn latest_sequence(&self) -> Option<u64> {
 		if let Some(serving) = self.serving() {
 			return serving.latest_sequence();
@@ -4665,7 +4665,7 @@ impl Consumer {
 
 	/// The first group the declared end excludes whole, or `None` while the track is open ended.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// pending: /quest/m1/public-model/deferred.md
+	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn final_sequence(&self) -> Option<u64> {
 		if let Some(serving) = self.serving() {
 			return serving.final_sequence();
@@ -6770,7 +6770,9 @@ impl Subscriber {
 	/// Poll for where the source's feed starts, raised to this cursor's floor, once
 	/// resolved: the first group a publisher tells its peer it serves. A feed starting
 	/// below the floor serves the floor's group too. `None` when the source declares none.
-	pub fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	// private: capability gap
+	pub(crate) fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let cursor = match &mut self.inner {
 			Inner::Plain(cursor) => cursor,
 			Inner::Resume(resume, _) => return resume.poll_start(waiter),
@@ -6834,7 +6836,9 @@ impl Subscriber {
 	///
 	/// Stale skips are recorded only once this has been polled, so a reader that never
 	/// forwards drops keeps none.
-	pub fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	// private: capability gap
+	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, StreamError)> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.poll_drop(waiter),
 			Inner::Resume(resume, _) => resume.poll_drop(waiter),
@@ -6845,7 +6849,7 @@ impl Subscriber {
 	/// largest position it holds; `None` for a track with nothing yet. A front's logical
 	/// track answers for the route serving it. See [`Producer::set_idle`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// pending: /quest/m1/track-live.md
+	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn poll_live(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let cursor = match &mut self.inner {
 			Inner::Plain(cursor) => cursor,
@@ -7024,7 +7028,7 @@ impl Subscriber {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	// pending: /quest/m1/track-live.md
+	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn latest_sequence(&self) -> Option<u64> {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.state.read().max_sequence,

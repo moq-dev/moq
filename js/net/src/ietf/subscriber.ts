@@ -20,14 +20,21 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { groupBounds, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import {
+	finalSequence,
+	groupBounds,
+	hiddenBelow,
+	hooks,
+	scopeCaptures,
+	scopeHead,
+	scopeOverlaps,
+} from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
-import { finalSequence } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Deadline, requestOptions } from "../util/deadline.ts";
 import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";

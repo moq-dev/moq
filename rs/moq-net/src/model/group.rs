@@ -2709,7 +2709,8 @@ impl Consumer {
 	/// [`max_delay`](crate::track::Subscription::max_delay) expires the group, it abandons
 	/// the stream, even with every frame already read off. It abandons it too once
 	/// [`Self::poll_finished`] fails. Stays `true` once set.
-	pub fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
+	// private: capability gap
+	pub(crate) fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
 		self.poll_expiry(waiter, true)
 	}
 
@@ -2968,9 +2969,8 @@ impl Consumer {
 	/// Poll until the group terminates, or this cursor reaches the end of its range, returning
 	/// its next frame index.
 	///
-	/// A publisher still writing the group races its transport against this and
-	/// [`Self::poll_expired`]: an error here means the frames it has yet to read are gone
-	/// (evicted, cut, or failed upstream) and no route will continue them.
+	/// An error means the frames this cursor has yet to read are gone (evicted, cut, or
+	/// failed upstream) and no route will continue them.
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<u64>> {
 		if self.recover.is_none() {
 			return self.poll_finished_once(waiter);

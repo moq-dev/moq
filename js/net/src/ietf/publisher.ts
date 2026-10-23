@@ -2235,7 +2235,7 @@ export class Publisher {
 			let answer: TrackStatusOk;
 			try {
 				const broadcast = await this.#resolve(name, hold.signal, msg.epoch);
-				const info = await broadcast.track(msg.trackName).info({ hold: hold.signal });
+				const info = await wireOf(broadcast).resolveTrackInfo(msg.trackName, hold.signal);
 				const largest = wireOf(broadcast).largest(msg.trackName);
 				answer = new TrackStatusOk({
 					requestId:
@@ -2934,7 +2934,7 @@ interface ServeRange {
 /** Read within a fixed filter, ending at its cap once the track itself finishes. */
 async function servingGroup(track: TrackSubscriber): Promise<group.Consumer | undefined> {
 	for (;;) {
-		const recv = track.tryRecvGroup();
+		const recv = hooks.tryRecvGroup(track, false);
 		if (recv.kind === "group") return recv.group;
 		if (recv.kind === "error") throw recv.error;
 		// A local reader holds this boundary for a possible cap raise; a fixed wire
@@ -2942,7 +2942,7 @@ async function servingGroup(track: TrackSubscriber): Promise<group.Consumer | un
 		if (recv.kind === "done" || recv.kind === "boundary") return undefined;
 		if (recv.kind === "drop") continue;
 		await new Promise<void>((resolve) => {
-			const dispose = track.groupChanged(() => {
+			const dispose = hooks.groupChanged(track, () => {
 				dispose();
 				resolve();
 			});
@@ -3000,10 +3000,8 @@ type FillServe =
  */
 function takeGroup(cache: TrackSubscriber, sequence: number): group.Consumer {
 	for (;;) {
-		const recv = cache.tryRecvGroup();
-		if (recv.kind === "error") throw recv.error;
-		if (recv.kind !== "group") throw new Error(`group not found: ${sequence}`);
-		const group = recv.group;
+		const group = cache.tryRecvGroup();
+		if (!group) throw new Error(`group not found: ${sequence}`);
 		if (group.sequence === sequence) return group;
 
 		group.close();

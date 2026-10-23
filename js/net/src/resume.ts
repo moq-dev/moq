@@ -41,10 +41,12 @@ import { Delivered } from "./delivered.ts";
 import { NotFound, SessionError, StreamCode, StreamError, sessionClosed } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import {
+	finalSequence,
 	type GroupRecover,
 	groupBounds,
 	hooks,
 	MAX_DATAGRAMS,
+	type Recv,
 	type RecvDatagram,
 	type Replacement,
 	type ResumeShell,
@@ -247,8 +249,8 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 }
 
 /** Take a copy's next group, in sequence or arrival order. */
-function take(copy: Copy, ordered: boolean): track.Recv {
-	return ordered ? hooks.tryNextGroup(copy.sub) : copy.sub.tryRecvGroup();
+function take(copy: Copy, ordered: boolean): Recv {
+	return ordered ? hooks.tryNextGroup(copy.sub) : hooks.tryRecvGroup(copy.sub, false);
 }
 
 /** The first group past where `copy` was replaced: 0 for one replaced before any group. */
@@ -501,7 +503,7 @@ class Reader implements ResumeSource {
 		return (end === undefined || sequence < end) && !delivered.has(sequence);
 	}
 
-	tryGroup(ordered: boolean, delivered: Delivered): track.Recv {
+	tryGroup(ordered: boolean, delivered: Delivered): Recv {
 		this.#delivered = delivered;
 		this.sync();
 		// Before anything is handed out, so a copy claiming other content hands out none of it.
@@ -620,7 +622,7 @@ class Reader implements ResumeSource {
 	 * Whether the track ended, once the serving copy's channel (as `done` reads it) ran out:
 	 * cleanly, or with a verdict a route failure does not excuse.
 	 */
-	#end(done: (copy: Copy) => Error | null | undefined): track.Recv & { kind: "idle" | "done" | "error" } {
+	#end(done: (copy: Copy) => Error | null | undefined): Recv & { kind: "idle" | "done" | "error" } {
 		const route = this.route;
 		const last = this.#copies.at(-1);
 		const serving = last?.generation === this.#generation ? last : undefined;
@@ -643,7 +645,7 @@ class Reader implements ResumeSource {
 		return { kind: "idle" };
 	}
 
-	#fail(error: Error): track.Recv & { kind: "error" } {
+	#fail(error: Error): Recv & { kind: "error" } {
 		this.#shell.close(error);
 		return { kind: "error", error };
 	}
@@ -761,7 +763,7 @@ class Reader implements ResumeSource {
 		const declared = this.#declared;
 		const until =
 			declared !== undefined
-				? track.finalSequence(declared) - 1
+				? finalSequence(declared) - 1
 				: Math.max(this.#newest ?? -1, hooks.latestSequence(serving.sub) ?? -1);
 		for (const copy of this.#copies) {
 			if (!copy.replaced || copy.until !== undefined) continue;
@@ -853,7 +855,7 @@ class Reader implements ResumeSource {
 		};
 		disposes.push(this.route.changed.changed(once), this.#changed.changed(once));
 		for (const copy of this.#copies)
-			disposes.push(copy.sub.groupChanged(once), hooks.datagramChanged(copy.sub, once));
+			disposes.push(hooks.groupChanged(copy.sub, once), hooks.datagramChanged(copy.sub, once));
 		return dispose;
 	}
 
@@ -886,7 +888,7 @@ class Reader implements ResumeSource {
 		}
 		const declared = this.#declared;
 		if (declared && !this.#closed) {
-			const final = track.finalSequence(declared);
+			const final = finalSequence(declared);
 			const seen = (sequence: number | undefined) => sequence !== undefined && sequence >= final;
 			if (
 				seen(this.#newest) ||
@@ -912,10 +914,7 @@ class Reader implements ResumeSource {
 			this.wake();
 		} else if (declared.group === end.group && declared.frame === end.frame) {
 			return;
-		} else if (
-			track.finalSequence(declared) === track.finalSequence(end) &&
-			(declared.frame === 0 || end.frame === 0)
-		) {
+		} else if (finalSequence(declared) === finalSequence(end) && (declared.frame === 0 || end.frame === 0)) {
 			if (declared.frame === 0) this.#declared = end;
 		} else {
 			this.#refuse();

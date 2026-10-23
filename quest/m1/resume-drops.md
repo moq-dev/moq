@@ -2,8 +2,8 @@
 
 ## Goal
 
-`tryRecvGroup({ drops: true })` on a routed (resumed) `@moq/net`
-`Track.Subscriber` reports the groups its copies gave up as a `drop`, as a
+The package-internal `hooks.tryRecvGroup(subscriber, true)` on a routed
+(resumed) `@moq/net` `Track.Subscriber` reports the groups its copies gave up as a `drop`, as a
 direct subscriber does and as the Rust resume reader forwards its serving
 copy's `poll_drop`. A lite or IETF publisher serving a routed track then sends
 `SUBSCRIBE_DROP` for them instead of leaving its peer waiting on groups that
@@ -26,11 +26,7 @@ Open decisions, to settle before implementing:
   copy never serves a group already reported dropped.
 
 Regression test: a resumed subscriber whose serving copy receives
-`SUBSCRIBE_DROP` reports it through `tryRecvGroup({ drops: true })`, and a
+`SUBSCRIBE_DROP` reports it through `hooks.tryRecvGroup(subscriber, true)`, and a
 downstream lite-07 publisher forwards it.
 
 Public API: behavior only. Wire: none.
-
-## Related
-
-- [Public JS feed start](/quest/m1/public-model/serve.md) - the public serving calls this rides on
