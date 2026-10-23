@@ -321,13 +321,13 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 	]);
 
 	const watching = consume.announced();
+	expect((await watching.next())?.kind).toBe("start");
 	const request = consume.request(Path.from("room"));
 	let routes: ReturnType<typeof consume.announced> | undefined;
 	let replacement: Awaited<ReturnType<typeof connect>> | undefined;
 	let replacementServer: Awaited<ReturnType<typeof accept>> | undefined;
 
 	try {
-		expect((await watching.next())?.kind).toBe("start");
 		await waitUntil(() => request.active.peek() !== undefined);
 		const front = request.active.peek();
 		if (!front) throw new Error("no route");

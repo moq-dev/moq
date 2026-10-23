@@ -1669,14 +1669,12 @@ impl Producer {
 		self.handle.frame_count()
 	}
 
-	/// Abort with `err` only while nothing consumes the group, returning whether it is
-	/// closed. Consumer creation and the check share a lock, so a reader arriving after
-	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
-	#[allow(dead_code)]
-	// The answering API retains these on the writer as well as the session observer.
-	// pending: /quest/m1/public-model/answer.md
-	pub(crate) fn abort_unused(&self, err: Error) -> bool {
-		self.handle.abort_unused(err)
+	/// Abort an unused group, returning its writer when a reader returned first.
+	pub fn abort_unused(self, err: Error) -> std::result::Result<(), Self> {
+		match self.handle.abort_unused(err) {
+			true => Ok(()),
+			false => Err(self),
+		}
 	}
 
 	/// Whether the group has been aborted (including pool eviction). The track's
@@ -1705,14 +1703,6 @@ impl Producer {
 	/// Watch reader demand without keeping the group alive.
 	pub fn demand(&self) -> Demand {
 		self.handle.demand()
-	}
-
-	/// Poll for the group becoming unused (every consumer dropped).
-	#[allow(dead_code)]
-	// The answering API retains these on the writer as well as the session observer.
-	// pending: /quest/m1/public-model/answer.md
-	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.handle.poll_unused(waiter)
 	}
 }
 
@@ -1844,7 +1834,7 @@ impl Handle {
 	/// closed. Consumer creation and the check share a lock, so a reader arriving after
 	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	// private: capability gap
 	pub(crate) fn abort_unused(&self, err: Error) -> bool {
 		match self.state.write_unused() {
 			kio::Unused::Idle(guard) => {
@@ -2165,7 +2155,7 @@ impl Handle {
 
 	/// Poll for the group becoming unused (every consumer dropped).
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	// private: capability gap
 	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state.poll_unused(waiter).map(|_| ())
 	}
@@ -3698,17 +3688,14 @@ mod test {
 		let producer = Info { sequence: 0 }.produce();
 
 		let consumer = producer.handle.try_consume().expect("open");
-		assert!(
-			!producer.abort_unused(crate::Error::Cancel),
-			"a reader declines the abort"
-		);
+		let producer = producer
+			.abort_unused(crate::Error::Cancel)
+			.expect_err("a reader declines the abort");
 		drop(consumer);
 
-		assert!(producer.abort_unused(crate::Error::Cancel));
-		assert!(
-			producer.handle.try_consume().is_none(),
-			"an aborted group mints no reader"
-		);
+		let handle = producer.handle();
+		assert!(producer.abort_unused(crate::Error::Cancel).is_ok());
+		assert!(handle.try_consume().is_none(), "an aborted group mints no reader");
 	}
 
 	#[test]

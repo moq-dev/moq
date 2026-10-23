@@ -7444,19 +7444,23 @@ impl Request {
 		self
 	}
 
-	/// Reject only while no consumer needs this pending track. Demand and the check
-	/// share one lock, so demand returning after `Demand::wanted` went to `None` wins the race, and the
-	/// close under that lock stops a later consumer attaching to a dead request.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
-	pub(crate) fn reject_unused(&self, err: Error) -> bool {
-		match self.state.write_unused() {
+	/// Reject an unused request, returning it when a reader returned first.
+	#[expect(
+		clippy::result_large_err,
+		reason = "return the owned request without allocating on an idle check"
+	)]
+	pub fn reject_unused(self, err: Error) -> std::result::Result<(), Self> {
+		let unused = match self.state.write_unused() {
 			kio::Unused::Idle(guard) => {
 				commit_abort(guard, err).abort();
 				true
 			}
 			kio::Unused::Closed => true,
 			kio::Unused::Used => false,
+		};
+		match unused {
+			true => Ok(()),
+			false => Err(self),
 		}
 	}
 
@@ -14133,7 +14137,9 @@ mod test {
 		drop(first.await.unwrap());
 
 		let hit = consumer.fetch_group(5, None);
-		assert!(!group.abort_unused(Error::Cancel), "the pending hit wants the group");
+		let _group = group
+			.abort_unused(Error::Cancel)
+			.expect_err("the pending hit wants the group");
 		let mut fetched = hit.await.unwrap();
 		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"head");
 	}
@@ -14183,7 +14189,7 @@ mod test {
 			.unwrap();
 		let group = req.accept(Info::timed()).unwrap();
 		drop(first.await.unwrap());
-		assert!(group.abort_unused(Error::Cancel));
+		assert!(group.abort_unused(Error::Cancel).is_ok());
 
 		let retry = consumer.fetch_group(5, None);
 		let req = dynamic

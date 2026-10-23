@@ -133,9 +133,19 @@ struct BroadcastState {
 	// one serves again once the newer route at its path withdraws.
 	finished: bool,
 
+	// A served source accepts new tracks only during the selection period that minted it.
+	validity: RequestValidity,
+
 	// Set once a finished broadcast's origin advertises a newer epoch at its path, which
 	// ends its `Finish` at once.
 	superseded: bool,
+}
+
+fn check_validity(state: &kio::Shared<BroadcastState>, waiter: &kio::Waiter) -> Result<(), Error> {
+	// The selection reads the origin, whose route changes can close broadcasts. Never
+	// hold the broadcast lock while checking it.
+	let validity = state.read().validity.clone();
+	validity.check(waiter)
 }
 
 impl BroadcastState {
@@ -450,6 +460,11 @@ impl Producer {
 		}
 	}
 
+	pub(super) fn with_validity(self, validity: RequestValidity) -> Self {
+		self.state.lock().validity = validity.start();
+		self
+	}
+
 	/// Create a dynamic producer that handles on-demand track requests from consumers.
 	pub fn dynamic(&self) -> Dynamic {
 		Dynamic::new(
@@ -530,16 +545,16 @@ impl Producer {
 	}
 
 	/// `Ready(Ok)` once no [`Consumer`] handle is left, `Ready(Err)` once the broadcast ended.
-	// pending: /quest/m1/public-model/answer.md
-	pub(crate) fn poll_unheld(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
+	// Unlike Demand, this counts held broadcast handles even when none reads a track.
+	pub fn poll_unheld(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
 		self.alive.token.poll_unused(waiter)
 	}
 
 	/// [`Self::close`], unless a [`Consumer`] holds the broadcast or a track it asked for
 	/// still waits for a handler. Atomic with minting a consumer, so a holder either keeps
 	/// the broadcast or only ever sees it closed. Returns whether the broadcast is closed.
-	// pending: /quest/m1/public-model/answer.md
-	pub(crate) fn close_unheld(&self) -> bool {
+	// Unlike Demand, held broadcast handles prevent this close even while idle.
+	pub fn close_unheld(&self) -> bool {
 		self.alive.close_unheld()
 	}
 
@@ -720,7 +735,7 @@ impl Drop for Alive {
 /// Whether a path request still names the source that handed out its track.
 #[derive(Clone, Default)]
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
-// pending: /quest/m1/public-model/answer.md
+// pending: /quest/m1/public-model/deferred.md
 pub(crate) enum RequestValidity {
 	#[default]
 	Unrestricted,
@@ -732,13 +747,13 @@ pub(crate) enum RequestValidity {
 
 impl RequestValidity {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	// pending: /quest/m1/public-model/deferred.md
 	pub(crate) fn token(route: Option<kio::Consumer<()>>) -> Self {
 		route.map(Self::Route).unwrap_or_default()
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	// pending: /quest/m1/public-model/deferred.md
 	pub(crate) fn for_source(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
 		route
 			.request_validity(path)
@@ -748,7 +763,7 @@ impl RequestValidity {
 
 	/// Capture one selection period so a pending request never revives after a replacement.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	// pending: /quest/m1/public-model/deferred.md
 	pub(crate) fn start(&self) -> Self {
 		match self {
 			Self::Selected(selected) => Self::Period(selected.current(), selected.clone()),
@@ -757,7 +772,7 @@ impl RequestValidity {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	// pending: /quest/m1/public-model/deferred.md
 	pub(crate) fn check(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
 			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
@@ -782,37 +797,6 @@ impl Producer {
 		info: impl Into<Option<track::Info>>,
 	) -> track::Producer {
 		self.create_track(name, info).expect("should not have errored")
-	}
-}
-
-/// A session-owned handle to a source broadcast created via
-/// [`crate::origin::Producer::create_broadcast`], closing it on drop even while the
-/// session's serve machines still hold its [`Dynamic`].
-///
-/// A peer's retraction and a dead session end the source the same way: a broadcast
-/// carries no end cause past this hop. Shared by the lite and IETF subscribers.
-#[cfg_attr(not(feature = "async"), allow(dead_code))]
-// pending: /quest/m1/public-model/answer.md
-pub(crate) struct SourceGuard(Producer);
-
-impl SourceGuard {
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn new(producer: Producer) -> Self {
-		Self(producer)
-	}
-}
-
-impl std::ops::Deref for SourceGuard {
-	type Target = Producer;
-
-	fn deref(&self) -> &Producer {
-		&self.0
-	}
-}
-
-impl Drop for SourceGuard {
-	fn drop(&mut self) {
-		self.0.close();
 	}
 }
 
@@ -892,6 +876,10 @@ impl Dynamic {
 	/// Returns [`Error::Closed`] once the broadcast has ended, so a serving loop
 	/// knows to stop and release its handle.
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
+		if check_validity(&self.state, waiter).is_err() {
+			self.alive.close();
+			return Poll::Ready(Err(Error::Closed));
+		}
 		let mut state = ready!(self.state.poll(waiter, |state| {
 			if state.requests.has_queued() || state.closing {
 				Poll::Ready(())
@@ -1052,6 +1040,7 @@ impl Consumer {
 	/// has ended, and [`Error::NotFound`] when nothing publishes the track and no
 	/// [`Dynamic`] would serve a request for it.
 	pub fn track(&self, name: &str) -> Result<track::Consumer, Error> {
+		check_validity(&self.state, &kio::Waiter::noop())?;
 		let current = {
 			let mut state = self.state.lock();
 			// An ended broadcast serves nothing new, not even a track it still has:
@@ -1084,6 +1073,7 @@ impl Consumer {
 		name: &str,
 		subscription: Option<&track::Subscription>,
 	) -> Result<(kio::Consumer<track::TrackState>, Option<track::Preferences>), Error> {
+		check_validity(&self.state, &kio::Waiter::noop())?;
 		let mut state = loop {
 			let mut state = self.state.lock();
 

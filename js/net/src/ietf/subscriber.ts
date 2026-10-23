@@ -39,7 +39,7 @@ import { untilAborted } from "../util/abort.ts";
 import { Deadline, requestOptions } from "../util/deadline.ts";
 import { abandoned as demandAbandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
-import { overrideBroadcastWire, wireOf } from "../wire.ts";
+import { overrideBroadcastWire } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
 import * as Cluster from "./cluster.ts";
@@ -724,10 +724,10 @@ export class Subscriber {
 		// moq-transport resolves metadata through SUBSCRIBE and has no one-shot group fetch here.
 		const consumer = new ConsumeBroadcast();
 		// Registered before anyone can list the broadcast, so no reader syncs on an empty answer.
-		void this.#refuseListing(wireOf(consumer).lister());
+		void this.#refuseListing(consumer.answering.lister());
 		void (async () => {
 			for (;;) {
-				const request = await wireOf(consumer).requested();
+				const request = await consumer.answering.requestedTrack();
 				if (!request) break;
 				// Every request names the instance the consume resolved, so the peer refuses
 				// rather than answers from another.
@@ -1746,6 +1746,10 @@ export class Subscriber {
  * group fetch, so `track.Consumer.fetchGroup()` is rejected.
  */
 class ConsumeBroadcast extends broadcast.Consumer {
+	get answering(): broadcast.Dynamic {
+		return this.dynamic();
+	}
+
 	constructor(state?: never) {
 		super(state);
 		overrideBroadcastWire(this, {

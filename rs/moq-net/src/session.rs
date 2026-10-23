@@ -7,6 +7,36 @@ use crate::transport::poll::Session as _;
 
 use crate::{Error, SessionError, Version, auth, bandwidth, coding::StreamCodes, goaway};
 
+/// A session-owned handle to a source broadcast created via
+/// [`crate::origin::Producer::answer_source`], closing it on drop even while the
+/// session's serve machines still hold its [`Dynamic`].
+///
+/// A peer's retraction and a dead session end the source the same way: a broadcast
+/// carries no end cause past this hop. Shared by the lite and IETF subscribers.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+pub(crate) struct SourceGuard(crate::broadcast::Producer);
+
+impl SourceGuard {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub fn new(producer: crate::broadcast::Producer) -> Self {
+		Self(producer)
+	}
+}
+
+impl std::ops::Deref for SourceGuard {
+	type Target = crate::broadcast::Producer;
+
+	fn deref(&self) -> &crate::broadcast::Producer {
+		&self.0
+	}
+}
+
+impl Drop for SourceGuard {
+	fn drop(&mut self) {
+		self.0.close();
+	}
+}
+
 /// How long [`Session::close`] waits for queued data before closing anyway.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 

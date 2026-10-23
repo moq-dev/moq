@@ -34,9 +34,9 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	subscriber: Subscriber<S>,
  	path: PathOwned,
  	epoch: Option<crate::Epoch>,
--	source: crate::model::broadcast::SourceGuard,
+-	source: crate::session::SourceGuard,
 +	// MUTATION: never dropped, so a session that ends keeps every source it minted alive.
-+	source: std::mem::ManuallyDrop<crate::model::broadcast::SourceGuard>,
++	source: std::mem::ManuallyDrop<crate::session::SourceGuard>,
  	dynamic: crate::broadcast::Dynamic,
  	route: kio::Consumer<()>,
  	// A dedicated close-watch handle, since each pending operation needs its own.

@@ -2051,8 +2051,7 @@ impl Producer {
 	/// subscriber issues no ANNOUNCE_PLEASE). Used to fill an unset session half
 	/// so both the publisher and subscriber loops still run.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
-	pub(crate) fn empty(hop: Hop) -> Self {
+	pub fn empty(hop: Hop) -> Self {
 		// No allowed prefixes means no broadcast is ever created, so nothing will
 		// ever be queued on the detached submission handle.
 		let (tasks, _) = TaskSet::new();
@@ -2176,13 +2175,35 @@ impl Producer {
 		Ok(broadcast)
 	}
 
+	/// Mint an unannounced source for this origin's forwarded request, bound to its selection.
+	///
+	/// New track requests fail with [`Error::Unroutable`] once that selection retires;
+	/// accepted tracks keep running. Application claims return [`Error::Unroutable`]
+	/// and answer through [`Request::prepare`] instead. Another origin or an
+	/// unauthorized path returns [`Error::Unauthorized`].
+	pub fn answer_source(&self, request: &Request) -> Result<broadcast::Producer, Error> {
+		// Application claims publish prepared answers under their own epoch.
+		if request.publisher.is_some() {
+			return Err(Error::Unroutable);
+		}
+		let broadcast::RequestValidity::Selected(selected) = &request.validity else {
+			return Err(Error::Unroutable);
+		};
+		if !selected.shared.same_channel(&self.shared) || !self.scope.permits(request.path()) {
+			return Err(Error::Unauthorized);
+		}
+		let relative = request.path().strip_prefix(self.root()).ok_or(Error::Unauthorized)?;
+		Ok(self.create_source(relative).with_validity(request.validity.clone()))
+	}
+
 	/// Mint a standalone source broadcast for a served-route request: it carries
 	/// this origin's cache policy and ingress attribution, but
 	/// is *not* entered into the route table. Sessions answer
 	/// [`Dynamic`] requests with one of these; the requester already holds
 	/// the request's result channel, so the table never needs to resolve it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
+	// private: test
+	// Session fixtures also mint an unrestricted source without a route.
 	pub(crate) fn create_source(&self, path: impl AsPath) -> broadcast::Producer {
 		let path = path.as_path();
 		let full = self.root.join(&path).to_owned();
@@ -5389,8 +5410,7 @@ impl Dynamic {
 	/// Retire an explicit peer withdrawal, hiding derived paths only once its
 	/// last live advertisement at the prefix is gone. A lost session just drops.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
-	pub(crate) fn withdrawn(self) {
+	pub fn withdrawn(self) {
 		self.announcement.retract(true);
 	}
 
@@ -5451,7 +5471,13 @@ impl Dynamic {
 		// entry. This mirrors how `poll_requested_track` keeps a served track
 		// discoverable via the weak cache across the same window.
 		let producer = state.requests.get(&path).expect("popped key must be pending").clone();
+		drop(state);
+		let validity = match self.publisher {
+			Some(_) => Default::default(),
+			None => broadcast::RequestValidity::for_source(self, &path),
+		};
 		Poll::Ready(Ok(Request {
+			validity,
 			path,
 			producer,
 			home: self.state.clone(),
@@ -5563,6 +5589,7 @@ impl ServeState {
 /// resolves it with a new exact-path broadcast, and [`reject`](Self::reject) resolves it
 /// with an error. Dropping the request without either rejects it.
 pub struct Request {
+	validity: broadcast::RequestValidity,
 	// Absolute path that was requested.
 	path: PathOwned,
 
@@ -6110,8 +6137,7 @@ impl Consumer {
 	/// announce-interest for a prefix outside our scope by announcing nothing,
 	/// rather than tearing the stream down.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	// pending: /quest/m1/public-model/answer.md
-	pub(crate) fn empty(&self) -> Self {
+	pub fn empty(&self) -> Self {
 		Self {
 			scope: OriginScope::empty(),
 			..self.clone()
@@ -7127,6 +7153,63 @@ mod tests {
 	use crate::model::test_tracing::count_drop_warnings;
 	use futures::FutureExt;
 	use std::sync::atomic::AtomicBool;
+
+	#[moq_clock::test]
+	async fn answer_source_retires_new_tracks_without_aborting_accepted_tracks() {
+		let producer = origin(1).produce();
+		let route = producer.clone().peer().dynamic_route("room", Route::default()).unwrap();
+		let consumer = producer.consume();
+		let requesting = consumer.request_broadcast("room/alice", None);
+		let request = queued(&route).await;
+		let source = producer.answer_source(&request).unwrap();
+		let mut tracks = source.dynamic();
+		request.accept(&source);
+		let _routed = requesting.await.unwrap();
+		let front = source.consume();
+		let reading = front.track("video").unwrap().subscribe(None);
+		assert!(reading.poll_ok(&kio::Waiter::noop()).is_pending());
+		let track = tracks.assert_request().accept(None);
+		drop(route);
+		assert!(matches!(front.track("new"), Err(Error::Unroutable)));
+		assert!(tracks.poll_requested_track(&kio::Waiter::noop()).is_ready());
+		track.finish().unwrap();
+		drop(reading);
+	}
+
+	#[moq_clock::test]
+	async fn answer_source_refuses_application_claims_and_another_origin() {
+		let producer = origin(1).produce();
+		let claim = producer.dynamic("room").unwrap();
+		let _requesting = producer.consume().request_broadcast("room/alice", None);
+		let request = queued(&claim).await;
+		assert!(matches!(producer.answer_source(&request), Err(Error::Unroutable)));
+		drop(request);
+		drop(claim);
+		let peer = producer
+			.clone()
+			.peer()
+			.dynamic_route("other", Route::default())
+			.unwrap();
+		let _requesting = producer.consume().request_broadcast("other/alice", None);
+		let request = queued(&peer).await;
+		let unrelated = origin(2).produce();
+		assert!(matches!(unrelated.answer_source(&request), Err(Error::Unauthorized)));
+	}
+
+	#[test]
+	fn empty_handles_keep_their_identity_and_refuse_every_path() {
+		let empty = Producer::empty(origin(1));
+		assert_eq!(empty.hop(), origin(1));
+		assert!(empty.allowed().is_empty());
+		assert!(matches!(empty.create_broadcast("room"), Err(Error::Unauthorized)));
+		let consumer = origin(2).produce().consume().empty();
+		assert_eq!(consumer.hop(), origin(2));
+		assert!(consumer.allowed().is_empty());
+		assert!(matches!(
+			consumer.request_broadcast("room", None).poll_ok(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Unauthorized))
+		));
+	}
 
 	fn origin(id: u64) -> Hop {
 		Hop::new(id).unwrap()

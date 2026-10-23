@@ -1831,7 +1831,7 @@ struct MintedSource {
 	path: PathOwned,
 	/// The publisher instance the route announced, asked for on every request.
 	epoch: Option<crate::Epoch>,
-	source: crate::model::broadcast::SourceGuard,
+	source: crate::session::SourceGuard,
 	/// The source's track handler, registered before its requester could ask for a track.
 	dynamic: crate::broadcast::Dynamic,
 	/// Closes when the route that minted the source goes.
@@ -1848,7 +1848,7 @@ struct SourceServe<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	path: PathOwned,
 	epoch: Option<crate::Epoch>,
-	source: crate::model::broadcast::SourceGuard,
+	source: crate::session::SourceGuard,
 	dynamic: crate::broadcast::Dynamic,
 	route: kio::Consumer<()>,
 	// A dedicated close-watch handle, since each pending operation needs its own.
@@ -3822,7 +3822,7 @@ mod tests {
 				validity,
 				path: Path::new("room").to_owned(),
 				epoch: None,
-				source: crate::model::broadcast::SourceGuard::new(broadcast),
+				source: crate::session::SourceGuard::new(broadcast),
 				dynamic,
 				route: route.consume(),
 			},
@@ -6084,7 +6084,13 @@ impl Announced {
 					continue;
 				};
 				let path = path.to_owned();
-				let source = subscriber.origin.create_source(&path);
+				let source = match subscriber.origin.answer_source(&request) {
+					Ok(source) => source,
+					Err(err) => {
+						request.reject(err);
+						continue;
+					}
+				};
 				// The handler exists before the requester sees the source, so a track it
 				// asks for before the serve machine first runs queues instead of failing
 				// `NotFound`. Accepted before the push, so the requester holds the source
@@ -6100,7 +6106,7 @@ impl Announced {
 					validity,
 					path,
 					epoch: entry.route.epoch.clone(),
-					source: crate::model::broadcast::SourceGuard::new(source),
+					source: crate::session::SourceGuard::new(source),
 					dynamic,
 					route: entry.live.consume(),
 				});
@@ -6704,14 +6710,17 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 	/// stream. Ready once the request is released.
 	fn poll_unused(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
-			let TrackRunState::Info { request, .. } = &self.state else {
+			let TrackRunState::Info { request, .. } = &mut self.state else {
 				return Poll::Pending;
 			};
 			let pending = request.as_ref().expect("request pending");
 			ready!(crate::util::poll_unwanted(&mut pending.demand(), waiter));
-			if pending.reject_unused(Error::Cancel) {
-				self.state = TrackRunState::Done;
-				return Poll::Ready(());
+			match request.take().expect("request pending").reject_unused(Error::Cancel) {
+				Ok(()) => {
+					self.state = TrackRunState::Done;
+					return Poll::Ready(());
+				}
+				Err(returned) => *request = Some(returned),
 			}
 			// Demand returned in the gap and won inside `reject_unused`: poll again so the
 			// unused wait is armed for when it leaves.

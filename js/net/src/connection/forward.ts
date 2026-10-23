@@ -5,11 +5,10 @@
  */
 
 import { Milli, Nano } from "@moq/clock";
-import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { type Route, routesEqual } from "../hop.ts";
 import { coveringPrefixes } from "../internal.ts";
-import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
+import type { Dynamic, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { after } from "../util/timer.ts";
 import { wireOf } from "../wire.ts";
@@ -295,49 +294,12 @@ async function drive(handle: Dynamic, conn: Established): Promise<void> {
  * any blind answer, so answering one would only park a handle nothing reads.
  */
 async function serveRequests(conn: Established, origin: OriginProducer): Promise<void> {
-	const table = wireOf(origin);
+	const fallback = origin.fallback();
 	const session = wireOf(conn);
-	// The withdraws for the answers this session provided, so a dead session only takes
-	// back its own. Keyed by path but remembering the slot, because a path outlives its
-	// slot: the last handle closing tears the slot down and a new request installs a fresh
-	// one, and those two writes coalesce into a single wakeup. Matching on the path alone
-	// would read the new slot as already answered and leave it unanswered forever.
-	const answered = new Map<Path.Valid, { slot: RequestSlot; withdraw: Dispose }>();
-
-	let dead = false;
-	const closed = conn.closed.then(() => {
-		dead = true;
-	});
-
-	for (;;) {
-		const map = table.requests.peek();
-		if (!map || dead) break;
-
-		for (const [path, slot] of map) {
-			if (!table.blind(slot)) continue;
-			if (answered.get(path)?.slot === slot || slot.answer !== undefined) continue;
-			if (table.routes(path)) continue;
-			const withdraw = table.answer(path, session.consume(path));
-			if (withdraw) answered.set(path, { slot, withdraw });
-		}
-
-		// A withdrawn request already released the answer; just forget our claim on the path.
-		// A replaced slot counts as withdrawn: the answer we hold belongs to the slot that
-		// went away, not to whatever now occupies the path.
-		for (const [path, entry] of [...answered]) {
-			if (map.get(path) === entry.slot && table.blind(entry.slot)) continue;
-			answered.delete(path);
-			entry.withdraw();
-		}
-
-		// Woken by the table too, not just the requests: a path that stops being routed needs
-		// the blind answer this loop skipped while it was.
-		await race([table.changed(), closed]);
+	void conn.closed.then(() => fallback.close());
+	try {
+		for await (const request of fallback.requested()) request.accept(session.consume(request.path));
+	} finally {
+		fallback.close();
 	}
-
-	// Session gone: withdraw our answers, waking a standby session to provide fresh ones.
-	for (const { withdraw } of answered.values()) {
-		withdraw();
-	}
-	answered.clear();
 }

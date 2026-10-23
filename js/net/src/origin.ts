@@ -241,7 +241,6 @@ class CoveringRoot {
 	}
 }
 
-// pending: /quest/m1/public-model/answer.md
 /**
  * One requested path: the notify node for everything watching it.
  *
@@ -1292,6 +1291,82 @@ export class Producer implements Table {
 	}
 
 	/**
+	 * Answer unrouted requests in this handle's scope without advertising a route.
+	 *
+	 * The first answer wins. Closing the handle or routing the path ends its resolved
+	 * requests with an error, since no epoch proves another answer serves the same
+	 * publisher. A standby can answer only unresolved and new requests.
+	 */
+	fallback(): Pick<Dynamic, "requested" | "close"> {
+		const server = new ServeState(this.#scope.root, this.#scope.root, false);
+		const held = new Map<Path.Valid, { slot: RequestSlot; withdraw?: Dispose }>();
+		const release = this.#expect();
+		const forget = (path: Path.Valid) => {
+			const entry = held.get(path);
+			if (!entry) return;
+			held.delete(path);
+			const pending = server.pending.get(path);
+			if (pending) server.forget(path, pending);
+			const front = server.served.get(path);
+			server.served.delete(path);
+			entry.withdraw?.();
+			front?.close();
+		};
+		const close = () => {
+			if (server.closed.peek() !== undefined) return;
+			server.close();
+			for (const path of held.keys()) forget(path);
+			release();
+		};
+		const routed = (path: Path.Valid) =>
+			this.#state.local.peek()?.has(path) || this.#state.bestEntry(path) !== undefined;
+		server.onChange = (path) => {
+			const entry = held.get(path);
+			const front = server.served.get(path);
+			if (!entry || entry.withdraw || !front) return;
+			entry.withdraw = this.#answer(path, front.clone());
+			if (!entry.withdraw) {
+				server.served.delete(path);
+				front.close();
+			}
+		};
+		server.onReject = (path, err) => {
+			const entry = held.get(path);
+			if (entry && this.#state.requests.peek()?.get(path) === entry.slot && !entry.slot.answer && !routed(path)) {
+				this.#state.drop(path, entry.slot, err);
+			}
+		};
+		void (async () => {
+			try {
+				while (server.closed.peek() === undefined) {
+					const map = this.#state.requests.peek();
+					if (!map) break;
+					for (const [path, entry] of held) {
+						if (map.get(path) !== entry.slot || !this.#state.blind(entry.slot) || routed(path))
+							forget(path);
+					}
+					for (const [path, slot] of map) {
+						if (
+							held.has(path) ||
+							slot.answer ||
+							!this.#scope.matches(path) ||
+							!this.#state.blind(slot) ||
+							routed(path)
+						)
+							continue;
+						held.set(path, { slot });
+						server.enqueue(path);
+					}
+					await race([this.#changed(), server.closed]);
+				}
+			} finally {
+				close();
+			}
+		})();
+		return { requested: () => requested(server), close };
+	}
+
+	/**
 	 * Advertise `prefix` and serve the requests beneath it.
 	 *
 	 * A route is always a prefix: it claims `prefix` and every path beneath it (the
@@ -1474,12 +1549,15 @@ export class Producer implements Table {
 		}
 		slot.answer = front;
 		this.#state.refresh(path);
+		// A blind answer has no epoch that could prove a later route serves the same
+		// publisher, even if that route has already replaced the slot's current view.
+		const resolved = slot.route.peek()?.front === front;
 
 		return () => {
 			if (slot.answer === front) {
 				// A request the answer resolved ends with its session: the next session is another
 				// publisher instance, since nothing (no epoch) says it serves the same bytes.
-				if (slot.route.peek()?.front === front) {
+				if (resolved || slot.route.peek()?.front === front) {
 					this.#state.drop(path, slot, unroutable());
 				} else {
 					slot.answer = undefined;
@@ -2320,36 +2398,39 @@ export class Dynamic {
 	}
 
 	/** Requests under this prefix, as they arrive, each to {@link Request.prepare} or reject. */
-	async *requested(): AsyncIterableIterator<Request> {
+	requested(): AsyncIterableIterator<Request> {
 		const server = this.#entry.server;
-		if (!server) return;
-		let current: Request | undefined;
-		const drop = () => {
-			current?.reject(unroutable());
-			current = undefined;
-		};
-		// Keep the cursor while draining: restarting it would rescan deleted entries.
-		let queued = server.queue.peek().values();
-		try {
-			for (;;) {
-				const next = queued.next();
-				if (!next.done) {
-					drop();
-					server.queue.mutate((queue) => {
-						queue.delete(next.value);
-					});
-					current = next.value;
-					current.publisher = this.#publisher;
-					yield next.value;
-					continue;
-				}
-				if (server.closed.peek() !== undefined) return;
-				await Signal.race(server.queue, server.closed);
-				queued = server.queue.peek().values();
+		return server ? requested(server, this.#publisher) : (async function* () {})();
+	}
+}
+
+async function* requested(server: ServeState, publisher?: Producer): AsyncIterableIterator<Request> {
+	let current: Request | undefined;
+	const drop = () => {
+		current?.reject(unroutable());
+		current = undefined;
+	};
+	// Keep the cursor while draining: restarting it would rescan deleted entries.
+	let queued = server.queue.peek().values();
+	try {
+		for (;;) {
+			const next = queued.next();
+			if (!next.done) {
+				drop();
+				server.queue.mutate((queue) => {
+					queue.delete(next.value);
+				});
+				current = next.value;
+				current.publisher = publisher;
+				yield next.value;
+				continue;
 			}
-		} finally {
-			drop();
+			if (server.closed.peek() !== undefined) return;
+			await Signal.race(server.queue, server.closed);
+			queued = server.queue.peek().values();
 		}
+	} finally {
+		drop();
 	}
 }
 

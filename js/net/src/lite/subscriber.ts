@@ -36,7 +36,7 @@ import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.t
 import { abandoned, isAbandoned, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
-import { overrideBroadcastWire, wireOf } from "../wire.ts";
+import { overrideBroadcastWire } from "../wire.ts";
 import {
 	AnnounceHistory,
 	AnnounceInit,
@@ -648,11 +648,11 @@ export class Subscriber {
 		};
 		const consumer = new ConsumeBroadcast(this, path, consumed);
 		// Registered before anyone can list the broadcast, so no reader syncs without the peer.
-		void this.#runListing(path, consumed, wireOf(consumer).lister());
+		void this.#runListing(path, consumed, consumer.answering.lister());
 
 		void (async () => {
 			for (;;) {
-				const request = await wireOf(consumer).requested();
+				const request = await consumer.answering.requestedTrack();
 				if (!request) break;
 				void this.#runSubscribe(path, consumed, request);
 			}
@@ -1847,6 +1847,10 @@ async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Pr
  * session. Live subscribes still flow through the inherited requested() queue.
  */
 class ConsumeBroadcast extends broadcast.Consumer {
+	get answering(): broadcast.Dynamic {
+		return this.dynamic();
+	}
+
 	#subscriber: Subscriber;
 	#path: Path.Valid;
 	#consumed: Consumed;

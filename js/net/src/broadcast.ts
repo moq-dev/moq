@@ -63,6 +63,7 @@ class BroadcastState {
 	// publisher that has started pulling them. The counterpart of a live Rust `broadcast::Dynamic`;
 	// without one, a track nobody publishes is `NotFound` rather than a request nobody will answer.
 	served = false;
+	handlers = 0;
 	// Each name's sequence namespace, shared by every producer of the name, created or requested.
 	sequences = new TrackSequences();
 	// Live consumer handles sharing this state (see {@link Consumer.clone}). The broadcast
@@ -121,19 +122,20 @@ function dequeueRequest(state: BroadcastState): track.Request | undefined {
 }
 
 // The next on-demand track request, or undefined once the broadcast closes.
-async function requested(state: BroadcastState): Promise<track.Request | undefined> {
+async function requested(state: BroadcastState, stopped?: GetPromise<null>): Promise<track.Request | undefined> {
 	// Pulling requests is what makes a broadcast serve tracks on demand, and it latches for the
 	// broadcast's lifetime since JS has no drop to mark the handler gone. A subscribe before the first
 	// pull is answered NotFound, so an on-demand publisher starts pulling before it publishes and keeps
 	// pulling until the broadcast closes.
-	state.served = true;
+	if (stopped === undefined) state.served = true;
 	for (;;) {
+		if (stopped !== undefined && stopped.peek() !== undefined) return undefined;
 		const request = dequeueRequest(state);
 		if (request) return request;
 
 		if (state.closed.peek() !== undefined) return undefined;
 
-		await Signal.race(state.requested, state.closed);
+		await Signal.race(state.requested, state.closed, ...(stopped !== undefined ? [stopped] : []));
 	}
 }
 
@@ -349,6 +351,44 @@ export class Demand {
 	}
 }
 
+let makeDynamic: (state: BroadcastState) => Dynamic;
+
+/** Answer on-demand track requests and listings for a broadcast. */
+export class Dynamic {
+	#state: BroadcastState;
+	#stopped = new Once<null>();
+
+	private constructor(state: BroadcastState) {
+		this.#state = state;
+		state.handlers++;
+		state.served = true;
+	}
+
+	static {
+		makeDynamic = (state) => new Dynamic(state);
+	}
+
+	/** Wait for the next requested track, or undefined once this handler or its broadcast closes. */
+	requestedTrack(): Promise<track.Request | undefined> {
+		return requested(this.#state, this.#stopped);
+	}
+
+	/** Answer the broadcast's track listings, refusing a second simultaneous lister. */
+	lister(): Lister {
+		return new Lister(this.#state.listing);
+	}
+
+	/** Stop handling new tracks, rejecting queued requests once no handler remains. */
+	close(): void {
+		if (this.#stopped.peek() !== undefined) return;
+		this.#stopped.set(null);
+		if (--this.#state.handlers !== 0) return;
+		this.#state.served = false;
+		for (const request of this.#state.requested.peek()) request.reject(new NotFound("no track handler"));
+		this.#state.requested.set([]);
+	}
+}
+
 /**
  * The write side of a broadcast.
  *
@@ -400,6 +440,11 @@ export class Producer {
 	/** Watch demand for the broadcast's tracks. */
 	demand(): Demand {
 		return this.#demand;
+	}
+
+	/** Handle on-demand track requests before handing consumers the broadcast. */
+	dynamic(): Dynamic {
+		return makeDynamic(this.#state);
 	}
 
 	/** A read handle for this broadcast, named by the path the origin created it at. */
@@ -645,6 +690,14 @@ export class Consumer {
 			tracks: (owner) => this.#tracks(owner),
 			lister: () => new Lister(this.#state.listing),
 		});
+	}
+
+	#answering?: Dynamic;
+
+	/** Give a custom session its source's on-demand track requests and listings. */
+	protected dynamic(): Dynamic {
+		this.#answering ??= makeDynamic(this.#state);
+		return this.#answering;
 	}
 
 	static {
