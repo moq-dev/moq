@@ -136,7 +136,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Wire-compat audio](/quest/m1/wire-compat-audio.md) - the wire-compat media lanes decode and check the interop tone across releases
 - [Interop AAC](/quest/m1/interop-aac.md) - the Rust interop publisher adds an AAC tone and every subscriber checks it beside Opus
 - [Interop pre-skip](/quest/m1/interop-preskip.md) - the interop tone check anchors phase to timestamps, so a misapplied pre-skip fails
-- [moq-net internals](/quest/m1/net-internals.md) - no per-group session clones, no transport type parameter in lite and IETF internals, and the `Local` check measured
 - [Fragmented QUIC sends](/quest/m1/quic-send-fragments.md) - a chunk-size by retained-flight sweep decides whether `SendBuffer::get`'s front-to-back scan needs a cursor or index
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Subscribe update camera check](/quest/m1/subscribe-update-churn.md) - a person checks a physical-camera publish for SUBSCRIBE_UPDATE chatter; bbb and the fake camera measured quiet

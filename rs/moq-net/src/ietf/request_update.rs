@@ -136,7 +136,9 @@ pub(super) struct Verdict {
 
 /// Close `session` for a peer past the MAX_REQUEST_UPDATES we advertised, returning the error
 /// that ends the request.
-pub(super) fn too_many<S: crate::transport::poll::Session>(session: &mut S) -> Error {
+#[cfg(feature = "async")]
+pub(super) fn too_many(session: &mut crate::driver::Transport) -> Error {
+	use crate::transport::poll::Session as _;
 	let err = SessionError::TooManyRequestUpdates;
 	session.close(super::error::to_session_code(&err), "too many request updates");
 	Error::Session(err)

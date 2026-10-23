@@ -69,6 +69,16 @@ Runtime comparison requires Linux because io\_uring and relay process metrics
 come from Linux interfaces. The default worker count is the number of logical
 CPUs the run may use.
 
+Measure `moq-uring`'s actual `Local` thread guard separately from I/O:
+
+```bash
+nix develop --command cargo bench --locked -p moq-uring --bench worker_turns -- local_thread_check
+```
+
+This compares the same constant-returning transport method directly and through
+`Local`. It isolates the thread guard; it does not attribute runtime workload CPU
+to that check or disable the production safety guard.
+
 Sweep the relay's QUIC shard count against the connection count, for the
 room (`video`: every connection publishes and subscribes) and `fanout` (one
 publisher, the rest subscribers) workloads:
