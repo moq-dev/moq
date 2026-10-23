@@ -953,6 +953,35 @@ ws = false
 		assert!(drift.is_empty(), "{drift:#?}");
 	}
 
+	/// The relay ignores a `MOQ_*` variable it doesn't know, so a stale name in the
+	/// NixOS module would silently drop that setting.
+	#[test]
+	fn the_nixos_module_sets_only_known_variables() {
+		let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../nix/modules/moq-relay.nix");
+		let module = std::fs::read_to_string(path).unwrap();
+		let registry = crate::settings();
+
+		let mut unknown = Vec::new();
+		for (start, _) in module.match_indices("MOQ_") {
+			let rest = &module[start..];
+			let end = rest
+				.find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+				.unwrap_or(rest.len());
+			let name = &rest[..end];
+			let known = registry
+				.props
+				.iter()
+				.any(|prop| prop.deprecated.is_none() && prop.envs.contains(&name));
+			if !known {
+				unknown.push(name);
+			}
+		}
+		assert!(
+			unknown.is_empty(),
+			"{path} sets variables moq-relay doesn't read: {unknown:?}"
+		);
+	}
+
 	/// An embedder can merge its relay fragment without parsing the binary CLI again.
 	#[test]
 	fn merge_into_relay_fragment() {

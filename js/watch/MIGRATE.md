@@ -4,6 +4,14 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Sync` drops its duplicate and decoder-only surface
+
+Read `Sync.out.delay` instead of `Sync.out.jitter`, and the element's `sync.out.delay` instead of its `jitter` getter; they always held the same value.
+Stop passing `probe` to `new Sync(...)`; it was never read.
+`Sync.now()` returns `Milli | undefined`.
+`received`, `wait`, and `register` are internal to the built-in decoders, and `epoch` and `skipped` are gone: `wait` now resolves `true` to present the frame or `false` to drop it.
+`<moq-watch>` no longer observes `reload`, `latency`, `latency-min`, or `jitter`, nor has the `latency`, `latencyMin`, `latencyMax`, or `reload` properties; use `announced`, `delay`, and `buffer` (see 0.5 -> 0.6).
+
 ### AAC decoding support is a `Level`
 
 `Support.Audio.aac` is `"full" | "partial" | "none"` like `opus`, instead of a boolean, since the libav fallback now decodes AAC where `AudioDecoder` is missing.

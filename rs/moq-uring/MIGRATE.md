@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Wrap sessions in `transport::Local` (#6176)
+
+moq-net dropped `connect_lite`, `accept_lite`, and `accept_request_lite`, and every session now needs a `Send` transport.
+Wrap the worker's session as `transport::Local::new(transport::Session::new(conn, binding))` and call `connect`, `accept`, or `accept_request`.
+
 ### Timers run on moq-clock
 
 The worker is a moq-clock backend, so its deadlines are `moq_clock::Instant`s instead of `std::time::Instant`s.

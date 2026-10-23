@@ -7,9 +7,9 @@
 //! connection's timeout, and wakes stream waiters. The returned
 //! [`Connection`] implements [`web_transport_trait::poll`], so
 //! wrapping it with `crate::transport::Session::new` and
-//! [`moq_net::transport::Binding::InBand`] lets
-//! `moq_net::Client::connect_lite` / `Server::accept_lite` run real moq-lite
-//! sessions on the worker; everything is `Rc`-shared and `!Send` by design.
+//! [`moq_net::transport::Binding::InBand`], then `crate::transport::Local`, lets
+//! `moq_net::Client::connect` / `Server::accept` run real MoQ sessions on the
+//! worker; everything is `Rc`-shared and `!Send` by design.
 //!
 //! An [`Endpoint`] serves many connections on one socket, demuxed by
 //! connection id; [`client::connect`] and [`server::accept`] are its

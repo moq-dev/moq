@@ -26,6 +26,7 @@
 #   ./run.sh --fragment-pes        # split generated clear PES headers across packets
 #   ./run.sh --clockless sections # sections, pes, or audio-scte35 without video
 #   ./run.sh --klv                 # add KLV and DVB AC-3, carried as whole PES, and grade them
+#   ./run.sh --revision            # revise the PMT mid-stream, adding then dropping a KLV stream
 #   ./run.sh --delay 2s            # pass the exporter's --delay
 #   ./run.sh --rate 7000000        # bufferbloat: 7 Mb/s to the subscriber behind a deep queue (moq-shaper)
 #   ./run.sh --loss 10             # drop 10% of the relay's datagrams to the subscriber (moq-shaper)
@@ -87,6 +88,7 @@ FULL=""         # the same with audio, in a multiplex the source fills with no n
 FRAGMENT_PES="" # use following null slots for fragmented PES headers
 CLOCKLESS=""    # generated programs clocked by audio or a dedicated PCR-only PID
 KLV=""          # inject asynchronous and synchronous KLV beside DVB AC-3, and grade every PES
+REVISION=""     # revise the PMT twice mid-stream, and grade the export's revisions
 LOSS=""         # percent of relay -> subscriber datagrams dropped at random by moq-shaper
 RATE=""         # bits/s moq-shaper carries from the relay to the subscriber, behind QUEUE
 QUEUE=""        # how long a datagram may wait for RATE before the path tail-drops it
@@ -182,6 +184,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --klv)
             KLV=1
+            shift
+            ;;
+        --revision)
+            REVISION=1
             shift
             ;;
         --delay)
@@ -284,6 +290,10 @@ fi
 
 if [[ -n "$KLV" && -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$PAIR$LIVE$PASSTHROUGH$MPTS" ]]; then
     echo "error: --klv generates its own clip and grades the demultiplexed export's PES" >&2
+    exit 1
+fi
+if [[ -n "$REVISION" && -n "$SOURCE$ANALYZE_ONLY$HRD$HEADROOM$LEAK$FULL$OPEN_GOP$FRAGMENT_PES$PAIR$LIVE$PASSTHROUGH$MPTS$KLV$CLOCKLESS" ]]; then
+    echo "error: --revision revises the generated closed-GOP clip and grades the demultiplexed export's PMT" >&2
     exit 1
 fi
 
@@ -566,6 +576,12 @@ else
         -x264-params "$X264" -b:v 8M \
         -c:a aac -b:a 128k \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
+fi
+# A KLV stream joins the program a third of the way in and leaves it two thirds in, each
+# change announced by a PMT revision, in the clip's null slots.
+if [[ -n "$REVISION" ]]; then
+    mv "$SRC_TS" "$HARNESS_RUN/media.ts"
+    python3 "$DIR/revision.py" inject "$HARNESS_RUN/media.ts" "$SRC_TS" --report "$HARNESS_RUN/revision-injected.json"
 fi
 
 if [[ -n "$FRAGMENT_PES" ]]; then
@@ -965,6 +981,17 @@ if [[ -n "$KLV" ]]; then
     if ! python3 "$DIR/klv.py" grade "$SRC_TS" "$SUB_TS" --report-json "$HARNESS_RUN/klv.json"; then
         echo >&2
         echo "error: KLV analysis failed (see round-trip logs below)" >&2
+        dump_logs
+        exit 1
+    fi
+fi
+
+# The export announces each layout the source's PMT revised to, at the next version.
+if [[ -n "$REVISION" ]]; then
+    echo
+    if ! python3 "$DIR/revision.py" grade "$SRC_TS" "$SUB_TS" --report-json "$HARNESS_RUN/revision.json"; then
+        echo >&2
+        echo "error: PMT revision analysis failed (see round-trip logs below)" >&2
         dump_logs
         exit 1
     fi

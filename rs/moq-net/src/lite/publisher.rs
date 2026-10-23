@@ -3142,7 +3142,7 @@ mod announce_test {
 		for version in [Version::Lite06, Version::Lite07] {
 			let mut h = harness_on(version).await;
 			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
-			let peer = h.origin.clone().peer().announce("cam", route.clone()).unwrap();
+			let newer = h.origin.announce("cam", route.clone()).unwrap();
 			// A restart waits out the update hold like an update.
 			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 			settle().await;
@@ -3173,7 +3173,7 @@ mod announce_test {
 			};
 			restarted(h.wire.take_announces());
 
-			drop(peer);
+			drop(newer);
 			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 			settle().await;
 			restarted(h.wire.take_announces());
@@ -3233,11 +3233,11 @@ mod announce_test {
 			// Same chain and cost, so only the instance changed. Both land before the loop polls.
 			let route = crate::origin::Route::default().with_hops(pub_hops()).with_cost(7);
 			let epoch = (!anonymous).then(crate::Epoch::mint);
-			let _newer = match &epoch {
-				Some(epoch) => h.origin.announce("cam", route.with_epoch(epoch.clone())),
-				None => h.origin.clone().peer().announce("cam", route),
-			}
-			.unwrap();
+			let route = match &epoch {
+				Some(epoch) => route.with_epoch(epoch.clone()),
+				None => route,
+			};
+			let _newer = h.origin.announce("cam", route).unwrap();
 			auth.authorize(&grant(&["cam", "other"]));
 			moq_clock::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 			settle().await;

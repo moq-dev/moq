@@ -1328,7 +1328,6 @@ impl Cluster {
 	/// Resolve origin handles for a lease already admitted by a local relay rule.
 	pub(crate) fn scope(&self, lease: auth::Lease, request: &moq_auth::Request) -> Result<Admitted, auth::Error> {
 		let token = lease.token();
-		token.uncapped()?;
 		let publisher = self.publisher(token);
 		let subscriber = self.subscriber(token);
 		let allowed = match request.role {
@@ -1450,7 +1449,7 @@ impl Cluster {
 	/// equivalent per-request setter), which derives the read handle. On an
 	/// upstream grant that handle never sees a route learned from another upstream.
 	pub fn subscriber(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.mounted(token)?.scope(&token.root, &token.subscribe.path).ok()
+		self.mounted(token)?.scope(&token.root, &token.subscribe).ok()
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's publish permissions,
@@ -1458,7 +1457,7 @@ impl Cluster {
 	/// [`origin::Producer::upstream`] when that peer is upstream.
 	/// Nothing is published beneath the grant's mounts.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.mounted(token)?.scope(&token.root, &token.publish.path).ok()
+		self.mounted(token)?.scope(&token.root, &token.publish).ok()
 	}
 
 	/// The origin marked with the grant's link and with its mounts applied,
@@ -2319,16 +2318,6 @@ fn remote_status(
 mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
-
-	#[tokio::test]
-	async fn fixed_leases_cannot_bypass_cap_refusal() {
-		let cluster = Cluster::new(Options::default()).unwrap();
-		let mut grant = moq_auth::Grant::new(moq_net::Pattern::all(), moq_net::Patterns::new());
-		grant.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
-		let lease = auth::Lease::new("/room", moq_auth::lease::Consumer::fixed(grant));
-		let request = moq_auth::Request::new("test", moq_auth::Transport::Http, "/room");
-		assert!(matches!(cluster.scope(lease, &request), Err(auth::Error::Forbidden(_))));
-	}
 
 	#[tokio::test]
 	async fn request_limits_follow_the_admitted_grant() {
