@@ -20,6 +20,12 @@ The encoder logs the controls it applied for `Config::preset` at debug level whe
 `DmaBuf::new` and `DmaBufLayout` are private until an external producer needs them.
 `DmaBuf` surfaces from capture and decode are unchanged.
 
+### `Source::Display` no longer opens the portal on Wayland
+
+`capture::Source::Display` captures X11 displays only, including XWayland's `x11:` ids.
+On Wayland the main display and any non-`x11:` id now fail with `Error::Unsupported` instead of opening the system picker with a selection shared by every publication in the process.
+Pass `Source::Portal(portal::Selection::new(portal::Kind::Screen))` to ask the picker, and keep that selection for the publication's reopens.
+
 ### `Control::cut` is not rate limited, and capture advertises refresh (#6048)
 
 `encode::Control::cut` no longer spaces keyframes 500 ms apart: every request forces one on the next frame, so frequent calls produce all-keyframe video.

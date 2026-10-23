@@ -231,7 +231,7 @@ void main() {
       name: 'events',
       info: TrackInfo(timescale: 1000000),
     );
-    broadcast.announce(route: MoqRoute());
+    broadcast.announce(route: AnnounceRoute());
     final announced =
         (await announcement.timeout(timeout) as AnnounceEventStart).announce;
     expect(announced.prefix, 'live');
@@ -309,7 +309,7 @@ void main() {
     );
     final broadcast = server.createBroadcast('live');
     final track = broadcast.publishTrack(name: 'events', info: null);
-    broadcast.announce(route: MoqRoute());
+    broadcast.announce(route: AnnounceRoute());
     final announced =
         (await announcement.timeout(timeout) as AnnounceEventStart).announce;
     expect(announced.prefix, 'live');
@@ -445,7 +445,7 @@ void main() {
       throwsA(anything),
     );
 
-    broadcast.announce(route: MoqRoute());
+    broadcast.announce(route: AnnounceRoute());
     final announced = consumer.announced(config: MoqAnnounceConfig());
     final first = await nextRoute(announced);
     expect(first, isA<AnnounceEventStart>());
@@ -460,7 +460,7 @@ void main() {
       throwsA(anything),
     );
 
-    broadcast.announce(route: MoqRoute());
+    broadcast.announce(route: AnnounceRoute());
     expect(await nextRoute(announced), isA<AnnounceEventStart>());
     await consumer.requestBroadcast(path: 'live').timeout(timeout);
     announced.cancel();
@@ -477,12 +477,12 @@ void main() {
       epochTime('018bcfe5-6800-7000-8000-000000000000'),
       DateTime.utc(2023, 11, 14, 22, 13, 20),
     );
-    broadcast.announce(route: MoqRoute(epoch: first));
+    broadcast.announce(route: AnnounceRoute(epoch: first));
     final start = await nextRoute(announced) as AnnounceEventStart;
     expect(start.announce.route.epoch, first);
 
     final second = mintEpoch();
-    broadcast.announce(route: MoqRoute(epoch: second));
+    broadcast.announce(route: AnnounceRoute(epoch: second));
     final restart = await nextRoute(announced) as AnnounceEventRestart;
     expect(restart.announce.route.epoch, second);
 
@@ -497,7 +497,7 @@ void main() {
       config: MoqAnnounceConfig(prefix: 'room', filter: '*/chat'),
     );
     final broadcast = origin.createBroadcast(path: 'room/alice/chat');
-    broadcast.announce(route: MoqRoute());
+    broadcast.announce(route: AnnounceRoute());
 
     final update = await nextRoute(announced) as AnnounceEventStart;
     expect(update.announce.prefix, 'room/alice/chat');

@@ -138,7 +138,7 @@ impl<'a> Path<'a> {
 		}
 	}
 
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn from_escaped(s: String) -> PathOwned {
 		if s.is_empty() {
 			Path::empty()

@@ -222,7 +222,10 @@ impl Row {
 }
 
 /// A consistent read of the window, for rendering one playlist (the serve path only).
-#[cfg_attr(not(feature = "server"), allow(dead_code))]
+#[cfg_attr(
+	not(feature = "server"),
+	allow(dead_code, reason = "only the `server` feature uses it")
+)]
 pub(crate) struct Window {
 	/// The `EXT-X-MEDIA-SEQUENCE` of the first listed segment: its source segment number, so
 	/// sequence numbers line up across renditions and edges.
@@ -249,7 +252,10 @@ enum Next {
 
 impl State {
 	/// Snapshot the current window. Every row is a complete segment, so all are listed.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	fn window(&self) -> Window {
 		Window {
 			sequence: self.sequence,
@@ -395,7 +401,10 @@ impl Producer {
 	}
 
 	/// Snapshot the current window (serve path).
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub fn window(&self) -> Window {
 		self.state.read().window()
 	}
@@ -439,7 +448,10 @@ impl Producer {
 
 	/// Whether the playlist has anything to serve yet (at least one segment, or the broadcast
 	/// already ended).
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub fn is_playable(&self) -> bool {
 		let state = self.state.read();
 		state.ended || !state.rows.is_empty()
@@ -447,7 +459,10 @@ impl Producer {
 
 	/// Poll until [`is_playable`](Self::is_playable) or the reference timeline failed, for the
 	/// serve path's long-poll.
-	#[cfg_attr(not(feature = "server"), allow(dead_code))]
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature uses it")
+	)]
 	pub fn poll_playable(&self, waiter: &kio::Waiter) -> Poll<()> {
 		let poll = self.state.poll_ref(waiter, |state| {
 			if state.ended || state.failed.is_some() || !state.rows.is_empty() {

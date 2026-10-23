@@ -17,14 +17,20 @@ pub use unlimited::Unlimited;
 /// Common interface for different congestion controllers
 pub trait Controller: Send + Sync {
     /// One or more packets were just sent
-    #[allow(unused_variables)]
+    #[allow(
+        unused_variables,
+        reason = "a no-op default that keeps the parameter names for implementors"
+    )]
     fn on_sent(&mut self, now: Instant, bytes: u64, last_packet_number: u64) {}
 
     /// One packet was just sent
     ///
     /// `packet_number` identifies the packet only within `space`; every packet number space
     /// numbers independently from zero.
-    #[allow(unused_variables)]
+    #[allow(
+        unused_variables,
+        reason = "a no-op default that keeps the parameter names for implementors"
+    )]
     fn on_packet_sent(&mut self, now: Instant, bytes: u16, packet_number: u64, space: SpaceId) {}
 
     /// The connection had data to send but was blocked by the congestion window
@@ -39,7 +45,10 @@ pub trait Controller: Send + Sync {
     /// including after a partial send. Congestion, pacing, and the local send window are sender
     /// limits. Receiver credit counts as application-limited: for MoQ, peer flow control is a
     /// configuration limit rather than a measure of path capacity.
-    #[allow(unused_variables)]
+    #[allow(
+        unused_variables,
+        reason = "a no-op default that keeps the parameter names for implementors"
+    )]
     fn on_app_limited(&mut self, in_flight: u64) {}
 
     /// Packet deliveries were confirmed
@@ -47,7 +56,14 @@ pub trait Controller: Send + Sync {
     /// `app_limited` indicates whether the connection was blocked on outgoing
     /// application data prior to receiving these acknowledgements.
     /// `pn` identifies the packet only within `space`.
-    #[allow(unused_variables)]
+    #[allow(
+        unused_variables,
+        reason = "a no-op default that keeps the parameter names for implementors"
+    )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a public trait method; reshaping it is a breaking change"
+    )]
     fn on_ack(
         &mut self,
         now: Instant,
@@ -61,7 +77,10 @@ pub trait Controller: Send + Sync {
     }
 
     /// Packets are acked in batches, all with the same `now` argument. This indicates one of those batches has completed.
-    #[allow(unused_variables)]
+    #[allow(
+        unused_variables,
+        reason = "a no-op default that keeps the parameter names for implementors"
+    )]
     fn on_end_acks(
         &mut self,
         now: Instant,
@@ -82,6 +101,10 @@ pub trait Controller: Send + Sync {
     /// in the congestion event, within `space`, and `sent` is its send time. For ECN, that is the
     /// largest packet acknowledged by the ACK whose CE count increased, and the event fires only
     /// on such an increase.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a public trait method; reshaping it is a breaking change"
+    )]
     fn on_congestion_event(
         &mut self,
         now: Instant,
@@ -96,7 +119,10 @@ pub trait Controller: Send + Sync {
     /// One packet was just lost
     ///
     /// `packet_number` identifies the packet only within `space`.
-    #[allow(unused_variables)]
+    #[allow(
+        unused_variables,
+        reason = "a no-op default that keeps the parameter names for implementors"
+    )]
     fn on_packet_lost(
         &mut self,
         lost_bytes: u16,
@@ -124,7 +150,10 @@ pub trait Controller: Send + Sync {
     ///
     /// Controllers can use this to refine estimates that depend on peer ACK behavior (e.g.
     /// BBR's offload budget).
-    #[allow(unused_variables)]
+    #[allow(
+        unused_variables,
+        reason = "a no-op default that keeps the parameter names for implementors"
+    )]
     fn on_ack_frequency_update(
         &mut self,
         ack_eliciting_threshold: u64,
