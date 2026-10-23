@@ -107,7 +107,9 @@ start_relay() {
     fi
 
     for attempt in {1..5}; do
-        port=$((40000 + (RANDOM % 20000)))
+        # Below the ephemeral ranges (Linux 32768+, macOS 49152+), where every client socket
+        # on a busy machine competes for the port; the heap mode's port + 1 stays below too.
+        port=$((20000 + (RANDOM % 12000)))
         config=$directory/relay-$attempt.toml
         log=$directory/relay-$attempt.log
         relay_config "$config" "$port" "$runtime" "$workers"
