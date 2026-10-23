@@ -1362,8 +1362,14 @@ impl PreSkip {
 		let headers = structure.get_optional::<gst::Array>("streamheader").ok()??;
 		let head = headers.first()?.get::<gst::Buffer>().ok()?;
 		let head = head.map_readable().ok()?;
-		let total = moq_mux::codec::opus::Config::parse(&mut head.as_slice()).ok()?.pre_skip.into();
-		(total > 0).then_some(Self { total, remaining: total })
+		let total = moq_mux::codec::opus::Config::parse(&mut head.as_slice())
+			.ok()?
+			.pre_skip
+			.into();
+		(total > 0).then_some(Self {
+			total,
+			remaining: total,
+		})
 	}
 
 	/// Clip this packet's share of the pre-skip, and stamp it where its first kept sample plays.
@@ -1372,14 +1378,11 @@ impl PreSkip {
 	fn apply(&mut self, buffer: &mut gst::BufferRef) -> Result<()> {
 		let mut clip = 0;
 		if self.remaining > 0 {
-			let samples = moq_mux::codec::opus::packet_samples(&buffer.map_readable()?).context("malformed Opus packet")?;
+			let samples =
+				moq_mux::codec::opus::packet_samples(&buffer.map_readable()?).context("malformed Opus packet")?;
 			clip = self.remaining.min(samples.into());
 			self.remaining -= clip;
-			gst_audio::AudioClippingMeta::add(
-				buffer,
-				gst::format::Default::from_u64(clip),
-				gst::format::Default::ZERO,
-			);
+			gst_audio::AudioClippingMeta::add(buffer, gst::format::Default::from_u64(clip), gst::format::Default::ZERO);
 		}
 		let early = gst::ClockTime::from_nseconds(
 			(self.total - clip)
@@ -1621,7 +1624,12 @@ mod tests {
 		gst::init().unwrap();
 		let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 		assert!(super::PreSkip::new(&super::audio_caps(&config).unwrap()).is_none());
-		config.description = Some(moq_mux::codec::opus::Config::new(48_000, 2).with_pre_skip(312).encode().unwrap());
+		config.description = Some(
+			moq_mux::codec::opus::Config::new(48_000, 2)
+				.with_pre_skip(312)
+				.encode()
+				.unwrap(),
+		);
 		let caps = super::audio_caps(&config).unwrap();
 
 		// TOC configs 28 and 31: a 2.5 ms (120-sample) and a 20 ms (960-sample) CELT packet.
@@ -1640,7 +1648,11 @@ mod tests {
 					meta.start().value() as u64
 				});
 				assert_eq!(clipped.unwrap_or(0), clip, "packet {index} of {micros}us");
-				assert_eq!(buffer.pts(), Some(gst::ClockTime::from_useconds(pts)), "packet {index} of {micros}us");
+				assert_eq!(
+					buffer.pts(),
+					Some(gst::ClockTime::from_useconds(pts)),
+					"packet {index} of {micros}us"
+				);
 			}
 		}
 	}
