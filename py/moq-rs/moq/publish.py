@@ -260,14 +260,14 @@ class Fill:
         await self._inner.unused()
 
     def is_wanted(self, sequence: int) -> bool:
-        """Whether a reader still reads group ``sequence``.
+        """Whether a reader still waits for group ``sequence`` from this fill.
 
-        False once every reader narrowed past it, or nobody waits on the fill.
+        False once every reader took it or narrowed past it, or nobody waits on the fill.
         """
         return self._inner.is_wanted(sequence)
 
     async def unwanted(self, sequence: int) -> None:
-        """Wait until no reader reads group ``sequence``, so stop serving it."""
+        """Wait until no reader waits for group ``sequence`` from this fill, so stop serving it."""
         await self._inner.unwanted(sequence)
 
 

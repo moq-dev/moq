@@ -621,19 +621,21 @@ impl Fill {
 		self.inner.result.poll_unused(waiter).map(|_| ())
 	}
 
-	/// Whether a reader still reads group `sequence`: false once every reader narrowed past
-	/// it, or nobody waits on the fill. A group stops being wanted for good.
+	/// Whether a reader still waits for group `sequence` from this fill: false once every
+	/// reader took it or narrowed past it, or nobody waits on the fill. A group stops being
+	/// wanted for good; once accepted and taken, [`group::Producer::demand`](crate::group::Producer::demand)
+	/// says who reads it.
 	pub fn is_wanted(&self, sequence: u64) -> bool {
 		self.inner.is_wanted(sequence)
 	}
 
-	/// Wait until no reader reads group `sequence`, so stop serving it.
+	/// Wait until no reader waits for group `sequence` from this fill, so stop serving it.
 	#[cfg(feature = "async")]
 	pub async fn unwanted(&self, sequence: u64) {
 		kio::wait(|waiter| self.poll_unwanted(sequence, waiter)).await
 	}
 
-	/// Poll until no reader reads group `sequence`.
+	/// Poll until no reader waits for group `sequence` from this fill.
 	pub fn poll_unwanted(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
 		self.inner.poll_unwanted(sequence, waiter)
 	}

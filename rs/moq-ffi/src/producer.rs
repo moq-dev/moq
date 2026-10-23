@@ -565,13 +565,13 @@ impl MoqFill {
 		.await
 	}
 
-	/// Whether a reader still reads group `sequence`: false once every reader narrowed past
-	/// it, or nobody waits on the fill.
+	/// Whether a reader still waits for group `sequence` from this fill: false once every
+	/// reader took it or narrowed past it, or nobody waits on the fill.
 	pub fn is_wanted(&self, sequence: u64) -> bool {
 		self.inner.is_wanted(sequence)
 	}
 
-	/// Wait until no reader reads group `sequence`, so stop serving it.
+	/// Wait until no reader waits for group `sequence` from this fill, so stop serving it.
 	pub async fn unwanted(&self, sequence: u64) -> Result<(), MoqError> {
 		let fill = self.inner.clone();
 		crate::ffi::detached(async move {

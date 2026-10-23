@@ -107,13 +107,13 @@ public final class Fill: Sendable {
         try await ffi.unused()
     }
 
-    /// Whether a reader still reads group `sequence`: false once every reader narrowed past
-    /// it, or nobody waits on the fill.
+    /// Whether a reader still waits for group `sequence` from this fill: false once every
+    /// reader took it or narrowed past it, or nobody waits on the fill.
     public func isWanted(sequence: UInt64) -> Bool {
         ffi.isWanted(sequence: sequence)
     }
 
-    /// Suspend until no reader reads group `sequence`, so stop serving it.
+    /// Suspend until no reader waits for group `sequence` from this fill, so stop serving it.
     public func unwanted(sequence: UInt64) async throws {
         try await ffi.unwanted(sequence: sequence)
     }

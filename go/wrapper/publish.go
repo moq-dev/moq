@@ -446,13 +446,14 @@ func (f *Fill) Unused(ctx context.Context) error {
 	return f.inner.Unused(ctx)
 }
 
-// IsWanted reports whether a reader still reads group sequence: false once every
-// reader narrowed past it, or nobody waits on the fill.
+// IsWanted reports whether a reader still waits for group sequence from this fill:
+// false once every reader took it or narrowed past it, or nobody waits on the fill.
 func (f *Fill) IsWanted(sequence uint64) bool {
 	return f.inner.IsWanted(sequence)
 }
 
-// Unwanted blocks until no reader reads group sequence, so stop serving it.
+// Unwanted blocks until no reader waits for group sequence from this fill, so stop
+// serving it.
 func (f *Fill) Unwanted(ctx context.Context, sequence uint64) error {
 	return f.inner.Unwanted(ctx, sequence)
 }
