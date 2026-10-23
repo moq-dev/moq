@@ -784,6 +784,9 @@ async fn follow_catalog(
 		stop: stopped,
 	};
 	let mut followers: HashMap<moq_net::PathOwned, Followed> = HashMap::new();
+	// Woken when a follower runs out of renditions, so the run can let it go without waiting for
+	// another catalog update.
+	let emptied = Arc::new(tokio::sync::Notify::new());
 	// The followers, and the retirements of pads the catalog no longer lists.
 	let mut tasks = tokio::task::JoinSet::new();
 	let mut catalog_closed = false;
@@ -799,10 +802,11 @@ async fn follow_catalog(
 			// Ended by a restart, or the session ending.
 			_ = cancel.changed() => break,
 			_ = tasks.join_next(), if !tasks.is_empty() => {}
+			_ = emptied.notified() => followers.retain(|_, follower| !follower.plan.is_closed() && !follower.idle()),
 			// The guard stops us polling a closed catalog track (which would spin the loop
 			// returning None) while the followers drain.
 			next = catalog_consumer.next(), if !catalog_closed => match next {
-				Ok(Some(catalog)) => reconcile(&catalog, &source, &playback, &mut followers, &mut tasks, cancel),
+				Ok(Some(catalog)) => reconcile(&catalog, &source, &playback, &mut followers, &mut tasks, &emptied, cancel),
 				// Catalog track closed. Don't stop the followers: let each reader reach its natural
 				// end, and just stop reconciling while they drain.
 				//
@@ -852,6 +856,7 @@ fn reconcile(
 	playback: &Playback,
 	followers: &mut HashMap<moq_net::PathOwned, Followed>,
 	tasks: &mut tokio::task::JoinSet<()>,
+	emptied: &Arc<tokio::sync::Notify>,
 	cancel: &watch::Receiver<bool>,
 ) {
 	// Build the desired shape for each rendition. This is deliberately cheap: caps come from the
@@ -937,31 +942,21 @@ fn reconcile(
 	// A broadcast no enabled rendition reads any more stops its readers, apart from a delisted
 	// one playing out its tail. Its follower stays reachable, with its finished records, while a
 	// disabled rendition still names it or a delisted one drains, so a re-enable or relist reaches
-	// it rather than a new follower. Once it plays nothing, the next update lets it go.
+	// it rather than a new follower. Once it plays nothing, the run lets it go.
 	let held: HashSet<moq_net::PathOwned> = disabled
 		.iter()
 		.filter_map(|(_, reference)| source.resolve_reference(reference.broadcast()))
 		.collect();
 	followers.retain(|path, follower| {
-		if plans.contains_key(path) {
-			return true;
-		}
-		let idle = *follower.empty.borrow() && follower.plan.borrow().renditions.is_empty();
-		if follower.plan.is_closed() || (idle && !held.contains(path)) {
+		// A follower whose broadcast failed exited, and this update follows it again.
+		if follower.plan.is_closed() {
 			return false;
 		}
-		follower.plan.send_replace(Plan::default());
-		true
+		follower.held = held.contains(path);
+		follower.plan.send_replace(plans.remove(path).unwrap_or_default());
+		!follower.idle()
 	});
 	for (path, plan) in plans {
-		// A follower whose broadcast failed exited, and this update follows it again.
-		if let Some(follower) = followers.get(&path)
-			&& !follower.plan.is_closed()
-		{
-			follower.plan.send_replace(plan);
-			continue;
-		}
-
 		// Follow without waiting: an unavailable sibling must not park the catalog loop and hold
 		// up every other rendition. The follower resolves its instances under the run. Every
 		// instance is followed, and each rendition checks the epoch it names.
@@ -975,6 +970,7 @@ fn reconcile(
 		};
 		let (plan_tx, plan) = watch::channel(plan);
 		let (empty_tx, empty) = watch::channel(false);
+		let held = held.contains(&path);
 		let follower_task = Follower {
 			playback: playback.clone(),
 			path: path.clone(),
@@ -986,21 +982,40 @@ fn reconcile(
 			started: 0,
 			next_id: 0,
 			empty: empty_tx,
+			emptied: emptied.clone(),
 		}
 		.run(instances, plan);
 		tasks.spawn_on(
 			STREAMING.scope(playback.element.clone(), follower_task),
 			RUNTIME.handle(),
 		);
-		followers.insert(path, Followed { plan: plan_tx, empty });
+		followers.insert(
+			path,
+			Followed {
+				plan: plan_tx,
+				empty,
+				held,
+			},
+		);
 	}
 }
 
 /// A [`Follower`] as its run reaches it.
 struct Followed {
 	plan: watch::Sender<Plan>,
-	/// Set while it plays no rendition, so the run may let it go.
+	/// Set while it plays no rendition.
 	empty: watch::Receiver<bool>,
+	/// A disabled rendition names its path, so a re-enable needs its finished records.
+	held: bool,
+}
+
+impl Followed {
+	/// Whether nothing reaches it again: it plays nothing, was asked for nothing, and keeps no
+	/// record a re-enable needs. Judged against the plan sent last, so a plan it has yet to take
+	/// keeps it.
+	fn idle(&self) -> bool {
+		!self.held && *self.empty.borrow() && self.plan.borrow().renditions.is_empty()
+	}
 }
 
 /// What one broadcast run shares with every follower and reader it starts. Pads survive a
@@ -1052,6 +1067,8 @@ struct Follower {
 	next_id: u64,
 	/// The run's [`Followed::empty`].
 	empty: watch::Sender<bool>,
+	/// Woken as [`Self::empty`] sets, so the run checks whether to let it go.
+	emptied: Arc<tokio::sync::Notify>,
 }
 
 /// The instance a [`Follower`] reads.
@@ -1113,12 +1130,19 @@ impl Follower {
 		self.play();
 
 		loop {
-			if !following && self.readers.is_empty() {
+			// Done once nothing it reads remains, or nothing is left to read and no plan can add
+			// any: a closed catalog stops renditions changing.
+			if (!following || !listening && self.renditions.is_empty()) && self.readers.is_empty() {
 				break;
 			}
 			let empty = self.renditions.is_empty();
-			self.empty
-				.send_if_modified(|was| std::mem::replace(was, empty) != empty);
+			if self
+				.empty
+				.send_if_modified(|was| std::mem::replace(was, empty) != empty)
+				&& empty
+			{
+				self.emptied.notify_one();
+			}
 
 			tokio::select! {
 				biased;
@@ -3499,6 +3523,46 @@ mod session_tests {
 		assert_eq!(recorder.count(|seen| *seen == Seen::Start(pad.clone())), 1, "{seen:?}");
 		recorder.assert_one_pad_held();
 		drop(first);
+	}
+
+	/// A sibling the catalog stopped reading is let go: once the catalog closes, the run ends while
+	/// both broadcasts stay up.
+	#[test]
+	fn a_sibling_no_rendition_reads_does_not_outlive_its_catalog() {
+		let _pad_ids = pad_ids();
+		let element = element();
+		let recorder = Recorder::attach(&element);
+		let origin = origin();
+		let mut room = referencing(&origin, None);
+		let (_shutdown, shutdown) = watch::channel(false);
+		let (_cancel, mut cancelled) = watch::channel(false);
+		let run = {
+			let weak = element.downgrade();
+			let source = moq_mux::Source::new(origin.consume(), room.broadcast.consume());
+			super::RUNTIME
+				.spawn(async move { follow_catalog(source, &Pads::default(), weak, &shutdown, &mut cancelled).await })
+		};
+
+		let mut cam = Publisher::sibling(&origin, Default::default());
+		recorder.written(&mut cam, 1);
+		// The delisted rendition plays out its track before its pad retires.
+		room.catalog.modify().unwrap().video.renditions.clear();
+		cam.video.finish().unwrap();
+		for _ in 0..200 {
+			if pads(&element, "video_").is_empty() {
+				break;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		assert!(pads(&element, "video_").is_empty(), "the removal never landed");
+
+		room.catalog.finish().unwrap();
+		super::RUNTIME
+			.block_on(async { tokio::time::timeout(Duration::from_secs(10), run).await })
+			.expect("the sibling's follower outlived the catalog")
+			.unwrap()
+			.unwrap();
+		drop((room, cam));
 	}
 
 	/// A catalog finished while its broadcast stays up still follows its siblings: the next
