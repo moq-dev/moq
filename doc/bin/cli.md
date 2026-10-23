@@ -443,24 +443,6 @@ continuity error, and the rest carry on. It takes neither `--linger`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
 
-`export ts --sync` renders every packet from the broadcast alone, so two exports
-of it, joined at different moments and fed with different skew, emit identical
-TS for the content both receive, continuity counters included, as the legs of a
-1+1 pair must; an SMPTE ST 2022-7 pair also needs identical RTP framing around
-it, which this command does not write. Each PID gets a fixed lane of the constant rate, sized
-for its codec's most, with video taking the rest; content one leg lacks leaves
-its packets as stuffing there. The PCR rides a PID of its own, and each PID's
-continuity counter restarts at every group with the break flagged. It needs a
-constant rate, the same on every leg since the lanes follow from it
-(`--mux-rate`, or the catalog's), costing headroom over the
-source's (a 10 Mb/s channel needs about 12), and takes neither `--stitch` nor
-`--passthrough`. A group that starts behind the one before it, on a lane too
-narrow to absorb that one, is logged and counted in `overruns`: the legs can
-differ there. So can reordered video whose SPS declares no reorder depth
-(`max_num_reorder_frames`), which is logged, and SI while one leg holds an older
-revision than the other or around an SI table the catalog adds or drops, which
-each leg takes up when its catalog update arrives.
-
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same
 stream. A return that cannot be read yet, such as one still routed through a
