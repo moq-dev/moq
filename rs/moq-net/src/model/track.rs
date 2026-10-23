@@ -812,6 +812,34 @@ impl Holdings for TrackState {
 }
 
 impl TrackState {
+	/// Start each mid-group range at its group's first frame unless a copy holds the
+	/// frames below it; see [`Producer::widen_compressed`].
+	#[cfg_attr(
+		not(feature = "async"),
+		allow(dead_code, reason = "Only session adapters request upstream.")
+	)]
+	fn widen_compressed(&self, subscription: &mut Subscription) {
+		for range in &mut subscription.ranges {
+			if range.is_empty() {
+				continue;
+			}
+			let Anchor::Absolute(start) = &mut range.start else {
+				continue;
+			};
+			if start.frame == 0 {
+				continue;
+			}
+			let prefix = self
+				.lookup
+				.get(&start.group)
+				.and_then(|slot| slot.copies().find(|group| group.holds_prefix(start.frame)));
+			match prefix {
+				Some(group) => group.cache_refresh(),
+				None => start.frame = 0,
+			}
+		}
+	}
+
 	/// A consumer joined at the live edge: ask for a group past every sequence written when
 	/// the newest group's bytes after its first frame exceed [`Info::refresh`] times that
 	/// frame.
@@ -3369,28 +3397,8 @@ impl Producer {
 	)]
 	// private: capability gap
 	pub(crate) fn widen_compressed(&self, subscription: &mut Subscription) {
-		if !self.info.compress {
-			return;
-		}
-		let state = self.state.read();
-		for range in &mut subscription.ranges {
-			if range.is_empty() {
-				continue;
-			}
-			let Anchor::Absolute(start) = &mut range.start else {
-				continue;
-			};
-			if start.frame == 0 {
-				continue;
-			}
-			let prefix = state
-				.lookup
-				.get(&start.group)
-				.and_then(|slot| slot.copies().find(|group| group.holds_prefix(start.frame)));
-			match prefix {
-				Some(group) => group.cache_refresh(),
-				None => start.frame = 0,
-			}
+		if self.info.compress {
+			self.state.read().widen_compressed(subscription);
 		}
 	}
 
@@ -6037,10 +6045,11 @@ impl Cursor {
 	///
 	/// Positioned without clamping, so a group missing the head asked for reads it as
 	/// [`Error::Lagged`], which a route copy recovers from another. A group relayed from
-	/// moq-transport is handed out whole, since its ranges may name Object IDs rather than
-	/// frame ordinals, so its reader filters by ID.
+	/// moq-transport is handed out whole unless its ingest pinned Object IDs to ordinals:
+	/// its ranges may name Object IDs, so an ordinal window could drop objects they cover,
+	/// and its reader filters by ID.
 	fn deliver(&self, mut group: group::Consumer) -> group::Consumer {
-		if !group.relayed() {
+		if group.ordinal() {
 			let (start, end) = self.filter.window.frames(group.sequence);
 			group.skip_to(start);
 			if let Some(end) = end {
@@ -7559,6 +7568,17 @@ impl Request {
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 		snapshot_subscription(&subs, bound)
+	}
+
+	/// As [`Producer::widen_compressed`], for a track whose info is not known yet: the
+	/// requester calls it when the answer may declare the track compressed.
+	#[cfg_attr(
+		not(feature = "async"),
+		allow(dead_code, reason = "Only session adapters request upstream.")
+	)]
+	// private: capability gap
+	pub(crate) fn widen_compressed(&self, subscription: &mut Subscription) {
+		self.state.read().widen_compressed(subscription);
 	}
 
 	/// Block until the aggregate [`subscription`](Self::subscription) changes,

@@ -52,17 +52,45 @@ struct Fixture {
 	_origins: Vec<moq_net::origin::Producer>,
 }
 
-/// A compressed track crosses a relay between the requested protocols.
-async fn connect(upstream: &str, downstream: &str) -> Fixture {
-	connect_with(upstream, downstream, moq_net::track::Subscription::default()).await
+/// A track announced by the original publisher, before any relay carries it.
+struct Published {
+	publisher: moq_net::origin::Producer,
+	broadcast: moq_net::broadcast::Producer,
+	track: moq_net::track::Producer,
 }
 
-/// As [`connect`], with the downstream application asking for `subscription`.
-async fn connect_with(upstream: &str, downstream: &str, subscription: moq_net::track::Subscription) -> Fixture {
+/// Announce one track described by `info`.
+fn publish(info: moq_net::track::Info) -> Published {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("data", compressed()).unwrap();
+	let track = broadcast.create_track("data", info).unwrap();
 	broadcast.announce(Default::default()).unwrap();
+	Published {
+		publisher,
+		broadcast,
+		track,
+	}
+}
+
+/// A compressed track crosses a relay between the requested protocols.
+async fn connect(upstream: &str, downstream: &str) -> Fixture {
+	relay(
+		publish(compressed()),
+		[upstream, downstream],
+		moq_net::track::Subscription::default(),
+	)
+	.await
+}
+
+/// `published` crosses a relay over the `[upstream, downstream]` protocols to an application
+/// asking for `subscription`.
+async fn relay(published: Published, hops: [&str; 2], subscription: moq_net::track::Subscription) -> Fixture {
+	let Published {
+		publisher,
+		broadcast,
+		track,
+	} = published;
+	let [upstream, downstream] = hops;
 
 	let relay = produce_origin(2);
 	let mut options = MockConnectOptions::new(upstream.parse::<Version>().unwrap());
@@ -91,52 +119,112 @@ async fn connect_with(upstream: &str, downstream: &str, subscription: moq_net::t
 	}
 }
 
-/// A cold subscriber needs the compressed prefix, but its application sees only its
-/// requested half-open frame range, including when it changes that range while live.
+/// Hops whose requester carries an application's mid-group start: lite-07, and
+/// moq-transport with compression negotiated.
+const RANGED: &[&str] = &[
+	"moq-lite-07-wip",
+	"moq-transport-17",
+	"moq-transport-18",
+	"moq-transport-22",
+];
+
+/// A cold subscriber needs a compressed group's prefix, but its application sees only its
+/// requested half-open frame range across every pair of hops, whether the group began before
+/// it subscribed or after, and on a plain track too. Lite-07 hops also carry a live change.
 #[moq_clock::test]
 async fn application_ranges_keep_their_filter_after_requesting_the_compressed_prefix() {
 	use moq_net::track::{Anchor, Position, Range, Subscription};
-	moq_clock::timeout(TIMEOUT, async {
-		let range = |group, start, end| {
-			Subscription::default().with_ranges([Range {
-				start: Anchor::Absolute(Position { group, frame: start }),
-				end: Some(Anchor::Absolute(Position { group, frame: end })),
-			}])
-		};
-		let mut fixture = connect_with("moq-lite-07-wip", "moq-lite-07-wip", range(5, 2, 4)).await;
-		assert_eq!(
-			fixture.track.subscription_changed().await.unwrap().unwrap().ranges[0].start,
-			Anchor::Absolute(Position::group(5)),
-			"upstream asks for the prefix"
-		);
-		for sequence in [5, 6] {
-			if sequence == 6 {
-				fixture.subscriber.update(range(6, 1, 3)).unwrap();
-				let updated = fixture.track.subscription_changed().await.unwrap().unwrap();
-				// Old route copies can keep their earlier floor until a newer group arrives.
-				// The updated end must already permit the newly requested group.
-				assert_eq!(
-					updated.ranges[0].end,
-					Some(Anchor::Absolute(Position { group: 6, frame: 3 }))
-				);
-			}
-			let mut group = fixture.track.create_group(moq_net::group::Info { sequence }).unwrap();
-			for index in 0..5 {
-				group
-					.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
-					.unwrap();
-			}
-			group.finish().unwrap();
-			let mut reading = fixture.subscriber.recv_group().await.unwrap().unwrap();
-			let (start, end) = if sequence == 5 { (2, 4) } else { (1, 3) };
-			for index in start..end {
-				assert_eq!(reading.read_frame().await.unwrap().unwrap().payload, payload(index));
-			}
-			assert!(reading.read_frame().await.unwrap().is_none());
+	let range = |group, start, end: Option<u64>| {
+		Subscription::default().with_ranges([Range {
+			start: Anchor::Absolute(Position { group, frame: start }),
+			end: end.map(|end| Anchor::Absolute(Position { group, frame: end })),
+		}])
+	};
+	let write = |group: &mut moq_net::group::Producer, frames: std::ops::Range<u64>| {
+		for index in frames {
+			group
+				.write_frame(Timestamp::from_millis(index).unwrap(), payload(index))
+				.unwrap();
 		}
-	})
-	.await
-	.expect("the requested frames arrive");
+	};
+	for &upstream in RANGED {
+		for &downstream in RANGED {
+			let hops = [upstream, downstream];
+			let lite = hops.iter().all(|hop| *hop == "moq-lite-07-wip");
+			// A pre-draft-20 join cannot carry an end, so its range stays open.
+			let end = hops
+				.iter()
+				.all(|hop| matches!(*hop, "moq-lite-07-wip" | "moq-transport-22"))
+				.then_some(4);
+			for compress in [true, false] {
+				// Frames of the group written before the subscription, which a joining FETCH
+				// or fill delivers.
+				for head in [0, 3] {
+					let case = format!("{upstream} -> {downstream}, compress {compress}, head {head}");
+					moq_clock::timeout(TIMEOUT, async {
+						let info = match compress {
+							true => compressed(),
+							false => moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+						};
+						let published = publish(info);
+						let mut group = published
+							.track
+							.create_group(moq_net::group::Info { sequence: 5 })
+							.unwrap();
+						write(&mut group, 0..head);
+						let mut fixture = relay(published, hops, range(5, 2, end)).await;
+						if lite {
+							assert_eq!(
+								fixture.track.subscription_changed().await.unwrap().unwrap().ranges[0].start,
+								Anchor::Absolute(Position {
+									group: 5,
+									frame: if compress { 0 } else { 2 }
+								}),
+								"{case}: upstream asks for the prefix a compressed group needs"
+							);
+						}
+						write(&mut group, head..5);
+						group.finish().unwrap();
+						let mut reading = fixture.subscriber.recv_group().await.unwrap().unwrap();
+						for index in 2..end.unwrap_or(5) {
+							assert_eq!(
+								reading.read_frame().await.unwrap().unwrap().payload,
+								payload(index),
+								"{case}"
+							);
+						}
+						assert!(reading.read_frame().await.unwrap().is_none(), "{case}");
+
+						// REQUEST_UPDATE carries no range: /quest/m1/subscribe-ranges/ietf.md.
+						if !lite {
+							return;
+						}
+						fixture.subscriber.update(range(6, 1, Some(3))).unwrap();
+						let updated = fixture.track.subscription_changed().await.unwrap().unwrap();
+						// Old route copies can keep their earlier floor until a newer group arrives.
+						// The updated end must already permit the newly requested group.
+						assert_eq!(
+							updated.ranges[0].end,
+							Some(Anchor::Absolute(Position { group: 6, frame: 3 }))
+						);
+						let mut group = fixture
+							.track
+							.create_group(moq_net::group::Info { sequence: 6 })
+							.unwrap();
+						write(&mut group, 0..5);
+						group.finish().unwrap();
+						let mut reading = fixture.subscriber.recv_group().await.unwrap().unwrap();
+						for index in 1..3 {
+							assert_eq!(reading.read_frame().await.unwrap().unwrap().payload, payload(index));
+						}
+						assert!(reading.read_frame().await.unwrap().is_none());
+					})
+					.await
+					.unwrap_or_else(|_| panic!("{case}: the requested frames never arrived"));
+				}
+			}
+		}
+	}
 }
 
 /// Whole and chunked frames on a compressed track read back as written on every version,

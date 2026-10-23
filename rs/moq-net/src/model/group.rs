@@ -507,6 +507,9 @@ enum Source {
 pub(crate) struct Wire {
 	/// Object IDs differ from the public frame ordinals, so ordinal recovery cannot stitch.
 	pub sparse: bool,
+	/// Ingest refuses an Object ID other than its frame ordinal, so a window in ordinals
+	/// selects the objects it names.
+	pub pinned: bool,
 	pub first_object: bool,
 	pub first_id: u64,
 	pub extensions: bool,
@@ -2526,10 +2529,10 @@ impl Consumer {
 		self.cursor.state.read().wire().cloned()
 	}
 
-	/// Whether the group was relayed from moq-transport, whose Object IDs may not be its frame
-	/// ordinals.
-	pub(super) fn relayed(&self) -> bool {
-		self.cursor.state.read().wire().is_some()
+	/// Whether frame ordinals address this group's objects: it was not relayed from
+	/// moq-transport, or its ingest pinned every Object ID to its ordinal.
+	pub(super) fn ordinal(&self) -> bool {
+		self.cursor.state.read().wire().is_none_or(|wire| wire.pinned)
 	}
 
 	/// Read a compressed group's stored DEFLATE slices instead of plain frames, with each
@@ -3420,6 +3423,7 @@ mod test {
 			group
 				.set_wire(Wire {
 					sparse: true,
+					pinned: false,
 					first_object: false,
 					first_id: 6,
 					extensions: true,
@@ -3871,6 +3875,7 @@ mod test {
 		};
 		let wire = Wire {
 			sparse: false,
+			pinned: false,
 			first_object: false,
 			first_id: 2,
 			extensions: true,

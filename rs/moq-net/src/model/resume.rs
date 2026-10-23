@@ -4617,6 +4617,7 @@ mod test {
 		group
 			.set_wire(group::Wire {
 				sparse: false,
+				pinned: false,
 				first_object: true,
 				first_id: 6,
 				extensions: false,
@@ -4685,6 +4686,7 @@ mod test {
 		group
 			.set_wire(group::Wire {
 				sparse: false,
+				pinned: false,
 				first_object: true,
 				first_id: 6,
 				extensions: false,
@@ -4731,6 +4733,7 @@ mod test {
 		group
 			.set_wire(group::Wire {
 				sparse: false,
+				pinned: false,
 				first_object: false,
 				first_id: 6,
 				extensions: false,

@@ -486,6 +486,18 @@ impl Target {
 		}
 	}
 
+	/// Widen a mid-group start to the group's first frame unless the copy holds the frames
+	/// below it, so a compressed group can inflate. A request learns whether the track is
+	/// compressed only from SUBSCRIBE_OK, so with compression `negotiated` it widens every
+	/// mid-group start, and a plain track pays for that group's prefix.
+	fn widen(&self, subscription: &mut track::Subscription, negotiated: bool) {
+		match self {
+			Self::Request(request) if negotiated => request.widen_compressed(subscription),
+			Self::Request(_) => {}
+			Self::Resume(idle) => idle.track.widen_compressed(subscription),
+		}
+	}
+
 	/// The subscription could not be made: the track fails with `err`.
 	fn fail(self, err: Error) {
 		match self {
@@ -576,9 +588,11 @@ struct TrackState {
 	// The joining FETCH's own request id, when one was sent.
 	fetch_id: Option<RequestId>,
 
-	// Where the subscription asked to start, when that is partway through a group: a
-	// resumed subscription picking up after the frames a previous route delivered. The
-	// stream for that group legitimately starts there, without a head.
+	// Where the subscription asked to start, when the request starts partway through a
+	// group: a resumed subscription picking up after the frames a previous route
+	// delivered, or an application range. The stream for that group legitimately starts
+	// there, without a head, and its Object IDs stay pinned to the ordinals the readers'
+	// windows count in. A compressed group's start is widened to its first frame.
 	resume: Option<track::Position>,
 
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
@@ -2813,7 +2827,12 @@ where
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
 		let validity = self.validity.start();
-		let subscription = target.subscription();
+		let requested = target.subscription();
+		let negotiated = self.peer_setup.get().await.flate;
+		let subscription = requested.clone().map(|mut subscription| {
+			target.widen(&mut subscription, negotiated);
+			subscription
+		});
 		let start = subscription.as_ref().and_then(|s| s.start());
 		let join = match subscribe_join(start, subscription.as_ref().and_then(|s| s.end()), self.version) {
 			Ok(join) => join,
@@ -2936,10 +2955,11 @@ where
 			state.subscribes.insert(
 				request_id,
 				TrackState {
-					resume: subscription
+					resume: requested
 						.as_ref()
 						.and_then(|s| s.start())
-						.filter(|start| start.frame != 0),
+						.filter(|start| start.frame != 0)
+						.and(start),
 					// A resumed copy is the session's to abort from here on.
 					producer: target.producer().cloned(),
 					epoch: self.epoch.clone(),
@@ -4338,10 +4358,14 @@ where
 			}
 		};
 
+		// A resumed group's ingest refuses gaps and drops what the copy already holds, so a
+		// stream starting at or below the copy's next frame keeps each Object ID its ordinal.
+		let stitch = resume.map(|_| start);
 		if passthrough || producer.wire().is_none() {
 			let first_id = start.max(producer.frame_count() as u64);
 			producer.set_wire(group::Wire {
 				sparse: false,
+				pinned: stitch.is_some_and(|start| start <= producer.frame_count() as u64),
 				first_object: group.flags.first_object && first_id == start,
 				first_id,
 				extensions: group.flags.has_extensions,
@@ -4356,7 +4380,7 @@ where
 		let mut producer = crate::recv::Group::new(producer);
 		let observing = producer.handle().clone();
 
-		let mut ingest = GroupIngest::new(self, &group, timescale, resume.map(|_| start));
+		let mut ingest = GroupIngest::new(self, &group, timescale, stitch);
 		let res = {
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
@@ -5058,6 +5082,8 @@ where
 				&& let Some(mut wire) = producer.wire()
 			{
 				wire.first_id = id;
+				// Resume refuses gaps here and in the tail stream that continues this group.
+				wire.pinned = resume.is_some_and(|resume| resume.group == *sequence);
 				producer.set_wire(wire)?;
 			}
 			if *next == 0
@@ -5530,6 +5556,7 @@ where
 		let (producer, track, timescale, start, end) = taken?;
 		producer.set_wire(group::Wire {
 			sparse: false,
+			pinned: false,
 			first_object: start == 0,
 			first_id: start,
 			extensions: true,
@@ -5801,6 +5828,7 @@ fn open_fill_group(
 	let producer = track.create_group(group::Info { sequence })?;
 	producer.set_wire(group::Wire {
 		sparse: false,
+		pinned: false,
 		first_object: true,
 		first_id: 0,
 		extensions: true,

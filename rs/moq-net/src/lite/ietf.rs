@@ -69,6 +69,7 @@ pub(crate) fn decode_state(state: u64, frame_start: u64) -> Result<Option<group:
 	}
 	Ok(Some(group::Wire {
 		sparse: false,
+		pinned: false,
 		first_object: state & FIRST_OBJECT != 0,
 		first_id: frame_start,
 		extensions: state & EXTENSIONS != 0,
@@ -480,6 +481,7 @@ mod tests {
 	fn group_state_round_trips() {
 		let wire = group::Wire {
 			sparse: true,
+			pinned: false,
 			first_object: true,
 			first_id: 9,
 			extensions: true,
@@ -1176,6 +1178,7 @@ mod hop_tests {
 			group
 				.set_wire(group::Wire {
 					sparse: false,
+					pinned: false,
 					first_object: true,
 					first_id: 6,
 					extensions: true,
@@ -1272,6 +1275,7 @@ mod hop_tests {
 		group
 			.set_wire(group::Wire {
 				sparse: false,
+				pinned: false,
 				first_object: true,
 				first_id: 0,
 				extensions: false,
