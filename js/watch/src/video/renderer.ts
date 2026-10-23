@@ -75,7 +75,10 @@ export class Renderer {
 			canvas: this.in.canvas,
 			frame: this.decoder.out.frame,
 			display: this.decoder.out.display,
-			presentation: this.decoder.source.out.catalog,
+			presentation: new Derived(
+				[this.decoder.source.out.catalog, this.decoder.out.interlaced],
+				(catalog, interlaced) => ({ rotation: catalog?.rotation, flip: catalog?.flip, interlaced }),
+			),
 			backend: this.in.backend,
 		});
 		this.#signals.cleanup(() => this.#video.close());
