@@ -1221,6 +1221,14 @@ mod tests {
 			oneshot(all_denied.router(), denied_uri).await.status(),
 			StatusCode::FORBIDDEN
 		);
+
+		// A timeline failure refuses listings, but its already-retained media
+		// still drains. Authorization checks must not broaden that failure.
+		let retained = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		retained.fail(crate::Error::Moq(moq_net::Error::SessionClosed));
+		assert!(retained.media_playlist(None).is_err());
+		assert!(retained.init().await.unwrap().is_some());
+		assert!(retained.segment("656e3d1b", 0).await.unwrap().is_some());
 	}
 
 	#[tokio::test]

@@ -726,10 +726,19 @@ impl Rendition {
 		(!failure.late || window.segments.iter().any(|row| self.is_failed(row))).then_some(failure.err)
 	}
 
+	/// Return bound media or its authorization refusal, leaving timeline state alone.
+	fn authorize(&self) -> Result<Arc<moq_mux::Binding>> {
+		let binding = self.media.sync(&self.live);
+		match self.media.refusal() {
+			Some(err) => Err(err),
+			None => Ok(binding),
+		}
+	}
+
 	/// Refuse denied media or a failed timeline (see [`failure`](Self::failure)).
 	fn check(&self) -> Result<()> {
-		self.media.sync(&self.live);
-		if let Some(err) = self.media.refusal().or_else(|| self.live.failure()) {
+		self.authorize()?;
+		if let Some(err) = self.live.failure() {
 			return Err(err);
 		}
 		// Only a failed own timeline needs the window to judge.
@@ -994,7 +1003,7 @@ impl Rendition {
 	/// [`segment`](Self::segment) serves by aligned number).
 	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub(crate) async fn segment_at(&self, tag: &str, time: u64) -> Result<Option<Bytes>> {
-		self.check()?;
+		self.authorize()?;
 		let Some(segment) = self.live.segment_number_at(tag, time, self.timescale()) else {
 			return Ok(None);
 		};
@@ -1104,8 +1113,7 @@ impl Rendition {
 	}
 
 	async fn load_init(&self) -> Result<Option<Arc<Init>>> {
-		self.check()?;
-		let binding = self.media.sync(&self.live);
+		let binding = self.authorize()?;
 		// A transmuxed segment can cache the init while another bootstrap holds `building`,
 		// blocked on an unfinished group.
 		if let Some(init) = self.run().init {
@@ -1159,7 +1167,7 @@ impl Rendition {
 	/// drains; a replacement's media is never read under these rows. A denied referenced
 	/// broadcast returns its authorization error even when the requested row is absent.
 	pub async fn segment(&self, tag: &str, segment: u64) -> Result<Option<Bytes>> {
-		self.check()?;
+		self.authorize()?;
 		let Some(row) = self.live.row(tag, segment) else {
 			return Ok(None);
 		};
@@ -1168,8 +1176,7 @@ impl Rendition {
 
 	/// Fetch and transmux `row`'s frames on this rendition; see [`segment`](Self::segment).
 	pub(crate) async fn fetch(&self, row: &segments::Row) -> Result<Option<Bytes>> {
-		self.check()?;
-		let binding = self.media.sync(&self.live);
+		let binding = self.authorize()?;
 		// Read the run before resolving the row (see `restart`), so an init decoded from its
 		// groups is never cached for a run that started while they were being fetched.
 		let run = self.run();
