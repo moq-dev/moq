@@ -745,7 +745,12 @@ root = ["ca.pem"]
 	/// Bare defaults loaded from TOML survive when the CLI does not mention them.
 	#[test]
 	fn cli_does_not_clobber_toml_stats_enabled() {
-		let _env = EnvGuard::clear(&["MOQ_STATS_ENABLED", "MOQ_STATS_DEPTH", "MOQ_STATS_LINGER"]);
+		let _env = EnvGuard::clear(&[
+			"MOQ_STATS_ENABLED",
+			"MOQ_STATS_DEPTH",
+			"MOQ_STATS_LAYOUT",
+			"MOQ_STATS_LINGER",
+		]);
 
 		let toml = r#"
 [stats]
@@ -753,6 +758,7 @@ enabled = true
 interval = 5
 node = "localhost"
 depth = 2
+layout = "track"
 linger = "2m"
 "#;
 		let dir = std::env::temp_dir().join("moq-relay-config-test");
@@ -770,15 +776,18 @@ linger = "2m"
 		assert_eq!(config.stats.interval, 5);
 		assert_eq!(config.stats.node.as_deref(), Some("localhost"));
 		assert_eq!(config.stats.depth, 2);
+		assert_eq!(config.stats.layout, crate::stats::Layout::Track);
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(120)));
 
 		let args = vec![
 			std::ffi::OsString::from("moq-relay"),
 			std::ffi::OsString::from(&path),
 			std::ffi::OsString::from("--stats-linger=30s"),
+			std::ffi::OsString::from("--stats-layout=broadcast"),
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert_eq!(config.stats.linger(), Some(std::time::Duration::from_secs(30)));
+		assert_eq!(config.stats.layout, crate::stats::Layout::Broadcast);
 	}
 
 	/// Bare runtime defaults loaded from TOML survive when the CLI omits them.

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use moq_net::{PathOwned, origin, stats::Registry, track};
 
-use super::{Drain, PendingPair, Task};
+use super::{Drain, Layout, PendingPair, Task};
 
 /// Plain and compressed publisher-frame sizes from one tick, in bytes.
 ///
@@ -33,12 +33,23 @@ impl Driver {
 	/// [`crate::Producer::new`] does at depth 0. `None` if the origin refuses
 	/// the broadcast.
 	pub fn new(registry: Registry, origin: origin::Producer) -> Option<Self> {
+		Self::build(registry, origin, 0, Layout::Broadcast)
+	}
+
+	/// [`Self::new`] in the track layout at depth 1: each first path segment
+	/// is a group track of `.stats/node`.
+	pub fn tracks(registry: Registry, origin: origin::Producer) -> Option<Self> {
+		Self::build(registry, origin, 1, Layout::Track)
+	}
+
+	fn build(registry: Registry, origin: origin::Producer, depth: usize, layout: Layout) -> Option<Self> {
 		let task = Task {
 			registry,
 			origin,
 			prefix: PathOwned::from(".stats"),
 			node: None,
-			depth: 0,
+			depth,
+			layout,
 			linger: Duration::from_secs(300),
 			interval: Duration::from_secs(1),
 		};
