@@ -139,7 +139,11 @@ describe("SharedAudioBuffer", () => {
 
 describe("PostAudioBuffer", () => {
 	// Only the postMessage path exists outside cross-origin isolation.
-	function post(): { buffer: ReturnType<typeof createAudioBuffer>; worklet: MessagePort; close: () => void } {
+	function post(): {
+		buffer: ReturnType<typeof createAudioBuffer>;
+		state: (timestamp: number, stalled: boolean, epoch: number) => Promise<void>;
+		close: () => void;
+	} {
 		const channel = new MessageChannel();
 		const global = globalThis as { crossOriginIsolated?: boolean };
 		const previous = global.crossOriginIsolated;
@@ -154,7 +158,16 @@ describe("PostAudioBuffer", () => {
 			);
 			return {
 				buffer,
-				worklet: channel.port2,
+				// Posts a worklet state report and resolves once the buffer has handled it: this
+				// listener is added after the buffer's, so it runs after it for the same message.
+				state: (timestamp, stalled, epoch) => {
+					const msg: State = { type: "state", timestamp: timestamp as Micro, stalled, underruns: 0, epoch };
+					const handled = new Promise<void>((resolve) =>
+						channel.port1.addEventListener("message", () => resolve(), { once: true }),
+					);
+					channel.port2.postMessage(msg);
+					return handled;
+				},
 				close: () => {
 					buffer.close();
 					channel.port1.close();
@@ -164,12 +177,6 @@ describe("PostAudioBuffer", () => {
 		} finally {
 			global.crossOriginIsolated = previous;
 		}
-	}
-
-	function state(worklet: MessagePort, timestamp: number, stalled: boolean, epoch: number): Promise<void> {
-		const msg: State = { type: "state", timestamp: timestamp as Micro, stalled, underruns: 0, epoch };
-		worklet.postMessage(msg);
-		return new Promise((resolve) => setTimeout(resolve, 10));
 	}
 
 	it("holds the lookahead before the worklet reports", () => {
@@ -187,18 +194,18 @@ describe("PostAudioBuffer", () => {
 	// A state message the worklet posted before it applied a reset carries the old timeline's
 	// playhead, which is no bound at all on the new one.
 	it("ignores state from before a reset", async () => {
-		const { buffer, worklet, close } = post();
+		const { buffer, state, close } = post();
 		const signal = new AbortController().signal;
 		try {
 			buffer.reset();
-			await state(worklet, 10_000_000, false, 0);
+			await state(10_000_000, false, 0);
 			expect(Bun.peek.status(buffer.wait(500_000 as Micro, signal))).toBe("fulfilled");
 			expect(Bun.peek.status(buffer.wait(600_000 as Micro, signal))).toBe("fulfilled");
 			const ahead = buffer.wait(700_000 as Micro, signal);
-			await state(worklet, 10_000_000, false, 0);
+			await state(10_000_000, false, 0);
 			expect(Bun.peek.status(ahead)).toBe("pending");
 
-			await state(worklet, 600_000, false, 1);
+			await state(600_000, false, 1);
 			expect(Bun.peek.status(ahead)).toBe("fulfilled");
 		} finally {
 			close();
