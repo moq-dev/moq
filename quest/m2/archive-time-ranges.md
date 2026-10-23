@@ -9,6 +9,11 @@ it, however old.
 
 ## Plan
 
+Decided 2026-10-23 (maintainer, on
+[moq-dev/moq#6262](https://github.com/moq-dev/moq/pull/6262)): this stays in
+m2, required by [DVR rewind](/quest/m2/archive-dvr.md), rather than blocking
+the archive consumer, which ships without time anchors.
+
 The consumer creates each track live from its newest stored group and serves
 older groups through `track::Fill`, so its cache holds almost nothing a time
 anchor can resolve against: today a `Time(pts)` start older than the newest
