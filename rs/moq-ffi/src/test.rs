@@ -1150,8 +1150,8 @@ async fn json_snapshot_roundtrip() {
 	assert_eq!(end, None);
 }
 
-/// An idle snapshot producer restates its value in a fresh group once a joiner would otherwise
-/// download more deltas than the track's refresh ratio allows.
+/// An idle snapshot producer restates its value in a fresh group once a join finds more deltas
+/// than the track's refresh ratio allows.
 #[tokio::test]
 async fn json_snapshot_refreshes_for_a_joiner() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();

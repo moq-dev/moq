@@ -39,8 +39,8 @@ use super::encoder::Codec;
 const DEFAULT_FRAMERATE: Rate = Rate::integer(30);
 
 /// The [`track::Info::refresh`](moq_net::track::Info::refresh) ratio a capture advertises: a
-/// joiner forces a keyframe once a group's deltas outweigh twice its keyframe, so it downloads
-/// at most about three keyframes' worth before it can decode.
+/// joiner forces a keyframe once a group's deltas outweigh twice its keyframe, so later joiners
+/// start near one. The joiner that asks still reads the cached group meanwhile.
 ///
 /// Measured on realtime CBR encodes (two-second GOPs at 2 to 4 Mbps), where a GOP's deltas run
 /// three to five keyframes: one join a second halves the mean joiner download for 10 to 13%
