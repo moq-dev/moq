@@ -6,7 +6,7 @@ import { StreamCode, StreamError } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Reader, Stream } from "../stream.ts";
+import { Reader, Stream, Writer } from "../stream.ts";
 import { NativeSession } from "./adapter.ts";
 import * as Message from "./message.ts";
 import { Group } from "./object.ts";
@@ -174,6 +174,36 @@ for (const version of drafts) {
 		track.close();
 		broadcast.removeTrack("video");
 		await clock.advance(Nano.zero);
+		await publishOk(stream, version);
+		expect(await stream.reader.u53()).toBe(PublishDone.id);
+		const done = await PublishDone.decode(stream.reader, version);
+		expect(done.statusCode).toBe(PublishDoneStatus.TRACK_ENDED);
+	});
+
+	// The PUBLISH may reach the peer before its write returns, as when the write budget yields
+	// after the transport took the bytes. A track that finishes then is listed already.
+	test(`a track finished as its PUBLISH goes out ends with TRACK_ENDED (${version})`, async () => {
+		const clock = new Manual();
+		using _installed = { [Symbol.dispose]: clock.install() };
+		const fx = fixture(version);
+		const broadcast = fx.origin.createBroadcast(Path.from("room/live"));
+		broadcast.announce();
+		const track = broadcast.createTrack("video");
+		const listing = await fx.list();
+		await ok(listing, version);
+		const resume = Promise.withResolvers<void>();
+		const write = Writer.prototype.write;
+		const held = spyOn(Writer.prototype, "write").mockImplementation(async function (this: Writer, chunk) {
+			await write.call(this, chunk);
+			if (chunk[0] !== Publish.id) return;
+			held.mockRestore();
+			await resume.promise;
+		});
+		const { stream } = await fx.offered(false);
+		track.close();
+		broadcast.removeTrack("video");
+		await clock.advance(Nano.zero);
+		resume.resolve();
 		await publishOk(stream, version);
 		expect(await stream.reader.u53()).toBe(PublishDone.id);
 		const done = await PublishDone.decode(stream.reader, version);

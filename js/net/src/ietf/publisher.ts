@@ -2547,12 +2547,12 @@ export class Publisher {
 		const stop = adding.subscribe((active) => {
 			if (!active) hold.abort();
 		});
-		// The peer lists the track on its PUBLISH, so one that finishes while the answer is
-		// awaited still waits for it, then ends with TRACK_ENDED; a reset would fail the peer's
-		// listing.
-		let answering = false;
+		// The peer lists the track once its PUBLISH arrives, which may be before the write
+		// returns, so a track that finishes from then on sees the PUBLISH through to its answer
+		// and ends with TRACK_ENDED; a reset would fail the peer's listing.
+		let publishing = false;
 		const removed = unlisted.subscribe((how) => {
-			if (how === "removed" || (how === "finished" && !answering)) hold.abort();
+			if (how === "removed" || (how === "finished" && !publishing)) hold.abort();
 		});
 		const cancelled = () => request?.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
 		hold.signal.addEventListener("abort", cancelled);
@@ -2595,6 +2595,7 @@ export class Publisher {
 				parameters.subscriptionFilter = subscription.filter;
 			}
 			const largest = wireOf(source).largest(name);
+			publishing = true;
 			await Message.write(
 				request.writer,
 				Publish.id,
@@ -2623,9 +2624,8 @@ export class Publisher {
 			stop();
 			// Once sent, the PUBLISH survives cancellation of its listing.
 			const state: Published = { streams: { opened: 0 }, unlisted, answer: false };
-			answering = true;
 			const answer = await untilAborted(request.next(), hold.signal);
-			answering = false;
+			publishing = false;
 			if (!answer) throw new ProtocolViolation("PUBLISH ended without an answer");
 			if (answer.type === RequestError.id) {
 				await RequestError.decode(answer.reader, version).catch((err) => {
