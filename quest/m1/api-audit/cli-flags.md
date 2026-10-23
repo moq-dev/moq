@@ -15,8 +15,9 @@ Decided 2026-10-22 (API audit):
   spellings get refusals, and release had `--max-age` there.
 - `--passthrough` means CMAF fragments on `import fmp4|hls` (#6250) and the
   raw TS multiplex on `import|export ts`. Rename the fmp4/hls one to
-  `--container cmaf` or another distinct name, consistent with
-  [container formats](/quest/m1/api-audit/container-format.md).
+  `--container cmaf` or another distinct name. `moq_mux::import::ContainerFormat`
+  names only the parsed input (`"cmaf"` is an `fmp4` alias), so packaging
+  is never chosen by an input-sounding name.
 - `linger`: publishers already linger on a clean end in rtmp, srt, rtc, and
   the CLI. Drop moqsink's new boolean `linger` property and `<moq-publish>`'s
   `linger` attribute so every publisher lingers; NULL and `close` still end

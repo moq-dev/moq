@@ -75,7 +75,6 @@ Rejected in planning:
 - [Sync.wait says what happened](/quest/m1/api-audit/sync-wait.md) - the decoder-facing `Sync` calls are internal and report present or skip; `jitter`, `probe`, and the `<moq-watch>` compat shims are gone
 - [Auth access is patterns](/quest/m1/api-audit/auth-access.md) - token claims and grants carry path patterns only until a rate quest enforces caps, and `Key::decode` is gone
 - [Unpublish what nothing uses](/quest/m1/api-audit/unpublish.md) - packages, features, and listeners with no consumer stop shipping or stop being on by default
-- [Container formats name inputs](/quest/m1/api-audit/container-format.md) - `ContainerFormat` names what is parsed, never how it is packaged; `ContainerStream` and TS passthrough internals are gone
 - [Binding connection state](/quest/m1/api-audit/binding-state.md) - one `state()` snapshot and `state_changed()` replace `status`, `connects`, and both `failure` polls
 - [moq-net exports with a consumer](/quest/m1/api-audit/net-exports.md) - Rust and JS model exports without a consumer go private, wrong ones are deleted, and JS names mirror Rust
 - [largest is a getter](/quest/m1/api-audit/largest-getter.md) - `track::Producer::largest` is a plain read in Rust and JS, never a shared cursor

@@ -26,7 +26,8 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 ### `ContainerFormat.FMP4` unwraps to Legacy (#6250)
 
 A container import with `ContainerFormat.FMP4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
-Pass the new `ContainerFormat.CMAF` to keep publishing CMAF.
+A reader that follows the catalog's container needs no change.
+Republishing each fragment whole as CMAF is Rust-only, through `moq_mux::container::fmp4::Import::with_passthrough`.
 
 ### Catalog references carry their epoch
 

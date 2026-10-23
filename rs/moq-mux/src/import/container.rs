@@ -1,16 +1,13 @@
-//! Container importers.
+//! The container importer.
 //!
-//! [`Container`] decodes a container from whole chunks; [`ContainerStream`]
-//! decodes it from a raw byte stream. A container may publish more than one MoQ
-//! track, so neither exposes a single-track demand/name handle. Today every
-//! container supports both; both wrap the same [`ContainerImpl`] dispatch.
+//! [`Container`] decodes a container from chunks split anywhere: every container
+//! recovers its own framing. A container may publish more than one MoQ track, so
+//! it exposes no single-track demand/name handle.
 
 use super::{ContainerFormat, ContainerInit};
 use crate::Result;
 
-/// The concrete container importers, shared by [`Container`] and
-/// [`ContainerStream`]. Containers parse their own internal framing, so a whole
-/// chunk and a stream chunk decode identically.
+/// The concrete container importers [`Container`] dispatches to.
 enum ContainerImpl<E: crate::container::ts::Catalog = ()> {
 	// Boxed because it's a large struct and clippy complains about the size.
 	Fmp4(Box<crate::container::fmp4::Import<E>>),
@@ -26,17 +23,15 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 		format: ContainerFormat,
 	) -> Self {
 		match format {
-			ContainerFormat::Fmp4 => Self::fmp4(broadcast, reserved, false),
-			ContainerFormat::Cmaf => Self::fmp4(broadcast, reserved, true),
+			ContainerFormat::Fmp4 => Self::fmp4(broadcast, reserved),
 			ContainerFormat::Mkv => Self::mkv(broadcast, reserved),
 			ContainerFormat::Ts => Self::ts(broadcast, reserved),
 			ContainerFormat::Flv => Self::flv(broadcast, reserved),
 		}
 	}
 
-	fn fmp4(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>, passthrough: bool) -> Self {
-		let import = crate::container::fmp4::Import::new(broadcast, reserved).with_passthrough(passthrough);
-		ContainerImpl::Fmp4(Box::new(import))
+	fn fmp4(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
+		ContainerImpl::Fmp4(Box::new(crate::container::fmp4::Import::new(broadcast, reserved)))
 	}
 
 	fn mkv(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> Self {
@@ -78,11 +73,12 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 		}
 	}
 
-	fn cut(&mut self) {
+	fn cut(&mut self) -> Result<()> {
 		// Only fMP4 has a segment concept to declare. The others recover their own framing and
 		// group on what they find in it, so there is nothing for a caller to draw.
-		if let ContainerImpl::Fmp4(decoder) = self {
-			decoder.cut();
+		match self {
+			ContainerImpl::Fmp4(decoder) => decoder.cut(),
+			_ => Ok(()),
 		}
 	}
 
@@ -96,10 +92,7 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 	}
 }
 
-/// A container importer for whole chunks.
-///
-/// Use this when the caller hands over discrete buffers (the typical case for
-/// files and reassembled network input). May publish more than one track.
+/// A container importer, fed chunks split anywhere. May publish more than one track.
 pub struct Container<E: crate::container::ts::Catalog = ()> {
 	inner: ContainerImpl<E>,
 }
@@ -107,6 +100,7 @@ pub struct Container<E: crate::container::ts::Catalog = ()> {
 impl<E: crate::container::ts::Catalog> Container<E> {
 	/// Create a new container importer, decoding [`ContainerInit::data`] as the initial chunk.
 	///
+	/// The data may be empty, leaving every byte to [`Self::decode`].
 	pub fn new(
 		broadcast: moq_net::broadcast::Producer,
 		reserved: crate::catalog::Reserved<E>,
@@ -138,64 +132,7 @@ impl<E: crate::container::ts::Catalog> Container<E> {
 	/// For a caller that knows the source's segmentation out of band (an HLS import following its
 	/// playlist). An fMP4 source that carries `styp` atoms declares its own, so this is only
 	/// needed when it doesn't. Ignored by container formats with no segment concept (MKV, TS, FLV).
-	pub fn cut(&mut self) {
-		self.inner.cut()
-	}
-
-	/// Close the current group and open the next one at `sequence`.
-	pub fn seek(&mut self, sequence: u64) -> Result<()> {
-		self.inner.seek(sequence)
-	}
-}
-
-/// A container importer for a raw byte stream.
-///
-/// Use this when the caller pushes arbitrary byte chunks and the container
-/// recovers its own framing. May publish more than one track.
-pub struct ContainerStream<E: crate::container::ts::Catalog = ()> {
-	inner: ContainerImpl<E>,
-}
-
-impl<E: crate::container::ts::Catalog> ContainerStream<E> {
-	/// Create a new container stream importer.
-	///
-	/// Takes a bare format rather than a [`ContainerInit`]: a stream recovers its own framing, so
-	/// there are no leading bytes to seed it with. Push everything through [`Self::decode`].
-	pub fn new(
-		broadcast: moq_net::broadcast::Producer,
-		reserved: crate::catalog::Reserved<E>,
-		format: ContainerFormat,
-	) -> Result<Self> {
-		// A separate list from [`Container::new`]: only containers that can be
-		// recovered from a raw byte stream belong here. Today that's all of them,
-		// but a non-streamable container (e.g. RTP) would be added to `Container`
-		// alone.
-		let inner = ContainerImpl::new(broadcast, reserved, format);
-		Ok(Self { inner })
-	}
-
-	/// Decode a chunk of the byte stream.
-	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
-		self.inner.decode(data)
-	}
-
-	/// Finish the importer, flushing any buffered data.
-	pub fn finish(&mut self) -> Result<()> {
-		self.inner.finish()
-	}
-
-	/// Abort every published track with `err`, so subscribers see the real cause
-	/// rather than [`moq_net::Error::Dropped`]. Consumes the importer.
-	pub fn abort(self, err: moq_net::Error) {
-		self.inner.abort(err)
-	}
-
-	/// Declare that the next fragment starts a new segment, rolling a group on every track.
-	///
-	/// For a caller that knows the source's segmentation out of band (an HLS import following its
-	/// playlist). An fMP4 source that carries `styp` atoms declares its own, so this is only
-	/// needed when it doesn't. Ignored by container formats with no segment concept (MKV, TS, FLV).
-	pub fn cut(&mut self) {
+	pub fn cut(&mut self) -> Result<()> {
 		self.inner.cut()
 	}
 
@@ -209,9 +146,9 @@ impl<E: crate::container::ts::Catalog> ContainerStream<E> {
 mod tests {
 	use super::*;
 
-	/// A stream recovers its own framing, which is why [`ContainerStream::new`] takes a bare format
-	/// with no leading bytes to seed it. Prove it: hand the whole file to `decode` in two chunks
-	/// split mid-header, and the tracks still land.
+	/// A container recovers its own framing, so it needs no leading bytes to seed it. Prove it:
+	/// start empty, hand the whole file to `decode` in two chunks split mid-header, and the tracks
+	/// still land.
 	#[test]
 	fn a_split_stream_publishes_its_tracks() {
 		let data = include_bytes!("../container/fmp4/test_data/bbb.mp4");
@@ -220,8 +157,8 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 
-		let mut stream: ContainerStream =
-			ContainerStream::new(broadcast, catalog.reserve(), ContainerFormat::Fmp4).unwrap();
+		let init = ContainerInit::new(ContainerFormat::Fmp4, bytes::Bytes::new());
+		let mut stream: Container = Container::new(broadcast, catalog.reserve(), &init).unwrap();
 
 		stream.decode(head).unwrap();
 		// The test file ends on a malformed fragment, so a trailing decode error is expected.

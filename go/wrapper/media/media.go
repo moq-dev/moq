@@ -330,8 +330,6 @@ const (
 const (
 	// ContainerFormatFmp4 is fragmented MP4 / CMAF, split into one frame per sample.
 	ContainerFormatFmp4 = ffi.MoqContainerFormatFmp4
-	// ContainerFormatCmaf is fragmented MP4 / CMAF, republished whole as one CMAF frame per fragment.
-	ContainerFormatCmaf = ffi.MoqContainerFormatCmaf
 	// ContainerFormatMkv is Matroska / WebM.
 	ContainerFormatMkv = ffi.MoqContainerFormatMkv
 	// ContainerFormatTs is an MPEG-2 transport stream.

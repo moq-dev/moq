@@ -31,6 +31,7 @@ mod health;
 mod import;
 mod lane;
 mod mux_rate;
+mod passthrough;
 mod programs;
 mod psi;
 mod release;
@@ -50,7 +51,6 @@ pub use passthrough::Passthrough;
 pub use programs::Programs;
 pub use release::Release;
 
-pub mod passthrough;
 pub mod stats;
 
 #[cfg(test)]

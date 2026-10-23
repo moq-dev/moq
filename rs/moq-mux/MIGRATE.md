@@ -18,7 +18,25 @@ Snapshot groups roll on joiner demand: create the track with `Info::refresh` and
 
 `container::fmp4::Import` now publishes one `Legacy` frame per sample instead of one `Cmaf` frame per fragment.
 Call `.with_passthrough(true)` to keep publishing CMAF.
-`import::ContainerFormat::Fmp4` follows, and `"cmaf"` no longer parses as its alias but as the new `ContainerFormat::Cmaf`, which keeps CMAF.
+`import::ContainerFormat::Fmp4` (and `"cmaf"`, still its alias) follows; `import::Container` has no passthrough, so build an `fmp4::Import` to keep CMAF.
+
+### `import::ContainerStream` is removed
+
+Call `import::Container::new` with `ContainerInit::new(format, Bytes::new())` instead: a container recovers its own framing, so it takes chunks split anywhere.
+
+### `"m2ts"` is not a container format name
+
+`"m2ts"` no longer parses as `ContainerFormat::Ts`; pass `"ts"`, `"mpegts"`, or `"mpeg2ts"`.
+
+### `ts::passthrough` is private
+
+`ts::Passthrough` stays, and its `decode` and `finish` return `moq_mux::Result`.
+Match `moq_mux::Error::{TsPacketSize, PcrRewind, PcrRestart, PcrGap}` where you downcast to `PacketSizeError`, `PcrRewindError`, `PcrRestartError`, or `PcrGapError`.
+`passthrough::{FALLBACK, GROUP_BYTES_MAX, GROUP_OBJECTS_MAX}` are gone; the `ts::Passthrough` docs describe the bounds.
+
+### Container cuts and discontinuities return `Result`
+
+`import::Container::cut`, `fmp4::Import::cut`, and `fmp4::Import::discontinuity` return `Result<()>`, like `import::Track`'s; propagate it with `?`.
 
 ### `Container` decodes one frame instead of reading a group
 
