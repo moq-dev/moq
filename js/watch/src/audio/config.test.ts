@@ -61,8 +61,12 @@ test("routing and decoder inputs change the playback identity", () => {
 });
 
 test("AAC and MP3 frame durations follow their codec frame sizes", () => {
-	expect(frameDuration(config({ codec: "mp4a.40.2", sampleRate: 48000 }))).toBeCloseTo(21.333, 3);
-	expect(frameDuration(config({ codec: "mp4a.40.5", sampleRate: 48000 }))).toBeCloseTo(42.667, 3);
+	for (const codec of ["mp4a.40.2", "mp4a.40.02", "mp4a.67"]) {
+		expect(frameDuration(config({ codec, sampleRate: 48000 }))).toBeCloseTo(21.333, 3);
+	}
+	for (const codec of ["mp4a.40.5", "mp4a.40.05", "mp4a.40.29"]) {
+		expect(frameDuration(config({ codec, sampleRate: 48000 }))).toBeCloseTo(42.667, 3);
+	}
 	expect(frameDuration(config({ codec: "mp3", sampleRate: 48000 }))).toBe(Milli(24));
 	expect(frameDuration(config({ codec: "mp3", sampleRate: 24000 }))).toBe(Milli(24));
 });
@@ -71,6 +75,8 @@ test("Opus and unknown codecs have no constant frame duration", () => {
 	// Opus states its duration per packet, in the TOC byte.
 	expect(frameDuration(config())).toBeUndefined();
 	expect(frameDuration(config({ codec: "flac" }))).toBeUndefined();
+	// An MP4 audio string the AAC registration does not name: MP3-in-MP4 is not 1024 samples.
+	expect(frameDuration(config({ codec: "mp4a.40.34" }))).toBeUndefined();
 });
 
 test("an implicit CMAF duration falls through to the Opus TOC", () => {

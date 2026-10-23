@@ -44,6 +44,20 @@ export function pickRate(rate: number): number {
 
 const AAC_LC = 2; // audioObjectType for AAC-LC
 
+/**
+ * The audioObjectType a WebCodecs AAC codec string names: AAC-LC (2), HE-AAC (5) or HE-AACv2 (29).
+ * Undefined for any other codec.
+ *
+ * Parsed rather than matched, so every spelling of a type agrees (`mp4a.40.05` is `mp4a.40.5`).
+ * MPEG-2 AAC-LC (`mp4a.67`) is the same bitstream as AAC-LC.
+ */
+export function objectType(codec: string): 2 | 5 | 29 | undefined {
+	if (codec === "mp4a.67") return AAC_LC;
+	const match = /^mp4a\.40\.(\d+)$/.exec(codec);
+	const type = match ? Number(match[1]) : undefined;
+	return type === 2 || type === 5 || type === 29 ? type : undefined;
+}
+
 // Map a channel count to its AAC channelConfiguration (ISO 14496-3 Table 1.19). Configs 1..=6 are
 // identity (5.1 is config 6 / 6 channels); 8 channels is config 7 (7.1). Anything else has no
 // config, and describing it as stereo would mislabel every channel past the first two.

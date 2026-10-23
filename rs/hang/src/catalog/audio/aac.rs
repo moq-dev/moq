@@ -48,5 +48,9 @@ mod test {
 
 		let output = decoded.to_string();
 		assert_eq!(output, encoded);
+
+		// The WebCodecs AAC registration spells each object type with and without a leading zero.
+		assert_eq!(AAC::from_str("mp4a.40.05").unwrap(), AAC { profile: 5 });
+		assert_eq!(AAC::from_str("mp4a.40.02").unwrap(), AAC { profile: 2 });
 	}
 }
